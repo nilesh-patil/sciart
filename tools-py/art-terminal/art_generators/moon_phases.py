@@ -1,20 +1,5 @@
 import math
 import time
-from colorama import Fore, Style, init
-
-init(autoreset=True)
-
-# Define color mappings for shading levels
-SHADE_COLORS = [
-    Fore.WHITE + "@",  # Brightest
-    Fore.LIGHTWHITE_EX + "#",
-    Fore.LIGHTYELLOW_EX + "%",
-    Fore.YELLOW + "*",
-    Fore.LIGHTBLACK_EX + "+",
-    Fore.BLACK + ":",
-    Fore.BLACK + ".",
-    " ",  # Darkest
-]
 
 
 def generate(width, height):
@@ -61,38 +46,20 @@ def generate(width, height):
                         normal_x * light_x + normal_y * light_y + normal_z * light_z
                     )
 
-                    # Map illumination to character
-                    if illumination > 0:
-                        # Lit side with shading
-                        shade_index = int((1 - illumination) * (len(SHADE_COLORS) - 1))
-                        grid[i][j] = SHADE_COLORS[
-                            min(shade_index, len(SHADE_COLORS) - 4)
-                        ]
+                    # Determine character based on illumination
+                    if illumination > 0.7:
+                        grid[i][j] = "●"
+                    elif illumination > 0.4:
+                        grid[i][j] = "◉"
+                    elif illumination > 0.1:
+                        grid[i][j] = "◎"
+                    elif illumination > -0.1:
+                        grid[i][j] = "│"  # Terminator line
+                    elif illumination > -0.4:
+                        grid[i][j] = "░"
+                    elif illumination > -0.7:
+                        grid[i][j] = "▒"
                     else:
-                        # Dark side
-                        grid[i][j] = SHADE_COLORS[-2]
-
-    # Add phase label
-    phase_names = [
-        "New Moon",
-        "Waxing Crescent",
-        "First Quarter",
-        "Waxing Gibbous",
-        "Full Moon",
-        "Waning Gibbous",
-        "Last Quarter",
-        "Waning Crescent",
-    ]
-    phase_index = int((phase + 0.0625) * 8) % 8
-    label = phase_names[phase_index]
-
-    # Draw label at bottom
-    label_x = moon_x - len(label) // 2
-    label_y = moon_y + moon_radius + 3
-    if 0 <= label_y < height:
-        for idx, char in enumerate(label):
-            x = label_x + idx
-            if 0 <= x < width:
-                grid[label_y][x] = Fore.CYAN + char + Style.RESET_ALL
+                        grid[i][j] = "▓"
 
     return "\n".join(["".join(row) for row in grid])

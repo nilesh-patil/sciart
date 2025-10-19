@@ -1,10 +1,9 @@
 import math
 import time
-from colorama import Fore, Style  # Adding color support
 
 
 def generate(width, height):
-    """Generates an enhanced pulsar with sweeping beams and magnetic field lines."""
+    """Generates pulsar with sweeping beams and magnetic field lines."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
     pulsar_x, pulsar_y = width // 2, height // 2
@@ -24,7 +23,8 @@ def generate(width, height):
                 (dist * math.sin(base_angle) - curve * math.cos(base_angle))
             )
             if 0 <= y < height and 0 <= x < width and dist > 8:
-                grid[y][x] = Fore.BLUE + "." + Style.RESET_ALL
+                if grid[y][x] == " ":
+                    grid[y][x] = "~" if dist % 2 == 0 else "≈"
 
     # Draw two opposing radio beams with cone shape
     for beam_num in range(2):
@@ -44,15 +44,11 @@ def generate(width, height):
                 if 0 <= y < height and 0 <= x < width:
                     intensity = max(0, 3 - (i // 8) - abs(offset))
                     if intensity > 0:
-                        chars = [
-                            Fore.LIGHTBLUE_EX + ".",
-                            Fore.CYAN + ":",
-                            Fore.YELLOW + "=",
-                            Fore.RED + "#",
-                        ]
-                        grid[y][x] = chars[min(intensity, 3)] + Style.RESET_ALL
+                        chars = ["·", "╱" if beam_num == 0 else "╲", "╱" if beam_num == 0 else "╲", "│"]
+                        if grid[y][x] == " ":
+                            grid[y][x] = chars[min(intensity, 3)]
 
-    # Draw pulsar core with accretion
+    # Draw pulsar core
     for dy in range(-2, 3):
         for dx in range(-4, 5):
             dist = math.sqrt((dx / 2.5) ** 2 + dy**2)
@@ -60,10 +56,10 @@ def generate(width, height):
                 y, x = pulsar_y + dy, pulsar_x + dx
                 if 0 <= y < height and 0 <= x < width:
                     if dist < 0.5:
-                        grid[y][x] = Fore.YELLOW + "@" + Style.RESET_ALL
+                        grid[y][x] = "⊙"
                     elif dist < 1:
-                        grid[y][x] = Fore.RED + "#" + Style.RESET_ALL
+                        grid[y][x] = "◉"
                     else:
-                        grid[y][x] = Fore.LIGHTYELLOW_EX + "o" + Style.RESET_ALL
+                        grid[y][x] = "○"
 
     return "\n".join(["".join(row) for row in grid])
