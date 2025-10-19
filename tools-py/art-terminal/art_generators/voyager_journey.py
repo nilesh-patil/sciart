@@ -17,15 +17,15 @@ def generate(width, height):
     probe_x = width // 5
     probe_y = height // 2
 
-    # Background stars
-    for _ in range(80):
+    # Background stars - much sparser
+    for _ in range(20):  # Reduced from 80
         star_seed = _ * 7919
         sx = star_seed % width
         sy = (star_seed // width) % height
         if 0 <= sy < height and 0 <= sx < width:
-            grid[sy][sx] = "."
+            grid[sy][sx] = "·"
 
-    # Jupiter encounter: 0-30s
+    # Jupiter encounter: 0-35s
     if elapsed < 35:
         jupiter_progress = elapsed / 35
         # Jupiter approaches from right
@@ -52,25 +52,17 @@ def generate(width, height):
                                 grs_dy = dy + 2
                                 grs_dist = math.sqrt(grs_dx**2 + (grs_dy * 1.5) ** 2)
                                 if grs_dist < 3:
-                                    grid[y][x] = "@"
+                                    grid[y][x] = "◉"
                                 elif band_pattern == 0:
-                                    grid[y][x] = "≡"
+                                    grid[y][x] = "≈"
                                 elif band_pattern == 1:
-                                    grid[y][x] = "="
+                                    grid[y][x] = "≈"
                                 else:
-                                    grid[y][x] = "▓"
+                                    grid[y][x] = "▓" if (y % 2) == 0 else " "
                             else:
-                                grid[y][x] = "░"
+                                grid[y][x] = "░" if dist > jupiter_radius - 1 else " "
 
-        # Current planet label
-        planet_label = "JUPITER"
-        label_x = width - len(planet_label) - 5
-        if 0 <= 2 < height:
-            for i, c in enumerate(planet_label):
-                if label_x + i < width:
-                    grid[2][label_x + i] = c
-
-    # Saturn encounter: 30-60s
+    # Saturn encounter: 25-60s
     if elapsed >= 25:
         saturn_progress = (elapsed - 25) / 35
         saturn_x = int(width - saturn_progress * (width - probe_x - 30))
@@ -90,9 +82,9 @@ def generate(width, height):
                         if 0 <= y < height and 0 <= x < width:
                             # Saturn's pale color
                             if dist < saturn_radius - 1:
-                                grid[y][x] = "░"
+                                grid[y][x] = "◎" if (x + y) % 3 == 0 else " "
                             else:
-                                grid[y][x] = "▒"
+                                grid[y][x] = "░"
 
             # Draw rings
             ring_inner = saturn_radius + 2
@@ -121,23 +113,21 @@ def generate(width, height):
                             > saturn_radius
                         ):
                             # In front of planet
-                            char = "―" if ring_dist % 2 == 0 else "="
+                            char = "≈"
                             grid[ring_y][ring_x] = char
                         else:
                             # Behind planet (dimmer)
-                            if grid[ring_y][ring_x] in ["░", "▒"]:
+                            if grid[ring_y][ring_x] in ["░", "◎", " "]:
                                 grid[ring_y][ring_x] = "·"
 
-        # Current planet label
-        planet_label = "SATURN"
-        label_x = width - len(planet_label) - 5
-        if 0 <= 2 < height and elapsed >= 30:
-            for i, c in enumerate(planet_label):
-                if label_x + i < width:
-                    grid[2][label_x + i] = c
-
-    # Draw Voyager probe
-    probe_art = ["    |", "  [===]", " {|VGR|}", "  [===]", "    |"]
+    # Draw Voyager probe - using approved characters
+    probe_art = [
+        "  │  ",
+        " ═╬═ ",
+        "  ◇  ",
+        " ═╬═ ",
+        "  │  "
+    ]
 
     for i, line in enumerate(probe_art):
         y = probe_y + i - len(probe_art) // 2
@@ -147,9 +137,9 @@ def generate(width, height):
                 if 0 <= x < width and char != " ":
                     grid[y][x] = char
 
-    # Draw trajectory path (gravity assist curve)
+    # Draw trajectory path (gravity assist curve) - sparser
     path_length = 25
-    for i in range(path_length):
+    for i in range(0, path_length, 2):  # Every 2nd point for sparseness
         # Curved path showing gravity assist
         path_progress = i / path_length
 
@@ -170,30 +160,6 @@ def generate(width, height):
         if 0 <= path_y < height and 0 <= path_x < width:
             if grid[path_y][path_x] == " ":
                 grid[path_y][path_x] = "·"
-
-    # HUD information
-    velocity = 15 + (elapsed / 60) * 5  # km/s, increases with gravity assists
-    distance = int(elapsed * 100)  # Million km
-
-    # Distance
-    dist_text = f"DIST: {distance}M km"
-    for i, c in enumerate(dist_text):
-        if i + 2 < width:
-            grid[1][i + 2] = c
-
-    # Velocity
-    vel_text = f"VEL: {velocity:.1f} km/s"
-    for i, c in enumerate(vel_text):
-        if i + 2 < width:
-            grid[height - 2][i + 2] = c
-
-    # Mission elapsed time
-    met_text = f"MET: {int(elapsed)}s"
-    x_offset = width - len(met_text) - 2
-    if x_offset > 0:
-        for i, c in enumerate(met_text):
-            if x_offset + i < width:
-                grid[height - 2][x_offset + i] = c
 
     return "\n".join(["".join(row) for row in grid])
 

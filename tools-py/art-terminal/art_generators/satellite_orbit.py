@@ -1,9 +1,5 @@
-from colorama import Fore, init
 import math
 import time
-
-# Initialize colorama
-init(autoreset=True)
 
 
 def generate(screen_width, screen_height):
@@ -16,68 +12,66 @@ def generate(screen_width, screen_height):
     earth_radius = min(screen_width, screen_height) // 4
     earth_x, earth_y = screen_width // 2, screen_height // 2
 
-    # Draw Earth with continents
+    # Draw Earth with continents - reduced density
     for i in range(screen_height):
         for j in range(screen_width):
             distance = math.sqrt(((j - earth_x) / 2.5) ** 2 + (i - earth_y) ** 2)
             if distance <= earth_radius:
                 # Create continent-like patterns
                 noise_val = ((i * 7 + j * 13) % 17) / 17.0
-                if noise_val < 0.3:
-                    grid[i][j] = Fore.GREEN + "▓"  # Land masses
-                elif noise_val < 0.4:
-                    grid[i][j] = Fore.YELLOW + "░"  # Coasts
+                if noise_val < 0.25:  # Reduced from 0.3
+                    grid[i][j] = "▓"  # Land masses
+                elif noise_val < 0.3:  # Reduced from 0.4
+                    grid[i][j] = " "  # Reduced coasts
                 else:
-                    grid[i][j] = Fore.BLUE + "~"  # Oceans
+                    # Ocean - much sparser
+                    if noise_val < 0.5:
+                        grid[i][j] = "~"
+                    elif noise_val < 0.6:
+                        grid[i][j] = "≈"
+                    else:
+                        grid[i][j] = " "  # More empty ocean
 
-    # Define satellites with different orbital parameters
+    # Define satellites with different orbital parameters - NO LABELS
     satellites = [
         {
-            "name": "GPS",
             "distance": earth_radius + 5,
             "speed": 0.02,
-            "char": Fore.CYAN + "G",
             "trail": True,
         },
         {
-            "name": "Weather",
             "distance": earth_radius + 8,
             "speed": 0.018,
-            "char": Fore.MAGENTA + "W",
             "trail": True,
         },
         {
-            "name": "Comm",
             "distance": earth_radius + 12,
             "speed": 0.012,
-            "char": Fore.YELLOW + "C",
             "trail": True,
         },
         {
-            "name": "ISS",
             "distance": earth_radius + 4,
             "speed": 0.025,
-            "char": Fore.RED + "█",
             "trail": True,
         },
     ]
 
-    # Draw orbital paths (faint)
+    # Draw orbital paths (faint) - much sparser
     for sat in satellites:
-        for angle in range(0, 360, 8):
+        for angle in range(0, 360, 15):  # Increased from 8 for less density
             rad = math.radians(angle)
             x = earth_x + int(sat["distance"] * math.cos(rad) * 2.5)
             y = earth_y + int(sat["distance"] * math.sin(rad))
             if 0 <= y < screen_height and 0 <= x < screen_width and grid[y][x] == " ":
-                grid[y][x] = Fore.LIGHTBLACK_EX + "·"
+                grid[y][x] = "∘"
 
-    # Draw satellites with trails
+    # Draw satellites with trails - all same character
     for sat in satellites:
         angle = time.time() * sat["speed"]
         x = earth_x + int(sat["distance"] * math.cos(angle) * 2.5)
         y = earth_y + int(sat["distance"] * math.sin(angle))
 
-        # Draw trail
+        # Draw trail - sparser
         if sat["trail"]:
             for trail_idx in range(1, 8):
                 trail_angle = angle - (trail_idx * 0.08)
@@ -88,20 +82,20 @@ def generate(screen_width, screen_height):
                     and 0 <= tx < screen_width
                     and grid[ty][tx] == " "
                 ):
-                    grid[ty][tx] = Fore.LIGHTBLUE_EX + (":" if trail_idx < 4 else ".")
+                    grid[ty][tx] = "·"
 
-        # Draw satellite
+        # Draw satellite - all the same character, no labels
         if 0 <= y < screen_height and 0 <= x < screen_width:
-            grid[y][x] = sat["char"]
+            grid[y][x] = "◆"
 
-    # Add atmosphere glow around Earth
-    for angle in range(0, 360, 5):
+    # Add atmosphere glow around Earth - much sparser
+    for angle in range(0, 360, 10):  # Increased from 5
         rad = math.radians(angle)
         glow_dist = earth_radius + 1
         x = earth_x + int(glow_dist * math.cos(rad) * 2.5)
         y = earth_y + int(glow_dist * math.sin(rad))
         if 0 <= y < screen_height and 0 <= x < screen_width and grid[y][x] == " ":
-            grid[y][x] = Fore.LIGHTCYAN_EX + "."
+            grid[y][x] = "░"
 
     return "\n".join(["".join(row) for row in grid])
 

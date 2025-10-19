@@ -71,14 +71,14 @@ def generate(width, height):
             if y >= height:
                 break
             if y == terrain_height:
-                # Surface characters
-                grid[y][x] = random.choice(["~", "^", "·", "-"])
+                # Surface characters - reduced variety
+                grid[y][x] = random.choice(["─", "~", " ", " "])
             elif y == terrain_height + 1:
-                grid[y][x] = random.choice(["▓", "░", "▒"])
+                grid[y][x] = random.choice(["▓", " ", " "])
             else:
-                grid[y][x] = random.choice(["▓", "█"])
+                grid[y][x] = "▓" if random.random() < 0.3 else " "
 
-    # Add craters
+    # Add craters - using approved characters
     for crater_center in range(0, width + 100, 40):
         crater_x = (crater_center - int(generate.distance)) % width
         if 0 <= crater_x < width:
@@ -95,20 +95,20 @@ def generate(width, height):
                         crater_y = terrain_heights[x] + depth
 
                         if crater_y < height:
-                            # Rim is slightly raised
+                            # Rim is slightly raised - using approved characters
                             if 0.8 < dist_norm <= 1.0:
                                 for dy in range(2):
                                     ry = crater_y - dy - 1
                                     if 0 <= ry < height and ry >= terrain_heights[x]:
-                                        grid[ry][x] = "^"
+                                        grid[ry][x] = "◠" if dx > 0 else "◡"
                             else:
-                                # Crater floor
+                                # Crater floor - sparse
                                 for dy in range(depth + 1):
                                     cy = terrain_heights[x] + dy
-                                    if cy < height:
+                                    if cy < height and random.random() < 0.3:
                                         grid[cy][x] = "·"
 
-    # Add rocks
+    # Add rocks - using approved characters
     for rock_pos in range(0, int(generate.distance) + width, 15):
         rock_x = rock_pos - int(generate.distance)
         if 0 <= rock_x < width:
@@ -117,16 +117,33 @@ def generate(width, height):
                 rock_y = terrain_heights[rock_x] - 1
                 if 0 <= rock_y < height - 1:
                     rock_size = int(rock_hash * 3) + 1
-                    rock_char = random.choice(["⬬", "◆", "▲", "■"])
-                    if grid[rock_y][rock_x] in [" ", "~", "^", "·", "-"]:
+                    rock_char = random.choice(["◆", "◇"])
+                    if grid[rock_y][rock_x] in [" ", "~", "─", "·"]:
                         grid[rock_y][rock_x] = rock_char
                         # Larger rocks
                         if rock_size > 1 and rock_x + 1 < width:
-                            if grid[rock_y][rock_x + 1] in [" ", "~", "^", "·", "-"]:
+                            if grid[rock_y][rock_x + 1] in [" ", "~", "─", "·"]:
                                 grid[rock_y][rock_x + 1] = rock_char
 
-    # Draw rover (multi-line ASCII art)
-    rover_art = ["  [CAMERA]  ", "    |_|     ", " ==={█}===  ", "  O  O  O   "]
+    # Add hills using approved characters
+    for x in range(width):
+        if terrain_heights[x] < height - 10:
+            # Steep slopes
+            if x > 0 and abs(terrain_heights[x] - terrain_heights[x-1]) > 1:
+                slope_y = terrain_heights[x] - 1
+                if 0 <= slope_y < height:
+                    if terrain_heights[x] < terrain_heights[x-1]:
+                        grid[slope_y][x] = "◢"
+                    else:
+                        grid[slope_y][x] = "◣"
+
+    # Draw rover - using approved characters only
+    rover_art = [
+        "   ⬡   ",
+        "  ╱─╲  ",
+        " ═════ ",
+        " ○   ○ "
+    ]
 
     for i, line in enumerate(rover_art):
         y = rover_y + i
@@ -136,8 +153,8 @@ def generate(width, height):
                 if 0 <= x < width and char != " ":
                     grid[y][x] = char
 
-    # Add occasional dust particles
-    if random.random() < 0.15:
+    # Add occasional dust particles - much sparser
+    if random.random() < 0.05:  # Reduced from 0.15
         generate.dust_particles.append(
             {
                 "x": random.randint(0, width - 1),
@@ -148,7 +165,7 @@ def generate(width, height):
             }
         )
 
-    # Update and draw dust
+    # Update and draw dust - very sparse
     particles_to_remove = []
     for dust in generate.dust_particles:
         dust["x"] += dust["vx"]
@@ -161,35 +178,13 @@ def generate(width, height):
             dx, dy = int(dust["x"]), int(dust["y"])
             if 0 <= dy < height - 5 and 0 <= dx < width:
                 if grid[dy][dx] == " ":
-                    grid[dy][dx] = random.choice(["·", "′", "."])
+                    grid[dy][dx] = "·"
 
     for dust in particles_to_remove:
         generate.dust_particles.remove(dust)
 
-    # Draw HUD
+    # Update distance (no HUD display)
     generate.distance += 1.5
-
-    # Distance display
-    dist_text = f"DISTANCE: {int(generate.distance)}m"
-    for i, char in enumerate(dist_text):
-        if i < width:
-            grid[1][i + 2] = char
-
-    # Altitude display (based on current terrain)
-    if rover_x < len(terrain_heights):
-        altitude = height - terrain_heights[rover_x]
-        alt_text = f"ALT: {altitude}m"
-        for i, char in enumerate(alt_text):
-            if i < width:
-                grid[2][i + 2] = char
-
-    # Mission time
-    mission_time = int(generate.distance / 10)
-    time_text = f"SOL: {mission_time // 60:02d}:{mission_time % 60:02d}"
-    for i, char in enumerate(time_text):
-        x = width - len(time_text) - 2 + i
-        if 0 <= x < width:
-            grid[1][x] = char
 
     return "\n".join(["".join(row) for row in grid])
 

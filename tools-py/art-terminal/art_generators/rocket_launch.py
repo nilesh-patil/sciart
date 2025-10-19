@@ -1,9 +1,5 @@
-from colorama import Fore, init
 import random
 import time
-
-# Initialize colorama
-init(autoreset=True)
 
 
 def generate(screen_width, screen_height):
@@ -34,17 +30,8 @@ def generate(screen_width, screen_height):
 
     # Countdown phase (first 3 seconds)
     if elapsed < 3:
-        countdown = 3 - int(elapsed)
-        text = str(countdown)
-        text_x = rocket_x - len(text) // 2
-        text_y = screen_height // 2
-        if 0 <= text_y < screen_height:
-            for i, char in enumerate(text):
-                if 0 <= text_x + i < screen_width:
-                    grid[text_y][text_x + i] = Fore.YELLOW + char
-
-        # Draw rocket on launchpad
-        rocket = ["  ^  ", " /|\\ ", "|   |", "|___| ", " | | "]
+        # No countdown display - just show rocket on launchpad
+        rocket = ["  ▲  ", " ◢█◣ ", " │█│ ", " ╱█╲ ", " │█│ ", " ╱█╲ "]
         rocket_start_y = screen_height - 8
         for i, line in enumerate(rocket):
             y = rocket_start_y + i
@@ -53,7 +40,7 @@ def generate(screen_width, screen_height):
                 for j, char in enumerate(line):
                     x = x_start + j
                     if 0 <= x < screen_width and char != " ":
-                        grid[y][x] = Fore.WHITE + char
+                        grid[y][x] = char
     else:
         # Launch phase - rocket accelerates upward
         launch_time = elapsed - 3
@@ -83,11 +70,11 @@ def generate(screen_width, screen_height):
             else:
                 bx = rocket_x + int(booster["x_offset"])
                 by = int(booster["y"])
-                # Draw small booster
+                # Draw small booster using approved characters
                 if 0 <= by < screen_height and 0 <= bx < screen_width:
-                    grid[by][bx] = Fore.CYAN + "["
+                    grid[by][bx] = "╱"
                 if 0 <= by + 1 < screen_height and 0 <= bx < screen_width:
-                    grid[by + 1][bx] = Fore.CYAN + "]"
+                    grid[by + 1][bx] = "╲"
 
         for b in boosters_to_remove:
             generate.boosters.remove(b)
@@ -96,9 +83,9 @@ def generate(screen_width, screen_height):
         if generate.rocket_y >= -6 and generate.rocket_y < screen_height:
             # Multi-line ASCII rocket (smaller in stage 2)
             if generate.stage == 1:
-                rocket = ["  ^  ", " /|\\ ", "|   |", "|___| ", " ||| "]
+                rocket = ["  ▲  ", " ◢█◣ ", " │█│ ", " ╱█╲ ", " │█│ ", " ╱█╲ "]
             else:
-                rocket = ["  ^  ", " / \\", "|   |", "|___| "]
+                rocket = ["  ▲  ", " ◢█◣ ", " │█│ ", " ╱█╲ "]
 
             for i, line in enumerate(rocket):
                 y = generate.rocket_y + i
@@ -107,7 +94,7 @@ def generate(screen_width, screen_height):
                     for j, char in enumerate(line):
                         x = x_start + j
                         if 0 <= x < screen_width and char != " ":
-                            grid[y][x] = Fore.WHITE + char
+                            grid[y][x] = char
 
             # Draw animated exhaust flames
             exhaust_y_start = generate.rocket_y + len(rocket)
@@ -124,27 +111,19 @@ def generate(screen_width, screen_height):
                             if random.random() < prob:
                                 # Animated flame characters
                                 if i < 3:
-                                    char = Fore.RED + random.choice(
-                                        ["▲", "△", "^", "*"]
-                                    )
+                                    char = random.choice(["∴", "∵", "·", "˙"])
                                 elif i < 6:
-                                    char = Fore.YELLOW + random.choice(
-                                        ["*", "+", "×", "·"]
-                                    )
+                                    char = random.choice(["·", "˙", "∘", " "])
                                 else:
-                                    char = Fore.LIGHTYELLOW_EX + random.choice(
-                                        ["~", ".", "·", " "]
-                                    )
+                                    char = random.choice(["~", ".", "·", " "])
                                 grid[y][x] = char
 
-            # Ground smoke cloud
+            # Ground smoke cloud - much sparser
             smoke_y = screen_height - 3
             for y in range(max(0, smoke_y), min(screen_height, smoke_y + 3)):
                 for x in range(max(0, rocket_x - 15), min(screen_width, rocket_x + 15)):
-                    if random.random() < 0.15:
-                        grid[y][x] = Fore.LIGHTBLACK_EX + random.choice(
-                            ["░", "▒", "~", "."]
-                        )
+                    if random.random() < 0.08:  # Reduced from 0.15
+                        grid[y][x] = random.choice(["░", "▒", "≈", " "])
 
     return "\n".join(["".join(row) for row in grid])
 

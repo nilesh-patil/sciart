@@ -13,8 +13,7 @@ def simple_noise(x, y, seed=0):
 def generate(width, height):
     """Generates a first-person lunar landing sequence.
 
-    Shows descending view of lunar surface with craters, HUD displays,
-    and dust effects from engine exhaust.
+    Shows descending view of lunar surface with craters and dust effects from engine exhaust.
     """
     # Initialize landing sequence
     if not hasattr(generate, "start_time"):
@@ -38,15 +37,10 @@ def generate(width, height):
     landing_duration = 30.0
     progress = min(elapsed / landing_duration, 1.0)
 
-    # Altitude decreases exponentially
-    altitude = 1000 * (1 - progress) ** 2  # meters
-    velocity = -50 * (1 - progress)  # m/s (negative = downward)
-    fuel = max(0, 100 - progress * 80)  # percentage
-
     # Surface zoom level (increases as we descend)
     zoom = 1 + progress * 15
 
-    # Generate lunar surface
+    # Generate lunar surface - much sparser
     surface_detail_y = int(height * 0.7)
 
     for i in range(height):
@@ -77,26 +71,27 @@ def generate(width, height):
                         depth_factor = 1 - (crater_dist / crater_radius)
 
                         if crater_dist > crater_radius * 0.9:
-                            # Crater rim (bright)
-                            crater_char = "^"
+                            # Crater rim
+                            if dx > 0:
+                                crater_char = "◠"
+                            else:
+                                crater_char = "◡"
                         elif depth_factor > 0.6:
-                            crater_char = "▓"
+                            crater_char = " "  # Less dense
                         elif depth_factor > 0.3:
-                            crater_char = "▒"
+                            crater_char = " "  # Less dense
                         else:
-                            crater_char = "░"
+                            crater_char = " "  # Less dense
                         break
 
                 if in_crater:
                     break
 
-            # Base regolith texture
+            # Base regolith texture - much sparser
             if not in_crater:
                 noise_val = simple_noise(world_x * 5, world_y * 5, 400)
-                if noise_val > 0.7:
+                if noise_val > 0.85:  # Much more selective
                     crater_char = "·"
-                elif noise_val > 0.4:
-                    crater_char = "."
                 else:
                     crater_char = " "
 
@@ -104,27 +99,35 @@ def generate(width, height):
             if i >= surface_detail_y - int(20 / zoom):
                 grid[i][j] = crater_char
 
+    # Draw terrain lines - using approved characters
+    terrain_y = int(height * 0.7)
+    for x in range(0, width, 5):
+        if terrain_y < height and x < width:
+            noise_y = int(simple_noise(x / zoom, 0, 500) * 3)
+            y = terrain_y + noise_y
+            if 0 <= y < height:
+                grid[y][x] = random.choice(["~", "─", "≈"])
+
     # Engine thrust indicator and dust
     if progress < 1.0:
-        thrust_level = min(fuel / 100, 1.0)
-
-        # Draw engine exhaust cone
+        # Draw dust kicked up in radial pattern
         exhaust_y = int(height * 0.4)
         exhaust_spread = int(15 * progress)  # Dust spreads as we get closer
 
-        for i in range(exhaust_spread):
-            y = exhaust_y + i
-            if y < height:
-                spread_width = int(i * 0.8)
-                for dx in range(-spread_width, spread_width + 1):
-                    x = width // 2 + dx
-                    if 0 <= x < width and random.random() < thrust_level * 0.6:
-                        if grid[y][x] == " ":
-                            char = random.choice(["*", "·", ".", "+", "~"])
-                            grid[y][x] = char
+        # Radial dust particles - sparse
+        if exhaust_spread > 5:
+            center_x = width // 2
+            for angle in range(0, 360, 30):  # Every 30 degrees
+                rad = math.radians(angle)
+                for dist in range(5, exhaust_spread, 3):
+                    x = center_x + int(dist * math.cos(rad) * 0.8)
+                    y = exhaust_y + int(dist * math.sin(rad) * 0.5)
+                    if 0 <= y < height and 0 <= x < width:
+                        if random.random() < 0.3 and grid[y][x] == " ":
+                            grid[y][x] = "∴"
 
         # Dust particles kicked up
-        if progress > 0.4 and random.random() < 0.3:
+        if progress > 0.4 and random.random() < 0.1:  # Reduced frequency
             generate.dust_particles.append(
                 {
                     "x": width / 2 + random.uniform(-10, 10),
@@ -159,69 +162,21 @@ def generate(width, height):
     for dust in particles_to_remove:
         generate.dust_particles.remove(dust)
 
-    # HUD - Box in upper left
-    hud_lines = [
-        "╔═══════════════╗",
-        "║ LUNAR MODULE  ║",
-        "╠═══════════════╣",
-        f"║ ALT: {altitude:7.1f}m ║",
-        f"║ VEL: {velocity:6.1f}m/s║",
-        f"║ FUEL: {fuel:5.1f}%  ║",
-        "╠═══════════════╣",
-        f"║ THR: {'█' * int(fuel / 10):10s} ║",
-        "╚═══════════════╝",
-    ]
+    # Landing shadow - grows as we descend
+    if progress > 0.3:
+        shadow_radius = int(8 * progress)
+        shadow_x = width // 2
+        shadow_y = int(height * 0.7)
 
-    for i, line in enumerate(hud_lines):
-        if i < height:
-            for j, char in enumerate(line):
-                if j < width:
-                    grid[i][j] = char
-
-    # Landing status
-    if progress >= 1.0:
-        if not generate.landed:
-            generate.landed = True
-
-        status_lines = [
-            "╔═══════════════════════╗",
-            "║   CONTACT LIGHT       ║",
-            "║   ENGINE STOP         ║",
-            "║   TRANQUILITY BASE    ║",
-            "║   THE EAGLE HAS       ║",
-            "║   LANDED              ║",
-            "╚═══════════════════════╝",
-        ]
-
-        start_y = height // 2 - len(status_lines) // 2
-        start_x = width // 2 - 12
-
-        for i, line in enumerate(status_lines):
-            y = start_y + i
-            if 0 <= y < height:
-                for j, char in enumerate(line):
-                    x = start_x + j
-                    if 0 <= x < width:
-                        grid[y][x] = char
-
-    # Crosshair in center
-    if progress < 1.0:
-        center_x, center_y = width // 2, height // 2
-
-        # Horizontal crosshair
-        for dx in range(-5, 6):
-            x = center_x + dx
-            if 0 <= x < width and abs(dx) > 2:
-                grid[center_y][x] = "─"
-
-        # Vertical crosshair
-        for dy in range(-3, 4):
-            y = center_y + dy
-            if 0 <= y < height and abs(dy) > 1:
-                grid[y][center_x] = "│"
-
-        # Center dot
-        grid[center_y][center_x] = "+"
+        for dy in range(-shadow_radius, shadow_radius + 1):
+            for dx in range(-int(shadow_radius * 2.5), int(shadow_radius * 2.5) + 1):
+                dist = math.sqrt((dx / 2.5) ** 2 + dy**2)
+                if dist <= shadow_radius:
+                    y = shadow_y + dy
+                    x = shadow_x + dx
+                    if 0 <= y < height and 0 <= x < width:
+                        if grid[y][x] == " " and random.random() < 0.3:
+                            grid[y][x] = "▓"
 
     return "\n".join(["".join(row) for row in grid])
 
