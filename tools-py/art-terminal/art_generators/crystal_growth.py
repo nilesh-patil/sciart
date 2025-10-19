@@ -12,7 +12,7 @@ def generate(width, height):
     if not hasattr(generate, "crystal"):
         generate.crystal = {}  # Use dict for sparse storage
         generate.age = 0
-        # Seed crystal in the center
+        # Seed crystal in the center using ⬡ (hexagon)
         center_x, center_y = width // 2, height // 2
         generate.crystal[(center_y, center_x)] = {"age": 0, "type": "core"}
 
@@ -75,31 +75,57 @@ def generate(width, height):
         if (ny, nx) not in generate.crystal:
             generate.crystal[(ny, nx)] = {"age": generate.age, "type": cell_type}
 
-    # Draw crystal with different characters based on type and age
+    # Draw crystal with different characters based on type
     for (cy, cx), cell_data in generate.crystal.items():
         if 0 <= cy < height and 0 <= cx < width:
-            cell_age = generate.age - cell_data["age"]
             cell_type = cell_data["type"]
 
-            # Character based on type and maturity
+            # Character based on type - using ⬡ for center, ╱─╲│ for branches, ◆ at endpoints
             if cell_type == "core":
-                char = "❄"
+                char = "⬡"  # Hexagon center seed
             elif cell_type == "main":
-                char = random.choice(["*", "✦", "❖"])
-            else:  # branch
-                if cell_age < 5:
-                    char = random.choice(["+", "·"])
+                # Main branches - use directional characters
+                dx = cx - center_x
+                dy = cy - center_y
+                angle = math.atan2(dy, dx / 2.5)
+                angle_deg = math.degrees(angle) % 360
+
+                # 6-fold symmetry: determine which axis this is on
+                if 75 <= angle_deg < 105 or 255 <= angle_deg < 285:
+                    char = "│"  # Vertical
+                elif 15 <= angle_deg < 75 or 195 <= angle_deg < 255:
+                    char = "╱"  # Diagonal up
+                elif 105 <= angle_deg < 165 or 285 <= angle_deg < 345:
+                    char = "╲"  # Diagonal down
                 else:
-                    char = random.choice(["*", "+", "·"])
+                    char = "─"  # Horizontal
+            else:  # branch
+                # Side branches - smaller characters
+                dx = cx - center_x
+                dy = cy - center_y
+                dist = math.sqrt((dx / 2.5) ** 2 + dy**2)
+
+                # Endpoints get ◆
+                if dist > min(width, height) / 3:
+                    char = "◆"
+                else:
+                    # Inner branches
+                    angle = math.atan2(dy, dx / 2.5)
+                    angle_deg = math.degrees(angle) % 360
+
+                    if 60 <= angle_deg < 120 or 240 <= angle_deg < 300:
+                        char = "╲" if angle_deg < 180 else "╱"
+                    else:
+                        char = "╱" if 0 <= angle_deg < 180 else "╲"
 
             grid[cy][cx] = char
 
-    # Add subtle "frost" pattern in background
-    if generate.age % 20 == 0:  # Occasionally add background frost
-        for _ in range(5):
+    # Add subtle "frost" pattern in background (very sparse)
+    if generate.age % 30 == 0:  # Occasionally add background frost
+        for _ in range(3):  # Reduced from 5
             fx, fy = random.randint(0, width - 1), random.randint(0, height - 1)
             if grid[fy][fx] == " ":
-                grid[fy][fx] = random.choice([".", "·", "′"])
+                grid[fy][fx] = "·"
 
     return "\n".join(["".join(row) for row in grid])
 

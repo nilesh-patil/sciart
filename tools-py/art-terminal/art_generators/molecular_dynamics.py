@@ -42,17 +42,17 @@ def generate(width, height):
 
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
-    # Draw bounding box
+    # Draw bounding box using ┌─┐│└┘
     for i in range(height):
-        grid[i][0] = "|"
-        grid[i][width - 1] = "|"
+        grid[i][0] = "│"
+        grid[i][width - 1] = "│"
     for j in range(width):
-        grid[0][j] = "-"
-        grid[height - 1][j] = "-"
-    grid[0][0] = "+"
-    grid[0][width - 1] = "+"
-    grid[height - 1][0] = "+"
-    grid[height - 1][width - 1] = "+"
+        grid[0][j] = "─"
+        grid[height - 1][j] = "─"
+    grid[0][0] = "┌"
+    grid[0][width - 1] = "┐"
+    grid[height - 1][0] = "└"
+    grid[height - 1][width - 1] = "┘"
 
     # Update and draw particles
     for particle in generate.particles:
@@ -70,33 +70,22 @@ def generate(width, height):
                     particle.vx, other.vx = other.vx, particle.vx
                     particle.vy, other.vy = other.vy, particle.vy
 
-        # Draw particle with character based on velocity (temperature)
+        # Draw particle with size-coded character based on velocity (mass visualization)
         x = int(particle.x)
         y = int(particle.y)
         if 0 <= y < height and 0 <= x < width:
-            # Calculate particle speed (kinetic energy ~ temperature)
+            # Calculate particle speed (kinetic energy)
             speed = math.sqrt(particle.vx**2 + particle.vy**2)
 
-            # Map speed to character (temperature visualization)
+            # Map speed to character size (·∘○)
             if speed < 0.3:
-                char = "."  # Cold/slow
-            elif speed < 0.6:
-                char = "o"  # Medium
-            elif speed < 0.9:
-                char = "O"  # Warm
+                char = "·"  # Slow/small
+            elif speed < 0.7:
+                char = "∘"  # Medium
             else:
-                char = "@"  # Hot/fast
+                char = "○"  # Fast/large
 
             grid[y][x] = char
-
-    # Draw temperature scale legend
-    legend_y = 1
-    legend_x = 2
-    legend = "Temp: . < o < O < @"
-    if legend_y < height:
-        for i, c in enumerate(legend):
-            if legend_x + i < width - 1:
-                grid[legend_y][legend_x + i] = c
 
     return "\n".join(["".join(row) for row in grid])
 
