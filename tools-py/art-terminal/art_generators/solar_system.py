@@ -7,6 +7,20 @@ def generate(width, height):
     """Generates solar system with size-coded circles for planets."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
+    # Add title
+    title = "SOLAR SYSTEM"
+    subtitle = "Orbital mechanics of 8 planets"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
     sun_x, sun_y = width // 2, height // 2
 
     # Planets with size-based character representation

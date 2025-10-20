@@ -7,6 +7,20 @@ def generate(width, height):
     """Gravitational lensing with Einstein rings, crosses, and arcs."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
+    # Add title
+    title = "GRAVITATIONAL LENSING"
+    subtitle = "Einstein rings from massive objects"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
     lens_center_x, lens_center_y = width // 2, height // 2
 
     # Multiple lensing masses (galaxy cluster)

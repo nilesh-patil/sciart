@@ -12,6 +12,22 @@ def generate(width, height):
     - Elastic collisions with momentum transfer
     - Heat map visualization
     """
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+
+    # Add title
+    title = "BROWNIAN MOTION"
+    subtitle = "Random walk from thermal fluctuations"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
     # Initialize on first call
     if not hasattr(generate, "particles"):
         generate.particles = []
@@ -50,8 +66,6 @@ def generate(width, height):
         generate.heat_map = [
             [0.0 for _ in range(width // 4)] for _ in range(height // 4)
         ]
-
-    grid = [[" " for _ in range(width)] for _ in range(height)]
 
     # Decay heat map slightly
     for y in range(len(generate.heat_map)):

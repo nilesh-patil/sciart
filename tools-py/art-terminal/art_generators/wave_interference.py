@@ -10,6 +10,20 @@ def generate(width, height):
     wave interference.
     """
     grid = [[" " for _ in range(width)] for _ in range(height)]
+    # Add title
+    title = "WAVE INTERFERENCE"
+    subtitle = "Superposition of two coherent sources"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
 
     # Two wave sources separated vertically
     source1_x = width // 4

@@ -9,6 +9,20 @@ def generate(width, height):
     in front (blue-shifted) and stretched waves behind (red-shifted).
     """
     grid = [[" " for _ in range(width)] for _ in range(height)]
+    # Add title
+    title = "DOPPLER EFFECT"
+    subtitle = "Frequency shift from source motion"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
 
     # Source moves from left to right
     period = 30  # seconds for one complete cycle

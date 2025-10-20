@@ -41,6 +41,20 @@ def generate(width, height):
         elapsed = 0
 
     grid = [[" " for _ in range(width)] for _ in range(height)]
+    # Add title
+    title = "RADIOACTIVE DECAY"
+    subtitle = "Exponential half-life process"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
 
     # Update isotopes
     undecayed_count = 0

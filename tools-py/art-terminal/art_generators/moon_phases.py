@@ -6,6 +6,20 @@ def generate(width, height):
     """Generates realistic moon phases with proper shading and terminator line."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
+    # Add title
+    title = "LUNAR PHASES"
+    subtitle = "Illumination cycle over 29.5 days"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
     moon_radius = min(width // 6, height // 3)
     moon_x, moon_y = width // 2, height // 2
 
