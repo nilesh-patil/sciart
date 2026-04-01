@@ -1,22 +1,5 @@
 import math
 import time
-from colorama import Fore, Style, init
-
-init(autoreset=True)
-
-# Define color mappings for shading levels and objects
-STAR_COLORS = [
-    Fore.YELLOW + ".",  # Faintest
-    Fore.YELLOW + ":",
-    Fore.LIGHTYELLOW_EX + "*",
-    Fore.LIGHTYELLOW_EX + "#",
-    Fore.LIGHTWHITE_EX + "@",  # Brightest
-]
-PLANET_COLOR = Fore.BLACK + "O" + Style.RESET_ALL
-AXIS_COLOR = Fore.CYAN + "|" + Style.RESET_ALL
-CURVE_COLOR = Fore.GREEN + "*" + Style.RESET_ALL
-MARKER_COLOR = Fore.RED + "X" + Style.RESET_ALL
-LABEL_COLOR = Fore.CYAN
 
 
 def generate(width, height):
@@ -44,8 +27,14 @@ def generate(width, height):
             if dist <= star_radius:
                 # Limb darkening effect
                 brightness = 1 - (dist / star_radius) ** 2 * 0.4
-                char_idx = int(brightness * (len(STAR_COLORS) - 1))
-                grid[i][j] = STAR_COLORS[char_idx]
+                if brightness > 0.8:
+                    grid[i][j] = "⊙"
+                elif brightness > 0.6:
+                    grid[i][j] = "◉"
+                elif brightness > 0.4:
+                    grid[i][j] = "○"
+                else:
+                    grid[i][j] = "∘"
 
     # Draw the planet (dark circle)
     for i in range(height):
@@ -54,23 +43,25 @@ def generate(width, height):
             dy = i - planet_y
             dist = math.sqrt(dx**2 + dy**2)
             if dist <= planet_radius:
-                grid[i][j] = PLANET_COLOR
+                grid[i][j] = "●"
 
     # Draw light curve on the right side
     curve_x_start = int(width * 0.6)
     curve_y_center = height // 2
     curve_height = min(20, height - 4)
 
-    # Draw axes
+    # Draw axes (minimal)
     for y in range(
         curve_y_center - curve_height // 2, curve_y_center + curve_height // 2
     ):
         if 0 <= y < height and curve_x_start < width:
-            grid[y][curve_x_start] = AXIS_COLOR
+            if y % 3 == 0:  # Sparse axis
+                grid[y][curve_x_start] = "│"
 
     for x in range(curve_x_start, min(width, curve_x_start + 30)):
         if 0 <= curve_y_center < height:
-            grid[curve_y_center][x] = AXIS_COLOR
+            if x % 3 == 0:  # Sparse axis
+                grid[curve_y_center][x] = "─"
 
     # Plot light curve
     for plot_x in range(curve_x_start + 1, min(width - 1, curve_x_start + 28)):
@@ -93,27 +84,11 @@ def generate(width, height):
         brightness = 1 - dimming
         plot_y = curve_y_center - int((brightness - 0.85) * curve_height)
         if 0 <= plot_y < height:
-            grid[plot_y][plot_x] = CURVE_COLOR
+            grid[plot_y][plot_x] = "·"
 
         # Current position marker
         if abs(curve_progress - progress) < 0.02:
             if 0 <= plot_y < height:
-                grid[plot_y][plot_x] = MARKER_COLOR
-
-    # Labels
-    labels = ["Brightness", "Time ->"]
-    if curve_y_center - curve_height // 2 - 2 >= 0:
-        for i, char in enumerate(labels[0]):
-            x = curve_x_start - 2
-            y = curve_y_center - curve_height // 2 + i
-            if 0 <= y < height and 0 <= x < width:
-                grid[y][x] = LABEL_COLOR + char + Style.RESET_ALL
-
-    if curve_y_center + curve_height // 2 + 1 < height:
-        for i, char in enumerate(labels[1]):
-            x = curve_x_start + i
-            y = curve_y_center + curve_height // 2 + 1
-            if 0 <= y < height and x < width:
-                grid[y][x] = LABEL_COLOR + char + Style.RESET_ALL
+                grid[plot_y][plot_x] = "※"
 
     return "\n".join(["".join(row) for row in grid])

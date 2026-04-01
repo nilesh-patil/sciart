@@ -1,34 +1,15 @@
 import random
 import math
 import time
-from colorama import Fore, init
-
-init(autoreset=True)
-
-# Define color mappings for nebula densities and objects
-NEBULA_COLORS = {
-    "dense": Fore.RED + "#",
-    "medium": Fore.MAGENTA + "+",
-    "thin": Fore.BLUE + ":",
-    "very_thin": Fore.CYAN + ".",
-}
-PILLAR_COLOR = Fore.YELLOW + "█"
-PILLAR_TOP_COLOR = Fore.LIGHTYELLOW_EX + "▓"
-PROTO_STAR_COLORS = {
-    "bright": Fore.LIGHTWHITE_EX + "★",
-    "medium": Fore.YELLOW + "*",
-    "dim": Fore.LIGHTYELLOW_EX + "+",
-    "glow": Fore.LIGHTCYAN_EX + "·",
-}
 
 
 def generate(grid_width, grid_height):
-    """Generates a vibrant nebula with swirling gas, dust lanes, and forming stars."""
+    """Generates a nebula with swirling gas, dust lanes, and forming stars."""
     # Initialize state
     if not hasattr(generate, "time_offset"):
         generate.time_offset = 0
         generate.proto_stars = []
-        generate.pillars = []  # Pillars of creation-like structures
+        generate.pillars = []
 
         # Create some dust pillars
         for _ in range(3):
@@ -64,15 +45,17 @@ def generate(grid_width, grid_height):
             )
             density *= 1 - dist_from_center * 0.5
 
-            # Map to colors
+            # Map to colors (only approved characters)
             if density > 0.7:
-                grid[i][j] = NEBULA_COLORS["dense"]
+                grid[i][j] = "▓"
             elif density > 0.5:
-                grid[i][j] = NEBULA_COLORS["medium"]
+                grid[i][j] = "▒"
             elif density > 0.3:
-                grid[i][j] = NEBULA_COLORS["thin"]
+                grid[i][j] = "░"
             elif density > 0.15:
-                grid[i][j] = NEBULA_COLORS["very_thin"]
+                # Turbulence patterns
+                if random.random() < 0.3:
+                    grid[i][j] = random.choice(["~", "≈"])
 
     # Draw dust pillars
     for pillar in generate.pillars:
@@ -85,7 +68,7 @@ def generate(grid_width, grid_height):
             for dx in range(-width_at_y // 2, width_at_y // 2 + 1):
                 y, x = py - dy, px + dx
                 if 0 <= y < grid_height and 0 <= x < grid_width:
-                    grid[y][x] = PILLAR_TOP_COLOR if dy < ph // 2 else PILLAR_COLOR
+                    grid[y][x] = "▓"
 
     # Spawn and update proto-stars
     if random.random() < 0.05 and len(generate.proto_stars) < 20:
@@ -115,11 +98,11 @@ def generate(grid_width, grid_height):
             x, y = star["x"], star["y"]
             if 0 <= y < grid_height and 0 <= x < grid_width:
                 if brightness > 0.7:
-                    grid[y][x] = PROTO_STAR_COLORS["bright"]
+                    grid[y][x] = "✦"
                 elif brightness > 0.4:
-                    grid[y][x] = PROTO_STAR_COLORS["medium"]
+                    grid[y][x] = "✹"
                 elif brightness > 0.2:
-                    grid[y][x] = PROTO_STAR_COLORS["dim"]
+                    grid[y][x] = "✧"
 
                 # Star glow
                 if brightness > 0.5:
@@ -128,9 +111,9 @@ def generate(grid_width, grid_height):
                         if (
                             0 <= gy < grid_height
                             and 0 <= gx < grid_width
-                            and grid[gy][gx] in [" ", NEBULA_COLORS["very_thin"]]
+                            and grid[gy][gx] == " "
                         ):
-                            grid[gy][gx] = PROTO_STAR_COLORS["glow"]
+                            grid[gy][gx] = "·"
 
     for star in stars_to_remove:
         generate.proto_stars.remove(star)

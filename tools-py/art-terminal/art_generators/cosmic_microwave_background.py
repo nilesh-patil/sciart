@@ -1,9 +1,5 @@
-import random
 import math
 import time
-from colorama import Fore, init
-
-init(autoreset=True)
 
 
 def smooth_noise(x, y, scale, seed_offset=0, time_offset=0):
@@ -39,37 +35,21 @@ def smooth_noise(x, y, scale, seed_offset=0, time_offset=0):
     return n0 * (1 - sy) + n1 * sy
 
 
-# Define color mappings for temperature levels
-TEMP_COLORS = [
-    Fore.BLUE + " ",  # Coldest
-    Fore.BLUE + ".",
-    Fore.CYAN + ":",
-    Fore.LIGHTCYAN_EX + "-",
-    Fore.WHITE + "=",
-    Fore.LIGHTYELLOW_EX + "+",
-    Fore.YELLOW + "*",
-    Fore.LIGHTRED_EX + "#",
-    Fore.RED + "@",  # Hottest
-]
+# Define color mappings for temperature levels (pure blocks)
+TEMP_CHARS = ["░", "▒", "▓"]
 
 
-# Resolve variable shadowing by renaming parameters in the generate function
 def generate(grid_width, grid_height):
-    """Generates a realistic Cosmic Microwave Background with scale-invariant fluctuations.
-
-    The CMB shows temperature fluctuations at multiple scales, representing
-    the seeds of galaxy formation from the early universe. Includes slow
-    wave propagation to show subtle evolution.
-    """
+    """Generates Cosmic Microwave Background with scale-invariant fluctuations."""
     grid = [[" " for _ in range(grid_width)] for _ in range(grid_height)]
 
-    # Very slow time evolution (like cosmic expansion)
-    t = time.time() * 0.05  # Extremely slow for CMB
+    # Very slow time evolution
+    t = time.time() * 0.05
 
     # Multi-scale noise for realistic CMB structure
     for i in range(grid_height):
         for j in range(grid_width):
-            # Combine multiple octaves of noise (like Perlin noise)
+            # Combine multiple octaves of noise
             value = 0.0
 
             # Large-scale fluctuations (acoustic peaks)
@@ -87,34 +67,13 @@ def generate(grid_width, grid_height):
             # Normalize to 0-1 range
             value = value / (0.5 + 0.3 + 0.15 + 0.05)
 
-            # Add subtle bias toward middle values (most areas near average temperature)
+            # Add subtle bias toward middle values
             value = (value + 0.5) / 2.0
 
-            # Map to color
-            char_idx = int(value * (len(TEMP_COLORS) - 1))
-            char_idx = max(0, min(len(TEMP_COLORS) - 1, char_idx))
-            grid[i][j] = TEMP_COLORS[char_idx]
-
-    # Add a few "hot spots" and "cold spots" (primordial density fluctuations)
-    for _ in range(5):
-        cx, cy = random.randint(0, grid_width - 1), random.randint(0, grid_height - 1)
-        is_hot = random.choice([True, False])
-        radius = random.randint(3, 8)
-
-        for dy in range(-radius, radius + 1):
-            for dx in range(-radius, radius + 1):
-                dist = math.sqrt(dx**2 + dy**2)
-                if dist <= radius:
-                    y, x = cy + dy, cx + dx
-                    if 0 <= y < grid_height and 0 <= x < grid_width:
-                        if is_hot:
-                            grid[y][x] = random.choice(
-                                [Fore.RED + "#", Fore.RED + "@", Fore.LIGHTRED_EX + "*"]
-                            )
-                        else:
-                            grid[y][x] = random.choice(
-                                [Fore.BLUE + " ", Fore.BLUE + ".", Fore.CYAN + ":"]
-                            )
+            # Map to character (only use block characters)
+            char_idx = int(value * (len(TEMP_CHARS) - 1))
+            char_idx = max(0, min(len(TEMP_CHARS) - 1, char_idx))
+            grid[i][j] = TEMP_CHARS[char_idx]
 
     return "\n".join(["".join(row) for row in grid])
 
@@ -131,3 +90,4 @@ if __name__ == "__main__":
         output = generate(width, height)
         os.system("clear" if os.name == "posix" else "cls")
         print(output)
+        time.sleep(0.1)
