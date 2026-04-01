@@ -9,8 +9,9 @@ class Molecule:
         self.vx = random.uniform(-1, 1)
         self.vy = random.uniform(-0.5, 0.5)
         self.type = mol_type
+        # Size based on type: A=· (small), B=∘ (medium), C=○ (large/product)
         self.size = {"A": 1, "B": 1, "C": 2}[mol_type]
-        self.char = {"A": "A", "B": "B", "C": "C"}[mol_type]
+        self.char = {"A": "·", "B": "∘", "C": "○"}[mol_type]
 
 
 def generate(width, height):
@@ -29,14 +30,14 @@ def generate(width, height):
         for _ in range(20):
             generate.molecules.append(
                 Molecule(
-                    random.uniform(5, width - 5), random.uniform(5, height - 10), "A"
+                    random.uniform(5, width - 5), random.uniform(5, height - 5), "A"
                 )
             )
 
         for _ in range(20):
             generate.molecules.append(
                 Molecule(
-                    random.uniform(5, width - 5), random.uniform(5, height - 10), "B"
+                    random.uniform(5, width - 5), random.uniform(5, height - 5), "B"
                 )
             )
 
@@ -63,9 +64,9 @@ def generate(width, height):
             mol.vx = -mol.vx
             mol.x = max(box_margin, min(width - box_margin, mol.x))
 
-        if mol.y <= box_margin or mol.y >= height - 8:
+        if mol.y <= box_margin or mol.y >= height - box_margin:
             mol.vy = -mol.vy
-            mol.y = max(box_margin, min(height - 8, mol.y))
+            mol.y = max(box_margin, min(height - box_margin, mol.y))
 
     # Check for reactions
     molecules_to_add = []
@@ -92,6 +93,12 @@ def generate(width, height):
                         # Create C molecule
                         new_x = (mol1.x + mol2.x) / 2
                         new_y = (mol1.y + mol2.y) / 2
+
+                        # Show collision flash with ✦
+                        cx, cy = int(new_x), int(new_y)
+                        if 0 <= cy < height and 0 <= cx < width:
+                            grid[cy][cx] = "✦"
+
                         molecules_to_add.append(Molecule(new_x, new_y, "C"))
 
                         # Remove reactants
@@ -134,34 +141,12 @@ def generate(width, height):
     for mol in molecules_to_add:
         generate.molecules.append(mol)
 
-    # Draw container box
-    for i in range(height - 7):
-        grid[i][0] = "│"
-        grid[i][width - 1] = "│"
-
-    for j in range(width):
-        grid[0][j] = "─"
-        grid[height - 8][j] = "─"
-
-    grid[0][0] = "┌"
-    grid[0][width - 1] = "┐"
-    grid[height - 8][0] = "└"
-    grid[height - 8][width - 1] = "┘"
-
-    # Draw molecules
+    # Draw molecules using distinct sizes: · for A, ∘ for B, ○ for C
     for mol in generate.molecules:
         mx, my = int(mol.x), int(mol.y)
 
-        if 0 <= my < height - 8 and 0 <= mx < width:
+        if 0 <= my < height and 0 <= mx < width:
             grid[my][mx] = mol.char
-
-            # Larger molecules (C) have extended shape
-            if mol.type == "C" and mol.size >= 2:
-                for dx, dy in [(-1, 0), (1, 0)]:
-                    nx, ny = mx + dx, my + dy
-                    if 0 <= ny < height - 8 and 0 <= nx < width:
-                        if grid[ny][nx] in [" ", "─", "│"]:
-                            grid[ny][nx] = "c"
 
     # Count molecules
     counts = {"A": 0, "B": 0, "C": 0}
@@ -179,55 +164,43 @@ def generate(width, height):
         if len(generate.history[key]) > max_history:
             generate.history[key].pop(0)
 
-    # Draw concentration graph
-    graph_y_start = height - 6
-    graph_height = 5
-    graph_width = min(60, width - 4)
+    # Draw concentration as pure dot histogram (no axes) - bottom section
+    graph_y_start = height - 8
+    graph_height = 7
+    graph_width = min(width - 4, 60)
 
-    # Graph axes
-    for y in range(graph_y_start, height):
-        if y < height:
-            grid[y][2] = "│"
-
-    for x in range(2, 2 + graph_width):
-        if x < width and graph_y_start + graph_height - 1 < height:
-            grid[graph_y_start + graph_height - 1][x] = "─"
-
-    # Plot concentrations
+    # Plot concentrations as vertical dot columns
     history_len = len(generate.history["A"])
-    for i, key in enumerate(["A", "B", "C"]):
-        char = {"A": "a", "B": "b", "C": "c"}[key]
+    for plot_x in range(min(history_len, graph_width)):
+        idx = max(0, history_len - graph_width + plot_x)
 
-        for plot_x in range(min(history_len, graph_width)):
-            idx = max(0, history_len - graph_width + plot_x)
-            concentration = generate.history[key][idx]
+        # Get concentrations for each type
+        conc_a = generate.history["A"][idx]
+        conc_b = generate.history["B"][idx]
+        conc_c = generate.history["C"][idx]
 
-            # Scale to graph
-            plot_y = (
-                graph_y_start
-                + graph_height
-                - 1
-                - int((concentration / 25) * (graph_height - 1))
-            )
+        screen_x = 2 + plot_x
 
-            screen_x = 3 + plot_x
+        # Draw A concentration (bottom)
+        for y_offset in range(min(conc_a // 2, graph_height)):
+            plot_y = graph_y_start + graph_height - 1 - y_offset
             if 0 <= plot_y < height and 0 <= screen_x < width:
-                if grid[plot_y][screen_x] in [" ", "─"]:
-                    grid[plot_y][screen_x] = char
+                if grid[plot_y][screen_x] == " ":
+                    grid[plot_y][screen_x] = "·"  # A type
 
-    # Labels
-    title = "CHEMICAL REACTION: A + B ⇌ C"
-    for i, c in enumerate(title):
-        if i + 2 < width and height - 7 < height:
-            grid[height - 7][i + 2] = c
+        # Draw B concentration (stacked on A)
+        for y_offset in range(min(conc_b // 2, graph_height)):
+            plot_y = graph_y_start + graph_height - 1 - (conc_a // 2) - y_offset
+            if 0 <= plot_y < height and 0 <= screen_x < width:
+                if grid[plot_y][screen_x] == " ":
+                    grid[plot_y][screen_x] = "∘"  # B type
 
-    # Current counts
-    count_text = f"[A]={counts['A']} [B]={counts['B']} [C]={counts['C']}"
-    count_x = width - len(count_text) - 2
-    if count_x > 0 and height - 7 < height:
-        for i, c in enumerate(count_text):
-            if count_x + i < width:
-                grid[height - 7][count_x + i] = c
+        # Draw C concentration (stacked on A+B)
+        for y_offset in range(min(conc_c // 2, graph_height)):
+            plot_y = graph_y_start + graph_height - 1 - (conc_a // 2) - (conc_b // 2) - y_offset
+            if 0 <= plot_y < height and 0 <= screen_x < width:
+                if grid[plot_y][screen_x] == " ":
+                    grid[plot_y][screen_x] = "○"  # C type
 
     return "\n".join(["".join(row) for row in grid])
 

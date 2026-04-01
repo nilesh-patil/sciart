@@ -1,7 +1,7 @@
 import math
 
 
-def draw_line(grid, x1, y1, x2, y2):
+def draw_line(grid, x1, y1, x2, y2, char_func):
     """Bresenham's line algorithm for drawing pendulum arms."""
     dx = abs(x2 - x1)
     dy = abs(y2 - y1)
@@ -11,7 +11,9 @@ def draw_line(grid, x1, y1, x2, y2):
 
     while True:
         if 0 <= y1 < len(grid) and 0 <= x1 < len(grid[0]):
-            grid[y1][x1] = "|"
+            # Use different characters based on angle
+            angle = math.atan2(y2 - y1, x2 - x1)
+            grid[y1][x1] = char_func(angle)
 
         if x1 == x2 and y1 == y2:
             break
@@ -23,6 +25,23 @@ def draw_line(grid, x1, y1, x2, y2):
         if e2 < dx:
             err += dx
             y1 += sy
+
+
+def get_arm_char(angle):
+    """Get arm character based on angle."""
+    # Convert to degrees
+    deg = math.degrees(angle) % 180
+    if 45 <= deg < 135:
+        return "│"  # Vertical
+    elif deg < 45 or deg >= 135:
+        if -0.4 < angle < 0.4 or 2.7 < angle or angle < -2.7:
+            return "─"  # Horizontal
+        elif angle > 0:
+            return "╲"  # Down-right
+        else:
+            return "╱"  # Down-left
+    else:
+        return "│"
 
 
 def double_pendulum_derivatives(state, L1, L2, m1, m2, g):
@@ -133,73 +152,36 @@ def generate(width, height):
     if len(generate.trail) > max_trail:
         generate.trail.pop(0)
 
-    # Draw trail with fading
-    trail_chars = [" ", ".", "·", ":", "*", "█"]
+    # Draw trail with fading using ·
     trail_len = len(generate.trail)
     for idx, (tx, ty) in enumerate(generate.trail):
         if 0 <= ty < height and 0 <= tx < width:
-            # Fade based on age
+            # Only draw fading trail (sparse)
             fade_factor = idx / trail_len
-            char_idx = int(fade_factor * (len(trail_chars) - 1))
-            char = trail_chars[char_idx]
-            if grid[ty][tx] == " ":
-                grid[ty][tx] = char
+            # Only draw every few trail points for sparsity
+            if fade_factor > 0.3 and idx % 2 == 0:
+                if grid[ty][tx] == " ":
+                    grid[ty][tx] = "·"
 
-    # Draw first arm
+    # Draw first arm using │╲╱─
     if 0 <= y1 < height and 0 <= x1 < width:
-        draw_line(grid, pivot_x, pivot_y, x1, y1)
+        draw_line(grid, pivot_x, pivot_y, x1, y1, get_arm_char)
 
-    # Draw second arm
+    # Draw second arm using │╲╱─
     if 0 <= y1 < height and 0 <= x1 < width and 0 <= y2 < height and 0 <= x2 < width:
-        draw_line(grid, x1, y1, x2, y2)
+        draw_line(grid, x1, y1, x2, y2, get_arm_char)
 
-    # Draw pivot
+    # Draw pivot as ※
     if 0 <= pivot_y < height and 0 <= pivot_x < width:
-        grid[pivot_y][pivot_x] = "▲"
+        grid[pivot_y][pivot_x] = "※"
 
-    # Draw first mass
+    # Draw first mass (joint) as ●
     if 0 <= y1 < height and 0 <= x1 < width:
         grid[y1][x1] = "●"
 
-    # Draw second mass (end mass - most visible)
+    # Draw second mass (end mass) as ●
     if 0 <= y2 < height and 0 <= x2 < width:
-        grid[y2][x2] = "◉"
-
-    # Calculate and display energy
-    # Potential energy
-    PE1 = m1 * g * L1 * (1 - math.cos(theta1))
-    PE2 = m2 * g * (L1 * (1 - math.cos(theta1)) + L2 * (1 - math.cos(theta2)))
-
-    # Kinetic energy
-    KE1 = 0.5 * m1 * (L1 * omega1) ** 2
-    KE2 = (
-        0.5
-        * m2
-        * (
-            (L1 * omega1 * math.cos(theta1) + L2 * omega2 * math.cos(theta2)) ** 2
-            + (L1 * omega1 * math.sin(theta1) + L2 * omega2 * math.sin(theta2)) ** 2
-        )
-    )
-
-    total_energy = PE1 + PE2 + KE1 + KE2
-
-    # HUD
-    title = "DOUBLE PENDULUM"
-    for i, c in enumerate(title):
-        if i + 2 < width and 1 < height:
-            grid[1][i + 2] = c
-
-    energy_text = f"E={total_energy:.2f}J"
-    for i, c in enumerate(energy_text):
-        if i + 2 < width and 2 < height:
-            grid[2][i + 2] = c
-
-    chaos_text = "Chaotic Motion"
-    chaos_x = width - len(chaos_text) - 2
-    if chaos_x > 0 and 1 < height:
-        for i, c in enumerate(chaos_text):
-            if chaos_x + i < width:
-                grid[1][chaos_x + i] = c
+        grid[y2][x2] = "●"
 
     return "\n".join(["".join(row) for row in grid])
 

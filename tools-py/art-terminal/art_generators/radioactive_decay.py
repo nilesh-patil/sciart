@@ -9,7 +9,7 @@ def generate(width, height):
     and a real-time decay curve.
     """
     # Initialize isotopes on first call or if dimensions changed
-    sample_width = int(width * 0.6)
+    sample_width = int(width * 0.5)  # Reduced from 0.6 for more space for graph
 
     if (
         not hasattr(generate, "isotopes")
@@ -24,7 +24,7 @@ def generate(width, height):
         for i in range(height):
             row = []
             for j in range(sample_width):
-                row.append({"decayed": False, "char": "U"})  # U for Uranium
+                row.append({"decayed": False})
             generate.isotopes.append(row)
 
     # Calculate decay based on elapsed time
@@ -37,17 +37,18 @@ def generate(width, height):
         for row in generate.isotopes:
             for isotope in row:
                 isotope["decayed"] = False
-                isotope["char"] = "U"
         generate.radiation_particles = []
         elapsed = 0
 
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
-    # Update isotopes (sample_width already calculated above)
+    # Update isotopes
     undecayed_count = 0
+    total_count = 0
     for i in range(height):
         for j in range(sample_width):
             isotope = generate.isotopes[i][j]
+            total_count += 1
 
             if not isotope["decayed"]:
                 undecayed_count += 1
@@ -55,23 +56,27 @@ def generate(width, height):
                 decay_chance = 1 - (0.5 ** (1 / (half_life * 10)))  # per frame
                 if random.random() < decay_chance:
                     isotope["decayed"] = True
-                    isotope["char"] = random.choice(["·", ".", "+"])
 
                     # Emit radiation particle
-                    if random.random() < 0.1:
+                    if random.random() < 0.15:
+                        speed = random.uniform(0.5, 1.5)
                         generate.radiation_particles.append(
                             {
                                 "x": j,
                                 "y": i,
-                                "vx": random.uniform(-1, 1),
-                                "vy": random.uniform(-1, 1),
+                                "vx": speed * random.choice([-1, 1]),
+                                "vy": speed * random.choice([-1, 1]),
                                 "age": 0,
                             }
                         )
 
-            grid[i][j] = isotope["char"]
+            # Draw isotope: ● for undecayed, ∘ for decayed
+            if isotope["decayed"]:
+                grid[i][j] = "∘"
+            else:
+                grid[i][j] = "●"
 
-    # Update and draw radiation particles
+    # Update and draw radiation particles with trajectories ╱╲
     particles_to_remove = []
     for particle in generate.radiation_particles:
         particle["x"] += particle["vx"]
@@ -82,29 +87,26 @@ def generate(width, height):
             particles_to_remove.append(particle)
         else:
             px, py = int(particle["x"]), int(particle["y"])
-            if 0 <= py < height and 0 <= px < sample_width and grid[py][px] == " ":
-                grid[py][px] = "γ"  # gamma radiation
+
+            # Draw trajectory based on direction
+            if 0 <= py < height and 0 <= px < width:
+                # Draw radiation particle as ·
+                if grid[py][px] == " ":
+                    grid[py][px] = "·"
 
     for p in particles_to_remove:
         generate.radiation_particles.remove(p)
 
-    # Draw decay curve graph on right side
-    graph_x_start = sample_width + 2
+    # Draw decay curve graph on right side as pure dot plot
+    graph_x_start = sample_width + 3
     graph_width = width - graph_x_start - 2
-    graph_height = height - 6
+    graph_height = height - 4
 
     if graph_width > 10 and graph_height > 5:
-        # Draw axes
-        for y in range(2, height - 2):
-            if graph_x_start < width:
-                grid[y][graph_x_start] = "│"
-
-        for x in range(graph_x_start, min(width, graph_x_start + graph_width)):
-            if height - 3 < height:
-                grid[height - 3][x] = "─"
-
-        # Plot decay curve
+        # Plot decay curve using only dots
         total_isotopes = len(generate.isotopes) * sample_width
+
+        # Plot expected decay curve
         for plot_x in range(graph_width - 1):
             # Time represented by this x position
             t = (plot_x / graph_width) * 60  # 60 second span
@@ -113,25 +115,21 @@ def generate(width, height):
             expected_fraction = 0.5 ** (t / half_life)
 
             # Plot position
-            plot_y = int(height - 4 - expected_fraction * graph_height)
-            actual_x = graph_x_start + 1 + plot_x
+            plot_y = int(height - 2 - expected_fraction * graph_height)
+            actual_x = graph_x_start + plot_x
 
-            if 2 <= plot_y < height - 3 and actual_x < width:
-                grid[plot_y][actual_x] = "*"
+            if 1 <= plot_y < height - 1 and actual_x < width:
+                if grid[plot_y][actual_x] == " ":
+                    grid[plot_y][actual_x] = "·"
 
-            # Mark current time
-            if abs(t - elapsed) < 0.5:
-                current_fraction = undecayed_count / total_isotopes
-                current_y = int(height - 4 - current_fraction * graph_height)
-                if 2 <= current_y < height - 3 and actual_x < width:
-                    grid[current_y][actual_x] = "●"
+        # Mark current time with ※ (progress marker)
+        if elapsed < 60:
+            current_x = int(graph_x_start + (elapsed / 60) * graph_width)
+            current_fraction = undecayed_count / total_isotopes if total_count > 0 else 0
+            current_y = int(height - 2 - current_fraction * graph_height)
 
-        # Labels
-        title = "Half-life Decay"
-        if len(title) + graph_x_start < width:
-            for i, c in enumerate(title):
-                if graph_x_start + i < width:
-                    grid[0][graph_x_start + i] = c
+            if 1 <= current_y < height - 1 and current_x < width:
+                grid[current_y][current_x] = "※"
 
     return "\n".join(["".join(row) for row in grid])
 

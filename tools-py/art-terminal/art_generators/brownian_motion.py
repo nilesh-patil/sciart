@@ -11,7 +11,6 @@ def generate(width, height):
     - Temperature-dependent molecular speeds
     - Elastic collisions with momentum transfer
     - Heat map visualization
-    - Real-time statistics
     """
     # Initialize on first call
     if not hasattr(generate, "particles"):
@@ -21,6 +20,7 @@ def generate(width, height):
         for _ in range(50):
             angle = random.uniform(0, 2 * math.pi)
             speed = random.gauss(1.5, 0.5)  # Maxwell-Boltzmann-ish distribution
+            mass = random.uniform(0.5, 1.5)  # Variable mass
             generate.particles.append(
                 {
                     "x": random.uniform(5, width - 5),
@@ -28,9 +28,8 @@ def generate(width, height):
                     "vx": speed * math.cos(angle),
                     "vy": speed * math.sin(angle),
                     "trail": [],
-                    "mass": 1,
+                    "mass": mass,
                     "type": "molecule",
-                    "char": random.choice(["·", "∙", "•"]),
                 }
             )
 
@@ -44,7 +43,6 @@ def generate(width, height):
                 "trail": [],
                 "mass": 25,  # Much heavier
                 "type": "brownian",
-                "char": "◉",
             }
         )
 
@@ -133,72 +131,47 @@ def generate(width, height):
             if len(particle["trail"]) > 150:
                 particle["trail"].pop(0)
 
-    # Draw heat map as background
-    heat_chars = [" ", "░", "▒", "▓"]
+    # Draw heat map as background (very subtle ░)
     for y in range(len(generate.heat_map)):
         for x in range(len(generate.heat_map[0])):
             heat = generate.heat_map[y][x]
-            if heat > 0.5:
-                char_idx = min(int(heat / 3), len(heat_chars) - 1)
-                # Draw 4x4 block for each heat map cell
+            # Only show heat in very hot zones
+            if heat > 3.0:
+                # Draw 4x4 block for each heat map cell (sparse)
                 for dy in range(4):
                     for dx in range(4):
                         gy, gx = y * 4 + dy, x * 4 + dx
                         if 0 <= gy < height and 0 <= gx < width:
-                            if grid[gy][gx] == " ":
-                                grid[gy][gx] = heat_chars[char_idx]
+                            if grid[gy][gx] == " " and random.random() < 0.3:
+                                grid[gy][gx] = "░"
 
-    # Draw Brownian particle trail
+    # Draw Brownian particle trail (sparse)
     brownian = [p for p in generate.particles if p["type"] == "brownian"][0]
-    trail_chars = ["·", ":", "*"]
     trail_len = len(brownian["trail"])
     for idx, (x, y) in enumerate(brownian["trail"]):
         if 0 <= y < height and 0 <= x < width:
-            char_idx = min(
-                int((idx / trail_len) * len(trail_chars)), len(trail_chars) - 1
-            )
-            if grid[y][x] in [" ", "░", "▒"]:
-                grid[y][x] = trail_chars[char_idx]
+            # Only draw every few trail points for sparsity
+            if idx % 3 == 0 and idx / trail_len > 0.3:
+                if grid[y][x] in [" ", "░"]:
+                    grid[y][x] = "·"
 
-    # Draw particles
+    # Draw particles - varied ·∘○ for sizes (mass)
     for particle in generate.particles:
         px, py = int(particle["x"]), int(particle["y"])
         if 0 <= py < height and 0 <= px < width:
-            grid[py][px] = particle["char"]
-
-            # Brownian particle gets visual emphasis
             if particle["type"] == "brownian":
-                for dy, dx in [(-1, 0), (1, 0), (0, -1), (0, 1)]:
-                    ny, nx = py + dy, px + dx
-                    if 0 <= ny < height and 0 <= nx < width:
-                        if grid[ny][nx] in [" ", "░", "▒", "·", ":"]:
-                            grid[ny][nx] = "○"
-
-    # Calculate and display statistics
-    avg_speed = sum(
-        math.sqrt(p["vx"] ** 2 + p["vy"] ** 2)
-        for p in generate.particles
-        if p["type"] == "molecule"
-    ) / sum(1 for p in generate.particles if p["type"] == "molecule")
-    brownian_speed = math.sqrt(brownian["vx"] ** 2 + brownian["vy"] ** 2)
-
-    # Temperature proportional to average kinetic energy
-    temperature = avg_speed**2
-
-    # Info panel
-    info_lines = [
-        "Brownian Motion Simulation",
-        f"Molecules: {sum(1 for p in generate.particles if p['type'] == 'molecule')} | Avg Speed: {avg_speed:.2f}",
-        f"Large Particle Speed: {brownian_speed:.2f} | T: {temperature:.1f}K",
-        "░▒▓ = Heat zones | ◉ = Brownian particle",
-    ]
-
-    # Draw info panel at top
-    for idx, line in enumerate(info_lines):
-        if idx < height:
-            for i, char in enumerate(line):
-                if i < width:
-                    grid[idx][i] = char
+                # Largest particle as ◎
+                grid[py][px] = "◎"
+            else:
+                # Size-coded based on mass
+                mass = particle["mass"]
+                if mass < 0.8:
+                    char = "·"  # Small
+                elif mass < 1.2:
+                    char = "∘"  # Medium
+                else:
+                    char = "○"  # Large
+                grid[py][px] = char
 
     return "\n".join(["".join(row) for row in grid])
 

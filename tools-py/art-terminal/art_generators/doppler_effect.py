@@ -7,7 +7,6 @@ def generate(width, height):
 
     Shows a wave source moving across the screen with compressed waves
     in front (blue-shifted) and stretched waves behind (red-shifted).
-    Includes wave density visualization.
     """
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
@@ -18,9 +17,9 @@ def generate(width, height):
     source_y = height // 2
 
     # Draw concentric wave circles with Doppler effect
-    num_waves = 20
+    num_waves = 15  # Reduced from 20 for less density
     wave_speed = 0.5
-    emission_interval = 0.04
+    emission_interval = 0.05
 
     for wave_idx in range(num_waves):
         # Time when this wave was emitted
@@ -39,8 +38,8 @@ def generate(width, height):
 
         wave_radius = time_since_emission * width * wave_speed
 
-        # Draw wave circle with varying intensity
-        for angle in range(0, 360, 5):
+        # Draw wave circle - sparse, only at specific angles
+        for angle in range(0, 360, 15):  # Increased from 5 to 15 for sparsity
             rad = math.radians(angle)
             x = emit_x + int(wave_radius * math.cos(rad) * 2.5)
             y = emit_y + int(wave_radius * math.sin(rad))
@@ -49,69 +48,29 @@ def generate(width, height):
                 # Determine if in front or behind source
                 if x > source_x:
                     # In front - compressed (higher frequency)
-                    char = "≈" if wave_idx % 2 == 0 else "~"
+                    # Tight spacing: ○○○
+                    if wave_idx % 2 == 0:
+                        char = "○"
+                    else:
+                        char = "◎"
                 else:
                     # Behind - stretched (lower frequency)
-                    char = "~" if wave_idx % 3 == 0 else "·"
+                    # Wide spacing: ○ ○ ○
+                    if wave_idx % 3 == 0:
+                        char = "○"
+                    else:
+                        char = " "  # Skip to create wider spacing
 
-                if grid[y][x] == " ":
+                if char != " " and grid[y][x] == " ":
                     grid[y][x] = char
 
-    # Draw wave density bars to show compression
-    density_y = height - 5
-    if density_y > 0:
-        # Calculate local wave density at different x positions
-        for check_x in range(0, width, 2):
-            # Count waves at this position
-            density = 0
-            for wave_idx in range(num_waves):
-                wave_time = progress - (wave_idx * emission_interval)
-                if wave_time < 0:
-                    wave_time += 1
-
-                emit_x = int(width * wave_time)
-                time_since_emission = progress - wave_time
-                if time_since_emission < 0:
-                    time_since_emission += 1
-
-                wave_radius = time_since_emission * width * wave_speed
-
-                # Check if wave passes through this x position
-                dist = abs(check_x - emit_x)
-                if abs(dist - wave_radius) < 3:
-                    density += 1
-
-            # Draw density bar
-            bar_height = min(4, density)
-            for bar_y in range(bar_height):
-                y = density_y + bar_y
-                if 0 <= y < height and 0 <= check_x < width:
-                    grid[y][check_x] = "│"
-
-    # Draw the moving source with direction indicator
+    # Draw the moving source as ◉ with → direction
     if 0 <= source_y < height and 0 <= source_x < width:
-        grid[source_y][source_x] = "@"
+        grid[source_y][source_x] = "◉"
+
         # Arrow showing direction
         if source_x + 1 < width:
             grid[source_y][source_x + 1] = "→"
-
-    # Add labels
-    label_y = 1
-    if label_y < height:
-        front_label = "Compressed (blue-shift)"
-        behind_label = "Stretched (red-shift)"
-
-        # Front label
-        if source_x + 5 < width - len(front_label):
-            for i, c in enumerate(front_label):
-                if source_x + 5 + i < width:
-                    grid[label_y][source_x + 5 + i] = c
-
-        # Behind label
-        if source_x > len(behind_label) + 5:
-            for i, c in enumerate(behind_label):
-                if source_x - len(behind_label) - 5 + i >= 0:
-                    grid[label_y][source_x - len(behind_label) - 5 + i] = c
 
     return "\n".join(["".join(row) for row in grid])
 
