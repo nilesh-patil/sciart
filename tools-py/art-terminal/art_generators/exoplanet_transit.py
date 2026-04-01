@@ -6,6 +6,20 @@ def generate(width, height):
     """Generates exoplanet transit with light curve visualization."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
+    # Add title
+    title = "EXOPLANET TRANSIT"
+    subtitle = "Brightness dip detection method"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
     star_radius = min(width // 8, height // 4)
     star_x, star_y = width // 3, height // 2
 

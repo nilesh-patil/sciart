@@ -9,6 +9,20 @@ def generate(screen_width, screen_height):
     """
     grid = [[" " for _ in range(screen_width)] for _ in range(screen_height)]
 
+    # Add title
+    title = "SATELLITE ORBITS"
+    subtitle = "Earth observation and communications"
+    title_x = (screen_width - len(title)) // 2
+    subtitle_x = (screen_width - len(subtitle)) // 2
+
+    if screen_height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < screen_width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < screen_width:
+                grid[1][subtitle_x + i] = char
+
     earth_radius = min(screen_width, screen_height) // 4
     earth_x, earth_y = screen_width // 2, screen_height // 2
 

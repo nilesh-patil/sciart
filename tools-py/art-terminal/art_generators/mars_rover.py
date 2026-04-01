@@ -41,6 +41,20 @@ def generate(width, height):
         generate.dust_particles = []
 
     grid = [[" " for _ in range(width)] for _ in range(height)]
+    # Add title
+    title = "MARS ROVER"
+    subtitle = "Autonomous exploration of Martian surface"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
 
     # Rover stays in left third of screen
     rover_x = width // 4

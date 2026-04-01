@@ -190,6 +190,20 @@ def generate(grid_width, grid_height):
     """Generates constellation map with stars and deep-sky objects."""
     grid = [[" " for _ in range(grid_width)] for _ in range(grid_height)]
 
+    # Add title
+    title = "CONSTELLATION"
+    subtitle = "Star patterns and deep sky objects"
+    title_x = (grid_width - len(title)) // 2
+    subtitle_x = (grid_width - len(subtitle)) // 2
+
+    if grid_height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < grid_width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < grid_width:
+                grid[1][subtitle_x + i] = char
+
     # Initialize background stars with varied brightness
     if not hasattr(generate, "background_stars"):
         generate.background_stars = []

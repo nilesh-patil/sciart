@@ -26,6 +26,20 @@ def generate(screen_width, screen_height):
 
     grid = [[" " for _ in range(screen_width)] for _ in range(screen_height)]
 
+    # Add title
+    title = "ROCKET LAUNCH"
+    subtitle = "Multi-stage ascent sequence"
+    title_x = (screen_width - len(title)) // 2
+    subtitle_x = (screen_width - len(subtitle)) // 2
+
+    if screen_height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < screen_width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < screen_width:
+                grid[1][subtitle_x + i] = char
+
     rocket_x = screen_width // 2
 
     # Countdown phase (first 3 seconds)

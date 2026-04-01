@@ -44,6 +44,20 @@ def generate(width, height):
         generate.history = {"A": [20], "B": [20], "C": [0]}
 
     grid = [[" " for _ in range(width)] for _ in range(height)]
+    # Add title
+    title = "CHEMICAL EQUILIBRIUM"
+    subtitle = "Reversible reaction dynamics"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
 
     # Reaction rate constants
     k_forward = 0.3  # A + B -> C
