@@ -1,3 +1,4 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
+tools-py/art_generators/__pycache__/*
