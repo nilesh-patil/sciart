@@ -2,4 +2,7 @@
 .pixi/*
 !.pixi/config.toml
 tools-py/art_generators/__pycache__/*
-/tools-py/art-terminal/art_generators/__pycache__
+
+# macOS metadata
+.DS_Store
+**/.DS_Store
