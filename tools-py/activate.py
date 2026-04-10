@@ -12,12 +12,33 @@ import art_generators
 
 
 def move_mouse():
-    """Moves the mouse to a random position within a restricted area on the screen."""
-    screen_width, screen_height = pyautogui.size()
-    margin = 50
-    x = random.randint(margin, screen_width - margin)
-    y = random.randint(margin, screen_height - margin)
-    pyautogui.moveTo(x, y, duration=0.5)
+    """Moves the mouse to a random position within a restricted area on the screen.
+
+    Never raises: pyautogui's fail-safe fires whenever the cursor sits in a
+    screen corner when moveTo is called, and macOS can revoke accessibility
+    permissions mid-run. A skipped move must not kill the simulation.
+    """
+    try:
+        screen_width, screen_height = pyautogui.size()
+        margin = 50
+        x = random.randint(margin, screen_width - margin)
+        y = random.randint(margin, screen_height - margin)
+        pyautogui.moveTo(x, y, duration=0.5)
+        return True
+    except Exception:
+        return False
+
+
+def safe_generate(generator, width, height):
+    """Runs a generator with dimensions clamped to >= 1.
+
+    Returns the generated art, or None if the generator raised - one bad
+    frame must not kill the simulation.
+    """
+    try:
+        return generator(max(1, width), max(1, height))
+    except Exception:
+        return None
 
 
 def generate_random_color_text(text):
@@ -71,14 +92,18 @@ def main():
     try:
         with Live(layout, console=console, screen=True, redirect_stderr=False) as live:
             while True:
-                move_mouse()
-                live.console.print(f"Moved mouse to {pyautogui.position()}")
+                if move_mouse():
+                    live.console.print(f"Moved mouse to {pyautogui.position()}")
 
                 width, height = console.width, console.height
                 generator = random.choice(art_generators)
-                art = generator(width, height)
-                colored_art = generate_random_color_text(art)
-                layout.update(colored_art)
+                art = safe_generate(generator, width, height)
+                if art is None:
+                    live.console.print(
+                        f"Generator '{generator.__module__}' failed; keeping last frame."
+                    )
+                else:
+                    layout.update(generate_random_color_text(art))
 
                 time.sleep(15)
 

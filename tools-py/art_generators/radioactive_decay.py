@@ -8,8 +8,9 @@ def generate(width, height):
     Shows unstable isotopes randomly decaying over time,
     following a half-life decay curve.
     """
-    # Initialize isotopes on first call
-    if not hasattr(generate, "isotopes"):
+    # Initialize isotopes on first call or when the terminal is resized
+    if getattr(generate, "dims", None) != (width, height):
+        generate.dims = (width, height)
         generate.isotopes = []
         generate.start_time = time.time()
         for i in range(height):

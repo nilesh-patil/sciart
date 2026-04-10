@@ -7,8 +7,9 @@ version = "0.1.0"
 
 [tasks]
 sim = "python tools-py/activate.py"
-lint = "ruff check tools-py"
-format = "ruff format tools-py"
+lint = "ruff check tools-py tests"
+format = "ruff format tools-py tests"
+test = "pytest tests -q"
 run_black_hole = "python tools-py/activate.py black_hole"
 run_constellation_map = "python tools-py/activate.py constellation_map"
 run_galaxy_collision = "python tools-py/activate.py galaxy_collision"
@@ -41,6 +42,7 @@ cleanup = "find . -name '__pycache__' -type d -exec rm -rf '{}' +"
 python-freethreading = ">=3.13.5,<4"
 uv = ">=0.9.3,<0.10"
 ruff = ">=0.14.1,<0.15"
+pytest = ">=8"
 
 [pypi-dependencies]
 pyautogui = ">=0.9.54"

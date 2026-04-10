@@ -1,0 +1,261 @@
+import math
+import time
+
+
+def draw_line(grid, x1, y1, x2, y2, char_func):
+    """Draw a line between two points with character selection function."""
+    dx = abs(x2 - x1)
+    dy = abs(y2 - y1)
+    sx = 1 if x1 < x2 else -1
+    sy = 1 if y1 < y2 else -1
+    err = dx - dy
+
+    while True:
+        if 0 <= y1 < len(grid) and 0 <= x1 < len(grid[0]):
+            if grid[y1][x1] == " ":
+                grid[y1][x1] = char_func(x1, y1, x2, y2)
+
+        if x1 == x2 and y1 == y2:
+            break
+
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            x1 += sx
+        if e2 < dx:
+            err += dx
+            y1 += sy
+
+
+def get_line_char(x1, y1, x2, y2):
+    """Get line character based on angle."""
+    dx = x2 - x1
+    dy = y2 - y1
+    if abs(dx) > abs(dy):
+        return "─"  # Horizontal
+    else:
+        return "│"  # Vertical
+
+
+def generate(width, height):
+    """Generates a spacetime grid warped by a massive object.
+
+    Visualizes general relativity by showing how mass curves the
+    fabric of spacetime, represented as a 2D grid. Includes
+    gravitational wave oscillations.
+    """
+    grid = [[" " for _ in range(width)] for _ in range(height)]
+    # Add title
+    title = "SPACETIME CURVATURE"
+    subtitle = "General relativity and warped geometry"
+    title_x = (width - len(title)) // 2
+    subtitle_x = (width - len(subtitle)) // 2
+
+    if height > 2:
+        for i, char in enumerate(title):
+            if 0 <= title_x + i < width:
+                grid[0][title_x + i] = char
+        for i, char in enumerate(subtitle):
+            if 0 <= subtitle_x + i < width:
+                grid[1][subtitle_x + i] = char
+
+    # Gravitational wave oscillation
+    t = time.time()
+    wave_amplitude = 2 * math.sin(t * 0.5)  # Slow oscillating wave
+
+    # Massive object at center
+    mass_x = width // 2
+    mass_y = height // 2
+    mass_radius = 4
+
+    # Warp strength (gravitational constant analogue) - oscillates with wave
+    G = 100.0 + wave_amplitude * 20
+
+    # Grid parameters - sparser grid
+    grid_spacing_x = 10
+    grid_spacing_y = 5
+    grid_points_x = width // grid_spacing_x + 2
+    grid_points_y = height // grid_spacing_y + 2
+
+    # Create warped grid
+    warped_points = []
+
+    for gy in range(grid_points_y):
+        row_points = []
+        for gx in range(grid_points_x):
+            # Unwarped position
+            base_x = gx * grid_spacing_x - grid_spacing_x
+            base_y = gy * grid_spacing_y - grid_spacing_y
+
+            # Distance to massive object
+            dx = base_x - mass_x
+            dy = base_y - mass_y
+            distance = math.sqrt(dx**2 + dy**2)
+
+            # Apply gravitational warping (pull toward mass)
+            if distance > 0:
+                # Warp decreases with distance
+                warp_factor = G / (distance**2 + 50)
+
+                # Normalize direction vector
+                dir_x = -dx / distance
+                dir_y = -dy / distance
+
+                # Apply warp
+                warped_x = int(base_x + dir_x * warp_factor)
+                warped_y = int(base_y + dir_y * warp_factor)
+            else:
+                warped_x = base_x
+                warped_y = base_y
+
+            row_points.append((warped_x, warped_y))
+
+        warped_points.append(row_points)
+
+    # Draw horizontal grid lines (bent)
+    for gy in range(len(warped_points)):
+        for gx in range(len(warped_points[gy]) - 1):
+            x1, y1 = warped_points[gy][gx]
+            x2, y2 = warped_points[gy][gx + 1]
+
+            # Calculate distance from center
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            dist_from_mass = math.sqrt((mid_x - mass_x) ** 2 + (mid_y - mass_y) ** 2)
+
+            # Draw line with compression near mass
+            if dist_from_mass < mass_radius * 2:
+                # Very compressed near mass - use ··
+                num_points = max(2, int(math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) / 2))
+                for i in range(num_points):
+                    px = int(x1 + (x2 - x1) * i / num_points)
+                    py = int(y1 + (y2 - y1) * i / num_points)
+                    if 0 <= py < height and 0 <= px < width:
+                        grid[py][px] = "·"
+            else:
+                draw_line(grid, x1, y1, x2, y2, get_line_char)
+
+    # Draw vertical grid lines (bent)
+    for gx in range(len(warped_points[0])):
+        for gy in range(len(warped_points) - 1):
+            x1, y1 = warped_points[gy][gx]
+            x2, y2 = warped_points[gy + 1][gx]
+
+            # Calculate distance from center
+            mid_x = (x1 + x2) / 2
+            mid_y = (y1 + y2) / 2
+            dist_from_mass = math.sqrt((mid_x - mass_x) ** 2 + (mid_y - mass_y) ** 2)
+
+            # Draw line with compression near mass
+            if dist_from_mass < mass_radius * 2:
+                # Very compressed near mass - use ··
+                num_points = max(2, int(math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2) / 2))
+                for i in range(num_points):
+                    px = int(x1 + (x2 - x1) * i / num_points)
+                    py = int(y1 + (y2 - y1) * i / num_points)
+                    if 0 <= py < height and 0 <= px < width:
+                        grid[py][px] = "·"
+            else:
+                draw_line(grid, x1, y1, x2, y2, get_line_char)
+
+    # Draw grid intersections as · or ┼
+    for gy in range(len(warped_points)):
+        for gx in range(len(warped_points[gy])):
+            gx_pos, gy_pos = warped_points[gy][gx]
+            if 0 <= gy_pos < height and 0 <= gx_pos < width:
+                # Distance from mass
+                dist = math.sqrt((gx_pos - mass_x) ** 2 + (gy_pos - mass_y) ** 2)
+                if dist < mass_radius * 2:
+                    grid[gy_pos][gx_pos] = "·"  # Compressed near mass
+                else:
+                    grid[gy_pos][gx_pos] = "┼"
+
+    # Draw the massive object creating the warp with ▓▒░ glow
+    for dy in range(-mass_radius, mass_radius + 1):
+        for dx in range(-mass_radius * 2, mass_radius * 2 + 1):
+            dist = math.sqrt((dx / 2.0) ** 2 + dy**2)
+            if dist <= mass_radius:
+                y, x = mass_y + dy, mass_x + dx
+                if 0 <= y < height and 0 <= x < width:
+                    if dist < mass_radius * 0.4:
+                        grid[y][x] = "●"  # Center
+                    elif dist < mass_radius * 0.6:
+                        grid[y][x] = "█"  # Inner glow
+                    elif dist < mass_radius * 0.8:
+                        grid[y][x] = "▓"  # Mid glow
+                    else:
+                        grid[y][x] = "▒"  # Outer glow
+
+    # Add a test particle following geodesic
+    if not hasattr(generate, "particle"):
+        # Initialize particle in orbit
+        generate.particle = {
+            "x": mass_x + 20,
+            "y": mass_y,
+            "vx": 0,
+            "vy": 2.0,
+            "trail": [],
+        }
+
+    # Update particle (simplified geodesic)
+    particle = generate.particle
+    px, py = particle["x"], particle["y"]
+
+    # Gravitational acceleration
+    dx = mass_x - px
+    dy = mass_y - py
+    distance = math.sqrt(dx**2 + dy**2)
+
+    if distance > mass_radius + 1:
+        # Simple Newtonian approximation for visualization
+        accel = 50.0 / (distance**2)
+        particle["vx"] += (dx / distance) * accel * 0.1
+        particle["vy"] += (dy / distance) * accel * 0.1
+
+        # Update position
+        particle["x"] += particle["vx"] * 0.1
+        particle["y"] += particle["vy"] * 0.1
+
+        # Add to trail
+        particle["trail"].append((int(px), int(py)))
+        if len(particle["trail"]) > 50:
+            particle["trail"].pop(0)
+
+        # Draw trail as ··· (geodesic)
+        for idx, (tx, ty) in enumerate(particle["trail"]):
+            if 0 <= ty < height and 0 <= tx < width:
+                if grid[ty][tx] in [" ", "─", "│", "┼", "·"]:
+                    # Only show every few trail points
+                    if idx % 2 == 0:
+                        grid[ty][tx] = "·"
+
+        # Draw particle
+        ppx, ppy = int(particle["x"]), int(particle["y"])
+        if 0 <= ppy < height and 0 <= ppx < width:
+            grid[ppy][ppx] = "●"
+    else:
+        # Reset if particle falls into mass
+        generate.particle = {
+            "x": mass_x + 20,
+            "y": mass_y,
+            "vx": 0,
+            "vy": 2.0,
+            "trail": [],
+        }
+
+    return "\n".join(["".join(row) for row in grid])
+
+
+if __name__ == "__main__":
+    import os
+
+    try:
+        width, height = os.get_terminal_size()
+    except OSError:
+        width, height = 80, 24
+
+    while True:
+        output = generate(width, height)
+        os.system("clear" if os.name == "posix" else "cls")
+        print(output)
+        time.sleep(0.1)

@@ -6,7 +6,9 @@ def generate(width, height):
     """Generates realistic moon phases with proper shading and terminator line."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
-    moon_radius = min(width // 6, height // 3)
+    # Clamp to >= 1: the radius is used as a divisor and small terminals
+    # would otherwise collapse it to 0
+    moon_radius = max(1, min(width // 6, height // 3))
     moon_x, moon_y = width // 2, height // 2
 
     # Cycle through phases over 60 seconds

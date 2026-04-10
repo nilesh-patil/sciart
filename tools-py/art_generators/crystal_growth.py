@@ -7,8 +7,9 @@ def generate(width, height):
     Uses a simple cellular automaton where cells adjacent to
     existing crystal cells can become part of the crystal.
     """
-    # Initialize crystal grid on first call
-    if not hasattr(generate, "crystal"):
+    # Initialize crystal grid on first call or when the terminal is resized
+    if getattr(generate, "dims", None) != (width, height):
+        generate.dims = (width, height)
         generate.crystal = [[False for _ in range(width)] for _ in range(height)]
         # Seed crystal in the center
         center_x, center_y = width // 2, height // 2
