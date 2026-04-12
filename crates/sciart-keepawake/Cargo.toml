@@ -8,10 +8,13 @@ license.workspace = true
 authors.workspace = true
 
 [features]
-# KA-R4: mouse backend is opt-in (M3)
-mouse = []
+# KA-R4: the real mouse backend (enigo) is opt-in; it needs macOS Accessibility permission.
+mouse = ["dep:enigo"]
 
 [dependencies]
+enigo = { workspace = true, optional = true }
+rand.workspace = true
+rand_chacha.workspace = true
 
 [lints]
 workspace = true

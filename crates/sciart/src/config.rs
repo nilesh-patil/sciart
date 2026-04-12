@@ -1,15 +1,18 @@
-//! Config file loading and settings resolution (SPEC-005 CFG-R1..R4).
+//! Config file loading and settings resolution (SPEC-005 CFG-R1..R5).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
+use sciart_keepawake::Mode;
 use sciart_render::Theme;
 use serde::Deserialize;
 
-use crate::cli::{Cli, ThemeArg, UsageError};
+use crate::cli::{Cli, KeepAwakeArg, ThemeArg, UsageError};
 
 pub const DEFAULT_FPS: u16 = 30;
 pub const DEFAULT_INTERVAL: f64 = 15.0;
+pub const DEFAULT_LOW_POWER_FPS: u16 = 5;
+pub const DEFAULT_IDLE_AFTER: f64 = 600.0;
 
 /// On-disk config; every key optional, unknown keys rejected (CFG-R3).
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -22,6 +25,17 @@ pub struct FileConfig {
     pub hud: Option<bool>,
     #[serde(default)]
     pub disabled: Vec<String>,
+    pub keep_awake: Option<KeepAwakeArg>,
+    #[serde(default)]
+    pub low_power: LowPowerConfig,
+}
+
+/// `[low_power]` table (CFG-R5).
+#[derive(Debug, Default, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LowPowerConfig {
+    pub idle_after: Option<f64>,
+    pub fps: Option<u16>,
 }
 
 /// Fully resolved settings the app runs with.
@@ -34,6 +48,9 @@ pub struct Settings {
     pub hud: bool,
     pub seed: Option<u64>,
     pub disabled: Vec<String>,
+    pub keep_awake: Mode,
+    pub low_power_fps: u16,
+    pub idle_after: f64,
 }
 
 /// `$XDG_CONFIG_HOME/sciart/config.toml`, else `$HOME/.config/sciart/config.toml` (CFG-R2).
@@ -47,15 +64,31 @@ pub fn default_path(xdg_config_home: Option<OsString>, home: Option<OsString>) -
 pub fn parse(text: &str, origin: &Path) -> Result<FileConfig, UsageError> {
     let invalid = |msg: String| UsageError::Config(format!("{}: {msg}", origin.display()));
     let config: FileConfig = toml::from_str(text).map_err(|e| invalid(e.to_string()))?;
-    if let Some(fps) = config.fps
-        && !(1..=120).contains(&fps)
-    {
-        return Err(invalid(format!("fps = {fps} is outside 1..=120")));
+    let fps_ok = |fps: Option<u16>| fps.is_none_or(|f| (1..=120).contains(&f));
+    let secs_ok = |s: Option<f64>| s.is_none_or(|v| v.is_finite() && v > 0.0);
+    if !fps_ok(config.fps) {
+        return Err(invalid(format!(
+            "fps = {:?} is outside 1..=120",
+            config.fps
+        )));
     }
-    if let Some(interval) = config.interval
-        && !(interval.is_finite() && interval > 0.0)
-    {
-        return Err(invalid(format!("interval = {interval} must be > 0")));
+    if !secs_ok(config.interval) {
+        return Err(invalid(format!(
+            "interval = {:?} must be > 0",
+            config.interval
+        )));
+    }
+    if !fps_ok(config.low_power.fps) {
+        return Err(invalid(format!(
+            "low_power.fps = {:?} is outside 1..=120",
+            config.low_power.fps
+        )));
+    }
+    if !secs_ok(config.low_power.idle_after) {
+        return Err(invalid(format!(
+            "low_power.idle_after = {:?} must be > 0",
+            config.low_power.idle_after
+        )));
     }
     Ok(config)
 }
@@ -95,6 +128,12 @@ pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
         hud: cli.hud || file.hud.unwrap_or(false),
         seed: cli.seed,
         disabled: file.disabled,
+        keep_awake: cli
+            .keep_awake
+            .or(file.keep_awake)
+            .map_or(Mode::platform_default(), Mode::from),
+        low_power_fps: file.low_power.fps.unwrap_or(DEFAULT_LOW_POWER_FPS),
+        idle_after: file.low_power.idle_after.unwrap_or(DEFAULT_IDLE_AFTER),
     };
     (settings, warnings)
 }
@@ -123,6 +162,9 @@ mod tests {
                 hud: false,
                 seed: None,
                 disabled: vec![],
+                keep_awake: Mode::platform_default(),
+                low_power_fps: DEFAULT_LOW_POWER_FPS,
+                idle_after: DEFAULT_IDLE_AFTER,
             }
         );
         assert!(warnings.is_empty());
@@ -211,6 +253,41 @@ mod tests {
             assert!(parse(bad, Path::new("c.toml")).is_err(), "{bad}");
         }
         assert_eq!(file("interval = 0.5").interval, Some(0.5));
+    }
+
+    #[test]
+    fn cfg_r5_keep_awake_and_low_power_defaults() {
+        let (s, _) = resolve(&cli(&[]).unwrap(), FileConfig::default());
+        assert_eq!(s.keep_awake, Mode::platform_default());
+        assert_eq!(s.low_power_fps, 5);
+        assert_eq!(s.idle_after, 600.0);
+    }
+
+    #[test]
+    fn cfg_r5_file_values_and_cli_precedence() {
+        let f = file("keep_awake = \"mouse\"\n[low_power]\nidle_after = 30\nfps = 2\n");
+        let (s, _) = resolve(&cli(&[]).unwrap(), f);
+        assert_eq!(
+            (s.keep_awake, s.low_power_fps, s.idle_after),
+            (Mode::Mouse, 2, 30.0)
+        );
+        let f = file("keep_awake = \"mouse\"");
+        let (s, _) = resolve(&cli(&["--keep-awake", "off"]).unwrap(), f);
+        assert_eq!(s.keep_awake, Mode::Off, "flag wins");
+    }
+
+    #[test]
+    fn cfg_r5_low_power_values_and_keys_are_validated() {
+        for bad in [
+            "[low_power]\nidle_after = 0",
+            "[low_power]\nidle_after = -3",
+            "[low_power]\nfps = 0",
+            "[low_power]\nfps = 500",
+            "[low_power]\nenabled = true",
+            "keep_awake = \"jiggle\"",
+        ] {
+            assert!(parse(bad, Path::new("c.toml")).is_err(), "{bad}");
+        }
     }
 
     #[test]

@@ -5,6 +5,7 @@ mod cli;
 mod config;
 mod fps;
 mod keys;
+mod pacer;
 mod runtime;
 
 use std::process::ExitCode;
@@ -33,7 +34,13 @@ fn main() -> ExitCode {
         }
     };
 
-    match app::run(opts) {
+    // KA-R2: a keep-awake failure is a warning; the art still runs.
+    let keep_awake = sciart_keepawake::start(opts.keep_awake, opts.seed).unwrap_or_else(|e| {
+        eprintln!("sciart: warning: {e}");
+        sciart_keepawake::Guard::failed(opts.keep_awake)
+    });
+
+    match app::run(opts, keep_awake) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("sciart: {e:#}");
@@ -69,5 +76,8 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         },
         hud: settings.hud,
         interval: (*command == Command::Sim).then_some(settings.interval),
+        keep_awake: settings.keep_awake,
+        low_power_fps: settings.low_power_fps,
+        idle_after: settings.idle_after,
     })
 }

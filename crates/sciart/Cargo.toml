@@ -7,10 +7,15 @@ rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 
+[features]
+# Real mouse-jiggle keep-awake backend (KA-R4); needs Accessibility permission on macOS.
+mouse = ["sciart-keepawake/mouse"]
+
 [dependencies]
 sciart-core.workspace = true
 sciart-generators.workspace = true
 sciart-render.workspace = true
+sciart-keepawake.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true

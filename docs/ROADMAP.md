@@ -23,7 +23,6 @@ Tick items as they land. Requirement IDs in brackets link each item to its spec.
 - [x] `Runtime` with catch_unwind quarantine + panic-hook filter [RT-R1..R4, RT-R7]; "all failed" message row
 - [x] CLI `run`, `list`, `sim` (random start; auto-cycle arrives in M2), `--fps --seed --theme --ascii` [CLI-R1..R4]
 - [x] `sciart-keepawake::Mode` parse + platform default [KA-R1] (pulled forward from M3)
-
 ## M2 — Runtime & UX ✅
 - [x] Auto-cycle with interval + no-repeat + history; render-on-switch [RT-R5, RT-R5a, RT-R7]
 - [x] Interactive keys n/p/←/→/space/r/h/t/q/Esc/Ctrl-C [RT-R6, RT-R9]
@@ -31,10 +30,13 @@ Tick items as they land. Requirement IDs in brackets link each item to its spec.
 - [x] TOML config + precedence + `deny_unknown_fields`; `--config` [CFG-R1..R4]; example in `docs/config.example.toml`
 - [x] Automated pty end-to-end tests (portable-pty + vt100) replace the manual RND-R5 check
 
-## M3 — Keep-awake & low-power
-- [ ] `KeepAwake` trait + fake; `caffeinate` backend (macOS); `--keep-awake` flag [KA-R2, R3, R5, R6]
-- [ ] `mouse` backend behind feature (enigo) [KA-R4]
-- [ ] Low-power FPS on idle / focus loss [F5, RT-R8]
+## M3 — Keep-awake & low-power ✅
+- [x] `Backend` trait + `Guard` (fakes in tests); `ChildGuard`; `caffeinate` backend (macOS); `--keep-awake` flag + `keep_awake` config key [KA-R2, R3, R5, R6, CLI-R6, CFG-R5]
+- [x] `Jiggler<Mover>` logic (always tested) + enigo `Mover` behind feature `mouse`; `pixi run rs-install-mouse` [KA-R4]
+- [x] Low-power FPS on idle / focus loss via `Pacer`; `[low_power]` config; focus reporting in `TerminalGuard` [F5, RT-R8, RND-R5]
+- [x] `MAX_STEPS` 5 → 15 so low-power frames keep real-time motion (ADR-0003 amended) [RT-R11]
+- [x] HUD shows keep-awake status and LOW-POWER [RND-R4]; e2e pty tests for all of the above
+- [ ] Manual check (can't be automated without moving the real cursor): `pixi run rs-install-mouse`, then `sciart --keep-awake mouse --hud`, grant Accessibility, confirm the HUD shows `mouse:on` and the cursor moves every 15 s
 
 ## M4 — Batch A: analytic / time-driven scenes (10)
 Shared helpers first: orbit/ellipse drawing, disc/ring fill, sine fields.
