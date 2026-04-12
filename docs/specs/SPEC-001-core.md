@@ -53,3 +53,11 @@ All take centers/radii in **rows** (x is stretched by `geom::ASPECT`), clip to t
 - **CORE-R25** `draw::ramp(v, glyphs)` maps `v ∈ [0, 1]` onto `glyphs` (0 ⇒ first, 1 ⇒ last), clamping outside values; NaN ⇒ first. Panics only for an empty slice (a programming error caught by tests).
 - **CORE-R26** `draw::text_centered(canvas, y, s, ink)` writes `s` horizontally centered on row `y`, clipped at both edges.
 - **CORE-R27** `draw::fit_radius(size, frac)` is the largest radius in rows such that a circle of that radius (aspect-stretched) centered on the canvas fits within `frac` of both dimensions: `frac * min(width / (2·ASPECT), height / 2)`, never negative.
+
+### Particle helpers (`particles`, M5)
+Shared by the particle-system scenes. Pure, allocation-free after construction, deterministic given `ctx.rng`.
+- **CORE-R28** `ParticlePool<P>::with_capacity(n)` holds at most `n` particles. `spawn(p) -> bool` adds `p` and returns `true`, or returns `false` and drops `p` when full. `retain(|&mut P| -> bool)` updates every particle in place and removes those for which the closure returns `false` (order is not preserved). `len`, `is_empty`, `capacity`, `iter`, `iter_mut`, `clear`, and `set_capacity(n)` (truncates when shrinking) complete the API. No operation other than `set_capacity` growing may allocate.
+- **CORE-R29** `Trail<T: Copy>::new(n)` is a fixed-length history: `push(v)` appends and evicts the oldest when `n` entries exist; `iter()` yields oldest → newest; `len() <= n`; `n = 0` keeps nothing; `clear()` empties it.
+- **CORE-R30** `gaussian(rng, mean, sd) -> f64` draws a normal variate (Box–Muller or `rand_distr`-free equivalent); always finite; `sd == 0` returns exactly `mean`; a large seeded sample has mean within 3 % of `sd` of `mean` and standard deviation within 3 % of `sd`; non-finite parameters are treated as 0 and a negative `sd` as `|sd|`. `gaussian2(rng, sd) -> (f64, f64)` draws an isotropic 2-D pair.
+- **CORE-R31** `kepler_speed(gm, r) = √(gm / r)` and `kepler_omega(gm, r) = √(gm / r³)` for `r > 0`, `gm ≥ 0`; `0` for `r ≤ 0` or non-finite input (never NaN or ∞).
+- **CORE-R32** `plot(canvas, x, y, glyph, ink)` takes **f64** cell coordinates, rounds to the nearest cell and ignores non-finite or off-canvas points (so particle code never casts NaN to `i32`).
