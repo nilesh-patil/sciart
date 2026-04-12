@@ -44,3 +44,12 @@ Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 - **CORE-R19** `Stage::new(generator, seed, size, mode)` builds a `Ctx`, calls `resize` once, and owns a front and back `Canvas`. `Stage::resize(size)` forwards to the generator only when the size changes.
 - **CORE-R20** `Stage::step(dt)` calls `update(dt)` then `ctx.advance(dt)`.
 - **CORE-R21** `Stage::render()` clears the back canvas, lets the generator draw into it, then swaps it to the front. If the generator panics mid-render, `Stage::frame()` still returns the previous complete frame (supports RT-R3).
+
+### Drawing helpers (`draw`, M4)
+All take centers/radii in **rows** (x is stretched by `geom::ASPECT`), clip to the canvas, never panic for any finite or non-finite input, and cost time proportional to the *visible* area they touch.
+- **CORE-R22** `draw::orbit(canvas, cx, cy, r, glyph, ink)` draws a closed ellipse outline of radius `r` rows: every drawn cell lies within 1 cell of the ideal curve, and consecutive samples are dense enough that the outline has no gaps (adjacent drawn cells are 8-connected). `r <= 0` draws nothing.
+- **CORE-R23** `draw::disc(canvas, cx, cy, r, shader)` visits every cell whose aspect-corrected normalized distance `d = dist / r` is `<= 1`, calling `shader(d, nx, ny) -> Option<(Glyph, Ink)>` with `nx, ny ∈ [-1, 1]` the normalized offsets; `None` leaves the cell untouched. With `0 < r < 0.5` only the center cell is shaded (with `d = 0`); `r <= 0` or non-finite draws nothing.
+- **CORE-R24** `draw::field(canvas, shader)` calls `shader(x, y) -> Option<(Glyph, Ink)>` exactly once per cell.
+- **CORE-R25** `draw::ramp(v, glyphs)` maps `v ∈ [0, 1]` onto `glyphs` (0 ⇒ first, 1 ⇒ last), clamping outside values; NaN ⇒ first. Panics only for an empty slice (a programming error caught by tests).
+- **CORE-R26** `draw::text_centered(canvas, y, s, ink)` writes `s` horizontally centered on row `y`, clipped at both edges.
+- **CORE-R27** `draw::fit_radius(size, frac)` is the largest radius in rows such that a circle of that radius (aspect-stretched) centered on the canvas fits within `frac` of both dimensions: `frac * min(width / (2·ASPECT), height / 2)`, never negative.
