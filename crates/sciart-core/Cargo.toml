@@ -1,0 +1,19 @@
+[package]
+name = "sciart-core"
+description = "Terminal-agnostic primitives for sciart: canvas, generator trait, fixed-step clock"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

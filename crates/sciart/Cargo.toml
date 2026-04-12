@@ -1,0 +1,22 @@
+[package]
+name = "sciart"
+description = "Real-time generative science & astronomy art in your terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+sciart-core.workspace = true
+sciart-generators.workspace = true
+sciart-render.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+ratatui.workspace = true
+
+[lints]
+workspace = true
