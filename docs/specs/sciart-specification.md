@@ -115,8 +115,9 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
 - **Story**: As a user I leave it running; scenes change automatically.
 - **Acceptance**: auto-advances every `--interval` seconds (default 15) to a random
   non-quarantined generator, never the same one twice in a row (when >1 available).
-- Keys: `n` next, `p` previous (history), `space` pause/resume the auto-cycle **and** the
-  simulation, `r` reset current generator, `h` toggle HUD, `t` cycle theme, `q`/`Esc` quit.
+- Keys: `n`/`→` next, `p`/`←` previous (history), `space` pause/resume the auto-cycle **and** the
+  simulation, `r` reset current generator, `h` toggle HUD, `t` cycle theme, `q`/`Esc`/`Ctrl-C` quit
+  (RT-R9). The same keys work in `run` mode.
 
 ### F3: `sciart list`
 - Prints `name  category  description` for every registered generator, sorted by name.

@@ -24,12 +24,12 @@ Tick items as they land. Requirement IDs in brackets link each item to its spec.
 - [x] CLI `run`, `list`, `sim` (random start; auto-cycle arrives in M2), `--fps --seed --theme --ascii` [CLI-R1..R4]
 - [x] `sciart-keepawake::Mode` parse + platform default [KA-R1] (pulled forward from M3)
 
-## M2 — Runtime & UX
-- [ ] Auto-cycle with interval + no-repeat + history [RT-R5]
-- [ ] Interactive keys n/p/space/r/h/t/q [RT-R6] (q/Esc/Ctrl-C already work)
-- [ ] HUD overlay [F4, RND-R4]; flags `--interval --hud`
-- [ ] TOML config + precedence + `deny_unknown_fields`; `--config` [CFG-R1..R4]
-- [ ] Automated pty smoke test for the binary (replaces manual RND-R5 check)
+## M2 — Runtime & UX ✅
+- [x] Auto-cycle with interval + no-repeat + history; render-on-switch [RT-R5, RT-R5a, RT-R7]
+- [x] Interactive keys n/p/←/→/space/r/h/t/q/Esc/Ctrl-C [RT-R6, RT-R9]
+- [x] HUD overlay + FPS meter [F4, RND-R4, RT-R10]; flags `--interval --hud` [CLI-R5]
+- [x] TOML config + precedence + `deny_unknown_fields`; `--config` [CFG-R1..R4]; example in `docs/config.example.toml`
+- [x] Automated pty end-to-end tests (portable-pty + vt100) replace the manual RND-R5 check
 
 ## M3 — Keep-awake & low-power
 - [ ] `KeepAwake` trait + fake; `caffeinate` backend (macOS); `--keep-awake` flag [KA-R2, R3, R5, R6]
