@@ -2,10 +2,6 @@
 .pixi/*
 !.pixi/config.toml
 
-# Python caches
-__pycache__/
-.pytest_cache/
-
 # Rust build output and pending snapshot reviews
 /target/
 *.snap.new

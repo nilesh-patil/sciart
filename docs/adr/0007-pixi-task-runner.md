@@ -13,5 +13,8 @@ Rust commands are pixi tasks prefixed `rs-` (`rs-ci`, `rs-test`, `rs-lint`, `rs-
 + One entry point (`pixi run …`) for contributors.
 − Contributors need rustup as well as pixi.
 
+## Update (M8)
+The Python prototype was removed; pixi now only runs the `rs-*` tasks and has no conda/PyPI dependencies.
+
 ## Alternatives considered
 justfile; GitHub Actions (deferred — see spec Future Considerations).
