@@ -1,0 +1,34 @@
+[package]
+name = "sciart"
+description = "Real-time generative science & astronomy art in your terminal"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# Real mouse-jiggle keep-awake backend (KA-R4); needs Accessibility permission on macOS.
+mouse = ["sciart-keepawake/mouse"]
+
+[dependencies]
+sciart-core.workspace = true
+sciart-generators.workspace = true
+sciart-render.workspace = true
+sciart-keepawake.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+crossterm.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+ratatui.workspace = true
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+portable-pty.workspace = true
+tempfile.workspace = true
+vt100.workspace = true
+
+[lints]
+workspace = true

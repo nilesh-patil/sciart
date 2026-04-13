@@ -1,0 +1,28 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
++------------------------------------------------------------------------------+
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                       O..O.O.O..O.O..O.O..O.O..O.O..O                        |
+|                        O..O.O..O.O..O.O..O.O..O.O.O..O                       |
+|                       O..O.O.O..O.O..O.O..O.O..O.O..O                        |
+|                        O..O.O..O.O..O.O..O.O..O.O.O..O                       |
+|                       O..O.O.O..O.O..O.O..O.O..O.O..O                        |
+|                        O..O.O..O.O..O.O..O.O..O.O.O..O                       |
+|                       O. O.O.O .O.O .O.O .O.O .O.O. O                        |
+|                        O..O.O..O.O..O.O..O.O..O.O.O..O                       |
+|                       O..O.O.O..O.O..O.O..O.O..O.O..O                        |
+|                        O..O.O..O.O..O.O..O.O..O.O.O..O                       |
+|                       O..O.O.O..O.O..O.O..O.O..O.O..O                        |
+|                        O..O.O..O.O..O.O..O.O..O.O.O..O                       |
+|                       O..O.O.                                                |
+|                                                                              |
+|                                                                              |
+|                                                                              |
+|                                                                              |
++------------------------------------------------------------------------------+
+      T = 0.40 -> 0.25 heating   U/N = -2.81   N = 159   LJ reduced units

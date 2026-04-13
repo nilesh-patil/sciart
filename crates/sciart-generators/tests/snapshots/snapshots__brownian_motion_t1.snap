@@ -1,0 +1,28 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
+                                                                 .              
+        o                                                                       
+            .                                          o                        
+                                                                                
+                                                                                
+                                                                                
+                      .                      o                                  
+                                                                                
+                                           OOO                       .      o   
+              .                     .     @@@@O                                 
+                          o              .O@@@O                                 
+                      o   .      o      .                                       
+                                                                 .              
+              .                                                                 
+                                                       o         .  .       .   
+            o                        .                  .                       
+                                      .                  o      .               
+            .      o                                                           o
+                                                                         o      
+           o                          .                                         
+                                  o                       .                     
+             o                                      o                           
+                                          .                                .    
+                 D^ (MSD@2s) = ...   D = 2.25 rows^2/s   t = 1s

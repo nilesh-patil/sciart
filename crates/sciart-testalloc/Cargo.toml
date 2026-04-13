@@ -1,0 +1,29 @@
+[package]
+name = "sciart-testalloc"
+description = "Test-only counting global allocator for sciart's allocation tests (ADR-0009)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[dev-dependencies]
+toml.workspace = true
+
+# ADR-0009: this is the ONLY crate that does not inherit `[workspace.lints]`, because
+# `unsafe_code = "forbid"` cannot be relaxed by an inner `#[allow]`. It mirrors the
+# workspace table with `unsafe_code = "deny"` instead, so the single `unsafe impl
+# GlobalAlloc` must opt in explicitly. `tests/lints_mirror.rs` fails if the two drift.
+[lints.rust]
+unsafe_code = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cast_lossless = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+undocumented_unsafe_blocks = "deny"

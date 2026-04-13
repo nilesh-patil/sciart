@@ -1,0 +1,55 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+authors = ["Nilesh <4813079+nilesh-patil@users.noreply.github.com>"]
+repository = "https://github.com/nilesh-patil/tasks-adhoc"
+
+[workspace.dependencies]
+sciart-core = { path = "crates/sciart-core" }
+sciart-generators = { path = "crates/sciart-generators" }
+sciart-render = { path = "crates/sciart-render" }
+sciart-keepawake = { path = "crates/sciart-keepawake" }
+sciart-testalloc = { path = "crates/sciart-testalloc" } # dev-only (ADR-0009)
+
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
+crossterm = "0.29"
+enigo = "0.6"
+rand = "0.9"
+rand_chacha = "0.9"
+ratatui = "0.30"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
+unicode-width = "0.2"
+
+criterion = "0.8"
+insta = "1"
+portable-pty = "0.9"
+proptest = "1"
+tempfile = "3"
+vt100 = "0.16"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_debug_implementations = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+cast_lossless = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"
+uninlined_format_args = "warn"
+
+[profile.release]
+panic = "unwind" # ADR-0006: catch_unwind quarantine needs unwinding
+lto = "thin"
+codegen-units = 1
+
+[profile.bench]
+debug = true
