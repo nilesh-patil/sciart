@@ -1,0 +1,28 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
+ T+00.0 s  ALT     0 m  VEL    0 m/s                                            
+                                                                                
+                                                                                
+                                                                                
+                                    LIFTOFF                                     
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                   *                                            
+                                   HX  .                                        
+                                   HX   ^  .                                    
+                                   HX  /#\                                      
+                              oo   HX  |#|                                      
+                           o@  @o  HX  =+=          o@oo                        
+                           o@o@@oo HX .|#|. .*@o@oo@@o                          
+                                o* **##/#\ #*@o@o@@@                            
+=====================================##*#*##====================================
+ .  .  .  .  .  .  .  .  .  .  .  .  .  *  .  .  .  .  .  .  .  .  .  .  .  .  .
