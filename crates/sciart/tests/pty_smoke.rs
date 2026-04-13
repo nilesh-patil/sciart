@@ -148,8 +148,9 @@ fn rnd_r5_run_draws_stars_and_restores_the_terminal() {
 
 #[test]
 fn rnd_r4_rt_r9_hud_reflects_keys() {
-    // A short scene name keeps the whole HUD inside the 80-column pty; `sim` would start on a
-    // seed-dependent scene whose long name can push `| PAUSED |` past the right edge.
+    // A fixed short-named scene keeps theme and seed on screen at 80 columns. Flags never fall
+    // off the edge (RND-R4 fitting, see the long-name test below), but key hints may be
+    // dropped, so assertions don't rely on a separator after a flag.
     let mut s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "3"]);
     s.wait_for("HUD", |t| {
         t.contains("starfield | ") && t.contains("| astro |")
@@ -157,9 +158,28 @@ fn rnd_r4_rt_r9_hud_reflects_keys() {
     s.press("t");
     s.wait_for("theme change", |t| t.contains("| rainbow |"));
     s.press(" ");
-    s.wait_for("pause", |t| t.contains("| PAUSED |"));
+    s.wait_for("pause", |t| t.contains("| PAUSED"));
     s.press("h");
     s.wait_for("HUD hidden", |t| !t.contains("seed 3"));
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
+/// RND-R4 regression: at 80 columns the full HUD of a long scene name is ~100 characters, and
+/// plain clipping used to cut `PAUSED` off the right edge. Priority fitting drops key hints and
+/// seed instead, so the flag stays visible. No `--seed`: a random 20-digit seed is the realistic
+/// (worst) case.
+#[test]
+fn rnd_r4_hud_keeps_paused_visible_with_a_long_scene_name_at_80_columns() {
+    let mut s = Session::start(&["run", "cosmic_microwave_background", "--hud", "--ascii"]);
+    s.wait_for("HUD", |t| t.contains("cosmic_microwave_background | "));
+    s.press(" ");
+    let screen = s.wait_for("PAUSED on an 80-column HUD", |t| t.contains("| PAUSED"));
+    let hud_row = screen.lines().last().unwrap_or_default();
+    assert!(
+        hud_row.starts_with("cosmic_microwave_background | "),
+        "{hud_row:?}"
+    );
     let (status, _) = s.quit();
     assert!(status.success());
 }
@@ -223,7 +243,7 @@ fn ka_r3_caffeinate_lives_and_dies_with_sciart() {
 fn ka_r2_unavailable_backend_is_a_warning_not_a_failure() {
     // Default test builds have no `mouse` feature, so this backend cannot start.
     let s = Session::start(&["run", "starfield", "--hud", "--keep-awake", "mouse"]);
-    s.wait_for("fallback status", |t| t.contains("| mouse:unavailable |"));
+    s.wait_for("fallback status", |t| t.contains("| mouse:unavailable"));
     let (status, raw) = s.quit();
     assert!(status.success());
     assert!(String::from_utf8_lossy(&raw).contains("warning: keep-awake 'mouse' unavailable"));
@@ -232,12 +252,12 @@ fn ka_r2_unavailable_backend_is_a_warning_not_a_failure() {
 #[test]
 fn rt_r8_focus_loss_enters_low_power_and_focus_gain_leaves_it() {
     let mut s = Session::start(&["run", "starfield", "--hud", "--keep-awake", "off"]);
-    s.wait_for("HUD", |t| t.contains("| off |"));
+    s.wait_for("HUD", |t| t.contains("| off"));
     s.press("\x1b[O"); // focus out
-    s.wait_for("low power", |t| t.contains("| LOW-POWER |"));
+    s.wait_for("low power", |t| t.contains("| LOW-POWER"));
     s.press("\x1b[I"); // focus in
     s.wait_for("full power", |t| {
-        !t.contains("LOW-POWER") && t.contains("| off |")
+        !t.contains("LOW-POWER") && t.contains("| off")
     });
     let (status, raw) = s.quit();
     assert!(status.success());
@@ -257,7 +277,7 @@ fn rt_r8_focus_loss_enters_low_power_and_focus_gain_leaves_it() {
 fn rt_r8_idle_time_enters_low_power_and_a_key_restores() {
     let config = "keep_awake = \"off\"\n[low_power]\nidle_after = 0.3\nfps = 4\n";
     let mut s = Session::start_with_config(&["run", "starfield", "--hud"], Some(config));
-    s.wait_for("idle low power", |t| t.contains("| LOW-POWER |"));
+    s.wait_for("idle low power", |t| t.contains("| LOW-POWER"));
     s.press("x"); // unbound key still counts as activity
     s.wait_for("activity restores", |t| !t.contains("LOW-POWER"));
     let (status, _) = s.quit();

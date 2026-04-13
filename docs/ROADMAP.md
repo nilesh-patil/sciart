@@ -44,8 +44,8 @@ Shared helpers first: orbit/ellipse drawing, disc/ring fill, sine fields.
 - [x] solar_system · [x] pulsar · [x] moon_phases · [x] exoplanet_transit · [x] satellite_orbit
 - [x] doppler_effect · [x] wave_interference · [x] cosmic_microwave_background · [x] gravitational_lensing · [x] constellation_map
 - [x] Snapshots recorded and reviewed; all Batch A benches ≤ 0.3 ms at 200×50 [GEN-R8]
-- [ ] Follow-up: HUD truncates on narrow terminals with long scene names (flags like `PAUSED` fall off the right edge) — prioritise flags or elide the name [RND-R4]
-- [ ] Follow-up: CMB with 6 modes looks stripy; consider more modes / a power-spectrum weighting
+- [x] Follow-up: HUD truncates on narrow terminals with long scene names — priority fitting keeps flags, elides the name with `~` [RND-R4]
+- [x] Follow-up: CMB is now a 96-mode isotropic Gaussian random field with a Planck-like D_ℓ (plateau + acoustic peaks + cell beam) [CMB-A4, CMB-A5]
 
 ## M5 — Batch B: particle systems (7)
 Shared helpers first: `ParticlePool` (fixed-capacity, respawn), Keplerian speed, gaussian spawn.
@@ -53,8 +53,8 @@ Shared helpers first: `ParticlePool` (fixed-capacity, respawn), Keplerian speed,
 - [x] black_hole · [x] galaxy_collision · [x] stellar_nursery · [x] brownian_motion
 - [x] molecular_dynamics · [x] particle_accelerator · [x] rocket_launch
 - [x] Snapshots recorded and reviewed; all Batch B benches < 0.5 ms at 200×50 [GEN-R8]
-- [ ] Follow-up: MD density (1σ ≈ 1.6 rows) makes the gas phase sparse on small terminals; consider denser packing
-- [ ] Follow-up: the pool "no allocation" guarantee (CORE-R28) is by construction only — no counting-allocator test (`unsafe_code = forbid`)
+- [x] Follow-up: MD density — per-terminal σ scale and N at ρ = 0.25 in the 2-D LJ coexistence dome; 80×24 now 159 atoms with droplets in the cold phase [MD-A5]; Brownian readout label now names its estimator
+- [x] Follow-up: pool/trail/grid allocation-freedom and allocation-free `render`/`update` for every scene tested with a counting allocator (`sciart-testalloc`, ADR-0009); fixed the one offender (`moon_phases` label) [CORE-R28, CORE-R29, CORE-R36, GEN-R11]
 
 ## M6 — Batch C: grid / automata / stochastic (4)
 Shared helpers first: `Grid<T>` with resize-rebuild, neighbourhood iteration.

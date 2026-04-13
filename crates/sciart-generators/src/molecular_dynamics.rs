@@ -6,15 +6,18 @@
 //! - velocity-Verlet with sub-steps `h ≤ 0.004 τ`, one simulated second = [`TIME_SCALE`] τ;
 //! - a cell list (cells ≥ `r_c`) so forces cost O(N), half-stencil + Newton's third law;
 //! - specular (elastic) walls, applied by mirror-folding during the drift;
-//! - a Berendsen thermostat (τ_T = 1 s) chasing a 30 s cosine cycle between T = 0.25 and 1.6.
+//! - a Berendsen thermostat (τ_T = 0.5 s) chasing a 30 s cycle between T = 0.25 and 1.0;
+//! - a per-terminal layout ([`layout`]): the screen scale (rows per σ) and N are chosen from
+//!   the terminal area so every size shows the same reduced density ρ = [`RHO`], which lies
+//!   inside the 2-D LJ vapour–liquid dome — the cold phase visibly separates into droplets.
 //!
 //! Blow-up guards (the r⁻¹² core is the classic way an MD toy explodes):
 //! 1. atoms start on a lattice at ≥ the LJ minimum spacing, never overlapping;
-//! 2. every frame is sub-stepped, so a frame `dt` of 0.25 s is 250 ordinary MD steps;
+//! 2. every frame is sub-stepped, so a frame `dt` of 0.25 s is 375 ordinary MD steps;
 //! 3. below [`R_CAP`] the potential continues *linearly* (constant repulsive force), so a
 //!    pathological overlap produces a large but finite kick instead of ∞/NaN. Because U and
 //!    F stay consistent (F = −dU/dr everywhere), energy conservation is unaffected; at the
-//!    temperatures used here (T ≤ 1.6) pairs never get that close (U(R_CAP) ≈ 43 ε).
+//!    temperatures used here (T ≲ 1.6) pairs never get that close (U(R_CAP) ≈ 43 ε).
 //! 4. the sim box is never smaller than [`MIN_BOX`] per side nor denser than
 //!    1/[`MIN_AREA_PER_ATOM`]; on a tiny terminal the box is larger than the screen and
 //!    simply clipped.
@@ -44,21 +47,38 @@ const RC2: f64 = RC * RC;
 const R_CAP: f64 = 0.8;
 /// LJ minimum `2^{1/6}`: the lattice spacing of the initial crystal.
 const R_MIN: f64 = 1.122_462_048_309_373;
-/// One σ on screen, rows (x is additionally stretched by ASPECT).
-const ROWS_PER_SIGMA: f64 = 1.6;
-/// Reduced time units per simulated second.
-const TIME_SCALE: f64 = 4.0;
+/// Target reduced number density N/A. The scene is 2-D, so the relevant phase diagram is the
+/// 2-D LJ one, not the familiar 3-D one (T_c ≈ 1.3, T_t ≈ 0.69): for the potential truncated
+/// and shifted at 2.5, T_c ≈ 0.46 and ρ_c ≈ 0.33–0.35 (Smit & Frenkel 1991; full potential
+/// T_c ≈ 0.53), triple point T_t ≈ 0.4. ρ = 0.25 sits inside the vapour–liquid dome on the
+/// low-density side of ρ_c: cold, it separates into dense droplets (ρ ≈ 0.75) in a thin
+/// vapour (ρ ≈ 0.01) covering about a third of the box — droplets, not a percolating
+/// sponge; hot, it is a uniform supercritical gas with ~2 σ between atoms.
+const RHO: f64 = 0.25;
+/// Screen rows per σ (x is additionally stretched by ASPECT), chosen per terminal: as small
+/// as legibility allows on small screens (for more atoms), growing on large screens once
+/// N hits [`N_MAX`]. At `S_MIN` the closest-packed crystal rows (`R_MIN·√3/2 σ`) are 1.07
+/// rows apart, so neighbouring atoms never share a cell.
+const S_MIN: f64 = 1.1;
+const S_MAX: f64 = 2.5;
+/// Reduced time units per simulated second. 6 τ/s gives nucleation and coarsening ~60 τ of
+/// sub-critical time per cycle (droplets by ~10 s after the peak) at a thermal speed of
+/// ~6 rows/s at T = 1.
+const TIME_SCALE: f64 = 6.0;
 /// Largest velocity-Verlet step, τ.
 const DT_MD_MAX: f64 = 0.004;
 /// Temperature cycle: period (s), extremes, and Berendsen coupling time (s).
+/// T_LO is below the 2-D triple point (crystallites), T_HI ≈ 2 T_c (a clear gas). The
+/// squared-cosine profile ([`target_temperature`]) keeps the target below T_c for ~52 % of
+/// each cycle (vs ~35 % for a plain cosine), so the latent heat released on condensing can
+/// be removed and droplets have time to coarsen.
 const CYCLE: f64 = 30.0;
 const T_LO: f64 = 0.25;
-const T_HI: f64 = 1.6;
-const TAU_T: f64 = 1.0;
-/// Atom count `clamp(area / 45, 8, 160)`.
-const CELLS_PER_ATOM: usize = 45;
+const T_HI: f64 = 1.0;
+const TAU_T: f64 = 0.5;
+/// Atom count bounds; the cap keeps a step + render well under 1 ms at 200x50 (GEN-R8).
 const N_MIN: usize = 8;
-const N_MAX: usize = 160;
+const N_MAX: usize = 240;
 /// Sim-box floor (guard 4).
 const MIN_BOX: f64 = 3.0;
 const MIN_AREA_PER_ATOM: f64 = 2.5;
@@ -131,9 +151,23 @@ pub(crate) fn berendsen_lambda(t: f64, t0: f64, dt: f64, tau: f64) -> f64 {
         .clamp(0.8, 1.25)
 }
 
-/// Thermostat target at scene time `t`: starts cold, peaks at 15 s, cold again at 30 s.
+/// Thermostat target at scene time `t`: `T_LO + (T_HI − T_LO)·u²` with
+/// `u = (1 − cos 2πt/30)/2` — starts cold, lingers there, peaks at 15 s, cold again at 30 s.
 pub(crate) fn target_temperature(t: f64) -> f64 {
-    T_LO + (T_HI - T_LO) * 0.5 * (1.0 - (TAU * t / CYCLE).cos())
+    let u = 0.5 * (1.0 - (TAU * t / CYCLE).cos());
+    T_LO + (T_HI - T_LO) * u * u
+}
+
+/// Screen scale (rows per σ) and atom count for an interior spanning `w` cols × `h` rows
+/// between the outermost atom centres: `s = clamp(√(ρ·A₁/N_MAX), S_MIN, S_MAX)` and
+/// `N = clamp(round(ρ·A₁/s²), N_MIN, N_MAX)`, with `A₁ = w·h/ASPECT` the area in σ² at one
+/// row per σ. Small screens get the finest legible scale and as many atoms as the density
+/// asks for; large screens get N_MAX atoms and a coarser scale that keeps the density.
+pub(crate) fn layout(w: f64, h: f64) -> (f64, usize) {
+    let a1 = w.max(0.0) * h.max(0.0) / ASPECT;
+    let scale = (RHO * a1 / N_MAX as f64).sqrt().clamp(S_MIN, S_MAX);
+    let n = (RHO * a1 / (scale * scale)).round() as usize;
+    (scale, n.clamp(N_MIN, N_MAX))
 }
 
 /// Mirror-fold `x` into `[0, len]`; `true` when a velocity must flip (odd reflections).
@@ -224,6 +258,8 @@ impl CellList {
 /// Screen placement of the sim box.
 #[derive(Debug, Default, Clone, Copy)]
 struct View {
+    /// Rows per σ (x is additionally stretched by ASPECT).
+    scale: f64,
     /// Screen position (cols, rows) of sim coordinate (0, 0).
     c0: f64,
     r0: f64,
@@ -394,8 +430,8 @@ impl MolecularDynamics {
 
     fn to_screen(&self, x: f64, y: f64) -> (f64, f64) {
         (
-            self.view.c0 + x * ROWS_PER_SIGMA * ASPECT,
-            self.view.r0 + y * ROWS_PER_SIGMA,
+            self.view.c0 + x * self.view.scale * ASPECT,
+            self.view.r0 + y * self.view.scale,
         )
     }
 }
@@ -415,10 +451,11 @@ impl Generator for MolecularDynamics {
         } else {
             (None, 0, 0, w, hb)
         };
-        let screen_lx = f64::from(iw - 1).max(0.0) / (ROWS_PER_SIGMA * ASPECT);
-        let screen_ly = f64::from(ih - 1).max(0.0) / ROWS_PER_SIGMA;
+        let (iw1, ih1) = (f64::from(iw - 1).max(0.0), f64::from(ih - 1).max(0.0));
+        let (scale, n) = layout(iw1, ih1);
+        let screen_lx = iw1 / (scale * ASPECT);
+        let screen_ly = ih1 / scale;
 
-        let n = (size.area() / CELLS_PER_ATOM).clamp(N_MIN, N_MAX);
         let (mut lx, mut ly) = (screen_lx.max(MIN_BOX), screen_ly.max(MIN_BOX));
         let need = MIN_AREA_PER_ATOM * n as f64;
         if lx * ly < need {
@@ -437,8 +474,9 @@ impl Generator for MolecularDynamics {
             f64::from(ir0) + f64::from(ih - 1).max(0.0) / 2.0,
         );
         self.view = View {
-            c0: icx - lx / 2.0 * ROWS_PER_SIGMA * ASPECT,
-            r0: icy - ly / 2.0 * ROWS_PER_SIGMA,
+            scale,
+            c0: icx - lx / 2.0 * scale * ASPECT,
+            r0: icy - ly / 2.0 * scale,
             border,
             label_row,
         };
@@ -734,13 +772,93 @@ mod tests {
         assert!((target_temperature(0.0) - T_LO).abs() < 1e-12);
         assert!((target_temperature(15.0) - T_HI).abs() < 1e-12);
         assert!((target_temperature(30.0) - T_LO).abs() < 1e-12);
+        // The path crosses the 2-D LJ critical temperature (≈ 0.46, rc = 2.5 truncated and
+        // shifted) both ways and stays below it for about half the cycle, above 2 T_c at the
+        // peak.
+        let (tc, samples) = (0.46, 3000u32);
+        let below = (0..samples)
+            .filter(|&k| target_temperature(CYCLE * f64::from(k) / f64::from(samples)) < tc)
+            .count() as f64
+            / f64::from(samples);
+        assert!((0.45..0.6).contains(&below), "below T_c {below:.2} of the cycle");
+        assert!(T_LO < 0.4 && T_HI > 2.0 * tc);
+    }
+
+    /// Mean number of neighbours within 1.5 σ: ≈ πr²ρ ≈ 1.8 for a uniform gas at ρ = 0.25,
+    /// 4–6 inside a 2-D droplet or crystallite.
+    fn coordination(g: &MolecularDynamics) -> f64 {
+        let mut k = 0usize;
+        for i in 0..g.n() {
+            for j in i + 1..g.n() {
+                if (g.x[i] - g.x[j]).hypot(g.y[i] - g.y[j]) < 1.5 {
+                    k += 2;
+                }
+            }
+        }
+        k as f64 / g.n().max(1) as f64
     }
 
     #[test]
     fn md_atom_count_follows_the_area() {
-        assert_eq!(fresh(200, 50, 1).0.n(), 160);
-        assert_eq!(fresh(80, 24, 1).0.n(), 1920 / 45);
-        assert_eq!(fresh(1, 1, 1).0.n(), 8);
+        // Small screens: σ sits at its legibility floor and N = ρ·area/σ² — 159 at 80x24,
+        // 3.8x the old fixed-scale count (42).
+        let (g, _) = fresh(80, 24, 1);
+        let a1 = 77.0 * 20.0 / ASPECT;
+        assert_eq!(g.view.scale, S_MIN);
+        assert_eq!(g.n(), (RHO * a1 / (S_MIN * S_MIN)).round() as usize);
+        assert!(g.n() >= 120, "N = {}", g.n());
+        // Large screens: N is capped (frame budget) and σ grows to keep the density.
+        let (g, _) = fresh(200, 50, 1);
+        assert_eq!(g.n(), N_MAX);
+        assert!(g.view.scale > S_MIN && g.view.scale <= S_MAX);
+        assert_eq!(fresh(1, 1, 1).0.n(), N_MIN);
+    }
+
+    #[test]
+    fn md_a5_density_is_inside_the_2d_coexistence_dome() {
+        // Wherever σ is not clamped the box holds the target density ρ = 0.25: between the
+        // cold 2-D LJ vapour (≈ 0.01) and liquid/solid (≈ 0.8) branches and below ρ_c ≈ 0.35,
+        // so the cold phase separates into droplets in a vapour.
+        for (w, h) in [(80, 24), (100, 30), (120, 40), (160, 45), (200, 50)] {
+            let (g, _) = fresh(w, h, 2);
+            let rho = g.n() as f64 / (g.lx * g.ly);
+            assert!((rho / RHO - 1.0).abs() < 0.05, "{w}x{h}: rho = {rho:.3}");
+        }
+    }
+
+    #[test]
+    fn md_glyphs_stay_legible_at_contact() {
+        // Triangular-lattice rows (the closest vertical packing, r_min·√3/2 σ apart) must land
+        // at least one terminal row apart, or crystal rows alias onto each other.
+        for (w, h) in [(1, 1), (20, 10), (80, 24), (100, 30), (200, 50), (400, 100)] {
+            let (g, _) = fresh(w, h, 3);
+            let s = g.view.scale;
+            assert!(R_MIN * 3f64.sqrt() / 2.0 * s >= 1.0, "{w}x{h}: {s} rows/σ");
+            assert!((S_MIN..=S_MAX).contains(&s), "{w}x{h}: {s} rows/σ");
+        }
+    }
+
+    #[test]
+    fn md_a5_small_terminal_condenses_in_the_cold_phase() {
+        // At 80x24, from the start crystal through the hot peak (15 s) into the next cold
+        // phase: around the peak the fluid is a uniform supercritical gas (coordination ≈ πr²ρ
+        // ≈ 1.8); by 28–33 s (T → T_LO, below the 2-D triple point) it has condensed again
+        // into droplets and crystallites (≈ 4–5). The old fixed 1.6 rows/σ layout (N = 42,
+        // ρ = 0.14) reached only 1.3 here.
+        let (mut g, mut ctx) = fresh(80, 24, 11);
+        let (mut hot, mut cold, mut nh, mut nc) = (0.0, 0.0, 0u32, 0u32);
+        while g.t < 33.0 {
+            g.update(0.05, &mut ctx);
+            if (14.0..19.0).contains(&g.t) {
+                hot += coordination(&g);
+                nh += 1;
+            } else if g.t >= 28.0 {
+                cold += coordination(&g);
+                nc += 1;
+            }
+        }
+        let (hot, cold) = (hot / f64::from(nh), cold / f64::from(nc));
+        assert!(cold > 2.0 * hot && cold > 3.5, "cold {cold:.2} vs hot {hot:.2}");
     }
 
     #[test]

@@ -1837,6 +1837,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "rand_chacha",
+ "sciart-testalloc",
  "unicode-width",
 ]
 
@@ -1849,6 +1850,7 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "sciart-core",
+ "sciart-testalloc",
 ]
 
 [[package]]
@@ -1867,6 +1869,13 @@ dependencies = [
  "crossterm",
  "ratatui",
  "sciart-core",
+]
+
+[[package]]
+name = "sciart-testalloc"
+version = "0.1.0"
+dependencies = [
+ "toml",
 ]
 
 [[package]]

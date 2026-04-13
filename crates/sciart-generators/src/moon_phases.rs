@@ -228,9 +228,23 @@ impl Generator for MoonPhases {
         });
 
         if let Some(y) = self.label_y {
-            let pct = (100.0 * illuminated_fraction(phase)).round() as u32;
-            let label = format!("{}  {pct}%", phase_name(phase));
-            draw::text_centered(canvas, y, &label, Ink::new(Role::Text, 220));
+            // "{name}  {pct}%" drawn in pieces so render never allocates (GEN-R11).
+            let name = phase_name(phase);
+            let pct = ((100.0 * illuminated_fraction(phase)).round() as u32).min(100);
+            let digits = if pct >= 100 { 3 } else if pct >= 10 { 2 } else { 1 };
+            let mut buf = [b'%'; 4];
+            let mut n = pct;
+            for slot in buf[..digits].iter_mut().rev() {
+                *slot = b'0' + (n % 10) as u8;
+                n /= 10;
+            }
+            let pct_text = std::str::from_utf8(&buf[..=digits]).unwrap_or("");
+            let len = (name.len() + 2 + pct_text.len()) as i32;
+            let x = (i32::from(canvas.size().width()) - len) / 2;
+            let ink = Ink::new(Role::Text, 220);
+            canvas.text(x, y, name, ink);
+            canvas.text(x + name.len() as i32, y, "  ", ink);
+            canvas.text(x + name.len() as i32 + 2, y, pct_text, ink);
         }
     }
 }

@@ -28,4 +28,5 @@
   | TEST-R3 | Process: `pixi run rs-ci` before every commit |
 - **TEST-R2** Snapshot changes are reviewed with `cargo insta review`; never blindly accepted.
 - **TEST-R3** `pixi run rs-ci` = `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`. Must pass before every commit.
+- **TEST-R5** Allocation guarantees (CORE-R28, CORE-R29, CORE-R36, GEN-R11) are verified by counting heap operations on the current thread with `sciart_testalloc::CountingAlloc` (ADR-0009). Each such test file is its own integration-test binary declaring `#[global_allocator]`. `sciart-testalloc` is `publish = false`, only ever a dev-dependency, the only crate allowed `unsafe` (a single `#[allow(unsafe_code)]` on `impl GlobalAlloc`), and mirrors `[workspace.lints]` except `unsafe_code = "deny"` (enforced by its `tests/lints_mirror.rs`).
 - **TEST-R4** Proptest case counts are kept modest (≤ 64 via `ProptestConfig::with_cases`) in `sciart-generators` and `sciart` so `rs-test` stays < 60 s; cheap pure properties in `sciart-core` may use proptest's default (256). `PROPTEST_CASES` can raise counts locally.
