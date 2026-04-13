@@ -29,10 +29,13 @@ registry![
     cosmic_microwave_background,
     crystal_growth,
     doppler_effect,
+    double_pendulum,
     exoplanet_transit,
     galaxy_collision,
     gravitational_lensing,
+    mars_rover,
     molecular_dynamics,
+    moon_landing,
     moon_phases,
     particle_accelerator,
     pulsar,
@@ -43,6 +46,7 @@ registry![
     spacetime_grid,
     starfield,
     stellar_nursery,
+    voyager_journey,
     wave_interference,
 ];
 

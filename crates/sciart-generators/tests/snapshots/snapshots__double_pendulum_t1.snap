@@ -1,0 +1,28 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
+                 two double pendulums, released 0.001 rad apart                 
+                                          .                                     
+                                          ..                                    
+                                           :                                    
+                                           :                                    
+                                           :                                    
+                                          :                                     
+                                          :                                     
+                                         ::                                     
+                                        ::                                      
+                                       ::                                       
+                                     oo-+                                       
+                                    ---                                         
+                                ----                                            
+                             -o-o                                               
+                           --oo                                                 
+                        ---o                                                    
+                      O-oo                                                      
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                   |dtheta| 2.4e-3 ( 0.9 e-folds)  dE/E 3e-7
