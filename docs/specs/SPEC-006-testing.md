@@ -19,15 +19,13 @@
 | End-to-end | `portable-pty` | `crates/sciart/tests/pty_smoke.rs` | real binary in an 80×24 pty: draws, restores the terminal (RND-R5), keys work, HUD visible |
 | Bench | `criterion` | `crates/sciart-generators/benches/frame.rs` | update(1/60)+render at 200×50 and 400×100 per generator |
 
-- **TEST-R1** Every implemented requirement ID is cited by ≥ 1 test name (`core_r10_…`), or has a non-test verification listed here:
+- **TEST-R1** Every requirement ID defined in `docs/specs` (bold `**X-RN**` requirements and backticked `X-AN` IDs on `- **Acceptance**` lines) is cited by ≥ 1 test — in its name (chains like `core_r9_r10_…` count), the comments/attributes directly above it, or its body — or is listed here as manual. Enforced by `crates/sciart/tests/spec_traceability.rs`, which also rejects citations of undefined IDs and stale manual entries (its `MANUAL` list must match this table):
 
   | ID | Verified by |
   |----|-------------|
-  | GEN-R3 | Process: `registry!` macro + contract suite iterates `registry()` |
-  | GEN-R7 | `clippy.toml` `disallowed-methods` + `-D warnings` in `rs-lint` (checked by injecting `Instant::now`/`rand::random` into starfield: both flagged) |
-  | GEN-R8 | `pixi run rs-bench` (starfield: 18 µs @ 200×50, 71 µs @ 400×100 on M-series, 2026-09-26) |
-  | RND-R5 | `crates/sciart/tests/pty_smoke.rs::rnd_r5_run_draws_stars_and_restores_the_terminal` (80×24 pty: stars on screen, `q` ⇒ exit 0, alt-screen enter/leave balanced) |
-  | TEST-R* | Process (this document) |
+  | GEN-R8 | `pixi run rs-bench` (release timing; all 26 scenes ≤ 0.55 ms @ 200×50 on M-series, 2026-09-26) |
+  | TEST-R2 | Process: snapshot diffs reviewed by a person |
+  | TEST-R3 | Process: `pixi run rs-ci` before every commit |
 - **TEST-R2** Snapshot changes are reviewed with `cargo insta review`; never blindly accepted.
 - **TEST-R3** `pixi run rs-ci` = `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`. Must pass before every commit.
-- **TEST-R4** Proptest case counts are kept modest by default (64) so `rs-test` stays < 60 s; `PROPTEST_CASES` can raise it locally.
+- **TEST-R4** Proptest case counts are kept modest (≤ 64 via `ProptestConfig::with_cases`) in `sciart-generators` and `sciart` so `rs-test` stays < 60 s; cheap pure properties in `sciart-core` may use proptest's default (256). `PROPTEST_CASES` can raise counts locally.
