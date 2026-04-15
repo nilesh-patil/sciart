@@ -1,9 +1,11 @@
 //! Executable form of docs/specs/SPEC-001-core.md. Test names cite requirement IDs.
 
+use std::f64::consts::FRAC_PI_2;
+
 use proptest::prelude::*;
 use rand::Rng;
-use sciart_core::geom;
 use sciart_core::prelude::*;
+use sciart_core::{geom, ink};
 
 const STAR: Glyph = Glyph::new('★', '*');
 const INK: Ink = Ink::new(Role::Star, 200);
@@ -210,6 +212,182 @@ fn core_r14_category_labels() {
     assert_eq!(Category::SpaceExploration.label(), "space-exploration");
     assert_eq!(Category::PhysicsChemistry.label(), "physics-chemistry");
     assert_eq!(Category::Basic.label(), "basic");
+}
+
+#[test]
+fn core_r47_biology_and_chemistry_categories() {
+    assert_eq!(Category::Biology.label(), "biology");
+    assert_eq!(Category::Chemistry.label(), "chemistry");
+    assert_eq!(Category::PhysicsChemistry.label(), "physics-chemistry");
+}
+
+// ---------- colormap inks ----------
+
+#[test]
+fn core_r46_seq_maps_unit_interval_onto_levels() {
+    assert_eq!(ink::seq(0.0), Ink::new(Role::Seq, 0));
+    assert_eq!(ink::seq(1.0), Ink::new(Role::Seq, 255));
+    assert_eq!(ink::seq(0.5).level, 128);
+    for (v, level) in [(-3.0, 0), (7.0, 255), (f64::NAN, 0), (f64::INFINITY, 255)] {
+        assert_eq!(ink::seq(v), Ink::new(Role::Seq, level), "{v}");
+    }
+}
+
+#[test]
+fn core_r46_div_maps_signed_interval_with_zero_at_128() {
+    assert_eq!(ink::div(0.0), Ink::new(Role::Div, 128));
+    assert_eq!(ink::div(-0.0), Ink::new(Role::Div, 128));
+    assert_eq!(ink::div(1.0), Ink::new(Role::Div, 255));
+    assert_eq!(ink::div(-1.0), Ink::new(Role::Div, 0));
+    for (v, level) in [
+        (-9.0, 0),
+        (9.0, 255),
+        (f64::NAN, 128),
+        (f64::NEG_INFINITY, 0),
+    ] {
+        assert_eq!(ink::div(v), Ink::new(Role::Div, level), "{v}");
+    }
+    assert!(
+        ink::div(0.01).level > 128 && ink::div(-0.01).level < 128,
+        "sign survives"
+    );
+}
+
+proptest! {
+    #[test]
+    fn core_r46_colormap_inks_are_monotone(a in -2.0f64..2.0, b in -2.0f64..2.0) {
+        let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+        prop_assert!(ink::seq(lo).level <= ink::seq(hi).level);
+        prop_assert!(ink::div(lo).level <= ink::div(hi).level);
+    }
+}
+
+// ---------- 3-D camera ----------
+
+const CENTRE: (f64, f64) = (40.0, 12.0);
+
+fn close(a: (f64, f64, f64), b: (f64, f64, f64)) -> bool {
+    (a.0 - b.0).abs() < 1e-9 && (a.1 - b.1).abs() < 1e-9 && (a.2 - b.2).abs() < 1e-9
+}
+
+#[test]
+fn core_r45_orthographic_axes_map_with_aspect_and_y_down() {
+    let cam = geom::Camera::default();
+    assert_eq!(cam.distance, f64::INFINITY, "default is orthographic");
+    let p = |v| cam.project(v, CENTRE, 3.0).expect("finite");
+    assert!(
+        close(p([0.0, 0.0, 0.0]), (40.0, 12.0, 0.0)),
+        "origin maps to centre"
+    );
+    assert!(close(
+        p([1.0, 0.0, 0.0]),
+        (40.0 + 3.0 * geom::ASPECT, 12.0, 0.0)
+    ));
+    assert!(
+        close(p([0.0, 1.0, 0.0]), (40.0, 9.0, 0.0)),
+        "+y is up on screen"
+    );
+    assert!(
+        close(p([0.0, 0.0, 2.0]), (40.0, 12.0, 2.0)),
+        "z is depth only"
+    );
+}
+
+#[test]
+fn core_r45_yaw_and_pitch_rotate_onto_the_depth_axis() {
+    let yawed = geom::Camera {
+        yaw: FRAC_PI_2,
+        ..geom::Camera::default()
+    };
+    let (x, y, z) = yawed.project([1.0, 0.0, 0.0], CENTRE, 3.0).unwrap();
+    assert!(
+        (x - 40.0).abs() < 1e-9 && (y - 12.0).abs() < 1e-9,
+        "+x lands on the view axis"
+    );
+    assert!((z.abs() - 1.0).abs() < 1e-9, "depth {z}");
+    // Yaw is about y: it never moves y.
+    let (_, y, _) = yawed.project([0.3, 1.0, -0.7], CENTRE, 3.0).unwrap();
+    assert!((y - 9.0).abs() < 1e-9);
+
+    let pitched = geom::Camera {
+        pitch: FRAC_PI_2,
+        ..geom::Camera::default()
+    };
+    let (x, y, z) = pitched.project([0.0, 1.0, 0.0], CENTRE, 3.0).unwrap();
+    assert!((x - 40.0).abs() < 1e-9 && (y - 12.0).abs() < 1e-9 && (z.abs() - 1.0).abs() < 1e-9);
+}
+
+#[test]
+fn core_r45_perspective_scales_by_d_over_d_minus_z() {
+    let cam = geom::Camera {
+        distance: 10.0,
+        ..geom::Camera::default()
+    };
+    let (x, y, z) = cam.project([1.0, 1.0, 5.0], CENTRE, 2.0).unwrap();
+    let k = 10.0 / (10.0 - 5.0);
+    assert!((x - (40.0 + 2.0 * geom::ASPECT * k)).abs() < 1e-9);
+    assert!((y - (12.0 - 2.0 * k)).abs() < 1e-9);
+    assert_eq!(z, 5.0);
+    // Nearer (larger z) is drawn larger.
+    let (far_x, ..) = cam.project([1.0, 0.0, -5.0], CENTRE, 2.0).unwrap();
+    assert!(far_x - 40.0 < x - 40.0);
+}
+
+#[test]
+fn core_r45_points_behind_the_eye_or_non_finite_are_none() {
+    let cam = geom::Camera {
+        distance: 10.0,
+        ..geom::Camera::default()
+    };
+    assert_eq!(cam.project([0.0, 0.0, 10.0], CENTRE, 1.0), None);
+    assert_eq!(cam.project([0.0, 0.0, 10.0 - 1e-12], CENTRE, 1.0), None);
+    assert_eq!(cam.project([0.0, 0.0, 50.0], CENTRE, 1.0), None);
+    assert!(cam.project([0.0, 0.0, 9.9], CENTRE, 1.0).is_some());
+    for p in [
+        [f64::NAN, 0.0, 0.0],
+        [0.0, f64::INFINITY, 0.0],
+        [0.0, 0.0, f64::NEG_INFINITY],
+    ] {
+        assert_eq!(cam.project(p, CENTRE, 1.0), None, "{p:?}");
+        assert_eq!(
+            geom::Camera::default().project(p, CENTRE, 1.0),
+            None,
+            "{p:?}"
+        );
+    }
+    assert_eq!(cam.project([0.0; 3], (f64::NAN, 0.0), 1.0), None);
+    assert_eq!(cam.project([0.0; 3], CENTRE, f64::INFINITY), None);
+    let broken = geom::Camera {
+        yaw: f64::NAN,
+        ..geom::Camera::default()
+    };
+    assert_eq!(broken.project([1.0, 0.0, 0.0], CENTRE, 1.0), None);
+}
+
+proptest! {
+    #[test]
+    fn core_r45_project_is_finite_or_none(
+        p in prop::array::uniform3(any::<f64>()),
+        yaw in any::<f64>(), pitch in any::<f64>(), distance in any::<f64>(),
+        scale in any::<f64>(),
+    ) {
+        let cam = geom::Camera { yaw, pitch, distance };
+        if let Some((x, y, z)) = cam.project(p, CENTRE, scale) {
+            prop_assert!(x.is_finite() && y.is_finite() && z.is_finite());
+        }
+    }
+
+    /// Rotation preserves distance from the origin (orthographic, scale 1, aspect undone).
+    #[test]
+    fn core_r45_rotation_preserves_length(
+        p in prop::array::uniform3(-100.0f64..100.0), yaw in -7.0f64..7.0, pitch in -7.0f64..7.0,
+    ) {
+        let cam = geom::Camera { yaw, pitch, ..geom::Camera::default() };
+        let (x, y, z) = cam.project(p, (0.0, 0.0), 1.0).unwrap();
+        let (x, y) = (x / geom::ASPECT, -y);
+        let len = |v: [f64; 3]| (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+        prop_assert!((len([x, y, z]) - len(p)).abs() < 1e-9 * len(p).max(1.0));
+    }
 }
 
 // ---------- geom ----------

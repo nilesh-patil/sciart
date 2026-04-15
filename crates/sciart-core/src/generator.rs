@@ -4,8 +4,13 @@ use crate::{Canvas, Ctx, Size};
 pub enum Category {
     Astronomy,
     SpaceExploration,
+    /// Physics scenes; also the pre-M10 chemistry scenes, which keep this label.
     PhysicsChemistry,
     Basic,
+    /// M10 (CORE-R47).
+    Biology,
+    /// M10 (CORE-R47).
+    Chemistry,
 }
 
 impl Category {
@@ -15,6 +20,8 @@ impl Category {
             Category::SpaceExploration => "space-exploration",
             Category::PhysicsChemistry => "physics-chemistry",
             Category::Basic => "basic",
+            Category::Biology => "biology",
+            Category::Chemistry => "chemistry",
         }
     }
 }
