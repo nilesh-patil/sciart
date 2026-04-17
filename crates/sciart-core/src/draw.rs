@@ -1,11 +1,11 @@
-//! Shared drawing helpers (SPEC-001 CORE-R22..R27).
+//! Shared drawing helpers (SPEC-001 CORE-R22..R27, CORE-R49).
 //!
 //! Centers and radii are in rows; x is stretched by [`ASPECT`] so circles look round.
 
 use std::f64::consts::TAU;
 
 use crate::geom::ASPECT;
-use crate::{Canvas, Glyph, Ink, Size};
+use crate::{Canvas, Glyph, GlyphMode, Ink, Size};
 
 /// Upper bound on outline samples, so absurd radii stay cheap.
 const MAX_ORBIT_SAMPLES: usize = 20_000;
@@ -101,6 +101,22 @@ pub fn text_centered(canvas: &mut Canvas, y: i32, s: &str, ink: Ink) {
     let len = s.chars().count() as i32;
     let x = (i32::from(canvas.size().width()) - len) / 2;
     canvas.text(x, y, s, ink);
+}
+
+/// Left-aligned text on row `y` from column `x`: `unicode` on a Unicode canvas, `ascii`
+/// on an ASCII one, clipped at both edges (CORE-R49, GEN-R10). Returns the column after
+/// the last char written (saturating), so labels can be chained.
+///
+/// For readouts whose Unicode form uses symbols (`ψ²`, `λ₁`, `→`) that a plain
+/// `Canvas::text` would pass through unchanged in ASCII mode.
+pub fn text_mode(canvas: &mut Canvas, x: i32, y: i32, unicode: &str, ascii: &str, ink: Ink) -> i32 {
+    let s = match canvas.mode() {
+        GlyphMode::Unicode => unicode,
+        GlyphMode::Ascii => ascii,
+    };
+    canvas.text(x, y, s, ink);
+    let n = i32::try_from(s.chars().count()).unwrap_or(i32::MAX);
+    x.saturating_add(n)
 }
 
 /// Largest circle radius (rows) fitting `frac` of the canvas (CORE-R27).

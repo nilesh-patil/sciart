@@ -1,4 +1,4 @@
-//! Semantic inks (CORE-R8) and the colormap-field helpers (CORE-R46, ADR-0011).
+//! Semantic inks (CORE-R8) and the colormap-field helpers (CORE-R46, CORE-R56, ADR-0011).
 
 /// What a cell *means*; themes turn roles into colors (ADR-0004, CORE-R8).
 #[non_exhaustive]
@@ -62,4 +62,39 @@ pub fn div(v: f64) -> Ink {
     let v = if v.is_nan() { 0.0 } else { v.clamp(-1.0, 1.0) };
     let half = if v < 0.0 { 128.0 } else { 127.0 };
     Ink::new(Role::Div, (128.0 + v * half).round() as u8)
+}
+
+/// The value `v ∈ [0, 1]` a [`Role::Seq`] level stands for: `level / 255`, the exact
+/// inverse of [`seq`] on its levels (CORE-R56). Reads `level` whatever the role.
+#[inline]
+pub fn seq_value(ink: Ink) -> f64 {
+    f64::from(ink.level) / 255.0
+}
+
+/// The value `v ∈ [−1, 1]` a [`Role::Div`] level stands for, the exact inverse of
+/// [`div`] on its levels (same two slopes either side of 128) (CORE-R56). Reads `level`
+/// whatever the role.
+#[inline]
+pub fn div_value(ink: Ink) -> f64 {
+    let d = f64::from(ink.level) - 128.0;
+    if d < 0.0 { d / 128.0 } else { d / 127.0 }
+}
+
+/// A cheap `tanh`-like squash onto `[−1, 1]` for mapping unbounded fields to colour
+/// (CORE-R56): the Padé approximant `x(27 + x²) / (27 + 9x²)`, which is odd, monotone
+/// (its derivative is `9(x² − 9)² / (27 + 9x²)² ≥ 0`), meets ±1 with zero slope at
+/// `|x| = 3`, and is exactly ±1 beyond. No libm call, so it is bit-reproducible across
+/// platforms; NaN ⇒ 0.
+#[inline]
+pub fn soft_clip(x: f64) -> f64 {
+    if x.is_nan() {
+        0.0
+    } else if x >= 3.0 {
+        1.0
+    } else if x <= -3.0 {
+        -1.0
+    } else {
+        let x2 = x * x;
+        (x * (27.0 + x2) / (27.0 + 9.0 * x2)).clamp(-1.0, 1.0)
+    }
 }

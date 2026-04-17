@@ -27,8 +27,10 @@
 //! The lattice walls reflect; a jump that would cross a wall is mirrored back (method of
 //! images: exact for the walk's position, an approximation for its first-passage point)
 //! and only kept if it lands well clear of the crystal.
+//!
+//! The crystal's colours age every step, so its `Dots` raster is rebuilt at the end of
+//! `update` (and `resize`); `render` only blits it (the M10 raster convention).
 
-use std::cell::RefCell;
 use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
@@ -361,10 +363,40 @@ pub struct CrystalGrowth {
     df_clock: f64,
     label: String,
     label_row: Option<i32>,
-    /// Render-time scratch raster for the crystal, sized in `resize`. The crystal's
-    /// colours change with age every frame, so it is rebuilt in `render`, which takes
-    /// `&self` (CORE-R14): hence the `RefCell`.
-    dots: RefCell<Dots>,
+    /// The crystal rasterised for the current state, sized in `resize` and rebuilt by
+    /// [`CrystalGrowth::rasterise`] after every state change; `render` only blits it.
+    dots: Dots,
+}
+
+/// The state that colours the crystal: phase, clock and melting threshold.
+#[derive(Debug, Clone, Copy)]
+struct Tint {
+    phase: Phase,
+    t: f64,
+    melt_k: f64,
+}
+
+impl Tint {
+    /// Ink for a terminal cell from its youngest dot's age, the melting front, and the seed.
+    fn cell_ink(self, youngest: f32, max_chem: u16, has_seed: bool) -> Ink {
+        if self.phase == Phase::Melt {
+            let front = (f64::from(max_chem) - (self.melt_k - MELT_BAND)) / MELT_BAND;
+            if front > 0.0 {
+                let level = 60.0 + 120.0 * (1.0 - front).clamp(0.0, 1.0);
+                return Ink::new(Role::Dim, level as u8);
+            }
+        }
+        let age = (self.t - f64::from(youngest)).max(0.0);
+        if age < TIP_AGE {
+            Ink::new(Role::Hot, 255)
+        } else if has_seed || age < WARM_AGE {
+            let f = ((age - TIP_AGE) / (WARM_AGE - TIP_AGE)).min(1.0);
+            Ink::new(Role::Accent, (250.0 - 70.0 * f) as u8)
+        } else {
+            let level = 110.0 + 135.0 * (-(age - WARM_AGE) / COOL_TAU).exp();
+            Ink::new(Role::Cold, level as u8)
+        }
+    }
 }
 
 impl Default for CrystalGrowth {
@@ -385,7 +417,7 @@ impl Default for CrystalGrowth {
             df_clock: 0.0,
             label: String::with_capacity(96),
             label_row: None,
-            dots: RefCell::default(),
+            dots: Dots::default(),
         }
     }
 }
@@ -466,24 +498,50 @@ impl CrystalGrowth {
         });
     }
 
-    /// Ink for a terminal cell from its youngest dot's age, the melting front, and the seed.
-    fn cell_ink(&self, youngest: f32, max_chem: u16, has_seed: bool) -> Ink {
-        if self.phase == Phase::Melt {
-            let front = (f64::from(max_chem) - (self.melt_k - MELT_BAND)) / MELT_BAND;
-            if front > 0.0 {
-                let level = 60.0 + 120.0 * (1.0 - front).clamp(0.0, 1.0);
-                return Ink::new(Role::Dim, level as u8);
+    /// Rebuild the crystal raster from the current state (no allocation: the lattice
+    /// was sized in `resize`).
+    fn rasterise(&mut self) {
+        let tint = Tint {
+            phase: self.phase,
+            t: self.t,
+            melt_k: self.melt_k,
+        };
+        let (dots, d, chem_map) = (&mut self.dots, &self.dla, &self.chem);
+        dots.clear();
+        // Only the terminal cells that can hold crystal: the seed's r_max box.
+        let r = d.r_max.ceil() as i32 + 1;
+        let (lw, lh) = d.dims();
+        let (x0, x1) = ((d.seed.0 - r).max(0), (d.seed.0 + r).min(lw - 1));
+        let (y0, y1) = ((d.seed.1 - r).max(0), (d.seed.1 + r).min(lh - 1));
+        for cy in y0 / SUB_Y..=y1 / SUB_Y {
+            for cx in x0 / SUB_X..=x1 / SUB_X {
+                // A cell's colour comes from all its crystal sites together (youngest
+                // age, melting front, seed), not from its single brightest dot, so
+                // collect the sites first and light them with one shared ink.
+                let mut sites = [(0, 0); (SUB_X * SUB_Y) as usize];
+                let mut n = 0;
+                let (mut youngest, mut chem, mut has_seed) = (EMPTY, 0u16, false);
+                for dy in 0..SUB_Y {
+                    for dx in 0..SUB_X {
+                        let (x, y) = (cx * SUB_X + dx, cy * SUB_Y + dy);
+                        if let Some(&a) = d.attach.get(x, y)
+                            && a >= 0.0
+                        {
+                            sites[n] = (x, y);
+                            n += 1;
+                            youngest = youngest.max(a);
+                            chem = chem.max(chem_map.get(x, y).copied().unwrap_or(0));
+                            has_seed |= (x, y) == d.seed;
+                        }
+                    }
+                }
+                if n > 0 {
+                    let ink = tint.cell_ink(youngest, chem, has_seed);
+                    for &(x, y) in &sites[..n] {
+                        dots.set(x, y, ink);
+                    }
+                }
             }
-        }
-        let age = (self.t - f64::from(youngest)).max(0.0);
-        if age < TIP_AGE {
-            Ink::new(Role::Hot, 255)
-        } else if has_seed || age < WARM_AGE {
-            let f = ((age - TIP_AGE) / (WARM_AGE - TIP_AGE)).min(1.0);
-            Ink::new(Role::Accent, (250.0 - 70.0 * f) as u8)
-        } else {
-            let level = 110.0 + 135.0 * (-(age - WARM_AGE) / COOL_TAU).exp();
-            Ink::new(Role::Cold, level as u8)
         }
     }
 }
@@ -495,9 +553,8 @@ impl Generator for CrystalGrowth {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         // The DLA lattice *is* the dot lattice: one site per braille dot.
-        let dots = self.dots.get_mut();
-        dots.resize(size);
-        let lattice = dots.dot_size();
+        self.dots.resize(size);
+        let lattice = self.dots.dot_size();
         self.dla = Dla::new(lattice, WALKERS);
         self.chem = Grid::new(lattice, u16::MAX);
         self.queue = Vec::with_capacity(lattice.area());
@@ -508,6 +565,7 @@ impl Generator for CrystalGrowth {
             (STEPS_REF * (r_rows / R_REF_ROWS).powf(COST_EXP)).clamp(STEPS_MIN, STEPS_MAX);
         self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
         self.reseed(ctx);
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -550,6 +608,7 @@ impl Generator for CrystalGrowth {
                 }
             }
         }
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -566,45 +625,7 @@ impl Generator for CrystalGrowth {
                 canvas.put(x / SUB_X, y / SUB_Y, glyph, Ink::new(Role::Dim, 110));
             }
         }
-        let mut dots = self.dots.borrow_mut();
-        dots.clear();
-        // Only the terminal cells that can hold crystal: the seed's r_max box.
-        let d = &self.dla;
-        let r = d.r_max.ceil() as i32 + 1;
-        let (lw, lh) = d.dims();
-        let (x0, x1) = ((d.seed.0 - r).max(0), (d.seed.0 + r).min(lw - 1));
-        let (y0, y1) = ((d.seed.1 - r).max(0), (d.seed.1 + r).min(lh - 1));
-        for cy in y0 / SUB_Y..=y1 / SUB_Y {
-            for cx in x0 / SUB_X..=x1 / SUB_X {
-                // A cell's colour comes from all its crystal sites together (youngest
-                // age, melting front, seed), not from its single brightest dot, so
-                // collect the sites first and light them with one shared ink.
-                let mut sites = [(0, 0); (SUB_X * SUB_Y) as usize];
-                let mut n = 0;
-                let (mut youngest, mut chem, mut has_seed) = (EMPTY, 0u16, false);
-                for dy in 0..SUB_Y {
-                    for dx in 0..SUB_X {
-                        let (x, y) = (cx * SUB_X + dx, cy * SUB_Y + dy);
-                        if let Some(&a) = d.attach.get(x, y)
-                            && a >= 0.0
-                        {
-                            sites[n] = (x, y);
-                            n += 1;
-                            youngest = youngest.max(a);
-                            chem = chem.max(self.chem.get(x, y).copied().unwrap_or(0));
-                            has_seed |= (x, y) == d.seed;
-                        }
-                    }
-                }
-                if n > 0 {
-                    let ink = self.cell_ink(youngest, chem, has_seed);
-                    for &(x, y) in &sites[..n] {
-                        dots.set(x, y, ink);
-                    }
-                }
-            }
-        }
-        dots.blit(canvas);
+        self.dots.blit(canvas);
     }
 }
 
