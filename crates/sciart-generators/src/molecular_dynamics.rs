@@ -780,7 +780,10 @@ mod tests {
             .filter(|&k| target_temperature(CYCLE * f64::from(k) / f64::from(samples)) < tc)
             .count() as f64
             / f64::from(samples);
-        assert!((0.45..0.6).contains(&below), "below T_c {below:.2} of the cycle");
+        assert!(
+            (0.45..0.6).contains(&below),
+            "below T_c {below:.2} of the cycle"
+        );
         assert!(T_LO < 0.4 && T_HI > 2.0 * tc);
     }
 
@@ -858,7 +861,10 @@ mod tests {
             }
         }
         let (hot, cold) = (hot / f64::from(nh), cold / f64::from(nc));
-        assert!(cold > 2.0 * hot && cold > 3.5, "cold {cold:.2} vs hot {hot:.2}");
+        assert!(
+            cold > 2.0 * hot && cold > 3.5,
+            "cold {cold:.2} vs hot {hot:.2}"
+        );
     }
 
     #[test]
