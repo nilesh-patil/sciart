@@ -1,6 +1,6 @@
 # SPEC-006: Testing & quality gates
 
-**Status**: M1 implemented (all four layers wired for starfield)
+**Status**: Implemented (all layers, including `alloc_free` and `spec_traceability`, cover all 41 scenes)
 
 ## TDD workflow
 1. Pick the next unchecked item in `docs/ROADMAP.md`.
