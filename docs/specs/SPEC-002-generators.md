@@ -1,6 +1,6 @@
 # SPEC-002: Generators & registry
 
-**Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches), M10 (Batch E) · **Status**: M1, M4–M7 (Batches A–D) implemented; M10 (Batch E, `chemical_reaction` upgrade) in progress
+**Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches), M10 (Batch E) · **Status**: M1, M4–M7 (Batches A–D) and M10 (Batch E, `chemical_reaction` upgrade) implemented
 
 Ports the Python stability contract (`docs/archive/issue-01-simulator-stability.md`, R1) to Rust
 and extends it for real-time animation.
