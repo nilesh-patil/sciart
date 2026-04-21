@@ -588,7 +588,7 @@ impl LiesegangRings {
     }
 
     /// Paint the liquid row and every visible gel pixel.
-    fn rasterize(&mut self) {
+    fn rasterise(&mut self) {
         let Self {
             tubes,
             layout: lay,
@@ -669,7 +669,7 @@ impl Generator for LiesegangRings {
         self.windows.extend(self.layout.windows());
         self.pixels.resize(size);
         self.classes.resize(self.pixels.pixel_size(), Class::Empty);
-        self.rasterize();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -700,7 +700,7 @@ impl Generator for LiesegangRings {
                 self.scan();
             }
         }
-        self.rasterize();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {

@@ -18,7 +18,9 @@ use std::f64::consts::{FRAC_PI_2, TAU};
 use rand::Rng;
 use rand::seq::SliceRandom;
 use sciart_core::ease;
+use sciart_core::geom::v3::{cross, scale, sub, unit};
 use sciart_core::geom::{self, ASPECT};
+use sciart_core::ink::level;
 use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
@@ -665,32 +667,19 @@ fn rung_cells(r: &Rung, mut f: impl FnMut(i32, i32, Glyph, Ink)) {
     } else {
         Glyph::new('╱', '/')
     };
-    let mut cells = geom::line(x0, y0, x1, y1).peekable();
-    let mut prev_x = None;
-    let mut k = 0;
-    while let Some((x, y)) = cells.next() {
+    geom::stroked_line(x0, y0, x1, y1, |k, x, y, (dx, _)| {
         // An unpaired half stops at the chord's midpoint.
         let Some(ink) = (if 2 * k <= len { Some(r.ink_a) } else { r.ink_b }) else {
             return;
         };
         // A step down one column (or a lone cell) is `│`; any step across is diagonal.
-        let upright = match prev_x {
-            Some(px) => px == x,
-            None => cells.peek().is_none_or(|&(nx, _)| nx == x),
+        let glyph = if dx == 0 {
+            Glyph::new('│', '|')
+        } else {
+            diagonal
         };
-        f(
-            x,
-            y,
-            if upright {
-                Glyph::new('│', '|')
-            } else {
-                diagonal
-            },
-            ink,
-        );
-        prev_x = Some(x);
-        k += 1;
-    }
+        f(x, y, glyph, ink);
+    });
 }
 
 fn draw_rung(canvas: &mut Canvas, r: &Rung) {
@@ -710,9 +699,9 @@ pub(crate) fn helicase(geo: &Geo, view: &View, snap: &Snapshot) -> Option<Ring> 
     }
     let centre = geo.world(Strand::Watson, f);
     let ahead = geo.world(Strand::Watson, f + 0.01);
-    let t = unit(std::array::from_fn(|k| ahead[k] - centre[k]));
+    let t = unit(sub(ahead, centre));
     // World up made normal to the tangent, and the third axis t × e1.
-    let e1 = unit(std::array::from_fn(|k| [0.0, 1.0, 0.0][k] - t[1] * t[k]));
+    let e1 = unit(sub([0.0, 1.0, 0.0], scale(t, t[1])));
     let e2 = cross(t, e1);
     Some(Ring {
         centre,
@@ -721,24 +710,6 @@ pub(crate) fn helicase(geo: &Geo, view: &View, snap: &Snapshot) -> Option<Ring> 
         depth: s.depth,
         ink: Ink::new(Role::Wave, level(RING_LEVEL * snap.fade)),
     })
-}
-
-fn unit(v: [f64; 3]) -> [f64; 3] {
-    let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
-    v.map(|c| c / n)
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-/// An ink level from a real value, rounded and clamped to `[0, 255]`.
-fn level(v: f64) -> u8 {
-    v.round().clamp(0.0, 255.0) as u8
 }
 
 /// Sample one backbone run into the far (`z_local < 0`) or near braille layer, joining
@@ -816,13 +787,10 @@ pub(crate) fn ring_marks(geo: &Geo, ring: &Ring) -> Option<[(i32, i32); 2]> {
     Some([point(1.0)?, point(-1.0)?])
 }
 
-/// Dot coordinates of cell point `(x, y)`: cell centres map to the middle of their
-/// 2×4 dot block.
+/// Dot coordinates of cell point `(x, y)`, whose integer values are cell centres: the
+/// centre maps to the middle of its 2×4 dot block (CORE-R64).
 fn to_dots(x: f64, y: f64) -> (f64, f64) {
-    (
-        x * f64::from(Dots::CELL_W) + 0.5,
-        y * f64::from(Dots::CELL_H) + 1.5,
-    )
+    Dots::from_cells(x + 0.5, y + 0.5)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1035,6 +1003,7 @@ impl Generator for DnaHelix {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sciart_core::geom::v3::{dot, norm};
 
     fn snap_at(t: f64) -> Snapshot {
         Story::new().at(t)
@@ -1210,7 +1179,7 @@ mod tests {
         for base in [4.0, 28.0] {
             for k in 0..=1080 {
                 let t = base + f64::from(k) / 60.0;
-                let d = (apex(t) - a0 + TAU / 2.0).rem_euclid(TAU) - TAU / 2.0;
+                let d = geom::wrap_angle(apex(t) - a0);
                 assert!(d.abs() < 1e-9, "t = {t}: {d}");
                 let geo = Geo::new(&view, t, &story.at(t));
                 let f = geo.fork.unwrap();
@@ -1223,7 +1192,7 @@ mod tests {
             }
         }
         // Watson sits at π/2 − Δ/2 at the apex, where it stands highest above Crick.
-        let a = (a0 - (FRAC_PI_2 - DELTA / 2.0) + TAU / 2.0).rem_euclid(TAU) - TAU / 2.0;
+        let a = geom::wrap_angle(a0 - (FRAC_PI_2 - DELTA / 2.0));
         assert!(a.abs() < 1e-9, "{a}");
         assert!((PHI0.rem_euclid(TAU) - 3.762).abs() < 1e-3, "{PHI0}");
         assert_eq!(arm_offset(-1.0), 0.0);
@@ -1264,7 +1233,7 @@ mod tests {
         for k in 1..=7200 {
             let t = f64::from(k) / 100.0;
             let phi = spin_phase(t);
-            let step = (phi - prev + TAU / 2.0).rem_euclid(TAU) - TAU / 2.0;
+            let step = geom::wrap_angle(phi - prev);
             if (step + SPIN / 100.0).abs() > 1e-9 {
                 assert!(story.at(t).fade < 0.02, "t = {t}");
             }
@@ -1553,18 +1522,6 @@ mod tests {
             scene_at(size, 2.0).render(&mut ascii);
             assert!(cells_with(&ascii, 'o').is_empty(), "{size:?}");
         }
-    }
-
-    fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|k| a[k] - b[k])
-    }
-
-    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-    }
-
-    fn norm(a: [f64; 3]) -> f64 {
-        dot(a, a).sqrt()
     }
 
     #[test]

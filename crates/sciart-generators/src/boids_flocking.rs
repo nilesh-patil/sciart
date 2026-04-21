@@ -22,6 +22,7 @@ use rand::Rng;
 use sciart_core::particles::{gaussian, gaussian2};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "boids_flocking",
@@ -375,8 +376,7 @@ fn attack_id(cycle: i64) -> u16 {
 
 /// Rotate `from` toward `to` (radians) by at most `max`.
 fn turn_toward(from: f64, to: f64, max: f64) -> f64 {
-    let diff = (to - from + PI).rem_euclid(TAU) - PI;
-    from + diff.clamp(-max, max)
+    from + geom::wrap_angle(to - from).clamp(-max, max)
 }
 
 /// Soft-bound push along one axis: `min(((m − d)/m)², 4)` inward within `m` of a wall.
@@ -829,7 +829,7 @@ impl Boids {
     /// Draw every bird as a heading-aware stroke (head, tail, and wings when banked) and
     /// the falcon's streak into `dots`. Strokes are clipped to the sky, so a tail or wing
     /// never reaches the label row.
-    fn rasterize(&mut self) {
+    fn rasterise(&mut self) {
         self.dots.clear();
         let step = self.step.wrapping_sub(1) as u32;
         let tail = 1.5 * self.sigma;
@@ -920,7 +920,7 @@ impl Generator for Boids {
         self.dots.resize(size);
         self.label.clear();
         let _ = write!(self.label, "N {n}  k={K}");
-        self.rasterize();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -935,7 +935,7 @@ impl Generator for Boids {
         for _ in 0..substeps {
             self.substep(&mut rng);
         }
-        self.rasterize();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -956,11 +956,7 @@ impl Generator for Boids {
         if Self::shows_label(self.cells) {
             // One dark cell either side, so the label never looks glued to a bird.
             let y = i32::from(self.cells.height()) - 1;
-            let end = 1 + self.label.as_str().len() as i32;
-            for x in [0, end] {
-                canvas.put(x, y, Glyph::ascii(' '), Ink::BLANK);
-            }
-            canvas.text(1, y, self.label.as_str(), LABEL_INK);
+            draw::label(canvas, 0, y, self.label.as_str(), LABEL_INK);
         }
     }
 }

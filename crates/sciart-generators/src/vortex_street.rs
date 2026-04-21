@@ -95,9 +95,6 @@ const U_MAX: f64 = 0.125;
 /// identical physics, and the cost does not grow with the terminal.
 const MAX_NODES: usize = 10_240;
 const BUCKET: f64 = 1.12;
-/// Height of the virtual display handed to `lattice_for`, large enough to reach the cap
-/// on both axes (and `4/0.9 · 2000` still fits a `u16`).
-const VIRTUAL_H: f64 = 2000.0;
 /// Hidden sponge fraction on the right; the domain is widened by `1/(1 − SPONGE)`.
 const SPONGE: f64 = 0.1;
 /// Peak sponge relaxation rate toward the inflow equilibrium (Israeli & Orszag 1981).
@@ -206,14 +203,10 @@ pub(crate) fn tau_minus(tau: f64, magic: f64) -> f64 {
 
 /// The simulation lattice for a display (ADR-0012, VOR-A4): the display's square-pixel
 /// aspect `w/2h`, clamped to [1, 4] and widened by the hidden sponge, is snapped to its
-/// power of [`BUCKET`] and handed to `lattice_for` as a virtual display beyond the cap,
-/// so the result depends only on the bucket. Snapping here, rather than leaving it to
-/// `lattice_for`, keeps the virtual display's integer rounding from moving an aspect
-/// that sits on a bucket boundary into the neighbouring bucket.
+/// power of [`BUCKET`], and the capped lattice of exactly that aspect is used whatever
+/// the display's size (CORE-R69), so the result depends only on the bucket.
 pub(crate) fn lattice_size(display: Size) -> Size {
-    let snapped = BUCKET.powi(bucket_index(display));
-    let virtual_display = Size::new((snapped * VIRTUAL_H).round() as u16, VIRTUAL_H as u16);
-    grid::lattice_for(virtual_display, MAX_NODES, BUCKET)
+    grid::lattice_for_aspect(BUCKET.powi(bucket_index(display)), MAX_NODES)
 }
 
 /// The power of [`BUCKET`] nearest to the display's clamped, sponge-widened aspect.
@@ -1016,7 +1009,7 @@ impl VortexStreet {
     }
 
     /// Recompute the vorticity and rasterise it (and the cylinder) into the pixels.
-    fn refresh_view(&mut self) {
+    fn rasterise(&mut self) {
         let Some(p) = self.params else { return };
         vorticity(&self.lat.ux, &self.lat.uy, VIEW_X0, &mut self.vort);
         let scale = p.d / (VORT_SCALE * p.u);
@@ -1024,52 +1017,51 @@ impl VortexStreet {
             *s = ink::soft_clip(f64::from(*s) * scale) as f32;
         }
         let px = self.pixels.pixel_size();
-        let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
-        // Pixel centre → lattice coordinates, the same cell-centre convention as the map.
-        let (sx, sy) = (
-            f64::from(self.vort.width()) / f64::from(pw),
-            p.h as f64 / f64::from(ph),
-        );
+        let (pw, ph) = (usize::from(px.width()), usize::from(px.height()));
+        let vw = usize::from(self.vort.width());
+        // Pixel size in lattice units, for the disc's partial coverage.
+        let (sx, sy) = (vw as f64 / pw as f64, p.h as f64 / ph as f64);
         let radius = 0.5 * p.d;
         // Pixels whose centre is within this distance of the centre may touch the disc
         // (half a pixel outside the rim) or lie in the upstream annulus.
         let opposite = radius + UPSTREAM_OPPOSITE_D * p.d;
         let reach = opposite.max(radius + 0.5 * sx.max(sy));
-        for y in 0..ph {
-            let dy = (f64::from(y) + 0.5) * sy - 0.5 - p.yc;
-            for x in 0..pw {
-                let dx = VIEW_X0 as f64 + (f64::from(x) + 0.5) * sx - 0.5 - p.xc;
-                let r2 = dx * dx + dy * dy;
-                let s = || f64::from(self.map.sample(&self.vort, x, y));
-                let ink = if r2 > reach * reach {
-                    vort_ink(s())
-                } else {
-                    let r = r2.sqrt();
-                    let fluid = || {
-                        let s = s();
-                        // Staircase noise upstream of the round mask. Rows grow downward,
-                        // so `s·dy < 0` is the sign opposite to the boundary layer's.
-                        let upstream = dx < 0.0 && r < opposite;
-                        let stray = r < radius + UPSTREAM_ANNULUS || s * dy < 0.0;
-                        if upstream && stray && s.abs() < UPSTREAM_MIN {
-                            None
-                        } else {
-                            vort_ink(s)
-                        }
-                    };
-                    match disc_coverage(dx, dy, r, radius, (sx, sy)) {
-                        c if c >= 1.0 => Some(CYLINDER_INK),
-                        c if c >= 0.5 => Some(rim_ink(c)),
-                        // A pixel partly covered from outside the rim shows the wall only
-                        // where the fluid is undrawn, so it never hides the boundary
-                        // layer, and the ASCII rule ignores it (see `ascii_cell`).
-                        c if c > 0.0 => fluid().or(Some(rim_ink(c))),
-                        _ => fluid(),
+        let (map, vort) = (&self.map, &self.vort);
+        self.pixels.shade(|x, y| {
+            // Pixel centre → lattice coordinates, the same cell-centre convention as the
+            // map (CORE-R68).
+            let dy = grid::centre_of(f64::from(y), ph, p.h) - p.yc;
+            let dx = VIEW_X0 as f64 + grid::centre_of(f64::from(x), pw, vw) - p.xc;
+            let r2 = dx * dx + dy * dy;
+            let s = || f64::from(map.sample(vort, x, y));
+            let ink = if r2 > reach * reach {
+                vort_ink(s())
+            } else {
+                let r = r2.sqrt();
+                let fluid = || {
+                    let s = s();
+                    // Staircase noise upstream of the round mask. Rows grow downward, so
+                    // `s·dy < 0` is the sign opposite to the boundary layer's.
+                    let upstream = dx < 0.0 && r < opposite;
+                    let stray = r < radius + UPSTREAM_ANNULUS || s * dy < 0.0;
+                    if upstream && stray && s.abs() < UPSTREAM_MIN {
+                        None
+                    } else {
+                        vort_ink(s)
                     }
                 };
-                self.pixels.set(x, y, ink.unwrap_or(Ink::BLANK));
-            }
-        }
+                match disc_coverage(dx, dy, r, radius, (sx, sy)) {
+                    c if c >= 1.0 => Some(CYLINDER_INK),
+                    c if c >= 0.5 => Some(rim_ink(c)),
+                    // A pixel partly covered from outside the rim shows the wall only
+                    // where the fluid is undrawn, so it never hides the boundary layer,
+                    // and the ASCII rule ignores it (see `ascii_cell`).
+                    c if c > 0.0 => fluid().or(Some(rim_ink(c))),
+                    _ => fluid(),
+                }
+            };
+            ink.unwrap_or(Ink::BLANK)
+        });
     }
 
     /// `Re≈140` and, once measured and at width ≥ 40, `  St≈0.18` (row 0, column 1); both
@@ -1131,7 +1123,7 @@ impl Generator for VortexStreet {
         self.cap_cols = self.params.map_or((1, 0), |p| {
             cap_columns(&p, self.vort.width(), self.pixels.pixel_size().width())
         });
-        self.refresh_view();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1159,7 +1151,7 @@ impl Generator for VortexStreet {
                 self.restart(&p, &mut ctx.rng);
             }
         }
-        self.refresh_view();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {

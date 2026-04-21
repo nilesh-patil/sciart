@@ -4,12 +4,13 @@ use crate::{Canvas, Ctx, Size};
 pub enum Category {
     Astronomy,
     SpaceExploration,
-    /// Physics scenes; also the pre-M10 chemistry scenes, which keep this label.
+    /// Physics scenes, and the molecular/crystal/Brownian scenes that predate
+    /// `Chemistry` (CORE-R47).
     PhysicsChemistry,
     Basic,
-    /// M10 (CORE-R47).
+    /// Life-science scenes (CORE-R47).
     Biology,
-    /// M10 (CORE-R47).
+    /// Chemistry scenes (CORE-R47).
     Chemistry,
 }
 

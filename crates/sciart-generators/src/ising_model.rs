@@ -18,7 +18,7 @@
 
 use std::fmt::Write as _;
 
-use sciart_core::grid::{lattice_for, resample_nearest};
+use sciart_core::grid::{lattice_for, regrid_nearest};
 use sciart_core::prelude::*;
 use sciart_core::{draw, ease, ink};
 
@@ -134,20 +134,11 @@ pub(crate) fn label(t_rel: f64, m_abs: f64, size: Size) -> Option<StackText<24>>
 const ALIGNED: [f64; 5] = [0.06, 0.12, 0.22, 0.38, 0.72];
 
 /// The `Div` ink of a spin `s` with `n_al` aligned neighbours, indexed by
-/// `(s > 0)·5 + n_al`: the levels of `ink::div(±ALIGNED[n_al])`, pinned by
-/// `ising_inks_follow_alignment`.
-const INKS: [Ink; 10] = [
-    Ink::new(Role::Div, 120),
-    Ink::new(Role::Div, 113),
-    Ink::new(Role::Div, 100),
-    Ink::new(Role::Div, 79),
-    Ink::new(Role::Div, 36),
-    Ink::new(Role::Div, 136),
-    Ink::new(Role::Div, 143),
-    Ink::new(Role::Div, 156),
-    Ink::new(Role::Div, 176),
-    Ink::new(Role::Div, 219),
-];
+/// `(s > 0)·5 + n_al`: `ink::div(±ALIGNED[n_al])`. Built once per scene (the one source
+/// of truth is [`ALIGNED`]).
+fn inks() -> [Ink; 10] {
+    std::array::from_fn(|i| ink::div(if i >= 5 { 1.0 } else { -1.0 } * ALIGNED[i % 5]))
+}
 
 /// A periodic spin lattice with its wrapped-neighbour tables and tracked magnetisation.
 #[derive(Debug, Default)]
@@ -207,6 +198,7 @@ impl Lattice {
         self.spins.len()
     }
 
+    #[cfg(test)]
     pub(crate) fn spins(&self) -> &Grid<i8> {
         &self.spins
     }
@@ -292,6 +284,8 @@ struct IsingModel {
     /// Ink of every lattice site, so large displays (several pixels per spin) cost one
     /// lookup per pixel.
     site_inks: Vec<Ink>,
+    /// [`inks`], indexed by `Lattice::ink_index`.
+    inks: [Ink; 10],
     pixels: Pixels,
     size: Size,
 }
@@ -309,6 +303,7 @@ impl IsingModel {
             cols: Vec::new(),
             rows: Vec::new(),
             site_inks: Vec::new(),
+            inks: inks(),
             pixels: Pixels::default(),
             size: Size::new(0, 0),
         }
@@ -319,20 +314,26 @@ impl IsingModel {
     }
 
     /// Ink every site, then paint each display pixel from its nearest site.
-    fn rasterize(&mut self) {
+    fn rasterise(&mut self) {
         let size = self.lattice.size();
         let w = usize::from(size.width());
         for (y, row) in self.site_inks.chunks_exact_mut(w.max(1)).enumerate() {
             for (x, ink) in row.iter_mut().enumerate() {
-                *ink = INKS[self.lattice.ink_index(x, y)];
+                *ink = self.inks[self.lattice.ink_index(x, y)];
             }
         }
-        for (y, &ly) in self.rows.iter().enumerate() {
-            let row = &self.site_inks[usize::from(ly) * w..][..w];
-            for (x, &lx) in self.cols.iter().enumerate() {
-                self.pixels.set(x as i32, y as i32, row[usize::from(lx)]);
-            }
-        }
+        let (rows, cols, site_inks) = (&self.rows, &self.cols, &self.site_inks);
+        self.pixels.shade(|x, y| {
+            // The tables cover the pixels after every resize; `get` only guards the
+            // protocol (an empty table before the first resize paints nothing).
+            let (Some(&ly), Some(&lx)) = (rows.get(y as usize), cols.get(x as usize)) else {
+                return Ink::BLANK;
+            };
+            site_inks
+                .get(usize::from(ly) * w + usize::from(lx))
+                .copied()
+                .unwrap_or(Ink::BLANK)
+        });
     }
 }
 
@@ -352,9 +353,7 @@ impl Generator for IsingModel {
             self.rng = SplitMix64::from_rng(&mut ctx.rng);
             self.lattice = Lattice::random(lattice, &mut self.rng);
         } else if lattice != self.lattice.size() {
-            self.scratch.resize(lattice, 1);
-            resample_nearest(self.lattice.spins(), &mut self.scratch);
-            std::mem::swap(&mut self.lattice.spins, &mut self.scratch);
+            regrid_nearest(&mut self.lattice.spins, lattice, &mut self.scratch);
             self.lattice.rebuild();
         }
         self.site_inks.resize(self.lattice.len(), Ink::BLANK);
@@ -369,7 +368,7 @@ impl Generator for IsingModel {
         self.rows.clear();
         self.rows
             .extend((0..i32::from(px.height())).map(|y| map.nearest(0, y).1 as u16));
-        self.rasterize();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -383,7 +382,7 @@ impl Generator for IsingModel {
         let whole = self.acc.floor();
         self.acc -= whole;
         self.lattice.attempts(whole as u64, &thr, &mut self.rng);
-        self.rasterize();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -647,7 +646,7 @@ mod tests {
         s.resize(Size::new(80, 24), &mut ctx);
         assert_eq!(s.lattice.size(), Size::new(80, 48));
         let mut expected = Grid::new(Size::new(80, 48), 0i8);
-        resample_nearest(&before, &mut expected);
+        sciart_core::grid::resample_nearest(&before, &mut expected);
         assert_eq!(s.lattice.spins(), &expected, "bucket change resamples");
         assert_consistent(&s.lattice);
     }
@@ -708,11 +707,11 @@ mod tests {
 
     #[test]
     fn ising_inks_follow_alignment() {
-        // The literal levels are `ink::div(±ALIGNED[n_al])`; this keeps them in sync.
-        for (i, ink) in INKS.iter().enumerate() {
-            let sign = if i >= 5 { 1.0 } else { -1.0 };
-            assert_eq!(*ink, ink::div(sign * ALIGNED[i % 5]), "entry {i}");
-        }
+        // Pinned ends: a lone down spin sits just below zero, a fully aligned up spin high.
+        let inks = inks();
+        assert_eq!(inks[0], Ink::new(Role::Div, 120));
+        assert_eq!(inks[4], Ink::new(Role::Div, 36));
+        assert_eq!(inks[9], Ink::new(Role::Div, 219));
         // Convex in n_al: every extra aligned neighbour brightens more than the last.
         let step: Vec<f64> = ALIGNED.windows(2).map(|w| w[1] - w[0]).collect();
         assert!(step.windows(2).all(|s| s[1] > s[0]), "{step:?}");

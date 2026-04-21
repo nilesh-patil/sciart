@@ -609,16 +609,12 @@ impl ChemicalReaction {
 
     /// Rasterise u, v into the pixels (bilinear, CORE-R52); u is sampled only off the
     /// pattern, where the halo needs it.
-    fn refresh_view(&mut self) {
-        let px = self.pixels.pixel_size();
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let v = self.map.sample(&self.v, x, y);
-                let (map, u) = (&self.map, &self.u);
-                let ink = v_ink(&self.levels, || map.sample(u, x, y), v).unwrap_or(Ink::BLANK);
-                self.pixels.set(x, y, ink);
-            }
-        }
+    fn rasterise(&mut self) {
+        let (map, u, v, levels) = (&self.map, &self.u, &self.v, &self.levels);
+        self.pixels.shade(|x, y| {
+            let s = map.sample(v, x, y);
+            v_ink(levels, || map.sample(u, x, y), s).unwrap_or(Ink::BLANK)
+        });
     }
 
     /// ` mitosis  F=.037 k=.065 ` on row 0 (CHEM-A7), the name only at width ≥ 56: the
@@ -643,10 +639,7 @@ impl ChemicalReaction {
             thousandths(c.f),
             thousandths(c.k)
         );
-        let gap = Glyph::ascii(' ');
-        canvas.put(0, 0, gap, Ink::BLANK);
-        let end = draw::text_mode(canvas, 1, 0, text.as_str(), text.as_str(), LABEL_INK);
-        canvas.put(end, 0, gap, Ink::BLANK);
+        draw::label(canvas, 0, 0, text.as_str(), LABEL_INK);
     }
 }
 
@@ -686,7 +679,7 @@ impl Generator for ChemicalReaction {
         self.size = size;
         self.pixels.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
-        self.refresh_view();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -721,7 +714,7 @@ impl Generator for ChemicalReaction {
                 self.reseed(&mut ctx.rng);
             }
         }
-        self.refresh_view();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {

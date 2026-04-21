@@ -502,14 +502,9 @@ impl Bz {
             let age = self.step.saturating_sub(at) as f64 / SUB_PER_S as f64;
             ease::smoothstep(age / FADE_IN_S) as f32
         });
-        let px = self.pixels.pixel_size();
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let u = self.map.sample(&self.u, x, y);
-                let v = self.map.sample(&self.v, x, y);
-                self.pixels.set(x, y, phase_ink(fade * phase(u, v)));
-            }
-        }
+        let (map, u, v) = (&self.map, &self.u, &self.v);
+        self.pixels
+            .shade(|x, y| phase_ink(fade * phase(map.sample(u, x, y), map.sample(v, x, y))));
     }
 }
 
@@ -533,9 +528,7 @@ impl Generator for Bz {
             // survives, and the waves relax to their natural λ within a few turns.
             // Resampled through the Laplacian scratch, which `bz_step` reshapes anyway.
             for field in [&mut self.u, &mut self.v] {
-                self.lap.resize(lat, 0.0);
-                grid::resample_bilinear(field, &mut self.lap);
-                std::mem::swap(field, &mut self.lap);
+                grid::regrid_bilinear(field, lat, &mut self.lap);
             }
         }
         self.map.rebuild(lat, px);

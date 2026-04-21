@@ -292,7 +292,7 @@ fn marker_levels(step: u64) -> (Option<u8>, Option<u8>) {
         .iter()
         .filter(|p| (p.at..p.at + MARK_STEPS).contains(&local))
     {
-        let lit = Some((255.0 * p.amp / STRONG).round() as u8);
+        let lit = Some(ink::level(255.0 * p.amp / STRONG));
         levels.0 = lit;
         if p.site == Site::Both {
             levels.1 = lit;
@@ -388,7 +388,10 @@ fn spike_char(level: u8) -> Option<char> {
 /// Dot row of `mv` on the oscilloscope panel `[x0, y0, x1, y1]` (cells), clamped to it.
 fn trace_y([_, y0, _, y1]: [i32; 4], mv: f64) -> f64 {
     let f = (mv - TRACE_BOTTOM_MV) / (TRACE_TOP_MV - TRACE_BOTTOM_MV);
-    let (top, bottom) = (f64::from(4 * y0), f64::from(4 * y1 + 3));
+    let (top, bottom) = (
+        f64::from(Dots::CELL_H * y0),
+        f64::from(Dots::CELL_H * y1 + Dots::CELL_H - 1),
+    );
     bottom - f.clamp(0.0, 1.0) * (bottom - top)
 }
 
@@ -409,7 +412,12 @@ fn slope_glyph(a: [f64; 2], b: [f64; 2]) -> char {
 
 /// Cells on the segment between two dot positions (2×4 dots per cell).
 fn cell_line(a: [f64; 2], b: [f64; 2]) -> impl Iterator<Item = (i32, i32)> {
-    let cell = |p: [f64; 2]| ((p[0] / 2.0).floor() as i32, (p[1] / 4.0).floor() as i32);
+    let cell = |p: [f64; 2]| {
+        (
+            (p[0] / f64::from(Dots::CELL_W)).floor() as i32,
+            (p[1] / f64::from(Dots::CELL_H)).floor() as i32,
+        )
+    };
     let ((x0, y0), (x1, y1)) = (cell(a), cell(b));
     geom::line(x0, y0, x1, y1)
 }

@@ -1,4 +1,5 @@
-//! Shared drawing helpers (SPEC-001 CORE-R22..R27, CORE-R49).
+//! Shared drawing helpers (SPEC-001 CORE-R22..R27, CORE-R49, CORE-R62, CORE-R63,
+//! CORE-R67).
 //!
 //! Centers and radii are in rows; x is stretched by [`ASPECT`] so circles look round.
 
@@ -61,10 +62,8 @@ pub fn disc(
         return;
     }
     for y in y0 as i32..=y1 as i32 {
-        let ny = (f64::from(y) - cy) / r;
         for x in x0 as i32..=x1 as i32 {
-            let nx = (f64::from(x) - cx) / rx;
-            let d = (nx * nx + ny * ny).sqrt();
+            let (d, nx, ny) = disc_offset(cx, cy, r, x, y);
             if d <= 1.0
                 && let Some((g, ink)) = shader(d, nx, ny)
             {
@@ -72,6 +71,30 @@ pub fn disc(
             }
         }
     }
+}
+
+/// Normalised offset `(d, nx, ny)` of cell `(x, y)` from a disc's centre, `nx` in units
+/// of `r·ASPECT` and `ny` in units of `r`: the one inside test shared by [`disc`] and
+/// [`disc_covers`], so the two cannot drift apart.
+#[inline]
+fn disc_offset(cx: f64, cy: f64, r: f64, x: i32, y: i32) -> (f64, f64, f64) {
+    let nx = (f64::from(x) - cx) / (r * ASPECT);
+    let ny = (f64::from(y) - cy) / r;
+    ((nx * nx + ny * ny).sqrt(), nx, ny)
+}
+
+/// Whether [`disc`]`(cx, cy, r, ..)` visits cell `(x, y)` on a canvas large enough to
+/// hold it (CORE-R63): the cells with `d ≤ 1`, or only the rounded centre cell when
+/// `r < 0.5`. False wherever `disc` draws nothing (non-finite input, `r ≤ 0`). For scenes
+/// that keep other strokes off a ball without painting the ball first.
+pub fn disc_covers(cx: f64, cy: f64, r: f64, x: i32, y: i32) -> bool {
+    if !(cx.is_finite() && cy.is_finite() && r.is_finite()) || r <= 0.0 {
+        return false;
+    }
+    if r < 0.5 {
+        return f64::from(x) == cx.round() && f64::from(y) == cy.round();
+    }
+    disc_offset(cx, cy, r, x, y).0 <= 1.0
 }
 
 /// Shade every cell once (CORE-R24).
@@ -117,6 +140,33 @@ pub fn text_mode(canvas: &mut Canvas, x: i32, y: i32, unicode: &str, ascii: &str
     canvas.text(x, y, s, ink);
     let n = i32::try_from(s.chars().count()).unwrap_or(i32::MAX);
     x.saturating_add(n)
+}
+
+/// A label on row `y`: a blank gutter cell at `x`, `s` from `x + 1`, and a blank cell
+/// after its last char, so the text never looks glued to the art around it (CORE-R67).
+/// Returns the column after the trailing blank. Chars are counted, not bytes.
+pub fn label(canvas: &mut Canvas, x: i32, y: i32, s: &str, ink: Ink) -> i32 {
+    let gap = Glyph::ascii(' ');
+    let start = x.saturating_add(1);
+    let end = start.saturating_add(i32::try_from(s.chars().count()).unwrap_or(i32::MAX));
+    canvas.put(x, y, gap, Ink::BLANK);
+    canvas.text(start, y, s, ink);
+    canvas.put(end, y, gap, Ink::BLANK);
+    end.saturating_add(1)
+}
+
+/// The glyph for one step `(dx, dy)` of a [`geom::stroked_line`] (CORE-R62): `─` along
+/// a row, `│` down a column, `╲`/`╱` where both change. Picked per step, a shallow line
+/// reads `──╲──` rather than two dash runs with a gap, and a steep one `│╲│`.
+///
+/// [`geom::stroked_line`]: crate::geom::stroked_line
+pub fn step_glyph(dx: i32, dy: i32) -> Glyph {
+    match (dx != 0, dy != 0) {
+        (_, false) => Glyph::new('─', '-'),
+        (false, true) => Glyph::new('│', '|'),
+        _ if (dx > 0) == (dy > 0) => Glyph::new('╲', '\\'),
+        _ => Glyph::new('╱', '/'),
+    }
 }
 
 /// Largest circle radius (rows) fitting `frac` of the canvas (CORE-R27).

@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::{geom, ink};
+use sciart_core::{draw, geom, ink};
 
 pub static META: Meta = Meta {
     name: "aurora",
@@ -1092,7 +1092,7 @@ impl Glow {
         } else {
             Role::Particle
         };
-        Some(Ink::new(role, (tone * 255.0).round() as u8))
+        Some(Ink::new(role, ink::level(f64::from(tone * 255.0))))
     }
 }
 
@@ -1838,19 +1838,19 @@ impl Aurora {
     }
 
     /// ` AL -620 nT  expansion `: AL rounded to 10 nT, then the beat's name, with a
-    /// blank gutter cell on each side so the label never merges into the curtain.
+    /// blank gutter cell on each side (CORE-R67) so the label never merges into the
+    /// curtain.
     fn draw_label(&self, canvas: &mut Canvas) {
         if self.view.label == Label::None {
             return;
         }
         let al = (al_from(self.params.activity) / 10.0).round() as i32 * 10;
         let mut buf = StackText::<32>::new();
-        let _ = write!(buf, " AL {al} nT");
+        let _ = write!(buf, "AL {al} nT");
         if self.view.label == Label::Full {
             let _ = write!(buf, "  {}", self.timeline.at(self.t).label);
         }
-        let _ = buf.write_char(' ');
-        canvas.text(0, 0, buf.as_str(), LABEL_INK);
+        draw::label(canvas, 0, 0, buf.as_str(), LABEL_INK);
     }
 }
 

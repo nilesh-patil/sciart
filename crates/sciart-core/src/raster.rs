@@ -1,5 +1,5 @@
 //! Sub-cell rasters layered onto a [`Canvas`] (SPEC-001 CORE-R41, CORE-R42, CORE-R51,
-//! CORE-R55, ADR-0010).
+//! CORE-R55, CORE-R64, CORE-R65, ADR-0010).
 //!
 //! - [`Dots`]: a braille lattice of 2 × 4 dots per cell, one ink per cell. With cells
 //!   ~2:1 tall ([`ASPECT`](crate::geom::ASPECT)) the dots are *square*, so line art,
@@ -159,6 +159,19 @@ impl Dots {
         }
     }
 
+    /// Dot coordinates of the continuous cell point `(x, y)`, where cell `i` spans
+    /// `[i, i + 1)` (CORE-R64): dot `j` is centred at cell `(j + ½) / CELL_W` across and
+    /// `(j + ½) / CELL_H` down, so [`plot`](Self::plot) lights the dot whose area holds
+    /// the point, inside the cell that holds it. The one cell → dot convention for every
+    /// scene; a cell *centre* `(cx + ½, cy + ½)` maps to the middle of its 2×4 block.
+    #[inline]
+    pub fn from_cells(x: f64, y: f64) -> (f64, f64) {
+        (
+            x * f64::from(Self::CELL_W) - 0.5,
+            y * f64::from(Self::CELL_H) - 0.5,
+        )
+    }
+
     /// Lattice dimensions in dots, `2·w × 4·h` (saturated at `u16::MAX` per axis).
     pub fn dot_size(&self) -> Size {
         Size::new(
@@ -232,6 +245,18 @@ impl Dots {
     pub fn is_lit(&self, x: i32, y: i32) -> bool {
         self.locate(x, y)
             .is_some_and(|(i, bit)| self.masks[i] & bit != 0)
+    }
+
+    /// The dot mask of cell `(cx, cy)` (bit layout as [`braille`]; 0 = no dot lit), or
+    /// `None` off the region (CORE-R64).
+    #[inline]
+    pub fn cell_mask(&self, cx: i32, cy: i32) -> Option<u8> {
+        let (w, h) = (
+            i32::from(self.cells.width()),
+            i32::from(self.cells.height()),
+        );
+        ((0..w).contains(&cx) && (0..h).contains(&cy))
+            .then(|| self.masks[cy as usize * w as usize + cx as usize])
     }
 
     /// Write every cell with at least one lit dot as its braille glyph (or the
@@ -349,24 +374,10 @@ impl Density {
         }
     }
 
-    /// Add `w` at every dot of the [`Dots::line`] segment from `(x0, y0)` to `(x1, y1)`
-    /// (CORE-R51 rules: rounded, inclusive, clipped, capped).
-    pub fn deposit_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, w: f32) {
-        if w.is_finite() {
-            let size = self.dots;
-            segment(x0, y0, x1, y1, size, |x, y| self.add(x, y, w));
-        }
-    }
-
     /// The value at dot `(x, y)`, or `None` off the buffer.
     #[inline]
     pub fn get(&self, x: i32, y: i32) -> Option<f32> {
         self.index(x, y).map(|i| self.buf[i])
-    }
-
-    /// The row-major values (`dot_size().width()` per row).
-    pub fn as_slice(&self) -> &[f32] {
-        &self.buf
     }
 
     /// Light every dot whose value is `≥ threshold` on `dots` with `map(value)`, in one
@@ -462,6 +473,19 @@ impl Pixels {
     #[inline]
     pub fn get(&self, x: i32, y: i32) -> Option<Ink> {
         self.index(x, y).map(|i| self.px[i])
+    }
+
+    /// Set every pixel to `shader(x, y)`, row by row (CORE-R65): the `Pixels` analogue
+    /// of [`draw::field`](crate::draw::field), for sampling a simulation lattice (e.g.
+    /// through a [`SampleMap`](crate::SampleMap)) onto the display pixels.
+    pub fn shade(&mut self, mut shader: impl FnMut(i32, i32) -> Ink) {
+        let w = usize::from(self.cells.width());
+        for (y, row) in self.px.chunks_exact_mut(w).enumerate() {
+            for (x, px) in row.iter_mut().enumerate() {
+                // Both fit: x < w ≤ u16::MAX, y < 2·h ≤ 2·u16::MAX.
+                *px = shader(x as i32, y as i32);
+            }
+        }
     }
 
     /// Draw the buffer onto `canvas`, one cell per vertical pixel pair.

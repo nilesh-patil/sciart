@@ -8,9 +8,10 @@ use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use rand::Rng;
+use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::{draw, geom, ode};
+use sciart_core::{draw, geom, ode, rng};
 
 pub static META: Meta = Meta {
     name: "globular_cluster",
@@ -45,9 +46,6 @@ const RH_TAU: f64 = 4.0;
 const VIEW_RADIUS: f64 = 2.2;
 /// The glow ends where `p` reaches 0: `g = 0.08` at `R = √(√12.5 − 1) a_g ≈ 1.5923 a_g`.
 const GLOW_EDGE: f64 = 1.5924;
-/// Levels below this are not drawn: every theme keeps level 0 visible, so a fade
-/// must end by removing ink, not by dimming it to nothing.
-const MIN_LEVEL: f64 = 12.0;
 const GIANT: Glyph = Glyph::new('✦', '*');
 /// A giant stands out only where the unresolved glow lights less than this fraction
 /// of the dots (`R > 0.83 a_g`); nearer the core it is lost in the glare.
@@ -203,15 +201,6 @@ fn x2_over(dx: f64, dy: f64, k2: f64) -> f64 {
     ((dx / geom::ASPECT).powi(2) + dy * dy) / k2
 }
 
-/// Braille dot coordinates of continuous cell coordinates `(x, y)`: dot `j` is centred
-/// at cell `(j + 0.5)/2` across and `(j + 0.5)/4` down.
-fn to_dots(x: f64, y: f64) -> (f64, f64) {
-    (
-        x * f64::from(Dots::CELL_W) - 0.5,
-        y * f64::from(Dots::CELL_H) - 0.5,
-    )
-}
-
 /// Plummer surface brightness `g = (1 + x²)^{−2}`, from `x² = (R/a_g)²`.
 fn surface(x2: f64) -> f64 {
     let d = 1.0 + x2;
@@ -227,8 +216,7 @@ fn lit_p(g: f64) -> f64 {
 /// A fixed per-dot uniform in `[0, 1)`, a pure function of `(x, y, salt)` (GC-A8), so
 /// the glow speckle holds still from frame to frame.
 pub(crate) fn dot_hash(x: i32, y: i32, salt: u64) -> f64 {
-    let packed = (u64::from(x as u32) << 32) | u64::from(y as u32);
-    SplitMix64::new(salt ^ packed).next_f64()
+    rng::hash01(salt ^ rng::cell_key(x, y))
 }
 
 /// The N-body system: interleaved `(x, y, z)` per body, plus the leapfrog carry.
@@ -464,7 +452,8 @@ impl GlobularCluster {
                         };
                         if lit {
                             let level = (90.0 + 165.0 * g) * b;
-                            self.dots.set(px, py, Ink::new(Role::Star, level as u8));
+                            self.dots
+                                .set(px, py, Ink::new(Role::Star, ink::level(level)));
                         }
                     }
                 }
@@ -491,20 +480,20 @@ impl GlobularCluster {
             if k < n_giants && lit_p(g) < GIANT_MAX_GLOW {
                 let level = self.giant_level(k, self.t) * b;
                 let (col, row) = (x.floor() as i32, y.floor() as i32);
-                if level >= MIN_LEVEL && !(row == 0 && col < keep_out) {
-                    self.giants[self.n_giants] = (col, row, level as u8);
+                if level >= MIN_VISIBLE_LEVEL && !(row == 0 && col < keep_out) {
+                    self.giants[self.n_giants] = (col, row, ink::level(level));
                     self.n_giants += 1;
                 }
                 continue;
             }
             let level = (100.0 + 140.0 * g.sqrt() + 20.0 * (z / 2.0).clamp(-1.0, 1.0)) * b;
-            let (dx, dy) = to_dots(x, y);
+            let (dx, dy) = Dots::from_cells(x, y);
             // `Dots::plot` rounds to the nearest dot; round here to test the keep-out.
             let (px, py) = (dx.round() as i32, dy.round() as i32);
             let by_label = py < Dots::CELL_H && px < keep_out * Dots::CELL_W;
-            if level >= MIN_LEVEL && !by_label {
+            if level >= MIN_VISIBLE_LEVEL && !by_label {
                 self.dots
-                    .plot(dx, dy, Ink::new(Role::Star, level.min(255.0) as u8));
+                    .plot(dx, dy, Ink::new(Role::Star, ink::level(level)));
             }
         }
     }
