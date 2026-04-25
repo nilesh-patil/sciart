@@ -1,0 +1,5 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
+ figure-8  Moore 1993

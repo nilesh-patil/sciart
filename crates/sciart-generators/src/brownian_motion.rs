@@ -365,7 +365,7 @@ impl Generator for BrownianMotion {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
         // Bottom row is the readout when there is room for it.
         self.width = usize::from(size.width());
- self.label_row = (size.height() >= 8).then(|| i32::from(size.height()) - 1);
+        self.label_row = (size.height() >= 8).then(|| i32::from(size.height()) - 1);
         let rows = if self.label_row.is_some() { h - 1.0 } else { h };
         self.mol_box = Bounds {
             x0: 0.0,
@@ -682,7 +682,11 @@ mod tests {
         let d = g.d_hat().expect("estimate after 150 s");
         assert!((d / D - 1.0).abs() < 0.4, "D^ = {d}");
         // The label names the estimator actually used and shows its value.
-        assert!(g.label.contains(&format!("D^ (MSD@2s) = {d:.2}")), "{}", g.label);
+        assert!(
+            g.label.contains(&format!("D^ (MSD@2s) = {d:.2}")),
+            "{}",
+            g.label
+        );
     }
 
     #[test]
@@ -701,7 +705,10 @@ mod tests {
             let label = g.label.clone();
             assert!(label.is_ascii(), "{w}: {label}");
             // Never clipped: the label plus a 1-cell margin each side fits, or it is empty.
-            assert!(label.is_empty() || label.len() + 2 <= usize::from(w), "{w}: {label}");
+            assert!(
+                label.is_empty() || label.len() + 2 <= usize::from(w),
+                "{w}: {label}"
+            );
             assert!(!label.contains("4t"), "{w}: stale estimator name: {label}");
             if !label.is_empty() {
                 assert!(label.starts_with("D^ (MSD@2s) = "), "{w}: {label}");
@@ -714,7 +721,11 @@ mod tests {
             let mut canvas = Canvas::new(size, GlyphMode::Ascii);
             g.render(&mut canvas);
             let bottom = &canvas.to_lines()[19];
-            assert_eq!(bottom.contains("D^ (MSD@2s)"), !label.is_empty(), "{w}: {bottom}");
+            assert_eq!(
+                bottom.contains("D^ (MSD@2s)"),
+                !label.is_empty(),
+                "{w}: {bottom}"
+            );
         }
         // Wide terminals get every part.
         g.resize(Size::new(120, 30), &mut ctx);

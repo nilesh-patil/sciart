@@ -4,8 +4,14 @@ use crate::{Canvas, Ctx, Size};
 pub enum Category {
     Astronomy,
     SpaceExploration,
+    /// Physics scenes, and the molecular/crystal/Brownian scenes that predate
+    /// `Chemistry` (CORE-R47).
     PhysicsChemistry,
     Basic,
+    /// Life-science scenes (CORE-R47).
+    Biology,
+    /// Chemistry scenes (CORE-R47).
+    Chemistry,
 }
 
 impl Category {
@@ -15,6 +21,8 @@ impl Category {
             Category::SpaceExploration => "space-exploration",
             Category::PhysicsChemistry => "physics-chemistry",
             Category::Basic => "basic",
+            Category::Biology => "biology",
+            Category::Chemistry => "chemistry",
         }
     }
 }

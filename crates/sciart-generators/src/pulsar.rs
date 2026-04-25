@@ -37,9 +37,9 @@ pub(crate) fn beam_angles(t: f64) -> [f64; 2] {
     [a, geom::wrap(a + PI, TAU)]
 }
 
-/// Signed smallest difference `a − b` in `(−π, π]`.
+/// Signed smallest difference `a − b` in `[−π, π)`.
 fn angle_diff(a: f64, b: f64) -> f64 {
-    (a - b + PI).rem_euclid(TAU) - PI
+    geom::wrap_angle(a - b)
 }
 
 /// Whether a beam currently faces the viewer (PUL-A2).

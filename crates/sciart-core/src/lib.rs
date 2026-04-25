@@ -10,22 +10,29 @@ pub mod draw;
 mod generator;
 pub mod geom;
 pub mod grid;
-mod ink;
+pub mod ink;
 pub mod ode;
 pub mod particles;
+pub mod raster;
+pub mod rng;
 mod size;
 mod stage;
+pub mod text;
 pub mod timeline;
 
 pub use canvas::{Canvas, Cell, Glyph, GlyphMode};
 pub use clock::FixedStep;
 pub use ctx::Ctx;
 pub use generator::{Category, Generator, Meta};
-pub use grid::{Edges, Grid, Hood};
+pub use geom::{Camera, Projector};
+pub use grid::{Edges, Grid, Hood, SampleMap};
 pub use ink::{Ink, Role};
-pub use particles::{ParticlePool, Trail};
+pub use particles::{InverseCdf, ParticlePool, SpatialHash, Trail};
+pub use raster::{Density, Dots, Pixels};
+pub use rng::SplitMix64;
 pub use size::Size;
 pub use stage::Stage;
+pub use text::StackText;
 pub use timeline::{Beat, Timeline, ease};
 
 /// Simulation step used by the runtime (ADR-0003).
@@ -34,7 +41,8 @@ pub const SIM_DT: f64 = 1.0 / 60.0;
 /// Everything a generator module needs: `use sciart_core::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        Beat, Canvas, Category, Cell, Ctx, Edges, FixedStep, Generator, Glyph, GlyphMode, Grid,
-        Hood, Ink, Meta, ParticlePool, Role, SIM_DT, Size, Stage, Timeline, Trail,
+        Beat, Camera, Canvas, Category, Cell, Ctx, Density, Dots, Edges, FixedStep, Generator,
+        Glyph, GlyphMode, Grid, Hood, Ink, InverseCdf, Meta, ParticlePool, Pixels, Projector, Role,
+        SIM_DT, SampleMap, Size, SpatialHash, SplitMix64, StackText, Stage, Timeline, Trail,
     };
 }
