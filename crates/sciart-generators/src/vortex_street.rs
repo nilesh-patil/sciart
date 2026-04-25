@@ -75,8 +75,6 @@ const TAU: f64 = 0.53;
 /// TRT magic parameter Λ = ¼: the most stable choice (Ginzburg et al. 2008); Λ = 3/16
 /// would instead put bounce-back walls exactly halfway for Poiseuille flow.
 const MAGIC: f64 = 0.25;
-/// Reynolds-number budget `U·D/ν`: Re = 150 whenever `1.5/D ≤ U_MAX` (D ≥ 12).
-const UD_MAX: f64 = 1.5;
 /// Inlet breathing: relative amplitude and period (simulated seconds).
 const BREATH_AMP: f64 = 0.08;
 const BREATH_PERIOD: f64 = 47.0;
@@ -89,8 +87,12 @@ const PREROLL_STEPS: usize = 160;
 /// displays 15 % of the width would put the front only ≈ 4 nodes past the inlet sponge,
 /// and the calm inflow would fill with the inlet's disturbances.
 const RUN_UP_D: f64 = 1.65;
-/// Inflow speed cap: Ma = U√3 ≤ 0.217 keeps the compressibility error small.
-const U_MAX: f64 = 0.125;
+/// Mean inflow speed U₀ on every lattice: inflow Ma = U₀√3 = 0.217 (0.234 at the breath's
+/// peak). The flow is weakly compressible: the shoulders reach |u| ≈ 1.7 U (local
+/// Ma ≈ 0.4) and ρ swings by ±6 %, yet the shedding frequency matches the literature
+/// (VOR-A5). Re = U₀D/ν = 12.5 D ≤ 150, because the node cap keeps D ≤ 12 (D ≥ 13 would
+/// need H ≥ 90 and W ≥ 125).
+const U0: f64 = 0.125;
 /// Lattice node budget and aspect bucket (ADR-0012): every display in one bucket runs
 /// identical physics, and the cost does not grow with the terminal.
 const MAX_NODES: usize = 10_240;
@@ -135,6 +137,12 @@ const PAIR_FADE_D: f64 = 1.0;
 /// is left to the terminal background (the irrotational flow).
 const VORT_SCALE: f64 = 2.5;
 const VORT_MIN: f64 = 0.06;
+/// Hysteresis on the drawn vorticity: a 4-connected group of `Div` pixels is drawn only
+/// if one of them reaches this |s|. Threshold-level pixels with nothing behind them are
+/// start-up and staircase noise, specks on the calm background; the faint fringes of real
+/// eddies and shear layers hang on to their cores. It equals the ASCII blank band, so a
+/// faint structure shows in both glyph modes or in neither.
+const VORT_SEED: f64 = 0.12;
 const CYLINDER_INK: Ink = Ink::new(Role::Structure, 200);
 /// Rim pixels at or above this level have their centre inside the disc; dimmer ones are
 /// the anti-aliased outside edge, which ASCII leaves out.
@@ -156,16 +164,14 @@ const UPSTREAM_MIN: f64 = 0.2;
 const LABEL_INK: Ink = Ink::new(Role::Text, 150);
 
 /// Strouhal probe: `PROBE_D` diameters behind the centre, crossings with ±`HYST`·U
-/// hysteresis, St from the last ≤ `ST_INTERVALS` periods once `ST_MIN_CROSSINGS` exist,
-/// kept in a ring of `RING` crossing steps.
+/// hysteresis, St from the last ≤ `ST_INTERVALS` periods once `ST_MIN_CROSSINGS` exist.
 const PROBE_D: f64 = 2.5;
 const HYST: f64 = 0.02;
 const ST_INTERVALS: usize = 4;
 const ST_MIN_CROSSINGS: usize = 3;
-const RING: usize = 8;
 /// ASCII vorticity bands: blank below `ASCII_DOT`, `.` below `ASCII_EDDY`, then x/o, and
 /// X/O from `ASCII_STRONG`.
-const ASCII_DOT: f64 = 0.12;
+const ASCII_DOT: f64 = VORT_SEED;
 const ASCII_EDDY: f64 = 0.25;
 const ASCII_STRONG: f64 = 0.6;
 
@@ -218,7 +224,7 @@ fn bucket_index(display: Size) -> i32 {
 
 /// Geometry and dynamics for a lattice (VOR-A4): `D = clamp(round(min(0.14 H, W_vis/9)),
 /// 6, 16)` (blockage ≤ 0.14) leaves room for 3–4 shed eddies in view even on square
-/// displays, and `U = min(0.125, 1.5/D)` gives Re = min(150, 12.5 D). The centre sits
+/// displays, and `U₀ = 0.125` gives Re = 12.5 D ∈ [87.5, 150] (see [`U0`]). The centre sits
 /// 15 % of the way across but never closer than `round(1.65 D)` to the inlet, so the
 /// cylinder's front keeps a calm run-up of ≈ 1.15 D past the inlet sponge on every
 /// display. The centre row `(H − 1)/2` is the domain's exact middle, so the staircase
@@ -231,7 +237,7 @@ pub(crate) fn flow_params(lattice: Size) -> FlowParams {
         .min(w_vis as f64 / 9.0)
         .round()
         .clamp(6.0, 16.0);
-    let u = U_MAX.min(UD_MAX / d);
+    let u = U0;
     let nu = (TAU - 0.5) / 3.0;
     // `TAU − 0.5` is 0.030000000000000027 in f64, so U·D/ν lands a hair below exact
     // half-values (137.4999…); rounding to 1e-6 restores them, and the label's
@@ -326,30 +332,97 @@ pub(crate) fn vorticity(ux: &Grid<f32>, uy: &Grid<f32>, x0: usize, out: &mut Gri
     }
 }
 
-/// The Strouhal number `D/(U·P̄)` from the step indices of the last upward crossings (a
-/// ring of [`RING`], `count` recorded in total), with P̄ the mean of the last ≤ 4
-/// periods; `None` before 3 crossings.
+/// The Strouhal number `D/(U·P̄)` from the lattice steps of the last upward crossings
+/// (oldest first), with P̄ their mean period and U = `u_at(step)` the inlet speed at the
+/// middle of that window; `None` before [`ST_MIN_CROSSINGS`] crossings. The breathing
+/// inlet drifts by up to ≈ 3 % over the ≈ 6 s window, so dividing by the speed at its
+/// latest crossing would bias St by as much; the middle matches the averaged period.
 ///
 /// St is based on the free-stream U, the same basis as Re. With y periodic at blockage
 /// D/H ≈ 0.15 the fluid passes a row of cylinders and the gap speed is
-/// U·H/(H − D) ≈ 1.17 U, so this St reads ≈ 0.20–0.21 at the reference lattices; the
-/// blockage-corrected St·(1 − D/H) (St on the gap speed), which the label shows, matches
-/// Williamson's unconfined values to ≈ 1 % at Re 75 and ≈ 3 % at Re 125–140.
-pub(crate) fn strouhal(ring: &[u64; RING], count: usize, d: f64, u: f64) -> Option<f64> {
-    if count < ST_MIN_CROSSINGS {
+/// U·H/(H − D) ≈ 1.17 U, so this St reads ≈ 0.20–0.21 at the reference lattices. The
+/// label shows St on the gap speed, St·(1 − D/H): a heuristic confinement correction,
+/// not an established blockage correction, which on these lattices matches Williamson's
+/// unconfined St(Re) to ≈ 1 % at Re 75 and ≈ 3 % at Re 125–140.
+pub(crate) fn strouhal(crossings: &Trail<u64>, d: f64, u_at: impl Fn(f64) -> f64) -> Option<f64> {
+    if crossings.len() < ST_MIN_CROSSINGS {
         return None;
     }
-    let k = (count - 1).min(ST_INTERVALS);
-    let last = ring[(count - 1) % ring.len()];
-    let first = ring[(count - 1 - k) % ring.len()];
-    let period = (last - first) as f64 / k as f64;
-    (period > 0.0).then(|| d / (u * period))
+    let (first, last) = (*crossings.iter().next()?, crossings.newest()?);
+    let period = (last - first) as f64 / (crossings.len() - 1) as f64;
+    let mid = 0.5 * (first + last) as f64;
+    (period > 0.0).then(|| d / (u_at(mid) * period))
 }
 
 /// The ink of one vorticity pixel: `ink::div` of the soft-clipped value, or `None` in the
 /// irrotational flow (|s| < 0.06), which is the terminal background.
 pub(crate) fn vort_ink(s: f64) -> Option<Ink> {
     (s.abs() >= VORT_MIN).then(|| ink::div(s))
+}
+
+/// Hysteresis marks of a pixel (see [`mark`]); `VISITED` is a `FAINT` pixel already
+/// grouped by [`drop_faint_islands`].
+const EMPTY: u8 = 0;
+const FAINT: u8 = 1;
+const SEED: u8 = 2;
+const VISITED: u8 = 3;
+
+/// The hysteresis mark of a drawn pixel: [`SEED`] for `Div` at |s| ≥ [`VORT_SEED`],
+/// [`FAINT`] for weaker `Div`, [`EMPTY`] for anything else. Other roles are never seeds and
+/// never dropped.
+pub(crate) fn mark(p: Ink) -> u8 {
+    match p.role {
+        Role::Div if ink::div_value(p).abs() >= VORT_SEED => SEED,
+        Role::Div => FAINT,
+        _ => EMPTY,
+    }
+}
+
+/// Hysteresis on the drawn vorticity (as in Canny's edge detector, 1986): every
+/// 4-connected group of `Div` pixels without a seed is blanked, so the faint fringes of
+/// eddies stay while isolated threshold-level specks go. `marks` holds the [`mark`] of
+/// every pixel of `px`, row-major, written while shading, so no pixel is read back. Each
+/// group of `FAINT` pixels is grown on its own and blanked unless it touches a `SEED`:
+/// only ≈ ¼ of the drawn pixels are faint, so this visits far fewer pixels than a fill
+/// from the seeds. `stack` is scratch (one group at a time, at most one entry per pixel).
+pub(crate) fn drop_faint_islands(px: &mut Pixels, marks: &mut [u8], stack: &mut Vec<(i32, i32)>) {
+    let size = px.pixel_size();
+    let (w, h) = (usize::from(size.width()), usize::from(size.height()));
+    if w == 0 || marks.len() != w * h {
+        return;
+    }
+    let (wi, hi) = (w as i32, h as i32);
+    for start in 0..w * h {
+        if marks[start] != FAINT {
+            continue;
+        }
+        marks[start] = VISITED;
+        stack.clear();
+        stack.push(((start % w) as i32, (start / w) as i32));
+        let (mut next, mut seeded) = (0, false);
+        while let Some(&(x, y)) = stack.get(next) {
+            next += 1;
+            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
+                if !((0..wi).contains(&nx) && (0..hi).contains(&ny)) {
+                    continue;
+                }
+                let m = &mut marks[ny as usize * w + nx as usize];
+                match *m {
+                    SEED => seeded = true,
+                    FAINT => {
+                        *m = VISITED;
+                        stack.push((nx, ny));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        if !seeded {
+            for &(x, y) in stack.iter() {
+                px.set(x, y, Ink::BLANK);
+            }
+        }
+    }
 }
 
 /// Share of a pixel covered by the cylinder disc of radius `radius`, for a pixel of
@@ -917,12 +990,22 @@ pub(crate) fn breath(t: f64) -> f64 {
 }
 
 /// Zero-crossing probe for the Strouhal readout.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct Probe {
     index: usize,
     armed: bool,
-    ring: [u64; RING],
-    count: usize,
+    /// Lattice steps of the last ≤ `ST_INTERVALS + 1` upward crossings.
+    crossings: Trail<u64>,
+}
+
+impl Default for Probe {
+    fn default() -> Self {
+        Self {
+            index: 0,
+            armed: false,
+            crossings: Trail::new(ST_INTERVALS + 1),
+        }
+    }
 }
 
 impl Probe {
@@ -942,8 +1025,7 @@ impl Probe {
             self.armed = true;
         } else if uy > band && self.armed {
             self.armed = false;
-            self.ring[self.count % self.ring.len()] = step;
-            self.count += 1;
+            self.crossings.push(step);
         }
     }
 }
@@ -962,6 +1044,9 @@ pub struct VortexStreet {
     vort: Grid<f32>,
     map: SampleMap,
     pixels: Pixels,
+    /// Scratch buffers of [`drop_faint_islands`], sized in `resize`.
+    marks: Vec<u8>,
+    stack: Vec<(i32, i32)>,
     size: Option<Size>,
     /// Display columns of the disc's ASCII caps (see [`ASCII_CAP_D`]), inclusive.
     cap_cols: (i32, i32),
@@ -974,24 +1059,13 @@ impl VortexStreet {
     }
 
     /// Re-grid the flow onto a new lattice after a bucket change (ADR-0012): ρ and u are
-    /// resampled and rescaled to the new inlet speed, then rebuilt at equilibrium.
-    fn regrid(&mut self, p: &FlowParams, old: &FlowParams) {
+    /// resampled, then rebuilt at equilibrium. Every lattice runs at the same U₀ ([`U0`]),
+    /// so the moments need no rescaling.
+    fn regrid(&mut self, p: &FlowParams) {
         let mut lat = Lattice::channel(p, self.inlet_scale());
-        let k = (p.u / old.u) as f32;
         grid::resample_bilinear(&self.lat.rho, &mut lat.rho);
         grid::resample_bilinear(&self.lat.ux, &mut lat.ux);
         grid::resample_bilinear(&self.lat.uy, &mut lat.uy);
-        for r in lat.rho.as_mut_slice() {
-            *r = 1.0 + (*r - 1.0) * k * k;
-        }
-        for v in lat
-            .ux
-            .as_mut_slice()
-            .iter_mut()
-            .chain(lat.uy.as_mut_slice())
-        {
-            *v *= k;
-        }
         lat.equilibrate();
         self.lat = lat;
     }
@@ -1008,7 +1082,8 @@ impl VortexStreet {
         self.probe = Probe::at(p);
     }
 
-    /// Recompute the vorticity and rasterise it (and the cylinder) into the pixels.
+    /// Recompute the vorticity and rasterise it into the pixels: the fluid, then the
+    /// hysteresis pass on it, then the cylinder on top.
     fn rasterise(&mut self) {
         let Some(p) = self.params else { return };
         vorticity(&self.lat.ux, &self.lat.uy, VIEW_X0, &mut self.vort);
@@ -1019,53 +1094,77 @@ impl VortexStreet {
         let px = self.pixels.pixel_size();
         let (pw, ph) = (usize::from(px.width()), usize::from(px.height()));
         let vw = usize::from(self.vort.width());
-        // Pixel size in lattice units, for the disc's partial coverage.
-        let (sx, sy) = (vw as f64 / pw as f64, p.h as f64 / ph as f64);
-        let radius = 0.5 * p.d;
-        // Pixels whose centre is within this distance of the centre may touch the disc
-        // (half a pixel outside the rim) or lie in the upstream annulus.
-        let opposite = radius + UPSTREAM_OPPOSITE_D * p.d;
-        let reach = opposite.max(radius + 0.5 * sx.max(sy));
-        let (map, vort) = (&self.map, &self.vort);
-        self.pixels.shade(|x, y| {
-            // Pixel centre → lattice coordinates, the same cell-centre convention as the
-            // map (CORE-R68).
-            let dy = grid::centre_of(f64::from(y), ph, p.h) - p.yc;
+        // Pixel centre → offset from the cylinder centre in lattice units, the same
+        // cell-centre convention as the map (CORE-R68).
+        let offset = |x: i32, y: i32| {
             let dx = VIEW_X0 as f64 + grid::centre_of(f64::from(x), pw, vw) - p.xc;
+            (dx, grid::centre_of(f64::from(y), ph, p.h) - p.yc)
+        };
+        let radius = 0.5 * p.d;
+        let opposite = radius + UPSTREAM_OPPOSITE_D * p.d;
+        let fluid = |x: i32, y: i32| {
+            let (dx, dy) = offset(x, y);
             let r2 = dx * dx + dy * dy;
-            let s = || f64::from(map.sample(vort, x, y));
-            let ink = if r2 > reach * reach {
-                vort_ink(s())
-            } else {
+            // Pixels centred inside the rim are the cylinder's (drawn below), so the
+            // wall's own shear never seeds the hysteresis pass.
+            if r2 <= radius * radius {
+                return Ink::BLANK;
+            }
+            let s = f64::from(self.map.sample(&self.vort, x, y));
+            // Staircase noise upstream of the round mask. Rows grow downward, so `s·dy < 0`
+            // is the sign opposite to the boundary layer's.
+            if dx < 0.0 && s.abs() < UPSTREAM_MIN && r2 < opposite * opposite {
                 let r = r2.sqrt();
-                let fluid = || {
-                    let s = s();
-                    // Staircase noise upstream of the round mask. Rows grow downward, so
-                    // `s·dy < 0` is the sign opposite to the boundary layer's.
-                    let upstream = dx < 0.0 && r < opposite;
-                    let stray = r < radius + UPSTREAM_ANNULUS || s * dy < 0.0;
-                    if upstream && stray && s.abs() < UPSTREAM_MIN {
-                        None
-                    } else {
-                        vort_ink(s)
-                    }
-                };
-                match disc_coverage(dx, dy, r, radius, (sx, sy)) {
-                    c if c >= 1.0 => Some(CYLINDER_INK),
-                    c if c >= 0.5 => Some(rim_ink(c)),
+                if r < radius + UPSTREAM_ANNULUS || s * dy < 0.0 {
+                    return Ink::BLANK;
+                }
+            }
+            vort_ink(s).unwrap_or(Ink::BLANK)
+        };
+        let marks = &mut self.marks;
+        // Grows only in the pass at the end of `resize`; every later pass reuses it.
+        marks.resize(pw * ph, EMPTY);
+        self.pixels.shade(|x, y| {
+            let ink = fluid(x, y);
+            marks[y as usize * pw + x as usize] = mark(ink);
+            ink
+        });
+        drop_faint_islands(&mut self.pixels, &mut self.marks, &mut self.stack);
+
+        // The cylinder, over the pixels that can touch it (centres within half a pixel of
+        // the rim).
+        let (sx, sy) = (vw as f64 / pw as f64, p.h as f64 / ph as f64);
+        let reach = radius + 0.5 * sx.max(sy);
+        // Pixel range whose centres lie within `reach` of lattice coordinate `c`.
+        let span = |c: f64, lattice: usize, pixels: usize| {
+            let lo = grid::centre_of(c - reach, lattice, pixels).floor().max(0.0);
+            let hi = grid::centre_of(c + reach, lattice, pixels).ceil();
+            (lo as i32, hi.min(pixels as f64 - 1.0) as i32)
+        };
+        let (x0, x1) = span(p.xc - VIEW_X0 as f64, vw, pw);
+        let (y0, y1) = span(p.yc, p.h, ph);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let (dx, dy) = offset(x, y);
+                // `sqrt` rather than libm's `hypot`: correctly rounded, so bit-identical.
+                let r = (dx * dx + dy * dy).sqrt();
+                let fluid = self.pixels.get(x, y).is_some_and(|i| i.role == Role::Div);
+                let ink = match disc_coverage(dx, dy, r, radius, (sx, sy)) {
+                    c if c >= 1.0 => CYLINDER_INK,
+                    c if c >= 0.5 => rim_ink(c),
                     // A pixel partly covered from outside the rim shows the wall only
                     // where the fluid is undrawn, so it never hides the boundary layer,
                     // and the ASCII rule ignores it (see `ascii_cell`).
-                    c if c > 0.0 => fluid().or(Some(rim_ink(c))),
-                    _ => fluid(),
-                }
-            };
-            ink.unwrap_or(Ink::BLANK)
-        });
+                    c if c > 0.0 && !fluid => rim_ink(c),
+                    _ => continue,
+                };
+                self.pixels.set(x, y, ink);
+            }
+        }
     }
 
     /// `Re≈140` and, once measured and at width ≥ 40, `  St≈0.18` (row 0, column 1); both
-    /// follow the breathing inlet. St is blockage-corrected, St·(1 − D/H).
+    /// follow the breathing inlet. St is on the gap speed, St·(1 − D/H) (see [`strouhal`]).
     fn label(&self, canvas: &mut Canvas) {
         let (Some(p), Some(size)) = (self.params, self.size) else {
             return;
@@ -1073,14 +1172,13 @@ impl VortexStreet {
         if size.width() < 16 || size.height() < 6 {
             return;
         }
-        let scale = self.inlet_scale();
-        let re = (p.re * scale / 5.0).round() as u32 * 5;
-        // Blockage-corrected (see `strouhal`), so the number compares directly with the
-        // unconfined literature value.
-        let blockage = 1.0 - p.d / p.h as f64;
-        let st = strouhal(&self.probe.ring, self.probe.count, p.d, p.u * scale)
+        let re = (p.re * self.inlet_scale() / 5.0).round() as u32 * 5;
+        // On the gap speed, so the number compares with the unconfined literature value.
+        let confinement = 1.0 - p.d / p.h as f64;
+        let u_at = |step: f64| p.u * breath(step / STEPS_PER_S);
+        let st = strouhal(&self.probe.crossings, p.d, u_at)
             .filter(|_| size.width() >= 40)
-            .map(|st| st * blockage);
+            .map(|st| st * confinement);
         let (mut uni, mut asc) = (StackText::<32>::new(), StackText::<32>::new());
         let _ = write!(uni, "Re≈{re}");
         let _ = write!(asc, "Re~{re}");
@@ -1109,8 +1207,8 @@ impl Generator for VortexStreet {
             let p = flow_params(lat_size);
             match self.params {
                 None => self.restart(&p, &mut ctx.rng),
-                Some(old) => {
-                    self.regrid(&p, &old);
+                Some(_) => {
+                    self.regrid(&p);
                     self.probe = Probe::at(&p);
                 }
             }
@@ -1118,6 +1216,8 @@ impl Generator for VortexStreet {
             self.vort = Grid::new(Size::new((p.w_vis - VIEW_X0) as u16, p.h as u16), 0.0);
         }
         self.pixels.resize(size);
+        // The hysteresis stack holds at most one entry per pixel (`drop_faint_islands`).
+        self.stack.reserve(self.pixels.pixel_size().area());
         self.map.rebuild(self.vort.size(), self.pixels.pixel_size());
         self.size = Some(size);
         self.cap_cols = self.params.map_or((1, 0), |p| {
@@ -1382,7 +1482,7 @@ mod tests {
                     );
                 }
                 assert_eq!(p.omega_p, (1.0 / TAU) as f32);
-                assert!(p.u <= 0.125 && p.u * 3f64.sqrt() <= 0.217);
+                assert!(p.u == U0 && p.u * 3f64.sqrt() <= 0.217 && p.d <= 12.0);
                 assert!((6.0..=16.0).contains(&p.d) && p.d / p.h as f64 <= 0.15);
                 assert!(
                     (87.0..=150.0 + 1e-9).contains(&p.re),
@@ -1461,7 +1561,7 @@ mod tests {
                 }
             }
         }
-        let st = strouhal(&probe.ring, probe.count, p.d, p.u).expect("shedding");
+        let st = strouhal(&probe.crossings, p.d, |_| p.u).expect("shedding");
         // St is based on the free-stream U. With y periodic the fluid passes a row of
         // cylinders H apart, so the gap speed is U·H/(H − D): Williamson's unconfined
         // St(75) ≈ 0.149 predicts 0.149/(1 − D/H) = 0.149/(1 − 1/6) ≈ 0.179 here. ±8 %
@@ -1546,6 +1646,92 @@ mod tests {
             }
         }
         n
+    }
+
+    /// 4-connected groups of drawn `Div` pixels none of which reaches [`VORT_SEED`]:
+    /// threshold-level specks with no structure behind them.
+    fn faint_islands(g: &VortexStreet) -> usize {
+        let px = g.pixels.pixel_size();
+        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+        let div = |x: i32, y: i32| g.pixels.get(x, y).filter(|i| i.role == Role::Div);
+        let mut seen = vec![false; (w * h) as usize];
+        let mut islands = 0;
+        for start in 0..w * h {
+            let (x0, y0) = (start % w, start / w);
+            if seen[start as usize] || div(x0, y0).is_none() {
+                continue;
+            }
+            seen[start as usize] = true;
+            let (mut stack, mut seeded) = (vec![(x0, y0)], false);
+            while let Some((x, y)) = stack.pop() {
+                seeded |= div(x, y).is_some_and(|i| mark(i) == SEED);
+                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
+                    let next = (0..w).contains(&nx) && (0..h).contains(&ny);
+                    if next && !seen[(ny * w + nx) as usize] && div(nx, ny).is_some() {
+                        seen[(ny * w + nx) as usize] = true;
+                        stack.push((nx, ny));
+                    }
+                }
+            }
+            islands += usize::from(!seeded);
+        }
+        islands
+    }
+
+    #[test]
+    fn vor_a7_faint_islands_are_dropped_and_fringes_kept() {
+        let faint = ink::div(-0.08);
+        let mut px = Pixels::new(Size::new(8, 2)); // 8×4 pixels, the last row empty
+        // F S F F . F F .     S strong, F / f faint, C cylinder
+        // . . C . F . . .
+        // S . . F . . . f
+        // The strong eddy keeps its faint fringe (0, 0) and (2, 0)–(3, 0). The faint pair
+        // (5, 0)–(6, 0) has nothing behind it, (4, 1) touches the fringe only diagonally,
+        // (3, 2) touches only the cylinder, which is never a seed nor touched, and (7, 2)
+        // is a lone speck: all four go.
+        for (x, y, ink) in [
+            (0, 0, faint),
+            (1, 0, ink::div(0.5)),
+            (2, 0, faint),
+            (3, 0, faint),
+            (5, 0, faint),
+            (6, 0, faint),
+            (2, 1, CYLINDER_INK),
+            (4, 1, faint),
+            (0, 2, ink::div(0.2)),
+            (3, 2, faint),
+            (7, 2, ink::div(0.07)),
+        ] {
+            px.set(x, y, ink);
+        }
+        let before = px.clone();
+        // The marks the scene writes while shading.
+        let marks_of = |px: &Pixels| -> Vec<u8> {
+            (0..4)
+                .flat_map(|y| (0..8).map(move |x| (x, y)))
+                .map(|(x, y)| mark(px.get(x, y).unwrap_or(Ink::BLANK)))
+                .collect()
+        };
+        assert_eq!(mark(CYLINDER_INK), EMPTY);
+        assert_eq!((mark(faint), mark(ink::div(0.2))), (FAINT, SEED));
+        let mut marks = marks_of(&px);
+        let mut stack = Vec::with_capacity(32);
+        drop_faint_islands(&mut px, &mut marks, &mut stack);
+        for (x, y) in [(0, 0), (1, 0), (2, 0), (3, 0), (2, 1), (0, 2)] {
+            assert_eq!(px.get(x, y), before.get(x, y), "({x}, {y}) kept");
+        }
+        for (x, y) in [(5, 0), (6, 0), (4, 1), (3, 2), (7, 2)] {
+            assert_eq!(px.get(x, y), Some(Ink::BLANK), "({x}, {y}) dropped");
+        }
+        // Idempotent, and the stack never outgrows one entry per pixel.
+        let once = px.clone();
+        let mut marks = marks_of(&px);
+        drop_faint_islands(&mut px, &mut marks, &mut stack);
+        assert_eq!(format!("{px:?}"), format!("{once:?}"));
+        assert_eq!(stack.capacity(), 32);
+        // Marks that do not match the buffer are ignored rather than misread.
+        drop_faint_islands(&mut px, &mut [FAINT; 5], &mut stack);
+        assert_eq!(format!("{px:?}"), format!("{once:?}"));
     }
 
     #[test]
@@ -1649,13 +1835,10 @@ mod tests {
                             g.update(SIM_DT, &mut ctx);
                             t += SIM_DT;
                         }
-                        // The start-up may leave a threshold-level speck or two (measured:
-                        // one pixel at |s| = 0.07, 100×40, t = 0); the flow never does.
-                        let allowed = if check < 1.0 { 2 } else { 0 };
-                        let n = upstream_div_pixels(&g);
-                        assert!(n <= allowed, "{size:?} seed {seed} t = {check}: {n} pixels");
-                        let n = upstream_opposite_pixels(&g);
-                        assert_eq!(n, 0, "{size:?} seed {seed} t = {check}: {n} specks");
+                        let id = format!("{size:?} seed {seed} t = {check}");
+                        assert_eq!(upstream_div_pixels(&g), 0, "{id}: upstream pixels");
+                        assert_eq!(upstream_opposite_pixels(&g), 0, "{id}: shoulder specks");
+                        assert_eq!(faint_islands(&g), 0, "{id}: faint islands");
                     }
                     // The watchdog never fires in normal operation.
                     assert_eq!(g.reinits, 0, "{size:?} seed {seed}");
@@ -1958,6 +2141,30 @@ mod tests {
     }
 
     #[test]
+    fn vor_a5_a8_strouhal_uses_the_inlet_speed_of_its_own_window() {
+        // Five crossings 400 steps apart, oldest evicted: the last four periods count.
+        let mut crossings = Trail::new(ST_INTERVALS + 1);
+        assert_eq!(strouhal(&crossings, 10.0, |_| 0.1), None);
+        for step in [200, 1000, 1400, 1800, 2200, 2600] {
+            crossings.push(step);
+        }
+        // The inlet speed drifts through the window. St divides by its value at the
+        // window's middle (step 1800), not at the latest crossing, so a period averaged
+        // over ≈ 6 s is not biased by the breath's drift.
+        let u_at = |step: f64| 0.1 * (1.0 + step / 10_000.0);
+        let st = strouhal(&crossings, 10.0, u_at).expect("four periods");
+        assert!(
+            (st - 10.0 / (u_at(1800.0) * 400.0)).abs() < 1e-12,
+            "St = {st}"
+        );
+        // Below three crossings there is no reading.
+        let mut two = Trail::new(ST_INTERVALS + 1);
+        two.push(100);
+        two.push(500);
+        assert_eq!(strouhal(&two, 10.0, u_at), None);
+    }
+
+    #[test]
     fn vor_a8_label_reads_re_and_then_st() {
         let re_of = |row: &str| -> u32 {
             let digits: String = row
@@ -1985,7 +2192,7 @@ mod tests {
         }
         let row = s.render().to_lines()[0].clone();
         assert!(row.contains("  St≈0."), "{row}");
-        // The label shows the blockage-corrected St·(1 − D/H), comparable with
+        // The label shows St on the gap speed, St·(1 − D/H), comparable with
         // Williamson's unconfined St ≈ 0.18 at Re 140–150 (free-stream basis: ≈ 0.21).
         let st: f64 = row
             .split("St≈")
