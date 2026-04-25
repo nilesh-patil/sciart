@@ -34,8 +34,12 @@ pub fn build() -> Box<dyn Generator> {
 
 /// Nodes per column; node `i` sits at depth `x = i + 1`, the reservoir ghost at `x = 0`.
 pub(crate) const NODES: usize = 160;
-/// Nodes shown on screen, `[0, VIEW_NODES)`.
+/// Nodes shown on screen, `[0, VIEW_NODES)`, once the gel has ≥ 42 pixel rows.
 const VIEW_NODES: f64 = 100.0;
+/// Most nodes per gel pixel: shorter terminals show fewer nodes (never below
+/// [`MIN_VIEW_NODES`]) rather than merge bands and gaps into one striped column.
+const NODES_PER_PX: f64 = 2.4;
+const MIN_VIEW_NODES: f64 = 50.0;
 
 // Dimensionless model parameters (SPEC-002 Model; D_a = D_b = 1).
 const TAU: f64 = 0.15;
@@ -93,6 +97,9 @@ const D_BAND: f64 = 0.04;
 pub(crate) enum Class {
     #[default]
     Empty,
+    /// Clear gel carrying only the supersaturation haze.
+    Haze,
+    /// Faint precipitate, or the junction zone.
     Faint,
     Band,
     Liquid,
@@ -131,11 +138,12 @@ pub(crate) struct Column<const N: usize> {
 }
 
 impl<const N: usize> Column<N> {
-    /// A fresh column: gel loaded with `b0`, no A, C, D or nuclei.
+    /// A fresh column: gel loaded with `b0`, no A, C, D or nuclei. This is the reset
+    /// state `(0, b₀,c, 0, 0, false, ∞)` (LIES-A6).
     pub(crate) fn new(a0: f64, b0: f64) -> Self {
-        let mut col = Self {
+        Self {
             a: [0.0; N],
-            b: [0.0; N],
+            b: [b0; N],
             c: [0.0; N],
             d: [0.0; N],
             nuc: [false; N],
@@ -143,21 +151,12 @@ impl<const N: usize> Column<N> {
             a0,
             b0,
             steps: 0,
-        };
-        col.reset(b0);
-        col
+        }
     }
 
-    /// Back to the reset state `(0, b₀,c, 0, 0, false, ∞)` (LIES-A6).
+    /// Back to the reset state with a new `b₀,c` (LIES-A6).
     pub(crate) fn reset(&mut self, b0: f64) {
-        self.a = [0.0; N];
-        self.b = [b0; N];
-        self.c = [0.0; N];
-        self.d = [0.0; N];
-        self.nuc = [false; N];
-        self.t_nuc = [f64::INFINITY; N];
-        self.b0 = b0;
-        self.steps = 0;
+        *self = Self::new(self.a0, b0);
     }
 
     /// Sim time of the steps taken so far.
@@ -171,9 +170,7 @@ impl<const N: usize> Column<N> {
     /// Positivity and the bounds `a ≤ a₀`, `b ≤ b₀` hold because every update is a convex
     /// combination: `τ(2 + k·a₀) ≤ 0.75` and `τ(2D_c + λ) ≤ 1` (LIES-A1).
     pub(crate) fn step(&mut self, ends: Ends) {
-        if N == 0 {
-            return;
-        }
+        const { assert!(N > 0, "a column needs at least one node") };
         // Ghost values above node 0 and below node N − 1 (old values, read before the
         // sweep overwrites them).
         let top_a = match ends {
@@ -309,10 +306,10 @@ pub(crate) fn ratios(bands: &[Band]) -> impl Iterator<Item = f64> + '_ {
         .map(|w| w[1].x / w[0].x)
 }
 
-/// The header's live ratio: the two deepest *complete* bands after the junction zone,
-/// a band being complete once a deeper band has nucleated (a nucleated run starts below
-/// it).
-pub(crate) fn live_ratio(bands: &[Band], nuc: &[bool]) -> Option<f64> {
+/// The header's live ratio and the end node of the deeper band it measures: the two
+/// deepest *complete* bands after the junction zone, a band being complete once a deeper
+/// band has nucleated (a nucleated run starts below it).
+pub(crate) fn live_ratio(bands: &[Band], nuc: &[bool]) -> Option<(f64, usize)> {
     let deepest_run = (1..nuc.len())
         .rev()
         .find(|&j| nuc[j] && !nuc[j - 1])
@@ -322,12 +319,23 @@ pub(crate) fn live_ratio(bands: &[Band], nuc: &[bool]) -> Option<f64> {
         .skip(1)
         .take_while(|b| b.end <= deepest_run)
         .count();
-    bands.get(..=complete).and_then(|b| ratios(b).last())
+    let pair = bands.get(..=complete)?;
+    Some((ratios(pair).last()?, pair.last()?.end))
 }
 
 /// The loop's phases (LIES-A6).
 fn schedule() -> Timeline {
     Timeline::new(&PHASES)
+}
+
+/// Depth in nodes of the redissolution front, `y_e = 120·√progress` during `dissolve`
+/// and 0 otherwise: nodes above it are dissolving (LIES-A6).
+fn dissolve_front(beat: Beat) -> f64 {
+    if beat.index == DISSOLVE {
+        FRONT_NODES * beat.progress.sqrt()
+    } else {
+        0.0
+    }
 }
 
 /// Sim time at a point of the loop: `T_END·(s/36)^{3/2}` through `grow`, then on at its
@@ -361,6 +369,8 @@ struct Layout {
     x0: [i32; 5],
     /// Gel pixel rows, from pixel row 4 (cell row 2) to the bottom edge.
     gel_px: i32,
+    /// Nodes shown, `[0, view)`: `clamp(2.4·gel_px, 50, 100)`.
+    view: f64,
     /// Meniscus depth at the tube axis, pixels: 0 below 40 gel rows (h < 22), where
     /// a pixel spans several nodes and a 1 px sag only notches single pixels.
     sag: f64,
@@ -379,6 +389,7 @@ impl Layout {
             *x = left + k as i32 * (pitch + gap) + 1;
         }
         let gel_px = 2 * (h - 2).max(0);
+        let view = (NODES_PER_PX * f64::from(gel_px)).clamp(MIN_VIEW_NODES, VIEW_NODES);
         // h ≥ 22 is gel_px ≥ 40.
         let sag = match h {
             40.. => 2.0,
@@ -391,8 +402,14 @@ impl Layout {
             inner,
             x0,
             gel_px,
+            view,
             sag,
         }
+    }
+
+    /// Header column of a tube's ratio (4 characters, centred over the interior).
+    fn ratio_col(&self, slot: usize) -> i32 {
+        self.x0[slot] + (self.inner - 4) / 2
     }
 
     /// `(tube slot, preset)` of the visible tubes.
@@ -409,10 +426,10 @@ impl Layout {
 
     /// The node window `[lo, hi)` each gel pixel shows, column-major (`inner` columns of
     /// `gel_px` rows); `None` above the concave meniscus, where the pixel is liquid. The
-    /// gel's `gel_px` rows show nodes `[0, VIEW_NODES)` and the pixel centre's depth is
+    /// gel's `gel_px` rows show nodes `[0, view)` and the pixel centre's depth is
     /// `row + ½ − sag·(1 − u²)`, so interface and bands curve together.
     fn windows(&self) -> impl Iterator<Item = Option<(f64, f64)>> + '_ {
-        let nodes_per_px = VIEW_NODES / f64::from(self.gel_px.max(1));
+        let nodes_per_px = self.view / f64::from(self.gel_px.max(1));
         (0..self.inner).flat_map(move |c| {
             let sag = self.sag * self.bulge(c);
             (0..self.gel_px).map(move |row| {
@@ -482,25 +499,30 @@ pub(crate) fn gel_pixel(d: f64, c: f64, junction: bool) -> Option<(f64, Class)> 
     let haze = HAZE * ((c / C_STAR - 0.5) / 0.5).clamp(0.0, 1.0);
     let class = if d >= D_BAND && !junction {
         Class::Band
-    } else if d > D_FAINT || haze > 0.0 {
+    } else if d > D_FAINT {
         Class::Faint
+    } else if haze > 0.0 {
+        Class::Haze
     } else {
         return None;
     };
     Some((precip.max(haze), class))
 }
 
-/// The ASCII glyph of a cell from its two pixel classes (SPEC-002 ASCII).
+/// The ASCII glyph of a cell from its two pixel classes (SPEC-002 ASCII). The haze is
+/// never more than a light `.` stipple, so its large sinking cloud cannot outweigh the
+/// precipitate.
 fn ascii_glyph(top: Class, bottom: Class) -> char {
-    use Class::{Band, Faint, Liquid};
+    use Class::{Band, Empty, Faint, Liquid};
     match (top, bottom) {
         (Liquid, _) | (_, Liquid) => '~',
         (Band, Band) => '=',
         (Band, _) => '-',
         (_, Band) => '_',
         (Faint, Faint) => ':',
-        (Faint, _) | (_, Faint) => '.',
-        _ => ' ',
+        (Empty, Empty) => ' ',
+        // One faint pixel, or any haze.
+        _ => '.',
     }
 }
 
@@ -515,15 +537,14 @@ fn ascii_cell(ct: Class, cb: Class, top: Ink, bottom: Ink) -> Option<(char, Ink)
     }
 }
 
-/// The header legend that fits a first gap of `gap` columns, the columns left of the
-/// first wall (it sits at column 1). Plain ASCII in both modes: subscript glyphs are
-/// missing from several common terminal fonts.
-fn legend(gap: i32) -> Option<&'static str> {
-    match gap {
-        12.. => Some("x(n+1)/x(n)"),
-        8.. => Some("xn+1/xn"),
-        _ => None,
-    }
+/// The header legend that fits at column 1 with a 2-column gap before the first
+/// tube's ratio at column `room` (the walls start below the header, so nothing else can
+/// collide). Plain ASCII in both modes: subscript glyphs are missing from several common
+/// terminal fonts.
+fn legend(room: i32) -> Option<&'static str> {
+    ["x(n+1)/x(n)", "xn+1/xn"]
+        .into_iter()
+        .find(|s| 1 + s.len() as i32 + 2 <= room)
 }
 
 #[derive(Debug, Clone)]
@@ -631,26 +652,27 @@ impl LiesegangRings {
 
     fn render_header(&self, canvas: &mut Canvas) {
         let lay = self.layout;
-        if lay.height < 6 {
+        if lay.height < 6 || lay.inner < 4 {
             return;
         }
+        let front = dissolve_front(self.schedule.at(self.t));
         let mut any = false;
         for (slot, preset) in lay.tubes() {
             let tube = &self.tubes[preset];
-            let Some(r) = live_ratio(tube.bands.as_slice(), &tube.col.nuc) else {
+            let Some((r, end)) = live_ratio(tube.bands.as_slice(), &tube.col.nuc) else {
                 continue;
             };
-            if lay.inner < 4 {
+            // Once the dissolve front has passed the deeper measured band (or the view
+            // bottom), the number would describe bands that are gone.
+            if (end as f64).min(lay.view) <= front {
                 continue;
             }
             any = true;
             let mut s = StackText::<8>::new();
             let _ = write!(s, "{r:.2}");
-            let x = lay.x0[slot] + (lay.inner - s.len() as i32) / 2;
-            canvas.text(x, 0, s.as_str(), RATIO_INK);
+            canvas.text(lay.ratio_col(slot), 0, s.as_str(), RATIO_INK);
         }
-        // The first gap is the x0 − 1 columns left of the first wall.
-        if let Some(text) = legend(lay.x0[0] - 1).filter(|_| any) {
+        if let Some(text) = legend(lay.ratio_col(0)).filter(|_| any) {
             canvas.text(1, 0, text, LEGEND_INK);
         }
     }
@@ -690,7 +712,7 @@ impl Generator for LiesegangRings {
         if beat.index == DISSOLVE {
             // Only the part of this step spent in `dissolve` decays.
             let k = (-DISSOLVE_RATE * dt.min(beat.local)).exp();
-            let front = FRONT_NODES * beat.progress.sqrt();
+            let front = dissolve_front(beat);
             for tube in &mut self.tubes {
                 tube.col.dissolve(front, k);
             }
@@ -966,15 +988,74 @@ mod tests {
     }
 
     #[test]
-    fn lies_legend_fits_the_first_gap() {
-        assert_eq!(legend(7), None);
-        for gap in 8..12 {
-            assert_eq!(legend(gap), Some("xn+1/xn"));
+    fn lies_a8_legend_fits_before_the_first_ratio() {
+        // The header is row 0 and the walls start at row 1, so only the first tube's
+        // ratio can collide with the legend: it keeps a 2-column gap before it.
+        assert_eq!(legend(9), None);
+        for room in 10..14 {
+            assert_eq!(legend(room), Some("xn+1/xn"));
         }
-        assert_eq!(legend(12), Some("x(n+1)/x(n)"));
-        let gap = |w, h| Layout::new(Size::new(w, h)).x0[0] - 1;
-        assert_eq!(legend(gap(80, 24)), Some("xn+1/xn"));
-        assert_eq!(legend(gap(200, 50)), Some("x(n+1)/x(n)"));
+        assert_eq!(legend(14), Some("x(n+1)/x(n)"));
+        let room = |w, h| Layout::new(Size::new(w, h)).ratio_col(0);
+        assert_eq!(legend(room(80, 24)), Some("x(n+1)/x(n)"));
+        assert_eq!(legend(room(200, 50)), Some("x(n+1)/x(n)"));
+        assert_eq!(legend(room(40, 12)), Some("x(n+1)/x(n)"));
+    }
+
+    fn header(s: &LiesegangRings) -> String {
+        let size = Size::new(s.layout.width, s.layout.height);
+        let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+        s.render(&mut canvas);
+        canvas.to_lines().swap_remove(0)
+    }
+
+    #[test]
+    fn lies_a8_header_ratios_leave_with_their_bands() {
+        let (mut s, mut ctx) = scene(Size::new(80, 24), 42);
+        while s.t + SIM_DT < 41.9 {
+            s.update(SIM_DT, &mut ctx);
+        }
+        let full = header(&s);
+        assert!(full.contains("x(n+1)/x(n)"), "{full:?}");
+        assert_eq!(
+            full.matches('.').count(),
+            3,
+            "three ratios in hold: {full:?}"
+        );
+        // The dissolve front erases each tube's measured bands, and its ratio with them.
+        while s.t + SIM_DT < 49.9 {
+            s.update(SIM_DT, &mut ctx);
+        }
+        assert_eq!(header(&s).trim(), "", "numbers over clear tubes");
+    }
+
+    #[test]
+    fn lies_a8_ascii_haze_is_lighter_than_precipitate() {
+        use Class::{Band, Empty, Faint, Haze};
+        let class = |d, c, junction| gel_pixel(d, c, junction).map(|p| p.1);
+        // Clear gel carrying only the supersaturation haze is its own, lightest class.
+        assert_eq!(class(0.0, 0.8 * C_STAR, false), Some(Haze));
+        assert_eq!(class(0.0, 0.4 * C_STAR, false), None);
+        assert_eq!(class(0.01, 0.8 * C_STAR, false), Some(Faint));
+        assert_eq!(class(0.1, 0.0, true), Some(Faint), "junction zone");
+        assert_eq!(class(0.1, 0.0, false), Some(Band));
+        assert_eq!(ascii_glyph(Haze, Haze), '.');
+        assert_eq!(ascii_glyph(Haze, Empty), '.');
+        assert_eq!(ascii_glyph(Empty, Haze), '.');
+        assert_eq!(ascii_glyph(Empty, Empty), ' ');
+        assert_eq!(ascii_glyph(Faint, Faint), ':');
+        assert_eq!(ascii_glyph(Faint, Haze), '.');
+    }
+
+    #[test]
+    fn lies_a8_short_terminals_show_fewer_nodes() {
+        // At most ≈ 2.4 nodes per pixel, so short terminals still resolve the gaps.
+        let view = |w, h| Layout::new(Size::new(w, h)).view;
+        assert_eq!((view(80, 24), view(200, 50)), (VIEW_NODES, VIEW_NODES));
+        assert_eq!(view(40, 12), 50.0);
+        assert_eq!(view(80, 16), 2.4 * 28.0);
+        let deepest = Layout::new(Size::new(40, 12)).windows().last().flatten();
+        assert!((deepest.unwrap().1 - 50.0).abs() < 1e-9, "{deepest:?}");
     }
 
     #[test]
@@ -1023,7 +1104,11 @@ mod tests {
             "the deepest band is not complete"
         );
         nuc[17] = true;
-        assert_eq!(live_ratio(&b, &nuc), Some(1.3));
+        assert_eq!(
+            live_ratio(&b, &nuc),
+            Some((1.3, 14)),
+            "ratio, deeper band's end"
+        );
     }
 
     #[test]

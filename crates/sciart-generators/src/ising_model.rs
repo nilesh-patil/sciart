@@ -181,8 +181,8 @@ impl Lattice {
             usize::from(self.spins.width()),
             usize::from(self.spins.height()),
         );
-        // w, h ≤ MAX_SPINS < 2¹⁶ and w·h ≤ MAX_SPINS in the scene (tests go to 192²),
-        // so the narrowing casts are lossless.
+        // Grid axes are u16, so column indices fit a u16 and row offsets (< 2¹⁶·2¹⁶) a
+        // u32: the narrowing casts are lossless.
         self.xl = (0..w).map(|x| ((x + w - 1) % w) as u16).collect();
         self.xr = (0..w).map(|x| ((x + 1) % w) as u16).collect();
         self.yu = (0..h).map(|y| (((y + h - 1) % h) * w) as u32).collect();
@@ -361,7 +361,7 @@ impl Generator for IsingModel {
         let px = self.pixels.pixel_size();
         let map = &mut self.map;
         map.rebuild(lattice, px);
-        // Lattice sides are ≤ MAX_SPINS < 2¹⁶, so the indices fit a u16.
+        // Grid axes are u16, so lattice indices fit a u16: the casts are lossless.
         self.cols.clear();
         self.cols
             .extend((0..i32::from(px.width())).map(|x| map.nearest(x, 0).0 as u16));
