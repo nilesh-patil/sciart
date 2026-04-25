@@ -340,9 +340,9 @@ fn mass(el: El) -> f64 {
     }
 }
 
-/// Ball radius as a fraction of the Bondi (1964) van der Waals radius: the IUCr Jmol
-/// figure-toolkit small-molecule default (20 %; plain Jmol uses spacefill 23 %). It keeps ≥ 0.5 Å of visible stick on C60's 1.40–1.46 Å bonds, so the
-/// cage reads as rings of balls rather than a heap of blobs.
+/// Ball radius as a fraction of the Bondi (1964) van der Waals radius. It keeps ≥ 0.5 Å
+/// of visible stick on C60's 1.40–1.46 Å bonds, so the cage reads as rings of balls
+/// rather than a heap of blobs.
 const BALL: f64 = 0.20;
 
 fn ball_radius(el: El) -> f64 {
@@ -350,8 +350,8 @@ fn ball_radius(el: El) -> f64 {
 }
 
 /// Smallest `r_eff` (Å), so the lightest molecules are framed but not ballooned: water
-/// (raw r_eff ≈ 1.16 Å) fills ≈ 60 % of the frame height, still smaller on screen than
-/// benzene and C60.
+/// (raw r_eff ≈ 1.16 Å) reaches ≈ 0.9 of the framing radius at its widest, and its
+/// small V still covers less of the screen than benzene and C60.
 const R_EFF_MIN: f64 = 1.25;
 
 /// A molecule ready to draw: recentred on its centre of mass, with its framing radius
@@ -500,12 +500,12 @@ pub(crate) fn pose(timeline: &Timeline, start: usize, t: f64) -> Pose {
 
 /// Eye distance in units of `r_eff`: gentle perspective.
 const EYE: f64 = 5.0;
-/// Perspective allowance in the scale, `EYE/(EYE − 1)` = 1.25: the magnification of a
-/// point at depth `r_eff` on the axis. It is a conservative bound: a sphere of radius
-/// `r_eff` seen from `EYE·r_eff` projects to at most `EYE/√(EYE² − 1)` ≈ 1.021 of its
-/// radius. The slack also covers floored bodies and rounded cells (MOL-A3 checks the
-/// fit), and the body classes ([`BODY_MIN`], [`COMPACT_MAX`]) are tuned at this scale.
-const MAX_MAGNIFY: f64 = EYE / (EYE - 1.0);
+/// Perspective allowance in the scale. A sphere of radius `r_eff` seen from `EYE·r_eff`
+/// projects to at most `EYE/√(EYE² − 1)` ≈ 1.021 of its radius; the ≈ 3 % on top covers
+/// floored bodies and rounded cells (MOL-A3 checks the fit at eight sizes). The looser
+/// on-axis bound `EYE/(EYE − 1)` = 1.25 left water and ethanol at ≈ 75 % of the frame.
+/// The body classes ([`BODY_MIN`], [`COMPACT_MAX`]) are tuned at this scale.
+const MAX_MAGNIFY: f64 = 1.05;
 /// Fraction of the drawing area the framing circle fills.
 const FILL: f64 = 0.86;
 
@@ -691,15 +691,15 @@ impl Lens {
 
 /// A molecule's heavy atoms (or its hydrogens) get shaded bodies when their largest
 /// unmagnified ball is at least this many rows at full size ([`Bodies`]). At 80×24 this
-/// lights ethanol (≈ 1.12 rows) and benzene (≈ 0.99) as well as water and methane, so
-/// only caffeine and C60 (≈ 0.6 rows) are dot-and-stick, which their size justifies.
+/// lights ethanol (≈ 1.33 rows) and benzene (≈ 1.18) as well as water and methane, so
+/// only caffeine and C60 (≈ 0.7–0.8 rows) are dot-and-stick, which their size justifies.
 const BODY_MIN: f64 = 0.95;
 /// Smallest body radius at full size, rows: far or small atoms (N and O beside C) keep a
 /// few lit cells, so their colour still reads.
 const BODY_FLOOR: f64 = 0.8 * BODY_MIN;
 /// Bodies of a class whose largest unmagnified ball is under this many rows at full size
-/// are compact ([`Bodies`]): at 80×24 ethanol's (≈ 1.12) and benzene's (≈ 0.99), while
-/// water and methane (≈ 2 rows) stay round discs.
+/// are compact ([`Bodies`]): at 80×24 benzene's (≈ 1.18), while water, methane
+/// (≈ 2.3 rows) and ethanol (≈ 1.33) are round discs.
 const COMPACT_MAX: f64 = 1.2;
 /// `draw::disc` radius of a dot atom: under half a cell, so the centre cell only.
 const DOT: f64 = 0.25;
@@ -918,7 +918,9 @@ pub(crate) fn frame(model: &Model, view: &View, pose: &Pose, bodies: Bodies) -> 
     };
     let mut depths = [0f32; MAX_ITEMS];
     for (i, atom) in model.atoms.iter().enumerate() {
-        // Finite tables always project; anything else is parked off-canvas, not a panic.
+        // Unreachable: every atom lies within `r_eff` of the centre and the eye is
+        // `5·r_eff` away, so `project` never fails. The fallback only avoids a panic; its
+        // bonds would still be stroked toward the corner.
         f.proj[i] = lens.project(atom, bodies).unwrap_or(Proj {
             x: -1.0,
             y: -1.0,
@@ -1279,7 +1281,16 @@ mod tests {
     fn mol_a3_motion_is_rigid_and_fits_the_frame() {
         let tl = gallery_timeline();
         let models = gallery();
-        for size in [Size::new(80, 24), Size::new(200, 50)] {
+        for size in [
+            Size::new(80, 24),
+            Size::new(200, 50),
+            Size::new(40, 12),
+            Size::new(120, 36),
+            Size::new(60, 20),
+            Size::new(100, 30),
+            Size::new(30, 10),
+            Size::new(160, 40),
+        ] {
             let view = View::new(size);
             let (w, h) = (i32::from(size.width()), i32::from(size.height()));
             for k in 0..500 {
@@ -1322,6 +1333,31 @@ mod tests {
                         }
                     }
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn mol_a3_every_molecule_reaches_the_framing_circle() {
+        // The scale allows only the true perspective bound plus slack, so even water
+        // and ethanol, framed by their bounding sphere, reach ≥ 85 % of the framing
+        // radius at some point of their hold turn.
+        let (tl, models) = (gallery_timeline(), gallery());
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            let view = View::new(size);
+            for (slot, m) in models.iter().enumerate() {
+                let bodies = Bodies::new(&view, m);
+                let mut reach: f64 = 0.0;
+                for k in 0..200 {
+                    let t = f64::from(slot as u32) * SLOT + GROW + HOLD * f64::from(k) / 200.0;
+                    let f = frame(m, &view, &pose(&tl, 0, t), bodies);
+                    for p in &f.proj[..m.atoms.len()] {
+                        let d = ((p.x - view.cx) / ASPECT).hypot(p.y - view.cy);
+                        reach = reach.max(d + p.r);
+                    }
+                }
+                let fill = reach / view.fit;
+                assert!(fill >= 0.85, "{size:?} {}: {fill:.2}", m.labels[2]);
             }
         }
     }
@@ -1695,7 +1731,7 @@ mod tests {
             .iter()
             .map(|m| Bodies::new(&view, m).heavy != Body::Dot)
             .collect();
-        // Water, methane, ethanol and benzene are lit; caffeine and C60 (≈ 0.6-row
+        // Water, methane, ethanol and benzene are lit; caffeine and C60 (≈ 0.7-row
         // balls) stay dot-and-stick.
         assert_eq!(heavy, [true, true, true, true, false, false]);
         // The scene caches the classes per size.
@@ -1733,17 +1769,31 @@ mod tests {
 
     #[test]
     fn mol_a6_small_bodies_are_compact_three_cell_balls() {
-        let size = Size::new(80, 24);
-        let view = View::new(size);
-        let compact: Vec<bool> = gallery()
-            .iter()
-            .map(|m| Bodies::new(&view, m).heavy == Body::Compact)
-            .collect();
-        // Ethanol's and benzene's ≈ 1-row balls; water and methane stay round discs,
-        // caffeine and C60 are dots.
-        assert_eq!(compact, [false, false, true, true, false, false]);
+        let compact = |size: Size| -> Vec<bool> {
+            let view = View::new(size);
+            gallery()
+                .iter()
+                .map(|m| Bodies::new(&view, m).heavy == Body::Compact)
+                .collect()
+        };
+        // At 80×24 benzene's ≈ 1.2-row balls; water, methane and ethanol are round discs,
+        // caffeine and C60 dots. At 40×12 water's and methane's ≈ 1.1-row balls.
+        assert_eq!(
+            compact(Size::new(80, 24)),
+            [false, false, false, true, false, false]
+        );
+        assert_eq!(
+            compact(Size::new(40, 12)),
+            [true, true, false, false, false, false]
+        );
         let tl = gallery_timeline();
-        for name in ["ethanol", "benzene"] {
+        for (size, name) in [
+            (Size::new(80, 24), "benzene"),
+            (Size::new(40, 12), "water"),
+            (Size::new(40, 12), "methane"),
+        ] {
+            let view = View::new(size);
+            let (w, h) = (i32::from(size.width()), i32::from(size.height()));
             let m = by_name(name);
             let bodies = Bodies::new(&view, &m);
             for k in 0..20 {
@@ -1759,8 +1809,8 @@ mod tests {
                     paint(&mut c, &m, &f, &[i as u16]);
                     let (cx, cy) = (p.x.round() as i32, p.y.round() as i32);
                     // A `█▓░` lozenge on the centre row, never a `+` of cells.
-                    for y in 0..24 {
-                        for x in 0..80 {
+                    for y in 0..h {
+                        for x in 0..w {
                             let want = y == cy && (x - cx).abs() <= 1;
                             let painted = c.get(x, y).unwrap().ch != ' ';
                             assert_eq!(painted, want, "{name} t = {t} atom {i} ({x}, {y})");
