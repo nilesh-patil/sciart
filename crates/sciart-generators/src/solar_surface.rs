@@ -49,11 +49,28 @@ const GRANULE_LIFE: (f64, f64) = (6.0, 10.0);
 const GRANULE_FADE: f64 = 1.5;
 /// Below this radius (px) granulation and loops are unresolvable and skipped.
 const R_MIN_DETAIL: f64 = 4.0;
+/// Granulation contrast at disc centre: the real rms ≈ 0.13 in the visible, set just
+/// under it so granule cores top out below the ramp's clip and the mottle stays a fine
+/// texture under the spots and loops rather than a cracked-tile mosaic.
+const GRANULE_CONTRAST: f64 = 0.12;
 
 /// Wilson depression in units of the penumbral radius: ≈ 2.5× the real d/ρ ≈ 0.04
 /// (0.4–0.8 Mm against ≈ 15 Mm). Spots are drawn 2–3× oversize, so in absolute depth
 /// it is 5–7 Mm, ≈ 10× real. The shift reads without swallowing the penumbra.
 const WILSON: f64 = 0.1;
+/// Display floor on the penumbral radius (px): at 80×24 (R ≈ 22 px) a 2.5° following
+/// spot is ≈ 1 px in penumbral radius and its umbra under half a pixel, so small discs
+/// draw spots at least this large (an umbra ≥ 0.9 px), but never beyond
+/// `sep/SPOT_SEP_CAP`, so a pair's blended penumbrae never touch (SUN-A6). At 200×50
+/// (R = 46 px) the floor is 2.49°, under every spot's own ρ_p, so no spot is enlarged.
+const SPOT_MIN_PX: f64 = 2.0;
+/// `2 × 1.07` plus a margin: two spots floored to `sep/SPOT_SEP_CAP` keep their
+/// blended penumbrae (1.07 ρ each) strictly apart even on the smallest discs.
+const SPOT_SEP_CAP: f64 = 2.2;
+/// Mean penumbral intensity (observed ≈ 0.75–0.85 in the visible): set a little darker so
+/// that, with the granulation gated out, the ring still stands about one ramp step
+/// below the intergranular lanes (0.88) at 80×24 instead of merging into them.
+const PENUMBRA: f64 = 0.70;
 /// Penumbral filament pitch (px of circumference) and the filament count range.
 const PENUMBRA_FILAMENT_PX: f64 = 3.0;
 const PENUMBRA_FILAMENTS: (f64, f64) = (6.0, 24.0);
@@ -61,7 +78,7 @@ const PENUMBRA_FILAMENTS: (f64, f64) = (6.0, 24.0);
 const REGIONS: usize = 3;
 /// Spot half-separation δ (deg) and penumbral radii ρ_p (deg) of the leading and
 /// following spots.
-const SPOT_HALF_SEP_DEG: (f64, f64) = (5.5, 7.5);
+const SPOT_HALF_SEP_DEG: (f64, f64) = (6.5, 7.5);
 const LEAD_RHO_DEG: (f64, f64) = (4.0, 6.0);
 const FOLLOW_RHO_DEG: (f64, f64) = (2.5, 4.0);
 const LOOPS: usize = 3;
@@ -120,7 +137,7 @@ const ANNULUS_PX: f64 = 2.6;
 const ASCII_RIM_PX: f64 = 1.0;
 
 /// `Seq` values of the H-α features. Loops sit above the limb (0.43), spicules and rim
-/// but below the penumbra (0.73): orange cool plasma, apart from the limb fuzz, rather
+/// but below the penumbra (0.67): orange cool plasma, apart from the limb fuzz, rather
 /// than a torn-off piece of the photosphere. Only the rain knots, adding up to
 /// `V_KNOT` (≈ 0.88, pale yellow), are the moving highlight.
 const V_RIM: f64 = 0.55;
@@ -162,18 +179,19 @@ fn omega_rad_per_sec(lat: f64) -> f64 {
 /// umbra–penumbra edge and `q` the penumbra–photosphere one. Returns
 /// the intensity factor and the photosphere weight (0 in the spot, 1 outside), which
 /// gates the faculae. Umbra 0.22 for q ≤ 0.375 (radius 0.45 ρ_p after the blend gives
-/// U/(U+P) ≈ 0.2); penumbra 0.78 ± 0.08 in `filaments` radial filaments.
+/// U/(U+P) ≈ 0.2); penumbra `PENUMBRA` ± 0.08 in `filaments` radial filaments.
 fn spot_profile(q_umbra: f64, q: f64, psi: f64, filaments: f64) -> (f64, f64) {
-    let penumbra = 0.78 + 0.08 * (filaments * psi).cos();
+    let penumbra = PENUMBRA + 0.08 * (filaments * psi).cos();
     let inner = ease::lerp(0.22, penumbra, ease::smoothstep((q_umbra - 0.375) / 0.15));
     let outside = ease::smoothstep((q - 0.93) / 0.14);
     (ease::lerp(inner, 1.0, outside), outside)
 }
 
 /// Penumbral filaments of a spot whose penumbral radius spans `rho_px` pixels: one per
-/// 3 px of its circumference 2πρ_p (so ≥ 2 px apart at mid-penumbra), 6–24 (SUN-A3). Real penumbrae hold hundreds of
-/// sub-arcsecond fibrils; drawn at a fixed 24 they would alias below a pixel and read as
-/// noise, so the count follows what the spot can show.
+/// 3 px of its circumference 2πρ_p (so ≥ 2 px apart at mid-penumbra), 6–24 (SUN-A3).
+/// Real penumbrae hold hundreds of sub-arcsecond fibrils; drawn at a fixed 24 they
+/// would alias below a pixel and read as noise, so the count follows what the spot can
+/// show.
 pub(crate) fn penumbra_filaments(rho_px: f64) -> f64 {
     (TAU * rho_px / PENUMBRA_FILAMENT_PX)
         .round()
@@ -189,8 +207,8 @@ pub(crate) fn facular_reach(rho: f64) -> f64 {
 /// Sky-plane shift of an umbra toward disc centre for a spot at unit vector `s`
 /// (observer frame): the Wilson depression, of magnitude `WILSON·ρ_p sin θ` since
 /// `|(s_x, s_y)| = sin θ` (SUN-A3). Lifted back onto the sphere it grows as
-/// `WILSON·tan θ` in units of ρ_p, the real Wilson effect: the centre-side penumbra
-/// is covered only below μ ≈ 0.2, as observed.
+/// `WILSON·tan θ` in units of ρ_p, the Wilson effect: the centre-side penumbra narrows
+/// toward the limb and is covered below μ ≈ 0.2 (≈ 0.08 at the real depth).
 pub(crate) fn wilson_offset(rho_p: f64, s: [f64; 3]) -> [f64; 2] {
     [-WILSON * rho_p * s[0], -WILSON * rho_p * s[1]]
 }
@@ -279,10 +297,10 @@ pub(crate) fn granule_pattern(f1: f64, f2: f64, w1: f64, s_g: f64) -> f64 {
     0.55 * lane + 0.45 * w1 * core * core
 }
 
-/// Granulation contrast at `μ`: ≈ 0.16 at disc centre, falling as √μ and tapering to
-/// zero over μ ∈ [0.1, 0.2] so no hard ring shows (SUN-A7).
+/// Granulation contrast at `μ`: `GRANULE_CONTRAST` at disc centre, falling as √μ and
+/// tapering to zero over μ ∈ [0.1, 0.2] so no hard ring shows (SUN-A7).
 pub(crate) fn granule_contrast(mu: f64) -> f64 {
-    0.16 * mu.max(0.0).sqrt() * ease::smoothstep((mu - 0.1) / 0.1)
+    GRANULE_CONTRAST * mu.max(0.0).sqrt() * ease::smoothstep((mu - 0.1) / 0.1)
 }
 
 /// The `Seq` ink for photospheric intensity `i`: `v = 0.12 + 0.78·i`.
@@ -482,8 +500,9 @@ impl Region {
         let up = centre;
         let across = cross(axis, up);
         // Half-separation δ: the spots are drawn 2–3× oversize (below), so they sit
-        // 2δ = 11–15° apart, beyond their widest blended penumbrae (1.07·(6° + 4°)):
-        // a shared penumbra would be a δ-spot, a few % of real groups.
+        // 2δ = 13–15° apart, beyond their widest blended penumbrae (1.07·(6° + 4°)) and
+        // beyond those of a pair on the display floor at 80×24 (1.07·(6° + 5.2°)): a
+        // shared penumbra would be a δ-spot, a few % of real groups.
         let delta: f64 = rng
             .random_range(SPOT_HALF_SEP_DEG.0..SPOT_HALF_SEP_DEG.1)
             .to_radians();
@@ -641,6 +660,9 @@ struct View {
     hash: SpatialHash,
     /// Photospheric intensity per pixel (NaN off the disc): what filaments absorb.
     disc_i: Vec<f32>,
+    /// Disc pixels inside a spot (photosphere weight < ½), which filaments skip, so the
+    /// thread bridges a group's spots without crossing their penumbrae.
+    in_spot: Vec<bool>,
     pixels: Pixels,
     label: Label,
 }
@@ -711,6 +733,7 @@ impl View {
                 hash
             },
             disc_i: vec![f32::NAN; w * rows],
+            in_spot: vec![false; w * rows],
             pixels: Pixels::new(size),
             label: if w < 30 || h < 10 {
                 Label::None
@@ -813,12 +836,14 @@ impl View {
         }
     }
 
-    /// Shade every disc pixel: limb darkening × granulation × spots and faculae.
+    /// Shade every disc pixel: limb darkening × spots × granulation (outside the spots
+    /// only: convection is suppressed in the umbra and penumbra, so a spot is a clean
+    /// dark ring on the mottle) × faculae.
     fn shade_disc(&mut self, spots: &[SpotView]) {
         for (dp, &grain) in self.disc.iter().zip(&self.grain) {
             let n = dp.n.map(f64::from);
             let mu = n[2];
-            let mut i = f64::from(dp.base) * f64::from(grain);
+            let mut i = f64::from(dp.base);
             let (px, py) = (f64::from(dp.x) + 0.5, f64::from(dp.y) + 0.5);
             // The strongest facular field, gated by the photosphere weight of every
             // spot covering the pixel, so no spot brightens another: order-independent.
@@ -840,9 +865,12 @@ impl View {
                     gate *= outside;
                 }
             }
+            i *= 1.0 + (f64::from(grain) - 1.0) * gate;
             // Faculae brighten near the limb only, as observed, and only outside spots.
             i *= 1.0 + 0.35 * (1.0 - mu) * faculae * gate;
-            self.disc_i[usize::from(dp.y) * self.w + usize::from(dp.x)] = i as f32;
+            let at = usize::from(dp.y) * self.w + usize::from(dp.x);
+            self.disc_i[at] = i as f32;
+            self.in_spot[at] = gate < 0.5;
             self.pixels
                 .set(i32::from(dp.x), i32::from(dp.y), photosphere_ink(i));
         }
@@ -894,12 +922,18 @@ impl View {
         }
     }
 
-    /// Absorb an on-disc pixel to `FILAMENT`× its photospheric intensity (idempotent).
+    /// Absorb an on-disc pixel to `FILAMENT`× its photospheric intensity (idempotent),
+    /// except inside a spot: the thread stops at the penumbrae rather than slashing
+    /// through the group's focal point.
     fn absorb(&mut self, x: i32, y: i32) {
         let Some(old) = self.pixels.get(x, y) else {
             return;
         };
-        let i = self.disc_i[y as usize * self.w + x as usize];
+        let at = y as usize * self.w + x as usize;
+        if self.in_spot[at] {
+            return;
+        }
+        let i = self.disc_i[at];
         if !i.is_nan() {
             let dark = photosphere_ink(FILAMENT * f64::from(i));
             if dark.level < old.level {
@@ -1068,23 +1102,32 @@ impl SolarSurface {
         let mut n = 0;
         for region in &self.regions {
             let view = view_of(region.lon, self.b0);
+            let [lead, follow] = region.spots;
+            // The display floor never lets the pair's penumbrae touch (SUN-A6).
+            let apart = dot(lead.centre, follow.centre).clamp(-1.0, 1.0).acos() / SPOT_SEP_CAP;
             for spot in region.spots.iter().filter(|s| s.present) {
                 let s = view.rotate(spot.centre);
                 if s[2] <= -spot.rho {
                     continue;
                 }
-                let [ox, oy] = wilson_offset(spot.rho, s);
+                let rho = spot.rho.max((SPOT_MIN_PX / self.view.r).min(apart));
+                let [ox, oy] = wilson_offset(rho, s);
                 let (ux, uy) = (s[0] + ox, s[1] + oy);
                 let (px, py) = self.view.screen(s);
                 out[n] = SpotView {
                     s,
-                    umbra: [ux, uy, (1.0 - ux * ux - uy * uy).max(0.0).sqrt()],
-                    rho: spot.rho,
+                    // On the spot's own hemisphere, even just behind the limb.
+                    umbra: [
+                        ux,
+                        uy,
+                        (1.0 - ux * ux - uy * uy).max(0.0).sqrt().copysign(s[2]),
+                    ],
+                    rho,
                     psi0: spot.psi0,
-                    filaments: penumbra_filaments(spot.rho * self.view.r),
+                    filaments: penumbra_filaments(rho * self.view.r),
                     px,
                     py,
-                    reach: facular_reach(spot.rho),
+                    reach: facular_reach(rho),
                 };
                 n += 1;
             }
@@ -1251,7 +1294,7 @@ mod tests {
         for n in [6.0, 10.0, 17.0, 24.0] {
             for q in [0.6, 0.8] {
                 let m = mean((0..720).map(|k| spot_profile(q, q, TAU * f64::from(k) / 720.0, n).0));
-                assert!((m - 0.78).abs() < 0.005, "{n} filaments: mean {m}");
+                assert!((m - 0.70).abs() < 0.005, "{n} filaments: mean {m}");
             }
         }
         // The rendered spots use it: unless held at the minimum, a 200×50 spot's
@@ -1283,6 +1326,13 @@ mod tests {
             let r = Region::spawn(&mut rng, lat, 0.0, LOOP_H.0);
             let [lead, follow] = r.spots;
             let sep = dot(lead.centre, follow.centre).clamp(-1.0, 1.0).acos();
+            // 2δ = 13–15°, wide enough that the display floor never makes them touch
+            // (SUN-A3).
+            assert!(
+                (13.0..=15.0).contains(&sep.to_degrees()),
+                "region {i}: {:.2}° apart",
+                sep.to_degrees()
+            );
             assert!(
                 sep > 1.07 * (lead.rho + follow.rho),
                 "region {i}: {:.2}° apart, radii {:.2}° + {:.2}°",
@@ -1465,9 +1515,9 @@ mod tests {
         }
         for i in 0..=40 {
             let q = 0.525 + (0.93 - 0.525) * f64::from(i) / 40.0;
-            assert!((azimuthal(q) - 0.78).abs() < 0.005);
+            assert!((azimuthal(q) - 0.70).abs() < 0.005);
             for k in 0..100 {
-                let m = spot_intensity(q, f64::from(k) * 0.07) - 0.78;
+                let m = spot_intensity(q, f64::from(k) * 0.07) - 0.70;
                 assert!(m.abs() <= 0.08 + 1e-12);
             }
         }
@@ -1480,10 +1530,12 @@ mod tests {
             let q = 1.5 * f64::from(i) / 1500.0;
             let m = azimuthal(q);
             assert!(m >= prev - 1e-12, "mean decreases at q = {q}");
-            if half.is_none() && m >= 0.5 {
+            // The umbra–penumbra midpoint (0.22 + 0.70)/2 and the penumbra–photosphere
+            // one (0.70 + 1)/2 mark the umbral and penumbral radii.
+            if half.is_none() && m >= 0.46 {
                 half = Some(q);
             }
-            if edge.is_none() && m >= 0.89 {
+            if edge.is_none() && m >= 0.85 {
                 edge = Some(q);
             }
             prev = m;
@@ -1531,6 +1583,112 @@ mod tests {
             px,
             py,
             reach: -1.0,
+        }
+    }
+
+    /// The shown spots of `s` (Wilson-shifted views).
+    fn shown_spots(s: &SolarSurface) -> Vec<SpotView> {
+        let mut out = [SpotView::default(); REGIONS * 2];
+        let n = s.spot_views(&mut out);
+        out[..n].to_vec()
+    }
+
+    #[test]
+    fn sun_a3_spots_are_free_of_granulation() {
+        // Convection is suppressed in the spot: a pixel well inside a penumbra (q ≤ 0.9)
+        // shades the same whatever the granulation there.
+        let (mut s, _) = scene(200, 50);
+        let spots = shown_spots(&s);
+        assert!(!spots.is_empty());
+        let inside: Vec<usize> = s
+            .view
+            .disc
+            .iter()
+            .enumerate()
+            .filter(|(_, d)| {
+                let n = d.n.map(f64::from);
+                spots.iter().any(|sp| {
+                    let beta = (2.0 * (1.0 - dot(n, sp.s)).max(0.0)).sqrt();
+                    beta / sp.rho <= 0.9
+                })
+            })
+            .map(|(i, _)| i)
+            .collect();
+        assert!(inside.len() >= 10, "only {} spot pixels", inside.len());
+        let shade = |s: &mut SolarSurface, g: f32| {
+            s.view.grain.fill(g);
+            s.view.shade_disc(&spots);
+            inside
+                .iter()
+                .map(|&i| {
+                    let d = s.view.disc[i];
+                    s.view.disc_i[usize::from(d.y) * s.view.w + usize::from(d.x)]
+                })
+                .collect::<Vec<f32>>()
+        };
+        let (plain, grainy) = (shade(&mut s, 1.0), shade(&mut s, 1.12));
+        for (a, b) in plain.iter().zip(&grainy) {
+            assert!((a - b).abs() < 1e-6, "granulation in a spot: {a} vs {b}");
+        }
+    }
+
+    /// The seeded scene's regions with only the view built (no granules, no raster).
+    fn spots_only(w: u16, h: u16, seed: u64) -> SolarSurface {
+        let mut ctx = Ctx::new(seed, Size::new(w, h));
+        let mut s = SolarSurface::new();
+        s.seed(&mut ctx.rng);
+        s.view = View::new(Size::new(w, h));
+        s
+    }
+
+    #[test]
+    fn sun_a3_small_discs_floor_the_spots_in_pixels() {
+        // Each shown spot is drawn at ρ_eff = max(ρ_p, min(2.0 px/R, sep/2.2)), in the
+        // order `spot_views` visits them: at 200×50 (R = 46 px) the floor is 2.49°,
+        // under every spot's own ρ_p, so every spot keeps its size; at 80×24 the umbra
+        // (0.45 ρ_eff) is ≥ 0.85 px in radius; and at every size the floored pair's
+        // blended penumbrae stay strictly apart (SUN-A6). Over 200 seeds.
+        for seed in 0..200 {
+            for (w, h) in [(80u16, 24u16), (200, 50), (40, 12)] {
+                let s = spots_only(w, h, seed);
+                let r = s.view.r;
+                let mut want = Vec::new();
+                for g in &s.regions {
+                    let [a, b] = g.spots;
+                    let sep = dot(a.centre, b.centre).clamp(-1.0, 1.0).acos();
+                    let eff = |rho: f64| rho.max((2.0 / r).min(sep / 2.2));
+                    if a.present && b.present {
+                        assert!(
+                            sep > 1.07 * (eff(a.rho) + eff(b.rho)),
+                            "seed {seed} {w}x{h}: {:.2}° apart, drawn {:.2}° + {:.2}°",
+                            sep.to_degrees(),
+                            eff(a.rho).to_degrees(),
+                            eff(b.rho).to_degrees()
+                        );
+                    }
+                    let view = view_of(g.lon, s.b0);
+                    for spot in g.spots.iter().filter(|x| x.present) {
+                        if view.rotate(spot.centre)[2] > -spot.rho {
+                            want.push((spot.rho, eff(spot.rho)));
+                        }
+                    }
+                }
+                let shown = shown_spots(&s);
+                assert_eq!(shown.len(), want.len(), "seed {seed} {w}x{h}");
+                for (sp, &(rho, eff)) in shown.iter().zip(&want) {
+                    assert!(
+                        (sp.rho - eff).abs() < 1e-12,
+                        "seed {seed} {w}x{h}: spot drawn at {:.2} px, want {:.2}",
+                        sp.rho * r,
+                        eff * r
+                    );
+                    if w == 200 {
+                        assert_eq!(sp.rho, rho, "seed {seed}: floored at 200x50");
+                    } else if w == 80 {
+                        assert!(0.45 * sp.rho * r >= 0.85, "{:.2} px", sp.rho * r);
+                    }
+                }
+            }
         }
     }
 
@@ -1905,9 +2063,9 @@ mod tests {
                 "loop value {v}"
             );
         }
-        // The loop body sits under the penumbra (0.12 + 0.78·0.78); only knots pass it.
+        // The loop body sits under the penumbra (0.12 + 0.78·0.70); only knots pass it.
         let body = values.iter().copied().fold(1.0, f64::min);
-        assert!(body < 0.12 + 0.78 * 0.78, "loop body {body}");
+        assert!(body < 0.12 + 0.78 * 0.70, "loop body {body}");
     }
 
     #[test]
@@ -1946,9 +2104,35 @@ mod tests {
         assert!(loops >= 8, "only {loops} loop cells clear of the rim");
     }
 
+    /// Whether disc pixel (x, y) lies inside a shown spot: the product of the spots'
+    /// photosphere weights `smoothstep((q − 0.93)/0.14)` is below ½.
+    fn in_a_spot(s: &SolarSurface, spots: &[SpotView], x: usize, y: usize) -> bool {
+        let v = &s.view;
+        let (dx, dy) = ((x as f64 + 0.5 - v.cx) / v.r, (y as f64 + 0.5 - v.cy) / v.r);
+        let n = [dx, -dy, (1.0 - dx * dx - dy * dy).max(0.0).sqrt()];
+        let gate: f64 = spots
+            .iter()
+            .map(|sp| {
+                let q = (2.0 * (1.0 - dot(n, sp.s)).max(0.0)).sqrt() / sp.rho;
+                ease::smoothstep((q - 0.93) / 0.14)
+            })
+            .product();
+        gate < 0.5
+    }
+
     #[test]
     fn sun_a5_filaments_are_elevated_threads_of_the_arcade() {
-        let (mut s, mut ctx) = scene(200, 50);
+        // Seed 11 (the scene seed) and the review seed 42, whose filament runs between
+        // its spots.
+        for seed in [11, 42] {
+            filaments_over_80_s(seed);
+        }
+    }
+
+    fn filaments_over_80_s(seed: u64) {
+        let mut ctx = Ctx::new(seed, Size::new(200, 50));
+        let mut s = SolarSurface::new();
+        s.resize(Size::new(200, 50), &mut ctx);
         let rows = usize::from(s.view.pixels.pixel_size().height());
         let w = s.view.w;
         let mut absorbed_total = 0;
@@ -1968,6 +2152,7 @@ mod tests {
                 .collect();
             s.show_loops = true;
             s.rasterise(true);
+            let spots = shown_spots(&s);
             // Pixels within 1 px of a Filament sample standing higher than 0.35 of its
             // loop's apex (apex measured from the samples themselves).
             let mut allowed = vec![false; rows * w];
@@ -2000,12 +2185,21 @@ mod tests {
                     let on = s.view.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
                     if on.level < off[y * w + x].level {
                         assert!(allowed[y * w + x], "t = {}: low filament at {x},{y}", s.t);
+                        // The thread bridges the spots but never crosses a penumbra.
+                        assert!(
+                            !in_a_spot(&s, &spots, x, y),
+                            "seed {seed} t = {}: filament across a spot at {x},{y}",
+                            s.t
+                        );
                         absorbed_total += 1;
                     }
                 }
             }
         }
-        assert!(absorbed_total > 0, "no filament crossed the disc");
+        assert!(
+            absorbed_total > 0,
+            "seed {seed}: no filament crossed the disc"
+        );
     }
 
     #[test]
