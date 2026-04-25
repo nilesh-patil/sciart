@@ -40,6 +40,10 @@ const RH_PER_A: f64 = 1.3048;
 const BUCKETS: [usize; 7] = [64, 96, 128, 192, 256, 384, 500];
 const N_MAX: usize = BUCKETS[BUCKETS.len() - 1];
 const MAX_GIANTS: usize = 10;
+/// Camera eye distance from the origin, model units (SPEC-002 Motion).
+const EYE: f64 = 10.0;
+/// Re-centring passes onto the inner half's mean position (GC-A2).
+const DENSITY_PASSES: usize = 4;
 /// Seconds of the `r_h` smoothing that drives the glow radius.
 const RH_TAU: f64 = 4.0;
 /// Model radius filling the frame's fit radius (≈ 93 % of the projected mass).
@@ -70,6 +74,11 @@ pub(crate) fn n_for(size: Size) -> usize {
         .rev()
         .find(|&n| n <= budget)
         .unwrap_or(BUCKETS[0])
+}
+
+/// Red giants among `n` bodies, `g_n = clamp(N/50, 3, 10)` (SPEC-002 Inks).
+pub(crate) fn giant_count(n: usize) -> usize {
+    (n / 50).clamp(3, MAX_GIANTS)
 }
 
 /// An isotropic unit vector (`z = 1 − 2u`, `φ = 2πu`).
@@ -196,6 +205,29 @@ pub(crate) fn half_mass_radius(pos: &[f64], scratch: &mut Vec<f64>) -> f64 {
     r2.sqrt()
 }
 
+/// Brightness factor of a body at camera depth `z` (larger = nearer): 1 up to
+/// `z = EYE/4`, 0 from `z = EYE/3`, where perspective would magnify it ≥ 1.5× (SPEC-002
+/// Inks). The eye sits inside the far halo (`r ≤ 38.7 a ≈ 23` units), so without this
+/// a near-side halo star would streak across the screen like a meteor.
+pub(crate) fn eye_fade(z: f64) -> f64 {
+    let (near, gone) = (EYE / 4.0, EYE / 3.0);
+    1.0 - ease::smoothstep((z - near) / (gone - near))
+}
+
+/// Mean position of the bodies within the half-mass radius about the origin: a cheap
+/// density-centre estimate, robust to the heavy Plummer tail; `scratch` is reused.
+pub(crate) fn density_centre(pos: &[f64], scratch: &mut Vec<f64>) -> [f64; 3] {
+    let rh = half_mass_radius(pos, scratch);
+    let (mut sum, mut n) = ([0.0; 3], 0.0);
+    for p in pos.chunks_exact(3) {
+        if p[0] * p[0] + p[1] * p[1] + p[2] * p[2] <= rh * rh {
+            sum = [sum[0] + p[0], sum[1] + p[1], sum[2] + p[2]];
+            n += 1.0;
+        }
+    }
+    if n > 0.0 { sum.map(|s| s / n) } else { sum }
+}
+
 /// `(R/a_g)²` of a point `(dx, dy)` cells from the centre, given `k2 = (scale·a_g)²`.
 fn x2_over(dx: f64, dy: f64, k2: f64) -> f64 {
     ((dx / geom::ASPECT).powi(2) + dy * dy) / k2
@@ -225,6 +257,8 @@ pub(crate) struct Cluster {
     pub pos: Vec<f64>,
     pub vel: Vec<f64>,
     acc: Vec<f64>,
+    /// Per-body squared radii for the half-mass radius, reused every frame.
+    scratch: Vec<f64>,
     pub m: f64,
     /// Length and velocity factors that took the last AHW sample to Hénon units;
     /// growing a sample reuses them so new stars match the old (SPEC-002 Resize).
@@ -237,6 +271,7 @@ impl Cluster {
             pos: Vec::with_capacity(3 * N_MAX),
             vel: Vec::with_capacity(3 * N_MAX),
             acc: Vec::with_capacity(3 * N_MAX),
+            scratch: Vec::with_capacity(N_MAX),
             ..Self::default()
         }
     }
@@ -245,8 +280,13 @@ impl Cluster {
         self.pos.len() / 3
     }
 
-    /// A fresh `n`-star Plummer sphere in Hénon units (GC-A2): COM at rest at the
-    /// origin, unsoftened `W = −1/2`, then `2K = |W_ε|`, so `E ≈ −0.248`.
+    /// Radius holding half the bodies, about the origin.
+    pub fn half_mass_radius(&mut self) -> f64 {
+        half_mass_radius(&self.pos, &mut self.scratch)
+    }
+
+    /// A fresh `n`-star Plummer sphere in Hénon units (GC-A2): at rest, density centre
+    /// at the origin, unsoftened `W = −1/2`, then `2K = |W_ε|`, so `E ≈ −0.248`.
     pub fn plummer(&mut self, rng: &mut impl Rng, n: usize) {
         self.pos.clear();
         self.vel.clear();
@@ -256,6 +296,13 @@ impl Cluster {
         sub3(&mut self.pos, com);
         let len = -2.0 * potential(&self.pos, self.m, 0.0);
         scale(&mut self.pos, len);
+        // The heavy halo tail puts the COM ≈ r_rms/√N (≈ 0.13 a at N = 500) off the
+        // body core; the view and the glow are centred on the origin, so move the
+        // density centre there (a translation: W and the dynamics are unchanged).
+        for _ in 0..DENSITY_PASSES {
+            let centre = density_centre(&self.pos, &mut self.scratch);
+            sub3(&mut self.pos, centre);
+        }
         let v = virialise(&self.pos, &mut self.vel, self.m);
         self.scales = (len, v);
         self.prime();
@@ -312,7 +359,6 @@ pub(crate) struct GlobularCluster {
     age: f64,
     /// Half-mass radius smoothed over `RH_TAU`, sizing the glow.
     rh: f64,
-    scratch: Vec<f64>,
     /// Salt of the per-dot glow hash, drawn once from `ctx.rng`.
     salt: u64,
     size: Size,
@@ -336,7 +382,6 @@ impl GlobularCluster {
             epoch: 0,
             age: 0.0,
             rh: 0.0,
-            scratch: Vec::with_capacity(N_MAX),
             salt: 0,
             size: Size::new(1, 1),
             scale: 1.0,
@@ -366,7 +411,7 @@ impl GlobularCluster {
     fn reseed(&mut self, rng: &mut impl Rng) {
         self.cluster.plummer(rng, self.cluster.n().max(BUCKETS[0]));
         self.age = 0.0;
-        self.rh = half_mass_radius(&self.cluster.pos, &mut self.scratch);
+        self.rh = self.cluster.half_mass_radius();
     }
 
     /// Canvas centre in continuous cell coordinates (cell `i` spans `[i, i + 1)`).
@@ -468,7 +513,7 @@ impl GlobularCluster {
         let centre = self.centre();
         let k2 = self.glow_k2();
         let keep_out = self.label_cells();
-        let n_giants = (self.cluster.n() / 50).clamp(3, MAX_GIANTS);
+        let n_giants = giant_count(self.cluster.n());
         self.n_giants = 0;
         for (k, p) in self.cluster.pos.chunks_exact(3).enumerate() {
             let Some((x, y, z)) = proj.project([p[0], p[1], p[2]], centre, self.scale) else {
@@ -486,7 +531,8 @@ impl GlobularCluster {
                 }
                 continue;
             }
-            let level = (100.0 + 140.0 * g.sqrt() + 20.0 * (z / 2.0).clamp(-1.0, 1.0)) * b;
+            let level =
+                (100.0 + 140.0 * g.sqrt() + 20.0 * (z / 2.0).clamp(-1.0, 1.0)) * eye_fade(z) * b;
             let (dx, dy) = Dots::from_cells(x, y);
             // `Dots::plot` rounds to the nearest dot; round here to test the keep-out.
             let (px, py) = (dx.round() as i32, dy.round() as i32);
@@ -509,8 +555,8 @@ impl GlobularCluster {
     /// draws from `ctx.rng`).
     fn build_twinkle(&mut self) {
         let (lo, hi) = GIANT_PERIODS;
-        for (k, slot) in self.twinkle.iter_mut().enumerate() {
-            let mut rng = SplitMix64::new(self.salt ^ (0x9e37_79b9 + k as u64));
+        let mut rng = SplitMix64::new(self.salt);
+        for slot in &mut self.twinkle {
             *slot = (lo + (hi - lo) * rng.next_f64(), TAU * rng.next_f64());
         }
     }
@@ -520,27 +566,27 @@ impl GlobularCluster {
         Camera {
             yaw: TAU * self.t / 90.0,
             pitch: 0.30 + 0.15 * (TAU * self.t / 67.0).sin(),
-            distance: 10.0,
+            distance: EYE,
         }
     }
 
-    /// `globular cluster  N=500  3 crossings` if it fits in `w − 2` columns, else
-    /// `globular cluster` if that fits, else nothing (SPEC-002 Label). The age counts
-    /// whole crossing times since the last reseed, so it changes only every 7.1 s.
+    /// `globular cluster  N=500  3 crossings` (no crossings clause before the first) if
+    /// it takes at most half the width, else `globular cluster` if that fits in `w − 2`
+    /// columns, else nothing (SPEC-002 Label). The age counts whole crossing times
+    /// since the last reseed, so it changes only every 7.1 s.
     fn write_label(&mut self) {
         self.label.clear();
-        let room = usize::from(self.size.width().saturating_sub(2));
+        let w = usize::from(self.size.width());
         // `age ≥ 0`, and ≤ 17 crossings per evolve phase: the cast is exact.
         let crossings = (self.age / T_CR).floor() as u32;
-        let plural = if crossings == 1 { "" } else { "s" };
-        let _ = write!(
-            self.label,
-            "{NAME}  N={}  {crossings} crossing{plural}",
-            self.cluster.n()
-        );
-        if self.label.len() > room {
+        let _ = write!(self.label, "{NAME}  N={}", self.cluster.n());
+        if crossings > 0 {
+            let plural = if crossings == 1 { "" } else { "s" };
+            let _ = write!(self.label, "  {crossings} crossing{plural}");
+        }
+        if 2 * self.label.len() > w {
             self.label.clear();
-            if NAME.len() <= room {
+            if NAME.len() + 2 <= w {
                 let _ = self.label.write_str(NAME);
             }
         }
@@ -558,7 +604,7 @@ impl Generator for GlobularCluster {
             self.salt = ctx.rng.random();
             self.build_twinkle();
             self.cluster.plummer(&mut ctx.rng, n);
-            self.rh = half_mass_radius(&self.cluster.pos, &mut self.scratch);
+            self.rh = self.cluster.half_mass_radius();
         } else if n != self.cluster.n() {
             self.cluster.rebucket(&mut ctx.rng, n);
         }
@@ -580,7 +626,7 @@ impl Generator for GlobularCluster {
         } else {
             self.cluster.advance(dt * RATE);
             self.age += dt * RATE;
-            let rh = half_mass_radius(&self.cluster.pos, &mut self.scratch);
+            let rh = self.cluster.half_mass_radius();
             self.rh += (rh - self.rh) * (1.0 - (-dt / RH_TAU).exp());
         }
         self.rasterise();
@@ -608,6 +654,18 @@ mod tests {
         p[0].hypot(p[1]).hypot(p[2])
     }
 
+    /// Kolmogorov–Smirnov distance of the sorted sample `xs` from the CDF `cdf`.
+    fn ks(xs: &[f64], cdf: impl Fn(f64) -> f64) -> f64 {
+        let n = xs.len() as f64;
+        xs.iter()
+            .enumerate()
+            .map(|(i, &x)| {
+                let c = cdf(x);
+                (c - i as f64 / n).abs().max((c - (i + 1) as f64 / n).abs())
+            })
+            .fold(0.0, f64::max)
+    }
+
     #[test]
     fn gc_a1_ahw_sampler_matches_the_truncated_plummer_profile() {
         let (mut pos, mut vel) = (Vec::new(), Vec::new());
@@ -617,26 +675,41 @@ mod tests {
             .map(|p| p[0].hypot(p[1]).hypot(p[2]))
             .collect();
         r.sort_by(f64::total_cmp);
-        let n = r.len() as f64;
         let mass = |r: f64| r.powi(3) / (1.0 + r * r).powf(1.5) / MASS_CUT;
-        let ks = r
-            .iter()
-            .enumerate()
-            .map(|(i, &ri)| {
-                (mass(ri) - i as f64 / n)
-                    .abs()
-                    .max((mass(ri) - (i + 1) as f64 / n).abs())
-            })
-            .fold(0.0, f64::max);
-        assert!(ks < 0.03, "KS distance {ks}");
+        let ks_r = ks(&r, mass);
+        assert!(ks_r < 0.03, "KS distance {ks_r}");
         let median = r[r.len() / 2];
         assert!((median / RH_PER_A - 1.0).abs() < 0.04, "median {median}");
-        for (p, v) in pos.chunks_exact(3).zip(vel.chunks_exact(3)) {
-            let (r, v) = (p[0].hypot(p[1]).hypot(p[2]), v[0].hypot(v[1]).hypot(v[2]));
-            assert!(
-                v < std::f64::consts::SQRT_2 * (1.0 + r * r).powf(-0.25),
-                "unbound star"
-            );
+        // Speed fractions q = v/v_esc(r) follow g(q) ∝ q²(1 − q²)^{7/2}: KS against its
+        // CDF (the regularised incomplete beta I_{q²}(3/2, 9/2)), integrated here by the
+        // trapezoid rule on a fine grid.
+        let mut q: Vec<f64> = pos
+            .chunks_exact(3)
+            .zip(vel.chunks_exact(3))
+            .map(|(p, v)| {
+                let r = p[0].hypot(p[1]).hypot(p[2]);
+                v[0].hypot(v[1]).hypot(v[2])
+                    / (std::f64::consts::SQRT_2 * (1.0 + r * r).powf(-0.25))
+            })
+            .collect();
+        q.sort_by(f64::total_cmp);
+        assert!(q[0] >= 0.0 && q[q.len() - 1] < 1.0, "unbound star");
+        // KS distance of the sorted q from g(q) ∝ q²(1 − q²)^e.
+        let ks_q = |e: f64| {
+            const GRID: usize = 20_000;
+            let step = 1.0 / GRID as f64;
+            let g = |q: f64| q * q * (1.0 - q * q).powf(e);
+            let mut cdf = vec![0.0; GRID + 1];
+            for i in 1..=GRID {
+                cdf[i] = cdf[i - 1] + 0.5 * step * (g((i - 1) as f64 * step) + g(i as f64 * step));
+            }
+            let big_g = |q: f64| cdf[(q * GRID as f64).round() as usize] / cdf[GRID];
+            ks(&q, big_g)
+        };
+        assert!(ks_q(3.5) < 0.03, "KS distance of q {}", ks_q(3.5));
+        // The test has teeth: a wrong exponent (5/2 or 9/2 for 7/2) fails it.
+        for e in [2.5, 4.5] {
+            assert!(ks_q(e) > 0.03, "exponent {e} not rejected: {}", ks_q(e));
         }
 
         let (mut pos, mut vel) = (Vec::new(), Vec::new());
@@ -648,11 +721,22 @@ mod tests {
 
     #[test]
     fn gc_a2_plummer_ics_are_in_henon_units_and_virialised() {
+        // Centred on the density centre, not the heavy-tailed COM (≈ r_rms/√N: 0.08
+        // units at N = 500, 0.22 at N = 64), so the glow sits on the body core. The
+        // mean-shift passes settle within a few hundredths (the inner half's own noise).
+        for seed in 1..=6 {
+            for n in [64, 256, 500] {
+                let mut c = Cluster::preallocated();
+                c.plummer(&mut rng(seed), n);
+                let mut scratch = Vec::new();
+                let dc = density_centre(&c.pos, &mut scratch);
+                let off = dc[0].hypot(dc[1]).hypot(dc[2]);
+                assert!(off < 0.03, "seed {seed}, N = {n}: density centre {off}");
+                assert!(momentum(&c) < 1e-14);
+            }
+        }
         let mut c = Cluster::preallocated();
         c.plummer(&mut rng(3), 256);
-        let com = mean3(&c.pos).map(|x| x * c.n() as f64 * c.m);
-        assert!(com[0].hypot(com[1]).hypot(com[2]) < 1e-14, "{com:?}");
-        assert!(momentum(&c) < 1e-14);
         assert!((potential(&c.pos, c.m, 0.0) + 0.5).abs() < 1e-12);
         let (k, w) = (kinetic(&c.vel, c.m), potential(&c.pos, c.m, EPS2));
         assert!((2.0 * k + w).abs() < 1e-12);
@@ -794,6 +878,29 @@ mod tests {
     }
 
     #[test]
+    fn gc_a6_reseed_reuses_the_preallocated_buffers() {
+        // The reseed runs only at t = 121.5 s, beyond the alloc_free suite's reach: its
+        // buffers must keep their build capacity (GEN-R11).
+        let (mut g, mut ctx) = scene_at(Size::new(200, 50), 0.0);
+        let caps = |c: &Cluster| {
+            [
+                c.pos.capacity(),
+                c.vel.capacity(),
+                c.acc.capacity(),
+                c.scratch.capacity(),
+            ]
+        };
+        let before = caps(&g.cluster);
+        let old = g.cluster.pos.clone();
+        g.t = 121.49;
+        g.update(SIM_DT, &mut ctx);
+        assert_eq!(g.epoch, 1, "no reseed");
+        assert_ne!(g.cluster.pos, old);
+        assert_eq!(caps(&g.cluster), before);
+        assert_eq!(g.cluster.n(), 500);
+    }
+
+    #[test]
     fn gc_a7_core_is_solid_glow_is_bounded_and_giants_are_few() {
         let size = Size::new(200, 50);
         let mut ctx = Ctx::new(42, size);
@@ -862,7 +969,19 @@ mod tests {
             mean(&inner),
             mean(&outer)
         );
-        let g_n = (g.cluster.n() / 50).clamp(3, MAX_GIANTS);
+        assert_eq!(
+            (giant_count(500), giant_count(384), giant_count(64)),
+            (10, 7, 3)
+        );
+        // Near-eye halo stars (perspective ≥ 1.5×) fade out instead of streaking.
+        for z in [-20.0, 0.0, 2.5] {
+            assert_eq!(eye_fade(z), 1.0);
+        }
+        for z in [EYE / 3.0, 5.0, 9.9] {
+            assert_eq!(eye_fade(z), 0.0);
+        }
+        assert!(eye_fade(2.7) > eye_fade(2.9) && eye_fade(2.9) > eye_fade(3.2));
+        let g_n = giant_count(g.cluster.n());
         assert!(giants <= g_n, "{giants} giants");
         assert!(a_g > 0.3, "a_g = {a_g}");
         // A giant projected where the glow lights ≥ half the dots (R < 0.83 a_g) is lost
@@ -924,17 +1043,29 @@ mod tests {
         g.age = 1.99 * T_CR;
         g.write_label();
         assert_eq!(g.label.as_str(), "globular cluster  N=384  1 crossing");
-        g.age = 0.0;
+        // No "0 crossings" debug counter: the clause appears after the first crossing.
+        g.age = 0.99 * T_CR;
+        g.write_label();
+        assert_eq!(g.label.as_str(), "globular cluster  N=384");
+        // The counts show only where the label takes at most half the width, so it
+        // never turns into a banner; then the bare name while it fits in `w − 2`.
+        g.age = 4.5 * T_CR;
         g.write_label();
         let full = g.label.as_str().len() as u16;
-        assert_eq!(g.label.as_str(), "globular cluster  N=384  0 crossings");
         for (w, expect) in [
-            (full + 2, "globular cluster  N=384  0 crossings"),
-            (full + 1, "globular cluster"),
+            (2 * full, "globular cluster  N=384  4 crossings"),
+            (2 * full - 1, "globular cluster"),
+            (40, "globular cluster"),
             (18, "globular cluster"),
             (17, ""),
             (1, ""),
         ] {
+            g.size = Size::new(w, 24);
+            g.write_label();
+            assert_eq!(g.label.as_str(), expect, "w = {w}");
+        }
+        g.age = 0.0;
+        for (w, expect) in [(46, "globular cluster  N=384"), (45, "globular cluster")] {
             g.size = Size::new(w, 24);
             g.write_label();
             assert_eq!(g.label.as_str(), expect, "w = {w}");

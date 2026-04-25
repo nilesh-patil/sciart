@@ -26,11 +26,19 @@ const SAMPLES: usize = 480;
 const RES: f64 = 4096.0;
 /// Seconds each orbit fades out while its physics keeps running.
 const FADE: f64 = 1.2;
-/// Seconds the heads take to fade in at each run start, so no orbit starts hard-on.
-const HEAD_IN: f64 = 0.3;
-/// Fraction of its period the moth's trail spans: its single period folds into a knot
-/// at small sizes, so only the newest loops are shown and the older ones dissolve.
+/// Seconds an orbit (heads, trails, triangle) takes to fade in at each run start, so no
+/// orbit starts hard-on.
+const FADE_IN: f64 = 0.3;
+/// Fraction of its period the moth's trail spans at `MOTH_FULL_SCALE` and above: its
+/// single period folds into a knot, so only the newest loops are shown and the older
+/// ones dissolve.
 const MOTH_TRAIL: f64 = 0.45;
+/// Rows per model unit from which the moth shows its full `MOTH_TRAIL` (its 80×24 view
+/// is 8.6); smaller views shorten the span in proportion, down to `MOTH_MIN_TRAIL`.
+const MOTH_FULL_SCALE: f64 = 8.0;
+const MOTH_MIN_TRAIL: f64 = 0.25;
+/// Level of Lagrange's triangle once its bodies are in (SPEC-002 Inks).
+const TRIANGLE_LEVEL: f64 = 80.0;
 /// Body `i` is drawn in `ROLES[i]` (SPEC-002 Inks).
 const ROLES: [Role; 3] = [Role::Hot, Role::Cold, Role::Accent];
 const HEAD: Glyph = Glyph::new('●', '@');
@@ -47,7 +55,8 @@ pub(crate) struct Orbit {
     pub vel: [f64; 6],
     /// Period `T` in model time units.
     pub period: f64,
-    /// Fraction of the period the trail spans (`1` = the whole period, SPEC-002 Inks).
+    /// Fraction of the period the trail spans (`1` = the whole period, SPEC-002 Inks);
+    /// below 1 it is the span at full size, see [`trail_span`].
     pub trail: f64,
     /// Periods shown per run (`n`).
     pub periods: u32,
@@ -224,7 +233,7 @@ impl Bodies {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct View {
     /// Rows per model unit (x is stretched by `ASPECT`).
-    pub scale: f64,
+    scale: f64,
     /// Canvas centre, in continuous cell coordinates.
     centre: (f64, f64),
     /// Model point drawn at the canvas centre: the bounding box centre.
@@ -271,6 +280,17 @@ pub(crate) fn label_for(w: u16, orbit: &Orbit) -> Option<&'static str> {
         .find(|s| s.len() <= room)
 }
 
+/// The fraction of its period `orbit`'s trail spans in a view of `scale` rows per unit.
+/// Full-period trails always span 1. A partial one (the moth) keeps its span from
+/// `MOTH_FULL_SCALE` up and shortens in proportion below, to no less than
+/// `MOTH_MIN_TRAIL`, so a small view shows one clean stroke rather than a knot (TB-A7).
+pub(crate) fn trail_span(orbit: &Orbit, scale: f64) -> f64 {
+    if orbit.trail >= 1.0 {
+        return 1.0;
+    }
+    (orbit.trail * scale / MOTH_FULL_SCALE).clamp(MOTH_MIN_TRAIL.min(orbit.trail), orbit.trail)
+}
+
 /// Trail brightness for a sample of age fraction `f ∈ [0, 1)` (0 = newest) on a trail
 /// spanning `span` of the period. A full-period trail keeps a floor of 40, so the whole
 /// orbit stays sketched; a shorter one tapers to 0 at `f = span` and its old loops
@@ -283,10 +303,21 @@ fn trail_level(f: f64, span: f64) -> f64 {
     160.0 * rest.powf(1.5) + 40.0 * rest
 }
 
-/// Head brightness: faded in over the first `HEAD_IN` seconds of a run, and out with
-/// the orbit (visual only; the physics is untouched).
+/// Ink multiplier of everything an orbit draws: faded in over the first `FADE_IN`
+/// seconds of a run and out with the orbit (visual only; the physics is untouched).
+fn orbit_fade(phase: &Phase) -> f64 {
+    ease::smoothstep((phase.tau / FADE_IN).min(1.0)) * phase.fade
+}
+
+/// Head brightness, `255·orbit_fade`.
 fn head_level(phase: &Phase) -> f64 {
-    255.0 * ease::smoothstep((phase.tau / HEAD_IN).min(1.0)) * phase.fade
+    255.0 * orbit_fade(phase)
+}
+
+/// Lagrange's triangle level, `80·orbit_fade`: it rises with the heads, so it never
+/// shows before the bodies at its corners (TB-A7).
+fn triangle_level(phase: &Phase) -> f64 {
+    TRIANGLE_LEVEL * orbit_fade(phase)
 }
 
 /// Where the looping gallery stands at sim time `t` (SPEC-002 Motion).
@@ -402,8 +433,8 @@ impl ThreeBody {
 
     /// Each body's trail as dot-lattice segments, dimming with age.
     fn trails_onto_dots(&mut self) {
-        let (view, fade) = (self.view, self.phase.fade);
-        let span = self.orbits[self.phase.seg].trail;
+        let (view, fade) = (self.view, orbit_fade(&self.phase));
+        let span = trail_span(&self.orbits[self.phase.seg], view.scale);
         for (i, trail) in self.trails.iter().enumerate() {
             let len = trail.len();
             let head = self.bodies.body(i);
@@ -425,7 +456,7 @@ impl ThreeBody {
     /// only in cells no trail has lit, so it reads as a clean dotted line (a `.` per
     /// cell in ASCII) and never thickens a trail.
     fn triangle(&mut self) {
-        let level = 80.0 * self.phase.fade;
+        let level = triangle_level(&self.phase);
         if level < MIN_VISIBLE_LEVEL {
             return;
         }
@@ -630,8 +661,7 @@ mod tests {
     fn tb_a3_orbits_return_each_period_and_never_collide() {
         let qs: Vec<u64> = orbits().iter().map(Orbit::q).collect();
         assert_eq!(qs, [54, 48, 54, 47, 128]);
-        // Per-orbit return tolerances, ≈ 1.5–3× the measured error, so a period off by
-        // the old tabulation slips (R4 4e-4, moth 4e-4, A1 1.1e-4) fails.
+        // Per-orbit return tolerances, ≈ 1.2–3× the measured error.
         let tol = [2e-6, 1e-6, 8e-5, 2e-5, 3e-4];
         for (o, tol) in orbits().iter().zip(tol) {
             let err = return_error(o);
@@ -657,6 +687,17 @@ mod tests {
                 let e = return_error(&nudged);
                 assert!(e > err, "{}: T{dt:+} gives {e} ≤ {err}", o.short);
             }
+        }
+        // The published (rounded) periods fail those tolerances: measured 1.1e-4 (A1),
+        // 2.5e-4 (R4) and 3.6e-4 (moth, a small margin: its lattice error is mostly
+        // leapfrog truncation at the 0.079 close approach, not the period).
+        for (seg, published) in [(2, 6.283_213), (3, 5.396), (4, 14.893_9)] {
+            let o = Orbit {
+                period: published,
+                ..orbits()[seg]
+            };
+            let e = return_error(&o);
+            assert!(e > tol[seg], "{} at T = {published}: {e}", o.short);
         }
         let (_, _, t) = lagrange_ics(0.3);
         let a = 1.0 / 1.3f64;
@@ -788,6 +829,19 @@ mod tests {
     fn tb_a7_moth_shows_only_its_newest_loops_and_the_others_a_full_period() {
         let spans: Vec<f64> = orbits().iter().map(|o| o.trail).collect();
         assert_eq!(spans, [1.0, 1.0, 1.0, 1.0, MOTH_TRAIL]);
+        // The moth keeps its full span from 80×24 up; smaller views shorten it (never
+        // below 0.25) so it stays one stroke, not a knot. Other orbits always span 1.
+        let moth = orbits()[4];
+        let span_at = |w, h| trail_span(&moth, view_for(Size::new(w, h), &moth).scale);
+        assert_eq!(span_at(80, 24), MOTH_TRAIL);
+        assert_eq!(span_at(200, 50), MOTH_TRAIL);
+        assert_eq!(span_at(40, 12), MOTH_MIN_TRAIL);
+        let mid = span_at(60, 18);
+        assert!(MOTH_MIN_TRAIL < mid && mid < MOTH_TRAIL, "60×18 span {mid}");
+        assert!(span_at(40, 12) <= span_at(50, 15) && span_at(50, 15) <= mid);
+        for o in &orbits()[..4] {
+            assert_eq!(trail_span(o, 0.25), 1.0);
+        }
         // Full-period trails keep the published ramp, floor 40 at the oldest sample.
         for i in 0..SAMPLES {
             let f = i as f64 / SAMPLES as f64;
@@ -840,13 +894,49 @@ mod tests {
     }
 
     #[test]
-    fn tb_a7_heads_fade_in_at_every_run_start() {
+    fn tb_a7_heads_and_lagrange_triangle_fade_in_at_every_run_start() {
         let run = |tau: f64, fade: f64| head_level(&Phase { seg: 0, tau, fade });
         assert_eq!(run(0.0, 1.0), 0.0);
         assert!(run(0.1, 1.0) > 0.0 && run(0.1, 1.0) < run(0.2, 1.0));
-        assert_eq!(run(HEAD_IN, 1.0), 255.0);
+        assert_eq!(run(FADE_IN, 1.0), 255.0);
         assert_eq!(run(5.0, 1.0), 255.0);
         assert_eq!(run(5.0, 0.5), 127.5);
+        // The triangle rises with the heads, to 80, and fades with the orbit.
+        let tri = |tau: f64, fade: f64| {
+            triangle_level(&Phase {
+                seg: LAGRANGE,
+                tau,
+                fade,
+            })
+        };
+        assert_eq!(tri(0.0, 1.0), 0.0);
+        assert!(tri(0.1, 1.0) > 0.0 && tri(0.1, 1.0) < tri(0.2, 1.0));
+        assert!((tri(FADE_IN, 1.0) - 80.0).abs() < 1e-12);
+        assert!((tri(5.0, 0.5) - 40.0).abs() < 1e-12);
+        // Seen in dots: nothing is lit on the Lagrange run's first frame (empty trails,
+        // triangle still dark); by 0.3 s the triangle is there.
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(0, size);
+        let mut g = ThreeBody::new();
+        g.resize(size, &mut ctx);
+        let start = g.orbits[0].run_secs() + FADE;
+        let lit = |d: &Dots| {
+            let s = d.dot_size();
+            (0..i32::from(s.height()))
+                .flat_map(|y| (0..i32::from(s.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| d.is_lit(x, y))
+                .count()
+        };
+        g.t = start;
+        g.update(SIM_DT, &mut ctx);
+        assert_eq!((g.phase.seg, lit(&g.dots)), (LAGRANGE, 0));
+        g.t = start + FADE_IN - SIM_DT;
+        g.update(SIM_DT, &mut ctx);
+        g.dots.clear();
+        g.trails_onto_dots();
+        let trails = lit(&g.dots);
+        g.triangle();
+        assert!(lit(&g.dots) >= trails + 20, "no triangle at τ = 0.3 s");
 
         // Seen in frames: no head on the scene's first frame, all three by 0.3 s.
         let mut stage = Stage::new(build(), 1, Size::new(80, 24), GlyphMode::Ascii);
