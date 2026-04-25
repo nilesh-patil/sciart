@@ -64,7 +64,8 @@ const R_I: f64 = 35.4;
 const C_M: f64 = 1e-6;
 /// `a/(2 R_i C_m)` in cm²/ms.
 const D: f64 = AXON_RADIUS_CM / (2.0 * R_I * C_M) * 1e-3;
-/// Sub-step, ms: 0.5 % velocity error against a converged fine-grid run (SPEC-002).
+/// Sub-step, ms. Against a converged fine-grid run (12.31 and 18.72 m/s) the velocity
+/// error is 0.4 % at 6.3 °C and 0.9 % at 18.5 °C (SPEC-002).
 const H_MS: f64 = 0.01;
 /// Temperature factor `3^((T − 6.3)/10)` at the scene's 6.3 °C.
 const PHI: f64 = 1.0;
@@ -154,8 +155,22 @@ const RIM: Ink = Ink::new(Role::Structure, 110);
 const ARBOR: Ink = Ink::new(Role::Structure, 85);
 /// Dendrite outline level by branching depth: thinner branches read dimmer.
 const DENDRITE_LEVEL: [u8; 4] = [110, 90, 75, 60];
-/// Shortest dendrite segment drawn, in dots (primaries are stretched to it instead).
-const MIN_TWIG_DOTS: f64 = 4.0;
+/// Dendrites fan out within this angle (rad) of pointing straight left, away from the
+/// axon.
+const DENDRITE_CONE: f64 = 1.45;
+/// Radial reach of a dendrite segment by depth, in soma radii (jittered ±20 %).
+const DENDRITE_REACH: [f64; 4] = [0.9, 0.7, 0.55, 0.45];
+/// Soma radii (cells) from which the dendrites fork a second and a third time: a small
+/// neuron draws fewer, longer branches instead of a scribble of short ones.
+const FORK_RADIUS: [f64; 2] = [4.0, 8.0];
+/// Shortest dendrite segment drawn, in cells (primaries are stretched to it instead):
+/// anything shorter reads as a stray speck, not a twig.
+const MIN_TWIG_CELLS: f64 = 2.0;
+/// The electrode's lead to the oscilloscope: a faint dotted wire.
+const LEAD_INK: Ink = Ink::new(Role::Dim, 60);
+/// The smallest oscilloscope panel: 4 rows (16 dots for 130 mV) by 12 columns.
+const SCOPE_MIN_ROWS: i32 = 4;
+const SCOPE_MIN_COLS: i32 = 12;
 /// Terminal arbor: trunk end → three primaries, the outer two forking into two each.
 const ARBOR_SEGS: usize = 7;
 const TRACE_INK: Ink = Ink::new(Role::Accent, 210);
@@ -396,10 +411,11 @@ fn trace_y([_, y0, _, y1]: [i32; 4], mv: f64) -> f64 {
 }
 
 /// The ASCII stroke for a segment between two dot positions (dots are square): `-`
-/// below 0.4 rise per run, `|` above 2.5, else `/` or a backslash by the screen direction.
+/// below 0.55 rise per run (≳ 3.6 cells per row), `|` above 2.5, else `/` or a
+/// backslash by the screen direction.
 fn slope_glyph(a: [f64; 2], b: [f64; 2]) -> char {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    if dy.abs() < 0.4 * dx.abs() {
+    if dy.abs() < 0.55 * dx.abs() {
         '-'
     } else if dy.abs() > 2.5 * dx.abs() {
         '|'
@@ -434,6 +450,7 @@ fn v_at(v: &[f64; N], c: f64) -> f64 {
 struct Seg {
     a: [f64; 2],
     b: [f64; 2],
+    depth: usize,
     ink: Ink,
 }
 
@@ -474,14 +491,15 @@ struct Vesicle {
     age: f64,
 }
 
-/// One dendrite segment in normalised tree space (unit = soma radius), drawn from
-/// `ctx.rng` once and fitted to the space left of the soma on every resize.
+/// One dendrite segment in normalised tree space, drawn from `ctx.rng` once and fitted
+/// to the space left of the soma on every resize. It ends at the node `(angle, rho)`:
+/// polar about the soma centre, `rho` soma radii beyond the rim. A primary starts on
+/// the rim at its own angle; every other segment starts at its parent's end.
 #[derive(Debug, Clone, Copy, Default)]
 struct Branch {
-    /// Parent segment, or `None` for a primary rooted on the soma rim.
     parent: Option<usize>,
     angle: f64,
-    len: f64,
+    rho: f64,
     depth: usize,
 }
 
@@ -492,35 +510,56 @@ struct Tree {
 }
 
 impl Tree {
-    /// Three primaries fanning left: one up, one down and one to a random side, so the
-    /// stimulus marker straight left of the soma stays clear. Each branches twice and
-    /// about half the twigs once more (21 + ~12 segments, capped at `DENDRITES`).
+    /// A radial tree: three primaries fan left, one up, one down and one to a random
+    /// side, so the stimulus marker straight left of the soma stays clear. Each owns a
+    /// wedge of the cone, and every fork splits its wedge at the parent's angle between
+    /// its two children, so subtrees never cross: each lies in its own convex wedge
+    /// about the soma centre. Every branch forks twice and about half the twigs once
+    /// more (21 + ~6 segments).
     fn grow(rng: &mut impl Rng) -> Self {
         let mut t = Tree {
             branches: [Branch::default(); DENDRITES],
             len: 0,
         };
+        let mut wedges = [(0.0, 0.0); DENDRITES];
         let third = if rng.random_bool(0.5) { 0.55 } else { -0.55 };
-        for spread in [-1.2, third, 1.2] {
-            let angle = PI + spread + rng.random_range(-0.12..0.12);
+        let spread = [-1.15, third, 1.15].map(|s| s + rng.random_range(-0.08..0.08));
+        let bounds = [
+            -DENDRITE_CONE,
+            0.5 * (spread[0] + spread[1]),
+            0.5 * (spread[1] + spread[2]),
+            DENDRITE_CONE,
+        ];
+        for (k, s) in spread.into_iter().enumerate() {
+            wedges[t.len] = (PI + bounds[k], PI + bounds[k + 1]);
             t.push(Branch {
                 parent: None,
-                angle,
-                len: rng.random_range(1.0..1.3),
+                angle: PI + s,
+                rho: DENDRITE_REACH[0] * rng.random_range(0.8..1.2),
                 depth: 0,
             });
         }
         let mut i = 0;
         while i < t.len {
             let b = t.branches[i];
+            let (lo, hi) = wedges[i];
             if b.depth < 2 || (b.depth == 2 && rng.random_bool(0.5)) {
-                for side in [-1.0, 1.0] {
-                    let angle = b.angle + side * rng.random_range(0.25..0.5);
-                    let len = b.len * rng.random_range(0.6..0.8);
+                // The fork splits the wedge at the parent's own angle.
+                for (side, (a, z)) in [(-1.0, (lo, b.angle)), (1.0, (b.angle, hi))] {
+                    let reach = DENDRITE_REACH[b.depth + 1] * rng.random_range(0.8..1.2);
+                    // Turn the child 22–38° off the parent's radial line, measured at
+                    // its end, 1 + rho soma radii out: a natural fork, not a sideways
+                    // spur. Clamped inside its half-wedge, which keeps the tree planar.
+                    let out = 1.0 + b.rho + reach;
+                    let turn = (rng.random_range(0.38..0.66f64).tan() * reach / out).atan();
+                    let pad = 0.15 * (z - a);
+                    if t.len < DENDRITES {
+                        wedges[t.len] = (a, z);
+                    }
                     t.push(Branch {
                         parent: Some(i),
-                        angle,
-                        len,
+                        angle: (b.angle + side * turn).clamp(a + pad, z - pad),
+                        rho: b.rho + reach,
                         depth: b.depth + 1,
                     });
                 }
@@ -537,19 +576,12 @@ impl Tree {
         }
     }
 
-    /// Each segment as `(root direction, start offset, end offset)`: the root is the soma
-    /// rim point along the primary's direction, offsets are in tree units from it.
-    fn offsets(&self, out: &mut [([f64; 2], [f64; 2], [f64; 2]); DENDRITES]) {
-        for (i, b) in self.branches[..self.len].iter().enumerate() {
-            let (root, start) = match b.parent {
-                Some(p) => (out[p].0, out[p].2),
-                None => ([b.angle.cos(), b.angle.sin()], [0.0, 0.0]),
-            };
-            let end = [
-                start[0] + b.len * b.angle.cos(),
-                start[1] + b.len * b.angle.sin(),
-            ];
-            out[i] = (root, start, end);
+    /// Each segment's start as `(angle, rho)`: the rim for a primary, else the parent's
+    /// end node.
+    fn start(&self, b: &Branch) -> (f64, f64) {
+        match b.parent {
+            Some(p) => (self.branches[p].angle, self.branches[p].rho),
+            None => (b.angle, 0.0),
         }
     }
 }
@@ -577,6 +609,10 @@ struct Layout {
     far: [i32; 2],
     /// Oscilloscope panel in cells: `[x0, y0, x1, y1]`, inclusive.
     panel: Option<[i32; 4]>,
+    /// The electrode's lead to the scope, in cells: `[x, top, bottom, end]`, a column
+    /// `x` from row `bottom` up to row `top`, then along row `top` to column `end`
+    /// (none when `end ≤ x`).
+    lead: Option<[i32; 4]>,
 }
 
 impl Layout {
@@ -600,7 +636,7 @@ impl Layout {
         // without it, the neuron is centred.
         let row = if scope { (0.55 * h) as i32 } else { hi / 2 - 1 }.min(hi - 2 - rows);
         let tube = 2 * row;
-        let half = f64::from(fill_px / 2 + 1);
+        let half = f64::from(rows);
         let cy = f64::from(tube) + half;
         let r = (0.22 * h).min(0.075 * w).max(3.5);
         let cx = (0.2 * w).max(r + 3.0);
@@ -621,19 +657,40 @@ impl Layout {
             [xb, 2 * (last + 2 * gap), 2],
         ];
         let at_s = |c: f64| f64::from(x0) + c / TRUNK_END * f64::from(x1 - x0);
-        let panel = scope.then(|| {
-            let y1 = 1 + (0.27 * h).round() as i32;
-            // Keep clear of the terminal arbor: end two rows above the top bouton, or
-            // else stop three columns short of the boutons. Either way keep the
-            // boutons' two-column margin from the right edge.
-            let x1 = if y1 <= boutons[0][1] / 2 - 2 {
-                wi - 3
-            } else {
-                (wi - 3).min(xb - 3)
-            };
-            [(0.625 * w).round() as i32, 1, x1, y1]
-        });
+        // The scope keeps clear of the terminal arbor. The trace's after-
+        // hyperpolarisation dip sits on the panel's bottom row, so that row ends at
+        // least two rows above the top bouton (one blank row between), shrinking the
+        // panel to no fewer than `SCOPE_MIN_ROWS`. Failing that, the panel ends three
+        // columns left of the arbor's first column; failing that too, there is none.
+        // Either way it keeps the boutons' two-column margin from the right edge.
+        let panel = scope
+            .then(|| {
+                let (x0, y1) = ((0.625 * w).round() as i32, 1 + (0.27 * h).round() as i32);
+                let above = boutons[0][1] / 2 - 2;
+                if above >= SCOPE_MIN_ROWS {
+                    Some([x0, 1, wi - 3, y1.min(above)])
+                } else {
+                    let x1 = (wi - 3).min(x1 - 3);
+                    (x1 - x0 + 1 >= SCOPE_MIN_COLS).then_some([x0, 1, x1, y1])
+                }
+            })
+            .flatten();
         let mid = row + (rows - 1) / 2;
+        let electrode = [at_s(ELECTRODE as f64).round() as i32, row - 1];
+        // The lead climbs from the electrode to the trace's resting baseline and runs
+        // along it to one cell short of the `-65` tick. Under the tick or the panel it
+        // stops a row below them instead.
+        let lead = panel.map(|p| {
+            let [x, y] = electrode;
+            let base = trace_y(p, V_REST).round() as i32 / 4;
+            let label = p[0] - 5;
+            if x < label {
+                [x, base, y - 1, label - 1]
+            } else {
+                let under = if x < p[0] { base } else { p[3] };
+                [x, under + 1, y - 1, x]
+            }
+        });
         Self {
             full,
             tube,
@@ -642,11 +699,12 @@ impl Layout {
             soma: [cx, cy, r],
             boutons,
             bouton_w,
-            electrode: [at_s(ELECTRODE as f64).round() as i32, row - 1],
+            electrode,
             stim: [(cx - r).floor() as i32 - 2, mid],
             // Just past the boutons, clamped on screen for narrow terminals.
             far: [(xb + bouton_w + 1).min(wi - 1), mid],
             panel,
+            lead,
         }
     }
 
@@ -844,46 +902,68 @@ impl ActionPotential {
             }
         }
 
-        // Dendrites: scale the tree as large as fits left of, above and below the soma.
+        // Dendrites: scale each primary's subtree as large as fits left of, above or
+        // below the soma: a node `(angle, rho)` sits `r + k·rho` from the soma centre.
+        // Subtrees keep to their own wedges, so scaling them apart keeps the tree
+        // planar; the up and down ones may grow up to 1.6× the tightest, since terminal
+        // rows are coarse and the room is mostly above and below.
         let Some(tree) = self.tree else { return };
-        let mut segs = [([0.0; 2], [0.0; 2], [0.0; 2]); DENDRITES];
-        tree.offsets(&mut segs);
         let [cx, cy, r] = l.soma;
+        let max_depth = 1 + FORK_RADIUS.iter().filter(|&&f| r >= f).count();
         let (lo, top, bottom) = (1.0, 1.0, 2.0 * f64::from(self.cells.height()) - 4.0);
-        let mut k = 1.3 * r;
-        for (root, _, end) in &segs[..tree.len] {
-            let (rx, ry) = (cx + r * root[0], cy + r * root[1]);
-            if end[0] < 0.0 {
-                k = k.min((rx - lo) / -end[0]);
+        let mut root = [0; DENDRITES];
+        let mut ks = [1.3 * r; 3];
+        for (i, b) in tree.branches[..tree.len].iter().enumerate() {
+            root[i] = b.parent.map_or(i, |p| root[p]);
+            if b.depth > max_depth {
+                continue;
             }
-            if end[1] < 0.0 {
-                k = k.min((ry - top) / -end[1]);
-            } else if end[1] > 0.0 {
-                k = k.min((bottom - ry) / end[1]);
+            let (cos, sin) = (b.angle.cos(), b.angle.sin());
+            let room = |free: f64, dir: f64| (free / dir - r) / b.rho;
+            let k = &mut ks[root[i]];
+            if cos < 0.0 {
+                *k = k.min(room(cx - lo, -cos));
+            }
+            if sin < 0.0 {
+                *k = k.min(room(cy - top, -sin));
+            } else if sin > 0.0 {
+                *k = k.min(room(bottom - cy, sin));
             }
         }
-        let k = k.max(0.0);
-        for (b, (root, s, e)) in tree.branches[..tree.len].iter().zip(&segs) {
-            let at = |o: [f64; 2]| dot(cx + r * root[0] + k * o[0], cy + r * root[1] + k * o[1]);
-            let (start, mut end) = (at(*s), at(*e));
-            if 2.0 * k * b.len < MIN_TWIG_DOTS {
-                // Twigs too short to read are scribbles: drop them (their children are
-                // shorter still, since every branch is shorter than its parent). The
-                // primaries stay, stretched to the minimum, so a small neuron keeps
-                // its dendrites.
-                if b.depth > 0 {
-                    continue;
+        let tightest = ks.iter().fold(f64::INFINITY, |m, &k| m.min(k)).max(0.0);
+        let ks = ks.map(|k| k.clamp(0.0, 1.6 * tightest));
+        let node = |(angle, rho): (f64, f64), k: f64| {
+            let d = r + k * rho;
+            dot(cx + d * angle.cos(), cy + d * angle.sin())
+        };
+        // Twigs too short to read are specks: drop them with their subtrees. The
+        // primaries stay, stretched to the minimum, so a small neuron keeps its
+        // dendrites.
+        let mut drawn = [false; DENDRITES];
+        for (i, b) in tree.branches[..tree.len].iter().enumerate() {
+            let k = ks[root[i]];
+            let (start, mut end) = (node(tree.start(b), k), node((b.angle, b.rho), k));
+            let cells = |a: [f64; 2], e: [f64; 2]| {
+                ((e[0] - a[0]) / f64::from(Dots::CELL_W))
+                    .abs()
+                    .max(((e[1] - a[1]) / f64::from(Dots::CELL_H)).abs())
+            };
+            let short = cells(start, end) < MIN_TWIG_CELLS;
+            match b.parent {
+                Some(p) if !drawn[p] || short || b.depth > max_depth => continue,
+                None if short => {
+                    let (dx, dy) = (b.angle.cos(), b.angle.sin());
+                    let reach = MIN_TWIG_CELLS / cells([0.0, 0.0], [dx, dy]);
+                    end = [start[0] + reach * dx, start[1] + reach * dy];
                 }
-                end = [
-                    start[0] + MIN_TWIG_DOTS * b.angle.cos(),
-                    start[1] + MIN_TWIG_DOTS * b.angle.sin(),
-                ];
+                _ => {}
             }
-            let ink = Ink::new(Role::Structure, DENDRITE_LEVEL[b.depth.min(3)]);
+            drawn[i] = true;
             self.dendrites.push(Seg {
                 a: start,
                 b: end,
-                ink,
+                depth: b.depth,
+                ink: Ink::new(Role::Structure, DENDRITE_LEVEL[b.depth.min(3)]),
             });
         }
     }
@@ -894,6 +974,19 @@ impl ActionPotential {
         self.dots.clear();
         self.art.clear();
         let l = self.layout;
+        if let Some([x, top, bottom, end]) = l.lead {
+            // Every other dot: a faint dotted wire. The run along the baseline shares
+            // its dot row, so the wire reads as the scope's input line.
+            for y in (4 * top..4 * bottom + 4).filter(|y| y % 2 == 1) {
+                self.art.set(2 * x, y, LEAD_INK);
+            }
+            if let Some(panel) = l.panel {
+                let base = trace_y(panel, V_REST).round() as i32;
+                for dx in (2 * x + 1..2 * end + 2).step_by(2) {
+                    self.art.set(dx, base, LEAD_INK);
+                }
+            }
+        }
         if let Some(panel) = l.panel {
             self.draw_trace(panel);
         }
@@ -908,7 +1001,7 @@ impl ActionPotential {
             }
             return;
         }
-        for &Seg { a, b, ink } in &self.dendrites {
+        for &Seg { a, b, ink, .. } in &self.dendrites {
             self.art.line(a[0], a[1], b[0], b[1], ink);
         }
         for &ArborDot { x, y, c } in &self.arbor {
@@ -1037,13 +1130,19 @@ impl ActionPotential {
     }
 
     /// The dendrites and the terminal arbor as ASCII line art (SPEC-002 ASCII): one
-    /// slope glyph per cell in the outline ink; an arbor cell off rest shows its
-    /// voltage glyph instead, except at the junction with the trunk.
+    /// slope glyph per cell in the outline ink. Dendrites go shallowest first and never
+    /// overwrite a drawn cell, so a parent's stroke wins every junction and a fork
+    /// reads `\|/`, not a clump. An arbor cell above rest shows its voltage glyph
+    /// instead, except at the junction with the trunk; below rest the stroke stays and
+    /// only its `Div` colour carries the after-hyperpolarisation.
     fn draw_line_art(&self, canvas: &mut Canvas) {
-        for &Seg { a, b, ink } in &self.dendrites {
+        for &Seg { a, b, depth, ink } in &self.dendrites {
             let glyph = slope_glyph(a, b);
-            for (x, y) in cell_line(a, b) {
-                canvas.put(x, y, Glyph::ascii(glyph), ink);
+            // A child's first cell is its parent's last.
+            for (x, y) in cell_line(a, b).skip(usize::from(depth > 0)) {
+                if canvas.get(x, y).is_some_and(|c| c.ch == ' ') {
+                    canvas.put(x, y, Glyph::ascii(glyph), ink);
+                }
             }
         }
         let v = &self.cable.v;
@@ -1055,8 +1154,11 @@ impl ActionPotential {
                 let junction = i < 3 && k < 2;
                 let ink = potential_ink(v_at(v, ease::lerp(c0, c1, k as f64 / n as f64)));
                 match spike_char(ink.level) {
-                    Some(ch) if !junction => canvas.put(x, y, Glyph::ascii(ch), ink),
-                    _ => canvas.put(x, y, Glyph::ascii(glyph), ARBOR),
+                    Some(ch) if !junction && ink.level > 128 => {
+                        canvas.put(x, y, Glyph::ascii(ch), ink);
+                    }
+                    Some(_) => canvas.put(x, y, Glyph::ascii(glyph), ink),
+                    None => canvas.put(x, y, Glyph::ascii(glyph), ARBOR),
                 }
             }
         }
@@ -1069,7 +1171,8 @@ impl ActionPotential {
             .filter(|i| i.role == Role::Div)
             .max_by_key(|i| i.level.abs_diff(128));
         let spike = div.and_then(|d| spike_char(d.level).map(|ch| (ch, d)));
-        if l.near_soma(x, y) && !l.on_axon(x, y) {
+        let on_axon = l.on_axon(x, y);
+        if l.near_soma(x, y) && !on_axon {
             // The soma at cell resolution: a rim derived from pixel pairs comes out
             // with gaps and bumps, so the rim is its own ellipse of cells, drawn
             // whatever the voltage, and only the cells inside it show the fill.
@@ -1079,13 +1182,17 @@ impl ActionPotential {
                 None => None,
             };
         }
-        if spike.is_some() {
-            return spike;
+        match spike {
+            // A hyperpolarised bouton keeps its `o`; the cool `Div` colour carries the
+            // after-hyperpolarisation, as on the arbor strokes.
+            Some(('~', ink)) if !on_axon => return Some(('o', ink)),
+            Some(_) => return spike,
+            None => {}
         }
         let outline = [top, bottom]
             .into_iter()
             .find(|i| i.role == Role::Structure);
-        if self.layout.on_axon(x, y) {
+        if on_axon {
             Some(('=', outline.unwrap_or(MEMBRANE)))
         } else {
             outline.map(|o| ('o', o))
@@ -1167,6 +1274,14 @@ impl Generator for ActionPotential {
         // for line art, so dendrites and arbor are drawn with slope glyphs instead. The
         // pixels go last so the axon, soma and boutons sit on top of both.
         if canvas.mode() == GlyphMode::Ascii {
+            if let Some([x, top, bottom, end]) = l.lead {
+                for y in top..=bottom {
+                    canvas.put(x, y, Glyph::ascii(':'), LEAD_INK);
+                }
+                for x in (x + 2..=end).step_by(2) {
+                    canvas.put(x, top, Glyph::ascii('.'), LEAD_INK);
+                }
+            }
             self.dots.blit(canvas);
             if l.full {
                 self.draw_line_art(canvas);
@@ -1517,7 +1632,12 @@ mod tests {
             ap.meter.speed
         };
         assert_eq!(read(0.25, &mut ap), None, "--.- before the first spike");
-        for (until, expect) in [(3.0, 12.3), (5.5, 10.9), (8.0, 10.1), (11.0, 9.8)] {
+        assert_eq!(
+            format!("{:.1}", read(3.0, &mut ap).unwrap()),
+            "12.3",
+            "from rest"
+        );
+        for (until, expect) in [(5.5, 10.9), (8.0, 10.1), (11.0, 9.8)] {
             let v = read(until, &mut ap).expect("a reading");
             assert!(
                 (v - expect).abs() <= 0.3,
@@ -1541,8 +1661,57 @@ mod tests {
             None,
             "--.- again after the loop wraps"
         );
-        let again = read(21.0, &mut ap).expect("a reading in the second loop");
-        assert!((again - 12.3).abs() <= 0.3, "second loop read {again:.2}");
+        // Later loops start 20 ms after the collision, in its supernormal phase (h up,
+        // n down): their single spike runs 0.8 % faster, and reads the same each loop.
+        let shown = |v: Option<f64>| format!("{:.1}", v.expect("a reading"));
+        let second = shown(read(21.0, &mut ap));
+        let third = shown(read(39.0, &mut ap));
+        assert_eq!((second.as_str(), third.as_str()), ("12.4", "12.4"));
+    }
+
+    /// Whether segments `p` and `q` properly cross (touching endpoints do not count).
+    fn cross(p: &Seg, q: &Seg) -> bool {
+        let side = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+            (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+        };
+        let eps = 1e-9;
+        side(p.a, p.b, q.a) * side(p.a, p.b, q.b) < -eps
+            && side(q.a, q.b, p.a) * side(q.a, q.b, p.b) < -eps
+    }
+
+    #[test]
+    fn ap_a9_dendrites_never_cross_and_every_twig_reads() {
+        for seed in 1..=24u64 {
+            for (w, h) in [
+                (24u16, 8u16),
+                (40, 12),
+                (56, 16),
+                (80, 24),
+                (120, 40),
+                (200, 50),
+            ] {
+                let size = Size::new(w, h);
+                let mut ap = ActionPotential::default();
+                ap.resize(size, &mut Ctx::new(seed, size));
+                let d = &ap.dendrites;
+                assert!(d.iter().filter(|s| s.depth == 0).count() == 3);
+                for (i, p) in d.iter().enumerate() {
+                    let cells = ((p.b[0] - p.a[0]) / 2.0)
+                        .abs()
+                        .max(((p.b[1] - p.a[1]) / 4.0).abs());
+                    assert!(
+                        cells >= MIN_TWIG_CELLS - 1e-9,
+                        "seed {seed} {w}x{h}: segment {i} spans {cells:.2} cells"
+                    );
+                    for (j, q) in d[..i].iter().enumerate() {
+                        assert!(
+                            !cross(p, q),
+                            "seed {seed} {w}x{h}: segments {j} and {i} cross: {q:?} {p:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     /// The scene at `size` after `t` simulated seconds, rendered in ASCII.
@@ -1578,6 +1747,64 @@ mod tests {
     }
 
     #[test]
+    fn ap_ascii_arbor_keeps_its_strokes_below_rest() {
+        // 6 s: the first train spike has passed the terminals and left them
+        // hyperpolarised; 14.2 s: the collision's wake.
+        for t in [6.0, 14.2] {
+            let (ap, lines) = ascii_frame(Size::new(80, 24), t);
+            let x0 = ap.layout.trunk.1 + 1;
+            let arbor: String = lines
+                .iter()
+                .map(|row| row.chars().skip(x0 as usize).collect::<String>())
+                .collect();
+            assert!(!arbor.contains('~'), "t={t}:\n{}", lines.join("\n"));
+            let strokes = arbor.chars().filter(|c| "/\\-|".contains(*c)).count();
+            assert!(
+                strokes >= 12,
+                "t={t}: {strokes} strokes:\n{}",
+                lines.join("\n")
+            );
+            assert!(arbor.matches('o').count() >= 5, "t={t}: boutons");
+        }
+    }
+
+    #[test]
+    fn ap_electrode_lead_runs_to_the_scope() {
+        for (w, h) in [(56u16, 16u16), (80, 24), (120, 40), (200, 50)] {
+            let (ap, lines) = ascii_frame(Size::new(w, h), 0.0);
+            let l = ap.layout;
+            let [x, top, bottom, end] = l.lead.expect("a lead with the scope");
+            let [ex, ey] = l.electrode;
+            assert_eq!(
+                (x, bottom),
+                (ex, ey - 1),
+                "{w}x{h}: it leaves the electrode"
+            );
+            let panel = l.panel.unwrap();
+            let base = trace_y(panel, V_REST).round() as i32 / 4;
+            let at = |x: i32, y: i32| lines[y as usize].chars().nth(x as usize).unwrap();
+            for y in top..=bottom {
+                assert_eq!(at(x, y), ':', "{w}x{h}: lead at row {y}");
+            }
+            if x < panel[0] - 5 {
+                // Up to the baseline, then along it to one blank cell before the
+                // `-65` tick.
+                assert_eq!((top, end), (base, panel[0] - 6), "{w}x{h}");
+                for x in (x + 2..=end).step_by(2) {
+                    assert_eq!(at(x, top), '.', "{w}x{h}: lead at column {x}");
+                }
+                assert_eq!(at(end + 1, top), ' ', "{w}x{h}");
+                assert_eq!(at(end + 2, top), '-', "{w}x{h}: meets the tick");
+            } else {
+                // Under the tick or the panel: it stops a row below them.
+                assert!(top == base + 1 || top == panel[3] + 1, "{w}x{h}");
+            }
+        }
+        let no_scope = Layout::new(Size::new(40, 12));
+        assert!(no_scope.lead.is_none());
+    }
+
+    #[test]
     fn ap_layout_fits_every_size() {
         for w in 24u16..=200 {
             for h in [8u16, 12, 16, 24, 50] {
@@ -1589,15 +1816,20 @@ mod tests {
                     "{w}x{h}: far marker at {far:?}"
                 );
                 if let Some([x0, y0, x1, y1]) = l.panel {
-                    // The scope never touches the terminal arbor: either it ends two
-                    // rows above the top bouton or two columns left of the boutons.
+                    // The scope never touches the terminal arbor: its bottom row (the
+                    // trace's dip) ends two rows above the top bouton, one blank row
+                    // between, or it ends three columns left of the arbor.
                     let top = l.boutons[0][1] / 2;
-                    let xb = l.boutons[0][0];
+                    let arbor = l.trunk.1;
                     assert!(
-                        y1 <= top - 2 || x1 <= xb - 3,
-                        "{w}x{h}: panel {:?} vs boutons at x {xb}, row {top}",
+                        y1 <= top - 2 || x1 <= arbor - 3,
+                        "{w}x{h}: panel {:?} vs arbor from x {arbor}, row {top}",
                         [x0, y0, x1, y1]
                     );
+                    assert!(y1 - y0 + 1 >= SCOPE_MIN_ROWS && x1 - x0 + 1 >= SCOPE_MIN_COLS);
+                    // The trace's lowest point, the −76 mV dip, lies within the panel.
+                    let dip = trace_y([x0, y0, x1, y1], -76.0).round() as i32 / 4;
+                    assert!(dip <= y1, "{w}x{h}: dip row {dip}");
                 }
             }
         }
