@@ -32,6 +32,7 @@ Design: `docs/design/M11-titles-taxonomy.md` §1–§3 · ADR-0013 (taxonomy) ·
 
   A title never claims more than the model does; wording is signed off by the science review.
 - **GEN-R14** Renamed scenes keep their old names as aliases: `ALIASES: &[(&str, &str)]` maps `chemical_reaction → gray_scott` and `crystal_growth → fractal_growth`. `find(name)` tries `meta.name` first, then an alias, so `sciart run <old name>` and `disabled = ["<old name>"]` (CFG-R7) keep working. Every alias target is registered, and no alias equals a registered name. `registry()` and `sciart list` show only current names. Acceptance IDs keep their prefixes (`CHEM-A*`, `CRY-A*`).
+- **GEN-R15** Each scene section heading in this file reads `### <name>  (<category label>, <milestones>)`. Every registered scene has exactly one such section, and its label equals `meta.category.label()` (CORE-R77), which is how each scene's category (ADR-0013) is written down. Checked by a test that parses this file.
 
 ## Per-generator spec template
 Each scene gets a short section appended below when its batch starts:

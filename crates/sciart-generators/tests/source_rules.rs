@@ -1,9 +1,10 @@
-//! Source-level rules that the type system cannot express (GEN-R3, GEN-R7).
+//! Source-level rules that the type system cannot express (GEN-R3, GEN-R7, GEN-R15).
 //!
-//! These read the crate's own sources at test time, so they fail the moment a
-//! module is added without a registry line or a generator reaches for the clock.
+//! These read the crate's own sources and SPEC-002 at test time, so they fail the moment
+//! a module is added without a registry line, a generator reaches for the clock, or a
+//! scene's category drifts from its spec heading.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -41,6 +42,39 @@ fn gen_r3_every_scene_module_file_is_registered_and_vice_versa() {
         files, registered,
         "GEN-R3: src/<name>.rs files and registry![...] entries must match one-to-one"
     );
+}
+
+#[test]
+fn gen_r15_spec_headings_carry_each_scenes_category_label() {
+    // SPEC-002 is where each scene's category (ADR-0013) is written down; this keeps the
+    // headings `### <name>  (<category label>, <milestones>)` in step with `Meta.category`.
+    let spec = fs::read_to_string(workspace_root().join("docs/specs/SPEC-002-generators.md"))
+        .expect("SPEC-002");
+    let mut headings: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for line in spec.lines() {
+        let Some((name, tail)) = line
+            .strip_prefix("### ")
+            .and_then(|rest| rest.split_once("  ("))
+        else {
+            continue;
+        };
+        let label = tail.split([',', ')']).next().unwrap_or_default();
+        headings.entry(name).or_default().push(label);
+    }
+    let problems: Vec<_> = registry()
+        .iter()
+        .filter_map(|e| {
+            let want = e.meta.category.label();
+            let found = headings.get(e.meta.name).map(Vec::as_slice);
+            (found != Some(&[want][..])).then(|| {
+                format!(
+                    "{}: want one `### {}  ({want}, …)` heading, found labels {found:?}",
+                    e.meta.name, e.meta.name
+                )
+            })
+        })
+        .collect();
+    assert!(problems.is_empty(), "GEN-R15:\n{}", problems.join("\n"));
 }
 
 #[test]

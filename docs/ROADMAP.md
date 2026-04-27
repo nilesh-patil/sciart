@@ -99,7 +99,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
 - [x] Titles for all 41 scenes (design §3; brownian_motion from the curator proposal); strange_attractors names the shown attractor through `caption()` [GEN-R12]
 - [x] Title contract over the registry; contract and alloc suites draw the title [GEN-R12, GEN-R11]
 - [x] Renames `chemical_reaction` → `gray_scott`, `crystal_growth` → `fractal_growth`, old names kept as aliases [GEN-R2, GEN-R14]
-- [ ] SPEC-002 scene headings carry each scene's category label [GEN-R15]
+- [x] SPEC-002 scene headings carry each scene's category label [GEN-R15]
 - [ ] Bottom-left kept free of scene text: readout moves to `draw::label_right`, label clamps [GEN-R13]
 - [ ] Runtime: title visible iff setting on and HUD off, category-interleaved cycle order [RT-R5, RT-R12, RT-R13]
 - [ ] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
