@@ -25,8 +25,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "dna_helix",
-    category: Category::Biology,
+    category: Category::Biochemistry,
     description: "The DNA double helix turning in space, unzipped and copied by a replication fork",
+    title: "DNA copying · strands unzip",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

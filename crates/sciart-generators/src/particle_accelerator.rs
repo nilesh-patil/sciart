@@ -14,8 +14,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "particle_accelerator",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "Counter-rotating bunches colliding into curling particle showers",
+    title: "Collider · magnets curl tracks",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

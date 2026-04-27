@@ -21,8 +21,10 @@ use sciart_core::{geom, ink};
 
 pub static META: Meta = Meta {
     name: "solar_surface",
-    category: Category::Astronomy,
+    category: Category::SunPlanets,
     description: "The granulated Sun turning slowly, with sunspots, limb loops and coronal rain",
+    title: "Sun · convection and sunspots",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

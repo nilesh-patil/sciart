@@ -13,7 +13,7 @@ use std::hint::black_box;
 
 use sciart_core::prelude::*;
 use sciart_core::raster::{Dots, Pixels};
-use sciart_core::{draw, geom, grid, ink, ode, rng};
+use sciart_core::{draw, geom, grid, ink, ode, rng, title};
 use sciart_testalloc::{Allocs, CountingAlloc, measure};
 
 #[global_allocator]
@@ -475,4 +475,20 @@ fn core_r62_r64_r65_r67_r68_audit_helpers_do_not_allocate() {
         stats,
     );
     black_box((sum, field.len(), spins.len()));
+}
+
+#[test]
+fn core_r74_r76_title_and_label_right_do_not_allocate() {
+    let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+    let (lead, stats) = measure(|| {
+        let t = title::Title::new("Strange attractor · chaos", Some("Rössler"));
+        let fit = t.fit(canvas.size());
+        let span = title::span(canvas.size(), &t);
+        title::draw(&mut canvas, &t, 9.0);
+        let lead = draw::label_right(&mut canvas, 23, "T 5772 K λ", Ink::new(Role::Text, 150));
+        black_box((fit, span));
+        lead
+    });
+    assert_free("title::{fit, span, draw} / label_right", stats);
+    black_box(lead);
 }

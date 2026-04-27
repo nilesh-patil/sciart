@@ -64,6 +64,8 @@ pub static META: Meta = Meta {
     name: "chemical_reaction",
     category: Category::Chemistry,
     description: "Gray-Scott reaction-diffusion growing living Turing patterns",
+    title: "Chemical spots · feed and kill",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

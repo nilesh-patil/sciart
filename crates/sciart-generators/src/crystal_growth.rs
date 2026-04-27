@@ -40,8 +40,10 @@ use sciart_core::{draw, raster};
 
 pub static META: Meta = Meta {
     name: "crystal_growth",
-    category: Category::PhysicsChemistry,
+    category: Category::PhysicalChemistry,
     description: "A dendrite growing by diffusion-limited aggregation, then melting and regrowing",
+    title: "Fractal growth · walkers stick",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

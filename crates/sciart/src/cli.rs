@@ -161,7 +161,7 @@ pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Ent
     }
 }
 
-/// `name<TAB>category<TAB>description`, sorted by name (CLI-R4).
+/// `name<TAB>category id<TAB>description`, sorted by name (CLI-R4).
 pub fn list_lines() -> Vec<String> {
     registry()
         .iter()
@@ -169,7 +169,7 @@ pub fn list_lines() -> Vec<String> {
             format!(
                 "{}\t{}\t{}",
                 e.meta.name,
-                e.meta.category.label(),
+                e.meta.category.id(),
                 e.meta.description
             )
         })
@@ -271,7 +271,7 @@ mod tests {
         assert_eq!(lines, sorted);
         assert!(lines.iter().all(|l| l.split('\t').count() == 3));
         assert!(lines.contains(&format!(
-            "starfield\tbasic\t{}",
+            "starfield\tdeep-cosmos\t{}",
             sciart_generators::starfield::META.description
         )));
     }

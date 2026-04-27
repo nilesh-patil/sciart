@@ -38,8 +38,10 @@ use sciart_core::{draw, ink};
 
 pub static META: Meta = Meta {
     name: "electron_orbitals",
-    category: Category::Chemistry,
+    category: Category::PhysicalChemistry,
     description: "Hydrogen orbitals as turning Monte-Carlo clouds, sloshing between states",
+    title: "Atom · where electrons may be",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

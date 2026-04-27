@@ -18,8 +18,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "rocket_launch",
-    category: Category::SpaceExploration,
+    category: Category::Voyages,
     description: "A rocket launch from countdown through stage separation",
+    title: "Rocket · drop mass to go faster",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

@@ -8,8 +8,10 @@ use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "pulsar",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "A lighthouse neutron star: two sweeping beams, dipole field loops, flashes",
+    title: "Pulsar · spinning neutron star",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

@@ -12,8 +12,10 @@ use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "moon_phases",
-    category: Category::Astronomy,
+    category: Category::EarthSky,
     description: "The Moon through a full lunation, with craters and the phase name",
+    title: "Moon phases · sunlit half",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

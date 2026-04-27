@@ -27,6 +27,8 @@ pub static META: Meta = Meta {
     name: "physarum",
     category: Category::Biology,
     description: "A slime mould spreading a lace of veins that thickens into a transport network",
+    title: "Slime mould · trails reinforce",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

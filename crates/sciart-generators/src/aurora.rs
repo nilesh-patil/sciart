@@ -22,8 +22,10 @@ use sciart_core::{draw, geom, ink};
 
 pub static META: Meta = Meta {
     name: "aurora",
-    category: Category::Astronomy,
+    category: Category::EarthSky,
     description: "Auroral curtains folding over a still northern lake at night",
+    title: "Aurora · electrons light the air",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

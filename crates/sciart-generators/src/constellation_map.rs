@@ -11,8 +11,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "constellation_map",
-    category: Category::Astronomy,
+    category: Category::EarthSky,
     description: "A star chart tracing and naming one constellation at a time",
+    title: "Sky chart · brightness sets size",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

@@ -17,8 +17,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "black_hole",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "A black hole with a beamed, lensed accretion disk and photon ring",
+    title: "Black hole · gravity bends light",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

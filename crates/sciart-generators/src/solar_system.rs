@@ -8,8 +8,10 @@ use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "solar_system",
-    category: Category::Astronomy,
+    category: Category::SunPlanets,
     description: "The eight planets orbiting the Sun at Kepler speeds, with an asteroid belt",
+    title: "Planets · farther ones go slower",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

@@ -21,8 +21,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "double_pendulum",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "Twin double pendulums diverging chaotically from almost identical starts",
+    title: "Double pendulum · twins diverge",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

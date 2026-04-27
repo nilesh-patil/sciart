@@ -1,12 +1,15 @@
+use crate::title::{self, Title};
 use crate::{Canvas, Ctx, Generator, GlyphMode, Meta, Size};
 
 /// Owns one generator plus its context and a double-buffered canvas, and is the single
-/// place that implements the call protocol (CORE-R15, CORE-R19..R21).
+/// place that implements the call protocol (CORE-R15, CORE-R19..R21) and draws the
+/// science title (CORE-R75).
 pub struct Stage {
     generator: Box<dyn Generator>,
     ctx: Ctx,
     front: Canvas,
     back: Canvas,
+    title_visible: bool,
 }
 
 impl std::fmt::Debug for Stage {
@@ -14,11 +17,14 @@ impl std::fmt::Debug for Stage {
         f.debug_struct("Stage")
             .field("generator", &self.generator.meta().name)
             .field("ctx", &self.ctx)
+            .field("title_visible", &self.title_visible)
             .finish_non_exhaustive()
     }
 }
 
 impl Stage {
+    /// The title starts hidden: M11 turns it on by default (CORE-R75) together with the
+    /// re-recorded snapshots and the scenes' readout moves (GEN-R13).
     pub fn new(mut generator: Box<dyn Generator>, seed: u64, size: Size, mode: GlyphMode) -> Self {
         let mut ctx = Ctx::new(seed, size);
         generator.resize(size, &mut ctx);
@@ -27,6 +33,7 @@ impl Stage {
             ctx,
             front: Canvas::new(size, mode),
             back: Canvas::new(size, mode),
+            title_visible: false,
         }
     }
 
@@ -36,6 +43,17 @@ impl Stage {
 
     pub fn ctx(&self) -> &Ctx {
         &self.ctx
+    }
+
+    /// The live title: `meta().title` with the current caption (CORE-R71). Also what the
+    /// HUD shows while the canvas title is hidden under it (RT-R12, RND-R9).
+    pub fn title(&self) -> Title {
+        Title::new(self.meta().title, self.generator.caption())
+    }
+
+    /// Whether `render` draws the title (CORE-R75); kept across `resize`.
+    pub fn set_title_visible(&mut self, visible: bool) {
+        self.title_visible = visible;
     }
 
     pub fn resize(&mut self, size: Size) {
@@ -57,10 +75,15 @@ impl Stage {
         self.ctx.advance(dt);
     }
 
-    /// Draw a new frame; on a generator panic the previous front frame is untouched.
+    /// Draw a new frame, the title over the scene; on a generator panic the previous front
+    /// frame is untouched.
     pub fn render(&mut self) -> &Canvas {
         self.back.clear();
         self.generator.render(&mut self.back);
+        if self.title_visible {
+            let title = self.title();
+            title::draw(&mut self.back, &title, self.ctx.time());
+        }
         std::mem::swap(&mut self.front, &mut self.back);
         &self.front
     }

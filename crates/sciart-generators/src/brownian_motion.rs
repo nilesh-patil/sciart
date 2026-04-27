@@ -21,8 +21,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "brownian_motion",
-    category: Category::PhysicsChemistry,
+    category: Category::PhysicalChemistry,
     description: "A pollen grain jittering among solvent molecules (Langevin dynamics)",
+    title: "Brownian motion · random kicks",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

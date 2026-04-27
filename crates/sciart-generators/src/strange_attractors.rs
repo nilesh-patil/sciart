@@ -30,8 +30,10 @@ use sciart_core::{draw, geom, ink, ode};
 
 pub static META: Meta = Meta {
     name: "strange_attractors",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A turning gallery of chaotic attractors traced by swarms of glowing threads",
+    title: "Strange attractor · chaos",
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -126,6 +128,10 @@ pub(crate) const GALLERY: [Attractor; 5] = [
     Attractor::Halvorsen,
     Attractor::Rossler,
 ];
+
+/// Title captions (GEN-R12), indexed by `Attractor as usize`: the shown attractor names
+/// the title's mechanism, `Strange attractor · Lorenz`.
+const CAPTIONS: [&str; 5] = ["Lorenz", "Aizawa", "Thomas", "Halvorsen", "Rössler"];
 
 /// Which native direction becomes the camera's up axis (+y).
 #[derive(Debug, Clone, Copy)]
@@ -976,15 +982,20 @@ impl StrangeAttractors {
             .to_dots(&mut self.dots, D_MIN, |d| thread_ink(d, ln_top));
     }
 
+    /// The attractor the swarm mostly shows: the target once a morph is half done.
+    fn shown(&self) -> Option<Attractor> {
+        let (from, to, weight) = self.gallery.as_ref()?.pair();
+        Some(if weight < 0.5 { from } else { to })
+    }
+
     fn label(&self, canvas: &mut Canvas) {
-        let Some(g) = &self.gallery else {
-            return;
-        };
         if !label_shown(canvas.size()) {
             return;
         }
-        let (from, to, weight) = g.pair();
-        let s = spec(if weight < 0.5 { from } else { to });
+        let Some(k) = self.shown() else {
+            return;
+        };
+        let s = spec(k);
         // Both variants have the same char count (ATT-A7), so one check serves both modes.
         let name = |t: &'static str| t.split_once("  ").map_or(t, |(name, _)| name);
         let w = usize::from(canvas.size().width());
@@ -1048,6 +1059,10 @@ impl Generator for StrangeAttractors {
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
         self.label(canvas);
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        self.shown().map(|k| CAPTIONS[k as usize])
     }
 }
 
@@ -1677,6 +1692,21 @@ mod tests {
         c.clear();
         s.render(c);
         c.to_lines().pop().unwrap()
+    }
+
+    #[test]
+    fn gen_r12_caption_names_the_shown_attractor() {
+        for (i, k) in GALLERY.into_iter().enumerate() {
+            let name = spec(k).label.split("  ").next().unwrap();
+            assert_eq!(CAPTIONS[k as usize], name, "{k:?}");
+            let (s, _, _) = scene(80, 24, GlyphMode::Unicode, i);
+            assert_eq!(s.caption(), Some(name));
+        }
+        assert_eq!(
+            StrangeAttractors::default().caption(),
+            None,
+            "before resize"
+        );
     }
 
     #[test]

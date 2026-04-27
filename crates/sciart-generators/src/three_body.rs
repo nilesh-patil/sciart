@@ -12,8 +12,10 @@ use sciart_core::{geom, ode};
 
 pub static META: Meta = Meta {
     name: "three_body",
-    category: Category::Astronomy,
+    category: Category::Physics,
     description: "Three equal suns dancing periodic three-body orbits: figure-8, Lagrange, Broucke, moth",
+    title: "Three bodies · periodic orbits",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
