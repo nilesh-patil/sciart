@@ -97,7 +97,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
 - [x] `title` module (split, charset, fit, span, two-tone draw with the 8–10 s dim), `Meta.title`/`captions`, `Generator::caption`, `Stage::title`/`set_title_visible` (hidden until the snapshots are re-recorded), `draw::label_right` [CORE-R71..R76]
 - [x] `Category` rebuilt: split sky + Voyages + the P×C×B lattice (11 categories), every scene re-filed; `list` prints category ids [CORE-R77, CLI-R4]
 - [x] Titles for all 41 scenes (design §3; brownian_motion from the curator proposal); strange_attractors names the shown attractor through `caption()` [GEN-R12]
-- [ ] Title contract over the registry; contract and alloc suites draw the title [GEN-R12, GEN-R11]
+- [x] Title contract over the registry; contract and alloc suites draw the title [GEN-R12, GEN-R11]
 - [ ] Renames `chemical_reaction` → `gray_scott`, `crystal_growth` → `fractal_growth`, old names kept as aliases [GEN-R2, GEN-R14]
 - [ ] SPEC-002 scene headings carry each scene's category label [GEN-R15]
 - [ ] Bottom-left kept free of scene text: readout moves to `draw::label_right`, label clamps [GEN-R13]

@@ -1,17 +1,23 @@
-//! Stability contract for EVERY registered generator (SPEC-002 GEN-R1..R10).
+//! Stability contract for EVERY registered generator (SPEC-002 GEN-R1..R10, GEN-R12).
 //!
 //! Port of the Python `tests/test_generator_contract.py`, extended for animation.
 //! New generators are covered automatically once they are in the registry.
 
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Form, Title};
 use sciart_generators::{Entry, find, registry};
 
 const SEED: u64 = 99;
 
+/// With the title on, as the runtime shows it (CORE-R75), so every stability check below
+/// also covers the title drawn over the scene.
 fn stage(entry: &Entry, size: Size, mode: GlyphMode) -> Stage {
-    Stage::new((entry.build)(), SEED, size, mode)
+    let mut stage = Stage::new((entry.build)(), SEED, size, mode);
+    stage.set_title_visible(true);
+    stage
 }
 
 fn check_frame(name: &str, canvas: &Canvas, size: Size) {
@@ -191,6 +197,89 @@ fn gen_r10_ascii_mode_is_pure_ascii() {
                 .filter(|c| !c.is_ascii())
                 .collect();
             assert!(bad.is_empty(), "non-ASCII glyphs in ASCII mode: {bad:?}");
+        }
+    });
+}
+
+/// Chars that would turn a title into a formula or markup (GEN-R12).
+const FORMULA: &[char] = &['=', '^', '_', '*', '/', '<', '>'];
+
+fn check_title_chars(s: &str) {
+    for c in s.chars() {
+        assert!(
+            title::ascii_of(c).is_some() && !FORMULA.contains(&c),
+            "{c:?} is not allowed in a title: {s:?}"
+        );
+    }
+}
+
+fn check_part(what: &str, s: &str) {
+    assert!(
+        !s.is_empty() && s.trim() == s,
+        "{what} must be non-empty and trimmed: {s:?}"
+    );
+}
+
+#[test]
+fn gen_r12_every_title_and_caption_is_valid() {
+    for_each_generator("titles", |e| {
+        let meta = e.meta;
+        assert_eq!(
+            meta.title.matches(title::SEPARATOR).count(),
+            1,
+            "exactly one ` · ` in {:?}",
+            meta.title
+        );
+        check_title_chars(meta.title);
+        let t = Title::new(meta.title, None);
+        check_part("phenomenon", t.phenomenon);
+        check_part("mechanism", t.mechanism);
+        assert!(t.width(Form::Full) <= 32, "{:?} over 32 cells", meta.title);
+        assert!(
+            t.width(Form::Phenomenon) <= 20,
+            "{:?} over 20 cells",
+            t.phenomenon
+        );
+        for &caption in meta.captions {
+            check_part("caption", caption);
+            check_title_chars(caption);
+            assert!(!caption.contains(title::SEPARATOR), "{caption:?}");
+            let live = Title::new(meta.title, Some(caption));
+            assert!(live.width(Form::Full) <= 32, "{live:?} over 32 cells");
+        }
+    });
+}
+
+#[test]
+fn gen_r12_titles_are_unique() {
+    let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in registry() {
+        owners.entry(e.meta.title).or_default().push(e.meta.name);
+    }
+    owners.retain(|_, names| names.len() > 1);
+    assert!(owners.is_empty(), "shared titles: {owners:?}");
+}
+
+#[test]
+fn gen_r12_live_captions_are_declared() {
+    for_each_generator("captions", |e| {
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = (e.build)();
+        g.resize(size, &mut ctx);
+        let mut steps = 0;
+        for secs in [0, 1, 5, 20] {
+            while steps < secs * 60 {
+                g.update(SIM_DT, &mut ctx);
+                ctx.advance(SIM_DT);
+                steps += 1;
+            }
+            if let Some(caption) = g.caption() {
+                assert!(
+                    e.meta.captions.contains(&caption),
+                    "caption {caption:?} at {secs} s is not in meta.captions"
+                );
+            }
         }
     });
 }
