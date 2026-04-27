@@ -7,7 +7,7 @@ and extends it for real-time animation.
 
 ## Registry
 - **GEN-R1** `registry() -> &'static [Entry]` lists every generator; `Entry { meta: &'static Meta, build: fn() -> Box<dyn Generator> }`. Names are unique, `snake_case`, and sorted.
-- **GEN-R2** `find(name) -> Option<&'static Entry>` is exact-match on `meta.name`.
+- **GEN-R2** `find(name) -> Option<&'static Entry>` is exact-match on `meta.name`, or on a retired name (GEN-R14).
 - **GEN-R3** Adding a generator requires exactly: one module file + one line in the registry macro. The contract suite picks it up automatically.
 
 ## Stability contract (every registered generator)
@@ -31,6 +31,7 @@ Design: `docs/design/M11-titles-taxonomy.md` §1–§3 · ADR-0013 (taxonomy) ·
   - `caption()` sampled at t = 0, 1, 5 and 20 s (seed 42, 80×24) is `None` or an entry of `meta.captions`, and a scene with empty `captions` always returns `None`.
 
   A title never claims more than the model does; wording is signed off by the science review.
+- **GEN-R14** Renamed scenes keep their old names as aliases: `ALIASES: &[(&str, &str)]` maps `chemical_reaction → gray_scott` and `crystal_growth → fractal_growth`. `find(name)` tries `meta.name` first, then an alias, so `sciart run <old name>` and `disabled = ["<old name>"]` (CFG-R7) keep working. Every alias target is registered, and no alias equals a registered name. `registry()` and `sciart list` show only current names. Acceptance IDs keep their prefixes (`CHEM-A*`, `CRY-A*`).
 
 ## Per-generator spec template
 Each scene gets a short section appended below when its batch starts:

@@ -1,6 +1,6 @@
 //! A frost dendrite growing from a seed by diffusion-limited aggregation (Witten–Sander),
 //! glowing at its growing tips, then melting from the tips inward and regrowing
-//! (SPEC-002 `crystal_growth`).
+//! (SPEC-002 `fractal_growth`).
 //!
 //! Physics: random walkers diffuse in from a launch circle just outside the cluster and
 //! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`.
@@ -39,7 +39,7 @@ use sciart_core::prelude::*;
 use sciart_core::{draw, raster};
 
 pub static META: Meta = Meta {
-    name: "crystal_growth",
+    name: "fractal_growth",
     category: Category::PhysicalChemistry,
     description: "A dendrite growing by diffusion-limited aggregation, then melting and regrowing",
     title: "Fractal growth · walkers stick",
@@ -47,7 +47,7 @@ pub static META: Meta = Meta {
 };
 
 pub fn build() -> Box<dyn Generator> {
-    Box::new(CrystalGrowth::default())
+    Box::new(FractalGrowth::default())
 }
 
 /// Braille dots per terminal cell; `SUB_Y / SUB_X = ASPECT` makes the dot lattice square.
@@ -342,7 +342,7 @@ enum Phase {
 }
 
 #[derive(Debug)]
-pub struct CrystalGrowth {
+pub struct FractalGrowth {
     dla: Dla,
     phase: Phase,
     /// Seconds since this crystal was seeded (attach times are on this clock).
@@ -366,7 +366,7 @@ pub struct CrystalGrowth {
     label: String,
     label_row: Option<i32>,
     /// The crystal rasterised for the current state, sized in `resize` and rebuilt by
-    /// [`CrystalGrowth::rasterise`] after every state change; `render` only blits it.
+    /// [`FractalGrowth::rasterise`] after every state change; `render` only blits it.
     dots: Dots,
 }
 
@@ -401,7 +401,7 @@ impl Tint {
     }
 }
 
-impl Default for CrystalGrowth {
+impl Default for FractalGrowth {
     fn default() -> Self {
         Self {
             dla: Dla::default(),
@@ -424,7 +424,7 @@ impl Default for CrystalGrowth {
     }
 }
 
-impl CrystalGrowth {
+impl FractalGrowth {
     fn reseed(&mut self, ctx: &mut Ctx) {
         let p = ctx.rng.random_range(P_STICK.0..=P_STICK.1);
         // The lattice centre is the terminal centre: the crystal sits mid-screen.
@@ -548,7 +548,7 @@ impl CrystalGrowth {
     }
 }
 
-impl Generator for CrystalGrowth {
+impl Generator for FractalGrowth {
     fn meta(&self) -> &'static Meta {
         &META
     }
@@ -676,7 +676,7 @@ mod tests {
         assert!((dot_w - dot_h).abs() < 1e-12);
         // The DLA lattice is the dot lattice of the screen.
         let size = Size::new(80, 24);
-        let mut g = CrystalGrowth::default();
+        let mut g = FractalGrowth::default();
         g.resize(size, &mut Ctx::new(1, size));
         assert_eq!(g.dla.attach.size(), Size::new(160, 96));
     }
@@ -802,7 +802,7 @@ mod tests {
     fn cry_cycle_grows_holds_melts_and_reseeds() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
-        let mut g = CrystalGrowth::default();
+        let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
         let (mut shrank, mut reseeded, mut held) = (false, false, false);
         let mut prev = g.dla.cells.len();
