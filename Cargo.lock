@@ -1817,6 +1817,7 @@ dependencies = [
  "clap",
  "crossterm",
  "portable-pty",
+ "proptest",
  "rand 0.9.5",
  "rand_chacha",
  "ratatui",

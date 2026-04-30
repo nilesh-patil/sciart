@@ -28,18 +28,18 @@ registry![
     black_hole,
     boids_flocking,
     brownian_motion,
-    chemical_reaction,
     constellation_map,
     cosmic_microwave_background,
-    crystal_growth,
     dna_helix,
     doppler_effect,
     double_pendulum,
     electron_orbitals,
     exoplanet_transit,
+    fractal_growth,
     galaxy_collision,
     globular_cluster,
     gravitational_lensing,
+    gray_scott,
     ising_model,
     liesegang_rings,
     mars_rover,
@@ -70,7 +70,42 @@ pub fn registry() -> &'static [Entry] {
     REGISTRY
 }
 
-/// Exact-name lookup (GEN-R2).
+/// Retired scene names and the scenes that replaced them (GEN-R14), so old command lines
+/// and config files keep working. Never listed by `registry()`.
+pub static ALIASES: &[(&str, &str)] = &[
+    ("chemical_reaction", "gray_scott"),
+    ("crystal_growth", "fractal_growth"),
+];
+
+/// Exact-name lookup, falling back to a retired name (GEN-R2, GEN-R14).
 pub fn find(name: &str) -> Option<&'static Entry> {
-    REGISTRY.iter().find(|e| e.meta.name == name)
+    let by_name = |name: &str| REGISTRY.iter().find(|e| e.meta.name == name);
+    by_name(name).or_else(|| {
+        let (_, new) = ALIASES.iter().find(|(old, _)| *old == name)?;
+        by_name(new)
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gen_r2_r14_retired_names_resolve_to_their_renamed_scene() {
+        assert_eq!(
+            find("chemical_reaction").map(|e| e.meta.name),
+            Some("gray_scott")
+        );
+        assert_eq!(
+            find("crystal_growth").map(|e| e.meta.name),
+            Some("fractal_growth")
+        );
+        for &(old, new) in ALIASES {
+            assert_eq!(find(old).map(|e| e.meta.name), Some(new), "{old}");
+            assert!(
+                REGISTRY.iter().all(|e| e.meta.name != old),
+                "alias {old} shadows a registered scene"
+            );
+        }
+    }
 }

@@ -9,8 +9,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "satellite_orbit",
-    category: Category::SpaceExploration,
+    category: Category::Voyages,
     description: "A rotating Earth with satellites on inclined orbits",
+    title: "Satellites · Earth turns beneath",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

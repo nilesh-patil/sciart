@@ -30,16 +30,20 @@
 //! ever drawn bigger than in its own hold.
 
 use std::f64::consts::{FRAC_PI_2, FRAC_PI_4, PI, TAU};
+use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::title::{self, Title};
 use sciart_core::{draw, ink};
 
 pub static META: Meta = Meta {
     name: "electron_orbitals",
-    category: Category::Chemistry,
+    category: Category::PhysicalChemistry,
     description: "Hydrogen orbitals as turning Monte-Carlo clouds, sloshing between states",
+    title: "Hydrogen atom · electron clouds",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -120,7 +124,7 @@ const NUCLEUS: Glyph = Glyph::new('•', 'o');
 const NUCLEUS_INK: Ink = Ink::new(Role::Accent, 180);
 /// The nucleus is drawn over its cell when at most this many of the 8 dots are lit.
 const NUCLEUS_MAX_DOTS: usize = 2;
-const LABEL_INK: Ink = Ink::new(Role::Text, 150);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Number of gallery states.
 const K: usize = GALLERY.len();
@@ -1016,9 +1020,9 @@ impl ElectronOrbitals {
         });
     }
 
-    /// Bottom-left: the state in a hold, `a → b  line` during a transition. Parts are
-    /// dropped, never clipped: the slow-down first, then the line, then the arrow part
-    /// (leaving `a`).
+    /// Bottom-right, clear of the title (GEN-R13): the state in a hold, `a → b  line`
+    /// during a transition. Parts are dropped, never clipped: the slow-down first, then
+    /// the line, then the arrow part, then `a` itself.
     fn label(&self, canvas: &mut Canvas) {
         let Some(atom) = &self.atom else {
             return;
@@ -1026,14 +1030,11 @@ impl ElectronOrbitals {
         if !label_shown(canvas.size()) {
             return;
         }
-        let w = usize::from(canvas.size().width());
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         let ascii = canvas.mode() == GlyphMode::Ascii;
-        let fits = |parts: &[(&str, &str)]| {
-            let len: usize = parts
-                .iter()
-                .map(|&(u, a)| if ascii { a } else { u }.chars().count())
-                .sum();
-            len + 2 <= w
+        let pick = |&(u, a): &(&'static str, &'static str)| if ascii { a } else { u };
+        let fits = |parts: &[(&'static str, &'static str)]| {
+            parts.iter().map(|p| pick(p).chars().count()).sum::<usize>() <= room
         };
         let (a, b) = (GALLERY[atom.at], GALLERY[atom.next()]);
         let (name, slowed) =
@@ -1047,21 +1048,22 @@ impl ElectronOrbitals {
             ("  ", "  "),
             slowed,
         ];
-        let shown = if atom.phase == Phase::Hold {
-            &parts[..1]
-        } else if fits(&parts) {
-            &parts[..]
-        } else if fits(&parts[..5]) {
-            &parts[..5]
-        } else if fits(&parts[..3]) {
-            &parts[..3]
+        let longest: &[usize] = if atom.phase == Phase::Hold {
+            &[1]
         } else {
-            &parts[..1]
+            &[7, 5, 3, 1]
         };
+        let Some(&n) = longest.iter().find(|&&n| fits(&parts[..n])) else {
+            return;
+        };
+        // Every label is under 64 bytes (the longest, a Pα one, is 49); writing into a
+        // StackText never fails.
+        let mut text = StackText::<64>::new();
+        for p in &parts[..n] {
+            let _ = text.write_str(pick(p));
+        }
         let y = i32::from(canvas.size().height()) - 1;
-        shown.iter().fold(1, |x, &(u, a)| {
-            draw::text_mode(canvas, x, y, u, a, LABEL_INK)
-        });
+        draw::label_right(canvas, y, text.as_str(), LABEL_INK);
     }
 }
 
@@ -1631,37 +1633,48 @@ mod tests {
     }
 
     #[test]
-    fn orb_a6_label_is_complete_or_falls_back() {
+    fn orb_a6_gen_r13_label_is_complete_or_falls_back() {
+        // Right-aligned and clear of the title (GEN-R13): beside the full "Hydrogen atom ·
+        // electron clouds" (31 cells, from w = 55) the label has w − 37 chars; beside
+        // "Hydrogen atom" alone, w − 19. Four blanks always separate the two texts.
+        let label = |s: &ElectronOrbitals, mode| {
+            let row = bottom_row(s, mode);
+            let lead = row.chars().count() - row.trim_start().chars().count() - 1;
+            let span = title::span(s.size, &Title::new(META.title, None));
+            let free = span.map_or(0, |(_, cols)| cols.end + 2);
+            assert!(i32::try_from(lead).unwrap() >= free, "{row:?}");
+            assert!(row.ends_with(' '), "{row:?}");
+            row.trim().to_owned()
+        };
         let mut s = scene(1, 80, 24);
-        assert!(bottom_row(&s, GlyphMode::Unicode).starts_with(" 2p_z "));
+        assert_eq!(label(&s, GlyphMode::Unicode), "2p_z");
         into_transition(&mut s);
-        let row = bottom_row(&s, GlyphMode::Ascii);
-        assert_eq!(row.trim_end(), " 2p_z -> 3d_z2  H-a 656.5 nm  slowed 1e15");
         assert_eq!(
-            bottom_row(&s, GlyphMode::Unicode).trim_end(),
-            " 2p_z → 3d_z²  Hα 656.5 nm  slowed 10¹⁵"
+            label(&s, GlyphMode::Ascii),
+            "2p_z -> 3d_z2  H-a 656.5 nm  slowed 1e15"
+        );
+        assert_eq!(
+            label(&s, GlyphMode::Unicode),
+            "2p_z → 3d_z²  Hα 656.5 nm  slowed 10¹⁵"
         );
 
-        // The slow-down goes first: the 40-char label needs w ≥ 42.
-        let mut s = scene(1, 41, 12);
+        // The slow-down goes first: the 40-char label needs w − 37 ≥ 40 and, as a readout
+        // never takes over half the row (CORE-R76), w/2 ≥ 40.
+        let mut s = scene(1, 79, 12);
         into_transition(&mut s);
-        let row = bottom_row(&s, GlyphMode::Ascii);
-        assert_eq!(row.trim_end(), " 2p_z -> 3d_z2  H-a 656.5 nm", "{row:?}");
-        let mut s = scene(1, 42, 12);
+        assert_eq!(label(&s, GlyphMode::Ascii), "2p_z -> 3d_z2  H-a 656.5 nm");
+        let mut s = scene(1, 80, 12);
         into_transition(&mut s);
-        assert!(bottom_row(&s, GlyphMode::Ascii).contains("slowed 1e15"));
+        assert!(label(&s, GlyphMode::Ascii).ends_with("slowed 1e15"));
 
-        // "2p_z -> 3d_z2  H-a 656.5 nm" is 27 chars: the line part needs w ≥ 29.
-        let mut s = scene(1, 28, 12);
+        // "2p_z -> 3d_z2  H-a 656.5 nm" is 27 chars: beside the phenomenon alone (below
+        // w = 55) the line part needs w − 19 ≥ 27 and w/2 ≥ 27.
+        let mut s = scene(1, 53, 12);
         into_transition(&mut s);
-        let row = bottom_row(&s, GlyphMode::Ascii);
-        assert!(
-            row.starts_with(" 2p_z -> 3d_z2") && !row.contains("656"),
-            "{row:?}"
-        );
-        let mut s = scene(1, 29, 12);
+        assert_eq!(label(&s, GlyphMode::Ascii), "2p_z -> 3d_z2");
+        let mut s = scene(1, 54, 12);
         into_transition(&mut s);
-        assert!(bottom_row(&s, GlyphMode::Ascii).contains("H-a 656.5 nm"));
+        assert!(label(&s, GlyphMode::Ascii).ends_with("H-a 656.5 nm"));
 
         for (w, h) in [(13, 24), (80, 7)] {
             let s = scene(1, w, h);
@@ -1671,23 +1684,20 @@ mod tests {
             );
         }
 
-        // "3d_xz -> 4f_xyz" (15 chars, 14 in Unicode) does not fit at w = 14 or 15: the
-        // arrow part falls back to the current state's name instead of being clipped.
-        for w in [14, 15] {
+        // "3d_xz -> 4f_xyz" (15 chars, 14 in Unicode) beside "Hydrogen atom" (from 25 wide,
+        // room w − 19) needs w ≥ 34 (33): below that the arrow part falls back to the
+        // current state's name instead of being clipped.
+        for w in [14, 25, 32] {
             let mut s = scene(4, w, 12);
             into_transition(&mut s);
             for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {
-                let row = bottom_row(&s, mode);
-                assert_eq!(row.trim_end(), " 3d_xz", "w = {w}, {mode:?}");
+                assert_eq!(label(&s, mode), "3d_xz", "w = {w}, {mode:?}");
             }
         }
-        let mut s = scene(4, 16, 12);
+        let mut s = scene(4, 33, 12);
         into_transition(&mut s);
-        assert_eq!(
-            bottom_row(&s, GlyphMode::Unicode).trim_end(),
-            " 3d_xz → 4f_xyz"
-        );
-        assert_eq!(bottom_row(&s, GlyphMode::Ascii).trim_end(), " 3d_xz");
+        assert_eq!(label(&s, GlyphMode::Unicode), "3d_xz → 4f_xyz");
+        assert_eq!(label(&s, GlyphMode::Ascii), "3d_xz");
     }
 
     #[test]

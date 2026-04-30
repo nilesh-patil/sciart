@@ -15,8 +15,10 @@ use sciart_core::{draw, geom, ode, rng};
 
 pub static META: Meta = Meta {
     name: "globular_cluster",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "An ancient globular cluster of live gravitating stars, seen by a slowly turning telescope",
+    title: "Star cluster · stars pull stars",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

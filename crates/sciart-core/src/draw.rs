@@ -1,5 +1,5 @@
 //! Shared drawing helpers (SPEC-001 CORE-R22..R27, CORE-R49, CORE-R62, CORE-R63,
-//! CORE-R67).
+//! CORE-R67, CORE-R76).
 //!
 //! Centers and radii are in rows; x is stretched by [`ASPECT`] so circles look round.
 
@@ -153,6 +153,21 @@ pub fn label(canvas: &mut Canvas, x: i32, y: i32, s: &str, ink: Ink) -> i32 {
     canvas.text(start, y, s, ink);
     canvas.put(end, y, gap, Ink::BLANK);
     end.saturating_add(1)
+}
+
+/// A right-aligned [`label`] on row `y` (CORE-R76): a blank cell in the last column, `s`
+/// ending in the column before it, and a blank cell just before its first char, clipped
+/// at column 0. Returns the column of that leading blank (negative when clipped), so a
+/// readout can be shortened or dropped before it reaches the title span (GEN-R13).
+pub fn label_right(canvas: &mut Canvas, y: i32, s: &str, ink: Ink) -> i32 {
+    let gap = Glyph::ascii(' ');
+    let last = i32::from(canvas.size().width()) - 1;
+    let start = last.saturating_sub(i32::try_from(s.chars().count()).unwrap_or(i32::MAX));
+    let lead = start.saturating_sub(1);
+    canvas.put(last, y, gap, Ink::BLANK);
+    canvas.text(start, y, s, ink);
+    canvas.put(lead, y, gap, Ink::BLANK);
+    lead
 }
 
 /// The glyph for one step `(dx, dy)` of a [`geom::stroked_line`] (CORE-R62): `─` along

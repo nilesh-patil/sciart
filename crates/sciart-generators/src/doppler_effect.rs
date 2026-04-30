@@ -4,13 +4,17 @@
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
+use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "doppler_effect",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A moving source compressing wavefronts ahead and stretching them behind",
+    title: "Doppler effect · waves bunch up",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -29,7 +33,13 @@ const START_FRAC: f64 = 0.3;
 const TAN_OCTANT: f64 = 0.414_213_562_373_095;
 const MAX_SAMPLES: usize = 20_000;
 const SOURCE: Glyph = Glyph::new('◉', '@');
-const CAPTION: &str = "<- redshift    v = 0.5c    blueshift ->";
+/// The bottom-row legend, longest first (GEN-R13 picks the longest that clears the title).
+/// The model is sound, so it names pitch and the speed of sound `c_s`, not light.
+const LEGENDS: [&str; 3] = [
+    "<- lower pitch  v = 0.5 c_s  higher pitch ->",
+    "<- lower  v = 0.5 c_s  higher ->",
+    "v = 0.5 c_s",
+];
 
 /// One circular wavefront: emitted at `(x0, y0)` (rows) at time `t0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -197,7 +207,7 @@ impl Generator for DopplerEffect {
                 if last != Some((x, y)) {
                     last = Some((x, y));
                     // An observer in direction θ from the emission point hears
-                    // f' = f / (1 − β cos θ): blueshifted iff cos θ > 0.
+                    // f' = f / (1 − β cos θ): higher pitch iff cos θ > 0.
                     let role = if c > 0.0 { Role::Cold } else { Role::Hot };
                     let level = 55.0 + 200.0 * fade * (0.45 + 0.55 * c.abs());
                     canvas.put(x, y, arc_glyph(c, s), Ink::new(role, level as u8));
@@ -217,13 +227,17 @@ impl Generator for DopplerEffect {
         );
         canvas.put(sx - 2, sy, Glyph::new('─', '-'), Ink::new(Role::Accent, 90));
 
-        let w = canvas.size().width();
-        if self.height > 8 && usize::from(w) >= CAPTION.len() + 2 {
-            sciart_core::draw::text_centered(
+        // Bottom-right, clear of the title (GEN-R13).
+        let room = title::readout_room(canvas.size(), &Title::of(self));
+        if self.height > 8
+            && let Some(legend) = LEGENDS.iter().find(|s| s.len() <= room)
+        {
+            let y = i32::from(self.height) - 1;
+            draw::label_right(
                 canvas,
-                i32::from(self.height) - 1,
-                CAPTION,
-                Ink::new(Role::Text, 170),
+                y,
+                legend,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
             );
         }
     }
@@ -338,5 +352,25 @@ mod tests {
             .find_map(|x| frame.get(x, sy).filter(|c| c.ch == '('));
         assert_eq!(right.map(|c| c.ink.role), Some(Role::Cold));
         assert_eq!(left.map(|c| c.ink.role), Some(Role::Hot));
+    }
+
+    #[test]
+    fn dop_gen_r13_legend_names_pitch_and_sits_right_of_the_title() {
+        // Beside the full "Doppler effect · waves bunch up" (31 cells) the room is w − 37,
+        // beside "Doppler effect" alone w − 20, and never over w/2 (CORE-R76): the long
+        // legend (44) needs 88 columns and the middle one (32) 69.
+        for (w, h, legend) in [
+            (88, 24, LEGENDS[0]),
+            (87, 24, LEGENDS[1]),
+            (69, 24, LEGENDS[1]),
+            (68, 24, LEGENDS[2]),
+            (54, 12, LEGENDS[2]),
+            (40, 12, LEGENDS[2]),
+        ] {
+            let mut stage = Stage::new(build(), 3, Size::new(w, h), GlyphMode::Ascii);
+            let row = stage.render().to_lines().pop().unwrap();
+            assert!(row.ends_with(&format!(" {legend} ")), "{w}x{h}: {row:?}");
+        }
+        assert!(LEGENDS.iter().all(|s| !s.contains("shift")));
     }
 }

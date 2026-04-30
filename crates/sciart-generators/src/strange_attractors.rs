@@ -26,12 +26,15 @@ use sciart_core::geom::ASPECT;
 use sciart_core::particles::gaussian;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::title::{self, Title};
 use sciart_core::{draw, geom, ink, ode};
 
 pub static META: Meta = Meta {
     name: "strange_attractors",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A turning gallery of chaotic attractors traced by swarms of glowing threads",
+    title: "Strange attractor · chaos",
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -100,7 +103,7 @@ const N_MIN: usize = 64;
 /// deposit, `τ·ln(1/D_MIN)` ≈ 0.253 s (its segment `j` updates old is lit iff
 /// `e^{−j·dt/τ} ≥ D_MIN`, i.e. `j ≤ 15`), so frame 0 already shows full-length threads.
 const PRIME_STEPS: usize = 16;
-const LABEL_INK: Ink = Ink::new(Role::Text, 150);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Parameters of the gallery flows (SPEC-002 Model).
 const LORENZ: (f64, f64, f64) = (10.0, 28.0, 8.0 / 3.0);
@@ -126,6 +129,10 @@ pub(crate) const GALLERY: [Attractor; 5] = [
     Attractor::Halvorsen,
     Attractor::Rossler,
 ];
+
+/// Title captions (GEN-R12), indexed by `Attractor as usize`: the shown attractor names
+/// the title's mechanism, `Strange attractor · Lorenz`.
+const CAPTIONS: [&str; 5] = ["Lorenz", "Aizawa", "Thomas", "Halvorsen", "Rössler"];
 
 /// Which native direction becomes the camera's up axis (+y).
 #[derive(Debug, Clone, Copy)]
@@ -153,8 +160,8 @@ struct Spec {
     /// Camera elevation (rad) and projected framing box over the camera loop.
     pitch: f64,
     frame: Frame,
-    label: &'static str,
-    label_ascii: &'static str,
+    params: &'static str,
+    params_ascii: &'static str,
 }
 
 /// A 99.5th-percentile box of the projected ensemble over the camera loop (perspective
@@ -199,8 +206,8 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 0.66,
                 swing: 0.0,
             },
-            label: "Lorenz  σ=10 ρ=28 β=8/3",
-            label_ascii: "Lorenz  s=10 r=28 b=8/3",
+            params: "σ=10 ρ=28 β=8/3",
+            params_ascii: "s=10 r=28 b=8/3",
         },
         Attractor::Aizawa => &Spec {
             h_max: 0.02,
@@ -217,9 +224,9 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 0.94,
                 swing: 0.0,
             },
-            // Its six parameters (41 chars) exceed the 24-char cap: name only (ATT-A7).
-            label: "Aizawa",
-            label_ascii: "Aizawa",
+            // Its six parameters exceed the 16-char cap: none are quoted (ATT-A7).
+            params: "",
+            params_ascii: "",
         },
         Attractor::Thomas => &Spec {
             h_max: 0.1,
@@ -236,8 +243,8 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 0.98,
                 swing: 0.0,
             },
-            label: "Thomas  b=0.18",
-            label_ascii: "Thomas  b=0.18",
+            params: "b=0.18",
+            params_ascii: "b=0.18",
         },
         Attractor::Halvorsen => &Spec {
             h_max: 0.005,
@@ -254,8 +261,8 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 0.92,
                 swing: 0.12,
             },
-            label: "Halvorsen  a=1.27",
-            label_ascii: "Halvorsen  a=1.27",
+            params: "a=1.27",
+            params_ascii: "a=1.27",
         },
         Attractor::Rossler => &Spec {
             h_max: 0.02,
@@ -272,8 +279,8 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 1.02,
                 swing: 0.0,
             },
-            label: "Rössler  a=.2 b=.2 c=5.7",
-            label_ascii: "Rossler  a=.2 b=.2 c=5.7",
+            params: "a=.2 b=.2 c=5.7",
+            params_ascii: "a=.2 b=.2 c=5.7",
         },
     }
 }
@@ -486,7 +493,7 @@ impl Gallery {
         let first = first % GALLERY.len();
         let phases: Vec<_> = GALLERY
             .iter()
-            .flat_map(|&k| [(spec(k).label_ascii, HOLD), ("morph", MORPH)])
+            .flat_map(|&k| [(CAPTIONS[k as usize], HOLD), ("morph", MORPH)])
             .collect();
         let mut slots = [vec![[0.0; 3]; N], vec![[0.0; 3]; N]];
         Scout::new(GALLERY[first], rng).run(&mut slots[0], usize::MAX);
@@ -976,25 +983,33 @@ impl StrangeAttractors {
             .to_dots(&mut self.dots, D_MIN, |d| thread_ink(d, ln_top));
     }
 
+    /// The attractor the swarm mostly shows: the target once a morph is half done.
+    fn shown(&self) -> Option<Attractor> {
+        let (from, to, weight) = self.gallery.as_ref()?.pair();
+        Some(if weight < 0.5 { from } else { to })
+    }
+
+    /// The shown attractor's parameter set, bottom-right and clear of the title, whose
+    /// caption already names the attractor (GEN-R13); whole or not at all.
     fn label(&self, canvas: &mut Canvas) {
-        let Some(g) = &self.gallery else {
-            return;
-        };
         if !label_shown(canvas.size()) {
             return;
         }
-        let (from, to, weight) = g.pair();
-        let s = spec(if weight < 0.5 { from } else { to });
+        let Some(k) = self.shown() else {
+            return;
+        };
+        let s = spec(k);
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         // Both variants have the same char count (ATT-A7), so one check serves both modes.
-        let name = |t: &'static str| t.split_once("  ").map_or(t, |(name, _)| name);
-        let w = usize::from(canvas.size().width());
-        let (unicode, ascii) = if s.label_ascii.chars().count() + 2 <= w {
-            (s.label, s.label_ascii)
-        } else {
-            (name(s.label), name(s.label_ascii))
+        if s.params.is_empty() || s.params_ascii.chars().count() > room {
+            return;
+        }
+        let params = match canvas.mode() {
+            GlyphMode::Unicode => s.params,
+            GlyphMode::Ascii => s.params_ascii,
         };
         let y = i32::from(canvas.size().height()) - 1;
-        draw::text_mode(canvas, 1, y, unicode, ascii, LABEL_INK);
+        draw::label_right(canvas, y, params, LABEL_INK);
     }
 }
 
@@ -1048,6 +1063,10 @@ impl Generator for StrangeAttractors {
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
         self.label(canvas);
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        self.shown().map(|k| CAPTIONS[k as usize])
     }
 }
 
@@ -1680,49 +1699,69 @@ mod tests {
     }
 
     #[test]
-    fn att_a7_label_fits_or_falls_back() {
+    fn gen_r12_caption_names_the_shown_attractor() {
+        for (i, k) in GALLERY.into_iter().enumerate() {
+            let (s, _, _) = scene(80, 24, GlyphMode::Unicode, i);
+            assert_eq!(s.caption(), Some(CAPTIONS[k as usize]), "{k:?}");
+        }
+        assert_eq!(
+            StrangeAttractors::default().caption(),
+            None,
+            "before resize"
+        );
+    }
+
+    #[test]
+    fn att_a7_gen_r13_parameters_sit_right_and_the_name_is_the_caption() {
         for k in GALLERY {
             let s = spec(k);
             assert_eq!(
-                s.label.chars().count(),
-                s.label_ascii.chars().count(),
+                s.params.chars().count(),
+                s.params_ascii.chars().count(),
                 "{k:?}"
             );
-            assert!(s.label_ascii.is_ascii());
+            assert!(s.params_ascii.is_ascii());
         }
+        // The name is the title's caption, so the row holds the parameters alone,
+        // right-aligned with a blank either side (Aizawa: nothing).
         for (i, k) in GALLERY.into_iter().enumerate() {
-            let (s, _, mut c) = scene(80, 24, GlyphMode::Ascii, i);
-            let row = label_row(&s, &mut c);
-            assert!(row.is_ascii());
-            assert!(
-                row.starts_with(&format!(" {}", spec(k).label_ascii)),
-                "{row:?}"
-            );
-            let (s, _, mut c) = scene(80, 24, GlyphMode::Unicode, i);
-            assert!(label_row(&s, &mut c).starts_with(&format!(" {}", spec(k).label)));
+            for (mode, params) in [
+                (GlyphMode::Ascii, spec(k).params_ascii),
+                (GlyphMode::Unicode, spec(k).params),
+            ] {
+                let (s, _, mut c) = scene(80, 24, mode, i);
+                let row = label_row(&s, &mut c);
+                assert_eq!(row.trim(), params, "{k:?} {mode:?}");
+                assert!(row.ends_with(' '), "{row:?}");
+                assert!(row.is_ascii() || mode == GlyphMode::Unicode);
+            }
         }
-        // Every label is restrained: at most 24 characters, under a third of 80 columns.
-        // It quotes the whole parameter set or, when that does not fit (Aizawa's six), none:
-        // one parameter out of several would read as the attractor's only one.
-        assert!(GALLERY.iter().all(|&k| spec(k).label.chars().count() <= 24));
+        // Every set is restrained (≤ 16 chars) and quoted whole or, when it does not fit
+        // (Aizawa's six), not at all: one parameter out of several would read as the
+        // attractor's only one.
+        assert!(
+            GALLERY
+                .iter()
+                .all(|&k| spec(k).params.chars().count() <= 16)
+        );
         for (k, params) in GALLERY.into_iter().zip([3, 6, 1, 1, 3]) {
-            let quoted = spec(k).label.matches('=').count();
+            let quoted = spec(k).params.matches('=').count();
             assert!(
                 quoted == params || quoted == 0,
                 "{k:?} quotes {quoted} of {params}"
             );
         }
-        // Lorenz's 23-char label: name only below 25 columns, in both modes.
+        // Lorenz's 15-char set beside "Strange attractor" alone (from 32 wide, the full
+        // title from 47), where the room is w − 23: dropped at 37 columns, shown at 38.
         for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {
-            let (s, _, mut c) = scene(24, 12, mode, 0);
-            let row = label_row(&s, &mut c);
-            assert_eq!(row.trim_end(), " Lorenz", "{mode:?}");
-            let (s, _, mut c) = scene(25, 12, mode, 0);
+            let (s, _, mut c) = scene(37, 12, mode, 0);
+            assert_eq!(label_row(&s, &mut c).trim(), "", "{mode:?}");
+            let (s, _, mut c) = scene(38, 12, mode, 0);
             assert!(label_row(&s, &mut c).contains("8/3"), "{mode:?}");
         }
         for (w, h) in [(11, 24), (80, 7)] {
             let (s, _, mut c) = scene(w, h, GlyphMode::Ascii, 0);
-            assert!(!label_row(&s, &mut c).contains("Lorenz"), "{w}x{h}");
+            assert!(!label_row(&s, &mut c).contains("8/3"), "{w}x{h}");
         }
     }
 

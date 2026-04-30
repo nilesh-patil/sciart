@@ -15,8 +15,10 @@ use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "gravitational_lensing",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "Stars and a galaxy lensed into double images and an Einstein ring",
+    title: "Gravity lens · mass bends light",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

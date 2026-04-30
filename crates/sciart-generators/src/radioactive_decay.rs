@@ -33,8 +33,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "radioactive_decay",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A lattice of nuclei decaying through a chain beside live Bateman curves",
+    title: "Decay chain · random yet lawful",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -554,7 +556,8 @@ impl RadioactiveDecay {
     fn draw_panel(&self, canvas: &mut Canvas, p: &Panel) {
         let n0 = f64::from(self.n0.max(1));
         let text = Ink::new(Role::Text, 200);
-        let faint = Ink::new(Role::Text, 120);
+        // The time-axis labels can land on the title row, so they share its readout tone.
+        let faint = Ink::new(Role::Text, sciart_core::title::READOUT_LEVEL);
         let axis = Ink::new(Role::Structure, 110);
 
         // Title and the live populations.

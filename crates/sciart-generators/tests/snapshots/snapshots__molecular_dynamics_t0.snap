@@ -25,4 +25,4 @@ expression: frame
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-      T = 0.40 -> 0.25 heating   U/N = -2.81   N = 159   LJ reduced units
+ Gas to liquid - cool atoms cling                      T = 0.40 -> 0.25 heating

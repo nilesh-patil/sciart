@@ -36,12 +36,15 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
-use sciart_core::{ease, ink};
+use sciart_core::title::{self, Title};
+use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
     category: Category::Chemistry,
     description: "Belousov-Zhabotinsky dish: spiral and target oxidation waves sweeping a dark medium",
+    title: "Chemical waves · fire, then rest",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -129,7 +132,7 @@ const R_SCALE: f32 = A - B0;
 const S_MIN: f32 = 0.06;
 /// Reseeded fronts brighten over this many seconds (display only, SPEC-002 Motion).
 const FADE_IN_S: f64 = 0.5;
-const LABEL_INK: Ink = Ink::new(Role::Text, 160);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// One broken front: a straight segment `a → b`, excited on the `n` side.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -479,9 +482,9 @@ fn phase_ink(s: f32) -> Ink {
     }
 }
 
-/// The label's phase word for beat `index` at width `w`.
-fn phase_word(index: usize, w: u16) -> &'static str {
-    match (index == QUENCH, w >= 40) {
+/// The label's phase word for beat `index` in a readout of at most `room` chars.
+fn phase_word(index: usize, room: usize) -> &'static str {
+    match (index == QUENCH, room >= "light quench".len()) {
         (false, _) => "waves",
         (true, true) => "light quench",
         (true, false) => "quench",
@@ -604,23 +607,23 @@ impl Generator for Bz {
         }
         let local = self.step % CYCLE_STEPS;
         let beat = self.timeline.at(local as f64 / SUB_PER_S as f64).index;
-        let word = phase_word(beat, w);
+        // Right of the title (GEN-R13), which names the reaction, and at most half the
+        // row (CORE-R76), so the label never competes with the waves.
+        let room = title::readout_room(self.cells, &Title::of(self));
+        let word = phase_word(beat, room);
         let b = self.b;
         let mut label = StackText::<80>::new();
-        // Padded by one blank cell each side, so it never touches the field. Each form
-        // takes at most about half the row, so the label never competes with the waves.
-        // `b` is live: it reads 0.45 in the quench, the one on-screen sign that the
-        // quench is a loss of excitability. Writing into a StackText never fails.
-        let _ = match w {
-            136.. => write!(
-                label,
-                " Belousov-Zhabotinsky  {word}  Barkley a=0.75 b={b:.2} eps=0.02 "
-            ),
-            80.. => write!(label, " Belousov-Zhabotinsky  {word}  b={b:.2} "),
-            52.. => write!(label, " BZ  {word}  b={b:.2} "),
-            _ => write!(label, " BZ  {word} "),
+        // Each threshold is its form's length in the quench, the longest word. `b` is
+        // live: it reads 0.45 in the quench, the one on-screen sign that the quench is a
+        // loss of excitability. Writing into a StackText never fails.
+        let _ = match room {
+            44.. => write!(label, "{word}  Barkley a=0.75 b={b:.2} eps=0.02"),
+            20.. => write!(label, "{word}  b={b:.2}"),
+            6.. => write!(label, "{word}"),
+            _ => return,
         };
-        canvas.text(0, i32::from(h) - 1, label.as_str(), LABEL_INK);
+        // label_right pads it with a blank cell each side, so it never touches the field.
+        draw::label_right(canvas, i32::from(h) - 1, label.as_str(), LABEL_INK);
     }
 }
 
@@ -1112,31 +1115,31 @@ mod tests {
     }
 
     #[test]
-    fn bz_label_is_padded_short_and_never_clipped() {
+    fn bz_gen_r13_label_is_right_aligned_padded_short_and_never_clipped() {
         let quench = WAVES_STEPS + SUB_PER_S;
+        // The room is the smaller of half the row and the title-row room (CORE-R76):
+        // w − 38 from w = 57, where the full title fits, w − 20 from w = 27, w − 2 below.
         for (w, after, want) in [
-            (14u16, 0, " BZ  waves "),
-            (39, quench, " BZ  quench "),
-            (40, quench, " BZ  light quench "),
-            (52, 0, " BZ  waves  b=0.06 "),
-            (79, quench, " BZ  light quench  b=0.45 "),
-            (80, 0, " Belousov-Zhabotinsky  waves  b=0.06 "),
-            (80, quench, " Belousov-Zhabotinsky  light quench  b=0.45 "),
-            (135, 0, " Belousov-Zhabotinsky  waves  b=0.06 "),
-            (
-                136,
-                quench,
-                " Belousov-Zhabotinsky  light quench  Barkley a=0.75 b=0.45 eps=0.02 ",
-            ),
+            (14u16, 0, "waves"),
+            (16, quench, "quench"),
+            (30, quench, "quench"),
+            (32, quench, "light quench"),
+            (39, quench, "light quench"),
+            (40, 0, "waves  b=0.06"),
+            (40, quench, "light quench  b=0.45"),
+            (56, 0, "waves  b=0.06"),
+            (57, 0, "waves"),
+            (80, 0, "waves  b=0.06"),
+            (87, quench, "light quench  b=0.45"),
+            (88, quench, "light quench  Barkley a=0.75 b=0.45 eps=0.02"),
         ] {
             let row = label(w, after);
-            assert!(row.starts_with(want), "w={w}: {row:?}");
-            // The name stays at most about half the row, so it never competes with the
-            // waves on a small tile.
-            assert!(2 * want.len() <= usize::from(w) + 12, "w={w}: {want:?}");
+            // A blank cell each side, so it never touches the field.
+            assert!(row.ends_with(&format!(" {want} ")), "w={w}: {row:?}");
+            // At most half the row, so it never competes with the waves on a small tile.
+            assert!(2 * want.len() <= usize::from(w), "w={w}: {want:?}");
         }
-        assert!(!label(13, 0).contains("BZ"), "no label below 14 columns");
-        assert_eq!(phase_word(0, 200), "waves");
+        assert!(!label(13, 0).contains("waves"), "no label below 14 columns");
     }
 
     impl Bz {

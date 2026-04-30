@@ -75,6 +75,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
             GlyphMode::Unicode
         },
         hud: settings.hud,
+        title: settings.title,
         interval: (*command == Command::Sim).then_some(settings.interval),
         keep_awake: settings.keep_awake,
         low_power_fps: settings.low_power_fps,

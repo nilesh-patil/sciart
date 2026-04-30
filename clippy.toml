@@ -6,4 +6,10 @@ disallowed-methods = [
     { path = "rand::rng", reason = "use ctx.rng (ADR-0008)" },
     { path = "rand::thread_rng", reason = "use ctx.rng (ADR-0008)" },
     { path = "rand::random", reason = "use ctx.rng (ADR-0008)" },
+    # TEST-R8: no deliberate leaks; every allocation is owned and dropped (TEST-R6).
+    { path = "std::boxed::Box::leak", reason = "own the value instead (TEST-R8)" },
+    { path = "std::vec::Vec::leak", reason = "own the value instead (TEST-R8)" },
+    { path = "std::string::String::leak", reason = "own the value instead (TEST-R8)" },
+    { path = "std::mem::forget", reason = "let it drop; memory must not leak (TEST-R8)" },
+    { path = "std::mem::ManuallyDrop::new", reason = "let it drop; memory must not leak (TEST-R8)" },
 ]

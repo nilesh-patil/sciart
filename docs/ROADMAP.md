@@ -89,8 +89,64 @@ Shared helpers first: layered raster, colormap roles, capped lattices, leapfrog,
 - [x] Snapshots recorded and reviewed for all 16; benches < 1 ms at 200×50 (max 0.47 ms, aurora; hard limit 5 ms) [GEN-R8, GEN-R11]; every new ID cited by a test [TEST-R1]; taste, physics and performance review per scene; SPEC-002 brought in line with the delivered code
 - [x] `rs-fmt`/`rs-lint` also run `rustfmt` on each scene file (modules declared inside `registry!` are invisible to `cargo fmt`)
 - [x] Review follow-ups: solar_surface spot granulation gated out of the penumbra + umbra pixel floor, aurora patch floor and ridge glow, physarum later-bloom exposure, vortex_street start-up specks, mono-theme `Seq`/`Div` floors (ADR-0011, RND-R6), liesegang ASCII haze class, three_body orbit fade-in (triangle included), pinning tests (ATT rates, ORB dipole table, GC reseed buffers); all 16 scenes polished over a second art/science/Rust review round, snapshots re-recorded and reviewed, max bench unchanged (aurora 0.47 ms) [AUR-A8, LIES-A8, AP-A9]
-- [ ] Second-round review follow-ups (minor, non-blocking): aurora red-crown ramp, thinner spruce ridge, gentler lake ripple, `Glow::red` doc and `ASCII_LAKE_BRIGHT` const, top-fade spec wording · solar_surface 2 px polar margin at small sizes, ASCII loop glyphs by pixel pair, interlaced-granulation spec note, `SpatialHash::reserve` (CORE-R54 amendment) to replace the dummy rebuild · chemical_reaction ASCII `HALO_DOT` 13→20 · electron_orbitals fade window on the framing weight, shorter label outside the beat · ising_model ASCII polarity follows the majority · liesegang_rings legend leaves with the first ratio · three_body `MOTH_FULL_SCALE`, triangle clear of adjacent trail cells · dna_helix zoom-aware rung stride · molecule_viewer rear-bond dotting threshold, tilted planar molecules · physarum third inoculum blur pass · action_potential dendrite spacing and deterministic third primary · belousov_zhabotinsky free-end spacing in `plan_seeds`
+- [ ] Second-round review follow-ups (minor, non-blocking): aurora red-crown ramp, thinner spruce ridge, gentler lake ripple, `Glow::red` doc and `ASCII_LAKE_BRIGHT` const, top-fade spec wording · solar_surface 2 px polar margin at small sizes, ASCII loop glyphs by pixel pair, interlaced-granulation spec note, `SpatialHash::reserve` (CORE-R54 amendment) to replace the dummy rebuild · gray_scott ASCII `HALO_DOT` 13→20 · electron_orbitals fade window on the framing weight, shorter label outside the beat · ising_model ASCII polarity follows the majority · liesegang_rings legend leaves with the first ratio · three_body `MOTH_FULL_SCALE`, triangle clear of adjacent trail cells · dna_helix zoom-aware rung stride · molecule_viewer rear-bond dotting threshold, tilted planar molecules · physarum third inoculum blur pass · action_potential dendrite spacing and deterministic third primary · belousov_zhabotinsky free-end spacing in `plan_seeds`
 - [ ] Follow-up proposals (unscheduled): `sciart record` (GIF/asciicast export for taste review); GitHub Actions CI (+ cargo-deny); `Role::Spectrum` for true spectral line colour
+
+## M11 — Science titles, P×C×B taxonomy, leak guards
+Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1–§4 · ADR-0013, ADR-0014 · branch `feat/m11-sciart-titles`.
+- [x] `title` module (split, charset, fit, span, two-tone draw with the 8–10 s dim), `Meta.title`/`captions`, `Generator::caption`, `Stage::title`/`set_title_visible`, `draw::label_right` [CORE-R71..R76]
+- [x] `Category` rebuilt: split sky + Voyages + the P×C×B lattice (11 categories), every scene re-filed; `list` prints category ids [CORE-R77, CLI-R4]
+- [x] Titles for all 41 scenes (design §3; brownian_motion from the curator proposal); strange_attractors names the shown attractor through `caption()` [GEN-R12]
+- [x] Title contract over the registry; contract and alloc suites draw the title [GEN-R12, GEN-R11]
+- [x] Renames `chemical_reaction` → `gray_scott`, `crystal_growth` → `fractal_growth`, old names kept as aliases [GEN-R2, GEN-R14]
+- [x] SPEC-002 scene headings carry each scene's category label [GEN-R15]
+- [x] Bottom-left kept free of scene text: readout moves to `draw::label_right`, label clamps [GEN-R13]
+- [x] Runtime: title visible iff setting on and HUD off, category-interleaved cycle order [RT-R5, RT-R12, RT-R13]
+- [x] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
+- [x] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
+- [x] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
+- [x] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
+- [x] Review round 1: 4-cell title–readout gap, fade restarts per caption, HUD title in the canvas title's columns, setting precedence and narrowed C/P clauses (brownian_motion → Forces & Waves, ising_model → States of Matter), category ids spelled from labels, title wording, per-scene TEST-R7 ceiling, wider leak bans [CORE-R71, CORE-R74..R77, GEN-R13, RND-R9, TEST-R7, TEST-R8]
+- [x] Review round 2: gauges and readouts clear of the title, per-act captions (moon_landing, strange_attractors), title wording, 2-cycle warm-up + 8 checked cycles in the churn guard [CORE-R76, GEN-R12, GEN-R13, TEST-R2, TEST-R6]
+- [x] the contributor guide updated (taxonomy, titles in "Adding a generator", leak-guard suites); benches at 200×50 max 0.46 ms (aurora; title drawing included) [GEN-R8]
+- [ ] Review round 3 follow-ups (minor, non-blocking):
+  - Titles (update design §3 and re-record snapshots): molecular_dynamics → "Condensation · cool atoms cling" (the cycle both melts and condenses, mostly below the 2-D triple point) · solar_surface → "Solar surface · convection cells" (not boiling) · constellation_map → "Constellations · star patterns" (Crux is not Ptolemaic) · action_potential → "Nerve spike · ion channels open" · spacetime_grid → "Spacetime waves · orbits shrink" · moon_phases → "Moon phases · half always sunlit" · optional boids_flocking → "Murmuration · each bird tracks 7"
+  - Title-row readouts sit at `title::READOUT_LEVEL` 110, brighter than the faded title (90): set it to `title::DIM_LEVEL`, or reword CORE-R76 and the constant's doc [CORE-R76]
+  - Act name shown twice once the caption fits: three_body's top label keeps only the attribution and molecule_viewer's only `CH4  16.04 g/mol` when `Title::fit` gives `Form::Full` (both variants built in `resize`)
+  - wave_interference: the field's lowest `.` level starts one pad cell after the title and reads as an ellipsis; leave the 3 cells after `title::span(..).end` blank on row h−1, or note it in SPEC-002
+  - SPEC-002 solar_surface Label still says "(`Text` 150)"; it is `Text` at `title::READOUT_LEVEL` (CORE-R76)
+  - `crates/sciart/src/app.rs`: the file-level `#![allow(clippy::disallowed_methods)]` also exempts the event loop from the TEST-R8 leak bans; move the allow onto the three `Instant::now` call sites
+  - `leak_free.rs`: one-line note at the TEST-R6 assertion that live bytes see capacity, not length (growth inside a `Vec`'s capacity is invisible until it doubles)
+
+## M12 — Scene upgrades (planned)
+Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5, §7 · branch `feat/m12-upgrades`. Research: `docs/design/M11-research/curator-proposal.md` §4, `cross-domain-taxonomy.md` §5.
+- [ ] Ink ADR: `Role::Phase` (cyclic), `Role::Blackbody` (temperature in `level`), named per-scene ramps (Ember, Ice, Ferroin, H-alpha, …) mapped by every theme; Mono keeps its floors
+- [ ] `Density::to_pixels` (asinh/log LUT built on resize)
+- [ ] Upgrade all 41 scenes from the per-scene lists (art first, honest science, stylisation stated in SPEC-002); rescore each in truecolor frames before and after
+- [ ] doppler_effect: two acts, acoustic with Mach cone and relativistic light with red/blue shift, each with its own caption
+- [ ] particle_accelerator: two acts, LHC-style event display and 1960s bubble chamber, each with its own caption
+- [ ] Every upgraded scene < 2 ms worst frame (step + render) at 200×50, allocation-free `render`/steady-state `update` [GEN-R8, GEN-R11]
+- [ ] Cap fractal_growth's DLA lattice with `grid::lattice_for` (ADR-0012) and drop its TEST-R7 exception
+- [ ] radioactive_decay: size the nucleus lattice to rows `0..h − 1`, so the title is not punched through its last row
+- [ ] Title-row readout polish: brownian_motion `D fit 4.63  true 2.25 rows^2/s`; double_pendulum long form padded at the front, not inside (`{growth:.1}x`, form chosen by its maximum width)
+- [ ] Review (art · science · Rust/perf) with fix loops; local `--no-ff` merge into `main`
+
+## M13 — New scenes (planned)
+Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6, §7 · branch `feat/m13-new-scenes` (may split per category group).
+- [ ] Curator + critic pass over `M11-research/` plus a fresh astronomy research pass; confirm the picks, including Reactions and the 12 extra sky scenes
+- [ ] Shared `pub(crate)` models in sciart-generators: excitable medium (BZ, heart, dicty), Laplacian growth (lichtenberg, fractal_growth), Cahn–Hilliard (spinodal, protocell); lift `lbm` into core only with kelvin_helmholtz
+- [ ] Deep Cosmos: spiral_galaxy, cosmic_web + 4 astronomy picks
+- [ ] Sun & Planets: saturn_rings, comet_tails + 4 (jupiter_storms, solar_eruption, …)
+- [ ] Earth & Sky: total_solar_eclipse, rainbow + 4 (hurricane, meteor shower, …)
+- [ ] Voyages: jwst_unfolding, orbital_rendezvous
+- [ ] Forces & Waves: kelvin_helmholtz, quantum_double_slit
+- [ ] Reactions: 2 C-only scenes chosen by the curator
+- [ ] Living Systems: lenia, firefly_sync
+- [ ] States of Matter: spinodal_decomposition, lichtenberg_discharge
+- [ ] Physics of Life: heart_fibrillation, motility_clustering
+- [ ] Molecules of Life: dicty_aggregation, seashell_pigmentation
+- [ ] Life from Matter: chemical_garden, molecular_motors
+- [ ] Every new scene: SPEC-002 section, title, category by ADR-0013, < 2 ms worst frame at 200×50, leak guards green; review; local `--no-ff` merge into `main`
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
