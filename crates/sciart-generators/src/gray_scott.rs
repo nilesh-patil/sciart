@@ -1,4 +1,4 @@
-//! Living Turing patterns from the Gray–Scott reaction–diffusion system
+//! Self-replicating spots and worms from the Gray–Scott reaction–diffusion system
 //! `U + 2V → 3V, V → P` (SPEC-002 `gray_scott`).
 //!
 //! Model (Pearson 1993, dimensionless, grid spacing 1 lattice node):
@@ -63,8 +63,8 @@ use sciart_core::{draw, ease, ink};
 pub static META: Meta = Meta {
     name: "gray_scott",
     category: Category::Chemistry,
-    description: "Gray-Scott reaction-diffusion growing living Turing patterns",
-    title: "Turing patterns · feed and kill",
+    description: "Gray-Scott reaction-diffusion growing self-replicating spots and worms",
+    title: "Spots and worms · react, spread",
     captions: &[],
 };
 
@@ -76,7 +76,7 @@ pub fn build() -> Box<dyn Generator> {
 /// h = 0.01, i.e. 0.1 here) gives ~10-node spots, too coarse for a terminal; the pattern
 /// wavelength scales as √D, so 0.03 gives ~5-node spots.
 const D_V: f32 = 0.03;
-/// D_u = 2 D_v (SPEC): the substrate must outrun the activator for Turing instability.
+/// D_u = 2 D_v (SPEC, Pearson 1993): the substrate must outrun the autocatalyst for spots to form.
 const D_U: f32 = 2.0 * D_V;
 /// Explicit Euler sub-step, reaction time units (bound derived in the module docs).
 const TAU_SUB: f32 = 0.5;

@@ -25,7 +25,11 @@ const CYCLE: [Size; 3] = [Size::new(200, 50), Size::new(1, 1), HOME];
 /// swap the field with its scratch, and a cycle has an odd number of regrids, so each of
 /// the pair reaches its peak size only on alternate cycles (ising_model).
 const WARMUP_CYCLES: usize = 2;
-const CYCLES: usize = WARMUP_CYCLES + 1;
+/// Cycles checked after the warm-up: enough that growth of one small element per cycle
+/// crosses a `Vec` capacity doubling (8 → 16 bytes) and shows up, not only growth that
+/// allocates afresh every cycle.
+const CHECKED_CYCLES: usize = 8;
+const CYCLES: usize = WARMUP_CYCLES + CHECKED_CYCLES;
 /// Half a simulated second per size: enough for respawns and lazily grown buffers.
 const CHURN_STEPS: usize = 30;
 

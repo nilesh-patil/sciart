@@ -33,8 +33,12 @@ pub static META: Meta = Meta {
     category: Category::Voyages,
     description: "Apollo 11 powered descent to Tranquility Base",
     title: "Apollo 11 · powered descent",
-    captions: &[],
+    captions: &CAPTIONS,
 };
+
+/// The title's caption per act (GEN-R12), so it never names a phase the LM has left:
+/// under power until the footpads touch, then on the ground, then on the surface.
+const CAPTIONS: [&str; 3] = ["powered descent", "touchdown", "Tranquility Base"];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(MoonLanding::new())
@@ -789,6 +793,15 @@ impl Generator for MoonLanding {
         self.draw_lm(canvas, &view, sprite);
         self.draw_hud(canvas, beat);
     }
+
+    fn caption(&self) -> Option<&'static str> {
+        // Touchdown is a model event, not a beat: the LM lands whenever its physics does.
+        Some(match self.beat().index {
+            PH_FLAG | PH_EARTHRISE => CAPTIONS[2],
+            _ if self.descent.touchdown.is_some() => CAPTIONS[1],
+            _ => CAPTIONS[0],
+        })
+    }
 }
 
 impl MoonLanding {
@@ -1045,16 +1058,13 @@ impl MoonLanding {
                             );
                         }
                     } else if self.t < 3.0 && self.height >= 12 {
-                        // Above the LM, which starts high in the frame.
+                        // Above the LM, which starts high in the frame. Names the craft
+                        // only: the title already says `Apollo 11 · powered descent`.
                         caption(
                             canvas,
                             w,
                             1,
-                            &[
-                                "APOLLO 11 - LM EAGLE - POWERED DESCENT",
-                                "LM EAGLE",
-                                "EAGLE",
-                            ],
+                            &["LUNAR MODULE EAGLE", "LM EAGLE", "EAGLE"],
                             ink,
                         );
                     }
@@ -1350,6 +1360,34 @@ mod tests {
     }
 
     #[test]
+    fn gen_r12_caption_names_the_act_the_lm_is_in() {
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(5, size);
+        let mut g = MoonLanding::new();
+        g.resize(size, &mut ctx);
+        let mut seen = vec![g.caption().unwrap()];
+        // Two loops, stopping a second short of the third descent.
+        for _ in 0..((2.0 * g.timeline.total() - 1.0) / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            let caption = g.caption().unwrap();
+            let want = match g.beat().index {
+                PH_FLAG | PH_EARTHRISE => CAPTIONS[2],
+                _ if g.descent.touchdown.is_some() => CAPTIONS[1],
+                _ => CAPTIONS[0],
+            };
+            assert_eq!(caption, want);
+            if *seen.last().unwrap() != caption {
+                seen.push(caption);
+            }
+        }
+        assert_eq!(
+            seen,
+            [CAPTIONS, CAPTIONS].concat(),
+            "each act once per loop"
+        );
+    }
+
+    #[test]
     fn ml_a4_timeline_phases_occur_in_order_and_loop() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
@@ -1421,6 +1459,6 @@ mod tests {
         // Narrow terminals get a shorter caption or none, never a clipped one.
         let mut small = Stage::new(build(), 42, Size::new(12, 10), GlyphMode::Ascii);
         let lines = small.render().to_lines();
-        assert!(!lines.iter().any(|l| l.contains("APOLLO")));
+        assert!(!lines.iter().any(|l| l.contains("LUNAR")));
     }
 }

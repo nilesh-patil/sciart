@@ -88,7 +88,7 @@ const FLAKE_OUT: f64 = 1.0;
 /// dark. A lower floor lights the diffuse attractant around every tube, which fattens
 /// the veins into blobs.
 const U_FLOOR: f64 = 0.45;
-const LABEL_INK: Ink = Ink::new(Role::Text, 110);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// `(cos, sin)` of the 16 headings, `k · 22.5°` with y down.
 pub(crate) const DIRS: [(f32, f32); 16] = {

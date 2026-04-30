@@ -624,11 +624,6 @@ impl Generator for FractalGrowth {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        if let Some(row) = self.label_row
-            && !self.label.is_empty()
-        {
-            draw::label_right(canvas, row, &self.label, Ink::new(Role::Text, 150));
-        }
         if self.phase == Phase::Grow {
             // The vapour is sparse: each walker is a lone dot that replaces its cell
             // (rather than merging into a `Dots` layer); the crystal then draws over it.
@@ -638,6 +633,17 @@ impl Generator for FractalGrowth {
             }
         }
         self.dots.blit(canvas);
+        // Last, so no walker or crystal dot lands inside the text.
+        if let Some(row) = self.label_row
+            && !self.label.is_empty()
+        {
+            draw::label_right(
+                canvas,
+                row,
+                &self.label,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
+        }
     }
 }
 
@@ -835,8 +841,9 @@ mod tests {
         let mut ctx = seeded(1);
         let mut g = FractalGrowth::default();
         // The room is w − 6 minus the title text (gutter, 4-cell gap, trailing blank):
-        // the full title (30 cells) at 80 wide, the phenomenon (14) at 40.
-        for (size, room) in [(Size::new(80, 24), 44), (Size::new(40, 12), 20)] {
+        // the full title (30 cells) at 80 wide, the phenomenon (14) at 40; at most half
+        // the row, so 44 becomes 40 at 80 wide (CORE-R76).
+        for (size, room) in [(Size::new(80, 24), 40), (Size::new(40, 12), 20)] {
             ctx.set_size(size);
             g.resize(size, &mut ctx);
             assert_eq!(g.room, room, "{size:?}");
@@ -855,9 +862,11 @@ mod tests {
             g.refresh_label();
             assert_eq!(g.label, want, "room {room}");
         }
-        // Drawn right-aligned, a blank cell either side.
+        // Drawn right-aligned, a blank cell either side, over any walker under it.
         g.room = 22;
         g.refresh_label();
+        g.phase = Phase::Grow;
+        g.dla.walkers[0] = (30 * SUB_X, 11 * SUB_Y);
         let mut canvas = Canvas::new(Size::new(40, 12), GlyphMode::Ascii);
         g.render(&mut canvas);
         assert!(canvas.to_lines()[11].ends_with(" N 1   D_f 1.71 "));

@@ -29,7 +29,7 @@ pub static META: Meta = Meta {
     name: "boids_flocking",
     category: Category::Biology,
     description: "A starling murmuration at dusk, rippling away from a stooping falcon",
-    title: "Murmuration · copy 7 neighbours",
+    title: "Murmuration · match 7 neighbours",
     captions: &[],
 };
 
@@ -123,7 +123,7 @@ const STREAK: usize = 18;
 /// Inks (SPEC-002 Inks): cool calm silhouettes, bright alarmed birds, the one warm falcon.
 const FALCON_INK: Ink = Ink::new(Role::Hot, 240);
 const STREAK_INK: Ink = Ink::new(Role::Hot, 90);
-const LABEL_INK: Ink = Ink::new(Role::Text, 110);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 /// A bird banked past this draws its wings (4 dots instead of 2).
 const WING_BANK: f64 = 35.0 * PI / 180.0;
 /// Bank angle at which a calm bird reaches its brightest level.

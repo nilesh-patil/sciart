@@ -19,6 +19,9 @@ const MIN_HEIGHT: u16 = 6;
 /// Ink levels (CORE-R74): the phenomenon reads first, the mechanism recedes.
 const PHENOMENON_LEVEL: f64 = 170.0;
 const MECHANISM_LEVEL: f64 = 110.0;
+/// Ink level of every title-row readout (CORE-R76): the mechanism's tone, so the numbers
+/// never outshine the scene's name.
+pub const READOUT_LEVEL: u8 = 110;
 /// After the viewer has had time to read it, the whole title fades to this level so it
 /// stops competing with the art (CORE-R74).
 const DIM_LEVEL: f64 = 90.0;
@@ -121,15 +124,16 @@ pub fn span(size: Size, title: &Title) -> Option<(i32, Range<i32>)> {
 }
 
 /// The most chars a [`draw::label_right`](crate::draw::label_right) readout on the title
-/// row can hold while keeping [`READOUT_GAP`] blank cells from the title's text (GEN-R13);
-/// the whole row but its two blanks when the title is hidden. Scenes drop or shorten parts
-/// to fit.
+/// row can hold while keeping [`READOUT_GAP`] blank cells from the title's text (GEN-R13),
+/// and at most half the row, so on narrow canvases the row stays art with a name and a
+/// number rather than one line of text. Scenes drop or shorten parts to fit.
 pub fn readout_room(size: Size, title: &Title) -> usize {
+    let w = usize::from(size.width());
     // Cells left of the readout's text: the gutter and title text, then the gap; or only
     // the readout's leading blank when there is no title.
     let before = span(size, title).map_or(1, |(_, cols)| cols.len() - 1 + READOUT_GAP);
     // One more for the readout's trailing blank in the last column.
-    usize::from(size.width()).saturating_sub(before + 1)
+    w.saturating_sub(before + 1).min(w / 2)
 }
 
 /// Draw the fitted title on the bottom row, laid out like `draw::label(canvas, 0, h − 1, …)`,

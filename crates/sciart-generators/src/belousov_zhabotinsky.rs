@@ -43,7 +43,7 @@ pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
     category: Category::Chemistry,
     description: "Belousov-Zhabotinsky dish: spiral and target oxidation waves sweeping a dark medium",
-    title: "Chemical waves · spirals turn",
+    title: "Chemical waves · fire, then rest",
     captions: &[],
 };
 
@@ -132,7 +132,7 @@ const R_SCALE: f32 = A - B0;
 const S_MIN: f32 = 0.06;
 /// Reseeded fronts brighten over this many seconds (display only, SPEC-002 Motion).
 const FADE_IN_S: f64 = 0.5;
-const LABEL_INK: Ink = Ink::new(Role::Text, 160);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// One broken front: a straight segment `a → b`, excited on the `n` side.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -608,8 +608,8 @@ impl Generator for Bz {
         let local = self.step % CYCLE_STEPS;
         let beat = self.timeline.at(local as f64 / SUB_PER_S as f64).index;
         // Right of the title (GEN-R13), which names the reaction, and at most half the
-        // row, so the label never competes with the waves.
-        let room = title::readout_room(self.cells, &Title::of(self)).min(usize::from(w) / 2);
+        // row (CORE-R76), so the label never competes with the waves.
+        let room = title::readout_room(self.cells, &Title::of(self));
         let word = phase_word(beat, room);
         let b = self.b;
         let mut label = StackText::<80>::new();
@@ -1117,8 +1117,8 @@ mod tests {
     #[test]
     fn bz_gen_r13_label_is_right_aligned_padded_short_and_never_clipped() {
         let quench = WAVES_STEPS + SUB_PER_S;
-        // The room is the smaller of half the row and the title-row room: w − 35 from
-        // w = 52, where the full title fits, w − 20 from w = 27, w − 2 below.
+        // The room is the smaller of half the row and the title-row room (CORE-R76):
+        // w − 38 from w = 57, where the full title fits, w − 20 from w = 27, w − 2 below.
         for (w, after, want) in [
             (14u16, 0, "waves"),
             (16, quench, "quench"),
@@ -1127,7 +1127,8 @@ mod tests {
             (39, quench, "light quench"),
             (40, 0, "waves  b=0.06"),
             (40, quench, "light quench  b=0.45"),
-            (52, 0, "waves"),
+            (56, 0, "waves  b=0.06"),
+            (57, 0, "waves"),
             (80, 0, "waves  b=0.06"),
             (87, quench, "light quench  b=0.45"),
             (88, quench, "light quench  Barkley a=0.75 b=0.45 eps=0.02"),
