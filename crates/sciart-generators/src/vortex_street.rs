@@ -1219,6 +1219,9 @@ impl Generator for VortexStreet {
         }
         self.pixels.resize(size);
         // The hysteresis stack holds at most one entry per pixel (`drop_faint_islands`).
+        // Cleared first: `reserve` counts from the length, and the last island is left
+        // in it, so the capacity would creep with each resize (TEST-R6).
+        self.stack.clear();
         self.stack.reserve(self.pixels.pixel_size().area());
         self.map.rebuild(self.vort.size(), self.pixels.pixel_size());
         self.size = Some(size);
