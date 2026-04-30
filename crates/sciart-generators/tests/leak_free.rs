@@ -1,0 +1,140 @@
+//! Leak guards for every registered generator (TEST-R6, TEST-R7), measured as live heap
+//! bytes with the counting global allocator (ADR-0009). Own test binary: a binary has
+//! exactly one global allocator.
+//!
+//! Live bytes are per thread, and each scene runs start to finish on its own scoped
+//! thread, so a reading sees only that scene's `Stage` (generator, context and both
+//! canvases).
+//!
+//! Run `cargo test -p sciart-generators --test leak_free -- --nocapture` for the tables.
+
+use std::fmt::Write as _;
+
+use sciart_core::prelude::*;
+use sciart_generators::{Entry, registry};
+use sciart_testalloc::{CountingAlloc, live_bytes};
+
+#[global_allocator]
+static GLOBAL: CountingAlloc = CountingAlloc;
+
+const SEED: u64 = 42;
+const HOME: Size = Size::new(80, 24);
+/// One churn cycle from `HOME`: grow, collapse to the smallest legal size, come back.
+const CYCLE: [Size; 3] = [Size::new(200, 50), Size::new(1, 1), HOME];
+/// Cycles that settle every buffer's high-water capacity. Two, not one: `grid::regrid_*`
+/// swap the field with its scratch, and a cycle has an odd number of regrids, so each of
+/// the pair reaches its peak size only on alternate cycles (ising_model).
+const WARMUP_CYCLES: usize = 2;
+const CYCLES: usize = WARMUP_CYCLES + 1;
+/// Half a simulated second per size: enough for respawns and lazily grown buffers.
+const CHURN_STEPS: usize = 30;
+
+const BIG: Size = Size::new(500, 150);
+/// One simulated second at `BIG` (TEST-R7).
+const BIG_STEPS: usize = 60;
+/// TEST-R7: the largest scene at `BIG` in the M11 measurement, rounded up to the next
+/// MiB: fractal_growth, 14.5 MiB (its uncapped braille-resolution lattice); every other
+/// scene holds < 4 MiB. May only be lowered; raising it needs a spec change.
+const LIVE_CEILING: i64 = 15 << 20;
+
+fn stage(entry: &Entry, size: Size) -> Stage {
+    let mut stage = Stage::new((entry.build)(), SEED, size, GlyphMode::Unicode);
+    // The runtime frame: the title and `caption()` must not leak either.
+    stage.set_title_visible(true);
+    stage
+}
+
+fn run(stage: &mut Stage, steps: usize) {
+    for _ in 0..steps {
+        stage.step(SIM_DT);
+    }
+    stage.render();
+}
+
+/// Live bytes after each churn cycle (TEST-R6), relative to the end of the warm-up.
+fn churn(entry: &Entry) -> [i64; CYCLES] {
+    let mut stage = stage(entry, HOME);
+    let mut live = [0; CYCLES];
+    for slot in &mut live {
+        for size in CYCLE {
+            stage.resize(size);
+            run(&mut stage, CHURN_STEPS);
+        }
+        *slot = live_bytes();
+    }
+    live.map(|l| l - live[WARMUP_CYCLES - 1])
+}
+
+/// Live bytes the scene's `Stage` holds at `BIG` after one simulated second (TEST-R7).
+fn footprint(entry: &Entry) -> i64 {
+    let before = live_bytes();
+    let mut stage = stage(entry, BIG);
+    run(&mut stage, BIG_STEPS);
+    let held = live_bytes() - before;
+    drop(stage);
+    held
+}
+
+/// `f` for every scene, one scoped thread each (live bytes are per thread).
+fn per_scene<T: Send>(f: fn(&Entry) -> T) -> Vec<(&'static str, T)> {
+    std::thread::scope(|s| {
+        let handles: Vec<_> = registry()
+            .iter()
+            .map(|e| (e.meta.name, s.spawn(move || f(e))))
+            .collect();
+        handles
+            .into_iter()
+            .map(|(name, h)| (name, h.join().unwrap_or_else(|_| panic!("{name} panicked"))))
+            .collect()
+    })
+}
+
+#[test]
+fn test_r6_resize_churn_returns_to_the_same_live_bytes() {
+    let rows = per_scene(churn);
+    let mut table =
+        format!("live bytes after each churn cycle, relative to cycle {WARMUP_CYCLES}:\n");
+    for (name, live) in &rows {
+        let _ = writeln!(table, "{name:<28} {live:?}");
+    }
+    println!("{table}");
+    let leaks: Vec<_> = rows
+        .iter()
+        .filter(|(_, live)| live[WARMUP_CYCLES..].iter().any(|&l| l != 0))
+        .map(|(name, live)| format!("{name}: live bytes keep changing after warm-up: {live:?}"))
+        .collect();
+    assert!(
+        leaks.is_empty(),
+        "TEST-R6:\n{}\n\n{table}",
+        leaks.join("\n")
+    );
+}
+
+#[test]
+fn test_r7_live_bytes_at_500x150_stay_under_the_ceiling() {
+    let mut rows = per_scene(footprint);
+    rows.sort_by_key(|&(_, held)| std::cmp::Reverse(held));
+    let mut table = format!(
+        "live bytes at {}x{} after {BIG_STEPS} steps (ceiling {LIVE_CEILING}):\n",
+        BIG.width(),
+        BIG.height()
+    );
+    for (name, held) in &rows {
+        let _ = writeln!(
+            table,
+            "{name:<28} {held:>10} B {:>6.2} MiB",
+            *held as f64 / f64::from(1 << 20)
+        );
+    }
+    println!("{table}");
+    let over: Vec<_> = rows
+        .iter()
+        .filter(|&&(_, held)| held >= LIVE_CEILING)
+        .map(|(name, held)| format!("{name}: {held} B"))
+        .collect();
+    assert!(
+        over.is_empty(),
+        "TEST-R7: over LIVE_CEILING:\n{}\n\n{table}",
+        over.join("\n")
+    );
+}

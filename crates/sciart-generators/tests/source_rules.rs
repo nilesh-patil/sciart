@@ -1,4 +1,5 @@
-//! Source-level rules that the type system cannot express (GEN-R3, GEN-R7, GEN-R15).
+//! Source-level rules that the type system cannot express (GEN-R3, GEN-R7, GEN-R15,
+//! TEST-R8).
 //!
 //! These read the crate's own sources and SPEC-002 at test time, so they fail the moment
 //! a module is added without a registry line, a generator reaches for the clock, or a
@@ -90,6 +91,17 @@ fn gen_r7_clippy_config_bans_wall_clock_and_global_rng() {
         assert!(
             clippy.contains(&format!("path = \"{path}\"")),
             "GEN-R7: clippy.toml disallowed-methods must ban `{path}`"
+        );
+    }
+}
+
+#[test]
+fn test_r8_clippy_config_bans_deliberate_leaks() {
+    let clippy = fs::read_to_string(workspace_root().join("clippy.toml")).expect("clippy.toml");
+    for path in ["std::boxed::Box::leak", "std::mem::forget"] {
+        assert!(
+            clippy.contains(&format!("path = \"{path}\"")),
+            "TEST-R8: clippy.toml disallowed-methods must ban `{path}`"
         );
     }
 }

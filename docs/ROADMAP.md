@@ -104,7 +104,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
 - [ ] Runtime: title visible iff setting on and HUD off, category-interleaved cycle order [RT-R5, RT-R12, RT-R13]
 - [ ] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
 - [ ] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
-- [ ] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
+- [x] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
 - [ ] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
 
 ## M9 — Future (unscheduled)
