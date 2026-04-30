@@ -94,7 +94,7 @@ Shared helpers first: layered raster, colormap roles, capped lattices, leapfrog,
 
 ## M11 — Science titles, P×C×B taxonomy, leak guards
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1–§4 · ADR-0013, ADR-0014 · branch `feat/m11-sciart-titles`.
-- [x] `title` module (split, charset, fit, span, two-tone draw with the 8–10 s dim), `Meta.title`/`captions`, `Generator::caption`, `Stage::title`/`set_title_visible` (hidden until the snapshots are re-recorded), `draw::label_right` [CORE-R71..R76]
+- [x] `title` module (split, charset, fit, span, two-tone draw with the 8–10 s dim), `Meta.title`/`captions`, `Generator::caption`, `Stage::title`/`set_title_visible`, `draw::label_right` [CORE-R71..R76]
 - [x] `Category` rebuilt: split sky + Voyages + the P×C×B lattice (11 categories), every scene re-filed; `list` prints category ids [CORE-R77, CLI-R4]
 - [x] Titles for all 41 scenes (design §3; brownian_motion from the curator proposal); strange_attractors names the shown attractor through `caption()` [GEN-R12]
 - [x] Title contract over the registry; contract and alloc suites draw the title [GEN-R12, GEN-R11]
@@ -105,7 +105,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
 - [x] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
 - [x] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
 - [x] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
-- [ ] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
+- [x] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).

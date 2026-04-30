@@ -25,4 +25,4 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
-                                       |dtheta| 1.0e-3 ( 0.0 e-folds)  dE/E 0e0
+ Double pendulum - twins diverge       |dtheta| 1.0e-3 ( 0.0 e-folds)  dE/E 0e0
