@@ -15,6 +15,7 @@ use rand::Rng;
 use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "cosmic_microwave_background",
@@ -82,7 +83,7 @@ const RAMP: [Glyph; 4] = [
     Glyph::new('▓', '*'),
     Glyph::new('█', '#'),
 ];
-const CAPTION: &str = "CMB  T=2.725K  dT~1e-5";
+const READOUT: &str = "CMB  T=2.725K  dT~1e-5";
 
 /// Angular power spectrum `D_ℓ` (μK²) of the CMB-like model (CMB-A5).
 pub(crate) fn d_ell(l: f64) -> f64 {
@@ -209,7 +210,7 @@ pub struct CosmicMicrowaveBackground {
     rx: f64,
     ry: f64,
     height: u16,
-    caption: bool,
+    readout: bool,
 }
 
 impl CosmicMicrowaveBackground {
@@ -282,8 +283,8 @@ impl Generator for CosmicMicrowaveBackground {
             }
         }
         self.height = size.height();
-        self.caption = size.height() > 6;
-        let sky_rows = f64::from(size.height()) - if self.caption { 1.0 } else { 0.0 };
+        self.readout = size.height() > 6;
+        let sky_rows = f64::from(size.height()) - if self.readout { 1.0 } else { 0.0 };
         self.cx = (w as f64 - 1.0) / 2.0;
         self.cy = (sky_rows - 1.0) / 2.0;
         self.rx = (OVAL * w as f64 / 2.0).max(0.5);
@@ -319,9 +320,11 @@ impl Generator for CosmicMicrowaveBackground {
                 canvas.put(x as i32, i32::from(y), draw::ramp(v, &RAMP), ink);
             }
         }
-        if self.caption {
+        // Bottom-right, clear of the title (GEN-R13); dropped when the row is too narrow.
+        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        if self.readout && READOUT.len() <= room {
             let y = i32::from(self.height) - 1;
-            draw::text_centered(canvas, y, CAPTION, Ink::new(Role::Text, 200));
+            draw::label_right(canvas, y, READOUT, Ink::new(Role::Text, 200));
         }
     }
 }
@@ -602,12 +605,12 @@ mod tests {
     }
 
     #[test]
-    fn cmb_oval_leaves_corners_empty_and_caption_on_last_row() {
+    fn cmb_gen_r13_oval_leaves_corners_empty_and_readout_bottom_right() {
         let mut stage = Stage::new(build(), 1, Size::new(100, 30), GlyphMode::Ascii);
         let frame = stage.render();
         assert_eq!(frame.get(0, 0).unwrap().ch, ' ');
         assert_eq!(frame.get(99, 28).unwrap().ch, ' ');
         assert_ne!(frame.get(50, 14).unwrap().ch, ' ');
-        assert!(frame.to_lines()[29].contains(CAPTION));
+        assert!(frame.to_lines()[29].ends_with(&format!(" {READOUT} ")));
     }
 }

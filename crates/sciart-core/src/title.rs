@@ -112,6 +112,14 @@ pub fn span(size: Size, title: &Title) -> Option<(i32, Range<i32>)> {
     Some((i32::from(size.height()) - 1, 0..end))
 }
 
+/// The most chars a [`draw::label_right`](crate::draw::label_right) readout on the title
+/// row can hold while its leading blank stays outside [`span`] (GEN-R13); the whole row
+/// but its two blanks when the title is hidden. Scenes drop or shorten parts to fit.
+pub fn readout_room(size: Size, title: &Title) -> usize {
+    let taken = span(size, title).map_or(0, |(_, cols)| cols.len());
+    usize::from(size.width()).saturating_sub(taken + 2)
+}
+
 /// Draw the fitted title on the bottom row, laid out like `draw::label(canvas, 0, h − 1, …)`,
 /// dimming with scene `time` in seconds (CORE-R74). Touches only the [`span`] cells, so the
 /// art keeps the rest of the row.

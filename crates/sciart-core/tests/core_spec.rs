@@ -6,7 +6,7 @@ use proptest::prelude::*;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Form, Title};
-use sciart_core::{geom, ink};
+use sciart_core::{draw, geom, ink};
 
 const STAR: Glyph = Glyph::new('★', '*');
 const INK: Ink = Ink::new(Role::Star, 200);
@@ -741,6 +741,27 @@ proptest! {
         if let Some((r, cols)) = span {
             prop_assert_eq!(r, i32::from(h) - 1);
             prop_assert_eq!(cols.start, 0);
+        }
+    }
+
+    #[test]
+    fn core_r76_gen_r13_readout_room_is_the_longest_readout_clear_of_the_span(
+        w in 1u16..160,
+        h in 1u16..40,
+    ) {
+        let size = Size::new(w, h);
+        let t = Title::new(SPOTS, None);
+        let free = title::span(size, &t).map_or(0, |(_, cols)| cols.end);
+        let room = title::readout_room(size, &t);
+        let lead = |n: usize| {
+            let mut c = Canvas::new(size, GlyphMode::Unicode);
+            draw::label_right(&mut c, i32::from(h) - 1, &"x".repeat(n), Ink::new(Role::Text, 150))
+        };
+        if w >= 2 {
+            prop_assert!(lead(room) >= free, "room {} leaves the lead at {}", room, lead(room));
+            prop_assert!(lead(room + 1) < free);
+        } else {
+            prop_assert_eq!(room, 0);
         }
     }
 }

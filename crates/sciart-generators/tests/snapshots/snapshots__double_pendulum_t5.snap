@@ -25,4 +25,4 @@ expression: frame
                                    ::        ::                                 
                                     :::   :::                                   
                                        ::::                                     
-                   |dtheta| 3.0e-2 ( 3.4 e-folds)  dE/E 3e-7
+                                      |dtheta| 3.0e-2 ( 3.4 e-folds)  dE/E 3e-7

@@ -36,6 +36,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 use sciart_core::{draw, raster};
 
 pub static META: Meta = Meta {
@@ -365,6 +366,8 @@ pub struct FractalGrowth {
     df_clock: f64,
     label: String,
     label_row: Option<i32>,
+    /// Chars the readout may take on its row, right of the title (GEN-R13).
+    room: usize,
     /// The crystal rasterised for the current state, sized in `resize` and rebuilt by
     /// [`FractalGrowth::rasterise`] after every state change; `render` only blits it.
     dots: Dots,
@@ -419,6 +422,7 @@ impl Default for FractalGrowth {
             df_clock: 0.0,
             label: String::with_capacity(96),
             label_row: None,
+            room: 0,
             dots: Dots::default(),
         }
     }
@@ -446,17 +450,22 @@ impl FractalGrowth {
         self.df = mass_radius_dimension(dists, FIT_LO, FIT_HI_FRAC * d.r_max).or(self.df);
     }
 
+    /// Readout, e.g. `p_s 0.62   N 812   D_f 1.71` (the title names the process). Parts
+    /// that would reach the title are dropped from the left, whole, so the measured
+    /// dimension goes last (GEN-R13); in-place edits of a pre-sized string, no allocation.
     fn refresh_label(&mut self) {
+        const SEP: &str = "   ";
         self.label.clear();
         let d = &self.dla;
-        let _ = write!(
-            self.label,
-            "diffusion-limited aggregation   p_s {:.2}   N {}",
-            d.p_stick,
-            d.cells.len()
-        );
+        let _ = write!(self.label, "p_s {:.2}{SEP}N {}", d.p_stick, d.cells.len());
         if let Some(df) = self.df {
-            let _ = write!(self.label, "   D_f {df:.2}");
+            let _ = write!(self.label, "{SEP}D_f {df:.2}");
+        }
+        while self.label.len() > self.room {
+            match self.label.find(SEP) {
+                Some(i) => self.label.replace_range(..i + SEP.len(), ""),
+                None => self.label.clear(),
+            }
         }
     }
 
@@ -566,6 +575,7 @@ impl Generator for FractalGrowth {
         self.steps_per_sec =
             (STEPS_REF * (r_rows / R_REF_ROWS).powf(COST_EXP)).clamp(STEPS_MIN, STEPS_MAX);
         self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
+        self.room = title::readout_room(size, &Title::new(META.title, self.caption()));
         self.reseed(ctx);
         self.rasterise();
     }
@@ -615,9 +625,9 @@ impl Generator for FractalGrowth {
 
     fn render(&self, canvas: &mut Canvas) {
         if let Some(row) = self.label_row
-            && usize::from(canvas.size().width()) >= self.label.len() + 2
+            && !self.label.is_empty()
         {
-            draw::text_centered(canvas, row, &self.label, Ink::new(Role::Text, 150));
+            draw::label_right(canvas, row, &self.label, Ink::new(Role::Text, 150));
         }
         if self.phase == Phase::Grow {
             // The vapour is sparse: each walker is a lone dot that replaces its cell
@@ -818,6 +828,39 @@ mod tests {
             prev = g.dla.cells.len();
         }
         assert!(held && shrank && reseeded, "{held} {shrank} {reseeded}");
+    }
+
+    #[test]
+    fn cry_gen_r13_readout_drops_whole_parts_from_the_left() {
+        let mut ctx = seeded(1);
+        let mut g = FractalGrowth::default();
+        // The room is w − 2 minus the title span: the full title (32 cells) at 80 wide,
+        // the phenomenon (16) at 40.
+        for (size, room) in [(Size::new(80, 24), 46), (Size::new(40, 12), 22)] {
+            ctx.set_size(size);
+            g.resize(size, &mut ctx);
+            assert_eq!(g.room, room, "{size:?}");
+        }
+        g.dla.p_stick = 0.62;
+        g.df = Some(1.71);
+        for (room, want) in [
+            (80, "p_s 0.62   N 1   D_f 1.71"),
+            (25, "p_s 0.62   N 1   D_f 1.71"),
+            (24, "N 1   D_f 1.71"),
+            (13, "D_f 1.71"),
+            (8, "D_f 1.71"),
+            (7, ""),
+        ] {
+            g.room = room;
+            g.refresh_label();
+            assert_eq!(g.label, want, "room {room}");
+        }
+        // Drawn right-aligned, a blank cell either side.
+        g.room = 22;
+        g.refresh_label();
+        let mut canvas = Canvas::new(Size::new(40, 12), GlyphMode::Ascii);
+        g.render(&mut canvas);
+        assert!(canvas.to_lines()[11].ends_with(" N 1   D_f 1.71 "));
     }
 
     #[test]

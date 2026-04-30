@@ -4,8 +4,10 @@
 use std::collections::VecDeque;
 use std::f64::consts::TAU;
 
+use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "doppler_effect",
@@ -31,7 +33,13 @@ const START_FRAC: f64 = 0.3;
 const TAN_OCTANT: f64 = 0.414_213_562_373_095;
 const MAX_SAMPLES: usize = 20_000;
 const SOURCE: Glyph = Glyph::new('◉', '@');
-const CAPTION: &str = "<- redshift    v = 0.5c    blueshift ->";
+/// The bottom-row legend, longest first (GEN-R13 picks the longest that clears the title).
+/// The model is sound, so it names pitch and the speed of sound `c_s`, not light.
+const LEGENDS: [&str; 3] = [
+    "<- lower pitch  v = 0.5 c_s  higher pitch ->",
+    "<- lower  v = 0.5 c_s  higher ->",
+    "v = 0.5 c_s",
+];
 
 /// One circular wavefront: emitted at `(x0, y0)` (rows) at time `t0`.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -199,7 +207,7 @@ impl Generator for DopplerEffect {
                 if last != Some((x, y)) {
                     last = Some((x, y));
                     // An observer in direction θ from the emission point hears
-                    // f' = f / (1 − β cos θ): blueshifted iff cos θ > 0.
+                    // f' = f / (1 − β cos θ): higher pitch iff cos θ > 0.
                     let role = if c > 0.0 { Role::Cold } else { Role::Hot };
                     let level = 55.0 + 200.0 * fade * (0.45 + 0.55 * c.abs());
                     canvas.put(x, y, arc_glyph(c, s), Ink::new(role, level as u8));
@@ -219,14 +227,13 @@ impl Generator for DopplerEffect {
         );
         canvas.put(sx - 2, sy, Glyph::new('─', '-'), Ink::new(Role::Accent, 90));
 
-        let w = canvas.size().width();
-        if self.height > 8 && usize::from(w) >= CAPTION.len() + 2 {
-            sciart_core::draw::text_centered(
-                canvas,
-                i32::from(self.height) - 1,
-                CAPTION,
-                Ink::new(Role::Text, 170),
-            );
+        // Bottom-right, clear of the title (GEN-R13).
+        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        if self.height > 8
+            && let Some(legend) = LEGENDS.iter().find(|s| s.len() <= room)
+        {
+            let y = i32::from(self.height) - 1;
+            draw::label_right(canvas, y, legend, Ink::new(Role::Text, 170));
         }
     }
 }
@@ -340,5 +347,21 @@ mod tests {
             .find_map(|x| frame.get(x, sy).filter(|c| c.ch == '('));
         assert_eq!(right.map(|c| c.ink.role), Some(Role::Cold));
         assert_eq!(left.map(|c| c.ink.role), Some(Role::Hot));
+    }
+
+    #[test]
+    fn dop_gen_r13_legend_names_pitch_and_sits_right_of_the_title() {
+        // "Doppler effect · waves bunch up" takes cols 0..33 at 80 wide (45 chars left);
+        // at 40 wide only "Doppler effect" shows, in cols 0..16 (22 chars left).
+        for (w, h, legend) in [
+            (80, 24, LEGENDS[0]),
+            (54, 12, LEGENDS[1]),
+            (40, 12, LEGENDS[2]),
+        ] {
+            let mut stage = Stage::new(build(), 3, Size::new(w, h), GlyphMode::Ascii);
+            let row = stage.render().to_lines().pop().unwrap();
+            assert!(row.ends_with(&format!(" {legend} ")), "{w}x{h}: {row:?}");
+        }
+        assert!(LEGENDS.iter().all(|s| !s.contains("shift")));
     }
 }

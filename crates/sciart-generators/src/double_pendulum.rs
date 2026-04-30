@@ -18,6 +18,7 @@ use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::ode;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "double_pendulum",
@@ -507,10 +508,12 @@ impl Generator for DoublePendulum {
         }
         sciart_core::particles::plot(canvas, pivot.0, pivot.1, PIVOT, Ink::new(Role::Text, 230));
 
+        // Right-aligned, clear of the title (GEN-R13).
+        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
         if let Some(row) = self.label_row
-            && let Some(label) = self.labels.iter().find(|l| l.len() as i32 + 2 <= width)
+            && let Some(label) = self.labels.iter().find(|l| l.len() <= room)
         {
-            sciart_core::draw::text_centered(canvas, row, label, Ink::new(Role::Text, 170));
+            sciart_core::draw::label_right(canvas, row, label, Ink::new(Role::Text, 170));
         }
     }
 }
@@ -740,6 +743,27 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn dp_gen_r13_readout_is_the_longest_form_right_of_the_title() {
+        // Long, mid and short forms: the room right of the title decides.
+        for (size, form) in [
+            (Size::new(200, 50), 0),
+            (Size::new(80, 24), 1),
+            (Size::new(40, 12), 2),
+        ] {
+            let mut g = DoublePendulum::default();
+            g.resize(size, &mut seeded(3));
+            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+            g.render(&mut canvas);
+            let bottom = &canvas.to_lines()[usize::from(size.height()) - 1];
+            let label = &g.labels[form];
+            assert!(
+                bottom.ends_with(&format!(" {label} ")),
+                "{size:?}: {bottom:?}"
+            );
         }
     }
 
