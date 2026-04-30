@@ -1,4 +1,4 @@
-//! Config file loading and settings resolution (SPEC-005 CFG-R1..R5).
+//! Config file loading and settings resolution (SPEC-005 CFG-R1..R7).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -23,6 +23,7 @@ pub struct FileConfig {
     pub theme: Option<ThemeArg>,
     pub ascii: Option<bool>,
     pub hud: Option<bool>,
+    pub title: Option<bool>,
     #[serde(default)]
     pub disabled: Vec<String>,
     pub keep_awake: Option<KeepAwakeArg>,
@@ -46,6 +47,8 @@ pub struct Settings {
     pub theme: Theme,
     pub ascii: bool,
     pub hud: bool,
+    /// Show the science title (CFG-R6, CLI-R7).
+    pub title: bool,
     pub seed: Option<u64>,
     pub disabled: Vec<String>,
     pub keep_awake: Mode,
@@ -126,6 +129,7 @@ pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
             .map_or(Theme::default(), Theme::from),
         ascii: cli.ascii || file.ascii.unwrap_or(false),
         hud: cli.hud || file.hud.unwrap_or(false),
+        title: !cli.no_title && file.title.unwrap_or(true),
         seed: cli.seed,
         disabled: file.disabled,
         keep_awake: cli
@@ -160,6 +164,7 @@ mod tests {
                 theme: Theme::Astro,
                 ascii: false,
                 hud: false,
+                title: true,
                 seed: None,
                 disabled: vec![],
                 keep_awake: Mode::platform_default(),
@@ -296,6 +301,34 @@ mod tests {
         let f = parse(text, Path::new("docs/config.example.toml")).unwrap();
         assert_eq!(f.fps, Some(DEFAULT_FPS));
         assert_eq!(f.interval, Some(DEFAULT_INTERVAL));
+        assert_eq!(f.title, Some(true), "CFG-R6 key documented");
+    }
+
+    #[test]
+    fn cfg_r6_cli_r7_title_defaults_on_and_no_title_can_only_turn_it_off() {
+        let title = |args: &[&str], text: &str| resolve(&cli(args).unwrap(), file(text)).0.title;
+        assert!(title(&[], ""), "default on");
+        assert!(!title(&[], "title = false"), "file wins over default");
+        assert!(title(&[], "title = true"));
+        assert!(!title(&["--no-title"], "title = true"), "flag beats file");
+        assert!(!title(&["--no-title"], ""));
+        assert!(!title(&["--no-title"], "title = false"));
+        assert!(parse("title = \"yes\"", Path::new("c.toml")).is_err());
+    }
+
+    #[test]
+    fn cfg_r7_retired_name_in_disabled_disables_the_renamed_scene_silently() {
+        use crate::cli::{Command, select};
+        let f = file("disabled = [\"chemical_reaction\", \"crystal_growth\"]");
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), f);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        let names: Vec<_> = select(&Command::Sim, &s.disabled)
+            .unwrap()
+            .iter()
+            .map(|e| e.meta.name)
+            .collect();
+        assert_eq!(names.len(), sciart_generators::registry().len() - 2);
+        assert!(!names.contains(&"gray_scott") && !names.contains(&"fractal_growth"));
     }
 
     #[test]

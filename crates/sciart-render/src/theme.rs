@@ -49,6 +49,9 @@ impl Theme {
             (Theme::Mono, Role::Div) => mono_table().div[usize::from(ink.level)],
             (Theme::Mono, _) => grey(ink.level),
             (Theme::Astro, role) => scale(astro_base(role), 0.3 + 0.7 * level),
+            // Per-cell hues would turn titles and labels into confetti; text reads as one
+            // neutral grey, the same as astro's (RND-R8).
+            (Theme::Rainbow, Role::Text) => scale(astro_base(Role::Text), 0.3 + 0.7 * level),
             (Theme::Rainbow, _) => hsv(cell_hue(x, y), 1.0, 0.35 + 0.65 * level),
         }
     }
@@ -458,6 +461,28 @@ mod tests {
         assert!(hues.len() > 10, "rainbow should differ across cells");
         let Rgb(r, g, b) = Theme::Mono.color(ink, 1, 1);
         assert!(r == g && g == b);
+    }
+
+    #[test]
+    fn rnd_r8_rainbow_text_is_one_neutral_grey_rising_with_level() {
+        let text = |l, x, y| Theme::Rainbow.color(Ink::new(Role::Text, l), x, y);
+        for level in 0..=255u8 {
+            let c = text(level, 0, 0);
+            let Rgb(r, g, b) = c;
+            assert!(r == g && g == b, "neutral at {level}: {c:?}");
+            for (x, y) in [(1, 0), (17, 3), (199, 49)] {
+                assert_eq!(text(level, x, y), c, "same grey in every cell");
+            }
+            if level > 0 {
+                assert!(luma(c) >= luma(text(level - 1, 0, 0)), "level {level}");
+            }
+        }
+        // Other roles keep their per-cell hues.
+        let star = Ink::new(Role::Star, 200);
+        assert_ne!(
+            Theme::Rainbow.color(star, 0, 0),
+            Theme::Rainbow.color(star, 1, 0)
+        );
     }
 
     #[test]

@@ -7,6 +7,8 @@ interval = 15       # seconds between scene changes in `sim`
 theme = "astro"     # astro | rainbow | mono
 ascii = false       # pure-ASCII glyphs
 hud = false         # start with the status line visible (toggle with `h`)
+title = true        # science title at the bottom-left, or in the HUD while it is on
+                    # (`--no-title` turns it off)
 
 # Excluded from `sim` cycling; `sciart run <name>` still works.
 disabled = []

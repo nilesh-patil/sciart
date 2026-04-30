@@ -101,9 +101,9 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
 - [x] Renames `chemical_reaction` → `gray_scott`, `crystal_growth` → `fractal_growth`, old names kept as aliases [GEN-R2, GEN-R14]
 - [x] SPEC-002 scene headings carry each scene's category label [GEN-R15]
 - [ ] Bottom-left kept free of scene text: readout moves to `draw::label_right`, label clamps [GEN-R13]
-- [ ] Runtime: title visible iff setting on and HUD off, category-interleaved cycle order [RT-R5, RT-R12, RT-R13]
-- [ ] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
-- [ ] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
+- [x] Runtime: title visible iff setting on and HUD off, category-interleaved cycle order [RT-R5, RT-R12, RT-R13]
+- [x] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
+- [x] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
 - [x] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
 - [ ] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
 

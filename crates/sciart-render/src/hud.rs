@@ -1,9 +1,10 @@
-//! One-line status overlay (SPEC-003 RND-R4, spec F4).
+//! One-line status overlay (SPEC-003 RND-R4, RND-R9, spec F4).
 //!
 //! The full line is
-//! `<name> | <fps> fps | <theme> | seed <n> | <keep-awake> | <flags…> | <key hints>`.
+//! `<name> | <fps> fps | <theme> | seed <n> | <keep-awake> | <flags…> | <key hints>`,
+//! where `<name>` is the scene's science title (RND-R9), or its id without one.
 //! When it is wider than the terminal it is *fitted*, not clipped: lower-priority fields are
-//! dropped or shortened one step at a time (see [`LADDER`]), then the scene name is elided, so
+//! dropped or shortened one step at a time (see [`LADDER`]), then the name is shortened, so
 //! the state flags (`LOW-POWER`, `PAUSED`, `<k> quarantined`) are the last thing to go.
 
 use std::fmt::{self, Write};
@@ -13,6 +14,7 @@ use ratatui::layout::Rect;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
+use sciart_core::title::{Form, Title, ascii_of};
 
 use crate::Theme;
 
@@ -24,7 +26,10 @@ const ELIDE: char = '~';
 
 #[derive(Debug, Clone)]
 pub struct Hud<'a> {
+    /// The scene id: the name when there is no title, and its last-resort short form.
     pub generator: &'a str,
+    /// The live science title (RT-R12); `None` when titles are off.
+    pub title: Option<Title>,
     pub fps: f64,
     pub theme: Theme,
     pub seed: u64,
@@ -95,11 +100,13 @@ const LADDER: [Plan; 7] = {
     [full, no_hints, no_seed, no_theme, ka_short, no_fps, no_ka]
 };
 
-/// How much of the scene name to show.
+/// What the name slot shows.
 #[derive(Debug, Clone, Copy)]
 enum Name {
-    Full,
-    /// At most this many columns (≥ 2), ending in [`ELIDE`] when cut.
+    /// A form of the title, written in ASCII (RND-R9).
+    Title(Title, Form),
+    Id,
+    /// The id cut to at most this many columns (≥ 2), ending in [`ELIDE`] when cut.
     Elided(usize),
     Hidden,
 }
@@ -110,22 +117,33 @@ impl Hud<'_> {
         self.fit(usize::MAX)
     }
 
-    /// The HUD text fitted to `width` columns (RND-R4). Never longer than `width`; deterministic;
-    /// every flag is present whenever `width` is at least the width of the flags alone.
+    /// The HUD text fitted to `width` columns (RND-R4, RND-R9). Never longer than `width`;
+    /// deterministic; every flag is present whenever `width` is at least the width of the flags
+    /// alone.
     ///
-    /// Widths are counted in `char`s: every input is ASCII (registry names, KA-R5 statuses), and
-    /// ratatui clips anything wider regardless. Measuring runs through a counting sink, so the
-    /// only allocation is the returned `String`.
+    /// Widths are counted in `char`s: every input is ASCII (registry names, KA-R5 statuses,
+    /// titles through `ascii_of`), and ratatui clips anything wider regardless. Measuring runs
+    /// through a counting sink, so the only allocation is the returned `String`.
     pub fn fit(&self, width: usize) -> String {
+        let name = self.title.map_or(Name::Id, |t| Name::Title(t, Form::Full));
         for plan in LADDER {
-            let len = self.measure(plan, Name::Full);
+            let len = self.measure(plan, name);
             if len <= width {
-                return self.render_to_string(plan, Name::Full, len);
+                return self.render_to_string(plan, name, len);
             }
         }
 
-        // Only the name and the flags are left; shorten the name before touching any flag.
+        // Only the name and the flags are left; shorten the name before touching any flag:
+        // first to shorter whole names (RND-R9), then by eliding the id.
         let last = LADDER[LADDER.len() - 1];
+        if let Some(title) = self.title {
+            for name in [Name::Title(title, Form::Phenomenon), Name::Id] {
+                let len = self.measure(last, name);
+                if len <= width {
+                    return self.render_to_string(last, name, len);
+                }
+            }
+        }
         let flags_len = self.measure(last, Name::Hidden);
         let name = if flags_len == 0 {
             Name::Elided(width)
@@ -163,7 +181,11 @@ impl Hud<'_> {
     fn write(&self, out: &mut impl Write, plan: Plan, name: Name) -> fmt::Result {
         let mut f = Fields { out, first: true };
         match name {
-            Name::Full => f.field(format_args!("{}", self.generator))?,
+            // `?` only for chars outside the title charset, which GEN-R12 keeps out.
+            Name::Title(title, form) => {
+                f.chars(title.chars(form).map(|c| ascii_of(c).unwrap_or('?')))?;
+            }
+            Name::Id => f.field(format_args!("{}", self.generator))?,
             Name::Elided(budget) => f.elided(self.generator, budget)?,
             Name::Hidden => {}
         }
@@ -218,6 +240,11 @@ impl<W: Write> Fields<'_, W> {
     fn field(&mut self, args: fmt::Arguments<'_>) -> fmt::Result {
         self.sep()?;
         self.out.write_fmt(args)
+    }
+
+    fn chars(&mut self, mut chars: impl Iterator<Item = char>) -> fmt::Result {
+        self.sep()?;
+        chars.try_for_each(|c| self.out.write_char(c))
     }
 
     /// `text` cut to `budget` columns, the last one being [`ELIDE`] when anything was cut.
@@ -288,9 +315,11 @@ mod tests {
 
     const BIG_SEED: u64 = 16_376_649_230_169_585_180; // 20 digits, like a random default seed
 
+    /// Untitled (`--no-title`): the name slot is the id, as before M11.
     fn hud() -> Hud<'static> {
         Hud {
             generator: "starfield",
+            title: None,
             fps: 29.6,
             theme: Theme::Astro,
             seed: 42,
@@ -309,6 +338,81 @@ mod tests {
             paused: true,
             ..hud()
         }
+    }
+
+    /// `cmb()` with its science title.
+    fn titled_cmb() -> Hud<'static> {
+        Hud {
+            title: Some(Title::new("Oldest light · early sound waves", None)),
+            ..cmb()
+        }
+    }
+
+    #[test]
+    fn rnd_r9_name_slot_is_the_ascii_title() {
+        let h = titled_cmb();
+        assert_eq!(
+            h.line(),
+            "Oldest light - early sound waves | 30 fps | astro | seed 16376649230169585180 \
+             | caffeinate:on | PAUSED | n p space r h t q"
+        );
+        let h = Hud {
+            title: Some(Title::new("Strange attractor · chaos", Some("Rössler"))),
+            ..hud()
+        };
+        assert!(h.line().starts_with("Strange attractor - Rossler | "));
+        assert!(h.line().is_ascii());
+    }
+
+    #[test]
+    fn rnd_r9_fit_steps_title_then_phenomenon_then_id() {
+        // The RND-R4 ladder runs with the full title; then the name slot shortens.
+        let h = titled_cmb();
+        let expected: &[(usize, &str)] = &[
+            (
+                80,
+                "Oldest light - early sound waves | 30 fps | astro | caffeinate:on | PAUSED",
+            ),
+            (41, "Oldest light - early sound waves | PAUSED"),
+            // Phenomenon only; the id (36 columns with the flag) is longer, so it is skipped.
+            (40, "Oldest light | PAUSED"),
+            (21, "Oldest light | PAUSED"),
+            // Then the id, elided.
+            (20, "cosmic_mic~ | PAUSED"),
+            (11, "c~ | PAUSED"),
+            (10, "PAUSED"),
+        ];
+        for &(width, want) in expected {
+            assert_eq!(h.fit(width), want, "width {width}");
+        }
+
+        // An id shorter than the phenomenon is used whole before it is elided.
+        let h = Hud {
+            generator: "pulsar",
+            title: Some(Title::new("Neutron star beacon · spin", None)),
+            ..cmb()
+        };
+        let expected: &[(usize, &str)] = &[
+            (35, "Neutron star beacon - spin | PAUSED"),
+            (34, "Neutron star beacon | PAUSED"),
+            (28, "Neutron star beacon | PAUSED"),
+            (27, "pulsar | PAUSED"),
+            (15, "pulsar | PAUSED"),
+            (14, "puls~ | PAUSED"),
+        ];
+        for &(width, want) in expected {
+            assert_eq!(h.fit(width), want, "width {width}");
+        }
+    }
+
+    #[test]
+    fn rnd_r9_without_a_title_the_slot_is_the_id() {
+        assert!(
+            cmb()
+                .line()
+                .starts_with("cosmic_microwave_background | 30 fps")
+        );
+        assert_eq!(cmb().fit(35), "cosmic_microwave_backgrou~ | PAUSED");
     }
 
     #[test]
@@ -434,26 +538,38 @@ mod tests {
     }
 
     /// Exhaustive property over widths 0..=160, every flag combination and a spread of names,
-    /// seeds, fps values and keep-awake statuses.
+    /// titles (longer and shorter than the id, captioned, accented), seeds, fps values and
+    /// keep-awake statuses.
     #[test]
-    fn rnd_r4_fit_properties_over_many_widths() {
+    fn rnd_r4_r9_fit_properties_over_many_widths() {
         let names = ["-", "x", "starfield", "cosmic_microwave_background"];
+        let titles = [
+            None,
+            Some(Title::new("Oldest light · early sound waves", None)),
+            Some(Title::new("Neutron star beacon · spin", None)),
+            Some(Title::new("Strange attractor · chaos", Some("Rössler"))),
+            Some(Title::new("Ab", None)),
+        ];
         let statuses = ["off", "caffeinate:on", "mouse:err(3)", "mouse:unavailable"];
         for name in names {
-            for keep_awake in statuses {
-                for seed in [0, 42, BIG_SEED, u64::MAX] {
-                    for fps in [0.0, 29.6, 144.0] {
-                        for bits in 0..8u8 {
-                            check_fit(&Hud {
-                                generator: name,
-                                fps,
-                                seed,
-                                keep_awake,
-                                low_power: bits & 1 != 0,
-                                paused: bits & 2 != 0,
-                                quarantined: if bits & 4 != 0 { 3 } else { 0 },
-                                ..hud()
-                            });
+            for title in titles {
+                for keep_awake in statuses {
+                    // Shortest and longest seed and fps texts: only their widths matter.
+                    for seed in [0, u64::MAX] {
+                        for fps in [0.0, 144.0] {
+                            for bits in 0..8u8 {
+                                check_fit(&Hud {
+                                    generator: name,
+                                    title,
+                                    fps,
+                                    seed,
+                                    keep_awake,
+                                    low_power: bits & 1 != 0,
+                                    paused: bits & 2 != 0,
+                                    quarantined: if bits & 4 != 0 { 3 } else { 0 },
+                                    ..hud()
+                                });
+                            }
                         }
                     }
                 }
@@ -492,7 +608,12 @@ mod tests {
                 }
             }
             if !flags.is_empty() && width >= flags_min + SEP.len() + 2 {
-                assert!(got.starts_with(&h.generator[..1]), "width {width}: {got:?}");
+                let title_initial = h.title.map(|t| &t.phenomenon[..1]);
+                assert!(
+                    got.starts_with(&h.generator[..1])
+                        || title_initial.is_some_and(|i| got.starts_with(i)),
+                    "width {width}: {got:?}"
+                );
             }
             assert_eq!(got.is_empty(), width == 0, "width {width}");
             assert!(!got.starts_with(' ') && !got.ends_with(' ') || got.ends_with(" ~"));
