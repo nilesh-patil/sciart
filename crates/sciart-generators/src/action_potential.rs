@@ -1208,7 +1208,7 @@ impl ActionPotential {
         if h < 3 {
             return;
         }
-        let room = title::readout_room(self.cells, &Title::new(META.title, self.caption()));
+        let room = title::readout_room(self.cells, &Title::of(self));
         let beat = self.timeline.at(self.step as f64 / SUB_PER_S as f64).label;
         let mut speed = StackText::<8>::new();
         // Writing into a StackText never fails.
@@ -1885,19 +1885,22 @@ mod tests {
         let long = "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s | single";
         let mid = "HH squid 6.3C | v=--.- m/s | single";
         let short = "HH 6.3C | v=--.- m/s | single";
-        // The room is w − 2 minus the title span: 33 cells from w = 55, where the full
-        // title fits, 13 for the phenomenon below that, none below w = 22.
+        // The room is w − 2 minus the title's gutter and text and the 4-cell gap: w − 37
+        // from w = 55, where the full title fits, w − 17 for the phenomenon below that, and
+        // w − 2 below w = 22, where the title hides.
         for (w, want) in [
-            (97u16, long),
-            (96, mid),
-            (73, mid),
-            (72, short),
-            (67, short),
-            (66, "HH 6.3C"),
+            (99u16, long),
+            (98, mid),
+            (75, mid),
+            (74, short),
+            (69, short),
+            (68, "HH 6.3C"),
             (55, "HH 6.3C"),
-            (54, mid),
-            (52, short),
-            (46, "HH 6.3C"),
+            (54, short),
+            (49, short),
+            (48, "HH 6.3C"),
+            (24, "HH 6.3C"),
+            (23, ""),
             (21, "HH 6.3C"),
             (9, "HH 6.3C"),
             (8, ""),
@@ -1909,8 +1912,8 @@ mod tests {
         }
         // The longest beats fit the least room of their form.
         for (w, t, want) in [
-            (73, 14.0, "HH squid 6.3C | v=12.3 m/s | collision"),
-            (67, 16.0, "HH 6.3C | v=12.3 m/s | threshold"),
+            (75, 14.0, "HH squid 6.3C | v=12.3 m/s | collision"),
+            (69, 16.0, "HH 6.3C | v=12.3 m/s | threshold"),
         ] {
             assert_eq!(readout(w, t, Some(12.3)).trim(), want, "w={w}");
         }

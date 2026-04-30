@@ -18,7 +18,7 @@ pub static META: Meta = Meta {
     name: "stellar_nursery",
     category: Category::DeepCosmos,
     description: "A glowing nebula where gas streams onto protostars that ignite",
-    title: "Star birth · gas clouds collapse",
+    title: "Star birth · gas falls inward",
     captions: &[],
 };
 

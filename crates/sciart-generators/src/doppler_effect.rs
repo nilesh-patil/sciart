@@ -228,7 +228,7 @@ impl Generator for DopplerEffect {
         canvas.put(sx - 2, sy, Glyph::new('─', '-'), Ink::new(Role::Accent, 90));
 
         // Bottom-right, clear of the title (GEN-R13).
-        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         if self.height > 8
             && let Some(legend) = LEGENDS.iter().find(|s| s.len() <= room)
         {
@@ -351,10 +351,11 @@ mod tests {
 
     #[test]
     fn dop_gen_r13_legend_names_pitch_and_sits_right_of_the_title() {
-        // "Doppler effect · waves bunch up" takes cols 0..33 at 80 wide (45 chars left);
-        // at 40 wide only "Doppler effect" shows, in cols 0..16 (22 chars left).
+        // Beside the full "Doppler effect · waves bunch up" (31 cells) the room is w − 37,
+        // so the long legend needs 81 columns; beside "Doppler effect" alone it is w − 20.
         for (w, h, legend) in [
-            (80, 24, LEGENDS[0]),
+            (81, 24, LEGENDS[0]),
+            (80, 24, LEGENDS[1]),
             (54, 12, LEGENDS[1]),
             (40, 12, LEGENDS[2]),
         ] {

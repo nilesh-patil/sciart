@@ -26,7 +26,7 @@ pub static META: Meta = Meta {
     name: "liesegang_rings",
     category: Category::Chemistry,
     description: "Liesegang bands snapping into place down a rack of gel columns",
-    title: "Liesegang · bands form in bursts",
+    title: "Liesegang bands · form in bursts",
     captions: &[],
 };
 

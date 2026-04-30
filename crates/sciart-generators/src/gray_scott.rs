@@ -64,7 +64,7 @@ pub static META: Meta = Meta {
     name: "gray_scott",
     category: Category::Chemistry,
     description: "Gray-Scott reaction-diffusion growing living Turing patterns",
-    title: "Chemical spots · feed and kill",
+    title: "Turing patterns · feed and kill",
     captions: &[],
 };
 

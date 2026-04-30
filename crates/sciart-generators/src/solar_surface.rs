@@ -24,7 +24,7 @@ pub static META: Meta = Meta {
     name: "solar_surface",
     category: Category::SunPlanets,
     description: "The granulated Sun turning slowly, with sunspots, limb loops and coronal rain",
-    title: "Sun · convection and sunspots",
+    title: "Solar surface · boiling granules",
     captions: &[],
 };
 
@@ -1205,7 +1205,7 @@ impl SolarSurface {
         if !self.view.label {
             return;
         }
-        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         let mut buf = StackText::<32>::new();
         let _ = write!(buf, "day {:.1}", DAYS_PER_SEC * self.t);
         let day = buf.len();
@@ -2316,9 +2316,10 @@ mod tests {
 
     #[test]
     fn sun_gen_r13_label_and_tiny_sizes() {
-        // Right-aligned, clear of the title: "Sun · convection and sunspots" takes cols
-        // 0..31 from 52 wide, which leaves 19 chars there, so Teff is dropped.
-        for (w, want) in [(80, " day 3.0  Teff 5772 K "), (52, " day 3.0 ")] {
+        // Right-aligned, clear of the title: beside the full "Solar surface · boiling
+        // granules" (32 cells, from 57 wide) the room is w − 38, 19 chars at 57, so Teff
+        // is dropped there.
+        for (w, want) in [(80, " day 3.0  Teff 5772 K "), (57, " day 3.0 ")] {
             let (mut s, mut ctx) = scene(w, 24);
             for _ in 0..40 {
                 s.update(0.25, &mut ctx);

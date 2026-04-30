@@ -22,7 +22,7 @@ use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "brownian_motion",
-    category: Category::PhysicalChemistry,
+    category: Category::Physics,
     description: "A pollen grain jittering among solvent molecules (Langevin dynamics)",
     title: "Brownian motion · random kicks",
     captions: &[],
@@ -290,8 +290,7 @@ impl BrownianMotion {
     /// by its estimator (time-averaged MSD at the lag τ, inertia-corrected — see [`d_hat`]),
     /// then the true D, then the elapsed time. When it would reach the title, trailing
     /// parts are dropped rather than clipped (GEN-R13); below the estimator alone the label
-    /// is empty (not drawn). Two-space gaps keep all three parts at 80 columns until
-    /// t = 100 s.
+    /// is empty (not drawn). At 80 columns, beside the full title, the time is dropped.
     ///
     /// [`d_hat`]: Self::d_hat
     fn refresh_label(&mut self) {
@@ -369,7 +368,7 @@ impl Generator for BrownianMotion {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
         // Bottom row is the readout when there is room for it.
-        self.room = title::readout_room(size, &Title::new(META.title, self.caption()));
+        self.room = title::readout_room(size, &Title::of(self));
         self.label_row = (size.height() >= 8).then(|| i32::from(size.height()) - 1);
         let rows = if self.label_row.is_some() { h - 1.0 } else { h };
         self.mol_box = Bounds {
@@ -735,12 +734,13 @@ mod tests {
                 "{w}: {bottom}"
             );
         }
-        // 80 columns already get every part, beside the full title.
+        // 80 columns, beside the full title, keep the estimate and the true D; the time
+        // is the first part dropped.
         g.resize(Size::new(80, 24), &mut ctx);
         for _ in 0..200 {
             g.update(SIM_DT, &mut ctx);
         }
-        assert!(g.label.contains("D = 2.25 rows^2/s") && g.label.contains("t = "));
+        assert!(g.label.ends_with("  D = 2.25 rows^2/s"), "{}", g.label);
     }
 
     #[test]

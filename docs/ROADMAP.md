@@ -106,6 +106,12 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
 - [x] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
 - [x] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
 - [x] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
+- [x] Review round 1: 4-cell title–readout gap, fade restarts per caption, HUD title in the canvas title's columns, setting precedence and narrowed C/P clauses (brownian_motion → Forces & Waves, ising_model → States of Matter), category ids spelled from labels, title wording, per-scene TEST-R7 ceiling, wider leak bans [CORE-R71, CORE-R74..R77, GEN-R13, RND-R9, TEST-R7, TEST-R8]
+
+## M12 — Scene upgrades (planned)
+Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5.
+- [ ] Cap fractal_growth's DLA lattice with `grid::lattice_for` (ADR-0012) and drop its TEST-R7 exception
+- [ ] radioactive_decay: size the nucleus lattice to rows `0..h − 1`, so the title is not punched through its last row
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).

@@ -32,16 +32,25 @@ const CHURN_STEPS: usize = 30;
 const BIG: Size = Size::new(500, 150);
 /// One simulated second at `BIG` (TEST-R7).
 const BIG_STEPS: usize = 60;
-/// TEST-R7: the largest scene at `BIG` in the M11 measurement, rounded up to the next
-/// MiB: fractal_growth, 14.5 MiB (its uncapped braille-resolution lattice); every other
-/// scene holds < 4 MiB. May only be lowered; raising it needs a spec change.
-const LIVE_CEILING: i64 = 15 << 20;
+/// TEST-R7: live bytes at `BIG` stay under this for every scene not in `EXCEPTIONS`; all of
+/// them held < 4 MiB in the M11 measurement. May only be lowered; raising it needs a spec
+/// change.
+const LIVE_CEILING: i64 = 4 << 20;
+/// Scenes with their own, higher ceiling, each named with its reason in TEST-R7, so one
+/// outlier does not loosen the guard for every other scene. fractal_growth held 14.5 MiB:
+/// its braille-resolution DLA lattice is uncapped until M12 caps it (ADR-0012).
+const EXCEPTIONS: &[(&str, i64)] = &[("fractal_growth", 15 << 20)];
 
+fn ceiling(name: &str) -> i64 {
+    EXCEPTIONS
+        .iter()
+        .find(|&&(scene, _)| scene == name)
+        .map_or(LIVE_CEILING, |&(_, ceiling)| ceiling)
+}
+
+/// Titles are on by default (CORE-R75), so the title and `caption()` are guarded too.
 fn stage(entry: &Entry, size: Size) -> Stage {
-    let mut stage = Stage::new((entry.build)(), SEED, size, GlyphMode::Unicode);
-    // The runtime frame: the title and `caption()` must not leak either.
-    stage.set_title_visible(true);
-    stage
+    Stage::new((entry.build)(), SEED, size, GlyphMode::Unicode)
 }
 
 fn run(stage: &mut Stage, steps: usize) {
@@ -115,7 +124,8 @@ fn test_r7_live_bytes_at_500x150_stay_under_the_ceiling() {
     let mut rows = per_scene(footprint);
     rows.sort_by_key(|&(_, held)| std::cmp::Reverse(held));
     let mut table = format!(
-        "live bytes at {}x{} after {BIG_STEPS} steps (ceiling {LIVE_CEILING}):\n",
+        "live bytes at {}x{} after {BIG_STEPS} steps (ceiling {LIVE_CEILING}, exceptions \
+         {EXCEPTIONS:?}):\n",
         BIG.width(),
         BIG.height()
     );
@@ -129,12 +139,12 @@ fn test_r7_live_bytes_at_500x150_stay_under_the_ceiling() {
     println!("{table}");
     let over: Vec<_> = rows
         .iter()
-        .filter(|&&(_, held)| held >= LIVE_CEILING)
-        .map(|(name, held)| format!("{name}: {held} B"))
+        .filter(|&&(name, held)| held >= ceiling(name))
+        .map(|(name, held)| format!("{name}: {held} B, ceiling {}", ceiling(name)))
         .collect();
     assert!(
         over.is_empty(),
-        "TEST-R7: over LIVE_CEILING:\n{}\n\n{table}",
+        "TEST-R7: over the ceiling:\n{}\n\n{table}",
         over.join("\n")
     );
 }

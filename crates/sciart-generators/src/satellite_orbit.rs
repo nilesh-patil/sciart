@@ -11,7 +11,7 @@ pub static META: Meta = Meta {
     name: "satellite_orbit",
     category: Category::Voyages,
     description: "A rotating Earth with satellites on inclined orbits",
-    title: "Satellites · lower orbits faster",
+    title: "Satellites · Earth turns beneath",
     captions: &[],
 };
 

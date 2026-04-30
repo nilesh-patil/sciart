@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::{Canvas, Glyph, Ink, Role, Size, ink};
+use crate::{Canvas, Generator, Glyph, Ink, Role, Size, ink};
 
 /// Splits a title into phenomenon and mechanism (CORE-R71).
 pub const SEPARATOR: &str = " · ";
@@ -24,6 +24,9 @@ const MECHANISM_LEVEL: f64 = 110.0;
 const DIM_LEVEL: f64 = 90.0;
 const DIM_FROM_S: f64 = 8.0;
 const DIM_OVER_S: f64 = 2.0;
+/// Blank cells between the title's text and a title-row readout's text (CORE-R76): with only
+/// the two pad cells between them, two grey runs read as one sentence.
+const READOUT_GAP: usize = 4;
 
 /// Which part of a title is shown (CORE-R72, CORE-R73).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -50,6 +53,11 @@ impl Title {
             phenomenon,
             mechanism: caption.unwrap_or(mechanism),
         }
+    }
+
+    /// The live title of `g`: its `Meta.title` with its current caption (CORE-R71).
+    pub fn of(g: &(impl Generator + ?Sized)) -> Self {
+        Self::new(g.meta().title, g.caption())
     }
 
     /// The pieces of `form` in reading order: phenomenon, separator, mechanism (the last
@@ -113,22 +121,26 @@ pub fn span(size: Size, title: &Title) -> Option<(i32, Range<i32>)> {
 }
 
 /// The most chars a [`draw::label_right`](crate::draw::label_right) readout on the title
-/// row can hold while its leading blank stays outside [`span`] (GEN-R13); the whole row
-/// but its two blanks when the title is hidden. Scenes drop or shorten parts to fit.
+/// row can hold while keeping [`READOUT_GAP`] blank cells from the title's text (GEN-R13);
+/// the whole row but its two blanks when the title is hidden. Scenes drop or shorten parts
+/// to fit.
 pub fn readout_room(size: Size, title: &Title) -> usize {
-    let taken = span(size, title).map_or(0, |(_, cols)| cols.len());
-    usize::from(size.width()).saturating_sub(taken + 2)
+    // Cells left of the readout's text: the gutter and title text, then the gap; or only
+    // the readout's leading blank when there is no title.
+    let before = span(size, title).map_or(1, |(_, cols)| cols.len() - 1 + READOUT_GAP);
+    // One more for the readout's trailing blank in the last column.
+    usize::from(size.width()).saturating_sub(before + 1)
 }
 
 /// Draw the fitted title on the bottom row, laid out like `draw::label(canvas, 0, h − 1, …)`,
-/// dimming with scene `time` in seconds (CORE-R74). Touches only the [`span`] cells, so the
-/// art keeps the rest of the row.
-pub fn draw(canvas: &mut Canvas, title: &Title, time: f64) {
+/// dimming with its `age`, the scene seconds it has been on show (CORE-R74). Touches only
+/// the [`span`] cells, so the art keeps the rest of the row.
+pub fn draw(canvas: &mut Canvas, title: &Title, age: f64) {
     let Some(form) = title.fit(canvas.size()) else {
         return;
     };
-    let time = if time.is_finite() { time } else { 0.0 };
-    let fade = ((time - DIM_FROM_S) / DIM_OVER_S).clamp(0.0, 1.0);
+    let age = if age.is_finite() { age } else { 0.0 };
+    let fade = ((age - DIM_FROM_S) / DIM_OVER_S).clamp(0.0, 1.0);
     let ink_at = |base: f64| Ink::new(Role::Text, ink::level(base + (DIM_LEVEL - base) * fade));
     let (phenomenon, rest) = (ink_at(PHENOMENON_LEVEL), ink_at(MECHANISM_LEVEL));
 

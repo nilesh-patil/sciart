@@ -210,29 +210,34 @@ fn core_r14_generator_is_object_safe_and_send() {
 }
 
 #[test]
-fn core_r77_categories_have_unique_ids_and_labels() {
+fn core_r77_categories_have_unique_labels_and_ids_spelled_from_them() {
     use Category::*;
     let table = [
-        (DeepCosmos, "deep-cosmos", "Deep Cosmos"),
-        (SunPlanets, "sun-planets", "Sun & Planets"),
-        (EarthSky, "earth-sky", "Earth & Sky"),
-        (Voyages, "voyages", "Voyages"),
-        (Physics, "physics", "Forces & Waves"),
-        (Chemistry, "chemistry", "Reactions"),
-        (Biology, "biology", "Living Systems"),
-        (PhysicalChemistry, "physical-chemistry", "States of Matter"),
-        (Biophysics, "biophysics", "Physics of Life"),
-        (Biochemistry, "biochemistry", "Molecules of Life"),
-        (LivingMatter, "living-matter", "Life from Matter"),
+        (DeepCosmos, "Deep Cosmos"),
+        (SunPlanets, "Sun & Planets"),
+        (EarthSky, "Earth & Sky"),
+        (Voyages, "Voyages"),
+        (Physics, "Forces & Waves"),
+        (Chemistry, "Reactions"),
+        (Biology, "Living Systems"),
+        (PhysicalChemistry, "States of Matter"),
+        (Biophysics, "Physics of Life"),
+        (Biochemistry, "Molecules of Life"),
+        (LivingMatter, "Life from Matter"),
     ];
-    assert_eq!(Category::ALL, table.map(|(c, _, _)| c));
-    for (c, id, label) in table {
-        assert_eq!((c.id(), c.label()), (id, label));
-        assert!(id.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-'));
+    assert_eq!(Category::ALL, table.map(|(c, _)| c));
+    for (c, label) in table {
+        assert_eq!(c.label(), label);
+        let kebab = label
+            .split([' ', '&'])
+            .filter(|w| !w.is_empty())
+            .map(str::to_ascii_lowercase)
+            .collect::<Vec<_>>()
+            .join("-");
+        assert_eq!(c.id(), kebab, "the id is the label in kebab case");
     }
-    let ids: std::collections::BTreeSet<_> = Category::ALL.map(Category::id).into();
     let labels: std::collections::BTreeSet<_> = Category::ALL.map(Category::label).into();
-    assert_eq!((ids.len(), labels.len()), (11, 11));
+    assert_eq!(labels.len(), 11, "labels, and so ids, are unique");
 }
 
 // ---------- colormap inks ----------
@@ -602,6 +607,10 @@ fn core_r71_caption_defaults_to_none_and_meta_carries_title_data() {
     assert_eq!(dot.meta().title, "Moving dot · steady drift");
     assert!(dot.meta().captions.is_empty());
     assert_eq!(Fill.caption(), Some("act two"));
+    assert_eq!(
+        Title::of(&Fill),
+        Title::new(FILL_META.title, Some("act two"))
+    );
 }
 
 #[test]
@@ -745,13 +754,15 @@ proptest! {
     }
 
     #[test]
-    fn core_r76_gen_r13_readout_room_is_the_longest_readout_clear_of_the_span(
+    fn core_r76_gen_r13_readout_room_keeps_four_blanks_after_the_title_text(
         w in 1u16..160,
         h in 1u16..40,
     ) {
         let size = Size::new(w, h);
         let t = Title::new(SPOTS, None);
-        let free = title::span(size, &t).map_or(0, |(_, cols)| cols.end);
+        // The leading blank may sit at column `free` at the leftmost: the title text ends
+        // at `cols.end - 2`, so its pad, two more blanks and the lead make four.
+        let free = title::span(size, &t).map_or(0, |(_, cols)| cols.end + 2);
         let room = title::readout_room(size, &t);
         let lead = |n: usize| {
             let mut c = Canvas::new(size, GlyphMode::Unicode);
@@ -793,12 +804,67 @@ fn core_r75_stage_draws_the_live_title_after_the_scene() {
 #[test]
 fn core_r75_stage_dims_the_title_by_scene_time() {
     let mut stage = Stage::new(Box::new(Fill), 1, Size::new(60, 8), GlyphMode::Unicode);
-    stage.set_title_visible(true);
     assert_eq!(stage.render().get(1, 7).unwrap().ink.level, 170);
     for _ in 0..10 {
         stage.step(1.0);
     }
     assert_eq!(stage.render().get(1, 7).unwrap().ink.level, 90);
+}
+
+/// Two acts: the caption turns from `one` to `two` at 12 s of scene time.
+#[derive(Debug, Default)]
+struct Acts {
+    t: f64,
+}
+
+static ACTS_META: Meta = Meta {
+    name: "acts",
+    category: Category::Physics,
+    description: "two captioned acts",
+    title: "Two acts · one",
+    captions: &["one", "two"],
+};
+
+impl Generator for Acts {
+    fn meta(&self) -> &'static Meta {
+        &ACTS_META
+    }
+    fn resize(&mut self, _size: Size, _ctx: &mut Ctx) {}
+    fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
+        self.t += dt;
+    }
+    fn render(&self, _canvas: &mut Canvas) {}
+    fn caption(&self) -> Option<&'static str> {
+        Some(ACTS_META.captions[usize::from(self.t >= 12.0)])
+    }
+}
+
+#[test]
+fn core_r74_r75_the_fade_restarts_when_the_caption_changes() {
+    let mut stage = Stage::new(
+        Box::<Acts>::default(),
+        1,
+        Size::new(60, 8),
+        GlyphMode::Unicode,
+    );
+    let level = |stage: &mut Stage| stage.render().get(1, 7).unwrap().ink.level;
+    for _ in 0..11 {
+        stage.step(1.0);
+    }
+    assert_eq!(level(&mut stage), 90, "act one has faded by 11 s");
+    stage.step(1.0);
+    assert_eq!(stage.title().mechanism, "two");
+    assert_eq!(
+        level(&mut stage),
+        170,
+        "a new caption shows at full strength"
+    );
+    for _ in 0..9 {
+        stage.step(1.0);
+    }
+    assert_eq!(level(&mut stage), 130, "then fades 8 s after it appeared");
+    stage.step(1.0);
+    assert_eq!(level(&mut stage), 90);
 }
 
 #[test]
@@ -809,7 +875,6 @@ fn core_r21_r75_panicking_render_keeps_previous_titled_frame() {
         Size::new(20, 6),
         GlyphMode::Ascii,
     );
-    stage.set_title_visible(true);
     let first = stage.render().to_lines();
     assert!(first[5].starts_with(" Moving dot "), "{first:?}");
 

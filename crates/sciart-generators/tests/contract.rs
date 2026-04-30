@@ -12,12 +12,9 @@ use sciart_generators::{Entry, find, registry};
 
 const SEED: u64 = 99;
 
-/// With the title on, as the runtime shows it (CORE-R75), so every stability check below
-/// also covers the title drawn over the scene.
+/// Titles are on by default (CORE-R75), so every check below also covers the title.
 fn stage(entry: &Entry, size: Size, mode: GlyphMode) -> Stage {
-    let mut stage = Stage::new((entry.build)(), SEED, size, mode);
-    stage.set_title_visible(true);
-    stage
+    Stage::new((entry.build)(), SEED, size, mode)
 }
 
 fn check_frame(name: &str, canvas: &Canvas, size: Size) {
@@ -285,9 +282,10 @@ fn gen_r12_live_captions_are_declared() {
 }
 
 #[test]
-fn gen_r13_no_scene_text_in_the_title_span() {
-    // Title hidden, so any text left in its span is the scene's own; Unicode only, since
-    // ASCII art fallbacks may use letters.
+fn gen_r13_no_scene_text_in_the_title_span_or_its_readout_gap() {
+    // Title hidden, so any text left there is the scene's own; Unicode only, since ASCII
+    // art fallbacks may use letters. The checked cells run from the span to where the
+    // longest title-row readout may start, so the gap (CORE-R76) is covered too.
     for_each_generator("title span", |e| {
         for size in [Size::new(80, 24), Size::new(40, 12)] {
             let mut stage = Stage::new((e.build)(), 42, size, GlyphMode::Unicode);
@@ -300,10 +298,13 @@ fn gen_r13_no_scene_text_in_the_title_span() {
                 }
                 let title = stage.title();
                 let canvas = stage.render();
-                let Some((y, cols)) = title::span(size, &title) else {
+                let Some((y, _)) = title::span(size, &title) else {
                     continue;
                 };
-                let row: String = cols
+                let text_from = i32::from(size.width())
+                    - 1
+                    - i32::try_from(title::readout_room(size, &title)).unwrap();
+                let row: String = (0..text_from)
                     .map(|x| canvas.get(x, y).map_or(' ', |c| c.ch))
                     .collect();
                 assert!(

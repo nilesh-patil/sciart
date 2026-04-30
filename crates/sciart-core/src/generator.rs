@@ -1,20 +1,22 @@
 use crate::{Canvas, Ctx, Size};
 
-/// Where a scene belongs (CORE-R77, ADR-0013). Sky scenes are sorted by setting; the rest
-/// by which of physics (P), chemistry (C) and biology (B) its model needs.
+/// Where a scene belongs (CORE-R77, ADR-0013). Sky scenes are sorted by setting (Voyages,
+/// then Earth & Sky, then Sun & Planets, then Deep Cosmos); the rest by which of physics (P),
+/// chemistry (C) and biology (B) its model needs. Variant order is display order only.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
     /// Deep space: galaxies, clusters, black holes, the early universe.
     DeepCosmos,
-    /// The Sun, planets, moons and comets.
+    /// The Sun, and planets, moons and comets (including exoplanets).
     SunPlanets,
     /// The sky as seen from Earth's surface or atmosphere.
     EarthSky,
     /// Human spacecraft and missions.
     Voyages,
-    /// P: a physical law (forces, flow, fields, waves, statistical or quantum mechanics).
+    /// P: a physical law (forces, flow, fields, waves, statistical or quantum mechanics,
+    /// deterministic chaos).
     Physics,
-    /// C: reaction kinetics, molecular structure or a phase change.
+    /// C: chemical kinetics, molecular structure or a phase change (incl. ordering).
     Chemistry,
     /// B: an organism, tissue, cell or artificial life.
     Biology,
@@ -44,20 +46,21 @@ impl Category {
         Category::LivingMatter,
     ];
 
-    /// Stable kebab-case identifier, printed by `sciart list` (CLI-R4).
+    /// The label in kebab case (`&` dropped), printed by `sciart list` (CLI-R4), so the
+    /// machine id and the name people see never drift apart.
     pub const fn id(self) -> &'static str {
         match self {
             Category::DeepCosmos => "deep-cosmos",
             Category::SunPlanets => "sun-planets",
             Category::EarthSky => "earth-sky",
             Category::Voyages => "voyages",
-            Category::Physics => "physics",
-            Category::Chemistry => "chemistry",
-            Category::Biology => "biology",
-            Category::PhysicalChemistry => "physical-chemistry",
-            Category::Biophysics => "biophysics",
-            Category::Biochemistry => "biochemistry",
-            Category::LivingMatter => "living-matter",
+            Category::Physics => "forces-waves",
+            Category::Chemistry => "reactions",
+            Category::Biology => "living-systems",
+            Category::PhysicalChemistry => "states-of-matter",
+            Category::Biophysics => "physics-of-life",
+            Category::Biochemistry => "molecules-of-life",
+            Category::LivingMatter => "life-from-matter",
         }
     }
 

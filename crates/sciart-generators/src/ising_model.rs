@@ -24,9 +24,9 @@ use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "ising_model",
-    category: Category::Physics,
+    category: Category::PhysicalChemistry,
     description: "The Ising ferromagnet quenched, reheated and cooled through its critical point",
-    title: "Magnet · spins align as it cools",
+    title: "Magnetic domains · spins align",
     captions: &[],
 };
 
