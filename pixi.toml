@@ -18,5 +18,7 @@ rs-bench = "cargo bench -p sciart-generators"
 rs-list = "cargo run -q -p sciart -- list"
 rs-sim = "cargo run --release -p sciart -- sim"
 rs-run = "cargo run --release -p sciart -- run"
+# Truecolor PNG frames for art review: `pixi run rs-preview <scene> --size 120x40 --t 0,5,20 --theme astro --out /tmp/p/<scene>`.
+rs-preview = "cargo run -q --release -p sciart-generators --example preview --"
 rs-install = "cargo install --path crates/sciart"
 rs-install-mouse = "cargo install --path crates/sciart --features mouse"
