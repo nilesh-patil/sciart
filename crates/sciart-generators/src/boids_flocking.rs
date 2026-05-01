@@ -29,7 +29,7 @@ pub static META: Meta = Meta {
     name: "boids_flocking",
     category: Category::Biology,
     description: "A starling murmuration at dusk, rippling away from a stooping falcon",
-    title: "Murmuration · match 7 neighbours",
+    title: "Murmuration · each bird tracks 7",
     captions: &[],
 };
 

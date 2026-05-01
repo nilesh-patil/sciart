@@ -1,5 +1,6 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
 +------------------------------------------------------------------------------+
@@ -25,4 +26,4 @@ expression: frame
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
- Gas to liquid - cool atoms cling                      T = 0.21 -> 0.25 heating
+ Condensation - cool atoms cling                       T = 0.21 -> 0.25 heating

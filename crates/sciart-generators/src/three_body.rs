@@ -8,6 +8,7 @@
 use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::title::{Form, Title};
 use sciart_core::{geom, ode};
 
 pub static META: Meta = Meta {
@@ -55,6 +56,8 @@ const CAPTIONS: [&str; 5] = ["figure-8", "Lagrange", "Broucke A1", "Broucke R4",
 pub(crate) struct Orbit {
     pub label: &'static str,
     pub short: &'static str,
+    /// Who found it and when: the whole label while the title already names the orbit.
+    pub attribution: &'static str,
     /// Interleaved `(x, y)` of bodies 1..3, COM-centred.
     pub pos: [f64; 6],
     pub vel: [f64; 6],
@@ -130,6 +133,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
     [
         Orbit {
             label: "figure-8  Moore 1993",
+            attribution: "Moore 1993",
             short: CAPTIONS[0],
             pos: [x1, y1, -x1, -y1, 0.0, 0.0],
             vel: [-vx3 / 2.0, -vy3 / 2.0, -vx3 / 2.0, -vy3 / 2.0, vx3, vy3],
@@ -141,6 +145,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Lagrange triangle  1772",
+            attribution: "1772",
             short: CAPTIONS[1],
             pos: lx,
             vel: lv,
@@ -152,6 +157,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Broucke A1  1975",
+            attribution: "1975",
             short: CAPTIONS[2],
             pos: [-0.989_262_004_3, 0.0, 2.209_617_724_1, 0.0, -1.220_355_719_7, 0.0],
             vel: [0.0, 1.916_924_418_5, 0.0, 0.191_026_873_8, 0.0, -2.107_951_292_4],
@@ -163,6 +169,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Broucke R4  1975",
+            attribution: "1975",
             short: CAPTIONS[3],
             pos: [0.873_304_709_1, 0.0, -0.625_403_028_8, 0.0, -0.247_901_680_3, 0.0],
             vel: [0.0, 1.010_776_443_6, 0.0, -1.683_353_345_8, 0.0, 0.672_576_902_2],
@@ -174,6 +181,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "moth I  Suvakov 2013",
+            attribution: "Suvakov 2013",
             short: CAPTIONS[4],
             pos: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             vel: [mvx, mvy, mvx, mvy, -2.0 * mvx, -2.0 * mvy],
@@ -276,13 +284,18 @@ pub(crate) fn view_for(size: Size, orbit: &Orbit) -> View {
     }
 }
 
-/// The orbit's label for a `w`-column canvas: the full form if it fits in `w − 2`
-/// columns, else the short form, else none (SPEC-002 Label).
-pub(crate) fn label_for(w: u16, orbit: &Orbit) -> Option<&'static str> {
-    let room = usize::from(w.saturating_sub(2));
-    [orbit.label, orbit.short]
-        .into_iter()
-        .find(|s| s.len() <= room)
+/// The orbit's label for a `size` canvas (SPEC-002 Label): just the attribution when the
+/// title already shows the orbit's name as its caption, else the full form, else the
+/// short form; each only if it fits in `w − 2` columns.
+pub(crate) fn label_for(size: Size, orbit: &Orbit) -> Option<&'static str> {
+    let room = usize::from(size.width().saturating_sub(2));
+    let named = Title::new(META.title, Some(orbit.short)).fit(size) == Some(Form::Full);
+    let forms: &[&'static str] = if named {
+        &[orbit.attribution]
+    } else {
+        &[orbit.label, orbit.short]
+    };
+    forms.iter().copied().find(|s| s.len() <= room)
 }
 
 /// The fraction of its period `orbit`'s trail spans in a view of `scale` rows per unit.
@@ -359,6 +372,8 @@ pub(crate) struct ThreeBody {
     view: View,
     /// Trails (and Lagrange's triangle), rasterised in `update`/`resize`.
     dots: Dots,
+    /// Each orbit's label at the current size, chosen in `resize`.
+    labels: [Option<&'static str>; 5],
 }
 
 impl ThreeBody {
@@ -379,6 +394,7 @@ impl ThreeBody {
             view: view_for(size, &orbits[0]),
             size,
             dots: Dots::default(),
+            labels: [None; 5],
             orbits,
         }
     }
@@ -504,6 +520,7 @@ impl Generator for ThreeBody {
         self.size = size;
         self.view = view_for(size, &self.orbits[self.phase.seg]);
         self.dots.resize(size);
+        self.labels = self.orbits.map(|o| label_for(size, &o));
         self.rasterise();
     }
 
@@ -539,8 +556,7 @@ impl Generator for ThreeBody {
                 );
             }
         }
-        let orbit = &self.orbits[self.phase.seg];
-        if let Some(label) = label_for(canvas.size().width(), orbit) {
+        if let Some(label) = self.labels[self.phase.seg] {
             canvas.text(1, 0, label, Ink::new(Role::Text, 150));
         }
     }
@@ -837,16 +853,42 @@ mod tests {
                     }
                 }
             }
-            assert!(o.label.is_ascii() && o.short.is_ascii());
-            assert_eq!(label_for(80, o), Some(o.label));
+            assert!(o.label.is_ascii() && o.short.is_ascii() && o.attribution.is_ascii());
+            // Too short for the title (fewer than 6 rows): the label carries the name.
+            let untitled = |w: u16| label_for(Size::new(w, 5), o);
+            assert_eq!(untitled(80), Some(o.label));
             let full = o.label.len() as u16 + 2;
-            assert_eq!(label_for(full, o), Some(o.label));
-            assert_eq!(label_for(full - 1, o), Some(o.short));
-            assert_eq!(label_for(o.short.len() as u16 + 1, o), None);
+            assert_eq!(untitled(full), Some(o.label));
+            assert_eq!(untitled(full - 1), Some(o.short));
+            assert_eq!(untitled(o.short.len() as u16 + 1), None);
         }
         let mut stage = Stage::new(build(), 1, Size::new(80, 24), GlyphMode::Unicode);
-        let row: String = stage.render().to_lines()[0].chars().take(22).collect();
-        assert_eq!(row, " figure-8  Moore 1993 ");
+        let row: String = stage.render().to_lines()[0].chars().take(12).collect();
+        assert_eq!(row, " Moore 1993 ");
+    }
+
+    #[test]
+    fn tb_a6_the_label_does_not_repeat_the_orbit_named_by_the_title() {
+        for (size, o) in [Size::new(80, 24), Size::new(200, 50)]
+            .into_iter()
+            .flat_map(|s| orbits().map(|o| (s, o)))
+        {
+            // Every caption fits the full title at these sizes.
+            assert_eq!(
+                Title::new(META.title, Some(o.short)).fit(size),
+                Some(Form::Full)
+            );
+            assert_eq!(label_for(size, &o), Some(o.attribution), "{}", o.short);
+        }
+        // A title narrowed to its phenomenon drops the caption: the label names the orbit.
+        let o = &orbits()[0];
+        let title = Title::new(META.title, Some(o.short));
+        let narrow = (1..80)
+            .map(|w| Size::new(w, 24))
+            .find(|&s| title.fit(s) == Some(Form::Phenomenon))
+            .expect("some width shows only the phenomenon");
+        let label = label_for(narrow, o);
+        assert!(label.is_some_and(|l| l.starts_with(o.short)), "{label:?}");
     }
 
     #[test]

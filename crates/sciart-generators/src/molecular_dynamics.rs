@@ -35,7 +35,7 @@ pub static META: Meta = Meta {
     name: "molecular_dynamics",
     category: Category::PhysicalChemistry,
     description: "A Lennard-Jones fluid melting and condensing as it is heated and cooled",
-    title: "Gas to liquid · cool atoms cling",
+    title: "Condensation · cool atoms cling",
     captions: &[],
 };
 
@@ -947,7 +947,7 @@ mod tests {
         };
         let full = readout(200);
         assert!(full.starts_with("T = 0.40 -> ") && full.ends_with("   LJ reduced units"));
-        // Beside the full "Gas to liquid · cool atoms cling" (32 cells, from w = 57) the
+        // Beside the full "Condensation · cool atoms cling" (32 cells, from w = 57) the
         // room is w − 38.
         let r = readout(100);
         assert!(

@@ -19,12 +19,10 @@ const MIN_HEIGHT: u16 = 6;
 /// Ink levels (CORE-R74): the phenomenon reads first, the mechanism recedes.
 const PHENOMENON_LEVEL: f64 = 170.0;
 const MECHANISM_LEVEL: f64 = 110.0;
-/// Ink level of every title-row readout (CORE-R76): the mechanism's tone, so the numbers
-/// never outshine the scene's name.
-pub const READOUT_LEVEL: u8 = 110;
-/// After the viewer has had time to read it, the whole title fades to this level so it
-/// stops competing with the art (CORE-R74).
-const DIM_LEVEL: f64 = 90.0;
+/// Ink level of every title-row readout (CORE-R76), and the level the whole title fades to
+/// once the viewer has had time to read it (CORE-R74): the numbers never outshine the
+/// scene's name, even after it has dimmed to stop competing with the art.
+pub const READOUT_LEVEL: u8 = 90;
 const DIM_FROM_S: f64 = 8.0;
 const DIM_OVER_S: f64 = 2.0;
 /// Blank cells between the title's text and a title-row readout's text (CORE-R76): with only
@@ -145,7 +143,8 @@ pub fn draw(canvas: &mut Canvas, title: &Title, age: f64) {
     };
     let age = if age.is_finite() { age } else { 0.0 };
     let fade = ((age - DIM_FROM_S) / DIM_OVER_S).clamp(0.0, 1.0);
-    let ink_at = |base: f64| Ink::new(Role::Text, ink::level(base + (DIM_LEVEL - base) * fade));
+    let dim = f64::from(READOUT_LEVEL);
+    let ink_at = |base: f64| Ink::new(Role::Text, ink::level(base + (dim - base) * fade));
     let (phenomenon, rest) = (ink_at(PHENOMENON_LEVEL), ink_at(MECHANISM_LEVEL));
 
     let y = i32::from(canvas.size().height()) - 1;

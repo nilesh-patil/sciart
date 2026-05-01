@@ -16,6 +16,7 @@ use sciart_core::geom::v3::{dot, norm, sub};
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::ink::level;
 use sciart_core::prelude::*;
+use sciart_core::title::{Form, Title};
 
 use El::{C, H, N, O};
 use Order::{Aromatic, Double, Single};
@@ -364,8 +365,14 @@ pub(crate) struct Model {
     pub bonds: Vec<Bond>,
     /// `max(|rᵢ| + r_ball,ᵢ, R_EFF_MIN)`: the radius the camera frames.
     pub r_eff: f64,
-    /// Label tiers, longest first: full, without the mass, the formula alone (MOL-A6).
-    pub labels: [String; 3],
+    /// Label forms: full, without the mass, without the name, the formula alone (MOL-A6).
+    pub labels: [String; 4],
+}
+
+/// The label forms (indices into `Model::labels`) tried longest first: with the name, or
+/// without it while the title already names the molecule (SPEC-002 Label).
+fn tiers(named: bool) -> &'static [usize] {
+    if named { &[2, 3] } else { &[0, 1, 3] }
 }
 
 impl Model {
@@ -403,6 +410,7 @@ impl Model {
             labels: [
                 format!("{name}  {formula}  {mass_label} g/mol"),
                 format!("{name}  {formula}"),
+                format!("{formula}  {mass_label} g/mol"),
                 formula.to_owned(),
             ],
         }
@@ -418,12 +426,14 @@ impl Model {
         )
     }
 
-    /// The longest label tier that fits in `room` columns, or `""` (MOL-A6).
-    pub fn label(&self, room: usize) -> &str {
-        self.labels
+    /// The longest label tier that fits in `room` columns, or `""` (MOL-A6); `named`
+    /// leaves out the name, which the title's caption already shows.
+    pub fn label(&self, room: usize, named: bool) -> &str {
+        tiers(named)
             .iter()
+            .map(|&i| self.labels[i].as_str())
             .find(|l| l.chars().count() <= room)
-            .map_or("", String::as_str)
+            .unwrap_or("")
     }
 }
 
@@ -974,6 +984,9 @@ pub(crate) struct MoleculeViewer {
     view: View,
     /// Each molecule's ball-or-dot classes at this size (MOL-A6), rebuilt in `resize`.
     bodies: [Bodies; MOLECULES],
+    /// Whether the title shows each molecule's name at this size (`Form::Full`), so its
+    /// label can leave the name out; set in `resize`.
+    named: [bool; MOLECULES],
 }
 
 impl MoleculeViewer {
@@ -985,6 +998,7 @@ impl MoleculeViewer {
             start: None,
             view: View::default(),
             bodies: [Bodies::default(); MOLECULES],
+            named: [false; MOLECULES],
         }
     }
 
@@ -1001,6 +1015,8 @@ impl Generator for MoleculeViewer {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.view = View::new(size);
         self.bodies = std::array::from_fn(|i| Bodies::new(&self.view, &self.models[i]));
+        self.named =
+            CAPTIONS.map(|c| Title::new(META.title, Some(c)).fit(size) == Some(Form::Full));
         if self.start.is_none() {
             self.start = Some(ctx.rng.random_range(0..MOLECULES));
         }
@@ -1016,7 +1032,12 @@ impl Generator for MoleculeViewer {
         let frame = frame(model, &self.view, &pose, self.bodies[pose.molecule]);
         paint(canvas, model, &frame, &frame.order[..frame.items]);
         let room = usize::from(canvas.size().width()).saturating_sub(2);
-        canvas.text(1, 0, model.label(room), LABEL_INK);
+        canvas.text(
+            1,
+            0,
+            model.label(room, self.named[pose.molecule]),
+            LABEL_INK,
+        );
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -1687,18 +1708,44 @@ mod tests {
     #[test]
     fn mol_a6_label_tier_is_the_longest_that_fits() {
         let m = by_name("caffeine");
-        assert_eq!(m.label(80), "caffeine  C8H10N4O2  194.19 g/mol");
-        assert_eq!(m.label(33), "caffeine  C8H10N4O2  194.19 g/mol");
-        assert_eq!(m.label(32), "caffeine  C8H10N4O2");
-        assert_eq!(m.label(18), "C8H10N4O2");
-        assert_eq!(m.label(8), "");
-        for room in 0..60 {
-            let l = m.label(room);
-            assert!(l.chars().count() <= room);
-            // Every longer tier (they come longest first) would have been clipped.
-            for tier in m.labels.iter().take_while(|x| x.as_str() != l) {
-                assert!(tier.chars().count() > room);
+        assert_eq!(m.label(80, false), "caffeine  C8H10N4O2  194.19 g/mol");
+        assert_eq!(m.label(33, false), "caffeine  C8H10N4O2  194.19 g/mol");
+        assert_eq!(m.label(32, false), "caffeine  C8H10N4O2");
+        assert_eq!(m.label(18, false), "C8H10N4O2");
+        assert_eq!(m.label(8, false), "");
+        // The title's caption names the molecule: the label keeps formula and mass.
+        assert_eq!(m.label(80, true), "C8H10N4O2  194.19 g/mol");
+        assert_eq!(m.label(23, true), "C8H10N4O2  194.19 g/mol");
+        assert_eq!(m.label(22, true), "C8H10N4O2");
+        for named in [false, true] {
+            for room in 0..60 {
+                let l = m.label(room, named);
+                assert!(l.chars().count() <= room);
+                // Every longer tier (they come longest first) would have been clipped.
+                for &i in tiers(named).iter().take_while(|&&i| m.labels[i] != l) {
+                    assert!(m.labels[i].chars().count() > room);
+                }
             }
+        }
+    }
+
+    #[test]
+    fn mol_a6_the_label_leaves_out_the_name_the_title_shows() {
+        let size = Size::new(80, 24);
+        let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(3, size));
+        g.resize(size, &mut ctx);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        for _ in 0..120 {
+            g.update(0.25, &mut ctx);
+            canvas.clear();
+            g.render(&mut canvas);
+            let caption = g.caption().unwrap_or_default();
+            let top = &canvas.to_lines()[0];
+            assert!(
+                !caption.is_empty() && !top.contains(caption),
+                "{caption}: {top}"
+            );
+            assert!(top.contains("g/mol"), "{top}");
         }
     }
 

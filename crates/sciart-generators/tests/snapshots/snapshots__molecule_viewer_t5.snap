@@ -1,8 +1,9 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
- methane  CH4  16.04 g/mol                                                      
+ CH4  16.04 g/mol                                                               
                                                                                 
                                                                                 
                                                                                 

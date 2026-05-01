@@ -16,7 +16,7 @@ pub static META: Meta = Meta {
     name: "spacetime_grid",
     category: Category::DeepCosmos,
     description: "A rubber-sheet spacetime dimpled by an orbiting binary emitting gravitational waves",
-    title: "Gravitational waves · inspiral",
+    title: "Spacetime waves · orbits shrink",
     captions: &[],
 };
 
