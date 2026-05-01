@@ -14,7 +14,7 @@
 //! (GEN-R11). A scene draws into one, then `blit`s it onto the canvas; a cell holds a
 //! single glyph, so one region uses one raster.
 
-use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom};
+use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink};
 
 /// Bit of dot `(dx, dy)` within its braille cell, indexed `[dx][dy]`: standard Unicode
 /// dot numbering 1-2-3-7 down the left column and 4-5-6-8 down the right, dot `n` being
@@ -394,6 +394,89 @@ impl Density {
                 }
             }
         }
+    }
+
+    /// Set every pixel of `pixels` from the sum of its 2 × 2 dot block through `tone`
+    /// (CORE-R81): level 0 ⇒ [`Ink::BLANK`], otherwise `ink(level)`. A `Density` and a
+    /// `Pixels` over the same cells line up exactly (4 dot rows per 2 pixel rows); pixels
+    /// with no full block in the density are emptied. One pass, no allocation.
+    pub fn to_pixels(&self, pixels: &mut Pixels, tone: &Tone, mut ink: impl FnMut(u8) -> Ink) {
+        let dw = usize::from(self.dots.width());
+        // Two dot rows per pixel row; the dot height (4·h) is always even.
+        let mut blocks = self.buf.chunks_exact(2 * dw);
+        for row in pixels
+            .px
+            .chunks_exact_mut(usize::from(pixels.cells.width()))
+        {
+            let mut out = row.iter_mut();
+            if let Some(pair) = blocks.next() {
+                let (top, bottom) = pair.split_at(dw);
+                let columns = top.chunks_exact(2).zip(bottom.chunks_exact(2));
+                for ((t, b), px) in columns.zip(&mut out) {
+                    let level = tone.level(t[0] + t[1] + b[0] + b[1]);
+                    *px = if level == 0 { Ink::BLANK } else { ink(level) };
+                }
+            }
+            out.for_each(|px| *px = Ink::BLANK);
+        }
+    }
+}
+
+/// An asinh tone curve for long exposures, tabulated so that a lookup costs one `sqrt`
+/// (CORE-R81): linear for faint values, logarithmic for bright ones (Lupton et al. 2004),
+/// so a sparse trail and a dense core both read without clipping. Inline and allocation-
+/// free, so a scene can rebuild it in `resize`.
+#[derive(Debug, Clone)]
+pub struct Tone {
+    /// `1 / white`: a value's position along the table is `√(v / white)`.
+    inv_white: f32,
+    /// Levels at `v = white · (i / (LUT − 1))²`: finest near zero, where asinh is steepest.
+    lut: [u8; Tone::LUT],
+}
+
+impl Default for Tone {
+    /// `Tone::asinh(1, 1)`, the fallback curve.
+    fn default() -> Self {
+        Self::asinh(1.0, 1.0)
+    }
+}
+
+impl Tone {
+    /// Table entries.
+    pub const LUT: usize = 1024;
+
+    /// `255 · asinh(v / knee) / asinh(white / knee)` on `[0, white]`, 255 above. A
+    /// non-finite or non-positive parameter becomes 1, and `knee` is raised to
+    /// `white / 1000`, the steepest stretch the table resolves to 2 levels.
+    pub fn asinh(knee: f32, white: f32) -> Self {
+        let sane = |v: f32| {
+            if v.is_finite() && v > 0.0 {
+                f64::from(v)
+            } else {
+                1.0
+            }
+        };
+        let white = sane(white);
+        let knee = sane(knee).max(white / 1000.0);
+        let norm = (white / knee).asinh();
+        let last = (Self::LUT - 1) as f64;
+        let lut = std::array::from_fn(|i| {
+            let s = i as f64 / last;
+            ink::level(255.0 * (white * s * s / knee).asinh() / norm)
+        });
+        Self {
+            inv_white: (1.0 / white) as f32,
+            lut,
+        }
+    }
+
+    /// The level of value `v`: 0 for `v ≤ 0` or NaN, 255 from `white` up.
+    #[inline]
+    pub fn level(&self, v: f32) -> u8 {
+        // No branches: √ of a negative or NaN is NaN and the saturating cast maps it to
+        // entry 0 (level 0); +∞ saturates to the last entry (255).
+        let pos = (v * self.inv_white).sqrt() * (Self::LUT - 1) as f32;
+        self.lut[(pos.round() as usize).min(Self::LUT - 1)]
     }
 }
 
