@@ -1,6 +1,6 @@
 # SPEC-001: sciart-core
 
-**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10, M11 · **Status**: Implemented (CORE-R1..R70; R60..R70 from the post-M10 audit); CORE-R71..R77 specified for M11
+**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R80 in M12
 
 Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
@@ -144,3 +144,11 @@ Every scene shows a short science title at the bottom-left, drawn once, centrall
  | `LivingMatter` | `life-from-matter` | Life from Matter | P×C×B |
 
  The setting rows are checked in the order Voyages, Earth & Sky, Sun & Planets, Deep Cosmos, and the first match wins (ADR-0013 rule 1); the table order is display order only.
+
+### Colour roles and tone mapping (M12, ADR-0015)
+
+Three more semantic roles for fields (still never RGB, ADR-0004). All are pure, allocation-free and never panic for any input. `Ink` stays two bytes.
+
+- **CORE-R78** `Role::Phase` is a cyclic field: `level` is a phase angle, one full turn over 256 levels, so level 255 is next to 0. `ink::phase(radians: f64) -> Ink` gives `round(frac(radians / 2π) · 256) mod 256` for any finite angle, negative or beyond 2π (NaN or ±∞ ⇒ 0). `ink::phase_value(ink) -> f64` returns `level · 2π / 256 ∈ [0, 2π)`, which is the exact inverse on levels. In a `Dots` cell (CORE-R41), Phase dots all have intensity 0, so the last dot set wins: a phase is not an intensity.
+- **CORE-R79** `Role::Blackbody` is temperature on a log scale: level 0 ⇔ `ink::BLACKBODY_MIN_K` = 1000 K, level 255 ⇔ `ink::BLACKBODY_MAX_K` = 30 000 K, and level `255 · ln(T / 1000) / ln 30` between them. `ink::blackbody(kelvin: f64) -> Ink` rounds and clamps (NaN ⇒ level 0). `ink::blackbody_kelvin(ink) -> f64` returns `1000 · 30^(level/255)`, so `blackbody(blackbody_kelvin(i)) == i` for every level.
+- **CORE-R80** `Role::Ramp(Ramp)` is a sequential field in a named ramp (level 0 = low, 255 = high, like `Seq`). `Ramp` is a closed enum `Ember, Ice, Ferroin, HAlpha, Aurora, Plasma`. `Ramp::ALL` lists them in that order, and `Ramp::name()` is a unique lower-case `&'static str` (`ember`, `ice`, `ferroin`, `halpha`, `aurora`, `plasma`). `ink::ramp(ramp, v)` maps `v ∈ [0, 1]` like `ink::seq` (clamped, NaN ⇒ 0), and `ink::seq_value` reads it back exactly. `size_of::<Ink>() == 2`.

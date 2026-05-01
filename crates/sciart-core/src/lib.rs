@@ -27,7 +27,7 @@ pub use ctx::Ctx;
 pub use generator::{Category, Generator, Meta};
 pub use geom::{Camera, Projector};
 pub use grid::{Edges, Grid, Hood, SampleMap};
-pub use ink::{Ink, Role};
+pub use ink::{Ink, Ramp, Role};
 pub use particles::{InverseCdf, ParticlePool, SpatialHash, Trail};
 pub use raster::{Density, Dots, Pixels};
 pub use rng::SplitMix64;
@@ -43,7 +43,7 @@ pub const SIM_DT: f64 = 1.0 / 60.0;
 pub mod prelude {
     pub use crate::{
         Beat, Camera, Canvas, Category, Cell, Ctx, Density, Dots, Edges, FixedStep, Generator,
-        Glyph, GlyphMode, Grid, Hood, Ink, InverseCdf, Meta, ParticlePool, Pixels, Projector, Role,
-        SIM_DT, SampleMap, Size, SpatialHash, SplitMix64, StackText, Stage, Timeline, Trail,
+        Glyph, GlyphMode, Grid, Hood, Ink, InverseCdf, Meta, ParticlePool, Pixels, Projector, Ramp,
+        Role, SIM_DT, SampleMap, Size, SpatialHash, SplitMix64, StackText, Stage, Timeline, Trail,
     };
 }

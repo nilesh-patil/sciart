@@ -1,5 +1,7 @@
 use sciart_core::{Ink, Role, ink};
 
+use crate::fields;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
@@ -45,8 +47,21 @@ impl Theme {
             (Theme::Astro, Role::Div) => gradient(&ASTRO_DIV, div_pos(ink)),
             (Theme::Rainbow, Role::Seq) => gradient(&TURBO, ink::seq_value(ink)),
             (Theme::Rainbow, Role::Div) => gradient(&BLUE_RED, div_pos(ink)),
-            (Theme::Mono, Role::Seq) => mono_table().seq[usize::from(ink.level)],
+            // A scene's physical or art-directed colour, not the theme's (ADR-0015).
+            (Theme::Astro | Theme::Rainbow, Role::Blackbody) => {
+                fields::tables().blackbody[usize::from(ink.level)]
+            }
+            (Theme::Astro | Theme::Rainbow, Role::Ramp(r)) => {
+                fields::tables().ramps[r as usize][usize::from(ink.level)]
+            }
+            (Theme::Astro, Role::Phase) => fields::tables().phase[usize::from(ink.level)],
+            (Theme::Rainbow, Role::Phase) => hsv(f64::from(ink.level) / 256.0, 1.0, 1.0),
+            // One grey channel: hotter or higher is brighter, like `Seq` (RND-R11, RND-R12).
+            (Theme::Mono, Role::Seq | Role::Blackbody | Role::Ramp(_)) => {
+                mono_table().seq[usize::from(ink.level)]
+            }
             (Theme::Mono, Role::Div) => mono_table().div[usize::from(ink.level)],
+            (Theme::Mono, Role::Phase) => mono_table().phase[usize::from(ink.level)],
             (Theme::Mono, _) => grey(ink.level),
             (Theme::Astro, role) => scale(astro_base(role), 0.3 + 0.7 * level),
             // Per-cell hues would turn titles and labels into confetti; text reads as one
@@ -80,10 +95,14 @@ fn grey(level: u8) -> Rgb {
 const MONO_FLOOR_L: f64 = 3.5;
 /// L* the negative side of `Div` reaches at −1 (grey ≈ 106).
 const MONO_NEG_MAX_L: f64 = 45.0;
+/// L* of `Phase` half a turn from 0: a triangle in L* is the one grey loop without a seam
+/// (RND-R10).
+const MONO_PHASE_PEAK_L: f64 = 85.0;
 
 struct MonoTable {
     seq: [Rgb; 256],
     div: [Rgb; 256],
+    phase: [Rgb; 256],
 }
 
 /// Built once: the sRGB transfer needs `powf`, too costly to evaluate per painted cell.
@@ -91,6 +110,7 @@ fn mono_table() -> &'static MonoTable {
     static TABLE: std::sync::LazyLock<MonoTable> = std::sync::LazyLock::new(|| {
         let mut seq = [Rgb(0, 0, 0); 256];
         let mut div = [Rgb(0, 0, 0); 256];
+        let mut phase = [Rgb(0, 0, 0); 256];
         for level in 0..=255u8 {
             let ink = Ink::new(Role::Seq, level);
             let s = MONO_FLOOR_L + (100.0 - MONO_FLOOR_L) * ink::seq_value(ink);
@@ -98,8 +118,12 @@ fn mono_table() -> &'static MonoTable {
             let v = ink::div_value(ink);
             let top = if v >= 0.0 { 100.0 } else { MONO_NEG_MAX_L };
             div[usize::from(level)] = lightness_grey(MONO_FLOOR_L + (top - MONO_FLOOR_L) * v.abs());
+            // Distance from phase 0 in half-turns: 0 at level 0, 1 at level 128.
+            let half_turns = f64::from(level.min(level.wrapping_neg())) / 128.0;
+            phase[usize::from(level)] =
+                lightness_grey(MONO_FLOOR_L + (MONO_PHASE_PEAK_L - MONO_FLOOR_L) * half_turns);
         }
-        MonoTable { seq, div }
+        MonoTable { seq, div, phase }
     });
     &TABLE
 }
@@ -253,8 +277,9 @@ fn hsv(h: f64, s: f64, v: f64) -> Rgb {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sciart_core::Ramp;
 
-    const ROLES: [Role; 14] = [
+    const ROLES: [Role; 17] = [
         Role::Background,
         Role::Dim,
         Role::Star,
@@ -269,6 +294,9 @@ mod tests {
         Role::Text,
         Role::Seq,
         Role::Div,
+        Role::Phase,
+        Role::Blackbody,
+        Role::Ramp(Ramp::Ember),
     ];
 
     fn luma(Rgb(r, g, b): Rgb) -> u32 {
@@ -300,7 +328,8 @@ mod tests {
     #[test]
     fn rnd_r1_r6_brighter_level_is_not_darker() {
         for theme in Theme::ALL {
-            for role in ROLES {
+            // A phase level is an angle, not an intensity (RND-R10 amends RND-R1).
+            for role in ROLES.into_iter().filter(|&r| r != Role::Phase) {
                 // For Div, 128 ± 120 are both "bright" and 128 ± 5 are both "dim".
                 let (lo, hi) = if role == Role::Div {
                     ([123, 133], [8, 248])
@@ -495,5 +524,211 @@ mod tests {
             t = t.next();
         }
         assert_eq!(t, Theme::Astro);
+    }
+
+    /// CIE L* of any sRGB colour: an independent check on the field tables.
+    fn rgb_lightness(Rgb(r, g, b): Rgb) -> f64 {
+        let lin = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        let y = 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b);
+        if y > 216.0 / 24389.0 {
+            116.0 * y.cbrt() - 16.0
+        } else {
+            y * 24389.0 / 27.0
+        }
+    }
+
+    /// HSV hue in degrees.
+    fn hue(Rgb(r, g, b): Rgb) -> f64 {
+        let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
+        let (max, min) = (r.max(g).max(b), r.min(g).min(b));
+        let d = max - min;
+        let h = if d == 0.0 {
+            0.0
+        } else if max == r {
+            60.0 * ((g - b) / d)
+        } else if max == g {
+            60.0 * ((b - r) / d + 2.0)
+        } else {
+            60.0 * ((r - g) / d + 4.0)
+        };
+        h.rem_euclid(360.0)
+    }
+
+    fn hue_gap(a: f64, b: f64) -> f64 {
+        let d = (a - b).abs();
+        d.min(360.0 - d)
+    }
+
+    fn distance(Rgb(r, g, b): Rgb, Rgb(p, q, s): Rgb) -> u32 {
+        u32::from(r.abs_diff(p)) + u32::from(g.abs_diff(q)) + u32::from(b.abs_diff(s))
+    }
+
+    fn field_roles() -> impl Iterator<Item = Role> {
+        [Role::Phase, Role::Blackbody]
+            .into_iter()
+            .chain(Ramp::ALL.map(Role::Ramp))
+    }
+
+    #[test]
+    fn rnd_r10_r11_r12_field_roles_ignore_the_cell_position() {
+        for theme in Theme::ALL {
+            for role in field_roles() {
+                for level in [0, 64, 128, 200, 255] {
+                    let ink = Ink::new(role, level);
+                    let first = theme.color(ink, 0, 0);
+                    for (x, y) in [(1, 0), (17, 3), (199, 49), (u16::MAX, 7)] {
+                        assert_eq!(theme.color(ink, x, y), first, "{theme:?}/{role:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r10_phase_is_a_loop_without_a_seam() {
+        for theme in Theme::ALL {
+            let c = |l: u8| theme.color(Ink::new(Role::Phase, l), 0, 0);
+            let widest_step = (1..=255u8).map(|l| distance(c(l - 1), c(l))).max();
+            let seam = distance(c(255), c(0));
+            assert!(
+                Some(seam) <= widest_step,
+                "{theme:?}: seam {seam} vs widest step {widest_step:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn rnd_r10_astro_phase_is_isoluminant_and_passes_six_hues() {
+        let c = |l: u8| Theme::Astro.color(Ink::new(Role::Phase, l), 0, 0);
+        let lights: Vec<f64> = (0..=255u8).map(|l| rgb_lightness(c(l))).collect();
+        let (lo, hi) = lights
+            .iter()
+            .fold((f64::MAX, f64::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        assert!(hi - lo <= 5.0, "L* spread {lo:.1}..{hi:.1}");
+        // Six phases a sixth of a turn apart are six clearly different hues.
+        let six: Vec<f64> = (0..6u8).map(|k| hue(c(k * 43))).collect();
+        for (i, a) in six.iter().enumerate() {
+            for b in &six[i + 1..] {
+                assert!(hue_gap(*a, *b) >= 30.0, "hues {six:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r10_rainbow_phase_is_a_full_hue_wheel() {
+        let c = |l: u8| Theme::Rainbow.color(Ink::new(Role::Phase, l), 0, 0);
+        for level in 0..=255u8 {
+            assert_eq!(c(level), hsv(f64::from(level) / 256.0, 1.0, 1.0));
+        }
+        assert_eq!(c(0), Rgb(255, 0, 0));
+    }
+
+    #[test]
+    fn rnd_r10_mono_phase_is_a_grey_triangle_from_the_floor() {
+        let c = |l: u8| Theme::Mono.color(Ink::new(Role::Phase, l), 0, 0);
+        assert_eq!(c(0), Theme::Mono.color(Ink::new(Role::Seq, 0), 0, 0));
+        assert!((rgb_lightness(c(128)) - 85.0).abs() < 1.0, "{:?}", c(128));
+        for level in 1..=255u8 {
+            let Rgb(r, g, b) = c(level);
+            assert!(r == g && g == b, "grey at {level}");
+            assert_eq!(c(level), c(level.wrapping_neg()), "symmetric at {level}");
+        }
+        for level in 1..=128u8 {
+            assert!(luma(c(level)) >= luma(c(level - 1)), "rising at {level}");
+        }
+    }
+
+    #[test]
+    fn rnd_r11_blackbody_follows_the_planck_locus() {
+        let c = |l: u8| Theme::Astro.color(Ink::new(Role::Blackbody, l), 0, 0);
+        let kelvin = |l: u8| ink::blackbody_kelvin(Ink::new(Role::Blackbody, l));
+        for level in 0..=255u8 {
+            assert_eq!(
+                c(level),
+                Theme::Rainbow.color(Ink::new(Role::Blackbody, level), 0, 0)
+            );
+            let Rgb(r, g, b) = c(level);
+            if kelvin(level) < 3000.0 {
+                assert!(
+                    r > g && g >= b,
+                    "red below 3000 K at {level}: {:?}",
+                    c(level)
+                );
+            }
+            if kelvin(level) >= 10_000.0 {
+                assert!(b > r && b > g, "blue at {level}: {:?}", c(level));
+                assert!(rgb_lightness(c(level)) >= 75.0, "bright at {level}");
+            }
+        }
+        let dark = rgb_lightness(c(0));
+        assert!(
+            (10.0..=14.0).contains(&dark),
+            "dark red at 1000 K: L* {dark:.1}"
+        );
+        // Near white at 6500 K.
+        let white = c(ink::blackbody(6500.0).level);
+        assert!(white.0.min(white.1).min(white.2) >= 235, "{white:?}");
+        for level in 1..=BLACKBODY_MONOTONE_TO {
+            assert!(luma(c(level)) >= luma(c(level - 1)), "rising at {level}");
+        }
+    }
+
+    /// Blackbody luminance rises up to the white point, 6500 K (RND-R11).
+    const BLACKBODY_MONOTONE_TO: u8 = 140;
+
+    #[test]
+    fn rnd_r11_r12_mono_maps_blackbody_and_ramps_like_seq() {
+        for role in field_roles().filter(|&r| r != Role::Phase) {
+            for level in 0..=255u8 {
+                assert_eq!(
+                    Theme::Mono.color(Ink::new(role, level), 0, 0),
+                    Theme::Mono.color(Ink::new(Role::Seq, level), 0, 0),
+                    "{role:?} {level}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r12_ramps_rise_from_near_black_to_pale() {
+        for ramp in Ramp::ALL {
+            let c = |l: u8| Theme::Astro.color(Ink::new(Role::Ramp(ramp), l), 0, 0);
+            assert!(rgb_lightness(c(0)) <= 6.0, "{ramp:?} dark: {:?}", c(0));
+            assert!(rgb_lightness(c(255)) >= 90.0, "{ramp:?} pale: {:?}", c(255));
+            for level in 1..=255u8 {
+                assert_eq!(
+                    c(level),
+                    Theme::Rainbow.color(Ink::new(Role::Ramp(ramp), level), 0, 0)
+                );
+                let (a, b) = (rgb_lightness(c(level - 1)), rgb_lightness(c(level)));
+                // 8-bit rounding may shave a hair off; a level step is ~0.35 L*.
+                assert!(b >= a - 0.25, "{ramp:?} L* at {level}: {a:.2} -> {b:.2}");
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r12_ramps_end_on_distinct_hues() {
+        let tops: Vec<(Ramp, f64)> = Ramp::ALL
+            .iter()
+            .map(|&r| {
+                (
+                    r,
+                    hue(Theme::Astro.color(Ink::new(Role::Ramp(r), 255), 0, 0)),
+                )
+            })
+            .collect();
+        for (i, (ra, a)) in tops.iter().enumerate() {
+            for (rb, b) in &tops[i + 1..] {
+                assert!(hue_gap(*a, *b) >= 15.0, "{ra:?} {a:.0} vs {rb:?} {b:.0}");
+            }
+        }
     }
 }

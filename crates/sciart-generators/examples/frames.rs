@@ -16,7 +16,8 @@ use sciart_core::prelude::*;
 const USAGE: &str =
     "usage: frames <scene> [--size WxH] [--t 0,1,5,20] [--ascii] [--inks] [--seed N]";
 const LEGEND: &str = "roles: D=Dim S=Star U=Sun P=Planet I=Particle W=Wave H=Hot C=Cold \
-T=Structure A=Accent X=Text Q=Seq V=Div  (lowercase: level < 128, '.': Background)";
+T=Structure A=Accent X=Text Q=Seq V=Div O=Phase B=Blackbody R=Ramp  \
+(lowercase: level < 128, '.': Background)";
 
 #[derive(Debug)]
 struct Args {
@@ -98,6 +99,9 @@ fn role_char(ink: Ink) -> char {
         Role::Text => 'X',
         Role::Seq => 'Q',
         Role::Div => 'V',
+        Role::Phase => 'O',
+        Role::Blackbody => 'B',
+        Role::Ramp(_) => 'R',
         _ => '?',
     };
     if ink.level < 128 {
