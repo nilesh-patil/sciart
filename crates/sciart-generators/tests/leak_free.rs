@@ -41,9 +41,9 @@ const BIG_STEPS: usize = 60;
 /// change.
 const LIVE_CEILING: i64 = 4 << 20;
 /// Scenes with their own, higher ceiling, each named with its reason in TEST-R7, so one
-/// outlier does not loosen the guard for every other scene. fractal_growth held 14.5 MiB:
-/// its braille-resolution DLA lattice is uncapped until M12 caps it (ADR-0012).
-const EXCEPTIONS: &[(&str, i64)] = &[("fractal_growth", 15 << 20)];
+/// outlier does not loosen the guard for every other scene. None since M12 capped
+/// fractal_growth's DLA lattice (ADR-0012).
+const EXCEPTIONS: &[(&str, i64)] = &[];
 
 fn ceiling(name: &str) -> i64 {
     EXCEPTIONS
