@@ -30,6 +30,7 @@ use rand::Rng;
 
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "radioactive_decay",
@@ -496,7 +497,8 @@ impl RadioactiveDecay {
         let len_cells = tr.speed * s_end * ASPECT;
         let n = ((len_cells * 2.0).ceil() as usize).clamp(1, 64);
         let fade = tr.fade();
-        let h = i32::from(canvas.size().height());
+        // Tracks stay over the lattice rows, clear of the title row (RAD-A4).
+        let h = i32::from(self.lattice.height());
         let mut last = tr.cell;
         for k in 1..=n {
             let s = s_end * k as f64 / n as f64;
@@ -557,7 +559,7 @@ impl RadioactiveDecay {
         let n0 = f64::from(self.n0.max(1));
         let text = Ink::new(Role::Text, 200);
         // The time-axis labels can land on the title row, so they share its readout tone.
-        let faint = Ink::new(Role::Text, sciart_core::title::READOUT_LEVEL);
+        let faint = Ink::new(Role::Text, title::READOUT_LEVEL);
         let axis = Ink::new(Role::Structure, 110);
 
         // Title and the live populations.
@@ -706,7 +708,10 @@ impl Generator for RadioactiveDecay {
         self.lat_w = self.panel.map_or(w, |p| p.x0 - 2).max(1);
         let gw = ((self.lat_w + 1) / 2).max(1);
         self.x_off = (self.lat_w - (2 * gw - 1)) / 2;
-        self.lattice = Grid::new(Size::new(gw as u16, h as u16), Nucleus::FRESH);
+        // Row h − 1 belongs to the title while it shows (RAD-A4, GEN-R13).
+        let titled = title::span(size, &Title::new(META.title, None)).is_some();
+        let rows = if titled { h - 1 } else { h }.max(1);
+        self.lattice = Grid::new(Size::new(gw as u16, rows as u16), Nucleus::FRESH);
         self.n0 = self.lattice.len() as u32;
 
         self.t_axis = AXIS_SLACK * reset_time();
@@ -1074,5 +1079,30 @@ mod tests {
             }
         }
         assert!(seen > 0, "decays emit tracks");
+    }
+
+    #[test]
+    fn rad_a4_the_title_row_is_left_to_the_title() {
+        let mut ctx = seeded(6);
+        for (w, h) in [(80u16, 24u16), (120, 36), (200, 50), (40, 5), (7, 3)] {
+            let size = Size::new(w, h);
+            let mut g = RadioactiveDecay::default();
+            g.resize(size, &mut ctx);
+            let titled = title::span(size, &Title::new(META.title, None)).is_some();
+            let rows = if titled { h - 1 } else { h };
+            assert_eq!(g.lattice.height(), rows, "{w}x{h}");
+            let last = i32::from(h) - 1;
+            for _ in 0..40 {
+                g.update(0.25, &mut ctx);
+                let panel = g.panel.take();
+                let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+                g.render(&mut canvas);
+                g.panel = panel;
+                if titled {
+                    let row = &canvas.to_lines()[last as usize];
+                    assert!(row.trim().is_empty(), "{w}x{h}: {row:?}");
+                }
+            }
+        }
     }
 }
