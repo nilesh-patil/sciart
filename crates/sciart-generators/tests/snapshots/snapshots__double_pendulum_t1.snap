@@ -2,25 +2,25 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-                 two double pendulums, released 0.001 rad apart                 
-                                          .                                     
-                                          ..                                    
-                                           :                                    
-                                           :                                    
-                                           :                                    
-                                          :                                     
-                                          :                                     
-                                         ::                                     
-                                        ::                                      
-                                       ::                                       
-                                     oo-+                                       
-                                    ---                                         
-                                ----                                            
-                             -o-o                                               
-                           --oo                                                 
-                        ---o                                                    
-                      O-oo                                                      
                                                                                 
+                                                                                
+                                          #                                     
+                                          +.                                    
+                                           +                                    
+                                          .+                                    
+                                          +                                     
+                                          +                                     
+                                         +:                                     
+                                        :+                                      
+                                       ::                                       
+                                      +#:                                       
+                                   .++:                                         
+                                 .#+.                                           
+                              +#+.                                              
+                            +:+.                                                
+                         :+:                                                    
+                     +###.                                                      
+                      ::                                                        
                                                                                 
                                                                                 
                                                                                 

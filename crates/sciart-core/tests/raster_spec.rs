@@ -1,4 +1,4 @@
-//! SPEC-001 CORE-R40..R42: cell background, braille `Dots` and half-block `Pixels`
+//! SPEC-001 CORE-R40..R42, R82: cell background, braille `Dots` (and its disc) and half-block `Pixels`
 //! (ADR-0010).
 
 use proptest::prelude::*;
@@ -411,4 +411,56 @@ fn core_r42_half_block_is_the_unicode_cell_rule_of_blit() {
             "{top:?} {bottom:?}"
         );
     }
+}
+
+// ---------------------------------------------------------------- CORE-R82
+
+fn lit(d: &Dots) -> Vec<(i32, i32)> {
+    let s = d.dot_size();
+    let (w, h) = (i32::from(s.width()), i32::from(s.height()));
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|&(x, y)| d.is_lit(x, y))
+        .collect()
+}
+
+#[test]
+fn core_r82_disc_lights_the_dots_within_its_radius() {
+    let mut d = Dots::new(Size::new(10, 5));
+    d.disc(9.3, 9.6, 2.0, A);
+    // Every dot of the 20 × 20 lattice whose centre is within the radius.
+    let want: Vec<_> = (0..20)
+        .flat_map(|y| (0..20).map(move |x| (x, y)))
+        .filter(|&(x, y)| (f64::from(x) - 9.3).hypot(f64::from(y) - 9.6) <= 2.0)
+        .collect();
+    assert_eq!(lit(&d), want);
+    assert!(want.len() >= 12, "{}", want.len());
+}
+
+#[test]
+fn core_r82_small_disc_is_the_nearest_dot_and_bad_input_lights_nothing() {
+    let mut d = Dots::new(Size::new(4, 2));
+    d.disc(2.4, 3.6, 0.2, A);
+    assert_eq!(lit(&d), vec![(2, 4)]);
+    let mut d = Dots::new(Size::new(4, 2));
+    for (x, y, r) in [
+        (f64::NAN, 1.0, 1.0),
+        (1.0, f64::INFINITY, 1.0),
+        (1.0, 1.0, -0.5),
+        (1.0, 1.0, f64::NAN),
+    ] {
+        d.disc(x, y, r, A);
+    }
+    assert!(lit(&d).is_empty());
+}
+
+#[test]
+fn core_r82_disc_is_clipped_to_the_lattice() {
+    let mut d = Dots::new(Size::new(3, 2));
+    d.disc(-1.0, -1.0, 2.0, A);
+    assert_eq!(lit(&d), vec![(0, 0)]);
+    // A huge disc fills the lattice and nothing more.
+    let mut d = Dots::new(Size::new(3, 2));
+    d.disc(2.0, 3.0, 1e12, A);
+    assert_eq!(lit(&d).len(), 6 * 8);
 }
