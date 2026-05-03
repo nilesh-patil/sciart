@@ -21,6 +21,14 @@ pub struct ParticlePool<P> {
     capacity: usize,
 }
 
+/// An empty pool of capacity 0, the placeholder until a scene sizes it with
+/// [`ParticlePool::set_capacity`]; allocates nothing.
+impl<P> Default for ParticlePool<P> {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
+}
+
 impl<P> ParticlePool<P> {
     /// An empty pool that will hold at most `capacity` particles (CORE-R28).
     pub fn with_capacity(capacity: usize) -> Self {

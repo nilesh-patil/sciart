@@ -39,7 +39,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink};
+use sciart_core::{Tone, draw, ease, ink, raster};
 
 pub static META: Meta = Meta {
     name: "vortex_street",
@@ -176,6 +176,29 @@ const ST_MIN_CROSSINGS: usize = 3;
 const ASCII_DOT: f64 = VORT_SEED;
 const ASCII_EDDY: f64 = 0.25;
 const ASCII_STRONG: f64 = 0.6;
+
+/// Dye ports (VOR-A9): one per shoulder, at this angle from the front stagnation point
+/// (just ahead of separation at Re ≈ 100–150), and their distance outside the rim in
+/// nodes; each releases one particle per lattice step. More ports fill the eddy cores
+/// with solid dye and hide the spiral filaments.
+const PORT_ANGLE_DEG: f64 = 80.0;
+const PORTS: usize = 2;
+const PORT_GAP: f64 = 1.0;
+/// Dye pool capacity: every port for 12 s of release, several times the ≈ 5 s a particle
+/// takes to cross the view, so releases never stall in normal operation (VOR-A10).
+const DYE_CAP: usize = PORTS * STEPS_PER_S as usize * 12;
+/// Dye tone: the age-weighted particle count per pixel (in units of a fresh particle)
+/// through asinh, spread over levels `DYE_DIM..=255` so the faintest dye still reads over
+/// the vorticity (VOR-A11).
+const DYE_KNEE: f32 = 0.25;
+const DYE_WHITE: f32 = 12.0;
+const DYE_DIM: u8 = 130;
+const DYE_RAMP: Ramp = Ramp::Plasma;
+/// A dye particle's weight falls linearly from 1 at release to 1/16 at this age (s), about
+/// the time dye takes to reach the second eddy, so fresh streaks are bright and old ones dim
+/// (VOR-A12). Weights are counted in sixteenths, `DYE_UNITS` for a fresh particle.
+const DYE_FADE_S: f64 = 3.0;
+const DYE_UNITS: u8 = 16;
 
 /// Boundary handling of [`step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -991,6 +1014,57 @@ pub(crate) fn breath(t: f64) -> f64 {
     1.0 + BREATH_AMP * (2.0 * PI * t / BREATH_PERIOD).sin()
 }
 
+/// Bilinear lattice velocity at `(x, y)` (lattice units, rows down): x clamped to the
+/// lattice, y periodic like the flow.
+pub(crate) fn velocity(lat: &Lattice, x: f64, y: f64) -> (f64, f64) {
+    let (w, h) = (lat.w, lat.h);
+    if w == 0 || h == 0 {
+        return (0.0, 0.0);
+    }
+    let x = x.clamp(0.0, (w - 1) as f64);
+    let y = y.rem_euclid(h as f64);
+    let (x0, y0) = (x.floor() as usize, y.floor() as usize);
+    let (fx, fy) = (x - x0 as f64, y - y0 as f64);
+    let (x1, y0, y1) = ((x0 + 1).min(w - 1), y0.min(h - 1), (y0 + 1) % h);
+    let at = |g: &Grid<f32>| {
+        let g = g.as_slice();
+        let top = f64::from(g[y0 * w + x0]) * (1.0 - fx) + f64::from(g[y0 * w + x1]) * fx;
+        let bottom = f64::from(g[y1 * w + x0]) * (1.0 - fx) + f64::from(g[y1 * w + x1]) * fx;
+        top * (1.0 - fy) + bottom * fy
+    };
+    (at(&lat.ux), at(&lat.uy))
+}
+
+/// Advect a dye particle through `n` lattice steps of the frozen velocity field by the
+/// midpoint rule (VOR-A9). Dye neither diffuses nor feels anything but the flow.
+pub(crate) fn advect(lat: &Lattice, (x, y): (f64, f64), n: f64) -> (f64, f64) {
+    let (u, v) = velocity(lat, x, y);
+    let (u, v) = velocity(lat, x + 0.5 * n * u, y + 0.5 * n * v);
+    (x + n * u, (y + n * v).rem_euclid(lat.h.max(1) as f64))
+}
+
+/// The two dye ports in lattice coordinates, upper then lower, [`PORT_ANGLE_DEG`] from
+/// the front stagnation point and [`PORT_GAP`] nodes outside the rim.
+pub(crate) fn dye_ports(p: &FlowParams) -> [(f64, f64); PORTS] {
+    let r = 0.5 * p.d + PORT_GAP;
+    let (s, c) = PORT_ANGLE_DEG.to_radians().sin_cos();
+    [-1.0, 1.0].map(|side| (p.xc - r * c, p.yc + side * r * s))
+}
+
+/// A dye particle: its lattice position and the lattice step it was released at.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Dye {
+    pos: (f64, f64),
+    born: u64,
+}
+
+/// A dye particle's weight at `age` seconds, in sixteenths: [`DYE_UNITS`] at release,
+/// falling linearly to 1 at [`DYE_FADE_S`] and staying there (VOR-A12).
+pub(crate) fn dye_units(age: f64) -> u8 {
+    let w = 1.0 - (1.0 - 1.0 / f64::from(DYE_UNITS)) * (age / DYE_FADE_S).clamp(0.0, 1.0);
+    (w * f64::from(DYE_UNITS)).round() as u8
+}
+
 /// Zero-crossing probe for the Strouhal readout.
 #[derive(Debug, Clone)]
 struct Probe {
@@ -1052,6 +1126,11 @@ pub struct VortexStreet {
     size: Option<Size>,
     /// Display columns of the disc's ASCII caps (see [`ASCII_CAP_D`]), inclusive.
     cap_cols: (i32, i32),
+    /// Dye particles in lattice coordinates (VOR-A9), their tone curve, and the dye level
+    /// of every pixel (0: none), drawn over the vorticity in Unicode.
+    dye: ParticlePool<Dye>,
+    tone: Tone,
+    dye_level: Vec<u8>,
 }
 
 impl VortexStreet {
@@ -1074,7 +1153,8 @@ impl VortexStreet {
 
     /// Start from the analytic street and pre-roll [`PREROLL_STEPS`]: the potential flow
     /// slips at the no-slip wall and starts impulsively, and the few steps it takes the
-    /// slip sheet to diffuse and the start-up pressure pulse to leave are not shown.
+    /// slip sheet to diffuse and the start-up pressure pulse to leave are not shown. The
+    /// old flow's dye goes with it (VOR-A10); clearing keeps the pool's buffer.
     fn restart(&mut self, p: &FlowParams, rng: &mut impl Rng) {
         self.lat = Lattice::channel(p, self.inlet_scale());
         init_street(&mut self.lat, p, rng);
@@ -1082,6 +1162,7 @@ impl VortexStreet {
             step(&mut self.lat, p, Bc::Channel);
         }
         self.probe = Probe::at(p);
+        self.dye.clear();
     }
 
     /// Recompute the vorticity and rasterise it into the pixels: the fluid, then the
@@ -1163,6 +1244,88 @@ impl VortexStreet {
                 self.pixels.set(x, y, ink);
             }
         }
+        self.paint_dye();
+    }
+
+    /// Advance the dye through this update's `n` lattice steps, then release `n` new
+    /// particles per port, each carried along its first path for the part of the update
+    /// after its release, and drop those that left the view or hit the cylinder (VOR-A9).
+    fn move_dye(&mut self, n: usize) {
+        let Some(p) = self.params else { return };
+        let lat = &self.lat;
+        let (x_end, r2) = ((p.w_vis - 1) as f64, 0.25 * p.d * p.d);
+        let inside = |(x, y): (f64, f64)| {
+            let (dx, dy) = (x - p.xc, y - p.yc);
+            (VIEW_X0 as f64..x_end).contains(&x) && dx * dx + dy * dy > r2
+        };
+        self.dye.retain(|q| {
+            q.pos = advect(lat, q.pos, n as f64);
+            inside(q.pos)
+        });
+        // `steps` already counts this update's n steps: step j of them released at
+        // `steps − n + j`, and has moved for the rest of the update since.
+        for port in dye_ports(&p) {
+            let (u, v) = velocity(lat, port.0, port.1);
+            for j in 0..n {
+                let age = n as f64 - j as f64 - 0.5;
+                let pos = (port.0 + age * u, port.1 + age * v);
+                if inside(pos) {
+                    let born = self.steps - (n - j) as u64;
+                    self.dye.spawn(Dye { pos, born });
+                }
+            }
+        }
+    }
+
+    /// Sum the dye's age weights per pixel ([`dye_units`]) and turn the sums into
+    /// [`DYE_RAMP`] levels in place. A pixel keeps no dye where there is none, where it is
+    /// the cylinder, or where no vorticity cloud is drawn: tracers that drift out of the
+    /// wake into calm water would only be confetti (VOR-A11).
+    fn paint_dye(&mut self) {
+        let Some(p) = self.params else { return };
+        let px = self.pixels.pixel_size();
+        let (pw, ph) = (usize::from(px.width()), usize::from(px.height()));
+        let vw = usize::from(self.vort.width());
+        self.dye_level.fill(0);
+        for d in self.dye.iter() {
+            let cx = grid::centre_of(d.pos.0 - VIEW_X0 as f64, vw, pw).round();
+            let cy = grid::centre_of(d.pos.1, p.h, ph).round();
+            if (0.0..pw as f64).contains(&cx) && (0.0..ph as f64).contains(&cy) {
+                let age = (self.steps - d.born) as f64 / STEPS_PER_S;
+                let c = &mut self.dye_level[cy as usize * pw + cx as usize];
+                *c = c.saturating_add(dye_units(age));
+            }
+        }
+        let span = f32::from(255 - DYE_DIM) / 255.0;
+        for (i, n) in self.dye_level.iter_mut().enumerate() {
+            let under = self.pixels.get((i % pw) as i32, (i / pw) as i32);
+            *n = match under {
+                _ if *n == 0 => 0,
+                Some(ink) if matches!(ink.role, Role::Structure | Role::Background) => 0,
+                Some(ink) => {
+                    let sum = f32::from(*n) / f32::from(DYE_UNITS);
+                    let level = DYE_DIM + (f32::from(self.tone.level(sum)) * span).round() as u8;
+                    // Never darker than the cloud under it: in a grey theme a dimmer dye
+                    // would read as dark speckle on a bright core.
+                    level.max(ink::level(255.0 * ink::div_value(ink).abs()))
+                }
+                None => 0,
+            };
+        }
+    }
+
+    /// The Unicode ink of pixel `(x, y)`: dye over the vorticity (VOR-A11).
+    fn dyed(&self, x: i32, y: i32) -> Ink {
+        let w = i32::from(self.pixels.pixel_size().width());
+        let level = self
+            .dye_level
+            .get((y * w + x) as usize)
+            .copied()
+            .unwrap_or(0);
+        match level {
+            0 => self.pixels.get(x, y).unwrap_or(Ink::BLANK),
+            l => Ink::new(Role::Ramp(DYE_RAMP), l),
+        }
     }
 
     /// `Re≈140` and, once measured and at width ≥ 40, `  St≈0.18` (row 0, column 1); both
@@ -1209,15 +1372,27 @@ impl Generator for VortexStreet {
             let p = flow_params(lat_size);
             match self.params {
                 None => self.restart(&p, &mut ctx.rng),
-                Some(_) => {
+                Some(old) => {
                     self.regrid(&p);
                     self.probe = Probe::at(&p);
+                    // Dye keeps its place relative to the cylinder, in diameters (VOR-A10).
+                    let k = p.d / old.d;
+                    for Dye { pos: q, .. } in self.dye.iter_mut() {
+                        *q = (p.xc + (q.0 - old.xc) * k, p.yc + (q.1 - old.yc) * k);
+                    }
                 }
             }
             self.params = Some(p);
             self.vort = Grid::new(Size::new((p.w_vis - VIEW_X0) as u16, p.h as u16), 0.0);
         }
         self.pixels.resize(size);
+        // First resize only: the pool and the dye tone do not depend on the size.
+        if self.dye.capacity() != DYE_CAP {
+            self.dye.set_capacity(DYE_CAP);
+            self.tone = Tone::asinh(DYE_KNEE, DYE_WHITE);
+        }
+        self.dye_level.clear();
+        self.dye_level.resize(self.pixels.pixel_size().area(), 0);
         // The hysteresis stack holds at most one entry per pixel (`drop_faint_islands`).
         // Cleared first: `reserve` counts from the length, and the last island is left
         // in it, so the capacity would creep with each resize (TEST-R6).
@@ -1248,6 +1423,7 @@ impl Generator for VortexStreet {
             // Rows grow downward; the crossing direction does not change the period.
             self.probe.sample(uy, p.u, self.steps);
         }
+        self.move_dye(n);
         self.since_check += dt;
         if self.since_check >= CHECK_EVERY {
             self.since_check = 0.0;
@@ -1267,6 +1443,24 @@ impl Generator for VortexStreet {
                 (self.cap_cols.0..=self.cap_cols.1).contains(&x),
             )
         });
+        // Unicode: the dyed cells again, dye over the vorticity; ASCII keeps the
+        // vorticity alone (VOR-A11).
+        if canvas.mode() == GlyphMode::Unicode {
+            let w = usize::from(self.pixels.pixel_size().width());
+            for (i, pair) in self.dye_level.chunks_exact(2 * w).enumerate() {
+                let (tops, bottoms) = pair.split_at(w);
+                for (x, _) in tops
+                    .iter()
+                    .zip(bottoms)
+                    .enumerate()
+                    .filter(|(_, (t, b))| **t | **b != 0)
+                {
+                    let (x, y) = (x as i32, i as i32);
+                    let (top, bottom) = (self.dyed(x, 2 * y), self.dyed(x, 2 * y + 1));
+                    raster::half_block(canvas, x, y, top, bottom);
+                }
+            }
+        }
         self.label(canvas);
     }
 }
@@ -1921,7 +2115,7 @@ mod tests {
     }
 
     #[test]
-    fn vor_a7_frame_shows_disc_and_two_signed_rows() {
+    fn vor_a7_a11_frame_shows_disc_and_two_signed_rows() {
         let mut s = Stage::new(build(), 42, Size::new(80, 24), GlyphMode::Ascii);
         // The scene's own frame: the title would sit on the calm inflow's last row.
         s.set_title_visible(false);
@@ -2002,7 +2196,11 @@ mod tests {
                 assert!(
                     matches!(
                         ink.role,
-                        Role::Div | Role::Structure | Role::Text | Role::Background
+                        Role::Div
+                            | Role::Structure
+                            | Role::Text
+                            | Role::Background
+                            | Role::Ramp(DYE_RAMP)
                     ),
                     "{ink:?}"
                 );
@@ -2216,5 +2414,178 @@ mod tests {
         s.set_glyph_mode(GlyphMode::Ascii);
         let row = s.render().to_lines()[0].clone();
         assert!(row.starts_with(" Re~") && !row.contains("St"), "{row}");
+    }
+
+    #[test]
+    fn vor_a9_dye_rides_a_uniform_flow_exactly() {
+        let size = Size::new(32, 16);
+        let mut lat = Lattice::new(size, |_, _| false);
+        lat.ux.fill(0.1);
+        lat.uy.fill(-0.03);
+        let (x, y) = advect(&lat, (3.25, 8.5), 20.0);
+        assert!(
+            (x - 5.25).abs() < 1e-6 && (y - 7.9).abs() < 1e-6,
+            "({x}, {y})"
+        );
+        // y is periodic like the flow.
+        let (_, y) = advect(&lat, (3.0, 0.2), 20.0);
+        assert!((y - 15.6).abs() < 1e-6, "{y}");
+    }
+
+    #[test]
+    fn vor_a9_a10_dye_stays_in_the_wake_and_reaches_the_far_wake() {
+        let (mut g, mut ctx) = scene(Size::new(200, 50));
+        let p = g.params.unwrap();
+        let ports = dye_ports(&p);
+        let x_min = ports.iter().map(|q| q.0).fold(f64::INFINITY, f64::min);
+        let mut peak = 0;
+        for _ in 0..(20.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            peak = peak.max(g.dye.len());
+            for &Dye { pos: (x, y), .. } in g.dye.iter() {
+                let (dx, dy) = (x - p.xc, y - p.yc);
+                assert!(
+                    dx * dx + dy * dy > 0.25 * p.d * p.d,
+                    "dye inside the cylinder"
+                );
+                assert!(x >= x_min - 0.5, "dye upstream of the ports: {x} < {x_min}");
+            }
+        }
+        // Releases never stall: the pool is never full.
+        assert!(peak < DYE_CAP && g.dye.capacity() == DYE_CAP, "peak {peak}");
+        assert!(g.dye.len() > 2000, "{} particles", g.dye.len());
+        // Both shoulders' dye, above and below the centre line.
+        let above = g.dye.iter().filter(|q| q.pos.1 < p.yc).count();
+        let below = g.dye.len() - above;
+        assert!(above > 500 && below > 500, "{above} above, {below} below");
+        // Dye pixels right of x_c + 3D: the streaks reach the far wake.
+        let px = g.pixels.pixel_size();
+        let vw = usize::from(g.vort.width());
+        let far = grid::centre_of(
+            p.xc + 3.0 * p.d - VIEW_X0 as f64,
+            vw,
+            usize::from(px.width()),
+        );
+        let dyed = (0..i32::from(px.height()))
+            .flat_map(|y| (far.ceil() as i32..i32::from(px.width())).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.dyed(x, y).role == Role::Ramp(DYE_RAMP))
+            .count();
+        assert!(dyed > 100, "{dyed} dye pixels in the far wake");
+    }
+
+    #[test]
+    fn vor_a10_bucket_change_keeps_dye_relative_to_the_cylinder() {
+        let (mut g, mut ctx) = scene(Size::new(200, 50));
+        for _ in 0..120 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let old = g.params.unwrap();
+        let before: Vec<_> = g.dye.iter().copied().collect();
+        let cap = g.dye.capacity();
+        g.resize(Size::new(100, 50), &mut ctx);
+        let p = g.params.unwrap();
+        assert_ne!(p.w, old.w);
+        assert_eq!(g.dye.capacity(), cap);
+        // The per-pixel dye buffer is sized in `resize`, not in the next update.
+        assert_eq!(g.dye_level.len(), g.pixels.pixel_size().area());
+        for (a, b) in before.iter().zip(g.dye.iter()) {
+            let (a, b) = (a.pos, b.pos);
+            assert!(((a.0 - old.xc) / old.d - (b.0 - p.xc) / p.d).abs() < 1e-9);
+            assert!(((a.1 - old.yc) / old.d - (b.1 - p.yc) / p.d).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn vor_a10_restart_clears_the_dye_and_keeps_its_capacity() {
+        let (mut g, mut ctx) = scene(Size::new(120, 40));
+        for _ in 0..120 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        assert!(!g.dye.is_empty());
+        let p = g.params.unwrap();
+        g.restart(&p, &mut ctx.rng);
+        assert!(g.dye.is_empty());
+        assert_eq!(g.dye.capacity(), DYE_CAP);
+    }
+
+    #[test]
+    fn vor_a12_dye_dims_with_age() {
+        // Weight units: `DYE_UNITS` at release, never rising, 1 from `DYE_FADE_S` on.
+        assert_eq!(dye_units(0.0), DYE_UNITS);
+        assert_eq!(dye_units(DYE_FADE_S), 1);
+        assert_eq!(dye_units(3.0 * DYE_FADE_S), 1);
+        let mut last = DYE_UNITS;
+        for i in 0..=100 {
+            let u = dye_units(f64::from(i) * DYE_FADE_S / 50.0);
+            assert!((1..=last).contains(&u), "{i}: {u}");
+            last = u;
+        }
+        // In the scene: fresh dye near the shoulders outshines old dye in the far wake.
+        let (mut g, mut ctx) = scene(Size::new(200, 50));
+        for _ in 0..(20.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let p = g.params.unwrap();
+        let px = g.pixels.pixel_size();
+        let (pw, vw) = (usize::from(px.width()), usize::from(g.vort.width()));
+        let col = |d: f64| grid::centre_of(p.xc + d * p.d - VIEW_X0 as f64, vw, pw) as i32;
+        let mean = |x0: i32, x1: i32| {
+            let (mut n, mut sum) = (0u32, 0u32);
+            for y in 0..i32::from(px.height()) {
+                for x in x0..x1 {
+                    let ink = g.dyed(x, y);
+                    if ink.role == Role::Ramp(DYE_RAMP) {
+                        n += 1;
+                        sum += u32::from(ink.level);
+                    }
+                }
+            }
+            assert!(n > 20, "{n} dye pixels in {x0}..{x1}");
+            f64::from(sum) / f64::from(n)
+        };
+        let (near, far) = (mean(col(0.5), col(2.0)), mean(col(7.0), pw as i32));
+        assert!(near > far + 20.0, "near {near:.0} vs far {far:.0}");
+    }
+
+    #[test]
+    fn vor_a11_dye_layers_over_the_vorticity_and_never_the_cylinder() {
+        let (mut g, mut ctx) = scene(Size::new(120, 40));
+        for _ in 0..(8.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let px = g.pixels.pixel_size();
+        let mut dye = 0;
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let (art, under) = (g.dyed(x, y), g.pixels.get(x, y).unwrap());
+                if art.role == Role::Ramp(DYE_RAMP) {
+                    assert!(art.level >= DYE_DIM, "({x}, {y}) {art:?}");
+                    assert_ne!(under.role, Role::Structure, "dye over the cylinder");
+                    // Dye shows only inside the wake's clouds: strays in calm water go.
+                    assert_ne!(under.role, Role::Background, "stray dye at ({x}, {y})");
+                    // Never darker than the cloud's magnitude, so in a grey theme the dye
+                    // reads light over a bright core rather than as dark speckle.
+                    let floor = 255.0 * ink::div_value(under).abs();
+                    assert!(
+                        f64::from(art.level) >= floor - 0.5,
+                        "({x}, {y}) {art:?} over {under:?}"
+                    );
+                    dye += 1;
+                } else {
+                    assert_eq!(art, under, "({x}, {y})");
+                }
+            }
+        }
+        assert!(dye > 200, "{dye} dye pixels");
+        // ASCII shows the vorticity alone: the same frame as blitting `pixels`.
+        let mut ascii = Canvas::new(Size::new(120, 40), GlyphMode::Ascii);
+        g.render(&mut ascii);
+        let mut plain = Canvas::new(Size::new(120, 40), GlyphMode::Ascii);
+        let caps = g.cap_cols;
+        g.pixels.blit(&mut plain, |x, _, top, bottom| {
+            ascii_cell(top, bottom, (caps.0..=caps.1).contains(&x))
+        });
+        g.label(&mut plain);
+        assert_eq!(ascii.to_lines(), plain.to_lines());
     }
 }

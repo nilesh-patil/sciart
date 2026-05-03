@@ -123,7 +123,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [x] Ink ADR-0015: `Role::Phase` (cyclic), `Role::Blackbody` (temperature in `level`), `Role::Ramp(Ramp)` with six named ramps (Ember, Ice, Ferroin, HAlpha, Aurora, Plasma) mapped by every theme; Mono keeps its floors [CORE-R78..R80, RND-R10..R12]
 - [x] `raster::Tone` (asinh LUT, built on resize) + `Density::to_pixels` [CORE-R81]
 - [ ] Upgrade all 41 scenes from the per-scene lists (art first, honest science, stylisation stated in SPEC-002); rescore each in truecolor frames before and after
-- [ ] doppler_effect: two acts, acoustic with Mach cone and relativistic light with red/blue shift, each with its own caption
+- [x] doppler_effect: two acts, acoustic with Mach cone and relativistic light with red/blue shift, each with its own caption [DOP-A1..A10]
 - [ ] particle_accelerator: two acts, LHC-style event display and 1960s bubble chamber, each with its own caption
 - [ ] Every upgraded scene < 2 ms worst frame (step + render) at 200×50, allocation-free `render`/steady-state `update` [GEN-R8, GEN-R11]
 - [x] Cap fractal_growth's DLA lattice with `grid::lattice_for` (ADR-0012) and drop its TEST-R7 exception (14.5 → 2.7 MiB at 500×150) [CRY-A5, TEST-R7]
