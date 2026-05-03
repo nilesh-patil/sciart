@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-+------------------------------------------------------------------------------+
-|                                            O.                                |
-|                                       O. O.. .O                              |
-|                                     O.. .O.O.O..O                            |
-|                                    O...O    O.O.                             |
-|                               O.O..O O.O.O. O.  O.                           |
-|                             O... O...O.O.O. O.O.O.O                          |
-|                           .O..O. O.O.O....O. .O.O.O                          |
-|                       O. O.O.O.O...O..O.O.O.O.O...O..O                       |
-|                       O .O...O.O O.O ...O...O.O.O.O. O.O                     |
-|                       ..O..O.O...O. O.O.O.O.O...O. ..O.O                     |
-|                     O.O.O .O.O.O.O ...O...O. .O..O.O O..                     |
-|                      .O.. .O...O..O.O.O.O.O.O. O.O.O...O                     |
-|                     O.O.O..O.O.O.. .O...O.O.O. O .   O.O .O                  |
-|                     O.  .O.O.O.O.O .O.O.O...O. ..O                           |
-|                        O.O...O...O..O.O.O.O. O O                             |
-|                            .O.O.O.O...O....O.                                |
-|                            O. ..O.O.O.O.O                                    |
-|                              O..O...O.                                       |
-|                              O .O.O.O                                        |
-|                                 ..O.                                         |
-|                                 O                                            |
-+------------------------------------------------------------------------------+
- Condensation - cool atoms cling                       T = 0.26 -> 0.30 heating
+                                                                                
+                                                                                
+                                                                                
+                              o                                                 
+                          o.o   o o o. o o  o                                   
+                        o. oo o  o o .. o   . o o o                             
+                     o   o.  o o o  ooo   o o  o o   o  o o                     
+                       o  oo  o o o  o o o o o o  oo  o o o                     
+                        o   o o  o o  o   o.o o o   o o o                       
+                       o o o o o  o o   o o o  o o o o o  o                     
+                        o  o  o o  o oo  o o o  o  o o  o                       
+                        o o o  o o o   o  o o o   o o o  o                      
+                     o o  o  o o  o.o o o o o  oo  o o o                        
+                     o   o o  o o  o  o o  o o   o o o  o                       
+                       .o o o  o o   o o o  o o o o o  o                        
+                      o  o o o o   o  o o o  o oo  o o o                        
+                     o o  o o   o.o o  o o o o   o  o o                         
+                      o o o o o    o o o  o o o o o o  o                        
+                               o o o  o o  o     o o o                          
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+ Condensation - cool atoms cling               T 0.26 -> 0.30  U/N -2.50  N 205

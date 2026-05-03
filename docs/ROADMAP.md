@@ -125,6 +125,8 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [ ] Upgrade all 41 scenes from the per-scene lists (art first, honest science, stylisation stated in SPEC-002); rescore each in truecolor frames before and after
 - [x] doppler_effect: two acts, acoustic with Mach cone and relativistic light with red/blue shift, each with its own caption [DOP-A1..A10]
 - [ ] particle_accelerator: two acts, LHC-style event display and 1960s bubble chamber, each with its own caption
+- [x] States of Matter group: molecular_dynamics (blackbody balls, ice streaks, MB inset), fractal_growth (frost + cathode forest, no halo), ising_model (Kawasaki spinodal act, chamfer-lit domains, thermometer), molecule_viewer (per-pixel z-buffered ball-and-stick with bond orders) [MD-A5..A9, CRY-A1..A8, ISING-A6..A9, MOL-A3..A7]
+- [ ] Matter review follow-ups (minor): ising_model one chamfer-depth curve for both spins with a darker, calmer crimson interior · molecular_dynamics streak cap scaled by the atom's pixel radius at 80×24 · fractal_growth pre-grown opening seed and a frost tip age gradient · shared `geom::LIGHT` + `geom::lambert` for molecular_dynamics and molecule_viewer (new CORE-R ID) · re-measure ising_model/200x50 on a quiet machine (1.27 ms worst at load ≈ 30)
 - [ ] Every upgraded scene < 2 ms worst frame (step + render) at 200×50, allocation-free `render`/steady-state `update` [GEN-R8, GEN-R11]
 - [x] Cap fractal_growth's DLA lattice with `grid::lattice_for` (ADR-0012) and drop its TEST-R7 exception (14.5 → 2.7 MiB at 500×150) [CRY-A5, TEST-R7]
 - [x] radioactive_decay: size the nucleus lattice to rows `0..h − 1`, so the title is not punched through its last row [RAD-A4]

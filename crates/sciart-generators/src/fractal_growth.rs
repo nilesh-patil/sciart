@@ -1,35 +1,44 @@
-//! A frost dendrite growing from a seed by diffusion-limited aggregation (Witten–Sander),
-//! glowing at its growing tips, then melting from the tips inward and regrowing
-//! (SPEC-002 `fractal_growth`).
+//! Diffusion-limited aggregation (Witten–Sander) in two acts that alternate: a frost
+//! dendrite growing from a seed, then a metal forest electrodeposited on a cathode strip.
+//! Each grows, glows in the colours of its arrival times, dissolves from the tips inward
+//! and hands over to the other (SPEC-002 `fractal_growth`).
 //!
-//! Physics: random walkers diffuse in from a launch circle just outside the cluster and
-//! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`.
+//! Physics: random walkers diffuse in from a launch curve just outside the aggregate and
+//! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`. The
+//! frost act launches from a circle around a single seed; the forest act from a line above
+//! a cathode that covers the bottom row: DLA on a line (Meakin 1983). Diffusion-limited
+//! electrodeposits are DLA fractals (Brady & Ball 1984; Matsushita et al. 1984; Grier et
+//! al. 1986; Sawada et al. 1986, mostly in radial cells); the cathode strip is their
+//! line-geometry version (real cells add ion migration, which is not modelled). Both are
+//! the same walk: only the launch curve and the "height" a walker is measured by differ
+//! ([`Dla`]).
 //!
 //! Aspect correction: the aggregate lives on the braille sub-cell lattice ([`Dots`],
 //! 2 × 4 dots per terminal cell). With cells ~2:1 tall (`ASPECT`), that lattice is
 //! *square* — 1/4 row a side — so walks are isotropic with four equally likely steps
-//! ([`walk_step`]), and so are the contact distance and the size of each frozen particle. (On the raw 2:1 cell
-//! grid, even with `ASPECT²`-weighted horizontal steps, vertical contacts reach twice as far
-//! as horizontal ones and a horizontal arm costs twice the particles per row, which grows
-//! vertical needles with `D_f ≈ 1.4`.) The fine lattice also gives 4× the linear
-//! resolution, which a sparse fractal needs: a DLA cluster 60 spacings in radius holds only
-//! ~600–1000 particles (measured).
+//! ([`walk_step`]), and so are the contact distance and the size of each frozen particle.
+//! (On the raw 2:1 cell grid vertical contacts reach twice as far as horizontal ones and
+//! grow vertical needles with `D_f ≈ 1.4`.) The fine lattice also gives 4× the linear
+//! resolution, which a sparse fractal needs.
 //!
 //! Efficiency (standard DLA accelerations):
 //! - a free walk first leaves a disc uniformly on its rim, so a walker inside a
 //!   crystal-free disc jumps straight to a uniform point on its circle (one budget step).
-//!   Far out the disc has radius `d − r_launch` (`r_launch = r_max + gap`); near the
-//!   crystal it comes from a capped map of the distance to the nearest crystal site,
-//!   updated around each new site (the Meakin / Ball–Brady trick), so walkers cross the
-//!   fjords in a few hops instead of hundreds of unit steps;
-//! - a walker beyond the kill radius `2 × r_launch` is relaunched on the launch circle.
+//!   Far out the disc's radius is the walker's height above the launch curve; near the
+//!   aggregate it comes from a capped map of the distance to the nearest crystal site,
+//!   updated around each new site (the Meakin / Ball–Brady trick);
+//! - frost: a walker beyond the kill radius is relaunched on the launch circle (the usual
+//!   approximation: `2×` the launch radius);
+//! - forest: a walker above the launch line is put straight back on it at its exact
+//!   first-passage point, a Cauchy offset of its height ([`line_return`]), so the strip
+//!   needs no kill height at all.
 //!
 //! The lattice walls reflect; a jump that would cross a wall is mirrored back (method of
 //! images: exact for the walk's position, an approximation for its first-passage point)
 //! and only kept if it lands well clear of the crystal.
 //!
-//! The crystal's colours age every step, so its `Dots` raster is rebuilt at the end of
-//! `update` (and `resize`); `render` only blits it (the M10 raster convention).
+//! The crystal's colours follow the growth clock every step, so its `Dots` raster is
+//! rebuilt at the end of `update` (and `resize`); `render` only blits it.
 
 use std::f64::consts::TAU;
 use std::fmt::Write as _;
@@ -37,19 +46,22 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, grid, raster};
+use sciart_core::{draw, grid, ink, raster};
 
 pub static META: Meta = Meta {
     name: "fractal_growth",
     category: Category::PhysicalChemistry,
-    description: "A dendrite growing by diffusion-limited aggregation, then melting and regrowing",
+    description: "Diffusion-limited aggregation: a frost dendrite from a seed, then a metal forest on a cathode",
     title: "Fractal growth · walkers stick",
-    captions: &[],
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(FractalGrowth::default())
 }
+
+/// The acts' captions (GEN-R12): walkers stick to a seed, then ions deposit on a cathode.
+const CAPTIONS: [&str; 2] = ["walkers stick", "ions deposit"];
 
 /// Braille dots per terminal cell; `SUB_Y / SUB_X = ASPECT` makes the dot lattice square.
 const SUB_X: i32 = Dots::CELL_W;
@@ -68,21 +80,29 @@ const EMPTY: f32 = -1.0;
 fn pool(lattice: Size) -> usize {
     lattice.area() / 4 + 1
 }
-/// Walker-step budget per simulated second at 200×50 (the spec caps a frame at 4000; with
-/// the jump accelerations a crystal needs far fewer). Measured cost grows ~R^2.5 with the
-/// crystal radius R, so the budget scales as `(R / R_REF)^2.5` for a ~15 s growth at any
-/// size, within `[STEPS_MIN, STEPS_MAX]`.
-const STEPS_REF: f64 = 4_400.0;
+/// Walker-step budget per simulated second of the frost act at 200×50. Measured cost grows
+/// ~R^2.5 with the crystal radius R, so the budget scales as `(R / R_REF)^2.5` for a
+/// comparable growth time at any size, within `[STEPS_MIN, STEPS_MAX]`: with the opening
+/// boost ([`EARLY_BOOST`]) the frost grows in 6–7 s at 200×50 (5.6–8 s at 80×24).
+const STEPS_REF: f64 = 8_000.0;
 const R_REF_ROWS: f64 = 21.25;
 const COST_EXP: f64 = 2.5;
-const STEPS_MIN: f64 = 400.0;
+const STEPS_MIN: f64 = 600.0;
 const STEPS_MAX: f64 = 240_000.0;
+/// The forest act's budget per lattice column and second: a deposit from a line costs
+/// about the same per unit of width at any size (CRY-A6).
+const FOREST_STEPS_PER_COL: f64 = 40.0;
+/// The frost opens `EARLY_BOOST` times faster, easing to the plain budget over its first
+/// `EARLY` s: a small aggregate is cheap to grow, so the act starts from a visible crystal
+/// instead of a lone seed (the forest starts from its whole cathode).
+const EARLY_BOOST: f64 = 4.0;
+const EARLY: f64 = 2.0;
 /// Concurrent walkers: a tiny fraction of the cluster, so growth is effectively
 /// one-particle-at-a-time (Witten–Sander), yet enough to draw a faint "vapour".
 const WALKERS: usize = 12;
-/// Launch circle radius = `r_max + LAUNCH_GAP`, lattice units ("just outside").
+/// Launch curve = `extent + LAUNCH_GAP` above the aggregate, lattice units ("just outside").
 const LAUNCH_GAP: f64 = 2.0;
-/// Kill radius = `KILL_FACTOR × r_launch` (spec: 2×).
+/// Frost kill radius = `KILL_FACTOR × r_launch` (spec: 2×).
 const KILL_FACTOR: f64 = 2.0;
 /// Shortest jump worth taking instead of a unit step, lattice units.
 const JUMP_MIN: f64 = 1.5;
@@ -91,12 +111,14 @@ const JUMP_MIN: f64 = 1.5;
 const FREE_CAP: u8 = 10;
 /// A mirrored (wall-crossing) jump must land at least this far from any crystal.
 const FOLD_CLEAR: u8 = 3;
-/// A walker within this distance of `r_max` may touch the crystal (diagonal contact √2).
+/// A walker within this distance of the extent may touch the crystal (diagonal contact √2).
 const TOUCH_REACH: f64 = 1.5;
-/// Growth stops at `R(GROW_FRAC)` or after `MAX_GROW` s; then hold, then melt (s).
+/// Growth stops at `R(GROW_FRAC)` (the forest: this fraction of the lattice height) or
+/// after `MAX_GROW` s; then hold, then melt (s).
 const GROW_FRAC: f64 = 0.85;
-const MAX_GROW: f64 = 60.0;
-const HOLD: f64 = 3.0;
+const FOREST_FRAC: f64 = 0.8;
+const MAX_GROW: f64 = 40.0;
+const HOLD: f64 = 5.0;
 const MELT: f64 = 3.0;
 /// Sticking probability range (lower = denser, fuzzier crystals).
 const P_STICK: (f64, f64) = (0.3, 1.0);
@@ -104,16 +126,23 @@ const P_STICK: (f64, f64) = (0.3, 1.0);
 /// (the outer shell is still growing, so it is not yet at its asymptotic density).
 const FIT_LO: f64 = 3.0;
 const FIT_HI_FRAC: f64 = 0.5;
+/// The frost act shows its live `D_f` estimate only from this many sites (CRY-A7): below
+/// it the fit is noise. At `p_s = 1` a grown cluster (N ≈ 1 500) fits 1.45–1.65, the
+/// finite-size underestimate of the asymptotic 1.71; low `p_s` packs the small scales
+/// denser and fits higher. Hence an estimate with one decimal, `D_f ~1.6`.
+const DF_MIN_N: usize = 600;
 /// How often the live D_f readout is refreshed, s.
 const DF_TICK: f64 = 0.5;
 /// Width of the melting front, in chemical-distance steps.
 const MELT_BAND: f64 = 8.0;
 
-// Age-colouring timescales, s.
+// Colour (CRY-A7): a site's ramp position is its arrival time over the growth clock, so
+// the core is deep and the newest tips pale; a site younger than TIP_AGE flashes at the
+// top of the ramp, and a melting site brightens toward it as the front reaches it.
 const TIP_AGE: f64 = 0.3;
-const WARM_AGE: f64 = 2.0;
-const COOL_TAU: f64 = 10.0;
-
+const RAMP_LO: f64 = 0.5;
+const RAMP_HI: f64 = 0.92;
+const WALKER_INK: Ink = Ink::new(Role::Dim, 110);
 /// One isotropic lattice step `(dx, dy)` for a uniform `u ∈ [0, 1)`: the four directions
 /// with equal probability, so `E[Δx²] = E[Δy²] = 1/2` on the square lattice.
 pub(crate) fn walk_step(u: f64) -> (i32, i32) {
@@ -123,6 +152,26 @@ pub(crate) fn walk_step(u: f64) -> (i32, i32) {
         2 => (0, -1),
         _ => (0, 1),
     }
+}
+
+/// Mirror `v` into `0..=max` (reflecting walls at 0 and `max`, method of images): the
+/// unfolded axis has period `2·max`, so this is exact for any `v`. NaN maps to 0.
+fn fold(v: f64, max: i32) -> i32 {
+    if max <= 0 {
+        return 0;
+    }
+    let period = 2.0 * f64::from(max);
+    let u = v.round().rem_euclid(period);
+    (if u > f64::from(max) { period - u } else { u }) as i32
+}
+
+/// Where a forest walker at column `x`, height `a > 0` above the launch line, first comes
+/// back down onto that line (CRY-A6): `x + a·tan(π(u − ½))` for a uniform `u`, the Cauchy
+/// (half-plane Poisson kernel) law of scale `a`, folded into `0..=max` by the reflecting
+/// walls. Exact for a free walk above the line, so nothing is killed.
+pub(crate) fn line_return(x: i32, a: f64, u: f64, max: i32) -> i32 {
+    let offset = a * (std::f64::consts::PI * (u - 0.5)).tan();
+    fold(f64::from(x) + offset, max)
 }
 
 /// Mass–radius fractal dimension: least-squares slope of `ln N(r)` against `ln r` for
@@ -157,20 +206,57 @@ pub(crate) fn mass_radius_dimension<I: Iterator<Item = f64> + Clone>(
     (n >= 3.0 && den > 0.0).then(|| (n * sxy - sx * sy) / den)
 }
 
+/// The two acts, alternating: DLA onto a seed, then onto a cathode strip.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Act {
+    #[default]
+    Frost,
+    Forest,
+}
+
+impl Act {
+    /// The act's named ramp (false colour, ADR-0015): frost in Ice, the metal in Ember.
+    fn ramp(self) -> Ramp {
+        match self {
+            Act::Frost => Ramp::Ice,
+            Act::Forest => Ramp::Ember,
+        }
+    }
+
+    fn next(self) -> Act {
+        match self {
+            Act::Frost => Act::Forest,
+            Act::Forest => Act::Frost,
+        }
+    }
+
+    fn caption(self) -> &'static str {
+        match self {
+            Act::Frost => CAPTIONS[0],
+            Act::Forest => CAPTIONS[1],
+        }
+    }
+}
+
 /// The aggregate and its walkers on a square lattice.
 #[derive(Debug, Default)]
 struct Dla {
+    /// The seed (frost) or the middle of the cathode (forest).
     seed: (i32, i32),
+    /// Forest geometry: the cathode is the bottom row and walkers launch from a line.
+    line: bool,
     /// Attach time per site (run seconds), [`EMPTY`] if free (CRY-A2).
     attach: Grid<f32>,
-    /// Occupied sites in attach order; `cells[0]` is the seed.
+    /// Occupied sites in attach order: the seed or the cathode first.
     cells: Vec<(i32, i32)>,
+    /// How many of `cells` are roots (the seed, or the cathode sites the pool held).
+    roots: usize,
     walkers: Vec<(i32, i32)>,
     /// Round-robin cursor, kept across calls so small budgets still move every walker.
     turn: usize,
     /// `floor` of the distance to the nearest crystal site, capped at [`FREE_CAP`].
     free: Grid<u8>,
-    /// Largest seed distance of any crystal site, lattice units.
+    /// Largest height ([`Dla::dist`]) of any crystal site, lattice units.
     r_max: f64,
     p_stick: f64,
 }
@@ -180,8 +266,10 @@ impl Dla {
     fn new(lattice: Size, walkers: usize) -> Self {
         Self {
             seed: (0, 0),
+            line: false,
             attach: Grid::new(lattice, EMPTY),
             cells: Vec::with_capacity(pool(lattice)),
+            roots: 0,
             walkers: vec![(0, 0); walkers],
             turn: 0,
             free: Grid::new(lattice, FREE_CAP),
@@ -190,22 +278,38 @@ impl Dla {
         }
     }
 
-    /// A fresh single-site seed at `seed` (clamped onto the lattice) and fresh walkers.
-    fn reset(&mut self, seed: (i32, i32), p_stick: f64, rng: &mut impl Rng) {
+    /// A fresh aggregate and fresh walkers: a single seed at `seed` (clamped onto the
+    /// lattice), or with `line` a cathode covering the whole bottom row.
+    fn reset(&mut self, seed: (i32, i32), line: bool, p_stick: f64, rng: &mut impl Rng) {
         let (w, h) = self.dims();
         self.attach.fill(EMPTY);
         self.free.fill(FREE_CAP);
         self.cells.clear();
-        self.seed = (
-            seed.0.clamp(0, (w - 1).max(0)),
-            seed.1.clamp(0, (h - 1).max(0)),
-        );
+        self.line = line;
+        self.seed = if line {
+            (w / 2, (h - 1).max(0))
+        } else {
+            (
+                seed.0.clamp(0, (w - 1).max(0)),
+                seed.1.clamp(0, (h - 1).max(0)),
+            )
+        };
         self.r_max = 0.0;
         self.p_stick = p_stick;
-        if self.attach.set(self.seed.0, self.seed.1, 0.0) {
-            self.cells.push(self.seed);
-            self.mark_free(self.seed);
+        let (x0, x1) = if line {
+            (0, w)
+        } else {
+            (self.seed.0, self.seed.0 + 1)
+        };
+        for x in x0..x1 {
+            // The pool holds a quarter of the lattice: a whole row unless the lattice is
+            // under 4 dots tall, where the cathode is cut short (never a reallocation).
+            if self.cells.len() < self.cells.capacity() && self.attach.set(x, self.seed.1, 0.0) {
+                self.cells.push((x, self.seed.1));
+                self.mark_free((x, self.seed.1));
+            }
         }
+        self.roots = self.cells.len();
         for i in 0..self.walkers.len() {
             self.walkers[i] = self.launch(rng);
         }
@@ -218,18 +322,34 @@ impl Dla {
         )
     }
 
-    /// Distance from the seed, lattice units.
+    /// How far a site is from where growth starts, lattice units: its distance from the
+    /// seed, or (forest) its height above the cathode row.
     #[inline]
     fn dist(&self, x: i32, y: i32) -> f64 {
-        f64::from(x - self.seed.0).hypot(f64::from(y - self.seed.1))
+        if self.line {
+            f64::from(self.seed.1 - y)
+        } else {
+            f64::from(x - self.seed.0).hypot(f64::from(y - self.seed.1))
+        }
     }
 
     fn r_launch(&self) -> f64 {
         self.r_max + LAUNCH_GAP
     }
 
+    /// Farthest a walker may be: the frost's kill radius, or (forest) the launch line
+    /// itself, since a walker above it is returned onto it ([`line_return`]).
     fn r_kill(&self) -> f64 {
-        KILL_FACTOR * self.r_launch()
+        if self.line {
+            self.r_launch()
+        } else {
+            KILL_FACTOR * self.r_launch()
+        }
+    }
+
+    /// The forest's launch row: the highest row at or below the launch line.
+    fn line_row(&self) -> i32 {
+        (f64::from(self.seed.1) - self.r_launch()).ceil() as i32
     }
 
     #[inline]
@@ -243,14 +363,21 @@ impl Dla {
         (-1..=1).any(|dy| (-1..=1).any(|dx| (dx, dy) != (0, 0) && self.occupied(x + dx, y + dy)))
     }
 
-    /// Uniform point on the launch circle, clamped onto the lattice. Clamping each axis
-    /// toward the seed only shortens the offset, so it stays inside the kill radius (CRY-A3).
+    /// Uniform point on the launch curve, clamped onto the lattice: the circle around the
+    /// seed, or the line above the cathode. Clamping only moves a point toward the start,
+    /// so it stays inside the kill height (CRY-A3).
     fn launch(&self, rng: &mut impl Rng) -> (i32, i32) {
-        let th = rng.random_range(0.0..TAU);
         let r = self.r_launch();
         let (w, h) = self.dims();
-        let x = (f64::from(self.seed.0) + r * th.cos()).round() as i32;
-        let y = (f64::from(self.seed.1) + r * th.sin()).round() as i32;
+        let (x, y) = if self.line {
+            (rng.random_range(0..w.max(1)), self.line_row())
+        } else {
+            let th = rng.random_range(0.0..TAU);
+            (
+                (f64::from(self.seed.0) + r * th.cos()).round() as i32,
+                (f64::from(self.seed.1) + r * th.sin()).round() as i32,
+            )
+        };
         (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)))
     }
 
@@ -274,13 +401,6 @@ impl Dla {
                 }
             }
         }
-    }
-
-    /// Mirror `v` into `0..=max` (reflecting walls).
-    fn fold(v: i32, max: i32) -> i32 {
-        let v = v.abs();
-        let v = if v > max { 2 * max - v } else { v };
-        v.clamp(0, max.max(0))
     }
 
     /// `steps` walker moves, round-robin over the walkers; new sites get attach time `t`.
@@ -318,8 +438,8 @@ impl Dla {
         }
 
         let (w, h) = self.dims();
-        // Radius of a crystal-free disc around the walker: outside the cluster's bounding
-        // circle, or from the distance map (nearest site ≥ `free` away; 2 spacings of
+        // Radius of a crystal-free disc around the walker: its height above the launch
+        // curve, or from the distance map (nearest site ≥ `free` away; 2 spacings of
         // slack so rounding the landing point can never put it on the crystal).
         let near = f64::from(self.free.get(x, y).copied().unwrap_or(0)) - 2.0;
         let jump = (d - self.r_launch()).max(near);
@@ -327,12 +447,14 @@ impl Dla {
         if jump >= JUMP_MIN {
             // First passage out of a crystal-free disc of radius `jump` is uniform on its rim.
             let th = rng.random_range(0.0..TAU);
-            let jx = (f64::from(x) + jump * th.cos()).round() as i32;
-            let jy = (f64::from(y) + jump * th.sin()).round() as i32;
-            let (fx, fy) = (Self::fold(jx, w - 1), Self::fold(jy, h - 1));
+            let (jx, jy) = (
+                f64::from(x) + jump * th.cos(),
+                f64::from(y) + jump * th.sin(),
+            );
+            let (fx, fy) = (fold(jx, w - 1), fold(jy, h - 1));
             // A mirrored landing is kept only well clear of the crystal; else a unit step.
-            let clear = self.free.get(fx, fy).is_some_and(|&f| f >= FOLD_CLEAR);
-            if (fx, fy) == (jx, jy) || clear {
+            let mirrored = (f64::from(fx), f64::from(fy)) != (jx.round(), jy.round());
+            if !mirrored || self.free.get(fx, fy).is_some_and(|&f| f >= FOLD_CLEAR) {
                 next = Some((fx, fy));
             }
         }
@@ -345,8 +467,24 @@ impl Dla {
             self.walkers[i] = (nx, ny);
         }
         let (x, y) = self.walkers[i];
-        if self.dist(x, y) > self.r_kill() {
+        if self.line {
+            let row = self.line_row();
+            // Above the launch line (so `row ≥ 1`, on the lattice): back onto it, exactly.
+            if y < row {
+                let a = f64::from(row - y);
+                self.walkers[i] = (line_return(x, a, rng.random(), w - 1), row);
+            }
+        } else if self.dist(x, y) > self.r_kill() {
             self.walkers[i] = self.launch(rng);
+        }
+    }
+
+    /// Whether site `(x, y)` is where growth starts: the seed, or a cathode site.
+    fn is_root(&self, x: i32, y: i32) -> bool {
+        if self.line {
+            y == self.seed.1
+        } else {
+            (x, y) == self.seed
         }
     }
 }
@@ -361,18 +499,23 @@ enum Phase {
 #[derive(Debug)]
 pub struct FractalGrowth {
     dla: Dla,
+    act: Act,
     phase: Phase,
-    /// Seconds since this crystal was seeded (attach times are on this clock).
+    /// Seconds since this aggregate was seeded (attach times are on this clock).
     t: f64,
+    /// The growth clock the colours are normalised by: `t` while growing, then frozen.
+    t_grown: f64,
     /// Seconds in the current phase.
     phase_t: f64,
-    /// Growth target radius `R(0.85)`, lattice units.
+    /// Frost growth target `R(0.85)` and forest target height, lattice units.
     r_target: f64,
-    /// Walker-step budget per simulated second for this size.
-    steps_per_sec: f64,
+    h_target: f64,
+    /// Walker-step budgets per simulated second for this size.
+    steps_frost: f64,
+    steps_forest: f64,
     /// Fractional walker steps carried between updates.
     carry: f64,
-    /// Chemical (graph) distance from the seed, computed when melting starts.
+    /// Chemical (graph) distance from the seed or cathode, computed when melting starts.
     chem: Grid<u16>,
     queue: Vec<(i32, i32)>,
     max_chem: u16,
@@ -383,42 +526,40 @@ pub struct FractalGrowth {
     label: String,
     label_row: Option<i32>,
     /// Chars the readout may take on its row, right of the title (GEN-R13).
-    room: usize,
+    room: [usize; 2],
     /// The crystal rasterised for the current state, sized in `resize` and rebuilt by
     /// [`FractalGrowth::rasterise`] after every state change; `render` only blits it.
     dots: Dots,
-    /// The lattice's top-left dot in the display: the capped lattice is centred (CRY-A5).
+    /// The lattice's top-left dot in the display (CRY-A5): the capped lattice is centred,
+    /// except that the forest's sits on the bottom of the art area, its cathode's place.
     origin: (i32, i32),
 }
 
-/// The state that colours the crystal: phase, clock and melting threshold.
+/// The state that colours the crystal: act, phase, clocks and melting threshold.
 #[derive(Debug, Clone, Copy)]
 struct Tint {
+    ramp: Ramp,
     phase: Phase,
     t: f64,
+    t_grown: f64,
     melt_k: f64,
 }
 
 impl Tint {
-    /// Ink for a terminal cell from its youngest dot's age, the melting front, and the seed.
-    fn cell_ink(self, youngest: f32, max_chem: u16, has_seed: bool) -> Ink {
+    /// Ink for a terminal cell from its youngest dot's arrival time and the melting front
+    /// (CRY-A7): the ramp position is `RAMP_LO + (RAMP_HI − RAMP_LO)·arrival/t_grown`;
+    /// tips younger than [`TIP_AGE`] and sites the melting front is reaching go to the top.
+    fn cell_ink(self, youngest: f32, chem: u16) -> Ink {
+        let arrival = f64::from(youngest);
+        let mut v = RAMP_LO + (RAMP_HI - RAMP_LO) * (arrival / self.t_grown.max(1e-9)).min(1.0);
+        if self.t - arrival < TIP_AGE {
+            v = 1.0;
+        }
         if self.phase == Phase::Melt {
-            let front = (f64::from(max_chem) - (self.melt_k - MELT_BAND)) / MELT_BAND;
-            if front > 0.0 {
-                let level = 60.0 + 120.0 * (1.0 - front).clamp(0.0, 1.0);
-                return Ink::new(Role::Dim, level as u8);
-            }
+            let front = (f64::from(chem) - (self.melt_k - MELT_BAND)) / MELT_BAND;
+            v += (1.0 - v) * front.clamp(0.0, 1.0);
         }
-        let age = (self.t - f64::from(youngest)).max(0.0);
-        if age < TIP_AGE {
-            Ink::new(Role::Hot, 255)
-        } else if has_seed || age < WARM_AGE {
-            let f = ((age - TIP_AGE) / (WARM_AGE - TIP_AGE)).min(1.0);
-            Ink::new(Role::Accent, (250.0 - 70.0 * f) as u8)
-        } else {
-            let level = 110.0 + 135.0 * (-(age - WARM_AGE) / COOL_TAU).exp();
-            Ink::new(Role::Cold, level as u8)
-        }
+        ink::ramp(self.ramp, v)
     }
 }
 
@@ -426,11 +567,15 @@ impl Default for FractalGrowth {
     fn default() -> Self {
         Self {
             dla: Dla::default(),
+            act: Act::Frost,
             phase: Phase::Grow,
             t: 0.0,
+            t_grown: 0.0,
             phase_t: 0.0,
             r_target: 0.0,
-            steps_per_sec: STEPS_MIN,
+            h_target: 0.0,
+            steps_frost: STEPS_MIN,
+            steps_forest: STEPS_MIN,
             carry: 0.0,
             chem: Grid::default(),
             queue: Vec::new(),
@@ -440,7 +585,7 @@ impl Default for FractalGrowth {
             df_clock: 0.0,
             label: String::with_capacity(96),
             label_row: None,
-            room: 0,
+            room: [0; 2],
             origin: (0, 0),
             dots: Dots::default(),
         }
@@ -450,12 +595,22 @@ impl Default for FractalGrowth {
 impl FractalGrowth {
     fn reseed(&mut self, ctx: &mut Ctx) {
         let p = ctx.rng.random_range(P_STICK.0..=P_STICK.1);
-        // The lattice centre is the terminal centre: the crystal sits mid-screen.
+        // The lattice centre is the art area's centre: the frost sits mid-screen.
         let size = self.chem.size();
         let seed = (i32::from(size.width()) / 2, i32::from(size.height()) / 2);
-        self.dla.reset(seed, p, &mut ctx.rng);
+        // The window is centred, except that the forest's sits on the bottom of the art
+        // area: its cathode is the floor of the picture on any terminal (CRY-A5).
+        let display = self.dots.dot_size();
+        let (mx, my) = (
+            i32::from(display.width() - size.width()),
+            i32::from(display.height() - size.height()),
+        );
+        self.origin = (mx / 2, if self.act == Act::Forest { my } else { my / 2 });
+        self.dla
+            .reset(seed, self.act == Act::Forest, p, &mut ctx.rng);
         self.phase = Phase::Grow;
         self.t = 0.0;
+        self.t_grown = 0.0;
         self.phase_t = 0.0;
         self.carry = 0.0;
         self.df = None;
@@ -465,22 +620,30 @@ impl FractalGrowth {
 
     fn measure_df(&mut self) {
         let d = &self.dla;
+        if d.line || d.cells.len() < DF_MIN_N {
+            self.df = None;
+            return;
+        }
         let dists = d.cells.iter().map(|&(x, y)| d.dist(x, y));
         self.df = mass_radius_dimension(dists, FIT_LO, FIT_HI_FRAC * d.r_max).or(self.df);
     }
 
-    /// Readout, e.g. `p_s 0.62   N 812   D_f 1.71` (the title names the process). Parts
-    /// that would reach the title are dropped from the left, whole, so the measured
-    /// dimension goes last (GEN-R13); in-place edits of a pre-sized string, no allocation.
+    /// Readout, e.g. `p_s 0.62   N 812   D_f ~1.6` (the title names the process; the
+    /// forest shows no D_f, its mass–height law is another fit). Parts that would reach
+    /// the title are dropped from the left, whole, so the measured dimension goes last
+    /// (GEN-R13); in-place edits of a pre-sized string, no allocation.
     fn refresh_label(&mut self) {
         const SEP: &str = "   ";
         self.label.clear();
         let d = &self.dla;
-        let _ = write!(self.label, "p_s {:.2}{SEP}N {}", d.p_stick, d.cells.len());
+        // The cathode is not deposit: count only what grew (the frost's seed is N's 1).
+        let grown = d.cells.len() - if d.line { d.roots } else { 0 };
+        let _ = write!(self.label, "p_s {:.2}{SEP}N {grown}", d.p_stick);
         if let Some(df) = self.df {
-            let _ = write!(self.label, "{SEP}D_f {df:.2}");
+            let _ = write!(self.label, "{SEP}D_f ~{df:.1}");
         }
-        while self.label.len() > self.room {
+        let room = self.room[usize::from(self.act == Act::Forest)];
+        while self.label.len() > room {
             match self.label.find(SEP) {
                 Some(i) => self.label.replace_range(..i + SEP.len(), ""),
                 None => self.label.clear(),
@@ -488,16 +651,18 @@ impl FractalGrowth {
         }
     }
 
-    /// Chemical distance of every crystal site from the seed (8-neighbour BFS). Removing
-    /// all sites beyond a threshold always leaves a set connected to the seed (CRY-A1),
-    /// and it melts every tip first — outside-in along the branches.
+    /// Chemical distance of every crystal site from the seed or cathode (8-neighbour BFS).
+    /// Removing all sites beyond a threshold always leaves a set connected to a root
+    /// (CRY-A1), and it melts every tip first — outside-in along the branches.
     fn start_melt(&mut self) {
         self.chem.fill(u16::MAX);
         self.queue.clear();
         self.max_chem = 0;
-        let seed = self.dla.seed;
-        if self.dla.occupied(seed.0, seed.1) && self.chem.set(seed.0, seed.1, 0) {
-            self.queue.push(seed);
+        let d = &self.dla;
+        for &(x, y) in &d.cells {
+            if d.is_root(x, y) && self.chem.set(x, y, 0) {
+                self.queue.push((x, y));
+            }
         }
         let mut head = 0;
         while let Some(&(x, y)) = self.queue.get(head) {
@@ -532,27 +697,37 @@ impl FractalGrowth {
     /// was sized in `resize`).
     fn rasterise(&mut self) {
         let tint = Tint {
+            ramp: self.act.ramp(),
             phase: self.phase,
             t: self.t,
+            t_grown: self.t_grown,
             melt_k: self.melt_k,
         };
+        // Chemical distances only mean something while melting (`start_melt` fills them).
+        let melting = self.phase == Phase::Melt;
         let (dots, d, chem_map) = (&mut self.dots, &self.dla, &self.chem);
         let (ox, oy) = self.origin;
         dots.clear();
-        // Only the terminal cells that can hold crystal: the seed's r_max box, in display
-        // dots (lattice site (x, y) is display dot (ox + x, oy + y)).
+        // Only the terminal cells that can hold crystal: the seed's r_max box (the forest:
+        // full width, from the cathode up to its height), in display dots (lattice site
+        // (x, y) is display dot (ox + x, oy + y)).
         let r = d.r_max.ceil() as i32 + 1;
         let (lw, lh) = d.dims();
-        let (x0, x1) = ((d.seed.0 - r).max(0) + ox, (d.seed.0 + r).min(lw - 1) + ox);
-        let (y0, y1) = ((d.seed.1 - r).max(0) + oy, (d.seed.1 + r).min(lh - 1) + oy);
+        let (x0, x1, y0) = if d.line {
+            (0, lw - 1, d.seed.1 - r)
+        } else {
+            (d.seed.0 - r, d.seed.0 + r, d.seed.1 - r)
+        };
+        let (x0, x1) = (x0.max(0) + ox, x1.min(lw - 1) + ox);
+        let (y0, y1) = (y0.max(0) + oy, (d.seed.1 + r).min(lh - 1) + oy);
         for cy in y0 / SUB_Y..=y1 / SUB_Y {
             for cx in x0 / SUB_X..=x1 / SUB_X {
                 // A cell's colour comes from all its crystal sites together (youngest
-                // age, melting front, seed), not from its single brightest dot, so
-                // collect the sites first and light them with one shared ink.
+                // arrival, melting front), not from its single brightest dot, so collect
+                // the sites first and light them with one shared ink.
                 let mut sites = [(0, 0); (SUB_X * SUB_Y) as usize];
                 let mut n = 0;
-                let (mut youngest, mut chem, mut has_seed) = (EMPTY, 0u16, false);
+                let (mut youngest, mut chem) = (EMPTY, 0u16);
                 for dy in 0..SUB_Y {
                     for dx in 0..SUB_X {
                         let (x, y) = (cx * SUB_X + dx, cy * SUB_Y + dy);
@@ -563,13 +738,14 @@ impl FractalGrowth {
                             sites[n] = (x, y);
                             n += 1;
                             youngest = youngest.max(a);
-                            chem = chem.max(chem_map.get(site.0, site.1).copied().unwrap_or(0));
-                            has_seed |= site == d.seed;
+                            if melting {
+                                chem = chem.max(chem_map.get(site.0, site.1).copied().unwrap_or(0));
+                            }
                         }
                     }
                 }
                 if n > 0 {
-                    let ink = tint.cell_ink(youngest, chem, has_seed);
+                    let ink = tint.cell_ink(youngest, chem);
                     for &(x, y) in &sites[..n] {
                         dots.set(x, y, ink);
                     }
@@ -585,28 +761,31 @@ impl Generator for FractalGrowth {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        // One site per braille dot, in a window of at most MAX_NODES dots centred in the
-        // display (ADR-0012). A resize reseeds, so nothing needs resampling.
-        self.dots.resize(size);
-        let display = self.dots.dot_size();
-        let lattice = grid::lattice_for(display, MAX_NODES, 0.0);
-        let margin = |d: u16, l: u16| i32::from(d - l) / 2;
-        self.origin = (
-            margin(display.width(), lattice.width()),
-            margin(display.height(), lattice.height()),
+        // The art keeps off the title row, so the cathode is never under the title.
+        self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
+        let art = Size::new(
+            size.width(),
+            size.height() - u16::from(self.label_row.is_some()),
         );
+        // One site per braille dot, in a window of at most MAX_NODES dots in the art area
+        // (ADR-0012), placed by `reseed`. A resize reseeds, so nothing needs resampling.
+        self.dots.resize(art);
+        let lattice = grid::lattice_for(self.dots.dot_size(), MAX_NODES, 0.0);
         self.dla = Dla::new(lattice, WALKERS);
         self.chem = Grid::new(lattice, u16::MAX);
         self.queue = Vec::with_capacity(pool(lattice));
-        // R(0.85) of the screen in lattice spacings (a row is SUB_Y), within the window.
+        // R(0.85) of the art area in lattice spacings (a row is SUB_Y), within the window.
         let window = f64::from(lattice.width().min(lattice.height())) / 2.0;
         self.r_target =
-            (draw::fit_radius(size, GROW_FRAC) * f64::from(SUB_Y)).min(GROW_FRAC * window);
+            (draw::fit_radius(art, GROW_FRAC) * f64::from(SUB_Y)).min(GROW_FRAC * window);
+        self.h_target = FOREST_FRAC * f64::from(lattice.height().saturating_sub(1));
         let r_rows = self.r_target / f64::from(SUB_Y);
-        self.steps_per_sec =
+        self.steps_frost =
             (STEPS_REF * (r_rows / R_REF_ROWS).powf(COST_EXP)).clamp(STEPS_MIN, STEPS_MAX);
-        self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
-        self.room = title::readout_room(size, &Title::of(self));
+        self.steps_forest =
+            (FOREST_STEPS_PER_COL * f64::from(lattice.width())).clamp(STEPS_MIN, STEPS_MAX);
+        self.room = [Act::Frost, Act::Forest]
+            .map(|act| title::readout_room(size, &Title::new(META.title, Some(act.caption()))));
         self.reseed(ctx);
         self.rasterise();
     }
@@ -620,7 +799,15 @@ impl Generator for FractalGrowth {
         self.phase_t += dt;
         match self.phase {
             Phase::Grow => {
-                self.carry += self.steps_per_sec * dt;
+                self.t_grown = self.t;
+                let (budget, target) = match self.act {
+                    Act::Frost => {
+                        let boost = 1.0 + (EARLY_BOOST - 1.0) * (1.0 - self.t / EARLY).max(0.0);
+                        (boost * self.steps_frost, self.r_target)
+                    }
+                    Act::Forest => (self.steps_forest, self.h_target),
+                };
+                self.carry += budget * dt;
                 let steps = self.carry.floor();
                 self.carry -= steps;
                 self.dla.advance(steps as usize, self.t, &mut ctx.rng);
@@ -630,7 +817,7 @@ impl Generator for FractalGrowth {
                     self.measure_df();
                 }
                 let full = self.dla.cells.len() * 4 >= self.dla.attach.len();
-                if self.dla.r_max >= self.r_target || self.phase_t >= MAX_GROW || full {
+                if self.dla.r_max >= target || self.phase_t >= MAX_GROW || full {
                     self.measure_df();
                     self.phase = Phase::Hold;
                     self.phase_t = 0.0;
@@ -644,6 +831,7 @@ impl Generator for FractalGrowth {
             }
             Phase::Melt => {
                 if self.phase_t >= MELT {
+                    self.act = self.act.next();
                     self.reseed(ctx);
                 } else {
                     let f = self.phase_t / MELT;
@@ -661,7 +849,7 @@ impl Generator for FractalGrowth {
             for &(x, y) in &self.dla.walkers {
                 let (x, y) = (x + self.origin.0, y + self.origin.1);
                 let glyph = raster::braille(raster::dot_bit(x, y));
-                canvas.put(x / SUB_X, y / SUB_Y, glyph, Ink::new(Role::Dim, 110));
+                canvas.put(x / SUB_X, y / SUB_Y, glyph, WALKER_INK);
             }
         }
         self.dots.blit(canvas);
@@ -676,6 +864,10 @@ impl Generator for FractalGrowth {
                 Ink::new(Role::Text, title::READOUT_LEVEL),
             );
         }
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        Some(self.act.caption())
     }
 }
 
@@ -693,15 +885,23 @@ mod tests {
         (w / 2, h / 2)
     }
 
-    /// Flood fill over 8-neighbours from the seed reaches every crystal site (CRY-A1).
+    /// Flood fill over 8-neighbours from the roots (seed or cathode) reaches every crystal
+    /// site (CRY-A1).
     fn connected_to_seed(d: &Dla) -> bool {
         if d.cells.is_empty() {
             return true;
         }
         let mut seen = vec![false; d.attach.len()];
         let w = i32::from(d.attach.width());
-        let mut stack = vec![d.seed];
-        seen[(d.seed.1 * w + d.seed.0) as usize] = true;
+        let mut stack: Vec<(i32, i32)> = d
+            .cells
+            .iter()
+            .copied()
+            .filter(|&(x, y)| d.is_root(x, y))
+            .collect();
+        for &(x, y) in &stack {
+            seen[(y * w + x) as usize] = true;
+        }
         let mut n = 0;
         while let Some((x, y)) = stack.pop() {
             n += 1;
@@ -717,20 +917,20 @@ mod tests {
     }
 
     #[test]
-    fn cry_braille_lattice_is_square_in_physical_units() {
+    fn cry_a4_braille_lattice_is_square_in_physical_units() {
         // A dot is 1/SUB_X of a cell wide and 1/SUB_Y of a row tall; cells are ASPECT:1.
         let dot_w = 1.0 / (sciart_core::geom::ASPECT * f64::from(SUB_X));
         let dot_h = 1.0 / f64::from(SUB_Y);
         assert!((dot_w - dot_h).abs() < 1e-12);
-        // The DLA lattice is the dot lattice of the screen.
+        // The DLA lattice is the dot lattice of the art area (all rows but the title's).
         let size = Size::new(80, 24);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut Ctx::new(1, size));
-        assert_eq!(g.dla.attach.size(), Size::new(160, 96));
+        assert_eq!(g.dla.attach.size(), Size::new(160, 92));
     }
 
     #[test]
-    fn cry_walk_is_isotropic_and_unbiased() {
+    fn cry_a4_walk_is_isotropic_and_unbiased() {
         // Exact quadrature over u: equal diffusivity per axis, zero drift.
         let (mut ex, mut ey, mut mx, mut my) = (0.0, 0.0, 0.0, 0.0);
         let n = 1000;
@@ -750,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn cry_mass_radius_estimator_recovers_line_and_disc() {
+    fn cry_a4_mass_radius_estimator_recovers_line_and_disc() {
         // Analytic anchors: a line has D = 1, a filled disc D = 2. Lattice rounding at
         // r ≥ 3 moves the fitted slope by < 0.05.
         let line = (0..400).map(|i| f64::from(i) * 0.5);
@@ -765,32 +965,35 @@ mod tests {
 
     #[test]
     fn cry_a1_a2_growth_only_adds_and_stays_8_connected() {
-        let mut ctx = seeded(3);
-        let mut d = Dla::new(Size::new(120, 100), 8);
-        d.reset(centre(&d), 0.5, &mut ctx.rng);
-        let mut t = 0.0;
-        let mut prev: Vec<f32> = d.attach.as_slice().to_vec();
-        for _ in 0..120 {
-            t += SIM_DT;
-            d.advance(2000, t, &mut ctx.rng);
-            for (a, b) in prev.iter().zip(d.attach.as_slice()) {
-                if *a >= 0.0 {
-                    assert_eq!(a, b, "attach time changed");
+        for line in [false, true] {
+            let mut ctx = seeded(3);
+            let mut d = Dla::new(Size::new(120, 100), 8);
+            d.reset(centre(&d), line, 0.5, &mut ctx.rng);
+            let mut t = 0.0;
+            let mut prev: Vec<f32> = d.attach.as_slice().to_vec();
+            for _ in 0..120 {
+                t += SIM_DT;
+                d.advance(2000, t, &mut ctx.rng);
+                for (a, b) in prev.iter().zip(d.attach.as_slice()) {
+                    if *a >= 0.0 {
+                        assert_eq!(a, b, "attach time changed");
+                    }
                 }
+                assert!(d.cells.len() >= prev.iter().filter(|a| **a >= 0.0).count());
+                assert_eq!(
+                    d.cells.len(),
+                    d.attach.as_slice().iter().filter(|a| **a >= 0.0).count()
+                );
+                assert!(connected_to_seed(&d), "line {line}");
+                prev.copy_from_slice(d.attach.as_slice());
             }
-            assert!(d.cells.len() >= prev.iter().filter(|a| **a >= 0.0).count());
-            assert_eq!(
-                d.cells.len(),
-                d.attach.as_slice().iter().filter(|a| **a >= 0.0).count()
-            );
-            assert!(connected_to_seed(&d));
-            prev.copy_from_slice(d.attach.as_slice());
+            let roots = if line { 120 } else { 1 };
+            assert!(d.cells.len() > roots + 100, "grew only {}", d.cells.len());
         }
-        assert!(d.cells.len() > 100, "grew only {}", d.cells.len());
     }
 
     #[test]
-    fn cry_a5_lattice_is_capped_and_centred() {
+    fn cry_a5_lattice_is_capped_centred_and_the_forest_sits_on_the_floor() {
         for (w, h) in [
             (1, 1),
             (80, 24),
@@ -808,46 +1011,60 @@ mod tests {
             if display.area() <= MAX_NODES {
                 assert_eq!(lattice, display, "{w}x{h}: uncapped");
             }
-            let (ox, oy) = g.origin;
-            let right = i32::from(display.width()) - i32::from(lattice.width()) - ox;
-            let bottom = i32::from(display.height()) - i32::from(lattice.height()) - oy;
-            assert!(
-                (0..=1).contains(&(right - ox)),
-                "{w}x{h}: x margins {ox} {right}"
-            );
-            assert!(
-                (0..=1).contains(&(bottom - oy)),
-                "{w}x{h}: y margins {oy} {bottom}"
-            );
+            // The frost's window is centred; the forest's is centred across and sits on the
+            // bottom of the art area, so its cathode is the picture's floor.
+            for act in [Act::Frost, Act::Forest] {
+                g.act = act;
+                g.reseed(&mut Ctx::new(1, size));
+                let (ox, oy) = g.origin;
+                let right = i32::from(display.width()) - i32::from(lattice.width()) - ox;
+                let bottom = i32::from(display.height()) - i32::from(lattice.height()) - oy;
+                let across = right - ox;
+                assert!((0..=1).contains(&across), "{w}x{h}: x margins {ox} {right}");
+                if act == Act::Forest {
+                    assert_eq!(bottom, 0, "{w}x{h}: the forest floats {bottom} dots up");
+                } else {
+                    let down = bottom - oy;
+                    assert!((0..=1).contains(&down), "{w}x{h}: y margins {oy} {bottom}");
+                }
+            }
         }
     }
 
     #[test]
-    fn cry_a5_a_full_cycle_at_500x150_stays_in_the_window_without_reallocating() {
+    fn cry_a5_both_acts_at_500x150_stay_in_the_window_without_reallocating() {
         let size = Size::new(500, 150);
         let mut ctx = Ctx::new(5, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
         let (pool_cap, queue_cap) = (g.dla.cells.capacity(), g.queue.capacity());
-        let (ox, oy) = g.origin;
         let (lw, lh) = g.dla.dims();
-        let window = |x: i32, y: i32| (ox..ox + lw).contains(&x) && (oy..oy + lh).contains(&y);
-        let mut saw_melt = false;
-        for _ in 0..(40.0 / SIM_DT) as usize {
+        // The window of the live act (the forest's sits lower).
+        let window = |g: &FractalGrowth, x: i32, y: i32| {
+            let (ox, oy) = g.origin;
+            (ox..ox + lw).contains(&x) && (oy..oy + lh).contains(&y)
+        };
+        let mut acts = [false; 2];
+        for _ in 0..(70.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
-            saw_melt |= g.phase == Phase::Melt;
+            acts[usize::from(g.act == Act::Forest)] |= g.phase == Phase::Melt;
+            let (ox, oy) = g.origin;
             for &(x, y) in &g.dla.walkers {
-                assert!(window(x + ox, y + oy), "walker ({x}, {y})");
+                assert!(window(&g, x + ox, y + oy), "walker ({x}, {y})");
             }
         }
-        assert!(saw_melt, "grew, held and melted within 40 s");
+        assert_eq!(
+            acts,
+            [true, true],
+            "both acts grew, held and melted within 70 s"
+        );
         assert_eq!(g.dla.cells.capacity(), pool_cap, "site pool reallocated");
         assert_eq!(g.queue.capacity(), queue_cap, "melt queue reallocated");
         // Every lit dot of the raster lies in the window.
         let d = g.dots.dot_size();
         for y in 0..i32::from(d.height()) {
             for x in 0..i32::from(d.width()) {
-                assert!(!g.dots.is_lit(x, y) || window(x, y), "dot ({x}, {y})");
+                assert!(!g.dots.is_lit(x, y) || window(&g, x, y), "dot ({x}, {y})");
             }
         }
     }
@@ -855,21 +1072,23 @@ mod tests {
     #[test]
     fn cry_a3_walkers_stay_in_kill_radius_and_grid() {
         let mut ctx = seeded(4);
-        for (w, h) in [
-            (120u16, 100u16),
-            (400, 200),
-            (3, 3),
-            (1, 1),
-            (2, 60),
-            (80, 1),
-        ] {
-            let mut d = Dla::new(Size::new(w, h), 8);
-            d.reset(centre(&d), 1.0, &mut ctx.rng);
-            for k in 0..150 {
-                d.advance(400, f64::from(k) * SIM_DT, &mut ctx.rng);
-                for &(x, y) in &d.walkers {
-                    assert!(d.attach.get(x, y).is_some(), "{w}x{h}: off grid");
-                    assert!(d.dist(x, y) <= d.r_kill() + 1e-9, "{w}x{h}: beyond kill");
+        for line in [false, true] {
+            for (w, h) in [
+                (120u16, 100u16),
+                (400, 200),
+                (3, 3),
+                (1, 1),
+                (2, 60),
+                (80, 1),
+            ] {
+                let mut d = Dla::new(Size::new(w, h), 8);
+                d.reset(centre(&d), line, 1.0, &mut ctx.rng);
+                for k in 0..150 {
+                    d.advance(400, f64::from(k) * SIM_DT, &mut ctx.rng);
+                    for &(x, y) in &d.walkers {
+                        assert!(d.attach.get(x, y).is_some(), "{w}x{h}: off grid");
+                        assert!(d.dist(x, y) <= d.r_kill() + 1e-9, "{w}x{h}: beyond kill");
+                    }
                 }
             }
         }
@@ -881,7 +1100,7 @@ mod tests {
         let mut ctx = seeded(seed);
         let side = (2.6 * r) as u16;
         let mut d = Dla::new(Size::new(side, side), 1);
-        d.reset(centre(&d), p_stick, &mut ctx.rng);
+        d.reset(centre(&d), false, p_stick, &mut ctx.rng);
         let mut guard = 0;
         while d.r_max < r && guard < 20_000 {
             d.advance(1000, 0.0, &mut ctx.rng);
@@ -910,7 +1129,83 @@ mod tests {
     }
 
     #[test]
-    fn cry_cycle_grows_holds_melts_and_reseeds() {
+    fn cry_a6_the_forest_is_a_sparse_deposit_screened_from_below() {
+        // DLA from a line (p_s = 1) grows a forest of trees, not a compact film: at 60 % of
+        // its height the deposit fills well under half the lattice below its front, and the
+        // few tallest trees screen the rest, so the occupied fraction falls with height.
+        let mut ctx = seeded(9);
+        let mut d = Dla::new(Size::new(200, 120), 12);
+        d.reset((0, 0), true, 1.0, &mut ctx.rng);
+        while d.r_max < 60.0 {
+            d.advance(20_000, 0.0, &mut ctx.rng);
+        }
+        let (w, h) = d.dims();
+        let band = |lo: i32, hi: i32| {
+            let n = d
+                .cells
+                .iter()
+                .filter(|&&(_, y)| (h - 1 - hi..h - 1 - lo).contains(&y));
+            n.count() as f64 / f64::from(w * (hi - lo))
+        };
+        let (low, high) = (band(5, 20), band(35, 50));
+        assert!(low < 0.45, "low band {low}");
+        assert!(high < low, "{high} vs {low}");
+        assert!(connected_to_seed(&d));
+    }
+
+    #[test]
+    fn cry_a7_arrival_colours_run_deep_to_pale_in_each_acts_ramp() {
+        let tint = |ramp, phase| Tint {
+            ramp,
+            phase,
+            t: 10.0,
+            t_grown: 10.0,
+            melt_k: 100.0,
+        };
+        let frost = tint(Ramp::Ice, Phase::Hold);
+        let levels: Vec<u8> = (0..=9).map(|k| frost.cell_ink(k as f32, 0).level).collect();
+        assert!(levels.windows(2).all(|w| w[1] > w[0]), "{levels:?}");
+        assert_eq!(frost.cell_ink(0.0, 0), ink::ramp(Ramp::Ice, RAMP_LO));
+        assert_eq!(
+            frost.cell_ink(9.8, 0),
+            ink::ramp(Ramp::Ice, 1.0),
+            "a fresh tip"
+        );
+        assert_eq!(
+            tint(Ramp::Ember, Phase::Hold).cell_ink(0.0, 0).role,
+            Role::Ramp(Ramp::Ember)
+        );
+        // The melting front brightens the sites it is about to take.
+        let melt = tint(Ramp::Ice, Phase::Melt);
+        assert!(melt.cell_ink(2.0, 99).level > melt.cell_ink(2.0, 50).level);
+        assert_eq!(melt.cell_ink(2.0, 50), frost.cell_ink(2.0, 50));
+
+        // The acts alternate, each with its caption and ramp.
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(5, size);
+        let mut g = FractalGrowth::default();
+        g.resize(size, &mut ctx);
+        let mut seen = Vec::new();
+        for _ in 0..(90.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            if seen.last() != Some(&g.caption()) {
+                seen.push(g.caption());
+            }
+        }
+        assert!(seen.len() >= 3, "{seen:?}");
+        assert_eq!(
+            &seen[..3],
+            [
+                Some("walkers stick"),
+                Some("ions deposit"),
+                Some("walkers stick")
+            ]
+        );
+        assert_eq!(META.captions, &CAPTIONS);
+    }
+
+    #[test]
+    fn cry_a1_cycle_grows_holds_melts_and_reseeds() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
         let mut g = FractalGrowth::default();
@@ -941,43 +1236,154 @@ mod tests {
         for (size, room) in [(Size::new(80, 24), 40), (Size::new(40, 12), 20)] {
             ctx.set_size(size);
             g.resize(size, &mut ctx);
-            assert_eq!(g.room, room, "{size:?}");
+            assert_eq!(g.room[0], room, "{size:?}");
         }
         g.dla.p_stick = 0.62;
         g.df = Some(1.71);
         for (room, want) in [
-            (80, "p_s 0.62   N 1   D_f 1.71"),
-            (25, "p_s 0.62   N 1   D_f 1.71"),
-            (24, "N 1   D_f 1.71"),
-            (13, "D_f 1.71"),
-            (8, "D_f 1.71"),
+            (80, "p_s 0.62   N 1   D_f ~1.7"),
+            (25, "p_s 0.62   N 1   D_f ~1.7"),
+            (24, "N 1   D_f ~1.7"),
+            (13, "D_f ~1.7"),
+            (8, "D_f ~1.7"),
             (7, ""),
         ] {
-            g.room = room;
+            g.room = [room; 2];
             g.refresh_label();
             assert_eq!(g.label, want, "room {room}");
         }
         // Drawn right-aligned, a blank cell either side, over any walker under it.
-        g.room = 22;
+        g.room = [22; 2];
         g.refresh_label();
         g.phase = Phase::Grow;
-        g.dla.walkers[0] = (30 * SUB_X, 11 * SUB_Y);
+        g.dla.walkers[0] = (30 * SUB_X, 10 * SUB_Y);
         let mut canvas = Canvas::new(Size::new(40, 12), GlyphMode::Ascii);
         g.render(&mut canvas);
-        assert!(canvas.to_lines()[11].ends_with(" N 1   D_f 1.71 "));
+        assert!(canvas.to_lines()[11].ends_with(" N 1   D_f ~1.7 "));
     }
 
     #[test]
-    fn cry_renders_hot_tips_cold_body_and_ascii_fallbacks() {
+    fn cry_a7_small_clusters_show_no_dimension() {
+        let size = Size::new(200, 50);
+        let mut ctx = Ctx::new(2, size);
+        let mut g = FractalGrowth::default();
+        g.resize(size, &mut ctx);
+        while g.phase == Phase::Grow {
+            g.update(SIM_DT, &mut ctx);
+            if g.dla.cells.len() < DF_MIN_N {
+                assert_eq!(g.df, None, "N {}", g.dla.cells.len());
+            }
+        }
+        // A grown cluster's fit is the finite-size estimate, near but under 1.71.
+        let df = g.df.expect("a grown frost shows D_f");
+        assert!((1.4..=1.8).contains(&df), "D_f {df}");
+    }
+
+    #[test]
+    fn cry_a8_the_crystal_draws_on_the_terminal_background() {
+        // No halo or backdrop: every cell keeps the terminal's background through both
+        // acts, in either glyph mode, so the braille filaments are the brightest thing on
+        // screen and the fjords between branches stay dark.
+        for size in [Size::new(200, 50), Size::new(80, 24)] {
+            let mut ctx = Ctx::new(3, size);
+            let mut g = FractalGrowth::default();
+            g.resize(size, &mut ctx);
+            let mut acts = [false; 2];
+            for k in 0..(60.0 / SIM_DT) as usize {
+                g.update(SIM_DT, &mut ctx);
+                acts[usize::from(g.act == Act::Forest)] = true;
+                if k % 30 != 0 {
+                    continue;
+                }
+                for mode in [GlyphMode::Unicode, GlyphMode::Ascii] {
+                    let mut c = Canvas::new(size, mode);
+                    g.render(&mut c);
+                    let cells = c.cells();
+                    assert!(cells.iter().any(|cell| cell.ink.role != Role::Background));
+                    let t = g.t;
+                    let bare = cells.iter().all(|cell| cell.bg == Ink::BLANK);
+                    assert!(bare, "{size:?} {mode:?} at {t:.1} s");
+                }
+            }
+            assert_eq!(acts, [true, true], "{size:?}: both acts ran");
+        }
+    }
+
+    #[test]
+    fn cry_a6_a_walker_above_the_line_returns_at_its_cauchy_first_passage_point() {
+        // Far from the walls |offset| has median a (the Cauchy law of scale a), not that
+        // of a uniform point across the strip. Exact quadrature over u.
+        let n = 4001;
+        let a = 10.0;
+        let mut offsets: Vec<i32> = (0..n)
+            .map(|k| {
+                let u = (f64::from(k) + 0.5) / f64::from(n);
+                (line_return(500_000, a, u, 1_000_000) - 500_000).abs()
+            })
+            .collect();
+        offsets.sort_unstable();
+        let median = f64::from(offsets[offsets.len() / 2]);
+        assert!((median - a).abs() <= 1.0, "median {median}");
+        // Walls reflect: every return is on the strip, and from far above (a ≫ width) the
+        // landing point is uniform across it, the far-field limit.
+        let (max, n) = (40, 40_001);
+        let mut hist = [0u32; 41];
+        for k in 0..n {
+            let x = line_return(3, 1e5, (f64::from(k) + 0.5) / f64::from(n), max);
+            assert!((0..=max).contains(&x), "{x}");
+            hist[x as usize] += 1;
+        }
+        let mean = f64::from(n) / 40.0;
+        assert!(
+            hist[1..40]
+                .iter()
+                .all(|&c| (f64::from(c) / mean - 1.0).abs() < 0.12),
+            "{hist:?}"
+        );
+        // Degenerate strips and non-finite offsets stay on the lattice.
+        assert_eq!(line_return(0, 5.0, 0.9, 0), 0);
+        assert!((0..=9).contains(&line_return(4, f64::INFINITY, 0.7, 9)));
+        assert_eq!(fold(f64::NAN, 9), 0);
+        for (v, want) in [(-1.0, 1), (10.0, 8), (19.0, 1), (-18.0, 0), (27.0, 9)] {
+            assert_eq!(fold(v, 9), want, "{v}");
+        }
+    }
+
+    #[test]
+    fn cry_a5_the_forest_survives_lattices_under_four_dots_tall() {
+        // There the pool (a quarter of the sites) cannot hold a whole cathode row, so the
+        // readout must count the roots the pool took, not the lattice width (GEN-R4).
+        for (w, h) in [(20_000, 1), (u16::MAX, 1), (3, 1), (1, 1)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(8, size);
+            let mut g = FractalGrowth::default();
+            g.resize(size, &mut ctx);
+            g.act = Act::Forest;
+            g.reseed(&mut ctx);
+            assert!(g.dla.roots <= g.dla.cells.capacity(), "{w}x{h}");
+            for _ in 0..30 {
+                g.update(0.25, &mut ctx);
+                assert!(g.dla.cells.len() >= g.dla.roots, "{w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn cry_a7_renders_ramps_walkers_and_ascii_fallbacks() {
         let mut stage = Stage::new(build(), 42, Size::new(100, 30), GlyphMode::Ascii);
         let mut roles = std::collections::HashSet::new();
-        for _ in 0..(12.0 / SIM_DT) as usize {
+        for _ in 0..(40.0 / SIM_DT) as usize {
             stage.step(SIM_DT);
             let frame = stage.render();
             assert!(frame.to_lines().iter().all(|l| l.is_ascii()));
             roles.extend(frame.cells().iter().map(|c| c.ink.role));
         }
-        for r in [Role::Hot, Role::Cold, Role::Accent, Role::Dim, Role::Text] {
+        for r in [
+            Role::Ramp(Ramp::Ice),
+            Role::Ramp(Ramp::Ember),
+            Role::Dim,
+            Role::Text,
+        ] {
             assert!(roles.contains(&r), "{r:?} missing");
         }
     }
