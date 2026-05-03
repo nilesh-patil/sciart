@@ -25,4 +25,4 @@ expression: frame
                                    ::        ::                                 
                                     :::   :::                                   
                                        ::::                                     
- Double pendulum - twins diverge                 |dtheta| 3.0e-2 ( 3.4 e-folds)
+ Double pendulum - twins diverge                  |dtheta| 3.0e-2 (3.4 e-folds)

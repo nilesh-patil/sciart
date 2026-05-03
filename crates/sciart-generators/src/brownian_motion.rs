@@ -286,28 +286,27 @@ impl BrownianMotion {
         }
     }
 
-    /// Readout, e.g. `D^ (MSD@2s) = 2.31  D = 2.25 rows^2/s  t = 42s`: the estimate named
-    /// by its estimator (time-averaged MSD at the lag τ, inertia-corrected — see [`d_hat`]),
-    /// then the true D, then the elapsed time. When it would reach the title, trailing
-    /// parts are dropped rather than clipped (GEN-R13); below the estimator alone the label
-    /// is empty (not drawn). At 80 columns, beside the full title, the time is dropped.
+    /// Readout, e.g. `D fit 2.31  true 2.25 rows^2/s  t 42s`: the diffusion constant fitted
+    /// from the grain's own track (time-averaged MSD at a 2 s lag, inertia-corrected — see
+    /// [`d_hat`]), then the true D, then the elapsed time. When it would reach the title,
+    /// trailing parts are dropped rather than clipped (GEN-R13); below the fit alone the
+    /// label is empty (not drawn). At 80 columns, beside the full title, the time is dropped.
     ///
     /// [`d_hat`]: Self::d_hat
     fn refresh_label(&mut self) {
-        let lag = LAG_TICKS as f64 * TICK;
         let d_hat = self.d_hat();
         // Longest first; the first that fits the room wins.
         for parts in (1..=3).rev() {
             self.label.clear();
             let _ = match d_hat {
-                Some(d) => write!(self.label, "D^ (MSD@{lag:.0}s) = {d:.2}"),
-                None => write!(self.label, "D^ (MSD@{lag:.0}s) = ..."),
+                Some(d) => write!(self.label, "D fit {d:.2}"),
+                None => write!(self.label, "D fit ..."),
             };
             if parts >= 2 {
-                let _ = write!(self.label, "  D = {D:.2} rows^2/s");
+                let _ = write!(self.label, "  true {D:.2} rows^2/s");
             }
             if parts >= 3 {
-                let _ = write!(self.label, "  t = {:.0}s", self.t);
+                let _ = write!(self.label, "  t {:.0}s", self.t);
             }
             if self.label.len() <= self.room {
                 return;
@@ -691,18 +690,14 @@ mod tests {
         let d = g.d_hat().expect("estimate after 150 s");
         assert!((d / D - 1.0).abs() < 0.4, "D^ = {d}");
         // The label names the estimator actually used and shows its value.
-        assert!(
-            g.label.contains(&format!("D^ (MSD@2s) = {d:.2}")),
-            "{}",
-            g.label
-        );
+        assert!(g.label.contains(&format!("D fit {d:.2}")), "{}", g.label);
     }
 
     #[test]
     fn bro_gen_r13_readout_names_the_estimator_and_fits_right_of_the_title() {
-        // The lag in the label is the estimator's lag, not a hard-coded string.
+        // The spec's 2 s estimator lag.
         assert_eq!(LAG_TICKS as f64 * TICK, 2.0);
-        let estimator = "D^ (MSD@2s) = 2.31".len();
+        let estimator = "D fit 2.31".len();
         let mut ctx = seeded(9);
         let mut g = BrownianMotion::default();
         for w in 1..=120u16 {
@@ -719,7 +714,7 @@ mod tests {
             assert!(label.len() <= room, "{w}: {label}");
             assert!(!label.contains("4t"), "{w}: stale estimator name: {label}");
             if !label.is_empty() {
-                assert!(label.starts_with("D^ (MSD@2s) = "), "{w}: {label}");
+                assert!(label.starts_with("D fit "), "{w}: {label}");
             }
             // Parts are dropped, never the estimator while it fits.
             if room >= estimator {
@@ -729,23 +724,18 @@ mod tests {
             let mut canvas = Canvas::new(size, GlyphMode::Ascii);
             g.render(&mut canvas);
             let bottom = &canvas.to_lines()[19];
-            assert_eq!(
-                bottom.contains("D^ (MSD@2s)"),
-                !label.is_empty(),
-                "{w}: {bottom}"
-            );
+            assert_eq!(bottom.contains("D fit"), !label.is_empty(), "{w}: {bottom}");
             assert!(
                 label.is_empty() || bottom.ends_with(&format!(" {label} ")),
                 "{w}: {bottom}"
             );
         }
-        // 80 columns, beside the full title, keep the estimate and the true D; the time
-        // is the first part dropped.
+        // 80 columns, beside the full title, show every part, time included.
         g.resize(Size::new(80, 24), &mut ctx);
         for _ in 0..200 {
             g.update(SIM_DT, &mut ctx);
         }
-        assert!(g.label.ends_with("  D = 2.25 rows^2/s"), "{}", g.label);
+        assert!(g.label.contains("  true 2.25 rows^2/s  t "), "{}", g.label);
     }
 
     #[test]
@@ -761,6 +751,6 @@ mod tests {
         for r in [Role::Accent, Role::Structure, Role::Particle, Role::Text] {
             assert!(roles.contains(&r), "{r:?} missing");
         }
-        assert!(lines[29].contains("D^"), "{}", lines[29]);
+        assert!(lines[29].contains("D fit"), "{}", lines[29]);
     }
 }

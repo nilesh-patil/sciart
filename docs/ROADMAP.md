@@ -128,7 +128,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [ ] Every upgraded scene < 2 ms worst frame (step + render) at 200×50, allocation-free `render`/steady-state `update` [GEN-R8, GEN-R11]
 - [x] Cap fractal_growth's DLA lattice with `grid::lattice_for` (ADR-0012) and drop its TEST-R7 exception (14.5 → 2.7 MiB at 500×150) [CRY-A5, TEST-R7]
 - [x] radioactive_decay: size the nucleus lattice to rows `0..h − 1`, so the title is not punched through its last row [RAD-A4]
-- [ ] Title-row readout polish: brownian_motion `D fit 4.63  true 2.25 rows^2/s`; double_pendulum long form padded at the front, not inside (`{growth:.1}x`, form chosen by its maximum width)
+- [x] Title-row readout polish [GEN-R13]: brownian_motion `D fit 4.63  true 2.25 rows^2/s`; double_pendulum long form padded at the front, not inside (`{growth:.1}x`, form chosen by its maximum width)
 - [ ] Review (art · science · Rust/perf) with fix loops; local `--no-ff` merge into `main`
 
 ## M13 — New scenes (planned)
