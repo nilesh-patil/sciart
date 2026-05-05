@@ -1,5 +1,5 @@
 //! Sub-cell rasters layered onto a [`Canvas`] (SPEC-001 CORE-R41, CORE-R42, CORE-R51,
-//! CORE-R55, CORE-R64, CORE-R65, ADR-0010).
+//! CORE-R55, CORE-R64, CORE-R65, CORE-R85, ADR-0010).
 //!
 //! - [`Dots`]: a braille lattice of 2 × 4 dots per cell, one ink per cell. With cells
 //!   ~2:1 tall ([`ASPECT`](crate::geom::ASPECT)) the dots are *square*, so line art,
@@ -9,6 +9,8 @@
 //!   fields.
 //! - [`Density`]: an `f32` long-exposure buffer at `Dots` resolution, thresholded onto
 //!   a `Dots` lattice.
+//! - [`Glow`]: an `f32` long-exposure buffer at `Pixels` resolution, tone-mapped onto a
+//!   `Pixels` layer.
 //!
 //! All are plain row-major buffers sized in `resize` and allocation-free afterwards
 //! (GEN-R11). A scene draws into one, then `blit`s it onto the canvas; a cell holds a
@@ -292,26 +294,49 @@ impl Dots {
     /// dot-count ASCII fallback) and ink; cells with no lit dots are left untouched, so
     /// a lattice layers over earlier drawing.
     pub fn blit(&self, canvas: &mut Canvas) {
-        // Line art and particles light a small fraction of cells, so skip empty runs
-        // a block at a time (one wide compare) instead of branching per cell.
+        self.blit_with(canvas, |_, _| Ink::BLANK);
+    }
+
+    /// [`blit`](Self::blit) over a half-block layer (CORE-R84): each written cell gets
+    /// [`Pixels::cell_bg`] of `under` as its background, so a glow drawn as [`Pixels`]
+    /// carries on under a point cloud or a track instead of stopping at the first dotted
+    /// cell. `under` should cover the same cells; outside it the background is blank.
+    /// ASCII mode has no half blocks, so there it is plain `blit`.
+    pub fn blit_over(&self, canvas: &mut Canvas, under: &Pixels) {
+        if canvas.mode() == GlyphMode::Ascii {
+            self.blit(canvas);
+        } else {
+            self.blit_with(canvas, |x, y| under.cell_bg(x, y));
+        }
+    }
+
+    /// Write every lit cell `(x, y)` with `bg(x, y)` behind its dots.
+    fn blit_with(&self, canvas: &mut Canvas, mut bg: impl FnMut(i32, i32) -> Ink) {
         const BLOCK: usize = 16;
         let mut blocks = self.masks.chunks_exact(BLOCK);
         let mut start = 0;
         for block in &mut blocks {
             if block != [0; BLOCK] {
-                self.blit_run(canvas, start, block);
+                self.blit_run(canvas, start, block, &mut bg);
             }
             start += BLOCK;
         }
-        self.blit_run(canvas, start, blocks.remainder());
+        self.blit_run(canvas, start, blocks.remainder(), &mut bg);
     }
 
     /// Blit the cells `start..start + masks.len()` (row-major indices).
-    fn blit_run(&self, canvas: &mut Canvas, start: usize, masks: &[u8]) {
+    fn blit_run(
+        &self,
+        canvas: &mut Canvas,
+        start: usize,
+        masks: &[u8],
+        bg: &mut impl FnMut(i32, i32) -> Ink,
+    ) {
         let w = usize::from(self.cells.width());
         for (i, &mask) in (start..).zip(masks) {
             if mask != 0 {
-                canvas.put((i % w) as i32, (i / w) as i32, braille(mask), self.inks[i]);
+                let (x, y) = ((i % w) as i32, (i / w) as i32);
+                canvas.put_bg(x, y, braille(mask), self.inks[i], bg(x, y));
             }
         }
     }
@@ -370,13 +395,7 @@ impl Density {
     /// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the buffer as is):
     /// an exponential fade, `k = exp(−dt / τ)` per step.
     pub fn decay(&mut self, k: f32) {
-        if k.is_nan() || k >= 1.0 {
-            return;
-        }
-        let k = k.max(0.0);
-        for v in &mut self.buf {
-            *v *= k;
-        }
+        fade(&mut self.buf, k);
     }
 
     #[inline]
@@ -441,6 +460,129 @@ impl Density {
                 let columns = top.chunks_exact(2).zip(bottom.chunks_exact(2));
                 for ((t, b), px) in columns.zip(&mut out) {
                     let level = tone.level(t[0] + t[1] + b[0] + b[1]);
+                    *px = if level == 0 { Ink::BLANK } else { ink(level) };
+                }
+            }
+            out.for_each(|px| *px = Ink::BLANK);
+        }
+    }
+}
+
+/// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the values as they are):
+/// the shared fade of [`Density::decay`] and [`Glow::decay`].
+fn fade(buf: &mut [f32], k: f32) {
+    if k.is_nan() || k >= 1.0 {
+        return;
+    }
+    let k = k.max(0.0);
+    for v in buf {
+        *v *= k;
+    }
+}
+
+/// A long-exposure `f32` buffer at [`Pixels`] resolution, `w × 2·h` (CORE-R85): points
+/// [`splat`](Self::splat) weight into it by their [`Dots`] position, [`decay`](Self::decay)
+/// fades it, and [`to_pixels`](Self::to_pixels) tone-maps it 1:1 onto a `Pixels` layer. A
+/// soft glow under a point cloud or an event display, at an eighth of a [`Density`]'s
+/// memory (one value per pixel instead of per dot).
+#[derive(Debug, Clone)]
+pub struct Glow {
+    /// Buffer size in pixels.
+    px: Size,
+    /// Row-major, `px.w × px.h`.
+    buf: Vec<f32>,
+}
+
+impl Default for Glow {
+    /// A 1×1-cell buffer, the placeholder until a scene's first `resize`.
+    fn default() -> Self {
+        Self::new(Size::new(1, 1))
+    }
+}
+
+impl Glow {
+    /// A pixel is this many dots across and down (a cell is 2 × 4 dots and 1 × 2 pixels).
+    const DOTS_PER_PIXEL: i32 = 2;
+
+    /// A zeroed buffer over `cells` terminal cells (`w × 2·h` pixels).
+    pub fn new(cells: Size) -> Self {
+        let mut g = Self {
+            px: Size::new(1, 1),
+            buf: Vec::new(),
+        };
+        g.resize(cells);
+        g
+    }
+
+    /// Buffer dimensions in pixels, as [`Pixels::pixel_size`].
+    pub fn pixel_size(&self) -> Size {
+        self.px
+    }
+
+    /// Resize to `cells` and zero. Reuses the buffer unless it must grow.
+    pub fn resize(&mut self, cells: Size) {
+        self.px = Size::new(cells.width(), sub_axis(cells.height(), 2));
+        self.buf.clear();
+        self.buf.resize(self.px.area(), 0.0);
+    }
+
+    /// Zero every pixel.
+    pub fn clear(&mut self) {
+        self.buf.fill(0.0);
+    }
+
+    /// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the buffer as is):
+    /// an exponential fade, `k = exp(−dt / τ)` per step.
+    pub fn decay(&mut self, k: f32) {
+        fade(&mut self.buf, k);
+    }
+
+    /// Add `scale · w` to pixel `(px + dx, py + dy)` for each `(dx, dy, w)` of `kernel`,
+    /// where `(px, py)` is the pixel holding dot `(x, y)` (dot units, rounded to the
+    /// nearest dot; a pixel is 2 × 2 dots). Non-finite coordinates or weights and
+    /// off-buffer pixels are ignored.
+    pub fn splat(&mut self, x: f64, y: f64, kernel: &[(i32, i32, f32)], scale: f32) {
+        if !(x.is_finite() && y.is_finite()) {
+            return;
+        }
+        // Saturating casts: anything huge lands off the buffer.
+        let (px, py) = (
+            (x.round() as i32).div_euclid(Self::DOTS_PER_PIXEL),
+            (y.round() as i32).div_euclid(Self::DOTS_PER_PIXEL),
+        );
+        let (w, h) = (i32::from(self.px.width()), i32::from(self.px.height()));
+        for &(dx, dy, k) in kernel {
+            let (x, y) = (px.saturating_add(dx), py.saturating_add(dy));
+            let add = scale * k;
+            if (0..w).contains(&x) && (0..h).contains(&y) && add.is_finite() {
+                self.buf[y as usize * w as usize + x as usize] += add;
+            }
+        }
+    }
+
+    /// The value at pixel `(x, y)`, or `None` off the buffer.
+    #[inline]
+    pub fn get(&self, x: i32, y: i32) -> Option<f32> {
+        let (w, h) = (i32::from(self.px.width()), i32::from(self.px.height()));
+        ((0..w).contains(&x) && (0..h).contains(&y))
+            .then(|| self.buf[y as usize * w as usize + x as usize])
+    }
+
+    /// Set every pixel of `pixels` from its value through `tone`: level 0 ⇒
+    /// [`Ink::BLANK`], otherwise `ink(level)` (which may itself be blank). A `Glow` and a
+    /// `Pixels` over the same cells line up 1:1; pixels outside the glow are emptied. One
+    /// pass, no allocation.
+    pub fn to_pixels(&self, pixels: &mut Pixels, tone: &Tone, mut ink: impl FnMut(u8) -> Ink) {
+        let gw = usize::from(self.px.width());
+        let mut rows = self.buf.chunks_exact(gw.max(1));
+        for row in pixels
+            .px
+            .chunks_exact_mut(usize::from(pixels.cells.width()).max(1))
+        {
+            let mut out = row.iter_mut();
+            if let Some(src) = rows.next() {
+                for (&v, px) in src.iter().zip(&mut out) {
+                    let level = tone.level(v);
                     *px = if level == 0 { Ink::BLANK } else { ink(level) };
                 }
             }
@@ -585,6 +727,20 @@ impl Pixels {
     #[inline]
     pub fn get(&self, x: i32, y: i32) -> Option<Ink> {
         self.index(x, y).map(|i| self.px[i])
+    }
+
+    /// The one ink that stands for cell `(x, y)`'s two pixels (CORE-R84): the more
+    /// intense non-empty one (the top on a tie), or [`Ink::BLANK`] when both are empty or
+    /// the cell is off the buffer. [`Dots::blit_over`] puts it behind a cell's dots.
+    #[inline]
+    pub fn cell_bg(&self, x: i32, y: i32) -> Ink {
+        let lit = |py: i32| self.get(x, py).filter(|&i| !is_empty(i));
+        match (lit(2 * y), lit(2 * y + 1)) {
+            (Some(t), Some(b)) if intensity(b) > intensity(t) => b,
+            (Some(t), _) => t,
+            (None, Some(b)) => b,
+            (None, None) => Ink::BLANK,
+        }
     }
 
     /// Set every pixel to `shader(x, y)`, row by row (CORE-R65): the `Pixels` analogue

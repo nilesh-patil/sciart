@@ -36,7 +36,7 @@ use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, ink};
+use sciart_core::{Tone, draw, ink};
 
 pub static META: Meta = Meta {
     name: "electron_orbitals",
@@ -117,9 +117,41 @@ const H_EV_S: f64 = 4.135_667_696e-15;
 const RYDBERG_H: f64 = 13.598_287;
 #[cfg(test)]
 const HC: f64 = 1239.842;
-/// Div levels: `±(SIGN_FLOOR + SIGN_SPAN·near)` keeps both signs clear of the dark zero.
-const SIGN_FLOOR: f64 = 0.44;
-const SIGN_SPAN: f64 = 0.56;
+/// Glow (ORB-A9): a ~`GLOW_TAU` s screen-space exposure of the visible points, each spread
+/// over its pixel and the four next to it (`SPLAT`: no wider, so nodes stay dark; the
+/// splat and the camera's turn smooth the Monte-Carlo mottling, time alone does not, as
+/// the points are fixed). Tone-mapped by an asinh curve (knee and white in expected points
+/// per pixel per frame, so a lobe's core reaches white and its edge sits near the knee) to
+/// `g ∈ [0, 1]` and drawn in `GLOW_RAMP` at `HAZE_MAX·smoothstep(g)`: one soft ramp from
+/// the fringe to the core, no cut and no plateau; blank below `ink::MIN_VISIBLE_LEVEL`.
+/// The cap keeps the phase-coloured dots ≥ 2.5× (astro) and ≥ 2× (mono) brighter than any
+/// glow behind them, and `Ice`'s deep blue shares no hue with the hold phases (±π/2).
+/// The glow shows stationary states only: it eases in over the first `GLOW_IN` s of a hold
+/// and out over its last `GLOW_OUT` s, and is off through the transition. A stationary
+/// state's time-mean is its instantaneous `|ψ|²`, while in a beat an exposure would only
+/// show the mean cloud lagging the slosh; and a transition's phases sweep through 0,
+/// which mono greys near black (RND-R10), so dots there would read as holes in a glow.
+const GLOW_TAU: f64 = 1.0;
+const GLOW_KNEE: f32 = 0.5;
+const GLOW_WHITE: f32 = 8.0;
+const GLOW_FLOOR: f64 = 0.25;
+const HAZE_MAX: u8 = 40;
+const GLOW_RAMP: Ramp = Ramp::Ice;
+const GLOW_IN: f64 = 1.5;
+/// The glow's own radial window (charge quantiles): points expose it fully inside `r₅₀`
+/// and not at all beyond `r₉₀`, so each lobe glows at its heart and the glow feathers
+/// out across the outer half of the cloud, well inside the dots' own `R_FADE` edge.
+const GLOW_FADE: (f64, f64) = (0.5, 0.9);
+const GLOW_OUT: f64 = 1.0;
+/// The glow's splat, `(dx, dy, weight)` in pixels: half in the point's pixel, an eighth in
+/// each edge neighbour.
+const SPLAT: [(i32, i32, f32); 5] = [
+    (0, 0, 0.5),
+    (-1, 0, 0.125),
+    (1, 0, 0.125),
+    (0, -1, 0.125),
+    (0, 1, 0.125),
+];
 const NUCLEUS: Glyph = Glyph::new('•', 'o');
 const NUCLEUS_INK: Ink = Ink::new(Role::Accent, 180);
 /// The nucleus is drawn over its cell when at most this many of the 8 dots are lit.
@@ -255,12 +287,13 @@ impl Fade {
         outer: f64::INFINITY,
     };
 
-    /// The window of one orbital: its `r₈₈` and `r₉₅`.
-    fn of(orb: Orb) -> Self {
+    /// The window of one orbital between the radii holding fractions `q.0` and `q.1` of
+    /// its charge.
+    fn window(orb: Orb, q: (f64, f64)) -> Self {
         let r = |q: f64| radius_quantile(orb.n(), orb.l(), q);
         Self {
-            inner: r(R_FADE.0),
-            outer: r(R_FADE.1),
+            inner: r(q.0),
+            outer: r(q.1),
         }
     }
 
@@ -426,6 +459,15 @@ pub(crate) fn line(na: u32, nb: u32) -> Option<&'static Line> {
 /// stated factor.
 pub(crate) fn beat_hz(na: u32, nb: u32) -> f64 {
     line(na, nb).map_or(0.0, |l| gap(na, nb) / H_EV_S / l.slowdown)
+}
+
+/// Signed display beat `ω = (E_b − E_a)/ħ` on the slowed clock (rad/s) for a transition
+/// from `n_a` to `n_b` (ORB-A8): positive going up (`E_n = −R/n²` rises with n), negative
+/// going down, so the phase winds the right way in both halves of the loop. `|Ψ|²` sees
+/// only `cos ωt`, which is even, so the density does not depend on the sign.
+pub(crate) fn beat_omega(na: u32, nb: u32) -> f64 {
+    let sign = if nb > na { 1.0 } else { -1.0 };
+    sign * TAU * beat_hz(na, nb)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -667,14 +709,35 @@ pub(crate) fn visible(p: f64, c: (f64, f64), cos_wt: f64, psi: (f64, f64), u: f6
     u < 0.5 + a * b * cos_wt / q
 }
 
-/// Sign of the dominant component `c_k ψ_k`: in holds, exactly the orbital's phase sign.
-fn dominant_sign(c: (f64, f64), psi: (f64, f64)) -> f64 {
+/// Phase of the wavefunction at a point, `arg(i·e^{−ig(t)}Ψ)` (ORB-A8), for amplitudes
+/// `c = (c_a, c_b)`, real `psi = (ψ_a, ψ_b)` and the terms' phases `theta = (θ_a, θ_b)`
+/// from [`gauge`]. The constant `i` puts the two signs of a real state at ±π/2 rather than
+/// 0 and π, a half turn apart and equally far from 0, so every theme (mono included:
+/// RND-R10 greys phase by its distance from 0) draws the two lobes of a real state equally
+/// bright, as their equal `|ψ|²` demands.
+pub(crate) fn phase_of(c: (f64, f64), psi: (f64, f64), theta: (f64, f64)) -> f64 {
     let (a, b) = (c.0 * psi.0, c.1 * psi.1);
-    if a.abs() >= b.abs() {
-        a.signum()
-    } else {
-        b.signum()
-    }
+    let (sa, ca) = theta.0.sin_cos();
+    let (sb, cb) = theta.1.sin_cos();
+    FRAC_PI_2 + (a * sa + b * sb).atan2(a * ca + b * cb)
+}
+
+/// The terms' phases `(θ_a, θ_b)` at `since` s into a transition with beat `omega`
+/// (ORB-A8). Only their difference `θ_a − θ_b = ωt` is physical (it is the phase in
+/// `|Ψ|²`); a common phase is unobservable, so where one term alone is non-zero the hue
+/// is a choice of gauge. This one is `θ_a = ωT·h(t/T)` over the transition's `T` s, with
+/// `h(x) = x²(2 − x)`: `θ_a` starts at 0 at rest (`h′(0) = 0`), so the outgoing state
+/// keeps its hold colours as the rise begins, and `θ_b = θ_a − ωt` ends at 0 at rest
+/// (`h(1) = h′(1) = 1`), so the incoming state arrives in its hold colours without a
+/// jump. `0 ≤ h′ ≤ 4/3`, so neither lone term's hue ever turns faster than `4|ω|/3`: the
+/// beat stays the fastest colour motion on screen. (The mean-energy gauge `θ_a = c_b²ωt`,
+/// `θ_b = −c_a²ωt` wound the lone terms 2.5|ω| rad away by the fall's start and back
+/// over its 2 s, at up to ~3.4|ω|.)
+pub(crate) fn gauge(omega: f64, since: f64) -> (f64, f64) {
+    const SPAN: f64 = RISE + BEAT + FALL;
+    let x = (since / SPAN).clamp(0.0, 1.0);
+    let theta_a = omega * SPAN * x * x * (2.0 - x);
+    (theta_a, theta_a - omega * since)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -687,6 +750,8 @@ pub(crate) struct Atom {
     r90: [f64; K],
     /// Display fade window per orbital (`r₈₈`, `r₉₅`, a₀; see `R_FADE`).
     r_fade: [Fade; K],
+    /// Glow fade window per orbital (`r₅₀`, `r₉₀`, a₀; see `GLOW_FADE`).
+    r_glow: [Fade; K],
     /// `slots[cur]` holds `GALLERY[at]`; the other holds `GALLERY[at + 1]`.
     slots: [Slot; 2],
     cur: usize,
@@ -698,6 +763,9 @@ pub(crate) struct Atom {
     /// Points per orbital for the current display.
     m: [usize; K],
     mix: Mixture,
+    /// The terms' phases `(θ_a, θ_b)` from [`gauge`] (0 in a hold), for the phase
+    /// colouring; `θ_a − θ_b = ωt` since the rise.
+    theta: (f64, f64),
     rng: SplitMix64,
 }
 
@@ -722,7 +790,8 @@ impl Atom {
         let mut atom = Self {
             samplers: GALLERY.iter().map(|&o| Sampler::new(o)).collect(),
             r90,
-            r_fade: GALLERY.map(Fade::of),
+            r_fade: GALLERY.map(|orb| Fade::window(orb, R_FADE)),
+            r_glow: GALLERY.map(|orb| Fade::window(orb, GLOW_FADE)),
             slots: [Slot::with_capacity(at, next), Slot::with_capacity(next, at)],
             cur: 0,
             timeline: Timeline::new(&phases),
@@ -731,6 +800,7 @@ impl Atom {
             phase: Phase::Hold,
             m,
             mix: Mixture::new(0.0, m[at], m[next], 1.0),
+            theta: (0.0, 0.0),
             rng,
         };
         atom.prepare(usize::MAX);
@@ -784,12 +854,17 @@ impl Atom {
         let beat = self.timeline.at(self.t);
         let since_rise = beat.local + self.phase.offset();
         let (a, b) = (GALLERY[self.at], GALLERY[self.next()]);
-        let omega = TAU * beat_hz(a.n(), b.n());
+        let omega = beat_omega(a.n(), b.n());
+        self.theta = if self.phase == Phase::Hold {
+            (0.0, 0.0)
+        } else {
+            gauge(omega, since_rise)
+        };
         self.mix = Mixture::new(
             chi(self.phase, beat.progress),
             self.m[self.at],
             self.m[self.next()],
-            (omega * since_rise).cos(),
+            (self.theta.0 - self.theta.1).cos(),
         );
         if self.phase == Phase::Hold {
             self.prepare((PREP_PER_TICK * dt / SIM_DT).ceil() as usize);
@@ -825,7 +900,23 @@ impl Atom {
         }
     }
 
-    /// Calls `f(slot, i, position (a₀), sign)` for every point visible through `fade`: one
+    /// The glow's radial window: the held state's (ORB-A9; the glow shows only in holds).
+    pub(crate) fn glow_fade(&self) -> Fade {
+        self.r_glow[self.at]
+    }
+
+    /// How much of the glow shows (ORB-A9): 1 through a hold's middle, eased in over its
+    /// first `GLOW_IN` s and out over its last `GLOW_OUT` s, 0 in a transition.
+    pub(crate) fn glow_weight(&self) -> f64 {
+        if self.phase != Phase::Hold {
+            return 0.0;
+        }
+        let local = self.timeline.at(self.t).local;
+        ease::smoothstep((local / GLOW_IN).clamp(0.0, 1.0))
+            * ease::smoothstep(((HOLD - local) / GLOW_OUT).clamp(0.0, 1.0))
+    }
+
+    /// Calls `f(slot, i, position (a₀), phase)` for every point visible through `fade`: one
     /// radial window for both slots, so the drawn density is exactly `τ(r)·(M(χ)/2)|Ψ|²`.
     pub(crate) fn for_each_visible(
         &self,
@@ -834,10 +925,10 @@ impl Atom {
     ) {
         let mx = self.mix;
         let own = [
-            (self.cur, mx.p_a, (mx.c_a, mx.c_b)),
-            (1 - self.cur, mx.p_b, (mx.c_b, mx.c_a)),
+            (self.cur, mx.p_a, (mx.c_a, mx.c_b), false),
+            (1 - self.cur, mx.p_b, (mx.c_b, mx.c_a), true),
         ];
-        for (s, p, c) in own {
+        for (s, p, c, is_b) in own {
             if p <= 0.0 {
                 continue;
             }
@@ -849,7 +940,8 @@ impl Atom {
                 let psi = (f64::from(slot.psi[i]), f64::from(slot.other[i]));
                 let (u, v) = (f64::from(slot.u[i]), f64::from(slot.v[i]));
                 if visible(p * taper, c, mx.cos_wt, psi, u, v) {
-                    f(s, i, pos, dominant_sign(c, psi));
+                    let ab = if is_b { (psi.1, psi.0) } else { psi };
+                    f(s, i, pos, phase_of((mx.c_a, mx.c_b), ab, self.theta));
                 }
             }
         }
@@ -925,6 +1017,15 @@ fn counts(size: Size, r90: &[f64; K]) -> [usize; K] {
     })
 }
 
+/// A point's camera depth (larger is nearer; world units, the blended r₉₀) and phase level
+/// packed so that the larger key is the nearer point: depth in 1/4096 steps over
+/// [−8, 8) in the high bits, the level in the low 8. Every drawn point sits within
+/// ~1.5 r₉₀ of the nucleus, well inside the range, and is > 0.
+fn front_key(depth: f64, level: u8) -> u32 {
+    let q = ((depth + 8.0) * 4096.0).clamp(1.0, f64::from(u16::MAX)) as u32;
+    q << 8 | u32::from(level)
+}
+
 /// Whether the label is drawn (and row h−1 is kept free of cloud).
 fn label_shown(size: Size) -> bool {
     size.width() >= 14 && size.height() >= 8
@@ -942,6 +1043,16 @@ struct ElectronOrbitals {
     atom: Option<Atom>,
     size: Size,
     dots: Dots,
+    /// Long exposure of the visible points at pixel resolution (a dot-resolution `Density`
+    /// would take 8 floats a cell and push the scene past the TEST-R7 ceiling at
+    /// 500×150), and its tone-mapped glow (ORB-A9).
+    exposure: Glow,
+    glow: Pixels,
+    tone: Tone,
+    /// Per cell, the nearest visible point as a [`front_key`] (0: none yet), so each cell
+    /// wears the phase of the cloud's front surface (ORB-A8): the dots of a cell share one
+    /// ink, and one picked in sample order mixed front and back into confetti.
+    front: Grid<u32>,
 }
 
 impl Default for ElectronOrbitals {
@@ -950,6 +1061,10 @@ impl Default for ElectronOrbitals {
             atom: None,
             size: Size::new(1, 1),
             dots: Dots::default(),
+            exposure: Glow::default(),
+            glow: Pixels::default(),
+            tone: Tone::asinh(GLOW_KNEE, GLOW_WHITE),
+            front: Grid::default(),
         }
     }
 }
@@ -981,9 +1096,17 @@ impl ElectronOrbitals {
 
     /// Project every visible point into `Dots`, orbital z up: (x, y, z) ↦ world (x, z, −y).
     /// The far dust fades out through the blended `R_FADE` window, and row h−1 is skipped
-    /// while it holds the label (the dust would otherwise speckle the text).
-    fn rasterise(&mut self, cam: Camera) {
+    /// while it holds the label (the dust would otherwise speckle the text). Each cell takes
+    /// the phase of its nearest point (`front`; `Dots` keeps the last ink set for
+    /// `Phase`, so every later, farther point is plotted in the front ink). The same points
+    /// expose the glow: the exposure keeps `keep` of its old value (0 starts afresh) and each
+    /// point adds `1 − keep` times its `GLOW_FADE` taper to its pixel, so it settles at the
+    /// expected (tapered) points per pixel per frame; the hold envelope then scales what
+    /// shows (ORB-A9).
+    fn rasterise(&mut self, cam: Camera, keep: f32) {
         self.dots.clear();
+        self.front.fill(0);
+        self.exposure.decay(keep);
         let Some(atom) = &self.atom else {
             return;
         };
@@ -1005,19 +1128,42 @@ impl ElectronOrbitals {
             cy + 0.5 / f64::from(Dots::CELL_H),
         );
         let proj = cam.projector();
-        let dots = &mut self.dots;
-        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], sign| {
+        let shown = atom.glow_weight();
+        let glow_fade = atom.glow_fade();
+        let (dots, exposure) = (&mut self.dots, &mut self.exposure);
+        let front = &mut self.front;
+        let weight = 1.0 - keep;
+        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], phase| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
-            if let Some((sx, sy, depth)) = proj.project(world, centre, scale) {
-                let (dx, dy) = Dots::from_cells(sx, sy);
-                if dy >= floor {
-                    return;
-                }
-                let near = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
-                let ink = ink::div(sign * (SIGN_FLOOR + SIGN_SPAN * near));
-                dots.plot(dx, dy, ink);
+            let Some((sx, sy, depth)) = proj.project(world, centre, scale) else {
+                return;
+            };
+            let (dx, dy) = Dots::from_cells(sx, sy);
+            if dy >= floor {
+                return;
             }
+            let mut ink = ink::phase(phase);
+            if let Some(f) = front.get_mut(sx.floor() as i32, sy.floor() as i32) {
+                *f = (*f).max(front_key(depth, ink.level));
+                ink.level = *f as u8;
+            }
+            dots.plot(dx, dy, ink);
+            // The pixel holding the dot, plus an eighth to each of its four neighbours:
+            // enough to smooth the grain, too little to fill a node.
+            let r = (x * x + y * y + z * z).sqrt();
+            exposure.splat(dx, dy, &SPLAT, weight * glow_fade.taper(r) as f32);
         });
+        self.exposure
+            .to_pixels(&mut self.glow, &self.tone, |level| {
+                let u = (f64::from(level) / 255.0 - GLOW_FLOOR) / (1.0 - GLOW_FLOOR);
+                let (lo, hi) = (ink::MIN_VISIBLE_LEVEL, f64::from(HAZE_MAX));
+                let haze = shown * (lo + (hi - lo) * ease::smoothstep(u.min(1.0)));
+                if u <= 0.0 || haze < lo {
+                    Ink::BLANK
+                } else {
+                    Ink::new(Role::Ramp(GLOW_RAMP), ink::level(haze))
+                }
+            });
     }
 
     /// Bottom-right, clear of the title (GEN-R13): the state in a hold, `a → b  line`
@@ -1075,6 +1221,9 @@ impl Generator for ElectronOrbitals {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.size = size;
         self.dots.resize(size);
+        self.exposure.resize(size);
+        self.glow.resize(size);
+        self.front.resize(size, 0);
         match &mut self.atom {
             Some(atom) => atom.resize(stage(size)),
             None => {
@@ -1084,7 +1233,7 @@ impl Generator for ElectronOrbitals {
             }
         }
         if let Some(cam) = self.atom.as_ref().map(Atom::camera) {
-            self.rasterise(cam);
+            self.rasterise(cam, 0.0);
         }
     }
 
@@ -1098,15 +1247,18 @@ impl Generator for ElectronOrbitals {
         }
         atom.step(dt);
         let cam = atom.camera();
-        self.rasterise(cam);
+        self.rasterise(cam, (-dt / GLOW_TAU).exp() as f32);
     }
 
     fn render(&self, canvas: &mut Canvas) {
         // Under the cloud, and over it where a node leaves its cell nearly empty (a
         // lobe dot or two from the tilt would otherwise hide it); 1s stays covered.
+        // The glow first (Unicode only: ASCII has no half blocks), then the dots over it
+        // with the glow carried on as their cells' background.
+        self.glow.blit(canvas, |_, _, _, _| None);
         let (x, y) = self.nucleus();
         canvas.put(x, y, NUCLEUS, NUCLEUS_INK);
-        self.dots.blit(canvas);
+        self.dots.blit_over(canvas, &self.glow);
         let node = self.atom.as_ref().is_some_and(Atom::has_node);
         if node && self.nucleus_dots() <= NUCLEUS_MAX_DOTS {
             canvas.put(x, y, NUCLEUS, NUCLEUS_INK);
@@ -1117,7 +1269,7 @@ impl Generator for ElectronOrbitals {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashMap, HashSet};
 
     use super::*;
     use sciart_core::geom::v3::norm;
@@ -1435,8 +1587,11 @@ mod tests {
         // 10 000·(∫τR_a²r² + ∫τR_b²r²) (the cross term has no s–p overlap), and the
         // z centroid is (∫τR_aR_b r³ dr)(1/√3) over half that bracket.
         let (a, b) = (Orb::S1, Orb::P2z);
-        let fade = Fade::blend(Fade::of(a), Fade::of(b), 0.5);
-        assert!(fade.inner > Fade::of(a).inner && fade.outer < Fade::of(b).outer);
+        let fade = Fade::blend(Fade::window(a, R_FADE), Fade::window(b, R_FADE), 0.5);
+        assert!(
+            fade.inner > Fade::window(a, R_FADE).inner
+                && fade.outer < Fade::window(b, R_FADE).outer
+        );
         let tapered = |f: &dyn Fn(f64) -> f64| radial_integral(|r| fade.taper(r) * f(r));
         let norm_a = tapered(&|r| (radial(1, 0, r) * r).powi(2));
         let norm_b = tapered(&|r| (radial(2, 1, r) * r).powi(2));
@@ -1611,11 +1766,14 @@ mod tests {
         s.resize(size, &mut ctx);
         let rng = SplitMix64::from_rng(&mut ctx.rng);
         s.atom = Some(Atom::new(first, stage(size), rng));
-        s.rasterise(Camera {
-            yaw: 0.3,
-            pitch: PITCH_LOW,
-            distance: DISTANCE,
-        });
+        s.rasterise(
+            Camera {
+                yaw: 0.3,
+                pitch: PITCH_LOW,
+                distance: DISTANCE,
+            },
+            0.0,
+        );
         s
     }
 
@@ -1724,7 +1882,7 @@ mod tests {
     fn at_clock(s: &mut ElectronOrbitals, k: usize, t: f64) {
         s.atom.as_mut().unwrap().t = ROCK_PERIOD * k as f64 + t;
         let cam = s.atom.as_ref().unwrap().camera();
-        s.rasterise(cam);
+        s.rasterise(cam, 0.0);
     }
 
     /// `scene` redrawn with the scene's own camera `t` s into the state's visit.
@@ -1796,7 +1954,7 @@ mod tests {
         );
     }
 
-    /// Sign runs of the Div cells met walking a ring of radius 0.5ρ_k about the nucleus
+    /// Sign runs of the Phase cells (±π/2 in a hold) met walking a ring of radius 0.5ρ_k about the nucleus
     /// (ρ_k: state k's on-screen r₉₀); a clover gives 4.
     fn ring_sign_runs(s: &ElectronOrbitals, k: usize) -> usize {
         let r90 = &s.atom.as_ref().unwrap().r90;
@@ -1810,7 +1968,7 @@ mod tests {
                 let x = cx + 0.5 * rho * sciart_core::geom::ASPECT * a.cos();
                 let y = cy - 0.5 * rho * a.sin();
                 let cell = c.get(x.floor() as i32, y.floor() as i32)?;
-                (cell.ink.role == Role::Div).then(|| ink::div_value(cell.ink) > 0.0)
+                (cell.ink.role == Role::Phase).then_some(cell.ink.level == POS)
             })
             .collect();
         signs.dedup();
@@ -2021,27 +2179,415 @@ mod tests {
         }
     }
 
+    /// Phase levels of the two signs of a real state: +π/2 and −π/2.
+    const POS: u8 = 64;
+    const NEG: u8 = 192;
+
     #[test]
-    fn orb_a7_sign_colouring_keeps_both_lobes_clear_of_zero() {
-        // 2p_z: the +z lobe is positive, the −z lobe negative, and no cell sits near zero.
+    fn orb_a8_phase_is_fixed_in_holds_and_winds_at_the_beat_in_superpositions() {
+        use std::f64::consts::FRAC_1_SQRT_2 as H;
+        let turn = |p: f64| p.rem_euclid(TAU);
+        // A hold (θ = 0) has one phase per sign: +π/2 where ψ > 0, −π/2 where ψ < 0; so
+        // does the incoming state at the end of a transition, where θ_b is 0 again.
+        let omega = 2.3;
+        let end = gauge(omega, RISE + BEAT + FALL);
+        for (c, psi, theta) in [
+            ((1.0, 0.0), (0.7, -3.0), (0.0, 0.0)),
+            ((0.0, 1.0), (5.0, 0.4), (0.0, 0.0)),
+            ((0.0, 1.0), (5.0, 0.4), end),
+            ((1.0, 0.0), (0.7, -3.0), gauge(omega, 0.0)),
+        ] {
+            let p = turn(phase_of(c, psi, theta));
+            assert!((p - FRAC_PI_2).abs() < 1e-9, "{c:?} {psi:?} {theta:?}: {p}");
+            let n = turn(phase_of(c, (-psi.0, -psi.1), theta));
+            assert!((n - 3.0 * FRAC_PI_2).abs() < 1e-9, "{c:?} {theta:?}: {n}");
+        }
+        assert_eq!(ink::phase(FRAC_PI_2).level, POS);
+        assert_eq!(ink::phase(-FRAC_PI_2).level, NEG);
+        // Only the relative phase is physical: at every time of a transition the terms
+        // differ by exactly ωt (the phase in |Ψ|² = q + 2c_a c_b ψ_a ψ_b cos ωt), and where
+        // ψ_a = ψ_b at χ = π/4 the phase is the mean of the two (a half turn on while
+        // the terms point more than a quarter turn apart).
+        for t in [0.0, 0.5, 2.0, 3.7, 6.2, RISE + BEAT + FALL] {
+            let theta = gauge(omega, t);
+            assert!((theta.0 - theta.1 - omega * t).abs() < 1e-12, "t {t}");
+            let a = phase_of((H, H), (1.0, 0.0), theta);
+            let b = phase_of((H, H), (0.0, 1.0), theta);
+            let both = phase_of((H, H), (1.0, 1.0), theta);
+            let flip = if (0.5 * omega * t).cos() < 0.0 {
+                PI
+            } else {
+                0.0
+            };
+            let mean = (FRAC_PI_2 + 0.5 * (theta.0 + theta.1) + flip - both).rem_euclid(TAU);
+            assert!(mean.min(TAU - mean) < 1e-9, "t {t}");
+            let rel = (a - b - omega * t).rem_euclid(TAU);
+            assert!(rel.min(TAU - rel) < 1e-9, "t {t}");
+        }
+    }
+
+    #[test]
+    fn orb_a8_the_phase_winds_with_the_sign_of_the_energy_step() {
+        // ω = (E_b − E_a)/ħ: up the ladder positive, down it negative, same size.
+        for (lo, hi) in [(1, 2), (2, 3), (3, 4)] {
+            let up = beat_omega(lo, hi);
+            assert!(up > 0.0 && (up - TAU * beat_hz(lo, hi)).abs() < 1e-12);
+            assert_eq!(beat_omega(hi, lo), -up);
+        }
+        // Stepping the atom into a downward beat (2p_x → 1s, the loop's last transition):
+        // the term of the lower, final state (ψ_b) runs ahead of the upper one's, by |ω|t
+        // = −(E_b − E_a)t, and in an upward beat (1s → 2p_z) behind it.
+        for (first, down) in [(K - 1, true), (0, false)] {
+            let mut atom = atom_at(first, 80, 24);
+            while atom.phase == Phase::Hold {
+                atom.step(SIM_DT);
+            }
+            for _ in 0..30 {
+                atom.step(SIM_DT);
+            }
+            let (a, b) = (GALLERY[atom.at], GALLERY[atom.next()]);
+            assert_eq!(b.n() < a.n(), down, "{a:?} → {b:?}");
+            let wt = atom.theta.0 - atom.theta.1;
+            let lead = atom.theta.1 - atom.theta.0;
+            let want = -beat_omega(a.n(), b.n()) / beat_omega(a.n(), b.n()).abs();
+            assert!(wt.abs() > 0.1, "{wt}");
+            assert!(
+                (lead - want * wt.abs()).abs() < 1e-9,
+                "{a:?} → {b:?}: lead {lead}, ωt {wt}"
+            );
+        }
+    }
+
+    #[test]
+    fn orb_a8_single_term_hues_turn_no_faster_than_1_5_omega_and_meet_the_holds() {
+        // Where only one term is non-zero its hue is pure gauge (θ_a or θ_b). Over every
+        // transition of the loop those hues start where the hold left them, end where the
+        // next hold starts, and never turn faster than 1.5|ω| (the fastest colour motion
+        // on screen is the beat, not bookkeeping).
+        let turned = |p: f64, q: f64| {
+            let d = (p - q).rem_euclid(TAU);
+            d.min(TAU - d)
+        };
+        let hues = |atom: &Atom| {
+            let c = (atom.mix.c_a, atom.mix.c_b);
+            (
+                phase_of(c, (1.0, 0.0), atom.theta),
+                phase_of(c, (0.0, 1.0), atom.theta),
+            )
+        };
+        let dt = SIM_DT;
+        for first in 0..K {
+            let mut atom = atom_at(first, 80, 24);
+            while atom.phase == Phase::Hold {
+                atom.step(dt);
+            }
+            let (a, b) = (GALLERY[atom.at], GALLERY[atom.next()]);
+            let omega = beat_omega(a.n(), b.n()).abs();
+            let mut prev = (FRAC_PI_2, FRAC_PI_2);
+            loop {
+                let now = hues(&atom);
+                if atom.phase == Phase::Hold {
+                    // The next hold: its hue is π/2 again, reached without a jump.
+                    assert!(
+                        turned(now.1, prev.1) <= 1.5 * omega * dt + 1e-9,
+                        "{a:?}→{b:?}"
+                    );
+                    assert!(turned(now.0, FRAC_PI_2) < 1e-9);
+                    break;
+                }
+                // A term with no amplitude has no hue (the fall ends at c_a = 0 exactly).
+                let live = [atom.mix.c_a > 1e-9, atom.mix.c_b > 1e-9];
+                for (k, (p, q)) in [(now.0, prev.0), (now.1, prev.1)].into_iter().enumerate() {
+                    if !live[k] {
+                        continue;
+                    }
+                    let rate = turned(p, q) / dt;
+                    assert!(
+                        rate <= 1.5 * omega + 1e-6,
+                        "{a:?}→{b:?} term {k} at t {:.2}: {rate:.2} rad/s vs ω {omega:.2}",
+                        atom.t
+                    );
+                }
+                prev = now;
+                atom.step(dt);
+            }
+        }
+    }
+
+    #[test]
+    fn orb_a8_both_signs_of_a_hold_are_equally_bright_and_over_the_glow() {
+        use sciart_render::{Rgb, Theme};
+        let luma =
+            |c: Rgb| 0.2126 * f64::from(c.0) + 0.7152 * f64::from(c.1) + 0.0722 * f64::from(c.2);
+        let haze = Ink::new(Role::Ramp(GLOW_RAMP), HAZE_MAX);
+        // Rainbow is full-saturation HSV, whose blue is dark in any use; it separates the
+        // lobes by hue alone.
+        for theme in [Theme::Astro, Theme::Mono] {
+            let [pos, neg, glow] = [Ink::new(Role::Phase, POS), Ink::new(Role::Phase, NEG), haze]
+                .map(|i| luma(theme.color(i, 0, 0)));
+            // Mono greys phase by its distance from 0 (RND-R10): ±π/2 are the same grey.
+            if theme == Theme::Mono {
+                assert!((pos - neg).abs() < 1.0, "{theme:?}: {pos} vs {neg}");
+            }
+            // Dots always stand out over the brightest glow behind them: ≥ 2.5× its luma in
+            // astro, ≥ 2× in mono (whose ±π/2 grey is mid-grey, RND-R10).
+            let ratio = if theme == Theme::Mono { 2.0 } else { 2.5 };
+            assert!(
+                pos.min(neg) >= ratio * glow,
+                "{theme:?}: dots {pos}/{neg}, glow {glow}"
+            );
+        }
+    }
+
+    #[test]
+    fn orb_a8_dots_stand_out_over_the_glow_in_every_frame() {
+        // Over a whole loop at 80×24, every dotted cell over a glow: its dots have ≥ 2.5×
+        // the glow's luma in astro and ≥ 2× in mono, for whatever phase they wear (in a
+        // beat, phases near 0 are near-black in mono, RND-R10).
+        use sciart_render::{Rgb, Theme};
+        let luma =
+            |c: Rgb| 0.2126 * f64::from(c.0) + 0.7152 * f64::from(c.1) + 0.0722 * f64::from(c.2);
+        let mut s = scene(0, 80, 24);
+        let mut ctx = Ctx::new(1, s.size);
+        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
+        let mut checked = 0;
+        for _ in 0..(ROCK_PERIOD * K as f64 / 0.1) as usize {
+            s.update(0.1, &mut ctx);
+            c.clear();
+            s.render(&mut c);
+            for cell in c.cells().iter().filter(|c| c.ink.role == Role::Phase) {
+                if cell.bg.role != Role::Ramp(GLOW_RAMP) || cell.bg.level == 0 {
+                    continue;
+                }
+                for (theme, ratio) in [(Theme::Astro, 2.5), (Theme::Mono, 2.0)] {
+                    let (dot, bg) = (theme.color(cell.ink, 0, 0), theme.color(cell.bg, 0, 0));
+                    assert!(
+                        luma(dot) >= ratio * luma(bg),
+                        "{theme:?}: phase level {} over glow {}",
+                        cell.ink.level,
+                        cell.bg.level
+                    );
+                }
+                checked += 1;
+            }
+        }
+        assert!(checked > 1000, "{checked} cells");
+    }
+
+    #[test]
+    fn orb_a8_cloud_cells_wear_the_phase_and_both_signs_show() {
+        // 2p_z hold: every cloud cell is a Phase cell at exactly +π/2 or −π/2.
         let s = scene(1, 80, 24);
         let mut c = Canvas::new(s.size, GlyphMode::Unicode);
         s.render(&mut c);
         let (mut pos, mut neg) = (0, 0);
-        for cell in c.cells().iter().filter(|c| c.ink.role == Role::Div) {
-            let v = ink::div_value(cell.ink);
-            assert!(
-                v.abs() >= 0.43,
-                "level {} too close to zero",
-                cell.ink.level
-            );
-            if v > 0.0 {
-                pos += 1;
-            } else {
-                neg += 1;
+        for cell in c
+            .cells()
+            .iter()
+            .filter(|c| c.ch as u32 >= 0x2801 && c.ch as u32 <= 0x28FF)
+        {
+            assert_eq!(cell.ink.role, Role::Phase);
+            match cell.ink.level {
+                POS => pos += 1,
+                NEG => neg += 1,
+                l => panic!("level {l} in a real hold"),
             }
         }
         assert!(pos > 20 && neg > 20, "{pos} positive, {neg} negative cells");
+        // Mid-beat of 1s → 2p_z the phase winds: many cells leave the two real levels.
+        let mut s = scene(0, 80, 24);
+        let mut ctx = Ctx::new(1, s.size);
+        while s.atom.as_ref().unwrap().phase != Phase::Beat {
+            s.update(SIM_DT, &mut ctx);
+        }
+        for _ in 0..20 {
+            s.update(SIM_DT, &mut ctx);
+        }
+        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
+        s.render(&mut c);
+        let cloud: Vec<u8> = c
+            .cells()
+            .iter()
+            .filter(|c| c.ink.role == Role::Phase)
+            .map(|c| c.ink.level)
+            .collect();
+        let complex = cloud.iter().filter(|&&l| l != POS && l != NEG).count();
+        assert!(
+            complex * 4 >= cloud.len(),
+            "{complex} of {} cells off the real axis",
+            cloud.len()
+        );
+    }
+
+    #[test]
+    fn orb_a8_each_cell_wears_the_phase_of_its_nearest_point() {
+        // Mid-beat of 3d_z2 → 4f_z3, where front and back of the cloud differ in phase.
+        let mut s = scene(2, 80, 24);
+        let mut ctx = Ctx::new(1, s.size);
+        while s.atom.as_ref().unwrap().phase != Phase::Beat {
+            s.update(SIM_DT, &mut ctx);
+        }
+        s.update(SIM_DT, &mut ctx);
+        let atom = s.atom.as_ref().unwrap();
+        let (ln_r90, ln_g) = atom.framing();
+        let (inv_r90, scale) = ((-ln_r90).exp(), s.radius() * ln_g.exp());
+        let (cx, cy) = s.centre();
+        let centre = (cx + 0.25, cy + 0.125);
+        let proj = atom.camera().projector();
+        let mut best: HashMap<(i32, i32), (f64, u8)> = HashMap::new();
+        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], phase| {
+            let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
+            let (sx, sy, d) = proj.project(world, centre, scale).unwrap();
+            if Dots::from_cells(sx, sy).1 >= 4.0 * 23.0 - 0.5 {
+                return;
+            }
+            let key = (sx.floor() as i32, sy.floor() as i32);
+            let e = best.entry(key).or_insert((f64::NEG_INFINITY, 0));
+            if d > e.0 {
+                *e = (d, ink::phase(phase).level);
+            }
+        });
+        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
+        s.render(&mut c);
+        let mut checked = 0;
+        for (&(x, y), &(_, level)) in &best {
+            let cell = c.get(x, y).unwrap();
+            if cell.ink.role == Role::Phase {
+                assert_eq!(cell.ink.level, level, "cell ({x},{y})");
+                checked += 1;
+            }
+        }
+        assert!(checked > 50, "{checked} cells");
+    }
+
+    #[test]
+    fn orb_a9_a_dim_glow_sits_under_the_cloud_and_nowhere_else() {
+        // 4f_z3 hold at 80×24, once the glow has eased in.
+        let mut s = scene(3, 80, 24);
+        let mut ctx = Ctx::new(1, s.size);
+        for _ in 0..(GLOW_IN / SIM_DT) as usize + 30 {
+            s.update(SIM_DT, &mut ctx);
+        }
+        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
+        s.render(&mut c);
+        let glow = |ink: Ink| ink.role == Role::Ramp(GLOW_RAMP) && ink.level > 0;
+        let (w, h) = (80, 24);
+        let cloud: Vec<&Cell> = c
+            .cells()
+            .iter()
+            .filter(|c| c.ink.role == Role::Phase)
+            .collect();
+        let lit_bg = cloud.iter().filter(|c| glow(c.bg)).count();
+        assert!(
+            lit_bg * 3 >= cloud.len() * 2,
+            "{lit_bg} of {} dotted cells glow",
+            cloud.len()
+        );
+        for cell in c.cells() {
+            for ink in [cell.ink, cell.bg] {
+                if ink.role == Role::Ramp(GLOW_RAMP) {
+                    assert!(ink.level <= HAZE_MAX, "haze level {}", ink.level);
+                }
+            }
+        }
+        // Corners stay black and the label row takes no glow.
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 2), (w - 1, h - 2)] {
+            assert_eq!(*c.get(x, y).unwrap(), Cell::BLANK, "corner ({x},{y})");
+        }
+        for x in 0..w {
+            let cell = c.get(x, h - 1).unwrap();
+            assert!(!glow(cell.ink) && !glow(cell.bg), "label row cell {x}");
+        }
+        // ASCII mode draws no glow at all.
+        let mut a = Canvas::new(s.size, GlyphMode::Ascii);
+        s.render(&mut a);
+        assert!(a.cells().iter().all(|c| !glow(c.ink) && !glow(c.bg)));
+        // The glow is the points' own density, unblurred: in the 2p_z hold the nodal plane
+        // (the nucleus row) glows far less than the lobes above and below it, and the
+        // halo's faint end is feathered (it holds more than one level below the cap).
+        let mut s = scene(1, 80, 24);
+        let mut ctx = Ctx::new(1, s.size);
+        for _ in 0..(GLOW_IN / SIM_DT) as usize + 60 {
+            s.update(SIM_DT, &mut ctx);
+        }
+        let (_, ny) = s.nucleus();
+        let row_glow =
+            |y: i32| -> u32 { (0..80).map(|x| u32::from(s.glow.cell_bg(x, y).level)).sum() };
+        let (node, lobe) = (row_glow(ny), row_glow(ny - 3).max(row_glow(ny + 3)));
+        assert!(2 * node < lobe, "node row glow {node}, lobe rows {lobe}");
+        let mut levels: Vec<u8> = (0..80)
+            .flat_map(|x| (0..46).map(move |y| (x, y)))
+            .filter_map(|(x, y)| s.glow.get(x, y))
+            .filter(|i| i.role == Role::Ramp(GLOW_RAMP))
+            .map(|i| i.level)
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
+        assert!(levels.len() > 20, "{} glow levels", levels.len());
+    }
+
+    #[test]
+    fn orb_a9_the_glow_ramps_softly_from_edge_to_core() {
+        // 2p_z hold at 200×50, glow fully in: down the column through the nucleus, from
+        // the first glowing pixel of the upper lobe to its brightest, the glow climbs over
+        // at least 3 pixels and never jumps by more than half the cap in one pixel.
+        let mut s = scene(1, 200, 50);
+        let mut ctx = Ctx::new(1, s.size);
+        for _ in 0..(3.0 / SIM_DT) as usize {
+            s.update(SIM_DT, &mut ctx);
+        }
+        let (nx, ny) = s.nucleus();
+        let mut ramps = 0;
+        for x in nx - 4..=nx + 4 {
+            let col: Vec<u8> = (0..2 * ny)
+                .map(|y| s.glow.get(x, y).map_or(0, |i| i.level))
+                .collect();
+            let Some(start) = col.iter().position(|&l| l > 0) else {
+                continue;
+            };
+            let peak = (start..col.len()).max_by_key(|&y| col[y]).unwrap();
+            for y in start.max(1)..=peak {
+                let jump = i32::from(col[y]) - i32::from(col[y - 1]);
+                assert!(
+                    jump <= i32::from(HAZE_MAX / 2),
+                    "column {x} pixel {y}: {col:?}"
+                );
+            }
+            ramps += usize::from(peak >= start + 3);
+        }
+        assert!(ramps >= 7, "{ramps} of 9 columns ramp over ≥ 3 pixels");
+    }
+
+    #[test]
+    fn orb_a9_the_glow_shows_stationary_states_only() {
+        // One loop at 80×24: no glow anywhere during a transition, full glow mid-hold.
+        let mut s = scene(0, 80, 24);
+        let mut ctx = Ctx::new(1, s.size);
+        let lit = |s: &ElectronOrbitals| {
+            (0..80)
+                .flat_map(|x| (0..46).map(move |y| (x, y)))
+                .filter(|&(x, y)| s.glow.get(x, y).is_some_and(|i| i.level > 0))
+                .count()
+        };
+        let (mut mid_hold, mut moving) = (0, 0);
+        for _ in 0..(ROCK_PERIOD * K as f64 / 0.05) as usize {
+            s.update(0.05, &mut ctx);
+            let atom = s.atom.as_ref().unwrap();
+            let local = atom.timeline.at(atom.t).local;
+            if atom.phase != Phase::Hold {
+                assert_eq!(lit(&s), 0, "glow in {:?} at t {:.2}", atom.phase, atom.t);
+                moving += 1;
+            } else if (GLOW_IN + 0.5..HOLD - GLOW_OUT).contains(&local) {
+                assert!(
+                    lit(&s) > 20,
+                    "mid-hold at t {:.2}: {} pixels",
+                    atom.t,
+                    lit(&s)
+                );
+                mid_hold += 1;
+            }
+        }
+        assert!(mid_hold > 100 && moving > 500, "{mid_hold} {moving}");
     }
 
     #[test]

@@ -372,6 +372,39 @@ fn core_r81_tone_and_to_pixels_do_not_allocate() {
 }
 
 #[test]
+fn core_r85_glow_does_not_allocate_after_resize() {
+    let size = Size::new(200, 50);
+    let mut glow = Glow::new(size);
+    let mut pixels = Pixels::new(size);
+    let tone = sciart_core::raster::Tone::asinh(0.4, 6.0);
+    let kernel = [(0, 0, 0.5), (1, 0, 0.25), (0, 1, 0.25)];
+    let ((), stats) = measure(|| {
+        glow.decay(0.9);
+        for i in 0..400 {
+            glow.splat(f64::from(i), f64::from(i % 200), &kernel, 3.0);
+        }
+        glow.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
+        glow.resize(Size::new(100, 20));
+        glow.clear();
+    });
+    assert_free("Glow", stats);
+}
+
+#[test]
+fn core_r84_blit_over_does_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut dots = Dots::new(size);
+    let mut under = Pixels::new(size);
+    let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+    for i in 0..400 {
+        dots.set(i, i % 200, Ink::new(Role::Star, 200));
+        under.set(i / 2, i % 100, Ink::new(Role::Seq, 90));
+    }
+    let ((), stats) = measure(|| dots.blit_over(&mut canvas, &under));
+    assert_free("Dots::blit_over", stats);
+}
+
+#[test]
 fn core_r52_sample_map_does_not_allocate_after_rebuild() {
     let src = Grid::new(Size::new(120, 60), 0.5f32);
     let mut map = SampleMap::default();
