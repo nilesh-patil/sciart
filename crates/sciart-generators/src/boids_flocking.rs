@@ -4,16 +4,26 @@
 //! Reynolds (1987) boids on the square braille dot lattice (1 dot ≈ 0.3 m at σ = 1),
 //! each bird steering by its `K = 7` topological nearest neighbours within a metric
 //! horizon (Ballerini et al. 2008; Hemelrijk & Hildenbrandt 2011). A falcon stoops every
-//! 14 s; birds near it turn away and their neighbours copy the escape manoeuvre a couple
+//! 12 s; birds near it turn away and their neighbours copy the escape manoeuvre a couple
 //! of substeps later (Hemelrijk et al. 2015), so the agitation wave outruns any bird, as
 //! Potts (1984) observed in dunlin flocks when he found manoeuvres passing between
-//! neighbours faster than a bird's startle reaction (his chorus-line hypothesis). Hemelrijk et al. also showed
-//! the dark band of such waves is orientation, not density: here an alarmed bird banks
-//! hard, which draws it as a 4-dot stroke in the bright `Star` ink.
+//! neighbours faster than a bird's startle reaction (his chorus-line hypothesis).
+//! Hemelrijk et al. also showed the dark band of such waves is orientation, not density:
+//! a banked bird shows the viewer its wing surface and looks dark, an edge-on one looks
+//! thin and light. Here an alarmed bird banked past `WING_BANK` draws its wings and its
+//! cells turn black, while birds at the front, just starting to roll, stand for birds
+//! turning edge-on (a stylised light band). The rest of the flock darkens by density: a
+//! fold is black, a sparse edge a haze.
 //!
 //! Integration is synchronous semi-implicit Euler at a fixed `h = 1/60 s`: every
 //! acceleration comes from the old state, so the result does not depend on update order.
-//! The flock is rasterised into `Dots` at the end of `update`; `render` only blits.
+//! The dusk sky is shaded into half-block `Pixels` once per `resize`, one value per cell
+//! row, so a bird cell's single background matches the sky around it exactly. The cost
+//! is faint horizontal bands, most visible in the glow and at 24 rows; a Bayer dither
+//! across cells was tried and read as a checkered mosaic. The flock
+//! and the falcon's streak are rasterised into braille `Dots` at the end of `update`, with
+//! one foreground ink per cell; `render` blits the sky and writes each bird cell as dark
+//! dots on that cell's sky colour.
 
 use std::f64::consts::{FRAC_PI_4, PI, TAU};
 use std::fmt::Write as _;
@@ -21,17 +31,27 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::particles::{gaussian, gaussian2};
 use sciart_core::prelude::*;
+use sciart_core::raster::braille;
+use sciart_core::rng::hash01;
 use sciart_core::timeline::ease;
-use sciart_core::title::{self, Title};
-use sciart_core::{draw, geom};
+use sciart_core::title;
+use sciart_core::{draw, geom, ink};
 
 pub static META: Meta = Meta {
     name: "boids_flocking",
     category: Category::Biology,
     description: "A starling murmuration at dusk, rippling away from a stooping falcon",
     title: "Murmuration · each bird tracks 7",
-    captions: &[],
+    captions: &CAPTIONS,
 };
+
+/// Captions: the stoop beat, the escape wave (while any bird is alarmed and `WAVE_HOLD`
+/// after, whatever the beat), and pursue and climb. Patrol shows the title's own
+/// mechanism.
+const CAPTIONS: [&str; 3] = ["a falcon stoops", "escape wave runs", "the flock closes"];
+/// Seconds the wave caption stays up after the last bird calms: a wave lasts ≈ 1 s, too
+/// short to read a caption that leaves with it.
+const WAVE_HOLD: f64 = 1.0;
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(Boids::new())
@@ -105,9 +125,9 @@ const A_ALARM: f64 = 160.0;
 const A_FLEE: f64 = 200.0;
 const ALARM_SPEED: f64 = 1.3;
 
-/// The falcon's 14 s attack cycle (BOID-A6).
+/// The falcon's 12 s attack cycle (BOID-A6): the attack fills more than half of it.
 const BEATS: [(&str, f64); 4] = [
-    ("patrol", 7.0),
+    ("patrol", 5.0),
     ("stoop", 2.5),
     ("pursue", 2.0),
     ("climb", 2.5),
@@ -117,19 +137,48 @@ const STOOP: usize = 1;
 const PURSUE: usize = 2;
 /// Patrol circles take 4 s.
 const PATROL_PERIOD: f64 = 4.0;
-/// Streak length in substeps (0.3 s).
+/// Streak length in substeps (0.3 s), and its ink levels from tail to head: it tapers.
 const STREAK: usize = 18;
+const STREAK_LEVELS: (f64, f64) = (120.0, 220.0);
 
-/// Inks (SPEC-002 Inks): cool calm silhouettes, bright alarmed birds, the one warm falcon.
-const FALCON_INK: Ink = Ink::new(Role::Hot, 240);
-const STREAK_INK: Ink = Ink::new(Role::Hot, 90);
+/// Inks (SPEC-002 Inks): dark silhouettes on a violet-to-amber dusk (the sequential field
+/// ink: sky luminance), and the falcon a pale cold streak against it.
+const FALCON: Ramp = Ramp::Ice;
+const FALCON_INK: Ink = Ink::new(Role::Ramp(FALCON), 255);
+/// ASCII has no sky to darken, so its birds are grey specks.
+const BIRD_ASCII: Ink = Ink::new(Role::Structure, 150);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// Sky value `top + rise·f^power` over the cell-row fraction f: a violet zenith
+/// brightening to an amber horizon, plus a low sun glow `SUN_GLOW·f⁴` centred at
+/// `SUN_X·w` with half-width `SUN_W·w` (SPEC-002 Sky). The zenith is bright enough for a
+/// bird silhouette to read anywhere in the sky.
+const SKY_TOP: f64 = 0.3;
+const SKY_RISE: f64 = 0.62;
+const SKY_POWER: f64 = 1.5;
+const SUN_GLOW: f64 = 0.22;
+const SUN_X: f64 = 0.68;
+const SUN_W: f64 = 0.2;
+/// Bird ink as a fraction of its cell's sky value: `LONE_BIRD` for one lit dot, falling
+/// linearly to black at eight (see [`bird_shade`]). A fixed fraction keeps the
+/// bird-to-sky contrast the same at the zenith as on the glow.
+const LONE_BIRD: f64 = 0.25;
+/// Escape-wave shading (SPEC-002 Escape wave): a bird that fired under `FLASH` substeps
+/// ago, the wave front, is drawn `FLASH_LIFT` above its sky (turning edge-on, stylised);
+/// behind the front an alarmed bird banked past `WING_BANK` shows its wing surface and
+/// is black.
+const FLASH: u32 = 5;
+const FLASH_LIFT: f64 = 0.3;
+/// Per-cell alarm states, by precedence: calm, banked (black), the front (pale).
+const CALM: u8 = 0;
+const BANKED: u8 = 1;
+const FRONT: u8 = 2;
+/// Reed-bed height in pixels (at most), drawn once the sky has this many rows.
+const REED_PX: f64 = 3.0;
+const REED_MIN_ROWS: i32 = 10;
 /// A bird banked past this draws its wings (4 dots instead of 2).
 const WING_BANK: f64 = 35.0 * PI / 180.0;
-/// Bank angle at which a calm bird reaches its brightest level.
-const FULL_BANK: f64 = 60.0 * PI / 180.0;
 /// The falcon glyph by heading octant, 0 = east, clockwise on screen (y down).
-const FALCON: [Glyph; 8] = [
+const FALCON_GLYPH: [Glyph; 8] = [
     Glyph::new('→', '>'),
     Glyph::new('↘', '\\'),
     Glyph::new('↓', 'v'),
@@ -409,7 +458,7 @@ fn reflect(x: &mut f64, v: &mut f64, hi: f64) -> bool {
     }
 }
 
-/// The falcon: a turn-limited glider on the 14 s patrol/stoop/pursue/climb cycle. It never
+/// The falcon: a turn-limited glider on the 12 s patrol/stoop/pursue/climb cycle. It never
 /// removes birds; it only frightens them.
 #[derive(Debug, Clone)]
 struct Falcon {
@@ -514,7 +563,7 @@ impl Falcon {
 
     /// The 8-way heading glyph: `round(atan2(vy, vx) / (π/4))`.
     fn glyph(&self) -> Glyph {
-        FALCON[((self.angle / FRAC_PI_4).round() as i64).rem_euclid(8) as usize]
+        FALCON_GLYPH[((self.angle / FRAC_PI_4).round() as i64).rem_euclid(8) as usize]
     }
 }
 
@@ -557,9 +606,24 @@ pub(crate) struct Boids {
     step: u64,
     clock: FixedStep,
     prev_beat: usize,
-    dots: Dots,
+    /// Scene time of the latest rasterisation with any bird alarmed (for the caption).
+    wave_at: f64,
+    /// Bird dots (head, tail, wings) over the sky cells.
+    birds: Dots,
+    /// The falcon's tapering streak, and per sky cell the ink of its brightest dot.
+    streak: Dots,
+    streak_ink: Vec<Ink>,
+    /// Per sky cell, row-major: its sky value, its birds' ink at the latest rasterisation, and its alarm state
+    /// (scratch for `rasterise`).
+    sky_cell: Vec<f32>,
+    bird_ink: Vec<Ink>,
+    alarm_cell: Vec<u8>,
+    /// The dusk sky and the reed bed, shaded in `resize`.
+    sky_px: Pixels,
     cells: Size,
     label: StackText<16>,
+    /// `title::stable_readout_room` at this size: the label never flickers with the beat.
+    readout_room: usize,
     ready: bool,
 }
 
@@ -590,9 +654,17 @@ impl Boids {
             step: 0,
             clock: FixedStep::new(H, MAX_SUBSTEPS),
             prev_beat: PATROL,
-            dots: Dots::default(),
+            wave_at: f64::NEG_INFINITY,
+            birds: Dots::default(),
+            streak: Dots::default(),
+            streak_ink: Vec::new(),
+            sky_cell: Vec::new(),
+            bird_ink: Vec::new(),
+            alarm_cell: Vec::new(),
+            sky_px: Pixels::default(),
             cells: Size::new(1, 1),
             label: StackText::new(),
+            readout_room: 0,
             ready: false,
         }
     }
@@ -831,47 +903,145 @@ impl Boids {
         hits
     }
 
-    /// Draw every bird as a heading-aware stroke (head, tail, and wings when banked) and
-    /// the falcon's streak into `dots`. Strokes are clipped to the sky, so a tail or wing
-    /// never reaches the label row.
+    /// Deposit every bird as a heading-aware stroke (head, tail, and wings when banked)
+    /// and give each bird cell its ink: dark by how many dots it holds, black where the
+    /// escape wave has banked its birds, pale at the wave front. The falcon's streak goes
+    /// into its own layer, tapering from tail to head. Everything is clipped to the sky,
+    /// so a tail, wing or streak never reaches the label row.
     fn rasterise(&mut self) {
-        self.dots.clear();
-        let step = self.step.wrapping_sub(1) as u32;
-        let tail = 1.5 * self.sigma;
+        self.birds.clear();
+        self.alarm_cell.fill(CALM);
+        let (w, rows) = (i32::from(self.cells.width()), self.sky_rows());
+        // Dots round to the nearest row, and rows from `sky` on are the label's.
         let sky = self.sky;
-        let dots = &mut self.dots;
-        // `Dots::plot` rounds to the nearest dot row, and rows from `sky` on are the label's.
-        let mut plot = |x: f64, y: f64, ink: Ink| {
-            if y.round() < sky {
-                dots.plot(x, y, ink);
-            }
+        let in_sky = move |y: f64| y.round() < sky;
+        let cell = |x: f64, y: f64| {
+            let cx = (x.round() as i32).div_euclid(Dots::CELL_W).clamp(0, w - 1);
+            let cy = (y.round() as i32)
+                .div_euclid(Dots::CELL_H)
+                .clamp(0, rows - 1);
+            (cy * w + cx) as usize
         };
+        let tail = 1.5 * self.sigma;
+        let step = self.step as u32;
+        let (birds, alarm_cell) = (&mut self.birds, &mut self.alarm_cell);
+        let mut alarmed = false;
         for i in 0..self.n {
             let p = self.pos[i];
             let dir = heading(self.vel[i]);
-            let bank = f64::from(self.bank[i]).abs();
-            let ink = match self.alarm.age(i, step) {
-                Some(age) => Ink::new(Role::Star, 255 - (55 * age / T_A) as u8),
-                None => Ink::new(
-                    Role::Structure,
-                    (80.0 + 105.0 * (bank / FULL_BANK).min(1.0)) as u8,
-                ),
+            let banked = f64::from(self.bank[i]).abs() > WING_BANK;
+            // The front is every bird that just fired; behind it only a bird banked far
+            // enough to show its wings turns dark (SPEC-002 Escape wave).
+            let age = self.alarm.age(i, step);
+            alarmed |= age.is_some();
+            let state = match age {
+                Some(age) if age < FLASH => FRONT,
+                Some(_) if banked => BANKED,
+                _ => CALM,
             };
-            let back = sub(p, scale(dir, tail));
-            plot(p[0], p[1], ink);
-            plot(back[0], back[1], ink);
-            if bank > WING_BANK {
+            // The dot ink is unused (`bird_ink` holds each cell's). The alarm state marks
+            // every cell the stroke touches, so a wing in the next cell matches its head.
+            let mut plot = |q: V2| {
+                // Only dots on the grid: `plot` clips the others, and `cell` would clamp
+                // them onto an edge cell that may hold a calm bird.
+                if in_sky(q[1]) && (0.0..2.0 * f64::from(w)).contains(&q[0].round()) {
+                    birds.plot(q[0], q[1], Ink::BLANK);
+                    let c = &mut alarm_cell[cell(q[0], q[1])];
+                    *c = (*c).max(state);
+                }
+            };
+            plot(p);
+            plot(sub(p, scale(dir, tail)));
+            if banked {
                 let mid = sub(p, scale(dir, 0.5 * tail));
                 let wing = perp(dir);
-                plot(mid[0] + wing[0], mid[1] + wing[1], ink);
-                plot(mid[0] - wing[0], mid[1] - wing[1], ink);
+                plot(add(mid, wing));
+                plot(sub(mid, wing));
             }
         }
-        if self.falcon_enabled {
-            for &[x, y] in self.falcon.streak.iter() {
-                plot(f64::from(x), f64::from(y), STREAK_INK);
+        if alarmed {
+            self.wave_at = self.time();
+        }
+        for cy in 0..rows {
+            for cx in 0..w {
+                let lit = self.birds.cell_mask(cx, cy).unwrap_or(0).count_ones() as usize;
+                if lit == 0 {
+                    continue;
+                }
+                let i = (cy * w + cx) as usize;
+                let sky = f64::from(self.sky_cell[i]);
+                let v = match self.alarm_cell[i] {
+                    FRONT => (sky + FLASH_LIFT).min(1.0),
+                    BANKED => 0.0,
+                    _ => bird_shade(lit) * sky,
+                };
+                self.bird_ink[i] = ink::seq(v);
             }
         }
+        self.streak.clear();
+        self.streak_ink.fill(Ink::BLANK);
+        if !self.falcon_enabled {
+            return;
+        }
+        let last = self.falcon.streak.len().saturating_sub(1).max(1) as f64;
+        let mut prev: Option<(i32, i32)> = None;
+        for (k, &[x, y]) in self.falcon.streak.iter().enumerate() {
+            let (lo, hi) = STREAK_LEVELS;
+            let ink = Ink::new(
+                Role::Ramp(FALCON),
+                ink::level(ease::lerp(lo, hi, k as f64 / last)),
+            );
+            let q = (f64::from(x).round() as i32, f64::from(y).round() as i32);
+            let (x0, y0) = prev.unwrap_or(q);
+            for (dx, dy) in geom::line(x0, y0, q.0, q.1) {
+                if in_sky(f64::from(dy)) && (0..2 * w).contains(&dx) && dy >= 0 {
+                    self.streak.set(dx, dy, ink);
+                    let slot = &mut self.streak_ink[cell(f64::from(dx), f64::from(dy))];
+                    if ink.level >= slot.level {
+                        *slot = ink;
+                    }
+                }
+            }
+            prev = Some(q);
+        }
+    }
+
+    /// Tabulate each sky cell's value and shade the dusk sky and the reed bed along its
+    /// foot into `sky_px` (SPEC-002 Sky). The sky is constant within a cell, so both
+    /// half-pixels match the one background a bird cell can carry; only the reeds use
+    /// the half-pixel resolution.
+    fn paint_sky(&mut self) {
+        let (w, rows) = (usize::from(self.cells.width()), self.sky_rows());
+        let reeds = rows >= REED_MIN_ROWS;
+        let wf = w as f64;
+        self.sky_cell.clear();
+        for cy in 0..rows {
+            let f = (f64::from(cy) + 0.5) / f64::from(rows);
+            self.sky_cell.extend((0..w).map(|x| {
+                let u = (x as f64 + 0.5 - SUN_X * wf) / (SUN_W * wf);
+                let glow = SUN_GLOW * f.powi(4) * (-u * u).exp();
+                (SKY_TOP + SKY_RISE * f.powf(SKY_POWER) + glow).min(1.0) as f32
+            }));
+        }
+        let sky_cell = &self.sky_cell;
+        let px_rows = 2 * rows;
+        self.sky_px.shade(|x, y| {
+            if reeds && f64::from(px_rows - 1 - y) < reed_height(x as usize) {
+                Ink::BLANK
+            } else {
+                ink::seq(f64::from(sky_cell[(y / 2) as usize * w + x as usize]))
+            }
+        });
+    }
+
+    /// Whether the reed bed reaches into sky cell `(cx, cy)`: its lower pixel is a reed.
+    fn reed_cell(&self, cx: i32, cy: i32) -> bool {
+        self.sky_px.get(cx, 2 * cy + 1) == Some(Ink::BLANK)
+    }
+
+    /// The sky colour of sky cell `i` (row-major), behind its dots.
+    fn sky_ink(&self, i: usize) -> Ink {
+        ink::seq(f64::from(self.sky_cell[i]))
     }
 
     /// Cell rows of the sky (the label row excluded).
@@ -880,9 +1050,34 @@ impl Boids {
     }
 }
 
+/// A bird cell's ink as a fraction of its sky value, by its lit dots (1 to 8).
+fn bird_shade(lit: usize) -> f64 {
+    LONE_BIRD * (8 - lit.clamp(1, 8)) as f64 / 7.0
+}
+
+/// Reed-bank height over column `x`, in pixels: a low bank with uneven, independent
+/// stems. Each stem is a whole cell wide, so this is a dark reed-bank silhouette, not
+/// individual reeds.
+fn reed_height(x: usize) -> f64 {
+    let bank = 0.25 + 0.15 * (0.13 * x as f64).sin();
+    let stem = hash01(x as u64 ^ 0x5eed_7eed).powi(3);
+    (REED_PX * (bank + 0.75 * stem)).round()
+}
+
 impl Generator for Boids {
     fn meta(&self) -> &'static Meta {
         &META
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        if self.time() - self.wave_at < WAVE_HOLD {
+            return Some(CAPTIONS[1]);
+        }
+        match self.timeline.at(self.time()).index {
+            PATROL => None,
+            STOOP => Some(CAPTIONS[0]),
+            _ => Some(CAPTIONS[2]),
+        }
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
@@ -927,9 +1122,20 @@ impl Generator for Boids {
         // Buckets of R/4 fit the tight hinted queries of `k_nearest`.
         self.hash.resize(w, h, 0.25 * R * sigma);
         self.cells = size;
-        self.dots.resize(size);
+        let sky_cells = Size::new(size.width(), self.sky_rows() as u16);
+        self.birds.resize(sky_cells);
+        self.streak.resize(sky_cells);
+        self.sky_px.resize(sky_cells);
+        for layer in [&mut self.bird_ink, &mut self.streak_ink] {
+            layer.clear();
+            layer.resize(sky_cells.area(), Ink::BLANK);
+        }
+        self.alarm_cell.clear();
+        self.alarm_cell.resize(sky_cells.area(), CALM);
+        self.paint_sky();
         self.label.clear();
         let _ = write!(self.label, "N {n}  k={K}");
+        self.readout_room = title::stable_readout_room(size, &META);
         self.rasterise();
     }
 
@@ -949,24 +1155,60 @@ impl Generator for Boids {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.dots.blit(canvas);
+        // ASCII has no sky: only the birds and the streak show, as specks.
+        let unicode = canvas.mode() == GlyphMode::Unicode;
+        if unicode {
+            self.sky_px.blit(canvas, |_, _, _, _| None);
+        }
+        let w = i32::from(self.cells.width());
+        for cy in 0..self.sky_rows() {
+            for cx in 0..w {
+                let bird = self.birds.cell_mask(cx, cy).unwrap_or(0);
+                let streak = self.streak.cell_mask(cx, cy).unwrap_or(0);
+                if bird | streak == 0 {
+                    continue;
+                }
+                // The reeds are in front of the flock and the falcon's streak.
+                if unicode && self.reed_cell(cx, cy) {
+                    continue;
+                }
+                let i = (cy * w + cx) as usize;
+                // Dark dots on the cell's own sky colour: the sky shows between them. A
+                // cell has one ink, so birds win one the streak crosses: the streak
+                // breaks behind them instead of paling them.
+                let (glyph, ink, ascii) = if bird == 0 {
+                    (
+                        braille(streak),
+                        self.streak_ink[i],
+                        ('.', self.streak_ink[i]),
+                    )
+                } else {
+                    let g = braille(bird);
+                    (g, self.bird_ink[i], (g.ascii, BIRD_ASCII))
+                };
+                if unicode {
+                    canvas.put_bg(cx, cy, glyph, ink, self.sky_ink(i));
+                } else {
+                    canvas.put(cx, cy, Glyph::ascii(ascii.0), ascii.1);
+                }
+            }
+        }
         if self.falcon_enabled {
             let [x, y] = self.falcon.pos;
             let (cx, cy) = (
-                (x / f64::from(Dots::CELL_W)).floor() as i32,
-                (y / f64::from(Dots::CELL_H)).floor() as i32,
+                ((x / f64::from(Dots::CELL_W)).floor() as i32).clamp(0, w - 1),
+                ((y / f64::from(Dots::CELL_H)).floor() as i32).clamp(0, self.sky_rows() - 1),
             );
-            canvas.put(
-                cx.min(i32::from(self.cells.width()) - 1),
-                cy.min(self.sky_rows() - 1),
-                self.falcon.glyph(),
-                FALCON_INK,
-            );
+            // On the sky of its cell, so the glyph has no black box around it; behind the
+            // reeds, hidden.
+            if !unicode {
+                canvas.put(cx, cy, self.falcon.glyph(), FALCON_INK);
+            } else if !self.reed_cell(cx, cy) {
+                let sky = self.sky_ink((cy * w + cx) as usize);
+                canvas.put_bg(cx, cy, self.falcon.glyph(), FALCON_INK, sky);
+            }
         }
-        let title = Title::of(self);
-        if Self::shows_label(self.cells)
-            && self.label.len() <= title::readout_room(self.cells, &title)
-        {
+        if Self::shows_label(self.cells) && self.label.len() <= self.readout_room {
             // Right of the title (GEN-R13), with one dark cell either side, so the label
             // never looks glued to a bird.
             let y = i32::from(self.cells.height()) - 1;
@@ -1414,7 +1656,7 @@ mod tests {
         let mut rng = SplitMix64::new(21);
         while !b.alarm.fire_attack[..b.n].contains(&1) {
             b.substep(&mut rng);
-            assert!(b.time() < 11.5, "no alarm during the first attack");
+            assert!(b.time() < 9.5, "no alarm during the first attack");
         }
         let first = b.step;
         let origin = b.pos[(0..b.n).find(|&i| b.alarm.fire_attack[i] == 1).unwrap()];
@@ -1470,15 +1712,15 @@ mod tests {
         let tl = Timeline::new(&BEATS);
         for (t, beat) in [
             (0.0, 0),
-            (6.99, 0),
-            (7.0, 1),
-            (9.49, 1),
-            (9.5, 2),
-            (11.49, 2),
-            (11.5, 3),
-            (13.99, 3),
-            (14.0, 0),
-            (21.0, 1),
+            (4.99, 0),
+            (5.0, 1),
+            (7.49, 1),
+            (7.5, 2),
+            (9.49, 2),
+            (9.5, 3),
+            (11.99, 3),
+            (12.0, 0),
+            (17.0, 1),
         ] {
             assert_eq!(tl.at(t).index, beat, "t = {t}");
         }
@@ -1497,7 +1739,7 @@ mod tests {
                     fired_at[i].push(b.alarm.fire_step[i]);
                 }
             }
-            let attack = (t / 14.0) as usize;
+            let attack = (t / 12.0) as usize;
             let beat = tl.at(t).index;
             if attack < 2 && matches!(beat, STOOP | PURSUE) {
                 let d = norm(sub(b.falcon.pos, b.centroid().0));
@@ -1519,5 +1761,234 @@ mod tests {
                 start_dist[a]
             );
         }
+    }
+
+    /// The scene at `size` (seed 42) after `t` simulated seconds, rendered in `mode`.
+    fn frame(size: Size, t: f64, mode: GlyphMode) -> (Boids, Canvas) {
+        let (mut b, mut ctx) = scene(size, 42, true);
+        while b.time() < t - 1e-9 {
+            b.update(H, &mut ctx);
+        }
+        let mut canvas = Canvas::new(size, mode);
+        b.render(&mut canvas);
+        (b, canvas)
+    }
+
+    #[test]
+    fn boid_a8_dusk_sky_behind_dark_silhouettes() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            for t in [0.0, 5.0, 9.0] {
+                let (b, canvas) = frame(size, t, GlyphMode::Unicode);
+                let (w, rows) = (i32::from(size.width()), b.sky_rows());
+                let [fx, fy] = b.falcon.pos;
+                let falcon = (
+                    ((fx / f64::from(Dots::CELL_W)).floor() as i32).clamp(0, w - 1),
+                    ((fy / f64::from(Dots::CELL_H)).floor() as i32).clamp(0, rows - 1),
+                );
+                let (mut reeds, mut birds) = (0, 0);
+                for x in 0..w {
+                    // The zenith is bright enough for a silhouette to read on it.
+                    assert!(b.sky_cell[x as usize] >= 0.25, "{size:?} zenith x = {x}");
+                    let mut above = 0;
+                    for y in 0..2 * rows {
+                        let px = b.sky_px.get(x, y).expect("a sky pixel");
+                        if px == Ink::BLANK {
+                            // The reed bed: dark, and only at the foot of the sky.
+                            assert!(y >= 2 * rows - 3, "{size:?} reed at ({x}, {y})");
+                            reeds += 1;
+                            continue;
+                        }
+                        // The sky brightens toward the horizon in every column, and is
+                        // one colour per cell: both halves are the cell's sky.
+                        let i = ((y / 2) * w + x) as usize;
+                        assert_eq!(px, b.sky_ink(i), "{size:?} ({x}, {y})");
+                        assert_eq!(px.role, Role::Seq, "{size:?} ({x}, {y})");
+                        assert!(px.level >= above, "{size:?} ({x}, {y}) darker than above");
+                        above = px.level;
+                    }
+                    for y in 0..rows {
+                        let i = (y * w + x) as usize;
+                        let c = canvas.get(x, y).expect("a sky cell");
+                        // The reeds are in front: a cell they reach shows no bird dots.
+                        if b.sky_px.get(x, 2 * y + 1) == Some(Ink::BLANK) {
+                            assert!(
+                                !('\u{2801}'..='\u{28ff}').contains(&c.ch),
+                                "{size:?} t = {t}: bird over the reeds at ({x}, {y})"
+                            );
+                            continue;
+                        }
+                        if b.birds.cell_mask(x, y).unwrap_or(0) == 0 || (x, y) == falcon {
+                            continue;
+                        }
+                        // Dots on the cell's own sky, which is exactly the sky of the
+                        // cells around it: no tile outlines the flock. Birds win a cell
+                        // the falcon's streak crosses, so it never pales them.
+                        assert_eq!(c.bg, b.sky_ink(i), "{size:?} t = {t}: ({x}, {y})");
+                        assert_eq!(c.ink, b.bird_ink[i], "{size:?} t = {t}: ({x}, {y})");
+                        assert_eq!(c.ink.role, Role::Seq, "{size:?} t = {t}: ({x}, {y})");
+                        // A silhouette at most 0.4 of its sky's level, anywhere in the
+                        // sky; the pale wave front is the one exception.
+                        if b.alarm_cell[i] != FRONT {
+                            assert!(
+                                f64::from(c.ink.level) <= 0.4 * f64::from(c.bg.level) + 0.5,
+                                "{size:?} t = {t}: ({x}, {y}) {:?} on {:?}",
+                                c.ink,
+                                c.bg
+                            );
+                            birds += 1;
+                        }
+                    }
+                    // The label row is ground: no background.
+                    if rows < i32::from(size.height()) {
+                        let c = canvas.get(x, rows).expect("the label row");
+                        assert_eq!(c.bg, Ink::BLANK, "{size:?} t = {t}: x = {x}");
+                    }
+                }
+                assert!(reeds > 0 && birds > 0, "{size:?} t = {t}: {reeds} {birds}");
+                // The falcon: a pale cold glyph on its cell's sky, no black box.
+                let (cx, cy) = falcon;
+                let c = canvas.get(cx, cy).expect("the falcon's cell");
+                assert_eq!(c.bg, b.sky_ink((cy * w + cx) as usize));
+                assert_eq!(c.ink, FALCON_INK, "{size:?} t = {t}");
+            }
+        }
+    }
+
+    #[test]
+    fn boid_a10_only_dots_on_the_sky_carry_the_alarm() {
+        // A tail, wing or head off the dot grid is clipped, so it must not mark the edge
+        // cell it would clamp to: an alarmed bird just past the left edge leaves column 0
+        // calm.
+        let (mut b, _) = scene(Size::new(40, 12), 7, false);
+        let mid = [0.5 * b.w, 0.5 * b.sky];
+        for i in 0..b.n {
+            b.pos[i] = mid;
+        }
+        b.pos[0] = [-2.0, mid[1]];
+        b.vel[0] = [V0, 0.0];
+        b.bank[0] = 1.0;
+        b.alarm.fire_attack[0] = 1;
+        b.alarm.fire_step[0] = b.step as u32;
+        b.rasterise();
+        let w = usize::from(b.cells.width());
+        for (i, &state) in b.alarm_cell.iter().enumerate().filter(|(i, _)| i % w == 0) {
+            assert_eq!(state, CALM, "column 0, row {}", i / w);
+        }
+    }
+
+    #[test]
+    fn boid_a8_bird_shade_is_a_fixed_fraction_of_the_sky() {
+        assert_eq!(bird_shade(1), LONE_BIRD);
+        assert_eq!(bird_shade(8), 0.0);
+        for lit in 1..8 {
+            assert!(bird_shade(lit + 1) < bird_shade(lit), "lit = {lit}");
+        }
+    }
+
+    #[test]
+    fn boid_a9_captions_follow_the_falcon() {
+        // The wave caption is up exactly while birds are alarmed and for `WAVE_HOLD` after,
+        // whichever beat that falls in, so it never promises a wave that is off screen.
+        let (mut b, mut ctx) = scene(Size::new(100, 30), 42, true);
+        let (mut seen, mut last_alarm, mut run, mut runs) = (Vec::new(), f64::MIN, 0.0, 0);
+        while b.time() < 36.0 {
+            b.update(H, &mut ctx);
+            let step = b.step as u32;
+            if (0..b.n).any(|i| b.alarm.age(i, step).is_some()) {
+                last_alarm = b.time();
+            }
+            let want = if b.time() - last_alarm < WAVE_HOLD {
+                Some("escape wave runs")
+            } else {
+                match b.timeline.at(b.time()).index {
+                    PATROL => None,
+                    STOOP => Some("a falcon stoops"),
+                    _ => Some("the flock closes"),
+                }
+            };
+            assert_eq!(b.caption(), want, "t = {}", b.time());
+            if want == Some("escape wave runs") {
+                run += H;
+            } else if run > 0.0 {
+                // Long enough to read.
+                assert!(
+                    run >= 1.5,
+                    "wave caption for {run:.2} s at t = {}",
+                    b.time()
+                );
+                (run, runs) = (0.0, runs + 1);
+            }
+            if let Some(c) = want {
+                assert!(META.captions.contains(&c));
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 3);
+        assert!(runs >= 3, "one wave per attack, got {runs}");
+        // A folding flock has dense cells: 5 or more lit dots, inked near black.
+        let (b, canvas) = frame(Size::new(200, 50), 6.5, GlyphMode::Unicode);
+        let w = i32::from(b.cells.width());
+        let dense = (0..b.sky_rows())
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                let lit = b.birds.cell_mask(x, y).unwrap_or(0).count_ones();
+                let (ink, bg) = canvas
+                    .get(x, y)
+                    .map_or((Ink::BLANK, Ink::BLANK), |c| (c.ink, c.bg));
+                lit >= 5 && ink.role == Role::Seq && ink.level <= bg.level / 8
+            })
+            .count();
+        assert!(dense > 0, "no dense fold at t = 6.5 s");
+    }
+
+    #[test]
+    fn boid_a10_escape_wave_is_a_pale_front_ahead_of_a_dark_band() {
+        // Over the first attack at 200×50, frames show the wave as a band: pale cells
+        // (lighter than their sky) at the front, black ones behind it.
+        let size = Size::new(200, 50);
+        let (mut b, mut ctx) = scene(size, 42, true);
+        let (mut pale, mut black, mut frames) = (0, 0, 0);
+        while b.time() < 9.5 {
+            b.update(H, &mut ctx);
+            if b.time() < 5.0 || b.step % 6 != 0 {
+                continue;
+            }
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            b.render(&mut canvas);
+            let w = i32::from(size.width());
+            let (mut p, mut k) = (0, 0);
+            for y in 0..b.sky_rows() {
+                for x in 0..w {
+                    let i = (y * w + x) as usize;
+                    let c = canvas.get(x, y).expect("a sky cell");
+                    if b.birds.cell_mask(x, y).unwrap_or(0) == 0
+                        || b.streak.cell_mask(x, y).unwrap_or(0) != 0
+                    {
+                        continue;
+                    }
+                    match b.alarm_cell[i] {
+                        FRONT => {
+                            assert!(c.ink.level > c.bg.level, "({x}, {y}) front not pale");
+                            p += 1;
+                        }
+                        BANKED => {
+                            assert_eq!(c.ink.level, 0, "({x}, {y}) banked not black");
+                            k += 1;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            pale += p;
+            black += k;
+            frames += usize::from(p > 0 && k > 0);
+        }
+        assert!(
+            pale > 20 && black > pale,
+            "{pale} pale, {black} black cells"
+        );
+        assert!(frames >= 5, "front and band together in {frames} frames");
     }
 }

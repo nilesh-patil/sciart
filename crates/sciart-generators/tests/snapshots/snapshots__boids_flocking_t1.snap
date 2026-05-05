@@ -3,7 +3,7 @@ source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
                                                                                 
-         <:::                         .      .                                  
+         <...                         .      .                                  
                               ..     : .   :.::.                                
                            .  #..  .  :    ::.:.+                               
                             . :.:  .:  ..   .:. ... ..                          
