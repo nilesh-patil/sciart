@@ -756,6 +756,19 @@ mod tests {
     }
 
     #[test]
+    fn rnd_r12_starlight_is_grey_while_faint_and_warm_when_bright() {
+        let c = |l: u8| Theme::Astro.color(Ink::new(Role::Ramp(Ramp::Starlight), l), 0, 0);
+        let spread = |Rgb(r, g, b): Rgb| r.max(g).max(b) - r.min(g).min(b);
+        // The faint fringe levels a halo or the Milky Way ends on: neutral grey, not sepia.
+        for level in 0..=24u8 {
+            assert!(spread(c(level)) <= 3, "level {level}: {:?}", c(level));
+        }
+        // The bright end is pale yellow-white (B − V ≈ 0.7): red above blue.
+        let Rgb(r, _, b) = c(200);
+        assert!(r > b + 8, "{:?}", c(200));
+    }
+
+    #[test]
     fn rnd_r12_ramps_end_on_distinct_hues() {
         let tops: Vec<(Ramp, f64)> = Ramp::ALL
             .iter()

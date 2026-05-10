@@ -53,17 +53,21 @@ pub enum Ramp {
     Aurora,
     /// Indigo → violet → lavender-white: discharges, lightning, synchrotron glow.
     Plasma,
+    /// Near-black → neutral grey → pale warm white: unresolved starlight, the nearly
+    /// colourless integrated light of an old stellar population.
+    Starlight,
 }
 
 impl Ramp {
     /// Every ramp, in declaration order.
-    pub const ALL: [Ramp; 6] = [
+    pub const ALL: [Ramp; 7] = [
         Ramp::Ember,
         Ramp::Ice,
         Ramp::Ferroin,
         Ramp::HAlpha,
         Ramp::Aurora,
         Ramp::Plasma,
+        Ramp::Starlight,
     ];
 
     /// A unique lower-case name.
@@ -75,6 +79,7 @@ impl Ramp {
             Ramp::HAlpha => "halpha",
             Ramp::Aurora => "aurora",
             Ramp::Plasma => "plasma",
+            Ramp::Starlight => "starlight",
         }
     }
 }
@@ -171,6 +176,23 @@ pub fn blackbody(kelvin: f64) -> Ink {
 #[inline]
 pub fn blackbody_kelvin(ink: Ink) -> f64 {
     BLACKBODY_MIN_K * (BLACKBODY_MAX_K / BLACKBODY_MIN_K).powf(f64::from(ink.level) / 255.0)
+}
+
+/// A temperature drawn from a spectral-class mix (CORE-R88): `classes` holds
+/// `(cumulative fraction, lowest K, highest K)` rows in increasing fraction; a uniform `u`
+/// picks the first row with `u < fraction` (the last row past the end) and `v ∈ [0, 1]`
+/// places the temperature within it, `lo + (hi − lo)·v`. NaN for an empty table.
+#[inline]
+pub fn class_kelvin(classes: &[(f64, f64, f64)], u: f64, v: f64) -> f64 {
+    let Some(&last) = classes.last() else {
+        return f64::NAN;
+    };
+    let (_, lo, hi) = classes
+        .iter()
+        .copied()
+        .find(|&(cum, _, _)| u < cum)
+        .unwrap_or(last);
+    lo + (hi - lo) * v
 }
 
 /// A [`Role::Div`] ink for `v ∈ [−1, 1]`: −1 ⇒ 0, 0 ⇒ 128, 1 ⇒ 255; clamped, NaN ⇒ 128

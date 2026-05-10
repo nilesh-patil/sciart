@@ -82,6 +82,12 @@ const fn spec(r: Ramp) -> RampSpec {
             h1: 310.0,
             chroma: 0.19,
         },
+        // near-black → neutral grey → pale warm white: unresolved starlight
+        Ramp::Starlight => RampSpec {
+            h0: 75.0,
+            h1: 70.0,
+            chroma: 0.035,
+        },
     }
 }
 
@@ -89,8 +95,15 @@ fn ramp(r: Ramp, t: f64) -> Rgb {
     let RampSpec { h0, h1, chroma } = spec(r);
     let l = RAMP_L.0 + (RAMP_L.1 - RAMP_L.0) * t;
     // A tinted dark end, full colour through the middle, and a pale but still hued top,
-    // so the six ramps stay apart at both ends.
-    let c = chroma * (0.3 + 2.8 * t).min(1.0) * (1.0 - 0.7 * t * t);
+    // so the ramps stay apart at both ends. Starlight alone stays grey while faint: an old
+    // population's integrated light (B−V ≈ 0.7) is pale yellow-white, so a faint halo or
+    // Milky Way must not read as sepia; its warmth shows only where it is bright.
+    let grey = if r == Ramp::Starlight {
+        (2.0 * t).min(1.0)
+    } else {
+        1.0
+    };
+    let c = chroma * grey * (0.3 + 2.8 * t).min(1.0) * (1.0 - 0.7 * t * t);
     oklch(l, c, h0 + (h1 - h0) * t)
 }
 

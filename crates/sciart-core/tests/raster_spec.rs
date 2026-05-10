@@ -565,3 +565,85 @@ fn core_r86_backdrop_puts_the_pixels_behind_glyphs_drawn_over_them() {
     px.backdrop(&mut a);
     assert_eq!(cell(&a, 0, 0).bg, Ink::BLANK);
 }
+
+// ---------------------------------------------------------------- CORE-R87
+
+#[test]
+fn core_r87_stronger_keeps_the_more_intense_ink() {
+    assert_eq!(raster::stronger(B, A), A);
+    assert_eq!(raster::stronger(A, B), A);
+    assert_eq!(raster::stronger(A, A), A, "the first on a tie");
+    assert_eq!(raster::stronger(Ink::BLANK, B), B, "an empty ink loses");
+    assert_eq!(raster::stronger(B, Ink::BLANK), B);
+    assert_eq!(raster::stronger(Ink::BLANK, Ink::BLANK), Ink::BLANK);
+    // A signed field's zero (128) is weaker than a deep negative lobe.
+    let (zero, lobe) = (Ink::new(Role::Div, 128), Ink::new(Role::Div, 10));
+    assert_eq!(raster::stronger(zero, lobe), lobe);
+}
+
+// ---------------------------------------------------------------- CORE-R89
+
+/// The lit mask of a `n × n`-pixel buffer filled with `ink` and dissolved at `floor`.
+fn dissolved(ink: Ink, floor: u8, n: u16) -> Vec<bool> {
+    let mut p = Pixels::new(Size::new(n, n / 2));
+    p.fill(ink);
+    p.dissolve(floor);
+    let n = i32::from(n);
+    (0..n)
+        .flat_map(|y| (0..n).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let px = p.get(x, y).expect("in range");
+            assert!(
+                px == ink || px == Ink::BLANK,
+                "dissolve only empties pixels"
+            );
+            px == ink
+        })
+        .collect()
+}
+
+fn share(mask: &[bool]) -> f64 {
+    mask.iter().filter(|&&b| b).count() as f64 / mask.len() as f64
+}
+
+#[test]
+fn core_r89_dissolve_empties_the_lower_half_and_thins_the_upper_half_of_the_fringe() {
+    let seq = |l: u8| Ink::new(Role::Seq, l);
+    // At or above the floor: untouched; below half of it: gone.
+    assert_eq!(share(&dissolved(seq(40), 40, 64)), 1.0);
+    assert_eq!(share(&dissolved(seq(200), 40, 64)), 1.0);
+    assert_eq!(share(&dissolved(seq(19), 40, 64)), 0.0);
+    assert_eq!(share(&dissolved(seq(0), 40, 64)), 0.0);
+    assert_eq!(share(&dissolved(seq(1), 0, 64)), 1.0, "floor 0 is a no-op");
+    // In [floor/2, floor) the share 2·level/floor − 1 survives, on average.
+    for (l, want) in [(30, 0.5), (35, 0.75), (25, 0.25)] {
+        let got = share(&dissolved(seq(l), 40, 64));
+        assert!((got - want).abs() < 0.04, "level {l}: {got} vs {want}");
+    }
+    // Div measures contrast from 128; Phase has no intensity and is left alone.
+    for div in [128 + 30, 128 - 30] {
+        let got = share(&dissolved(Ink::new(Role::Div, div), 40, 64));
+        assert!((got - 0.5).abs() < 0.04, "div {div}: {got}");
+    }
+    assert_eq!(share(&dissolved(Ink::new(Role::Phase, 3), 40, 64)), 1.0);
+}
+
+#[test]
+fn core_r89_dissolve_has_no_periodic_pattern() {
+    // An ordered dither repeats every 2 or 4 pixels: its mask equals itself shifted by
+    // the period. White noise agrees with a shifted copy only by chance (s² + (1 − s)²).
+    let n = 64usize;
+    let mask = dissolved(Ink::new(Role::Seq, 30), 40, n as u16);
+    for lag in [2, 4, 8] {
+        let (mut same, mut total) = (0usize, 0usize);
+        for y in 0..n {
+            for x in 0..n - lag {
+                same += usize::from(mask[y * n + x] == mask[y * n + x + lag]);
+                same += usize::from(mask[x * n + y] == mask[(x + lag) * n + y]);
+                total += 2;
+            }
+        }
+        let agree = same as f64 / total as f64;
+        assert!(agree < 0.6, "lag {lag}: masks agree {agree}");
+    }
+}

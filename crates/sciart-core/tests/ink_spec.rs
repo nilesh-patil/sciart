@@ -88,13 +88,22 @@ fn core_r80_ramps_are_named_and_listed() {
             Ramp::Ferroin,
             Ramp::HAlpha,
             Ramp::Aurora,
-            Ramp::Plasma
+            Ramp::Plasma,
+            Ramp::Starlight
         ]
     );
     let names: Vec<_> = Ramp::ALL.iter().map(|r| r.name()).collect();
     assert_eq!(
         names,
-        ["ember", "ice", "ferroin", "halpha", "aurora", "plasma"]
+        [
+            "ember",
+            "ice",
+            "ferroin",
+            "halpha",
+            "aurora",
+            "plasma",
+            "starlight"
+        ]
     );
 }
 
@@ -120,6 +129,18 @@ fn core_r80_ramp_maps_like_seq_and_seq_value_reads_it_back() {
 #[test]
 fn core_r80_ink_stays_two_bytes() {
     assert_eq!(std::mem::size_of::<Ink>(), 2);
+}
+
+#[test]
+fn core_r88_class_kelvin_picks_the_class_then_spreads_within_it() {
+    let classes = [(0.25, 3000.0, 4000.0), (1.0, 9000.0, 10_000.0)];
+    assert_eq!(ink::class_kelvin(&classes, 0.0, 0.0), 3000.0);
+    assert_eq!(ink::class_kelvin(&classes, 0.2, 0.5), 3500.0);
+    assert_eq!(ink::class_kelvin(&classes, 0.25, 0.0), 9000.0);
+    assert_eq!(ink::class_kelvin(&classes, 0.99, 1.0), 10_000.0);
+    // Past the last fraction the last row still applies; an empty table has no answer.
+    assert_eq!(ink::class_kelvin(&classes, 1.5, 0.0), 9000.0);
+    assert!(ink::class_kelvin(&[], 0.5, 0.5).is_nan());
 }
 
 proptest! {
