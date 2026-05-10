@@ -112,10 +112,16 @@ const NEST: [f64; LOOPS] = [1.0, 0.72, 0.48];
 /// loops show as nested arches rather than edge-on spikes. Real filament channels are
 /// sheared ≳ 70°, their field within ≈ 20° of the polarity inversion line.
 const SHEAR_DEG: (f64, f64) = (45.0, 65.0);
-/// Filaments: loops darken the disc only where they stand above this share of their
-/// apex height. The low legs would trace a ring around the spots; the elevated arches
-/// overlap as one short dark thread along the loop plane, 25–45° off the inversion
-/// line (a real filament lies along it; see `SHEAR_DEG`).
+/// Twist: each field line is bowed out of the arcade's plane by up to this share of its
+/// half-span, `ARCADE_TWIST·half·sin(π·a/half)` at `a` along it, one way on one leg and
+/// the other on the other, so from above the arcade and its filament form an S (a
+/// sigmoid, as twisted filament channels do) instead of a straight rod.
+const ARCADE_TWIST: f64 = 0.1;
+/// Filaments: the arcade's tallest loop darkens the disc only where it stands above this
+/// share of its apex height. The low legs would trace a ring around the spots; the
+/// elevated arch is one short dark thread, 1 px wide, along the loop plane, 25–45° off
+/// the inversion line (a real filament lies along it; see `SHEAR_DEG`). The nested
+/// arches below it would thicken the thread into a bar.
 const FILAMENT_RISE: f64 = 0.35;
 /// Loops with a lower apex (px) are not drawn.
 const MIN_LOOP_PX: f64 = 2.5;
@@ -135,11 +141,16 @@ const RIM_PX: f64 = 0.8;
 const SPICULE_PER_R: f64 = 0.035;
 const SPICULE_PX: f64 = 1.6;
 const ANNULUS_PX: f64 = 2.6;
+/// The rim breaks where the spicule wave falls under `RIM_BREAK.0` below `RIM_WIDE`
+/// columns and under `RIM_BREAK.1` from there, so the chromosphere reads as travelling
+/// fuzz rather than a drawn outline; a large disc's rim is broken less.
+const RIM_WIDE: usize = 120;
+const RIM_BREAK: (f64, f64) = (-0.35, -0.6);
 /// ASCII rim: the cells holding a pixel within 1 px of the limb. Pixel-centre distances
 /// step by < 1 px, so every radius meets one and the ring closes.
 const ASCII_RIM_PX: f64 = 1.0;
 
-/// `Seq` values of the H-α features. Loops sit above the limb (0.43), spicules and rim
+/// Values of the H-α features (`h_alpha_ink`). Loops sit above the limb (0.43), spicules and rim
 /// but below the penumbra (0.67): orange cool plasma, apart from the limb fuzz, rather
 /// than a torn-off piece of the photosphere. Only the rain knots, adding up to
 /// `V_KNOT` (≈ 0.88, pale yellow), are the moving highlight.
@@ -155,11 +166,56 @@ const V_KNOT_CORE: f64 = V_LOOP + 0.9 * V_KNOT;
 /// Filaments absorb to this fraction of the disc intensity behind them: a dark thread
 /// against the granulation, still well above the umbrae (0.22).
 const FILAMENT: f64 = 0.6;
+/// Long-slit spectrograph inset (SUN-A8): 400–700 nm across, the slit's length down,
+/// one cell row per slit position; its size in cells, and the clearance (disc radii)
+/// every inset pixel keeps from the disc centre, beyond the tallest loops (1.32 R).
+const SPECTRUM_NM: (f64, f64) = (400.0, 700.0);
+const INSET_W: (usize, usize) = (24, 40);
+const INSET_H: (usize, usize) = (4, 8);
+const INSET_CLEAR: f64 = 1.35;
+/// Hue turns of the violet end (the red end is turn 0 of the `Phase` loop).
+const VIOLET_TURNS: f64 = 0.78;
+/// Slit rows darker than this (an umbra) are drawn as a dark band.
+const SLIT_DARK: f32 = 0.45;
+/// Granulation under the slit brighter (darker) than its limb-darkened mean by this share
+/// is rising (sinking) gas: its lines shift blueward (redward), a sub-cell wiggle. A
+/// shifted row returns to rest only inside `DOPPLER_HOLD`, so a row near the threshold
+/// does not flicker between glyphs from frame to frame.
+const DOPPLER_SHARE: f32 = 0.02;
+const DOPPLER_HOLD: f32 = 0.01;
+/// Fraunhofer lines (nm) within the range: G (CH/Fe), H-γ, H-β (F), Mg b, Fe (E), Na D
+/// (D1/D2 blend at this resolution), H-α (C). Each is drawn as one thin glyph, a column
+/// about 7.5 nm wide at 40 cells: 20–70× its real width.
+const FRAUNHOFER_NM: [f64; 7] = [430.8, 434.0, 486.1, 518.4, 527.0, 589.3, 656.3];
+/// Absorption lines, the umbra's dark band and the slit's jaws: thin dark glyphs over the
+/// colour behind them.
+const DARK_INK: Ink = Ink::new(Role::Dim, 0);
+/// The slit's jaws: a dark hairline on the slit's column in only the first `JAW_CELLS`
+/// cells inside the limb, top and bottom, like the notches of a slit-jaw image. They tie
+/// the inset to the column it samples without a seam through the granulation (the disc
+/// fills the height at the default size, so they cannot sit outside it).
+const JAW_CELLS: i32 = 2;
+const SPECTRUM_LABEL: &str = "slit spectrum 400-700nm, false colour";
+const SPECTRUM_LABEL_SHORT: &str = "slit spectrum 400-700nm";
+
 /// IAU nominal solar effective temperature (K).
 const TEFF_K: u32 = 5772;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 // --- Physics (pure) -----------------------------------------------------------------
+
+/// The slit row's line shift (−1 blueward, 0, +1 redward) for granulation `excess` over
+/// its mean, given the row's previous shift: set beyond `±DOPPLER_SHARE`, held until
+/// the excess falls inside `±DOPPLER_HOLD` (SUN-A8).
+pub(crate) fn doppler_shift(prev: i8, excess: f32) -> i8 {
+    if excess > DOPPLER_SHARE || (prev == -1 && excess > DOPPLER_HOLD) {
+        -1
+    } else if excess < -DOPPLER_SHARE || (prev == 1 && excess < -DOPPLER_HOLD) {
+        1
+    } else {
+        0
+    }
+}
 
 /// Linear limb darkening `I(μ) = 1 − u(1 − μ)`, u = 0.6 (SUN-A1).
 pub(crate) fn limb_intensity(mu: f64) -> f64 {
@@ -306,9 +362,29 @@ pub(crate) fn granule_contrast(mu: f64) -> f64 {
     GRANULE_CONTRAST * mu.max(0.0).sqrt() * ease::smoothstep((mu - 0.1) / 0.1)
 }
 
-/// The `Seq` ink for photospheric intensity `i`: `v = 0.12 + 0.78·i`.
+/// The `Ember` value of photospheric intensity `i`, `v = 0.08 + 0.74·i^1.25` (false
+/// colour: oxblood umbrae, scarlet penumbrae, an orange-red limb, gold granules). The
+/// power spreads the bright end, where the ramp's pale golds sit close together, so
+/// intergranular lanes read some 20 % darker than the granules they part.
+pub(crate) fn photosphere_value(i: f64) -> f64 {
+    let i = i.max(0.0);
+    0.08 + 0.74 * i * i.sqrt().sqrt()
+}
+
+/// The intensity behind an `Ember` value: the inverse of [`photosphere_value`].
+pub(crate) fn photosphere_intensity(v: f64) -> f64 {
+    ((v - 0.08) / 0.74).max(0.0).powf(0.8)
+}
+
+/// The photosphere's ink for intensity `i`.
 pub(crate) fn photosphere_ink(i: f64) -> Ink {
-    ink::seq(0.12 + 0.78 * i)
+    ink::ramp(Ramp::Ember, photosphere_value(i))
+}
+
+/// The ink of an H-α feature of value `v` (rim, spicules, loops, rain): the `HAlpha`
+/// ramp, the colour of the 656.3 nm line they are seen in.
+fn h_alpha_ink(v: f64) -> Ink {
+    ink::ramp(Ramp::HAlpha, v)
 }
 
 /// Heliographic unit vector (x west, y north, z toward the observer at λ = 0).
@@ -533,7 +609,8 @@ impl Region {
         ];
         // The dipole sits 2δ deep, so its radial field peaks under the spots (±δ). The
         // arcade is that dipole's field lines turned about the vertical by the shear,
-        // either way: nested loops in one vertical plane over the inversion line.
+        // either way: nested loops in one vertical plane over the inversion line, each
+        // bowed into an S by the twist.
         let d_b = 2.0 * delta;
         let shear = rng.random_range(SHEAR_DEG.0..SHEAR_DEG.1).to_radians() * coin(rng);
         let (ss, cs) = shear.sin_cos();
@@ -543,9 +620,12 @@ impl Region {
             let h = (h_max * NEST[k]).max(0.04);
             let local = dipole_loop(d_b, d_b + h);
             let apex = local.iter().map(|&p| norm(p) - 1.0).fold(0.0, f64::max);
+            let half = local.iter().map(|p| p[0].abs()).fold(1e-9, f64::max);
             Loop {
-                pts: local
-                    .map(|[a, b, c]| axpy(a, arc_axis, axpy(b, arc_across, up.map(|u| c * u)))),
+                pts: local.map(|[a, b, c]| {
+                    let b = b + ARCADE_TWIST * half * (PI * a / half).sin();
+                    axpy(a, arc_axis, axpy(b, arc_across, up.map(|u| c * u)))
+                }),
                 apex,
                 knots: std::array::from_fn(|_| Knot::falling(rng)),
                 period: rng.random_range(5.0..9.0),
@@ -661,6 +741,72 @@ struct View {
     pixels: Pixels,
     /// Whether the day readout is drawn at all: small terminals keep every cell for the Sun.
     label: bool,
+    /// The spectrograph inset, when it fits clear of the Sun (SUN-A8).
+    inset: Option<Inset>,
+    /// The slit sampled at each inset row, in `rasterise`.
+    slit: [SlitRow; INSET_H.1],
+}
+
+/// The spectrograph inset in cells: left column, top row, width and height.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Inset {
+    x: usize,
+    y: usize,
+    w: usize,
+    h: usize,
+}
+
+/// One slit position: its photospheric intensity (NaN off the disc) and the Doppler
+/// shift of its lines, −1 blueward, 0 or +1 redward.
+#[derive(Debug, Clone, Copy)]
+struct SlitRow {
+    i: f32,
+    shift: i8,
+}
+
+impl Default for SlitRow {
+    fn default() -> Self {
+        Self {
+            i: f32::NAN,
+            shift: 0,
+        }
+    }
+}
+
+impl Inset {
+    /// The top-right inset for a `w × rows` pixel view with the disc at `(cx, cy)`,
+    /// radius `r`, if every pixel of it keeps `INSET_CLEAR·r` from the centre.
+    fn fit(w: usize, rows: usize, cx: f64, cy: f64, r: f64) -> Option<Self> {
+        let (cells_w, cells_h) = (w, rows / 2);
+        let iw = (cells_w / 5).clamp(INSET_W.0, INSET_W.1);
+        let ih = (cells_h / 6).clamp(INSET_H.0, INSET_H.1);
+        // One cell of margin at the right and top; the label row above it.
+        let inset = Self {
+            x: cells_w.checked_sub(iw + 1)?,
+            y: 1,
+            w: iw,
+            h: ih,
+        };
+        // Its extent in pixels (rows are two tall).
+        let (top, bottom) = (2 * inset.y, 2 * (inset.y + inset.h));
+        let nx = (cx.clamp(inset.x as f64, (inset.x + inset.w) as f64) - cx).abs();
+        let ny = (cy.clamp(top as f64, bottom as f64) - cy).abs();
+        (bottom + 2 <= rows && nx.hypot(ny) >= INSET_CLEAR * r).then_some(inset)
+    }
+
+    /// Wavelength (nm) at inset column `u`.
+    fn nm(&self, u: usize) -> f64 {
+        let span = (self.w.max(2) - 1) as f64;
+        SPECTRUM_NM.0 + (SPECTRUM_NM.1 - SPECTRUM_NM.0) * u as f64 / span
+    }
+
+    /// Whether column `u` holds a Fraunhofer line: the column nearest to the line.
+    fn is_line(&self, u: usize) -> bool {
+        let step = (SPECTRUM_NM.1 - SPECTRUM_NM.0) / (self.w.max(2) - 1) as f64;
+        FRAUNHOFER_NM
+            .iter()
+            .any(|&l| (l - self.nm(u)).abs() <= 0.5 * step)
+    }
 }
 
 impl View {
@@ -732,6 +878,8 @@ impl View {
             in_spot: vec![false; w * rows],
             pixels: Pixels::new(size),
             label: w >= 30 && h >= 10,
+            inset: Inset::fit(w, rows, cx, cy, r),
+            slit: [SlitRow::default(); INSET_H.1],
         }
     }
 
@@ -872,14 +1020,22 @@ impl View {
     fn shade_rim(&mut self, t: f64, phase: [f64; 2]) {
         let (n1, n2) = self.lobes;
         let spicule = spicule_px(self.r);
+        let gap = if self.w < RIM_WIDE {
+            RIM_BREAK.0
+        } else {
+            RIM_BREAK.1
+        };
         for rp in &self.rim {
             let above = f64::from(rp.above);
+            let th = f64::from(rp.theta);
+            let wave = 0.5 * (n1 * th + 1.3 * t + phase[0]).sin()
+                + 0.5 * (n2 * th - 0.9 * t + phase[1]).sin();
             let v = if above <= RIM_PX {
-                V_RIM
+                if wave < gap {
+                    continue;
+                }
+                V_RIM * (0.9 + 0.1 * wave)
             } else {
-                let th = f64::from(rp.theta);
-                let wave = 0.5 * (n1 * th + 1.3 * t + phase[0]).sin()
-                    + 0.5 * (n2 * th - 0.9 * t + phase[1]).sin();
                 let height = spicule * wave.max(0.0);
                 let up = above - RIM_PX;
                 let (ix, iy) = (i32::from(rp.inward.0), i32::from(rp.inward.1));
@@ -894,7 +1050,7 @@ impl View {
                 ease::lerp(V_SPICULE.0, V_SPICULE.1, up / spicule)
             };
             self.pixels
-                .set(i32::from(rp.x), i32::from(rp.y), ink::seq(v));
+                .set(i32::from(rp.x), i32::from(rp.y), h_alpha_ink(v));
         }
     }
 
@@ -932,6 +1088,97 @@ impl View {
         }
     }
 
+    /// The pixel column the slit lies on: through the disc centre.
+    fn slit_x(&self) -> usize {
+        self.cx.floor() as usize
+    }
+
+    /// Sample the slit at each inset row, top to bottom across the disc (SUN-A8): the
+    /// photospheric intensity, and the Doppler shift of rising bright granules (blue) and
+    /// sinking dark lanes (red).
+    fn sample_slit(&mut self) {
+        let Some(inset) = self.inset else { return };
+        let slit = self.slit_x();
+        let rows = self.disc_i.len() / self.w.max(1);
+        let dx = (slit as f64 + 0.5 - self.cx) / self.r;
+        for (v, row) in self.slit.iter_mut().enumerate().take(inset.h) {
+            let py = self.cy - self.r + (v as f64 + 0.5) * 2.0 * self.r / inset.h as f64;
+            let i = if (0.0..rows as f64).contains(&py) {
+                self.disc_i[py as usize * self.w + slit]
+            } else {
+                f32::NAN
+            };
+            let dy = (py - self.cy) / self.r;
+            let mean = limb_intensity((1.0 - dx * dx - dy * dy).max(0.0).sqrt()) as f32;
+            let shift = doppler_shift(row.shift, i / mean - 1.0);
+            *row = SlitRow { i, shift };
+        }
+    }
+
+    /// The spectrum's colour at inset column `u`: a hue by wavelength, red at 700 nm to
+    /// violet at 400 nm (false colour: `Phase` is isoluminant).
+    fn spectrum_ink(inset: Inset, u: usize) -> Ink {
+        let turns = (SPECTRUM_NM.1 - inset.nm(u)) / (SPECTRUM_NM.1 - SPECTRUM_NM.0);
+        ink::phase(TAU * VIOLET_TURNS * turns)
+    }
+
+    /// The long-slit spectrum (SUN-A8): one cell row per slit position, a continuous
+    /// band of colour crossed by thin dark Fraunhofer lines, which wiggle with the
+    /// granulation under the slit; an umbra on the slit is a dark stripe (about a quarter
+    /// of the continuum) with heavier lines. Rows off the disc stay empty. Jaws above and
+    /// below the disc mark the slit.
+    fn draw_spectrum(&self, canvas: &mut Canvas) {
+        let Some(inset) = self.inset else { return };
+        let unicode = canvas.mode() == GlyphMode::Unicode;
+        for (v, row) in self.slit.iter().enumerate().take(inset.h) {
+            if row.i.is_nan() {
+                continue;
+            }
+            let umbra = row.i < SLIT_DARK;
+            let y = (inset.y + v) as i32;
+            for u in 0..inset.w {
+                let colour = Self::spectrum_ink(inset, u);
+                let x = (inset.x + u) as i32;
+                let line = inset.is_line(u);
+                if !unicode {
+                    let ch = if line {
+                        '|'
+                    } else if umbra {
+                        '-'
+                    } else {
+                        '='
+                    };
+                    canvas.put(x, y, Glyph::ascii(ch), colour);
+                    continue;
+                }
+                let ch = match (line, umbra, row.shift) {
+                    (true, true, _) => '┃',
+                    (true, false, -1) => '▏',
+                    (true, false, 1) => '▕',
+                    (true, false, _) => '│',
+                    (false, true, _) => '▓',
+                    (false, false, _) => ' ',
+                };
+                canvas.put_bg(x, y, Glyph::new(ch, '|'), DARK_INK, colour);
+            }
+        }
+        if !unicode {
+            return;
+        }
+        // The jaws: the first `JAW_CELLS` cells wholly on the disc from each end of the
+        // slit's column.
+        let x = self.slit_x() as i32;
+        let cells = (self.disc_i.len() / self.w.max(1) / 2) as i32;
+        let inside = |cy: &i32| self.on_disc(x, 2 * cy) && self.on_disc(x, 2 * cy + 1);
+        let top = (0..cells).filter(inside).take(JAW_CELLS as usize);
+        let bottom = (0..cells).rev().filter(inside).take(JAW_CELLS as usize);
+        for cy in top.chain(bottom) {
+            if let Some(colour) = self.pixels.get(x, 2 * cy) {
+                canvas.put_bg(x, cy, Glyph::new('│', '|'), DARK_INK, colour);
+            }
+        }
+    }
+
     /// Whether nested loop `k` (apex `apex` R☉) is drawn at this size: loops lower than
     /// `MIN_LOOP_PX` would fuse with the taller ones into a blob, and so would the middle
     /// arch on a disc smaller than `THIN_ARCADE_R`.
@@ -964,7 +1211,7 @@ impl View {
                                     k.weight() * (-0.5 * z * z).exp()
                                 })
                                 .fold(0.0, f64::max);
-                            let ink = ink::seq(V_LOOP + V_KNOT * knot);
+                            let ink = h_alpha_ink(V_LOOP + V_KNOT * knot);
                             match prev {
                                 Some((x0, y0)) if (x - x0).abs().max((y - y0).abs()) > 1 => {
                                     for (lx, ly) in geom::line(x0, y0, x, y) {
@@ -976,7 +1223,7 @@ impl View {
                             prev = Some((x, y));
                         }
                         Sample::Filament => {
-                            if norm(p) - 1.0 > FILAMENT_RISE * lp.apex {
+                            if k == 0 && norm(p) - 1.0 > FILAMENT_RISE * lp.apex {
                                 self.absorb(x, y);
                             }
                             prev = None;
@@ -1147,6 +1394,7 @@ impl SolarSurface {
         if detailed && self.show_loops && self.show_regions {
             v.draw_loops(&self.regions, self.b0);
         }
+        v.sample_slit();
     }
 
     /// The ASCII fallback. On the disc, a brightness ramp over the pair's mean lit `Seq`
@@ -1163,24 +1411,23 @@ impl SolarSurface {
         };
         // The cell centre is the boundary between its two pixels.
         if past_limb(f64::from(2 * cy + 1)) <= 0.0 {
-            let (sum, count) = lit
-                .iter()
-                .flatten()
-                .fold((0.0, 0.0), |(s, c), v| (s + v, c + 1.0));
+            let (sum, count) = lit.iter().flatten().fold((0.0, 0.0), |(s, c), &v| {
+                (s + photosphere_intensity(v), c + 1.0)
+            });
             if count == 0.0 {
                 return None;
             }
-            let v = sum / count;
-            let ch = match v {
-                v if v >= 0.92 => '#',
-                v if v >= 0.84 => '*',
-                v if v >= 0.72 => '+',
-                v if v >= 0.58 => '=',
-                v if v >= 0.46 => ':',
-                v if v >= 0.36 => '.',
+            let i = sum / count;
+            let ch = match i {
+                i if i >= 1.026 => '#',
+                i if i >= 0.923 => '*',
+                i if i >= 0.769 => '+',
+                i if i >= 0.59 => '=',
+                i if i >= 0.436 => ':',
+                i if i >= 0.308 => '.',
                 _ => ' ',
             };
-            return Some((ch, ink::seq(v)));
+            return Some((ch, photosphere_ink(i)));
         }
         let v = lit.iter().flatten().copied().reduce(f64::max)?;
         let rim = [2 * cy, 2 * cy + 1].into_iter().any(|py| {
@@ -1196,7 +1443,7 @@ impl SolarSurface {
         } else {
             return None;
         };
-        Some((ch, ink::seq(v)))
+        Some((ch, h_alpha_ink(v)))
     }
 
     /// `day 12.4  Teff 5772 K`, bottom-right and clear of the title (GEN-R13); `Teff`
@@ -1269,6 +1516,22 @@ impl Generator for SolarSurface {
         self.view.pixels.blit(canvas, |cx, cy, top, bottom| {
             self.ascii_cell(cx, cy, top, bottom)
         });
+        self.view.draw_spectrum(canvas);
+        if let Some(inset) = self.view.inset {
+            // The false-colour note when the row has room for it.
+            let label = if SPECTRUM_LABEL.len() + 2 <= inset.w + 1 {
+                SPECTRUM_LABEL
+            } else {
+                SPECTRUM_LABEL_SHORT
+            };
+            draw::label(
+                canvas,
+                inset.x as i32 - 1,
+                inset.y as i32 - 1,
+                label,
+                LABEL_INK,
+            );
+        }
         self.draw_label(canvas);
     }
 }
@@ -1822,10 +2085,19 @@ mod tests {
             assert!((44.9..=65.1).contains(&shear), "shear {shear}°");
             let mut prev: Option<(f64, f64)> = None;
             for lp in &r.loops {
-                for &p in &lp.pts {
-                    // Every sample in the vertical plane through the region centre.
-                    assert!(dot(axpy(-1.0, up, p), unit(normal)).abs() < 1e-9);
+                // Every sample within the twist of the vertical plane through the region
+                // centre, bowed one way on one leg and the other way on the other: an S.
+                let off = |p: [f64; 3]| dot(axpy(-1.0, up, p), unit(normal));
+                let along = |p: [f64; 3]| dot(axpy(-1.0, up, p), unit(dir)).abs();
+                let half = lp.pts.iter().map(|&p| along(p)).fold(0.0, f64::max);
+                let mut bow = 0.0f64;
+                for (i, &p) in lp.pts.iter().enumerate() {
+                    assert!(off(p).abs() <= ARCADE_TWIST * half * 1.05 + 1e-9);
+                    let mirror = off(lp.pts[LOOP_SAMPLES - 1 - i]);
+                    assert!((off(p) + mirror).abs() < 1e-6 * half.max(1e-3), "not an S");
+                    bow = bow.max(off(p).abs());
                 }
+                assert!(bow > 0.5 * ARCADE_TWIST * half, "no twist: {bow}");
                 let apex = lp.pts.iter().map(|&p| norm(p) - 1.0).fold(0.0, f64::max);
                 let span = norm(axpy(-1.0, lp.pts[0], lp.pts[LOOP_SAMPLES - 1]));
                 if let Some((a0, s0)) = prev {
@@ -2062,9 +2334,10 @@ mod tests {
                 "loop value {v}"
             );
         }
-        // The loop body sits under the penumbra (0.12 + 0.78·0.70); only knots pass it.
+        // The loop body sits under the quiet disc's dark lanes (intensity 0.8); only knots
+        // pass it.
         let body = values.iter().copied().fold(1.0, f64::min);
-        assert!(body < 0.12 + 0.78 * 0.70, "loop body {body}");
+        assert!(body < photosphere_value(0.8), "loop body {body}");
     }
 
     #[test]
@@ -2296,7 +2569,7 @@ mod tests {
             let ratio: Vec<f64> = disc_values(&s)
                 .into_iter()
                 .filter(|p| p.0 > lo && p.0 < hi)
-                .map(|(mu, v)| ((v - 0.12) / 0.78) / limb_intensity(mu))
+                .map(|(mu, v)| photosphere_intensity(v) / limb_intensity(mu))
                 .collect();
             let m = mean(ratio.iter().copied());
             mean(ratio.iter().map(|r| (r - m) * (r - m))).sqrt()
@@ -2316,9 +2589,9 @@ mod tests {
 
     #[test]
     fn sun_gen_r13_label_and_tiny_sizes() {
-        // Right-aligned, clear of the title: beside the full "Solar surface · boiling
-        // granules" (32 cells, from 57 wide) the room is w − 38, 19 chars at 57, so Teff
-        // is dropped there.
+        // Right-aligned, clear of the title: beside the full "Solar surface · convection
+        // cells" (32 cells, from 57 wide) the room is w − 38, 19 chars at 57, so Teff is
+        // dropped there.
         for (w, want) in [(80, " day 3.0  Teff 5772 K "), (57, " day 3.0 ")] {
             let (mut s, mut ctx) = scene(w, 24);
             for _ in 0..40 {
@@ -2334,6 +2607,166 @@ mod tests {
             s.update(0.25, &mut ctx);
             let mut canvas = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
             s.render(&mut canvas);
+        }
+    }
+
+    #[test]
+    fn sun_a8_slit_spectrum_shows_lines_and_spot_bands_clear_of_the_sun() {
+        assert!(quiet(80, 24).view.inset.is_none());
+        let mut s = quiet(200, 50);
+        let inset = s.view.inset.expect("inset at 200x50");
+        let v = &s.view;
+        // Clear of the disc and loops (in pixels: rows are two tall), above the title.
+        for y in 2 * inset.y..2 * (inset.y + inset.h) {
+            for x in inset.x..inset.x + inset.w {
+                let d = (x as f64 + 0.5 - v.cx).hypot(y as f64 + 0.5 - v.cy);
+                assert!(d >= INSET_CLEAR * v.r, "({x}, {y}) at {d}");
+            }
+        }
+        assert!(inset.y + inset.h <= 50 - 2);
+        // Every line in range falls on its nearest column (G and H-γ, 3 nm apart, share
+        // one at this resolution).
+        let step = (SPECTRUM_NM.1 - SPECTRUM_NM.0) / (inset.w - 1) as f64;
+        for l in FRAUNHOFER_NM {
+            let u = ((l - SPECTRUM_NM.0) / step).round() as usize;
+            assert!(inset.is_line(u), "{l} nm");
+        }
+        let lines = (0..inset.w).filter(|&u| inset.is_line(u)).count();
+        assert!(lines >= FRAUNHOFER_NM.len() - 1 && lines <= FRAUNHOFER_NM.len());
+        let render = |s: &SolarSurface| {
+            let mut c = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
+            s.render(&mut c);
+            c
+        };
+        let cell = |c: &Canvas, u: usize, row: usize| {
+            *c.get((inset.x + u) as i32, (inset.y + row) as i32).unwrap()
+        };
+        // A continuous band: every cell of a disc row is coloured, and only the line
+        // columns carry a thin dark line.
+        let mid = inset.h / 2;
+        let c = render(&s);
+        for u in 0..inset.w {
+            let k = cell(&c, u, mid);
+            assert_eq!(k.bg.role, Role::Phase, "column {u}");
+            let thin = ['│', '▏', '▕'].contains(&k.ch);
+            assert_eq!(thin, inset.is_line(u), "column {u}: {:?}", k.ch);
+            if thin {
+                assert_eq!(k.ink, DARK_INK);
+            }
+        }
+        // Red at the right, violet at the left.
+        let hue = |u: usize| ink::phase_value(cell(&c, u, mid).bg);
+        assert!(hue(inset.w - 1) < 0.1 * TAU && hue(0) > 0.7 * TAU);
+        // An umbra on the slit is a dark stripe with heavy lines; the next row is not.
+        let row = 3;
+        s.view.slit[row] = SlitRow { i: 0.2, shift: 0 };
+        s.view.slit[row + 1] = SlitRow { i: 1.0, shift: -1 };
+        let c = render(&s);
+        for u in 0..inset.w {
+            let (k, next) = (cell(&c, u, row), cell(&c, u, row + 1));
+            assert_eq!(k.ch, if inset.is_line(u) { '┃' } else { '▓' }, "column {u}");
+            assert_eq!(k.bg.role, Role::Phase);
+            // Rising gas shifts the lines blueward.
+            assert_eq!(
+                next.ch,
+                if inset.is_line(u) { '▏' } else { ' ' },
+                "column {u}"
+            );
+        }
+        // Off the disc the slit sees nothing.
+        s.view.slit[0].i = f32::NAN;
+        let c = render(&s);
+        assert!((0..inset.w).all(|u| cell(&c, u, 0).bg.role == Role::Background));
+        // The slit is marked by its jaws just inside the limb, top and bottom: a dark
+        // hairline over the photosphere, and none across the middle of the disc.
+        let x = s.view.slit_x() as i32;
+        let jaws = (0..50)
+            .filter(|&y| {
+                c.get(x, y)
+                    .is_some_and(|k| k.ch == '│' && k.ink == DARK_INK)
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(jaws.len(), 2 * JAW_CELLS as usize, "{jaws:?}");
+        for &y in &jaws {
+            assert_eq!(
+                c.get(x, y).unwrap().bg.role,
+                Role::Ramp(Ramp::Ember),
+                "row {y}"
+            );
+        }
+        let (top, bottom) = (jaws[0], jaws[jaws.len() - 1]);
+        assert!(
+            jaws[1] - top < 2 && bottom - jaws[jaws.len() - 2] < 2,
+            "{jaws:?}"
+        );
+        assert!(!s.view.on_disc(x, 2 * top - 1) && !s.view.on_disc(x, 2 * bottom + 2));
+        // Sampled from the photosphere: the Doppler sign follows the granulation.
+        s.view.sample_slit();
+        assert!(s.view.slit[..inset.h].iter().any(|r| !r.i.is_nan()));
+    }
+
+    #[test]
+    fn sun_a8_doppler_shift_holds_until_the_excess_falls_back() {
+        assert_eq!(doppler_shift(0, 0.03), -1);
+        assert_eq!(doppler_shift(0, -0.03), 1);
+        assert_eq!(doppler_shift(0, 0.015), 0);
+        // Hysteresis: a shifted row near the threshold stays shifted...
+        assert_eq!(doppler_shift(-1, 0.015), -1);
+        assert_eq!(doppler_shift(1, -0.015), 1);
+        // ...until the excess falls inside the hold band, or flips sign past the threshold.
+        assert_eq!(doppler_shift(-1, 0.005), 0);
+        assert_eq!(doppler_shift(1, -0.005), 0);
+        assert_eq!(doppler_shift(-1, -0.03), 1);
+        // A wobble about the threshold changes the glyph once, not every frame.
+        let mut shift = 0;
+        let mut changes = 0;
+        for k in 0..40 {
+            let excess = 0.02 + 0.004 * if k % 2 == 0 { 1.0 } else { -1.0 };
+            let next = doppler_shift(shift, excess);
+            changes += i32::from(next != shift);
+            shift = next;
+        }
+        assert_eq!(changes, 1);
+    }
+
+    #[test]
+    fn sun_rim_breaks_into_fuzz_at_every_size() {
+        // At 200×50 as at 80×24, some rim pixels drop out where the spicule wave is low,
+        // so the chromosphere never reads as a drawn outline.
+        for (w, h) in [(200, 50), (80, 24)] {
+            let mut ctx = Ctx::new(11, Size::new(w, h));
+            let mut s = SolarSurface::new();
+            s.resize(Size::new(w, h), &mut ctx);
+            s.rasterise(true);
+            let rim = s.view.rim.iter().filter(|rp| f64::from(rp.above) <= RIM_PX);
+            let (mut lit, mut all) = (0, 0);
+            for rp in rim {
+                all += 1;
+                lit += usize::from(
+                    s.view
+                        .pixels
+                        .get(i32::from(rp.x), i32::from(rp.y))
+                        .is_some_and(|i| i.role == Role::Ramp(Ramp::HAlpha)),
+                );
+            }
+            assert!(lit < all && lit * 10 > all * 7, "{w}x{h}: {lit} of {all}");
+        }
+    }
+
+    #[test]
+    fn sun_a9_granules_stand_out_and_umbrae_punch_through() {
+        // The photosphere's ramp values: granules gold, lanes ≥ 15 % darker, an orange-red
+        // limb and umbrae near the bottom of the ramp.
+        let (granule, lane) = (photosphere_value(1.1), photosphere_value(0.9));
+        assert!(granule - lane >= 0.15 * granule, "{granule} {lane}");
+        assert!((0.25..0.45).contains(&photosphere_value(0.45)));
+        assert!(photosphere_value(0.22) < 0.2);
+        for k in 0..=100 {
+            let i = 1.3 * f64::from(k) / 100.0;
+            assert!(
+                (photosphere_intensity(photosphere_value(i)) - i).abs() < 1e-9,
+                "{i}"
+            );
         }
     }
 }

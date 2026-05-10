@@ -56,10 +56,11 @@ impl Theme {
             }
             (Theme::Astro, Role::Phase) => fields::tables().phase[usize::from(ink.level)],
             (Theme::Rainbow, Role::Phase) => hsv(f64::from(ink.level) / 256.0, 1.0, 1.0),
-            // One grey channel: hotter or higher is brighter, like `Seq` (RND-R11, RND-R12).
-            (Theme::Mono, Role::Seq | Role::Blackbody | Role::Ramp(_)) => {
-                mono_table().seq[usize::from(ink.level)]
-            }
+            // One grey channel: higher is brighter, like `Seq` (RND-R12).
+            (Theme::Mono, Role::Seq | Role::Ramp(_)) => mono_table().seq[usize::from(ink.level)],
+            // A glow keeps its own lightness in grey, so a star outshines the planets round
+            // it in `mono` as it does in colour (RND-R11).
+            (Theme::Mono, Role::Blackbody) => mono_table().blackbody[usize::from(ink.level)],
             (Theme::Mono, Role::Div) => mono_table().div[usize::from(ink.level)],
             (Theme::Mono, Role::Phase) => mono_table().phase[usize::from(ink.level)],
             (Theme::Mono, _) => grey(ink.level),
@@ -103,6 +104,8 @@ struct MonoTable {
     seq: [Rgb; 256],
     div: [Rgb; 256],
     phase: [Rgb; 256],
+    /// The lightness of each `astro` blackbody colour, in grey (RND-R11).
+    blackbody: [Rgb; 256],
 }
 
 /// Built once: the sRGB transfer needs `powf`, too costly to evaluate per painted cell.
@@ -123,7 +126,19 @@ fn mono_table() -> &'static MonoTable {
             phase[usize::from(level)] =
                 lightness_grey(MONO_FLOOR_L + (MONO_PHASE_PEAK_L - MONO_FLOOR_L) * half_turns);
         }
-        MonoTable { seq, div, phase }
+        // `i < 256`: the cast is exact.
+        let blackbody = std::array::from_fn(|i| {
+            lightness_grey(fields::blackbody_lightness(Ink::new(
+                Role::Blackbody,
+                i as u8,
+            )))
+        });
+        MonoTable {
+            seq,
+            div,
+            phase,
+            blackbody,
+        }
     });
     &TABLE
 }
@@ -684,8 +699,34 @@ mod tests {
     const BLACKBODY_MONOTONE_TO: u8 = 140;
 
     #[test]
-    fn rnd_r11_r12_mono_maps_blackbody_and_ramps_like_seq() {
-        for role in field_roles().filter(|&r| r != Role::Phase) {
+    fn rnd_r11_mono_blackbody_keeps_the_colour_lightness() {
+        // A 5000–6000 K star is near white in colour, so it must be near white in grey too,
+        // not the mid-grey its level would give as `Seq`.
+        let l = |theme: Theme, level: u8| {
+            let Rgb(r, g, b) = theme.color(Ink::new(Role::Blackbody, level), 0, 0);
+            rgb_lightness(Rgb(r, g, b))
+        };
+        for level in 0..=255u8 {
+            let Rgb(r, g, b) = Theme::Mono.color(Ink::new(Role::Blackbody, level), 0, 0);
+            assert!(r == g && g == b, "grey at {level}");
+            assert!(
+                (l(Theme::Mono, level) - l(Theme::Astro, level)).abs() < 1.5,
+                "{level}"
+            );
+        }
+        for level in 1..=BLACKBODY_MONOTONE_TO {
+            assert!(
+                l(Theme::Mono, level) >= l(Theme::Mono, level - 1) - 0.3,
+                "{level}"
+            );
+        }
+        let sun = ink::blackbody(5772.0).level;
+        assert!(l(Theme::Mono, sun) > l(Theme::Mono, 0) + 60.0 && l(Theme::Mono, sun) > 85.0);
+    }
+
+    #[test]
+    fn rnd_r12_mono_maps_ramps_like_seq() {
+        for role in field_roles().filter(|&r| r != Role::Phase && r != Role::Blackbody) {
             for level in 0..=255u8 {
                 assert_eq!(
                     Theme::Mono.color(Ink::new(role, level), 0, 0),
