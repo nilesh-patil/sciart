@@ -1,31 +1,51 @@
-//! Voyager 2's Grand Tour, 1977–1989, in 48 s (SPEC-002 `voyager_journey`).
+//! Voyager 2's Grand Tour, 1977–1989, and its run out to the heliopause (SPEC-002
+//! `voyager_journey`).
 //!
 //! A top-down heliocentric map. Planets move on circular orbits with their real J2000
-//! semi-major axes and mean longitudes, and with periods from Kepler's third law
-//! (VOY-A2). Every position is a pure function of a *mission day* (days since
-//! 2000-01-01), so the spacecraft path — a monotone cubic Hermite curve in (r, φ)
-//! through the planets' model positions on the real encounter dates — meets each planet
-//! exactly on its date (VOY-A1). The scene clock maps sim seconds to mission days with
-//! slow-downs at every encounter (VOY-A3), and radii are drawn through a strictly
-//! monotone log compression so Earth … Neptune fit on one screen (VOY-A4). A looping
-//! `Timeline` runs the 48 s mission, then an 8 s "Pale Blue Dot" epilogue.
+//! semi-major axes and mean longitudes and periods from Kepler's third law (VOY-A2). The
+//! spacecraft flies four Kepler conics, one per leg, each the Lambert solution that
+//! leaves one planet's model position on its real encounter date and reaches the next
+//! planet's on its date (VOY-A1, VOY-A5). A flyby is where one conic ends and the next
+//! begins: the jump in heliocentric speed there *is* the gravity assist, and the inset
+//! plots it against the Sun's escape speed (VOY-A6). After Neptune the craft coasts out
+//! on a fifth conic, a hyperbola with today's excess speed whose heading is fitted so it
+//! reaches the real heliopause crossing, 119 AU on 2018-11-05, while the map pulls back
+//! to show it (VOY-A7).
+//!
+//! Every position is a pure function of a *mission day* (days since 2000-01-01); the scene
+//! clock maps sim seconds to mission days with slow-downs at each encounter (VOY-A3), and
+//! radii are drawn through a strictly monotone log compression (VOY-A4). The Sun is an
+//! asinh-toned glow and planets and the craft are half-block [`Pixels`]; orbits, trail
+//! and inset are braille [`Dots`]; all are rasterised in `update`.
 
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 use std::fmt::{self, Write as _};
 
 use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
-use sciart_core::particles::plot;
+use sciart_core::ink::ramp;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease};
+use sciart_core::{Tone, ease};
 
 pub static META: Meta = Meta {
     name: "voyager_journey",
     category: Category::Voyages,
-    description: "Voyager 2 Grand Tour past Jupiter, Saturn, Uranus and Neptune",
+    description: "Voyager 2 Grand Tour past Jupiter, Saturn, Uranus and Neptune to the heliopause",
     title: "Voyager 2 · planets fling it on",
-    captions: &[],
+    captions: &ACTS,
 };
+
+/// The title's caption around each encounter and after Neptune (GEN-R12); `None` on the
+/// cruise legs, where the title's own mechanism reads. Neptune bent Voyager 2 south over
+/// its pole toward Triton and slowed it, so its caption says flyby, not assist.
+const ACTS: [&str; 6] = [
+    "Jupiter assist",
+    "Saturn assist",
+    "Uranus assist",
+    "Neptune flyby",
+    "to the heliopause",
+    "interstellar space",
+];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(VoyagerJourney::new())
@@ -78,8 +98,15 @@ const JUPITER_CA: f64 = day(1979, 7, 9);
 const SATURN_CA: f64 = day(1981, 8, 26);
 const URANUS_CA: f64 = day(1986, 1, 24);
 const NEPTUNE_CA: f64 = day(1989, 8, 25);
-/// Voyager 1's "Pale Blue Dot" family portrait — the epilogue's date.
-const PALE_BLUE_DOT: f64 = day(1990, 2, 14);
+/// Termination-shock crossing, at 83.7 AU (Stone et al. 2008, Nature 454).
+const SHOCK: f64 = day(2007, 8, 30);
+const SHOCK_AU: f64 = 83.7;
+/// Heliopause crossing into interstellar space, at 119 AU (Stone et al. 2019, Nat.
+/// Astron. 3).
+const HELIOPAUSE: f64 = day(2018, 11, 5);
+const HELIOPAUSE_AU: f64 = 119.0;
+/// Voyager 2's hyperbolic excess speed (km/s): ~15.4 km/s at 119 AU, less the Sun's pull.
+const V_INF_KMS: f64 = 14.9;
 
 // ---------------------------------------------------------------------------------------
 // Planets (VOY-A2).
@@ -92,51 +119,67 @@ const YEAR_DAYS: f64 = 365.256_363;
 const A_EARTH: f64 = 1.000_002_61;
 
 struct Body {
-    glyph: Glyph,
     /// Semi-major axis (AU), J2000 (Standish, JPL "Keplerian Elements for Approximate
     /// Positions of the Major Planets", Table 1, 1800–2050 AD).
     a: f64,
     /// Mean longitude at J2000 (degrees), same table.
     l0_deg: f64,
-    /// Real sidereal period (days), NASA planetary fact sheets — only for VOY-A2.
-    #[cfg_attr(not(test), allow(dead_code))]
-    real_period: f64,
+    /// Map label.
+    initial: &'static str,
+    /// Drawn disc radius (pixels at full size), ramp and level: a false-colour hint of
+    /// each world (blue Earth, banded ochre Jupiter, pale-gold Saturn, cyan Uranus,
+    /// azure Neptune), not to scale.
+    radius: f64,
+    ramp: Ramp,
+    level: f64,
 }
 
 /// Earth, then the four encounter targets, in encounter order.
 const BODIES: [Body; 5] = [
     Body {
-        glyph: Glyph::new('⊕', 'E'),
         a: A_EARTH,
         l0_deg: 100.464_571_66,
-        real_period: 365.256,
+        initial: "E",
+        radius: 1.45,
+        ramp: Ramp::Ice,
+        level: 0.62,
     },
     Body {
-        glyph: Glyph::new('♃', 'J'),
         a: 5.202_887,
         l0_deg: 34.396_440_51,
-        real_period: 4_332.59,
+        initial: "J",
+        radius: 2.6,
+        ramp: Ramp::Ember,
+        level: 0.70,
     },
     Body {
-        glyph: Glyph::new('♄', 'S'),
         a: 9.536_675_94,
         l0_deg: 49.954_244_23,
-        real_period: 10_759.22,
+        initial: "S",
+        radius: 2.2,
+        ramp: Ramp::Ember,
+        level: 0.84,
     },
     Body {
-        glyph: Glyph::new('⛢', 'U'),
         a: 19.189_164_64,
         l0_deg: 313.238_104_51,
-        real_period: 30_688.5,
+        initial: "U",
+        radius: 1.7,
+        ramp: Ramp::Ice,
+        level: 0.82,
     },
     Body {
-        glyph: Glyph::new('♆', 'N'),
         a: 30.069_922_76,
         l0_deg: -55.120_029_69,
-        real_period: 60_182.0,
+        initial: "N",
+        radius: 1.7,
+        ramp: Ramp::Ice,
+        level: 0.52,
     },
 ];
-const EARTH: usize = 0;
+const JUPITER: usize = 1;
+const SATURN: usize = 2;
+const NEPTUNE: usize = 4;
 
 /// Kepler's third law with Earth's sidereal year as the unit (VOY-A2).
 pub(crate) fn period_days(a: f64) -> f64 {
@@ -150,184 +193,290 @@ pub(crate) fn longitude(b: usize, day: f64) -> f64 {
     body.l0_deg.to_radians() + TAU / period_days(body.a) * (day - J2000)
 }
 
-// ---------------------------------------------------------------------------------------
-// Radial compression (VOY-A4).
-// ---------------------------------------------------------------------------------------
-
-/// Softening radius (AU) of the log map: keeps Earth ~¼ of the way out.
-const R0: f64 = 0.6;
-/// Heliocentric distance (AU) drawn at the screen edge; Neptune lands at ~0.97.
-const R_MAX: f64 = 34.0;
-
-/// Fraction of the screen radius for heliocentric distance `r` (AU):
-/// `ρ = ln(1 + r/r₀) / ln(1 + r_max/r₀)`, strictly increasing, `ρ(0) = 0`.
-pub(crate) fn rho(r: f64) -> f64 {
-    (r / R0).ln_1p() / (R_MAX / R0).ln_1p()
+/// Ecliptic position (AU) of body `b` on mission day `day`.
+fn planet_pos(b: usize, day: f64) -> [f64; 2] {
+    let (s, c) = longitude(b, day).sin_cos();
+    [BODIES[b].a * c, BODIES[b].a * s]
 }
 
-/// Maps heliocentric (r, φ) to fractional cell coordinates, north ecliptic pole up
-/// (prograde = counter-clockwise on screen).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct Proj {
-    cx: f64,
-    cy: f64,
-    /// Rows at `ρ = 1`; chosen so `ρ = 1` exactly touches the nearer canvas edge.
-    scale: f64,
+// ---------------------------------------------------------------------------------------
+// Two-body mechanics in AU and days (VOY-A5, VOY-A6).
+// ---------------------------------------------------------------------------------------
+
+/// The Sun's gravitational parameter, `k²` with Gauss's constant (AU³/day²).
+pub(crate) const GM: f64 = 2.959_122_082_9e-4;
+/// km/s per AU/day.
+pub(crate) const KM_S: f64 = 1_731.456_836_8;
+
+fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
+    a[0] * b[0] + a[1] * b[1]
 }
 
-impl Proj {
-    pub(crate) fn new(size: Size) -> Self {
-        let cx = (f64::from(size.width()) - 1.0).max(0.0) / 2.0;
-        let cy = (f64::from(size.height()) - 1.0).max(0.0) / 2.0;
-        Self {
-            cx,
-            cy,
-            scale: (cx / ASPECT).min(cy),
+fn norm(a: [f64; 2]) -> f64 {
+    a[0].hypot(a[1])
+}
+
+/// Stumpff functions `(C(z), S(z))`, with series near zero.
+fn stumpff(z: f64) -> (f64, f64) {
+    if z.abs() < 1e-6 {
+        (0.5 - z / 24.0, 1.0 / 6.0 - z / 120.0)
+    } else if z > 0.0 {
+        let s = z.sqrt();
+        ((1.0 - s.cos()) / z, (s - s.sin()) / (s * z))
+    } else {
+        let s = (-z).sqrt();
+        ((s.cosh() - 1.0) / -z, (s.sinh() - s) / (s * -z))
+    }
+}
+
+/// Position and velocity `dt` days after `(r0, v0)` on the conic they define: the
+/// universal-variable Kepler problem (Curtis, *Orbital Mechanics*, Alg. 3.4), solved by
+/// Newton's method, for ellipses and hyperbolas alike.
+pub(crate) fn propagate(r0: [f64; 2], v0: [f64; 2], dt: f64) -> ([f64; 2], [f64; 2]) {
+    let mu_s = GM.sqrt();
+    let rn = norm(r0);
+    let vr = dot(r0, v0) / rn;
+    let alpha = 2.0 / rn - dot(v0, v0) / GM;
+    let mut chi = mu_s * alpha.abs() * dt;
+    for _ in 0..60 {
+        let z = alpha * chi * chi;
+        let (c, s) = stumpff(z);
+        let f = rn * vr / mu_s * chi * chi * c + (1.0 - alpha * rn) * chi.powi(3) * s + rn * chi
+            - mu_s * dt;
+        let df = rn * vr / mu_s * chi * (1.0 - z * s) + (1.0 - alpha * rn) * chi * chi * c + rn;
+        let step = f / df;
+        chi -= step;
+        if step.abs() < 1e-13 * (1.0 + chi.abs()) {
+            break;
         }
     }
+    let z = alpha * chi * chi;
+    let (c, s) = stumpff(z);
+    let f = 1.0 - chi * chi / rn * c;
+    let g = dt - chi.powi(3) / mu_s * s;
+    let r = [f * r0[0] + g * v0[0], f * r0[1] + g * v0[1]];
+    let r1 = norm(r);
+    let fd = mu_s / (r1 * rn) * (alpha * chi.powi(3) * s - chi);
+    let gd = 1.0 - chi * chi / r1 * c;
+    (r, [fd * r0[0] + gd * v0[0], fd * r0[1] + gd * v0[1]])
+}
 
-    pub(crate) fn screen(&self, r: f64, phi: f64) -> (f64, f64) {
-        let d = rho(r) * self.scale;
-        (self.cx + d * phi.cos() * ASPECT, self.cy - d * phi.sin())
+/// The prograde single-revolution conic from `r1` to `r2` in `dt` days: the departure
+/// and arrival velocities (Lambert's problem in universal variables, Curtis Alg. 5.2, with
+/// bisection on `z`, which is robust for every transfer angle below 2π).
+pub(crate) fn lambert(r1: [f64; 2], r2: [f64; 2], dt: f64) -> ([f64; 2], [f64; 2]) {
+    let (n1, n2) = (norm(r1), norm(r2));
+    let cross = r1[0] * r2[1] - r1[1] * r2[0];
+    let cos = (dot(r1, r2) / (n1 * n2)).clamp(-1.0, 1.0);
+    let theta = if cross >= 0.0 {
+        cos.acos()
+    } else {
+        TAU - cos.acos()
+    };
+    let a = theta.sin() * (n1 * n2 / (1.0 - cos)).sqrt();
+    let y = |z: f64| {
+        let (c, s) = stumpff(z);
+        n1 + n2 + a * (z * s - 1.0) / c.sqrt()
+    };
+    let time = |z: f64| {
+        let (c, s) = stumpff(z);
+        let yz = y(z);
+        ((yz / c).powf(1.5) * s + a * yz.sqrt()) / GM.sqrt()
+    };
+    // `z` from deep hyperbolic to just short of a full revolution; lift the low end until
+    // `y(z) ≥ 0`, where the time of flight is defined and increases with `z`.
+    let (mut lo, mut hi) = (-4.0 * TAU * TAU, TAU * TAU - 1e-9);
+    if y(lo) < 0.0 {
+        let (mut a0, mut b0) = (lo, hi);
+        for _ in 0..200 {
+            let m = 0.5 * (a0 + b0);
+            if y(m) < 0.0 { a0 = m } else { b0 = m }
+        }
+        lo = b0;
     }
+    for _ in 0..200 {
+        let m = 0.5 * (lo + hi);
+        if time(m) < dt { lo = m } else { hi = m }
+    }
+    let yz = y(0.5 * (lo + hi));
+    let f = 1.0 - yz / n1;
+    let g = a * (yz / GM).sqrt();
+    let gd = 1.0 - yz / n2;
+    let v1 = [(r2[0] - f * r1[0]) / g, (r2[1] - f * r1[1]) / g];
+    let v2 = [(gd * r2[0] - r1[0]) / g, (gd * r2[1] - r1[1]) / g];
+    (v1, v2)
+}
+
+/// Solar escape speed at `r` AU (AU/day).
+pub(crate) fn escape_speed(r: f64) -> f64 {
+    (2.0 * GM / r).sqrt()
 }
 
 // ---------------------------------------------------------------------------------------
-// Spacecraft path (VOY-A1).
+// Spacecraft path (VOY-A1, VOY-A5..A7).
 // ---------------------------------------------------------------------------------------
 
-/// Cruise speed after Neptune (AU/yr): ~15.4 km/s.
-const CRUISE_AU_PER_YEAR: f64 = 3.25;
-/// End of the interpolated path; later days clamp here.
-const PATH_END: f64 = day(1995, 1, 1);
-/// Extra prograde sweep between Neptune and [`PATH_END`] (the real trajectory then
-/// dives south of the ecliptic, so its projected longitude barely changes).
-const POST_NEPTUNE_SWEEP: f64 = 0.09;
-const KNOTS: usize = 6;
+/// Encounter dates, launch first.
+const ENCOUNTERS: [f64; 5] = [LAUNCH, JUPITER_CA, SATURN_CA, URANUS_CA, NEPTUNE_CA];
 
-/// Monotone piecewise-cubic Hermite curve `(r(day), φ(day))` through the encounters.
+/// One leg: its conic's departure state.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Leg {
+    t0: f64,
+    r0: [f64; 2],
+    v0: [f64; 2],
+}
+
+/// Where the spacecraft is: `(r AU, φ rad, speed AU/day)`.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub(crate) struct Fix {
+    pub r: f64,
+    pub phi: f64,
+    pub speed: f64,
+}
+
+/// Samples of the precomputed path, uniform in mission day from launch to the
+/// heliopause: the trail and the speed inset are drawn from them, so a frame solves one
+/// Kepler problem (the craft's own position) instead of hundreds.
+const TABLE_N: usize = 1500;
+const TABLE_STEP: f64 = (HELIOPAUSE - LAUNCH) / (TABLE_N - 1) as f64;
+
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Path {
-    day: [f64; KNOTS],
-    r: [f64; KNOTS],
-    phi: [f64; KNOTS],
-    mr: [f64; KNOTS],
-    mphi: [f64; KNOTS],
-}
-
-/// Fritsch–Butland tangents: a weighted harmonic mean of neighbouring secants, zero at
-/// extrema, never more than 3× either secant, so each cubic piece is monotone.
-/// `m0_frac` sets the start slope as a fraction of the first secant (must be in [0, 3]).
-fn tangents(x: &[f64; KNOTS], y: &[f64; KNOTS], m0_frac: f64) -> [f64; KNOTS] {
-    let h = |i: usize| x[i + 1] - x[i];
-    let delta = |i: usize| (y[i + 1] - y[i]) / h(i);
-    std::array::from_fn(|i| {
-        if i == 0 {
-            m0_frac * delta(0)
-        } else if i == KNOTS - 1 {
-            delta(KNOTS - 2)
-        } else {
-            let (d0, d1) = (delta(i - 1), delta(i));
-            if d0 * d1 <= 0.0 {
-                0.0
-            } else {
-                // Scipy's PCHIP weights: w₁ = 2h₁ + h₀ on δ₀, w₂ = h₁ + 2h₀ on δ₁.
-                let (h0, h1) = (h(i - 1), h(i));
-                3.0 * (h0 + h1) / ((2.0 * h1 + h0) / d0 + (h1 + 2.0 * h0) / d1)
-            }
-        }
-    })
-}
-
-fn hermite(s: f64, h: f64, y0: f64, y1: f64, m0: f64, m1: f64) -> f64 {
-    let (s2, s3) = (s * s, s * s * s);
-    (2.0 * s3 - 3.0 * s2 + 1.0) * y0
-        + (s3 - 2.0 * s2 + s) * h * m0
-        + (-2.0 * s3 + 3.0 * s2) * y1
-        + (s3 - s2) * h * m1
+    /// The four Lambert legs, then the post-Neptune cruise.
+    legs: [Leg; 5],
+    table: Box<[Fix]>,
 }
 
 impl Path {
     pub(crate) fn new() -> Self {
-        let day = [
-            LAUNCH, JUPITER_CA, SATURN_CA, URANUS_CA, NEPTUNE_CA, PATH_END,
-        ];
-        let mut r = [0.0; KNOTS];
-        let mut phi = [0.0; KNOTS];
-        for k in 0..5 {
-            r[k] = BODIES[k].a;
-            let lon = longitude(k, day[k]);
-            // Unwrap so φ increases along the tour: each leg is its prograde arc.
-            phi[k] = if k == 0 {
-                lon.rem_euclid(TAU)
-            } else {
-                phi[k - 1] + (lon - phi[k - 1]).rem_euclid(TAU)
+        let mut legs = [Leg {
+            t0: 0.0,
+            r0: [0.0; 2],
+            v0: [0.0; 2],
+        }; 5];
+        for (k, leg) in legs.iter_mut().take(4).enumerate() {
+            let r0 = planet_pos(k, ENCOUNTERS[k]);
+            let r1 = planet_pos(k + 1, ENCOUNTERS[k + 1]);
+            let (v0, _) = lambert(r0, r1, ENCOUNTERS[k + 1] - ENCOUNTERS[k]);
+            *leg = Leg {
+                t0: ENCOUNTERS[k],
+                r0,
+                v0,
             };
         }
-        r[5] = r[4] + CRUISE_AU_PER_YEAR * (PATH_END - NEPTUNE_CA) / YEAR_DAYS;
-        phi[5] = phi[4] + POST_NEPTUNE_SWEEP;
-        Self {
-            // Leave Earth nearly tangentially (perihelion of the transfer orbit)…
-            mr: tangents(&day, &r, 0.2),
-            // …sweeping longitude as fast as monotonicity allows.
-            mphi: tangents(&day, &phi, 3.0),
-            day,
-            r,
-            phi,
+        legs[4] = Self::cruise();
+        let mut path = Self {
+            legs,
+            table: Box::default(),
+        };
+        path.table = (0..TABLE_N)
+            .map(|i| path.fix(LAUNCH + TABLE_STEP * i as f64))
+            .collect();
+        path
+    }
+
+    /// The post-Neptune leg: from Neptune on its encounter date at today's excess speed,
+    /// its flight-path angle (off radial, prograde) fitted by bisection so the craft is at
+    /// 119 AU on the heliopause date. More angle means a slower climb away from the Sun.
+    fn cruise() -> Leg {
+        let r0 = planet_pos(NEPTUNE, NEPTUNE_CA);
+        let v_inf = V_INF_KMS / KM_S;
+        let speed = (v_inf * v_inf + 2.0 * GM / norm(r0)).sqrt();
+        let phi = r0[1].atan2(r0[0]);
+        let leg = |gamma: f64| {
+            let (s, c) = (phi + gamma).sin_cos();
+            Leg {
+                t0: NEPTUNE_CA,
+                r0,
+                v0: [speed * c, speed * s],
+            }
+        };
+        let reach = |gamma: f64| {
+            let l = leg(gamma);
+            norm(propagate(l.r0, l.v0, HELIOPAUSE - NEPTUNE_CA).0)
+        };
+        let (mut lo, mut hi) = (0.0, 1.5);
+        for _ in 0..100 {
+            let m = 0.5 * (lo + hi);
+            if reach(m) > HELIOPAUSE_AU {
+                lo = m;
+            } else {
+                hi = m;
+            }
+        }
+        leg(0.5 * (lo + hi))
+    }
+
+    /// The spacecraft on mission day `day` (clamped to launch … heliopause).
+    pub(crate) fn fix(&self, day: f64) -> Fix {
+        let day = if day.is_nan() {
+            LAUNCH
+        } else {
+            day.clamp(LAUNCH, HELIOPAUSE)
+        };
+        let leg = &self.legs[ENCOUNTERS[1..].partition_point(|&d| d <= day)];
+        let (r, v) = propagate(leg.r0, leg.v0, day - leg.t0);
+        Fix {
+            r: norm(r),
+            phi: r[1].atan2(r[0]),
+            speed: norm(v),
         }
     }
 
-    /// `(r AU, φ rad)` on mission day `day`, clamped to the path's date range.
-    pub(crate) fn at(&self, day: f64) -> (f64, f64) {
-        let x = if day.is_nan() {
-            self.day[0]
-        } else {
-            day.clamp(self.day[0], self.day[KNOTS - 1])
-        };
-        let i = self.day[1..KNOTS - 1].partition_point(|&d| d <= x);
-        let h = self.day[i + 1] - self.day[i];
-        let s = (x - self.day[i]) / h;
-        (
-            hermite(s, h, self.r[i], self.r[i + 1], self.mr[i], self.mr[i + 1]),
-            hermite(
-                s,
-                h,
-                self.phi[i],
-                self.phi[i + 1],
-                self.mphi[i],
-                self.mphi[i + 1],
-            ),
-        )
+    /// The table's samples up to mission day `day`, then `now`, the exact fix on `day`.
+    fn history(&self, day: f64, now: Fix) -> impl Iterator<Item = Fix> + '_ {
+        let n = ((day - LAUNCH) / TABLE_STEP)
+            .floor()
+            .clamp(0.0, (TABLE_N - 1) as f64);
+        self.table[..=n as usize]
+            .iter()
+            .copied()
+            .chain(std::iter::once(now))
+    }
+
+    /// Heliocentric speed (AU/day) arriving at and leaving encounter `k` of
+    /// [`ENCOUNTERS`] (1..=4): the assist's jump (VOY-A6).
+    #[cfg(test)]
+    pub(crate) fn flyby_speeds(&self, k: usize) -> (f64, f64) {
+        let leg = &self.legs[k - 1];
+        let (_, v_in) = propagate(leg.r0, leg.v0, ENCOUNTERS[k] - leg.t0);
+        (norm(v_in), norm(self.legs[k].v0))
+    }
+
+    /// Map rotation that points the outbound cruise at the roomier screen axis: left on
+    /// a landscape canvas, down on a portrait one (the map's orientation is free; only
+    /// its handedness, prograde counter-clockwise, is kept).
+    fn view_turn(&self, landscape: bool) -> f64 {
+        let out = if landscape { PI } else { -0.5 * PI };
+        out - self.table[TABLE_N - 1].phi
     }
 }
 
 // ---------------------------------------------------------------------------------------
-// Scene clock (VOY-A3).
+// Scene clock (VOY-A3) and map (VOY-A4, VOY-A7).
 // ---------------------------------------------------------------------------------------
 
-const MISSION: f64 = 48.0;
-const EPILOGUE: f64 = 8.0;
-/// Sim seconds at launch, each encounter, and the Pale Blue Dot.
-const KEY_T: [f64; 6] = [0.0, 11.0, 20.0, 31.0, 42.0, MISSION];
+/// Sim seconds at launch, each encounter and the heliopause crossing.
+const KEY_T: [f64; 6] = [0.0, 11.0, 20.0, 31.0, 42.0, 54.0];
 const KEY_DAY: [f64; 6] = [
-    LAUNCH,
-    JUPITER_CA,
-    SATURN_CA,
-    URANUS_CA,
-    NEPTUNE_CA,
-    PALE_BLUE_DOT,
+    LAUNCH, JUPITER_CA, SATURN_CA, URANUS_CA, NEPTUNE_CA, HELIOPAUSE,
 ];
+/// Acts: the tour, the run out to the heliopause, a hold beyond it.
+const TOUR: f64 = 43.0;
+const OUTWARD: f64 = 11.0;
+const BEYOND: f64 = 5.0;
 /// Share of each leg's calendar that runs at a constant rate; the rest is eased, so the
 /// clock runs at 25 % of the leg average at the ends (encounters) and never stops.
 const CLOCK_LINEAR: f64 = 0.25;
 
-/// Mission day at mission sim-time `t ∈ [0, 48]` (clamped). Strictly increasing, and
-/// exactly the key date at each key time.
+/// Mission day at sim-time `t ∈ [0, 54]` (clamped). Strictly increasing, and exactly the
+/// key date at each key time.
 pub(crate) fn mission_day(t: f64) -> f64 {
     let t = if t.is_nan() {
         0.0
     } else {
-        t.clamp(0.0, MISSION)
+        t.clamp(0.0, KEY_T[5])
     };
     let i = KEY_T[1..KEY_T.len() - 1].partition_point(|&k| k <= t);
     let x = (t - KEY_T[i]) / (KEY_T[i + 1] - KEY_T[i]);
@@ -335,55 +484,130 @@ pub(crate) fn mission_day(t: f64) -> f64 {
     ease::lerp(KEY_DAY[i], KEY_DAY[i + 1], f)
 }
 
-// ---------------------------------------------------------------------------------------
-// Text (allocation-free).
-// ---------------------------------------------------------------------------------------
+/// Softening radius (AU) of the log map: keeps Earth ~¼ of the way out.
+const R0: f64 = 0.6;
+/// Heliocentric distance (AU) at the screen edge during the tour; Neptune lands at ~0.97.
+const R_MAX: f64 = 34.0;
+/// …and once the map has pulled back: the heliopause sits at ~96 % of the radius.
+const R_MAX_OUT: f64 = 150.0;
 
-/// Fixed-capacity string for `write!` in `render` without allocating.
-struct TextBuf {
-    buf: [u8; 64],
-    len: usize,
+/// Fraction of the screen radius for heliocentric distance `r` (AU) when the edge is at
+/// `r_max`: `ρ = ln(1 + r/r₀) / ln(1 + r_max/r₀)`, strictly increasing, `ρ(0) = 0`.
+pub(crate) fn rho(r: f64, r_max: f64) -> f64 {
+    (r / R0).ln_1p() / (r_max / R0).ln_1p()
 }
 
-impl TextBuf {
-    fn new() -> Self {
+/// The map edge at sim time `t`: the tour's, easing out to the heliopause's over the
+/// first 8 s of the outward act.
+pub(crate) fn map_edge(t: f64) -> f64 {
+    let u = ease::smoothstep((t - TOUR) / 8.0);
+    // Interpolate the log of the edge so the pull-back feels uniform.
+    (R_MAX.ln() + (R_MAX_OUT.ln() - R_MAX.ln()) * u).exp()
+}
+
+/// Maps heliocentric (r, φ) to fractional cell coordinates, north ecliptic pole up
+/// (prograde = counter-clockwise on screen), turned by `turn`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub(crate) struct Proj {
+    cx: f64,
+    cy: f64,
+    /// Rows at `ρ = 1`; chosen so `ρ = 1` exactly touches the nearer canvas edge.
+    scale: f64,
+    r_max: f64,
+    turn: f64,
+}
+
+impl Proj {
+    pub(crate) fn new(size: Size, r_max: f64) -> Self {
+        let cx = (f64::from(size.width()) - 1.0).max(0.0) / 2.0;
+        let cy = (f64::from(size.height()) - 1.0).max(0.0) / 2.0;
         Self {
-            buf: [0; 64],
-            len: 0,
+            cx,
+            cy,
+            scale: (cx / ASPECT).min(cy),
+            r_max,
+            turn: 0.0,
         }
     }
 
-    fn as_str(&self) -> &str {
-        // Only whole `&str` pieces are ever appended, so this cannot fail.
-        std::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    /// The map moved left, and shrunk only if that is not enough, until its rim (`ρ = 1`)
+    /// keeps a cell clear of `keep_out` (VOY-A8).
+    fn avoiding(self, keep_out: Rect) -> Self {
+        let (x0, x1) = (
+            f64::from(keep_out.x - 1),
+            f64::from(keep_out.x + keep_out.w),
+        );
+        let (y0, y1) = (
+            f64::from(keep_out.y - 1),
+            f64::from(keep_out.y + keep_out.h),
+        );
+        let clear = |cx: f64, scale: f64| {
+            // The rect's nearest point to the centre lies outside the rim's ellipse.
+            let dx = (cx.clamp(x0, x1) - cx) / (scale * ASPECT);
+            let dy = (self.cy.clamp(y0, y1) - self.cy) / scale;
+            dx * dx + dy * dy > 1.0
+        };
+        let mut scale = self.scale;
+        while scale > 1.0 {
+            if clear(self.cx, scale) {
+                return Self { scale, ..self };
+            }
+            // The rim stays a cell inside the left edge, where the cruise may point.
+            let left = scale * ASPECT + 1.0;
+            if clear(left, scale) {
+                // The smallest shift left that clears it.
+                let (mut ok, mut bad) = (left, self.cx);
+                for _ in 0..30 {
+                    let m = 0.5 * (ok + bad);
+                    if clear(m, scale) { ok = m } else { bad = m }
+                }
+                return Self {
+                    cx: ok,
+                    scale,
+                    ..self
+                };
+            }
+            scale *= 0.97;
+        }
+        self
+    }
+
+    /// Whether the canvas has more room across than down, in map units.
+    fn landscape(&self) -> bool {
+        self.cx / ASPECT >= self.cy
+    }
+
+    /// Radius in rows of heliocentric distance `r`.
+    fn rows(&self, r: f64) -> f64 {
+        rho(r, self.r_max) * self.scale
+    }
+
+    pub(crate) fn screen(&self, r: f64, phi: f64) -> (f64, f64) {
+        let d = self.rows(r);
+        let (s, c) = (phi + self.turn).sin_cos();
+        (self.cx + d * c * ASPECT, self.cy - d * s)
     }
 }
 
-impl fmt::Write for TextBuf {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let end = self.len + s.len();
-        if end > self.buf.len() {
-            return Err(fmt::Error);
-        }
-        self.buf[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
+// ---------------------------------------------------------------------------------------
+// Text.
+// ---------------------------------------------------------------------------------------
 
 /// First option that fits `width` with a one-cell margin each side, or none: captions
 /// are shortened or skipped, never clipped mid-word.
-fn pick<'a>(options: &[&'a str], width: u16) -> Option<&'a str> {
-    let room = usize::from(width).saturating_sub(2);
+fn pick<'a>(options: &[&'a str], width: i32) -> Option<&'a str> {
+    let room = usize::try_from(width - 2).unwrap_or(0);
     options
         .iter()
         .copied()
         .find(|s| !s.is_empty() && s.chars().count() <= room)
 }
 
-fn caption(canvas: &mut Canvas, y: i32, options: &[&str], level: u8) {
-    if let Some(s) = pick(options, canvas.size().width()) {
-        draw::text_centered(canvas, y, s, Ink::new(Role::Text, level));
+/// The first option that fits, centred on row `y` of the columns `0..right`.
+fn caption(canvas: &mut Canvas, y: i32, right: i32, options: &[&str], level: u8) {
+    if let Some(s) = pick(options, right) {
+        let x = (right - s.chars().count() as i32) / 2;
+        canvas.text(x, y, s, Ink::new(Role::Text, level));
     }
 }
 
@@ -416,105 +640,373 @@ const CAPTIONS: [[&str; 3]; 5] = [
         "Neptune",
     ],
 ];
-const EPILOGUE_LINES: [[&str; 3]; 3] = [
+/// The real crossings, as measured; the readout above shows the model's distance.
+const OUTWARD_LINES: [[&str; 3]; 2] = [
     [
-        "Pale Blue Dot - Voyager 1 looks back, 1990-02-14",
-        "Pale Blue Dot, 1990-02-14",
-        "Pale Blue Dot",
+        "Termination shock 2007-08-30 - 84 AU",
+        "Termination shock 2007",
+        "Shock 2007",
     ],
     [
-        "\"That's here. That's home. That's us.\" - Carl Sagan",
-        "That's here. That's home. That's us.",
-        "That's home.",
-    ],
-    [
-        "Voyager 2 crossed the heliopause 2018-11-05 at 119 AU",
+        "Heliopause 2018-11-05 - 119 AU - interstellar space",
         "Heliopause 2018-11-05, 119 AU",
         "Heliopause 2018",
     ],
+];
+/// Ring labels, longest first.
+const RING_LABELS: [[&str; 2]; 2] = [
+    ["termination shock 84 AU", "shock"],
+    ["heliopause 119 AU", "heliopause"],
 ];
 
 // ---------------------------------------------------------------------------------------
 // Scene.
 // ---------------------------------------------------------------------------------------
 
-/// Seconds (sim) a flyby flash ring expands for.
+/// Seconds (sim) a flyby flash lasts.
 const FLASH: f64 = 2.0;
-/// Caption window around each encounter, sim seconds.
+/// Caption window around each encounter, sim seconds, cut short once the mission clock
+/// is `CAPTION_YEARS` past the event (it races after Neptune).
 const CAPTION_BEFORE: f64 = 0.8;
 const CAPTION_AFTER: f64 = 4.5;
-const TRAIL_SAMPLES: usize = 320;
+const CAPTION_YEARS: f64 = 1.5;
 /// One background star per this many cells.
-const CELLS_PER_STAR: usize = 45;
+const CELLS_PER_STAR: usize = 40;
+/// Speed axis of the inset (km/s) and its log distance axis (AU).
+const INSET_V_MAX: f64 = 42.0;
+const INSET_R: (f64, f64) = (0.8, 130.0);
+/// Inset size in cells, and the smallest canvas that gets one.
+const INSET_W: i32 = 40;
+const INSET_H: i32 = 10;
+const INSET_MIN: (u16, u16) = (110, 30);
 
-const SUN: Glyph = Glyph::new('☉', 'O');
-const ORBIT: Glyph = Glyph::new('·', '.');
-const TRAIL: Glyph = Glyph::new('•', 'o');
-const CRAFT: Glyph = Glyph::new('✦', '+');
-const RING: Glyph = Glyph::new('∘', '*');
-const STAR: Glyph = Glyph::ascii('.');
+/// Inset x axis: log distance across `INSET_R`.
+fn inset_x(r: f64) -> f64 {
+    (r / INSET_R.0).max(1.0).ln() / (INSET_R.1 / INSET_R.0).ln()
+}
 
-/// Orbit of `r` rows around the Sun as a dotted ellipse (~one dot per two cells of arc),
-/// lighter than a solid outline so the trail stands out.
-fn dotted_orbit(canvas: &mut Canvas, proj: Proj, r: f64, ink: Ink) {
-    if !(r.is_finite() && r > 0.0) {
-        return;
+/// The encounter (0 = launch … 4 = Neptune) whose caption window holds sim time `t`.
+fn encounter_at(t: f64) -> Option<usize> {
+    (0..5).find(|&k| {
+        let before = if k == 0 { 0.0 } else { CAPTION_BEFORE };
+        (-before..CAPTION_AFTER).contains(&(t - KEY_T[k]))
+            && mission_day(t) < KEY_DAY[k] + CAPTION_YEARS * YEAR_DAYS
+    })
+}
+
+/// A cell rectangle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Rect {
+    x: i32,
+    y: i32,
+    w: i32,
+    h: i32,
+}
+
+impl Rect {
+    /// Every cell the inset's text uses around its plot: the axis's `40 km/s` a column to
+    /// the left and the giants' initials two rows below.
+    fn keep_out(self) -> Rect {
+        Rect {
+            x: self.x - 1,
+            y: self.y,
+            w: self.w + 2,
+            h: self.h + 2,
+        }
     }
-    // Mean of the ellipse's semi-axes (r rows, r·ASPECT columns) approximates arc length.
-    let arc = TAU * r * (1.0 + ASPECT) / 2.0;
-    let n = ((arc / 2.0).ceil() as usize).clamp(8, 4096);
-    for i in 0..n {
-        let th = TAU * i as f64 / n as f64;
-        plot(
-            canvas,
-            proj.cx + r * ASPECT * th.cos(),
-            proj.cy - r * th.sin(),
-            ORBIT,
-            ink,
-        );
+
+    fn holds(&self, x: i32, y: i32) -> bool {
+        (self.x..self.x + self.w).contains(&x) && (self.y..self.y + self.h).contains(&y)
     }
 }
 
 #[derive(Debug)]
 pub struct VoyagerJourney {
-    /// Sim time within the current cycle, `[0, MISSION + EPILOGUE)`.
+    /// Sim time within the current cycle.
     t: f64,
     timeline: Timeline,
     path: Path,
+    size: Size,
     proj: Proj,
-    /// `(x, y, level)` of background stars, rebuilt on resize.
+    /// The Sun's tone-mapped glow as `(x, y, ink)` pixels, built in `resize`.
+    sun: Vec<(i32, i32, Ink)>,
+    px: Pixels,
+    dots: Dots,
+    /// Background stars as dot coordinates and levels, rebuilt on resize.
     stars: Vec<(i32, i32, u8)>,
+    inset: Option<Rect>,
+    /// The mission day and the craft's fix this frame, set by `rasterise`.
+    today: f64,
+    fix: Fix,
 }
 
 impl VoyagerJourney {
     fn new() -> Self {
         Self {
             t: 0.0,
-            timeline: Timeline::new(&[("mission", MISSION), ("epilogue", EPILOGUE)]),
+            timeline: Timeline::new(&[("tour", TOUR), ("outward", OUTWARD), ("beyond", BEYOND)]),
             path: Path::new(),
+            size: Size::new(1, 1),
             proj: Proj::default(),
+            px: Pixels::default(),
+            dots: Dots::default(),
+            sun: Vec::new(),
             stars: Vec::new(),
+            inset: None,
+            today: LAUNCH,
+            fix: Fix::default(),
         }
     }
 
-    fn draw_trail(&self, canvas: &mut Canvas, today: f64, fade: f64) {
-        let mut prev: Option<(i32, i32)> = None;
-        for i in 0..=TRAIL_SAMPLES {
-            let u = i as f64 / TRAIL_SAMPLES as f64;
-            let (r, phi) = self.path.at(ease::lerp(LAUNCH, today, u));
-            let (x, y) = self.proj.screen(r, phi);
-            let p = (x.round() as i32, y.round() as i32);
-            let ink = Ink::new(Role::Structure, ((60.0 + 150.0 * u) * fade) as u8);
-            match prev {
-                Some(q) if q != p => {
-                    for (lx, ly) in geom::line(q.0, q.1, p.0, p.1).skip(1) {
-                        canvas.put(lx, ly, TRAIL, ink);
-                    }
+    /// Whether dot `(x, y)` falls in the inset's cells, which the map leaves to it.
+    fn in_inset(&self, x: f64, y: f64) -> bool {
+        self.inset.is_some_and(|r| {
+            let (cx, cy) = (x / f64::from(Dots::CELL_W), y / f64::from(Dots::CELL_H));
+            r.keep_out().holds(cx.floor() as i32, cy.floor() as i32)
+        })
+    }
+
+    /// A circle of `rows` radius around cell point `(cx, cy)` on the dot lattice, every
+    /// `stride`-th dot of ~one per dot of arc, left out of the inset (a flyby's flash can
+    /// reach past the map's rim).
+    fn ring(&mut self, cx: f64, cy: f64, rows: f64, stride: usize, ink: Ink) {
+        if !(rows.is_finite() && rows > 0.0) {
+            return;
+        }
+        let (ox, oy) = Dots::from_cells(cx + 0.5, cy + 0.5);
+        let rd = rows * f64::from(Dots::CELL_H);
+        let n = ((TAU * rd).ceil() as usize).clamp(8, 8192);
+        for i in (0..n).step_by(stride.max(1)) {
+            let (s, c) = (TAU * i as f64 / n as f64).sin_cos();
+            let (x, y) = (ox + rd * c, oy - rd * s);
+            if !self.in_inset(x, y) {
+                self.dots.plot(x, y, ink);
+            }
+        }
+    }
+
+    /// How far the heliosphere's rings have faded in (0 during the tour).
+    fn rings_shown(&self) -> f64 {
+        ease::smoothstep((self.t - TOUR - 2.0) / 3.0)
+    }
+
+    fn rasterise(&mut self) {
+        self.proj.r_max = map_edge(self.t);
+        self.today = mission_day(self.t);
+        self.fix = self.path.fix(self.today);
+        let today = self.today;
+        let proj = self.proj;
+        self.dots.clear();
+        for &(x, y, level) in &self.stars {
+            self.dots.set(x, y, Ink::new(Role::Star, level));
+        }
+        // Planet orbits: faint dotted circles.
+        for b in &BODIES {
+            self.ring(proj.cx, proj.cy, proj.rows(b.a), 3, ramp(Ramp::Ice, 0.30));
+        }
+        // The heliosphere's edges, once the map has pulled back far enough to hold them;
+        // each brightens once the craft has crossed it, the heliopause drawn denser.
+        let show = self.rings_shown();
+        if show > 0.05 {
+            for (au, when, stride) in [(SHOCK_AU, SHOCK, 4), (HELIOPAUSE_AU, HELIOPAUSE, 1)] {
+                if proj.rows(au) > proj.scale * 1.02 {
+                    continue;
                 }
-                None => canvas.put(p.0, p.1, TRAIL, ink),
-                _ => {}
+                let level = if today >= when { 0.66 } else { 0.36 };
+                self.ring(
+                    proj.cx,
+                    proj.cy,
+                    proj.rows(au),
+                    stride,
+                    ramp(Ramp::Plasma, level * show),
+                );
+            }
+        }
+        self.draw_trail(today);
+        // Flyby flashes: rings expanding from the planet (sim-time driven).
+        for k in 1..5 {
+            let age = self.t - KEY_T[k];
+            if (0.0..FLASH).contains(&age) {
+                let (x, y) = proj.screen(BODIES[k].a, longitude(k, today));
+                let u = age / FLASH;
+                let ink = ramp(Ramp::Ember, 0.9 * (1.0 - u).powf(0.7));
+                self.ring(x, y, proj.scale * (0.03 + 0.14 * u), 1, ink);
+            }
+        }
+        if let Some(rect) = self.inset {
+            self.draw_inset(rect, today);
+        }
+        // Pixels: the Sun, the planets, then the craft on top.
+        self.px.clear();
+        for &(x, y, ink) in &self.sun {
+            self.px.set(x, y, ink);
+        }
+        let small = (proj.scale / 24.0).clamp(0.45, 1.0);
+        for (k, b) in BODIES.iter().enumerate() {
+            let (x, y) = proj.screen(b.a, longitude(k, today));
+            // Each giant flares as the craft swings past it.
+            let age = self.t - KEY_T[k];
+            let flash = if k > 0 && (0.0..FLASH).contains(&age) {
+                0.25 * (1.0 - age / FLASH)
+            } else {
+                0.0
+            };
+            self.planet(k, (x + 0.5, 2.0 * y + 1.0), b.radius * small, flash);
+        }
+        let (x, y) = proj.screen(self.fix.r, self.fix.phi);
+        let (cx, cy) = ((x + 0.5).floor() as i32, (2.0 * y + 1.0).floor() as i32);
+        // The craft: a white-hot pixel in a small warm glow.
+        for (ox, oy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            self.px.set(cx + ox, cy + oy, ramp(Ramp::Ember, 0.62));
+        }
+        self.px.set(cx, cy, Ink::new(Role::Star, 255));
+    }
+
+    /// The trail from launch to `today`: an Ember line, oldest dimmest, its newest tenth
+    /// at full strength and two dots wide, so the hero path carries the frame.
+    fn draw_trail(&mut self, today: f64) {
+        let proj = self.proj;
+        let n = ((today - LAUNCH) / TABLE_STEP).max(1.0);
+        let mut prev: Option<(f64, f64)> = None;
+        for (i, f) in self.path.history(today, self.fix).enumerate() {
+            let (x, y) = proj.screen(f.r, f.phi);
+            let p = Dots::from_cells(x + 0.5, y + 0.5);
+            let u = (i as f64 / n).min(1.0);
+            let level = if u > 0.9 { 0.97 } else { 0.42 + 0.50 * u * u };
+            if let Some(q) = prev {
+                let ink = ramp(Ramp::Ember, level);
+                self.dots.line(q.0, q.1, p.0, p.1, ink);
+                if u > 0.9 {
+                    // The second dot across the segment's run.
+                    let (ox, oy) = if (p.0 - q.0).abs() > (p.1 - q.1).abs() {
+                        (0.0, 1.0)
+                    } else {
+                        (1.0, 0.0)
+                    };
+                    self.dots.line(q.0 + ox, q.1 + oy, p.0 + ox, p.1 + oy, ink);
+                }
             }
             prev = Some(p);
+        }
+    }
+
+    /// Planet `k` as a small lit disc centred on the pixel holding point `c`, brightened by
+    /// `flash`; Jupiter banded, Saturn ringed. Centred on a pixel centre, a disc of any
+    /// radius is a symmetric stamp (one pixel, a plus, a 3 × 3 square, a rounded disc),
+    /// never the tetromino a fractional centre samples out of a 2–3 pixel disc (VOY-A4).
+    fn planet(&mut self, k: usize, (cx, cy): (f64, f64), r: f64, flash: f64) {
+        let (cx, cy) = (cx.floor() + 0.5, cy.floor() + 0.5);
+        let b = &BODIES[k];
+        // Unit vector toward the Sun, for a lit and a dark half.
+        let (dx, dy) = (self.proj.cx + 0.5 - cx, 2.0 * self.proj.cy + 1.0 - cy);
+        let d = dx.hypot(dy).max(1e-9);
+        let (sx, sy) = (dx / d, dy / d);
+        let reach = r.ceil() as i32 + 4;
+        let (x0, y0) = (cx.floor() as i32, cy.floor() as i32);
+        for py in y0 - reach..=y0 + reach {
+            for px in x0 - reach..=x0 + reach {
+                let (ox, oy) = (f64::from(px) + 0.5 - cx, f64::from(py) + 0.5 - cy);
+                let q = (ox * ox + oy * oy).sqrt() / r.max(0.5);
+                let ring = k == SATURN && {
+                    let e = (ox / (2.3 * r)).powi(2) + (oy / (0.55 * r)).powi(2);
+                    (0.62..1.0).contains(&e) && !(q < 1.0 && oy < 0.0)
+                };
+                if ring {
+                    self.px.set(px, py, ramp(Ramp::Ember, 0.58 + flash));
+                } else if q < 1.0 || (r < 1.0 && ox.abs() < 0.5 && oy.abs() < 0.5) {
+                    let lit = 0.5 + 0.5 * ((ox * sx + oy * sy) / r.max(0.5)).clamp(-1.0, 1.0);
+                    let band = if k == JUPITER && (py - y0).rem_euclid(2) == 1 {
+                        -0.14
+                    } else {
+                        0.0
+                    };
+                    // Kept below the Sun's white-hot core, the brightest pixel in the map.
+                    let level = (b.level * (0.55 + 0.45 * lit) + band + flash).min(0.95);
+                    self.px.set(px, py, ramp(b.ramp, level));
+                }
+            }
+        }
+    }
+
+    /// The speed inset: heliocentric speed against (log) distance, with the Sun's escape
+    /// speed dotted in; each flyby is a vertical jump (VOY-A6).
+    fn draw_inset(&mut self, rect: Rect, today: f64) {
+        let (x0, y0) = Dots::from_cells(f64::from(rect.x), f64::from(rect.y + 1));
+        let (x1, y1) = Dots::from_cells(f64::from(rect.x + rect.w), f64::from(rect.y + rect.h));
+        let at = |r: f64, v_kms: f64| {
+            (
+                x0 + (x1 - x0) * inset_x(r),
+                y1 - (y1 - y0) * (v_kms / INSET_V_MAX).clamp(0.0, 1.0),
+            )
+        };
+        let axis = ramp(Ramp::Ice, 0.30);
+        self.dots.line(x0, y1, x1, y1, axis);
+        self.dots.line(x0, y0, x0, y1, axis);
+        // Escape speed, dotted.
+        let n = 160;
+        for i in (0..=n).step_by(2) {
+            let r = INSET_R.0 * (INSET_R.1 / INSET_R.0).powf(f64::from(i) / f64::from(n));
+            let (x, y) = at(r, escape_speed(r) * KM_S);
+            self.dots.plot(x, y, ramp(Ramp::Ice, 0.55));
+        }
+        let mut prev: Option<(f64, f64)> = None;
+        for f in self.path.history(today, self.fix) {
+            let p = at(f.r, f.speed * KM_S);
+            if let Some(q) = prev {
+                self.dots.line(q.0, q.1, p.0, p.1, ramp(Ramp::Ember, 0.85));
+            }
+            prev = Some(p);
+        }
+        if let Some((x, y)) = prev {
+            self.dots.plot(x, y, Ink::new(Role::Star, 255));
+            self.dots.plot(x + 1.0, y, Ink::new(Role::Star, 255));
+        }
+    }
+
+    fn fit_inset(size: Size) -> Option<Rect> {
+        (size.width() >= INSET_MIN.0 && size.height() >= INSET_MIN.1).then(|| Rect {
+            x: i32::from(size.width()) - INSET_W - 2,
+            y: 1,
+            w: INSET_W,
+            h: INSET_H,
+        })
+    }
+
+    /// Initials beside the planets, and the heliosphere rings' names beside their
+    /// right-hand edge, off the text rows, the title row and the inset.
+    fn draw_labels(&self, canvas: &mut Canvas) {
+        let (w, h) = (i32::from(self.size.width()), i32::from(self.size.height()));
+        let free = |x: i32, y: i32, len: i32| {
+            (2..h - 1).contains(&y)
+                && x >= 0
+                && x + len < w
+                && self
+                    .inset
+                    .is_none_or(|r| x + len < r.x || y > r.y + r.h + 1)
+        };
+        let proj = self.proj;
+        let today = self.today;
+        let small = (proj.scale / 24.0).clamp(0.45, 1.0);
+        for (k, b) in BODIES.iter().enumerate() {
+            let (x, y) = proj.screen(b.a, longitude(k, today));
+            let lx = (x + 0.5 + b.radius * small).round() as i32 + 1;
+            let ly = y.round() as i32;
+            if free(lx, ly, 1) {
+                canvas.text(lx, ly, b.initial, Ink::new(Role::Text, 150));
+            }
+        }
+        let show = self.rings_shown();
+        if show < 0.5 || proj.rows(HELIOPAUSE_AU) > proj.scale * 1.02 {
+            return;
+        }
+        let edge = (proj.cx + proj.rows(HELIOPAUSE_AU) * ASPECT).round() as i32 + 2;
+        let cy = proj.cy.round() as i32;
+        for (labels, (dy, level)) in RING_LABELS.iter().zip([(1, 0.36), (-1, 0.66)]) {
+            if let Some(s) = pick(labels, w - edge + 1)
+                && free(edge, cy + dy, s.len() as i32)
+            {
+                canvas.text(edge, cy + dy, s, ramp(Ramp::Plasma, level));
+            }
         }
     }
 }
@@ -531,183 +1023,151 @@ impl Generator for VoyagerJourney {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        self.proj = Proj::new(size);
-        let (w, h) = (i32::from(size.width()), i32::from(size.height()));
-        self.stars.clear();
-        if w > 0 && h > 0 {
-            let n = size.area() / CELLS_PER_STAR;
-            self.stars.extend((0..n).map(|_| {
-                (
-                    ctx.rng.random_range(0..w),
-                    ctx.rng.random_range(0..h),
-                    ctx.rng.random_range(35..110u8),
-                )
-            }));
+        self.size = size;
+        self.proj = Proj::new(size, map_edge(self.t));
+        self.proj.turn = self.path.view_turn(self.proj.landscape());
+        self.inset = Self::fit_inset(size);
+        if let Some(rect) = self.inset {
+            self.proj = self.proj.avoiding(rect.keep_out());
         }
+        self.px.resize(size);
+        self.dots.resize(size);
+        // The Sun: a point source with a soft halo, tone-mapped once per resize (asinh, so
+        // a white-hot core fades through Ember into the dark within ~6 % of the map
+        // radius) and stamped onto the pixels every frame. The core is the top of the
+        // Ember ramp, the brightest ink of every theme (in mono a 5800 K blackbody would
+        // read mid-grey).
+        let tone = Tone::asinh(0.05, 3.2);
+        let (sx, sy) = (self.proj.cx + 0.5, 2.0 * self.proj.cy + 1.0);
+        let reach = (self.proj.scale * 0.14).max(1.0);
+        let core = (reach / 6.0).max(0.4);
+        self.sun.clear();
+        for y in (sy - reach).floor() as i32..=(sy + reach).ceil() as i32 {
+            for x in (sx - reach).floor() as i32..=(sx + reach).ceil() as i32 {
+                let d = (f64::from(x) + 0.5 - sx).hypot(f64::from(y) + 0.5 - sy);
+                // A pixel gathers four dots' worth of the halo profile.
+                let v = 4.0 / (1.0 + (d / core).powi(2)) * (1.0 - d / reach).max(0.0);
+                // The pixels at the centre are the white-hot core itself.
+                let level = if d < 0.75 { 255 } else { tone.level(v as f32) };
+                if level > 0 {
+                    self.sun
+                        .push((x, y, ramp(Ramp::Ember, f64::from(level) / 255.0)));
+                }
+            }
+        }
+        let dot = self.dots.dot_size();
+        let n = size.area() / CELLS_PER_STAR;
+        self.stars.clear();
+        self.stars.extend((0..n).map(|_| {
+            (
+                ctx.rng.random_range(0..i32::from(dot.width())),
+                ctx.rng.random_range(0..i32::from(dot.height())),
+                ctx.rng.random_range(30..120u8),
+            )
+        }));
+        let inset = self.inset.map(Rect::keep_out);
+        self.stars.retain(|&(x, y, _)| {
+            inset.is_none_or(|r| !r.holds(x / Dots::CELL_W, y / Dots::CELL_H))
+        });
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         if dt.is_finite() && dt > 0.0 {
             self.t = geom::wrap(self.t + dt, self.timeline.total());
         }
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let (w, h) = (canvas.size().width(), canvas.size().height());
+        let (w, h) = (
+            i32::from(canvas.size().width()),
+            i32::from(canvas.size().height()),
+        );
         if w == 0 || h == 0 {
             return;
         }
-        let beat = self.timeline.at(self.t);
-        let epilogue = beat.index == 1;
-        // Epilogue: everything but Earth fades to a whisper over 2 s.
-        let fade = if epilogue {
-            1.0 - 0.65 * ease::smoothstep(beat.local / 2.0)
-        } else {
-            1.0
-        };
-        let today = mission_day(if epilogue { MISSION } else { self.t });
-        let proj = self.proj;
-
-        for &(x, y, level) in &self.stars {
-            canvas.put(x, y, STAR, Ink::new(Role::Star, level));
-        }
-        for b in &BODIES {
-            dotted_orbit(
-                canvas,
-                proj,
-                rho(b.a) * proj.scale,
-                Ink::new(Role::Dim, (90.0 * fade) as u8),
-            );
-        }
-        canvas.put(
-            proj.cx.round() as i32,
-            proj.cy.round() as i32,
-            SUN,
-            Ink::new(Role::Sun, 255),
-        );
-
-        self.draw_trail(canvas, today, fade);
-
-        // Flyby flashes: expanding rings around the planet (sim-time driven).
-        if !epilogue {
-            for k in 1..5 {
-                let age = self.t - KEY_T[k];
-                if (0.0..FLASH).contains(&age) {
-                    let (px, py) = proj.screen(BODIES[k].a, longitude(k, today));
-                    let u = age / FLASH;
-                    let level = (255.0 * (1.0 - u).powf(0.7)) as u8;
-                    // Rings scale with the map: ~5 % → 25 % of the screen radius.
-                    let outer = proj.scale * (0.05 + 0.2 * u);
-                    for (r, dim) in [(outer.max(0.5), 1.0), ((0.5 * outer).max(0.3), 0.6)] {
-                        draw::orbit(
-                            canvas,
-                            px,
-                            py,
-                            r,
-                            RING,
-                            Ink::new(Role::Hot, (f64::from(level) * dim) as u8),
-                        );
-                    }
-                }
-            }
-        }
-
-        // Spacecraft, then planets on top so each planet stays visible at its flyby.
-        let (r, phi) = self.path.at(today);
-        let (sx, sy) = proj.screen(r, phi);
-        if epilogue && beat.local > 1.0 {
-            // Looking back: a faint dotted sight-line from the spacecraft to Earth.
-            let (ex, ey) = proj.screen(BODIES[EARTH].a, longitude(EARTH, today));
-            let ink = Ink::new(
-                Role::Cold,
-                (70.0 * ease::smoothstep(beat.local - 1.0)) as u8,
-            );
-            let (x0, y0) = (sx.round() as i32, sy.round() as i32);
-            for (i, (x, y)) in geom::line(x0, y0, ex.round() as i32, ey.round() as i32).enumerate()
-            {
-                if i % 3 == 1 {
-                    canvas.put(x, y, ORBIT, ink);
-                }
-            }
-        }
-        let blink = !epilogue || (beat.local * 2.0).fract() < 0.6;
-        if blink {
-            plot(canvas, sx, sy, CRAFT, Ink::new(Role::Accent, 255));
-        }
-        for (k, b) in BODIES.iter().enumerate() {
-            let (px, py) = proj.screen(b.a, longitude(k, today));
-            let ink = if epilogue && k == EARTH {
-                Ink::new(Role::Cold, 255)
-            } else if epilogue {
-                Ink::new(Role::Planet, (200.0 * fade) as u8)
-            } else if k == EARTH || today >= KEY_DAY[k] {
-                Ink::new(Role::Planet, 255)
+        self.dots.blit(canvas);
+        self.px.blit(canvas, |_, _, top, bottom| {
+            let ink = if top.role == Role::Background {
+                bottom
             } else {
-                Ink::new(Role::Planet, 190)
+                top
             };
-            // Only where Earth's orbit is roomy enough that the ring stays off the Sun.
-            if epilogue && k == EARTH && beat.local > 1.0 && proj.scale >= 8.0 {
-                // The pale blue dot: a slow breathing ring around Earth.
-                let pulse = 0.5 + 0.5 * (TAU * (beat.local - 1.0) / 2.5).sin();
-                draw::orbit(
-                    canvas,
-                    px,
-                    py,
-                    1.0 + 0.6 * pulse,
-                    RING,
-                    Ink::new(Role::Cold, (90.0 + 120.0 * pulse) as u8),
-                );
+            match ink.role {
+                Role::Background => None,
+                _ if ink.level > 245 => Some(('O', ink)),
+                _ if ink.level > 150 => Some(('o', ink)),
+                _ => Some(('.', ink)),
             }
-            plot(canvas, px, py, b.glyph, ink);
+        });
+        self.draw_labels(canvas);
+        let today = self.today;
+        readout(canvas, today, self.fix);
+        // Captions centre in the columns left of the inset.
+        let right = self.inset.map_or(w, |r| r.x - 1);
+        if let Some(rect) = self.inset {
+            let dim = Ink::new(Role::Text, 110);
+            canvas.text(rect.x, rect.y, "heliocentric speed", dim);
+            canvas.text(
+                rect.x + rect.w - 9,
+                rect.y + 2,
+                "escape",
+                Ink::new(Role::Text, 80),
+            );
+            canvas.text(rect.x + rect.w - 3, rect.y + rect.h - 1, "AU", dim);
+            canvas.text(rect.x + 1, rect.y + 1, "40 km/s", dim);
+            // The four giants' distances under the axis.
+            for b in &BODIES[1..] {
+                let x = f64::from(rect.x) + f64::from(rect.w) * inset_x(b.a);
+                canvas.text(x.round() as i32, rect.y + rect.h + 1, b.initial, dim);
+            }
         }
+        if h < 3 {
+            return;
+        }
+        if let Some(k) = encounter_at(self.t) {
+            caption(canvas, 1, right, &CAPTIONS[k], 255);
+        } else if self.timeline.at(self.t).index > 0 {
+            // The shock's line from a year before the craft reaches it until the caption
+            // window closes; the heliopause's from the crossing, with the title's caption.
+            let shock = (SHOCK - YEAR_DAYS..SHOCK + CAPTION_YEARS * YEAR_DAYS).contains(&today);
+            let line = if today >= HELIOPAUSE {
+                Some(&OUTWARD_LINES[1])
+            } else {
+                shock.then_some(&OUTWARD_LINES[0])
+            };
+            if let Some(text) = line {
+                caption(canvas, 1, right, text, 235);
+            }
+        }
+    }
 
-        // Text last, stacked from the top: in the real 1977–89 geometry Uranus, Neptune
-        // and the outbound spacecraft all sit near φ ≈ 250–290° (bottom of the map), so
-        // the top rows only ever cross faint orbit dots. Captions need a row of their own
-        // below the readout; on very short canvases they are skipped.
-        readout(canvas, today, r);
-        if epilogue {
-            let l = beat.local;
-            // (start s, minimum canvas height): extra lines only where the map has room.
-            let lines = [(0.5, 3), (2.5, 14), (5.0, 18)];
-            for (row, (&(start, min_h), text)) in lines.iter().zip(&EPILOGUE_LINES).enumerate() {
-                if l > start && h >= min_h {
-                    caption(canvas, row as i32 + 1, text, [255, 220, 170][row]);
-                }
-            }
-        } else {
-            let active = (0..5).find(|&k| {
-                let age = self.t - KEY_T[k];
-                let before = if k == 0 { 0.0 } else { CAPTION_BEFORE };
-                (-before..CAPTION_AFTER).contains(&age)
-            });
-            if let Some(k) = active
-                && h >= 3
-            {
-                caption(canvas, 1, &CAPTIONS[k], 255);
-            }
+    fn caption(&self) -> Option<&'static str> {
+        match encounter_at(self.t) {
+            Some(k) if k > 0 => Some(ACTS[k - 1]),
+            _ if self.timeline.at(self.t).index == 0 => None,
+            // By date: inside the heliosphere until the craft crosses the heliopause.
+            _ if mission_day(self.t) < HELIOPAUSE => Some(ACTS[4]),
+            _ => Some(ACTS[5]),
         }
     }
 }
 
-/// Top-left date / distance readout, shortened to fit.
-fn readout(canvas: &mut Canvas, today: f64, r: f64) {
-    let (mut long, mut mid, mut short) = (TextBuf::new(), TextBuf::new(), TextBuf::new());
-    let mut date = TextBuf::new();
+/// Top-left date / distance / speed readout, shortened to fit.
+fn readout(canvas: &mut Canvas, today: f64, fix: Fix) {
+    let mut date = StackText::<16>::new();
     if write_date(&mut date, today).is_err() {
         return;
     }
     let d = date.as_str();
-    let ok = write!(long, "VOYAGER 2  {d}  {r:.1} AU").is_ok()
-        && write!(mid, "{d}  {r:.1} AU").is_ok()
-        && write!(short, "{d}").is_ok();
-    if !ok {
-        return;
-    }
-    if let Some(s) = pick(
-        &[long.as_str(), mid.as_str(), short.as_str()],
-        canvas.size().width(),
-    ) {
+    let (r, v) = (fix.r, fix.speed * KM_S);
+    let mut long = StackText::<64>::new();
+    let mut mid = StackText::<32>::new();
+    let _ = write!(long, "VOYAGER 2  {d}  {r:.1} AU  {v:.1} km/s");
+    let _ = write!(mid, "{d}  {r:.1} AU");
+    let width = i32::from(canvas.size().width());
+    if let Some(s) = pick(&[long.as_str(), mid.as_str(), d], width) {
         canvas.text(1, 0, s, Ink::new(Role::Text, 200));
     }
 }
@@ -715,6 +1175,7 @@ fn readout(canvas: &mut Canvas, today: f64, r: f64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::f64::consts::PI;
 
     const ENCOUNTER_DATES: [&str; 5] = [
         "1977-08-20",
@@ -736,59 +1197,49 @@ mod tests {
         let path = Path::new();
         for k in 0..5 {
             let day = KEY_DAY[k];
-            let (r, phi) = path.at(day);
+            let f = path.fix(day);
+            let p = planet_pos(k, day);
             let (a, lon) = (BODIES[k].a, longitude(k, day));
-            assert!((r - a).abs() < 1e-9, "encounter {k}: r {r} vs a {a}");
-            let dphi = (phi - lon).rem_euclid(TAU);
-            assert!(
-                dphi.min(TAU - dphi) < 1e-9,
-                "encounter {k}: φ {phi} vs {lon}"
-            );
-            // The scene clock lands exactly on the encounter day at the encounter time.
+            let miss = (f.r * f.phi.cos() - p[0]).hypot(f.r * f.phi.sin() - p[1]);
+            assert!(miss < 1e-6 * a, "encounter {k}: {miss} AU off");
             assert_eq!(mission_day(KEY_T[k]), day, "clock at encounter {k}");
             for (w, h) in SIZES {
-                let p = Proj::new(Size::new(w, h));
-                let (sx, sy) = p.screen(r, phi);
-                let (px, py) = p.screen(a, lon);
-                let d = ((sx - px).powi(2) + (sy - py).powi(2)).sqrt();
-                assert!(d < 0.5, "encounter {k} at {w}x{h}: {d} cells apart");
+                let pr = Proj::new(Size::new(w, h), R_MAX);
+                let (sx, sy) = pr.screen(f.r, f.phi);
+                let (px, py) = pr.screen(a, lon);
+                assert!((sx - px).hypot(sy - py) < 0.5, "encounter {k} at {w}x{h}");
             }
         }
     }
 
     #[test]
-    fn voy_a1_path_is_smooth_with_monotone_r_and_prograde_phi() {
+    fn voy_a1_path_is_continuous_outbound_and_prograde() {
         let path = Path::new();
-        let (d0, d1) = (KEY_DAY[0], KEY_DAY[5]);
-        let n = 4000;
-        let mut prev = path.at(d0);
+        let n = 6000;
+        let mut prev = path.fix(LAUNCH);
         for i in 1..=n {
-            let day = d0 + (d1 - d0) * f64::from(i) / f64::from(n);
-            let cur = path.at(day);
-            assert!(cur.0 >= prev.0, "r not monotone at day {day}");
-            assert!(cur.1 >= prev.1, "φ not prograde at day {day}");
-            // No jumps: a step of ~1.1 days moves < 0.05 AU and < 1°.
-            assert!(cur.0 - prev.0 < 0.05 && cur.1 - prev.1 < 1f64.to_radians());
+            let day = LAUNCH + (HELIOPAUSE - LAUNCH) * f64::from(i) / f64::from(n);
+            let cur = path.fix(day);
+            let dphi = geom::wrap_angle(cur.phi - prev.phi);
+            // Outbound (within 1 % while leaving Earth's perihelion) and prograde.
+            assert!(cur.r >= prev.r * 0.99, "r fell at day {day}");
+            assert!(dphi >= -1e-9, "retrograde at day {day}");
+            assert!(
+                dphi < 4f64.to_radians() && (cur.r - prev.r).abs() < 0.2,
+                "jump at {day}"
+            );
             prev = cur;
-        }
-        // Each leg sweeps a sensible prograde arc (< one revolution).
-        for k in 0..4 {
-            let sweep = path.at(KEY_DAY[k + 1]).1 - path.at(KEY_DAY[k]).1;
-            assert!(sweep > 0.0 && sweep < TAU, "leg {k} sweep {sweep}");
         }
     }
 
     #[test]
     fn voy_a2_planet_periods_follow_kepler_and_match_real_within_1_percent() {
-        for (i, b) in BODIES.iter().enumerate() {
+        // Real sidereal periods (days), NASA planetary fact sheets.
+        let real = [365.256, 4_332.59, 10_759.22, 30_688.5, 60_182.0];
+        for (i, (b, real)) in BODIES.iter().zip(real).enumerate() {
             let p = period_days(b.a);
-            let err = (p - b.real_period).abs() / b.real_period;
-            assert!(
-                err < 0.01,
-                "body {i}: model {p} d vs real {} d",
-                b.real_period
-            );
-            // The longitude function actually advances at 2π / P.
+            let err = (p - real).abs() / real;
+            assert!(err < 0.01, "body {i}: model {p} d vs real {real} d");
             let rate = longitude(i, 1000.0) - longitude(i, 0.0);
             assert!((rate / 1000.0 - TAU / p).abs() < 1e-12, "body {i} rate");
             for b2 in &BODIES {
@@ -801,32 +1252,28 @@ mod tests {
     #[test]
     fn voy_a3_calendar_conversion_round_trips_and_is_exact_at_encounters() {
         assert_eq!(days_from_civil(2000, 1, 1), 0);
-        assert_eq!(days_from_civil(1970, 1, 1), -10_957);
         assert_eq!(days_from_civil(1977, 8, 20), -8_169);
-        assert_eq!(civil_from_days(-8_169), (1977, 8, 20));
         assert_eq!(civil_from_days(days_from_civil(1980, 2, 29)), (1980, 2, 29));
-        for z in -9000..-2000 {
+        for z in -9000..7000 {
             let (y, m, d) = civil_from_days(z);
             assert_eq!(days_from_civil(y, m, d), z);
         }
         for (k, want) in ENCOUNTER_DATES.iter().enumerate() {
             assert_eq!(date_str(mission_day(KEY_T[k])), *want, "encounter {k}");
         }
-        assert_eq!(date_str(mission_day(KEY_T[5])), "1990-02-14");
+        assert_eq!(date_str(mission_day(KEY_T[5])), "2018-11-05");
     }
 
     #[test]
     fn voy_a3_mission_clock_is_strictly_monotone_and_slows_at_encounters() {
         let mut prev = mission_day(0.0);
-        let n = 48 * 240;
+        let n = 54 * 240;
         for i in 1..=n {
-            let t = 48.0 * f64::from(i) / f64::from(n);
+            let t = 54.0 * f64::from(i) / f64::from(n);
             let d = mission_day(t);
             assert!(d > prev, "clock not strictly increasing at t={t}");
             prev = d;
         }
-        // Either side of each planet encounter the calendar runs at well under the
-        // average rate of that leg.
         let h = 0.05;
         for k in 1..5 {
             let before = (mission_day(KEY_T[k]) - mission_day(KEY_T[k] - h)) / h;
@@ -840,49 +1287,229 @@ mod tests {
 
     #[test]
     fn voy_a4_radial_map_is_strictly_monotone_and_fits_neptune() {
-        assert_eq!(rho(0.0), 0.0);
-        assert!((rho(R_MAX) - 1.0).abs() < 1e-12);
-        let mut prev = rho(0.0);
-        for i in 1..=10_000 {
-            let r = 0.01 * f64::from(i);
-            let v = rho(r);
-            assert!(v > prev, "rho not strictly increasing at {r} AU");
-            prev = v;
+        assert_eq!(rho(0.0, R_MAX), 0.0);
+        assert!((rho(R_MAX, R_MAX) - 1.0).abs() < 1e-12);
+        for r_max in [R_MAX, 70.0, R_MAX_OUT] {
+            let mut prev = 0.0;
+            for i in 1..=20_000 {
+                let v = rho(0.01 * f64::from(i), r_max);
+                assert!(v > prev, "rho not strictly increasing");
+                prev = v;
+            }
         }
-        let rn = rho(BODIES[4].a);
+        let rn = rho(BODIES[NEPTUNE].a, R_MAX);
         assert!(rn < 1.0 && rn > 0.9, "Neptune at {rn} of the radius");
-        // Earth is not squashed into the Sun: well clear of the centre.
-        assert!(rho(1.0) > 0.2);
+        assert!(rho(1.0, R_MAX) > 0.2);
         for (w, h) in SIZES {
-            let p = Proj::new(Size::new(w, h));
+            let p = Proj::new(Size::new(w, h), R_MAX);
             for i in 0..360 {
-                let (x, y) = p.screen(BODIES[4].a, f64::from(i).to_radians());
-                let (x, y) = (x.round(), y.round());
-                assert!((0.0..f64::from(w)).contains(&x), "{w}x{h}: x {x}");
-                assert!((0.0..f64::from(h)).contains(&y), "{w}x{h}: y {y}");
+                let (x, y) = p.screen(BODIES[NEPTUNE].a, f64::from(i).to_radians());
+                assert!((0.0..f64::from(w)).contains(&x.round()), "{w}x{h}: x {x}");
+                assert!((0.0..f64::from(h)).contains(&y.round()), "{w}x{h}: y {y}");
             }
         }
     }
 
     #[test]
-    fn voy_a4_neptune_is_drawn_throughout_the_cycle() {
-        for (w, h) in [(200, 50), (60, 16)] {
-            let mut stage = Stage::new(build(), 3, Size::new(w, h), GlyphMode::Ascii);
-            // The scene's own frame: the title may cover Neptune low on the bottom row.
-            stage.set_title_visible(false);
-            for s in 0..56 {
-                for _ in 0..60 {
-                    stage.step(SIM_DT);
+    fn voy_a4_every_planet_is_drawn_throughout_the_tour() {
+        let mut g = VoyagerJourney::new();
+        let size = Size::new(200, 50);
+        let mut ctx = Ctx::new(3, size);
+        g.resize(size, &mut ctx);
+        for s in 0..43 {
+            g.t = f64::from(s);
+            g.rasterise();
+            let craft = g.fix;
+            let craft = g.proj.screen(craft.r, craft.phi);
+            for (k, b) in BODIES.iter().enumerate() {
+                let (x, y) = g.proj.screen(b.a, longitude(k, g.today));
+                if (x - craft.0).hypot(2.0 * (y - craft.1)) < 1.5 {
+                    // The craft is at this planet and drawn over it.
+                    continue;
                 }
-                let frame = stage.render();
-                let n = frame
-                    .cells()
-                    .iter()
-                    .filter(|c| c.ch == 'N' && c.ink.role == Role::Planet)
-                    .count();
-                assert_eq!(n, 1, "{w}x{h} at t={s}s");
+                let ink =
+                    g.px.get((x + 0.5).floor() as i32, (2.0 * y + 1.0).floor() as i32);
+                assert_eq!(
+                    ink.map(|i| i.role),
+                    Some(Role::Ramp(b.ramp)),
+                    "{k} at t={s}"
+                );
             }
         }
+    }
+
+    #[test]
+    fn voy_a4_planets_are_round_stamps_symmetric_about_their_centre() {
+        for (w, h) in [(80, 24), (200, 50), (120, 40)] {
+            let size = Size::new(w, h);
+            let mut g = VoyagerJourney::new();
+            g.resize(size, &mut Ctx::new(3, size));
+            for s in [0.0, 7.3, 18.9, 31.4] {
+                g.t = s;
+                g.rasterise();
+                let small = (g.proj.scale / 24.0).clamp(0.45, 1.0);
+                for (k, b) in BODIES.iter().enumerate() {
+                    let (x, y) = g.proj.screen(b.a, longitude(k, g.today));
+                    g.px.clear();
+                    g.planet(k, (x + 0.5, 2.0 * y + 1.0), b.radius * small, 0.0);
+                    let c = ((x + 0.5).floor() as i32, (2.0 * y + 1.0).floor() as i32);
+                    let lit = |p: (i32, i32)| g.px.get(p.0, p.1).is_some_and(|i| i != Ink::BLANK);
+                    assert!(lit(c), "{w}x{h} t {s}: planet {k} has no centre pixel");
+                    let (pw, ph) = (i32::from(w), 2 * i32::from(h));
+                    for py in 0..ph {
+                        for px in 0..pw {
+                            if !lit((px, py)) {
+                                continue;
+                            }
+                            // The whole silhouette is visible: shading only modulates it.
+                            let ink = g.px.get(px, py).unwrap();
+                            assert!(
+                                f64::from(ink.level) >= sciart_core::ink::MIN_VISIBLE_LEVEL,
+                                "{ink:?}"
+                            );
+                            // Mirror images across both axes through the centre pixel,
+                            // where they fall on screen.
+                            for m in [(2 * c.0 - px, py), (px, 2 * c.1 - py)] {
+                                let on = (0..pw).contains(&m.0) && (0..ph).contains(&m.1);
+                                assert!(
+                                    !on || lit(m),
+                                    "{w}x{h} t {s}: planet {k} lit at {px},{py} not at {m:?}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn voy_a5_each_leg_is_one_kepler_conic_that_lands_on_time() {
+        let path = Path::new();
+        for (k, leg) in path.legs[..4].iter().enumerate() {
+            let energy = |r: [f64; 2], v: [f64; 2]| 0.5 * dot(v, v) - GM / norm(r);
+            let e0 = energy(leg.r0, leg.v0);
+            let span = ENCOUNTERS[k + 1] - leg.t0;
+            for i in 1..=20 {
+                let (r, v) = propagate(leg.r0, leg.v0, span * f64::from(i) / 20.0);
+                assert!(
+                    (energy(r, v) - e0).abs() < 1e-9 * e0.abs(),
+                    "leg {k} energy"
+                );
+                // Angular momentum too.
+                let h = |r: [f64; 2], v: [f64; 2]| r[0] * v[1] - r[1] * v[0];
+                assert!((h(r, v) - h(leg.r0, leg.v0)).abs() < 1e-9 * h(leg.r0, leg.v0));
+            }
+            let (end, _) = propagate(leg.r0, leg.v0, span);
+            let target = planet_pos(k + 1, ENCOUNTERS[k + 1]);
+            assert!(
+                (end[0] - target[0]).hypot(end[1] - target[1]) < 1e-6,
+                "leg {k}"
+            );
+        }
+        // Propagation round-trips, for an ellipse and a hyperbola.
+        for v in [[0.0, 0.017], [0.0, 0.03]] {
+            let (r, w) = propagate([1.0, 0.0], v, 400.0);
+            let (back, _) = propagate(r, [-w[0], -w[1]], 400.0);
+            assert!(
+                (back[0] - 1.0).abs() < 1e-9 && back[1].abs() < 1e-9,
+                "{back:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn voy_a6_the_giants_speed_it_up_past_solar_escape() {
+        let path = Path::new();
+        for (k, name) in [(1, "Jupiter"), (2, "Saturn"), (3, "Uranus")] {
+            let (v_in, v_out) = path.flyby_speeds(k);
+            assert!(
+                v_out > v_in * 1.05,
+                "{name}: {} -> {} km/s",
+                v_in * KM_S,
+                v_out * KM_S
+            );
+        }
+        // Bound to the Sun before Jupiter, escaping after it.
+        let before = path.fix(JUPITER_CA - 30.0);
+        assert!(before.speed < escape_speed(before.r));
+        let (_, out) = path.flyby_speeds(1);
+        assert!(out > escape_speed(BODIES[JUPITER].a), "{} km/s", out * KM_S);
+        for day in [
+            SATURN_CA + 10.0,
+            URANUS_CA + 10.0,
+            NEPTUNE_CA + 10.0,
+            HELIOPAUSE,
+        ] {
+            let f = path.fix(day);
+            assert!(f.speed > escape_speed(f.r), "bound again at day {day}");
+        }
+        // It leaves at about today's 15 km/s.
+        let v = path.fix(HELIOPAUSE).speed * KM_S;
+        assert!((14.0..17.5).contains(&v), "cruise {v} km/s");
+    }
+
+    #[test]
+    fn voy_a7_it_crosses_the_heliopause_where_and_when_it_did() {
+        let path = Path::new();
+        let f = path.fix(HELIOPAUSE);
+        assert!((f.r - HELIOPAUSE_AU).abs() < 0.01, "{} AU", f.r);
+        let shock = path.fix(SHOCK).r;
+        assert!(
+            (shock - SHOCK_AU).abs() < 1.0,
+            "termination shock at {shock} AU"
+        );
+        // The map pulls back from Neptune's edge to the heliopause's.
+        assert!((map_edge(0.0) - R_MAX).abs() < 1e-9);
+        assert!((map_edge(TOUR + OUTWARD) - R_MAX_OUT).abs() < 1e-9);
+        assert!(rho(HELIOPAUSE_AU, R_MAX_OUT) < 1.0);
+        let mut prev = 0.0;
+        for i in 0..=600 {
+            let e = map_edge(f64::from(i) * 0.1);
+            assert!(e >= prev);
+            prev = e;
+        }
+    }
+
+    #[test]
+    fn voy_a8_inset_stays_top_right_and_clear_of_the_title() {
+        let mut stage = Stage::new(build(), 5, Size::new(200, 50), GlyphMode::Unicode);
+        for _ in 0..(25 * 60) {
+            stage.step(SIM_DT);
+        }
+        let frame = stage.render();
+        let rect = VoyagerJourney::fit_inset(Size::new(200, 50)).unwrap();
+        // The speed trace (Ember braille) lies inside the inset rows.
+        let trace = frame.cells().iter().enumerate().filter(|(i, c)| {
+            let (x, y) = ((i % 200) as i32, (i / 200) as i32);
+            c.ink.role == Role::Ramp(Ramp::Ember)
+                && (rect.x..rect.x + rect.w).contains(&x)
+                && (rect.y..rect.y + rect.h).contains(&y)
+        });
+        assert!(trace.count() > 10, "speed trace drawn");
+        assert!(rect.y + rect.h < 49 && rect.x > 100);
+        assert!(VoyagerJourney::fit_inset(Size::new(80, 24)).is_none());
+    }
+
+    #[test]
+    fn gen_r12_voyager_caption_names_the_assist_under_way() {
+        let mut g = VoyagerJourney::new();
+        g.t = KEY_T[2] + 1.0;
+        assert_eq!(g.caption(), Some("Saturn assist"));
+        g.t = 5.0;
+        assert_eq!(g.caption(), None);
+        // Neptune's caption ends with its mission-date window, as the clock races outward.
+        g.t = KEY_T[4] + 1.0;
+        assert_eq!(g.caption(), Some("Neptune flyby"));
+        g.t = KEY_T[4] + 4.0;
+        assert_eq!(g.caption(), Some("to the heliopause"));
+        // Inside the heliosphere until the craft crosses the heliopause.
+        g.t = TOUR + 6.0;
+        assert_eq!(g.caption(), Some("to the heliopause"));
+        g.t = KEY_T[5] - 0.2;
+        assert_eq!(g.caption(), Some("to the heliopause"));
+        g.t = KEY_T[5] + 1.0;
+        assert_eq!(g.caption(), Some("interstellar space"));
     }
 
     #[test]
@@ -898,20 +1525,200 @@ mod tests {
                 stage.render().to_lines(),
                 "{w}x{h}: static after 1 s"
             );
-            for _ in 0..(56 * 12) {
+            for _ in 0..(59 * 12) {
                 for _ in 0..5 {
                     stage.step(SIM_DT);
                 }
                 let frame = stage.render();
-                // Captions keep a one-cell margin, so text never reaches the right edge.
                 for y in 0..i32::from(h) {
                     let edge = frame.get(i32::from(w) - 1, y).unwrap();
                     assert!(
                         edge.ink.role != Role::Text,
-                        "{w}x{h}: text at the right edge on row {y}"
+                        "{w}x{h}: text at the edge, row {y}"
                     );
                 }
             }
         }
+    }
+
+    #[test]
+    fn voy_a6_neptune_slows_it_and_the_cruise_keeps_todays_speed() {
+        let path = Path::new();
+        let (v_in, v_out) = path.flyby_speeds(4);
+        let drop = (v_in - v_out) * KM_S;
+        assert!((1.0..5.0).contains(&drop), "Neptune takes {drop} km/s");
+        let v = path.fix(HELIOPAUSE).speed * KM_S;
+        assert!(
+            (14.8..16.0).contains(&v),
+            "cruise {v} km/s at the heliopause"
+        );
+    }
+
+    #[test]
+    fn voy_a7_the_craft_stays_inside_the_frame_at_the_heliopause() {
+        for (w, h) in [(200, 50), (120, 40), (100, 30), (80, 24), (40, 40)] {
+            let size = Size::new(w, h);
+            let mut g = VoyagerJourney::new();
+            g.resize(size, &mut Ctx::new(1, size));
+            g.t = KEY_T[5];
+            g.rasterise();
+            let f = g.fix;
+            let (x, y) = g.proj.screen(f.r, f.phi);
+            let margin = x
+                .min(f64::from(w) - 1.0 - x)
+                .min(y)
+                .min(f64::from(h) - 2.0 - y);
+            assert!(margin >= 2.0, "{w}x{h}: craft at {x:.1},{y:.1}");
+        }
+    }
+
+    /// A fresh scene at `size`, `t` seconds into the cycle, and its rendered rows.
+    fn frame_at(size: Size, t: f64) -> (VoyagerJourney, Vec<String>) {
+        let mut g = VoyagerJourney::new();
+        g.resize(size, &mut Ctx::new(2, size));
+        g.t = t;
+        g.rasterise();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        (g, canvas.to_lines())
+    }
+
+    #[test]
+    fn voy_a8_captions_keep_clear_of_the_inset() {
+        for (w, h) in [(120, 40), (200, 50), (110, 30)] {
+            let names = ["Launch", "Jupiter", "Saturn", "Uranus", "Neptune"];
+            for (t, name) in KEY_T.iter().zip(names) {
+                let (_, rows) = frame_at(Size::new(w, h), t + 1.0);
+                let row = &rows[1];
+                assert!(row.contains(" heliocentric speed"), "{w}x{h}: {row}");
+                assert!(row.contains(name), "{w}x{h}: {row}");
+            }
+        }
+    }
+
+    #[test]
+    fn voy_a8_captions_end_within_two_years_of_their_event() {
+        let size = Size::new(200, 50);
+        let events = [
+            ("Launch", LAUNCH),
+            ("Jupiter", JUPITER_CA),
+            ("Saturn", SATURN_CA),
+            ("Uranus", URANUS_CA),
+            ("Neptune", NEPTUNE_CA),
+            ("Termination shock", SHOCK),
+        ];
+        let mut seen = [false; 7];
+        for i in 0..(TOUR + OUTWARD + BEYOND) as usize * 20 {
+            let t = i as f64 * 0.05;
+            let (g, rows) = frame_at(size, t);
+            let (row, today) = (&rows[1], g.today);
+            for (k, (name, day)) in events.iter().enumerate() {
+                if row.contains(name) {
+                    seen[k] = true;
+                    assert!(
+                        today < day + 2.0 * YEAR_DAYS,
+                        "t {t}: {name} caption on {}",
+                        date_str(today)
+                    );
+                }
+            }
+            // The heliopause line and the subtitle switch on the same frame.
+            let crossed = row.contains("Heliopause");
+            seen[6] |= crossed;
+            assert_eq!(crossed, today >= HELIOPAUSE, "t {t}: {row}");
+            assert_eq!(g.caption() == Some("interstellar space"), crossed, "t {t}");
+        }
+        assert!(seen.iter().all(|&s| s), "{seen:?}");
+    }
+
+    #[test]
+    fn voy_a8_the_map_keeps_clear_of_the_inset() {
+        for (w, h) in [(120, 40), (110, 30), (160, 45), (200, 50)] {
+            let size = Size::new(w, h);
+            let mut g = VoyagerJourney::new();
+            let mut ctx = Ctx::new(3, size);
+            g.resize(size, &mut ctx);
+            let rect = g.inset.expect("inset").keep_out();
+            let inside = |(x, y): (f64, f64)| rect.holds(x.round() as i32, y.round() as i32);
+            // The map's rim: every orbit, the trail and the craft lie within it.
+            for i in 0..720 {
+                let a = f64::from(i) * TAU / 720.0;
+                let p = g.proj.screen(g.proj.r_max, a);
+                assert!(!inside(p), "{w}x{h}: rim at {p:?} in the inset");
+            }
+            for _ in 0..((TOUR + OUTWARD + BEYOND) / (6.0 * SIM_DT)) as usize {
+                for _ in 0..6 {
+                    g.update(SIM_DT, &mut ctx);
+                }
+                let proj = g.proj;
+                for f in g.path.history(g.today, g.fix) {
+                    assert!(!inside(proj.screen(f.r, f.phi)), "{w}x{h} t {}", g.t);
+                }
+                // No map pixel (the Sun, a planet, the craft) inside the inset.
+                for y in rect.y..rect.y + rect.h {
+                    for x in rect.x..rect.x + rect.w {
+                        for py in [2 * y, 2 * y + 1] {
+                            let ink = g.px.get(x, py).unwrap_or(Ink::BLANK);
+                            assert_eq!(ink, Ink::BLANK, "{w}x{h} t {}: pixel {x},{py}", g.t);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn voy_a9_planets_are_labelled_by_initial() {
+        for (w, h) in [(200, 50), (80, 24)] {
+            let size = Size::new(w, h);
+            let (g, rows) = frame_at(size, 5.0);
+            let (proj, day) = (g.proj, g.today);
+            for (k, name) in ['E', 'J', 'S', 'U', 'N'].into_iter().enumerate() {
+                let (x, y) = proj.screen(BODIES[k].a, longitude(k, day));
+                let row: Vec<char> = rows[y.round() as usize].chars().collect();
+                let near = (x.round() as usize + 1..(x.round() as usize + 6).min(row.len()))
+                    .any(|c| row[c] == name);
+                assert!(near, "{w}x{h}: no {name} beside ({x:.0}, {y:.0})");
+            }
+        }
+    }
+
+    #[test]
+    fn voy_a4_the_sun_core_tops_its_ramp_in_every_theme() {
+        // Theme-independent: a ramp's top level is its brightest in every theme,
+        // including mono, where a 5800 K blackbody would read mid-grey.
+        let size = Size::new(200, 50);
+        let mut g = VoyagerJourney::new();
+        g.resize(size, &mut Ctx::new(1, size));
+        let core = (99..=101)
+            .flat_map(|x| (49..=51).map(move |y| (x, y)))
+            .filter_map(|(x, y)| g.px.get(x, y))
+            .max_by_key(|i| i.level)
+            .unwrap();
+        assert_eq!(core, ramp(Ramp::Ember, 1.0));
+        for y in 0..100 {
+            for x in 0..200 {
+                let ink = g.px.get(x, y).unwrap();
+                if (x - 100).abs() + (y - 50).abs() > 3 {
+                    assert!(
+                        ink.level < 250 || !matches!(ink.role, Role::Ramp(_)),
+                        "{x},{y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn voy_a5_lambert_matches_a_hohmann_transfer() {
+        // Earth (1 AU) to Mars-ish (1.524 AU) half an ellipse away: the Hohmann time and
+        // perihelion speed come back (angle just short of π to keep the plane defined).
+        let (r1, r2): (f64, f64) = (1.0, 1.524);
+        let a = 0.5 * (r1 + r2);
+        let t = PI * (a.powi(3) / GM).sqrt();
+        let th = PI - 1e-6;
+        let (v1, _) = lambert([r1, 0.0], [r2 * th.cos(), r2 * th.sin()], t);
+        let vp = (GM * (2.0 / r1 - 1.0 / a)).sqrt();
+        assert!((norm(v1) - vp).abs() < 1e-4 * vp, "{} vs {vp}", norm(v1));
     }
 }
