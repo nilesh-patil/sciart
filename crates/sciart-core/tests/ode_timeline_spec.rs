@@ -5,7 +5,7 @@ use std::f64::consts::TAU;
 use proptest::prelude::*;
 use sciart_core::ease;
 use sciart_core::ode::{self, MAX_STEPS};
-use sciart_core::{Beat, Timeline};
+use sciart_core::{Beat, Timeline, Trig};
 
 // ---------------------------------------------------------------- CORE-R37
 
@@ -87,7 +87,7 @@ fn core_r37_integrate_uses_ceil_equal_steps_and_absolute_time() {
     let steps = ode::integrate(&mut y, 1.0, 1.0, 0.3, |t, _| {
         calls += 1;
         last_t = t;
-        [t.cos()]
+        [t.cos_det()]
     });
     assert_eq!(steps, 4, "ceil(1.0 / 0.3) = 4");
     assert_eq!(calls, 4 * 4, "four evaluations per RK4 step");
@@ -95,7 +95,7 @@ fn core_r37_integrate_uses_ceil_equal_steps_and_absolute_time() {
         (last_t - 2.0).abs() < 1e-12,
         "last stage evaluates at t + dt"
     );
-    assert!((y[0] - (2.0f64.sin() - 1.0f64.sin())).abs() < 1e-5);
+    assert!((y[0] - (2.0f64.sin_det() - 1.0f64.sin_det())).abs() < 1e-5);
 
     // Exact multiples must not gain a spurious extra step from rounding.
     assert_eq!(ode::integrate(&mut [0.0], 0.0, 0.9, 0.3, |_, _| [0.0]), 3);
@@ -188,7 +188,7 @@ fn spring(pos: &[f64], acc: &mut [f64]) {
 /// Nonlinear pendulum `θ'' = −sin θ`, to check reversibility beyond linear forces.
 fn pendulum(pos: &[f64], acc: &mut [f64]) {
     for (a, x) in acc.iter_mut().zip(pos) {
-        *a = -x.sin();
+        *a = -x.sin_det();
     }
 }
 

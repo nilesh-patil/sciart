@@ -421,7 +421,7 @@ pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
         let mut last = None;
         for _ in 0..SEED_TRIES {
             let len = rng.random_range(1.2..=2.0) * LAMBDA;
-            let (sin, cos) = rng.random_range(0.0..TWO_PI).sin_cos();
+            let (sin, cos) = rng.random_range(0.0..TWO_PI).sin_cos_det();
             let mid = [
                 w * rng.random_range(0.2..=0.8),
                 h * rng.random_range(0.2..=0.8),

@@ -116,7 +116,7 @@ pub(crate) fn ld_flux(d: f64, p: f64, u: (f64, f64)) -> f64 {
 /// the sky, `z` toward the observer (TRAN-A5).
 pub(crate) fn orbit(phi: f64) -> [f64; 3] {
     let sin_i = (1.0 - (IMPACT / A).powi(2)).sqrt();
-    let (s, c) = phi.sin_cos();
+    let (s, c) = phi.sin_cos_det();
     [A * s, IMPACT * c, A * sin_i * c]
 }
 
@@ -126,7 +126,7 @@ fn scatter(k: i64) -> f64 {
     let key = (k as u64).wrapping_mul(2);
     let u1 = rng::hash01(key).max(1e-12);
     let u2 = rng::hash01(key ^ 0x9E37_79B9_7F4A_7C15);
-    (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos()
+    (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos_det()
 }
 
 /// `ramp` at value `v`, or `None` below the visible floor (CORE-R66), so fades end in

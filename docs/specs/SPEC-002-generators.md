@@ -13,7 +13,7 @@ and extends it for real-time animation.
 ## Stability contract (every registered generator)
 - **GEN-R4** Never panics for any `Size` with `w, h >= 1` across any sequence of `resize`, `update(dt)` (`0 <= dt <= 0.25`), and `render` calls — including resizes between any two calls.
 - **GEN-R5** Dimension-dependent state is rebuilt in `resize`; `update`/`render` must tolerate the smallest size (1×1).
-- **GEN-R6** Determinism: same seed + same call sequence ⇒ byte-identical `Canvas::to_lines()`.
+- **GEN-R6** Determinism: same seed + same call sequence ⇒ byte-identical `Canvas::to_lines()`, in every build profile: a frame must not depend on the optimiser. Rust never contracts to FMA or reorders float operations, but LLVM does fuse `sin`/`cos` pairs by inlining context, so all trigonometry goes through `sciart_core::trig` (CORE-R90), enforced by `clippy.toml` `disallowed-methods`; the snapshot suite runs in both dev and release builds (TEST-R9).
 - **GEN-R7** No wall-clock reads (`Instant`, `SystemTime`) and no global RNG (`rand::rng()`/`thread_rng`) inside generators; time comes from `dt`/`ctx.time`, randomness from `ctx.rng`. Enforced by `clippy.toml` `disallowed-methods`.
 - **GEN-R8** Performance: `update(1/60)` + `render` < 5 ms at 200×50 in release (criterion bench per generator).
 - **GEN-R9** Motion: over 1 simulated second at 200×50 the rendered frame changes (a scene is an animation, not a still). Verified by the contract suite.

@@ -420,8 +420,8 @@ impl Track {
             let ds = KINK.min(flown - s);
             let kick = self.scatter * (2.0 * hash01(self.key ^ k.wrapping_mul(0x9E37)) - 1.0);
             theta += self.omega * ds + kick;
-            x += self.speed * ds * theta.cos();
-            y += self.speed * ds * theta.sin();
+            x += self.speed * ds * theta.cos_det();
+            y += self.speed * ds * theta.sin_det();
             f(x, y);
             s += ds;
             k += 1;
@@ -460,7 +460,7 @@ fn draw_track(dots: &mut Dots, tr: &Track, w: i32, h: i32) {
         let ring = ink::ramp(if tr.alpha { RAMPS[1] } else { RAMPS[2] }, 1.0 - 0.4 * u);
         for k in 0..12 {
             let a = TAU * f64::from(k) / 12.0;
-            let p = (cx + r * a.cos(), cy + r * a.sin());
+            let p = (cx + r * a.cos_det(), cy + r * a.sin_det());
             if inside(p) {
                 dots.plot(p.0, p.1, ring);
             }

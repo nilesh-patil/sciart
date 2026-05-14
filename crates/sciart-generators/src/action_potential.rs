@@ -948,7 +948,7 @@ impl ActionPotential {
             let x = f64::from(2 * (b[0] + self.layout.bouton_w));
             let y = f64::from(2 * b[1] + b[2]);
             for _ in 0..VESICLES_PER_BOUTON {
-                let (sin, cos) = rng.random_range(-1.0..1.0f64).sin_cos();
+                let (sin, cos) = rng.random_range(-1.0..1.0f64).sin_cos_det();
                 let speed = rng.random_range(5.0..10.0);
                 self.vesicles.spawn(Vesicle {
                     x,
@@ -1082,7 +1082,7 @@ impl ActionPotential {
             if b.depth > max_depth {
                 continue;
             }
-            let (cos, sin) = (b.angle.cos(), b.angle.sin());
+            let (cos, sin) = (b.angle.cos_det(), b.angle.sin_det());
             let room = |free: f64, dir: f64| (free / dir - r) / b.rho;
             let k = &mut ks[root[i]];
             if cos < 0.0 {
@@ -1098,7 +1098,7 @@ impl ActionPotential {
         let ks = ks.map(|k| k.clamp(0.0, 1.6 * tightest));
         let node = |(angle, rho): (f64, f64), k: f64| {
             let d = r + k * rho;
-            dot(cx + d * angle.cos(), cy + d * angle.sin())
+            dot(cx + d * angle.cos_det(), cy + d * angle.sin_det())
         };
         // Twigs too short to read are specks: drop them with their subtrees. The
         // primaries stay, stretched to the minimum, so a small neuron keeps its
@@ -1116,7 +1116,7 @@ impl ActionPotential {
             match b.parent {
                 Some(p) if !drawn[p] || short || b.depth > max_depth => continue,
                 None if short => {
-                    let (dx, dy) = (b.angle.cos(), b.angle.sin());
+                    let (dx, dy) = (b.angle.cos_det(), b.angle.sin_det());
                     let reach = MIN_TWIG_CELLS / cells([0.0, 0.0], [dx, dy]);
                     end = [start[0] + reach * dx, start[1] + reach * dy];
                 }

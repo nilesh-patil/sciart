@@ -525,7 +525,7 @@ impl Falcon {
                 let err = ((d - r_c) / r_c.max(1e-9)).clamp(-1.0, 1.0);
                 heading(add(perp(inward), scale(inward, err)))
             } else {
-                [self.angle.cos(), self.angle.sin()]
+                [self.angle.cos_det(), self.angle.sin_det()]
             }
         };
         let (speed, turn, goal) = match beat.index {
@@ -543,12 +543,12 @@ impl Falcon {
         // a stoop that overshoots the flock does not end sliding along the frame.
         let m = Self::radius(sigma);
         let wall = [soft_bound(self.pos[0], w, m), soft_bound(self.pos[1], h, m)];
-        let into = (-dot([self.angle.cos(), self.angle.sin()], wall)).max(0.0);
+        let into = (-dot([self.angle.cos_det(), self.angle.sin_det()], wall)).max(0.0);
         let goal = add(goal, scale(wall, 3.0));
         let speed = (speed / (1.0 + 2.0 * into)).max(0.8);
         self.angle = turn_toward(self.angle, goal[1].atan2(goal[0]), turn * H);
         let step = speed * v0 * H;
-        let mut v = [step * self.angle.cos(), step * self.angle.sin()];
+        let mut v = [step * self.angle.cos_det(), step * self.angle.sin_det()];
         let mut p = add(self.pos, v);
         // Should it still reach a wall, it glances off (a specular pull-up) rather than
         // sliding along the frame.
@@ -691,8 +691,8 @@ impl Boids {
         let (r, m, room) = (self.flock_radius(), self.margin, self.room);
         let amp = |len: f64, frac: f64| room * (frac * len).min((0.5 * len - r - m).max(0.0));
         [
-            0.5 * self.w + amp(self.w, 0.25) * (TAU * t / 23.0).sin(),
-            0.5 * self.sky + amp(self.sky, 0.2) * (TAU * t / 37.0).sin(),
+            0.5 * self.w + amp(self.w, 0.25) * (TAU * t / 23.0).sin_det(),
+            0.5 * self.sky + amp(self.sky, 0.2) * (TAU * t / 37.0).sin_det(),
         ]
     }
 
@@ -714,8 +714,8 @@ impl Boids {
         let c = self.roost(self.time());
         for i in 0..self.n {
             let r = radius * rng.random::<f64>().sqrt();
-            let (s, co) = (TAU * rng.random::<f64>()).sin_cos();
-            let (vs, vc) = (TAU * rng.random::<f64>()).sin_cos();
+            let (s, co) = (TAU * rng.random::<f64>()).sin_cos_det();
+            let (vs, vc) = (TAU * rng.random::<f64>()).sin_cos_det();
             self.pos[i] = [
                 (c[0] + r * co).clamp(0.0, self.w),
                 (c[1] + r * s).clamp(0.0, self.sky),
@@ -1059,7 +1059,7 @@ fn bird_shade(lit: usize) -> f64 {
 /// stems. Each stem is a whole cell wide, so this is a dark reed-bank silhouette, not
 /// individual reeds.
 fn reed_height(x: usize) -> f64 {
-    let bank = 0.25 + 0.15 * (0.13 * x as f64).sin();
+    let bank = 0.25 + 0.15 * (0.13 * x as f64).sin_det();
     let stem = hash01(x as u64 ^ 0x5eed_7eed).powi(3);
     (REED_PX * (bank + 0.75 * stem)).round()
 }

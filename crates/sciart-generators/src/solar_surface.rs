@@ -224,7 +224,7 @@ pub(crate) fn limb_intensity(mu: f64) -> f64 {
 
 /// Sidereal rotation rate (°/day) at latitude `lat_deg` (SUN-A2).
 pub(crate) fn omega_deg_per_day(lat_deg: f64) -> f64 {
-    let s2 = lat_deg.to_radians().sin().powi(2);
+    let s2 = lat_deg.to_radians().sin_det().powi(2);
     ROT[0] + ROT[1] * s2 + ROT[2] * s2 * s2
 }
 
@@ -240,7 +240,7 @@ fn omega_rad_per_sec(lat: f64) -> f64 {
 /// gates the faculae. Umbra 0.22 for q ≤ 0.375 (radius 0.45 ρ_p after the blend gives
 /// U/(U+P) ≈ 0.2); penumbra `PENUMBRA` ± 0.08 in `filaments` radial filaments.
 fn spot_profile(q_umbra: f64, q: f64, psi: f64, filaments: f64) -> (f64, f64) {
-    let penumbra = PENUMBRA + 0.08 * (filaments * psi).cos();
+    let penumbra = PENUMBRA + 0.08 * (filaments * psi).cos_det();
     let inner = ease::lerp(0.22, penumbra, ease::smoothstep((q_umbra - 0.375) / 0.15));
     let outside = ease::smoothstep((q - 0.93) / 0.14);
     (ease::lerp(inner, 1.0, outside), outside)
@@ -260,7 +260,7 @@ pub(crate) fn penumbra_filaments(rho_px: f64) -> f64 {
 /// Cosine of the cap about a spot of penumbral radius `rho` outside which it neither
 /// darkens nor brightens: its faculae `exp(−(β/3ρ)²)` fall below 1 % by 6.5 ρ.
 pub(crate) fn facular_reach(rho: f64) -> f64 {
-    (6.5 * rho).cos()
+    (6.5 * rho).cos_det()
 }
 
 /// Sky-plane shift of an umbra toward disc centre for a spot at unit vector `s`
@@ -298,7 +298,7 @@ pub(crate) fn classify(p: [f64; 3]) -> Sample {
 /// dipole axis. Local frame: `a` along the dipole axis, `b` across, `c` radially up,
 /// with the Sun's centre at the origin (SUN-A4).
 fn dipole_point(d_b: f64, l: f64, theta: f64) -> [f64; 3] {
-    let (st, ct) = theta.sin_cos();
+    let (st, ct) = theta.sin_cos_det();
     let r = l * st * st;
     [r * ct, 0.0, 1.0 - d_b + r * st]
 }
@@ -389,8 +389,8 @@ fn h_alpha_ink(v: f64) -> Ink {
 
 /// Heliographic unit vector (x west, y north, z toward the observer at λ = 0).
 fn sphere(lat: f64, lon: f64) -> [f64; 3] {
-    let (sl, cl) = lat.sin_cos();
-    let (so, co) = lon.sin_cos();
+    let (sl, cl) = lat.sin_cos_det();
+    let (so, co) = lon.sin_cos_det();
     [cl * so, sl, cl * co]
 }
 
@@ -568,13 +568,13 @@ impl Region {
     fn spawn(rng: &mut impl Rng, lat: f64, lon: f64, h_max: f64) -> Self {
         let centre = sphere(lat, 0.0);
         let east_west = [1.0, 0.0, 0.0];
-        let north = [0.0, lat.cos(), -lat.sin()];
+        let north = [0.0, lat.cos_det(), -lat.sin_det()];
         // Joy's law: tilt γ = 0.5|φ|, the leading (westward) spot equatorward.
         let tilt = (0.5 * lat.abs().to_degrees()).to_radians();
         let axis = axpy(
-            -lat.signum() * tilt.sin(),
+            -lat.signum() * tilt.sin_det(),
             north,
-            east_west.map(|v| v * tilt.cos()),
+            east_west.map(|v| v * tilt.cos_det()),
         );
         let up = centre;
         let across = cross(axis, up);
@@ -585,7 +585,7 @@ impl Region {
         let delta: f64 = rng
             .random_range(SPOT_HALF_SEP_DEG.0..SPOT_HALF_SEP_DEG.1)
             .to_radians();
-        let (sd, cd) = delta.sin_cos();
+        let (sd, cd) = delta.sin_cos_det();
         let spot = |sign: f64, rho: f64, present: bool, psi0: f64| Spot {
             centre: axpy(sign * sd, axis, centre.map(|v| v * cd)),
             rho,
@@ -613,7 +613,7 @@ impl Region {
         // bowed into an S by the twist.
         let d_b = 2.0 * delta;
         let shear = rng.random_range(SHEAR_DEG.0..SHEAR_DEG.1).to_radians() * coin(rng);
-        let (ss, cs) = shear.sin_cos();
+        let (ss, cs) = shear.sin_cos_det();
         let arc_axis = axpy(ss, across, axis.map(|v| v * cs));
         let arc_across = axpy(-ss, axis, across.map(|v| v * cs));
         let loops = std::array::from_fn(|k| {
@@ -623,7 +623,7 @@ impl Region {
             let half = local.iter().map(|p| p[0].abs()).fold(1e-9, f64::max);
             Loop {
                 pts: local.map(|[a, b, c]| {
-                    let b = b + ARCADE_TWIST * half * (PI * a / half).sin();
+                    let b = b + ARCADE_TWIST * half * (PI * a / half).sin_det();
                     axpy(a, arc_axis, axpy(b, arc_across, up.map(|u| c * u)))
                 }),
                 apex,
@@ -903,7 +903,7 @@ impl View {
         self.cells.clear();
         self.pts.clear();
         for g in granules {
-            let (so, co) = g.lon.sin_cos();
+            let (so, co) = g.lon.sin_cos_det();
             let p = tilt.rotate([g.cos_lat * so, g.sin_lat, g.cos_lat * co]);
             if p[2] > 0.0 {
                 let w = g.weight();
@@ -1028,8 +1028,8 @@ impl View {
         for rp in &self.rim {
             let above = f64::from(rp.above);
             let th = f64::from(rp.theta);
-            let wave = 0.5 * (n1 * th + 1.3 * t + phase[0]).sin()
-                + 0.5 * (n2 * th - 0.9 * t + phase[1]).sin();
+            let wave = 0.5 * (n1 * th + 1.3 * t + phase[0]).sin_det()
+                + 0.5 * (n2 * th - 0.9 * t + phase[1]).sin_det();
             let v = if above <= RIM_PX {
                 if wave < gap {
                     continue;
@@ -1992,7 +1992,7 @@ mod tests {
     fn sun_a3_each_spot_acts_only_within_its_own_facular_cap() {
         // A spot's faculae fall below 1 % by 6.5 ρ_p, so each spot view carries its own
         // cap `cos(6.5 ρ_p)` about its centre, not one sized for the leading spot.
-        assert_eq!(facular_reach(0.05), (6.5f64 * 0.05).cos());
+        assert_eq!(facular_reach(0.05), (6.5f64 * 0.05).cos_det());
         // At the cap the facular field is < 1 %.
         assert!((-(6.5f64 * 6.5) / 9.0).exp() < 0.01);
         let (s, _) = scene(200, 50);
@@ -2178,7 +2178,7 @@ mod tests {
             for (i, p) in pts.iter().enumerate() {
                 let th = ease::lerp(t0, t1, i as f64 / (LOOP_SAMPLES - 1) as f64);
                 let rel = axpy(-1.0, c_d, *p);
-                let expect = l * th.sin().powi(2);
+                let expect = l * th.sin_det().powi(2);
                 assert!((norm(rel) - expect).abs() <= 1e-9 * expect.max(1e-12));
                 // In the vertical plane through the dipole axis.
                 assert_eq!(rel[1], 0.0);

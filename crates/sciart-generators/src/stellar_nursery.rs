@@ -268,7 +268,7 @@ pub(crate) struct Gas {
 
 impl Gas {
     pub(crate) fn pos(&self, s: &Protostar) -> (f64, f64) {
-        let (sn, cs) = self.theta.sin_cos();
+        let (sn, cs) = self.theta.sin_cos_det();
         (s.x + self.r * cs, s.y + self.r * sn)
     }
 }
@@ -326,8 +326,8 @@ impl Pillar {
         let grow = ease::smoothstep((s - 0.1) / 0.2);
         let edge = |phase: f64, k: f64| {
             half * (1.0
-                + LOBE * grow * (TAU * s / self.lobe_period + phase).sin()
-                + ROUGH * (k * TAU * s / self.lobe_period + 2.0 * phase).sin())
+                + LOBE * grow * (TAU * s / self.lobe_period + phase).sin_det()
+                + ROUGH * (k * TAU * s / self.lobe_period + 2.0 * phase).sin_det())
         };
         (edge(self.lobe_phase.0, 7.0), edge(self.lobe_phase.1, 9.0))
     }
@@ -433,7 +433,7 @@ impl Default for StellarNursery {
 
 /// Unit vector from a pixel towards the ionising source on side `s` (y down).
 fn to_source(s: f64) -> (f64, f64) {
-    (s * SOURCE_TILT.sin(), -SOURCE_TILT.cos())
+    (s * SOURCE_TILT.sin_det(), -SOURCE_TILT.cos_det())
 }
 
 /// How strongly a dust surface is lit by the source (NUR-A4), from the gradient `grad` of
@@ -498,8 +498,8 @@ impl StellarNursery {
                 let dir: f64 = rng.random_range(0.0..TAU);
                 let k = TAU / wavelength;
                 Mode {
-                    kx: k * dir.cos(),
-                    ky: k * dir.sin(),
+                    kx: k * dir.cos_det(),
+                    ky: k * dir.sin_det(),
                     phase: rng.random_range(0.0..TAU),
                     omega: rng.random_range(0.04..=0.14)
                         * if rng.random_bool(0.5) { 1.0 } else { -1.0 },
@@ -690,16 +690,16 @@ impl StellarNursery {
         let (t, wp) = (self.t, self.warp);
         for (x, c) in self.col.iter_mut().enumerate() {
             let xr = x as f64 / ASPECT;
-            let dy = wp.amp * (wp.qx * xr + wp.px + wp.nu * t).sin();
+            let dy = wp.amp * (wp.qx * xr + wp.px + wp.nu * t).sin_det();
             for (o, m) in c.iter_mut().zip(&self.modes) {
-                *o = (m.kx * xr + m.ky * dy + m.phase + m.omega * t).sin_cos();
+                *o = (m.kx * xr + m.ky * dy + m.phase + m.omega * t).sin_cos_det();
             }
         }
         for (py, r) in self.row.iter_mut().enumerate() {
             let yf = (py as f64 - 0.5) / 2.0;
-            let dx = wp.amp * (wp.qy * yf + wp.py - 0.7 * wp.nu * t).sin();
+            let dx = wp.amp * (wp.qy * yf + wp.py - 0.7 * wp.nu * t).sin_det();
             for (o, m) in r.iter_mut().zip(&self.modes) {
-                *o = (m.ky * yf + m.kx * dx).sin_cos();
+                *o = (m.ky * yf + m.kx * dx).sin_cos_det();
             }
         }
     }
@@ -795,7 +795,7 @@ impl StellarNursery {
             let th = feed + rng.random_range(-0.22..=0.22);
             let u: f64 = rng.random();
             let r = R_SPAWN_MIN + (self.r_feed - R_SPAWN_MIN).max(0.0) * u.sqrt();
-            let (x, y) = (host.x + r * th.cos(), host.y + r * th.sin());
+            let (x, y) = (host.x + r * th.cos_det(), host.y + r * th.sin_det());
             let Some((cx, cy)) = self.cell(x, y).filter(|_| self.in_bounds(x, y)) else {
                 continue;
             };
@@ -837,7 +837,7 @@ impl StellarNursery {
     fn emit_jets(&mut self, i: usize, h: f64, rng: &mut impl Rng) {
         let s = self.stars[i];
         let Phase::Shining(age) = s.phase else { return };
-        let pulse = (0.5 + 0.5 * (TAU * age / JET_PULSE).sin()).powi(2);
+        let pulse = (0.5 + 0.5 * (TAU * age / JET_PULSE).sin_det()).powi(2);
         let strength = s.brightness() * (-age / JET_DECAY).exp() * pulse;
         let mut acc = s.jet_acc + JET_RATE * strength * h;
         while acc >= 1.0 {
@@ -845,7 +845,7 @@ impl StellarNursery {
             let sign = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
             let speed = rng.random_range(8.0..=12.0);
             let spread = rng.random_range(-0.08..=0.08);
-            let (a_s, a_c) = (s.jet + spread).sin_cos();
+            let (a_s, a_c) = (s.jet + spread).sin_cos_det();
             let jet = Jet {
                 x: s.x + sign * 0.6 * a_c,
                 y: s.y + sign * 0.6 * a_s,
@@ -1533,7 +1533,7 @@ mod tests {
         assert_eq!(rim_light((0.0, 0.0), d), 0.0);
         // Lighting turns on smoothly with the facing angle, with no cut-off.
         let lit_at = |a: f64| {
-            let (s, c) = (d.1.atan2(d.0) + a).sin_cos();
+            let (s, c) = (d.1.atan2(d.0) + a).sin_cos_det();
             rim_light((-c, -s), d)
         };
         let curve: Vec<f64> = (0..=90)

@@ -175,8 +175,8 @@ fn random_modes(rng: &mut impl Rng) -> Vec<Mode> {
             let k = wavenumber(l);
             let omega = rng.random_range(OMEGA.0..=OMEGA.1);
             Mode {
-                kx: k * dir.cos(),
-                ky: k * dir.sin(),
+                kx: k * dir.cos_det(),
+                ky: k * dir.sin_det(),
                 phase: rng.random_range(0.0..TAU),
                 omega: if rng.random::<bool>() { omega } else { -omega },
             }
@@ -194,7 +194,7 @@ pub(crate) fn field_value(modes: &[Mode], x_rows: f64, y: f64, t: f64) -> f64 {
     }
     modes
         .iter()
-        .map(|m| (m.kx * x_rows + m.ky * y + m.phase + m.omega * t).sin())
+        .map(|m| (m.kx * x_rows + m.ky * y + m.phase + m.omega * t).sin_det())
         .sum::<f64>()
         / modes.len() as f64
 }
@@ -272,7 +272,7 @@ impl CosmicMicrowaveBackground {
     fn rotation(&self) -> [(f64, f64); MODES] {
         let mut rot = [(0.0, 1.0); MODES];
         for (r, m) in rot.iter_mut().zip(&self.modes) {
-            *r = (m.omega * self.t).sin_cos();
+            *r = (m.omega * self.t).sin_cos_det();
         }
         rot
     }
@@ -426,7 +426,7 @@ impl Generator for CosmicMicrowaveBackground {
             let start = self.cols.len();
             self.cols.resize(start + 2 * MODES, 0.0);
             for (i, m) in self.modes.iter().enumerate() {
-                (self.cols[start + i], self.cols[start + MODES + i]) = (m.kx * xr).sin_cos();
+                (self.cols[start + i], self.cols[start + MODES + i]) = (m.kx * xr).sin_cos_det();
             }
         }
         self.rows.clear();
@@ -434,7 +434,7 @@ impl Generator for CosmicMicrowaveBackground {
             let start = self.rows.len();
             self.rows.resize(start + 2 * MODES, 0.0);
             for (i, m) in self.modes.iter().enumerate() {
-                let (s, c) = (m.ky * pixel_row(py) + m.phase).sin_cos();
+                let (s, c) = (m.ky * pixel_row(py) + m.phase).sin_cos_det();
                 (self.rows[start + i], self.rows[start + MODES + i]) = (c, s);
             }
         }
@@ -496,7 +496,7 @@ mod tests {
     fn ensemble_correlation(modes: &[Mode], lag_rows: (f64, f64)) -> f64 {
         modes
             .iter()
-            .map(|m| (m.kx * lag_rows.0 + m.ky * lag_rows.1).cos())
+            .map(|m| (m.kx * lag_rows.0 + m.ky * lag_rows.1).cos_det())
             .sum::<f64>()
             / modes.len() as f64
     }

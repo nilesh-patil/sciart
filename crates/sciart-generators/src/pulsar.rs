@@ -123,7 +123,7 @@ const ASCII_MIN_LEVEL: u8 = 60;
 
 /// Spin axis `Ω̂ = (0, sin ζ, cos ζ)`.
 pub(crate) fn spin_axis() -> V3 {
-    [0.0, ZETA.sin(), ZETA.cos()]
+    [0.0, ZETA.sin_det(), ZETA.cos_det()]
 }
 
 /// Rotation phase at time `t`.
@@ -135,10 +135,10 @@ pub(crate) fn phase(t: f64) -> f64 {
 /// `ê₂ = Ω̂ × x̂` (PUL-A1).
 pub(crate) fn magnetic_axis(phi: f64) -> V3 {
     let e2 = cross(spin_axis(), [1.0, 0.0, 0.0]);
-    let (s, c) = phi.sin_cos();
+    let (s, c) = phi.sin_cos_det();
     add(
-        scale(spin_axis(), ALPHA.cos()),
-        scale(add([c, 0.0, 0.0], scale(e2, s)), ALPHA.sin()),
+        scale(spin_axis(), ALPHA.cos_det()),
+        scale(add([c, 0.0, 0.0], scale(e2, s)), ALPHA.sin_det()),
     )
 }
 
@@ -166,10 +166,13 @@ fn frame(m: V3) -> (V3, V3) {
 /// meridian at magnetic azimuth `ψ` about the axis `m` (PUL-A3).
 pub(crate) fn field_point(l: f64, theta: f64, psi: f64, m: V3) -> V3 {
     let (u1, u2) = frame(m);
-    let r = l * theta.sin().powi(2);
-    let (sp, cp) = psi.sin_cos();
+    let r = l * theta.sin_det().powi(2);
+    let (sp, cp) = psi.sin_cos_det();
     let across = add(scale(u1, cp), scale(u2, sp));
-    scale(add(scale(across, theta.sin()), scale(m, theta.cos())), r)
+    scale(
+        add(scale(across, theta.sin_det()), scale(m, theta.cos_det())),
+        r,
+    )
 }
 
 /// The closed loops drawn on a canvas `width` cells wide (PUL-A3): the outer loop only
@@ -344,7 +347,7 @@ impl Pulsar {
             }
             for end in [-CYLINDER_H, CYLINDER_H] {
                 let rim = |i: usize| {
-                    let (s, c) = (TAU * i as f64 / steps as f64).sin_cos();
+                    let (s, c) = (TAU * i as f64 / steps as f64).sin_cos_det();
                     add(scale(axis, end), add([c, 0.0, 0.0], scale(e2, s)))
                 };
                 self.line(rim(i), rim(i + 1), ink);
@@ -420,8 +423,8 @@ impl Pulsar {
             let (u1, u2) = frame(axis);
             for j in 0..RAYS {
                 let f = ((j as f64 + 0.5) / RAYS as f64).sqrt();
-                let (s, c) = (golden * j as f64 + turn).sin_cos();
-                let (sa, ca) = (f * RHO).sin_cos();
+                let (s, c) = (golden * j as f64 + turn).sin_cos_det();
+                let (sa, ca) = (f * RHO).sin_cos_det();
                 let d = add(scale(axis, ca), scale(add(scale(u1, c), scale(u2, s)), sa));
                 // Brightest on the axis, falling to exactly zero at the cone's edge, so the
                 // fringe fades out before it dissolves.
@@ -714,9 +717,9 @@ mod tests {
         for (l, psi) in [(0.6, 0.0), (0.85, 2.1), (2.5, 4.0)] {
             for th in [0.2, 0.9, 1.57, 2.6] {
                 let p = field_point(l, th, psi, m);
-                assert!((norm(p) - l * th.sin().powi(2)).abs() < 1e-12);
+                assert!((norm(p) - l * th.sin_det().powi(2)).abs() < 1e-12);
                 let cos = dot(p, m) / norm(p);
-                assert!((cos - th.cos()).abs() < 1e-9, "colatitude");
+                assert!((cos - th.cos_det()).abs() < 1e-9, "colatitude");
             }
         }
         for &l in &CLOSED {

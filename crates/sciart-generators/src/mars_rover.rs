@@ -199,7 +199,7 @@ fn sub(a: P2, b: P2) -> P2 {
 /// Rotate `v` counter-clockwise by `a`.
 #[inline]
 fn rot(a: f64, v: P2) -> P2 {
-    let (s, c) = a.sin_cos();
+    let (s, c) = a.sin_cos_det();
     (v.0 * c - v.1 * s, v.0 * s + v.1 * c)
 }
 
@@ -426,13 +426,13 @@ fn arm(pose: &Pose, near: &Ridge, k: f64) -> (P2, P2, P2) {
     let cos_a = ((ARM_L1 * ARM_L1 + dist * dist - ARM_L2 * ARM_L2) / (2.0 * ARM_L1 * dist))
         .clamp(-1.0, 1.0);
     let ik1 = d.1.atan2(d.0) + cos_a.acos();
-    let elbow_ik = add(s, (ARM_L1 * ik1.cos(), ARM_L1 * ik1.sin()));
+    let elbow_ik = add(s, (ARM_L1 * ik1.cos_det(), ARM_L1 * ik1.sin_det()));
     let t2 = sub(target, elbow_ik);
     let ik2 = t2.1.atan2(t2.0);
     let a1 = lerp_angle(STOW_A1 + pose.phi, ik1, k);
     let a2 = lerp_angle(STOW_A2 + pose.phi, ik2, k);
-    let e = add(s, (ARM_L1 * a1.cos(), ARM_L1 * a1.sin()));
-    let t = add(e, (ARM_L2 * a2.cos(), ARM_L2 * a2.sin()));
+    let e = add(s, (ARM_L1 * a1.cos_det(), ARM_L1 * a1.sin_det()));
+    let t = add(e, (ARM_L2 * a2.cos_det(), ARM_L2 * a2.sin_det()));
     (s, e, t)
 }
 
@@ -487,9 +487,10 @@ fn hour_angle(t: f64) -> f64 {
 
 /// Solar elevation (rad) for hour angle `h`.
 fn sun_elevation(h: f64) -> f64 {
-    (LATITUDE.sin() * DECLINATION.sin() + LATITUDE.cos() * DECLINATION.cos() * h.cos())
-        .clamp(-1.0, 1.0)
-        .asin()
+    (LATITUDE.sin_det() * DECLINATION.sin_det()
+        + LATITUDE.cos_det() * DECLINATION.cos_det() * h.cos_det())
+    .clamp(-1.0, 1.0)
+    .asin()
 }
 
 fn max_elevation() -> f64 {
@@ -970,8 +971,8 @@ impl MarsRover {
     fn sun_cell(&self, hour: f64, e: f64) -> P2 {
         let l = self.layout;
         (
-            l.w * (0.5 + 0.3 * hour.sin()),
-            l.horizon - (l.horizon - 1.0) * e.sin() / max_elevation().sin(),
+            l.w * (0.5 + 0.3 * hour.sin_det()),
+            l.horizon - (l.horizon - 1.0) * e.sin_det() / max_elevation().sin_det(),
         )
     }
 
@@ -1009,7 +1010,7 @@ impl MarsRover {
         self.day = sky.day;
         self.light = 0.35 + 0.65 * sky.day;
         // Which way the near slopes must face to catch the Sun.
-        let toward = if hour.sin() >= 0.0 { 1.0 } else { -1.0 };
+        let toward = if hour.sin_det() >= 0.0 { 1.0 } else { -1.0 };
         let size = self.px.pixel_size();
         let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
         for c in 0..pw {
@@ -1055,7 +1056,7 @@ impl MarsRover {
         if p < PHOBOS_UP {
             let u = p / PHOBOS_UP;
             let x = (l.w * (0.95 - 0.9 * u)).floor() as i32;
-            let y = (2.0 * (l.horizon - 0.55 * l.horizon * (PI * u).sin())).floor() as i32;
+            let y = (2.0 * (l.horizon - 0.55 * l.horizon * (PI * u).sin_det())).floor() as i32;
             if self
                 .tops
                 .get(x as usize)
@@ -1072,7 +1073,7 @@ impl MarsRover {
                 // Whole-sky cells only: braille in a skyline cell would replace its half
                 // block, and the backdrop would put the ridge colour behind the star.
                 if self.px.cell_bg(x / Dots::CELL_W, y / Dots::CELL_H) == Ink::BLANK {
-                    let tw = 0.8 + 0.2 * (self.t * 2.3 + 2.4 * i as f64).sin();
+                    let tw = 0.8 + 0.2 * (self.t * 2.3 + 2.4 * i as f64).sin_det();
                     let level = f64::from(level) * sky.dark * tw;
                     self.dots.set(x, y, Ink::new(Role::Star, level as u8));
                 }
@@ -1117,7 +1118,7 @@ impl MarsRover {
         let Some((ox, oy)) = self.orbiter(beat) else {
             return;
         };
-        let blink = beat.index == PH_TRANSMIT && (self.t * 6.0).sin() > 0.0;
+        let blink = beat.index == PH_TRANSMIT && (self.t * 6.0).sin_det() > 0.0;
         let ink = Ink::new(Role::Accent, if blink { 255 } else { 190 });
         plot(canvas, ox, oy, PIXEL, ink);
         if self.layout.s >= TINY_SCALE {
@@ -1137,7 +1138,7 @@ impl MarsRover {
         let l = self.layout;
         Some((
             l.w * (0.08 + 0.84 * u),
-            (0.16 * l.horizon).max(1.0) + 0.4 * l.s * (PI * u).sin(),
+            (0.16 * l.horizon).max(1.0) + 0.4 * l.s * (PI * u).sin_det(),
         ))
     }
 
@@ -1157,7 +1158,7 @@ impl MarsRover {
                 let f = f64::from(j) / f64::from(rows);
                 let y = base_row - f64::from(j) - 0.5;
                 let lean = 0.8 * f * f * f64::from(rows);
-                let sway = (2.0 * f - 2.5 * self.t + dv.phase).sin() * (0.3 + 0.8 * f);
+                let sway = (2.0 * f - 2.5 * self.t + dv.phase).sin_det() * (0.3 + 0.8 * f);
                 let cx = base_col + lean + sway;
                 let half = 0.5 + 1.8 * f * l.s;
                 let a = alpha * (1.0 - 0.55 * f);
@@ -1168,7 +1169,8 @@ impl MarsRover {
                         continue;
                     }
                     // Swirl: dust bands rotating around the column's axis.
-                    let band = ((q.asin() + 4.0 * self.t - 1.7 * f64::from(j)).sin() + 1.0) * 0.5;
+                    let band =
+                        ((q.asin() + 4.0 * self.t - 1.7 * f64::from(j)).sin_det() + 1.0) * 0.5;
                     let v = a * (0.35 + 0.65 * band) * (1.0 - q * q) * day;
                     if v < 0.12 {
                         continue;
@@ -1323,7 +1325,7 @@ impl MarsRover {
             }
             _ => pose.phi - 0.5,
         };
-        let (sa, ca) = aim.sin_cos();
+        let (sa, ca) = aim.sin_cos_det();
         let half = 0.6;
         let dish = self.lit(Role::Structure, 225);
         let (d0, d1) = (
@@ -1349,7 +1351,7 @@ impl MarsRover {
             self.lit(Role::Text, 240),
         );
         if beat.index == PH_DRILL {
-            let bit = if (self.t * 24.0).sin() > 0.0 {
+            let bit = if (self.t * 24.0).sin_det() > 0.0 {
                 Glyph::new('┃', '|')
             } else {
                 Glyph::new('╽', '!')
@@ -1475,7 +1477,7 @@ fn veil(canvas: &mut Canvas, x: f64, y: f64, boost: u8, fallback: (Glyph, Ink)) 
 /// Whole cells only: a half-block leaves its other half at the terminal background,
 /// which shows as a black seam against the solid sky and ground.
 fn fill_box(canvas: &mut Canvas, view: &View, pose: &Pose, u: (f64, f64), v: (f64, f64), ink: Ink) {
-    let (sn, cs) = pose.phi.sin_cos();
+    let (sn, cs) = pose.phi.sin_cos_det();
     if cs.abs() < 0.2 {
         return;
     }

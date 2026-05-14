@@ -167,12 +167,12 @@ pub(crate) fn derivs(met: f64, y: &State, drag_on: bool) -> State {
     };
     let th = pitch(met, vx, vh);
     let a = thrust / m;
-    let steer = a * (1.0 - (th - ux.atan2(uh)).cos());
+    let steer = a * (1.0 - (th - ux.atan2(uh)).cos_det());
     [
         vx,
         vh,
-        a * th.sin() - drag * ux,
-        a * th.cos() - drag * uh - g,
+        a * th.sin_det() - drag * ux,
+        a * th.cos_det() - drag * uh - g,
         -mdot,
         a,
         g * uh,
@@ -690,7 +690,7 @@ impl RocketLaunch {
         // After staging the upper stage stays a readable sprite with a visible nose.
         let body = if upper { (len * 0.35).max(4.0) } else { len };
         let width = (len / 11.0).clamp(1.0, 3.0);
-        let (sn, cs) = th.sin_cos();
+        let (sn, cs) = th.sin_cos_det();
         // Base of what is left of the stack.
         let (bx, by) = if upper {
             (bx + (len - body) * sn, by - (len - body) * cs)
@@ -752,7 +752,7 @@ impl RocketLaunch {
             th,
             width,
         } = nozzle;
-        let (sn, cs) = th.sin_cos();
+        let (sn, cs) = th.sin_cos_det();
         let (plen, spread) = plume_shape(len, h, vacuum);
         let plen = plen * (0.9 + 0.2 * self.flicker);
         let diamonds = if vacuum {
@@ -1032,7 +1032,7 @@ fn noise(x: i32, y: i32) -> f64 {
 /// The pixels of a one-pixel bar `len` long from its base `(x, y)` along heading `th`
 /// (from vertical).
 fn stroke(x: f64, y: f64, th: f64, len: f64) -> impl Iterator<Item = (i32, i32)> {
-    let (s, c) = th.sin_cos();
+    let (s, c) = th.sin_cos_det();
     (0..=(len * 2.0).ceil() as i32).map(move |i| {
         let u = f64::from(i) / 2.0;
         ((x + u * s).floor() as i32, (y - u * c).floor() as i32)

@@ -87,7 +87,7 @@ pub(crate) fn radius_for_period(period: f64) -> f64 {
 pub(crate) fn j2_rates(el: &Elements) -> (f64, f64) {
     let p = el.a * (1.0 - el.e * el.e);
     let k = 0.75 * mean_motion(el.a) * J2 * (RE_KM / p).powi(2);
-    let c = el.i.cos();
+    let c = el.i.cos_det();
     (-2.0 * k * c, k * (5.0 * c * c - 1.0))
 }
 
@@ -97,7 +97,7 @@ pub(crate) fn eccentric_anomaly(m: f64, e: f64) -> f64 {
     let m = wrap_angle(m);
     let mut ea = if e < 0.8 { m } else { PI.copysign(m) };
     for _ in 0..16 {
-        let step = (ea - e * ea.sin() - m) / (1.0 - e * ea.cos());
+        let step = (ea - e * ea.sin_det() - m) / (1.0 - e * ea.cos_det());
         ea -= step;
         if step.abs() < 1e-15 {
             break;
@@ -109,9 +109,9 @@ pub(crate) fn eccentric_anomaly(m: f64, e: f64) -> f64 {
 /// Rotate a perifocal point `(x, y)` (x toward perigee) into ECI:
 /// `R_z(Ω) · R_x(i) · R_z(ω)`.
 fn perifocal_to_eci(x: f64, y: f64, raan: f64, i: f64, argp: f64) -> [f64; 3] {
-    let (so, co) = raan.sin_cos();
-    let (si, ci) = i.sin_cos();
-    let (sw, cw) = argp.sin_cos();
+    let (so, co) = raan.sin_cos_det();
+    let (si, ci) = i.sin_cos_det();
+    let (sw, cw) = argp.sin_cos_det();
     let (x1, y1) = (cw * x - sw * y, sw * x + cw * y);
     let (y2, z2) = (ci * y1, si * y1);
     [co * x1 - so * y2, so * x1 + co * y2, z2]
@@ -124,7 +124,7 @@ fn perifocal_to_eci(x: f64, y: f64, raan: f64, i: f64, argp: f64) -> [f64; 3] {
 /// synchronous radius by ~2 km, which GEO station-keeping absorbs, so no drift is applied.
 fn point_at(el: &Elements, tr: f64, ea: f64) -> [f64; 3] {
     let (d_raan, d_argp) = if el.i > 0.0 { j2_rates(el) } else { (0.0, 0.0) };
-    let (s, c) = ea.sin_cos();
+    let (s, c) = ea.sin_cos_det();
     let b = el.a * (1.0 - el.e * el.e).sqrt();
     perifocal_to_eci(
         el.a * (c - el.e),
@@ -166,7 +166,7 @@ pub(crate) fn squash(r: f64) -> f64 {
 
 /// ECI (any unit) → view axes: x right, y up, z toward the viewer.
 pub(crate) fn to_view(p: [f64; 3], elev: f64) -> [f64; 3] {
-    let (sb, cb) = elev.sin_cos();
+    let (sb, cb) = elev.sin_cos_det();
     // Edge-on the equator runs across the screen, north is up and ECI +y points away.
     let (vy, vz) = (p[2], -p[1]);
     [p[0], vy * cb - vz * sb, vy * sb + vz * cb]
@@ -174,7 +174,7 @@ pub(crate) fn to_view(p: [f64; 3], elev: f64) -> [f64; 3] {
 
 /// View axes → ECI: the inverse of [`to_view`].
 fn from_view(v: [f64; 3], elev: f64) -> [f64; 3] {
-    let (sb, cb) = elev.sin_cos();
+    let (sb, cb) = elev.sin_cos_det();
     let (vy, vz) = (v[1] * cb + v[2] * sb, -v[1] * sb + v[2] * cb);
     [v[0], -vz, vy]
 }
@@ -848,8 +848,8 @@ impl Generator for SatelliteOrbit {
             // The fleet and the Earth's phase survive resizes; only the scale changes.
             self.ready = true;
             self.spin0 = ctx.rng.random_range(0.0..TAU);
-            let (sd, cd) = SUN_DEC.sin_cos();
-            self.sun = [cd * SUN_RA.cos(), cd * SUN_RA.sin(), sd];
+            let (sd, cd) = SUN_DEC.sin_cos_det();
+            self.sun = [cd * SUN_RA.cos_det(), cd * SUN_RA.sin_det(), sd];
             self.sats = fleet(&mut ctx.rng, self.spin0);
         }
         self.size = size;
@@ -982,7 +982,7 @@ mod tests {
             for k in 0..200 {
                 let m = -PI + TAU * f64::from(k) / 200.0;
                 let ea = eccentric_anomaly(m, e);
-                let resid = wrap_angle(ea - e * ea.sin() - m);
+                let resid = wrap_angle(ea - e * ea.sin_det() - m);
                 assert!(resid.abs() < 1e-12, "e={e} M={m}: residual {resid}");
             }
         }

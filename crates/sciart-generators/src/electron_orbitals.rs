@@ -262,7 +262,7 @@ impl Pose {
     /// mid-hold, and the pitch wobbles about p a quarter period behind, so one of them is
     /// always at full speed.
     fn camera(self, t: f64) -> Camera {
-        let (s, c) = (TAU * (t - MID_HOLD) / ROCK_PERIOD + self.phase).sin_cos();
+        let (s, c) = (TAU * (t - MID_HOLD) / ROCK_PERIOD + self.phase).sin_cos_det();
         Camera {
             yaw: self.yaw + self.rock * c,
             pitch: self.pitch - PITCH_WOBBLE * s,
@@ -490,11 +490,11 @@ impl Sampler {
         let r_max = R_SPAN * radius_quantile(n, l, 0.999);
         let meridian = |mu: f64| {
             let s = (1.0 - mu * mu).max(0.0).sqrt();
-            solid(orb, [s * FRAC_PI_4.cos(), s * FRAC_PI_4.sin(), mu]).powi(2)
+            solid(orb, [s * FRAC_PI_4.cos_det(), s * FRAC_PI_4.sin_det(), mu]).powi(2)
         };
         let parallel = |phi: f64| {
             let s = 0.75f64.sqrt();
-            solid(orb, [s * phi.cos(), s * phi.sin(), 0.5]).powi(2)
+            solid(orb, [s * phi.cos_det(), s * phi.sin_det(), 0.5]).powi(2)
         };
         Self {
             r: InverseCdf::build(0.0, r_max, |r| (r * radial(n, l, r)).powi(2)),
@@ -508,7 +508,7 @@ impl Sampler {
         let mu = self.mu.sample(rng.next_f64());
         let phi = self.phi.sample(rng.next_f64());
         let s = r * (1.0 - mu * mu).max(0.0).sqrt();
-        [s * phi.cos(), s * phi.sin(), r * mu]
+        [s * phi.cos_det(), s * phi.sin_det(), r * mu]
     }
 }
 
@@ -681,7 +681,7 @@ impl Mixture {
         } else if chi >= FRAC_PI_2 {
             (0.0, 1.0, 0.0, 1.0)
         } else {
-            let (s, c) = chi.sin_cos();
+            let (s, c) = chi.sin_cos_det();
             let m = 1.0 / (c * c / m_a + s * s / m_b);
             (c, s, m * c * c / m_a, m * s * s / m_b)
         };
@@ -717,8 +717,8 @@ pub(crate) fn visible(p: f64, c: (f64, f64), cos_wt: f64, psi: (f64, f64), u: f6
 /// bright, as their equal `|ψ|²` demands.
 pub(crate) fn phase_of(c: (f64, f64), psi: (f64, f64), theta: (f64, f64)) -> f64 {
     let (a, b) = (c.0 * psi.0, c.1 * psi.1);
-    let (sa, ca) = theta.0.sin_cos();
-    let (sb, cb) = theta.1.sin_cos();
+    let (sa, ca) = theta.0.sin_cos_det();
+    let (sb, cb) = theta.1.sin_cos_det();
     FRAC_PI_2 + (a * sa + b * sb).atan2(a * ca + b * cb)
 }
 
@@ -864,7 +864,7 @@ impl Atom {
             chi(self.phase, beat.progress),
             self.m[self.at],
             self.m[self.next()],
-            (self.theta.0 - self.theta.1).cos(),
+            (self.theta.0 - self.theta.1).cos_det(),
         );
         if self.phase == Phase::Hold {
             self.prepare((PREP_PER_TICK * dt / SIM_DT).ceil() as usize);
@@ -1293,7 +1293,7 @@ mod tests {
         const N: usize = 48;
         (0..N)
             .map(|i| {
-                let mut x = (PI * (i as f64 + 0.75) / (N as f64 + 0.5)).cos();
+                let mut x = (PI * (i as f64 + 0.75) / (N as f64 + 0.5)).cos_det();
                 let mut dp = 1.0;
                 for _ in 0..100 {
                     let (mut p0, mut p1) = (1.0, x);
@@ -1320,7 +1320,7 @@ mod tests {
             let st = (1.0 - mu * mu).sqrt();
             for j in 0..96 {
                 let phi = TAU * f64::from(j) / 96.0;
-                s += w * (TAU / 96.0) * f([st * phi.cos(), st * phi.sin(), mu]);
+                s += w * (TAU / 96.0) * f([st * phi.cos_det(), st * phi.sin_det(), mu]);
             }
         }
         s
@@ -1965,8 +1965,8 @@ mod tests {
         let mut signs: Vec<bool> = (0..96)
             .filter_map(|i| {
                 let a = TAU * f64::from(i) / 96.0;
-                let x = cx + 0.5 * rho * sciart_core::geom::ASPECT * a.cos();
-                let y = cy - 0.5 * rho * a.sin();
+                let x = cx + 0.5 * rho * sciart_core::geom::ASPECT * a.cos_det();
+                let y = cy - 0.5 * rho * a.sin_det();
                 let cell = c.get(x.floor() as i32, y.floor() as i32)?;
                 (cell.ink.role == Role::Phase).then_some(cell.ink.level == POS)
             })
@@ -2214,7 +2214,7 @@ mod tests {
             let a = phase_of((H, H), (1.0, 0.0), theta);
             let b = phase_of((H, H), (0.0, 1.0), theta);
             let both = phase_of((H, H), (1.0, 1.0), theta);
-            let flip = if (0.5 * omega * t).cos() < 0.0 {
+            let flip = if (0.5 * omega * t).cos_det() < 0.0 {
                 PI
             } else {
                 0.0

@@ -189,8 +189,8 @@ fn project([x, y, z]: [f64; 3]) -> (f64, f64, f64) {
 /// Screen offset and depth of the point at angle `t` on a ring of radius `a` (SOL-A6).
 /// The ring plane's pole is fixed in space, so this does not depend on where Saturn is.
 pub(crate) fn ring_offset(a: f64, t: f64) -> (f64, f64, f64) {
-    let (st, ct) = SATURN_TILT_DEG.to_radians().sin_cos();
-    let (s, c) = t.sin_cos();
+    let (st, ct) = SATURN_TILT_DEG.to_radians().sin_cos_det();
+    let (s, c) = t.sin_cos_det();
     // Ring-plane axes: e1 = ŷ and e2 = pole × e1 = (−cos T, 0, sin T).
     project([-a * s * ct, a * c, a * s * st])
 }
@@ -259,7 +259,7 @@ pub struct SolarSystem {
 impl SolarSystem {
     /// Screen position (px) of the point at angle `theta` on the orbit at `frac`.
     fn orbit_xy(&self, frac: f64, theta: f64) -> (f64, f64) {
-        let (s, c) = theta.sin_cos();
+        let (s, c) = theta.sin_cos_det();
         let r = self.outer * frac;
         let (dx, dy, _) = project([r * c, r * s, 0.0]);
         (self.cx + dx, self.cy + dy)
@@ -313,7 +313,7 @@ impl SolarSystem {
         // its reddened limb is its glow, and any darker ring round it reads as an outline.
         let r_sun = (SUN_FRAC * self.outer).max(SUN_MIN_PX);
         for i in 0..PLANETS.len() {
-            if self.phases[i].sin() > 0.0 {
+            if self.phases[i].sin_det() > 0.0 {
                 self.draw_planet(i);
             }
         }
@@ -324,7 +324,7 @@ impl SolarSystem {
             self.pixels.set(x, y, ink::blackbody(t));
         });
         for i in 0..PLANETS.len() {
-            if self.phases[i].sin() <= 0.0 {
+            if self.phases[i].sin_det() <= 0.0 {
                 self.draw_planet(i);
             }
         }
@@ -352,7 +352,7 @@ impl SolarSystem {
         let (x, y) = self.planet_xy(i);
         let r = planet_px(p.radius, self.outer);
         // The Sun's direction from the planet, in view axes (right, up, toward viewer).
-        let (s, c) = self.phases[i].sin_cos();
+        let (s, c) = self.phases[i].sin_cos_det();
         let (_, up, toward) = project([-c, -s, 0.0]);
         let sun = [-c, -up, toward];
         let night = if r < CORNER_BELOW { NIGHT_SMALL } else { NIGHT };
@@ -588,7 +588,7 @@ mod tests {
             let (near, far) = (at(1.0).level, at(-1.0).level);
             // Beyond the Sun the disc is nearly full, so both may be fully lit.
             assert!(near >= far, "phase {k}: {near} < {far}");
-            if s.phases[JUPITER].sin() <= 0.0 {
+            if s.phases[JUPITER].sin_det() <= 0.0 {
                 assert!(near > far, "phase {k}: {near} vs {far}");
             }
         }
@@ -618,7 +618,7 @@ mod tests {
     fn sol_a6_saturn_rings_hold_one_ellipse_wherever_saturn_is() {
         // The ring pole is tilted 26.7° and seen from 30° above the ecliptic: an ellipse
         // of axis ratio cos 26.7° · sin 30°.
-        let minor = SATURN_TILT_DEG.to_radians().cos() * SQUASH;
+        let minor = SATURN_TILT_DEG.to_radians().cos_det() * SQUASH;
         assert!((minor - 0.447).abs() < 0.001);
         let lengths: Vec<f64> = (0..3600)
             .map(|j| {

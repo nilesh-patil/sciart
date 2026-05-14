@@ -153,7 +153,7 @@ pub(crate) fn fly(lm: &mut Lm, h: f64) {
     if h.is_nan() || h <= 0.0 {
         return;
     }
-    let (thrust, (s, c)) = (lm.thrust.max(0.0), lm.theta.sin_cos());
+    let (thrust, (s, c)) = (lm.thrust.max(0.0), lm.theta.sin_cos_det());
     // Burn only as long as there is propellant; coast for the rest of the step.
     let burn = if thrust > 0.0 {
         (lm.fuel() * VE / thrust).min(h)
@@ -240,7 +240,7 @@ pub(crate) fn steer(lm: &mut Lm, a: (f64, f64), tilt_max: f64, h: f64) {
     let want = ax.atan2(az).clamp(-tilt_max, tilt_max);
     let d = (want - lm.theta).clamp(-SLEW * h, SLEW * h);
     lm.theta += d;
-    let (s, c) = lm.theta.sin_cos();
+    let (s, c) = lm.theta.sin_cos_det();
     let f = lm.m * (ax * s + az * c);
     lm.thrust = if lm.fuel() > 0.0 {
         f.clamp(THROTTLE_MIN * T_MAX, T_MAX)
@@ -361,7 +361,7 @@ impl Terrain {
     pub(crate) fn height(&self, x: f64) -> f64 {
         let mut h = 0.0;
         for &(a, k, p) in &self.waves {
-            h += a * (k * x + p).sin();
+            h += a * (k * x + p).sin_det();
         }
         for c in &self.craters {
             h += c.height(x);
@@ -521,7 +521,7 @@ fn ballistic(p: &mut Grain, h: f64) {
 /// Unit vector toward the Sun in the (x, z) plane: `SUN_ELEV` up, behind an LM flying
 /// toward `side` (Apollo 11 came in with the Sun at its back, so its shadow ran ahead).
 pub(crate) fn sun_dir(side: f64) -> (f64, f64) {
-    let (s, c) = SUN_ELEV.sin_cos();
+    let (s, c) = SUN_ELEV.sin_cos_det();
     (-side * c, s)
 }
 
@@ -623,9 +623,9 @@ const SUBSOLAR_LAT: f64 = 20.6 * PI / 180.0;
 pub(crate) fn earth_sun() -> [f64; 3] {
     let c = 2.0 * EARTH_LIT - 1.0;
     let dl = SUBSOLAR_LON - EARTH_FACING_LON;
-    let east = SUBSOLAR_LAT.cos() * dl.sin();
-    let north = SUBSOLAR_LAT.sin() * EARTH_FACING_LAT.cos()
-        - SUBSOLAR_LAT.cos() * EARTH_FACING_LAT.sin() * dl.cos();
+    let east = SUBSOLAR_LAT.cos_det() * dl.sin_det();
+    let north = SUBSOLAR_LAT.sin_det() * EARTH_FACING_LAT.cos_det()
+        - SUBSOLAR_LAT.cos_det() * EARTH_FACING_LAT.sin_det() * dl.cos_det();
     let s = (1.0 - c * c).sqrt() / east.hypot(north);
     [s * east, s * north, c]
 }
@@ -1078,7 +1078,7 @@ impl MoonLanding {
         let s0 = lm.x + self.side * above / SUN_ELEV.tan();
         let s1 = s0 + self.side * LM_HEIGHT / SUN_ELEV.tan();
         let (sa, sb) = (s0.min(s1) - FOOT_HALF * 0.5, s0.max(s1));
-        let flat = SUN_ELEV.sin();
+        let flat = SUN_ELEV.sin_det();
         // The footpads' pixel row and the columns under the sprite: a site that lies up
         // to a cell below the pads is raised to them, so the LM, whose pad row is rounded
         // to whole cells, stands on regolith instead of over a sky-black notch (ML-A8).
@@ -1686,7 +1686,7 @@ mod tests {
         for side in [1.0, -1.0] {
             let sun = sun_dir(side);
             let flat = slope_light(0.0, sun);
-            assert!((flat - SUN_ELEV.sin()).abs() < 1e-12);
+            assert!((flat - SUN_ELEV.sin_det()).abs() < 1e-12);
             // Terrain rising away from the Sun faces it; falling away turns its back.
             let facing = slope_light(0.2 * side, sun);
             let away = slope_light(-0.2 * side, sun);

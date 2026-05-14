@@ -132,7 +132,7 @@ pub(crate) fn giant_count(n: usize) -> usize {
 /// An isotropic unit vector (`z = 1 − 2u`, `φ = 2πu`).
 fn unit_vec(rng: &mut impl Rng) -> [f64; 3] {
     let z = 1.0 - 2.0 * rng.random::<f64>();
-    let (s, c) = (TAU * rng.random::<f64>()).sin_cos();
+    let (s, c) = (TAU * rng.random::<f64>()).sin_cos_det();
     let rho = (1.0 - z * z).max(0.0).sqrt();
     [rho * c, rho * s, z]
 }
@@ -741,7 +741,7 @@ impl GlobularCluster {
     fn camera(&self) -> Camera {
         Camera {
             yaw: TAU * self.t / 90.0,
-            pitch: 0.30 + 0.15 * (TAU * self.t / 67.0).sin(),
+            pitch: 0.30 + 0.15 * (TAU * self.t / 67.0).sin_det(),
             distance: EYE,
         }
     }
@@ -1207,7 +1207,7 @@ mod tests {
             };
             let (mut lo, mut hi) = (f64::INFINITY, 0.0_f64);
             for k in 0..32 {
-                let (s, c) = (TAU * f64::from(k) / 32.0).sin_cos();
+                let (s, c) = (TAU * f64::from(k) / 32.0).sin_cos_det();
                 // Walk out to the last lit pixel (the fringe dissolves, so allow gaps).
                 let (mut r, mut last, mut contour) = (0.0, 0.0, 0.0);
                 let mut ramp = Vec::new();

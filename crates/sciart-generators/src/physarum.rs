@@ -443,7 +443,7 @@ impl Colony {
         for _ in 0..n.min(MAX_AGENTS) {
             for _ in 0..32 {
                 let d = r * rng.random::<f32>().sqrt();
-                let (s, c) = (std::f32::consts::TAU * rng.random::<f32>()).sin_cos();
+                let (s, c) = (std::f32::consts::TAU * rng.random::<f32>()).sin_cos_det();
                 let (x, y) = (plan.centre.0 + d * c, plan.centre.1 + d * s);
                 let (sx, sy) = site(x, y);
                 if self.occ.get(sx, sy) == Some(&false) {
@@ -852,7 +852,7 @@ const ORGANISM: Role = Role::Ramp(Ramp::Ember);
 /// A tube tone `u ≥ U_FLOOR` at streaming phase `phase`: pulsed by ±`depth`, never
 /// below the tube floor.
 fn stream(u: f64, depth: f64, phase: f64) -> f64 {
-    (u * (1.0 + depth * phase.sin())).max(U_FLOOR)
+    (u * (1.0 + depth * phase.sin_det())).max(U_FLOOR)
 }
 
 /// The tube tone `u ≥ U_FLOOR` an ink of [`organism_ink`] stands for (to its level's
@@ -1099,7 +1099,8 @@ mod tests {
         for (k, (c, s)) in DIRS.iter().enumerate() {
             let a = k as f64 * std::f64::consts::TAU / 16.0;
             assert!(
-                (f64::from(*c) - a.cos()).abs() < 1e-6 && (f64::from(*s) - a.sin()).abs() < 1e-6
+                (f64::from(*c) - a.cos_det()).abs() < 1e-6
+                    && (f64::from(*s) - a.sin_det()).abs() < 1e-6
             );
         }
         for start in 0..16u8 {

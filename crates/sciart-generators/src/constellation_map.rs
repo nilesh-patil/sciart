@@ -325,7 +325,7 @@ pub(crate) fn teff(bv: f64) -> f64 {
 /// all in degrees: the gnomonic projection's denominator.
 fn cos_c(ra: f64, dec: f64, ra0: f64, dec0: f64) -> f64 {
     let (d, d0) = (dec.to_radians(), dec0.to_radians());
-    d0.sin() * d.sin() + d0.cos() * d.cos() * (ra - ra0).to_radians().cos()
+    d0.sin_det() * d.sin_det() + d0.cos_det() * d.cos_det() * (ra - ra0).to_radians().cos_det()
 }
 
 /// Gnomonic (tangent-plane) projection of `(ra, dec)` about `(ra0, dec0)`, all in degrees.
@@ -335,8 +335,8 @@ pub(crate) fn project(ra: f64, dec: f64, ra0: f64, dec0: f64) -> (f64, f64) {
     let (a, d, d0) = (ra.to_radians(), dec.to_radians(), dec0.to_radians());
     let da = a - ra0.to_radians();
     let cos_c = cos_c(ra, dec, ra0, dec0);
-    let xi = d.cos() * da.sin() / cos_c; // eastward
-    let eta = (d0.cos() * d.sin() - d0.sin() * d.cos() * da.cos()) / cos_c; // northward
+    let xi = d.cos_det() * da.sin_det() / cos_c; // eastward
+    let eta = (d0.cos_det() * d.sin_det() - d0.sin_det() * d.cos_det() * da.cos_det()) / cos_c; // northward
     (-xi, -eta)
 }
 
@@ -349,9 +349,9 @@ pub(crate) fn unproject((x, y): Point, ra0: f64, dec0: f64) -> (f64, f64) {
         return (ra0, dec0);
     }
     let c = rho.atan();
-    let (sc, cc) = c.sin_cos();
-    let dec = (cc * d0.sin() + eta * sc * d0.cos() / rho).asin();
-    let da = (xi * sc).atan2(rho * d0.cos() * cc - eta * d0.sin() * sc);
+    let (sc, cc) = c.sin_cos_det();
+    let dec = (cc * d0.sin_det() + eta * sc * d0.cos_det() / rho).asin();
+    let da = (xi * sc).atan2(rho * d0.cos_det() * cc - eta * d0.sin_det() * sc);
     ((ra0 + da.to_degrees()).rem_euclid(360.0), dec.to_degrees())
 }
 
@@ -359,10 +359,10 @@ pub(crate) fn unproject((x, y): Point, ra0: f64, dec0: f64) -> (f64, f64) {
 /// deg).
 pub(crate) fn galactic(ra: f64, dec: f64) -> (f64, f64) {
     let (d, dp) = (dec.to_radians(), NGP.1.to_radians());
-    let (sin_da, cos_da) = (ra - NGP.0).to_radians().sin_cos();
-    let sin_b = d.sin() * dp.sin() + d.cos() * dp.cos() * cos_da;
-    let y = d.cos() * sin_da;
-    let x = d.sin() * dp.cos() - d.cos() * dp.sin() * cos_da;
+    let (sin_da, cos_da) = (ra - NGP.0).to_radians().sin_cos_det();
+    let sin_b = d.sin_det() * dp.sin_det() + d.cos_det() * dp.cos_det() * cos_da;
+    let y = d.cos_det() * sin_da;
+    let x = d.sin_det() * dp.cos_det() - d.cos_det() * dp.sin_det() * cos_da;
     let l = (L_NCP - y.atan2(x).to_degrees()).rem_euclid(360.0);
     (l, sin_b.clamp(-1.0, 1.0).asin().to_degrees())
 }
@@ -411,9 +411,9 @@ fn centre(stars: &[CatStar]) -> (f64, f64) {
     let (mut x, mut y, mut z) = (0.0, 0.0, 0.0);
     for s in stars {
         let (a, d) = (s.ra.to_radians(), s.dec.to_radians());
-        x += d.cos() * a.cos();
-        y += d.cos() * a.sin();
-        z += d.sin();
+        x += d.cos_det() * a.cos_det();
+        y += d.cos_det() * a.sin_det();
+        z += d.sin_det();
     }
     (y.atan2(x).to_degrees(), z.atan2(x.hypot(y)).to_degrees())
 }
@@ -475,7 +475,7 @@ impl Chart {
     fn steps(&self) -> (f64, f64) {
         let tall = (2.0 * self.screen.1 / self.scale.max(1e-9)).to_degrees();
         let wide = (2.0 * self.screen.0 / (ASPECT * self.scale.max(1e-9))).to_degrees()
-            / self.dec0.to_radians().cos().max(0.1);
+            / self.dec0.to_radians().cos_det().max(0.1);
         let pick = |steps: &[f64], span: f64| {
             steps
                 .iter()
@@ -626,7 +626,7 @@ impl ConstellationMap {
         // Half-spans (deg) generous enough to cross the frame.
         let half_dec = (h / chart.scale.max(1e-9)).to_degrees().min(89.0);
         let half_ra = ((w / ASPECT) / chart.scale.max(1e-9)).to_degrees()
-            / chart.dec0.to_radians().cos().max(0.1);
+            / chart.dec0.to_radians().cos_det().max(0.1);
         let half_ra = half_ra.min(180.0);
         let (mut n_dec, mut n_ra) = (0, 0);
         let dots = &mut self.sky;
@@ -917,7 +917,7 @@ impl Generator for ConstellationMap {
         // Background sky: faint, twinkling, denser toward the galactic plane.
         for s in &self.bg {
             let level = f64::from(s.levels[idx]);
-            let tw = 0.5 + 0.5 * (s.phase + s.rate * self.t).sin();
+            let tw = 0.5 + 0.5 * (s.phase + s.rate * self.t).sin_det();
             if level > 0.0 && tw > 0.15 {
                 let g = BG_GLYPHS[usize::from(level * tw > 60.0)];
                 let ink = Ink::new(Role::Dim, ink::level(level * (0.55 + 0.45 * tw)));
