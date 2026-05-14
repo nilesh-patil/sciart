@@ -3,7 +3,7 @@
 //! beamed ahead of a relativistic source.
 
 use std::collections::VecDeque;
-use std::f64::consts::TAU;
+use std::f64::consts::{PI, TAU};
 use std::fmt::Write as _;
 
 use sciart_core::geom::{self, ASPECT};
@@ -180,6 +180,151 @@ pub(crate) fn axis_crossings<'a>(
 fn stroke(dots: &mut Dots, p: (f64, f64), (c, s): (f64, f64), ink: Ink) {
     dots.plot(p.0, p.1, ink);
     dots.plot(p.0 - c, p.1 - s, ink);
+}
+
+/// Rows the screen is grown by before clipping fronts to it: a sample just off screen can
+/// still light the stroke's inner dot or round onto the edge (DOP-A11).
+const CLIP_MARGIN: f64 = 1.0;
+/// A front's sample angles come from a rotation recurrence, re-seeded exactly every
+/// `RESEED` samples; clipped runs start on a re-seed, so they see the very same angles
+/// as the whole walk (DOP-A11).
+const RESEED: usize = 64;
+
+/// The arcs of the circle of radius `r` about `(cx, cy)` inside the rectangle
+/// `(x0, x1, y0, y1)`, as `(start, span)` in radians, written to `out`; returns how many
+/// (at most 4: a circle meets each side at most twice). The whole circle is `(0, 2π)`.
+pub(crate) fn circle_rect_arcs(
+    cx: f64,
+    cy: f64,
+    r: f64,
+    (x0, x1, y0, y1): (f64, f64, f64, f64),
+    out: &mut [(f64, f64); 4],
+) -> usize {
+    if !(r > 0.0 && r.is_finite() && cx.is_finite() && cy.is_finite()) {
+        return 0;
+    }
+    let inside = |a: f64| {
+        let (s, c) = a.sin_cos_det();
+        let (x, y) = (cx + r * c, cy + r * s);
+        (x0..=x1).contains(&x) && (y0..=y1).contains(&y)
+    };
+    // Where the circle crosses the four side lines (tangents do not cross).
+    let mut cuts = [0.0; 8];
+    let mut n = 0;
+    for (v, vertical) in [
+        (x0 - cx, true),
+        (x1 - cx, true),
+        (y0 - cy, false),
+        (y1 - cy, false),
+    ] {
+        let q = v / r;
+        if q.abs() < 1.0 {
+            let (a, b) = if vertical {
+                let a = q.acos();
+                (a, TAU - a)
+            } else {
+                let a = q.asin();
+                (a.rem_euclid(TAU), (PI - a).rem_euclid(TAU))
+            };
+            cuts[n] = a;
+            cuts[n + 1] = b;
+            n += 2;
+        }
+    }
+    if n == 0 {
+        out[0] = (0.0, TAU);
+        return usize::from(inside(0.0));
+    }
+    let cuts = &mut cuts[..n];
+    cuts.sort_by(f64::total_cmp);
+    // The pieces between consecutive cuts are wholly in or out; start the scan after a
+    // piece that is out, so a run of inside pieces never straddles the scan's ends.
+    let piece = |i: usize| {
+        let (a, b) = (
+            cuts[i],
+            cuts[(i + 1) % n] + if i + 1 == n { TAU } else { 0.0 },
+        );
+        (a, b - a)
+    };
+    let Some(first) = (0..n).find(|&i| {
+        let (a, len) = piece(i);
+        !inside(a + 0.5 * len)
+    }) else {
+        out[0] = (0.0, TAU);
+        return 1;
+    };
+    let mut count = 0;
+    let mut open: Option<(f64, f64)> = None;
+    for j in 1..=n {
+        let (a, len) = piece((first + j) % n);
+        if len > 0.0 && inside(a + 0.5 * len) {
+            open = Some(open.map_or((a, len), |(s, l)| (s, l + len)));
+        } else if let Some(arc) = open.take() {
+            out[count.min(3)] = arc;
+            count += 1;
+        }
+    }
+    count.min(4)
+}
+
+/// The sample indices `k ∈ 0..=n` (angles `start + k·step`) that fall on `arcs`, as
+/// merged, ascending, inclusive runs written to `out`; returns how many. Each run starts
+/// on a multiple of [`RESEED`], so [`walk`] gives its samples the same angles as a walk
+/// over `0..=n`, and in the same order.
+pub(crate) fn sample_runs(
+    start: f64,
+    step: f64,
+    n: usize,
+    arcs: &[(f64, f64)],
+    out: &mut [(usize, usize); 8],
+) -> usize {
+    if step.is_nan() || step <= 0.0 {
+        return 0;
+    }
+    let mut raw = [(0usize, 0usize); 8];
+    let mut m = 0;
+    let mut push = |lo: f64, hi: f64| {
+        let k0 = (lo / step).ceil().max(0.0) as usize;
+        let k1 = ((hi / step).floor().max(0.0) as usize).min(n);
+        if k0 <= k1 && m < raw.len() {
+            raw[m] = ((k0 / RESEED) * RESEED, k1);
+            m += 1;
+        }
+    };
+    for &(lo, len) in arcs {
+        let d = (lo - start).rem_euclid(TAU);
+        push(d, d + len);
+        // An arc running past the grid's start angle continues from k = 0.
+        if d + len > TAU {
+            push(0.0, d + len - TAU);
+        }
+    }
+    let raw = &mut raw[..m];
+    raw.sort_unstable();
+    let mut count = 0;
+    for &(k0, k1) in raw.iter() {
+        if count > 0 && k0 <= out[count - 1].1 + 1 {
+            out[count - 1].1 = out[count - 1].1.max(k1);
+        } else {
+            out[count] = (k0, k1);
+            count += 1;
+        }
+    }
+    count
+}
+
+/// Call `f(cos, sin)` for the angles `start + k·step`, `k ∈ k0..=k1`, by rotation, re-seeded
+/// exactly at every multiple of [`RESEED`] (and at `k0`).
+fn walk(start: f64, step: f64, k0: usize, k1: usize, mut f: impl FnMut(f64, f64)) {
+    let (ds, dc) = step.sin_cos_det();
+    let (mut s, mut c) = (0.0, 0.0);
+    for k in k0..=k1 {
+        if k == k0 || k % RESEED == 0 {
+            (s, c) = (start + k as f64 * step).sin_cos_det();
+        }
+        f(c, s);
+        (c, s) = (c * dc - s * ds, s * dc + c * ds);
+    }
 }
 
 /// How far up the sound act's ramp a front point sits: the pitch heard in its direction,
@@ -362,10 +507,23 @@ impl DopplerEffect {
 
     /// Draw every front onto the dot lattice.
     fn rasterise(&mut self) {
+        self.rasterise_with(true);
+    }
+
+    /// [`Self::rasterise`]; `clip = false` walks each front's whole visible arc, which
+    /// DOP-A11 checks the clipped walk against.
+    fn rasterise_with(&mut self, clip: bool) {
         self.dots.clear();
         let (cam, t) = (self.cam(), self.t);
         // Fronts fade out linearly as their radius approaches [`REACH`], where they go.
         let reach = (REACH * self.diag).max(1e-9);
+        let (x0, x1, y0, y1) = self.screen();
+        let grown = (
+            x0 - CLIP_MARGIN,
+            x1 + CLIP_MARGIN,
+            y0 - CLIP_MARGIN,
+            y1 + CLIP_MARGIN,
+        );
         for f in &self.fronts {
             let r = f.radius(t);
             if r < 0.25 {
@@ -378,50 +536,78 @@ impl DopplerEffect {
             if shown <= 0.0 || span <= 0.0 {
                 continue;
             }
+            // The parts of the circle actually on screen, in lab angle (DOP-A11).
+            let mut arcs = [(start, span); 4];
+            let arcs = if clip {
+                let n = circle_rect_arcs(f.x0, f.y0, r, grown, &mut arcs);
+                &arcs[..n]
+            } else {
+                &arcs[..1]
+            };
             let dot = |x: f64, y: f64| Dots::from_cells((x - cam) * ASPECT, y);
             match f.wave {
                 Wave::Sound => {
                     let n = ((span * per_rad).ceil() as usize).clamp(2, MAX_SAMPLES);
-                    let (ds, dc) = (span / n as f64).sin_cos_det();
-                    let (mut s, mut c) = start.sin_cos_det();
-                    for _ in 0..=n {
-                        // Up the ramp with the pitch heard that way (DOP-A8). A fading
-                        // front loses its dots one by one, never all at once.
-                        let level = shown * (25.0 + 230.0 * fade * pitch_value(f.m, c));
-                        if level >= ink::MIN_VISIBLE_LEVEL {
-                            let (x, y) = dot(f.x0 + r * c, f.y0 + r * s);
-                            let ink = ink::ramp(SOUND_RAMP, level / 255.0);
-                            stroke(&mut self.dots, (x, y), (c, s), ink);
-                        }
-                        (c, s) = (c * dc - s * ds, s * dc + c * ds);
+                    let step = span / n as f64;
+                    let mut runs = [(0, n); 8];
+                    let m = if clip {
+                        sample_runs(start, step, n, arcs, &mut runs)
+                    } else {
+                        1
+                    };
+                    for &(k0, k1) in &runs[..m] {
+                        walk(start, step, k0, k1, |c, s| {
+                            // Up the ramp with the pitch heard that way (DOP-A8). A fading
+                            // front loses its dots one by one, never all at once.
+                            let level = shown * (25.0 + 230.0 * fade * pitch_value(f.m, c));
+                            if level >= ink::MIN_VISIBLE_LEVEL {
+                                let (x, y) = dot(f.x0 + r * c, f.y0 + r * s);
+                                let ink = ink::ramp(SOUND_RAMP, level / 255.0);
+                                stroke(&mut self.dots, (x, y), (c, s), ink);
+                            }
+                        });
                     }
                 }
                 Wave::Light => {
                     // Photons evenly spaced in the source's rest frame, placed at their
                     // aberrated lab angles: they crowd forward (beaming, DOP-A5). The
-                    // visible lab arc maps to a rest-frame arc (aberration keeps order).
-                    let (start, span) = if span >= TAU {
-                        (0.0, TAU)
-                    } else {
-                        let a = rest_angle(BETA, start);
-                        (a, (rest_angle(BETA, start + span) - a).rem_euclid(TAU))
+                    // visible lab arc maps to a rest-frame arc (aberration keeps order),
+                    // and so does each on-screen arc within it.
+                    let to_rest = |(start, span): (f64, f64)| {
+                        if span >= TAU {
+                            (0.0, TAU)
+                        } else {
+                            let a = rest_angle(BETA, start);
+                            (a, (rest_angle(BETA, start + span) - a).rem_euclid(TAU))
+                        }
                     };
+                    let (start, span) = to_rest((start, span));
+                    let mut rest = [(0.0, 0.0); 4];
+                    for (r, &a) in rest.iter_mut().zip(arcs) {
+                        *r = to_rest(a);
+                    }
                     let density = per_rad * fade.max(0.3) * shown;
                     let n = ((span * density).ceil() as usize).clamp(2, MAX_SAMPLES);
-                    let (ds, dc) = (span / n as f64).sin_cos_det();
-                    let (mut s, mut c) = start.sin_cos_det();
-                    for _ in 0..=n {
-                        let den = 1.0 + BETA * c;
-                        let (lc, ls) = (aberrate(BETA, c), s / (GAMMA * den));
-                        let i = ((c + 1.0) * 0.5 * (LUT - 1) as f64).round() as usize;
-                        let (x, y) = dot(f.x0 + r * lc, f.y0 + r * ls);
-                        stroke(
-                            &mut self.dots,
-                            (x, y),
-                            (lc, ls),
-                            self.light_inks[i.min(LUT - 1)],
-                        );
-                        (c, s) = (c * dc - s * ds, s * dc + c * ds);
+                    let step = span / n as f64;
+                    let mut runs = [(0, n); 8];
+                    let m = if clip {
+                        sample_runs(start, step, n, &rest[..arcs.len()], &mut runs)
+                    } else {
+                        1
+                    };
+                    for &(k0, k1) in &runs[..m] {
+                        walk(start, step, k0, k1, |c, s| {
+                            let den = 1.0 + BETA * c;
+                            let (lc, ls) = (aberrate(BETA, c), s / (GAMMA * den));
+                            let i = ((c + 1.0) * 0.5 * (LUT - 1) as f64).round() as usize;
+                            let (x, y) = dot(f.x0 + r * lc, f.y0 + r * ls);
+                            stroke(
+                                &mut self.dots,
+                                (x, y),
+                                (lc, ls),
+                                self.light_inks[i.min(LUT - 1)],
+                            );
+                        });
                     }
                 }
             }
@@ -978,6 +1164,106 @@ mod tests {
         // Centred left of the screen: too small to reach it, or reaching it.
         assert_eq!(g.visible_arc(x0 - 10.0, cy, 9.0).1, 0.0);
         assert!(g.visible_arc(x0 - 10.0, cy, 11.0).1 > 0.0);
+    }
+
+    #[test]
+    fn dop_a11_circle_rect_arcs_hold_exactly_the_circle_inside_the_rectangle() {
+        let mut rng = SplitMix64::new(11);
+        let mut u = |lo: f64, hi: f64| lo + (hi - lo) * rng.next_f64();
+        for case in 0..3000 {
+            let (x0, y0) = (u(-50.0, 50.0), u(-50.0, 50.0));
+            let rect = (x0, x0 + u(1.0, 120.0), y0, y0 + u(1.0, 60.0));
+            // Centres inside, around and far outside; radii from specks to huge.
+            let (cx, cy) = (u(-150.0, 250.0), u(-150.0, 200.0));
+            let r = if case % 3 == 0 {
+                u(0.1, 10.0)
+            } else {
+                u(1.0, 400.0)
+            };
+            let mut arcs = [(0.0, 0.0); 4];
+            let m = circle_rect_arcs(cx, cy, r, rect, &mut arcs);
+            let arcs = &arcs[..m];
+            let total: f64 = arcs.iter().map(|a| a.1).sum();
+            assert!(total <= TAU + 1e-9, "case {case}: arcs overlap, {arcs:?}");
+            for k in 0..1440 {
+                let a = (f64::from(k) + 0.37) * TAU / 1440.0;
+                let (s, c) = a.sin_cos_det();
+                let (x, y) = (cx + r * c, cy + r * s);
+                let eps = 1e-6 * r.max(1.0);
+                let within = x > rect.0 + eps && x < rect.1 - eps;
+                let within = within && y > rect.2 + eps && y < rect.3 - eps;
+                let outside = x < rect.0 - eps || x > rect.1 + eps;
+                let outside = outside || y < rect.2 - eps || y > rect.3 + eps;
+                let on = arcs
+                    .iter()
+                    .any(|&(lo, len)| (a - lo).rem_euclid(TAU) <= len);
+                assert!(
+                    !within || on,
+                    "case {case}: inside point at {a} off the arcs"
+                );
+                assert!(
+                    !outside || !on,
+                    "case {case}: outside point at {a} on the arcs"
+                );
+            }
+        }
+        // Degenerate input clips to nothing.
+        let mut arcs = [(0.0, 0.0); 4];
+        let rect = (0.0, 10.0, 0.0, 10.0);
+        assert_eq!(circle_rect_arcs(5.0, 5.0, 0.0, rect, &mut arcs), 0);
+        assert_eq!(circle_rect_arcs(f64::NAN, 5.0, 1.0, rect, &mut arcs), 0);
+    }
+
+    #[test]
+    fn dop_a11_clipped_fronts_light_the_same_dots_as_the_whole_arc() {
+        let mut checked = 0;
+        for (w, h) in [(120, 40), (200, 50)] {
+            let (mut g, mut ctx) = fresh(w, h);
+            let size = Size::new(w, h);
+            let (mut a, mut b) = (
+                Canvas::new(size, GlyphMode::Unicode),
+                Canvas::new(size, GlyphMode::Unicode),
+            );
+            // A whole 48 s loop and into the next, so both hand-overs are covered.
+            for step in 1..=(50.0 / SIM_DT) as usize {
+                g.update(SIM_DT, &mut ctx);
+                if step % 30 != 0 && !(2870..2890).contains(&step) {
+                    continue;
+                }
+                a.clear();
+                g.dots.blit(&mut a);
+                g.rasterise_with(false);
+                b.clear();
+                g.dots.blit(&mut b);
+                g.rasterise_with(true);
+                assert!(a.cells() == b.cells(), "{w}x{h} t = {:.2}", g.t);
+                checked += 1;
+            }
+        }
+        assert!(checked > 200);
+    }
+
+    #[test]
+    fn dop_a11_sample_runs_are_merged_ascending_and_start_on_a_reseed() {
+        let mut runs = [(0, 0); 8];
+        let step = TAU / 1000.0;
+        // Two arcs, one running past the grid's start angle.
+        let arcs = [(1.0, 0.5), (6.0, 1.0)];
+        let m = sample_runs(0.0, step, 1000, &arcs, &mut runs);
+        let runs = &runs[..m];
+        assert!(runs.windows(2).all(|p| p[0].1 + 1 < p[1].0), "{runs:?}");
+        assert!(
+            runs.iter().all(|r| r.0 % RESEED == 0 && r.1 <= 1000),
+            "{runs:?}"
+        );
+        for &(lo, len) in &arcs {
+            for k in 0..=1000 {
+                let d = (k as f64 * step - lo).rem_euclid(TAU);
+                if d <= len {
+                    assert!(runs.iter().any(|r| (r.0..=r.1).contains(&k)), "k {k}");
+                }
+            }
+        }
     }
 
     #[test]
