@@ -199,6 +199,10 @@ pub(crate) struct Geodesics {
     /// Sweep angle at which ray `k` is captured (`u = ½`) or escapes (`u = 0`); `> 2π`
     /// when it is still circling at the end of the table.
     end: Box<[f32]>,
+    /// The table's range in the asinh coordinate, [`Self::t_range`], kept so a lookup
+    /// costs one `asinh`, not three (a resize traces ~10⁵ rays).
+    t0: f64,
+    t1: f64,
 }
 
 impl Geodesics {
@@ -249,23 +253,30 @@ impl Geodesics {
                 row[j] = y[0] as f32;
             }
         }
-        Self { u, end }
+        let (t0, t1) = Self::t_range();
+        Self { u, end, t0, t1 }
     }
 
     /// Fractional table row of `b`, or `None` beyond `B_MAX` (weak field).
-    fn row(b: f64) -> Option<(usize, f64)> {
+    fn row(&self, b: f64) -> Option<(usize, f64)> {
         if b > B_MAX {
             return None;
         }
-        let (t0, t1) = Self::t_range();
+        let (t0, t1) = (self.t0, self.t1);
         let x = ((Self::t_of(b) - t0) / (t1 - t0) * (NB - 1) as f64).clamp(0.0, (NB - 1) as f64);
         let k = (x as usize).min(NB - 2);
         Some((k, x - k as f64))
     }
 
     /// Sweep angle at which the ray with impact parameter `b` is captured or escapes.
+    #[cfg(test)]
     pub(crate) fn end(&self, b: f64) -> f64 {
-        match Self::row(b) {
+        self.end_at(self.row(b), b)
+    }
+
+    /// [`Self::end`] with `b`'s table row already looked up.
+    fn end_at(&self, row: Option<(usize, f64)>, b: f64) -> f64 {
+        match row {
             Some((k, f)) => {
                 let (a, c) = (f64::from(self.end[k]), f64::from(self.end[k + 1]));
                 a + (c - a) * f
@@ -276,8 +287,14 @@ impl Geodesics {
     }
 
     /// `u = 1/r` of the ray with impact parameter `b` after sweeping `phi ∈ [0, 2π]`.
+    #[cfg(test)]
     pub(crate) fn u(&self, b: f64, phi: f64) -> f64 {
-        let Some((k, fb)) = Self::row(b) else {
+        self.u_at(self.row(b), b, phi)
+    }
+
+    /// [`Self::u`] with `b`'s table row already looked up.
+    fn u_at(&self, row: Option<(usize, f64)>, b: f64, phi: f64) -> f64 {
+        let Some((k, fb)) = row else {
             // u = sin φ / b + (1 − cos φ)² / b², first order in M/b.
             return phi.sin_det() / b + (1.0 - phi.cos_det()).powi(2) / (b * b);
         };
@@ -292,14 +309,15 @@ impl Geodesics {
 
     /// Trace a camera ray with impact parameter `b` at screen angle `psi` (BH-A2, BH-A6).
     pub(crate) fn trace(&self, b: f64, psi: f64) -> Fate {
-        let end = self.end(b);
+        let row = self.row(b);
+        let end = self.end_at(row, b);
         let gamma0 = first_crossing(psi);
         for order in 0..2u8 {
             let gamma = gamma0 + f64::from(order) * PI;
             if gamma >= end {
                 break;
             }
-            let u = self.u(b, gamma);
+            let u = self.u_at(row, b, gamma);
             if u > 0.0 {
                 let r = 1.0 / u;
                 if (ISCO..=R_OUT).contains(&r) {
