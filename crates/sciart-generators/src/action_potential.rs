@@ -1392,12 +1392,9 @@ impl ActionPotential {
         // 12.3 m/s is right for 6.3 °C, not the textbook 21 m/s at 18.5 °C.
         // Sized for every caption, so the form never flickers with the beat.
         let _ = match self.readout_room {
-            50.. => write!(
-                label,
-                "Hodgkin-Huxley 1952 | squid axon 6.3C | v={speed} m/s"
-            ),
-            26.. => write!(label, "HH squid 6.3C | v={speed} m/s"),
-            20.. => write!(label, "HH 6.3C | v={speed} m/s"),
+            48.. => write!(label, "Hodgkin-Huxley 1952  squid axon 6.3C  v={speed} m/s"),
+            25.. => write!(label, "HH squid 6.3C  v={speed} m/s"),
+            19.. => write!(label, "HH 6.3C  v={speed} m/s"),
             7.. => write!(label, "HH 6.3C"),
             _ => return,
         };
@@ -2067,20 +2064,20 @@ mod tests {
 
     #[test]
     fn ap_gen_r13_label_forms_follow_the_room_right_of_the_title() {
-        let long = "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s";
-        let mid = "HH squid 6.3C | v=--.- m/s";
-        let short = "HH 6.3C | v=--.- m/s";
+        let long = "Hodgkin-Huxley 1952  squid axon 6.3C  v=--.- m/s";
+        let mid = "HH squid 6.3C  v=--.- m/s";
+        let short = "HH 6.3C  v=--.- m/s";
         // The room is `title::stable_readout_room` (CORE-R83): the least over the title
         // with each caption, at this width and every wider one, so the form never
         // flickers with the beat and only grows with the width.
         for (w, want) in [
             (124u16, long),
-            (100, long),
-            (99, mid),
-            (64, mid),
-            (63, short),
-            (58, short),
-            (57, "HH 6.3C"),
+            (96, long),
+            (95, mid),
+            (63, mid),
+            (62, short),
+            (56, short),
+            (55, "HH 6.3C"),
             (24, "HH 6.3C"),
             (23, ""),
             (10, ""),
@@ -2095,7 +2092,7 @@ mod tests {
         }
         assert_eq!(
             readout(64, 14.0, Some(12.3)).trim(),
-            "HH squid 6.3C | v=12.3 m/s"
+            "HH squid 6.3C  v=12.3 m/s"
         );
     }
 
