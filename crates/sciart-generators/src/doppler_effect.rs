@@ -69,6 +69,9 @@ const ACT_FADE: f64 = 2.0;
 /// Mach 1 fade out over this many seconds, so the zone of silence ahead of the cone reads
 /// dark (DOP-A9).
 const SUBSONIC_FADE: f64 = 3.0;
+/// Seconds into the sound act at which the source breaks through Mach 1: the end of the
+/// "barrier" beat, the sum of the first three [`BEATS`] (checked by a DOP-A9 test).
+const T_BREAK: f64 = 14.0;
 /// Dot spacing along a front (dots are square, 4 per row).
 const DOTS_PER_ROW: f64 = 4.0;
 const SPACING: f64 = 0.7;
@@ -85,6 +88,29 @@ const WAKE: [Glyph; 2] = [Glyph::new('━', '='), Glyph::new('─', '-')];
 enum Wave {
     Sound,
     Light,
+}
+
+/// The act on screen and seconds since it began: what decides how much of a front shows.
+#[derive(Debug, Clone, Copy)]
+struct Visibility {
+    now: Wave,
+    age: f64,
+}
+
+impl Visibility {
+    /// How much of a front of `wave`, emitted at speed `m`, is still shown. Fronts left
+    /// over from the other act fade out over [`ACT_FADE`] s while the new act opens on its
+    /// own steady state (DOP-A10). In the sound act, once the source breaks through Mach 1
+    /// at [`T_BREAK`] its subsonic fronts fade out over [`SUBSONIC_FADE`] s (DOP-A9).
+    fn of(self, wave: Wave, m: f64) -> f64 {
+        if wave != self.now {
+            (1.0 - self.age / ACT_FADE).clamp(0.0, 1.0)
+        } else if wave == Wave::Sound && m < 1.0 && self.age > T_BREAK {
+            (1.0 - (self.age - T_BREAK) / SUBSONIC_FADE).clamp(0.0, 1.0)
+        } else {
+            1.0
+        }
+    }
 }
 
 /// One circular wavefront: emitted at `(x0, y0)` (rows, in the medium) at time `t0` by a
@@ -423,8 +449,9 @@ impl DopplerEffect {
     fn prune(&mut self) {
         let (t, reach) = (self.t, REACH * self.diag);
         let left = self.sx - ANCHOR_FAST * self.width;
-        let sound = [self.shown(Wave::Sound, 0.0), self.shown(Wave::Sound, 1.0)];
-        let light = self.shown(Wave::Light, BETA);
+        let vis = self.visibility();
+        let sound = [vis.of(Wave::Sound, 0.0), vis.of(Wave::Sound, 1.0)];
+        let light = vis.of(Wave::Light, BETA);
         self.fronts.retain(|f| {
             let shown = match f.wave {
                 Wave::Sound => sound[usize::from(f.m >= 1.0)],
@@ -443,21 +470,18 @@ impl DopplerEffect {
         }
     }
 
-    /// How much of a front of `wave`, emitted at speed `m`, is still shown. Fronts left
-    /// over from the other act fade out over [`ACT_FADE`] s while the new act opens on its
-    /// own steady state (DOP-A10). In the sound act, once the source breaks through Mach 1
-    /// its subsonic fronts fade out over [`SUBSONIC_FADE`] s (DOP-A9).
+    /// The current act and its age, read once per pass over the fronts.
+    fn visibility(&self) -> Visibility {
+        Visibility {
+            now: self.speed().1,
+            age: self.act_age(),
+        }
+    }
+
+    /// [`Visibility::of`] at the current time.
+    #[cfg(test)]
     fn shown(&self, wave: Wave, m: f64) -> f64 {
-        let (now, age) = (self.speed().1, self.act_age());
-        if wave != now {
-            return (1.0 - age / ACT_FADE).clamp(0.0, 1.0);
-        }
-        let t_break: f64 = BEATS[..3].iter().map(|b| b.1).sum();
-        if wave == Wave::Sound && m < 1.0 && age > t_break {
-            (1.0 - (age - t_break) / SUBSONIC_FADE).clamp(0.0, 1.0)
-        } else {
-            1.0
-        }
+        self.visibility().of(wave, m)
     }
 
     /// The arc of a circle of radius `r` centred at `(cx, cy)` that can meet the screen,
@@ -524,12 +548,13 @@ impl DopplerEffect {
             y0 - CLIP_MARGIN,
             y1 + CLIP_MARGIN,
         );
+        let vis = self.visibility();
         for f in &self.fronts {
             let r = f.radius(t);
             if r < 0.25 {
                 continue;
             }
-            let (fade, shown) = ((1.0 - r / reach).clamp(0.0, 1.0), self.shown(f.wave, f.m));
+            let (fade, shown) = ((1.0 - r / reach).clamp(0.0, 1.0), vis.of(f.wave, f.m));
             // Samples per radian of the circle, and the lab arc that can meet the screen.
             let per_rad = r * DOTS_PER_ROW / SPACING;
             let (start, span) = self.visible_arc(f.x0, f.y0, r);
@@ -630,7 +655,7 @@ impl DopplerEffect {
                     );
                     let _ = write!(mid, "M {m:.2}  x{ahead:.2} ahead");
                 } else if let Some(a) = mach_half_angle(m).filter(|_| m > 1.0 + BARRIER) {
-                    let _ = write!(long, "M {m:.2}  cone {:.0} deg", a.to_degrees());
+                    let _ = write!(long, "M {m:.2}  Mach angle {:.0} deg", a.to_degrees());
                 }
             }
             Wave::Light => {
@@ -1020,7 +1045,32 @@ mod tests {
             stage.step(SIM_DT);
         }
         let row = stage.render().to_lines().pop().unwrap();
-        assert!(row.ends_with(" M 1.60  cone 39 deg "), "{row:?}");
+        // asin(1/1.6) = 38.7°: the cone's half-angle, named as such (the cone itself
+        // opens ≈ 77°).
+        assert!(row.ends_with(" M 1.60  Mach angle 39 deg "), "{row:?}");
+    }
+
+    #[test]
+    fn dop_a9_break_time_is_the_end_of_the_barrier_beat() {
+        let sum: f64 = BEATS[..3].iter().map(|b| b.1).sum();
+        assert_eq!(T_BREAK, sum);
+        // The subsonic fronts start fading exactly there, and are gone SUBSONIC_FADE later.
+        let (g, _) = fresh(120, 40);
+        let vis = |age| {
+            Visibility {
+                now: Wave::Sound,
+                age,
+            }
+            .of(Wave::Sound, 0.5)
+        };
+        assert_eq!(vis(T_BREAK), 1.0);
+        assert!(vis(T_BREAK + 0.5 * SUBSONIC_FADE) < 1.0);
+        assert_eq!(vis(T_BREAK + SUBSONIC_FADE), 0.0);
+        // `shown` is the same rule at the scene's own act age.
+        assert_eq!(
+            g.shown(Wave::Sound, 0.5),
+            g.visibility().of(Wave::Sound, 0.5)
+        );
     }
 
     /// Braille cells of `role` in `frame`, as `(column, level)`.
