@@ -372,7 +372,7 @@ fn core_r81_tone_and_to_pixels_do_not_allocate() {
 }
 
 #[test]
-fn core_r85_glow_does_not_allocate_after_resize() {
+fn core_r85_r92_glow_does_not_allocate_after_resize() {
     let size = Size::new(200, 50);
     let mut glow = Glow::new(size);
     let mut pixels = Pixels::new(size);
@@ -382,7 +382,9 @@ fn core_r85_glow_does_not_allocate_after_resize() {
         glow.decay(0.9);
         for i in 0..400 {
             glow.splat(f64::from(i), f64::from(i % 200), &kernel, 3.0);
+            glow.splat_bilinear(f64::from(i) * 0.37, f64::from(i % 90) * 0.9, 1.0);
         }
+        black_box(glow.values_mut()[0]);
         glow.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
         glow.resize(Size::new(100, 20));
         glow.clear();

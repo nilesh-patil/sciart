@@ -15,7 +15,7 @@ use sciart_core::geom::v3::{V3, add, cross, dot, norm, scale, sub, unit};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{Tone, draw, ink, raster};
+use sciart_core::{Tone, draw, ink, raster, rng};
 
 pub static META: Meta = Meta {
     name: "pulsar",
@@ -57,6 +57,9 @@ const BEAM_TAU: f64 = 0.06;
 /// How fast the ray pattern turns about each beam axis (rad/s): fast enough that
 /// consecutive frames interleave, which hides the discrete rays.
 const RAY_TURN: f64 = 37.0;
+/// Each ray's samples start at a hashed offset of up to one sample step, new every
+/// exposure, so the samples of neighbouring rays never line up into radial spokes.
+const RAY_JITTER_SALT: u64 = 0x5075_6C73_6172_0001;
 /// Length of the flash's horizontal spikes at the pulse peak, in `R_LC`.
 const FLASH_SPIKE: f64 = 1.6;
 /// Beam tone: exposure at the knee and at white, and the level below which the beam's
@@ -86,15 +89,19 @@ const INSET_MAX: (u16, u16) = (40, 12);
 const INSET_MIN_CANVAS: (u16, u16) = (60, 16);
 /// The beam's brightness under the inset, so the pulse traces read over it, and the
 /// width (pixels) of the feathered band across the inset's border over which it dims.
-const INSET_DIM: f64 = 0.3;
+const INSET_DIM: f64 = 0.2;
+/// Pulse stack spacing: at most one trace per `STACK_ROW_DOTS` dot rows and per
+/// `STACK_COL_DOTS` dot columns of the inset, and a pulse's height `STACK_AMP` gaps, so the
+/// traces overlap like the CP 1919 plot without piling into one band.
+const STACK_ROW_DOTS: i32 = 6;
+const STACK_COL_DOTS: i32 = 8;
+const STACK_AMP: f64 = 3.5;
 const INSET_FEATHER: f64 = 2.0;
 /// A beam whose axis points at us (`axis·ẑ` from `FACING.0` to `FACING.1`) is dimmed by
 /// up to `FACING_DIM` and shortened by up to `FACING_SHORTEN`.
 const FACING: (f64, f64) = (0.3, 0.9);
 const FACING_DIM: f64 = 0.6;
 const FACING_SHORTEN: f64 = 0.6;
-/// A beam sample lands in one pixel.
-const POINT: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
 /// Below this width only the inner closed loop is drawn per meridian: the outer one and
 /// the cylinder crowd the star into a tangle of thin lines.
 const OUTER_LOOP_MIN_WIDTH: u16 = 120;
@@ -224,6 +231,17 @@ pub(crate) fn pulse(n: i64, rng: &mut impl Rng, out: &mut [f32; SAMPLES]) {
     }
 }
 
+/// Pulse-stack layout for an inset `dw × dh` dots: `(lines, amp, gap)` in dot rows,
+/// `lines = clamp(min(PULSES, dh/6, dw/8), 2, PULSES)`, `amp = 3.5·gap`, and the stack
+/// (the oldest trace's peak to the newest baseline) filling `dh − 2` (PUL-A5).
+pub(crate) fn stack_layout(dw: i32, dh: i32) -> (usize, f64, f64) {
+    let lines = (dh / STACK_ROW_DOTS)
+        .min(dw / STACK_COL_DOTS)
+        .clamp(2, PULSES as i32) as usize;
+    let gap = f64::from((dh - 2).max(1)) / ((lines - 1) as f64 + STACK_AMP);
+    (lines, STACK_AMP * gap, gap)
+}
+
 /// Where the pulse stack goes: the top-right corner, clear of the title (PUL-A5).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Inset {
@@ -274,6 +292,8 @@ pub struct Pulsar {
     pulse_no: i64,
     /// Whether the stack has been filled (by the first resize).
     primed: bool,
+    /// Exposures so far: keys each exposure's ray jitter.
+    exposures: u64,
     readout: bool,
 }
 
@@ -293,6 +313,7 @@ impl Default for Pulsar {
             newest: 0,
             pulse_no: 0,
             primed: false,
+            exposures: 0,
             readout: false,
         }
     }
@@ -406,6 +427,8 @@ impl Pulsar {
     /// marched out from the star; brightest on the axis and near the star.
     fn expose(&mut self, m: V3, dt: f64, t: f64) {
         self.beams.decay((-dt / BEAM_TAU).exp() as f32);
+        self.exposures = self.exposures.wrapping_add(1);
+        let salt = RAY_JITTER_SALT ^ self.exposures.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let reach = {
             let (w, h) = (f64::from(self.size.width()), f64::from(self.size.height()));
             (w / ASPECT).hypot(h) / self.zoom
@@ -421,7 +444,7 @@ impl Pulsar {
             let w0 = (dt / BEAM_TAU * (1.0 - FACING_DIM * facing)) as f32;
             let length = reach * (1.0 - FACING_SHORTEN * facing);
             let (u1, u2) = frame(axis);
-            for j in 0..RAYS {
+            for (j, key) in (0..RAYS).zip(0u64..) {
                 let f = ((j as f64 + 0.5) / RAYS as f64).sqrt();
                 let (s, c) = (golden * j as f64 + turn).sin_cos_det();
                 let (sa, ca) = (f * RHO).sin_cos_det();
@@ -429,11 +452,17 @@ impl Pulsar {
                 // Brightest on the axis, falling to exactly zero at the cone's edge, so the
                 // fringe fades out before it dissolves.
                 let across = w0 * (((-3.0 * f * f).exp() - edge) / (1.0 - edge)) as f32;
+                let jitter = rng::hash01(salt ^ (key << 1 | u64::from(axis[2] < m[2])));
                 for i in 0..RAY_STEPS {
-                    let r = R_STAR + length * (i as f64 + 0.5) / RAY_STEPS as f64;
+                    let r = R_STAR + length * (i as f64 + jitter) / RAY_STEPS as f64;
                     let (x, y) = self.dot(scale(d, r));
-                    self.beams
-                        .splat(x, y, &POINT, across / (1.0 + 2.0 * r as f32));
+                    // Bilinear (CORE-R92): a pixel is 2 × 2 dots, its centre at dot
+                    // `2p + 0.5`, so no sample snaps to the nearest pixel.
+                    self.beams.splat_bilinear(
+                        (x - 0.5) / 2.0,
+                        (y - 0.5) / 2.0,
+                        across / (1.0 + 2.0 * r as f32),
+                    );
                 }
             }
         }
@@ -513,10 +542,7 @@ impl Pulsar {
         let Some(inset) = self.inset else { return };
         let (dw, dh) = (inset.w * Dots::CELL_W, inset.h * Dots::CELL_H);
         let (x0, y0) = (inset.x * Dots::CELL_W, inset.y * Dots::CELL_H);
-        let lines = PULSES.min((dh / 5).max(2) as usize);
-        let amp = 0.45 * f64::from(dh);
-        let span = f64::from(dh - 2) - amp;
-        let gap = span / (lines.max(2) - 1) as f64;
+        let (lines, amp, gap) = stack_layout(dw, dh);
         let phi = phase(self.t) - PULSE_PHASE;
         // Samples of the newest pulse received so far.
         let into = (phi + PI).rem_euclid(TAU) - PI;
@@ -672,6 +698,24 @@ mod tests {
     use super::*;
 
     const DEG: f64 = PI / 180.0;
+
+    #[test]
+    fn pul_a5_stack_lines_are_capped_and_spaced_by_their_amplitude() {
+        for size in [Size::new(80, 24), Size::new(120, 40), Size::new(200, 50)] {
+            let inset = Inset::fit(size).unwrap();
+            let (dw, dh) = (inset.w * Dots::CELL_W, inset.h * Dots::CELL_H);
+            let (lines, amp, gap) = stack_layout(dw, dh);
+            let cap = (dh / 6).min(dw / 8).clamp(2, PULSES as i32) as usize;
+            assert_eq!(lines, cap, "{size:?}");
+            assert!((amp / gap - 3.5).abs() < 1e-9);
+            // Oldest peak to newest baseline fills the inset exactly.
+            let height = (lines - 1) as f64 * gap + amp;
+            assert!((height - f64::from(dh - 2)).abs() < 1e-9, "{size:?}");
+            assert!(gap >= 3.0, "{size:?}: traces {gap} dots apart");
+        }
+        // Degenerate insets never panic and keep two lines.
+        assert_eq!(stack_layout(0, 0).0, 2);
+    }
 
     #[test]
     fn pul_a1_magnetic_axis_turns_about_the_spin_axis_once_per_period() {

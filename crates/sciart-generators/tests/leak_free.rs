@@ -41,9 +41,9 @@ const BIG_STEPS: usize = 60;
 /// change.
 const LIVE_CEILING: i64 = 4 << 20;
 /// Scenes with their own, higher ceiling, each named with its reason in TEST-R7, so one
-/// outlier does not loosen the guard for every other scene. None since M12 capped
-/// fractal_growth's DLA lattice (ADR-0012).
-const EXCEPTIONS: &[(&str, i64)] = &[];
+/// outlier does not loosen the guard for every other scene. galaxy_collision keeps a
+/// second, longer-lived tail exposure and blurred copies per host (M12 closing).
+const EXCEPTIONS: &[(&str, i64)] = &[("galaxy_collision", 7 << 20)];
 
 fn ceiling(name: &str) -> i64 {
     EXCEPTIONS

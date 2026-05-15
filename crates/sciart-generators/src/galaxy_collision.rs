@@ -13,7 +13,9 @@
 //!
 //! The picture is a short long exposure: each host has its own exposure buffer at
 //! half-block pixel resolution; stars splat into it every step and it decays with
-//! `EXPOSURE_TAU`, so a few thousand test stars read as smooth glowing disks. After the
+//! `EXPOSURE_TAU`, so a few thousand test stars read as smooth glowing disks. Stars beyond
+//! the disk (tails and bridge) go to a second, longer exposure per host that is blurred
+//! before toning, so the sparse streams read as continuous luminous bands. After the
 //! first close approach a fixed sample of "cloud" stars lights up as Hα knots where the
 //! stellar density is high (triggered star formation, stylised: the model has no gas).
 
@@ -67,12 +69,20 @@ const TAIL_ROOM: f64 = 2.5 * RD;
 /// e-folding time of the exposure (s): long enough to smooth a disk of test stars, short
 /// enough that the tails stay crisp while the camera zooms.
 const EXPOSURE_TAU: f64 = 0.15;
-/// Tail and bridge stars are also exposed back along their path over this many seconds
-/// (± `TAIL_JITTER` of it per star), in `TAIL_SAMPLES` splats: the sparse streams need a
-/// longer exposure than the disks.
-const TAIL_EXPOSURE: f64 = 0.6;
-const TAIL_JITTER: f64 = 0.3;
-const TAIL_SAMPLES: usize = 6;
+/// Tail and bridge stars (weight `1 − inside`) expose a separate buffer with this longer
+/// e-folding time (s): a star's light is smeared continuously along its own path, not in
+/// discrete back-splats, so neighbouring stars do not print a comb.
+const TAIL_TAU: f64 = 0.6;
+/// Box-blur passes (radius 1 px each) over the tail buffers before toning: two passes are
+/// a 5-px triangle kernel (σ ≈ 1.15 px), wide enough to merge neighbouring streams into
+/// one band ≥ 3 px across, narrow enough that the tails stay thin.
+const TAIL_BLUR_PASSES: usize = 2;
+/// Tail light is lifted by this gain before the shared tone curve: a band a few stars
+/// deep sits on the tone's linear toe, where it would otherwise vanish.
+const TAIL_GAIN: f32 = 1.8;
+/// One blur pass over the disk light too (σ ≈ 0.8 px): at pericentre disk stars move
+/// several pixels per frame and would otherwise print parallel streaks.
+const DISK_BLUR_PASSES: usize = 1;
 /// Light of a nucleus in stars, spread by `NUCLEUS` (weights sum to 1).
 const BULGE: f32 = 3.0;
 const NUCLEUS: [(f64, f64, f32); 9] = [
@@ -116,10 +126,12 @@ const KNOT_DIAGONAL: f64 = 0.55;
 /// Where the two hosts' light overlaps, the minority host's share from which its pixels
 /// start to show through (stippled), and the fraction of pixels they take at an even
 /// (½) share.
-const MIX_FROM: f64 = 0.3;
-const MIX_MAX: f64 = 0.3;
+const MIX_FROM: f64 = 0.35;
+const MIX_MAX: f64 = 0.2;
 /// Host ramps, galaxy 1 and galaxy 2: false colour telling which galaxy a star came from.
-const HOSTS: [Ramp; 2] = [Ramp::Ice, Ramp::Ember];
+/// Cool against warm violet; neither is the amber the gallery already leans on, and the
+/// knots' Hα pink stays distinct from both.
+const HOSTS: [Ramp; 2] = [Ramp::Ice, Ramp::Ferroin];
 const SKY: Glyph = Glyph::new('·', '.');
 const SKY_STARS: usize = 70;
 /// ASCII stand-ins for a pixel pair, by the brighter pixel's level.
@@ -208,30 +220,6 @@ fn disk_basis(n: V3) -> (V3, V3) {
     (e1, cross(n, e1))
 }
 
-/// Add weight `w` at continuous pixel position `(x, y)` (integers are pixel centres) of a
-/// row-major `pw`-wide buffer, split bilinearly over the four nearest pixels: motion stays
-/// smooth below a pixel and the weight is conserved in bounds (GAL-A5).
-pub(crate) fn splat(buf: &mut [f32], pw: usize, x: f64, y: f64, w: f32) {
-    if !(x.is_finite() && y.is_finite()) || pw == 0 {
-        return;
-    }
-    let ph = buf.len() / pw;
-    let (x0, y0) = (x.floor(), y.floor());
-    let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
-    for (dx, dy, k) in [
-        (0.0, 0.0, (1.0 - fx) * (1.0 - fy)),
-        (1.0, 0.0, fx * (1.0 - fy)),
-        (0.0, 1.0, (1.0 - fx) * fy),
-        (1.0, 1.0, fx * fy),
-    ] {
-        let (px, py) = (x0 + dx, y0 + dy);
-        // Saturating casts: anything huge fails the bounds check.
-        if px >= 0.0 && py >= 0.0 && (px as usize) < pw && (py as usize) < ph {
-            buf[py as usize * pw + px as usize] += w * k;
-        }
-    }
-}
-
 /// The dynamical state of one encounter (no screen knowledge).
 #[derive(Debug, Clone)]
 pub(crate) struct Encounter {
@@ -261,7 +249,8 @@ impl Encounter {
 
     /// Start over in place, reusing the star buffer (no allocation unless `n` outgrows
     /// it; GEN-R11): cores at apocentre of the bound orbit, `n` stars split ∝ mass on
-    /// circular orbits. Galaxy 1 spins nearly prograde; galaxy 2 is inclined 40°–140°
+    /// circular orbits. The hosts are interleaved ([`host_of_index`]) so every prefix of
+    /// the buffer keeps the mass split and a shrink that truncates it keeps both galaxies. Galaxy 1 spins nearly prograde; galaxy 2 is inclined 40°–140°
     /// (possibly retrograde).
     pub(crate) fn reset(&mut self, n: usize, rng: &mut impl Rng) {
         let ra = A * (1.0 + E);
@@ -289,12 +278,11 @@ impl Encounter {
                 rng.random_range(0.0..TAU),
             ),
         ];
-        let n1 = ((n as f64) * M1 / M).round() as usize;
         let disks = spins.map(disk_basis);
         self.stars.clear();
         self.stars.set_capacity(n);
         for i in 0..n {
-            let g = usize::from(i >= n1);
+            let g = host_of_index(i);
             let (host, m) = (cores[g], [M1, M2][g]);
             let (e1, e2) = disks[g];
             // Two trailing log-spiral arms (pitch ≈ 20°) with scatter; they wind up
@@ -387,6 +375,14 @@ impl Encounter {
     }
 }
 
+/// The host of star `i`: galaxy 2 exactly when `⌊(i + 1)·M2/M⌋ > ⌊i·M2/M⌋` (a Bresenham
+/// split), so any first `n` stars hold `⌊n·M2/M⌋` of galaxy 2 and the rest of galaxy 1
+/// (GAL-A2, GAL-A4).
+fn host_of_index(i: usize) -> usize {
+    let share = |k: usize| (k as f64 * M2 / M).floor();
+    usize::from(share(i + 1) > share(i))
+}
+
 /// Seeded viewpoint: tilt of the orbital plane, roll, and a horizontal mirror.
 #[derive(Debug, Clone, Copy, Default)]
 struct View {
@@ -445,8 +441,15 @@ impl Frame {
 pub struct GalaxyCollision {
     sim: Option<Encounter>,
     frame: Frame,
-    /// Per-host exposure at pixel resolution (`w × 2h`, row-major).
-    exposure: [Vec<f32>; 2],
+    /// Per-host disk exposure at pixel resolution.
+    exposure: [Glow; 2],
+    /// Per-host tail and bridge exposure (longer, blurred before toning).
+    tails: [Glow; 2],
+    /// The blurred tail and disk light per host, and one line of scratch for the
+    /// separable blur.
+    blurred: [Vec<f32>; 2],
+    disk: [Vec<f32>; 2],
+    scratch: Vec<f32>,
     tone: Tone,
     pixels: Pixels,
     /// Distant field stars, normalized `[0, 1)²` (they do not zoom).
@@ -463,7 +466,11 @@ impl Default for GalaxyCollision {
                 zoom: 1.0,
                 size: Size::new(1, 1),
             },
-            exposure: [Vec::new(), Vec::new()],
+            exposure: [Glow::default(), Glow::default()],
+            tails: [Glow::default(), Glow::default()],
+            blurred: [Vec::new(), Vec::new()],
+            disk: [Vec::new(), Vec::new()],
+            scratch: Vec::new(),
             tone: Tone::asinh(KNEE, WHITE),
             pixels: Pixels::default(),
             sky: Vec::new(),
@@ -494,8 +501,9 @@ impl GalaxyCollision {
         self.frame.view = View::random(&mut ctx.rng);
         self.snap_camera();
         // A new encounter starts from its own light, not the last one's afterglow.
-        self.exposure.iter_mut().for_each(|e| e.fill(0.0));
-        self.expose(3.0 * EXPOSURE_TAU);
+        self.exposure.iter_mut().for_each(Glow::clear);
+        self.tails.iter_mut().for_each(Glow::clear);
+        self.expose(3.0 * TAIL_TAU);
     }
 
     /// Camera target `(centre, zoom)`: frame the cores with their disks, centred on the
@@ -529,48 +537,36 @@ impl GalaxyCollision {
         (self.frame.centre, self.frame.zoom) = self.target_frame();
     }
 
-    /// Expose for `dt` seconds: decay both buffers, then add every star's and both
+    /// Expose for `dt` seconds: decay the buffers, then add every star's and both
     /// nuclei's light (a star holding still accumulates ≈ 1, brighter on a spiral arm).
+    /// A star's light is split between its host's disk buffer (weight `inside`) and its
+    /// tail buffer (`1 − inside`), so the weight is conserved either way (GAL-A5).
     fn expose(&mut self, dt: f64) {
         let Some(sim) = &self.sim else { return };
-        let (frame, pw) = (self.frame, usize::from(self.frame.size.width()));
-        let keep = (-dt.max(0.0) / EXPOSURE_TAU).exp() as f32;
-        let w = 1.0 - keep;
-        for e in &mut self.exposure {
-            e.iter_mut().for_each(|v| *v *= keep);
-        }
-        for (k, s) in sim.stars.iter().enumerate() {
+        let frame = self.frame;
+        let dt = dt.max(0.0);
+        let keep = (-dt / EXPOSURE_TAU).exp() as f32;
+        let keep_tail = (-dt / TAIL_TAU).exp() as f32;
+        let (w, wt) = (1.0 - keep, 1.0 - keep_tail);
+        self.exposure.iter_mut().for_each(|e| e.decay(keep));
+        self.tails.iter_mut().for_each(|e| e.decay(keep_tail));
+        for s in &sim.stars {
             let (x, y) = frame.pixel(s.body.pos);
             let (wave, inside) = sim.arm(s);
+            let g = usize::from(s.gal);
             let lit = (1.0 + ARM_CONTRAST * inside * wave) as f32;
-            let e = &mut self.exposure[usize::from(s.gal)];
-            // Beyond the disk (tails and bridge) stars are sparse: each one's light is
-            // spread back along its path over the last `TAIL_EXPOSURE` s, a longer exposure
-            // for them alone, so a few hundred read as smooth streams rather than speckle
-            // (GAL-A5: the weight is conserved either way).
-            let spread = (1.0 - inside) as f32;
-            splat(e, pw, x, y, w * lit * (1.0 - spread));
-            if spread > 0.0 {
-                // Each star's exposure has its own length and sample phase, so the ends
-                // and samples of neighbouring streaks do not line up into a comb.
-                let (u, phase) = (
-                    rng::hash01(rng::cell_key(k as i32, 0)),
-                    rng::hash01(rng::cell_key(k as i32, 1)),
-                );
-                let span = TAIL_EXPOSURE * (1.0 - TAIL_JITTER + 2.0 * TAIL_JITTER * u);
-                let back = scale(s.body.vel, -span * time_scale());
-                let k = w * lit * spread / TAIL_SAMPLES as f32;
-                for j in 0..TAIL_SAMPLES {
-                    let f = (j as f64 + phase) / TAIL_SAMPLES as f64;
-                    let (x, y) = frame.pixel(add(s.body.pos, scale(back, f)));
-                    splat(e, pw, x, y, k);
-                }
+            let inside = inside as f32;
+            if inside > 0.0 {
+                self.exposure[g].splat_bilinear(x, y, w * lit * inside);
+            }
+            if inside < 1.0 {
+                self.tails[g].splat_bilinear(x, y, wt * (1.0 - inside));
             }
         }
         for (e, core) in self.exposure.iter_mut().zip(&sim.cores) {
             let (x, y) = frame.pixel(core.pos);
             for (dx, dy, k) in NUCLEUS {
-                splat(e, pw, x + dx, y + dy, w * BULGE * k);
+                e.splat_bilinear(x + dx, y + dy, w * BULGE * k);
             }
         }
     }
@@ -578,19 +574,31 @@ impl GalaxyCollision {
     /// Brightness envelope: fade in after a restart and out before the next one.
     fn fade(&self) -> f64 {
         let t = self.sim.as_ref().map_or(0.0, |s| s.t);
-        let x = (t / 1.5).min((CYCLE - t) / 2.0).clamp(0.0, 1.0);
-        0.3 + 0.7 * x * x * (3.0 - 2.0 * x)
+        0.3 + 0.7 * ease::smoothstep((t / 1.5).min((CYCLE - t) / 2.0))
     }
 
     /// Tone-map the exposures onto the pixels, then light the knots (the M10 raster
     /// convention: `render` only blits).
     fn develop(&mut self) {
         let fade = self.fade();
-        let pw = usize::from(self.frame.size.width());
-        let (tone, [e1, e2]) = (&self.tone, &self.exposure);
+        let size = self.exposure[0].pixel_size();
+        let (pw, ph) = (usize::from(size.width()), usize::from(size.height()));
+        for (out, tail) in self.blurred.iter_mut().zip(&self.tails) {
+            out.copy_from_slice(tail.values());
+            for _ in 0..TAIL_BLUR_PASSES {
+                box_blur(out, pw, ph, &mut self.scratch);
+            }
+        }
+        for (out, disk) in self.disk.iter_mut().zip(&self.exposure) {
+            out.copy_from_slice(disk.values());
+            for _ in 0..DISK_BLUR_PASSES {
+                box_blur(out, pw, ph, &mut self.scratch);
+            }
+        }
+        let (tone, [e1, e2], [t1, t2]) = (&self.tone, &self.disk, &self.blurred);
         self.pixels.shade(|x, y| {
             let i = y as usize * pw + x as usize;
-            let (a, b) = (e1[i], e2[i]);
+            let (a, b) = (e1[i] + TAIL_GAIN * t1[i], e2[i] + TAIL_GAIN * t2[i]);
             match tone.level((a + b) * fade as f32) {
                 0 => Ink::BLANK,
                 level => Ink::new(Role::Ramp(HOSTS[host_of(a, b, x, y)]), level),
@@ -604,12 +612,12 @@ impl GalaxyCollision {
         for s in sim.stars.iter().filter(|s| s.cloud) {
             let (x, y) = self.frame.pixel(s.body.pos);
             let (px, py) = (x.round(), y.round());
-            // `NaN as usize` is 0: reject non-finite positions as `splat` does.
-            if !(px.is_finite() && py.is_finite()) || px < 0.0 || py < 0.0 || px as usize >= pw {
+            if !(px.is_finite() && py.is_finite()) {
                 continue;
             }
-            let i = py as usize * pw + px as usize;
-            let Some(&rho) = self.exposure[usize::from(s.gal)].get(i) else {
+            // Saturating casts: anything huge is off the buffer.
+            let (px, py) = (px as i32, py as i32);
+            let Some(rho) = self.exposure[usize::from(s.gal)].get(px, py) else {
                 continue;
             };
             // Clouds collapse where the gas is squeezed: on an arm's crest in the disk,
@@ -618,9 +626,34 @@ impl GalaxyCollision {
             let squeeze = 1.0 - inside + inside * wave.max(0.0);
             let b = burst * squeeze * f64::from((rho / KNOT_RHO).min(1.0));
             if b >= KNOT_MIN {
-                knot(&mut self.pixels, px as i32, py as i32, b);
+                knot(&mut self.pixels, px, py, b);
             }
         }
+    }
+}
+
+/// One radius-1 box-blur pass over a row-major `pw × ph` buffer, separable (rows then
+/// columns), with the edge pixel repeated so no light leaks off the border. `scratch`
+/// holds one line and is sized in `resize` (`max(pw, ph)` values); too small, it is a
+/// no-op rather than an allocation.
+fn box_blur(buf: &mut [f32], pw: usize, ph: usize, scratch: &mut [f32]) {
+    if pw == 0 || ph == 0 || scratch.len() < pw.max(ph) || buf.len() < pw * ph {
+        return;
+    }
+    let mut pass = |n: usize, at: &dyn Fn(usize) -> usize, buf: &mut [f32]| {
+        for k in 0..n {
+            let (l, r) = (k.saturating_sub(1), (k + 1).min(n - 1));
+            scratch[k] = (buf[at(l)] + buf[at(k)] + buf[at(r)]) / 3.0;
+        }
+        for k in 0..n {
+            buf[at(k)] = scratch[k];
+        }
+    };
+    for y in 0..ph {
+        pass(pw, &|k| y * pw + k, buf);
+    }
+    for x in 0..pw {
+        pass(ph, &|k| k * pw + x, buf);
     }
 }
 
@@ -701,20 +734,29 @@ impl Generator for GalaxyCollision {
                 .collect();
         }
         self.pixels.resize(size);
-        let px = self.pixels.pixel_size().area();
-        for e in &mut self.exposure {
-            e.clear();
-            e.resize(px, 0.0);
+        for e in self.exposure.iter_mut().chain(&mut self.tails) {
+            e.resize(size);
         }
+        let px = self.pixels.pixel_size();
+        for b in self.blurred.iter_mut().chain(&mut self.disk) {
+            b.clear();
+            b.resize(px.area(), 0.0);
+        }
+        self.scratch
+            .resize(usize::from(px.width().max(px.height())), 0.0);
         let n = star_count(size);
         match &mut self.sim {
-            // Fewer stars: keep the encounter running with a subset.
-            Some(sim) if n <= sim.stars.len() => {
-                sim.stars.set_capacity(n);
+            // Keep the running encounter at any new size (GAL-A4). A shrink keeps a prefix
+            // of the stars, which the interleaved hosts keep split by mass; a grow keeps the
+            // stars it has, and the next cycle starts with the new count.
+            Some(sim) => {
+                if n < sim.stars.len() {
+                    sim.stars.set_capacity(n);
+                }
                 self.snap_camera();
-                self.expose(3.0 * EXPOSURE_TAU);
+                self.expose(3.0 * TAIL_TAU);
             }
-            _ => self.restart(ctx),
+            None => self.restart(ctx),
         }
         self.develop();
     }
@@ -832,8 +874,8 @@ mod tests {
         }
         let sim = encounter(400, 3);
         assert_eq!(sim.stars.len(), 400);
-        let n1 = sim.stars.iter().filter(|s| s.gal == 0).count();
-        assert_eq!(n1, (400.0 * M1 / M).round() as usize);
+        let n2 = sim.stars.iter().filter(|s| s.gal == 1).count();
+        assert_eq!(n2, (400.0 * M2 / M).floor() as usize);
         for s in &sim.stars {
             let g = usize::from(s.gal);
             let host = sim.cores[g];
@@ -873,8 +915,10 @@ mod tests {
             while sim.t < 20.0 {
                 sim.step(SIM_DT);
             }
+            // ≥ 20 of 600 (> 3 %): a retrograde galaxy 2 throws almost no tail of its own
+            // (as in Toomre & Toomre), so the prograde host alone must supply it.
             let n = far(&sim);
-            assert!(n >= 30, "only {n} stars in tails (seed {seed})");
+            assert!(n >= 20, "only {n} stars in tails (seed {seed})");
         }
     }
 
@@ -898,6 +942,44 @@ mod tests {
         assert!((sim.separation() - ra).abs() < 1e-3);
         assert_eq!(sim.stars.len(), star_count(size));
         assert_eq!(sim.close, None, "the burst resets with the encounter");
+    }
+
+    #[test]
+    fn gal_a2_every_prefix_of_the_stars_is_split_by_mass() {
+        let sim = encounter(3000, 7);
+        let mut g2 = 0usize;
+        for (i, s) in sim.stars.iter().enumerate() {
+            g2 += usize::from(s.gal);
+            let expect = (i + 1) as f64 * M2 / M;
+            assert!(
+                (g2 as f64 - expect).abs() <= 1.0,
+                "prefix {i}: {g2} vs {expect}"
+            );
+        }
+    }
+
+    #[test]
+    fn gal_a4_shrink_keeps_mass_ratio_and_the_running_encounter() {
+        let (mut g, mut ctx) = scene_at(Size::new(200, 50), 15.0);
+        let t = g.sim.as_ref().unwrap().t;
+        for small in [Size::new(120, 40), Size::new(80, 24)] {
+            g.resize(small, &mut ctx);
+            let sim = g.sim.as_ref().unwrap();
+            let n = sim.stars.len();
+            assert_eq!(n, star_count(small));
+            assert_eq!(sim.t, t, "a shrink keeps the running encounter");
+            let n2 = sim.stars.iter().filter(|s| s.gal == 1).count() as f64;
+            assert!(
+                (n2 - n as f64 * M2 / M).abs() <= 1.0,
+                "{n2} of {n} in host 2"
+            );
+        }
+        // A grow keeps it too (the next cycle starts with the new count).
+        g.resize(Size::new(200, 50), &mut ctx);
+        let sim = g.sim.as_ref().unwrap();
+        assert_eq!(sim.t, t, "a grow keeps the running encounter");
+        let n2 = sim.stars.iter().filter(|s| s.gal == 1).count() as f64;
+        assert!((n2 - sim.stars.len() as f64 * M2 / M).abs() <= 1.0);
     }
 
     #[test]
@@ -1002,7 +1084,7 @@ mod tests {
     #[test]
     fn gal_a7_knots_are_round_pink_cores_in_a_brightened_host() {
         let mut px = Pixels::new(Size::new(9, 5));
-        let host = Ink::new(Role::Ramp(Ramp::Ember), 100);
+        let host = Ink::new(Role::Ramp(Ramp::Ferroin), 100);
         px.fill(host);
         knot(&mut px, 4, 4, 1.0);
         let core = px.get(4, 4).unwrap();
@@ -1044,29 +1126,103 @@ mod tests {
     }
 
     #[test]
-    fn gal_a5_bilinear_splat_conserves_weight() {
-        let (pw, ph) = (7, 5);
-        for (x, y) in [(3.0, 2.0), (2.25, 1.6), (0.0, 0.0), (5.9, 3.99), (1.5, 3.5)] {
-            let mut buf = vec![0.0_f32; pw * ph];
-            splat(&mut buf, pw, x, y, 2.0);
-            let total: f32 = buf.iter().sum();
-            assert!((total - 2.0).abs() < 1e-6, "({x}, {y}) sums to {total}");
-            assert!(buf.iter().all(|&v| v >= 0.0));
+    fn gal_a5_exposure_conserves_each_stars_light() {
+        // One exposure step from empty buffers: each host's disk + tail light is the sum
+        // of its stars' weights (arm-modulated in the disk) plus its nucleus, all in
+        // bounds at t = 0, where the camera frames both disks.
+        let (mut g, _) = scene_at(Size::new(200, 50), 0.0);
+        g.exposure
+            .iter_mut()
+            .chain(&mut g.tails)
+            .for_each(Glow::clear);
+        let dt = 0.05;
+        g.expose(dt);
+        let w = 1.0 - (-dt / EXPOSURE_TAU).exp();
+        let wt = 1.0 - (-dt / TAIL_TAU).exp();
+        let sim = g.sim.as_ref().unwrap();
+        for host in 0..2u8 {
+            let mut expect = w * f64::from(BULGE);
+            for s in sim.stars.iter().filter(|s| s.gal == host) {
+                let (wave, inside) = sim.arm(s);
+                expect += w * (1.0 + ARM_CONTRAST * inside * wave) * inside + wt * (1.0 - inside);
+            }
+            let h = usize::from(host);
+            let got: f64 = g.exposure[h]
+                .values()
+                .iter()
+                .chain(g.tails[h].values())
+                .map(|&v| f64::from(v))
+                .sum();
+            assert!(
+                (got - expect).abs() < 1e-3 * expect,
+                "host {host}: {got} vs {expect}"
+            );
         }
+    }
+
+    #[test]
+    fn gal_a5_tail_blur_conserves_light_and_spreads_it_over_3_px() {
+        let (pw, ph) = (9, 7);
         let mut buf = vec![0.0_f32; pw * ph];
-        splat(&mut buf, pw, 3.0, 2.0, 1.0);
-        assert_eq!(
-            buf[2 * pw + 3],
-            1.0,
-            "a star on a pixel centre lights only it"
-        );
-        // Off the buffer or non-finite: nothing, and no panic.
-        let mut buf = vec![0.0_f32; pw * ph];
-        for (x, y) in [(-3.0, 1.0), (1.0, 99.0), (f64::NAN, 1.0), (1e300, -1e300)] {
-            splat(&mut buf, pw, x, y, 1.0);
+        buf[3 * pw + 4] = 1.0;
+        let mut scratch = vec![0.0_f32; pw.max(ph)];
+        for _ in 0..TAIL_BLUR_PASSES {
+            box_blur(&mut buf, pw, ph, &mut scratch);
         }
-        assert!(buf.iter().all(|&v| v == 0.0));
-        splat(&mut [], 0, 0.0, 0.0, 1.0);
+        let total: f32 = buf.iter().sum();
+        assert!((total - 1.0).abs() < 1e-6, "{total}");
+        // A single tail star is a soft blob at least 3 px across in both directions.
+        let peak = buf[3 * pw + 4];
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let v = buf[(3 + dy) as usize * pw + (4 + dx) as usize];
+            assert!(v > 0.4 * peak, "({dx},{dy}) {v} vs {peak}");
+        }
+        // Too small a scratch is a no-op, never a panic or an allocation.
+        box_blur(&mut buf, pw, ph, &mut []);
+    }
+
+    #[test]
+    fn gal_a3_tails_render_as_connected_bands() {
+        // Well after pericentre, the tail light forms a band: the pixels it lights are
+        // mostly interior (lit on both sides across the band), not a comb of 1-px teeth.
+        for seed in [42, 7] {
+            let size = Size::new(200, 50);
+            let mut ctx = Ctx::new(seed, size);
+            let mut g = GalaxyCollision::default();
+            g.resize(size, &mut ctx);
+            for _ in 0..(20.0 / SIM_DT) as usize {
+                g.update(SIM_DT, &mut ctx);
+            }
+            let px = g.pixels.pixel_size();
+            let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+            let pw = px.width() as usize;
+            let tail_lit = |x: i32, y: i32| {
+                if !(0..w).contains(&x) || !(0..h).contains(&y) {
+                    return false;
+                }
+                let i = y as usize * pw + x as usize;
+                let tail = TAIL_GAIN * (g.blurred[0][i] + g.blurred[1][i]);
+                let disk = g.disk[0][i] + g.disk[1][i];
+                tail > disk && g.tone.level(tail + disk) > 0
+            };
+            let (mut lit, mut thick) = (0, 0);
+            for y in 0..h {
+                for x in 0..w {
+                    if tail_lit(x, y) {
+                        lit += 1;
+                        // Lit across the band in either direction: ≥ 3 px wide here.
+                        let across = (tail_lit(x - 1, y) && tail_lit(x + 1, y))
+                            || (tail_lit(x, y - 1) && tail_lit(x, y + 1));
+                        thick += usize::from(across);
+                    }
+                }
+            }
+            assert!(lit >= 150, "seed {seed}: only {lit} tail pixels");
+            assert!(
+                thick as f64 >= 0.6 * f64::from(lit),
+                "seed {seed}: {thick} of {lit} tail pixels are ≥ 3 px across"
+            );
+        }
     }
 
     #[test]
@@ -1078,13 +1234,17 @@ mod tests {
             assert!(
                 matches!(
                     ink.role,
-                    Role::Background | Role::Ramp(Ramp::Ice | Ramp::Ember | Ramp::HAlpha)
+                    Role::Background | Role::Ramp(Ramp::Ice | Ramp::Ferroin | Ramp::HAlpha)
                 ),
                 "{ink:?}"
             );
         }
         assert!(count(Ramp::Ice) > 200, "host 1: {}", count(Ramp::Ice));
-        assert!(count(Ramp::Ember) > 200, "host 2: {}", count(Ramp::Ember));
+        assert!(
+            count(Ramp::Ferroin) > 200,
+            "host 2: {}",
+            count(Ramp::Ferroin)
+        );
         // The nuclei are the brightest light in the frame.
         let peak = inks.iter().map(|i| i.level).max().unwrap_or(0);
         assert!(peak > 200, "peak level {peak}");
