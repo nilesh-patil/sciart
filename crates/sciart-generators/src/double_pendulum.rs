@@ -1,8 +1,10 @@
-//! Twin double pendulums released 10⁻³ rad apart: they swing as one white pendulum, then
-//! split into an aurora-green twin and an Hα-crimson twin, each lower bob tracing a 3 s
-//! fading path. A fan of ghost pendulums, all started inside the 10⁻³ rad gap between the
-//! twins, is drawn as the material line joining their lower bobs; chaos stretches and
-//! folds it across the whole swing (SPEC-002 `double_pendulum`).
+//! Twin double pendulums released 10⁻³ rad apart: an aurora-green twin and an Hα-crimson
+//! twin, superposed as one two-tone pendulum while they are closer than a braille cell
+//! (dashed rods and trail alternating the hues, crimson rims around the green bobs), then
+//! visibly two, each lower bob tracing a 3 s fading path. A fan of ghost pendulums, all
+//! started inside the 10⁻³ rad gap between the twins, is drawn as the material line joining
+//! their lower bobs; chaos stretches and folds it across the whole swing (SPEC-002
+//! `double_pendulum`).
 //!
 //! Everything is drawn on a braille [`Dots`] lattice rasterised in `update`/`resize` from
 //! model-space state, so a resize keeps the trails; `render` only blits and writes the
@@ -83,32 +85,32 @@ const MAX_DT: f64 = 0.25;
 /// Slack for accumulated-time comparisons: summing 2700 frame steps of 1/60 s misses
 /// 45 s by ~1e-12, which must still count as "the run is over".
 const TIME_SLACK: f64 = 1e-9;
-/// The twins are drawn as one white pendulum until matching bobs have been `MERGE_DOTS`
-/// apart on screen (a braille cell is 2×4 dots, so closer twins would share cells and
-/// the one drawn last would take them), and in full colour from `SPLIT_DOTS` (DP-A5).
+/// While the twins' matching bobs have been closer than `MERGE_DOTS` on screen they share
+/// braille cells (a cell is 2×4 dots and shows one ink), so they are drawn superposed:
+/// dashes alternating the two hues, and twin B's bobs as the right half of a disc laid on
+/// twin A's, so each bob is half green, half crimson. Twin B's disc grows back to whole
+/// between `MERGE_DOTS` and `SPLIT_DOTS` (DP-A5).
 const MERGE_DOTS: f64 = 4.0;
 const SPLIT_DOTS: f64 = 8.0;
-/// Where a parting twin's ramp value starts: the pale, near-white top every ramp shares,
-/// so the white pendulum turns into two hues without a jump (DP-A5).
-const WHITE_V: f64 = 0.97;
-/// While the twins are one they are drawn in `Text` at `v^WHITE_GAMMA`: at the ramp values a
-/// neutral grey reads dull (the trail head 0.7 would be mid-grey), and a power lift is
-/// monotone, so the brightness order below holds in white too (trail head 0.81, rods 0.87,
-/// bobs 0.91, cores 0.97).
-const WHITE_GAMMA: f64 = 0.6;
+/// Dash length along a rod, dots, and along the trail, samples. Each dash is drawn with
+/// one twin on top, alternating, so coinciding twins read as a two-tone stripe rather
+/// than as whichever twin was drawn last (DP-A5).
+const ROD_DASH: f64 = 6.0;
+const TRAIL_DASH: usize = 4;
 
 /// Twin A is aurora green, twin B Hα crimson: near-complementary false colours, and a
 /// pair no other dynamics scene uses (DP-A5).
 const RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::HAlpha];
 /// Ramp values of the parts of a twin. The pendulum outshines its own trail (capped at
-/// `TRAIL_V`), and the bodies stay below the pale top of the ramp so the hue survives
-/// at the heads; each bob gets a one-dot core near the top as a highlight.
-const ROD_V: f64 = 0.8;
-const BOB_V: f64 = 0.85;
-const CORE_V: f64 = 0.95;
+/// `TRAIL_V`), and the bodies sit in the saturated middle of the ramps (above ~0.8 both
+/// wash out towards white, and the two-tone superposition with them); each bob gets a
+/// one-dot core at 0.8 as a highlight.
+const ROD_V: f64 = 0.62;
+const BOB_V: f64 = 0.68;
+const CORE_V: f64 = 0.8;
 /// Trail ramp value: `TRAIL_FLOOR` at the tail up to `TRAIL_V` at the newest segment.
 const TRAIL_FLOOR: f64 = 0.12;
-const TRAIL_V: f64 = 0.7;
+const TRAIL_V: f64 = 0.56;
 /// The pivot hinge, always visible.
 const PIVOT_LEVEL: u8 = 230;
 // The pendulum outshines its own trail, and its core outshines its body (DP-A5).
@@ -121,7 +123,7 @@ const LOWER_R_TALL: f64 = 3.5;
 const TALL_ROWS: u16 = 40;
 const PIVOT_R: f64 = 1.0;
 /// The ghost line at full fade-in, as a ramp value: under the twins and their trails.
-const GHOST_V: f64 = 0.55;
+const GHOST_V: f64 = 0.45;
 /// Ghost line segments longer than this (model units) are left out: where the line has
 /// been stretched further than its samples resolve, a chord would be a straight streak
 /// across the swing, not the material line (DP-A6, stated in SPEC-002).
@@ -233,7 +235,7 @@ pub(crate) fn seeded_start(rng: &mut impl Rng) -> [f64; 4] {
 
 /// How far the twins have split (DP-A5), from the most their matching bobs have been
 /// apart this run, in dots: 0 up to `MERGE_DOTS`, 1 from `SPLIT_DOTS`, smoothstepped
-/// between. It only grows during a run, so twins that later cross never turn white again.
+/// between. It only grows during a run, so twins that later cross are never drawn superposed again.
 pub(crate) fn split(apart_dots: f64) -> f64 {
     ease::smoothstep((apart_dots - MERGE_DOTS) / (SPLIT_DOTS - MERGE_DOTS))
 }
@@ -298,21 +300,69 @@ pub(crate) fn ghost_link(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).hypot(a.1 - b.1) <= GHOST_LINK
 }
 
-/// A part of twin `i` at ramp value `v` once the twins have split by `split` (DP-A5):
-/// white light while they are one, then its ramp, starting from the pale top.
-fn twin_ink(i: usize, v: f64, split: f64) -> Ink {
-    if split > 0.0 {
-        ink::ramp(RAMPS[i], v + (1.0 - split) * (WHITE_V - v))
+/// A part of twin `i` at ramp value `v`: twin A aurora, twin B Hα (DP-A5).
+fn twin_ink(i: usize, v: f64) -> Ink {
+    ink::ramp(RAMPS[i], v)
+}
+
+/// Which twin is drawn on top in dash `k`: they alternate, so neither wins every cell
+/// they share (DP-A5).
+fn dash_order(k: usize) -> [usize; 2] {
+    if k % 2 == 0 { [1, 0] } else { [0, 1] }
+}
+
+/// Both twins' segments `from[i] → to[i]` (dots), cut into matching dashes of about
+/// `ROD_DASH` dots, the twins alternating on top dash by dash (DP-A5).
+fn dashed(dots: &mut Dots, from: [(f64, f64); 2], to: [(f64, f64); 2], v: f64) {
+    let len = |i: usize| (to[i].0 - from[i].0).hypot(to[i].1 - from[i].1);
+    let span = len(0).max(len(1));
+    // A rod is at most the screen's dot diagonal long; the cap only guards NaN or ∞.
+    let n = if span.is_finite() {
+        (span / ROD_DASH).ceil().clamp(1.0, 4096.0) as usize
     } else {
-        Ink::new(Role::Text, ink::level(255.0 * v.powf(WHITE_GAMMA)))
+        1
+    };
+    let at = |i: usize, u: f64| {
+        (
+            from[i].0 + u * (to[i].0 - from[i].0),
+            from[i].1 + u * (to[i].1 - from[i].1),
+        )
+    };
+    for k in 0..n {
+        let (u0, u1) = (k as f64 / n as f64, (k + 1) as f64 / n as f64);
+        for i in dash_order(k) {
+            let (p, q) = (at(i, u0), at(i, u1));
+            dots.line(p.0, p.1, q.0, q.1, twin_ink(i, v));
+        }
     }
 }
 
-/// A trail sample: both twins' lower bobs (model units) and the twins' `apart` then.
+/// The dots of the disc of radius `r` about `c` (dots) that lie right of `c.x − cut`:
+/// the whole disc for `cut ≥ r`, its right half for `cut = 0` (DP-A5). Lattice-clipped
+/// by [`Dots::set`]; a non-finite centre draws nothing.
+fn clipped_disc(dots: &mut Dots, c: (f64, f64), r: f64, cut: f64, ink: Ink) {
+    if !(c.0.is_finite() && c.1.is_finite()) {
+        return;
+    }
+    let (x0, x1) = ((c.0 - r.min(cut)).ceil(), (c.0 + r).floor());
+    let (y0, y1) = ((c.1 - r).ceil(), (c.1 + r).floor());
+    let mut y = y0;
+    while y <= y1 {
+        let mut x = x0;
+        while x <= x1 {
+            if (x - c.0).hypot(y - c.1) <= r {
+                dots.set(x as i32, y as i32, ink);
+            }
+            x += 1.0;
+        }
+        y += 1.0;
+    }
+}
+
+/// A trail sample: both twins' lower bobs, model units.
 #[derive(Debug, Clone, Copy)]
 struct Sample {
     lows: [(f64, f64); 2],
-    apart: f64,
 }
 
 #[derive(Debug)]
@@ -336,6 +386,8 @@ pub struct DoublePendulum {
     apart: f64,
     /// Lower-bob positions of both twins, oldest → newest (DP-A7).
     trail: Trail<Sample>,
+    /// Trail samples pushed this run, so each keeps its dash as the trail scrolls.
+    pushed: usize,
     view: View,
     label_row: Option<i32>,
     /// Lower bob radius for the current size, dots.
@@ -360,6 +412,7 @@ impl Default for DoublePendulum {
             sep0: TWIN_OFFSET,
             apart: 0.0,
             trail: Trail::new(TRAIL_LEN),
+            pushed: 0,
             view: View::default(),
             label_row: None,
             lower_r: LOWER_R,
@@ -385,6 +438,7 @@ impl DoublePendulum {
         self.run_t = 0.0;
         self.tick_clock = 0.0;
         self.trail.clear();
+        self.pushed = 0;
         self.push_trail();
         self.started = true;
         self.refresh_labels();
@@ -395,10 +449,8 @@ impl DoublePendulum {
         let [a, b] = self.twins.map(|y| bobs(&SCENE, y[0], y[1]));
         let gap = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).hypot(p.1 - q.1);
         self.apart = self.apart.max(gap(a[0], b[0])).max(gap(a[1], b[1]));
-        self.trail.push(Sample {
-            lows: [a[1], b[1]],
-            apart: self.apart,
-        });
+        self.trail.push(Sample { lows: [a[1], b[1]] });
+        self.pushed += 1;
     }
 
     fn rel_drift(&self) -> f64 {
@@ -455,45 +507,42 @@ impl DoublePendulum {
             }
         }
 
-        // Trails: white while the twins are one, then an aurora path and an Hα path. The
-        // twins take turns drawing last, so neither wins every cell they share.
+        // Trails: an aurora path and an Hα path, in dashes of `TRAIL_DASH` segments that
+        // alternate which twin is on top, so the pair reads two-tone while they coincide.
         let n = self.trail.len();
         let now = Sample {
             lows: [line[0], line[LINKS]],
-            apart: self.apart,
         };
         let newer = self.trail.iter().skip(1).chain([&now]);
         for (k, (old, new)) in self.trail.iter().zip(newer).enumerate() {
             // Age 0 = newest segment, → 1 at the tail.
-            let fresh = 1.0 - (n - 1 - k) as f64 / TRAIL_LEN as f64;
+            let age = n - 1 - k;
+            let fresh = 1.0 - age as f64 / TRAIL_LEN as f64;
             let v = TRAIL_FLOOR + (TRAIL_V - TRAIL_FLOOR) * fresh * fresh;
-            let s = split_of(new.apart);
-            let order: &[usize] = match (s > 0.0, k % 2 == 0) {
-                (false, _) => &[0],
-                (true, true) => &[0, 1],
-                (true, false) => &[1, 0],
-            };
-            for &i in order {
+            // Dashes by the sample's run-wide index, so each stays on its stretch of path.
+            for i in dash_order((self.pushed.saturating_sub(n) + k) / TRAIL_DASH) {
                 let (d0, d1) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
-                self.dots.line(d0.0, d0.1, d1.0, d1.1, twin_ink(i, v, s));
+                self.dots.line(d0.0, d0.1, d1.0, d1.1, twin_ink(i, v));
             }
         }
 
-        // The twins: rods, then bobs with a bright core; one white pendulum until they part.
+        // The twins: dashed rods, then bobs with a bright core. Twin A's discs go first,
+        // then twin B's on top, cut to their right half while the twins coincide (a
+        // half-green, half-crimson bob) and whole again once they have parted.
         let arms = self
             .twins
             .map(|y| bobs(&SCENE, y[0], y[1]).map(|p| view.dot(p)));
-        let twins = if parted > 0.0 { 2 } else { 1 };
         let pivot = view.dot((0.0, 0.0));
-        for (i, [p1, p2]) in arms.iter().enumerate().take(twins) {
-            let rod = twin_ink(i, ROD_V, parted);
-            self.dots.line(pivot.0, pivot.1, p1.0, p1.1, rod);
-            self.dots.line(p1.0, p1.1, p2.0, p2.1, rod);
-        }
-        for (i, [p1, p2]) in arms.iter().enumerate().take(twins) {
+        let [[a1, a2], [b1, b2]] = arms;
+        dashed(&mut self.dots, [pivot, pivot], [a1, b1], ROD_V);
+        dashed(&mut self.dots, [a1, b1], [a2, b2], ROD_V);
+        for (i, [p1, p2]) in arms.into_iter().enumerate() {
             for (p, r) in [(p1, UPPER_R), (p2, self.lower_r)] {
-                self.dots.disc(p.0, p.1, r, twin_ink(i, BOB_V, parted));
-                self.dots.plot(p.0, p.1, twin_ink(i, CORE_V, parted));
+                // Twin B keeps the dots right of `p.x − cut`: its right half while the
+                // twins coincide, the whole disc once parted; twin A is always whole.
+                let cut = if i == 0 { r } else { 2.0 * r * parted - 0.5 };
+                clipped_disc(&mut self.dots, p, r, cut, twin_ink(i, BOB_V));
+                self.dots.plot(p.0, p.1, twin_ink(i, CORE_V));
             }
         }
         self.dots
@@ -661,7 +710,7 @@ mod tests {
     ];
 
     #[test]
-    fn dp_scene_upper_arm_small_angle_period_is_2_2_s() {
+    fn dp_a2_upper_arm_small_angle_period_is_2_2_s() {
         let period = TAU * (SCENE.l1 / SCENE.g).sqrt();
         assert!((period - UPPER_PERIOD).abs() < 1e-12, "{period}");
     }
@@ -802,7 +851,7 @@ mod tests {
     }
 
     #[test]
-    fn dp_bobs_stay_on_screen_at_any_size_and_angle() {
+    fn dp_a8_bobs_stay_on_screen_at_any_size_and_angle() {
         for (w, h) in [
             (1, 1),
             (2, 3),
@@ -893,7 +942,7 @@ mod tests {
     }
 
     #[test]
-    fn dp_view_is_aspect_correct() {
+    fn dp_a4_view_is_aspect_correct() {
         let v = View::fit(&SCENE, 100.0, 30.0);
         let (x, _) = v.map((1.0, 0.0));
         let (_, y) = v.map((0.0, 1.0));
@@ -901,7 +950,7 @@ mod tests {
     }
 
     #[test]
-    fn dp_starts_are_high_energy_and_twins_differ_only_in_theta2() {
+    fn dp_a9_starts_are_high_energy_and_twins_differ_only_in_theta2() {
         let mut ctx = seeded(5);
         for _ in 0..200 {
             let y = seeded_start(&mut ctx.rng);
@@ -917,7 +966,7 @@ mod tests {
     }
 
     #[test]
-    fn dp_separation_wraps_full_turns() {
+    fn dp_a3_separation_wraps_full_turns() {
         let a = [0.1, -3.1, 0.0, 0.0];
         let b = [0.1 + TAU, 3.1, 5.0, 5.0];
         let d = separation(&a, &b);
@@ -925,7 +974,7 @@ mod tests {
     }
 
     #[test]
-    fn dp_restarts_every_45_s_with_new_seeded_angles() {
+    fn dp_a9_restarts_every_45_s_with_new_seeded_angles() {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(2);
         g.resize(Size::new(80, 24), &mut ctx);
@@ -944,7 +993,7 @@ mod tests {
     }
 
     #[test]
-    fn dp_resize_keeps_the_run() {
+    fn dp_a9_resize_keeps_the_run() {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(4);
         g.resize(Size::new(80, 24), &mut ctx);
@@ -982,22 +1031,31 @@ mod tests {
             .collect()
     }
 
+    /// Lit cells in each twin's ramp.
+    fn hue_counts(lit: &[Role]) -> [usize; 2] {
+        RAMPS.map(|r| lit.iter().filter(|&&l| l == Role::Ramp(r)).count())
+    }
+
     #[test]
-    fn dp_a5_twins_are_one_white_pendulum_until_they_part_into_aurora_and_halpha() {
+    fn dp_a5_both_twins_show_in_their_own_hues_from_the_first_frame() {
         let size = Size::new(80, 24);
         for seed in 0..4 {
-            let early = roles(&run(seed, size, 1.0), size);
-            assert!(!early.is_empty());
-            assert!(
-                early.iter().all(|&r| r == Role::Text),
-                "seed {seed}: {early:?}"
-            );
+            for t in [0.0, 1.0] {
+                let g = run(seed, size, t);
+                // Still merged: closer than a braille cell.
+                assert_eq!(split(g.apart * g.view.dots_per_unit()), 0.0, "seed {seed}");
+                let lit = roles(&g, size);
+                // Only the pivot hinge (≤ 2 cells) is white; the rest is the two twins in
+                // comparable amounts.
+                let text = lit.iter().filter(|&&r| r == Role::Text).count();
+                assert!(text <= 2, "seed {seed} t {t}: {text} white cells");
+                let [a, b] = hue_counts(&lit);
+                assert!(a.min(b) * 3 >= a.max(b), "seed {seed} t {t}: {a} vs {b}");
+            }
             let late = run(seed, size, 30.0);
             assert_eq!(split(late.apart * late.view.dots_per_unit()), 1.0);
-            let late = roles(&late, size);
-            for ramp in RAMPS {
-                assert!(late.contains(&Role::Ramp(ramp)), "seed {seed}: {ramp:?}");
-            }
+            let [a, b] = hue_counts(&roles(&late, size));
+            assert!(a > 0 && b > 0, "seed {seed}: {a} vs {b}");
         }
     }
 
@@ -1018,69 +1076,81 @@ mod tests {
     }
 
     #[test]
-    fn dp_a5_twins_sharing_cells_stay_white_and_part_into_even_hues() {
+    fn dp_a5_superposed_twins_are_two_tone_with_half_green_half_crimson_bobs() {
         assert_eq!(split(MERGE_DOTS), 0.0);
         assert_eq!(split(SPLIT_DOTS), 1.0);
-        // Two dots apart the twins share braille cells: one white pendulum, not a
-        // two-coloured speckle.
-        let (mut g, size) = posed(2.0);
-        let lit = roles(&g, size);
-        // Drawn once, as twin A: a trail swept with twin B 2 dots off draws exactly the
-        // dots of one swept with twin B on top of A.
-        let sweep = |g: &mut DoublePendulum, gap: f64| {
+        for gap in [0.0, 2.0] {
+            let (mut g, size) = posed(gap);
+            // A swept trail as well as the rods: both hues, neither drowning the other.
             g.trail.clear();
             for j in 0..40 {
                 let a = [0.4 + 0.02 * f64::from(j), 0.9, 0.0, 0.0];
-                g.twins = [a, [a[0] + gap, a[1] + gap, 0.0, 0.0]];
+                let d = g.twins[1][0] - g.twins[0][0];
+                g.twins = [a, [a[0] + d, a[1] + d, 0.0, 0.0]];
                 g.push_trail();
             }
             g.rasterise();
-            let (w, h) = (i32::from(size.width()), i32::from(size.height()));
-            (0..h)
-                .flat_map(|y| (0..w).map(move |x| (x, y)))
-                .map(|(x, y)| g.dots.cell_mask(x, y))
-                .collect::<Vec<_>>()
-        };
-        let gap = g.twins[1][0] - g.twins[0][0];
-        assert_eq!(
-            sweep(&mut g, gap),
-            sweep(&mut g, 0.0),
-            "twin B drawn while merged"
-        );
-        assert!(
-            !lit.is_empty() && lit.iter().all(|&r| r == Role::Text),
-            "{lit:?}"
-        );
+            let [a, b] = hue_counts(&roles(&g, size));
+            assert!(
+                a.min(b) * 3 >= a.max(b),
+                "gap {gap}: aurora {a} vs halpha {b}"
+            );
+            // The lower bob: half twin A's green, half twin B's crimson.
+            let tip = g.view.dot(bobs(&SCENE, g.twins[0][0], g.twins[0][1])[1]);
+            let (cx, cy) = ((tip.0 / 2.0) as i32, (tip.1 / 4.0) as i32);
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let [a, b] = [0, 1].map(|i| {
+                (-2..=2)
+                    .flat_map(|dy| (-2..=2).map(move |dx| (cx + dx, cy + dy)))
+                    .filter_map(|(x, y)| canvas.get(x, y))
+                    .filter(|c| c.ink == twin_ink(i, BOB_V))
+                    .count()
+            });
+            assert!(
+                a >= 1 && b >= 1,
+                "gap {gap}: bob cells aurora {a}, halpha {b}"
+            );
+        }
         // Ten dots apart both hues show in comparable amounts.
         let (g, size) = posed(10.0);
-        let lit = roles(&g, size);
-        let [a, b] = RAMPS.map(|r| lit.iter().filter(|&&l| l == Role::Ramp(r)).count());
+        let [a, b] = hue_counts(&roles(&g, size));
         assert!(a.min(b) * 3 >= a.max(b) * 2, "aurora {a} vs halpha {b}");
     }
 
     #[test]
-    fn dp_a5_parting_twins_start_from_the_pale_top_of_their_ramps() {
-        // Just past the merge the parts are near white in their own hue, then settle on
-        // their own values: the split is one continuous fade, not a jump.
-        assert_eq!(twin_ink(1, ROD_V, 1e-9), ink::ramp(RAMPS[1], WHITE_V));
-        assert_eq!(twin_ink(0, ROD_V, 1.0), ink::ramp(RAMPS[0], ROD_V));
+    fn dp_a5_dashes_alternate_the_twin_on_top_and_stay_on_their_stretch_of_path() {
+        assert_eq!(dash_order(0), [1, 0]);
+        assert_eq!(dash_order(1), [0, 1]);
+        // Coinciding rods: every dash is drawn by both twins, each on top in turn.
+        let mut dots = Dots::default();
+        dots.resize(Size::new(40, 10));
+        let (p, q) = ((2.0, 20.0), (70.0, 20.0));
+        dashed(&mut dots, [p, p], [q, q], ROD_V);
+        let mut canvas = Canvas::new(Size::new(40, 10), GlyphMode::Unicode);
+        dots.blit(&mut canvas);
+        let hues: Vec<_> = (1..35)
+            .filter_map(|x| canvas.get(x, 5))
+            .map(|c| c.ink.role)
+            .collect();
+        let [a, b] = hue_counts(&hues);
+        assert!(a >= 8 && b >= 8, "{a} {b}");
+        // Full trail: the run-wide sample index picks the dash, so one more push does not
+        // move a sample's dash.
+        let mut g = run(2, Size::new(80, 24), 5.0);
+        let base = |g: &DoublePendulum| g.pushed - g.trail.len();
+        let before = base(&g);
+        g.push_trail();
+        assert_eq!(base(&g), before + 1);
+        // Trail samples and the dash index agree after a restart.
+        g.release(&mut seeded(2));
+        assert_eq!((g.pushed, g.trail.len()), (1, 1));
     }
 
     #[test]
-    fn dp_a5_merged_pendulum_reads_white_and_keeps_its_brightness_order() {
-        // Before the split the one pendulum is white, not mid-grey: its trail head is at
-        // least 0.78 of full, and the trail, rods, bobs and cores still rise in that order.
-        let white = |v| {
-            let ink = twin_ink(0, v, 0.0);
-            assert_eq!(ink.role, Role::Text);
-            ink.level
-        };
-        assert!(
-            white(TRAIL_V) >= ink::level(255.0 * 0.78),
-            "{}",
-            white(TRAIL_V)
-        );
-        let levels = [TRAIL_V, ROD_V, BOB_V, CORE_V].map(white);
+    fn dp_a5_trail_rods_bobs_and_cores_rise_in_brightness() {
+        // The pendulum outshines its own trail (also a compile-time assertion).
+        let levels = [TRAIL_V, ROD_V, BOB_V, CORE_V].map(|v| twin_ink(0, v).level);
         assert!(levels.is_sorted_by(|a, b| a < b), "{levels:?}");
     }
 

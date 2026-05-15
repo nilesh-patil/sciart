@@ -61,12 +61,23 @@ const LAG_TICKS: usize = 16;
 /// four; the readout waits rather than show that as the simulation disagreeing with itself.
 const LAG_MIN: u64 = 80;
 /// Solvent molecules per cell and their hard cap (GEN-R8).
-const MOL_PER_CELL: f64 = 0.12;
+const MOL_PER_CELL: f64 = 0.16;
 const MOL_MAX: usize = 1600;
 /// Maxwell–Boltzmann velocity standard deviation per axis for the molecules, rows/s.
 const MOL_SD: f64 = 7.0;
 /// A molecule that hits the grain glows, decaying with this time constant, s (BRO-A4).
 const GLOW_TAU: f64 = 0.3;
+/// A molecule is drawn with a dimmer tail dot where it was this long ago, s, so the
+/// solvent reads as motion rather than salt.
+const MOL_STREAK: f64 = 0.06;
+/// Largest frame step honoured (GEN-R4's range); bounds the per-frame cost.
+const MAX_DT: f64 = 0.25;
+/// Every resize starts from a pre-rolled past: this much exact OU track (trail and MSD
+/// lags) is simulated before the first frame, so the trail, the ring and the estimate
+/// all show from t = 0. The velocity starts stationary, so this is an honest past.
+const PREROLL: f64 = 20.0;
+/// The first ring epoch is this far along at t = 0, centred where the grain was then.
+const RING_PREROLL: f64 = 2.0;
 /// Above this glow a molecule is drawn as a 5-dot bead instead of one dot.
 const GLOW_BEAD: f64 = 0.35;
 /// Brightest a flash is drawn: below the trail's hot head (BRO-A6).
@@ -380,11 +391,12 @@ impl BrownianMotion {
         }
     }
 
-    /// Readout, e.g. `D 1-path 2.31  true 2.25 rows^2/s  t 42s`: D estimated from this
+    /// Readout, e.g. `D 1-path 2.31 rows^2/s  true 2.25  t 42s`: D estimated from this
     /// grain's own track (time-averaged MSD at a 2 s lag, inertia-corrected, see [`d_hat`];
-    /// `...` until `LAG_MIN` lags), then the true D, then the elapsed time. Trailing parts
-    /// are dropped rather than clipped (GEN-R13); when even the estimate does not fit, the
-    /// label is empty. At 80 columns, beside the full title, the time is dropped.
+    /// the pre-rolled past gives it `LAG_MIN` lags from the first frame, `...` otherwise)
+    /// with its unit, then the true D, then the track's age. Trailing parts are dropped
+    /// rather than clipped (GEN-R13), so even the shortest form carries the unit; when the
+    /// estimate does not fit, the label is empty.
     ///
     /// [`d_hat`]: Self::d_hat
     fn refresh_label(&mut self) {
@@ -393,11 +405,11 @@ impl BrownianMotion {
         for parts in (1..=3).rev() {
             self.label.clear();
             let _ = match d_hat {
-                Some(d) => write!(self.label, "D 1-path {d:.2}"),
-                None => write!(self.label, "D 1-path ..."),
+                Some(d) => write!(self.label, "D 1-path {d:.2} rows^2/s"),
+                None => write!(self.label, "D 1-path ... rows^2/s"),
             };
             if parts >= 2 {
-                let _ = write!(self.label, "  true {D:.2} rows^2/s");
+                let _ = write!(self.label, "  true {D:.2}");
             }
             if parts >= 3 {
                 let _ = write!(self.label, "  t {:.0}s", self.t);
@@ -407,6 +419,29 @@ impl BrownianMotion {
             }
         }
         self.label.clear();
+    }
+
+    /// Advance the grain by `dt`, recording trail samples and MSD lags. The OU transition
+    /// is exact for any h, so the step is split at trail-sample boundaries: samples land
+    /// at exact multiples of their ticks whatever dt is.
+    fn advance_grain(&mut self, dt: f64, rng: &mut impl Rng) {
+        let sample = TICK / TRAIL_PER_TICK as f64;
+        let mut left = dt;
+        while left > 0.0 {
+            let next = sample * ((self.tick_clock / sample + 1e-9).floor() + 1.0);
+            let h = left.min(next - self.tick_clock);
+            let step = OuStep::new(GAMMA, SIGMA, h);
+            ou_step_2d(&step, &mut self.grain, rng);
+            self.tick_clock += h;
+            left -= h;
+            if self.tick_clock >= next - 1e-12 {
+                self.trail.push(self.grain_pos());
+                if self.tick_clock >= TICK - 1e-12 {
+                    self.tick_clock = 0.0;
+                    self.tick();
+                }
+            }
+        }
     }
 
     fn move_molecules(&mut self, dt: f64) {
@@ -494,7 +529,14 @@ impl BrownianMotion {
             // they move nothing, SPEC-002 Stylised). Capped below the trail's head so a
             // flash never paints over the hero path.
             let r = if m.glow > GLOW_BEAD { 1.0 } else { 0.0 };
-            self.dots.disc(x, y, r, ink::ramp(SOLVENT, v.min(GLOW_TOP)));
+            let ink = ink::ramp(SOLVENT, v.min(GLOW_TOP));
+            // A dimmer tail dot where it was MOL_STREAK s ago, so it reads as moving.
+            let (tx, ty) = dot_of((m.x - m.vx * MOL_STREAK, m.y - m.vy * MOL_STREAK));
+            if (ty.round() as i32) < floor {
+                self.dots
+                    .plot(tx, ty, ink::ramp(SOLVENT, 0.6 * v.min(GLOW_TOP)));
+            }
+            self.dots.disc(x, y, r, ink);
         }
 
         // Trail: the path so far, oldest dimmest, joined to the grain; the newest
@@ -568,9 +610,24 @@ impl Generator for BrownianMotion {
         self.msd_count = 0;
         self.tick();
         self.trail.push(self.grain_pos());
+        // The pre-rolled past (BRO-A7): the scene opens on a grain that has already been
+        // walking for PREROLL s, with its trail, lags and an estimate.
+        self.advance_grain(PREROLL, &mut ctx.rng);
+        self.t = PREROLL;
         let g = self.grain_box;
         self.epoch = epoch_len(0.5 * (g.x1 - g.x0).min(g.y1 - g.y0));
-        self.new_epoch();
+        // The first ring epoch began RING_PREROLL s ago (at most half an epoch), centred
+        // on the grain's position then, which the trail recorded.
+        let per_s = TRAIL_PER_TICK as f64 / TICK;
+        let back = (RING_PREROLL.min(0.5 * self.epoch) * per_s).round() as usize;
+        self.ring_age = back as f64 / per_s;
+        self.ring_origin = self
+            .trail
+            .iter()
+            .rev()
+            .nth(back)
+            .copied()
+            .unwrap_or_else(|| self.grain_pos());
 
         let n = ((MOL_PER_CELL * size.area() as f64) as usize).min(MOL_MAX);
         self.molecules.set_capacity(n);
@@ -595,32 +652,20 @@ impl Generator for BrownianMotion {
         if !(dt.is_finite() && dt > 0.0) {
             return;
         }
-        // The OU transition is exact for any h, so split the frame at trail-sample
-        // boundaries: trail and MSD samples land at exact multiples of their ticks
-        // whatever dt is.
-        let sample = TICK / TRAIL_PER_TICK as f64;
-        let mut left = dt;
-        while left > 0.0 {
-            let next = sample * ((self.tick_clock / sample + 1e-9).floor() + 1.0);
-            let h = left.min(next - self.tick_clock);
-            let step = OuStep::new(GAMMA, SIGMA, h);
-            ou_step_2d(&step, &mut self.grain, &mut ctx.rng);
-            self.tick_clock += h;
-            left -= h;
-            if self.tick_clock >= next - 1e-12 {
-                self.trail.push(self.grain_pos());
-                if self.tick_clock >= TICK - 1e-12 {
-                    self.tick_clock = 0.0;
-                    self.tick();
-                }
-            }
-        }
+        let dt = dt.min(MAX_DT);
+        self.advance_grain(dt, &mut ctx.rng);
         self.t += dt;
         self.ring_age += dt;
         if self.ring_age >= self.epoch {
             self.new_epoch();
         }
-        self.move_molecules(dt);
+        // Substeps short enough that a 3σ-fast molecule moves at most half the contact
+        // reach, so none tunnels through the grain at a large dt.
+        let reach = self.grain_r + CONTACT_PAD;
+        let subs = (dt * 3.0 * MOL_SD / (0.5 * reach)).ceil().clamp(1.0, 16.0);
+        for _ in 0..subs as usize {
+            self.move_molecules(dt / subs);
+        }
         self.refresh_label();
         self.rasterise();
     }
@@ -680,7 +725,7 @@ mod tests {
     }
 
     #[test]
-    fn bro_constants_satisfy_d_equals_sigma2_over_2gamma2() {
+    fn bro_a1_constants_satisfy_d_equals_sigma2_over_2gamma2() {
         assert!((SIGMA * SIGMA / (2.0 * GAMMA * GAMMA) - D).abs() < 1e-12);
         // ~3 rows of rms 2-D displacement per √s (spec).
         assert!(((4.0 * D).sqrt() - 3.0).abs() < 1e-12);
@@ -832,20 +877,30 @@ mod tests {
     }
 
     #[test]
-    fn bro_a7_readout_waits_for_ten_seconds_of_lag_samples() {
+    fn bro_a7_first_frame_opens_on_a_pre_rolled_past_with_an_estimate() {
         let mut ctx = seeded(8);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(200, 50), &mut ctx);
-        // The first lag sample lands at τ = 2 s, so 10 s of lags complete at 12 s.
-        for _ in 0..(11.5 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-        }
+        // 20 s of track: a full-length hot trail, ≥ LAG_MIN lags and an estimate, labelled
+        // with its unit and the track's age.
+        assert_eq!(g.trail.len(), 1 + (PREROLL * 32.0).round() as usize);
+        assert!(g.msd_count >= LAG_MIN, "{}", g.msd_count);
+        let d = g.d_hat().expect("an estimate from the first frame");
+        assert!(
+            g.label.starts_with(&format!("D 1-path {d:.2} rows^2/s")),
+            "{}",
+            g.label
+        );
+        assert!(g.label.ends_with("  t 20s"), "{}", g.label);
+        // The ring is RING_PREROLL s into its epoch, centred where the grain was then.
+        assert!((g.ring_age - RING_PREROLL).abs() < 1e-12, "{}", g.ring_age);
+        assert_eq!(Some(&g.ring_origin), g.trail.iter().rev().nth(64));
+        assert!(g.ring_radius() > 3.0 && ring_fade(g.ring_age, g.epoch) == 1.0);
+        // The estimator itself still waits for LAG_MIN lag samples.
+        g.msd_count = LAG_MIN - 1;
         assert_eq!(g.d_hat(), None);
-        assert!(g.label.starts_with("D 1-path ..."), "{}", g.label);
-        for _ in 0..(1.0 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-        }
-        assert!(g.d_hat().is_some());
+        g.refresh_label();
+        assert!(g.label.starts_with("D 1-path ... rows^2/s"), "{}", g.label);
     }
 
     #[test]
@@ -899,7 +954,7 @@ mod tests {
     fn bro_gen_r13_readout_names_the_estimator_and_fits_right_of_the_title() {
         // The spec's 2 s estimator lag.
         assert_eq!(LAG_TICKS as f64 * TICK, 2.0);
-        let estimator = "D 1-path 2.31".len();
+        let estimator = "D 1-path 2.31 rows^2/s".len();
         let mut ctx = seeded(9);
         let mut g = BrownianMotion::default();
         for w in 1..=120u16 {
@@ -941,11 +996,11 @@ mod tests {
         for _ in 0..200 {
             g.update(SIM_DT, &mut ctx);
         }
-        assert!(g.label.contains("  true 2.25 rows^2/s  t "), "{}", g.label);
+        assert!(g.label.contains(" rows^2/s  true 2.25  t "), "{}", g.label);
     }
 
     #[test]
-    fn bro_renders_grain_trail_molecules_and_readout_in_ascii() {
+    fn bro_a6_gen_r10_renders_grain_trail_molecules_and_readout_in_ascii() {
         let mut stage = Stage::new(build(), 42, Size::new(100, 30), GlyphMode::Ascii);
         for _ in 0..120 {
             stage.step(SIM_DT);
@@ -985,6 +1040,29 @@ mod tests {
         }
         let glow = g.molecules.iter().next().expect("one molecule").glow;
         assert!((glow - (-1.0 / GLOW_TAU).exp()).abs() < 1e-9, "{glow}");
+    }
+
+    #[test]
+    fn bro_a4_a_fast_molecule_at_the_largest_dt_bounces_instead_of_tunnelling() {
+        let mut ctx = seeded(4);
+        let mut g = BrownianMotion::default();
+        g.resize(Size::new(80, 24), &mut ctx);
+        let (gx, gy) = g.grain_pos();
+        g.molecules.clear();
+        let reach = g.grain_r + CONTACT_PAD;
+        // A 3σ-fast molecule would cross the whole grain within one unsplit 0.25 s move.
+        g.molecules.spawn(Molecule {
+            x: gx + reach + 0.1,
+            y: gy,
+            vx: -3.0 * MOL_SD,
+            vy: 0.0,
+            glow: 0.0,
+        });
+        // A huge dt is clamped to 0.25 s, so the frame's work stays bounded (GEN-R4).
+        g.update(1e9, &mut ctx);
+        assert!((g.t - PREROLL - MAX_DT).abs() < 1e-12, "{}", g.t);
+        let m = *g.molecules.iter().next().expect("one molecule");
+        assert!(m.glow > 0.0 && m.vx > 0.0, "tunnelled: {m:?}");
     }
 
     #[test]
