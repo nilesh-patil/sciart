@@ -5,9 +5,11 @@
 //! each bird steering by its `K = 7` topological nearest neighbours within a metric
 //! horizon (Ballerini et al. 2008; Hemelrijk & Hildenbrandt 2011). A falcon stoops every
 //! 12 s; birds near it turn away and their neighbours copy the escape manoeuvre a couple
-//! of substeps later (Hemelrijk et al. 2015), so the agitation wave outruns any bird, as
+//! of substeps later (Hemelrijk et al. 2015), so the agitation wave outruns the flock, as
 //! Potts (1984) observed in dunlin flocks when he found manoeuvres passing between
 //! neighbours faster than a bird's startle reaction (his chorus-line hypothesis).
+//! Stylised: the front runs ≈ 2–3× the 13 m/s mean Procaccini et al. (2011) measured in
+//! starlings (range 3.7–25 m/s), so it crosses this small flock in about a second.
 //! Hemelrijk et al. also showed the dark band of such waves is orientation, not density:
 //! a banked bird shows the viewer its wing surface and looks dark, an edge-on one looks
 //! thin and light. Here an alarmed bird banked past `WING_BANK` draws its wings and its
@@ -117,6 +119,8 @@ const BANK_TAU: f64 = 0.1;
 /// A bird this close to the falcon fires directly (and flees).
 const R_FLEE: f64 = 12.0;
 /// Contagion lag: a neighbour must have fired at least `LAG` substeps (33 ms) earlier.
+/// The front then runs ≈ 30–45 m/s, ≈ 2–3× the measured starling mean (SPEC-002
+/// Stylisation), so the wave crosses the small on-screen flock in about a second.
 const LAG: u32 = 2;
 /// Alarm duration in substeps (0.35 s).
 const T_A: u32 = 21;
@@ -1678,7 +1682,7 @@ mod tests {
             b.substep(&mut rng);
         }
         // The front's speed, the least-squares slope of distance on time, beats the
-        // fastest a bird can fly (2 v₀): the wave outruns any bird.
+        // fastest a bird can fly in the model (2 v₀): the wave outruns the flock.
         let n = front.len() as f64;
         let (mt, md) = front
             .iter()

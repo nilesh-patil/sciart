@@ -89,21 +89,26 @@ const SHOWN_TAU: f64 = 0.15;
 /// The old flakes fade out over the last second of the fade, so rest opens on an empty
 /// plate.
 const FLAKE_OUT: f64 = 1.0;
-/// Tubes start at this tone (`V ≈ T_ref / 2`). Between `U_HALO` and it the diffuse
-/// attractant around a tube glows as a dark halo; below `U_HALO` the plate is the
-/// terminal's own dark. The halo stays in the ramp's near-black end, so it softens the
-/// tube edges instead of fattening the veins into blobs.
-const U_FLOOR: f64 = 0.45;
-const U_HALO: f64 = 0.25;
-/// Ember ramp values: the halo spans `HALO_LO..=HALO_HI` (oxblood), the tubes
-/// `CORE_LO..=1` (scarlet through orange to pale gold at the junctions).
-const HALO_LO: f64 = 0.04;
-const HALO_HI: f64 = 0.26;
-const CORE_LO: f64 = 0.36;
-/// `CORE_LO`'s ink level, `round(0.36 · 255)`: the dimmest tube pixel.
-const CORE_LO_LEVEL: u8 = 92;
-/// Tube tones are raised to this power: an orange body around a pale-gold channel.
-const CORE_GAMMA: f64 = 1.6;
+/// Tubes start at this tone (`V ≈ 0.76·T_ref`), high enough that only a vein's
+/// channel is drawn, not the diffuse attractant around it. Between `U_HALO` and it that
+/// attractant shows as a dark rim about one pixel wide; below `U_HALO` the plate is the
+/// terminal's own dark. The rim stays in the ramp's near-black end, so it antialiases
+/// the half-block edges instead of fattening the veins into blobs.
+const U_FLOOR: f64 = 0.55;
+const U_HALO: f64 = 0.50;
+/// Sulfur ramp values: the rim spans `HALO_LO..=HALO_HI` (dark olive), the tubes
+/// `CORE_LO..=1` (chrome yellow to pale lemon at the junctions).
+const HALO_LO: f64 = 0.06;
+const HALO_HI: f64 = 0.30;
+const CORE_LO: f64 = 0.55;
+/// `CORE_LO`'s ink level, `round(0.40 · 255)`: the dimmest tube pixel.
+const CORE_LO_LEVEL: u8 = 140;
+/// Tube tones are raised to this power: a yellow body around a pale channel, with the
+/// thin trunks still luminous.
+const CORE_GAMMA: f64 = 1.2;
+/// ASCII grades `. : + #` step by this above the tube floor, so `#` marks the top 10 %
+/// of the tone range, as with the M10 floor.
+const ASCII_STEP: f64 = (0.9 - U_FLOOR) / 3.0;
 /// Shuttle streaming, stylised (SPEC-002 Streaming): while the network consolidates, tube
 /// tones pulse by ±`STREAM_DEPTH` in a wave running out from the inoculum,
 /// `STREAM_WAVE` of the plate's shorter side long, every `STREAM_PERIOD` s. Real
@@ -118,8 +123,8 @@ const STREAM_PERIOD: f64 = 3.0;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 /// Oat flakes: small oat-beige motes, an art-directed `Blackbody` tint (level 105 ≈
 /// 4 000 K; not a temperature), so the food belongs to the organism's warm world. The
-/// level stays below the tubes' pale-gold peak, so in mono the organism stays the
-/// brightest thing on the plate; fading the level darkens a flake through the ramp's
+/// level stays below the tubes' pale-lemon peak, so in mono the organism stays the
+/// brightest thing on the plate; fading the level darkens a flake through the blackbody's
 /// dim reds into the plate.
 const FLAKE: Role = Role::Blackbody;
 const FLAKE_LEVEL: f64 = 105.0;
@@ -846,8 +851,10 @@ fn shows_label(size: Size) -> bool {
     size.width() >= 40 && size.height() >= 12
 }
 
-/// The organism's ramp (false colour; real *Physarum* is yellow, SPEC-002 Inks).
-const ORGANISM: Role = Role::Ramp(Ramp::Ember);
+/// The organism's ramp: the chrome yellow of a real *Physarum* plasmodium, stylised
+/// into a near-black-to-lemon ramp (SPEC-002 Inks).
+const RAMP: Ramp = Ramp::Sulfur;
+const ORGANISM: Role = Role::Ramp(RAMP);
 
 /// A tube tone `u ≥ U_FLOOR` at streaming phase `phase`: pulsed by ±`depth`, never
 /// below the tube floor.
@@ -866,13 +873,13 @@ fn tube_tone(px: Ink) -> Option<f64> {
 }
 
 /// ASCII fallback per cell (GEN-R10): the brighter tube pixel's tone, read back from its
-/// ink, graded `. : + #` in steps of 0.15 above the tube floor, in that pixel's ink. The
+/// ink, graded `. : + #` in steps of `ASCII_STEP` above the tube floor, in that pixel's ink. The
 /// halo and the food pixels count as blank; `render` marks each flake with a single `o`
 /// instead of the mote it covers in half blocks.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let (ut, ub) = (tube_tone(top), tube_tone(bottom));
     let (u, ink) = if ut >= ub { (ut?, top) } else { (ub?, bottom) };
-    let ch = match ((u - U_FLOOR) / 0.15) as u32 {
+    let ch = match ((u - U_FLOOR) / ASCII_STEP) as u32 {
         0 => '.',
         1 => ':',
         2 => '+',
@@ -882,7 +889,7 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
 }
 
 /// The ink of a pixel at tone `u ≥ U_HALO`: a dark halo below the tube floor, then the
-/// tube ramp up to pale gold at `u = 1`.
+/// tube ramp up to pale lemon at `u = 1`.
 fn organism_ink(u: f64) -> Ink {
     let v = if u < U_FLOOR {
         ease::lerp(HALO_LO, HALO_HI, (u - U_HALO) / (U_FLOOR - U_HALO))
@@ -890,7 +897,7 @@ fn organism_ink(u: f64) -> Ink {
         let t = ((u - U_FLOOR) / (1.0 - U_FLOOR)).min(1.0);
         ease::lerp(CORE_LO, 1.0, t.powf(CORE_GAMMA))
     };
-    ink::ramp(Ramp::Ember, v)
+    ink::ramp(RAMP, v)
 }
 
 impl Generator for Physarum {
@@ -1560,12 +1567,10 @@ mod tests {
     }
 
     #[test]
-    fn phy_a8_ember_tubes_glow_through_a_dark_halo() {
-        let ember = Role::Ramp(Ramp::Ember);
-        let (halo_top, core_bottom) = (
-            ink::ramp(Ramp::Ember, HALO_HI),
-            ink::ramp(Ramp::Ember, CORE_LO),
-        );
+    fn phy_a8_sulfur_tubes_with_a_one_pixel_halo() {
+        let organism = Role::Ramp(Ramp::Sulfur);
+        assert_eq!(ORGANISM, organism);
+        let (halo_top, core_bottom) = (ink::ramp(RAMP, HALO_HI), ink::ramp(RAMP, CORE_LO));
         assert!(halo_top.level < core_bottom.level);
         for (size, t) in [(Size::new(80, 24), 5.0), (Size::new(200, 50), 20.0)] {
             let (mut p, mut ctx) = scene(size, 42);
@@ -1580,7 +1585,7 @@ mod tests {
                     if px == Ink::BLANK || px == p.flake_ink {
                         continue;
                     }
-                    assert_eq!(px.role, ember, "{size:?} ({x}, {y})");
+                    assert_eq!(px.role, organism, "{size:?} ({x}, {y})");
                     // Two bands: a dim halo and bright tubes, nothing in between.
                     let is_core = px.level >= core_bottom.level;
                     assert!(is_core || px.level <= halo_top.level, "{size:?} {px:?}");
@@ -1589,11 +1594,11 @@ mod tests {
                         continue;
                     }
                     halo += 1;
-                    // A glow hugs a tube: a core pixel within 3 pixels.
-                    let hugs = (-3..=3).any(|dy| {
-                        (-3..=3).any(|dx| {
+                    // The halo is one pixel wide: a core pixel among its 8 neighbours.
+                    let hugs = (-1..=1).any(|dy| {
+                        (-1..=1).any(|dx| {
                             at(x + dx, y + dy).level >= core_bottom.level
-                                && at(x + dx, y + dy).role == ember
+                                && at(x + dx, y + dy).role == organism
                         })
                     });
                     near += usize::from(hugs);
@@ -1634,8 +1639,8 @@ mod tests {
     fn phy_a10_tubes_pulse_with_shuttle_streaming() {
         // The pulse: none at depth 0, within ±depth, never below the tube floor, and the
         // ASCII grade reads a tube's tone back from its ink.
-        for k in 0..=55 {
-            let u = U_FLOOR + 0.01 * f64::from(k);
+        for k in 0..=100 {
+            let u = ease::lerp(U_FLOOR, 1.0, f64::from(k) / 100.0);
             assert_eq!(stream(u, 0.0, 1.0), u);
             for phase in [0.0, 1.0, 2.5, 4.0, 5.5] {
                 let v = stream(u, STREAM_DEPTH, phase);
@@ -1644,8 +1649,12 @@ mod tests {
             let back = tube_tone(organism_ink(u)).expect("a tube ink");
             assert!((back - u).abs() < 0.012, "{u} -> {back}");
         }
-        assert_eq!(tube_tone(organism_ink(0.3)), None, "the halo is not a tube");
-        assert_eq!(CORE_LO_LEVEL, ink::ramp(Ramp::Ember, CORE_LO).level);
+        assert_eq!(
+            tube_tone(organism_ink(0.5 * (U_HALO + U_FLOOR))),
+            None,
+            "the halo is not a tube"
+        );
+        assert_eq!(CORE_LO_LEVEL, ink::ramp(RAMP, CORE_LO).level);
         // On only while the network consolidates: the bloom and the fade hold still.
         let size = Size::new(80, 24);
         let (mut p, mut ctx) = scene(size, 42);

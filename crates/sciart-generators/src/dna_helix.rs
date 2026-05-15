@@ -137,7 +137,8 @@ pub(crate) fn draw_sequence(rng: &mut impl Rng, seq: &mut Seq) {
     seq.shuffle(rng);
 }
 
-/// One nucleotide of a duplex and whether it is parental (grey backbone) or new.
+/// One nucleotide of a duplex and whether it is parental (`Ramp(Ice)` backbone) or new
+/// (`Ramp(HAlpha)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Nt {
     pub base: u8,

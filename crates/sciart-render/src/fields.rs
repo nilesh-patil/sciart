@@ -88,6 +88,12 @@ const fn spec(r: Ramp) -> RampSpec {
             h1: 70.0,
             chroma: 0.035,
         },
+        // near-black olive → chrome yellow → pale lemon: Physarum's plasmodium
+        Ramp::Sulfur => RampSpec {
+            h0: 80.0,
+            h1: 110.0,
+            chroma: 0.21,
+        },
     }
 }
 

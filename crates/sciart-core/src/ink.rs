@@ -56,11 +56,14 @@ pub enum Ramp {
     /// Near-black → neutral grey → pale warm white: unresolved starlight, the nearly
     /// colourless integrated light of an old stellar population.
     Starlight,
+    /// Near-black olive → chrome yellow → pale lemon: the plasmodium of *Physarum
+    /// polycephalum*, sulfur and pollen yellows (a yellow that is not Ember's orange).
+    Sulfur,
 }
 
 impl Ramp {
     /// Every ramp, in declaration order.
-    pub const ALL: [Ramp; 7] = [
+    pub const ALL: [Ramp; 8] = [
         Ramp::Ember,
         Ramp::Ice,
         Ramp::Ferroin,
@@ -68,6 +71,7 @@ impl Ramp {
         Ramp::Aurora,
         Ramp::Plasma,
         Ramp::Starlight,
+        Ramp::Sulfur,
     ];
 
     /// A unique lower-case name.
@@ -80,6 +84,7 @@ impl Ramp {
             Ramp::Aurora => "aurora",
             Ramp::Plasma => "plasma",
             Ramp::Starlight => "starlight",
+            Ramp::Sulfur => "sulfur",
         }
     }
 }

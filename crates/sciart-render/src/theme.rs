@@ -769,6 +769,23 @@ mod tests {
     }
 
     #[test]
+    fn rnd_r12_sulfur_is_chrome_yellow_not_amber() {
+        // Physarum's own colour: yellow through the middle (red and green both well above
+        // blue), clearly yellower than Ember's orange at the same level.
+        let c = |r: Ramp, l: u8| Theme::Astro.color(Ink::new(Role::Ramp(r), l), 0, 0);
+        for level in [128u8, 170, 210] {
+            let Rgb(r, g, b) = c(Ramp::Sulfur, level);
+            let (h, ember) = (hue(c(Ramp::Sulfur, level)), hue(c(Ramp::Ember, level)));
+            assert!((48.0..=66.0).contains(&h), "level {level}: hue {h:.0}");
+            assert!(r > b + 60 && g > b + 60, "level {level}: {r} {g} {b}");
+            assert!(
+                h >= ember + 12.0,
+                "level {level}: sulfur {h:.0}, ember {ember:.0}"
+            );
+        }
+    }
+
+    #[test]
     fn rnd_r12_ramps_end_on_distinct_hues() {
         let tops: Vec<(Ramp, f64)> = Ramp::ALL
             .iter()
