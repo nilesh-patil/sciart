@@ -1,6 +1,6 @@
 # SPEC-001: sciart-core
 
-**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R92 in M12
+**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R95 in M12
 
 Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
@@ -172,6 +172,12 @@ Three more semantic roles for fields (still never RGB, ADR-0004), and a tone-map
 ### Shared helpers lifted in the M12 closing review
 
 - **CORE-R92** `Glow::splat_bilinear(x, y, w)` adds `w` at a continuous *pixel* position (integers are pixel centres) split bilinearly over the four nearest pixels, weights `(1−fx)(1−fy), fx(1−fy), (1−fx)fy, fx·fy`. Off-buffer pixels are skipped, so the in-bounds share of `w` is conserved exactly when all four are on the buffer, and no pixel beyond distance 1 on either axis is touched; non-finite `x`, `y` or `w` deposit nothing. `Glow::values()` / `values_mut()` expose the row-major buffer for scene-side filters (a blur) between splatting and toning. Allocation-free (M12: galaxy_collision had a private copy; pulsar's beam rays and globular_cluster's glow used nearest-pixel `splat`, which quantised a moving source into spokes and stair steps).
+
+### Stellar discs (M12)
+
+- **CORE-R93** `stellar::limb_darkening(mu, (u1, u2)) -> f64` is the quadratic limb-darkening law `1 − u1(1 − μ) − u2(1 − μ)²` (the linear law is `u2 = 0`), with `μ` clamped onto `[0, 1]` and NaN read as the limb (`μ = 0`).
+- **CORE-R94** `stellar::brightness_temperature(t_centre, i) -> f64` is the 550 nm brightness temperature of a surface element at intensity `i` of the centre's, by Wien's law `1/T = 1/t_centre − (λ/c₂)·ln i` with `λ/c₂ = stellar::WIEN_550`; `i` is clamped onto `[10⁻⁶, 1]` (NaN ⇒ 10⁻⁶), so `T` is finite, positive, non-decreasing in `i` and never above `t_centre`. With `Role::Blackbody` (CORE-R79) it colours a limb-darkened disc in true colour, reddening and dimming toward the limb.
+- **CORE-R95** `raster::disc_cover(x, y, c, r) -> f64` is the share of pixel `[x, x + 1) × [y, y + 1)` inside the circle of radius `r` about `c`, estimated from the pixel centre's distance `d` as `clamp(r + ½ − d, 0, 1)` (NaN ⇒ 0). `raster::disc_pixels(c, r, f)` calls `f(x, y, cover)` for exactly the pixels with `cover > 0`, each once, row by row and left to right, unclipped, and visits nothing for non-finite input or `r < 0`.
 
 ### Title helpers (M12)
 

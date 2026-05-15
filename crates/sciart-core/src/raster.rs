@@ -1,5 +1,5 @@
 //! Sub-cell rasters layered onto a [`Canvas`] (SPEC-001 CORE-R41, CORE-R42, CORE-R51,
-//! CORE-R55, CORE-R64, CORE-R65, CORE-R85, CORE-R86, ADR-0010).
+//! CORE-R55, CORE-R64, CORE-R65, CORE-R85, CORE-R86, CORE-R95, ADR-0010).
 //!
 //! - [`Dots`]: a braille lattice of 2 × 4 dots per cell, one ink per cell. With cells
 //!   ~2:1 tall ([`ASPECT`](crate::geom::ASPECT)) the dots are *square*, so line art,
@@ -93,6 +93,40 @@ pub fn ascii_ramp_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         ASCII_RAMP[usize::from(ink.level) * ASCII_RAMP.len() / 256],
         ink,
     ))
+}
+
+/// Share of the square pixel `(x, y)` (spanning `[x, x + 1) × [y, y + 1)`) inside the
+/// circle of radius `r` about `c` (CORE-R95), estimated from the pixel centre's distance
+/// `d` as `clamp(r + ½ − d, 0, 1)`: one `hypot` per pixel, exact for a straight edge
+/// through the centre and symmetric about the circle's centre. NaN input ⇒ 0.
+#[inline]
+pub fn disc_cover(x: i32, y: i32, c: (f64, f64), r: f64) -> f64 {
+    let d = (f64::from(x) + 0.5 - c.0).hypot(f64::from(y) + 0.5 - c.1);
+    // `f64::min` would turn a NaN distance into full cover; compare first.
+    let cover = r + 0.5 - d;
+    if cover > 0.0 { cover.min(1.0) } else { 0.0 }
+}
+
+/// Call `f(x, y, cover)` for every pixel the disc of radius `r` about `c` covers
+/// (`disc_cover > 0`, CORE-R95), row by row, left to right: the one anti-aliased disc
+/// walk for half-block `Pixels` pictures of suns, moons and planets. Pixel coordinates
+/// are unclipped; `f` ignores the ones off its buffer. Non-finite input or `r < 0` visits
+/// nothing.
+pub fn disc_pixels(c: (f64, f64), r: f64, mut f: impl FnMut(i32, i32, f64)) {
+    if !(c.0.is_finite() && c.1.is_finite() && r.is_finite()) || r < 0.0 {
+        return;
+    }
+    let reach = r + 0.5;
+    let (x0, x1) = ((c.0 - reach).floor() as i32, (c.0 + reach).ceil() as i32);
+    let (y0, y1) = ((c.1 - reach).floor() as i32, (c.1 + reach).ceil() as i32);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let cover = disc_cover(x, y, c, r);
+            if cover > 0.0 {
+                f(x, y, cover);
+            }
+        }
+    }
 }
 
 /// Walk the dots of the segment `(x0, y0)–(x1, y1)` on a `lattice`-sized dot grid
