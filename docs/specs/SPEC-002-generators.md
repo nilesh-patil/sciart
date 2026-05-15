@@ -366,7 +366,7 @@ Shared helpers: `sciart_core::draw` (CORE-R22..R27). All lengths below are in **
   each pass.
 - **Resize**: lattice, `β` map, lens light and sample map; textures and pass state survive.
 - **Inks**: source light `Ramp(Ice)`, lens light `Ramp(Ember)`, critical curve `Structure` 40. ASCII
-  fallback: brightness ramp (shared with black_hole).
+  fallback: `raster::ascii_ramp_cell` (CORE-R91), shared with black_hole.
 - **Captions**: `meta.captions = ["Einstein ring"]`; see LENS-A6.
 - **Acceptance**: `LENS-A1` *(changed)* every SIS image maps back to `β` through `β = θ − θE θ̂`; `LENS-A2` *(changed)* for `|β| < θE` there are two images, on opposite sides, at `|θ| = θE ± |β|`, so both approach `θE` as `β → 0`; `LENS-A3` *(changed)* for `|β| > θE` there is one image, displaced outward by exactly `θE`; `LENS-A4` *(new)* surface brightness is conserved: every node shows the source brightness at its own `β` (recomputed from `θ`), so nothing lensed is brighter than the brightest source; `LENS-A5` *(new; was an unnumbered test)* an aligned hero lights the whole circle `|θ| = θE` and leaves `|θ| < 0.3 θE` free of source light; `LENS-A6` *(new)* `caption()` is `Einstein ring` exactly while the hero's arm-averaged surface brightness on the lens axis (`β = 0`, which the whole critical curve images) is ≥ 0.05, the ring is then closed, and every pass closes it for at least 2 s (checked over 400 seeded passes); `LENS-A7` *(new)* the field is a quiet ground: no field texel exceeds 0.75 (half the hero's peak), and without the hero at least 60 % of the frame is dark; `LENS-A8` *(new)* the lens glow fades out through an ordered halftone and leaves a gap for the ring: at 200 × 50, in 0.025 θE annuli from 0.2 to 0.95 θE, the share of lens-lit pixels starts full, is zero from 0.65 θE out, never rises by more than 0.1 outward, and passes through at least three annuli strictly between 10 % and 90 %; and every 4 × 4 block of a uniform light `k/16` of the faintest visible level keeps exactly `k` dots.
 
@@ -489,7 +489,7 @@ bounded (GEN-R8); particles are respawned rather than reallocated. Positions are
   star map and clump noise are size-independent and survive.
 - **Inks**: disk `Blackbody` (the display temperature), stars `Star` (levels 40–150, below the disk's
   hottest level in every theme), shadow and empty sky blank. ASCII
-  fallback: brightness ramp `.:-=+*#%@` from the brighter half-pixel's level.
+  fallback: `raster::ascii_ramp_cell` (CORE-R91), the stronger (CORE-R87) half-pixel's level on `.:-=+*#%@`.
 - **Acceptance**: `BH-A1` ω strictly decreases with r and the ISCO period is 2.5 s; `BH-A2` *(changed)* the shadow is black: no ray with `b < b_c` receives sky light, and the only disk light inside the shadow is the direct image of the near half (the far half is seen only outside it); `BH-A3` *(changed)* the approaching half is bluer and brighter: `g(ψ = π) > g(ψ = 0)` at every radius and the mean Blackbody level of the left half of the image exceeds the right's; `BH-A4` *(changed)* the clumps ride the disk flow: a parcel orbiting at Kepler ω while drifting in at `dr/dt = −0.02 r` maps back to its birth position through the layer's closed-form transport, the two layers' weights satisfy `w₀² + w₁² = 1`, and the clump multiplier averages 1 with at least 5 % of bins below 0.6 and above 1.6; `BH-A5` *(new)* the geodesic table is right: rays are captured iff `b < 3√3` (outside the table's resolution there), for `b ≥ 20` the deflection matches `4/b + 15π/(4b²) + 128/(3b³)` within 1 %, and early on every ray is the straight line `u = sin φ / b` to first order; `BH-A6` *(new)* the order-1 (secondary) image lies outside the shadow; above the hole (`sin ψ ≥ 0`) it is a thin lensing ring, `b < b_c + 0.8`, drawn without gaps (at 120 × 40 and 200 × 50 every pixel it passes through above the shadow, where its gas is hot enough to show, is lit), and below it the wider lower arc; `BH-A7` *(new)* through the poles of the image (`cos ψ = 0`) there is no line-of-sight Doppler shift: `g = √(1 − 3/r)`, gravitational redshift times the transverse (time-dilation) Doppler shift; the emitted temperature peaks at `r = 49/36 · r_isco` and is 0 at the ISCO; `BH-A8` *(new)* the sky is a quiet field of steady point stars: over a full turn of the star field, stars light at most 5 % of the frame's pixels; however strongly lensed, a star shows in at most two nodes (one per image); and at 80 × 24, 120 × 40 and 200 × 50 over 20 s, a star image that vanishes with no star within two pixels has lasted at least 0.55 s on average; `BH-A9` *(new)* the disk is the hero and never clips: the display temperature starts at the coolest blackbody level, rises strictly and continuously (also at 4 500 K), lifts the dim disk (2 000 K shows above 2 600 K) and stays below 10 000 K, fewer than 5 % of the disk's pixels come within 3 % of it, and the disk's hottest level exceeds every star's (at 80 × 24, 120 × 40 and 200 × 50).
 
 ### galaxy_collision  (Deep Cosmos, M5, M12)
@@ -731,22 +731,26 @@ Shared helpers: `sciart_core::grid` (CORE-R33..R36) plus `particles` and `draw`.
 
 ### spacetime_grid  (Deep Cosmos, M6, M12)
 - **Intent**: the rubber-sheet picture of a binary black-hole merger (GW150914): a dim purple braille
-  mesh funnelling down into two orbiting black holes — dark cores with hot, glowing rims — with cooling
-  orbit trails; quadrupole ripples spiral outward as magenta-to-orange crests and tighten as the orbit
+  mesh funnelling down into two orbiting black holes — dark cores with hot, glowing rims — with cold,
+  fading orbit trails; quadrupole ripples spiral outward as magenta-to-orange crests and tighten as the orbit
   shrinks; the holes plunge and merge in a flash; the merger's burst sweeps across the sheet as an
   expanding band of light while the single remnant rings down; a strain inset (top-left) draws the chirp
   a distant detector would record, brightening to the merger.
 - **Model**: sheet height `z = −K Σ m / √(d² + ε²)` (softened Newtonian wells, `K = 0.16`, `ε = 0.16`)
   plus the quadrupole wave `A f(r) S(t_r) cos 2(φ − Ψ(t_r))` with retarded time `t_r = t − r/c`,
   `c = 0.35` sheet units/s, `A = 0.08` and `f(r) = (1 − e^{−(r/0.5)²}) √(0.5/r)`, the 2-D sheet's
-  energy-conserving fall-off (real strain falls as 1/r). The source runs a 20.1 s cycle: *inspiral* on
+  energy-conserving fall-off (real strain falls as 1/r). The source runs a 17.1 s cycle: *inspiral* on
   the Newtonian Peters chirp `a = a₀(1 − τ/τc)^{1/4}` (τc = 15 s, Ω₀ = 2π/4 s), Kepler Ω and closed-form
-  phase, from `a₀` to `0.5 a₀`, strain `S = a₀/a` (`h ∝ a²Ω² ∝ 1/a`), eased in over the first 2 s;
+  phase, from `a₀` to `0.5 a₀`, strain `S = a₀/a` (`h ∝ a²Ω² ∝ 1/a`), with no switch-on: each cycle's binary has always been
+  inspiralling, so waves with retarded times before the cycle began are the same Peters chirp
+  extrapolated backwards (`τ < 0`, `u = 1 − τ/τc > 1`, capped at `u = 4`, far beyond any retarded time
+  on the sheet), and the sheet and the inset (`wave_state(t_r, now)`) never go quiet between cycles (SPT-A11);
   *merger* (0.5 s): `a = a_m(1 − s²) → 0` while the orbital speed doubles linearly, `S` rises by 2.2×,
   and 5 % of the mass is radiated; then one remnant of `0.95 (m₁ + m₂)` at the centre of mass with an
   `m = 2` *ringdown*, `S ∝ e^{−τ/0.35 s}`, pattern speed 1.2 × the end-of-plunge orbital speed (which is
-  `2 Ω_m`), i.e. `2.4 Ω_m`; *quiet* for 5.5 s while the burst runs off the sheet; then a cut (0.5 s dip
-  to dark each side) to a new binary at a new angle. Merger flash: `s²` through the plunge, 1 at
+  `2 Ω_m`), i.e. `2.4 Ω_m`; *quiet* for 2.5 s after coalescence (about the sheet's half-depth over `c`, so
+  the burst band is still crossing the outer sheet at the cut); then a cut to a new binary at a new angle,
+  with a brief dip 0.3 s each side down to half brightness (smoothstepped), never to black. Merger flash: `s²` through the plunge, 1 at
   coalescence, then `e^{−τ/0.3 s}`. Mesh: perspective camera (pitch 55°, slow yaw sway), lines every ~7
   columns / ~2.8 rows, 3 samples per edge, rasterised as braille `Dots` segments with the parts inside
   each black hole's moat clipped out, fitted into rows 1 … h − 3 (a clear top row; the title row and a
@@ -754,7 +758,7 @@ Shared helpers: `sciart_core::grid` (CORE-R33..R36) plus `particles` and `draw`.
   aliasing into moiré. Black holes on their own `Dots` layer (drawn in `update`): a hot two-dot rim of
   radius `0.12 m^{1/3}` (× (1 + flash); at least 2.5 dots) round a dark core, graded by a cooler halo
   ring 2.5 dots further out (in braille cells of its own), in a dark moat to 1.4 × that radius plus a
-  dot that the mesh and trails keep out of, and a 1 s orbit trail that cools as it fades. The camera fit
+  dot that the mesh and trails keep out of, and a 1 s orbit trail in one cold hue that fades by level. The camera fit
   includes the remnant's lifted well bottom, derived from `K`, `ε`, the radiated fraction and the lift. Inset:
   the source strain, signed-square-root scaled to the merger peak, over the last 4 s, one sample per dot
   column, in a 3-row strip at the top-left, `w/6` columns (12–22) wide (cleared under, labelled `strain`
@@ -768,23 +772,27 @@ Shared helpers: `sciart_core::grid` (CORE-R33..R36) plus `particles` and `draw`.
   hot Blackbody rims so they read in their funnels — the rims mark them (black holes emit no light), rim
   size is not horizon size, and the merger flash is a visual cue for the energy radiated; the display
   low-pass hides the shortest ringdown ripples on the sheet (the inset shows them), but the mesh's light
-  still carries the unfiltered wave energy density (`∝ h²`), so the burst reads as a band of light where
-  its ripples are too fine to draw; the loop restarts with a cut.
+  still carries the unfiltered wave energy density (`∝ ḣ²`), so the burst reads as a band of light where
+  its ripples are too fine to draw; the loop restarts with a cut, the new binary's earlier inspiral
+  already on the sheet.
 - **Motion**: black holes orbit and spiral in (4 s → 1.4 s orbits), brighter crests stream outward; a
-  merger flash and ringdown every 20 s.
+  merger flash and ringdown every 17 s.
 - **Resize**: mesh sample lists, camera fit and sheet width, low-pass limit, the three `Dots` layers and
   the inset.
 - **Inks**: mesh `Seq` (a field of sheet energy; inferno-like in astro): resting level 60, + 45 in
-  wells, + 110 on full crests (troughs dimmed by up to 30 %), + 220 × the wave's normalised energy
-  density `(f(r) S(t_r) / max)²`; nearness shades it by at most 30 % and the foreground edge fades; all
+  wells, + 110 on full crests (troughs dimmed by up to 30 %), + 220 × the wave's energy density
+  `ḣ² ∝ (f(r) S(t_r) Ω(t_r))²` in units of its value at the envelope's peak with the end-of-inspiral
+  `S = 1/Q` and `Ω_m` (so the late chirp and the burst are the bright bands); nearness shades it by at most 30 % and the foreground edge fades; all
   scaled by the cut and brightened up to 1.6 × by the merger flash; capped at level 210, and at 170
   within 2.5 moat radii of a black hole (easing back to 210 by 3.5), so the rims win in their funnels.
-  Rims `Blackbody` (30 000 K and 25 000 K, levels ≥ 240; remnant 30 000 K), halo rings at 0.15 × the rim
-  temperature, warming with the flash; trails cooling from 0.35 × to 0.1 × the rim temperature.
+  Rims `Blackbody` (30 000 K and 25 000 K, levels ≥ 240; remnant 30 000 K), halo rings at 0.35 × the rim
+  temperature (≥ 8 750 K, still white-blue, so each marker reads as one cold beacon), warming with the
+  flash; trails in one cold hue, `Ramp(Ice)`, fading by level from 150 at the head to 40 at the tail
+  (a `Blackbody` level is a temperature, so it cannot carry the fade), scaled by the cut.
   Inset trace `Ramp(Aurora)` from level 110 (quiet) to 255 (merger peak) with a dim axis, label `Text` at
   `title::READOUT_LEVEL`.
 - **Captions**: `meta.captions = ["merger", "ringdown"]`; see SPT-A7.
-- **Acceptance**: `SPT-A1` single-mass well radially symmetric, deepening toward the mass; `SPT-A2` circular binary: fixed centre of mass and constant separation; `SPT-A3` the wave has period π in azimuth and its phase at radius r equals the source phase at `t − r/c` (inspiral); `SPT-A4` *(new)* the merger is continuous: separation shrinks monotonically to 0, phase and well depth are continuous at both joins, the centre of mass stays fixed, and afterwards one mass `0.95 (m₁ + m₂)` sits at the centre; `SPT-A5` *(new)* the strain envelope peaks at the merger, then decays as `e^{−τ/τ_rd}` while the pattern turns faster than at the end of the inspiral; `SPT-A6` *(new)* the inset draws the (scaled) source strain at every dot column of its window, its rectangle stays inside the canvas and above the title row (none below 48 × 16), no mesh dot ever enters its cleared box, and from 120 columns up it has its full width (at least 20 columns); `SPT-A7` *(new)* `caption()` is `merger` from 0.5 s before the plunge until 0.5 s after coalescence, `ringdown` from then until 2.5 s after coalescence, and `None` otherwise; `SPT-A8` *(new)* the merger is the brightest moment: the flash is 1 at coalescence, 0 through the inspiral and from 3 s after it, and it raises the mesh level; `SPT-A9` *(new)* the black holes sit in deep funnels and outshine the mesh: at 80 × 24, outside the cut, the sheet under the heavier mass lies at least 2 rows below the sheet 0.5 units to either side of it, no mesh dot lies inside a black hole's moat, the brightest rim level is at least 1.5 × every mesh cell's level within two moat radii (about three disc radii) of a black hole, and the camera fit's lowest point equals the remnant's lifted well bottom; `SPT-A10` *(new)* the chirp and the burst light up the sheet: at 120 × 40, the mean on-screen mesh level over the last 3 s of the inspiral exceeds that over its early half, the mean over the 3 s after coalescence is at least 1.4 × the early-inspiral mean, crests reach level 120 during the inspiral and the burst reaches level 180.
+- **Acceptance**: `SPT-A1` single-mass well radially symmetric, deepening toward the mass; `SPT-A2` circular binary: fixed centre of mass and constant separation; `SPT-A3` the wave has period π in azimuth and its phase at radius r equals the source phase at `t − r/c` (inspiral); `SPT-A4` *(new)* the merger is continuous: separation shrinks monotonically to 0, phase and well depth are continuous at both joins, the centre of mass stays fixed, and afterwards one mass `0.95 (m₁ + m₂)` sits at the centre; `SPT-A5` *(new)* the strain envelope peaks at the merger, then decays as `e^{−τ/τ_rd}` while the pattern turns faster than at the end of the inspiral; `SPT-A6` *(new)* the inset draws the (scaled) source strain at every dot column of its window, its rectangle stays inside the canvas and above the title row (none below 48 × 16), no mesh dot ever enters its cleared box, and from 120 columns up it has its full width (at least 20 columns); `SPT-A7` *(new)* `caption()` is `merger` from 0.5 s before the plunge until 0.5 s after coalescence, `ringdown` from then until 2.5 s after coalescence, and `None` otherwise; `SPT-A8` *(new)* the merger is the brightest moment: the flash is 1 at coalescence, 0 through the inspiral and from 3 s after it, and it raises the mesh level; `SPT-A9` *(new)* the black holes sit in deep funnels and outshine the mesh: at 80 × 24, outside the cut, the sheet under the heavier mass lies at least 2 rows below the sheet 0.5 units to either side of it, no mesh dot lies inside a black hole's moat, the brightest rim level is at least 1.5 × every mesh cell's level within two moat radii (about three disc radii) of a black hole, and the camera fit's lowest point equals the remnant's lifted well bottom; `SPT-A10` *(new)* the chirp and the burst light up the sheet: at 120 × 40, the mean on-screen mesh level over the last 3 s of the inspiral exceeds that over its early half, the mean over the 3 s after coalescence is at least 1.4 × the early-inspiral mean, crests reach level 120 during the inspiral and the burst reaches level 180; `SPT-A11` *(new)* the waves before a cycle are its own chirp extrapolated back and the sheet never goes dead between cycles: `wave_state(t, t)` is the source the bodies show; across a cycle's start `wave_state` is continuous in strain and phase (within 10⁻⁶); 0.5–9 s before it the source is the Peters inspiral at `u = 1 − τ/τc > 1` (`a = a₀u^{1/4}`, `Ω = Ω₀u^{−3/8}`, `S = u^{−1/4} > 0.5`, not merged), finite however far back; at 120 × 40 over cycles 3–6, every 1 s window clear of the cut dip has a mean on-screen mesh level ≥ 0.8 × that of mid-inspiral and a crest of level ≥ 100 (at least 45 such windows).
 
 ---
 ## Batch D — physics sims & narrative scenes (M7)

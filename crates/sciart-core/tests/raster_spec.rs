@@ -581,6 +581,34 @@ fn core_r87_stronger_keeps_the_more_intense_ink() {
     assert_eq!(raster::stronger(zero, lobe), lobe);
 }
 
+// ---------------------------------------------------------------- CORE-R91
+
+#[test]
+fn core_r91_ascii_ramp_cell_draws_the_stronger_pixel_on_the_ramp() {
+    assert_eq!(raster::ascii_ramp_cell(Ink::BLANK, Ink::BLANK), None);
+    // The stronger pixel's ink, top on a tie; an empty pixel loses.
+    assert_eq!(raster::ascii_ramp_cell(A, B), Some(('%', A)));
+    assert_eq!(raster::ascii_ramp_cell(B, A), Some(('%', A)));
+    assert_eq!(raster::ascii_ramp_cell(A, C), Some(('%', A)));
+    assert_eq!(raster::ascii_ramp_cell(Ink::BLANK, B), Some(('=', B)));
+    // Level `l` maps to ramp entry `l · 9 / 256`: both ends and every step boundary.
+    let ramp = raster::ASCII_RAMP;
+    for level in 0..=255u8 {
+        let ink = Ink::new(Role::Blackbody, level);
+        let (ch, got) = raster::ascii_ramp_cell(ink, Ink::BLANK).expect("drawn");
+        assert_eq!(got, ink);
+        assert_eq!(ch, ramp[usize::from(level) * 9 / 256], "level {level}");
+    }
+    assert_eq!(
+        raster::ascii_ramp_cell(Ink::new(Role::Star, 0), Ink::BLANK).map(|c| c.0),
+        Some('.')
+    );
+    assert_eq!(
+        raster::ascii_ramp_cell(Ink::new(Role::Star, 255), Ink::BLANK).map(|c| c.0),
+        Some('@')
+    );
+}
+
 // ---------------------------------------------------------------- CORE-R89
 
 /// The lit mask of a `n × n`-pixel buffer filled with `ink` and dissolved at `floor`.

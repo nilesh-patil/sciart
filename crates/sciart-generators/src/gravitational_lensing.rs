@@ -13,11 +13,9 @@ use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::grid::lattice_for;
 use sciart_core::prelude::*;
-use sciart_core::raster::Tone;
+use sciart_core::raster::{Tone, ascii_ramp_cell};
 use sciart_core::timeline::ease;
 use sciart_core::{draw, ink};
-
-use crate::black_hole::ascii_cell;
 
 pub static META: Meta = Meta {
     name: "gravitational_lensing",
@@ -377,7 +375,7 @@ impl Generator for GravitationalLensing {
 
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
     }
 
     fn caption(&self) -> Option<&'static str> {
