@@ -645,13 +645,13 @@ impl GrayScott {
 
     /// Move the culture onto a new lattice, stretching the pattern to the new domain
     /// (ADR-0012); the edge-clamp seam heals by diffusion within ≈ 1 s.
+    /// The next-step buffers serve as the resampling scratch, then only take the new
+    /// shape: `gs_step` overwrites every node of them before they are read.
     fn regrid(&mut self, lattice: Size) {
-        let (mut u, mut v) = (Grid::new(lattice, 1.0), Grid::new(lattice, 0.0));
-        grid::resample_bilinear(&self.u, &mut u);
-        grid::resample_bilinear(&self.v, &mut v);
-        (self.u, self.v) = (u, v);
-        self.u_next = Grid::new(lattice, 1.0);
-        self.v_next = Grid::new(lattice, 0.0);
+        grid::regrid_bilinear(&mut self.u, lattice, &mut self.u_next);
+        grid::regrid_bilinear(&mut self.v, lattice, &mut self.v_next);
+        self.u_next.resize(lattice, 1.0);
+        self.v_next.resize(lattice, 0.0);
     }
 
     /// Rasterise u, v into the pixels (bilinear, CORE-R52); u is sampled only off the

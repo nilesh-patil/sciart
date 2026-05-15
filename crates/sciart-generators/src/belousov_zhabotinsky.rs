@@ -36,7 +36,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
-use sciart_core::title::{self, Title};
+use sciart_core::title;
 use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
@@ -44,8 +44,11 @@ pub static META: Meta = Meta {
     category: Category::Chemistry,
     description: "Belousov-Zhabotinsky dish: spiral and target oxidation waves sweeping a dark medium",
     title: "Chemical waves · fire, then rest",
-    captions: &[],
+    captions: &CAPTIONS,
 };
+
+/// The quench's caption; the waves show the title's own mechanism (CORE-R71).
+const CAPTIONS: [&str; 1] = ["light quench"];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(Bz::default())
@@ -180,6 +183,9 @@ struct Bz {
     /// Live `b`, for the label.
     b: f32,
     cells: Size,
+    /// `title::stable_readout_room` at this size: the label never changes form with
+    /// the caption (CORE-R83).
+    readout_room: usize,
 }
 
 impl Default for Bz {
@@ -199,6 +205,7 @@ impl Default for Bz {
             reseeded_at: None,
             b: B0,
             cells: Size::new(1, 1),
+            readout_room: 0,
         }
     }
 }
@@ -527,15 +534,6 @@ fn phase_ink(s: f32) -> Ink {
     }
 }
 
-/// The label's phase word for beat `index` in a readout of at most `room` chars.
-fn phase_word(index: usize, room: usize) -> &'static str {
-    match (index == QUENCH, room >= "light quench".len()) {
-        (false, _) => "waves",
-        (true, true) => "light quench",
-        (true, false) => "quench",
-    }
-}
-
 /// ASCII for a cell from the brighter of its two pixels (SPEC-002 ASCII): the M10
 /// thresholds `s` = 0.85, 0.70, 0.40, 0.20, read through [`phase_level`]; the resting
 /// medium is blank.
@@ -615,8 +613,16 @@ impl Generator for Bz {
         &META
     }
 
+    fn caption(&self) -> Option<&'static str> {
+        let beat = self
+            .timeline
+            .at((self.step % CYCLE_STEPS) as f64 / SUB_PER_S as f64);
+        (beat.index == QUENCH).then_some(CAPTIONS[0])
+    }
+
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.cells = size;
+        self.readout_room = title::stable_readout_room(size, &META);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
@@ -658,21 +664,16 @@ impl Generator for Bz {
         if h < 4 || w < 14 {
             return;
         }
-        let local = self.step % CYCLE_STEPS;
-        let beat = self.timeline.at(local as f64 / SUB_PER_S as f64).index;
-        // Right of the title (GEN-R13), which names the reaction, and at most half the
-        // row (CORE-R76), so the label never competes with the waves.
-        let room = title::readout_room(self.cells, &Title::of(self));
-        let word = phase_word(beat, room);
+        // Numbers only: the title names the reaction and its caption the beat. The room
+        // is right of every caption's title (GEN-R13, CORE-R83) and at most half the row
+        // (CORE-R76), so the label never competes with the waves. `b` is live: it reads
+        // 0.45 in the quench, the sign that the quench is a loss of excitability.
         let b = self.b;
-        let mut label = StackText::<80>::new();
-        // Each threshold is its form's length in the quench, the longest word. `b` is
-        // live: it reads 0.45 in the quench, the one on-screen sign that the quench is a
-        // loss of excitability. Writing into a StackText never fails.
-        let _ = match room {
-            44.. => write!(label, "{word}  Barkley a=0.75 b={b:.2} eps=0.02"),
-            20.. => write!(label, "{word}  b={b:.2}"),
-            6.. => write!(label, "{word}"),
+        let mut label = StackText::<40>::new();
+        // Each threshold is its form's length. Writing into a StackText never fails.
+        let _ = match self.readout_room {
+            31.. => write!(label, "Barkley a=0.75 b={b:.2} eps=0.02"),
+            6.. => write!(label, "b={b:.2}"),
             _ => return,
         };
         // label_right pads it with a blank cell each side, so it never touches the field.
@@ -1176,7 +1177,7 @@ mod tests {
     }
 
     #[test]
-    fn bz_inks_leading_edge_has_no_refractory_halo_on_a_stretched_lattice() {
+    fn bz_a9_leading_edge_has_no_refractory_halo_on_a_stretched_lattice() {
         let (mut bz, _) = scene(Size::new(200, 50), 1);
         assert_ne!(
             bz.u.size(),
@@ -1200,7 +1201,7 @@ mod tests {
     }
 
     /// The bottom row at width `w`, `after` sub-steps into the scene (clock only: the
-    /// label reads the beat and `b`, not the fields).
+    /// label reads `b`, not the fields).
     fn label(w: u16, after: u64) -> String {
         let size = Size::new(w, 12);
         let (mut bz, _) = scene(size, 3);
@@ -1212,31 +1213,46 @@ mod tests {
     }
 
     #[test]
-    fn bz_gen_r13_label_is_right_aligned_padded_short_and_never_clipped() {
+    fn bz_gen_r13_label_is_numbers_only_right_aligned_and_never_clipped() {
         let quench = WAVES_STEPS + SUB_PER_S;
-        // The room is the smaller of half the row and the title-row room (CORE-R76):
-        // w − 38 from w = 57, where the full title fits, w − 20 from w = 27, w − 2 below.
         for (w, after, want) in [
-            (14u16, 0, "waves"),
-            (16, quench, "quench"),
-            (30, quench, "quench"),
-            (32, quench, "light quench"),
-            (39, quench, "light quench"),
-            (40, 0, "waves  b=0.06"),
-            (40, quench, "light quench  b=0.45"),
-            (56, 0, "waves  b=0.06"),
-            (57, 0, "waves"),
-            (80, 0, "waves  b=0.06"),
-            (87, quench, "light quench  b=0.45"),
-            (88, quench, "light quench  Barkley a=0.75 b=0.45 eps=0.02"),
+            (14u16, 0, "b=0.06"),
+            (40, 0, "b=0.06"),
+            (40, quench, "b=0.45"),
+            (68, 0, "b=0.06"),
+            (69, 0, "Barkley a=0.75 b=0.06 eps=0.02"),
+            (80, quench, "Barkley a=0.75 b=0.45 eps=0.02"),
         ] {
             let row = label(w, after);
             // A blank cell each side, so it never touches the field.
             assert!(row.ends_with(&format!(" {want} ")), "w={w}: {row:?}");
-            // At most half the row, so it never competes with the waves on a small tile.
-            assert!(2 * want.len() <= usize::from(w), "w={w}: {want:?}");
+            // The beat is the title's caption now, never a word in the readout.
+            assert!(
+                !row.contains("waves  ") && !row.contains("quench "),
+                "w={w}: {row:?}"
+            );
         }
-        assert!(!label(13, 0).contains("waves"), "no label below 14 columns");
+        // The form follows the stable room (CORE-R83), so it never changes with the beat.
+        for w in 14u16..=120 {
+            let (waves, quenched) = (label(w, 0), label(w, quench));
+            assert_eq!(
+                waves.replace("0.06", "0.45"),
+                quenched,
+                "w={w}: the readout flickers with the beat"
+            );
+        }
+        assert!(!label(13, 0).contains("b="), "no label below 14 columns");
+    }
+
+    #[test]
+    fn bz_core_r71_quench_is_the_caption() {
+        let (mut bz, _) = scene(Size::new(80, 24), 3);
+        assert_eq!(bz.caption(), None, "waves: the title's own mechanism");
+        bz.step = WAVES_STEPS;
+        assert_eq!(bz.caption(), Some("light quench"));
+        assert_eq!(META.captions, &["light quench"]);
+        bz.step = CYCLE_STEPS;
+        assert_eq!(bz.caption(), None, "the next cycle's waves");
     }
 
     impl Bz {
