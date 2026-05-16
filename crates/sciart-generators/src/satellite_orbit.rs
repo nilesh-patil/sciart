@@ -902,11 +902,32 @@ impl Generator for SatelliteOrbit {
         // sea never swallows or touches a letter.
         let (w, h) = (i32::from(self.size.width()), i32::from(self.size.height()));
         if h >= 16 {
+            // Placed chips as (row, first column, last column), chip cells included: a
+            // label that would touch one moves a row up or down, or to the satellite's
+            // left, and is dropped if none of those is clear (SAT-A13).
+            // Blank cells kept between two chips on one row.
+            const LABEL_GAP: i32 = 4;
+            let mut placed = [(0, 0, -1); 5];
+            let mut n = 0;
             for &(kind, x, y) in self.labels.iter().flatten() {
                 let text = kind.label();
-                let gutter = x + 2;
-                if (1..h - 1).contains(&y) && gutter + (text.len() as i32) < w - 1 {
-                    draw::label(canvas, gutter, y, text, Ink::new(Role::Text, 210));
+                let len = text.len() as i32;
+                let clear = |gx: i32, gy: i32, placed: &[(i32, i32, i32)]| {
+                    (1..h - 1).contains(&gy)
+                        && gx >= 1
+                        && gx + len < w - 1
+                        && placed.iter().all(|&(py, a, b)| {
+                            py != gy || gx + len + LABEL_GAP < a || gx - 1 > b + LABEL_GAP
+                        })
+                };
+                let spots = [(x + 2, y), (x + 2, y - 1), (x + 2, y + 1), (x - 2 - len, y)];
+                if let Some(&(gx, gy)) = spots.iter().find(|&&(gx, gy)| clear(gx, gy, &placed[..n]))
+                {
+                    draw::label(canvas, gx, gy, text, Ink::new(Role::Text, 210));
+                    if n < placed.len() {
+                        placed[n] = (gy, gx - 1, gx + len);
+                        n += 1;
+                    }
                 }
             }
         }
@@ -1397,6 +1418,27 @@ mod tests {
             }
         }
         assert!(pairs > 50, "{pairs} face-on pairs");
+    }
+
+    #[test]
+    fn sat_a13_class_labels_never_touch_each_other() {
+        let (mut g, mut ctx) = scene(120, 40, 42);
+        for c in frames(&mut g, &mut ctx, 12.0) {
+            for l in c.to_lines() {
+                // Two labels on one row are at least one blank cell apart beyond their
+                // chips: no "ISS GEO" run-together.
+                let words: Vec<&str> = l.split_whitespace().collect();
+                for pair in words.windows(2) {
+                    let names = ["ISS", "GEO", "GPS", "Molniya", "Starlink"];
+                    let both = names.contains(&pair[0]) && names.contains(&pair[1]);
+                    if both {
+                        let gap =
+                            l.find(pair[1]).unwrap() - (l.find(pair[0]).unwrap() + pair[0].len());
+                        assert!(gap >= 5, "labels too close: {l:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

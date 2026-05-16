@@ -51,6 +51,13 @@ const TEFF: f64 = 5050.0;
 /// below this (≈ 3200 K) is not drawn, so the edge and the silhouette's rim fade out
 /// rather than ending in a dark red ring.
 const STAR_MIN_I: f64 = 0.05;
+/// The disc is coloured by the brightness temperature of `I^LIMB_GAIN`: the real limb
+/// (≈ 4000 K) is too little cooler to read at this size, so the darkening is drawn 3×
+/// as strong in log intensity (≈ 2850 K at the limb), as `solar_system` does. **Exaggerated**.
+const LIMB_GAIN: f64 = 3.0;
+/// The planet's night side: a faint grey disc, so the planet reads as a whole round body
+/// off the star, never as a bare crescent (TRAN-A6).
+const NIGHT_INK: Ink = Ink::new(Role::Dim, 60);
 
 /// Flux table over `d ∈ [0, 1 + P]` and the radial quadrature steps per entry.
 const FLUX_N: usize = 256;
@@ -229,23 +236,33 @@ impl ExoplanetTransit {
     /// of its mean intensity, so edges are anti-aliased by cooling and dimming, as in a
     /// slightly blurred photograph; `None` below `STAR_MIN_I` (TRAN-A7, TRAN-A9).
     fn star_ink(nx: f64, ny: f64, lit: f64) -> Option<Ink> {
-        let i = Self::star_intensity(nx, ny)? * lit;
-        (i >= STAR_MIN_I).then(|| ink::blackbody(brightness_temperature(TEFF, i)))
+        let i = Self::star_intensity(nx, ny)?;
+        let colour = i.powf(LIMB_GAIN) * lit;
+        (i * lit >= STAR_MIN_I).then(|| ink::blackbody(brightness_temperature(TEFF, colour)))
     }
 
     /// The planet's lit-side ink for a normal `(nx, ny)` (clamped onto the disc, for rim
     /// pixels whose centre lies just outside it) and the unit star→planet vector `r`,
-    /// dimmed by the share `cover` of the pixel the planet fills; `None` on the night side
-    /// (TRAN-A6, TRAN-A9).
+    /// dimmed by the share `cover` of the pixel the planet fills; the faint `NIGHT_INK` on
+    /// the night side, so the whole disc shows (TRAN-A6, TRAN-A9).
     fn planet_ink(nx: f64, ny: f64, r: [f64; 3], cover: f64) -> Option<Ink> {
         let k = nx.hypot(ny).max(1.0);
         let (nx, ny) = (nx / k, ny / k);
         let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
         let cos = -(nx * r[0] + ny * r[1] + nz * r[2]);
         let gain = (cover / PLANET_FULL_COVER).min(1.0);
-        (cos > 0.0 && cover >= PLANET_MIN_COVER)
-            .then(|| visible(Ramp::Ice, (0.25 + 0.4 * cos) * gain))
-            .flatten()
+        if cover < PLANET_MIN_COVER {
+            return None;
+        }
+        let night = || {
+            let level = f64::from(NIGHT_INK.level) * gain;
+            (level >= ink::MIN_VISIBLE_LEVEL).then(|| Ink::new(NIGHT_INK.role, ink::level(level)))
+        };
+        if cos > 0.0 {
+            visible(Ramp::Ice, (0.25 + 0.4 * cos) * gain).or_else(night)
+        } else {
+            night()
+        }
     }
 
     fn strip_y(&self, s: Strip, f: f64) -> f64 {
@@ -669,7 +686,7 @@ mod tests {
 
     #[test]
     fn tran_a7_star_is_true_colour_at_the_brightness_temperature_of_the_law() {
-        // Teff at the centre, falling with I(μ) by Wien to ≈ 4000 K at the limb.
+        // Teff at the centre, falling with I(μ)^LIMB_GAIN by Wien to ≈ 2850 K at the limb.
         let kelvin =
             |r: f64| ink::blackbody_kelvin(ExoplanetTransit::star_ink(r, 0.0, 1.0).unwrap());
         // One Blackbody level is 1.3 % in temperature.
@@ -678,10 +695,10 @@ mod tests {
         for k in 0..=100 {
             let r = f64::from(k) / 100.0;
             let i = limb_darkening((1.0 - r * r).max(0.0).sqrt(), (U1, U2));
-            let want = brightness_temperature(TEFF, i);
+            let want = brightness_temperature(TEFF, i.powf(LIMB_GAIN));
             assert!(near(kelvin(r), want), "r={r}: {} vs {want}", kelvin(r));
         }
-        assert!((3900.0..4100.0).contains(&kelvin(1.0)), "{}", kelvin(1.0));
+        assert!((2750.0..2950.0).contains(&kelvin(1.0)), "{}", kelvin(1.0));
         // Cooler, and so darker and redder, by mid-radius, not flat until the limb.
         assert!(kelvin(0.7) < 0.97 * TEFF, "{}", kelvin(0.7));
         // Drawn: along a radius the level never rises, and the disc ends within a pixel of
@@ -831,7 +848,8 @@ mod tests {
                         .get(xx, yy)
                         .filter(|i| i.role == Role::Ramp(Ramp::Ice));
                     let (nx, ny) = ((fx - x) / rp, (fy - y) / rp);
-                    let day = ExoplanetTransit::planet_ink(nx, ny, r_hat, 1.0).is_some();
+                    let day = ExoplanetTransit::planet_ink(nx, ny, r_hat, 1.0)
+                        .is_some_and(|i| i.role == Role::Ramp(Ramp::Ice));
                     if cover >= 0.5 && day {
                         assert!(got.is_some(), "φ={phi} ({xx}, {yy}) cover {cover}");
                     }

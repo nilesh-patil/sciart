@@ -10,19 +10,19 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                  ==                                            
-                                  ==    |                                       
-                                  ==   ||                                       
-                                  ==   ||                                       
-                                  ==   ||                                       
-                                  ==   ||        ooo                            
-                         ooooooooo==   ||   oooooooooooo                        
-                         oo**********o || o**********ooo                        
-=========================oooooo*ooooooo||ooo*oooooooooo=========================
-=================================o=============o================================
- Rocket launch - stages drop away ==============================================
+                               ===                                              
+                               ===                                              
+                               = =     ||                                       
+                               ===     |||                                      
+                               ===     |||                                      
+                               ===     |||                                      
+                               ===     ===                                      
+                               = =     |||                                      
+                               ===     |||             ooooo                    
+                oooooooooooo   ===     |||          ooooooooooooo               
+               oooooooooooooooo===     |||     oooooooooooooooooo               
+                ooooo*ooooooooo=o=o    |||   ooooooooooooo*oooooo               
+               ooooooooooo**********o  |||o***********oooooooooo                
+================ooooooooooooooooooooo==|||oo*ooooooooooooooooooo================
+============================o=======================oo======o===================
+ Rocket launch - stage drops away ==============================================

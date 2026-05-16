@@ -141,11 +141,8 @@ const RIM_PX: f64 = 0.8;
 const SPICULE_PER_R: f64 = 0.035;
 const SPICULE_PX: f64 = 1.6;
 const ANNULUS_PX: f64 = 2.6;
-/// The rim breaks where the spicule wave falls under `RIM_BREAK.0` below `RIM_WIDE`
-/// columns and under `RIM_BREAK.1` from there, so the chromosphere reads as travelling
-/// fuzz rather than a drawn outline; a large disc's rim is broken less.
-const RIM_WIDE: usize = 120;
-const RIM_BREAK: (f64, f64) = (-0.35, -0.6);
+/// Outward falloff exponent of the chromosphere's glow above the rim (SUN-A10).
+const RIM_FALLOFF: f64 = 1.3;
 /// ASCII rim: the cells holding a pixel within 1 px of the limb. Pixel-centre distances
 /// step by < 1 px, so every radius meets one and the ring closes.
 const ASCII_RIM_PX: f64 = 1.0;
@@ -157,6 +154,12 @@ const ASCII_RIM_PX: f64 = 1.0;
 const V_RIM: f64 = 0.55;
 const V_SPICULE: (f64, f64) = (0.50, 0.42);
 const V_LOOP: f64 = 0.60;
+/// The prominence sheet under the outer arch (SUN-A11): its value from foot to arch, the
+/// shimmer's amplitude and its angular speed (rad/s) and wavenumber along the loop, so the
+/// plasma visibly streams in a deeper crimson than the arches drawn over it.
+const V_FILL: (f64, f64) = (0.40, 0.52);
+const FILL_SHIMMER: f64 = 0.04;
+const FILL_WAVE: (f64, f64) = (2.2, 9.0);
 const V_KNOT: f64 = 0.28;
 /// ASCII: an off-disc cell is a loop `.` from this value up (above every rim and
 /// spicule value) ...
@@ -1014,29 +1017,21 @@ impl View {
         }
     }
 
-    /// The rim and the flickering spicules, in pixels the disc left empty. Spicules
-    /// grow out of the rim: a pixel more than 1 px above it lights only if the next
-    /// pixel inward is lit, so no speck floats free of the limb.
+    /// The chromosphere (SUN-A10): an unbroken rim, brightest on the limb and fading
+    /// smoothly outward through the spicule layer, its brightness travelling round the
+    /// limb in slow waves, a glowing ring rather than spikes. A pixel more than 1 px above
+    /// the rim lights only if the next pixel inward is lit, so no speck floats free.
     fn shade_rim(&mut self, t: f64, phase: [f64; 2]) {
         let (n1, n2) = self.lobes;
-        let spicule = spicule_px(self.r);
-        let gap = if self.w < RIM_WIDE {
-            RIM_BREAK.0
-        } else {
-            RIM_BREAK.1
-        };
+        let reach = spicule_px(self.r).max(1e-6);
         for rp in &self.rim {
             let above = f64::from(rp.above);
             let th = f64::from(rp.theta);
             let wave = 0.5 * (n1 * th + 1.3 * t + phase[0]).sin_det()
                 + 0.5 * (n2 * th - 0.9 * t + phase[1]).sin_det();
             let v = if above <= RIM_PX {
-                if wave < gap {
-                    continue;
-                }
                 V_RIM * (0.9 + 0.1 * wave)
             } else {
-                let height = spicule * wave.max(0.0);
                 let up = above - RIM_PX;
                 let (ix, iy) = (i32::from(rp.inward.0), i32::from(rp.inward.1));
                 let rooted = up <= 1.0
@@ -1044,10 +1039,12 @@ impl View {
                         .pixels
                         .get(ix, iy)
                         .is_some_and(|i| i.role != Role::Background);
-                if up > height || !rooted {
+                let fall = (1.0 - up / reach).max(0.0).powf(RIM_FALLOFF);
+                let v = V_SPICULE.0 * fall * (0.8 + 0.2 * wave);
+                if !rooted || 255.0 * v < ink::MIN_VISIBLE_LEVEL {
                     continue;
                 }
-                ease::lerp(V_SPICULE.0, V_SPICULE.1, up / spicule)
+                v
             };
             self.pixels
                 .set(i32::from(rp.x), i32::from(rp.y), h_alpha_ink(v));
@@ -1188,9 +1185,21 @@ impl View {
 
     /// Cool loops: bright above the limb with falling rain knots; on the disc their
     /// elevated arches absorb as one short dark filament (only the loops `loop_shown`).
-    fn draw_loops(&mut self, regions: &[Region], b0: f64) {
+    fn draw_loops(&mut self, regions: &[Region], b0: f64, t: f64) {
         for region in regions {
             let view = view_of(region.lon, b0);
+            // The outer arch's sheet first, so the arches and their rain glow over it.
+            if self.loop_shown(0, region.loops[0].apex) {
+                let steps = fill_steps(region.loops[0].apex, self.r);
+                for (u, f, q) in fill_points(&region.loops[0], &view, steps) {
+                    if classify(q) == Sample::Emission {
+                        let (sx, sy) = self.screen(q);
+                        let shimmer = (FILL_WAVE.0 * t - FILL_WAVE.1 * u + 3.0 * f).sin_det();
+                        let v = ease::lerp(V_FILL.0, V_FILL.1, f) + FILL_SHIMMER * shimmer;
+                        self.glow(sx.floor() as i32, sy.floor() as i32, h_alpha_ink(v));
+                    }
+                }
+            }
             for (k, lp) in region.loops.iter().enumerate() {
                 if !self.loop_shown(k, lp.apex) {
                     continue;
@@ -1234,6 +1243,32 @@ impl View {
             }
         }
     }
+}
+
+/// Steps up the outer arch's sheet from the surface to the arch, for an apex `apex` R☉
+/// on a disc of `r_px` pixels: about two per pixel of height (SUN-A11).
+pub(crate) fn fill_steps(apex: f64, r_px: f64) -> usize {
+    ((2.0 * apex * r_px).ceil() as usize).clamp(2, 64)
+}
+
+/// The prominence sheet under loop `lp` (SUN-A11): for every loop sample, points from
+/// its foot on the surface (the sample pulled in radially to R☉) up to the sample, in
+/// `steps` steps, as `(u along the loop, f up the sheet, observer-frame point)`.
+fn fill_points<'a>(
+    lp: &'a Loop,
+    view: &'a Projector,
+    steps: usize,
+) -> impl Iterator<Item = (f64, f64, [f64; 3])> + 'a {
+    let last = (LOOP_SAMPLES - 1) as f64;
+    lp.pts.iter().enumerate().flat_map(move |(i, &p)| {
+        let n = norm(p).max(1e-9);
+        let foot = [p[0] / n, p[1] / n, p[2] / n];
+        (1..=steps).map(move |j| {
+            let f = j as f64 / steps as f64;
+            let q = [0, 1, 2].map(|a| foot[a] + (p[a] - foot[a]) * f);
+            (i as f64 / last, f, view.rotate(q))
+        })
+    })
 }
 
 /// A spot as seen this frame (observer frame and pixels).
@@ -1392,7 +1427,7 @@ impl SolarSurface {
         v.shade_disc(&spots[..n]);
         v.shade_rim(self.t, self.spicule_phase);
         if detailed && self.show_loops && self.show_regions {
-            v.draw_loops(&self.regions, self.b0);
+            v.draw_loops(&self.regions, self.b0, self.t);
         }
         v.sample_slit();
     }
@@ -2254,6 +2289,23 @@ mod tests {
                 }
             }
         }
+        // ... or on the outer arch's prominence sheet (SUN-A11).
+        for region in &on.regions {
+            if !v.loop_shown(0, region.loops[0].apex) {
+                continue;
+            }
+            let view = view_of(region.lon, on.b0);
+            let steps = fill_steps(region.loops[0].apex, v.r);
+            for (_, _, q) in fill_points(&region.loops[0], &view, steps) {
+                if classify(q) == Sample::Emission {
+                    let (sx, sy) = v.screen(q);
+                    let (x, y) = (sx.floor() as i32, sy.floor() as i32);
+                    if (0..v.w as i32).contains(&x) && (0..rows as i32).contains(&y) {
+                        near[y as usize * v.w + x as usize] = true;
+                    }
+                }
+            }
+        }
         let (mut emitted, mut absorbed) = (0, 0);
         for y in 0..rows as i32 {
             for x in 0..v.w as i32 {
@@ -2329,8 +2381,9 @@ mod tests {
         );
         let values: Vec<f64> = lit.into_iter().map(ink::seq_value).collect();
         for &v in &values {
+            // (The prominence sheet under the outer arch, SUN-A11, is dimmer crimson.)
             assert!(
-                (V_RIM + 0.03..=V_LOOP + V_KNOT + 0.01).contains(&v),
+                (V_FILL.0 - FILL_SHIMMER - 0.01..=V_LOOP + V_KNOT + 0.01).contains(&v),
                 "loop value {v}"
             );
         }
@@ -2730,26 +2783,60 @@ mod tests {
     }
 
     #[test]
-    fn sun_rim_breaks_into_fuzz_at_every_size() {
-        // At 200×50 as at 80×24, some rim pixels drop out where the spicule wave is low,
-        // so the chromosphere never reads as a drawn outline.
+    fn sun_a11_prominences_are_filled_sheets_that_stream() {
+        // Under the outer arch, the sheet lights the pixels between the arch and the
+        // limb: many more loop pixels than the arches alone, and they change over time.
+        let (on, _) = scene(200, 50);
+        let count = |s: &SolarSurface| clear_of_the_limb(s).len();
+        assert!(count(&on) >= 12);
+        // Sheet values stay under the arches (so they read over it), above the floor.
+        assert!(V_FILL.1 + FILL_SHIMMER < V_LOOP);
+        assert!(255.0 * (V_FILL.0 - FILL_SHIMMER) > 3.0 * ink::MIN_VISIBLE_LEVEL);
+        assert!(fill_steps(0.3, 46.0) >= 2 && fill_steps(10.0, 1e6) == 64);
+        // Streaming: the same frame a quarter second on differs in its sheet pixels.
+        let (mut s, mut ctx) = scene(200, 50);
+        let before: Vec<Ink> = clear_of_the_limb(&s);
+        s.update(0.25, &mut ctx);
+        let after: Vec<Ink> = clear_of_the_limb(&s);
+        assert_ne!(before, after);
+    }
+
+    #[test]
+    fn sun_a10_the_chromosphere_is_a_smooth_ring_fading_outward() {
+        // At 200×50 as at 80×24: every rim pixel is lit (no breaks, no spikes), and above
+        // the rim the glow never brightens outward along a radius.
         for (w, h) in [(200, 50), (80, 24)] {
             let mut ctx = Ctx::new(11, Size::new(w, h));
             let mut s = SolarSurface::new();
             s.resize(Size::new(w, h), &mut ctx);
+            s.show_loops = false;
             s.rasterise(true);
-            let rim = s.view.rim.iter().filter(|rp| f64::from(rp.above) <= RIM_PX);
-            let (mut lit, mut all) = (0, 0);
-            for rp in rim {
-                all += 1;
-                lit += usize::from(
-                    s.view
-                        .pixels
-                        .get(i32::from(rp.x), i32::from(rp.y))
-                        .is_some_and(|i| i.role == Role::Ramp(Ramp::HAlpha)),
+            let v = &s.view;
+            let level = |x: u16, y: u16| {
+                v.pixels
+                    .get(i32::from(x), i32::from(y))
+                    .filter(|i| i.role == Role::Ramp(Ramp::HAlpha))
+                    .map(|i| i.level)
+            };
+            for rp in v.rim.iter().filter(|rp| f64::from(rp.above) <= RIM_PX) {
+                assert!(
+                    level(rp.x, rp.y).is_some(),
+                    "{w}x{h}: rim gap at {},{}",
+                    rp.x,
+                    rp.y
                 );
             }
-            assert!(lit < all && lit * 10 > all * 7, "{w}x{h}: {lit} of {all}");
+            for rp in v.rim.iter().filter(|rp| f64::from(rp.above) > RIM_PX + 1.0) {
+                if let (Some(out), Some(inn)) = (level(rp.x, rp.y), level(rp.inward.0, rp.inward.1))
+                {
+                    assert!(
+                        out <= inn,
+                        "{w}x{h}: {out} above {inn} at {},{}",
+                        rp.x,
+                        rp.y
+                    );
+                }
+            }
         }
     }
 

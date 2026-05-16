@@ -60,7 +60,7 @@ const ACC_TIME: f64 = 16.0;
 /// Closest spawn distance to a protostar (rows).
 const R_SPAWN_MIN: f64 = 3.0;
 /// Jet particles per second per freshly ignited star.
-const JET_RATE: f64 = 90.0;
+const JET_RATE: f64 = 45.0;
 /// e-folding time of jet activity after ignition (s): outflows weaken as accretion stops.
 const JET_DECAY: f64 = 9.0;
 /// Period of episodic ejection, which is what makes Herbig–Haro knots (s).
@@ -103,28 +103,38 @@ const ION_BAND: f64 = 0.025;
 /// stand as silhouettes), plus up to `LIMB` more a few pixels in from a lit face (limb
 /// brightening: the column reads as lit in 3-D, not as a cut-out). Rims: levels from barely
 /// lit to full light, and the light below which a rim pixel is plain dust.
-const DUST_LEVEL: (f64, f64) = (0.0, 28.0);
-const LIMB: f64 = 24.0;
-const RIM_LEVEL: (f64, f64) = (60.0, 250.0);
+const DUST_LEVEL: (f64, f64) = (0.0, 36.0);
+const LIMB: f64 = 56.0;
+/// Faces lit less than this (of full) do not brighten their limb.
+const LIMB_FROM: f64 = 0.5;
+const RIM_LEVEL: (f64, f64) = (40.0, 250.0);
 const RIM_MIN: f64 = 0.08;
 /// A rim is lit by `smoothstep` of `n̂·d̂` from `RIM_LIT.0` to `RIM_LIT.1` (full); `n̂` is
 /// the outward normal of the pillar's 7 × 7-smoothed outline. The dark end lies past
 /// grazing, so faces edge-on to the source keep a dim rim: the diffuse ionising field and
 /// the photoevaporative flow light them too (NUR-A4).
-const RIM_LIT: (f64, f64) = (-0.2, 0.8);
+const RIM_LIT: (f64, f64) = (-0.1, 0.9);
 /// An ionisation front is brightest at the tip facing the source and fades down the
 /// flanks to this share of it at the base.
-const RIM_BASE: f64 = 0.55;
+const RIM_BASE: f64 = 0.4;
 /// Pillar outline, as fractions of the half-width: lobes and necks (long periods, so the
 /// rim's normal turns slowly and never zips, NUR-A4) and fine roughness.
 const LOBE: f64 = 0.3;
 /// Pillar widths scale with the terminal width, but never below this many columns' worth.
 const MIN_SPAN: f64 = 110.0;
 const ROUGH: f64 = 0.02;
+/// Erosion (NUR-A7): each edge is displaced by value noise along the column, two octaves
+/// of `EROSION_BUMPS` bumps per pillar length at these amplitudes (fractions of the local
+/// half-width), so the flanks are ragged with bays and fingers, not a smooth sausage; the
+/// dome is roughened by the same noise.
+const EROSION: (f64, f64) = (0.34, 0.16);
+const EROSION_BUMPS: (f64, f64) = (9.0, 26.0);
 /// Half-width of the outline smoothing (pixels), the light of a rim's second pixel, and
 /// how deep (pixels) the limb brightening reaches.
 const RIM_REACH: i32 = 3;
-const RIM_INNER: f64 = 0.45;
+/// A rim is a single bright pixel with only a faint second one: a thin ionisation front,
+/// not an outline.
+const RIM_INNER: f64 = 0.15;
 const LIMB_REACH: usize = 5;
 /// Dust texture: value-noise lattice spacings (pixels) of its two octaves.
 const TEX_CELL: (f64, f64) = (6.0, 2.5);
@@ -327,9 +337,18 @@ impl Pillar {
         let edge = |phase: f64, k: f64| {
             half * (1.0
                 + LOBE * grow * (TAU * s / self.lobe_period + phase).sin_det()
-                + ROUGH * (k * TAU * s / self.lobe_period + 2.0 * phase).sin_det())
+                + ROUGH * (k * TAU * s / self.lobe_period + 2.0 * phase).sin_det()
+                + self.erosion(phase, s))
         };
         (edge(self.lobe_phase.0, 7.0), edge(self.lobe_phase.1, 9.0))
+    }
+
+    /// Edge displacement (fraction of the half-width) at `s` for the edge seeded by
+    /// `phase`: two octaves of 1-D value noise in `[−1, 1]`, weighted by `EROSION`.
+    fn erosion(&self, phase: f64, s: f64) -> f64 {
+        let salt = phase.to_bits() ^ 0xE205_1011;
+        let n = |bumps: f64, salt: u64| 2.0 * value_noise(salt, s * bumps, 0.5, 1.0) - 1.0;
+        EROSION.0 * n(EROSION_BUMPS.0, salt) + EROSION.1 * n(EROSION_BUMPS.1, !salt)
     }
 }
 
@@ -570,8 +589,10 @@ impl StellarNursery {
         if w == 0 || ph == 0 {
             return;
         }
-        // How far down its pillar each dust pixel lies (0 at the head, 1 at the base).
+        // How far down its pillar each dust pixel lies (0 at the head, 1 at the base), and
+        // each dust pixel's limb brightening, added once the rims are known.
         let mut along = vec![1.0_f32; w * ph];
+        let mut limbs = vec![0.0_f32; w * ph];
         let (wf, hf) = (w as f64, self.h as f64);
         for p in &self.pillars {
             let bottom = hf - 1.0;
@@ -601,7 +622,9 @@ impl StellarNursery {
                         continue;
                     }
                     let half = tip_half * (1.0 - d * d).sqrt();
-                    (half, half)
+                    // Roughen the dome with the flank noise, running on past the head.
+                    let rough = |phase: f64| 1.0 + 0.6 * p.erosion(phase, -0.3 * d);
+                    (half * rough(p.lobe_phase.0), half * rough(p.lobe_phase.1))
                 };
                 let c = centre(yf);
                 let x0 = (c - half_l).ceil().max(0.0);
@@ -676,11 +699,33 @@ impl StellarNursery {
                     self.dust[i] = ink::level(ease::lerp(RIM_LEVEL.0, RIM_LEVEL.1, lit * tip));
                     continue;
                 }
-                let limb = facing * (1.0 - (depth as f64 - 1.0) / LIMB_REACH as f64).max(0.0);
+                // Only well-lit faces brighten their limb: a grazing or shadowed face
+                // stays dust right up to the sky.
+                let lit_face = ((facing - LIMB_FROM) / (1.0 - LIMB_FROM)).max(0.0);
+                let limb = lit_face * (1.0 - (depth as f64 - 1.0) / LIMB_REACH as f64).max(0.0);
                 let tex = 0.65 * value_noise(self.tex_salt, x as f64, y as f64, TEX_CELL.0)
                     + 0.35 * value_noise(!self.tex_salt, x as f64, y as f64, TEX_CELL.1);
-                self.dust[i] =
-                    ink::level(ease::lerp(DUST_LEVEL.0, DUST_LEVEL.1, tex) + LIMB * limb * tip);
+                self.dust[i] = ink::level(ease::lerp(DUST_LEVEL.0, DUST_LEVEL.1, tex));
+                limbs[i] = (LIMB * limb * tip) as f32;
+            }
+        }
+        // The limb glows only behind a well-lit rim: an eroded bay facing the source but
+        // hidden from it by the rest of the column stays dark dust.
+        let strong = RIM + (LIMB_FROM * f64::from(255 - RIM)) as u8;
+        let r = LIMB_REACH;
+        for y in 0..ph {
+            for x in 0..w {
+                let i = y * w + x;
+                if limbs[i] <= 0.0 || self.mask[i] != DUST {
+                    continue;
+                }
+                let behind_rim = (y.saturating_sub(r)..=(y + r).min(ph - 1)).any(|ny| {
+                    (x.saturating_sub(r)..=(x + r).min(w - 1))
+                        .any(|nx| self.mask[ny * w + nx] >= strong)
+                });
+                if behind_rim {
+                    self.dust[i] = ink::level(f64::from(self.dust[i]) + f64::from(limbs[i]));
+                }
             }
         }
     }

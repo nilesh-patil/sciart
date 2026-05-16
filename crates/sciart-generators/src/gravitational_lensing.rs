@@ -67,8 +67,8 @@ const ARMS: f64 = 0.55;
 /// Lens light: a Sérsic n = 2 core with effective radius `LENS_RE` θE and centre
 /// `LENS_PEAK`, plus a faint `r⁻²` halo, the sum tapered to zero between `FADE.0` and
 /// `FADE.1` θE, inside the critical curve, so a dark gap is left for the Einstein ring
-/// (stylised, SPEC-002). Below the faintest visible level it is halftoned (LENS-A8), so
-/// the glow fades out instead of ending on an edge.
+/// (stylised, SPEC-002). The taper brings it smoothly down to the faintest visible level,
+/// where it stops (LENS-A8): a soft glow into the ramp's darkest red, with no stipple.
 const LENS_RE: f64 = 0.2;
 const LENS_PEAK: f64 = 1.5;
 const HALO_PEAK: f64 = 0.06;
@@ -146,20 +146,11 @@ fn faintest_visible() -> f64 {
     knee * (level / 255.0 * (white / knee).asinh()).sinh()
 }
 
-/// Halftone light fainter than `faintest` (the value of the lowest visible level) with an
-/// ordered 4 × 4 Bayer threshold at node `(i, j)`: kept at `faintest` where
-/// `v / faintest` exceeds it, else dropped, so a fading glow thins out into an even dot
-/// pattern instead of stopping on an edge or turning to grain (LENS-A8).
-fn halftone(v: f64, faintest: f64, (i, j): (usize, usize)) -> f64 {
-    const BAYER: [[u8; 4]; 4] = [[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]];
-    let threshold = (f64::from(BAYER[j % 4][i % 4]) + 0.5) / 16.0;
-    if v >= faintest {
-        v
-    } else if v > threshold * faintest {
-        faintest
-    } else {
-        0.0
-    }
+/// Light fainter than `faintest` (the value of the lowest visible level) is dropped: the
+/// taper has already brought the glow down to it, so it ends at the ramp's darkest shade
+/// rather than on a bright edge, and no dither is needed (LENS-A8).
+fn floor_cut(v: f64, faintest: f64) -> f64 {
+    if v >= faintest { v } else { 0.0 }
 }
 
 /// The background field: `FIELD` exponential ellipses stamped into a periodic texture.
@@ -353,11 +344,10 @@ impl Generator for GravitationalLensing {
         self.beta.clear();
         let thetas = self.node_thetas();
         let faintest = faintest_visible();
-        let lw = usize::from(lattice.width());
-        for (k, ((tx, ty), l)) in thetas.zip(self.lens.as_mut_slice()).enumerate() {
+        for ((tx, ty), l) in thetas.zip(self.lens.as_mut_slice()) {
             let (bx, by) = source_plane((tx, ty));
             self.beta.push((bx as f32, by as f32));
-            *l = halftone(lens_light(tx.hypot(ty)), faintest, (k % lw, k / lw)) as f32;
+            *l = floor_cut(lens_light(tx.hypot(ty)), faintest) as f32;
         }
         self.raster();
     }
@@ -539,17 +529,17 @@ mod tests {
     }
 
     #[test]
-    fn lens_a8_the_lens_glow_fades_out_through_a_stipple() {
+    fn lens_a8_the_lens_glow_fades_smoothly_to_the_floor() {
         let size = Size::new(200, 50);
         let mut g = scene(size);
         g.field.fill(0.0);
         g.pass_t = 0.0; // no hero
         g.raster();
         let (c, te) = (g.centre, g.theta_e_px);
-        // Share of lens-lit pixels in thin annuli: from solid, through a thinning
-        // stipple, to none, without a jump from solid to dark.
+        // Share of lens-lit pixels in thin annuli, and their mean level: solid, then none,
+        // the level falling annulus by annulus to near the floor before the glow ends.
         let share = |r0: f64| {
-            let (mut lit, mut all) = (0, 0);
+            let (mut lit, mut all, mut sum) = (0, 0, 0.0);
             let px = g.pixels.pixel_size();
             for y in 0..i32::from(px.height()) {
                 for x in 0..i32::from(px.width()) {
@@ -557,35 +547,46 @@ mod tests {
                     let r = dx.hypot(dy) / te;
                     if (r0..r0 + 0.025).contains(&r) {
                         all += 1;
-                        lit += usize::from(
-                            g.pixels.get(x, y).unwrap().role == Role::Ramp(Ramp::Ember),
-                        );
+                        let ink = g.pixels.get(x, y).unwrap();
+                        if ink.role == Role::Ramp(Ramp::Ember) {
+                            lit += 1;
+                            sum += f64::from(ink.level);
+                        }
                     }
                 }
             }
-            lit as f64 / f64::from(all.max(1))
+            (
+                f64::from(lit) / f64::from(all.max(1)),
+                sum / f64::from(lit.max(1)),
+            )
         };
-        // Annuli 0.025 θE wide from 0.2 θE: a solid core, a halftone fade, then a dark
-        // gap from 0.65 θE to the critical curve that the Einstein ring owns.
-        let shares: Vec<f64> = (0..30).map(|k| share(0.2 + 0.025 * f64::from(k))).collect();
-        assert!(shares[0] > 0.99, "{shares:?}");
-        assert!(shares[18..].iter().all(|&s| s == 0.0), "no gap: {shares:?}");
-        let between = shares.iter().filter(|&&s| (0.1..0.9).contains(&s)).count();
-        assert!(between >= 3, "hard edge: {shares:?}");
-        for w in shares.windows(2) {
-            assert!(w[1] <= w[0] + 0.1, "{shares:?}");
+        // Annuli 0.025 θE wide from 0.2 θE: a solid core fading, then a dark gap from
+        // 0.65 θE to the critical curve that the Einstein ring owns.
+        let rings: Vec<(f64, f64)> = (0..30).map(|k| share(0.2 + 0.025 * f64::from(k))).collect();
+        assert!(rings[0].0 > 0.99, "{rings:?}");
+        assert!(
+            rings[18..].iter().all(|&(s, _)| s == 0.0),
+            "no gap: {rings:?}"
+        );
+        // No stipple: an annulus is lit all round or not at all (bar the one the edge
+        // crosses), and the level only falls outward.
+        let partial = rings
+            .iter()
+            .filter(|&&(s, _)| (0.1..0.9).contains(&s))
+            .count();
+        assert!(partial <= 1, "stipple: {rings:?}");
+        let lit: Vec<f64> = rings.iter().filter(|r| r.0 > 0.0).map(|r| r.1).collect();
+        for w in lit.windows(2) {
+            assert!(w[1] <= w[0] + 1.0, "{lit:?}");
         }
-        // The fade is an ordered halftone, not grain: every 4 × 4 block of a uniform
-        // light `k/16` of the faintest level keeps exactly `k` dots.
-        for k in 0..=16 {
-            for (ox, oy) in [(0, 0), (4, 8), (13, 2)] {
-                let v = (f64::from(k) - 0.25).max(0.0) / 16.0;
-                let kept = (0..16)
-                    .filter(|&n| halftone(v, 1.0, (ox + n % 4, oy + n / 4)) > 0.0)
-                    .count();
-                assert_eq!(kept, k as usize, "k={k} at {ox},{oy}");
-            }
-        }
+        // It ends close to the floor, not on a bright edge.
+        let last = *lit.last().unwrap();
+        assert!(
+            last <= ink::MIN_VISIBLE_LEVEL + 10.0,
+            "ends at level {last}"
+        );
+        assert_eq!(floor_cut(0.5, 1.0), 0.0);
+        assert_eq!(floor_cut(1.5, 1.0), 1.5);
     }
 
     #[test]

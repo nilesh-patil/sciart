@@ -337,6 +337,19 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
 /// the coring by day, imaging through the afternoon, the UHF relay at the evening
 /// orbiter pass with the Sun a few degrees up, then sleep through the night, as a real
 /// rover works (it does not drive in the dark).
+/// The rover's shadow (MR-A12): half its footprint (units), the longest it gets, how
+/// deep into the ground surface it darkens (pixel rows / 2) and by how much at full
+/// daylight.
+const SHADOW_HALF: f64 = 2.6;
+const SHADOW_MAX: f64 = 14.0;
+const SHADOW_ROWS: f64 = 3.0;
+const SHADOW_DEPTH: f64 = 0.5;
+/// Mastcam-Z's field of view while imaging (MR-A12): tilt range below the horizontal
+/// (rad), half-width, reach as a share of the frame width, and ink.
+const FOV_TILT: (f64, f64) = (0.05, 0.4);
+const FOV_HALF: f64 = 0.09;
+const FOV_REACH: f64 = 0.33;
+const FOV_INK: Ink = Ink::new(Role::Ramp(Ramp::Ice), 140);
 const DRIVE: f64 = 18.0;
 const DEPLOY: f64 = 3.0;
 const DRILL: f64 = 4.0;
@@ -375,6 +388,22 @@ const CRUISE: f64 = 1.6;
 const RAMP: f64 = 1.5;
 /// Distance covered in one drive phase.
 const DRIVE_DIST: f64 = CRUISE * (DRIVE - RAMP);
+
+/// The rover's shadow on the ground in world x, `(lo, hi)`, for the rover at `rover_x`,
+/// the Sun on the `toward` side (+1 right) at elevation `e` (rad): its footprint
+/// (`SHADOW_HALF` either side) stretched down-Sun by `BODY_V.1 / tan e`, at most
+/// `SHADOW_MAX` (MR-A12). `None` once the Sun is down.
+pub(crate) fn shadow_span(rover_x: f64, toward: f64, e: f64) -> Option<(f64, f64)> {
+    if e.is_nan() || e <= 0.0 {
+        return None;
+    }
+    let reach = (BODY_V.1 / e.tan()).min(SHADOW_MAX);
+    let tip = rover_x - toward * reach;
+    Some((
+        (rover_x - SHADOW_HALF).min(tip - SHADOW_HALF),
+        (rover_x + SHADOW_HALF).max(tip + SHADOW_HALF),
+    ))
+}
 
 pub(crate) fn sol_timeline() -> Timeline {
     Timeline::new(&PLAN)
@@ -1089,6 +1118,11 @@ impl MarsRover {
         self.light = 0.35 + 0.65 * sky.day;
         // Which way the near slopes must face to catch the Sun.
         let toward = if hour.sin_det() >= 0.0 { 1.0 } else { -1.0 };
+        // The rover's shadow on the ground (MR-A12): its body's top falls
+        // `BODY_V.1 / tan e` units down-Sun, so the shadow swings from one side at morning
+        // to the other through the afternoon and stretches toward sunset.
+        let shadow = shadow_span(self.rover_x(&w), toward, e);
+        let shade = SHADOW_DEPTH * sky.day;
         let size = self.px.pixel_size();
         let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
         for c in 0..pw {
@@ -1122,6 +1156,9 @@ impl MarsRover {
                         } else {
                             0.50 - 0.03 * depth.min(3.0) + 0.04 * n
                         };
+                        let shaded = shadow.is_some_and(|(lo, hi)| (lo..=hi).contains(&xn))
+                            && depth < SHADOW_ROWS;
+                        let base = if shaded { base * (1.0 - shade) } else { base };
                         ramp(Ramp::Ember, base * light)
                     }
                 };
@@ -1399,6 +1436,9 @@ impl MarsRover {
             Glyph::new('◘', 'o'),
             Ink::new(Role::Accent, 200),
         );
+        if beat.index == PH_IMAGE {
+            draw_fov(canvas, eye, fov_tilt(beat.progress), self.layout.w);
+        }
         // High-gain antenna: the X-band dish for direct-to-Earth links, parked; the relay
         // to the orbiter goes over the small UHF mast on the rear deck.
         let post = pose.body(HGA.0, HGA.1);
@@ -1612,6 +1652,36 @@ fn fill_box(canvas: &mut Canvas, view: &View, pose: &Pose, u: (f64, f64), v: (f6
 /// the rover so it passes behind it. Over the half-block picture the dot replaces the
 /// half block and `backdrop` puts the sky back behind it (CORE-R86), so the link shows by
 /// day as well as by night.
+/// Mastcam-Z's tilt (rad, below the horizontal) at `progress ∈ [0, 1)` through imaging
+/// (MR-A12): the camera steps down the scene and back up twice, a mosaic's rows.
+pub(crate) fn fov_tilt(progress: f64) -> f64 {
+    let u = 0.5 - 0.5 * (std::f64::consts::TAU * 2.0 * progress).cos_det();
+    FOV_TILT.0 + (FOV_TILT.1 - FOV_TILT.0) * u
+}
+
+/// The imaging camera's field of view (MR-A12): two faint dotted edges `FOV_HALF` either
+/// side of the tilt, out from the eye across a third of the frame, over sky and ground
+/// only. **Stylised**: a camera's view is invisible.
+fn draw_fov(canvas: &mut Canvas, eye: P2, tilt: f64, width: f64) {
+    let reach = FOV_REACH * width;
+    for a in [tilt - FOV_HALF, tilt + FOV_HALF] {
+        let (s, c) = a.sin_cos_det();
+        // Right and down in cells: x stretched by the cell aspect.
+        let end = (eye.0 + reach * c, eye.1 + reach * s / ASPECT);
+        let n = ((end.0 - eye.0).abs().max((end.1 - eye.1).abs()) / 2.0).min(200.0) as usize;
+        for i in 2..n {
+            let q = i as f64 / n as f64;
+            let (x, y) = (ease::lerp(eye.0, end.0, q), ease::lerp(eye.1, end.1, q));
+            if canvas
+                .get(x.round() as i32, y.round() as i32)
+                .is_some_and(|c| matches!(c.ch, ' ' | '▀' | '▄'))
+            {
+                plot(canvas, x, y, DOT, FOV_INK);
+            }
+        }
+    }
+}
+
 fn draw_beam(canvas: &mut Canvas, a: P2, o: P2) {
     let n = ((o.0 - a.0).abs().max((o.1 - a.1).abs()) / 3.0).min(200.0) as usize;
     for i in 1..n {
@@ -2096,6 +2166,38 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn mr_a12_the_shadow_swings_with_the_sun_and_the_camera_scans() {
+        // No shadow at night; by day it covers the footprint and stretches down-Sun,
+        // longer as the Sun sinks, capped.
+        assert!(shadow_span(10.0, 1.0, -0.1).is_none());
+        let (lo, hi) = shadow_span(10.0, 1.0, 0.8).unwrap();
+        assert!(lo < 10.0 - SHADOW_HALF - 0.5 && (hi - (10.0 + SHADOW_HALF)).abs() < 1e-9);
+        let (lo2, hi2) = shadow_span(10.0, -1.0, 0.8).unwrap();
+        assert!(hi2 > 10.0 + SHADOW_HALF + 0.5 && (lo2 - (10.0 - SHADOW_HALF)).abs() < 1e-9);
+        let len = |e: f64| {
+            let (a, b) = shadow_span(0.0, 1.0, e).unwrap();
+            b - a
+        };
+        assert!(len(0.2) > len(0.5) && len(0.5) > len(1.2));
+        assert!(len(0.01) <= SHADOW_MAX + 2.0 * SHADOW_HALF + 1e-9);
+        // The camera tilts through its range and back while imaging.
+        let tilts: Vec<f64> = (0..100).map(|i| fov_tilt(f64::from(i) / 100.0)).collect();
+        assert!(
+            tilts
+                .iter()
+                .all(|t| (FOV_TILT.0 - 1e-9..=FOV_TILT.1 + 1e-9).contains(t))
+        );
+        let (lo, hi) = tilts
+            .iter()
+            .fold((9.0f64, -9.0f64), |(a, b), &t| (a.min(t), b.max(t)));
+        assert!(hi - lo > 0.9 * (FOV_TILT.1 - FOV_TILT.0));
+        // Rendered: the field-of-view dots show only while imaging.
+        let fov = |t: f64| count_at(t, FOV_INK.role);
+        let image = DRIVE + DEPLOY + DRILL + STOW + 0.5 * IMAGE;
+        assert!(fov(image) > 5, "{}", fov(image));
     }
 
     #[test]

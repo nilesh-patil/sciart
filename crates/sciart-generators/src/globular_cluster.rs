@@ -81,6 +81,14 @@ const COMPANIONS: usize = 3;
 const COMPANION_R: f64 = 0.2;
 const GRAIN_TOP: u8 = 150;
 const GRAIN: Ink = Ink::new(Role::Star, 40);
+/// Motion streaks (GC-A10): each coloured star outside the bright glow trails a faint
+/// line back to where it was `TRAIL_T` N-body time units ago (≈ 1 s, a seventh of a
+/// crossing). **Stylised**: a long exposure; the eye sees no trails.
+const TRAIL_T: f64 = 0.4;
+const TRAIL: Ink = Ink::new(Role::Star, 26);
+const TRAIL_MAX_G: f64 = 0.12;
+/// Seconds per turn of the telescope round the cluster.
+const TURN: f64 = 48.0;
 const GLOW_RAMP: Role = Role::Ramp(Ramp::Starlight);
 /// Tone curve of the glow, in units of the Plummer central surface brightness: the asinh
 /// knee keeps the inner halo visible; white sits just below the centre's (blurred) value,
@@ -726,6 +734,21 @@ impl GlobularCluster {
                 class_ink(self.salt, k)
             };
             let (dx, dy) = Dots::from_cells(x, y);
+            // A faint streak back along its velocity over the last `TRAIL_T` (GC-A10), in
+            // the halo only: a long exposure that shows the orbits turning.
+            let v = [
+                self.cluster.vel[3 * k],
+                self.cluster.vel[3 * k + 1],
+                self.cluster.vel[3 * k + 2],
+            ];
+            let back = [0, 1, 2].map(|a| p[a] - TRAIL_T * v[a]);
+            if g < TRAIL_MAX_G
+                && ink.role == Role::Blackbody
+                && let Some((bx, by, _)) = proj.project(back, centre, self.scale)
+            {
+                let (tx, ty) = Dots::from_cells(bx, by);
+                self.dots.line(tx, ty - 0.5, dx, dy - 0.5, TRAIL);
+            }
             self.dots.plot(dx, dy - 0.5, ink);
             // Coloured stars are a 2 × 2 dot block: a lone braille dot is too thin to show
             // a colour, and they are the brighter stars; a turn-off star is one faint dot.
@@ -737,10 +760,11 @@ impl GlobularCluster {
         }
     }
 
-    /// The slowly turning, gently nodding telescope (SPEC-002 Motion).
+    /// The slowly turning, gently nodding telescope (SPEC-002 Motion): once round in
+    /// `TURN` s, so the halo visibly swings past the core within a minute (GC-A10).
     fn camera(&self) -> Camera {
         Camera {
-            yaw: TAU * self.t / 90.0,
+            yaw: TAU * self.t / TURN,
             pitch: 0.30 + 0.15 * (TAU * self.t / 67.0).sin_det(),
             distance: EYE,
         }
@@ -1278,6 +1302,56 @@ mod tests {
             }
         }
         assert!(grain > 40, "only {grain} grain cells");
+    }
+
+    #[test]
+    fn gc_a10_the_cluster_visibly_moves_between_frames_seconds_apart() {
+        const { assert!(TURN <= 60.0) };
+        let size = Size::new(120, 40);
+        let mut stage = Stage::new(build(), 42, size, GlyphMode::Unicode);
+        let frame = |stage: &mut Stage| -> Vec<(char, Ink)> {
+            stage
+                .render()
+                .cells()
+                .iter()
+                .map(|c| (c.ch, c.ink))
+                .collect()
+        };
+        for _ in 0..300 {
+            stage.step(SIM_DT);
+        }
+        let a = frame(&mut stage);
+        for _ in 0..(25 * 60) {
+            stage.step(SIM_DT);
+        }
+        let b = frame(&mut stage);
+        // Among the cells lit in either frame, most change: the halo swings round.
+        let lit = |c: &(char, Ink)| c.0 != ' ';
+        let either = a.iter().zip(&b).filter(|(x, y)| lit(x) || lit(y)).count();
+        let changed = a
+            .iter()
+            .zip(&b)
+            .filter(|(x, y)| (lit(x) || lit(y)) && x != y)
+            .count();
+        assert!(
+            changed * 2 > either,
+            "{changed} of {either} lit cells changed"
+        );
+        // Trails: the long exposure lights more of the halo than the stars alone.
+        let mut g = GlobularCluster::new();
+        g.resize(size, &mut Ctx::new(42, size));
+        let halo_dots = |g: &GlobularCluster| {
+            let d = g.dots.dot_size();
+            (0..i32::from(d.height()))
+                .flat_map(|y| (0..i32::from(d.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| g.dots.is_lit(x, y))
+                .count()
+        };
+        let with = halo_dots(&g);
+        g.cluster.vel.iter_mut().for_each(|v| *v = 0.0);
+        g.rasterise();
+        let without = halo_dots(&g);
+        assert!(with > without + 20, "{with} vs {without} lit dots");
     }
 
     #[test]
