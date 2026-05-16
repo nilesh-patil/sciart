@@ -1,6 +1,6 @@
 # SPEC-001: sciart-core
 
-**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R95 in M12
+**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R96 in M12
 
 Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
@@ -172,6 +172,7 @@ Three more semantic roles for fields (still never RGB, ADR-0004), and a tone-map
 ### Shared helpers lifted in the M12 closing review
 
 - **CORE-R92** `Glow::splat_bilinear(x, y, w)` adds `w` at a continuous *pixel* position (integers are pixel centres) split bilinearly over the four nearest pixels, weights `(1−fx)(1−fy), fx(1−fy), (1−fx)fy, fx·fy`. Off-buffer pixels are skipped, so the in-bounds share of `w` is conserved exactly when all four are on the buffer, and no pixel beyond distance 1 on either axis is touched; non-finite `x`, `y` or `w` deposit nothing. `Glow::values()` / `values_mut()` expose the row-major buffer for scene-side filters (a blur) between splatting and toning. Allocation-free (M12: galaxy_collision had a private copy; pulsar's beam rays and globular_cluster's glow used nearest-pixel `splat`, which quantised a moving source into spokes and stair steps).
+- **CORE-R96** `Glow::stroke(a, b, kernel, scale)` exposes the dot-space segment `a → b` by `splat`ting `kernel` at `scale` at the midpoints of `n = clamp(⌈len/2⌉, 1, 2048)` equal parts (one splat per pixel of length, a pixel being 2 dots), so the exposure per pixel of length does not depend on the length; a non-finite length draws nothing. `raster::STROKE_KERNEL` is the 3 × 3 stroke splat (centre 0.36, edges 0.12, corners 0.04; sum 1), and the `const fn raster::halo_kernel::<N>(r)` builds a round halo over the `(2r + 1)² = N` square, weights `(1 − d²/(r + ½)²)²` (1 at the centre, 0 outside radius `r + ½`; a wrong `N` fails the build). Allocation-free (M12: double_pendulum and three_body each had a private copy).
 
 ### Stellar discs (M12)
 

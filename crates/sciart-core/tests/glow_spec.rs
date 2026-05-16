@@ -183,3 +183,62 @@ proptest! {
  prop_assert!(g.values().iter().all(|v| v.is_finite()));
  }
 }
+
+// ---------------------------------------------------------------- CORE-R96
+
+#[test]
+fn core_r96_stroke_kernel_is_a_normalised_3x3_splat() {
+    let k = sciart_core::raster::STROKE_KERNEL;
+    let sum: f32 = k.iter().map(|&(_, _, w)| w).sum();
+    assert!((sum - 1.0).abs() < 1e-6, "{sum}");
+    assert!(k.iter().all(|&(dx, dy, _)| dx.abs() <= 1 && dy.abs() <= 1));
+    assert_eq!(k[0], (0, 0, 0.36));
+}
+
+#[test]
+fn core_r96_halo_kernel_is_round_and_falls_from_one_to_zero() {
+    const HALO: [(i32, i32, f32); 49] = sciart_core::raster::halo_kernel(3);
+    let w = |dx: i32, dy: i32| {
+        HALO.iter()
+            .find(|&&(x, y, _)| (x, y) == (dx, dy))
+            .map(|&(_, _, w)| w)
+            .expect("offset in the kernel")
+    };
+    assert_eq!(w(0, 0), 1.0);
+    // Symmetric under the square's eight symmetries, falling outward, 0 in the corners.
+    for (dx, dy) in [(1, 0), (2, 1), (3, 0), (2, 2)] {
+        let v = w(dx, dy);
+        for (x, y) in [(dx, dy), (-dx, dy), (dy, dx), (-dy, -dx), (dx, -dy)] {
+            assert_eq!(w(x, y), v);
+        }
+    }
+    assert!(w(0, 0) > w(1, 0) && w(1, 0) > w(2, 0) && w(2, 0) > w(3, 0));
+    assert!(w(3, 0) > 0.0);
+    assert_eq!(w(3, 3), 0.0);
+    let expect = (1.0 - 5.0 / (3.5f32 * 3.5)).powi(2);
+    assert!((w(2, 1) - expect).abs() < 1e-6);
+    let one: [(i32, i32, f32); 1] = sciart_core::raster::halo_kernel(0);
+    assert_eq!(one, [(0, 0, 1.0)]);
+}
+
+#[test]
+fn core_r96_stroke_exposes_one_splat_per_pixel_of_length() {
+    let point = [(0, 0, 1.0f32)];
+    // 20 dots = 10 pixels: ten splats of 1 along the row.
+    let mut g = Glow::new(Size::new(20, 4));
+    g.stroke((0.0, 2.0), (20.0, 2.0), &point, 1.0);
+    let total: f32 = g.values().iter().sum();
+    assert_eq!(total, 10.0);
+    // A zero-length stroke is one splat; a non-finite one draws nothing.
+    let mut g = Glow::new(Size::new(20, 4));
+    g.stroke((5.0, 2.0), (5.0, 2.0), &point, 2.0);
+    assert_eq!(g.values().iter().sum::<f32>(), 2.0);
+    let mut g = Glow::new(Size::new(20, 4));
+    g.stroke((0.0, 0.0), (f64::INFINITY, 1.0), &point, 1.0);
+    g.stroke((f64::NAN, 0.0), (1.0, 1.0), &point, 1.0);
+    assert!(g.values().iter().all(|&v| v == 0.0));
+    // A runaway segment is capped at 2048 splats, never a hang or a panic.
+    let mut g = Glow::new(Size::new(4, 2));
+    g.stroke((0.0, 0.0), (1e12, 0.0), &point, 1.0);
+    assert!(g.values().iter().sum::<f32>() <= 2048.0);
+}
