@@ -271,6 +271,11 @@ const ZOOM_IN: f64 = 2.5;
 /// it, so they keep `ZOOM_IN`.
 const ZOOM_TALL: f64 = 2.8;
 const TALL_ROWS: f64 = 20.0;
+/// Share of rows `[1, h − 1)` the fork's content is fitted to on tall views: the strand
+/// centre lines, leaving room for the 3–4-dot near strands.
+const FIT_FILL: f64 = 0.88;
+/// Bisection steps for the fitted zoom: 1.8/2⁷ ≈ 0.014 of zoom.
+const FIT_STEPS: usize = 7;
 const DOLLY: f64 = 3.0;
 
 /// The whole story state at one instant (DNA-A6).
@@ -534,8 +539,98 @@ pub(crate) struct Geo {
 }
 
 impl Geo {
+    /// The frame's geometry (DNA-A4). Views under `TALL_ROWS` rows follow the story's
+    /// zoom. Taller views fit their content instead: the largest zoom in
+    /// `1..=view.zoom(ZOOM_IN)` at which everything on screen (the four strands and the
+    /// helicase) fits `FIT_FILL` of rows `[1, h − 1)`, centred on them. The fork's opening
+    /// arms then pull the camera back as they reach the screen (the dolly), while an
+    /// intact stretch fills the frame. Both are pure functions of the view and `t`, so
+    /// resizes never desync them.
     pub fn new(view: &View, t: f64, snap: &Snapshot) -> Self {
-        Self::with_camera(view, camera(view, t, view.zoom(snap.zoom)), t, snap)
+        let z0 = view.zoom(snap.zoom);
+        if view.h < TALL_ROWS {
+            return Self::at_zoom(view, t, snap, z0, 0.0);
+        }
+        let avail = FIT_FILL * (view.h - 2.0);
+        let fits = |z: f64| {
+            Self::at_zoom(view, t, snap, z, 0.0)
+                .extent(view)
+                .is_none_or(|(top, bottom)| bottom - top <= avail)
+        };
+        // Bisect for the largest fitting zoom: the extent is not monotone in the zoom (the
+        // fork's arms leave the screen's left edge as it narrows), so this finds a
+        // fitting zoom near the largest one; zoom 1 always fits (`FIT_R`, DNA-A4).
+        let (mut lo, mut hi) = (1.0, view.zoom(ZOOM_IN));
+        if fits(hi) {
+            lo = hi;
+        } else {
+            for _ in 0..FIT_STEPS {
+                let mid = 0.5 * (lo + hi);
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        let geo = Self::at_zoom(view, t, snap, lo, 0.0);
+        let Some((top, bottom)) = geo.extent(view) else {
+            return geo;
+        };
+        let z = lo;
+        let dy = if bottom - top <= view.h - 3.0 {
+            (view.h - 1.0) / 2.0 - 0.5 * (top + bottom)
+        } else {
+            0.0
+        };
+        Self::at_zoom(view, t, snap, z, dy)
+    }
+
+    fn at_zoom(view: &View, t: f64, snap: &Snapshot, zoom: f64, dy: f64) -> Self {
+        let mut geo = Self::with_camera(view, camera(view, t, zoom), t, snap);
+        geo.k = view.scale * zoom;
+        geo.look_x = view.width / (2.0 * zoom);
+        geo.centre.1 += dy;
+        geo
+    }
+
+    /// Top and bottom row of everything drawn on screen: the four backbones (sampled
+    /// eight times per pair, whether or not synthesised yet) and the helicase collar.
+    fn extent(&self, view: &View) -> Option<(f64, f64)> {
+        let (mut top, mut bottom) = (f64::INFINITY, f64::NEG_INFINITY);
+        let strands = [
+            Strand::Watson,
+            Strand::Crick,
+            Strand::Lagging,
+            Strand::Leading,
+        ];
+        for i in 0..8 * view.n {
+            let u = i as f64 * 0.125;
+            for strand in strands {
+                if let Some(s) = self.sample(strand, u)
+                    && (0.0..view.w).contains(&s.x.round())
+                {
+                    top = top.min(s.y);
+                    bottom = bottom.max(s.y);
+                }
+            }
+        }
+        if let Some(f) = self.fork
+            && let Some(s) = self.sample(Strand::Watson, f)
+        {
+            // The collar's rows as the screen edges clip it (an ellipse `reach` columns
+            // wide): its extent grows and shrinks smoothly as it enters and leaves, so
+            // the fitted zoom does not jump.
+            let r = RING * R * self.k * MAX_MAGNIFY;
+            let reach = ASPECT * r + 1.0;
+            let out = (-s.x).max(s.x - (view.w - 1.0)).max(0.0) / reach;
+            if out < 1.0 {
+                let half = r * (1.0 - out * out).sqrt();
+                top = top.min(s.y - half);
+                bottom = bottom.max(s.y + half);
+            }
+        }
+        (top <= bottom).then_some((top, bottom))
     }
 
     pub fn with_camera(view: &View, cam: Camera, t: f64, snap: &Snapshot) -> Self {
@@ -703,6 +798,8 @@ struct Rung {
     depth: f64,
     /// In front of its duplex axis: drawn as the half-block slab [`SLAB`].
     near: bool,
+    /// Pairs are at least `WIDE_RUNG_COLS` apart: upright cells are doubled.
+    wide: bool,
     index: u16,
 }
 
@@ -751,6 +848,11 @@ fn rung_chord(a: (f64, f64), b: (f64, f64)) -> Option<[i32; 4]> {
 /// base-pair plates, near ones solid, while staying under the 3-dot backbones.
 const BAR: Glyph = Glyph::new('▐', '|');
 const SLAB: Glyph = Glyph::new('█', '|');
+/// The left half-cell beside a far bar on wide rungs: `▐▌` reads as one 2-dot bar.
+const BAR_PAIR: Glyph = Glyph::new('▌', '|');
+/// Rungs are doubled once pairs lie at least this many columns apart (the zoomed-in
+/// opening on tall views), where a one-column rung reads thin and sparse.
+const WIDE_RUNG_COLS: f64 = 6.0;
 
 /// The cells of a rung, as `(x, y, glyph, ink)`, one per row: an upright one straight
 /// down its middle column, a slanted one as a Bresenham chord with `┃` for a step down a
@@ -783,7 +885,18 @@ fn rung_cells(r: &Rung, mut f: impl FnMut(i32, i32, Glyph, Ink)) {
 }
 
 fn draw_rung(canvas: &mut Canvas, r: &Rung) {
-    rung_cells(r, |x, y, glyph, ink| canvas.put(x, y, glyph, ink));
+    rung_cells(r, |x, y, glyph, ink| {
+        canvas.put(x, y, glyph, ink);
+        // Zoomed in, an upright rung takes the next column too (DNA-A9): a near slab
+        // becomes 4 dots wide, a far bar 2 dots straddling the cell edge.
+        if r.wide {
+            if glyph == SLAB {
+                canvas.put(x + 1, y, SLAB, ink);
+            } else if glyph == BAR {
+                canvas.put(x + 1, y, BAR_PAIR, ink);
+            }
+        }
+    });
 }
 
 /// The helicase at the apex, only while the apex is on screen (no stray ring dots at
@@ -1101,6 +1214,7 @@ impl DnaHelix {
             ink_b: paired.then(|| ink(sb, nb, &b)),
             depth: 0.5 * (a.depth + b.depth),
             near: a.z_local + b.z_local >= 0.0,
+            wide: ASPECT * RISE * geo.k >= WIDE_RUNG_COLS,
             index: self.rungs.len() as u16,
         });
     }
@@ -1478,6 +1592,36 @@ mod tests {
     }
 
     #[test]
+    fn dna_a4_fork_frames_fill_and_centre_on_tall_views() {
+        // A tall view fits its content to the rows (the reset fade aside): ≥ 80 % of rows [1, h − 1), inside them, centred to within a
+        // row, in every beat.
+        let story = Story::new();
+        for size in [Size::new(80, 24), Size::new(120, 40), Size::new(200, 50)] {
+            let view = View::new(size);
+            for k in 0..120 {
+                let t = 0.2 * f64::from(k);
+                let snap = story.at(t);
+                if snap.fade < 1.0 {
+                    continue;
+                }
+                let geo = Geo::new(&view, t, &snap);
+                let (top, bottom) = geo.extent(&view).expect("content on screen");
+                let fill = (bottom - top) / (view.h - 2.0);
+                assert!(fill >= 0.8, "{size:?} t = {t}: fills {fill:.2}");
+                assert!(
+                    top >= 0.5 && bottom <= view.h - 1.5,
+                    "{size:?} t = {t}: {top}..{bottom}"
+                );
+                let mid = 0.5 * (top + bottom);
+                assert!(
+                    (mid - (view.h - 1.0) / 2.0).abs() <= 1.0,
+                    "{size:?} t = {t}: mid {mid}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dna_a4_opening_helix_fills_the_frame() {
         // The `helix` opening is zoomed in on the intact duplex, which needs only ±R (plus
         // the pitch shear and sway), not the open fork's budget: it fills at least 85 % of
@@ -1784,6 +1928,35 @@ mod tests {
             scene_at(size, 2.0).render(&mut ascii);
             assert!(cells_with(&ascii, 'o').is_empty(), "{size:?}");
         }
+    }
+
+    #[test]
+    fn dna_a9_zoomed_in_rungs_are_twice_as_wide() {
+        // At the opening zoom on a tall view pairs are ≥ 6 columns apart, so each upright
+        // rung takes a second column (`█` near, `▌` beside a far `▐`); zoomed out, not.
+        let size = Size::new(120, 40);
+        let wide = scene_at(size, 2.0);
+        assert!(wide.rungs.iter().filter(|r| r.wide).count() >= 4);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        wide.render(&mut canvas);
+        let mut pairs = 0;
+        for r in wide.rungs.iter().filter(|r| r.wide) {
+            rung_cells(r, |x, y, glyph, _| {
+                if glyph == SLAB || glyph == BAR {
+                    let next = canvas.get(x + 1, y).map(|c| c.ch);
+                    let want = if glyph == SLAB {
+                        SLAB.unicode
+                    } else {
+                        BAR_PAIR.unicode
+                    };
+                    pairs += usize::from(next == Some(want));
+                }
+            });
+        }
+        assert!(pairs >= 8, "{pairs} doubled rung cells");
+        assert_eq!(BAR_PAIR.ascii, '|');
+        let narrow = scene_at(size, 12.0);
+        assert!(narrow.rungs.iter().all(|r| !r.wide));
     }
 
     #[test]
