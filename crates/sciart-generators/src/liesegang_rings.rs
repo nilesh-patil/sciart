@@ -58,15 +58,16 @@ const DISH_A0: f64 = 3.0;
 /// Header column of the dish's one ratio: right of the full legend and its 2-column gap,
 /// clear of the rim's top arc (LIES-A13).
 const DISH_RATIO_COL: i32 = 1 + "x(n+1)/x(n)".len() as i32 + 2;
-/// The palette of every gel pixel (LIES-A9): silver dichromate's ruby-to-brick red, in
-/// false colour: lightness encodes the amount of precipitate, whereas in a real gel the
-/// densest bands are the darkest; the yellow dichromate gel is drawn black. `HAlpha`
-/// (wine → crimson → rose) keeps the scene red, apart from the gallery's many amber
-/// (`Ember`) scenes and from its neighbours' green (`gray_scott`) and violet
-/// (`belousov_zhabotinsky`).
-const PALETTE: Ramp = Ramp::HAlpha;
-/// Ramp position of the densest precipitate: rose, below the ramp's pale-pink top, so a
-/// mature band never reads as white light.
+/// The palette of every gel pixel (LIES-A9), in false colour: real silver dichromate is
+/// ruby to brick red, and in a real gel the densest bands are the darkest, whereas here
+/// lightness encodes the amount of precipitate and the yellow dichromate gel is drawn
+/// black. `Cobalt` (ultramarine → cobalt → silver-blue) reads as a cool mineral
+/// precipitate that brightens towards silver, and keeps the scene apart from the
+/// gallery's many amber (`Ember`) and crimson (`HAlpha`) scenes and from its neighbours'
+/// magenta (`gray_scott`) and red-to-blue (`belousov_zhabotinsky`).
+const PALETTE: Ramp = Ramp::Cobalt;
+/// Ramp position of the densest precipitate: silver-blue, below the ramp's near-white
+/// top, so a mature band never reads as white light.
 const BAND_TOP: f64 = 0.85;
 
 /// Nodes per column; node `i` sits at depth `x = i + 1`, the reservoir ghost at `x = 0`.
@@ -512,7 +513,8 @@ impl Layout {
     fn new(size: Size) -> Self {
         let (w, h) = (i32::from(size.width()), i32::from(size.height()));
         let n = tube_count(size.width()) as i32;
-        let inner = ((f64::from(w) / (2.6 * f64::from(n))).round() as i32).clamp(1, 16);
+        // Tubes about as wide as the gaps between them, so the rack fills the width.
+        let inner = ((f64::from(w) / (2.2 * f64::from(n))).round() as i32).clamp(1, 20);
         let pitch = inner + 2;
         let gap = ((w - n * pitch) / (n + 1)).max(0);
         let left = (w - (n * pitch + (n - 1) * gap)) / 2;
@@ -1334,9 +1336,9 @@ mod tests {
     }
 
     #[test]
-    fn lies_a9_a10_halpha_inks_below_the_pale_top_and_a_free_title_row() {
-        // The densest bands stop at rose, below HAlpha's pale-pink top (LIES-A9).
-        let top = ink::ramp(Ramp::HAlpha, BAND_TOP).level;
+    fn lies_a9_a10_cobalt_inks_below_the_pale_top_and_a_free_title_row() {
+        // The densest bands stop at silver-blue, below Cobalt's near-white top (LIES-A9).
+        let top = ink::ramp(Ramp::Cobalt, BAND_TOP).level;
         assert!(top < 230, "band top {top}");
         for opening in ACTS {
             for (w, h) in [(80u16, 24u16), (40, 12), (200, 50)] {
@@ -1355,10 +1357,10 @@ mod tests {
                             Class::Empty => Role::Background,
                             Class::Liquid => Role::Wave,
                             Class::Glass => Role::Structure,
-                            _ => Role::Ramp(Ramp::HAlpha),
+                            _ => Role::Ramp(Ramp::Cobalt),
                         };
                         assert_eq!(ink.role, want, "{opening:?} {w}x{h} ({x}, {y})");
-                        if want == Role::Ramp(Ramp::HAlpha) {
+                        if want == Role::Ramp(Ramp::Cobalt) {
                             assert!(ink.level <= top, "{opening:?} {w}x{h} ({x}, {y}): {ink:?}");
                         }
                         match class {

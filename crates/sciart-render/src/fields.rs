@@ -94,6 +94,18 @@ const fn spec(r: Ramp) -> RampSpec {
             h1: 110.0,
             chroma: 0.21,
         },
+        // deep ultramarine → cobalt blue → pale silver-blue
+        Ramp::Cobalt => RampSpec {
+            h0: 258.0,
+            h1: 278.0,
+            chroma: 0.17,
+        },
+        // hematoxylin purple → eosin magenta → pale pink
+        Ramp::Eosin => RampSpec {
+            h0: 312.0,
+            h1: 344.0,
+            chroma: 0.2,
+        },
     }
 }
 

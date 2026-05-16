@@ -134,7 +134,7 @@ const V_TOP_RANGE: (f32, f32) = (0.24, 0.45);
 const EXPOSURE_TAU_S: f64 = 1.5;
 /// Histogram bins over `[V_EDGE, V_TOP_RANGE.1]` used to find `v_top`.
 const EXPOSURE_BINS: usize = 64;
-/// Body ramp: the level at the pattern edge (a dim teal rim, above the halo) and the
+/// Body ramp: the level at the pattern edge (a dim purple rim, above the halo) and the
 /// exponent that keeps the bright top of the ramp for the spine.
 const BODY_EDGE: f64 = 0.26;
 const GAMMA: f64 = 2.0;
@@ -143,8 +143,10 @@ const GAMMA: f64 = 2.0;
 const HALO_MIN: f32 = 0.2;
 const HALO_FULL: f32 = 0.6;
 const HALO_PEAK: f32 = 0.1;
-/// The culture's palette (CHEM-A7): false colour, u and v have no hue.
-const PALETTE: Ramp = Ramp::Aurora;
+/// The culture's palette (CHEM-A7): false colour, u and v have no hue. Eosin (hematoxylin
+/// purple → magenta → pale pink) reads as stained tissue and keeps the dish apart from the
+/// gallery's Aurora greens (aurora, ising_model).
+const PALETTE: Ramp = Ramp::Eosin;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Feed rate F and kill rate k.
@@ -417,8 +419,8 @@ pub(crate) fn lattice_size(display: Size) -> Size {
 }
 
 /// Body level for the pattern position `p = (v − V_EDGE)/(v_top − V_EDGE)` at index
-/// `round(255 p)`: from a dim teal rim at [`BODY_EDGE`] (above the halo's peak, so edges
-/// stay graded) up to the lime-white top, `p^GAMMA` keeping the top for the spine.
+/// `round(255 p)`: from a dim purple rim at [`BODY_EDGE`] (above the halo's peak, so edges
+/// stay graded) up to the pale-pink top, `p^GAMMA` keeping the top for the spine.
 fn level_table() -> [u8; 256] {
     std::array::from_fn(|i| {
         let p = i as f64 / 255.0;
@@ -427,7 +429,7 @@ fn level_table() -> [u8; 256] {
 }
 
 /// The ink of one pixel (CHEM-A7): pattern where `v ≥ V_EDGE`, shaded against the
-/// exposure `v_top`; else a dim teal halo that fades in with substrate depletion; else
+/// exposure `v_top`; else a dim purple halo that fades in with substrate depletion; else
 /// `None`, the terminal's own background. `u` is only read (and so only sampled) off the
 /// pattern.
 pub(crate) fn v_ink(
@@ -1236,13 +1238,13 @@ mod tests {
                     let quiet = v < V_EDGE && halo * 255.0 < 0.5;
                     assert_eq!(ink.is_none(), quiet, "u {u} v {v}");
                     if let Some(ink) = ink {
-                        assert_eq!(ink.role, Role::Ramp(Ramp::Aurora));
+                        assert_eq!(ink.role, Role::Ramp(Ramp::Eosin));
                         assert!(ink.level >= last, "level falls at u {u} v {v}");
                         last = ink.level;
                     }
                 }
             }
-            // Exposed: a dim teal rim at the pattern edge, the lime-white top at v_top.
+            // Exposed: a dim purple rim at the pattern edge, the pale-pink top at v_top.
             let level = |v: f32| v_ink(&levels, || 1.0, v, top).map_or(0, |i| i.level);
             assert!((60..=90).contains(&level(V_EDGE)), "edge {}", level(V_EDGE));
             assert_eq!(level(top), 255, "top {top}");
@@ -1280,7 +1282,7 @@ mod tests {
         assert_eq!(exposure_target(&[0.13; 64]), V_TOP_RANGE.0);
         assert_eq!(exposure_target(&[0.9; 64]), V_TOP_RANGE.1);
         // Live: in every regime a bright ridge (level ≥ 200) runs inside the bodies, and
-        // most of the body stays below it (emerald, not washed out).
+        // most of the body stays below it (magenta, not washed out).
         for (slot, t) in [(0, 4.0), (0, 16.0), (2, 10.0), (3, 10.0), (4, 10.0)] {
             let (mut g, mut ctx) = scene(Some(slot), 7, 80, 24);
             run_to(&mut g, &mut ctx, t);
@@ -1299,16 +1301,13 @@ mod tests {
         }
         // ASCII: the faint halo fringe stays blank, the rest of the halo is '.', and the
         // brighter half decides.
-        let aurora = |level| Ink::new(Role::Ramp(PALETTE), level);
-        assert_eq!(ascii_cell(aurora(12), Ink::BLANK), None);
-        assert_eq!(ascii_cell(Ink::BLANK, aurora(13)), Some(('.', aurora(13))));
-        assert_eq!(ascii_cell(aurora(31), aurora(20)), Some(('.', aurora(31))));
-        assert_eq!(ascii_cell(aurora(65), Ink::BLANK), Some(('.', aurora(65))));
-        assert_eq!(ascii_cell(aurora(66), aurora(20)), Some((':', aurora(66))));
-        assert_eq!(
-            ascii_cell(aurora(66), aurora(255)),
-            Some(('@', aurora(255)))
-        );
+        let eosin = |level| Ink::new(Role::Ramp(PALETTE), level);
+        assert_eq!(ascii_cell(eosin(12), Ink::BLANK), None);
+        assert_eq!(ascii_cell(Ink::BLANK, eosin(13)), Some(('.', eosin(13))));
+        assert_eq!(ascii_cell(eosin(31), eosin(20)), Some(('.', eosin(31))));
+        assert_eq!(ascii_cell(eosin(65), Ink::BLANK), Some(('.', eosin(65))));
+        assert_eq!(ascii_cell(eosin(66), eosin(20)), Some((':', eosin(66))));
+        assert_eq!(ascii_cell(eosin(66), eosin(255)), Some(('@', eosin(255))));
         assert_eq!(ascii_cell(Ink::BLANK, Ink::BLANK), None);
 
         let mut s = Stage::new(
@@ -1327,7 +1326,7 @@ mod tests {
             for ink in [c.ink, c.bg] {
                 assert!(matches!(
                     ink.role,
-                    Role::Ramp(Ramp::Aurora) | Role::Text | Role::Background
+                    Role::Ramp(Ramp::Eosin) | Role::Text | Role::Background
                 ));
             }
         }

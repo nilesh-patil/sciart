@@ -25,10 +25,13 @@
 //! The soma, dendrites and terminal arbor are drawn, not simulated (the real giant axon
 //! is a syncytium grown from the stellate ganglion): the soma shows V of compartment 0
 //! and the arbor fans out the last 0.8 cm of the cable. Membrane potential is false
-//! colour on the theme's diverging map (`Role::Div`: amber above rest, blue below, dark
-//! at rest), like a voltage-dye movie. Ions crossing the membrane are symbolic: each short streak stands
-//! for a fixed share of the charge the live Na⁺ (warm, falling in) or K⁺ (cool, drifting
-//! out) current carries through that stretch of axon.
+//! colour in the Plasma ramp, like a voltage-dye movie: a dim indigo glow at rest,
+//! shaded as a cylinder and a sphere, violet to lavender-white through the spike, and a
+//! dark notch in the deep after-hyperpolarisation. Ions crossing the membrane are
+//! symbolic: each short streak stands for a fixed share of the charge the live Na⁺
+//! (sodium-flame yellow, falling in) or K⁺ (cool blue, drifting out) current carries
+//! through that stretch of axon, and a sparse dim trickle stands for the resting leak.
+//! The squid giant axon is unmyelinated, so no nodes of Ranvier are drawn.
 
 use std::f64::consts::PI;
 use std::fmt::Write as _;
@@ -185,28 +188,36 @@ const SCOPE_MIN_ROWS: i32 = 4;
 const SCOPE_MIN_COLS: i32 = 12;
 /// Terminal arbor: trunk end → three primaries, the outer two forking into two each.
 const ARBOR_SEGS: usize = 7;
-/// An amber-phosphor oscilloscope: the warm side of the membrane's diverging map
-/// (`div` ≈ +0.8).
-const TRACE_INK: Ink = Ink::new(Role::Div, 230);
+/// Membrane potential's ramp (SPEC-002 Inks, AP-A11): Plasma, indigo → violet →
+/// lavender-white, a discharge colour, off the gallery's amber. False colour, like a
+/// voltage-dye movie.
+const SPIKE: Ramp = Ramp::Plasma;
+/// Ramp position at rest: the polarised membrane as a dim indigo glow, so the axoplasm
+/// and soma read as living tissue between spikes. Above rest the tone climbs from here
+/// to the ramp's top at the spike's peak. Below rest the long shallow tail of the
+/// after-hyperpolarisation (tones above `−WAKE_FLOOR`, V ≳ −73 mV) keeps the glow, and
+/// only the deep, recent wake sinks toward black, reaching it at tone `−WAKE_SPAN`
+/// (≈ −76 mV, the undershoot's minimum): a dark notch just behind the spike.
+const U_REST: f64 = 0.16;
+const WAKE_FLOOR: f64 = 0.3;
+const WAKE_SPAN: f64 = 0.48;
+/// Filled regions brighten the resting glow by up to `REST_SHADE` of itself toward the
+/// axis or the lit side (`bulge` → 1), so they read as a cylinder and a sphere. It only
+/// brightens, so a shaded resting pixel never reads as the wake, and it stays under
+/// ASCII's `+` threshold.
+const REST_SHADE: f64 = 0.35;
+/// The oscilloscope: the spike's own violet phosphor, near the ramp's top.
+const TRACE_INK: Ink = Ink::new(Role::Ramp(SPIKE), 225);
 const TICK_INK: Ink = Ink::new(Role::Dim, 120);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const ELECTRODE_INK: Ink = Ink::new(Role::Accent, 200);
-/// Tones this close to rest are drawn as background in filled regions: +0.2 mV above (so
-/// sub-threshold responses show) and −8 mV below (V ≳ −73 mV), so only the deepest,
-/// most recent after-hyperpolarisation tints the axoplasm, not its long shallow tail.
-const FILL_QUIET_ABOVE: f64 = 6.5 / 127.0;
-const WAKE_FLOOR: f64 = 0.3;
-/// Below rest the map's cool side starts at its dark centre on `WAKE_FLOOR` and rises `WAKE_GAIN` per
-/// unit of tone, to ≈ 0.18 at the −75.9 mV minimum (`|x| ≈ 0.48`): a dim glow just
-/// behind the spike, in keeping with a ≈ 10 mV undershoot beside a ≈ 105 mV spike.
-const WAKE_GAIN: f64 = 1.0;
 /// ASCII tone thresholds (SPEC-002 ASCII): `@` from ≈ +20 mV, `#` from ≈ −20 mV, `+` from
 /// ≈ −63 mV, `~` below ≈ −74 mV (the deep, recent after-hyperpolarisation only).
 const X_AT: f64 = 113.5 / 127.0;
 const X_HASH: f64 = 82.5 / 127.0;
 const X_PLUS: f64 = 16.5 / 127.0;
 const X_TILDE: f64 = -44.5 / 128.0;
-/// Transmitter vesicles: pale glints, apart from the membrane's amber and blue.
+/// Transmitter vesicles: pale glints, apart from the membrane's violet.
 const VESICLE: Role = Role::Star;
 
 // ---- Ions (SPEC-002 Ions) ----
@@ -221,9 +232,17 @@ const IONS_PER_SPIKE: f64 = 12.0;
 const SPIKE_CHARGE_NA: f64 = 70.0;
 const SPIKE_CHARGE_K: f64 = 280.0;
 /// Na⁺ inward, the current that depolarises; K⁺ outward, the one that repolarises. Each
-/// has its own hue, matching the side of the membrane map its current drives V towards.
-const SODIUM: Role = Role::Hot;
+/// has its own hue: sodium's flame-test yellow (the 589 nm D lines) and a cool blue.
+const SODIUM: Role = Role::Ramp(Ramp::Sulfur);
 const POTASSIUM: Role = Role::Cold;
+/// The resting leak (AP-A13): at rest Na⁺ leaks in and K⁺ out through always-open
+/// channels (balanced by the Na⁺/K⁺ pump, not simulated). Symbolic like the channel
+/// streaks: `LEAK_PER_COL` streaks per trunk column per second, whatever V, drifting at
+/// `LEAK_SLOW` of a channel streak's speed, at most `LEAK_LEVEL` of its brightness.
+const LEAK_PER_COL: f64 = 0.3;
+const LEAK_SLOW: f64 = 0.5;
+const LEAK_LEVEL: f64 = 0.6;
+const LEAK_CAP: usize = 96;
 /// A streak's tail, in dots behind its head (against its motion): a 4-dot stroke.
 const ION_TAIL: f64 = 3.0;
 /// Channel currents below this (μA/cm²) spawn nothing: the resting leak is not shown,
@@ -411,40 +430,50 @@ fn tone(v: f64) -> f64 {
     }
 }
 
-/// The ink of tone `x` on the diverging map: warm above rest, cool below, from its dark
-/// centre at `−WAKE_FLOOR`.
-fn tone_ink(x: f64) -> Ink {
+/// A leak streak's ink (AP-A13): its species' hue at up to `LEAK_LEVEL`, fading in and
+/// out over its life, so the trickle stays under the channel streaks.
+fn leak_ink(ion: &Ion) -> Ink {
+    let f = (ion.age * LEAK_SLOW / ION_LIFE).clamp(0.0, 1.0);
+    let v = 255.0 * LEAK_LEVEL * (0.5 + 0.5 * (1.0 - (2.0 * f - 1.0).abs()));
+    let role = if ion.sodium { SODIUM } else { POTASSIUM };
+    Ink::new(role, ink::level(v))
+}
+
+/// Ramp position of tone `x` with the resting glow at `rest` (AP-A11): from `rest` up to
+/// 1 at `x = 1`; `rest` down to `x = −WAKE_FLOOR`, then down to 0 at `x = −WAKE_SPAN`.
+fn tone_u(x: f64, rest: f64) -> f64 {
     if x >= 0.0 {
-        ink::div(x)
+        rest + (1.0 - U_REST) * x
     } else {
-        ink::div(-(-x - WAKE_FLOOR).max(0.0) * WAKE_GAIN)
+        let deep = ((-x - WAKE_FLOOR) / (WAKE_SPAN - WAKE_FLOOR)).clamp(0.0, 1.0);
+        rest * (1.0 - deep)
     }
 }
 
-/// The tone an ink of [`tone_ink`] stands for (to its level's rounding; any tone in
-/// `[−WAKE_FLOOR, 0)` reads as 0), or `None` for any other ink.
+/// The ink of tone `x` on the membrane's ramp: brighter with V, a dim glow at rest.
+fn tone_ink(x: f64) -> Ink {
+    ink::ramp(SPIKE, tone_u(x, U_REST))
+}
+
+/// The tone an ink of [`tone_ink`] stands for (to its level's rounding; the shallow
+/// tail `[−WAKE_FLOOR, 0)` reads as 0), or `None` for any other ink.
 fn ink_tone(i: Ink) -> Option<f64> {
-    (i.role == Role::Div).then(|| {
-        let d = ink::div_value(i);
-        if d >= 0.0 {
-            d
+    (i.role == Role::Ramp(SPIKE)).then(|| {
+        let u = ink::seq_value(i);
+        if u >= U_REST {
+            (u - U_REST) / (1.0 - U_REST)
         } else {
-            d / WAKE_GAIN - WAKE_FLOOR
+            -WAKE_FLOOR - (1.0 - u / U_REST) * (WAKE_SPAN - WAKE_FLOOR)
         }
     })
 }
 
-/// [`tone_ink`] for a filled region (axoplasm, soma), left empty within a hair of
-/// rest, where the map's dark centre is indistinguishable from the background anyway. A
-/// resting axon then reads as its two membrane lines, and the half-block glyphs change
-/// as a spike passes, not only their colours.
-fn fill_ink(v: f64) -> Ink {
-    let x = tone(v);
-    if (-WAKE_FLOOR..FILL_QUIET_ABOVE).contains(&x) {
-        Ink::BLANK
-    } else {
-        tone_ink(x)
-    }
+/// [`tone_ink`] for a filled region (axoplasm, soma) at `bulge ∈ [0, 1]` across it (1 on
+/// the axis or the lit side): the resting glow brightened as a cylinder or sphere
+/// ([`REST_SHADE`]), so the tissue is lit even between spikes (AP-A13).
+fn fill_ink(v: f64, bulge: f64) -> Ink {
+    let rest = U_REST * (1.0 + REST_SHADE * bulge.clamp(0.0, 1.0));
+    ink::ramp(SPIKE, tone_u(tone(v), rest))
 }
 
 /// [`tone_ink`], except that near rest a drawn outline shows instead.
@@ -846,6 +875,8 @@ struct ActionPotential {
     trace: Trail<f32>,
     vesicles: ParticlePool<Vesicle>,
     ions: ParticlePool<Ion>,
+    /// The resting leak's streaks (AP-A13), apart from the channel ions.
+    leak: ParticlePool<Ion>,
     timeline: Timeline,
     /// Sub-steps run so far: the scene clock.
     step: u64,
@@ -889,6 +920,7 @@ impl Default for ActionPotential {
             trace,
             vesicles: ParticlePool::with_capacity(5 * VESICLES_PER_BOUTON),
             ions: ParticlePool::with_capacity(ION_CAP),
+            leak: ParticlePool::with_capacity(LEAK_CAP),
             timeline: Timeline::new(&BEATS),
             step: 0,
             owed: 0.0,
@@ -1018,6 +1050,49 @@ impl ActionPotential {
                     sodium,
                 });
             }
+        }
+    }
+
+    /// The resting leak for `dt` seconds (AP-A13): `LEAK_PER_COL·dt` expected streaks
+    /// per trunk column whatever V, each Na⁺ in or K⁺ out by a hashed coin (the RNG
+    /// stream is untouched), from the same start points as the channel streaks but
+    /// slower. It shows that a resting membrane is not idle, not how big the leak is.
+    fn spawn_leak(&mut self, dt: f64) {
+        let l = self.layout;
+        if !l.full {
+            return;
+        }
+        let (top, bottom) = (2 * l.tube, 2 * (l.tube + l.fill_px + 1) + 1);
+        let speed = LEAK_SLOW * ION_REACH / ION_LIFE;
+        let expected = LEAK_PER_COL * dt;
+        let tick = SplitMix64::mix(self.step ^ 0x1eaf);
+        for k in 0..self.trunk_c.len() {
+            let x = l.trunk.0 + k as i32;
+            let key = cell_key(k as i32, 7) ^ tick;
+            if hash01(key) >= expected {
+                continue;
+            }
+            let coin = hash01(key.wrapping_add(1));
+            let sodium = coin < 0.5;
+            let above = (4.0 * coin).fract() < 0.5;
+            let dx = f64::from(2 * x) + f64::from(u8::from((8.0 * coin).fract() >= 0.5));
+            let (membrane, out) = if above {
+                (f64::from(top) - 1.0, -1.0)
+            } else {
+                (f64::from(bottom) + 1.0, 1.0)
+            };
+            let (y, vy) = if sodium {
+                (membrane + out * ION_REACH, -out * speed)
+            } else {
+                (membrane, out * speed)
+            };
+            self.leak.spawn(Ion {
+                x: dx,
+                y,
+                vy,
+                age: 0.0,
+                sodium,
+            });
         }
     }
 
@@ -1188,11 +1263,18 @@ impl ActionPotential {
             let back = -ion.vy.signum() * ION_TAIL;
             self.art.line(ion.x, ion.y, ion.x, ion.y + back, ink);
         }
+        for ion in self.leak.iter() {
+            let back = -ion.vy.signum() * ION_TAIL;
+            self.art
+                .line(ion.x, ion.y, ion.x, ion.y + back, leak_ink(ion));
+        }
         for (x, &c) in (l.trunk.0..).zip(&self.trunk_c) {
-            let ink = fill_ink(v_at(v, c));
+            let vc = v_at(v, c);
             self.pixels.set(x, l.tube, MEMBRANE);
             for y in l.tube + 1..=l.tube + l.fill_px {
-                self.pixels.set(x, y, ink);
+                // Across the tube, −1 at one membrane to +1 at the other: a cylinder.
+                let u = 2.0 * (f64::from(y - l.tube) - 0.5) / f64::from(l.fill_px) - 1.0;
+                self.pixels.set(x, y, fill_ink(vc, 1.0 - u * u));
             }
             self.pixels.set(x, l.tube + l.fill_px + 1, MEMBRANE);
         }
@@ -1208,12 +1290,17 @@ impl ActionPotential {
 
     fn draw_soma(&mut self) {
         let [cx, cy, r] = self.layout.soma;
-        let fill = fill_ink(self.cable.v[0]);
+        let v0 = self.cable.v[0];
+        // Lit from the upper left, like a sphere: the glow peaks 0.3 r up-left of centre.
+        let (lx, ly) = (cx - 0.3 * r, cy - 0.3 * r);
         for y in (cy - r).floor() as i32..=(cy + r).ceil() as i32 {
             for x in (cx - r).floor() as i32..=(cx + r).ceil() as i32 {
-                let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
+                let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                let d = (px - cx).hypot(py - cy);
                 if d <= r {
-                    self.pixels.set(x, y, if d > r - 1.0 { RIM } else { fill });
+                    let lit = 1.0 - ((px - lx).hypot(py - ly) / (1.3 * r)).powi(2);
+                    let ink = if d > r - 1.0 { RIM } else { fill_ink(v0, lit) };
+                    self.pixels.set(x, y, ink);
                 }
             }
         }
@@ -1452,7 +1539,13 @@ impl Generator for ActionPotential {
             p.y += p.vy * dt;
             p.age < ION_LIFE
         });
+        self.leak.retain(|p| {
+            p.age += dt;
+            p.y += p.vy * dt;
+            p.age < ION_LIFE / LEAK_SLOW
+        });
         self.spawn_ions(n as u32);
+        self.spawn_leak(dt);
         self.rasterise();
     }
 
@@ -2133,45 +2226,59 @@ mod tests {
     }
 
     #[test]
-    fn ap_a11_voltage_diverges_about_rest() {
-        let above = tone_ink(0.5);
-        assert_eq!(above.role, Role::Div);
-        assert!(ink::div_value(above) > 0.0);
-        assert!(ink::div_value(tone_ink(-0.4)) < 0.0);
-        for x in [-0.48, -0.4, -0.32, 0.05, 0.3, 0.7, 0.99] {
-            let back = ink_tone(tone_ink(x)).expect("a potential ink");
-            assert!((back - x).abs() < 0.005, "{x} -> {back}");
+    fn ap_a11_voltage_is_one_violet_ramp_brightening_with_v() {
+        // One named ramp, off amber: brighter with V, a resting glow at rest, dimmer in
+        // the after-hyperpolarisation, and the tone recoverable from the ink (ASCII).
+        assert_eq!(SPIKE, Ramp::Plasma);
+        let mut last = 0;
+        for k in 0..=74 {
+            let x = -0.48 + f64::from(k) * 0.02;
+            let i = tone_ink(x);
+            assert_eq!(i.role, Role::Ramp(SPIKE), "{x}");
+            assert!(i.level >= last, "{x}: {} < {last}", i.level);
+            last = i.level;
+            let back = ink_tone(i).expect("a potential ink");
+            let want = if (-WAKE_FLOOR..0.0).contains(&x) {
+                0.0
+            } else {
+                x
+            };
+            assert!((back - want).abs() < 0.02, "{x} -> {back}");
         }
-        // The wake starts at the diverging map's dark centre: its shallow tail fades into
-        // the plate.
-        assert_eq!(tone_ink(-WAKE_FLOOR), ink::div(0.0));
+        assert_eq!(tone_ink(0.0), ink::ramp(SPIKE, U_REST));
+        assert_eq!(tone_ink(1.0).level, 255);
+        assert!(f64::from(tone_ink(0.0).level) >= ink::MIN_VISIBLE_LEVEL);
         // Mid-axon spike at 1.2 s (the pulse left the soma at 0.2 s): above rest ahead of
-        // the wake, below rest in it, nothing else in the axoplasm; the scope trace is the
-        // map's warm side (an amber phosphor).
+        // the wake, below rest in it, the resting glow elsewhere; never an empty pixel.
         let ap = run_to(1.2);
         let l = ap.layout;
-        let (mut above, mut below) = (0, 0);
+        let (mut above, mut below, mut resting) = (0, 0, 0);
         for x in l.trunk.0..=l.trunk.1 {
             for y in l.tube + 1..=l.tube + l.fill_px {
                 let px = ap.pixels.get(x, y).expect("an axon pixel");
-                match px.role {
-                    Role::Div if ink::div_value(px) > 0.0 => above += 1,
-                    Role::Div if ink::div_value(px) < 0.0 => below += 1,
-                    Role::Background => {}
-                    other => panic!("axoplasm in {other:?} {}", px.level),
+                let t = ink_tone(px).unwrap_or_else(|| panic!("axoplasm in {px:?}"));
+                match t {
+                    t if t > X_PLUS => above += 1,
+                    t if t < -0.1 => below += 1,
+                    _ => resting += 1,
                 }
             }
         }
-        assert!(above > 20 && below > 4, "above {above} below {below}");
-        assert_eq!(TRACE_INK.role, Role::Div);
-        assert!(ink::div_value(TRACE_INK) > 0.5);
+        assert!(
+            above > 20 && below > 4 && resting > 20,
+            "{above} {below} {resting}"
+        );
+        // The oscilloscope is the spike's own violet phosphor.
+        assert_eq!(TRACE_INK.role, Role::Ramp(SPIKE));
+        const { assert!(TRACE_INK.level >= 200) };
     }
 
     #[test]
     fn ap_a11_wake_is_quiet_beside_the_spike() {
         // The ≈ 10 mV undershoot must not weigh like the ≈ 105 mV spike: over the filled
-        // trunk and soma at 5 s (120×40), the wake's total strength (|div value|) is
-        // under 0.35 of the spike's, and its strongest pixel under 0.2.
+        // trunk and soma at 5 s (120×40), the wake's total departure from the resting
+        // glow is under 0.35 of the spike's, and no wake pixel departs by more than the
+        // glow itself.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut ap = ActionPotential::default();
@@ -2179,17 +2286,20 @@ mod tests {
         while (ap.step as f64) < 5.0 * SUB_PER_S as f64 - 1e-6 {
             ap.update(SIM_DT, &mut ctx);
         }
+        let rest = ink::seq_value(tone_ink(0.0));
         let (mut spike, mut wake, mut peak) = (0.0, 0.0, 0.0_f64);
         for y in 0..2 * i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let px = ap.pixels.get(x, y).expect("a pixel");
-                if px.role != Role::Div {
+                if px.role != Role::Ramp(SPIKE) {
                     continue;
                 }
-                let d = ink::div_value(px);
-                if d > 0.0 {
+                // Shading only brightens the glow, so below it is the wake; above it,
+                // only a real response (past ASCII's `+`) counts as spike.
+                let d = ink::seq_value(px) - rest;
+                if ink_tone(px).is_some_and(|x| x > X_PLUS) {
                     spike += d;
-                } else {
+                } else if d < 0.0 {
                     wake -= d;
                     peak = peak.max(-d);
                 }
@@ -2197,7 +2307,62 @@ mod tests {
         }
         assert!(spike > 0.0, "no spike at 5 s");
         assert!(wake < 0.35 * spike, "wake {wake} vs spike {spike}");
-        assert!(peak < 0.2, "wake peak {peak}");
+        assert!(peak <= rest + 1e-9, "wake peak {peak}");
+    }
+
+    #[test]
+    fn ap_a13_soma_and_axon_glow_at_rest_and_leak_ions_trickle() {
+        // Between spikes (11.5 s: the 8 s spike has left, the 13 s pair not begun) the
+        // soma is a filled, shaded disc and the axoplasm a lit tube, not outlines.
+        let ap = run_to(11.5);
+        let l = ap.layout;
+        let [cx, cy, r] = l.soma;
+        let (mut lo, mut hi, mut inside) = (u8::MAX, 0, 0);
+        for y in (cy - r).floor() as i32..=(cy + r).ceil() as i32 {
+            for x in (cx - r).floor() as i32..=(cx + r).ceil() as i32 {
+                let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
+                if d > r - 1.5 {
+                    continue;
+                }
+                let px = ap.pixels.get(x, y).expect("a soma pixel");
+                assert_eq!(px.role, Role::Ramp(SPIKE), "({x}, {y})");
+                assert!(f64::from(px.level) >= ink::MIN_VISIBLE_LEVEL, "({x}, {y})");
+                (lo, hi) = (lo.min(px.level), hi.max(px.level));
+                inside += 1;
+            }
+        }
+        assert!(
+            inside > 50 && hi > lo + 4,
+            "{inside} pixels, levels {lo}..{hi}"
+        );
+        for x in l.trunk.0..=l.trunk.1 {
+            for y in l.tube + 1..=l.tube + l.fill_px {
+                let px = ap.pixels.get(x, y).expect("an axon pixel");
+                assert_eq!(px.role, Role::Ramp(SPIKE), "({x}, {y})");
+            }
+        }
+        // The resting leak: a sparse, dim trickle of both species, inward Na⁺ and
+        // outward K⁺, drawn in the ions' own hues but well under a spike's streaks.
+        let (mut na, mut k) = (0, 0);
+        for t in [0.15, 11.5, 12.0] {
+            let ap = run_to(t);
+            assert!(!ap.leak.is_empty(), "no leak at {t}");
+            assert!(ap.leak.len() <= LEAK_CAP);
+            for ion in ap.leak.iter() {
+                let i = leak_ink(ion);
+                assert!(i.level <= 160, "{i:?}");
+                if ion.sodium {
+                    na += 1;
+                    assert_eq!(i.role, SODIUM);
+                } else {
+                    k += 1;
+                    assert_eq!(i.role, POTASSIUM);
+                }
+            }
+        }
+        assert!(na > 0 && k > 0, "Na {na} K {k}");
+        // Sodium streaks are sodium-flame yellow, not the gallery's amber.
+        assert_eq!(SODIUM, Role::Ramp(Ramp::Sulfur));
     }
 
     #[test]

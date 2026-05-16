@@ -59,11 +59,18 @@ pub enum Ramp {
     /// Near-black olive → chrome yellow → pale lemon: the plasmodium of *Physarum
     /// polycephalum*, sulfur and pollen yellows (a yellow that is not Ember's orange).
     Sulfur,
+    /// Deep ultramarine → cobalt blue → pale silver-blue: cobalt glass and pigments, a
+    /// cool precipitate (M12, `liesegang_rings`), a blue that is not Ice's cyan.
+    Cobalt,
+    /// Hematoxylin purple → eosin magenta → pale pink: a histology stain, for patterns
+    /// that read as tissue (M12, `gray_scott`), a magenta that is neither Plasma's violet
+    /// nor HAlpha's crimson.
+    Eosin,
 }
 
 impl Ramp {
     /// Every ramp, in declaration order.
-    pub const ALL: [Ramp; 8] = [
+    pub const ALL: [Ramp; 10] = [
         Ramp::Ember,
         Ramp::Ice,
         Ramp::Ferroin,
@@ -72,6 +79,8 @@ impl Ramp {
         Ramp::Plasma,
         Ramp::Starlight,
         Ramp::Sulfur,
+        Ramp::Cobalt,
+        Ramp::Eosin,
     ];
 
     /// A unique lower-case name.
@@ -85,6 +94,8 @@ impl Ramp {
             Ramp::Plasma => "plasma",
             Ramp::Starlight => "starlight",
             Ramp::Sulfur => "sulfur",
+            Ramp::Cobalt => "cobalt",
+            Ramp::Eosin => "eosin",
         }
     }
 }

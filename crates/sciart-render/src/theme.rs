@@ -786,6 +786,19 @@ mod tests {
     }
 
     #[test]
+    fn rnd_r12_cobalt_is_blue_and_eosin_is_magenta() {
+        // Cobalt is a blue, not Ice's cyan; Eosin a magenta, not HAlpha's crimson.
+        let c = |r: Ramp, l: u8| Theme::Astro.color(Ink::new(Role::Ramp(r), l), 0, 0);
+        for level in [96u8, 128, 170] {
+            let Rgb(r, g, b) = c(Ramp::Cobalt, level);
+            assert!(b > g + 60 && g >= r, "cobalt {level}: {r} {g} {b}");
+            let Rgb(r, g, b) = c(Ramp::Eosin, level);
+            assert!(r > g + 50 && b > g + 50, "eosin {level}: {r} {g} {b}");
+            assert!(r.abs_diff(b) <= 40, "eosin {level}: {r} {g} {b}");
+        }
+    }
+
+    #[test]
     fn rnd_r12_ramps_end_on_distinct_hues() {
         let tops: Vec<(Ramp, f64)> = Ramp::ALL
             .iter()
