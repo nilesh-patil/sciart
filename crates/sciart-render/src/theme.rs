@@ -786,15 +786,21 @@ mod tests {
     }
 
     #[test]
-    fn rnd_r12_cobalt_is_blue_and_eosin_is_magenta() {
-        // Cobalt is a blue, not Ice's cyan; Eosin a magenta, not HAlpha's crimson.
+    fn rnd_r12_cobalt_is_blue_and_eosin_is_rose() {
+        // Cobalt is a blue, not Ice's cyan; Eosin a rose, neither plum nor crimson.
         let c = |r: Ramp, l: u8| Theme::Astro.color(Ink::new(Role::Ramp(r), l), 0, 0);
         for level in [96u8, 128, 170] {
             let Rgb(r, g, b) = c(Ramp::Cobalt, level);
             assert!(b > g + 60 && g >= r, "cobalt {level}: {r} {g} {b}");
+            // Eosin is rose-pink: red leads blue (away from Ferroin's plum and Plasma's
+            // violet, where blue leads or ties), but blue stays well above green and
+            // within reach of red (not HAlpha's crimson, where red leads by ≈ 100).
             let Rgb(r, g, b) = c(Ramp::Eosin, level);
-            assert!(r > g + 50 && b > g + 50, "eosin {level}: {r} {g} {b}");
-            assert!(r.abs_diff(b) <= 40, "eosin {level}: {r} {g} {b}");
+            assert!(r > g + 50 && b > g + 25, "eosin {level}: {r} {g} {b}");
+            assert!(
+                (15..=80).contains(&(i32::from(r) - i32::from(b))),
+                "eosin {level}: {r} {g} {b}"
+            );
         }
     }
 

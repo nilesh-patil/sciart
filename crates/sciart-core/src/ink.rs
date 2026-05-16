@@ -62,9 +62,9 @@ pub enum Ramp {
     /// Deep ultramarine → cobalt blue → pale silver-blue: cobalt glass and pigments, a
     /// cool precipitate (M12, `liesegang_rings`), a blue that is not Ice's cyan.
     Cobalt,
-    /// Hematoxylin purple → eosin magenta → pale pink: a histology stain, for patterns
-    /// that read as tissue (M12, `gray_scott`), a magenta that is neither Plasma's violet
-    /// nor HAlpha's crimson.
+    /// Wine-rose → eosin rose-pink → pale pink-lilac: the eosin of a histology stain, for
+    /// patterns that read as tissue (M12, `gray_scott`), a rose that is neither Ferroin's
+    /// plum, Plasma's violet nor HAlpha's crimson.
     Eosin,
 }
 

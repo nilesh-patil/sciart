@@ -44,7 +44,7 @@ and each keeps `Ink` at two bytes.
  | `Starlight` | near-black → neutral grey → pale warm white | unresolved starlight (a globular cluster's glow, the Milky Way); added in M12 |
  | `Sulfur` | near-black olive → chrome yellow → pale lemon | the *Physarum* plasmodium, pollen and sulfur yellows; added in M12 so a yellow organism need not borrow Ember's orange |
   | `Cobalt` | ultramarine → cobalt → silver-blue | cobalt glass and pigment, a cool mineral precipitate (`liesegang_rings`); a blue that is neither Ice's cyan nor Ferroin's azure top; added in M12 |
-  | `Eosin` | hematoxylin purple → magenta → pale pink | an H&E stain, for patterns that read as tissue (`gray_scott`); added in M12 |
+  | `Eosin` | wine-rose → eosin rose-pink → pale pink-lilac | an H&E stain, for patterns that read as tissue (`gray_scott`); added in M12 |
 
   Each ramp is a 256-level table built once from OKLCh: lightness linear in level, hue linear
   between the two ends, chroma lowered only where sRGB cannot hold it.
