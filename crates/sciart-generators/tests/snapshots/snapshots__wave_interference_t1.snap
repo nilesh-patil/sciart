@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-      ..ooOOOOOOOOOOoo..      ..oO0OOo.oOOOo.....       .oo...oOOo..oOOo.oO  ###
-oo.   .oooooooooooooooo.   .oooo.oO00Oo..ooo.      ..o...oOOo..oOOo.oO0Oo.o  ###
-Oo.    .....oooooo.....    .oO00Oo.ooOOo.      ... .ooOo..oOOo.oO0Oo.oOOo..   ##
-..oo..  .ooOO0000OOoo.  ..oo..o000o.....   .. .ooOo..o0Oo.oO0Oo.oOOo..oOOo.   -#
-oO0Oo.   .oooooooooo.   .oO0Oo..ooo.      .ooo..O0Oo.oO0Oo.oOOo..oOoo..ooo.    #
-O0Oo..o.  ..oOOOOo..  .o..oO0Oo.     .ooo..O0Oo.oO0Oo.oOOo..ooo...oo.. ...      
-.o..o00Oo  .OOOOOO.  oO00o..o.. ..o...O00o.oO0Oo.oOOo..ooo. ....   .            
-.. .oOOOo.....**.....oOOOo. ....oO0Oo.o00Oo.oOOo...o..  ..                      
-0Oo. ....O00o.**.o00O.... .oO0Oo.O00O..ooo. ....            ..  .... .... .    #
-0Oo.oO0O...oooooooo...O0Oo.oO0Oo..oo.           .... ..o. ..oo...ooo..ooo..   -#
-.. ..oOOo..ooOOOOoo..oOOo.. ..  ...  .oo. .ooo..oOOo..oOo..oOOo.oOOo..oOO..  -##
-oO0Oo..ooOooo.oo.oooOoo..oO0Oo.oO0Oo.o00o.oO0Oo.o00o.oO0Oo.o0Oo.oO0O..O0Oo.  ###
-oO0Oo..ooOooo.oo.oooOoo..oO0Oo.oO0Oo.o00o.oO0Oo.o00o.oO0Oo.o0Oo.oO0O..O0Oo.  ###
-.. ..oOOo..ooOOOOoo..oOOo.. ..  ...  .oo. .ooo..oOOo..oOo..oOOo.oOOo..oOO..  -##
-0Oo.oO0O...oooooooo...O0Oo.oO0Oo..oo.           .... ..o. ..oo...ooo..ooo..   -#
-0Oo. ....O00o.**.o00O.... .oO0Oo.O00O..ooo. ....            ..  .... .... .    #
-.. .oOOOo.....**.....oOOOo. ....oO0Oo.o00Oo.oOOo...o..  ..                      
-.o..o00Oo  .OOOOOO.  oO00o..o.. ..o...O00o.oO0Oo.oOOo..ooo. ....   .            
-O0Oo..o.  ..oOOOOo..  .o..oO0Oo.     .ooo..O0Oo.oO0Oo.oOOo..ooo...oo.. ...      
-oO0Oo.   .oooooooooo.   .oO0Oo..ooo.      .ooo..O0Oo.oO0Oo.oOOo..oOoo..ooo.    #
-..oo..  .ooOO0000OOoo.  ..oo..o000o.....   .. .ooOo..o0Oo.oO0Oo.oOOo..oOOo.   -#
-Oo.    .....oooooo.....    .oO00Oo.ooOOo.      ... .ooOo..oOOo.oO0Oo.oOOo..   ##
-oo.   .oooooooooooooooo.   .oooo.oO00Oo..ooo.      ..o...oOOo..oOOo.oO0Oo.o  ###
- Interference - crests add up    O0OOo.oOOOo.....       .oo...oOOo..oOOo.oO  ###
+      ..ooOOOOOOOOOOoo..      ..oO0OOo.oOOOo.....       .oo...oOOo..oOOo.oO  + |
+oo.   .oooooooooooooooo.   .oooo.oO00Oo..ooo.      ..o...oOOo..oOOo.oO0Oo.o  + |
+Oo.    .....oooooo.....    .oO00Oo.ooOOo.      ... .ooOo..oOOo.oO0Oo.oOOo..  + |
+..oo..  .ooOO0000OOoo.  ..oo..o000o.....   .. .ooOo..o0Oo.oO0Oo.oOOo..oOOo.  ::|
+oO0Oo.   .oooooooooo.   .oO0Oo..ooo.      .ooo..O0Oo.oO0Oo.oOOo..oOoo..ooo.   +|
+O0Oo..o.  ..oOOOOo..  .o..oO0Oo.     .ooo..O0Oo.oO0Oo.oOOo..ooo...oo.. ...    +|
+.o..o00Oo  .OOOOOO.  oO00o..o.. ..o...O00o.oO0Oo.oOOo..ooo. ....   .          +|
+.. .oOOOo.....**.....oOOOo. ....oO0Oo.o00Oo.oOOo...o..  ..                    +|
+0Oo. ....O00o.**.o00O.... .oO0Oo.O00O..ooo. ....            ..  .... .... .   +|
+0Oo.oO0O...oooooooo...O0Oo.oO0Oo..oo.           .... ..o. ..oo...ooo..ooo..  ::|
+.. ..oOOo..ooOOOOoo..oOOo.. ..  ...  .oo. .ooo..oOOo..oOo..oOOo.oOOo..oOO..  + |
+oO0Oo..ooOooo.oo.oooOoo..oO0Oo.oO0Oo.o00o.oO0Oo.o00o.oO0Oo.o0Oo.oO0O..O0Oo.  + |
+oO0Oo..ooOooo.oo.oooOoo..oO0Oo.oO0Oo.o00o.oO0Oo.o00o.oO0Oo.o0Oo.oO0O..O0Oo.  + |
+.. ..oOOo..ooOOOOoo..oOOo.. ..  ...  .oo. .ooo..oOOo..oOo..oOOo.oOOo..oOO..  + |
+0Oo.oO0O...oooooooo...O0Oo.oO0Oo..oo.           .... ..o. ..oo...ooo..ooo..  ::|
+0Oo. ....O00o.**.o00O.... .oO0Oo.O00O..ooo. ....            ..  .... .... .   +|
+.. .oOOOo.....**.....oOOOo. ....oO0Oo.o00Oo.oOOo...o..  ..                    +|
+.o..o00Oo  .OOOOOO.  oO00o..o.. ..o...O00o.oO0Oo.oOOo..ooo. ....   .          +|
+O0Oo..o.  ..oOOOOo..  .o..oO0Oo.     .ooo..O0Oo.oO0Oo.oOOo..ooo...oo.. ...    +|
+oO0Oo.   .oooooooooo.   .oO0Oo..ooo.      .ooo..O0Oo.oO0Oo.oOOo..oOoo..ooo.   +|
+..oo..  .ooOO0000OOoo.  ..oo..o000o.....   .. .ooOo..o0Oo.oO0Oo.oOOo..oOOo.  ::|
+Oo.    .....oooooo.....    .oO00Oo.ooOOo.      ... .ooOo..oOOo.oO0Oo.oOOo..  + |
+oo.   .oooooooooooooooo.   .oooo.oO00Oo..ooo.      ..o...oOOo..oOOo.oO0Oo.o  + |
+ Interference - crests add up    O0OOo.oOOOo.....       .oo...oOOo..oOOo.oO  + |

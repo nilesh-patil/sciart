@@ -10,9 +10,12 @@
 //! the statistics (stationary variance `σ²/(2γ)`, diffusion constant `D = σ²/(2γ²)`) are
 //! exact for any frame step `dt` — no sub-stepping and no step-size bias.
 //!
-//! Walls: the grain lives in an *unfolded* free space and is drawn at its mirror-folded
-//! position ([`fold`]). For dynamics that are symmetric under reflection (free OU is), the
-//! method of images makes this exactly a specularly reflecting box, at any `dt`.
+//! Tracking stage (M12): the grain walks in unbounded free space, and the view is a
+//! microscope stage that follows it. When the grain drifts out of the central band the
+//! stage glides (exponential ease, [`STAGE_TAU`]) until it is centred again, so the hero
+//! never hugs a wall. The solvent is a homogeneous bath seen through the moving window:
+//! molecules live in view coordinates, periodic across the screen ([`wrap`]), and shift
+//! with the stage. The trail and the ring are world coordinates and glide with it.
 //!
 //! Raster (M12): solvent, trail and ring are braille [`Dots`] and the grain a shaded
 //! half-block [`Pixels`] sphere, both rasterised in `update`/`resize`; `render` only blits
@@ -44,15 +47,15 @@ pub fn build() -> Box<dyn Generator> {
 /// grain in water forgets its velocity in ~0.1 µs), so the ballistic start of the ring is
 /// visible (SPEC-002 Stylised).
 const GAMMA: f64 = 2.0;
-/// Diffusion constant, rows²/s: `√(4 D · 1 s) = 3` rows of rms 2-D displacement per √s.
-const D: f64 = 2.25;
+/// Diffusion constant, rows²/s: `√(4 D · 1 s) = 4` rows of rms 2-D displacement per √s.
+const D: f64 = 4.0;
 /// Noise strength σ = γ √(2D), from `D = σ²/(2γ²)` (4.2426… rows/s^{3/2}).
-const SIGMA: f64 = GAMMA * 2.121_320_343_559_642_4;
+const SIGMA: f64 = GAMMA * 2.828_427_124_746_19;
 /// Sampling tick for the MSD estimator, s.
 const TICK: f64 = 0.125;
-/// The trail takes `TRAIL_PER_TICK` samples per tick (32 Hz) and keeps 22 s of path.
+/// The trail takes `TRAIL_PER_TICK` samples per tick (32 Hz) and keeps 32 s of path.
 const TRAIL_PER_TICK: usize = 4;
-pub(crate) const TRAIL_LEN: usize = 704;
+pub(crate) const TRAIL_LEN: usize = 1024;
 /// MSD lag τ for the D̂ estimator, in ticks (2 s ≫ 1/γ = 0.5 s).
 const LAG_TICKS: usize = 16;
 /// Lag samples (ticks) before the readout shows D̂: 10 s of lag samples, so about 12 s of
@@ -81,17 +84,20 @@ const RING_PREROLL: f64 = 2.0;
 /// Above this glow a molecule is drawn as a 5-dot bead instead of one dot.
 const GLOW_BEAD: f64 = 0.35;
 /// Brightest a flash is drawn: below the trail's hot head (BRO-A6).
-const GLOW_TOP: f64 = 0.68;
+const GLOW_TOP: f64 = 0.6;
+/// The solvent is a quiet ground: its dots sit at `MOL_BASE + MOL_SPEED·speed` (≤ 0.2).
+const MOL_BASE: f64 = 0.15;
+const MOL_SPEED: f64 = 0.05;
 /// The newest this many seconds of trail are drawn hot (BRO-A6).
-const TRAIL_HOT: f64 = 5.0;
+const TRAIL_HOT: f64 = 10.0;
 /// The newest this many seconds of trail are a two-dot stroke (BRO-A6).
-const TRAIL_BOLD: f64 = 3.0;
+const TRAIL_BOLD: f64 = 8.0;
 const _: () = assert!(TRAIL_BOLD <= TRAIL_HOT, "only the hot head is bold");
-const _: () = assert!(GLOW_TOP < 0.7, "flashes stay below the hot trail (BRO-A6)");
+const _: () = assert!(GLOW_TOP < 0.85, "flashes stay below the hot trail (BRO-A6)");
 /// Molecules bounce off the grain at this extra distance, rows.
 const CONTACT_PAD: f64 = 0.35;
 /// Grain radius as a fraction of the box's short side (rows), and its limits.
-const GRAIN_FRAC: f64 = 0.075;
+const GRAIN_FRAC: f64 = 0.06;
 const GRAIN_R: (f64, f64) = (0.6, 3.5);
 /// Rms-displacement ring epochs: at most this long, and the ring stops growing at this fraction of
 /// the box's half short side (BRO-A5).
@@ -99,10 +105,18 @@ const EPOCH_MAX: f64 = 16.0;
 const RING_REACH: f64 = 0.8;
 /// The ring fades in and out over this long at each end of its epoch, s.
 const RING_FADE: f64 = 0.8;
+/// The stage starts to recentre when the grain is more than this fraction of the view's
+/// half extent (per axis) from the centre, and stops once it is within `STAGE_DONE` of
+/// that band; it closes the gap with time constant `STAGE_TAU`, s.
+const STAGE_BAND: f64 = 0.45;
+const STAGE_DONE: f64 = 0.15;
+const STAGE_TAU: f64 = 0.9;
 
-/// False colours (BRO-A6): cold solvent, a warm grain and its warm path.
-const SOLVENT: Ramp = Ramp::Ice;
-const GRAIN: Ramp = Ramp::Ember;
+/// False colours (BRO-A6): a quiet neutral solvent, a pale violet grain and its path in
+/// ice (cyan → white), the hero.
+const SOLVENT: Ramp = Ramp::Starlight;
+const GRAIN: Ramp = Ramp::Plasma;
+const PATH: Ramp = Ramp::Ice;
 
 /// Exact one-axis transition of the OU process over a step `h` (BRO-A1, BRO-A2).
 ///
@@ -164,21 +178,16 @@ impl OuStep {
     }
 }
 
-/// Mirror-fold `x` into `[lo, hi]`; the flag is `true` for an odd number of reflections,
-/// i.e. when a velocity must flip sign (BRO-A3). Non-finite `x` or an empty interval map
-/// to `lo`.
-pub(crate) fn fold(x: f64, lo: f64, hi: f64) -> (f64, bool) {
+/// Wrap `x` periodically into `[lo, hi)` (the solvent seen through the moving stage,
+/// BRO-A3). Non-finite `x` or an empty interval map to `lo`.
+pub(crate) fn wrap(x: f64, lo: f64, hi: f64) -> f64 {
     let len = hi - lo;
     if !x.is_finite() || len.is_nan() || len <= 0.0 {
-        return (lo, false);
+        return lo;
     }
-    // Reflection has period 2·len; the second half of the period is the mirror image.
-    let u = (x - lo).rem_euclid(2.0 * len);
-    if u > len {
-        ((hi - (u - len)).clamp(lo, hi), true)
-    } else {
-        ((lo + u).clamp(lo, hi), false)
-    }
+    // rem_euclid can round up to `len` for tiny negative inputs.
+    let u = (x - lo).rem_euclid(len);
+    if u >= len { lo } else { lo + u }
 }
 
 /// Expected 2-D MSD after `t` seconds for a walker started from the stationary velocity
@@ -237,15 +246,15 @@ pub(crate) fn epoch_len(half: f64) -> f64 {
 }
 
 /// Trail ramp value for a segment `age` s old (BRO-A6): the newest `TRAIL_HOT` s glow
-/// from 0.8 down to 0.7, above the ring, the solvent and its flashes; older path fades
-/// from 0.55 to 0.2 at the 22 s tail.
+/// from 1 (white) down to 0.85 (pale cyan), above the ring, the solvent and its flashes;
+/// older path fades from 0.7 to 0.3 at the 32 s tail.
 pub(crate) fn trail_value(age: f64) -> f64 {
     let span = TRAIL_LEN as f64 * TICK / TRAIL_PER_TICK as f64;
     if age < TRAIL_HOT {
-        0.8 - 0.1 * age / TRAIL_HOT
+        1.0 - 0.15 * age / TRAIL_HOT
     } else {
         let fresh = (1.0 - (age - TRAIL_HOT) / (span - TRAIL_HOT)).clamp(0.0, 1.0);
-        0.2 + 0.35 * fresh.powf(1.2)
+        0.3 + 0.4 * fresh.powf(1.2)
     }
 }
 
@@ -303,13 +312,17 @@ pub struct BrownianMotion {
     t: f64,
     /// Time since the last tick.
     tick_clock: f64,
-    /// Unfolded grain state `(x, y, vx, vy)`, rows and rows/s.
+    /// Free grain state `(x, y, vx, vy)` in world rows and rows/s.
     grain: [f64; 4],
     grain_r: f64,
-    /// Box for molecules and for the grain's center.
+    /// The view: the periodic solvent box (view rows) and the band the grain's centre is
+    /// kept in (BRO-A3).
     mol_box: Bounds,
     grain_box: Bounds,
-    /// Folded grain positions, oldest → newest (BRO-A3, BRO-A6).
+    /// The stage: the world point shown at the view's centre, and whether it is gliding.
+    cam: (f64, f64),
+    recentring: bool,
+    /// World grain positions, oldest → newest (BRO-A6).
     trail: Trail<(f64, f64)>,
     /// Unfolded positions over the last lag τ, for the time-averaged MSD.
     lag: Trail<(f64, f64)>,
@@ -339,6 +352,8 @@ impl Default for BrownianMotion {
             grain_r: 1.0,
             mol_box: Bounds::default(),
             grain_box: Bounds::default(),
+            cam: (0.0, 0.0),
+            recentring: false,
             trail: Trail::new(TRAIL_LEN),
             lag: Trail::new(LAG_TICKS + 1),
             msd_sum: 0.0,
@@ -363,13 +378,51 @@ fn dot_of((x, y): (f64, f64)) -> (f64, f64) {
 }
 
 impl BrownianMotion {
-    /// Folded (on-screen) grain center, rows.
+    /// Grain centre in world rows.
     fn grain_pos(&self) -> (f64, f64) {
+        (self.grain[0], self.grain[1])
+    }
+
+    /// View rows of world point `p`: the stage puts `cam` at the view's centre.
+    fn to_view(&self, p: (f64, f64)) -> (f64, f64) {
         let b = &self.grain_box;
         (
-            fold(self.grain[0], b.x0, b.x1).0,
-            fold(self.grain[1], b.y0, b.y1).0,
+            p.0 - self.cam.0 + 0.5 * (b.x0 + b.x1),
+            p.1 - self.cam.1 + 0.5 * (b.y0 + b.y1),
         )
+    }
+
+    /// Glide the stage after a step of `dt` (BRO-A3): start when the grain leaves the
+    /// central band, ease towards it, stop once it is well inside; never let the grain's
+    /// disc leave the view. Returns the stage's shift, which the solvent follows.
+    fn track(&mut self, dt: f64) -> (f64, f64) {
+        let b = self.grain_box;
+        let half = (0.5 * (b.x1 - b.x0), 0.5 * (b.y1 - b.y0));
+        let (ex, ey) = (self.grain[0] - self.cam.0, self.grain[1] - self.cam.1);
+        let (bx, by) = (STAGE_BAND * half.0, STAGE_BAND * half.1);
+        if ex.abs() > bx || ey.abs() > by {
+            self.recentring = true;
+        }
+        let old = self.cam;
+        if self.recentring {
+            let k = -(-dt / STAGE_TAU).exp_m1();
+            self.cam.0 += k * ex;
+            self.cam.1 += k * ey;
+            let (rx, ry) = (self.grain[0] - self.cam.0, self.grain[1] - self.cam.1);
+            if rx.abs() <= STAGE_DONE * bx && ry.abs() <= STAGE_DONE * by {
+                self.recentring = false;
+            }
+        }
+        // Hard limit: the grain's centre stays inside the view's grain band.
+        self.cam.0 = self
+            .cam
+            .0
+            .clamp(self.grain[0] - half.0, self.grain[0] + half.0);
+        self.cam.1 = self
+            .cam
+            .1
+            .clamp(self.grain[1] - half.1, self.grain[1] + half.1);
+        (self.cam.0 - old.0, self.cam.1 - old.1)
     }
 
     /// Time-averaged MSD at lag τ, corrected for the ballistic start of the OU walk, so it
@@ -391,7 +444,7 @@ impl BrownianMotion {
         }
     }
 
-    /// Readout, e.g. `D 1-path 2.31 rows^2/s  true 2.25  t 42s`: D estimated from this
+    /// Readout, e.g. `D 1-path 2.31 rows^2/s  true 4.00  t 42s`: D estimated from this
     /// grain's own track (time-averaged MSD at a 2 s lag, inertia-corrected, see [`d_hat`];
     /// the pre-rolled past gives it `LAG_MIN` lags from the first frame, `...` otherwise)
     /// with its unit, then the true D, then the track's age. Trailing parts are dropped
@@ -444,22 +497,17 @@ impl BrownianMotion {
         }
     }
 
-    fn move_molecules(&mut self, dt: f64) {
+    /// Move the solvent by `dt` in view rows, the stage having shifted by `shift` world
+    /// rows over the same step (the bath slides the other way), periodic across the view.
+    fn move_molecules(&mut self, dt: f64, shift: (f64, f64)) {
         let b = self.mol_box;
-        let (gx, gy) = self.grain_pos();
+        let (gx, gy) = self.to_view(self.grain_pos());
         let reach = self.grain_r + CONTACT_PAD;
         let fade = (-dt / GLOW_TAU).exp();
         for m in self.molecules.iter_mut() {
             m.glow *= fade;
-            let (x, fx) = fold(m.x + m.vx * dt, b.x0, b.x1);
-            let (y, fy) = fold(m.y + m.vy * dt, b.y0, b.y1);
-            (m.x, m.y) = (x, y);
-            if fx {
-                m.vx = -m.vx;
-            }
-            if fy {
-                m.vy = -m.vy;
-            }
+            m.x = wrap(m.x + m.vx * dt - shift.0, b.x0, b.x1);
+            m.y = wrap(m.y + m.vy * dt - shift.1, b.y0, b.y1);
             // Specular bounce off the grain; every hit lights the molecule up.
             let (dx, dy) = (m.x - gx, m.y - gy);
             let d2 = dx * dx + dy * dy;
@@ -472,8 +520,8 @@ impl BrownianMotion {
                     m.vy -= 2.0 * vn * ny;
                     m.glow = 1.0;
                 }
-                m.x = fold(gx + nx * reach, b.x0, b.x1).0;
-                m.y = fold(gy + ny * reach, b.y0, b.y1).0;
+                m.x = wrap(gx + nx * reach, b.x0, b.x1);
+                m.y = wrap(gy + ny * reach, b.y0, b.y1);
             }
         }
     }
@@ -501,8 +549,8 @@ impl BrownianMotion {
         let fade = ring_fade(self.ring_age, self.epoch);
         let r = self.ring_radius();
         if fade > 0.0 && r > 0.5 {
-            let ink = ink::ramp(SOLVENT, 0.2 + 0.25 * fade);
-            let (cx, cy) = dot_of(self.ring_origin);
+            let ink = ink::ramp(GRAIN, 0.2 + 0.25 * fade);
+            let (cx, cy) = dot_of(self.to_view(self.ring_origin));
             let rd = r * f64::from(Dots::CELL_H);
             let n = (TAU * rd).ceil().min(4096.0) as usize;
             for k in (0..n).step_by(2) {
@@ -520,10 +568,11 @@ impl BrownianMotion {
             }
         }
 
-        // Solvent: one dot per molecule, brighter when fast, white-hot after a hit.
+        // Solvent: one dim dot per molecule, a little brighter when fast, flashing after
+        // a hit: a quiet ground for the path.
         for m in self.molecules.iter() {
             let speed = (m.vx.hypot(m.vy) / (3.0 * MOL_SD)).min(1.0);
-            let v = (0.3 + 0.35 * speed).max(m.glow);
+            let v = (MOL_BASE + MOL_SPEED * speed).max(m.glow);
             let (x, y) = dot_of((m.x, m.y));
             // A fresh hit is a small bead; the flashes stand for the kicks (decorative:
             // they move nothing, SPEC-002 Stylised). Capped below the trail's head so a
@@ -542,13 +591,15 @@ impl BrownianMotion {
         // Trail: the path so far, oldest dimmest, joined to the grain; the newest
         // `TRAIL_BOLD` s as a two-dot stroke, so the walk outweighs the solvent speckle.
         let n = self.trail.len();
-        let head = self.grain_pos();
-        let newer = self.trail.iter().skip(1).chain([&head]);
+        let world_head = self.grain_pos();
+        let newer = self.trail.iter().skip(1).chain([&world_head]);
         for (k, (&p, &q)) in self.trail.iter().zip(newer).enumerate() {
             let age = (n - 1 - k) as f64 * TICK / TRAIL_PER_TICK as f64;
-            let ink = ink::ramp(GRAIN, trail_value(age));
-            stroke(&mut self.dots, dot_of(p), dot_of(q), ink, age < TRAIL_BOLD);
+            let ink = ink::ramp(PATH, trail_value(age));
+            let (p, q) = (dot_of(self.to_view(p)), dot_of(self.to_view(q)));
+            stroke(&mut self.dots, p, q, ink, age < TRAIL_BOLD);
         }
+        let head = self.to_view(world_head);
 
         // The grain: a sphere lit from the upper left, on square half-block pixels.
         self.pixels.clear();
@@ -569,7 +620,7 @@ impl BrownianMotion {
                 }
                 let n = [dx / r, dy / r, (1.0 - rr).sqrt()];
                 let lambert = (n[0] * LIGHT[0] + n[1] * LIGHT[1] + n[2] * LIGHT[2]).max(0.0);
-                let v = 0.3 + 0.55 * lambert + 0.15 * lambert.powi(12);
+                let v = 0.45 + 0.4 * lambert + 0.15 * lambert.powi(12);
                 self.pixels.set(x, y, ink::ramp(GRAIN, v));
             }
         }
@@ -587,21 +638,28 @@ impl Generator for BrownianMotion {
         self.room = title::readout_room(size, &Title::of(self));
         self.label_row = (size.height() >= 8).then(|| i32::from(size.height()) - 1);
         let rows = if self.label_row.is_some() { h - 1.0 } else { h };
+        // The solvent is periodic over the whole view; the grain's centre is kept a radius
+        // inside the drawable span.
         self.mol_box = Bounds {
+            x0: 0.0,
+            x1: w / ASPECT,
+            y0: 0.0,
+            y1: rows,
+        };
+        self.grain_r = (GRAIN_FRAC * rows.min(w / ASPECT)).clamp(GRAIN_R.0, GRAIN_R.1);
+        self.grain_box = Bounds {
             x0: 0.0,
             x1: (w - 1.0) / ASPECT,
             y0: 0.0,
             y1: rows - 1.0,
-        };
-        self.grain_r = (GRAIN_FRAC * rows.min(w / ASPECT)).clamp(GRAIN_R.0, GRAIN_R.1);
-        self.grain_box = self.mol_box.inset(self.grain_r);
+        }
+        .inset(self.grain_r);
         self.dots.resize(size);
         self.pixels.resize(size);
 
-        // A fresh run: grain at the center with a stationary velocity.
-        let b = self.grain_box;
+        // A fresh run: grain at the world origin with a stationary velocity.
         let (vx, vy) = gaussian2(&mut ctx.rng, v_stationary_sd());
-        self.grain = [(b.x0 + b.x1) / 2.0, (b.y0 + b.y1) / 2.0, vx, vy];
+        self.grain = [0.0, 0.0, vx, vy];
         self.t = 0.0;
         self.tick_clock = 0.0;
         self.trail.clear();
@@ -614,6 +672,9 @@ impl Generator for BrownianMotion {
         // walking for PREROLL s, with its trail, lags and an estimate.
         self.advance_grain(PREROLL, &mut ctx.rng);
         self.t = PREROLL;
+        // The stage opens centred on the grain.
+        self.cam = self.grain_pos();
+        self.recentring = false;
         let g = self.grain_box;
         self.epoch = epoch_len(0.5 * (g.x1 - g.x0).min(g.y1 - g.y0));
         // The first ring epoch began RING_PREROLL s ago (at most half an epoch), centred
@@ -654,6 +715,7 @@ impl Generator for BrownianMotion {
         }
         let dt = dt.min(MAX_DT);
         self.advance_grain(dt, &mut ctx.rng);
+        let shift = self.track(dt);
         self.t += dt;
         self.ring_age += dt;
         if self.ring_age >= self.epoch {
@@ -663,8 +725,9 @@ impl Generator for BrownianMotion {
         // reach, so none tunnels through the grain at a large dt.
         let reach = self.grain_r + CONTACT_PAD;
         let subs = (dt * 3.0 * MOL_SD / (0.5 * reach)).ceil().clamp(1.0, 16.0);
+        let part = (shift.0 / subs, shift.1 / subs);
         for _ in 0..subs as usize {
-            self.move_molecules(dt / subs);
+            self.move_molecules(dt / subs, part);
         }
         self.refresh_label();
         self.rasterise();
@@ -727,8 +790,8 @@ mod tests {
     #[test]
     fn bro_a1_constants_satisfy_d_equals_sigma2_over_2gamma2() {
         assert!((SIGMA * SIGMA / (2.0 * GAMMA * GAMMA) - D).abs() < 1e-12);
-        // ~3 rows of rms 2-D displacement per √s (spec).
-        assert!(((4.0 * D).sqrt() - 3.0).abs() < 1e-12);
+        // ~4 rows of rms 2-D displacement per √s (spec).
+        assert!(((4.0 * D).sqrt() - 4.0).abs() < 1e-12);
     }
 
     #[test]
@@ -838,22 +901,19 @@ mod tests {
     }
 
     #[test]
-    fn bro_a3_fold_reflects_and_reports_parity() {
-        assert_eq!(fold(0.5, 0.0, 1.0), (0.5, false));
-        let (x, flip) = fold(1.25, 0.0, 1.0);
-        assert!((x - 0.75).abs() < 1e-12 && flip);
-        let (x, flip) = fold(-0.25, 0.0, 1.0);
-        assert!((x - 0.25).abs() < 1e-12 && flip);
-        let (x, flip) = fold(2.25, 0.0, 1.0);
-        assert!((x - 0.25).abs() < 1e-12 && !flip);
-        let (x, _) = fold(-1e9 - 0.3, 2.0, 5.0);
-        assert!((2.0..=5.0).contains(&x));
-        assert_eq!(fold(f64::NAN, 2.0, 5.0), (2.0, false));
-        assert_eq!(fold(3.0, 2.0, 2.0), (2.0, false));
+    fn bro_a3_wrap_is_periodic() {
+        assert_eq!(wrap(0.5, 0.0, 1.0), 0.5);
+        assert!((wrap(1.25, 0.0, 1.0) - 0.25).abs() < 1e-12);
+        assert!((wrap(-0.25, 0.0, 1.0) - 0.75).abs() < 1e-12);
+        let x = wrap(-1e9 - 0.3, 2.0, 5.0);
+        assert!((2.0..5.0).contains(&x));
+        assert!((2.0..5.0).contains(&wrap(-1e-17, 2.0, 5.0)));
+        assert_eq!(wrap(f64::NAN, 2.0, 5.0), 2.0);
+        assert_eq!(wrap(3.0, 2.0, 2.0), 2.0);
     }
 
     #[test]
-    fn bro_a3_grain_and_molecules_stay_in_the_box_and_trail_is_bounded() {
+    fn bro_a3_grain_stays_in_view_and_molecules_in_the_box_and_trail_is_bounded() {
         let mut ctx = seeded(5);
         let mut g = BrownianMotion::default();
         let dts = [SIM_DT, 0.25, 0.0, 0.1, SIM_DT, 0.013];
@@ -861,19 +921,58 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
-            for i in 0..900 {
+            for i in 0..1200 {
                 g.update(dts[i % dts.len()], &mut ctx);
-                let (gx, gy) = g.grain_pos();
-                assert!(g.grain_box.contains(gx, gy), "{w}x{h}: grain ({gx}, {gy})");
+                let (gx, gy) = g.to_view(g.grain_pos());
+                let b = g.grain_box;
+                let eps = 1e-9;
+                assert!(
+                    (b.x0 - eps..=b.x1 + eps).contains(&gx)
+                        && (b.y0 - eps..=b.y1 + eps).contains(&gy),
+                    "{w}x{h}: grain ({gx}, {gy})"
+                );
                 for m in g.molecules.iter() {
                     assert!(g.mol_box.contains(m.x, m.y), "{w}x{h}: molecule");
                 }
                 assert!(g.trail.len() <= TRAIL_LEN);
                 assert!(g.molecules.len() <= MOL_MAX);
             }
-            // 900 frames averaging ~0.08 s ≫ 180 ticks: the trail is full, never longer.
+            // 1200 frames averaging ~0.08 s ≫ 256 ticks: the trail is full, never longer.
             assert_eq!(g.trail.len(), TRAIL_LEN, "{w}x{h}");
         }
+    }
+
+    #[test]
+    fn bro_a8_the_stage_keeps_the_grain_near_the_centre() {
+        // Over 5 minutes at 120x40 the free grain wanders ~ √(4D·300) ≈ 69 rows, several
+        // view heights, yet the stage keeps it in the central part of the view: always
+        // inside the recentre band plus the distance one glide lags, and mostly well
+        // inside it.
+        let mut ctx = seeded(17);
+        let mut g = BrownianMotion::default();
+        g.resize(Size::new(120, 40), &mut ctx);
+        let b = g.grain_box;
+        let half = (0.5 * (b.x1 - b.x0), 0.5 * (b.y1 - b.y0));
+        let (mut far, mut inner, mut n) = (0.0f64, 0, 0);
+        let start = g.grain_pos();
+        for _ in 0..(300.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            let (ex, ey) = (g.grain[0] - g.cam.0, g.grain[1] - g.cam.1);
+            let e = (ex.abs() / half.0).max(ey.abs() / half.1);
+            far = far.max(e);
+            if e <= STAGE_BAND {
+                inner += 1;
+            }
+            n += 1;
+        }
+        let (gx, gy) = g.grain_pos();
+        let wandered = (gx - start.0).hypot(gy - start.1);
+        assert!(wandered > half.1, "the grain barely moved: {wandered}");
+        assert!(far < 0.75, "grain reached {far:.2} of the half view");
+        assert!(
+            f64::from(inner) > 0.9 * f64::from(n),
+            "{inner}/{n} frames in the band"
+        );
     }
 
     #[test]
@@ -905,15 +1004,16 @@ mod tests {
 
     #[test]
     fn bro_a6_newest_trail_outshines_the_ring_and_the_flashes() {
-        // Hot head: 0.8 → 0.7 over 5 s, then a dimmer, monotone fade to 0.2 at the tail.
-        assert_eq!(trail_value(0.0), 0.8);
+        // Hot head: 1 → 0.85 over 10 s, then a dimmer, monotone fade to 0.3 at the tail.
+        assert_eq!(trail_value(0.0), 1.0);
         let span = TRAIL_LEN as f64 * TICK / TRAIL_PER_TICK as f64;
-        assert!((trail_value(span) - 0.2).abs() < 1e-12);
-        let vs: Vec<f64> = (0..=220).map(|i| trail_value(f64::from(i) * 0.1)).collect();
+        assert!((trail_value(span) - 0.3).abs() < 1e-12);
+        let vs: Vec<f64> = (0..=320).map(|i| trail_value(f64::from(i) * 0.1)).collect();
         assert!(vs.windows(2).all(|w| w[1] <= w[0]), "not monotone");
-        // Above the flash cap and the ring's brightest (0.2 + 0.25), which the 0.7 floor of
-        // the hot head clears.
-        assert!(vs[..50].iter().all(|&v| v >= 0.7), "{:?}", &vs[..50]);
+        // Above the flash cap (0.6) and the ring's brightest (0.2 + 0.25), which the 0.85
+        // floor of the hot head clears; the solvent ground stays at or under 0.2.
+        assert!(vs[..100].iter().all(|&v| v >= 0.85), "{:?}", &vs[..100]);
+        const { assert!(GLOW_TOP < 0.85 && MOL_BASE + MOL_SPEED <= 0.2 + 1e-12) };
     }
 
     #[test]
@@ -922,7 +1022,7 @@ mod tests {
         // steep; one when not bold.
         let mut dots = Dots::default();
         dots.resize(Size::new(20, 10));
-        let ink = ink::ramp(GRAIN, trail_value(0.0));
+        let ink = ink::ramp(PATH, trail_value(0.0));
         let per_column = |d: &Dots, x| (0..40).filter(|&y| d.is_lit(x, y)).count();
         let per_row = |d: &Dots, y| (0..40).filter(|&x| d.is_lit(x, y)).count();
         stroke(&mut dots, (2.0, 5.0), (30.0, 12.0), ink, true);
@@ -996,7 +1096,7 @@ mod tests {
         for _ in 0..200 {
             g.update(SIM_DT, &mut ctx);
         }
-        assert!(g.label.contains(" rows^2/s  true 2.25  t "), "{}", g.label);
+        assert!(g.label.contains(" rows^2/s  true 4.00  t "), "{}", g.label);
     }
 
     #[test]
@@ -1009,7 +1109,12 @@ mod tests {
         let lines = frame.to_lines();
         assert!(lines.iter().all(|l| l.is_ascii()));
         let roles: Vec<_> = frame.cells().iter().map(|c| c.ink.role).collect();
-        for r in [Role::Ramp(GRAIN), Role::Ramp(SOLVENT), Role::Text] {
+        for r in [
+            Role::Ramp(GRAIN),
+            Role::Ramp(PATH),
+            Role::Ramp(SOLVENT),
+            Role::Text,
+        ] {
             assert!(roles.contains(&r), "{r:?} missing");
         }
         assert!(lines[29].contains("D 1-path"), "{}", lines[29]);
@@ -1020,7 +1125,7 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(80, 24), &mut ctx);
-        let (gx, gy) = g.grain_pos();
+        let (gx, gy) = g.to_view(g.grain_pos());
         g.molecules.clear();
         let reach = g.grain_r + CONTACT_PAD;
         // Heading straight at the grain from just outside contact.
@@ -1031,12 +1136,12 @@ mod tests {
             vy: 0.0,
             glow: 0.0,
         });
-        g.move_molecules(SIM_DT);
+        g.move_molecules(SIM_DT, (0.0, 0.0));
         let m = *g.molecules.iter().next().expect("one molecule");
         assert_eq!(m.glow, 1.0);
         assert!(m.vx > 0.0, "bounced: {}", m.vx);
         for _ in 0..60 {
-            g.move_molecules(SIM_DT);
+            g.move_molecules(SIM_DT, (0.0, 0.0));
         }
         let glow = g.molecules.iter().next().expect("one molecule").glow;
         assert!((glow - (-1.0 / GLOW_TAU).exp()).abs() < 1e-9, "{glow}");
@@ -1047,7 +1152,7 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(80, 24), &mut ctx);
-        let (gx, gy) = g.grain_pos();
+        let (gx, gy) = g.to_view(g.grain_pos());
         g.molecules.clear();
         let reach = g.grain_r + CONTACT_PAD;
         // A 3σ-fast molecule would cross the whole grain within one unsplit 0.25 s move.
@@ -1120,8 +1225,8 @@ mod tests {
     }
 
     #[test]
-    fn bro_a6_trail_is_22_s_at_32_hz_and_the_grain_is_a_round_pixel_sphere() {
-        assert!((TRAIL_LEN as f64 * TICK / TRAIL_PER_TICK as f64 - 22.0).abs() < 1e-12);
+    fn bro_a6_trail_is_32_s_at_32_hz_and_the_grain_is_a_round_pixel_sphere() {
+        assert!((TRAIL_LEN as f64 * TICK / TRAIL_PER_TICK as f64 - 32.0).abs() < 1e-12);
         let mut ctx = seeded(12);
         let mut g = BrownianMotion::default();
         let size = Size::new(120, 40);
@@ -1130,6 +1235,7 @@ mod tests {
             g.update(SIM_DT, &mut ctx);
         }
         assert_eq!(g.trail.len(), TRAIL_LEN);
+        // The grain is drawn where the stage puts it: near the view's centre.
         // The sphere covers about π r² pixels of 0.5 × 0.5 rows.
         let lit = (0..2 * 40)
             .flat_map(|y| (0..120).map(move |x| (x, y)))

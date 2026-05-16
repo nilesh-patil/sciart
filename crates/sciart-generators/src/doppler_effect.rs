@@ -78,7 +78,7 @@ const SPACING: f64 = 0.7;
 const MAX_SAMPLES: usize = 12_000;
 /// Entries of the light act's rest-angle → Blackbody-level table.
 const LUT: usize = 129;
-const SOUND_RAMP: Ramp = Ramp::Aurora;
+const SOUND_RAMP: Ramp = Ramp::Ice;
 const SOUND_SOURCE: Glyph = Glyph::new('◉', '@');
 const LIGHT_SOURCE: Glyph = Glyph::new('✦', '*');
 const WAKE: [Glyph; 2] = [Glyph::new('━', '='), Glyph::new('─', '-')];
@@ -974,7 +974,7 @@ mod tests {
         assert_eq!(seen, [&cycle[..], &cycle[..]].concat());
         // Fronts carry their act's palette.
         let mut stage = Stage::new(build(), 3, Size::new(120, 40), GlyphMode::Unicode);
-        for (t, role) in [(3.0, Role::Ramp(Ramp::Aurora)), (40.0, Role::Blackbody)] {
+        for (t, role) in [(3.0, Role::Ramp(SOUND_RAMP)), (40.0, Role::Blackbody)] {
             while stage.ctx().time() < t {
                 stage.step(SIM_DT);
             }

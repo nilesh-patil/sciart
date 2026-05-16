@@ -1,8 +1,9 @@
 //! Diffusion-limited aggregation (Witten–Sander) in two acts that alternate: a frost
 //! dendrite growing from a seed, then a metal forest electrodeposited on a cathode strip.
-//! Each grows, glows in the colours of its arrival times, melts back from the tips inward
-//! (a staged hand-over, not modelled dissolution) and hands over to the other (SPEC-002
-//! `fractal_growth`).
+//! Each grows, glows in the colours of its arrival times and holds; then the next act's
+//! seed starts growing at once while the old aggregate fades out as a ghost behind it,
+//! tips first (a staged cross-fade, not modelled dissolution), so the screen is never
+//! empty between acts (SPEC-002 `fractal_growth`).
 //!
 //! Physics: random walkers diffuse in from a launch curve just outside the aggregate and
 //! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`. The
@@ -100,9 +101,12 @@ const STEPS_MAX: f64 = 240_000.0;
 const FOREST_STEPS_PER_COL: f64 = 40.0;
 /// The frost opens `EARLY_BOOST` times faster, easing to the plain budget over its first
 /// `EARLY` s: a small aggregate is cheap to grow, so the act starts from a visible crystal
-/// instead of a lone seed (the forest starts from its whole cathode).
+/// instead of a lone seed. The forest opens `FOREST_BOOST` times faster, easing over its
+/// first `FOREST_EARLY` s, so its first trees rise while the frost's ghost fades (CRY-A9).
 const EARLY_BOOST: f64 = 4.0;
 const EARLY: f64 = 2.0;
+const FOREST_BOOST: f64 = 3.0;
+const FOREST_EARLY: f64 = 3.0;
 /// Concurrent walkers: a tiny fraction of the cluster, so growth is effectively
 /// one-particle-at-a-time (Witten–Sander), yet enough to draw a faint "vapour".
 const WALKERS: usize = 12;
@@ -120,12 +124,13 @@ const FOLD_CLEAR: u8 = 3;
 /// A walker within this distance of the extent may touch the crystal (diagonal contact √2).
 const TOUCH_REACH: f64 = 1.5;
 /// Growth stops at `R(GROW_FRAC)` (the forest: this fraction of the lattice height) or
-/// after `MAX_GROW` s; then hold, then melt (s).
+/// after `MAX_GROW` s; then it holds for `HOLD` s, and the next act starts while this one
+/// fades out as a ghost over `FADE` s (CRY-A9).
 const GROW_FRAC: f64 = 0.85;
 const FOREST_FRAC: f64 = 0.8;
 const MAX_GROW: f64 = 40.0;
 const HOLD: f64 = 5.0;
-const MELT: f64 = 3.0;
+const FADE: f64 = 3.0;
 /// Sticking probability range (lower = denser, fuzzier crystals).
 const P_STICK: (f64, f64) = (0.3, 1.0);
 /// Live mass–radius fit, lattice units: from a few spacings up to a fraction of `r_max`
@@ -139,12 +144,19 @@ const FIT_HI_FRAC: f64 = 0.5;
 const DF_MIN_N: usize = 600;
 /// How often the live D_f readout is refreshed, s.
 const DF_TICK: f64 = 0.5;
-/// Width of the melting front, in chemical-distance steps.
-const MELT_BAND: f64 = 8.0;
+/// The ghost (CRY-A9): a site's strength starts at `1 − GHOST_SPREAD·chem/max_chem` (tips,
+/// the chemically farthest sites, weakest), decays as `exp(−t/τ)` and the site is gone below
+/// `GHOST_CUT`; τ is set so the roots, at strength 1, go exactly at `FADE`. The ghost is
+/// drawn in the old act's ramp from `GHOST_LO` (at the cut) up to `GHOST_HI` (fresh),
+/// below the live crystal's core, so it reads as an after-image behind the new growth.
+const GHOST_SPREAD: f32 = 0.65;
+const GHOST_CUT: f32 = 0.08;
+const GHOST_LO: f64 = 0.22;
+const GHOST_HI: f64 = 0.45;
 
 // Colour (CRY-A7): a site's ramp position is its arrival time over the growth clock, so
 // the core is deep and the newest tips pale; a site younger than TIP_AGE flashes at the
-// top of the ramp, and a melting site brightens toward it as the front reaches it.
+// top of the ramp.
 const TIP_AGE: f64 = 0.3;
 const RAMP_LO: f64 = 0.5;
 const RAMP_HI: f64 = 0.92;
@@ -221,11 +233,13 @@ enum Act {
 }
 
 impl Act {
-    /// The act's named ramp (false colour, ADR-0015): frost in Ice, the metal in Ember.
+    /// The act's named ramp (false colour, ADR-0015): frost in Ice, the metal in
+    /// Starlight, a neutral grey to pale white, like freshly deposited silver (not the
+    /// gallery's overused amber).
     fn ramp(self) -> Ramp {
         match self {
             Act::Frost => Ramp::Ice,
-            Act::Forest => Ramp::Ember,
+            Act::Forest => Ramp::Starlight,
         }
     }
 
@@ -499,7 +513,6 @@ impl Dla {
 enum Phase {
     Grow,
     Hold,
-    Melt,
 }
 
 #[derive(Debug)]
@@ -521,12 +534,15 @@ pub struct FractalGrowth {
     steps_forest: f64,
     /// Fractional walker steps carried between updates.
     carry: f64,
-    /// Chemical (graph) distance from the seed or cathode, computed when melting starts.
+    /// Chemical (graph) distance from the seed or cathode, computed at the hand-over.
     chem: Grid<u16>,
     queue: Vec<(i32, i32)>,
     max_chem: u16,
-    /// Melting threshold: sites with `chem > melt_k` are gone.
-    melt_k: f64,
+    /// The previous act's aggregate fading out (CRY-A9): display dot and initial strength
+    /// per site, capacity fixed in `resize`; its ramp and the seconds since the hand-over.
+    ghost: Vec<(i32, i32, f32)>,
+    ghost_ramp: Ramp,
+    ghost_t: f64,
     df: Option<f64>,
     df_clock: f64,
     label: StackText<LABEL_CAP>,
@@ -541,29 +557,41 @@ pub struct FractalGrowth {
     origin: (i32, i32),
 }
 
-/// The state that colours the crystal: act, phase, clocks and melting threshold.
+/// The ghost's decay time: a root (strength 1) reaches [`GHOST_CUT`] exactly at [`FADE`].
+fn ghost_tau() -> f64 {
+    FADE / (1.0 / f64::from(GHOST_CUT)).ln()
+}
+
+/// A ghost site's strength `t` s after the hand-over, or `None` once it is gone (CRY-A9).
+fn ghost_strength(v0: f32, t: f64) -> Option<f32> {
+    let v = v0 * (-t / ghost_tau()).exp() as f32;
+    (v >= GHOST_CUT).then_some(v)
+}
+
+/// The ghost's ink at strength `v`: the old act's ramp from [`GHOST_LO`] at the cut to
+/// [`GHOST_HI`] at full strength.
+fn ghost_ink(ramp: Ramp, v: f32) -> Ink {
+    let u = (f64::from(v - GHOST_CUT) / f64::from(1.0 - GHOST_CUT)).clamp(0.0, 1.0);
+    ink::ramp(ramp, GHOST_LO + (GHOST_HI - GHOST_LO) * u)
+}
+
+/// The state that colours the crystal: act and clocks.
 #[derive(Debug, Clone, Copy)]
 struct Tint {
     ramp: Ramp,
-    phase: Phase,
     t: f64,
     t_grown: f64,
-    melt_k: f64,
 }
 
 impl Tint {
-    /// Ink for a terminal cell from its youngest dot's arrival time and the melting front
-    /// (CRY-A7): the ramp position is `RAMP_LO + (RAMP_HI − RAMP_LO)·arrival/t_grown`;
-    /// tips younger than [`TIP_AGE`] and sites the melting front is reaching go to the top.
-    fn cell_ink(self, youngest: f32, chem: u16) -> Ink {
+    /// Ink for a terminal cell from its youngest dot's arrival time (CRY-A7): the ramp
+    /// position is `RAMP_LO + (RAMP_HI − RAMP_LO)·arrival/t_grown`; tips younger than
+    /// [`TIP_AGE`] go to the top.
+    fn cell_ink(self, youngest: f32) -> Ink {
         let arrival = f64::from(youngest);
         let mut v = RAMP_LO + (RAMP_HI - RAMP_LO) * (arrival / self.t_grown.max(1e-9)).min(1.0);
         if self.t - arrival < TIP_AGE {
             v = 1.0;
-        }
-        if self.phase == Phase::Melt {
-            let front = (f64::from(chem) - (self.melt_k - MELT_BAND)) / MELT_BAND;
-            v += (1.0 - v) * front.clamp(0.0, 1.0);
         }
         ink::ramp(self.ramp, v)
     }
@@ -586,7 +614,9 @@ impl Default for FractalGrowth {
             chem: Grid::default(),
             queue: Vec::new(),
             max_chem: 0,
-            melt_k: 0.0,
+            ghost: Vec::new(),
+            ghost_ramp: Ramp::Ice,
+            ghost_t: 0.0,
             df: None,
             df_clock: 0.0,
             label: StackText::new(),
@@ -658,9 +688,9 @@ impl FractalGrowth {
     }
 
     /// Chemical distance of every crystal site from the seed or cathode (8-neighbour BFS).
-    /// Removing all sites beyond a threshold always leaves a set connected to a root
-    /// (CRY-A1), and it melts every tip first — outside-in along the branches.
-    fn start_melt(&mut self) {
+    /// Every site is reached from a root (CRY-A1), and the tips are the farthest, so the
+    /// ghost fades outside-in along the branches.
+    fn measure_chem(&mut self) {
         self.chem.fill(u16::MAX);
         self.queue.clear();
         self.max_chem = 0;
@@ -682,38 +712,46 @@ impl FractalGrowth {
                 }
             }
         }
-        self.melt_k = f64::from(self.max_chem);
-        self.phase = Phase::Melt;
-        self.phase_t = 0.0;
     }
 
-    fn melt_to(&mut self, k: f64) {
-        self.melt_k = k;
-        let (chem, attach) = (&self.chem, &mut self.dla.attach);
-        self.dla.cells.retain(|&(x, y)| {
-            let keep = chem.get(x, y).is_some_and(|&c| f64::from(c) <= k);
-            if !keep {
-                attach.set(x, y, EMPTY);
+    /// Hand over to the other act (CRY-A9): the grown aggregate becomes the ghost, each
+    /// site at a strength that falls with its chemical distance (tips weakest, so they go
+    /// first), and the next act is seeded at once, its readout starting from its own N.
+    fn hand_over(&mut self, ctx: &mut Ctx) {
+        self.measure_chem();
+        self.ghost.clear();
+        let (ox, oy) = self.origin;
+        let far = f32::from(self.max_chem.max(1));
+        for &(x, y) in &self.dla.cells {
+            let c = self.chem.get(x, y).copied().unwrap_or(0).min(self.max_chem);
+            let v0 = 1.0 - GHOST_SPREAD * f32::from(c) / far;
+            if self.ghost.len() < self.ghost.capacity() {
+                self.ghost.push((x + ox, y + oy, v0));
             }
-            keep
-        });
+        }
+        self.ghost_ramp = self.act.ramp();
+        self.ghost_t = 0.0;
+        self.act = self.act.next();
+        self.reseed(ctx);
     }
 
     /// Rebuild the crystal raster from the current state (no allocation: the lattice
-    /// was sized in `resize`).
+    /// was sized in `resize`): the ghost first, then the live crystal over it.
     fn rasterise(&mut self) {
         let tint = Tint {
             ramp: self.act.ramp(),
-            phase: self.phase,
             t: self.t,
             t_grown: self.t_grown,
-            melt_k: self.melt_k,
         };
+        self.dots.clear();
+        for &(x, y, v0) in &self.ghost {
+            if let Some(v) = ghost_strength(v0, self.ghost_t) {
+                self.dots.set(x, y, ghost_ink(self.ghost_ramp, v));
+            }
+        }
         // Chemical distances only mean something while melting (`start_melt` fills them).
-        let melting = self.phase == Phase::Melt;
-        let (dots, d, chem_map) = (&mut self.dots, &self.dla, &self.chem);
+        let (dots, d) = (&mut self.dots, &self.dla);
         let (ox, oy) = self.origin;
-        dots.clear();
         // Only the terminal cells that can hold crystal: the seed's r_max box (the forest:
         // full width, from the cathode up to its height), in display dots (lattice site
         // (x, y) is display dot (ox + x, oy + y)).
@@ -733,7 +771,7 @@ impl FractalGrowth {
                 // the sites first and light them with one shared ink.
                 let mut sites = [(0, 0); (SUB_X * SUB_Y) as usize];
                 let mut n = 0;
-                let (mut youngest, mut chem) = (EMPTY, 0u16);
+                let mut youngest = EMPTY;
                 for dy in 0..SUB_Y {
                     for dx in 0..SUB_X {
                         let (x, y) = (cx * SUB_X + dx, cy * SUB_Y + dy);
@@ -744,14 +782,11 @@ impl FractalGrowth {
                             sites[n] = (x, y);
                             n += 1;
                             youngest = youngest.max(a);
-                            if melting {
-                                chem = chem.max(chem_map.get(site.0, site.1).copied().unwrap_or(0));
-                            }
                         }
                     }
                 }
                 if n > 0 {
-                    let ink = tint.cell_ink(youngest, chem);
+                    let ink = tint.cell_ink(youngest);
                     for &(x, y) in &sites[..n] {
                         dots.set(x, y, ink);
                     }
@@ -780,6 +815,7 @@ impl Generator for FractalGrowth {
         self.dla = Dla::new(lattice, WALKERS);
         self.chem = Grid::new(lattice, u16::MAX);
         self.queue = Vec::with_capacity(pool(lattice));
+        self.ghost = Vec::with_capacity(pool(lattice));
         // R(0.85) of the art area in lattice spacings (a row is SUB_Y), within the window.
         let window = f64::from(lattice.width().min(lattice.height())) / 2.0;
         self.r_target =
@@ -792,6 +828,7 @@ impl Generator for FractalGrowth {
             (FOREST_STEPS_PER_COL * f64::from(lattice.width())).clamp(STEPS_MIN, STEPS_MAX);
         self.room = [Act::Frost, Act::Forest]
             .map(|act| title::readout_room(size, &Title::new(META.title, Some(act.caption()))));
+        self.ghost.clear();
         self.reseed(ctx);
         self.rasterise();
     }
@@ -811,7 +848,11 @@ impl Generator for FractalGrowth {
                         let boost = 1.0 + (EARLY_BOOST - 1.0) * (1.0 - self.t / EARLY).max(0.0);
                         (boost * self.steps_frost, self.r_target)
                     }
-                    Act::Forest => (self.steps_forest, self.h_target),
+                    Act::Forest => {
+                        let boost =
+                            1.0 + (FOREST_BOOST - 1.0) * (1.0 - self.t / FOREST_EARLY).max(0.0);
+                        (boost * self.steps_forest, self.h_target)
+                    }
                 };
                 self.carry += budget * dt;
                 let steps = self.carry.floor();
@@ -832,17 +873,14 @@ impl Generator for FractalGrowth {
             }
             Phase::Hold => {
                 if self.phase_t >= HOLD {
-                    self.start_melt();
+                    self.hand_over(ctx);
                 }
             }
-            Phase::Melt => {
-                if self.phase_t >= MELT {
-                    self.act = self.act.next();
-                    self.reseed(ctx);
-                } else {
-                    let f = self.phase_t / MELT;
-                    self.melt_to(f64::from(self.max_chem) * (1.0 - f));
-                }
+        }
+        if !self.ghost.is_empty() {
+            self.ghost_t += dt;
+            if self.ghost_t >= FADE {
+                self.ghost.clear();
             }
         }
         self.rasterise();
@@ -1053,7 +1091,9 @@ mod tests {
         let mut acts = [false; 2];
         for _ in 0..(70.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
-            acts[usize::from(g.act == Act::Forest)] |= g.phase == Phase::Melt;
+            // An act that has handed over is the ghost behind the next one.
+            let ghost_forest = g.ghost_ramp == Act::Forest.ramp();
+            acts[usize::from(ghost_forest)] |= !g.ghost.is_empty();
             let (ox, oy) = g.origin;
             for &(x, y) in &g.dla.walkers {
                 assert!(window(&g, x + ox, y + oy), "walker ({x}, {y})");
@@ -1062,11 +1102,14 @@ mod tests {
         assert_eq!(
             acts,
             [true, true],
-            "both acts grew, held and melted within 70 s"
+            "both acts grew, held and faded within 70 s"
         );
         assert_eq!(g.dla.cells.capacity(), pool_cap, "site pool reallocated");
-        assert_eq!(g.queue.capacity(), queue_cap, "melt queue reallocated");
-        // Every lit dot of the raster lies in the window.
+        assert_eq!(g.queue.capacity(), queue_cap, "hand-over queue reallocated");
+        assert_eq!(g.ghost.capacity(), pool_cap, "ghost reallocated");
+        // Every lit dot of the live raster lies in the window.
+        g.ghost.clear();
+        g.rasterise();
         let d = g.dots.dot_size();
         for y in 0..i32::from(d.height()) {
             for x in 0..i32::from(d.width()) {
@@ -1161,30 +1204,26 @@ mod tests {
 
     #[test]
     fn cry_a7_arrival_colours_run_deep_to_pale_in_each_acts_ramp() {
-        let tint = |ramp, phase| Tint {
+        let tint = |ramp| Tint {
             ramp,
-            phase,
             t: 10.0,
             t_grown: 10.0,
-            melt_k: 100.0,
         };
-        let frost = tint(Ramp::Ice, Phase::Hold);
-        let levels: Vec<u8> = (0..=9).map(|k| frost.cell_ink(k as f32, 0).level).collect();
+        let frost = tint(Act::Frost.ramp());
+        let levels: Vec<u8> = (0..=9).map(|k| frost.cell_ink(k as f32).level).collect();
         assert!(levels.windows(2).all(|w| w[1] > w[0]), "{levels:?}");
-        assert_eq!(frost.cell_ink(0.0, 0), ink::ramp(Ramp::Ice, RAMP_LO));
+        assert_eq!(frost.cell_ink(0.0), ink::ramp(Ramp::Ice, RAMP_LO));
         assert_eq!(
-            frost.cell_ink(9.8, 0),
+            frost.cell_ink(9.8),
             ink::ramp(Ramp::Ice, 1.0),
             "a fresh tip"
         );
+        // The metal is a silver Starlight, not amber.
+        assert_eq!(Act::Forest.ramp(), Ramp::Starlight);
         assert_eq!(
-            tint(Ramp::Ember, Phase::Hold).cell_ink(0.0, 0).role,
-            Role::Ramp(Ramp::Ember)
+            tint(Act::Forest.ramp()).cell_ink(0.0).role,
+            Role::Ramp(Ramp::Starlight)
         );
-        // The melting front brightens the sites it is about to take.
-        let melt = tint(Ramp::Ice, Phase::Melt);
-        assert!(melt.cell_ink(2.0, 99).level > melt.cell_ink(2.0, 50).level);
-        assert_eq!(melt.cell_ink(2.0, 50), frost.cell_ink(2.0, 50));
 
         // The acts alternate, each with its caption and ramp.
         let size = Size::new(80, 24);
@@ -1211,25 +1250,86 @@ mod tests {
     }
 
     #[test]
-    fn cry_a1_cycle_grows_holds_melts_and_reseeds() {
+    fn cry_a1_cycle_grows_holds_and_hands_over() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
-        let (mut shrank, mut reseeded, mut held) = (false, false, false);
+        let (mut handed, mut faded, mut held) = (false, false, false);
         let mut prev = g.dla.cells.len();
         for _ in 0..(70.0 / SIM_DT) as usize {
-            let before = g.phase;
+            let (before, act) = (g.phase, g.act);
             g.update(SIM_DT, &mut ctx);
             if g.phase != Phase::Grow || g.dla.cells.len() != prev {
                 assert!(connected_to_seed(&g.dla), "{:?}", g.phase);
             }
             held |= g.phase == Phase::Hold;
-            shrank |= g.phase == Phase::Melt && g.dla.cells.len() < prev;
-            reseeded |= before == Phase::Melt && g.phase == Phase::Grow;
+            if g.act != act {
+                assert_eq!(before, Phase::Hold);
+                assert_eq!(g.phase, Phase::Grow);
+                assert!(!g.ghost.is_empty(), "the old act stays as a ghost");
+                handed = true;
+            }
+            faded |= handed && g.ghost.is_empty();
             prev = g.dla.cells.len();
         }
-        assert!(held && shrank && reseeded, "{held} {shrank} {reseeded}");
+        assert!(held && handed && faded, "{held} {handed} {faded}");
+    }
+
+    #[test]
+    fn cry_a9_the_old_act_fades_tips_first_while_the_new_one_grows() {
+        // Strength: roots (1) last exactly FADE; tips (1 − spread) go first; monotone.
+        assert!(ghost_strength(1.0, FADE - 0.01).is_some());
+        assert!(ghost_strength(1.0, FADE + 0.01).is_none());
+        let tip = 1.0 - GHOST_SPREAD;
+        let gone = |v0| (0..400).find(|&k| ghost_strength(v0, f64::from(k) * 0.01).is_none());
+        assert!(gone(tip).unwrap() < gone(1.0).unwrap(), "tips fade first");
+        // The ghost is drawn in its act's ramp below the live crystal's core.
+        let full = ghost_ink(Ramp::Ice, 1.0);
+        assert_eq!(full, ink::ramp(Ramp::Ice, GHOST_HI));
+        assert!(full.level < ink::ramp(Ramp::Ice, RAMP_LO).level);
+        assert!(ghost_ink(Ramp::Ice, GHOST_CUT).level >= 2 * ink::MIN_VISIBLE_LEVEL as u8);
+
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = FractalGrowth::default();
+        g.resize(size, &mut ctx);
+        let (mut switches, mut min_lit, mut frames) = (0, usize::MAX, 0);
+        for _ in 0..(62.0 / SIM_DT) as usize {
+            let act = g.act;
+            let old_n = g.dla.cells.len();
+            g.update(SIM_DT, &mut ctx);
+            if g.act != act {
+                switches += 1;
+                // Every old site is in the ghost, and the readout restarts with the new act.
+                assert_eq!(g.ghost.len(), old_n);
+                assert_eq!(g.ghost_ramp, act.ramp());
+                let n: usize = g
+                    .label
+                    .as_str()
+                    .split("N ")
+                    .nth(1)
+                    .unwrap()
+                    .split(' ')
+                    .next()
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                assert!(n < old_n / 2, "N {n} restarted (was {old_n})");
+            }
+            // The screen is never close to empty: from the first second on, at least
+            // 120 cells hold crystal or ghost.
+            if g.t > 1.0 || switches > 0 {
+                let lit = (0..40)
+                    .flat_map(|cy| (0..120).map(move |cx| (cx, cy)))
+                    .filter(|&(cx, cy)| g.dots.cell_mask(cx, cy).is_some_and(|m| m != 0))
+                    .count();
+                min_lit = min_lit.min(lit);
+                frames += 1;
+            }
+        }
+        assert!(switches >= 2, "{switches} hand-overs in 62 s");
+        assert!(frames > 0 && min_lit >= 120, "min {min_lit} lit cells");
     }
 
     #[test]
@@ -1386,7 +1486,7 @@ mod tests {
         }
         for r in [
             Role::Ramp(Ramp::Ice),
-            Role::Ramp(Ramp::Ember),
+            Role::Ramp(Ramp::Starlight),
             Role::Dim,
             Role::Text,
         ] {

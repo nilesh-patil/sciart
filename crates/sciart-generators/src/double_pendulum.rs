@@ -28,7 +28,7 @@ use sciart_core::geom::{ASPECT, wrap_angle};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{ink, ode};
+use sciart_core::{Tone, ink, ode};
 
 pub static META: Meta = Meta {
     name: "double_pendulum",
@@ -101,16 +101,84 @@ const TRAIL_DASH: usize = 4;
 /// Twin A is aurora green, twin B Hα crimson: near-complementary false colours, and a
 /// pair no other dynamics scene uses (DP-A5).
 const RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::HAlpha];
+/// The glow under the line art (DP-A10): each twin's trail, rods and bobs expose a
+/// half-block [`Glow`] of their own, rebuilt every frame from the model-space trail (so a
+/// resize keeps it), tone-mapped by an asinh curve and drawn in the twin's ramp at up to
+/// `GLOW_V`, under the trail's top value, so the lines stay the brightest thing in their
+/// cells and the glow reads as light spilling from them. Each pixel takes the ramp of the
+/// twin that exposed it more. Unicode only: ASCII has no half blocks.
+const GLOW_V: f64 = 0.4;
+const GLOW_KNEE: f32 = 0.4;
+const GLOW_WHITE: f32 = 5.0;
+/// Glow exposure per pixel of path: the trail by freshness², the rods evenly; a bob adds a
+/// wide halo (`HALO`) at `BOB_GLOW`.
+const TRAIL_GLOW: f32 = 0.45;
+const ROD_GLOW: f32 = 0.4;
+const BOB_GLOW: f32 = 2.5;
+/// A 3×3 splat for strokes (`(dx, dy, w)` in pixels) and a radius-3 halo for the bobs.
+const STROKE: [(i32, i32, f32); 9] = [
+    (0, 0, 0.36),
+    (-1, 0, 0.12),
+    (1, 0, 0.12),
+    (0, -1, 0.12),
+    (0, 1, 0.12),
+    (-1, -1, 0.04),
+    (1, -1, 0.04),
+    (-1, 1, 0.04),
+    (1, 1, 0.04),
+];
+const HALO_R: i32 = 3;
+const HALO_N: usize = ((2 * HALO_R + 1) * (2 * HALO_R + 1)) as usize;
+/// The halo kernel, `w = (1 − r/(R + 1))²` inside radius `R + ½`.
+const HALO: [(i32, i32, f32); HALO_N] = halo_kernel();
+const _: () = assert!(GLOW_V < TRAIL_V);
+
+const fn halo_kernel() -> [(i32, i32, f32); HALO_N] {
+    let mut k = [(0, 0, 0.0f32); HALO_N];
+    let mut i = 0;
+    let mut dy = -HALO_R;
+    while dy <= HALO_R {
+        let mut dx = -HALO_R;
+        while dx <= HALO_R {
+            let r2 = (dx * dx + dy * dy) as f32;
+            // No const sqrt: (1 − r/(R+1))² ≈ 1 − r²/(R+½)² is close enough for a halo.
+            let reach = (HALO_R as f32 + 0.5) * (HALO_R as f32 + 0.5);
+            let w = 1.0 - r2 / reach;
+            k[i] = (dx, dy, if w > 0.0 { w * w } else { 0.0 });
+            i += 1;
+            dx += 1;
+        }
+        dy += 1;
+    }
+    k
+}
+
+/// Splat `kernel` at every pixel along the dot-space segment `a → b` (one per pixel of
+/// length, at least one), `w` each.
+fn glow_stroke(glow: &mut Glow, a: (f64, f64), b: (f64, f64), kernel: &[(i32, i32, f32)], w: f32) {
+    let len = (b.0 - a.0).hypot(b.1 - a.1);
+    if !len.is_finite() {
+        return;
+    }
+    // A pixel is 2 dots across; the cap only bounds a runaway length.
+    let n = (len / 2.0).ceil().clamp(1.0, 2048.0) as usize;
+    for k in 0..n {
+        let u = (k as f64 + 0.5) / n as f64;
+        glow.splat(a.0 + u * (b.0 - a.0), a.1 + u * (b.1 - a.1), kernel, w);
+    }
+}
+
 /// Ramp values of the parts of a twin. The pendulum outshines its own trail (capped at
 /// `TRAIL_V`), and the bodies sit in the saturated middle of the ramps (above ~0.8 both
 /// wash out towards white, and the two-tone superposition with them); each bob gets a
-/// one-dot core at 0.8 as a highlight.
-const ROD_V: f64 = 0.62;
-const BOB_V: f64 = 0.68;
-const CORE_V: f64 = 0.8;
+/// one-dot core at 0.9 as a highlight (M12: lifted from 0.62 / 0.68 / 0.8 / 0.56 so the arms
+/// read as lit over their glow).
+const ROD_V: f64 = 0.66;
+const BOB_V: f64 = 0.72;
+const CORE_V: f64 = 0.9;
 /// Trail ramp value: `TRAIL_FLOOR` at the tail up to `TRAIL_V` at the newest segment.
 const TRAIL_FLOOR: f64 = 0.12;
-const TRAIL_V: f64 = 0.56;
+const TRAIL_V: f64 = 0.6;
 /// The pivot hinge, always visible.
 const PIVOT_LEVEL: u8 = 230;
 // The pendulum outshines its own trail, and its core outshines its body (DP-A5).
@@ -394,6 +462,10 @@ pub struct DoublePendulum {
     lower_r: f64,
     /// Everything but the readout, rasterised in `update`/`resize`.
     dots: Dots,
+    /// Each twin's glow exposure and the toned half-block layer under the dots (DP-A10).
+    glow: [Glow; 2],
+    halo: Pixels,
+    tone: Tone,
     /// Readouts in decreasing length; render picks the longest that fits.
     labels: [String; 3],
 }
@@ -417,6 +489,9 @@ impl Default for DoublePendulum {
             label_row: None,
             lower_r: LOWER_R,
             dots: Dots::default(),
+            glow: [Glow::default(), Glow::default()],
+            halo: Pixels::default(),
+            tone: Tone::asinh(GLOW_KNEE, GLOW_WHITE),
             labels: std::array::from_fn(|_| String::with_capacity(96)),
         }
     }
@@ -547,6 +622,63 @@ impl DoublePendulum {
         }
         self.dots
             .disc(pivot.0, pivot.1, PIVOT_R, Ink::new(Role::Text, PIVOT_LEVEL));
+        self.expose();
+    }
+
+    /// Rebuild the glow under the line art from the trail, rods and bobs (DP-A10). The
+    /// trail lives in model space, so this is exact after a resize too.
+    fn expose(&mut self) {
+        let view = self.view;
+        let n = self.trail.len();
+        for g in &mut self.glow {
+            g.clear();
+        }
+        let arms = self.twins.map(|y| bobs(&SCENE, y[0], y[1]));
+        let now = arms.map(|a| a.map(|p| view.dot(p)));
+        // The newest trail segment joins the bobs' current positions, as the trail does.
+        let head = Sample {
+            lows: [arms[0][1], arms[1][1]],
+        };
+        let newer = self.trail.iter().skip(1).chain([&head]);
+        for (k, (old, new)) in self.trail.iter().zip(newer).enumerate() {
+            let age = n - 1 - k;
+            let fresh = 1.0 - age as f32 / TRAIL_LEN as f32;
+            for (i, glow) in self.glow.iter_mut().enumerate() {
+                let (a, b) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
+                glow_stroke(glow, a, b, &STROKE, TRAIL_GLOW * fresh * fresh);
+            }
+        }
+        let pivot = view.dot((0.0, 0.0));
+        for (glow, [b1, b2]) in self.glow.iter_mut().zip(now) {
+            glow_stroke(glow, pivot, b1, &STROKE, ROD_GLOW);
+            glow_stroke(glow, b1, b2, &STROKE, ROD_GLOW);
+            glow.splat(b1.0, b1.1, &HALO, 0.6 * BOB_GLOW);
+            glow.splat(b2.0, b2.1, &HALO, BOB_GLOW);
+        }
+        let (tone, [ga, gb]) = (&self.tone, &self.glow);
+        let (va, vb) = (ga.values(), gb.values());
+        let w = i32::from(ga.pixel_size().width()).max(1);
+        self.halo.shade(|x, y| {
+            let i = (y * w + x) as usize;
+            let (a, b) = (va.get(i).copied(), vb.get(i).copied());
+            let (a, b) = (a.unwrap_or(0.0), b.unwrap_or(0.0));
+            // Where both twins expose a pixel about equally (superposed), alternate them
+            // on a checkerboard, the glow's analogue of the dashed two-tone lines.
+            let close = (a - b).abs() <= 0.35 * a.max(b);
+            let twin = if close {
+                ((x + y) & 1) as usize
+            } else {
+                usize::from(b > a)
+            };
+            let v = a.max(b) + 0.5 * a.min(b);
+            let level = tone.level(v);
+            let value = GLOW_V * f64::from(level) / 255.0;
+            if 255.0 * value < ink::MIN_VISIBLE_LEVEL {
+                Ink::BLANK
+            } else {
+                twin_ink(twin, value)
+            }
+        });
     }
 }
 
@@ -567,6 +699,10 @@ impl Generator for DoublePendulum {
             LOWER_R
         };
         self.dots.resize(size);
+        self.halo.resize(size);
+        for g in &mut self.glow {
+            g.resize(size);
+        }
         // The dynamics and trails are in model units, so a resize never restarts a run.
         if !self.started {
             self.release(ctx);
@@ -611,7 +747,10 @@ impl Generator for DoublePendulum {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.dots.blit(canvas);
+        // The glow first (Unicode only), then the line art with the glow carried on as
+        // its cells' background (DP-A10).
+        self.halo.blit(canvas, |_, _, _, _| None);
+        self.dots.blit_over(canvas, &self.halo);
         // Right-aligned, clear of the title (GEN-R13).
         let room = title::readout_room(canvas.size(), &Title::of(self));
         if let Some(row) = self.label_row
@@ -1006,6 +1145,59 @@ mod tests {
     }
 
     /// Scene `seed` at `size` after `seconds` of simulated time.
+    #[test]
+    fn dp_a10_each_twin_glows_in_its_own_ramp_under_brighter_line_art() {
+        let size = Size::new(120, 40);
+        let g = run(0, size, 30.0);
+        // Round each lower bob: a halo in that twin's ramp, from the first frame after a
+        // resize too (the glow is rebuilt from the model-space trail).
+        let mut resized = run(0, Size::new(80, 24), 30.0);
+        resized.resize(size, &mut seeded(0));
+        for s in [&g, &resized] {
+            for (i, (y, ramp)) in s.twins.iter().zip(RAMPS).enumerate() {
+                let (dx, dy) = s.view.dot(bobs(&SCENE, y[0], y[1])[1]);
+                let (px, py) = ((dx / 2.0) as i32, (dy / 2.0) as i32);
+                let own = (-3..=3)
+                    .flat_map(|oy| (-3..=3).map(move |ox| (px + ox, py + oy)))
+                    .filter_map(|(x, y)| s.halo.get(x, y))
+                    .filter(|p| p.role == Role::Ramp(ramp))
+                    .count();
+                assert!(own >= 12, "twin {i}: {own} halo pixels");
+            }
+        }
+        // The glow stays under the line art: no pixel above GLOW_V, and every dotted
+        // cell's ink is brighter than the glow behind it.
+        let cap = ink::ramp(RAMPS[0], GLOW_V).level;
+        let mut glowing = 0;
+        for y in 0..80 {
+            for x in 0..120 {
+                let p = g.halo.get(x, y).unwrap();
+                assert!(p.level <= cap, "({x},{y}) {p:?}");
+                glowing += usize::from(p.level > 0);
+            }
+        }
+        assert!(glowing > 300, "{glowing} glowing pixels");
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut c);
+        for cell in c.cells() {
+            let braille = ('\u{2801}'..='\u{28FF}').contains(&cell.ch);
+            if braille
+                && matches!(cell.bg.role, Role::Ramp(_))
+                && matches!(cell.ink.role, Role::Ramp(_))
+            {
+                assert!(cell.ink.level > cell.bg.level, "{cell:?}");
+            }
+        }
+        // ASCII has no half blocks, so no glow: only the line art's own cells.
+        let mut a = Canvas::new(size, GlyphMode::Ascii);
+        g.render(&mut a);
+        assert!(a.cells().iter().all(|c| c.bg == Ink::BLANK));
+        let mut lines = Canvas::new(size, GlyphMode::Ascii);
+        g.dots.blit(&mut lines);
+        let w = usize::from(size.width());
+        assert_eq!(a.cells()[..39 * w], lines.cells()[..39 * w]);
+    }
+
     fn run(seed: u64, size: Size, seconds: f64) -> DoublePendulum {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(seed);
