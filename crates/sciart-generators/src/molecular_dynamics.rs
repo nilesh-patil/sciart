@@ -125,6 +125,10 @@ const HEAT_RAMP: Ramp = Ramp::Plasma;
 const HEAT_OFFSET: f64 = 0.1;
 const HEAT_GAIN: f64 = 1.3;
 const HEAT_FLOOR: f64 = 0.35;
+/// The atoms' colour is relative to the live temperature (MD-A9): the floor, and the
+/// multiple of the mean kinetic energy that reaches the top of the ramp.
+const REL_FLOOR: f64 = 0.35;
+const REL_SPAN: f64 = 2.0;
 /// An atom's colour follows its kinetic energy smoothed over this time (s): the
 /// instantaneous energy of one atom is exponentially distributed, so unsmoothed a crystal
 /// at one temperature reads as speckle.
@@ -180,6 +184,23 @@ pub(crate) fn heat_ink(e: f64) -> Ink {
         HEAT_RAMP,
         (HEAT_GAIN * heat_u(e) + HEAT_OFFSET).clamp(HEAT_FLOOR, 1.0),
     )
+}
+
+/// An atom's colour relative to the live temperature `t` (MD-A9): Plasma at
+/// `REL_FLOOR + (1 − REL_FLOOR)·clamp(e/(REL_SPAN·t), 0, 1)`, with `e` its smoothed kinetic
+/// energy (LJ units, k_B = 1; in 2-D the mean is `t`). An atom at the mean sits at 0.68,
+/// one at twice the mean or more is near white, and a resting atom keeps the 0.35
+/// floor. So in every phase the atoms hotter than their surroundings (the ones evaporating
+/// off a cluster's edge) glow and the bulk stays calm, instead of the whole condensed
+/// phase sinking to one dim indigo on an absolute scale. A non-positive or NaN `t` reads as
+/// the floor. False colour; the absolute temperature is the readout's job.
+pub(crate) fn relative_heat_ink(e: f64, t: f64) -> Ink {
+    let u = if t > 0.0 && e.is_finite() {
+        (e / (REL_SPAN * t)).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    ink::ramp(HEAT_RAMP, REL_FLOOR + (1.0 - REL_FLOOR) * u)
 }
 
 /// Exact 2-D Maxwell–Boltzmann probability of each speed bin at temperature `t`, the
@@ -658,11 +679,20 @@ impl MolecularDynamics {
         // σ = `scale` rows = 4·scale dots; dots are square on screen.
         let r = ATOM_R * f64::from(Dots::CELL_H) * self.view.scale;
         self.atoms.clear();
+        // Atoms are coloured relative to the live temperature, the readout's T (MD-A9).
+        let t_now = self.temperature();
         for i in 0..self.n() {
             let (px, py) = self.to_pixel(self.x[i], self.y[i]);
             // Dot j spans pixel coordinates [j/2, (j + 1)/2).
             let (dx, dy) = (2.0 * px - 0.5, 2.0 * py - 0.5);
-            paint_atom(&mut self.atoms, dx, dy, r, heat_ink(self.heat[i]), panel);
+            paint_atom(
+                &mut self.atoms,
+                dx,
+                dy,
+                r,
+                relative_heat_ink(self.heat[i], t_now),
+                panel,
+            );
         }
         self.plot.clear();
         if let Some((x0, _)) = self.view.inset {
@@ -1365,6 +1395,42 @@ mod tests {
     }
 
     #[test]
+    fn md_a9_atoms_are_coloured_relative_to_the_live_temperature() {
+        let lv = |e: f64, t: f64| f64::from(relative_heat_ink(e, t).level) / 255.0;
+        assert_eq!(relative_heat_ink(1.0, 1.0).role, Role::Ramp(Ramp::Plasma));
+        assert!((lv(0.0, 0.3) - REL_FLOOR).abs() < 0.005);
+        assert!((lv(0.3, 0.3) - (REL_FLOOR + (1.0 - REL_FLOOR) / REL_SPAN)).abs() < 0.005);
+        assert!(lv(0.3 * REL_SPAN, 0.3) > 0.99 && lv(5.0, 0.3) > 0.99);
+        // Scale-free: the same multiple of the temperature is the same colour.
+        for (e, t) in [(0.1, 0.25), (0.5, 1.0), (1.3, 0.7)] {
+            assert_eq!(relative_heat_ink(e, t), relative_heat_ink(2.0 * e, 2.0 * t));
+        }
+        for t in [0.0, -1.0, f64::NAN] {
+            assert!((lv(1.0, t) - REL_FLOOR).abs() < 0.005, "{t}");
+        }
+        // In the condensed phase (t = 5 s, T ≈ 0.3) the bulk stays calm and the hottest
+        // atoms glow: the brightest 3 % reach ≥ 0.8 while the median is ≤ 0.72.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = MolecularDynamics::default();
+        g.resize(size, &mut ctx);
+        for _ in 0..(5.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let t = g.temperature();
+        assert!(t < 0.5, "condensed: T {t}");
+        let mut levels: Vec<f64> = g.heat.iter().map(|&e| lv(e, t)).collect();
+        levels.sort_by(f64::total_cmp);
+        let n = levels.len();
+        let (median, top) = (levels[n / 2], levels[n - 1 - n * 3 / 100]);
+        assert!(
+            median <= 0.72 && top >= 0.8,
+            "median {median:.2}, top 3 % {top:.2}"
+        );
+        assert!(levels[0] >= REL_FLOOR - 0.005);
+    }
+
+    #[test]
     fn md_a6_the_opening_crystal_is_one_colour() {
         // Heat starts at the mean kinetic energy, not each atom's exponentially
         // distributed instantaneous one, so t = 0 shows no speckle.
@@ -1395,7 +1461,8 @@ mod tests {
     fn md_a6_atoms_outshine_their_streaks() {
         // Luminance order holds in every theme (Mono maps both roles by level): an atom
         // hot enough to streak is brighter than the brightest streak, even at its rim.
-        let atom = f64::from(heat_ink(E_STREAK).level);
+        // Any atom is at least the relative colour's floor (MD-A9).
+        let atom = f64::from(relative_heat_ink(0.0, 1.0).level);
         assert!(TRAIL_MAX * 255.0 < RIM * atom, "{atom}");
     }
 

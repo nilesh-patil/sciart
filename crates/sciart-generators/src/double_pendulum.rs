@@ -1,6 +1,6 @@
-//! Twin double pendulums released 10⁻³ rad apart: an aurora-green twin and an Hα-crimson
+//! Twin double pendulums released 10⁻³ rad apart: an ice-cyan twin and an eosin-rose
 //! twin, superposed as one two-tone pendulum while they are closer than a braille cell
-//! (dashed rods and trail alternating the hues, crimson rims around the green bobs), then
+//! (dashed rods and trail alternating the hues, rose rims around the cyan bobs), then
 //! visibly two, each lower bob tracing a 3 s fading path. A fan of ghost pendulums, all
 //! started inside the 10⁻³ rad gap between the twins, is drawn as the material line joining
 //! their lower bobs; chaos stretches and folds it across the whole swing (SPEC-002
@@ -88,7 +88,7 @@ const TIME_SLACK: f64 = 1e-9;
 /// While the twins' matching bobs have been closer than `MERGE_DOTS` on screen they share
 /// braille cells (a cell is 2×4 dots and shows one ink), so they are drawn superposed:
 /// dashes alternating the two hues, and twin B's bobs as the right half of a disc laid on
-/// twin A's, so each bob is half green, half crimson. Twin B's disc grows back to whole
+/// twin A's, so each bob is half cyan, half rose. Twin B's disc grows back to whole
 /// between `MERGE_DOTS` and `SPLIT_DOTS` (DP-A5).
 const MERGE_DOTS: f64 = 4.0;
 const SPLIT_DOTS: f64 = 8.0;
@@ -101,9 +101,10 @@ const MERGE_SHIFT: (f64, f64) = (Dots::CELL_W as f64, -(Dots::CELL_H as f64));
 const ROD_DASH: f64 = 6.0;
 const TRAIL_DASH: usize = 4;
 
-/// Twin A is aurora green, twin B Hα crimson: near-complementary false colours, and a
-/// pair no other dynamics scene uses (DP-A5).
-const RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::HAlpha];
+/// Twin A is ice cyan, twin B eosin rose: near-complementary false colours that stay
+/// apart for red–green colour-blind viewers, and a pair no other dynamics scene uses
+/// (three_body shares Ice but pairs it with HAlpha and Plasma) (DP-A5).
+const RAMPS: [Ramp; 2] = [Ramp::Ice, Ramp::Eosin];
 /// The glow under the line art (DP-A10): each twin's trail, rods and bobs expose a
 /// half-block [`Glow`] of their own, rebuilt every frame from the model-space trail (so a
 /// resize keeps it), tone-mapped by an asinh curve and drawn in the twin's ramp at up to
@@ -322,7 +323,7 @@ pub(crate) fn ghost_link(a: (f64, f64), b: (f64, f64)) -> bool {
     (a.0 - b.0).hypot(a.1 - b.1) <= GHOST_LINK
 }
 
-/// A part of twin `i` at ramp value `v`: twin A aurora, twin B Hα (DP-A5).
+/// A part of twin `i` at ramp value `v`: twin A ice, twin B eosin (DP-A5).
 fn twin_ink(i: usize, v: f64) -> Ink {
     ink::ramp(RAMPS[i], v)
 }
@@ -406,7 +407,7 @@ fn shifted(p: (f64, f64), d: (f64, f64)) -> (f64, f64) {
 
 #[derive(Debug)]
 pub struct DoublePendulum {
-    /// The twins: A (aurora) and B (Hα), 10⁻³ rad apart in `θ₂`.
+    /// The twins: A (ice) and B (eosin), 10⁻³ rad apart in `θ₂`.
     twins: [[f64; 4]; 2],
     /// The ghost fan between them (DP-A6).
     ghosts: [[f64; 4]; GHOSTS],
@@ -556,7 +557,7 @@ impl DoublePendulum {
             }
         }
 
-        // Trails: an aurora path and an Hα path, in dashes of `TRAIL_DASH` segments that
+        // Trails: an ice path and an eosin path, in dashes of `TRAIL_DASH` segments that
         // alternate which twin is on top, so the pair reads two-tone while they coincide.
         let n = self.trail.len();
         let now = Sample {
@@ -582,7 +583,7 @@ impl DoublePendulum {
 
         // The twins: dashed rods, then bobs with a bright core. Twin A's discs go first,
         // then twin B's on top, cut to their right half while the twins coincide (a
-        // half-green, half-crimson bob) and whole again once they have parted.
+        // half-cyan, half-rose bob) and whole again once they have parted.
         let shift = merge_shift(parted);
         let mut arms = self
             .twins
@@ -1311,11 +1312,8 @@ mod tests {
             }
             g.rasterise();
             let [a, b] = hue_counts(&roles(&g, size));
-            assert!(
-                a.min(b) * 3 >= a.max(b),
-                "gap {gap}: aurora {a} vs halpha {b}"
-            );
-            // The lower bob: half twin A's green, half twin B's crimson.
+            assert!(a.min(b) * 3 >= a.max(b), "gap {gap}: ice {a} vs eosin {b}");
+            // The lower bob: half twin A's cyan, half twin B's rose.
             let tip = g.view.dot(bobs(&SCENE, g.twins[0][0], g.twins[0][1])[1]);
             let (cx, cy) = ((tip.0 / 2.0) as i32, (tip.1 / 4.0) as i32);
             let mut canvas = Canvas::new(size, GlyphMode::Unicode);
@@ -1327,15 +1325,12 @@ mod tests {
                     .filter(|c| c.ink == twin_ink(i, BOB_V))
                     .count()
             });
-            assert!(
-                a >= 1 && b >= 1,
-                "gap {gap}: bob cells aurora {a}, halpha {b}"
-            );
+            assert!(a >= 1 && b >= 1, "gap {gap}: bob cells ice {a}, eosin {b}");
         }
         // Ten dots apart both hues show in comparable amounts.
         let (g, size) = posed(10.0);
         let [a, b] = hue_counts(&roles(&g, size));
-        assert!(a.min(b) * 3 >= a.max(b) * 2, "aurora {a} vs halpha {b}");
+        assert!(a.min(b) * 3 >= a.max(b) * 2, "ice {a} vs eosin {b}");
     }
 
     #[test]
