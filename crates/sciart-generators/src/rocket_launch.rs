@@ -397,6 +397,12 @@ const VIEW_MIN: f64 = 150.0;
 const SKY_ZENITH: f64 = 0.5;
 const SKY_HORIZON: f64 = 0.95;
 const SKY_FALL: f64 = 0.3;
+/// The Sun (ROC-A10): its place on screen as shares of the pixel height (x, y), its
+/// radius and glare radius in the same units, and the glare's peak added to the haze.
+const SUN_AT: (f64, f64) = (0.42, 0.34);
+const SUN_R: f64 = 0.035;
+const SUN_GLOW_R: f64 = 0.22;
+const SUN_GLARE: f64 = 0.55;
 const VEHICLE_M: f64 = 70.0;
 /// Launch tower: x offset from the pad centre and height (m).
 const TOWER_X: f64 = -24.0;
@@ -973,14 +979,23 @@ fn backdrop(cam: &Camera, px: i32, py: i32) -> (Ink, bool) {
         let alt = cam.world_h(f64::from(py) + 0.5);
         let rise = ((ground_py - f64::from(py) - 0.5) / cam.rows).max(0.0);
         let haze = SKY_ZENITH + SKY_HORIZON * (-rise / SKY_FALL).exp();
-        // A smooth ramp down to the last visible level (CORE-R66), then a stipple of that
-        // level thinning into the terminal's black over the next 30 % of the fall
-        // (a few pixel rows), so the air has no hard top edge.
-        let level = 255.0 * sky_level(alt) * haze;
+        // The Sun low in the east (ROC-A10): a white disc at a fixed place on screen (at
+        // infinity it does not move as the camera climbs) in a glare that brightens the
+        // blue round it, fading with the air as the sky does.
+        let (sx, sy) = (SUN_AT.0 * cam.rows, SUN_AT.1 * cam.rows);
+        let d = (f64::from(px) + 0.5 - sx).hypot(f64::from(py) + 0.5 - sy) / cam.rows;
+        if d < SUN_R {
+            return Ink::new(Role::Ramp(Ramp::Ice), 255);
+        }
+        let glare = SUN_GLARE * (-(d / SUN_GLOW_R).powi(2)).exp();
+        // A smooth ramp down to the last visible level (CORE-R66), held there solid over
+        // the next half of the fall, then black: the air ends on its faintest blue, with
+        // no speckle (ROC-A5).
+        let level = 255.0 * sky_level(alt) * (haze + glare);
         if level >= ink::MIN_VISIBLE_LEVEL {
             Ink::new(Role::Ramp(Ramp::Ice), ink::level(level))
-        } else if level > 0.7 * ink::MIN_VISIBLE_LEVEL {
-            stipple(level, px, py)
+        } else if level > 0.5 * ink::MIN_VISIBLE_LEVEL {
+            Ink::new(Role::Ramp(Ramp::Ice), ink::level(ink::MIN_VISIBLE_LEVEL))
         } else {
             Ink::BLANK
         }
@@ -1015,20 +1030,6 @@ fn backdrop(cam: &Camera, px: i32, py: i32) -> (Ink, bool) {
 }
 
 /// The top of the air, where the sky's `level` has fallen below the last visible one:
-/// that level at pixel `(px, py)` with a chance falling from 1 to 0 over the next 30 % of
-/// the fall, else black (ROC-A5). Out of line, behind a cheap level test in [`backdrop`]:
-/// the band is a few pixel rows, and inlined it slowed every sky pixel (~10 %).
-#[cold]
-#[inline(never)]
-fn stipple(level: f64, px: i32, py: i32) -> Ink {
-    let min = ink::MIN_VISIBLE_LEVEL;
-    if (level / min - 0.7) / 0.3 > noise(px, py) {
-        Ink::new(Role::Ramp(Ramp::Ice), ink::level(min))
-    } else {
-        Ink::BLANK
-    }
-}
-
 /// A stable per-pixel threshold in [0, 1): white noise, without the regular rows of an
 /// ordered dither.
 fn noise(x: i32, y: i32) -> f64 {
@@ -1538,6 +1539,21 @@ mod tests {
     }
 
     #[test]
+    fn roc_a10_a_low_sun_glares_in_the_morning_sky() {
+        let g = scene_at(Size::new(120, 40), 5.0);
+        let rows = g.cam.rows;
+        let (sx, sy) = (SUN_AT.0 * rows, SUN_AT.1 * rows);
+        let at = |x: f64, y: f64| backdrop(&g.cam, x as i32, y as i32).0;
+        assert_eq!(at(sx, sy), Ink::new(Role::Ramp(Ramp::Ice), 255));
+        // The glare brightens the blue round the disc, falling off with distance.
+        let near = at(sx + 0.08 * rows, sy).level;
+        let mid = at(sx + 0.2 * rows, sy).level;
+        let far = at(sx + 0.6 * rows, sy).level;
+        assert!(near > mid && mid > far, "{near} {mid} {far}");
+        assert_eq!(at(sx, sy + 0.1 * rows).role, Role::Ramp(Ramp::Ice));
+    }
+
+    #[test]
     fn roc_a5_the_sky_fades_to_black_as_a_smooth_ramp() {
         // High on the climb the whole fade from blue to black is in frame.
         for t in [
@@ -1570,8 +1586,10 @@ mod tests {
                         mixed[y as usize].1 = true;
                     }
                     // In the fade to black (the last 40 levels) no step bigger than the
-                    // last visible level (CORE-R66).
+                    // last visible level (CORE-R66), and no speck: once black going up,
+                    // the air stays black.
                     if let Some(p) = prev {
+                        assert!(p > 0 || level == 0, "t {t}: speck of blue at {x},{y}");
                         assert!(
                             level <= p || level <= faintest,
                             "t {t}: column {x} brightens at {y}"
@@ -1583,9 +1601,7 @@ mod tests {
                 }
             }
             assert!(blanks > 100, "t {t}: black space in frame");
-            // The air ends in a stipple several pixel rows deep, not on a hard line.
-            let band = mixed.iter().filter(|&&(b, f)| b && f).count();
-            assert!(band >= 3, "t {t}: the edge of the air is {band} rows deep");
+            let _ = mixed;
         }
     }
 

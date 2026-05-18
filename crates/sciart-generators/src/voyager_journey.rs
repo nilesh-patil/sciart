@@ -1019,7 +1019,8 @@ impl VoyagerJourney {
         let Some(rect) = self.log else {
             return;
         };
-        canvas.text(rect.x, rect.y, "flybys", Ink::new(Role::Text, 110));
+        // The gains are the model's, not Voyager 2's measured ones (VOY-A11).
+        canvas.text(rect.x, rect.y, "flybys (model)", Ink::new(Role::Text, 110));
         let next = (1..ENCOUNTERS.len()).find(|&k| self.today < ENCOUNTERS[k]);
         for (i, name) in FLYBY_NAMES.iter().enumerate() {
             let k = i + 1;
@@ -1615,7 +1616,7 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let early = text(2.0);
-        assert_eq!(early[0], "flybys");
+        assert_eq!(early[0], "flybys (model)");
         assert!(early[1].starts_with("> Jupiter 1979-07-09"), "{early:?}");
         assert!(early[4].contains("Neptune 1989-08-25") && !early[4].contains("km/s"));
         let late = text(46.0);

@@ -52,9 +52,9 @@ const TEFF: f64 = 5050.0;
 /// rather than ending in a dark red ring.
 const STAR_MIN_I: f64 = 0.05;
 /// The disc is coloured by the brightness temperature of `I^LIMB_GAIN`: the real limb
-/// (≈ 4000 K) is too little cooler to read at this size, so the darkening is drawn 3×
-/// as strong in log intensity (≈ 2850 K at the limb), as `solar_system` does. **Exaggerated**.
-const LIMB_GAIN: f64 = 3.0;
+/// (≈ 4000 K) is too little cooler to read at this size, so the darkening is drawn 4×
+/// as strong in log intensity (≈ 2480 K at the limb). **Exaggerated**.
+const LIMB_GAIN: f64 = 4.0;
 /// The planet's night side: a faint grey disc, so the planet reads as a whole round body
 /// off the star, never as a bare crescent (TRAN-A6).
 const NIGHT_INK: Ink = Ink::new(Role::Dim, 60);
@@ -686,7 +686,7 @@ mod tests {
 
     #[test]
     fn tran_a7_star_is_true_colour_at_the_brightness_temperature_of_the_law() {
-        // Teff at the centre, falling with I(μ)^LIMB_GAIN by Wien to ≈ 2850 K at the limb.
+        // Teff at the centre, falling with I(μ)^LIMB_GAIN by Wien to ≈ 2480 K at the limb.
         let kelvin =
             |r: f64| ink::blackbody_kelvin(ExoplanetTransit::star_ink(r, 0.0, 1.0).unwrap());
         // One Blackbody level is 1.3 % in temperature.
@@ -698,7 +698,7 @@ mod tests {
             let want = brightness_temperature(TEFF, i.powf(LIMB_GAIN));
             assert!(near(kelvin(r), want), "r={r}: {} vs {want}", kelvin(r));
         }
-        assert!((2750.0..2950.0).contains(&kelvin(1.0)), "{}", kelvin(1.0));
+        assert!((2400.0..2560.0).contains(&kelvin(1.0)), "{}", kelvin(1.0));
         // Cooler, and so darker and redder, by mid-radius, not flat until the limb.
         assert!(kelvin(0.7) < 0.97 * TEFF, "{}", kelvin(0.7));
         // Drawn: along a radius the level never rises, and the disc ends within a pixel of

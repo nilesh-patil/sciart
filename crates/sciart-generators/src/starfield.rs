@@ -30,8 +30,9 @@ const DIST: [f64; 4] = [8.0, 4.0, 2.0, 1.0];
 /// Drift of the nearest layer in cells per second; parallax scales as `1 / distance`, so
 /// the farthest layer creeps at an eighth of it (STAR-A2).
 const NEAR_SPEED: f64 = 12.0;
-/// Seconds of travel a star's motion streak spans, and its ink (STAR-A2): 0.25 s is three
-/// cells for the nearest layer and under one dot for the farthest.
+/// Seconds of travel a star's motion streak spans, and its ink (STAR-A2): 0.14 s, so the
+/// nearer layers, which move more than a glyph's width in it, draw a short streak and the
+/// farther ones none.
 const STREAK_TIME: f64 = 0.14;
 const STREAK: Ink = Ink::new(Role::Star, 42);
 /// Brightness buckets gained per layer nearer: inverse-square dimming, stylised (STAR-A4).
@@ -318,11 +319,12 @@ impl Starfield {
             }
             // A camera-exposure streak over the last `STREAK_TIME` of travel (stylised: an
             // eye sees none), so the parallax reads in any single frame; too short to
-            // show for the far layers. It stops short of a bright star's glyph cell.
+            // show for the far layers. It stops short of a bright star's glyph cell and is
+            // always two dots, a tick rather than a dotted line.
             let len = f64::from(Dots::CELL_W) * speed(s.layer) * STREAK_TIME;
             let gap = if faint { 1.0 } else { f64::from(Dots::CELL_W) };
             if len > gap {
-                self.sky.line(x - len, y, x - gap, y, STREAK);
+                self.sky.line(x - gap - 1.0, y, x - gap, y, STREAK);
             }
         }
     }

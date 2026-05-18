@@ -906,7 +906,7 @@ impl Generator for SatelliteOrbit {
             // label that would touch one moves a row up or down, or to the satellite's
             // left, and is dropped if none of those is clear (SAT-A13).
             // Blank cells kept between two chips on one row.
-            const LABEL_GAP: i32 = 4;
+            const LABEL_GAP: i32 = 7;
             let mut placed = [(0, 0, -1); 5];
             let mut n = 0;
             for &(kind, x, y) in self.labels.iter().flatten() {
@@ -1434,7 +1434,7 @@ mod tests {
                     if both {
                         let gap =
                             l.find(pair[1]).unwrap() - (l.find(pair[0]).unwrap() + pair[0].len());
-                        assert!(gap >= 5, "labels too close: {l:?}");
+                        assert!(gap >= 8, "labels too close: {l:?}");
                     }
                 }
             }

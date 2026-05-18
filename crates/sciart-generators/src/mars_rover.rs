@@ -344,12 +344,8 @@ const SHADOW_HALF: f64 = 2.6;
 const SHADOW_MAX: f64 = 14.0;
 const SHADOW_ROWS: f64 = 3.0;
 const SHADOW_DEPTH: f64 = 0.5;
-/// Mastcam-Z's field of view while imaging (MR-A12): tilt range below the horizontal
-/// (rad), half-width, reach as a share of the frame width, and ink.
-const FOV_TILT: (f64, f64) = (0.05, 0.4);
-const FOV_HALF: f64 = 0.09;
-const FOV_REACH: f64 = 0.33;
-const FOV_INK: Ink = Ink::new(Role::Ramp(Ramp::Ice), 140);
+/// The rover's screen column (share of the width) at the start and end of a drive.
+const ROVER_COLS: (f64, f64) = (0.3, 0.62);
 const DRIVE: f64 = 18.0;
 const DEPLOY: f64 = 3.0;
 const DRILL: f64 = 4.0;
@@ -728,8 +724,6 @@ struct Layout {
     far_base: f64,
     /// Row where the sun sets.
     horizon: f64,
-    /// Column of the rover's body pivot.
-    rover_col: f64,
 }
 
 impl Layout {
@@ -746,7 +740,6 @@ impl Layout {
             mid_base: near_base - 2.1 * s,
             far_base,
             horizon: far_base - 0.45 * FAR_AMP * s,
-            rover_col: 0.4 * w,
         }
     }
 
@@ -756,9 +749,22 @@ impl Layout {
     }
 }
 
-/// Where the near-layer camera is: world x of column 0.
-fn camera(l: &Layout, rover_x: f64) -> f64 {
-    rover_x - l.rover_col * l.dx()
+/// Where the near-layer camera is at time `t`: world x of column 0, with the rover at
+/// [`rover_col`].
+fn camera(l: &Layout, rover_x: f64, t: f64) -> f64 {
+    rover_x - rover_col(l.w, t) * l.dx()
+}
+
+/// The rover's screen column at time `t` in a frame `w` cells wide (MR-A12): it drives
+/// from `ROVER_COLS.0` to `ROVER_COLS.1` of the width during the drive (the camera
+/// following at a lag, so the terrain scrolls too), holds there through the work plan,
+/// and the camera eases back to `ROVER_COLS.0` over the night.
+pub(crate) fn rover_col(w: f64, t: f64) -> f64 {
+    let t = if t.is_finite() { t.max(0.0) } else { 0.0 };
+    let local = t - (t / CYCLE).floor() * CYCLE;
+    let driven = drive_profile(local).0 / DRIVE_DIST;
+    let back = ease::smoothstep((local - (CYCLE - SLEEP)) / SLEEP);
+    w * (ROVER_COLS.0 + (ROVER_COLS.1 - ROVER_COLS.0) * (driven - back))
 }
 
 /// World (near layer) → fractional cell coordinates.
@@ -950,7 +956,7 @@ impl MarsRover {
         self.devil_timer -= h;
         if self.devil_timer <= 0.0 {
             self.devil_timer = ctx.rng.random_range(3.0..9.0);
-            let cam_mid = camera(&l, self.rover_x(w)) * PARALLAX_MID;
+            let cam_mid = camera(&l, self.rover_x(w), self.t) * PARALLAX_MID;
             if let Some(slot) = self.devils.iter_mut().find(|d| d.is_none()) {
                 let col = ctx.rng.random_range(0.05..0.95) * l.w;
                 *slot = Some(Devil {
@@ -1017,7 +1023,7 @@ impl Generator for MarsRover {
         let Some(w) = self.world else { return };
         let l = self.layout;
         let rover_x = self.rover_x(&w);
-        let cam = camera(&l, rover_x);
+        let cam = camera(&l, rover_x, self.t);
         let view = View {
             cam,
             k: l.s * ASPECT,
@@ -1100,7 +1106,7 @@ impl MarsRover {
     fn rasterise(&mut self) {
         let Some(w) = self.world else { return };
         let l = self.layout;
-        let cam = camera(&l, self.rover_x(&w));
+        let cam = camera(&l, self.rover_x(&w), self.t);
         let hour = hour_angle(self.t);
         let e = sun_elevation(hour);
         let e_deg = e.to_degrees();
@@ -1436,9 +1442,7 @@ impl MarsRover {
             Glyph::new('◘', 'o'),
             Ink::new(Role::Accent, 200),
         );
-        if beat.index == PH_IMAGE {
-            draw_fov(canvas, eye, fov_tilt(beat.progress), self.layout.w);
-        }
+
         // High-gain antenna: the X-band dish for direct-to-Earth links, parked; the relay
         // to the orbiter goes over the small UHF mast on the rear deck.
         let post = pose.body(HGA.0, HGA.1);
@@ -1652,36 +1656,6 @@ fn fill_box(canvas: &mut Canvas, view: &View, pose: &Pose, u: (f64, f64), v: (f6
 /// the rover so it passes behind it. Over the half-block picture the dot replaces the
 /// half block and `backdrop` puts the sky back behind it (CORE-R86), so the link shows by
 /// day as well as by night.
-/// Mastcam-Z's tilt (rad, below the horizontal) at `progress ∈ [0, 1)` through imaging
-/// (MR-A12): the camera steps down the scene and back up twice, a mosaic's rows.
-pub(crate) fn fov_tilt(progress: f64) -> f64 {
-    let u = 0.5 - 0.5 * (std::f64::consts::TAU * 2.0 * progress).cos_det();
-    FOV_TILT.0 + (FOV_TILT.1 - FOV_TILT.0) * u
-}
-
-/// The imaging camera's field of view (MR-A12): two faint dotted edges `FOV_HALF` either
-/// side of the tilt, out from the eye across a third of the frame, over sky and ground
-/// only. **Stylised**: a camera's view is invisible.
-fn draw_fov(canvas: &mut Canvas, eye: P2, tilt: f64, width: f64) {
-    let reach = FOV_REACH * width;
-    for a in [tilt - FOV_HALF, tilt + FOV_HALF] {
-        let (s, c) = a.sin_cos_det();
-        // Right and down in cells: x stretched by the cell aspect.
-        let end = (eye.0 + reach * c, eye.1 + reach * s / ASPECT);
-        let n = ((end.0 - eye.0).abs().max((end.1 - eye.1).abs()) / 2.0).min(200.0) as usize;
-        for i in 2..n {
-            let q = i as f64 / n as f64;
-            let (x, y) = (ease::lerp(eye.0, end.0, q), ease::lerp(eye.1, end.1, q));
-            if canvas
-                .get(x.round() as i32, y.round() as i32)
-                .is_some_and(|c| matches!(c.ch, ' ' | '▀' | '▄'))
-            {
-                plot(canvas, x, y, DOT, FOV_INK);
-            }
-        }
-    }
-}
-
 fn draw_beam(canvas: &mut Canvas, a: P2, o: P2) {
     let n = ((o.0 - a.0).abs().max((o.1 - a.1).abs()) / 3.0).min(200.0) as usize;
     for i in 1..n {
@@ -1766,7 +1740,7 @@ mod tests {
             g.update(0.25, &mut ctx);
             let rx = g.rover_x(&w);
             let pose = solve_pose(|x| w.near.eval(x), rx);
-            let cam = camera(&l, rx);
+            let cam = camera(&l, rx, g.t);
             for (hx, hy) in pose.wheel_centers() {
                 let contact_row = l.near_base - l.s * (hy - WHEEL_R);
                 let ground_row = l.near_base - l.s * w.near.height(hx);
@@ -2169,7 +2143,7 @@ mod tests {
     }
 
     #[test]
-    fn mr_a12_the_shadow_swings_with_the_sun_and_the_camera_scans() {
+    fn mr_a12_the_shadow_swings_with_the_sun_and_the_rover_crosses_the_frame() {
         // No shadow at night; by day it covers the footprint and stretches down-Sun,
         // longer as the Sun sinks, capped.
         assert!(shadow_span(10.0, 1.0, -0.1).is_none());
@@ -2183,21 +2157,15 @@ mod tests {
         };
         assert!(len(0.2) > len(0.5) && len(0.5) > len(1.2));
         assert!(len(0.01) <= SHADOW_MAX + 2.0 * SHADOW_HALF + 1e-9);
-        // The camera tilts through its range and back while imaging.
-        let tilts: Vec<f64> = (0..100).map(|i| fov_tilt(f64::from(i) / 100.0)).collect();
-        assert!(
-            tilts
-                .iter()
-                .all(|t| (FOV_TILT.0 - 1e-9..=FOV_TILT.1 + 1e-9).contains(t))
-        );
-        let (lo, hi) = tilts
-            .iter()
-            .fold((9.0f64, -9.0f64), |(a, b), &t| (a.min(t), b.max(t)));
-        assert!(hi - lo > 0.9 * (FOV_TILT.1 - FOV_TILT.0));
-        // Rendered: the field-of-view dots show only while imaging.
-        let fov = |t: f64| count_at(t, FOV_INK.role);
-        let image = DRIVE + DEPLOY + DRILL + STOW + 0.5 * IMAGE;
-        assert!(fov(image) > 5, "{}", fov(image));
+        // The rover crosses the frame while it drives, holds, and returns overnight.
+        let w = 120.0;
+        assert!((rover_col(w, 0.0) - ROVER_COLS.0 * w).abs() < 1e-9);
+        assert!((rover_col(w, DRIVE) - ROVER_COLS.1 * w).abs() < 1e-9);
+        assert!((rover_col(w, DRIVE + DEPLOY + DRILL + STOW) - ROVER_COLS.1 * w).abs() < 1e-9);
+        assert!((rover_col(w, CYCLE - 1e-9) - ROVER_COLS.0 * w).abs() < 1e-6);
+        let cols: Vec<f64> = (0..=36).map(|i| rover_col(w, f64::from(i) * 0.5)).collect();
+        assert!(cols.windows(2).all(|p| p[1] >= p[0] - 1e-12));
+        assert!(rover_col(w, 5.0) + 0.1 * w < rover_col(w, 30.0));
     }
 
     #[test]
@@ -2228,7 +2196,7 @@ mod tests {
         let w = g.world.unwrap();
         for _ in 0..20 {
             g.update(0.5, &mut ctx);
-            let cam = camera(&g.layout, g.rover_x(&w));
+            let cam = camera(&g.layout, g.rover_x(&w), g.t);
             for c in 0..120 {
                 let (tops, _) = g.layer_tops(&w, cam, c);
                 let mut last = Layer::Sky;
