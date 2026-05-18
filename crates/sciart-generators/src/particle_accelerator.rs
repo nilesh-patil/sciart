@@ -122,7 +122,8 @@ const M_PI: f64 = 0.139_570;
 const CTAU_K: f64 = 0.026_84;
 
 const TRACK_CAP: usize = 192;
-/// Charged hadrons softer than this (GeV) are loopers, drawn thin and dim (ACC-A14).
+/// Charged hadrons softer than this (GeV) are soft tracks, drawn thin and dim (ACC-A14);
+/// only those under ≈ 0.74 GeV (0.3·B·R_ECAL/2) actually loop inside the tracker.
 const SOFT_PT: f64 = 1.0;
 /// Ramp value of the softest charged hadron (ACC-A12, ACC-A14).
 const SOFT_V: f64 = 0.45;
@@ -621,7 +622,7 @@ impl ParticleAccelerator {
         let rng = &mut ctx.rng;
         let qb = |q: f64| q * GEV_PER_TM * B_SOLENOID;
         let from_ip = |pt: f64, phi: f64, q: f64| Spiral::new(0.0, 0.0, pt, phi, qb(q), 0.0);
-        // Soft underlying event: a steeply falling pT spectrum, many loopers.
+        // Soft underlying event: a steeply falling pT spectrum, many soft tracks.
         for _ in 0..rng.random_range(6..=12) {
             let pt = (0.45 * rng.random::<f64>().max(1e-3).powf(-0.5)).min(20.0);
             let q = charge(rng);
@@ -1020,7 +1021,7 @@ fn tower_ink(tw: &Tower, bright: f64) -> Ink {
 
 /// A collider track's ramp and value at full event brightness (ACC-A12, ACC-A13): all clear
 /// of the detector outline. Charged tracks take their charge's hue, for the
-/// softest loopers at `SOFT_V` (so the tracker's centre stays calm and the stiff jet
+/// softest tracks at `SOFT_V` (so the tracker's centre stays calm and the stiff jet
 /// tracks carry the event's axis) to 0.82 for stiff ones, where each hue is still
 /// saturated; muons are near-white; the K⁰_S flight is a dim neutral dash.
 fn fresh_tone(flavour: Flavour, pt: f64, positive: bool) -> (Ramp, f64) {
@@ -1033,11 +1034,11 @@ fn fresh_tone(flavour: Flavour, pt: f64, positive: bool) -> (Ramp, f64) {
     }
 }
 
-/// Whether a track is a soft looper (ACC-A14): a charged hadron under [`SOFT_PT`] curls up
-/// inside the tracker, so it is drawn as a thin dotted trace (every third sample, about
-/// two dots apart) at the
-/// dim end of its ramp, and the stiff tracks read as the jet's axis through the clutter.
-fn is_looper(tr: &CTrack) -> bool {
+/// Whether a track is soft (ACC-A14): a charged hadron under [`SOFT_PT`] is drawn as a thin
+/// dotted trace (every third sample, about two dots apart) at the dim end of its ramp, so
+/// the stiff tracks read as the jet's axis through the clutter. Those under ≈ 0.74 GeV
+/// (0.3·B·R_ECAL/2) curl up inside the tracker as loopers.
+fn is_soft(tr: &CTrack) -> bool {
     tr.flavour == Flavour::Hadron && tr.pt < SOFT_PT
 }
 
@@ -1052,7 +1053,7 @@ fn draw_ctrack(dots: &mut Dots, view: View, t: f64, tr: &CTrack, fade: f64) {
         return;
     }
     let dashed = tr.flavour == Flavour::Neutral;
-    let sparse = is_looper(tr);
+    let sparse = is_soft(tr);
     let shown = tr.len * ease::out_quad(age / GROW);
     let speed = tr.path.p(0.0) * view.dots_per_m();
     trace(&tr.path, shown, speed, dots, |j, x, y| {
@@ -1618,8 +1619,8 @@ mod tests {
     /// muons `Starlight`, towers as thin `Aurora` (ECAL) and `Plasma` (HCAL) bars, the
     /// outline `Dim`, and no `Ember` anywhere in the act.
     #[test]
-    fn acc_a14_soft_loopers_are_thin_so_the_jet_axis_reads() {
-        // Draw each track of a collider event alone, whole and fresh: a looper (a charged
+    fn acc_a14_soft_tracks_are_thin_so_the_jet_axis_reads() {
+        // Draw each track of a collider event alone, whole and fresh: a soft track (a charged
         // hadron under SOFT_PT) lights about half the dots of the same path drawn solid,
         // and stiff tracks are drawn solid.
         let (mut g, mut ctx) = fresh(120, 40);
@@ -1636,7 +1637,7 @@ mod tests {
                 .filter(|&(x, y)| d.is_lit(x, y))
                 .count()
         };
-        let (mut loopers, mut stiff) = (0, 0);
+        let (mut soft, mut stiff) = (0, 0);
         for tr in &tracks {
             if tr.flavour != Flavour::Hadron {
                 continue;
@@ -1649,11 +1650,11 @@ mod tests {
             if b < 40 {
                 continue;
             }
-            if is_looper(tr) {
-                loopers += 1;
+            if is_soft(tr) {
+                soft += 1;
                 assert!(
                     (a as f64) < 0.7 * b as f64,
-                    "looper pT {:.2}: {a} of {b}",
+                    "soft pT {:.2}: {a} of {b}",
                     tr.pt
                 );
             } else {
@@ -1661,7 +1662,7 @@ mod tests {
                 assert_eq!(a, b);
             }
         }
-        assert!(loopers > 0 && stiff > 0, "{loopers} loopers, {stiff} stiff");
+        assert!(soft > 0 && stiff > 0, "{soft} soft, {stiff} stiff");
     }
 
     #[test]
