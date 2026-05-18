@@ -118,9 +118,9 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1�
   - `crates/sciart/src/app.rs`: the file-level `#![allow(clippy::disallowed_methods)]` also exempts the event loop from the TEST-R8 leak bans; move the allow onto the three `Instant::now` call sites
   - `leak_free.rs`: one-line note at the TEST-R6 assertion that live bytes see capacity, not length (growth inside a `Vec`'s capacity is invisible until it doubles)
 
-## M12 — Scene upgrades (review pending)
+## M12 — Scene upgrades (done)
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5, §7 · branch `feat/m12-upgrades`. Research: `docs/design/M11-research/curator-proposal.md` §4, `cross-domain-taxonomy.md` §5.
-- [x] Ink ADR-0015: `Role::Phase` (cyclic), `Role::Blackbody` (temperature in `level`), `Role::Ramp(Ramp)` with six named ramps (Ember, Ice, Ferroin, HAlpha, Aurora, Plasma) mapped by every theme; Mono keeps its floors [CORE-R78..R80, RND-R10..R12]
+- [x] Ink ADR-0015: `Role::Phase` (cyclic), `Role::Blackbody` (temperature in `level`), `Role::Ramp(Ramp)` with named ramps mapped by every theme (six at first: Ember, Ice, Ferroin, HAlpha, Aurora, Plasma; M12 later added Starlight, Sulfur, Cobalt, Eosin); Mono keeps its floors [CORE-R78..R80, RND-R10..R12]
 - [x] `raster::Tone` (asinh LUT, built on resize) + `Density::to_pixels` [CORE-R81]
 - [x] Upgrade all 41 scenes from the per-scene lists (art first, honest science, stylisation stated in SPEC-002) in ten groups, each reviewed in truecolor frames; gallery rescore after: every scene 6–8/10
 - [x] doppler_effect: two acts, acoustic with Mach cone and relativistic light with red/blue shift, each with its own caption [DOP-A1..A10]
@@ -150,7 +150,12 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [x] Cap fractal_growth's DLA lattice with `grid::lattice_for` (ADR-0012) and drop its TEST-R7 exception (14.5 → 2.7 MiB at 500×150) [CRY-A5, TEST-R7]
 - [x] radioactive_decay: size the nucleus lattice to rows `0..h − 1`, so the title is not punched through its last row [RAD-A4]
 - [x] Title-row readout polish [GEN-R13]: brownian_motion `D fit 4.63  true 2.25 rows^2/s`; double_pendulum long form padded at the front, not inside (`{growth:.1}x`, form chosen by its maximum width)
-- [ ] Review (art · science · Rust/perf) with fix loops; local `--no-ff` merge into `main`
+- [x] Review (art · science · Rust/perf) with fix loops: the closing review integrated ten groups' fixes, then three implementer rounds (sky & space, physics & matter, chemistry & life) with the chief scientist's wording corrections; every acceptance ID traced, snapshots inspected (dev and release) [TEST-R1, TEST-R2, TEST-R9]
+- [x] Core lifts from the closing review: `raster::ascii_ramp_cell` (black_hole, gravitational_lensing), `Glow::splat_bilinear` (galaxy_collision, pulsar), `stellar::limb_darkening` / `brightness_temperature` and `raster::disc_cover` / `disc_pixels` (exoplanet_transit), `Glow::stroke` + `STROKE_KERNEL` + `halo_kernel` (double_pendulum, three_body); ramps `Sulfur`, `Cobalt`, `Eosin` [CORE-R80, CORE-R91..R96, RND-R12]
+- [x] galaxy_collision back under the TEST-R7 ceiling (6.24 → 3.95 MiB at 500×150, pre-blurred splats); no TEST-R7 exceptions remain [GAL-A5, TEST-R7]
+- [x] Closing bench (`rs-worst`, release, all 41 scenes): worst frame at 200×50 ≤ 0.98 ms (ising_model 0.98, electron_orbitals 0.97, boids_flocking 0.89); at 500×150 max 4.7 ms (doppler_effect); criterion `frame` mean max 0.56 ms at 200×50 (electron_orbitals), `worst` group max 0.89 ms [GEN-R8]
+- [ ] Local `--no-ff` merge of `feat/m12-upgrades` into `main`
+- [ ] M12 closing follow-ups (minor): globular_cluster motion (review 7.5/10) · exoplanet_transit star reads flat (7.5) · pulsar spikes at t = 5 s (7.5) · satellite_orbit label crowding · constellation_map Cassiopeia wash · double_pendulum: round 2 intended twin B's bob to stop being a half-disc while merged, but the code (and SPEC-002, which follows it) still clips it to its right half (decide and align) · dna_helix zoom transition at t ≈ 6–8 s · 500×150 worst frames over 2 ms: doppler_effect 4.7, aurora 4.1, stellar_nursery 4.0, moon_phases 3.9, cosmic_microwave_background 3.7, solar_surface 3.2, strange_attractors 2.7, molecule_viewer 2.6, rocket_launch 2.4, wave_interference 2.3, liesegang_rings 2.2, electron_orbitals 2.1, spacetime_grid 2.2, mars_rover 2.1 ms · near-ceiling live bytes at 500×150 (TEST-R7 4 MiB): galaxy_collision 3.95, solar_surface 3.93, electron_orbitals 3.86 MiB · stale test names `dp_a5_…half_green_half_crimson_bobs`, `orb_a8_…over_the_glow`, and MD-A9 covering both caption and relative colour (split to MD-A10 with a test rename)
 
 ## M13 — New scenes (planned)
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6, §7 · branch `feat/m13-new-scenes` (may split per category group).
