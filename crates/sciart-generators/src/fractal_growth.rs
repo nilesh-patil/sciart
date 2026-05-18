@@ -160,6 +160,9 @@ const GHOST_HI: f64 = 0.45;
 const TIP_AGE: f64 = 0.3;
 const RAMP_LO: f64 = 0.5;
 const RAMP_HI: f64 = 0.92;
+/// The metal sits this much higher on its `Starlight` ramp than the frost on `Ice`: the
+/// lower half of Starlight is a dull grey-brown, and silver should gleam (CRY-A7).
+const METAL_LIFT: f64 = 0.15;
 const WALKER_INK: Ink = Ink::new(Role::Dim, 110);
 /// One isotropic lattice step `(dx, dy)` for a uniform `u ∈ [0, 1)`: the four directions
 /// with equal probability, so `E[Δx²] = E[Δy²] = 1/2` on the square lattice.
@@ -585,11 +588,15 @@ struct Tint {
 
 impl Tint {
     /// Ink for a terminal cell from its youngest dot's arrival time (CRY-A7): the ramp
-    /// position is `RAMP_LO + (RAMP_HI − RAMP_LO)·arrival/t_grown`; tips younger than
-    /// [`TIP_AGE`] go to the top.
+    /// position is `RAMP_LO + (RAMP_HI − RAMP_LO)·arrival/t_grown`, lifted by
+    /// [`METAL_LIFT`] for the silver metal (capped at 1); tips younger than [`TIP_AGE`] go
+    /// to the top.
     fn cell_ink(self, youngest: f32) -> Ink {
         let arrival = f64::from(youngest);
         let mut v = RAMP_LO + (RAMP_HI - RAMP_LO) * (arrival / self.t_grown.max(1e-9)).min(1.0);
+        if self.ramp == Act::Forest.ramp() {
+            v = (v + METAL_LIFT).min(1.0);
+        }
         if self.t - arrival < TIP_AGE {
             v = 1.0;
         }
@@ -1218,8 +1225,18 @@ mod tests {
             ink::ramp(Ramp::Ice, 1.0),
             "a fresh tip"
         );
-        // The metal is a silver Starlight, not amber.
+        // The metal is a silver Starlight, not amber, lifted so its core is no dull grey.
         assert_eq!(Act::Forest.ramp(), Ramp::Starlight);
+        let metal = tint(Act::Forest.ramp());
+        assert_eq!(
+            metal.cell_ink(0.0),
+            ink::ramp(Ramp::Starlight, RAMP_LO + METAL_LIFT)
+        );
+        assert_eq!(
+            metal.cell_ink(9.0),
+            ink::ramp(Ramp::Starlight, 1.0),
+            "capped at 1"
+        );
         assert_eq!(
             tint(Act::Forest.ramp()).cell_ink(0.0).role,
             Role::Ramp(Ramp::Starlight)

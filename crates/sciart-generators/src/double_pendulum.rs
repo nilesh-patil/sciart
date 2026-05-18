@@ -92,6 +92,9 @@ const TIME_SLACK: f64 = 1e-9;
 /// between `MERGE_DOTS` and `SPLIT_DOTS` (DP-A5).
 const MERGE_DOTS: f64 = 4.0;
 const SPLIT_DOTS: f64 = 8.0;
+/// Twin B's display offset while merged, dots: one braille cell right and up, away from
+/// the readout row (DP-A11).
+const MERGE_SHIFT: (f64, f64) = (Dots::CELL_W as f64, -(Dots::CELL_H as f64));
 /// Dash length along a rod, dots, and along the trail, samples. Each dash is drawn with
 /// one twin on top, alternating, so coinciding twins read as a two-tone stripe rather
 /// than as whichever twin was drawn last (DP-A5).
@@ -382,6 +385,23 @@ fn clipped_disc(dots: &mut Dots, c: (f64, f64), r: f64, cut: f64, ink: Ink) {
 #[derive(Debug, Clone, Copy)]
 struct Sample {
     lows: [(f64, f64); 2],
+    /// The twins' largest gap so far when this sample was taken (model units): how far
+    /// twin B's copy of it is drawn from twin A's ([`merge_shift`], DP-A11).
+    apart: f64,
+}
+
+/// Where twin B is drawn relative to its true position while the twins are merged
+/// (DP-A11): one braille cell right and up (`MERGE_SHIFT` dots) at `parted = 0`, easing
+/// to nothing as they part. Superposed twins in one braille cell show one ink, so without
+/// it they read as a chopped red/green dash; with it they are two parallel strokes, one
+/// per twin, the width of a cell apart. Display only: the physics is untouched.
+pub(crate) fn merge_shift(parted: f64) -> (f64, f64) {
+    let k = 1.0 - parted.clamp(0.0, 1.0);
+    (k * MERGE_SHIFT.0, k * MERGE_SHIFT.1)
+}
+
+fn shifted(p: (f64, f64), d: (f64, f64)) -> (f64, f64) {
+    (p.0 + d.0, p.1 + d.1)
 }
 
 #[derive(Debug)]
@@ -475,7 +495,10 @@ impl DoublePendulum {
         let [a, b] = self.twins.map(|y| bobs(&SCENE, y[0], y[1]));
         let gap = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).hypot(p.1 - q.1);
         self.apart = self.apart.max(gap(a[0], b[0])).max(gap(a[1], b[1]));
-        self.trail.push(Sample { lows: [a[1], b[1]] });
+        self.trail.push(Sample {
+            lows: [a[1], b[1]],
+            apart: self.apart,
+        });
         self.pushed += 1;
     }
 
@@ -538,6 +561,7 @@ impl DoublePendulum {
         let n = self.trail.len();
         let now = Sample {
             lows: [line[0], line[LINKS]],
+            apart: self.apart,
         };
         let newer = self.trail.iter().skip(1).chain([&now]);
         for (k, (old, new)) in self.trail.iter().zip(newer).enumerate() {
@@ -547,7 +571,11 @@ impl DoublePendulum {
             let v = TRAIL_FLOOR + (TRAIL_V - TRAIL_FLOOR) * fresh * fresh;
             // Dashes by the sample's run-wide index, so each stays on its stretch of path.
             for i in dash_order((self.pushed.saturating_sub(n) + k) / TRAIL_DASH) {
-                let (d0, d1) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
+                let (mut d0, mut d1) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
+                if i == 1 {
+                    d0 = shifted(d0, merge_shift(split_of(old.apart)));
+                    d1 = shifted(d1, merge_shift(split_of(new.apart)));
+                }
                 self.dots.line(d0.0, d0.1, d1.0, d1.1, twin_ink(i, v));
             }
         }
@@ -555,18 +583,29 @@ impl DoublePendulum {
         // The twins: dashed rods, then bobs with a bright core. Twin A's discs go first,
         // then twin B's on top, cut to their right half while the twins coincide (a
         // half-green, half-crimson bob) and whole again once they have parted.
-        let arms = self
+        let shift = merge_shift(parted);
+        let mut arms = self
             .twins
             .map(|y| bobs(&SCENE, y[0], y[1]).map(|p| view.dot(p)));
+        arms[1] = arms[1].map(|p| shifted(p, shift));
         let pivot = view.dot((0.0, 0.0));
         let [[a1, a2], [b1, b2]] = arms;
-        dashed(&mut self.dots, [pivot, pivot], [a1, b1], ROD_V);
+        dashed(
+            &mut self.dots,
+            [pivot, shifted(pivot, shift)],
+            [a1, b1],
+            ROD_V,
+        );
         dashed(&mut self.dots, [a1, b1], [a2, b2], ROD_V);
         for (i, [p1, p2]) in arms.into_iter().enumerate() {
             for (p, r) in [(p1, UPPER_R), (p2, self.lower_r)] {
                 // Twin B keeps the dots right of `p.x − cut`: its right half while the
                 // twins coincide, the whole disc once parted; twin A is always whole.
-                let cut = if i == 0 { r } else { 2.0 * r * parted - 0.5 };
+                let cut = if i == 0 {
+                    r
+                } else {
+                    (2.0 * r * parted - 0.5).max(0.0)
+                };
                 clipped_disc(&mut self.dots, p, r, cut, twin_ink(i, BOB_V));
                 self.dots.plot(p.0, p.1, twin_ink(i, CORE_V));
             }
@@ -589,18 +628,27 @@ impl DoublePendulum {
         // The newest trail segment joins the bobs' current positions, as the trail does.
         let head = Sample {
             lows: [arms[0][1], arms[1][1]],
+            apart: self.apart,
         };
+        let split_of = |apart: f64| split(apart * view.dots_per_unit());
+        let shift = merge_shift(split_of(self.apart));
+        let now = [now[0], now[1].map(|p| shifted(p, shift))];
         let newer = self.trail.iter().skip(1).chain([&head]);
         for (k, (old, new)) in self.trail.iter().zip(newer).enumerate() {
             let age = n - 1 - k;
             let fresh = 1.0 - age as f32 / TRAIL_LEN as f32;
             for (i, glow) in self.glow.iter_mut().enumerate() {
-                let (a, b) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
+                let (mut a, mut b) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
+                if i == 1 {
+                    a = shifted(a, merge_shift(split_of(old.apart)));
+                    b = shifted(b, merge_shift(split_of(new.apart)));
+                }
                 glow.stroke(a, b, &raster::STROKE_KERNEL, TRAIL_GLOW * fresh * fresh);
             }
         }
         let pivot = view.dot((0.0, 0.0));
-        for (glow, [b1, b2]) in self.glow.iter_mut().zip(now) {
+        for (i, (glow, [b1, b2])) in self.glow.iter_mut().zip(now).enumerate() {
+            let pivot = if i == 1 { shifted(pivot, shift) } else { pivot };
             glow.stroke(pivot, b1, &raster::STROKE_KERNEL, ROD_GLOW);
             glow.stroke(b1, b2, &raster::STROKE_KERNEL, ROD_GLOW);
             glow.splat(b1.0, b1.1, &HALO, 0.6 * BOB_GLOW);
@@ -1147,6 +1195,35 @@ mod tests {
         g.dots.blit(&mut lines);
         let w = usize::from(size.width());
         assert_eq!(a.cells()[..39 * w], lines.cells()[..39 * w]);
+    }
+
+    #[test]
+    fn dp_a11_merged_twins_are_two_parallel_strokes_a_cell_apart() {
+        // One braille cell right and up while merged, nothing once parted.
+        assert_eq!(merge_shift(0.0), (2.0, -4.0));
+        assert_eq!(merge_shift(1.0), (0.0, 0.0));
+        assert_eq!(merge_shift(0.5), (1.0, -2.0));
+        // Superposed twins: each hue has cells of its own, and twin B's centroid sits about
+        // one cell right of and above twin A's, so the pair reads as two strokes, not a
+        // chopped two-tone dash.
+        let (g, size) = posed(0.0);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let w = i32::from(size.width());
+        let centroid = |ramp: Ramp| {
+            let (mut n, mut sx, mut sy) = (0.0, 0.0, 0.0);
+            for (k, c) in canvas.cells().iter().enumerate() {
+                if c.ch != ' ' && c.ink.role == Role::Ramp(ramp) {
+                    n += 1.0;
+                    sx += f64::from(k as i32 % w);
+                    sy += f64::from(k as i32 / w);
+                }
+            }
+            assert!(n >= 10.0, "{ramp:?}: {n} cells");
+            (sx / n, sy / n)
+        };
+        let (a, b) = (centroid(RAMPS[0]), centroid(RAMPS[1]));
+        assert!(b.0 - a.0 > 0.5 && a.1 - b.1 > 0.5, "{a:?} {b:?}");
     }
 
     fn run(seed: u64, size: Size, seconds: f64) -> DoublePendulum {

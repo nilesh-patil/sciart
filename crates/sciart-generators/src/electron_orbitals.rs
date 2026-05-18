@@ -147,6 +147,49 @@ const GLOW_FLOOR: f64 = 0.2;
 const HAZE_MAX: u8 = 92;
 /// The glow ramps by sign of the phase's sine: `+π/2` lobes, then `−π/2` lobes.
 const GLOW_RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::Plasma];
+/// The display blur of the exposure before toning (ORB-A11), `(dx, dy, weight)` in pixels:
+/// a 3×3 binomial tent, `[1 2 1]ᵀ[1 2 1]/16`. It smooths the Monte-Carlo grain the splat
+/// leaves at the brighter M12 glow; it spreads a point no further than one pixel, so a
+/// nodal plane still reads as a dark seam.
+const BLUR: [(i32, i32, f32); 9] = [
+    (0, 0, 4.0),
+    (-1, 0, 2.0),
+    (1, 0, 2.0),
+    (0, -1, 2.0),
+    (0, 1, 2.0),
+    (-1, -1, 1.0),
+    (1, -1, 1.0),
+    (-1, 1, 1.0),
+    (1, 1, 1.0),
+];
+
+/// The exposure at pixel `(x, y)` through [`BLUR`], renormalised over the in-bounds taps so
+/// the edges do not darken (ORB-A11). Interior pixels read the buffer directly (nine loads,
+/// no bounds juggling): this runs for every pixel of the glow each frame.
+fn blurred(exposure: &Glow, x: i32, y: i32) -> f32 {
+    let size = exposure.pixel_size();
+    let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+    if x > 0 && y > 0 && x < w - 1 && y < h - 1 {
+        let v = exposure.values();
+        let (w, i) = (w as usize, (y * w + x) as usize);
+        let (up, mid, down) = (
+            &v[i - w - 1..=i - w + 1],
+            &v[i - 1..=i + 1],
+            &v[i + w - 1..=i + w + 1],
+        );
+        let row = |r: &[f32]| r[0] + 2.0 * r[1] + r[2];
+        return (row(up) + 2.0 * row(mid) + row(down)) / 16.0;
+    }
+    let (mut sum, mut wsum) = (0.0f32, 0.0f32);
+    for &(dx, dy, k) in &BLUR {
+        if let Some(v) = exposure.get(x + dx, y + dy) {
+            sum += k * v;
+            wsum += k;
+        }
+    }
+    if wsum > 0.0 { sum / wsum } else { 0.0 }
+}
+
 /// The glow's own radial window (charge quantiles): points expose it fully inside `r₇₀`
 /// and not at all beyond `r₉₅`, so the whole lobe glows and the glow feathers out with the
 /// dots' own `R_FADE` edge.
@@ -1222,10 +1265,10 @@ impl ElectronOrbitals {
         });
         let (tone, exposure, balance) = (&self.tone, &self.exposure, &self.balance);
         self.glow.shade(|x, y| {
-            let Some(e) = exposure.get(x, y) else {
+            if exposure.get(x, y).is_none() {
                 return Ink::BLANK;
-            };
-            let level = tone.level(e);
+            }
+            let level = tone.level(blurred(exposure, x, y));
             let u = (f64::from(level) / 255.0 - GLOW_FLOOR) / (1.0 - GLOW_FLOOR);
             // The sign balance of this cell and its four neighbours (centre counted twice),
             // so overlapping lobes split into coherent patches rather than confetti, and a
@@ -2704,6 +2747,26 @@ mod tests {
             lo_neg > 200 && lo_neg > 20 * lo_pos,
             "lower {lo_pos} / {lo_neg}"
         );
+    }
+
+    #[test]
+    fn orb_a11_the_exposure_is_blurred_one_pixel_and_no_further() {
+        // A single exposed pixel spreads as the 3×3 binomial tent, and not a pixel beyond,
+        // so a node stays dark; a uniform exposure is unchanged, edges included.
+        let mut e = Glow::default();
+        e.resize(Size::new(10, 5));
+        e.values_mut()[4 * 10 + 5] = 16.0;
+        assert_eq!(blurred(&e, 5, 4), 4.0);
+        assert_eq!(blurred(&e, 6, 4), 2.0);
+        assert_eq!(blurred(&e, 6, 5), 1.0);
+        assert_eq!(blurred(&e, 7, 4), 0.0);
+        assert_eq!(blurred(&e, 5, 2), 0.0);
+        e.values_mut().fill(3.0);
+        for (x, y) in [(0, 0), (9, 9), (4, 5), (9, 0)] {
+            assert!((blurred(&e, x, y) - 3.0).abs() < 1e-6, "({x},{y})");
+        }
+        let total: f32 = BLUR.iter().map(|b| b.2).sum();
+        assert_eq!(total, 16.0);
     }
 
     #[test]

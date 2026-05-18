@@ -78,7 +78,9 @@ const SPACING: f64 = 0.7;
 const MAX_SAMPLES: usize = 12_000;
 /// Entries of the light act's rest-angle → Blackbody-level table.
 const LUT: usize = 129;
-const SOUND_RAMP: Ramp = Ramp::Ice;
+/// The sound act's ramp (DOP-A6): Aurora, teal at the dim rear fronts to lime-white at the
+/// Mach pile-up; green, because the gallery already leans cold blue.
+const SOUND_RAMP: Ramp = Ramp::Aurora;
 const SOUND_SOURCE: Glyph = Glyph::new('◉', '@');
 const LIGHT_SOURCE: Glyph = Glyph::new('✦', '*');
 const WAKE: [Glyph; 2] = [Glyph::new('━', '='), Glyph::new('─', '-')];
@@ -951,6 +953,11 @@ mod tests {
 
     #[test]
     fn dop_a6_acts_walk_the_captions_and_inks() {
+        assert_eq!(
+            SOUND_RAMP,
+            Ramp::Aurora,
+            "the sound act is green, not another blue"
+        );
         let (mut g, mut ctx) = fresh(120, 40);
         let mut seen: Vec<&str> = Vec::new();
         for _ in 0..(2.0 * 48.0 / SIM_DT) as usize {
