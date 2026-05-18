@@ -2,14 +2,16 @@
 
 use std::f64::consts::{PI, TAU};
 
+use crate::trig::Trig;
+
 /// Terminal cells are ~2x taller than wide; scale x by this for round shapes.
 pub const ASPECT: f64 = 2.0;
 
 /// Point at angle `theta` (radians) on a circle of radius `r` rows around `(cx, cy)`,
 /// with x stretched by [`ASPECT`].
 pub fn polar(cx: f64, cy: f64, r: f64, theta: f64) -> (i32, i32) {
-    let x = cx + r * theta.cos() * ASPECT;
-    let y = cy + r * theta.sin();
+    let x = cx + r * theta.cos_det() * ASPECT;
+    let y = cy + r * theta.sin_det();
     (x.round() as i32, y.round() as i32)
 }
 
@@ -132,8 +134,8 @@ impl Camera {
     /// This view with its rotation's sines and cosines computed once (CORE-R50), for
     /// projecting many points per frame without four transcendental calls each.
     pub fn projector(&self) -> Projector {
-        let (sy, cy) = self.yaw.sin_cos();
-        let (sp, cp) = self.pitch.sin_cos();
+        let (sy, cy) = self.yaw.sin_cos_det();
+        let (sp, cp) = self.pitch.sin_cos_det();
         Projector {
             sy,
             cy,

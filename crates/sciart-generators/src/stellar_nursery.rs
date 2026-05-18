@@ -1,6 +1,9 @@
 //! An emission nebula with dust pillars where gas falls onto protostars that ignite and
 //! launch bipolar jets (SPEC-002 `stellar_nursery`, NUR-A1..A3).
 //!
+//! Seen as a narrowband image (HOO palette: Hα red, [O III] blue, false colour) lit by an
+//! off-frame cluster that carves the pillars and lights their rims from one side.
+//!
 //! Positions are in rows (x on screen = `x · ASPECT`). The nebula is a domain-warped sum of
 //! sines whose warp is chosen *separable* (x is warped by a function of y and vice versa),
 //! so every mode's phase splits into a column part plus a row part and a frame costs
@@ -9,10 +12,11 @@
 use std::f64::consts::TAU;
 
 use rand::Rng;
-use sciart_core::draw;
 use sciart_core::geom::ASPECT;
-use sciart_core::particles::{kepler_speed, plot};
+use sciart_core::particles::kepler_speed;
 use sciart_core::prelude::*;
+use sciart_core::timeline::ease;
+use sciart_core::{ink, raster, rng};
 
 pub static META: Meta = Meta {
     name: "stellar_nursery",
@@ -26,8 +30,8 @@ pub fn build() -> Box<dyn Generator> {
     Box::new(StellarNursery::default())
 }
 
-/// Sine terms in the nebula field (spec: ≤ 6).
-const MODES: usize = 6;
+/// Sine terms in the nebula field: two octaves of structure with a 1/f-like spectrum.
+const MODES: usize = 12;
 /// Largest internal integration step; `update` sub-steps larger `dt`s.
 const MAX_STEP: f64 = 1.0 / 60.0;
 /// Ignition mass (normalized units).
@@ -42,7 +46,7 @@ pub(crate) const IGNITION_RAMP: f64 = 1.0;
 pub(crate) const SHINE: f64 = 25.0;
 /// Fade-out before replacement (s).
 pub(crate) const FADE: f64 = 2.5;
-const GAS_PER_AREA: f64 = 0.03;
+const GAS_PER_AREA: f64 = 0.02;
 pub(crate) const GAS_MAX: usize = 600;
 pub(crate) const JET_MAX: usize = 240;
 /// Target free-fall time from the feeding radius (s); fixes `gm` per size.
@@ -56,42 +60,111 @@ const ACC_TIME: f64 = 16.0;
 /// Closest spawn distance to a protostar (rows).
 const R_SPAWN_MIN: f64 = 3.0;
 /// Jet particles per second per freshly ignited star.
-const JET_RATE: f64 = 90.0;
+const JET_RATE: f64 = 22.0;
 /// e-folding time of jet activity after ignition (s): outflows weaken as accretion stops.
 const JET_DECAY: f64 = 9.0;
 /// Period of episodic ejection, which is what makes Herbig–Haro knots (s).
 const JET_PULSE: f64 = 0.8;
 
-/// Nebula z-score below which nothing is drawn, and the span mapped to full brightness.
-const NEB_THRESHOLD: f64 = -0.1;
-const NEB_SPAN: f64 = 2.4;
-
-const NEBULA: [Glyph; 4] = [
-    Glyph::new('·', '.'),
-    Glyph::new('░', ':'),
-    Glyph::new('▒', '+'),
-    Glyph::new('▓', '#'),
-];
-const DUST: Glyph = Glyph::new('█', '#');
-const DUST_THIN: Glyph = Glyph::new('▓', '#');
-const RIM_TOP: Glyph = Glyph::new('▒', '%');
-const RIM_SIDE: Glyph = Glyph::new('░', ':');
-const GAS: [Glyph; 3] = [
-    Glyph::new('·', '.'),
-    Glyph::new('∙', '.'),
-    Glyph::new('•', 'o'),
-];
-const EMBEDDED: [Glyph; 2] = [Glyph::new('∙', '.'), Glyph::new('•', 'o')];
+/// Nebula z-score below which nothing is drawn, the span mapped to full brightness, and
+/// the exposure's contrast: above 1 it keeps most gas dim, so only the filaments near
+/// the ionisation front reach the ramp's top and the sky between stays black.
+const NEB_THRESHOLD: f64 = 0.0;
+const NEB_SPAN: f64 = 2.6;
+const NEB_GAMMA: f64 = 1.5;
+/// The exposure's shoulder: brightness `peak·(1 − e^{−k·t})^γ` for `t` the z-score over
+/// `NEB_SPAN`, approaching (never clipping at) each line's peak, [O III] below white so
+/// its cyan filaments keep their texture (NUR-A6).
+const NEB_SHOULDER: f64 = 1.6;
+const OIII_PEAK: f64 = 0.85;
+const HA_PEAK: f64 = 0.95;
+/// Nebula levels below this dissolve into black space (the ramps' floors are tinted).
+const NEB_FLOOR: u8 = 24;
+/// The ionising cluster sits off-frame at this angle from straight up, on a seeded side.
+const SOURCE_TILT: f64 = 35.0 * std::f64::consts::PI / 180.0;
+/// How far the pillar tips lean towards the source, as a fraction of the width.
+const LEAN: (f64, f64) = (0.03, 0.16);
+/// Brightness gradient towards the source (z-score across the frame).
+const SOURCE_BIAS: f64 = 0.9;
+/// The cluster's light bleeding in from its corner: peak z-score and Gaussian radius (a
+/// fraction of the frame's larger pixel side), centred just off-frame.
+const SOURCE_GLOW: f64 = 1.2;
+const SOURCE_GLOW_R: f64 = 0.3;
+/// Ionisation proxy: `ION_BASE + ION_SLOPE·u` towards the source, plus `ION_BUBBLE` per
+/// unit of HII-bubble or source glow, less `ION_DENSE` per unit of brightness (dense gas
+/// recombines to Hα). [O III] lies where it exceeds ½: a zone round the source, its
+/// edge stippled over `±ION_BAND` rather than cut.
+const ION_BASE: f64 = 0.3;
+const ION_SLOPE: f64 = 0.8;
+const ION_BUBBLE: f64 = 0.5;
+const ION_DENSE: f64 = 0.1;
+const ION_BAND: f64 = 0.025;
+/// Dust: `DUST_RAMP` levels of the pillars' textured interior (dark umber, so they
+/// stand as silhouettes), plus up to `LIMB` more a few pixels in from a lit face (limb
+/// brightening: the column reads as lit in 3-D, not as a cut-out). Rims: levels from barely
+/// lit to full light, and the light below which a rim pixel is plain dust.
+const DUST_LEVEL: (f64, f64) = (0.0, 62.0);
+/// The pillars' and the Hα gas's ramps (NUR-A8): umber/rust dust and gold gas beside the
+/// teal [O III], the Hubble "Pillars" look. False colour, as the HOO palette was.
+const DUST_RAMP: Ramp = Ramp::Ember;
+const GAS_RAMP: Ramp = Ramp::Sulfur;
+/// Share of the dust's level set by its place along the column (bright head, dark base),
+/// the rest by its texture (NUR-A8).
+const DUST_ALONG: f64 = 0.55;
+const LIMB: f64 = 56.0;
+/// Faces lit less than this (of full) do not brighten their limb.
+const LIMB_FROM: f64 = 0.5;
+const RIM_LEVEL: (f64, f64) = (40.0, 105.0);
+const RIM_MIN: f64 = 0.08;
+/// A rim is lit by `smoothstep` of `n̂·d̂` from `RIM_LIT.0` to `RIM_LIT.1` (full); `n̂` is
+/// the outward normal of the pillar's 7 × 7-smoothed outline. The dark end lies past
+/// grazing, so faces edge-on to the source keep a dim rim: the diffuse ionising field and
+/// the photoevaporative flow light them too (NUR-A4).
+const RIM_LIT: (f64, f64) = (-0.1, 0.9);
+/// An ionisation front is brightest at the tip facing the source and fades down the
+/// flanks to this share of it at the base.
+const RIM_BASE: f64 = 0.4;
+/// Pillar outline, as fractions of the half-width: lobes and necks (long periods, so the
+/// rim's normal turns slowly and never zips, NUR-A4) and fine roughness.
+const LOBE: f64 = 0.3;
+/// Pillar widths scale with the terminal width, but never below this many columns' worth.
+const MIN_SPAN: f64 = 110.0;
+const ROUGH: f64 = 0.02;
+/// Erosion (NUR-A7): each edge is displaced by value noise along the column, two octaves
+/// of `EROSION_BUMPS` bumps per pillar length at these amplitudes (fractions of the local
+/// half-width), so the flanks are ragged with bays and fingers, not a smooth sausage; the
+/// dome is roughened by the same noise.
+const EROSION: (f64, f64) = (0.34, 0.16);
+const EROSION_BUMPS: (f64, f64) = (9.0, 26.0);
+/// Half-width of the outline smoothing (pixels), the light of a rim's second pixel, and
+/// how deep (pixels) the limb brightening reaches.
+const RIM_REACH: i32 = 3;
+/// A rim is a single bright pixel with only a faint second one: a thin ionisation front,
+/// not an outline.
+const RIM_INNER: f64 = 0.15;
+const LIMB_REACH: usize = 5;
+/// Dust texture: value-noise lattice spacings (pixels) of its two octaves.
+const TEX_CELL: (f64, f64) = (6.0, 2.5);
+/// Mask values: open sky, pillar interior; rims store `RIM + lit·(255 − RIM)`.
+const OPEN: u8 = 0;
+const DUST: u8 = 1;
+const RIM: u8 = 2;
+/// Temperature (K) of young stars once shining.
+const SHINING_K: f64 = 22_000.0;
+/// Star glows (pixels): an embedded protostar's Gaussian glow radius and peak `Ramp(Ember)`
+/// value, growing from `.0` to `.1` with mass (an infrared source glowing in its dust;
+/// the pillars' focal points); a shining star's glare radius and peak Ice level.
+const EMBEDDED_HALO: (f64, f64) = (2.0, 3.4);
+const EMBEDDED_PEAK: (f64, f64) = (0.5, 0.75);
+const SHINING_HALO: f64 = 3.5;
+const GLARE: f64 = OIII_PEAK;
 const STAR: Glyph = Glyph::new('✦', '*');
-const SPIKE_H: Glyph = Glyph::new('─', '-');
-const SPIKE_V: Glyph = Glyph::new('│', '|');
-const JET_DIRS: [Glyph; 4] = [
-    Glyph::new('─', '-'),
-    Glyph::new('╲', '\\'),
-    Glyph::new('│', '|'),
-    Glyph::new('╱', '/'),
-];
-const KNOT: Glyph = Glyph::new('•', 'o');
+/// Jet streak length (s of flight) and the age fraction after which a jet is a knot.
+const JET_STREAK: f64 = 0.3;
+const KNOT_AGE: f64 = 0.6;
+/// Gas streak length: seconds of infall drawn behind each parcel.
+const STREAK: f64 = 0.18;
+const ASCII_RAMP: [char; 4] = ['.', ':', '+', '#'];
 
 /// Radial acceleration toward a protostar, `gm / (d² + ε²)` (Plummer-softened).
 #[inline]
@@ -212,7 +285,7 @@ pub(crate) struct Gas {
 
 impl Gas {
     pub(crate) fn pos(&self, s: &Protostar) -> (f64, f64) {
-        let (sn, cs) = self.theta.sin_cos();
+        let (sn, cs) = self.theta.sin_cos_det();
         (s.x + self.r * cs, s.y + self.r * sn)
     }
 }
@@ -226,7 +299,6 @@ struct Jet {
     vy: f64,
     age: f64,
     life: f64,
-    dir: u8,
 }
 
 /// One nebula plane wave; `k` in rad/row, `omega` in rad/s.
@@ -245,9 +317,46 @@ struct Pillar {
     base: f64,
     lean: f64,
     height: f64,
+    /// Half-width at the base (fraction of the width), the neck's share of it, and the
+    /// head's half-width as a multiple of the neck's.
     base_half: f64,
-    tip_half: f64,
-    wobble: f64,
+    neck: f64,
+    head: f64,
+    /// Lobe period as a fraction of the pillar's length, and each edge's lobe phase: the
+    /// edges swell and pinch out of step, so the column has necks and bulges.
+    lobe_period: f64,
+    lobe_phase: (f64, f64),
+    /// Side knobs (evaporating gaseous globules): position down the body, side (±1) and
+    /// radius as a share of the local half-width.
+    knobs: [(f64, f64, f64); 2],
+}
+
+impl Pillar {
+    /// Left and right half-widths (columns) at `s ∈ [0, 1]` from the head's widest row
+    /// (0) to the base (1), for a base half-width of `base_half` columns: a bulbous head
+    /// over a narrower neck, a flaring base, and lobes that grow in below the head.
+    fn half_widths(&self, s: f64, base_half: f64) -> (f64, f64) {
+        let neck = (base_half * self.neck).max(0.8);
+        let core = neck + (base_half - neck) * s.powf(1.5);
+        let bulb = neck * self.head * (-(s / 0.24).powi(2)).exp();
+        let half = core.max(bulb);
+        let grow = ease::smoothstep((s - 0.1) / 0.2);
+        let edge = |phase: f64, k: f64| {
+            half * (1.0
+                + LOBE * grow * (TAU * s / self.lobe_period + phase).sin_det()
+                + ROUGH * (k * TAU * s / self.lobe_period + 2.0 * phase).sin_det()
+                + self.erosion(phase, s))
+        };
+        (edge(self.lobe_phase.0, 7.0), edge(self.lobe_phase.1, 9.0))
+    }
+
+    /// Edge displacement (fraction of the half-width) at `s` for the edge seeded by
+    /// `phase`: two octaves of 1-D value noise in `[−1, 1]`, weighted by `EROSION`.
+    fn erosion(&self, phase: f64, s: f64) -> f64 {
+        let salt = phase.to_bits() ^ 0xE205_1011;
+        let n = |bumps: f64, salt: u64| 2.0 * value_noise(salt, s * bumps, 0.5, 1.0) - 1.0;
+        EROSION.0 * n(EROSION_BUMPS.0, salt) + EROSION.1 * n(EROSION_BUMPS.1, !salt)
+    }
 }
 
 /// Separable domain warp: x is displaced by `amp·sin(qy·y + …)`, y by `amp·sin(qx·x + …)`.
@@ -261,11 +370,6 @@ struct Warp {
     nu: f64,
 }
 
-/// Mask values.
-const M_DUST: u8 = 1;
-const M_RIM_TOP: u8 = 2;
-const M_RIM_SIDE: u8 = 3;
-
 #[derive(Debug)]
 pub struct StellarNursery {
     t: f64,
@@ -275,12 +379,25 @@ pub struct StellarNursery {
     warp: Warp,
     /// 1/σ of the raw field (so the sum reads as a z-score).
     inv_sigma: f64,
+    /// Per-column and per-pixel-row `(sin, cos)` tables of the nebula modes.
     col: Vec<[(f64, f64); MODES]>,
     row: Vec<[(f64, f64); MODES]>,
-    /// Illumination gradient: the ionizing cluster sits above the frame.
-    row_bias: Vec<f64>,
+    /// Position towards the ionising source, split into a column and a pixel-row part:
+    /// `u = col_u[x] + row_u[y]`, from about −0.6 (far) to +0.6 (near).
+    col_u: Vec<f64>,
+    row_u: Vec<f64>,
+    /// The source's glow, separable: `glow = col_g[x]·row_g[py]`.
+    col_g: Vec<f64>,
+    row_g: Vec<f64>,
+    /// Side of the ionising source: −1 upper left, +1 upper right.
+    source: f64,
     pillars: Vec<Pillar>,
+    /// Pillar mask at pixel resolution (`OPEN`, `DUST` or a lit rim).
     mask: Vec<u8>,
+    /// Static `DUST_RAMP` level of each pillar pixel: lit rims and textured dust.
+    dust: Vec<u8>,
+    /// Seed of the dust texture.
+    tex_salt: u64,
     tips: Vec<(f64, f64)>,
     stars: Vec<Protostar>,
     gas: ParticlePool<Gas>,
@@ -291,7 +408,16 @@ pub struct StellarNursery {
     gas_mass: f64,
     spawn_acc: f64,
     next_id: u32,
+    /// The nebula, and the gas, jets and spikes over it.
+    pixels: Pixels,
+    dots: Dots,
+    /// Cells of the shining stars' `✦` glyphs.
+    shining: [(i32, i32); MAX_STARS],
+    n_shining: usize,
 }
+
+/// Protostars at once (the scene keeps 3–5).
+const MAX_STARS: usize = 5;
 
 impl Default for StellarNursery {
     fn default() -> Self {
@@ -304,9 +430,15 @@ impl Default for StellarNursery {
             inv_sigma: 0.0,
             col: Vec::new(),
             row: Vec::new(),
-            row_bias: Vec::new(),
+            col_u: Vec::new(),
+            row_u: Vec::new(),
+            col_g: Vec::new(),
+            row_g: Vec::new(),
+            source: 1.0,
             pillars: Vec::new(),
             mask: Vec::new(),
+            dust: Vec::new(),
+            tex_salt: 0,
             tips: Vec::new(),
             stars: Vec::new(),
             gas: ParticlePool::with_capacity(0),
@@ -317,24 +449,87 @@ impl Default for StellarNursery {
             gas_mass: 0.0,
             spawn_acc: 0.0,
             next_id: 0,
+            pixels: Pixels::default(),
+            dots: Dots::default(),
+            shining: [(0, 0); MAX_STARS],
+            n_shining: 0,
         }
     }
+}
+
+/// Unit vector from a pixel towards the ionising source on side `s` (y down).
+fn to_source(s: f64) -> (f64, f64) {
+    (s * SOURCE_TILT.sin_det(), -SOURCE_TILT.cos_det())
+}
+
+/// How strongly a dust surface is lit by the source (NUR-A4), from the gradient `grad` of
+/// the smoothed dust mask (it points into the pillar, so the outward normal is
+/// `n̂ = −grad/|grad|`): `smoothstep` of `n̂·d̂` over `RIM_LIT`, so faces turned towards
+/// the source glow, grazing ones fade and faces turned away stay dark; 0 on a flat mask.
+/// Being taken from a smoothed outline, `n̂` turns gradually along a pixel staircase.
+pub(crate) fn rim_light(grad: (f64, f64), d: (f64, f64)) -> f64 {
+    let len = grad.0.hypot(grad.1);
+    if len < 1e-9 {
+        return 0.0;
+    }
+    let facing = -(grad.0 * d.0 + grad.1 * d.1) / len;
+    ease::smoothstep((facing - RIM_LIT.0) / (RIM_LIT.1 - RIM_LIT.0))
+}
+
+/// The share of dust in the `(2·RIM_REACH + 1)²` window around every pixel (clipped at
+/// the edges): a smoothed outline whose gradient gives the rims their normals (a 7 × 7
+/// box keeps them from flipping along pixel steps). Built on resize only.
+fn smoothed_dust(mask: &[u8], w: usize) -> Vec<f32> {
+    let h = mask.len() / w.max(1);
+    let reach = RIM_REACH as usize;
+    let dust = |i: usize| f32::from(u8::from(mask[i] != OPEN));
+    // Separable box: rows, then columns.
+    let mut rows = vec![0.0_f32; mask.len()];
+    for y in 0..h {
+        for x in 0..w {
+            let (a, b) = (x.saturating_sub(reach), (x + reach).min(w - 1));
+            rows[y * w + x] = (a..=b).map(|k| dust(y * w + k)).sum::<f32>() / (b - a + 1) as f32;
+        }
+    }
+    let mut out = vec![0.0_f32; mask.len()];
+    for y in 0..h {
+        let (a, b) = (y.saturating_sub(reach), (y + reach).min(h - 1));
+        for x in 0..w {
+            out[y * w + x] = (a..=b).map(|k| rows[k * w + x]).sum::<f32>() / (b - a + 1) as f32;
+        }
+    }
+    out
+}
+
+/// Smooth value noise in `[0, 1)` at pixel `(x, y)` on a lattice of spacing `cell` pixels
+/// (hashed corners, smoothstep-blended): the dust's texture.
+fn value_noise(salt: u64, x: f64, y: f64, cell: f64) -> f64 {
+    let (u, v) = (x / cell, y / cell);
+    let (i, j) = (u.floor(), v.floor());
+    let corner = |di: i32, dj: i32| rng::hash01(salt ^ rng::cell_key(i as i32 + di, j as i32 + dj));
+    let (fu, fv) = (ease::smoothstep(u - i), ease::smoothstep(v - j));
+    ease::lerp(
+        ease::lerp(corner(0, 0), corner(1, 0), fu),
+        ease::lerp(corner(0, 1), corner(1, 1), fu),
+        fv,
+    )
 }
 
 impl StellarNursery {
     fn init_sky(&mut self, rng: &mut impl Rng) {
         self.modes = (0..MODES)
             .map(|_| {
-                let wavelength = rng.random_range(10.0..=42.0);
+                // Log-uniform wavelengths, longer ones stronger: filaments with texture.
+                let wavelength: f64 = (rng.random_range(5f64.ln()..=42f64.ln())).exp();
                 let dir: f64 = rng.random_range(0.0..TAU);
                 let k = TAU / wavelength;
                 Mode {
-                    kx: k * dir.cos(),
-                    ky: k * dir.sin(),
+                    kx: k * dir.cos_det(),
+                    ky: k * dir.sin_det(),
                     phase: rng.random_range(0.0..TAU),
                     omega: rng.random_range(0.04..=0.14)
                         * if rng.random_bool(0.5) { 1.0 } else { -1.0 },
-                    weight: rng.random_range(0.5..=1.0),
+                    weight: rng.random_range(0.5..=1.0) * (wavelength / 42.0).powf(0.8),
                 }
             })
             .collect();
@@ -349,121 +544,224 @@ impl StellarNursery {
             py: rng.random_range(0.0..TAU),
             nu: rng.random_range(0.08..=0.16),
         };
+        self.source = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+        self.tex_salt = rng.random();
         let n = rng.random_range(2..=3);
         let slot = 1.0 / f64::from(n);
         self.pillars = (0..n)
-            .map(|i| Pillar {
-                base: slot * (f64::from(i) + rng.random_range(0.3..=0.7)),
-                lean: rng.random_range(-0.05..=0.05),
-                height: rng.random_range(0.35..=0.7),
-                base_half: rng.random_range(0.035..=0.06),
-                tip_half: rng.random_range(0.7..=1.0),
-                wobble: rng.random_range(0.0..TAU),
+            .map(|i| {
+                let phase: f64 = rng.random_range(0.0..TAU);
+                let mut knob = || {
+                    let side = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
+                    (
+                        rng.random_range(0.3..=0.85),
+                        side,
+                        rng.random_range(0.35..=0.6),
+                    )
+                };
+                let knobs = [knob(), knob()];
+                Pillar {
+                    base: slot * (f64::from(i) + rng.random_range(0.3..=0.7)),
+                    // Pillars point at the stars that sculpt them (NUR-A5).
+                    lean: self.source * rng.random_range(LEAN.0..=LEAN.1),
+                    height: rng.random_range(0.35..=0.75),
+                    base_half: rng.random_range(0.04..=0.07),
+                    neck: rng.random_range(0.45..=0.6),
+                    head: rng.random_range(1.9..=2.3),
+                    lobe_period: rng.random_range(0.3..=0.6),
+                    lobe_phase: (phase, phase + rng.random_range(0.6..=1.6)),
+                    // One or two knobs: a second, when absent, has zero radius.
+                    knobs: [
+                        knobs[0],
+                        if rng.random_bool(0.5) {
+                            knobs[1]
+                        } else {
+                            (0.0, 0.0, 0.0)
+                        },
+                    ],
+                }
             })
             .collect();
     }
 
-    /// Rasterise the pillars into `mask` and find their tips (rows).
+    /// Rasterise the pillars into the pixel `mask`, light their rims from the source, shade
+    /// their dust into `dust` (static levels) and find their tips (rows).
     fn build_mask(&mut self) {
-        let (w, h) = (self.w, self.h);
+        let (w, ph) = (self.w, 2 * self.h);
         self.mask.clear();
-        self.mask.resize(w * h, 0);
+        self.mask.resize(w * ph, OPEN);
+        self.dust.clear();
+        self.dust.resize(w * ph, 0);
         self.tips.clear();
-        let (wf, hf) = (w as f64, h as f64);
+        if w == 0 || ph == 0 {
+            return;
+        }
+        // How far down its pillar each dust pixel lies (0 at the head, 1 at the base), and
+        // each dust pixel's limb brightening, added once the rims are known.
+        let mut along = vec![1.0_f32; w * ph];
+        let mut limbs = vec![0.0_f32; w * ph];
+        let (wf, hf) = (w as f64, self.h as f64);
         for p in &self.pillars {
             let bottom = hf - 1.0;
             let tip_y = (bottom - p.height * hf).max(0.0);
-            let base_half = (p.base_half * wf).max(1.0);
-            let tip_half = (base_half * p.tip_half).max(0.8);
-            let centre = |y: f64| {
-                let s = ((y - tip_y) / (bottom - tip_y).max(1.0)).clamp(0.0, 1.0);
-                (p.base + p.lean * (1.0 - s)) * wf
+            let length = (bottom - tip_y).max(1.0);
+            // Narrow terminals keep the pillars as wide as at `MIN_SPAN` columns, so they
+            // stay columns rather than sticks.
+            let base_half = p.base_half * wf.max(MIN_SPAN);
+            let s_at = |y: f64| ((y - tip_y) / length).clamp(0.0, 1.0);
+            let centre = |y: f64| (p.base + p.lean * (1.0 - s_at(y))) * wf;
+            let mut fill = |x: usize, py: usize, s: f64| {
+                let i = py * w + x;
+                self.mask[i] = DUST;
+                along[i] = along[i].min(s as f32);
             };
-            // A bulbous head (the dense globule that shields the column), a narrower neck,
-            // and a base that flares; the two edges wobble independently.
-            let head = tip_half / ASPECT;
-            let neck = 0.7 * tip_half;
-            let ph = p.wobble;
-            for y in 0..h {
-                let yf = y as f64;
+            // The head's widest row, capped above by a round dome (a half-ellipse, round
+            // on screen); the body below.
+            let tip_half = p.half_widths(0.0, base_half).0;
+            let dome = tip_half / ASPECT;
+            for py in 0..ph {
+                let yf = (py as f64 - 0.5) / 2.0;
                 let (half_l, half_r) = if yf >= tip_y {
-                    let s = ((yf - tip_y) / (bottom - tip_y).max(1.0)).clamp(0.0, 1.0);
-                    let core = neck + (base_half - neck) * s.powf(1.5);
-                    let bulb = tip_half * (-(s / 0.14).powi(2)).exp();
-                    let half = core.max(bulb);
-                    (
-                        half * (1.0
-                            + 0.18 * (0.9 * yf + ph).sin()
-                            + 0.08 * (2.7 * yf + 2.0 * ph).sin()),
-                        half * (1.0
-                            + 0.18 * (0.7 * yf + ph + 2.0).sin()
-                            + 0.08 * (3.1 * yf + ph).sin()),
-                    )
+                    p.half_widths(s_at(yf), base_half)
                 } else {
-                    let d = (tip_y - yf) / head.max(0.5);
+                    let d = (tip_y - yf) / dome.max(0.5);
                     if d > 1.0 {
                         continue;
                     }
                     let half = tip_half * (1.0 - d * d).sqrt();
-                    (half, half)
+                    // Roughen the dome with the flank noise, running on past the head.
+                    let rough = |phase: f64| 1.0 + 0.6 * p.erosion(phase, -0.3 * d);
+                    (half * rough(p.lobe_phase.0), half * rough(p.lobe_phase.1))
                 };
                 let c = centre(yf);
                 let x0 = (c - half_l).ceil().max(0.0);
                 let x1 = (c + half_r).floor().min(wf - 1.0);
-                if x0 > x1 {
+                if x0 <= x1 {
+                    for x in x0 as usize..=x1 as usize {
+                        fill(x, py, s_at(yf));
+                    }
+                }
+            }
+            // Side knobs: round globules half-emerged from the flank.
+            for &(s, side, size) in &p.knobs {
+                let yf = tip_y + s * length;
+                let (half_l, half_r) = p.half_widths(s, base_half);
+                let r = size * if side < 0.0 { half_l } else { half_r };
+                if r < 1.0 {
                     continue;
                 }
-                for x in x0 as usize..=x1 as usize {
-                    self.mask[y * w + x] = M_DUST;
+                let cx = centre(yf) + side * (if side < 0.0 { half_l } else { half_r } + 0.3 * r);
+                let cy = 2.0 * yf + 0.5;
+                let y_span =
+                    (cy - r).floor().max(0.0) as usize..=((cy + r).ceil() as usize).min(ph - 1);
+                for py in y_span {
+                    for x in
+                        (cx - r).floor().max(0.0) as usize..=((cx + r).ceil() as usize).min(w - 1)
+                    {
+                        if (x as f64 - cx).hypot(py as f64 - cy) <= r {
+                            fill(x, py, s);
+                        }
+                    }
                 }
             }
             self.tips.push((centre(tip_y) / ASPECT, tip_y + 0.5));
         }
-        // Ionization fronts: dust surfaces facing the (overhead) ionizing stars glow.
-        for y in 0..h {
+        // Ionisation fronts: dust surfaces facing the source glow, brightest at the tip,
+        // the rest stay dark. A rim is two pixels deep: full light on the surface,
+        // `RIM_INNER` one pixel in. Deeper in, the dust is textured and limb-brightened.
+        let d = to_source(self.source);
+        let smooth = smoothed_dust(&self.mask, w);
+        let at = |x: usize, y: usize| f64::from(smooth[y * w + x]);
+        let open_within = |mask: &[u8], x: usize, y: usize, r: usize| {
+            (y.saturating_sub(r)..=(y + r).min(ph - 1)).any(|ny| {
+                (x.saturating_sub(r)..=(x + r).min(w - 1)).any(|nx| mask[ny * w + nx] == OPEN)
+            })
+        };
+        for y in 0..ph {
             for x in 0..w {
                 let i = y * w + x;
-                if self.mask[i] == 0 {
+                if self.mask[i] == OPEN {
                     continue;
                 }
-                let open = |xx: usize, yy: usize| self.mask[yy * w + xx] == 0;
-                if y == 0 || open(x, y - 1) {
-                    self.mask[i] = M_RIM_TOP;
-                } else if (x > 0 && open(x - 1, y)) || (x + 1 < w && open(x + 1, y)) {
-                    self.mask[i] = M_RIM_SIDE;
+                // Distance (pixels, Chebyshev) to open sky, up to the limb's reach.
+                let depth = (1..=LIMB_REACH)
+                    .find(|&r| open_within(&self.mask, x, y, r))
+                    .unwrap_or(LIMB_REACH + 1);
+                // A wide central difference of the smoothed outline: finely graded
+                // directions, so the light turns smoothly along a pixel staircase.
+                let grad = (
+                    at((x + 2).min(w - 1), y) - at(x.saturating_sub(2), y),
+                    at(x, (y + 2).min(ph - 1)) - at(x, y.saturating_sub(2)),
+                );
+                let facing = rim_light(grad, d);
+                let tip = ease::lerp(1.0, RIM_BASE, f64::from(along[i]));
+                let lit = facing
+                    * match depth {
+                        1 => 1.0,
+                        2 => RIM_INNER,
+                        _ => 0.0,
+                    };
+                if lit >= RIM_MIN {
+                    self.mask[i] = RIM + (lit * f64::from(255 - RIM)).round() as u8;
+                    self.dust[i] = ink::level(ease::lerp(RIM_LEVEL.0, RIM_LEVEL.1, lit * tip));
+                    continue;
+                }
+                // Only well-lit faces brighten their limb: a grazing or shadowed face
+                // stays dust right up to the sky.
+                let lit_face = ((facing - LIMB_FROM) / (1.0 - LIMB_FROM)).max(0.0);
+                let limb = lit_face * (1.0 - (depth as f64 - 1.0) / LIMB_REACH as f64).max(0.0);
+                let tex = 0.65 * value_noise(self.tex_salt, x as f64, y as f64, TEX_CELL.0)
+                    + 0.35 * value_noise(!self.tex_salt, x as f64, y as f64, TEX_CELL.1);
+                let head = 1.0 - f64::from(along[i]);
+                let shade = (1.0 - DUST_ALONG) * tex + DUST_ALONG * head;
+                self.dust[i] = ink::level(ease::lerp(DUST_LEVEL.0, DUST_LEVEL.1, shade));
+                limbs[i] = (LIMB * limb * tip) as f32;
+            }
+        }
+        // The limb glows only behind a well-lit rim: an eroded bay facing the source but
+        // hidden from it by the rest of the column stays dark dust.
+        let strong = RIM + (LIMB_FROM * f64::from(255 - RIM)) as u8;
+        let r = LIMB_REACH;
+        for y in 0..ph {
+            for x in 0..w {
+                let i = y * w + x;
+                if limbs[i] <= 0.0 || self.mask[i] != DUST {
+                    continue;
+                }
+                let behind_rim = (y.saturating_sub(r)..=(y + r).min(ph - 1)).any(|ny| {
+                    (x.saturating_sub(r)..=(x + r).min(w - 1))
+                        .any(|nx| self.mask[ny * w + nx] >= strong)
+                });
+                if behind_rim {
+                    self.dust[i] = ink::level(f64::from(self.dust[i]) + f64::from(limbs[i]));
                 }
             }
         }
     }
 
-    /// Fill the per-column and per-row `(sin, cos)` tables for the current time.
+    /// Fill the per-column and per-pixel-row `(sin, cos)` tables for the current time.
     fn refresh_tables(&mut self) {
         let (t, wp) = (self.t, self.warp);
         for (x, c) in self.col.iter_mut().enumerate() {
             let xr = x as f64 / ASPECT;
-            let dy = wp.amp * (wp.qx * xr + wp.px + wp.nu * t).sin();
+            let dy = wp.amp * (wp.qx * xr + wp.px + wp.nu * t).sin_det();
             for (o, m) in c.iter_mut().zip(&self.modes) {
-                *o = (m.kx * xr + m.ky * dy + m.phase + m.omega * t).sin_cos();
+                *o = (m.kx * xr + m.ky * dy + m.phase + m.omega * t).sin_cos_det();
             }
         }
-        for (y, r) in self.row.iter_mut().enumerate() {
-            let yf = y as f64;
-            let dx = wp.amp * (wp.qy * yf + wp.py - 0.7 * wp.nu * t).sin();
+        for (py, r) in self.row.iter_mut().enumerate() {
+            let yf = (py as f64 - 0.5) / 2.0;
+            let dx = wp.amp * (wp.qy * yf + wp.py - 0.7 * wp.nu * t).sin_det();
             for (o, m) in r.iter_mut().zip(&self.modes) {
-                *o = (m.ky * yf + m.kx * dx).sin_cos();
+                *o = (m.ky * yf + m.kx * dx).sin_cos_det();
             }
         }
     }
 
-    /// Nebula z-score at cell `(x, y)`: `Σ wᵢ sin(Aᵢ(x) + Bᵢ(y)) / σ` plus the gradient.
-    #[inline]
-    fn field(&self, x: usize, y: usize) -> f64 {
-        let (c, r) = (&self.col[x], &self.row[y]);
-        let mut f = 0.0;
-        for i in 0..MODES {
-            f += self.modes[i].weight * (c[i].0 * r[i].1 + c[i].1 * r[i].0);
-        }
-        f * self.inv_sigma + self.row_bias[y]
+    /// Nebula z-score at pixel `(x, py)`, brighter towards the source.
+    fn field(&self, x: usize, py: usize) -> f64 {
+        nebula_z(&self.modes, self.inv_sigma, &self.col[x], &self.row[py])
+            + SOURCE_BIAS * (self.col_u[x] + self.row_u[py])
     }
 
     fn in_bounds(&self, x: f64, y: f64) -> bool {
@@ -551,13 +849,13 @@ impl StellarNursery {
             let th = feed + rng.random_range(-0.22..=0.22);
             let u: f64 = rng.random();
             let r = R_SPAWN_MIN + (self.r_feed - R_SPAWN_MIN).max(0.0) * u.sqrt();
-            let (x, y) = (host.x + r * th.cos(), host.y + r * th.sin());
+            let (x, y) = (host.x + r * th.cos_det(), host.y + r * th.sin_det());
             let Some((cx, cy)) = self.cell(x, y).filter(|_| self.in_bounds(x, y)) else {
                 continue;
             };
             // Prefer the bright (dense) parts of the cloud; dust pillars count as dense too.
-            if self.mask[cy * self.w + cx] != 0
-                || self.field(cx, cy) > NEB_THRESHOLD
+            if self.mask[2 * cy * self.w + cx] != OPEN
+                || self.field(cx, 2 * cy) > NEB_THRESHOLD
                 || attempt == 5
             {
                 (px, py, found) = (x, y, true);
@@ -593,27 +891,22 @@ impl StellarNursery {
     fn emit_jets(&mut self, i: usize, h: f64, rng: &mut impl Rng) {
         let s = self.stars[i];
         let Phase::Shining(age) = s.phase else { return };
-        let pulse = (0.5 + 0.5 * (TAU * age / JET_PULSE).sin()).powi(2);
+        let pulse = (0.5 + 0.5 * (TAU * age / JET_PULSE).sin_det()).powi(2);
         let strength = s.brightness() * (-age / JET_DECAY).exp() * pulse;
         let mut acc = s.jet_acc + JET_RATE * strength * h;
-        let (sn, cs) = s.jet.sin_cos();
-        // Screen-space orientation of the axis picks the line glyph.
-        let ang = sn.atan2(cs * ASPECT).rem_euclid(std::f64::consts::PI);
-        let dir = ((ang / (std::f64::consts::PI / 4.0)).round() as u8) % 4;
         while acc >= 1.0 {
             acc -= 1.0;
             let sign = if rng.random_bool(0.5) { 1.0 } else { -1.0 };
-            let speed = rng.random_range(6.0..=10.0);
+            let speed = rng.random_range(8.0..=12.0);
             let spread = rng.random_range(-0.08..=0.08);
-            let (a_s, a_c) = (s.jet + spread).sin_cos();
+            let (a_s, a_c) = (s.jet + spread).sin_cos_det();
             let jet = Jet {
                 x: s.x + sign * 0.6 * a_c,
                 y: s.y + sign * 0.6 * a_s,
                 vx: sign * speed * a_c,
                 vy: sign * speed * a_s,
                 age: 0.0,
-                life: rng.random_range(0.9..=1.5),
-                dir,
+                life: rng.random_range(1.4..=2.2),
             };
             if !self.jets.spawn(jet) {
                 acc = 0.0;
@@ -695,9 +988,10 @@ impl StellarNursery {
         });
     }
 
-    fn render_nebula(&self, canvas: &mut Canvas) {
+    /// Shade the nebula pixels (the M10 raster convention: `render` only blits).
+    fn shade(&mut self) {
         // HII regions: each shining star ionizes a growing bubble (Strömgren sphere).
-        let mut lamps = [(0.0, 0.0, 0.0, 0.0); 5];
+        let mut lamps = [(0.0, 0.0, 0.0, 0.0); MAX_STARS];
         let mut n = 0;
         for s in &self.stars {
             let b = s.brightness();
@@ -713,54 +1007,245 @@ impl StellarNursery {
             }
         }
         let lamps = &lamps[..n];
-        for y in 0..self.h {
-            let yf = y as f64;
-            for x in 0..self.w {
-                let m = self.mask[y * self.w + x];
-                let z = self.field(x, y);
-                match m {
-                    M_DUST => {
-                        let v = ((z + 1.5) / 4.0).clamp(0.0, 1.0);
-                        // Thinner, back-lit dust where the nebula behind is bright.
-                        let g = if v > 0.7 { DUST_THIN } else { DUST };
-                        canvas.put(
-                            x as i32,
-                            y as i32,
-                            g,
-                            Ink::new(Role::Structure, (8.0 + 40.0 * v) as u8),
-                        );
+        let Self {
+            pixels,
+            modes,
+            inv_sigma,
+            col,
+            row,
+            col_u,
+            row_u,
+            col_g,
+            row_g,
+            mask,
+            dust,
+            w,
+            ..
+        } = self;
+        let w = *w;
+        pixels.shade(|x, py| {
+            let (xu, pyu) = (x as usize, py as usize);
+            if mask[pyu * w + xu] != OPEN {
+                // Dust is drawn after the fringe is dissolved.
+                return Ink::BLANK;
+            }
+            let u = col_u[xu] + row_u[pyu];
+            let z = nebula_z(modes, *inv_sigma, &col[xu], &row[pyu]) + SOURCE_BIAS * u;
+            let yr = (f64::from(py) - 0.5) / 2.0;
+            let mut glow = col_g[xu] * row_g[pyu];
+            for &(lx, ly, r, b) in lamps {
+                let (dx, dy) = ((f64::from(x) - lx) / ASPECT, yr - ly);
+                let q = 1.0 - (dx * dx + dy * dy) / (r * r);
+                if q > 0.0 {
+                    glow += 2.2 * b * q * q;
+                }
+            }
+            let z = z + glow;
+            if z <= NEB_THRESHOLD {
+                return Ink::BLANK;
+            }
+            let t = (z - NEB_THRESHOLD) / NEB_SPAN;
+            let v = t.min(1.0);
+            // [O III] in the highly ionised zone round the source and the stars' bubbles,
+            // Hα beyond; the boundary is stippled over a band, not cut (NUR-A6).
+            let ion = ION_BASE + ION_SLOPE * u + ION_BUBBLE * glow - ION_DENSE * v;
+            let p = ease::smoothstep((ion - 0.5 + ION_BAND) / (2.0 * ION_BAND));
+            let (line, peak) = if p > rng::hash01(rng::cell_key(x, py)) {
+                (Ramp::Ice, OIII_PEAK)
+            } else {
+                (GAS_RAMP, HA_PEAK)
+            };
+            // A shoulder instead of a clip: the brightest gas approaches `peak` but never
+            // flattens there, so filaments keep their texture (NUR-A6).
+            let exposure = 1.0 - (-NEB_SHOULDER * t).exp();
+            ink::ramp(line, peak * exposure.powf(NEB_GAMMA))
+        });
+        pixels.dissolve(NEB_FLOOR);
+        // Pillars: textured dust and the ionisation fronts on the faces turned to the
+        // source, fixed on resize (`build_mask`).
+        for (i, (&m, &level)) in mask.iter().zip(dust.iter()).enumerate() {
+            if m != OPEN {
+                let (x, py) = ((i % w) as i32, (i / w) as i32);
+                pixels.set(x, py, Ink::new(Role::Ramp(DUST_RAMP), level));
+            }
+        }
+        self.star_glows();
+    }
+
+    /// Each protostar as a soft pixel glow that only ever brightens what is under it. An
+    /// embedded star is an infrared source seen through its dust: a red-orange Gaussian
+    /// glow in `Ramp(Ember)` that grows with mass, drawn only inside a pillar (in the open
+    /// nebula it is its gas streams alone) and always dimmer than the lit rims. A shining
+    /// star gets a blue glare in the Ice ramp, fainter than its `✦`, so the glyph still
+    /// reads over it.
+    fn star_glows(&mut self) {
+        let w = self.w;
+        for s in &self.stars {
+            // Continuous pixel coordinates of the star.
+            let (cx, cy) = Self::to_cells(s.x, s.y);
+            let (px, py) = (cx, 2.0 * cy);
+            // The glow's reach (pixels), ramp and peak, and its profile at `r / reach`.
+            let (reach, ramp, peak, embedded) = match s.phase {
+                Phase::Accreting => {
+                    let (x, y) = (px.floor(), py.floor());
+                    let in_dust = x >= 0.0
+                        && y >= 0.0
+                        && (x as usize) < w
+                        && self
+                            .mask
+                            .get(y as usize * w + x as usize)
+                            .is_some_and(|&m| m != OPEN);
+                    if !in_dust {
                         continue;
                     }
-                    M_RIM_TOP => {
-                        canvas.put(x as i32, y as i32, RIM_TOP, Ink::new(Role::Hot, 210));
+                    let m = (s.mass / M_IGN).clamp(0.0, 1.0);
+                    let radius = ease::lerp(EMBEDDED_HALO.0, EMBEDDED_HALO.1, m);
+                    let peak = ease::lerp(EMBEDDED_PEAK.0, EMBEDDED_PEAK.1, m);
+                    (radius, Ramp::Ember, peak, true)
+                }
+                _ => {
+                    let b = s.brightness();
+                    if b <= 0.3 {
                         continue;
                     }
-                    M_RIM_SIDE => {
-                        canvas.put(x as i32, y as i32, RIM_SIDE, Ink::new(Role::Hot, 120));
+                    (SHINING_HALO * b, Ramp::Ice, b * GLARE, false)
+                }
+            };
+            // A Gaussian (σ = half the radius, cut at two σ) for a soft infrared source;
+            // a quadratic fall to zero for the glare.
+            let glow = |f: f64| {
+                let profile = if embedded {
+                    (-2.0 * f * f).exp()
+                } else {
+                    (1.0 - f).max(0.0).powi(2)
+                };
+                ink::ramp(ramp, peak * profile)
+            };
+            let n = reach.ceil() as i32;
+            for dy in -n..=n {
+                for dx in -n..=n {
+                    let (x, y) = (px.floor() as i32 + dx, py.floor() as i32 + dy);
+                    let r = (f64::from(x) + 0.5 - px).hypot(f64::from(y) + 0.5 - py);
+                    let Some(under) = self.pixels.get(x, y).filter(|_| r <= reach) else {
                         continue;
-                    }
-                    _ => {}
-                }
-                let mut glow = 0.0;
-                for &(lx, ly, r, b) in lamps {
-                    let (dx, dy) = ((x as f64 - lx) / ASPECT, yf - ly);
-                    let q = 1.0 - (dx * dx + dy * dy) / (r * r);
-                    if q > 0.0 {
-                        glow += 2.2 * b * q * q;
+                    };
+                    let ink = glow(r / reach);
+                    if f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL {
+                        self.pixels.set(x, y, raster::stronger(ink, under));
                     }
                 }
-                let z = z + glow;
-                if z <= NEB_THRESHOLD {
-                    continue;
-                }
-                let v = ((z - NEB_THRESHOLD) / NEB_SPAN).min(1.0);
-                // Hubble palette: faint [O III] teal outskirts, bright Hα/[S II] cores.
-                let role = if v < 0.5 { Role::Wave } else { Role::Hot };
-                let ink = Ink::new(role, (30.0 + 225.0 * v) as u8);
-                canvas.put(x as i32, y as i32, draw::ramp(v, &NEBULA), ink);
             }
         }
     }
+
+    /// Continuous cell coordinates of a point `(x, y)` in rows (cell `i` spans
+    /// `[i, i + 1)`, and a star at row `y` sits in cell `round(y)`).
+    fn to_cells(x: f64, y: f64) -> (f64, f64) {
+        (x * ASPECT + 0.5, y + 0.5)
+    }
+
+    /// Gas, jets and stars as braille dots over the nebula, and the shining stars' cells.
+    /// Each gas parcel is a streak back along its last `STREAK` s of spiralling infall,
+    /// so the flow reads as it speeds up towards its star.
+    fn rasterise(&mut self) {
+        self.dots.clear();
+        for g in &self.gas {
+            let Some(s) = self.stars.get(g.star) else {
+                continue;
+            };
+            let close = (1.0 - g.r / self.r_feed).clamp(0.0, 1.0);
+            let fade_in = (g.age / 0.4).min(1.0);
+            let level = (70.0 + 110.0 * close) * fade_in;
+            if level < ink::MIN_VISIBLE_LEVEL {
+                continue;
+            }
+            // Where the parcel was `STREAK` s ago, at its current speeds.
+            let back = Gas {
+                r: g.r + g.vr * STREAK,
+                theta: g.theta - (g.l / (g.r * g.r) * STREAK).clamp(-0.5, 0.5),
+                ..*g
+            };
+            let ink = Ink::new(Role::Particle, ink::level(level));
+            let ((x0, y0), (x1, y1)) = (back.pos(s), g.pos(s));
+            let (b0, b1) = (Self::to_cells(x0, y0), Self::to_cells(x1, y1));
+            let ((dx0, dy0), (dx1, dy1)) =
+                (Dots::from_cells(b0.0, b0.1), Dots::from_cells(b1.0, b1.1));
+            self.dots.line(dx0, dy0, dx1, dy1, ink);
+        }
+        for j in &self.jets {
+            let f = 1.0 - j.age / j.life;
+            let ink = Ink::new(Role::Accent, ink::level(130.0 + 125.0 * f));
+            let (cx, cy) = Self::to_cells(j.x, j.y);
+            let (x1, y1) = Dots::from_cells(cx, cy);
+            if j.age < KNOT_AGE * j.life {
+                // A thin streak along the flight direction.
+                let (bx, by) = Self::to_cells(j.x - j.vx * JET_STREAK, j.y - j.vy * JET_STREAK);
+                let (x0, y0) = Dots::from_cells(bx, by);
+                self.dots.line(x0, y0, x1, y1, ink);
+            } else {
+                self.dots.plot(x1, y1, ink);
+            }
+        }
+        self.n_shining = 0;
+        for s in &self.stars {
+            let (cx, cy) = Self::to_cells(s.x, s.y);
+            let (dx, dy) = Dots::from_cells(cx, cy);
+            match s.phase {
+                // An embedded star is its pixel glow alone (`star_glows`).
+                Phase::Accreting => {}
+                _ => {
+                    let b = s.brightness();
+                    if b <= 0.3 {
+                        if b > 0.02 {
+                            self.dots.plot(dx, dy, ink::blackbody(SHINING_K));
+                        }
+                        continue;
+                    }
+                    // Brief flash at ignition: longer diffraction spikes for ~2 s.
+                    let flash = match s.phase {
+                        Phase::Shining(a) => (-(a - IGNITION_RAMP).max(0.0) / 1.2).exp() * b,
+                        _ => 0.0,
+                    };
+                    let ink = ink::blackbody(SHINING_K);
+                    let arm = f64::from(Dots::CELL_W) * (1.0 + 3.0 * flash) * b;
+                    let varm = f64::from(Dots::CELL_H) * if flash > 0.3 { 2.0 } else { 1.0 } * b;
+                    self.dots.line(dx - arm, dy, dx + arm, dy, ink);
+                    self.dots.line(dx, dy - varm, dx, dy + varm, ink);
+                    self.shining[self.n_shining] = (cx.floor() as i32, cy.floor() as i32);
+                    self.n_shining += 1;
+                }
+            }
+        }
+    }
+}
+
+/// `Σ wᵢ sin(Aᵢ(x) + Bᵢ(y)) / σ` from a column's and a row's `(sin, cos)` tables.
+#[inline]
+fn nebula_z(
+    modes: &[Mode],
+    inv_sigma: f64,
+    c: &[(f64, f64); MODES],
+    r: &[(f64, f64); MODES],
+) -> f64 {
+    let mut f = 0.0;
+    for (i, m) in modes.iter().enumerate() {
+        f += m.weight * (c[i].0 * r[i].1 + c[i].1 * r[i].0);
+    }
+    f * inv_sigma
+}
+
+/// ASCII stand-in for a nebula pixel pair: a density char by the brighter pixel's level;
+/// a cell of unlit pillar dust (`in_dust`, drawn in the Hα ramp) is left blank, so the
+/// pillars stand as silhouettes inside their lit rims.
+fn ascii_pixel(top: Ink, bottom: Ink, in_dust: bool) -> Option<(char, Ink)> {
+    let ink = raster::stronger(top, bottom);
+    let dust = in_dust && ink.role == Role::Ramp(DUST_RAMP);
+    (ink.role != Role::Background && !dust).then(|| {
+        (
+            ASCII_RAMP[usize::from(ink.level) * ASCII_RAMP.len() / 256],
+            ink,
+        )
+    })
 }
 
 impl Generator for StellarNursery {
@@ -777,11 +1262,28 @@ impl Generator for StellarNursery {
         self.col.clear();
         self.col.resize(w, [(0.0, 1.0); MODES]);
         self.row.clear();
-        self.row.resize(h, [(0.0, 1.0); MODES]);
-        self.row_bias.clear();
-        let hf = (h as f64).max(1.0);
-        self.row_bias
-            .extend((0..h).map(|y| 0.7 * (0.5 - y as f64 / hf)));
+        self.row.resize(2 * h, [(0.0, 1.0); MODES]);
+        // u = (x/w − ½)·s·sin θ + (½ − y/h)·cos θ: the position towards the source.
+        let (sx, sy) = to_source(self.source);
+        let (wf, phf) = ((w as f64).max(1.0), (2 * h) as f64);
+        self.col_u.clear();
+        self.col_u
+            .extend((0..w).map(|x| (x as f64 / wf - 0.5) * sx));
+        self.row_u.clear();
+        self.row_u
+            .extend((0..2 * h).map(|py| (py as f64 / phf.max(1.0) - 0.5) * sy));
+        // The cluster just off the top corner on its side; a Gaussian is separable.
+        let (gx, gy) = (0.5 * wf * (1.0 + 1.1 * self.source), -0.1 * phf);
+        let r = SOURCE_GLOW_R * wf.max(phf);
+        let gauss = |d: f64| (-0.5 * (d / r).powi(2)).exp();
+        self.col_g.clear();
+        self.col_g
+            .extend((0..w).map(|x| SOURCE_GLOW * gauss(x as f64 - gx)));
+        self.row_g.clear();
+        self.row_g
+            .extend((0..2 * h).map(|py| gauss(py as f64 - gy)));
+        self.pixels.resize(size);
+        self.dots.resize(size);
         self.build_mask();
         self.refresh_tables();
 
@@ -802,7 +1304,7 @@ impl Generator for StellarNursery {
         self.spawn_acc = 0.0;
 
         self.stars.clear();
-        let n = ctx.rng.random_range(3..=5);
+        let n = ctx.rng.random_range(3..=MAX_STARS);
         for k in 0..n {
             // Some protostars sit in the pillar heads (evaporating gaseous globules).
             let (x, y) = match self.tips.get(k) {
@@ -821,6 +1323,8 @@ impl Generator for StellarNursery {
         // Each hub keeps ≈ cap/n parcels in flight, each arriving after ≈ T_ARRIVE, so it
         // accretes ≈ (cap/n)·m/T_ARRIVE per second; m gives an ACC_TIME build-up at any size.
         self.gas_mass = M_IGN * T_ARRIVE * n as f64 / (ACC_TIME * cap as f64);
+        self.shade();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -833,89 +1337,29 @@ impl Generator for StellarNursery {
             self.substep(h, &mut ctx.rng);
         }
         self.refresh_tables();
+        self.shade();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        if self.w == 0 || self.h == 0 || self.col.len() != self.w || self.row.len() != self.h {
+        if self.w == 0 || self.h == 0 {
             return;
         }
-        self.render_nebula(canvas);
-
-        for g in &self.gas {
-            let Some(s) = self.stars.get(g.star) else {
-                continue;
-            };
-            let (x, y) = g.pos(s);
-            let close = (1.0 - g.r / self.r_feed).clamp(0.0, 1.0);
-            let fade_in = (g.age / 0.4).min(1.0);
-            let ink = Ink::new(Role::Particle, ((80.0 + 175.0 * close) * fade_in) as u8);
-            plot(canvas, x * ASPECT, y, draw::ramp(close, &GAS), ink);
-        }
-
-        for j in &self.jets {
-            let f = 1.0 - j.age / j.life;
-            let glyph = if j.age < 0.6 * j.life {
-                JET_DIRS[usize::from(j.dir)]
+        // A cell whose two pixels are both plain (unlit) dust.
+        let dust = |x: i32, py: i32| self.mask[py as usize * self.w + x as usize] == DUST;
+        self.pixels.blit(canvas, |x, y, top, bottom| {
+            ascii_pixel(top, bottom, dust(x, 2 * y) && dust(x, 2 * y + 1))
+        });
+        self.dots.blit_over(canvas, &self.pixels);
+        let unicode = canvas.mode() == GlyphMode::Unicode;
+        let ink = ink::blackbody(SHINING_K);
+        for &(x, y) in &self.shining[..self.n_shining] {
+            let bg = if unicode {
+                self.pixels.cell_bg(x, y)
             } else {
-                KNOT
+                Ink::BLANK
             };
-            plot(
-                canvas,
-                j.x * ASPECT,
-                j.y,
-                glyph,
-                Ink::new(Role::Accent, (70.0 + 185.0 * f) as u8),
-            );
-        }
-
-        for s in &self.stars {
-            let (cx, cy) = (s.x * ASPECT, s.y);
-            match s.phase {
-                Phase::Accreting => {
-                    let m = (s.mass / M_IGN).clamp(0.0, 1.0);
-                    let g = draw::ramp(m, &EMBEDDED);
-                    plot(
-                        canvas,
-                        cx,
-                        cy,
-                        g,
-                        Ink::new(Role::Star, (70.0 + 110.0 * m) as u8),
-                    );
-                }
-                _ => {
-                    let b = s.brightness();
-                    if b <= 0.02 {
-                        continue;
-                    }
-                    // Brief flash at ignition: longer diffraction spikes for ~2 s.
-                    let flash = match s.phase {
-                        Phase::Shining(a) => (-(a - IGNITION_RAMP).max(0.0) / 1.2).exp() * b,
-                        _ => 0.0,
-                    };
-                    let spike = Ink::new(Role::Star, (60.0 + 150.0 * b) as u8);
-                    let arm = (1.0 + 3.0 * flash).round() as i32;
-                    if b > 0.3 {
-                        for k in 1..=arm {
-                            let k = f64::from(k);
-                            plot(canvas, cx - k, cy, SPIKE_H, spike);
-                            plot(canvas, cx + k, cy, SPIKE_H, spike);
-                        }
-                        let varm = if flash > 0.3 { 2.0 } else { 1.0 };
-                        for k in 1..=varm as i32 {
-                            let k = f64::from(k);
-                            plot(canvas, cx, cy - k, SPIKE_V, spike);
-                            plot(canvas, cx, cy + k, SPIKE_V, spike);
-                        }
-                    }
-                    plot(
-                        canvas,
-                        cx,
-                        cy,
-                        STAR,
-                        Ink::new(Role::Star, (80.0 + 175.0 * b) as u8),
-                    );
-                }
-            }
+            canvas.put_bg(x, y, STAR, ink, bg);
         }
     }
 }
@@ -1111,18 +1555,397 @@ mod tests {
     #[test]
     fn nur_pillars_occlude_the_nebula() {
         let (g, _) = scene(8, 160, 48);
-        let mut canvas = Canvas::new(Size::new(160, 48), GlyphMode::Unicode);
-        g.render(&mut canvas);
-        let dust = g.mask.iter().filter(|&&m| m == M_DUST).count();
-        assert!(dust > 50, "pillars too small: {dust}");
+        let dust = g.mask.iter().filter(|&&m| m == DUST).count();
+        assert!(dust > 100, "pillars too small: {dust}");
+        // Pixels (continuous coordinates) under a star's glow, which lies over the dust.
+        let glowing = |x: f64, y: f64| {
+            g.stars.iter().any(|s| {
+                let (cx, cy) = StellarNursery::to_cells(s.x, s.y);
+                (x - cx).hypot(y - 2.0 * cy) <= EMBEDDED_HALO.1.max(SHINING_HALO) + 1.0
+            })
+        };
         for (i, &m) in g.mask.iter().enumerate() {
-            if m == M_DUST {
-                let c = canvas.cells()[i];
+            let (x, y) = ((i % 160) as i32, (i / 160) as i32);
+            if m == DUST && !glowing(f64::from(x) + 0.5, f64::from(y) + 0.5) {
+                let ink = g.pixels.get(x, y).unwrap();
+                assert_eq!(ink.role, Role::Ramp(DUST_RAMP), "pixel {i}");
                 assert!(
-                    c.ink.role == Role::Structure || c.ink.role == Role::Star,
-                    "nebula drawn through a pillar at {i}"
+                    f64::from(ink.level) <= DUST_LEVEL.1 + LIMB + 0.5,
+                    "lit dust at {i}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn nur_a4_rims_are_lit_from_the_source_side_only() {
+        let d = to_source(1.0);
+        // The mask's gradient points into the dust. A face whose outward normal points at
+        // the source is fully lit; one turned away, or a flat mask, is dark.
+        assert!(rim_light((-d.0, -d.1), d) > 0.99);
+        assert_eq!(rim_light(d, d), 0.0);
+        assert_eq!(rim_light((0.0, 0.0), d), 0.0);
+        // Lighting turns on smoothly with the facing angle, with no cut-off.
+        let lit_at = |a: f64| {
+            let (s, c) = (d.1.atan2(d.0) + a).sin_cos_det();
+            rim_light((-c, -s), d)
+        };
+        let curve: Vec<f64> = (0..=90)
+            .map(|deg| lit_at(f64::from(deg).to_radians()))
+            .collect();
+        assert!(
+            curve.windows(2).all(|p| p[1] <= p[0] && p[0] - p[1] < 0.06),
+            "{curve:?}"
+        );
+        for seed in [3, 8] {
+            let (g, _) = scene(seed, 160, 48);
+            let (w, h) = (160_i32, 96_i32);
+            let d = to_source(g.source);
+            let open = |x: i32, y: i32| {
+                (0..w).contains(&x) && (0..h).contains(&y) && g.mask[(y * w + x) as usize] == OPEN
+            };
+            let (mut lit, mut facing) = (0, 0);
+            for y in 0..h {
+                for x in 0..w {
+                    let m = g.mask[(y * w + x) as usize];
+                    if m < RIM + 80 {
+                        continue;
+                    }
+                    lit += 1;
+                    let reach = -RIM_REACH..=RIM_REACH;
+                    let sees_source = reach.clone().any(|dy| {
+                        reach.clone().any(|dx| {
+                            open(x + dx, y + dy) && f64::from(dx) * d.0 + f64::from(dy) * d.1 > 0.0
+                        })
+                    });
+                    facing += usize::from(sees_source);
+                }
+            }
+            assert!(lit > 20, "seed {seed}: only {lit} lit rim pixels");
+            assert!(
+                facing * 100 >= lit * 85,
+                "seed {seed}: {facing}/{lit} face the source"
+            );
+            // Continuous rims: down a lit side, the surface pixel of one row is lit much
+            // like the next row's, not a zipper of lit and dark pixels.
+            let side = g.source as i32;
+            // The outermost dust pixels of each row on the source's side of a pillar.
+            let surface = |y: i32| -> Vec<i32> {
+                (0..w)
+                    .filter(|&x| g.mask[(y * w + x) as usize] != OPEN && open(x + side, y))
+                    .collect()
+            };
+            // The light may turn with the outline's curves (the mean step stays small),
+            // but hardly ever flips from lit to dark between two rows.
+            let (mut pairs, mut jumps, mut total) = (0, 0, 0);
+            for y in 0..h - 1 {
+                let next = surface(y + 1);
+                for x in surface(y) {
+                    let Some(&x2) = next.iter().find(|x2| (*x2 - x).abs() <= 1) else {
+                        continue;
+                    };
+                    let (a, b) = (
+                        g.mask[(y * w + x) as usize],
+                        g.mask[((y + 1) * w + x2) as usize],
+                    );
+                    if a.max(b) < RIM + 120 {
+                        continue;
+                    }
+                    pairs += 1;
+                    total += usize::from(a.abs_diff(b));
+                    jumps += usize::from(a.abs_diff(b) > 90);
+                }
+            }
+            assert!(pairs > 20, "seed {seed}: {pairs} lit surface pairs");
+            assert!(
+                total < 40 * pairs,
+                "seed {seed}: mean rim step {}",
+                total / pairs
+            );
+            assert!(jumps * 8 <= pairs, "seed {seed}: {jumps}/{pairs} rim jumps");
+        }
+    }
+
+    #[test]
+    fn nur_a4_rims_run_unbroken_down_the_source_side_of_each_pillar() {
+        // Below the head, a pillar's source-facing surface is a rim nearly all the way
+        // down: the diffuse ionising field lights even grazing faces. Only the underside
+        // of a lobe or knob, turned away from the source, is shadowed, and such shadows
+        // come as a few runs, never the many short gaps of a zipper.
+        for seed in [1, 3, 5, 8, 13] {
+            let (g, _) = scene(seed, 160, 48);
+            let (w, hf) = (160_usize, 48.0);
+            let side = g.source as i32;
+            for (p, &(_, tip_y)) in g.pillars.iter().zip(&g.tips) {
+                let bottom = hf - 1.0;
+                let tip_y = tip_y - 0.5;
+                let body =
+                    (2.0 * (tip_y + 0.3 * (bottom - tip_y))) as usize..(2.0 * bottom) as usize - 2;
+                let (mut dark, mut gaps, mut rows, mut was_lit) = (0, 0, 0, true);
+                for py in body {
+                    let yf = (py as f64 - 0.5) / 2.0;
+                    let s = ((yf - tip_y) / (bottom - tip_y)).clamp(0.0, 1.0);
+                    let mut x = ((p.base + p.lean * (1.0 - s)) * w as f64) as i32;
+                    let at = |x: i32| g.mask[py * w + x as usize];
+                    if !(0..w as i32).contains(&x) || at(x) == OPEN {
+                        continue;
+                    }
+                    // Walk towards the source to the pillar's last dust pixel.
+                    while (0..w as i32).contains(&(x + side)) && at(x + side) != OPEN {
+                        x += side;
+                    }
+                    if !(0..w as i32).contains(&(x + side)) {
+                        continue;
+                    }
+                    rows += 1;
+                    let lit = f64::from(at(x).saturating_sub(RIM)) / f64::from(255 - RIM);
+                    let is_lit = at(x) >= RIM && lit >= RIM_MIN;
+                    dark += usize::from(!is_lit);
+                    gaps += usize::from(was_lit && !is_lit);
+                    was_lit = is_lit;
+                }
+                assert!(rows > 10, "seed {seed}: only {rows} body rows");
+                assert!(
+                    dark * 3 <= rows && gaps <= 3,
+                    "seed {seed}: {dark} of {rows} rows dark, in {gaps} gaps"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn nur_a7_pillars_have_broad_heads_necks_and_lobes() {
+        for seed in 1..=12 {
+            let (g, _) = scene(seed, 160, 48);
+            for p in &g.pillars {
+                let width = |s: f64| {
+                    let (l, r) = p.half_widths(s, 8.0);
+                    l + r
+                };
+                // A head at least 1.3× the neck below it.
+                let neck = (15..=50)
+                    .map(|k| width(f64::from(k) / 100.0))
+                    .fold(f64::INFINITY, f64::min);
+                assert!(width(0.0) >= 1.3 * neck, "seed {seed}: head vs neck");
+                // Down the body the column swells and pinches: its width is not monotone.
+                let ws: Vec<f64> = (25..=100).map(|k| width(f64::from(k) / 100.0)).collect();
+                let turns = ws
+                    .windows(3)
+                    .filter(|t| (t[1] - t[0]) * (t[2] - t[1]) < 0.0)
+                    .count();
+                assert!(turns >= 1, "seed {seed}: a straight taper");
+                // One or two knobs.
+                assert!(p.knobs[0].2 > 0.0, "seed {seed}");
+            }
+        }
+    }
+
+    #[test]
+    fn nur_a8_umber_pillars_bright_at_the_head_dark_at_the_base_without_an_outline() {
+        assert_eq!(DUST_RAMP, Ramp::Ember);
+        assert_eq!(GAS_RAMP, Ramp::Sulfur);
+        // Rims stay subdued: under 0.42 of full, so no bright outline.
+        const { assert!(RIM_LEVEL.1 <= 0.42 * 255.0) };
+        for seed in [3, 8] {
+            let (g, _) = scene(seed, 160, 48);
+            let (w, ph) = (160_usize, 96_usize);
+            // Mean dust level in the top and bottom thirds of the pillar pixels.
+            let (mut top, mut nt, mut bottom, mut nb) = (0.0, 0, 0.0, 0);
+            let rows: Vec<usize> = (0..ph)
+                .filter(|&y| (0..w).any(|x| g.mask[y * w + x] == DUST))
+                .collect();
+            let (first, last) = (rows[0], *rows.last().unwrap());
+            let third = (last - first) / 3;
+            for y in first..=last {
+                for x in 0..w {
+                    if g.mask[y * w + x] != DUST {
+                        continue;
+                    }
+                    let v = f64::from(g.dust[y * w + x]);
+                    if y < first + third {
+                        (top, nt) = (top + v, nt + 1);
+                    } else if y > last - third {
+                        (bottom, nb) = (bottom + v, nb + 1);
+                    }
+                }
+            }
+            let (top, bottom) = (top / f64::from(nt.max(1)), bottom / f64::from(nb.max(1)));
+            assert!(
+                top > bottom + 5.0,
+                "seed {seed}: head {top} vs base {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn nur_a7_dust_is_textured_and_limb_brightened() {
+        for seed in [3, 8] {
+            let (g, _) = scene(seed, 160, 48);
+            let (w, ph) = (160_usize, 96_usize);
+            // Distance (Chebyshev, capped) from a dust pixel to a lit rim.
+            let near_rim = |x: usize, y: usize, r: usize| {
+                (y.saturating_sub(r)..=(y + r).min(ph - 1)).any(|ny| {
+                    (x.saturating_sub(r)..=(x + r).min(w - 1))
+                        .any(|nx| g.mask[ny * w + nx] > RIM + 120)
+                })
+            };
+            let (mut deep, mut limb) = (Vec::new(), Vec::new());
+            for y in 0..ph {
+                for x in 0..w {
+                    if g.mask[y * w + x] != DUST {
+                        continue;
+                    }
+                    let level = f64::from(g.dust[y * w + x]);
+                    if near_rim(x, y, 2) {
+                        limb.push(level);
+                    } else if !near_rim(x, y, 7) {
+                        deep.push(level);
+                    }
+                }
+            }
+            let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
+            let distinct = |v: &[f64]| {
+                let mut v: Vec<u8> = v.iter().map(|&l| l as u8).collect();
+                v.sort_unstable();
+                v.dedup();
+                v.len()
+            };
+            assert!(deep.len() > 100 && limb.len() > 20, "seed {seed}");
+            assert!(distinct(&deep) >= 12, "seed {seed}: flat dust");
+            assert!(
+                deep.iter().all(|&l| l <= DUST_LEVEL.1 + 0.5),
+                "seed {seed}: deep dust too bright"
+            );
+            assert!(
+                mean(&limb) > mean(&deep) + 5.0,
+                "seed {seed}: limb {} vs deep {}",
+                mean(&limb),
+                mean(&deep)
+            );
+        }
+    }
+
+    #[test]
+    fn nur_a7_embedded_protostars_glow_softly_and_only_inside_the_dust() {
+        let mut inside = 0;
+        for seed in [1, 2, 4, 6, 9] {
+            let (mut g, mut ctx) = scene(seed, 120, 40);
+            for step in 0..(8 * 60) {
+                g.update(SIM_DT, &mut ctx);
+                if step % 120 != 0 {
+                    continue;
+                }
+                for s in g.stars.iter().filter(|s| s.is_accreting()) {
+                    let (cx, cy) = StellarNursery::to_cells(s.x, s.y);
+                    let (px, py) = (cx.floor() as i32, (2.0 * cy).floor() as i32);
+                    let reach = EMBEDDED_HALO.1.ceil() as i32;
+                    let mut levels = Vec::new();
+                    for y in py - reach..=py + reach {
+                        for x in px - reach..=px + reach {
+                            if let Some(ink) = g.pixels.get(x, y)
+                                && ink.role == Role::Ramp(Ramp::Ember)
+                            {
+                                levels.push(ink.level);
+                            }
+                        }
+                    }
+                    let in_dust = g.mask[py as usize * 120 + px as usize] != OPEN;
+                    if !in_dust {
+                        assert!(levels.is_empty(), "seed {seed}: a glow in the open");
+                        continue;
+                    }
+                    inside += 1;
+                    // Soft: several levels, not one flat block, capped at its peak.
+                    levels.sort_unstable();
+                    levels.dedup();
+                    assert!(levels.len() >= 3, "seed {seed}: {levels:?}");
+                    let top = f64::from(*levels.last().unwrap());
+                    assert!(top <= 255.0 * EMBEDDED_PEAK.1 + 1.0);
+                }
+            }
+        }
+        assert!(inside > 5, "only {inside} embedded glows seen");
+    }
+
+    #[test]
+    fn nur_a5_pillar_tips_lean_towards_the_source() {
+        for seed in [1, 2, 3, 4, 5, 6] {
+            let (g, _) = scene(seed, 160, 48);
+            for (p, tip) in g.pillars.iter().zip(&g.tips) {
+                let base = p.base * 160.0 / ASPECT;
+                assert_eq!((tip.0 - base).signum(), g.source, "seed {seed}");
+                assert!(p.lean.abs() >= LEAN.0);
+            }
+        }
+    }
+
+    #[test]
+    fn nur_a6_halpha_and_oiii_with_more_oiii_near_the_source() {
+        let (g, _) = scene(8, 160, 48);
+        let (mut near, mut far) = ([0usize; 2], [0usize; 2]);
+        for y in 0..96 {
+            for x in 0..160 {
+                if g.mask[(y * 160 + x) as usize] != OPEN {
+                    continue;
+                }
+                let ink = g.pixels.get(x, y).unwrap();
+                let oiii = match ink.role {
+                    Role::Background => continue,
+                    Role::Ramp(Ramp::Ice) => 1,
+                    Role::Ramp(GAS_RAMP) => 0,
+                    other => panic!("{other:?} in the nebula"),
+                };
+                let u = g.col_u[x as usize] + g.row_u[y as usize];
+                if u > 0.0 {
+                    near[oiii] += 1;
+                } else {
+                    far[oiii] += 1;
+                }
+            }
+        }
+        let frac = |c: [usize; 2]| c[1] as f64 / (c[0] + c[1]).max(1) as f64;
+        assert!(
+            frac(near) > frac(far) + 0.2,
+            "[O III] near {} vs far {}",
+            frac(near),
+            frac(far)
+        );
+    }
+
+    #[test]
+    fn nur_a6_bright_gas_rolls_off_below_white_and_keeps_its_texture() {
+        // A shoulder, not a clip: [O III] peaks at OIII_PEAK and bright filaments keep
+        // distinct levels instead of posterising to one flat white-cyan.
+        for seed in [8, 21] {
+            let (mut g, mut ctx) = scene(seed, 120, 40);
+            for _ in 0..(20 * 60) {
+                g.update(SIM_DT, &mut ctx);
+            }
+            let mut levels = Vec::new();
+            for y in 0..80 {
+                for x in 0..120 {
+                    let ink = g.pixels.get(x, y).unwrap();
+                    if ink.role == Role::Ramp(Ramp::Ice) {
+                        levels.push(ink.level);
+                    }
+                }
+            }
+            assert!(
+                levels.len() > 200,
+                "seed {seed}: {} [O III] pixels",
+                levels.len()
+            );
+            let top = *levels.iter().max().unwrap();
+            assert!(
+                f64::from(top) <= 255.0 * OIII_PEAK + 1.0,
+                "seed {seed}: [O III] at {top}"
+            );
+            let flat = levels.iter().filter(|&&l| l + 4 >= top).count();
+            assert!(
+                flat * 20 < levels.len(),
+                "seed {seed}: {flat} of {} [O III] pixels within 4 levels of the top",
+                levels.len()
+            );
         }
     }
 }

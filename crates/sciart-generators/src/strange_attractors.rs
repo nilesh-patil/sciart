@@ -1,8 +1,8 @@
 //! A turning gallery of chaotic attractors traced by swarms of glowing threads
 //! (SPEC-002 `strange_attractors`).
 //!
-//! Five classic flows (Lorenz, Aizawa, Thomas, Halvorsen, Rössler) are integrated in f64
-//! with RK4: chaos turns f32 rounding into platform-dependent trajectories. Each ensemble of
+//! Six classic flows (Lorenz, Aizawa, Thomas, Chen, Halvorsen, Rössler) are integrated in
+//! f64 with RK4: chaos turns f32 rounding into platform-dependent trajectories. Each ensemble of
 //! 1024 particles is sampled from one long "scout" orbit, stored at bit-reversed indices so
 //! every power-of-two prefix is spread along the attractor; only a prefix that grows
 //! linearly with the lattice is simulated and drawn.
@@ -17,7 +17,9 @@
 //! cylindrical radius, and the blend is stretched per axis so the swarm keeps its extent.
 //!
 //! Raster convention (M10): the density is decayed, deposited and thresholded into
-//! [`Dots`] at the end of `update` and `resize`; `render` only blits and writes the label.
+//! [`Dots`], and a long-exposure [`Glow`] under it (ATT-A11) toned into half-block
+//! [`Pixels`], at the end of `update` and `resize`; `render` only blits and writes the
+//! label.
 
 use std::f64::consts::{FRAC_1_SQRT_2, PI, SQRT_2, TAU};
 
@@ -27,7 +29,7 @@ use sciart_core::particles::gaussian;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, geom, ink, ode};
+use sciart_core::{Tone, draw, geom, ink, ode};
 
 pub static META: Meta = Meta {
     name: "strange_attractors",
@@ -46,7 +48,7 @@ pub(crate) type V3 = [f64; 3];
 /// Particles per ensemble; a power of two so bit-reversed prefixes stay spread out.
 const N: usize = 1024;
 const LOG2_N: u32 = N.trailing_zeros();
-/// Timeline: hold then morph per attractor, 5 × 12 s = a 60 s loop (ATT-A6).
+/// Timeline: hold then morph per attractor, 6 × 12 s = a 72 s loop (ATT-A6).
 const HOLD: f64 = 8.0;
 const MORPH: f64 = 4.0;
 /// Scout burn-in and sample spacing, in simulated seconds of flow (× `rate` tu/s).
@@ -65,8 +67,24 @@ const SCOUT_STEPS_PER_TICK: f64 = 400.0;
 /// clone from its source instead of shadowing it forever.
 const ESCAPE: f64 = 3.0;
 const CLONE_JITTER: f64 = 1e-6;
-/// Camera: yaw period, pitch wobble, eye distance (world units; |p| ≤ 1).
+/// Camera: yaw period, pitch wobble, eye distance (world units; |p| ≤ 1). The loop (72 s)
+/// is two yaw turns, so each member's hold always sweeps the same 80° of yaw, offset by
+/// its [`Spec::yaw`].
 const YAW_PERIOD: f64 = 36.0;
+/// Default yaw offset: two thirds of a turn, the same views as none for the 3-fold flows
+/// (Thomas, Halvorsen). With holds starting every 120° of yaw it gives Aizawa's hold 0°–80°
+/// (it is nearly axisymmetric about its up axis, so only the tube's side changes) and
+/// Rössler's 120°–200° (the disc seen obliquely with the fold spike rising off its near
+/// side), both checked in the previews.
+const YAW_PHASE: f64 = 240.0 * PI / 180.0;
+/// Yaw offset of the two-wing flows (Lorenz, Chen). Their projected width peaks near
+/// 125°–130° of yaw (wings side by side) and falls to a third of that near 45° (a narrow
+/// V, one wing behind the other); a hold sweeps 0°–80° plus the offset, so 88° keeps the
+/// wings at least 70 % open throughout (ATT-A10). Both flows are odd in (x, y) about their
+/// up axis, so the view at ψ + 180° is the view at ψ: 268° shows the same wings while
+/// sitting only 28° from `YAW_PHASE`, so a morph beside them changes the 10 °/s turn rate
+/// by at most about 1× instead of whipping the camera round (or backwards).
+const WINGS_OPEN: f64 = 268.0 * PI / 180.0;
 const PITCH_WOBBLE: f64 = 0.10;
 const PITCH_PERIOD: f64 = 29.0;
 const DISTANCE: f64 = 4.5;
@@ -80,6 +98,17 @@ const FILL_W: f64 = 0.92;
 const TAU_S: f64 = 0.1;
 const D_MIN: f32 = 0.08;
 const D_TOP: f64 = 4.0;
+/// Thread density → ramp value (ATT-A9): `FLOOR + (TOP − FLOOR)·u^GAMMA` for the
+/// log-compressed density `u ∈ [0, 1]`. The floor lifts the sparsest strands into each
+/// ramp's hue (not its near-black foot); the gamma keeps the bulk saturated and lets only
+/// the densest cores climb towards the near-white top, so figures glow at their cores
+/// without washing every palette to the same pale grey.
+const PALETTE_FLOOR: f64 = 0.26;
+/// The floor for the crimson, violet and wine ramps: at equal OKLab lightness their deep
+/// hues read darker on a black terminal than orange, cyan or green do.
+const PALETTE_FLOOR_DEEP: f64 = 0.34;
+const PALETTE_TOP: f64 = 0.95;
+const PALETTE_GAMMA: f64 = 1.6;
 /// Longest segment (dots, Chebyshev) drawn as a thread; longer jumps deposit only the end.
 const MAX_SEGMENT: i32 = 16;
 /// Deposit per dot `FAR + NEAR·near`, `near = (depth + 1)/2`: nearer threads glow brighter.
@@ -104,6 +133,27 @@ const N_MIN: usize = 64;
 /// `e^{−j·dt/τ} ≥ D_MIN`, i.e. `j ≤ 15`), so frame 0 already shows full-length threads.
 const PRIME_STEPS: usize = 16;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// Long-exposure glow under the threads (ATT-A11): each displayed particle splats its
+/// weight bilinearly into a half-block [`Glow`] that fades with `GLOW_TAU_S`, so where the
+/// flow keeps returning builds up into a soft cloud (the time-averaged invariant measure)
+/// and the threads ride on it.
+const GLOW_TAU_S: f64 = 1.2;
+/// Tone: the asinh knee and white point as multiples of the mean steady-state value of a
+/// covered pixel, `N_eff · 60 · τ_g / (COVER · pixels)`, so the cloud reads the same at
+/// every size and prefix.
+const GLOW_COVER: f64 = 0.3;
+const GLOW_KNEE: f64 = 0.45;
+const GLOW_WHITE: f64 = 8.0;
+/// Glow ramp values: `FLOOR + (TOP − FLOOR)·level/255`, kept below the threads' band so
+/// the threads stay the brightest thing on screen.
+const GLOW_FLOOR: f64 = 0.06;
+const GLOW_TOP: f64 = 0.48;
+/// Tone levels below this are dissolved into the black sky (CORE-R89).
+const GLOW_DISSOLVE: u8 = 22;
+/// A glow pixel under this tone level (0.1 of the glow's range) with no lit pixel among
+/// its eight neighbours is dropped (ATT-A12): the dissolved fringe otherwise leaves lone
+/// specks scattered around the cloud's edge.
+const ISOLATED_BELOW: u8 = 26;
 
 /// Parameters of the gallery flows (SPEC-002 Model).
 const LORENZ: (f64, f64, f64) = (10.0, 28.0, 8.0 / 3.0);
@@ -111,6 +161,8 @@ const AIZAWA: [f64; 6] = [0.95, 0.7, 0.6, 3.5, 0.25, 0.1];
 const THOMAS_B: f64 = 0.18;
 const HALVORSEN_A: f64 = 1.27;
 const ROSSLER: (f64, f64, f64) = (0.2, 0.2, 5.7);
+/// Chen's two-wing attractor (Chen & Ueta 1999), `(a, b, c)`.
+const CHEN: (f64, f64, f64) = (35.0, 3.0, 28.0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Attractor {
@@ -119,20 +171,22 @@ pub(crate) enum Attractor {
     Thomas,
     Halvorsen,
     Rossler,
+    Chen,
 }
 
 /// Gallery order (ATT-A6).
-pub(crate) const GALLERY: [Attractor; 5] = [
+pub(crate) const GALLERY: [Attractor; 6] = [
     Attractor::Lorenz,
     Attractor::Aizawa,
     Attractor::Thomas,
+    Attractor::Chen,
     Attractor::Halvorsen,
     Attractor::Rossler,
 ];
 
 /// Title captions (GEN-R12), indexed by `Attractor as usize`: the shown attractor names
 /// the title's mechanism, `Strange attractor · Lorenz`.
-const CAPTIONS: [&str; 5] = ["Lorenz", "Aizawa", "Thomas", "Halvorsen", "Rössler"];
+const CAPTIONS: [&str; 6] = ["Lorenz", "Aizawa", "Thomas", "Halvorsen", "Rössler", "Chen"];
 
 /// Which native direction becomes the camera's up axis (+y).
 #[derive(Debug, Clone, Copy)]
@@ -162,6 +216,13 @@ struct Spec {
     frame: Frame,
     params: &'static str,
     params_ascii: &'static str,
+    /// Thread colours: a named false-colour ramp (ATT-A9).
+    palette: Ramp,
+    /// Extra scale on the fitted frame: below 1 when rare excursions reach far beyond
+    /// the 99.5 % frame (Chen's outer loops, ATT-A4), so they mostly stay on screen.
+    zoom: f64,
+    /// Camera yaw offset (rad), so the hold shows the attractor's most telling side.
+    yaw: f64,
 }
 
 /// A 99.5th-percentile box of the projected ensemble over the camera loop (perspective
@@ -185,7 +246,7 @@ struct Frame {
 impl Frame {
     /// Vertical midpoint of the box at camera yaw `yaw` (world units).
     fn mid(&self, yaw: f64) -> f64 {
-        (self.top + self.bottom) / 2.0 + self.swing * (3.0 * yaw).cos()
+        (self.top + self.bottom) / 2.0 + self.swing * (3.0 * yaw).cos_det()
     }
 }
 
@@ -208,6 +269,9 @@ const fn spec(k: Attractor) -> &'static Spec {
             },
             params: "σ=10 ρ=28 β=8/3",
             params_ascii: "s=10 r=28 b=8/3",
+            palette: Ramp::Ember,
+            zoom: 1.0,
+            yaw: WINGS_OPEN,
         },
         Attractor::Aizawa => &Spec {
             h_max: 0.02,
@@ -224,9 +288,12 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 0.94,
                 swing: 0.0,
             },
-            // Its six parameters exceed the 16-char cap: none are quoted (ATT-A7).
-            params: "",
-            params_ascii: "",
+            // All six, the longest set (ATT-A7); dropped whole where it does not fit.
+            params: "a=.95 b=.7 c=.6 d=3.5 e=.25 f=.1",
+            params_ascii: "a=.95 b=.7 c=.6 d=3.5 e=.25 f=.1",
+            palette: Ramp::Ice,
+            zoom: 1.0,
+            yaw: YAW_PHASE,
         },
         Attractor::Thomas => &Spec {
             h_max: 0.1,
@@ -245,6 +312,9 @@ const fn spec(k: Attractor) -> &'static Spec {
             },
             params: "b=0.18",
             params_ascii: "b=0.18",
+            palette: Ramp::Aurora,
+            zoom: 1.0,
+            yaw: YAW_PHASE,
         },
         Attractor::Halvorsen => &Spec {
             h_max: 0.005,
@@ -263,6 +333,9 @@ const fn spec(k: Attractor) -> &'static Spec {
             },
             params: "a=1.27",
             params_ascii: "a=1.27",
+            palette: Ramp::Plasma,
+            zoom: 1.0,
+            yaw: YAW_PHASE,
         },
         Attractor::Rossler => &Spec {
             h_max: 0.02,
@@ -281,6 +354,30 @@ const fn spec(k: Attractor) -> &'static Spec {
             },
             params: "a=.2 b=.2 c=5.7",
             params_ascii: "a=.2 b=.2 c=5.7",
+            palette: Ramp::Ferroin,
+            zoom: 1.0,
+            yaw: YAW_PHASE,
+        },
+        Attractor::Chen => &Spec {
+            h_max: 0.004,
+            rate: 0.229,
+            centre: [0.0, 0.0, 28.5],
+            half: 31.5,
+            rho: 1.22,
+            up: Up::Z,
+            start: [-10.0, 0.0, 37.0],
+            pitch: 0.20,
+            frame: Frame {
+                x: 0.86,
+                top: -0.49,
+                bottom: 0.60,
+                swing: 0.0,
+            },
+            params: "a=35 b=3 c=28",
+            params_ascii: "a=35 b=3 c=28",
+            palette: Ramp::HAlpha,
+            zoom: 0.85,
+            yaw: WINGS_OPEN,
         },
     }
 }
@@ -291,7 +388,11 @@ const fn spec(k: Attractor) -> &'static Spec {
 
 /// Thomas' cyclically symmetric flow `ẋ = sin y − bx` (and cyclic).
 pub(crate) fn thomas(b: f64, [x, y, z]: V3) -> V3 {
-    [y.sin() - b * x, z.sin() - b * y, x.sin() - b * z]
+    [
+        y.sin_det() - b * x,
+        z.sin_det() - b * y,
+        x.sin_det() - b * z,
+    ]
 }
 
 /// Halvorsen's cyclically symmetric flow `ẋ = −ax − 4y − 4z − y²` (and cyclic).
@@ -324,6 +425,10 @@ pub(crate) fn field(k: Attractor, p: V3) -> V3 {
         Attractor::Rossler => {
             let (a, b, c) = ROSSLER;
             [-y - z, x + a * y, b + z * (x - c)]
+        }
+        Attractor::Chen => {
+            let (a, b, c) = CHEN;
+            [a * (y - x), (c - a) * x - x * z + c * y, x * y - b * z]
         }
     }
 }
@@ -518,6 +623,12 @@ impl Gallery {
 
     fn next(&self) -> usize {
         (self.at + 1) % GALLERY.len()
+    }
+
+    /// Timeline clock (s). It is also the camera's clock, so every member's hold is seen
+    /// from the same yaws whatever the seeded first member.
+    pub(crate) fn t(&self) -> f64 {
+        self.t
     }
 
     /// Simulated (and displayed) prefix.
@@ -798,8 +909,7 @@ pub(crate) fn n_eff(size: Size) -> usize {
 fn fit(k: Attractor, size: Size) -> f64 {
     let f = spec(k).frame;
     let (w, rows) = (f64::from(size.width()), f64::from(stage_rows(size)));
-    (FILL_H * rows / (f.bottom - f.top))
-        .min(FILL_W * w / (2.0 * ASPECT * f.x))
+    (spec(k).zoom * (FILL_H * rows / (f.bottom - f.top)).min(FILL_W * w / (2.0 * ASPECT * f.x)))
         .max(f64::MIN_POSITIVE)
 }
 
@@ -813,10 +923,145 @@ fn stage_rows(size: Size) -> u16 {
     size.height() - u16::from(label_shown(size))
 }
 
-/// Thread colour: density log-compressed by `ln_top = ln(1 + D_TOP/D_MIN)` onto the
-/// sequential map.
-fn thread_ink(d: f32, ln_top: f64) -> Ink {
-    ink::seq((1.0 + f64::from(d) / f64::from(D_MIN)).ln() / ln_top)
+/// Thread colour: density log-compressed by `ln_top = ln(1 + D_TOP/D_MIN)` onto the shown
+/// attractor's palette (ATT-A9).
+fn thread_ink(palette: Ramp, d: f32, ln_top: f64) -> Ink {
+    let u = ((1.0 + f64::from(d) / f64::from(D_MIN)).ln() / ln_top).clamp(0.0, 1.0);
+    let floor = match palette {
+        Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin | Ramp::Cobalt | Ramp::Eosin => {
+            PALETTE_FLOOR_DEEP
+        }
+        Ramp::Ember | Ramp::Ice | Ramp::Aurora | Ramp::Starlight | Ramp::Sulfur => PALETTE_FLOOR,
+    };
+    ink::ramp(
+        palette,
+        floor + (PALETTE_TOP - floor) * u.powf(PALETTE_GAMMA),
+    )
+}
+
+/// Glow colour: the tone level onto the lower band of the shown palette (ATT-A11).
+fn glow_ink(palette: Ramp, level: u8) -> Ink {
+    ink::ramp(
+        palette,
+        GLOW_FLOOR + (GLOW_TOP - GLOW_FLOOR) * f64::from(level) / 255.0,
+    )
+}
+
+/// The glow's tone curve at `size`, scaled to the mean steady-state value of a covered
+/// pixel (ATT-A11), so the cloud's brightness does not depend on the lattice size.
+fn glow_tone(size: Size) -> Tone {
+    let px = f64::from(size.width()) * 2.0 * f64::from(size.height());
+    let mean = n_eff(size) as f64 * 60.0 * GLOW_TAU_S / (GLOW_COVER * px.max(1.0));
+    Tone::asinh((GLOW_KNEE * mean) as f32, (GLOW_WHITE * mean) as f32)
+}
+
+/// Empty every pixel dimmer than `below` that has no lit pixel among its eight neighbours
+/// (ATT-A12). One in-place pass: an isolated pixel has no lit neighbour to affect, so
+/// removing it never changes another pixel's verdict. No allocation.
+fn drop_isolated(pixels: &mut Pixels, below: u8) {
+    let size = pixels.pixel_size();
+    let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+    let lit = |p: Option<Ink>| p.is_some_and(|i| i.role != Role::Background);
+    for y in 0..h {
+        for x in 0..w {
+            let Some(p) = pixels.get(x, y) else { continue };
+            if p.role == Role::Background || p.level >= below {
+                continue;
+            }
+            let alone = (-1..=1)
+                .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                .filter(|&d| d != (0, 0))
+                .all(|(dx, dy)| !lit(pixels.get(x + dx, y + dy)));
+            if alone {
+                pixels.set(x, y, Ink::BLANK);
+            }
+        }
+    }
+}
+
+/// Splat a particle's weight into the glow at its dot, bilinearly in pixel units, never
+/// on the label row.
+fn splat(glow: &mut Glow, pen: &Pen, (x, y): (i32, i32), w: f32) {
+    if y >= pen.floor {
+        return;
+    }
+    let px = (f64::from(x) - 0.5) / 2.0;
+    // Bilinear weight must not spill onto the label row's pixels either.
+    let py = ((f64::from(y) - 0.5) / 2.0).min(f64::from(pen.floor / 2 - 1));
+    glow.splat_bilinear(px, py, w);
+}
+
+/// The threads' short exposure at braille-dot resolution: a [`Density`] in 16-bit fixed
+/// point (`1/SCALE` per unit, saturating at `u16::MAX / SCALE` ≈ 64 deposits), half the
+/// memory of the `f32` buffer. At 500×150 that is 1.2 MB, which keeps the scene with its
+/// long-exposure glow under the TEST-R7 ceiling. Decay rounds down, so a lone deposit
+/// always fades to zero; the threshold `D_MIN` is 82 units, far above the rounding.
+#[derive(Debug, Default)]
+struct Exposure {
+    w: usize,
+    h: usize,
+    buf: Vec<u16>,
+}
+
+impl Exposure {
+    const SCALE: f32 = 1024.0;
+
+    /// Resize to `cells` terminal cells (`2·w × 4·h` dots) and zero; reuses the buffer
+    /// unless it must grow.
+    fn resize(&mut self, cells: Size) {
+        self.w = usize::from(cells.width()) * Dots::CELL_W as usize;
+        self.h = usize::from(cells.height()) * Dots::CELL_H as usize;
+        self.buf.clear();
+        self.buf.resize(self.w * self.h, 0);
+    }
+
+    /// Add `w` at the dot nearest to `(x, y)`; non-finite input and off-buffer dots are
+    /// ignored, as [`Density::deposit`].
+    fn deposit(&mut self, x: f64, y: f64, w: f32) {
+        if !(x.is_finite() && y.is_finite() && w.is_finite() && w > 0.0) {
+            return;
+        }
+        let (x, y) = (x.round(), y.round());
+        if x < 0.0 || y < 0.0 || x >= self.w as f64 || y >= self.h as f64 {
+            return;
+        }
+        let v = &mut self.buf[y as usize * self.w + x as usize];
+        let add = (w * Self::SCALE).round().min(f32::from(u16::MAX)) as u16;
+        *v = v.saturating_add(add);
+    }
+
+    /// Multiply every value by `k ∈ [0, 1]`, rounding down (NaN leaves it as is).
+    fn decay(&mut self, k: f32) {
+        if k.is_nan() {
+            return;
+        }
+        // 16-bit fixed-point factor: exact for k = 1, and `v·k` rounds down.
+        let q = (k.clamp(0.0, 1.0) * 65536.0) as u32;
+        for v in &mut self.buf {
+            *v = ((u32::from(*v) * q) >> 16) as u16;
+        }
+    }
+
+    /// Light every dot whose value is `≥ threshold` with `map(value)`, as
+    /// [`Density::to_dots`].
+    fn to_dots(&self, dots: &mut Dots, threshold: f32, mut map: impl FnMut(f32) -> Ink) {
+        let t = (threshold * Self::SCALE).ceil().max(1.0) as u32;
+        if self.w == 0 {
+            return;
+        }
+        for (y, row) in self.buf.chunks_exact(self.w).enumerate() {
+            for (x, &v) in row.iter().enumerate() {
+                if u32::from(v) >= t {
+                    dots.set(x as i32, y as i32, map(f32::from(v) / Self::SCALE));
+                }
+            }
+        }
+    }
+}
+
+/// Camera yaw (rad) at gallery clock `t`, `w` of the way from `from`'s offset to `to`'s.
+fn camera_yaw(t: f64, from: Attractor, to: Attractor, w: f64) -> f64 {
+    TAU * t / YAW_PERIOD + ease::lerp(spec(from).yaw, spec(to).yaw, w)
 }
 
 /// Where and how a particle deposits this update.
@@ -844,7 +1089,7 @@ impl Pen {
     /// Deposit the thread from `from` (deposited earlier, so skipped unless the particle is
     /// still on it: dwelling brightens a dot, as a long exposure would) to `to`. Longer
     /// jumps than `MAX_SEGMENT` deposit only their end; the label row is never drawn.
-    fn thread(&self, density: &mut Density, from: Option<(i32, i32)>, to: (i32, i32), w: f32) {
+    fn thread(&self, density: &mut Exposure, from: Option<(i32, i32)>, to: (i32, i32), w: f32) {
         let mut put = |(x, y): (i32, i32)| {
             if y < self.floor {
                 density.deposit(f64::from(x), f64::from(y), w);
@@ -865,10 +1110,12 @@ struct StrangeAttractors {
     /// Built at the first resize (the seeded start needs `ctx.rng`).
     gallery: Option<Gallery>,
     size: Size,
-    /// Camera clock (s).
-    t: f64,
-    density: Density,
+    density: Exposure,
     dots: Dots,
+    /// Long-exposure cloud under the threads (ATT-A11), toned into `pixels`.
+    glow: Glow,
+    pixels: Pixels,
+    tone: Tone,
     /// Previous dot of each displayed particle (`None`: forgotten, no thread segment).
     prev: Vec<Option<(i32, i32)>>,
 }
@@ -878,9 +1125,11 @@ impl Default for StrangeAttractors {
         Self {
             gallery: None,
             size: Size::new(1, 1),
-            t: 0.0,
-            density: Density::default(),
+            density: Exposure::default(),
             dots: Dots::default(),
+            glow: Glow::default(),
+            pixels: Pixels::default(),
+            tone: Tone::default(),
             prev: vec![None; N],
         }
     }
@@ -892,9 +1141,9 @@ impl StrangeAttractors {
     fn view(&self, g: &Gallery) -> (Projector, (f64, f64), f64) {
         let (from, to, w) = g.pair();
         let pitch = ease::lerp(spec(from).pitch, spec(to).pitch, w)
-            + PITCH_WOBBLE * (TAU * self.t / PITCH_PERIOD).sin();
+            + PITCH_WOBBLE * (TAU * g.t() / PITCH_PERIOD).sin_det();
         let scale = ease::lerp(fit(from, self.size).ln(), fit(to, self.size).ln(), w).exp();
-        let yaw = TAU * self.t / YAW_PERIOD;
+        let yaw = camera_yaw(g.t(), from, to, w);
         let mid = |k: Attractor| spec(k).frame.mid(yaw);
         let cam = Camera {
             yaw,
@@ -919,7 +1168,7 @@ impl StrangeAttractors {
             proj,
             centre,
             scale,
-            dim: 1.0 - MORPH_DIM * (PI * g.pair().2).sin(),
+            dim: 1.0 - MORPH_DIM * (PI * g.pair().2).sin_det(),
             floor,
         }
     }
@@ -940,6 +1189,7 @@ impl StrangeAttractors {
                 continue;
             };
             pen.thread(&mut self.density, *prev, dot, w as f32);
+            splat(&mut self.glow, &pen, dot, w as f32);
             *prev = Some(dot);
         }
         self.threshold();
@@ -957,16 +1207,23 @@ impl StrangeAttractors {
         }
         let pen = self.pen(g);
         let fade = (-SIM_DT / TAU_S).exp();
+        // The glow outlives the replay: scale the replayed deposits up to the steady state
+        // of an endless exposure, `1 / (1 − k^(steps + 1))`, so frame 0 already glows.
+        let glow_fade = (-SIM_DT / GLOW_TAU_S).exp();
+        let glow_prime = 1.0 / (1.0 - glow_fade.powi(PRIME_STEPS as i32 + 1));
         for (i, prev) in self.prev[..g.n()].iter_mut().enumerate() {
             let Some((head, w)) = pen.mark(g.displayed(i)) else {
                 *prev = None;
                 continue;
             };
-            let (mut to, mut age) = (head, 1.0);
-            let density = &mut self.density;
+            let (mut to, mut age, mut glow_age) = (head, 1.0, 1.0);
+            let (density, glow) = (&mut self.density, &mut self.glow);
+            splat(glow, &pen, head, (w * glow_prime) as f32);
             g.rewind(i, SIM_DT, PRIME_STEPS, |p| {
                 if let Some((from, _)) = pen.mark(p) {
                     pen.thread(density, Some(from), to, (w * age) as f32);
+                    glow_age *= glow_fade;
+                    splat(glow, &pen, from, (w * glow_prime * glow_age) as f32);
                     (to, age) = (from, age * fade);
                 }
             });
@@ -978,9 +1235,23 @@ impl StrangeAttractors {
 
     fn threshold(&mut self) {
         self.dots.clear();
-        let ln_top = (1.0 + D_TOP / f64::from(D_MIN)).ln();
+        self.pixels.clear();
+        let Some(k) = self.shown() else {
+            return;
+        };
+        let (palette, ln_top) = (spec(k).palette, (1.0 + D_TOP / f64::from(D_MIN)).ln());
         self.density
-            .to_dots(&mut self.dots, D_MIN, |d| thread_ink(d, ln_top));
+            .to_dots(&mut self.dots, D_MIN, |d| thread_ink(palette, d, ln_top));
+        self.glow.to_pixels(&mut self.pixels, &self.tone, |l| {
+            // Nothing under a tenth of the glow's range is drawn (ATT-A12).
+            if l < ISOLATED_BELOW {
+                Ink::BLANK
+            } else {
+                glow_ink(palette, l)
+            }
+        });
+        self.pixels.dissolve(GLOW_DISSOLVE);
+        drop_isolated(&mut self.pixels, glow_ink(palette, ISOLATED_BELOW).level);
     }
 
     /// The attractor the swarm mostly shows: the target once a morph is half done.
@@ -1029,6 +1300,9 @@ impl Generator for StrangeAttractors {
         self.size = size;
         self.density.resize(size);
         self.dots.resize(size);
+        self.glow.resize(size);
+        self.pixels.resize(size);
+        self.tone = glow_tone(size);
         let n = n_eff(size);
         match &mut self.gallery {
             Some(g) => g.set_n(n),
@@ -1044,7 +1318,7 @@ impl Generator for StrangeAttractors {
         let Some(g) = &mut self.gallery else {
             return;
         };
-        // The one dt guard: it also keeps the camera clock and the decay finite.
+        // The one dt guard: it also keeps the gallery (camera) clock and the decay finite.
         if !(dt.is_finite() && dt > 0.0) {
             return;
         }
@@ -1055,13 +1329,15 @@ impl Generator for StrangeAttractors {
         if g.n() != n {
             self.prev[n.min(g.n())..].fill(None);
         }
-        self.t += dt;
         self.density.decay((-dt / TAU_S).exp() as f32);
+        self.glow.decay((-dt / GLOW_TAU_S).exp() as f32);
         self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.dots.blit(canvas);
+        // ASCII has no half blocks: the cloud is left out and the threads carry the shape.
+        self.pixels.blit(canvas, |_, _, _, _| None);
+        self.dots.blit_over(canvas, &self.pixels);
         self.label(canvas);
     }
 
@@ -1077,7 +1353,11 @@ mod tests {
     type M3 = [[f64; 3]; 3];
 
     fn thomas_jacobian(b: f64, [x, y, z]: V3) -> M3 {
-        [[-b, y.cos(), 0.0], [0.0, -b, z.cos()], [x.cos(), 0.0, -b]]
+        [
+            [-b, y.cos_det(), 0.0],
+            [0.0, -b, z.cos_det()],
+            [x.cos_det(), 0.0, -b],
+        ]
     }
 
     fn halvorsen_jacobian(a: f64, [x, y, z]: V3) -> M3 {
@@ -1113,6 +1393,10 @@ mod tests {
             Attractor::Rossler => {
                 let (a, _, c) = ROSSLER;
                 [[0.0, -1.0, -1.0], [1.0, a, 0.0], [z, 0.0, x - c]]
+            }
+            Attractor::Chen => {
+                let (a, b, c) = CHEN;
+                [[-a, a, 0.0], [c - a - z, c, -x], [y, x, -b]]
             }
         }
     }
@@ -1193,6 +1477,7 @@ mod tests {
             (Attractor::Thomas, 200.0, 1500.0),
             (Attractor::Halvorsen, 50.0, 400.0),
             (Attractor::Rossler, 100.0, 1500.0),
+            (Attractor::Chen, 50.0, 400.0),
         ];
         for (k, burn, t) in runs {
             let h = if k == Attractor::Lorenz {
@@ -1275,6 +1560,7 @@ mod tests {
                     Attractor::Thomas => -3.0 * THOMAS_B,
                     Attractor::Halvorsen => -3.0 * HALVORSEN_A,
                     Attractor::Rossler => ROSSLER.0 + x - ROSSLER.2,
+                    Attractor::Chen => CHEN.2 - CHEN.0 - CHEN.1,
                 };
                 assert!(close(trace(&j), div, 1e-12), "{k:?} trace at {p:?}");
             }
@@ -1306,20 +1592,31 @@ mod tests {
 
     #[test]
     fn att_a4_scout_ensembles_fill_their_boxes_and_frames() {
+        // In `Attractor` order; Chen's is the median scout box of seeds 0–7 (its rare long
+        // excursions make a long orbit's box a poor reference).
         let boxes = [
             [1.44, 1.95, 1.70],
             [2.00, 2.00, 1.49],
             [2.0; 3],
             [2.0; 3],
             [1.81, 1.64, 2.00],
+            [1.45, 1.63, 1.13],
         ];
-        for (k, reference) in GALLERY.into_iter().zip(boxes) {
+        for k in GALLERY {
+            let reference = boxes[k as usize];
             let s = spec(k);
             // Lorenz 0.8, not the 0.9 of the others: a 1024 × 0.05 tu = 51 tu scout rarely
             // reaches the outer spiral (z is the short axis; minimum 0.825 over seeds 0–7,
             // 0.806 over 0–63, where 35 of 64 seeds are below 0.9). Aizawa keeps 0.9, which
             // its coexisting inner attractor (z: 0.82) fails.
             let fill = if k == Attractor::Lorenz { 0.8 } else { 0.9 };
+            // A heavy tail: Chen's outer spiral is reached by some 1024-sample scouts and
+            // not others, so its radius varies more by seed (0.86–1.03 ρ), and its rarest
+            // points reach 1.38× the 99.5 % frame (clipped at the edge while they are out).
+            let (radius_floor, tail) = match k {
+                Attractor::Chen => (0.85, 1.4),
+                _ => (0.9, 1.2),
+            };
             let mut reach = [0.0f64; 3];
             for seed in 0..8 {
                 let pts = ensemble(k, seed);
@@ -1344,7 +1641,7 @@ mod tests {
                     );
                 }
                 assert!(
-                    (0.90 * s.rho..=1.03 * s.rho).contains(&rmax),
+                    (radius_floor * s.rho..=1.03 * s.rho).contains(&rmax),
                     "{k:?} seed {seed}: max radius {rmax}"
                 );
                 // The frame is the 99.5th percentile of every pose over the camera loop,
@@ -1362,7 +1659,7 @@ mod tests {
                             distance: DISTANCE,
                         };
                         let pr = cam.projector();
-                        let swing = f.swing * (3.0 * yaw).cos();
+                        let swing = f.swing * (3.0 * yaw).cos_det();
                         let (mut xs, mut ys) = (Vec::with_capacity(N), Vec::with_capacity(N));
                         for &p in &pts {
                             let (x, y, _) = pr.project(world(k, p), (0.0, 0.0), 1.0).unwrap();
@@ -1385,7 +1682,7 @@ mod tests {
                         }
                         let (x, top, bottom) = (xs[N - 1], ys[0], ys[N - 1]);
                         assert!(
-                            x <= 1.2 * f.x && top >= 1.2 * f.top && bottom <= 1.2 * f.bottom,
+                            x <= tail * f.x && top >= tail * f.top && bottom <= tail * f.bottom,
                             "{k:?} seed {seed}: extremes ({x}, {top}, {bottom})"
                         );
                     }
@@ -1613,7 +1910,7 @@ mod tests {
         }
 
         let mut g = Gallery::new(0, 64, &mut r);
-        assert_eq!(g.timeline.total(), 60.0);
+        assert_eq!(g.timeline.total(), 72.0);
         let mut seen = vec![(g.at, g.morphing, 0.0)];
         let mut last: Vec<V3> = (0..64).map(|i| g.displayed(i)).collect();
         let mut worst = 0.0f64;
@@ -1629,7 +1926,7 @@ mod tests {
             })
         };
         let (mut body, mut stretched) = (0.0f64, 0);
-        let steps = 3601;
+        let steps = 4321;
         for s in 1..=steps {
             g.step(SIM_DT, &mut r);
             if (g.at, g.morphing) != (seen.last().unwrap().0, seen.last().unwrap().1) {
@@ -1668,7 +1965,7 @@ mod tests {
             "the stretch did not act ({stretched} axis-steps)"
         );
         let order: Vec<_> = seen.iter().map(|&(at, m, _)| (at, m)).collect();
-        let expected: Vec<_> = (0..5)
+        let expected: Vec<_> = (0..GALLERY.len())
             .flat_map(|k| [(k, false), (k, true)])
             .chain([(0, false)])
             .collect();
@@ -1690,6 +1987,103 @@ mod tests {
         s.gallery = Some(Gallery::new(first, n_eff(size), &mut ctx.rng));
         s.resize(size, &mut ctx);
         (s, ctx, Canvas::new(size, mode))
+    }
+
+    /// ATT-A11: a long-exposure cloud glows under the threads in Unicode mode: half-block
+    /// cells in the lower band of the shown palette, covering
+    /// more of the stage than the threads alone and never on the label row; ASCII keeps
+    /// only the threads (it has no half blocks).
+    #[test]
+    fn att_a12_lone_dim_glow_specks_are_dropped() {
+        let mut px = Pixels::default();
+        px.resize(Size::new(10, 5));
+        let (dim, bright) = (ink::ramp(Ramp::Ice, 0.05), ink::ramp(Ramp::Ice, 0.4));
+        px.set(1, 1, dim); // alone and dim: dropped
+        px.set(8, 1, bright); // alone but bright: kept
+        px.set(4, 6, dim); // dim with a diagonal neighbour: kept
+        px.set(5, 7, dim);
+        let below = ink::ramp(Ramp::Ice, 0.1).level;
+        drop_isolated(&mut px, below);
+        assert_eq!(px.get(1, 1), Some(Ink::BLANK));
+        assert_eq!(px.get(8, 1), Some(bright));
+        assert_eq!((px.get(4, 6), px.get(5, 7)), (Some(dim), Some(dim)));
+        // In the scene (Chen's hold included) no glow pixel is under a tenth of the glow's
+        // range at all: the fringe ends in black, not in specks.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut gal = StrangeAttractors::default();
+        gal.resize(size, &mut ctx);
+        let mut seen = 0;
+        for step in 0..(40.0 / SIM_DT) as usize {
+            gal.update(SIM_DT, &mut ctx);
+            if step % 60 != 0 {
+                continue;
+            }
+            let k = gal.shown().unwrap();
+            let cut = glow_ink(spec(k).palette, ISOLATED_BELOW).level;
+            for y in 0..80 {
+                for x in 0..120 {
+                    let Some(p) = gal.pixels.get(x, y) else {
+                        continue;
+                    };
+                    if p.role != Role::Background {
+                        assert!(p.level >= cut, "{k:?}: dim glow pixel at ({x},{y})");
+                        seen += 1;
+                    }
+                }
+            }
+        }
+        assert!(seen > 1000, "{seen} glow pixels");
+    }
+
+    #[test]
+    fn att_a11_a_long_exposure_cloud_glows_under_the_threads() {
+        let top = glow_ink(Ramp::Ice, 255).level;
+        for (i, k) in GALLERY.into_iter().enumerate() {
+            for (w, h) in [(80, 24), (200, 50)] {
+                let (mut s, mut ctx, mut c) = scene(w, h, GlyphMode::Unicode, i);
+                for _ in 0..60 {
+                    s.update(SIM_DT, &mut ctx);
+                }
+                c.clear();
+                s.render(&mut c);
+                let palette = Role::Ramp(spec(k).palette);
+                let (mut glow, mut threads) = (0, 0);
+                for (j, cell) in c.cells().iter().enumerate() {
+                    let y = j / usize::from(w);
+                    let block = matches!(cell.ch, '▀' | '▄');
+                    let dots = ('\u{2801}'..='\u{28ff}').contains(&cell.ch);
+                    if block || (dots && cell.bg != Ink::BLANK) {
+                        glow += 1;
+                        let g = if block { cell.ink } else { cell.bg };
+                        assert_eq!(g.role, palette, "{k:?} {w}x{h}");
+                        assert!(g.level <= top, "{k:?}: glow {} > {top}", g.level);
+                        assert!(y + 1 < usize::from(h), "{k:?}: glow on the label row");
+                    }
+                    if dots {
+                        threads += 1;
+                    }
+                }
+                assert!(
+                    glow > threads,
+                    "{k:?} {w}x{h}: {glow} glow vs {threads} threads"
+                );
+            }
+            let (s, _, mut c) = scene(80, 24, GlyphMode::Ascii, i);
+            c.clear();
+            s.render(&mut c);
+            assert!(c.cells().iter().all(|cell| cell.bg == Ink::BLANK), "{k:?}");
+        }
+        // Size-independent tone: a covered pixel's mean steady value tones to the same
+        // level at every size.
+        let mid = |w, h| {
+            let size = Size::new(w, h);
+            let px = f64::from(w) * 2.0 * f64::from(h);
+            let mean = n_eff(size) as f64 * 60.0 * GLOW_TAU_S / (GLOW_COVER * px);
+            glow_tone(size).level(mean as f32)
+        };
+        assert_eq!(mid(80, 24), mid(200, 50));
+        assert!(mid(80, 24) > 100);
     }
 
     fn label_row(s: &StrangeAttractors, c: &mut Canvas) -> String {
@@ -1723,7 +2117,7 @@ mod tests {
             assert!(s.params_ascii.is_ascii());
         }
         // The name is the title's caption, so the row holds the parameters alone,
-        // right-aligned with a blank either side (Aizawa: nothing).
+        // right-aligned with a blank either side (every act has its set, ATT-A7).
         for (i, k) in GALLERY.into_iter().enumerate() {
             for (mode, params) in [
                 (GlyphMode::Ascii, spec(k).params_ascii),
@@ -1736,21 +2130,21 @@ mod tests {
                 assert!(row.is_ascii() || mode == GlyphMode::Unicode);
             }
         }
-        // Every set is restrained (≤ 16 chars) and quoted whole or, when it does not fit
-        // (Aizawa's six), not at all: one parameter out of several would read as the
-        // attractor's only one.
+        // Every set is quoted whole (Aizawa's six in 32 characters, the longest) and
+        // dropped whole where it does not fit: one parameter out of several would read
+        // as the attractor's only one.
         assert!(
             GALLERY
                 .iter()
-                .all(|&k| spec(k).params.chars().count() <= 16)
+                .all(|&k| spec(k).params.chars().count() <= 32)
         );
-        for (k, params) in GALLERY.into_iter().zip([3, 6, 1, 1, 3]) {
+        for (k, params) in GALLERY.into_iter().zip([3, 6, 1, 3, 1, 3]) {
             let quoted = spec(k).params.matches('=').count();
-            assert!(
-                quoted == params || quoted == 0,
-                "{k:?} quotes {quoted} of {params}"
-            );
+            assert_eq!(quoted, params, "{k:?} quotes {quoted} of {params}");
         }
+        // Aizawa (gallery index 1): shown whole at 80 columns, dropped whole at 50.
+        let (s, _, mut c) = scene(50, 24, GlyphMode::Unicode, 1);
+        assert_eq!(label_row(&s, &mut c).trim(), "");
         // Lorenz's 15-char set beside "Strange attractor" alone (from 32 wide, the full
         // title from 47), where the room is w − 23: dropped at 37 columns, shown at 38.
         for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {
@@ -1779,7 +2173,7 @@ mod tests {
 
         // Row h−1 stays free for the whole loop (80×24: in the composition test below).
         let (mut s, mut ctx, _) = scene(40, 12, GlyphMode::Unicode, 0);
-        for step in 0..3600 {
+        for step in 0..4320 {
             s.update(SIM_DT, &mut ctx);
             let x = (0..40).find(|&x| cell_lit(&s, x, 11));
             assert!(
@@ -1864,7 +2258,7 @@ mod tests {
         let mut mids: Vec<(Attractor, Attractor, f64, f64)> = Vec::new();
         let (mut lit, mut span, mut frames) = (0.0, 0.0, 0.0);
         let mut uneven = 0i32;
-        for step in 0..3600 {
+        for step in 0..4320 {
             s.update(SIM_DT, &mut ctx);
             let x = (0..80).find(|&x| cell_lit(&s, x, 23));
             assert!(x.is_none(), "step {step}: dot on the label row at {x:?}");
@@ -1889,7 +2283,8 @@ mod tests {
                 mids.push((from, to, l as f64, r as f64));
             }
         }
-        assert_eq!((holds.len(), mids.len()), (5, 5));
+        let n = GALLERY.len();
+        assert_eq!((holds.len(), mids.len()), (n, n));
         let lit_of = |k: Attractor| holds.iter().find(|h| h.0 == k).unwrap().1;
         let span_of = |k: Attractor| holds.iter().find(|h| h.0 == k).unwrap().2;
 
@@ -1915,12 +2310,12 @@ mod tests {
         for &(k, _, rows) in &holds {
             assert!(rows >= 0.72 * 23.0, "{k:?} spans {rows:.1} rows");
         }
-        let mean = holds.iter().map(|h| h.2).sum::<f64>() / 5.0;
+        let mean = holds.iter().map(|h| h.2).sum::<f64>() / n as f64;
         assert!(mean >= 0.8 * 23.0, "holds span {mean:.1} rows on average");
         // Aizawa's shell covers its disc where the others are sheets and bands, so it lights
         // more cells, but never twice as many (1.33× their mean; seeds 0–23: 1.40–1.75×).
         let others = GALLERY[..].iter().filter(|&&k| k != Attractor::Aizawa);
-        let others = others.map(|&k| lit_of(k)).sum::<f64>() / 4.0;
+        let others = others.map(|&k| lit_of(k)).sum::<f64>() / (n - 1) as f64;
         let aizawa = lit_of(Attractor::Aizawa);
         assert!(aizawa <= 2.0 * others, "Aizawa {aizawa:.0} vs {others:.0}");
         // Mid-morph the swarm keeps its body: ≥ 0.55 of the smaller neighbour's hold. The
@@ -1940,5 +2335,127 @@ mod tests {
                 "{from:?} -> {to:?}: spans {rows} rows vs {lo:.1}"
             );
         }
+    }
+
+    #[test]
+    fn att_a9_threads_take_the_shown_attractors_palette() {
+        // Every member has its own palette, so each reads as itself (false colour).
+        for (i, a) in GALLERY.iter().enumerate() {
+            for b in &GALLERY[i + 1..] {
+                assert_ne!(spec(*a).palette, spec(*b).palette, "{a:?} {b:?}");
+            }
+        }
+        for (i, k) in GALLERY.into_iter().enumerate() {
+            let (mut s, mut ctx, mut c) = scene(80, 24, GlyphMode::Unicode, i);
+            for _ in 0..30 {
+                s.update(SIM_DT, &mut ctx);
+            }
+            s.render(&mut c);
+            let roles: Vec<Role> = c.cells()[..80 * 23]
+                .iter()
+                .filter(|cell| cell.ch != ' ')
+                .map(|cell| cell.ink.role)
+                .collect();
+            assert!(roles.len() > 50, "{k:?}: {} cells", roles.len());
+            assert!(
+                roles.iter().all(|&r| r == Role::Ramp(spec(k).palette)),
+                "{k:?}"
+            );
+        }
+        // Sparse strands sit in the hue, not the ramp's black foot; the bulk stays
+        // saturated; only the densest cores approach the near-white top.
+        let ln_top = (1.0 + D_TOP / f64::from(D_MIN)).ln();
+        let at = |d: f64| thread_ink(Ramp::HAlpha, d as f32, ln_top);
+        assert_eq!(at(f64::from(D_MIN)).role, Role::Ramp(Ramp::HAlpha));
+        assert!(at(f64::from(D_MIN)).level >= ink::seq(0.3).level);
+        assert!(at(D_TOP / 8.0).level <= ink::seq(0.75).level);
+        assert_eq!(at(D_TOP).level, ink::seq(0.95).level);
+        assert_eq!(at(1e9), at(D_TOP));
+        // The deep crimson, violet and wine ramps start higher, so their sparse strands
+        // are no darker on screen than the others'.
+        for ramp in Ramp::ALL {
+            let floor = thread_ink(ramp, 0.0, ln_top).level;
+            let deep = matches!(
+                ramp,
+                Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin | Ramp::Cobalt | Ramp::Eosin
+            );
+            let want = if deep {
+                PALETTE_FLOOR_DEEP
+            } else {
+                PALETTE_FLOOR
+            };
+            assert_eq!(floor, ink::seq(want).level, "{ramp:?}");
+        }
+    }
+
+    /// Horizontal extent of `k`'s attractor seen from camera yaw `yaw` (world units), from
+    /// a 60 000-step RK4 orbit after a transient.
+    fn width_at(path: &[V3], yaw: f64) -> f64 {
+        let proj = Camera {
+            yaw,
+            pitch: 0.0,
+            distance: f64::INFINITY,
+        }
+        .projector();
+        let xs = path.iter().map(|&p| proj.rotate(p)[0]);
+        xs.clone().fold(f64::MIN, f64::max) - xs.fold(f64::MAX, f64::min)
+    }
+
+    #[test]
+    fn att_a10_two_wing_flows_open_their_wings_through_the_hold() {
+        // Seen side-on a two-wing flow is a narrow V (a third of its widest); seen face-on
+        // its wings open side by side and the figure is at its widest. Every yaw of
+        // Lorenz's and Chen's hold, whichever member the seed starts at, shows them at
+        // least 70 % open.
+        for k in [Attractor::Lorenz, Attractor::Chen] {
+            let mut y = spec(k).start;
+            let h = spec(k).h_max;
+            let mut path = Vec::new();
+            for n in 0..62_000 {
+                ode::rk4_step(&mut y, 0.0, h, |_, p| field(k, *p));
+                if n >= 2_000 && n % 4 == 0 {
+                    path.push(world(k, y));
+                }
+            }
+            let widest = (0..180)
+                .map(|d| width_at(&path, f64::from(d).to_radians()))
+                .fold(0.0, f64::max);
+            // The camera clock runs with the gallery's, where member `i`'s hold starts at
+            // 12·i s (mod 72 s = two yaw turns).
+            let i = GALLERY.iter().position(|&g| g == k).unwrap();
+            let start = (HOLD + MORPH) * i as f64;
+            for s in 0..=8 {
+                let yaw = TAU * (start + HOLD * f64::from(s) / 8.0) / YAW_PERIOD + spec(k).yaw;
+                let open = width_at(&path, yaw) / widest;
+                assert!(open >= 0.7, "{k:?} {s}/8 of the hold: {open:.2} open");
+            }
+        }
+    }
+
+    #[test]
+    fn att_a10_opening_the_wings_never_whips_or_reverses_the_camera() {
+        // The wing flows' offset must not turn the steady 10 °/s turntable into a whip pan
+        // at the morphs next to them: over a whole loop the yaw rate stays within
+        // [−1, 25] °/s (the base rate is 10 °/s).
+        let base = 360.0 / YAW_PERIOD;
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for (i, &from) in GALLERY.iter().enumerate() {
+            let to = GALLERY[(i + 1) % GALLERY.len()];
+            let start = (HOLD + MORPH) * i as f64;
+            let yaw = |t: f64| {
+                let w = ease::smoothstep(((t - start - HOLD) / MORPH).clamp(0.0, 1.0));
+                camera_yaw(t, from, to, w)
+            };
+            let mut t = start;
+            while t < start + HOLD + MORPH {
+                let rate = (yaw(t + SIM_DT) - yaw(t)).to_degrees() / SIM_DT;
+                (lo, hi) = (lo.min(rate), hi.max(rate));
+                t += SIM_DT;
+            }
+        }
+        assert!(
+            lo >= -1.0 && hi <= 2.5 * base,
+            "yaw rate {lo:.1}..{hi:.1} °/s"
+        );
     }
 }

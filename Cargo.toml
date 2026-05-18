@@ -35,6 +35,10 @@ proptest = "1"
 tempfile = "3"
 vt100 = "0.16"
 
+# Dev-only: the `preview` example (PNG frames for art review).
+font8x8 = "0.3"
+png = "0.17"
+
 [workspace.lints.rust]
 unsafe_code = "forbid"
 missing_debug_implementations = "warn"

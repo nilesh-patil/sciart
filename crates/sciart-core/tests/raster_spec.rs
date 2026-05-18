@@ -1,4 +1,4 @@
-//! SPEC-001 CORE-R40..R42: cell background, braille `Dots` and half-block `Pixels`
+//! SPEC-001 CORE-R40..R42, R82: cell background, braille `Dots` (and its disc) and half-block `Pixels`
 //! (ADR-0010).
 
 use proptest::prelude::*;
@@ -386,4 +386,292 @@ fn core_r42_background_role_pixels_count_as_empty() {
             bg: Ink::BLANK
         }
     );
+}
+
+// ---------------------------------------------------------------- CORE-R84
+
+#[test]
+fn core_r84_cell_bg_is_the_more_intense_lit_pixel_of_the_cell() {
+    let mut px = Pixels::new(Size::new(3, 1));
+    // Cell 0: both lit, the bottom brighter; cell 1: top only; cell 2: both empty.
+    px.set(0, 0, B);
+    px.set(0, 1, A);
+    px.set(1, 0, C);
+    assert_eq!(px.cell_bg(0, 0), A);
+    assert_eq!(px.cell_bg(1, 0), C);
+    assert_eq!(px.cell_bg(2, 0), Ink::BLANK);
+    // A tie goes to the top; a lone bottom pixel stands for its cell.
+    px.set(2, 0, Ink::new(Role::Star, 90));
+    px.set(2, 1, B);
+    assert_eq!(px.cell_bg(2, 0), Ink::new(Role::Star, 90));
+    px.set(1, 0, Ink::BLANK);
+    px.set(1, 1, B);
+    assert_eq!(px.cell_bg(1, 0), B);
+    // Off the buffer: blank.
+    assert_eq!(px.cell_bg(3, 0), Ink::BLANK);
+    assert_eq!(px.cell_bg(0, 1), Ink::BLANK);
+    assert_eq!(px.cell_bg(-1, 0), Ink::BLANK);
+}
+
+#[test]
+fn core_r84_blit_over_puts_the_pixels_behind_lit_cells_only() {
+    let mut dots = Dots::new(Size::new(3, 2));
+    dots.set(0, 0, A);
+    dots.set(5, 7, C);
+    let mut under = Pixels::new(Size::new(3, 2));
+    under.set(0, 1, B);
+    under.set(1, 0, C);
+    let mut plain = Canvas::new(Size::new(3, 2), GlyphMode::Unicode);
+    dots.blit(&mut plain);
+    let mut c = Canvas::new(Size::new(3, 2), GlyphMode::Unicode);
+    c.put_bg(1, 0, X, A, B);
+    dots.blit_over(&mut c, &under);
+    for (x, y) in [(0, 0), (2, 1)] {
+        let (got, want) = (cell(&c, x, y), cell(&plain, x, y));
+        assert_eq!((got.ch, got.ink), (want.ch, want.ink), "same dots as blit");
+        assert_eq!(got.bg, under.cell_bg(x, y));
+    }
+    assert_eq!(cell(&c, 0, 0).bg, B);
+    assert_eq!(cell(&c, 2, 1).bg, Ink::BLANK);
+    // Unlit cells keep what was drawn before, even over a lit pixel.
+    assert_eq!(
+        cell(&c, 1, 0),
+        Cell {
+            ch: 'x',
+            ink: A,
+            bg: B
+        }
+    );
+    // ASCII mode has no half blocks: plain `blit`.
+    let mut ascii = Canvas::new(Size::new(3, 2), GlyphMode::Ascii);
+    let mut ascii_plain = Canvas::new(Size::new(3, 2), GlyphMode::Ascii);
+    dots.blit_over(&mut ascii, &under);
+    dots.blit(&mut ascii_plain);
+    assert_eq!(ascii.cells(), ascii_plain.cells());
+}
+
+#[test]
+fn core_r42_half_block_is_the_unicode_cell_rule_of_blit() {
+    // Every (top, bottom) pair: `half_block` on one cell equals `blit` of that pair.
+    for (top, bottom) in [
+        (Ink::BLANK, Ink::BLANK),
+        (A, Ink::BLANK),
+        (Ink::BLANK, B),
+        (A, B),
+    ] {
+        let mut px = Pixels::new(Size::new(1, 1));
+        px.set(0, 0, top);
+        px.set(0, 1, bottom);
+        let mut blitted = Canvas::new(Size::new(1, 1), GlyphMode::Unicode);
+        blitted.put(0, 0, X, C);
+        let mut direct = blitted.clone();
+        px.blit(&mut blitted, |_, _, _, _| None);
+        raster::half_block(&mut direct, 0, 0, top, bottom);
+        assert_eq!(
+            cell(&direct, 0, 0),
+            cell(&blitted, 0, 0),
+            "{top:?} {bottom:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------- CORE-R82
+
+fn lit(d: &Dots) -> Vec<(i32, i32)> {
+    let s = d.dot_size();
+    let (w, h) = (i32::from(s.width()), i32::from(s.height()));
+    (0..h)
+        .flat_map(|y| (0..w).map(move |x| (x, y)))
+        .filter(|&(x, y)| d.is_lit(x, y))
+        .collect()
+}
+
+#[test]
+fn core_r82_disc_lights_the_dots_within_its_radius() {
+    let mut d = Dots::new(Size::new(10, 5));
+    d.disc(9.3, 9.6, 2.0, A);
+    // Every dot of the 20 × 20 lattice whose centre is within the radius.
+    let want: Vec<_> = (0..20)
+        .flat_map(|y| (0..20).map(move |x| (x, y)))
+        .filter(|&(x, y)| (f64::from(x) - 9.3).hypot(f64::from(y) - 9.6) <= 2.0)
+        .collect();
+    assert_eq!(lit(&d), want);
+    assert!(want.len() >= 12, "{}", want.len());
+}
+
+#[test]
+fn core_r82_small_disc_is_the_nearest_dot_and_bad_input_lights_nothing() {
+    let mut d = Dots::new(Size::new(4, 2));
+    d.disc(2.4, 3.6, 0.2, A);
+    assert_eq!(lit(&d), vec![(2, 4)]);
+    let mut d = Dots::new(Size::new(4, 2));
+    for (x, y, r) in [
+        (f64::NAN, 1.0, 1.0),
+        (1.0, f64::INFINITY, 1.0),
+        (1.0, 1.0, -0.5),
+        (1.0, 1.0, f64::NAN),
+    ] {
+        d.disc(x, y, r, A);
+    }
+    assert!(lit(&d).is_empty());
+}
+
+#[test]
+fn core_r82_disc_is_clipped_to_the_lattice() {
+    let mut d = Dots::new(Size::new(3, 2));
+    d.disc(-1.0, -1.0, 2.0, A);
+    assert_eq!(lit(&d), vec![(0, 0)]);
+    // A huge disc fills the lattice and nothing more.
+    let mut d = Dots::new(Size::new(3, 2));
+    d.disc(2.0, 3.0, 1e12, A);
+    assert_eq!(lit(&d).len(), 6 * 8);
+}
+
+// ---------------------------------------------------------------- CORE-R86
+
+#[test]
+fn core_r86_backdrop_puts_the_pixels_behind_glyphs_drawn_over_them() {
+    let size = Size::new(4, 2);
+    let mut px = Pixels::new(size);
+    // Cell (0, 0): both pixels set; cell (1, 0): top only; cell (2, 0): none.
+    px.set(0, 0, A);
+    px.set(0, 1, B);
+    px.set(1, 0, C);
+    let mut c = Canvas::new(size, GlyphMode::Unicode);
+    px.blit(&mut c, |_, _, _, _| None);
+    for x in 0..3 {
+        c.put(x, 0, Glyph::new('─', '-'), A);
+    }
+    // A label's blank over the pixels counts too.
+    px.set(3, 1, B);
+    c.put(3, 0, Glyph::ascii(' '), A);
+    px.backdrop(&mut c);
+    assert_eq!(cell(&c, 3, 0).bg, B, "a label gap takes the backdrop");
+    assert_eq!(
+        cell(&c, 0, 0).bg,
+        A,
+        "the cell's `cell_bg`, its more intense pixel"
+    );
+    assert_eq!(cell(&c, 1, 0).bg, C, "top pixel when the bottom is empty");
+    assert_eq!(cell(&c, 2, 0).bg, Ink::BLANK, "no pixels, no backdrop");
+    assert_eq!(
+        (cell(&c, 0, 0).ch, cell(&c, 0, 0).ink),
+        ('─', A),
+        "glyph kept"
+    );
+    // ASCII canvases have no half blocks to match: untouched.
+    let mut a = Canvas::new(size, GlyphMode::Ascii);
+    a.put(0, 0, X, A);
+    px.backdrop(&mut a);
+    assert_eq!(cell(&a, 0, 0).bg, Ink::BLANK);
+}
+
+// ---------------------------------------------------------------- CORE-R87
+
+#[test]
+fn core_r87_stronger_keeps_the_more_intense_ink() {
+    assert_eq!(raster::stronger(B, A), A);
+    assert_eq!(raster::stronger(A, B), A);
+    assert_eq!(raster::stronger(A, A), A, "the first on a tie");
+    assert_eq!(raster::stronger(Ink::BLANK, B), B, "an empty ink loses");
+    assert_eq!(raster::stronger(B, Ink::BLANK), B);
+    assert_eq!(raster::stronger(Ink::BLANK, Ink::BLANK), Ink::BLANK);
+    // A signed field's zero (128) is weaker than a deep negative lobe.
+    let (zero, lobe) = (Ink::new(Role::Div, 128), Ink::new(Role::Div, 10));
+    assert_eq!(raster::stronger(zero, lobe), lobe);
+}
+
+// ---------------------------------------------------------------- CORE-R91
+
+#[test]
+fn core_r91_ascii_ramp_cell_draws_the_stronger_pixel_on_the_ramp() {
+    assert_eq!(raster::ascii_ramp_cell(Ink::BLANK, Ink::BLANK), None);
+    // The stronger pixel's ink, top on a tie; an empty pixel loses.
+    assert_eq!(raster::ascii_ramp_cell(A, B), Some(('%', A)));
+    assert_eq!(raster::ascii_ramp_cell(B, A), Some(('%', A)));
+    assert_eq!(raster::ascii_ramp_cell(A, C), Some(('%', A)));
+    assert_eq!(raster::ascii_ramp_cell(Ink::BLANK, B), Some(('=', B)));
+    // Level `l` maps to ramp entry `l · 9 / 256`: both ends and every step boundary.
+    let ramp = raster::ASCII_RAMP;
+    for level in 0..=255u8 {
+        let ink = Ink::new(Role::Blackbody, level);
+        let (ch, got) = raster::ascii_ramp_cell(ink, Ink::BLANK).expect("drawn");
+        assert_eq!(got, ink);
+        assert_eq!(ch, ramp[usize::from(level) * 9 / 256], "level {level}");
+    }
+    assert_eq!(
+        raster::ascii_ramp_cell(Ink::new(Role::Star, 0), Ink::BLANK).map(|c| c.0),
+        Some('.')
+    );
+    assert_eq!(
+        raster::ascii_ramp_cell(Ink::new(Role::Star, 255), Ink::BLANK).map(|c| c.0),
+        Some('@')
+    );
+}
+
+// ---------------------------------------------------------------- CORE-R89
+
+/// The lit mask of a `n × n`-pixel buffer filled with `ink` and dissolved at `floor`.
+fn dissolved(ink: Ink, floor: u8, n: u16) -> Vec<bool> {
+    let mut p = Pixels::new(Size::new(n, n / 2));
+    p.fill(ink);
+    p.dissolve(floor);
+    let n = i32::from(n);
+    (0..n)
+        .flat_map(|y| (0..n).map(move |x| (x, y)))
+        .map(|(x, y)| {
+            let px = p.get(x, y).expect("in range");
+            assert!(
+                px == ink || px == Ink::BLANK,
+                "dissolve only empties pixels"
+            );
+            px == ink
+        })
+        .collect()
+}
+
+fn share(mask: &[bool]) -> f64 {
+    mask.iter().filter(|&&b| b).count() as f64 / mask.len() as f64
+}
+
+#[test]
+fn core_r89_dissolve_empties_the_lower_half_and_thins_the_upper_half_of_the_fringe() {
+    let seq = |l: u8| Ink::new(Role::Seq, l);
+    // At or above the floor: untouched; below half of it: gone.
+    assert_eq!(share(&dissolved(seq(40), 40, 64)), 1.0);
+    assert_eq!(share(&dissolved(seq(200), 40, 64)), 1.0);
+    assert_eq!(share(&dissolved(seq(19), 40, 64)), 0.0);
+    assert_eq!(share(&dissolved(seq(0), 40, 64)), 0.0);
+    assert_eq!(share(&dissolved(seq(1), 0, 64)), 1.0, "floor 0 is a no-op");
+    // In [floor/2, floor) the share 2·level/floor − 1 survives, on average.
+    for (l, want) in [(30, 0.5), (35, 0.75), (25, 0.25)] {
+        let got = share(&dissolved(seq(l), 40, 64));
+        assert!((got - want).abs() < 0.04, "level {l}: {got} vs {want}");
+    }
+    // Div measures contrast from 128; Phase has no intensity and is left alone.
+    for div in [128 + 30, 128 - 30] {
+        let got = share(&dissolved(Ink::new(Role::Div, div), 40, 64));
+        assert!((got - 0.5).abs() < 0.04, "div {div}: {got}");
+    }
+    assert_eq!(share(&dissolved(Ink::new(Role::Phase, 3), 40, 64)), 1.0);
+}
+
+#[test]
+fn core_r89_dissolve_has_no_periodic_pattern() {
+    // An ordered dither repeats every 2 or 4 pixels: its mask equals itself shifted by
+    // the period. White noise agrees with a shifted copy only by chance (s² + (1 − s)²).
+    let n = 64usize;
+    let mask = dissolved(Ink::new(Role::Seq, 30), 40, n as u16);
+    for lag in [2, 4, 8] {
+        let (mut same, mut total) = (0usize, 0usize);
+        for y in 0..n {
+            for x in 0..n - lag {
+                same += usize::from(mask[y * n + x] == mask[y * n + x + lag]);
+                same += usize::from(mask[x * n + y] == mask[(x + lag) * n + y]);
+                total += 2;
+            }
+        }
+        let agree = same as f64 / total as f64;
+        assert!(agree < 0.6, "lag {lag}: masks agree {agree}");
+    }
 }

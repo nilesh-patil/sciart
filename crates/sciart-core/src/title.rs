@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::{Canvas, Generator, Glyph, Ink, Role, Size, ink};
+use crate::{Canvas, Generator, Glyph, Ink, Meta, Role, Size, ink};
 
 /// Splits a title into phenomenon and mechanism (CORE-R71).
 pub const SEPARATOR: &str = " · ";
@@ -19,12 +19,10 @@ const MIN_HEIGHT: u16 = 6;
 /// Ink levels (CORE-R74): the phenomenon reads first, the mechanism recedes.
 const PHENOMENON_LEVEL: f64 = 170.0;
 const MECHANISM_LEVEL: f64 = 110.0;
-/// Ink level of every title-row readout (CORE-R76): the mechanism's tone, so the numbers
-/// never outshine the scene's name.
-pub const READOUT_LEVEL: u8 = 110;
-/// After the viewer has had time to read it, the whole title fades to this level so it
-/// stops competing with the art (CORE-R74).
-const DIM_LEVEL: f64 = 90.0;
+/// Ink level of every title-row readout (CORE-R76), and the level the whole title fades to
+/// once the viewer has had time to read it (CORE-R74): the numbers never outshine the
+/// scene's name, even after it has dimmed to stop competing with the art.
+pub const READOUT_LEVEL: u8 = 90;
 const DIM_FROM_S: f64 = 8.0;
 const DIM_OVER_S: f64 = 2.0;
 /// Blank cells between the title's text and a title-row readout's text (CORE-R76): with only
@@ -98,6 +96,13 @@ impl Title {
             .into_iter()
             .find(|&form| self.width(form) + 2 <= limit)
     }
+
+    /// The narrowest canvas width from which [`fit`](Self::fit) always picks
+    /// [`Form::Full`] (at a tall enough height): `⌊3w/5⌋ ≥ n` ⇔ `w ≥ ⌈5n/3⌉`, with `n` the
+    /// full form plus its two pad cells (CORE-R73).
+    pub fn full_fits_from(&self) -> usize {
+        (5 * (self.width(Form::Full) + 2)).div_ceil(3)
+    }
 }
 
 /// The title charset and its one-cell ASCII fallback (CORE-R72): printable ASCII maps to
@@ -136,6 +141,32 @@ pub fn readout_room(size: Size, title: &Title) -> usize {
     w.saturating_sub(before + 1).min(w / 2)
 }
 
+/// The readout room a captioned scene can count on at `size` whatever its caption
+/// (CORE-R83): the least [`readout_room`] over its title with no caption and with each of
+/// `meta.captions`, at this width and every wider one. A readout sized by it therefore
+/// never comes and goes with the beat, and never grows as the terminal narrows (a
+/// narrower terminal can fall back to the shorter phenomenon-only title and free room).
+/// Scenes compute it in `resize`; it does not allocate.
+pub fn stable_readout_room(size: Size, meta: &Meta) -> usize {
+    let titles = || {
+        std::iter::once(None)
+            .chain(meta.captions.iter().copied().map(Some))
+            .map(|c| Title::new(meta.title, c))
+    };
+    // From this width up every title shows its full form, so its span is fixed and each
+    // `readout_room` only grows with the width: the minimum over wider widths is reached
+    // by this one.
+    let settled = titles().map(|t| t.full_fits_from()).max().unwrap_or(0);
+    let settled = u16::try_from(settled).unwrap_or(u16::MAX).max(size.width());
+    (size.width()..=settled)
+        .map(|w| {
+            let at = Size::new(w, size.height());
+            titles().map(|t| readout_room(at, &t)).min().unwrap_or(0)
+        })
+        .min()
+        .unwrap_or(0)
+}
+
 /// Draw the fitted title on the bottom row, laid out like `draw::label(canvas, 0, h − 1, …)`,
 /// dimming with its `age`, the scene seconds it has been on show (CORE-R74). Touches only
 /// the [`span`] cells, so the art keeps the rest of the row.
@@ -145,7 +176,8 @@ pub fn draw(canvas: &mut Canvas, title: &Title, age: f64) {
     };
     let age = if age.is_finite() { age } else { 0.0 };
     let fade = ((age - DIM_FROM_S) / DIM_OVER_S).clamp(0.0, 1.0);
-    let ink_at = |base: f64| Ink::new(Role::Text, ink::level(base + (DIM_LEVEL - base) * fade));
+    let dim = f64::from(READOUT_LEVEL);
+    let ink_at = |base: f64| Ink::new(Role::Text, ink::level(base + (dim - base) * fade));
     let (phenomenon, rest) = (ink_at(PHENOMENON_LEVEL), ink_at(MECHANISM_LEVEL));
 
     let y = i32::from(canvas.size().height()) - 1;

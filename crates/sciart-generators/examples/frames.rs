@@ -9,6 +9,8 @@
 //! `--inks` adds two same-sized grids per frame (foreground and background roles), one
 //! letter per cell: uppercase for level >= 128, lowercase below, '.' for Background.
 
+mod common;
+
 use std::process::ExitCode;
 
 use sciart_core::prelude::*;
@@ -16,7 +18,8 @@ use sciart_core::prelude::*;
 const USAGE: &str =
     "usage: frames <scene> [--size WxH] [--t 0,1,5,20] [--ascii] [--inks] [--seed N]";
 const LEGEND: &str = "roles: D=Dim S=Star U=Sun P=Planet I=Particle W=Wave H=Hot C=Cold \
-T=Structure A=Accent X=Text Q=Seq V=Div  (lowercase: level < 128, '.': Background)";
+T=Structure A=Accent X=Text Q=Seq V=Div O=Phase B=Blackbody R=Ramp  \
+(lowercase: level < 128, '.': Background)";
 
 #[derive(Debug)]
 struct Args {
@@ -40,29 +43,8 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
     while let Some(arg) = it.next() {
         let mut value = || it.next().ok_or(format!("{arg} needs a value"));
         match arg.as_str() {
-            "--size" => {
-                let v = value()?;
-                let (w, h) = v.split_once('x').ok_or(format!("bad --size {v}"))?;
-                let parse_dim = |s: &str| s.parse::<u16>().ok().filter(|&n| n > 0);
-                let (w, h) = parse_dim(w)
-                    .zip(parse_dim(h))
-                    .ok_or(format!("bad --size {v}"))?;
-                args.size = Size::new(w, h);
-            }
-            "--t" => {
-                let v = value()?;
-                args.times = v
-                    .split(',')
-                    .map(|s| {
-                        s.trim()
-                            .parse::<f64>()
-                            .ok()
-                            .filter(|t| t.is_finite() && *t >= 0.0)
-                    })
-                    .collect::<Option<_>>()
-                    .ok_or(format!("bad --t {v}"))?;
-                args.times.sort_by(f64::total_cmp);
-            }
+            "--size" => args.size = common::size(&value()?)?,
+            "--t" => args.times = common::times(&value()?)?,
             "--seed" => {
                 let v = value()?;
                 args.seed = v.parse().map_err(|_| format!("bad --seed {v}"))?;
@@ -98,6 +80,9 @@ fn role_char(ink: Ink) -> char {
         Role::Text => 'X',
         Role::Seq => 'Q',
         Role::Div => 'V',
+        Role::Phase => 'O',
+        Role::Blackbody => 'B',
+        Role::Ramp(_) => 'R',
         _ => '?',
     };
     if ink.level < 128 {
@@ -128,17 +113,12 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let Some(entry) = sciart_generators::find(&args.scene) else {
-        let names: Vec<_> = sciart_generators::registry()
-            .iter()
-            .map(|e| e.meta.name)
-            .collect();
-        eprintln!(
-            "frames: unknown scene {:?}; known: {}",
-            args.scene,
-            names.join(", ")
-        );
-        return ExitCode::from(2);
+    let entry = match common::scene(&args.scene) {
+        Ok(entry) => entry,
+        Err(e) => {
+            eprintln!("frames: {e}");
+            return ExitCode::from(2);
+        }
     };
 
     let (w, h) = (args.size.width(), args.size.height());
@@ -148,11 +128,7 @@ fn main() -> ExitCode {
     }
     let mut steps: u64 = 0;
     for &t in &args.times {
-        let target = (t / SIM_DT).round() as u64;
-        while steps < target {
-            stage.step(SIM_DT);
-            steps += 1;
-        }
+        common::step_to(&mut stage, &mut steps, t);
         println!(
             "== {} t={t}s {w}x{h} seed={} ({steps} steps)",
             entry.meta.name, args.seed

@@ -5,13 +5,13 @@
 //! ladder of coloured base pairs while the duplex spins. A 24 s story then runs a
 //! replication fork through it: a helicase ring unzips the ladder, the leading strand is
 //! copied continuously and the lagging strand in Okazaki fragments, and two daughter
-//! helices remain, each half old (grey) and half new (magenta).
+//! helices remain, each half old (ice blue) and half new (rose).
 //!
 //! Nothing is integrated: every quantity is a closed-form function of scene time
 //! ([`Story::at`] and the synthesis-time functions), so the story cannot drift or desync
-//! on resize. Backbones and the helicase collar are rasterised into two braille layers
-//! (far and near) at the end of `update` and `resize`; `render` only blits them around
-//! the depth-sorted rungs.
+//! on resize. Backbones are rasterised into two braille layers (far and near) and the
+//! helicase collar into a third at the end of `update` and `resize`; `render` only blits
+//! them around the depth-sorted rungs, the collar last so it clamps the strand.
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
@@ -28,8 +28,16 @@ pub static META: Meta = Meta {
     category: Category::Biochemistry,
     description: "The DNA double helix turning in space, unzipped and copied by a replication fork",
     title: "DNA copying · strands unzip",
-    captions: &[],
+    captions: &CAPTIONS,
 };
+
+/// Captions by beat: the intact helix, the running fork, the finished daughters (`reset`
+/// shows the title's own mechanism).
+const CAPTIONS: [&str; 3] = [
+    "right-handed helix",
+    "helicase unzips",
+    "half old, half new",
+];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(DnaHelix::new())
@@ -86,9 +94,27 @@ fn letter(b: u8) -> char {
     ['A', 'C', 'G', 'T'][usize::from(b & 3)]
 }
 
-/// Four-dye sequencing colours: A green, C blue, G yellow, T red.
-fn base_role(b: u8) -> Role {
-    [Role::Particle, Role::Cold, Role::Sun, Role::Hot][usize::from(b & 3)]
+/// Rung and letter colour by pair type (false colour, SPEC-002 Inks): A·T pairs (two
+/// hydrogen bonds) green, G·C pairs (three) violet, whichever strand holds the base.
+pub(crate) fn pair_role(b: u8) -> Role {
+    match b & 3 {
+        A | T => Role::Ramp(Ramp::Aurora),
+        _ => Role::Ramp(Ramp::Plasma),
+    }
+}
+
+/// A pyrimidine (C, T: one ring) is drawn at this share of a purine's level (A, G: two
+/// rings), so the two halves of every rung differ and the letters key them.
+const PYRIMIDINE: f64 = 0.6;
+
+/// The ink of base `b` at level `lit`: its pair's ramp, a pyrimidine dimmer.
+pub(crate) fn base_ink(b: u8, lit: f64) -> Ink {
+    let k = if matches!(b & 3, A | G) {
+        1.0
+    } else {
+        PYRIMIDINE
+    };
+    Ink::new(pair_role(b), level(lit * k))
 }
 
 /// Fewest and most G/C positions: a realised GC fraction within [0.35, 0.65] (DNA-A3).
@@ -111,7 +137,8 @@ pub(crate) fn draw_sequence(rng: &mut impl Rng, seq: &mut Seq) {
     seq.shuffle(rng);
 }
 
-/// One nucleotide of a duplex and whether it is parental (grey backbone) or new.
+/// One nucleotide of a duplex and whether it is parental (`Ramp(Ice)` backbone) or new
+/// (`Ramp(HAlpha)`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Nt {
     pub base: u8,
@@ -236,9 +263,19 @@ const UNWIND_S: f64 = secs(Phase::Unwind);
 const RESET_HALF: f64 = secs(Phase::Reset) / 2.0;
 /// Zoom during `helix`; eases to 1 over the first `DOLLY` s of `unwind`. `FIT_R` budgets
 /// the open fork's ±2.7R, but the intact helix needs only ±R plus the pitch shear and
-/// sway, so zoomed in it fills about two thirds of rows [1, h) and still fits them
+/// sway, so zoomed in it fills about four fifths of rows [1, h − 1) and still fits them
 /// (DNA-A4).
-const ZOOM_IN: f64 = 2.2;
+const ZOOM_IN: f64 = 2.5;
+/// The opening zoom on views of at least `TALL_ROWS` rows: there the intact helix fills
+/// ≥ 85 % of the rows; on shorter views rounding and the fixed margins leave no room for
+/// it, so they keep `ZOOM_IN`.
+const ZOOM_TALL: f64 = 2.8;
+const TALL_ROWS: f64 = 20.0;
+/// Share of rows `[1, h − 1)` the fork's content is fitted to on tall views: the strand
+/// centre lines, leaving room for the 3–4-dot near strands.
+const FIT_FILL: f64 = 0.88;
+/// Bisection steps for the fitted zoom: 1.8/2⁷ ≈ 0.014 of zoom.
+const FIT_STEPS: usize = 7;
 const DOLLY: f64 = 3.0;
 
 /// The whole story state at one instant (DNA-A6).
@@ -322,8 +359,10 @@ pub(crate) fn spin_phase(t: f64) -> f64 {
 // ---------------------------------------------------------------------------------------
 
 /// Vertical budget in units of R: the open fork's ±2.7R, turned by the pitch, plus the
-/// sway's edge depth sheared by the pitch and the near side's perspective (DNA-A4).
-const FIT_R: f64 = 6.6;
+/// sway's edge depth sheared by the pitch and the near side's perspective (DNA-A4). M12
+/// tightened it from 6.6 (the fit test still holds at 6.0, not at 5.7), so the daughters
+/// fill the rows instead of floating in a band of empty ones.
+const FIT_R: f64 = 6.0;
 const YAW_SWAY: f64 = 0.2;
 const YAW_PERIOD: f64 = 19.0;
 const PITCH_TILT: f64 = 0.18;
@@ -343,13 +382,15 @@ const MAX_MAGNIFY: f64 = 1.1;
 /// Rungs are drawn at least this many columns apart, so the ladder keeps its rhythm.
 const RUNG_GAP: f64 = 2.0;
 /// The fork runs only on views where the zoom-1 backbone radius is at least this many
-/// rows: below it (h ≲ 14) the arms, daughters and helicase share too few rows and knot
+/// rows (scaled with [`FIT_R`], so the same heights keep the fork): below it (h ≲ 15) the arms, daughters and helicase share too few rows and knot
 /// into braille, so the view keeps the intact helix, zoomed in, all cycle.
-const FORK_MIN_ROWS: f64 = 1.75;
-/// From this zoom-1 backbone radius (rows) the near strands are drawn 2 dots wide: on
-/// large views a 1-dot thread is outweighed by the full-cell `│` rungs, and the depth
+const FORK_MIN_ROWS: f64 = 1.95;
+/// From this zoom-1 backbone radius (rows) the near strands are drawn 3 dots wide: on
+/// large views a 1-dot thread is outweighed by the full-cell `┃` rungs, and the depth
 /// cue needs the area.
 const BOLD_MIN_ROWS: f64 = 4.5;
+/// From this backbone radius (rows, at the current zoom) bold near strands are 4 dots wide.
+const THICK_ROWS: f64 = 9.0;
 
 /// Per-size framing (rebuilt in `resize`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -367,14 +408,15 @@ pub(crate) struct View {
     pub stride: usize,
     /// Whether the replication fork is shown ([`FORK_MIN_ROWS`]).
     pub fork: bool,
-    /// Whether near strands are 2 dots wide ([`BOLD_MIN_ROWS`]).
+    /// Whether near strands are 3 dots wide ([`BOLD_MIN_ROWS`]).
     pub bold: bool,
 }
 
 impl View {
     pub fn new(size: Size) -> Self {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-        let fit = (h - 2.0).max(1.0) / (FIT_R * R);
+        // Rows [1, h − 1): the top row holds the sequence label, the bottom one the title.
+        let fit = (h - 3.0).max(1.0) / (FIT_R * R);
         // Wide views: never need more than N_MAX pairs across. On extreme aspect ratios
         // (w/h beyond ≈ 50) that floor would outgrow the height fit and push the strands
         // off rows [1, h), so it is capped there and the duplex ends short of the right
@@ -411,6 +453,17 @@ impl View {
         }
     }
 
+    /// The zoom this view draws for the story's `zoom` (`1..=ZOOM_IN`): the same, except
+    /// that tall views stretch the range to `1..=ZOOM_TALL`, linearly, so the dolly stays
+    /// continuous (DNA-A4).
+    pub fn zoom(&self, zoom: f64) -> f64 {
+        if self.h >= TALL_ROWS {
+            1.0 + (zoom - 1.0) * (ZOOM_TALL - 1.0) / (ZOOM_IN - 1.0)
+        } else {
+            zoom
+        }
+    }
+
     /// Pairs on screen: the layout minus its margins.
     pub fn visible(&self) -> std::ops::Range<usize> {
         MARGIN..self.n.saturating_sub(MARGIN)
@@ -423,7 +476,7 @@ pub(crate) fn camera(view: &View, t: f64, zoom: f64) -> Camera {
     let half = view.width / (2.0 * zoom);
     let sway = YAW_SWAY.min((SWAY_DEPTH / half).min(1.0).asin());
     Camera {
-        yaw: sway * (TAU * t / YAW_PERIOD).sin(),
+        yaw: sway * (TAU * t / YAW_PERIOD).sin_det(),
         pitch: PITCH_TILT,
         distance: EYE.max(EYE_PER_HALF_WIDTH * half),
     }
@@ -486,16 +539,107 @@ pub(crate) struct Geo {
 }
 
 impl Geo {
+    /// The frame's geometry (DNA-A4). Views under `TALL_ROWS` rows follow the story's
+    /// zoom. Taller views fit their content instead: the largest zoom in
+    /// `1..=view.zoom(ZOOM_IN)` at which everything on screen (the four strands and the
+    /// helicase) fits `FIT_FILL` of rows `[1, h − 1)`, centred on them. The fork's opening
+    /// arms then pull the camera back as they reach the screen (the dolly), while an
+    /// intact stretch fills the frame. Both are pure functions of the view and `t`, so
+    /// resizes never desync them.
     pub fn new(view: &View, t: f64, snap: &Snapshot) -> Self {
-        Self::with_camera(view, camera(view, t, snap.zoom), t, snap)
+        let z0 = view.zoom(snap.zoom);
+        if view.h < TALL_ROWS {
+            return Self::at_zoom(view, t, snap, z0, 0.0);
+        }
+        let avail = FIT_FILL * (view.h - 2.0);
+        let fits = |z: f64| {
+            Self::at_zoom(view, t, snap, z, 0.0)
+                .extent(view)
+                .is_none_or(|(top, bottom)| bottom - top <= avail)
+        };
+        // Bisect for the largest fitting zoom: the extent is not monotone in the zoom (the
+        // fork's arms leave the screen's left edge as it narrows), so this finds a
+        // fitting zoom near the largest one; zoom 1 always fits (`FIT_R`, DNA-A4).
+        let (mut lo, mut hi) = (1.0, view.zoom(ZOOM_IN));
+        if fits(hi) {
+            lo = hi;
+        } else {
+            for _ in 0..FIT_STEPS {
+                let mid = 0.5 * (lo + hi);
+                if fits(mid) {
+                    lo = mid;
+                } else {
+                    hi = mid;
+                }
+            }
+        }
+        let geo = Self::at_zoom(view, t, snap, lo, 0.0);
+        let Some((top, bottom)) = geo.extent(view) else {
+            return geo;
+        };
+        let z = lo;
+        let dy = if bottom - top <= view.h - 3.0 {
+            (view.h - 1.0) / 2.0 - 0.5 * (top + bottom)
+        } else {
+            0.0
+        };
+        Self::at_zoom(view, t, snap, z, dy)
+    }
+
+    fn at_zoom(view: &View, t: f64, snap: &Snapshot, zoom: f64, dy: f64) -> Self {
+        let mut geo = Self::with_camera(view, camera(view, t, zoom), t, snap);
+        geo.k = view.scale * zoom;
+        geo.look_x = view.width / (2.0 * zoom);
+        geo.centre.1 += dy;
+        geo
+    }
+
+    /// Top and bottom row of everything drawn on screen: the four backbones (sampled
+    /// eight times per pair, whether or not synthesised yet) and the helicase collar.
+    fn extent(&self, view: &View) -> Option<(f64, f64)> {
+        let (mut top, mut bottom) = (f64::INFINITY, f64::NEG_INFINITY);
+        let strands = [
+            Strand::Watson,
+            Strand::Crick,
+            Strand::Lagging,
+            Strand::Leading,
+        ];
+        for i in 0..8 * view.n {
+            let u = i as f64 * 0.125;
+            for strand in strands {
+                if let Some(s) = self.sample(strand, u)
+                    && (0.0..view.w).contains(&s.x.round())
+                {
+                    top = top.min(s.y);
+                    bottom = bottom.max(s.y);
+                }
+            }
+        }
+        if let Some(f) = self.fork
+            && let Some(s) = self.sample(Strand::Watson, f)
+        {
+            // The collar's rows as the screen edges clip it (an ellipse `reach` columns
+            // wide): its extent grows and shrinks smoothly as it enters and leaves, so
+            // the fitted zoom does not jump.
+            let r = RING * R * self.k * MAX_MAGNIFY;
+            let reach = ASPECT * r + 1.0;
+            let out = (-s.x).max(s.x - (view.w - 1.0)).max(0.0) / reach;
+            if out < 1.0 {
+                let half = r * (1.0 - out * out).sqrt();
+                top = top.min(s.y - half);
+                bottom = bottom.max(s.y + half);
+            }
+        }
+        (top <= bottom).then_some((top, bottom))
     }
 
     pub fn with_camera(view: &View, cam: Camera, t: f64, snap: &Snapshot) -> Self {
         Self {
             proj: cam.projector(),
-            centre: (view.w / 2.0, view.h / 2.0),
-            k: view.scale * snap.zoom,
-            look_x: view.width / (2.0 * snap.zoom),
+            // The middle of rows [1, h − 1) (cell centres at integer y).
+            centre: (view.w / 2.0, (view.h - 1.0) / 2.0),
+            k: view.scale * view.zoom(snap.zoom),
+            look_x: view.width / (2.0 * view.zoom(snap.zoom)),
             phi: spin_phase(t),
             fork: snap.tau.map(fork),
         }
@@ -509,7 +653,7 @@ impl Geo {
     /// World position of `strand` at pair position `u`: `(x, y₀ + R cos θ, R sin θ)`.
     pub fn world(&self, strand: Strand, u: f64) -> [f64; 3] {
         let theta = self.phi + TWIST * (u - MARGIN as f64) + strand.slot();
-        let (s, c) = theta.sin_cos();
+        let (s, c) = theta.sin_cos_det();
         [bp_x(u), self.axis(strand, u) + R * c, R * s]
     }
 
@@ -533,12 +677,13 @@ impl Geo {
     }
 }
 
-/// Backbone depth cue: 70 far … 230 near (DNA-A2).
+/// Backbone depth cue: 85 far … 235 near (DNA-A2). The backbones are the helix's
+/// silhouette, so the near strand is the brightest thing in the frame.
 pub(crate) fn backbone_level(z_local: f64) -> f64 {
-    70.0 + 160.0 * ((z_local + R) / (2.0 * R)).clamp(0.0, 1.0)
+    85.0 + 150.0 * ((z_local + R) / (2.0 * R)).clamp(0.0, 1.0)
 }
 
-/// Rung half level at its backbone end: `max(0.9 × backbone level, 110)`.
+/// Rung half level at its backbone end: `max(0.8 × backbone level, 100)`.
 pub(crate) fn rung_level(z_local: f64) -> f64 {
     (RUNG * backbone_level(z_local)).max(RUNG_FLOOR)
 }
@@ -620,15 +765,25 @@ pub(crate) fn for_each_segment(snap: &Snapshot, n: usize, mut f: impl FnMut(Segm
 // Rungs and the helicase.
 // ---------------------------------------------------------------------------------------
 
-/// Rungs at this fraction of their backbone end's level, floored at `RUNG_FLOOR`, so
-/// the base colours stay clear on the far side while near and far still differ.
-const RUNG: f64 = 0.9;
-const RUNG_FLOOR: f64 = 110.0;
-/// Helicase collar radius, in R: snug around the strand, not a halo over the fork.
-const RING: f64 = 0.35;
-/// Points around the collar; at 200×50 its ≈ 20-dot circumference is fully joined.
-const RING_SAMPLES: usize = 32;
-const RING_LEVEL: f64 = 210.0;
+/// Backbone inks: parental strands ice blue, new ones rose (false colour).
+const OLD: Role = Role::Ramp(Ramp::Ice);
+const NEW: Role = Role::Ramp(Ramp::HAlpha);
+/// Rungs at this fraction of their backbone end's level, floored at `RUNG_FLOOR`: the
+/// ladder stays under the backbones, while near and far rungs still differ.
+const RUNG: f64 = 0.8;
+const RUNG_FLOOR: f64 = 100.0;
+/// Helicase collar radius, in R: a ring that reads at a glance (a hexameric DnaB ring is
+/// ≈ 12 nm across, about 3× the duplex, so this is still an understatement) while
+/// clamping only the upper strand (Crick is 1.78 R below the apex). It is a filled
+/// doughnut, traced at these fractions of the radius.
+const RING: f64 = 0.6;
+const RING_BAND: [f64; 9] = [0.4, 0.48, 0.55, 0.63, 0.7, 0.78, 0.85, 0.93, 1.0];
+/// Points around the collar; at 200×50 its ≈ 35-dot circumference is fully joined.
+const RING_SAMPLES: usize = 48;
+/// The motor at the fork: the frame's one chrome-yellow object, apart from the ice and
+/// rose strands and the green and violet pairs (false colour, like every ink here).
+const RING_ROLE: Role = Role::Ramp(Ramp::Sulfur);
+const RING_LEVEL: f64 = 235.0;
 const LABEL_LEVEL: f64 = 150.0;
 const LABEL_BASE_LEVEL: f64 = 220.0;
 
@@ -641,19 +796,24 @@ struct Rung {
     ink_a: Ink,
     ink_b: Option<Ink>,
     depth: f64,
+    /// In front of its duplex axis: drawn as the half-block slab [`SLAB`].
+    near: bool,
+    /// Pairs are at least `WIDE_RUNG_COLS` apart: upright cells are doubled.
+    wide: bool,
     index: u16,
 }
 
 /// The helicase: a circle of radius `RING·R` about Watson's apex point, in the plane
-/// normal to the strand there, so the strand threads through it.
+/// normal to the strand there, so the strand threads through it. Watson runs 5′→3′ along
+/// +x, the fork's direction, so it is the lagging-strand template: this is the bacterial
+/// DnaB arrangement (a ring on the lagging-strand template, moving 5′→3′); eukaryotic
+/// CMG instead encircles the leading-strand template.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Ring {
     pub centre: [f64; 3],
     /// Orthonormal axes of the ring's plane (world).
     pub e1: [f64; 3],
     pub e2: [f64; 3],
-    /// Camera depth of the centre: ring points behind it go to the far layer.
-    pub depth: f64,
     pub ink: Ink,
 }
 
@@ -670,7 +830,7 @@ fn rung_upright(dx: f64, dy: f64) -> bool {
 /// two rows (a lone `╲`/`╱` scratch across the braille strands), over four rows, or
 /// making more than one column step per two rows. Near a crossing the backbones there
 /// run at the chord's own slope a column or two away, so a longer or flatter `╲`
-/// staircase reads as a doubled strand or hatching, not a base pair; the upright `│`
+/// staircase reads as a doubled strand or hatching, not a base pair; the upright `┃`
 /// comb keeps the ladder's rhythm and the rare short, steep `╲` still gives the 3-D cue.
 fn rung_chord(a: (f64, f64), b: (f64, f64)) -> Option<[i32; 4]> {
     let (y0, y1) = (a.1.round() as i32, b.1.round() as i32);
@@ -683,11 +843,22 @@ fn rung_chord(a: (f64, f64), b: (f64, f64)) -> Option<[i32; 4]> {
     (rows >= 2 && 2 * (x1 - x0).abs() <= rows && rows <= 4).then_some([x0, y0, x1, y1])
 }
 
+/// A rung's upright stroke: a half-cell bar (one braille dot wide) behind the axis, and
+/// in front of it a full-cell slab (two dots wide), so the ladder reads as stacked
+/// base-pair plates, near ones solid, while staying under the 3-dot backbones.
+const BAR: Glyph = Glyph::new('▐', '|');
+const SLAB: Glyph = Glyph::new('█', '|');
+/// The left half-cell beside a far bar on wide rungs: `▐▌` reads as one 2-dot bar.
+const BAR_PAIR: Glyph = Glyph::new('▌', '|');
+/// Rungs are doubled once pairs lie at least this many columns apart (the zoomed-in
+/// opening on tall views), where a one-column rung reads thin and sparse.
+const WIDE_RUNG_COLS: f64 = 6.0;
+
 /// The cells of a rung, as `(x, y, glyph, ink)`, one per row: an upright one straight
-/// down its middle column, a slanted one as a Bresenham chord with `│` for a step down a
-/// column and the chord's diagonal (`╲`/`╱`) for a step across, so it reads `│╲│` or a
-/// `╲` staircase, never `─`; the half nearer `a` in `ink_a`, the rest in `ink_b` (only
-/// if paired).
+/// down its middle column, a slanted one as a Bresenham chord with `┃` for a step down a
+/// column and the chord's diagonal (`╲`/`╱`) for a step across, so it reads `┃╲┃` or a
+/// `╲` staircase, never `─`; the half nearer `a` in `ink_a`, the rest in `ink_b` (only if
+/// paired).
 fn rung_cells(r: &Rung, mut f: impl FnMut(i32, i32, Glyph, Ink)) {
     let Some([x0, y0, x1, y1]) = rung_chord(r.a, r.b) else {
         return;
@@ -703,18 +874,29 @@ fn rung_cells(r: &Rung, mut f: impl FnMut(i32, i32, Glyph, Ink)) {
         let Some(ink) = (if 2 * k <= len { Some(r.ink_a) } else { r.ink_b }) else {
             return;
         };
-        // A step down one column (or a lone cell) is `│`; any step across is diagonal.
-        let glyph = if dx == 0 {
-            Glyph::new('│', '|')
-        } else {
-            diagonal
+        // A step down one column (or a lone cell) is upright; any step across is diagonal.
+        let glyph = match (dx, r.near) {
+            (0, true) => SLAB,
+            (0, false) => BAR,
+            _ => diagonal,
         };
         f(x, y, glyph, ink);
     });
 }
 
 fn draw_rung(canvas: &mut Canvas, r: &Rung) {
-    rung_cells(r, |x, y, glyph, ink| canvas.put(x, y, glyph, ink));
+    rung_cells(r, |x, y, glyph, ink| {
+        canvas.put(x, y, glyph, ink);
+        // Zoomed in, an upright rung takes the next column too (DNA-A9): a near slab
+        // becomes 4 dots wide, a far bar 2 dots straddling the cell edge.
+        if r.wide {
+            if glyph == SLAB {
+                canvas.put(x + 1, y, SLAB, ink);
+            } else if glyph == BAR {
+                canvas.put(x + 1, y, BAR_PAIR, ink);
+            }
+        }
+    });
 }
 
 /// The helicase at the apex, only while the apex is on screen (no stray ring dots at
@@ -738,14 +920,14 @@ pub(crate) fn helicase(geo: &Geo, view: &View, snap: &Snapshot) -> Option<Ring> 
         centre,
         e1,
         e2,
-        depth: s.depth,
-        ink: Ink::new(Role::Wave, level(RING_LEVEL * snap.fade)),
+        ink: Ink::new(RING_ROLE, level(RING_LEVEL * snap.fade)),
     })
 }
 
 /// Sample one backbone run into the far (`z_local < 0`) or near braille layer, joining
-/// consecutive samples with lines; when `bold`, near lines get a twin one dot along the
-/// screen normal (below a rightward stroke), so the near strand is 2 dots wide. The
+/// consecutive samples with lines; near lines get `twins` more, each one dot further
+/// along the screen normal (below a rightward stroke), so the near strand is `1 + twins`
+/// dots wide. The
 /// `τ = 0` fallback is inert: without a fork only the parents exist, and a parent's
 /// freshness age `τ − (−∞)` is infinite at any τ.
 fn trace(
@@ -755,12 +937,12 @@ fn trace(
     snap: &Snapshot,
     seg: Segment,
     per_bp: f64,
-    bold: bool,
+    twins: u8,
 ) {
     let steps = ((seg.u1 - seg.u0) * per_bp).ceil().max(0.0) as usize;
     let role = match seg.strand {
-        Strand::Watson | Strand::Crick => Role::Structure,
-        Strand::Lagging | Strand::Leading => Role::Accent,
+        Strand::Watson | Strand::Crick => OLD,
+        Strand::Lagging | Strand::Leading => NEW,
     };
     let tau = snap.tau.unwrap_or(0.0);
     let mut prev: Option<(f64, f64)> = None;
@@ -782,9 +964,9 @@ fn trace(
         match prev {
             Some((px, py)) => {
                 layer.line(px, py, dx, dy, ink);
-                if bold && is_near {
-                    // One whole dot across the stroke (down for a flat one, sideways for
-                    // a steep one), so the twin is the same staircase shifted, not a
+                if is_near {
+                    // Whole dots across the stroke (down for a flat one, sideways for a
+                    // steep one), so each twin is the same staircase shifted, not a
                     // ragged second one.
                     let (ex, ey) = (dx - px, dy - py);
                     let (nx, ny) = if ex.abs() >= ey.abs() {
@@ -792,7 +974,10 @@ fn trace(
                     } else {
                         (-ey.signum(), 0.0)
                     };
-                    layer.line(px + nx, py + ny, dx + nx, dy + ny, ink);
+                    for k in 1..=twins {
+                        let (ox, oy) = (f64::from(k) * nx, f64::from(k) * ny);
+                        layer.line(px + ox, py + oy, dx + ox, dy + oy, ink);
+                    }
                 }
             }
             None => layer.plot(dx, dy, ink),
@@ -801,29 +986,28 @@ fn trace(
     }
 }
 
-/// Rasterise the helicase into the braille layers: the half behind the strand point
-/// into `far` (under the rungs and near backbones), the rest into `near`, so the
-/// strand visibly passes through the collar.
-pub(crate) fn trace_ring(far: &mut Dots, near: &mut Dots, geo: &Geo, ring: &Ring) {
-    let r = RING * R;
-    let mut prev: Option<(f64, f64, bool)> = None;
-    for i in 0..=RING_SAMPLES {
-        let (s, c) = (TAU * i as f64 / RING_SAMPLES as f64).sin_cos();
-        let p = std::array::from_fn(|k| ring.centre[k] + r * (c * ring.e1[k] + s * ring.e2[k]));
-        let Some((x, y, depth)) = geo.project(p) else {
-            prev = None;
-            continue;
-        };
-        let (dx, dy) = to_dots(x, y);
-        let behind = depth < ring.depth;
-        let layer = if behind { &mut *far } else { &mut *near };
-        match prev {
-            Some((px, py, was_behind)) if was_behind == behind => {
-                layer.line(px, py, dx, dy, ring.ink);
+/// Rasterise the helicase into its own braille layer, blitted over everything else: its
+/// cells hide the backbone dots under them, so the collar reads whole, clamped on the
+/// strand, with a dark core where the strand passes through.
+pub(crate) fn trace_ring(layer: &mut Dots, geo: &Geo, ring: &Ring) {
+    // Concentric circles across the band fill the doughnut solid.
+    for band in RING_BAND {
+        let r = band * RING * R;
+        let mut prev: Option<(f64, f64)> = None;
+        for i in 0..=RING_SAMPLES {
+            let (s, c) = (TAU * i as f64 / RING_SAMPLES as f64).sin_cos_det();
+            let p = std::array::from_fn(|k| ring.centre[k] + r * (c * ring.e1[k] + s * ring.e2[k]));
+            let Some((x, y, _)) = geo.project(p) else {
+                prev = None;
+                continue;
+            };
+            let (dx, dy) = to_dots(x, y);
+            match prev {
+                Some((px, py)) => layer.line(px, py, dx, dy, ring.ink),
+                None => layer.plot(dx, dy, ring.ink),
             }
-            _ => layer.plot(dx, dy, ring.ink),
+            prev = Some((dx, dy));
         }
-        prev = Some((dx, dy, behind));
     }
 }
 
@@ -837,6 +1021,25 @@ pub(crate) fn ring_marks(geo: &Geo, ring: &Ring) -> Option<[(i32, i32); 2]> {
             .map(|(x, y, _)| (x.round() as i32, y.round() as i32))
     };
     Some([point(1.0)?, point(-1.0)?])
+}
+
+/// The caption for what the view shows (SPEC-002 Captions): `helicase unzips` only while
+/// the helicase is on screen; before its apex enters, the duplex is still intact
+/// (`right-handed helix`), and once it has left, the daughters are done (`half old, half
+/// new`). `reset` shows the title's own mechanism.
+fn caption(geo: &Geo, view: &View, snap: &Snapshot, helicase: bool) -> Option<&'static str> {
+    if snap.phase == Phase::Reset {
+        return None;
+    }
+    let past = |tau: f64| {
+        geo.sample(Strand::Watson, fork(tau))
+            .is_none_or(|s| s.x.round() >= view.w)
+    };
+    Some(match snap.tau {
+        Some(_) if helicase => CAPTIONS[1],
+        Some(tau) if past(tau) => CAPTIONS[2],
+        _ => CAPTIONS[0],
+    })
 }
 
 /// Dot coordinates of cell point `(x, y)`, whose integer values are cell centres: the
@@ -874,6 +1077,8 @@ pub(crate) struct DnaHelix {
     view: View,
     far: Dots,
     near: Dots,
+    /// The helicase collar, drawn over both.
+    collar: Dots,
     /// Sorted far → near.
     rungs: Vec<Rung>,
     /// The helicase's ASCII `o` cells and ink ([`ring_marks`]), while it is drawn.
@@ -882,6 +1087,8 @@ pub(crate) struct DnaHelix {
     label: Option<(usize, usize)>,
     /// The `reset` fade, which the label follows like everything else.
     fade: f64,
+    /// The caption for what the latest rasterisation shows ([`caption`]).
+    caption: Option<&'static str>,
 }
 
 impl DnaHelix {
@@ -895,10 +1102,12 @@ impl DnaHelix {
             view: View::new(Size::new(1, 1)),
             far: Dots::default(),
             near: Dots::default(),
+            collar: Dots::default(),
             rungs: Vec::new(),
             ring_marks: None,
             label: None,
             fade: 1.0,
+            caption: None,
         }
     }
 
@@ -914,20 +1123,31 @@ impl DnaHelix {
         let geo = Geo::new(&self.view, self.t, snap);
         self.far.clear();
         self.near.clear();
+        self.collar.clear();
         // Samples ≤ 4 dots apart along the arc, joined by lines: on a backbone radius
         // of ≳ 10 dots the chords' sagitta stays under a quarter dot, so the curve is
         // as smooth as the lattice allows.
         let arc_per_bp = (R * TWIST).hypot(RISE);
         let dots_per_bp = f64::from(Dots::CELL_H) * geo.k * MAX_MAGNIFY * arc_per_bp;
         let per_bp = (dots_per_bp / 4.0).ceil().clamp(2.0, 32.0);
-        let (far, near, bold) = (&mut self.far, &mut self.near, self.view.bold);
+        // Bold views draw the near strands 3 dots wide, and 4 once the backbone radius
+        // reaches `THICK_ROWS` (the zoomed-in opening): the backbones are the helix's
+        // silhouette and outweigh the thin rungs.
+        let twins = match (self.view.bold, geo.k * R >= THICK_ROWS) {
+            (false, _) => 0,
+            (true, false) => 2,
+            (true, true) => 3,
+        };
+        let (far, near) = (&mut self.far, &mut self.near);
         for_each_segment(snap, self.view.n, |seg| {
-            trace(far, near, &geo, snap, seg, per_bp, bold);
+            trace(far, near, &geo, snap, seg, per_bp, twins);
         });
-        self.ring_marks = helicase(&geo, &self.view, snap).and_then(|ring| {
-            trace_ring(&mut self.far, &mut self.near, &geo, &ring);
+        let ring = helicase(&geo, &self.view, snap);
+        self.ring_marks = ring.and_then(|ring| {
+            trace_ring(&mut self.collar, &geo, &ring);
             ring_marks(&geo, &ring).map(|cells| (cells, ring.ink))
         });
+        self.caption = caption(&geo, &self.view, snap, ring.is_some());
         self.build_rungs(&geo, snap);
         self.fade = snap.fade;
     }
@@ -985,7 +1205,7 @@ impl DnaHelix {
             } else {
                 fresh(base, tau - made_at(strand, u))
             };
-            Ink::new(base_role(nt.base), level(lit * snap.fade))
+            base_ink(nt.base, lit * snap.fade)
         };
         self.rungs.push(Rung {
             a: (a.x, a.y),
@@ -993,6 +1213,8 @@ impl DnaHelix {
             ink_a: ink(sa, na, &a),
             ink_b: paired.then(|| ink(sb, nb, &b)),
             depth: 0.5 * (a.depth + b.depth),
+            near: a.z_local + b.z_local >= 0.0,
+            wide: ASPECT * RISE * geo.k >= WIDE_RUNG_COLS,
             index: self.rungs.len() as u16,
         });
     }
@@ -1001,6 +1223,10 @@ impl DnaHelix {
 impl Generator for DnaHelix {
     fn meta(&self) -> &'static Meta {
         &META
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        self.caption
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
@@ -1012,6 +1238,7 @@ impl Generator for DnaHelix {
         self.label = label_window(&self.view);
         self.far.resize(size);
         self.near.resize(size);
+        self.collar.resize(size);
         // Up to two daughter rungs per pair.
         self.rungs.reserve(2 * self.view.n);
         self.refresh();
@@ -1033,6 +1260,7 @@ impl Generator for DnaHelix {
             draw_rung(canvas, rung);
         }
         self.near.blit(canvas);
+        self.collar.blit(canvas);
         // ASCII's dot-count glyphs cannot draw the collar: mark it `o` above and below
         // the strand (SPEC-002 ASCII).
         if canvas.mode() == GlyphMode::Ascii
@@ -1044,11 +1272,11 @@ impl Generator for DnaHelix {
         }
         if let Some((start, len)) = self.label {
             let text = Ink::new(Role::Text, level(LABEL_LEVEL * self.fade));
-            let base = level(LABEL_BASE_LEVEL * self.fade);
+            let base = LABEL_BASE_LEVEL * self.fade;
             canvas.text(1, 0, "5'-", text);
             let x = 4;
             for (k, &b) in self.seq[start..start + len].iter().enumerate() {
-                let ink = Ink::new(base_role(b), base);
+                let ink = base_ink(b, base);
                 canvas.put(x + k as i32, 0, Glyph::ascii(letter(b)), ink);
             }
             canvas.text(x + len as i32, 0, "-3'", text);
@@ -1074,7 +1302,7 @@ mod tests {
         let major = PITCH - minor;
         assert!((minor - 12.50).abs() < 0.05, "{minor}");
         assert!((major - 23.20).abs() < 0.05, "{major}");
-        let chord = 2.0 * 5.9 * (DELTA / 2.0).sin();
+        let chord = 2.0 * 5.9 * (DELTA / 2.0).sin_det();
         assert!((chord - 10.5).abs() < 0.1, "{chord}");
         // Right-handed: positive torsion of successive chords at 0.5 bp steps.
         let geo = Geo::new(&View::new(Size::new(80, 24)), 0.7, &snap_at(0.7));
@@ -1325,7 +1553,7 @@ mod tests {
                             continue;
                         }
                         assert!(
-                            s.y.round() >= 1.0 && s.y.round() < view.h,
+                            s.y.round() >= 1.0 && s.y.round() < view.h - 1.0,
                             "{size:?} t = {t} {seg:?} u = {u}: row {}",
                             s.y
                         );
@@ -1364,10 +1592,40 @@ mod tests {
     }
 
     #[test]
+    fn dna_a4_fork_frames_fill_and_centre_on_tall_views() {
+        // A tall view fits its content to the rows (the reset fade aside): ≥ 80 % of rows [1, h − 1), inside them, centred to within a
+        // row, in every beat.
+        let story = Story::new();
+        for size in [Size::new(80, 24), Size::new(120, 40), Size::new(200, 50)] {
+            let view = View::new(size);
+            for k in 0..120 {
+                let t = 0.2 * f64::from(k);
+                let snap = story.at(t);
+                if snap.fade < 1.0 {
+                    continue;
+                }
+                let geo = Geo::new(&view, t, &snap);
+                let (top, bottom) = geo.extent(&view).expect("content on screen");
+                let fill = (bottom - top) / (view.h - 2.0);
+                assert!(fill >= 0.8, "{size:?} t = {t}: fills {fill:.2}");
+                assert!(
+                    top >= 0.5 && bottom <= view.h - 1.5,
+                    "{size:?} t = {t}: {top}..{bottom}"
+                );
+                let mid = 0.5 * (top + bottom);
+                assert!(
+                    (mid - (view.h - 1.0) / 2.0).abs() <= 1.0,
+                    "{size:?} t = {t}: mid {mid}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn dna_a4_opening_helix_fills_the_frame() {
         // The `helix` opening is zoomed in on the intact duplex, which needs only ±R (plus
-        // the pitch shear and sway), not the open fork's budget: it fills about 70 % of
-        // rows [1, h). The fit to rows [1, h) itself is `dna_a4_open_fork_fits_the_frame`.
+        // the pitch shear and sway), not the open fork's budget: it fills at least 85 % of
+        // rows [1, h − 1), centred on them. The fit itself is `dna_a4_open_fork_fits_the_frame`.
         let story = Story::new();
         for size in [Size::new(80, 24), Size::new(200, 50), Size::new(120, 36)] {
             let view = View::new(size);
@@ -1386,8 +1644,18 @@ mod tests {
                         }
                     }
                 }
-                let fill = (bottom - top) / (view.h - 1.0);
-                assert!(fill >= 0.62, "{size:?} t = {t}: fills {fill:.2}");
+                let fill = (bottom - top) / (view.h - 2.0);
+                assert!(fill >= 0.85, "{size:?} t = {t}: fills {fill:.2}");
+                // Inside rows [1, h − 1) and centred on them to within a row.
+                assert!(
+                    top >= 0.5 && bottom <= view.h - 1.5,
+                    "{size:?} t = {t}: {top}..{bottom}"
+                );
+                let mid = 0.5 * (top + bottom);
+                assert!(
+                    (mid - (view.h - 1.0) / 2.0).abs() <= 1.0,
+                    "{size:?} t = {t}: mid {mid}"
+                );
             }
         }
     }
@@ -1440,7 +1708,8 @@ mod tests {
             (Size::new(40, 12), false),
             (Size::new(200, 10), false),
             (Size::new(40, 13), false),
-            (Size::new(50, 14), true),
+            (Size::new(50, 14), false),
+            (Size::new(50, 15), true),
             (Size::new(80, 24), true),
         ] {
             let view = View::new(size);
@@ -1490,7 +1759,7 @@ mod tests {
                     rung_cells(rung, |x, y, glyph, _| {
                         // No flat strokes: an end-on pair is hidden, not drawn as `─`.
                         assert!(
-                            matches!(glyph.unicode, '│' | '╲' | '╱'),
+                            [BAR, SLAB].contains(&glyph) || matches!(glyph.unicode, '╲' | '╱'),
                             "{size:?} t = {t}: {glyph:?}"
                         );
                         // One cell per row: side-by-side `╱╱` never join into a stroke.
@@ -1514,7 +1783,10 @@ mod tests {
                 let scene = scene_at(size, 0.1 * f64::from(k));
                 for rung in &scene.rungs {
                     rung_cells(rung, |x, y, glyph, _| {
-                        assert!(x != 0 || glyph.unicode != '│', "{size:?} k = {k} row {y}");
+                        assert!(
+                            x != 0 || ![BAR, SLAB].contains(&glyph),
+                            "{size:?} k = {k} row {y}"
+                        );
                     });
                 }
             }
@@ -1552,7 +1824,7 @@ mod tests {
     }
 
     #[test]
-    fn dna_a2_helicase_is_a_collar_threaded_on_the_upper_strand() {
+    fn dna_a2_helicase_is_a_collar_clamped_on_the_upper_strand() {
         for size in [Size::new(80, 24), Size::new(120, 36), Size::new(200, 50)] {
             let view = View::new(size);
             for t in [6.0, 9.0, 12.0] {
@@ -1568,21 +1840,36 @@ mod tests {
                 assert!((norm(ring.e1) - 1.0).abs() < 1e-12);
                 assert!(dot(ring.e1, ring.e2).abs() < 1e-12);
                 assert_eq!(ring.centre, w);
-                // The strand passes through it: part of the ring lies behind the strand
-                // point (far layer) and part in front (near layer).
-                let (mut far, mut near) = (Dots::new(size), Dots::new(size));
-                trace_ring(&mut far, &mut near, &geo, &ring);
-                let lit = |d: &Dots| {
-                    let s = d.dot_size();
-                    (0..i32::from(s.width()))
-                        .flat_map(|x| (0..i32::from(s.height())).map(move |y| (x, y)))
-                        .filter(|&(x, y)| d.is_lit(x, y))
-                        .count()
-                };
-                let (nf, nn) = (lit(&far), lit(&near));
-                assert!(nf >= 4 && nn >= 4, "{size:?} t = {t}: far {nf} near {nn}");
-                // A collar, not a halo: 0.35 R.
-                assert!((RING - 0.35).abs() < 1e-12);
+                // A solid doughnut on its own layer, with a dark core on the strand.
+                let mut collar = Dots::new(size);
+                trace_ring(&mut collar, &geo, &ring);
+                let s = collar.dot_size();
+                let lit = (0..i32::from(s.width()))
+                    .flat_map(|x| (0..i32::from(s.height())).map(move |y| (x, y)))
+                    .filter(|&(x, y)| collar.is_lit(x, y))
+                    .count();
+                assert!(lit >= 8, "{size:?} t = {t}: {lit} collar dots");
+                let (cx, cy, _) = geo.project(ring.centre).expect("on screen");
+                let (dx, dy) = to_dots(cx, cy);
+                assert!(
+                    !collar.is_lit(dx.round() as i32, dy.round() as i32),
+                    "{size:?} t = {t}: no dark core"
+                );
+                // Drawn over the backbones: every collar cell shows the collar's ink.
+                let scene = scene_at(size, t);
+                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                scene.render(&mut canvas);
+                for y in 0..i32::from(size.height()) {
+                    for x in 0..i32::from(size.width()) {
+                        if scene.collar.cell_mask(x, y).unwrap_or(0) != 0 {
+                            let c = canvas.get(x, y).expect("a cell");
+                            assert_eq!(c.ink.role, RING_ROLE, "{size:?} t = {t}: ({x}, {y})");
+                        }
+                    }
+                }
+                // A collar that reads at a glance but still clamps one strand: 0.6 R,
+                // clear of Crick 1.78 R below the apex.
+                assert!((RING - 0.6).abs() < 1e-12);
             }
         }
     }
@@ -1641,6 +1928,50 @@ mod tests {
             scene_at(size, 2.0).render(&mut ascii);
             assert!(cells_with(&ascii, 'o').is_empty(), "{size:?}");
         }
+    }
+
+    #[test]
+    fn dna_a9_zoomed_in_rungs_are_twice_as_wide() {
+        // At the opening zoom on a tall view pairs are ≥ 6 columns apart, so each upright
+        // rung takes a second column (`█` near, `▌` beside a far `▐`); zoomed out, not.
+        let size = Size::new(120, 40);
+        let wide = scene_at(size, 2.0);
+        assert!(wide.rungs.iter().filter(|r| r.wide).count() >= 4);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        wide.render(&mut canvas);
+        let mut pairs = 0;
+        for r in wide.rungs.iter().filter(|r| r.wide) {
+            rung_cells(r, |x, y, glyph, _| {
+                if glyph == SLAB || glyph == BAR {
+                    let next = canvas.get(x + 1, y).map(|c| c.ch);
+                    let want = if glyph == SLAB {
+                        SLAB.unicode
+                    } else {
+                        BAR_PAIR.unicode
+                    };
+                    pairs += usize::from(next == Some(want));
+                }
+            });
+        }
+        assert!(pairs >= 8, "{pairs} doubled rung cells");
+        assert_eq!(BAR_PAIR.ascii, '|');
+        let narrow = scene_at(size, 12.0);
+        assert!(narrow.rungs.iter().all(|r| !r.wide));
+    }
+
+    #[test]
+    fn dna_a9_rungs_are_two_dots_wide_and_the_helicase_is_sulfur() {
+        // Near rungs fill their cell (two braille dots across), far rungs half of it, so
+        // the ladder reads as solid base-pair slabs under the 3-dot backbones.
+        assert_eq!(SLAB, Glyph::new('█', '|'));
+        assert_eq!(BAR, Glyph::new('▐', '|'));
+        // The motor is the frame's one chrome-yellow object, apart from every strand
+        // and pair ramp.
+        assert_eq!(RING_ROLE, Role::Ramp(Ramp::Sulfur));
+        for b in [A, C, G, T] {
+            assert_ne!(pair_role(b), RING_ROLE);
+        }
+        assert!(![OLD, NEW].contains(&RING_ROLE));
     }
 
     #[test]
@@ -1802,5 +2133,141 @@ mod tests {
         let before = (scene.t, scene.seq);
         scene.resize(Size::new(200, 50), &mut ctx);
         assert_eq!(before, (scene.t, scene.seq));
+    }
+
+    #[test]
+    fn dna_a7_palette_old_ice_new_rose_pairs_by_type() {
+        let ramp = |r| Role::Ramp(r);
+        // A·T pairs are green, G·C pairs violet, whichever strand holds them; the
+        // pyrimidine of each pair (T, C) is dimmer than its purine (A, G).
+        for b in [A, T] {
+            assert_eq!(pair_role(b), ramp(Ramp::Aurora));
+        }
+        for b in [G, C] {
+            assert_eq!(pair_role(b), ramp(Ramp::Plasma));
+        }
+        for (purine, pyrimidine) in [(A, T), (G, C)] {
+            assert!(base_ink(purine, 200.0).level > base_ink(pyrimidine, 200.0).level);
+        }
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            for t in [2.0, 10.0, 20.0] {
+                let scene = scene_at(size, t);
+                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                scene.render(&mut canvas);
+                let (mut ice, mut rose, mut ring) = (0, 0, 0);
+                let (mut backbone, mut rung) = (0u64, 0u64);
+                let (mut n_backbone, mut n_rung) = (0u64, 0u64);
+                for c in canvas.cells() {
+                    if ('\u{2801}'..='\u{28ff}').contains(&c.ch) {
+                        // Backbones: parental Ice, new HAlpha; the helicase Hot.
+                        assert!(
+                            [ramp(Ramp::Ice), ramp(Ramp::HAlpha), RING_ROLE].contains(&c.ink.role),
+                            "{size:?} t = {t}: {c:?}"
+                        );
+                        ice += usize::from(c.ink.role == ramp(Ramp::Ice));
+                        rose += usize::from(c.ink.role == ramp(Ramp::HAlpha));
+                        ring += usize::from(c.ink.role == RING_ROLE);
+                        if c.ink.role != RING_ROLE {
+                            backbone += u64::from(c.ink.level);
+                            n_backbone += 1;
+                        }
+                    }
+                    if [BAR.unicode, SLAB.unicode, '╲', '╱'].contains(&c.ch) {
+                        assert!(
+                            [ramp(Ramp::Aurora), ramp(Ramp::Plasma)].contains(&c.ink.role),
+                            "{size:?} t = {t}: rung {c:?}"
+                        );
+                        rung += u64::from(c.ink.level);
+                        n_rung += 1;
+                    }
+                }
+                assert!(ice > 0, "{size:?} t = {t}");
+                // New strands exist once the fork has run (the daughters at t = 20 s).
+                assert_eq!(rose > 0, t > 4.0, "{size:?} t = {t}: {rose}");
+                // The helicase is on screen mid-unwind, and it is the brightest object.
+                assert_eq!(ring > 0, t == 10.0, "{size:?} t = {t}: {ring}");
+                // The backbones outshine the rungs on average: the helix is the hero.
+                assert!(
+                    backbone * n_rung > rung * n_backbone,
+                    "{size:?} t = {t}: backbone {backbone}/{n_backbone} rung {rung}/{n_rung}"
+                );
+                // The bottom row stays clear of the helix, for the title.
+                let h = i32::from(size.height());
+                for x in 0..i32::from(size.width()) {
+                    assert_eq!(
+                        canvas.get(x, h - 1).map(|c| c.ch),
+                        Some(' '),
+                        "{size:?} t = {t}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dna_a8_captions_follow_the_story() {
+        for (size, forks) in [(Size::new(80, 24), true), (Size::new(40, 12), false)] {
+            let mut ctx = Ctx::new(42, size);
+            let mut scene = DnaHelix::new();
+            scene.resize(size, &mut ctx);
+            let mut seen = Vec::new();
+            while scene.t < 24.0 {
+                scene.update(0.1, &mut ctx);
+                let snap = scene.view.shown(scene.story.at(scene.t));
+                let geo = Geo::new(&scene.view, scene.t, &snap);
+                let on_screen = helicase(&geo, &scene.view, &snap).is_some();
+                // Where the apex is: left of the screen (not yet), on it, or past it.
+                let apex = snap
+                    .tau
+                    .and_then(|tau| geo.sample(Strand::Watson, fork(tau)))
+                    .map(|s| s.x.round());
+                let want = match snap.phase {
+                    Phase::Reset => None,
+                    _ if on_screen => Some("helicase unzips"),
+                    _ if apex.is_some_and(|x| x >= scene.view.w) => Some("half old, half new"),
+                    _ => Some("right-handed helix"),
+                };
+                assert_eq!(scene.caption(), want, "{size:?} t = {}", scene.t);
+                if let Some(c) = want {
+                    assert!(META.captions.contains(&c));
+                    // The unzip caption only ever names a helicase that is drawn.
+                    assert_eq!(
+                        c == "helicase unzips",
+                        scene.ring_marks.is_some() || on_screen
+                    );
+                    if !seen.contains(&c) {
+                        seen.push(c);
+                    }
+                }
+            }
+            assert_eq!(seen.len(), if forks { 3 } else { 1 }, "{size:?}: {seen:?}");
+        }
+    }
+
+    #[test]
+    fn dna_a7_near_rungs_are_slabs_far_rungs_bars() {
+        // Depth on the ladder: an upright rung in front of the axis is a 2-dot slab, one
+        // behind it a thin bar, and a frame of the helix shows both.
+        for size in [Size::new(80, 24), Size::new(120, 40), Size::new(200, 50)] {
+            let (mut slabs, mut bars) = (0, 0);
+            for t in [0.5, 1.5, 3.0] {
+                let scene = scene_at(size, t);
+                for rung in &scene.rungs {
+                    rung_cells(rung, |_, _, glyph, _| {
+                        if glyph == SLAB {
+                            assert!(rung.near, "{size:?} t = {t}: {rung:?}");
+                            slabs += 1;
+                        } else if glyph == BAR {
+                            assert!(!rung.near, "{size:?} t = {t}: {rung:?}");
+                            bars += 1;
+                        }
+                    });
+                }
+            }
+            assert!(
+                slabs > 0 && bars > 0,
+                "{size:?}: {slabs} slabs, {bars} bars"
+            );
+        }
     }
 }

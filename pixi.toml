@@ -13,10 +13,16 @@ rs-test = "cargo test --workspace"
 # so they are also formatted/checked file by file.
 rs-fmt = "cargo fmt --all && rustfmt --config-path rustfmt.toml crates/sciart-generators/src/*.rs"
 rs-lint = "cargo fmt --all --check && rustfmt --check --config-path rustfmt.toml crates/sciart-generators/src/*.rs && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
-rs-ci = { depends-on = ["rs-lint", "rs-test"] }
+# TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run in release.
+rs-snap-release = "cargo test --release -p sciart-generators --test snapshots"
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-snap-release"] }
 rs-bench = "cargo bench -p sciart-generators"
+# GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
+rs-worst = "cargo run -q --release -p sciart-generators --example worst_frame --"
 rs-list = "cargo run -q -p sciart -- list"
 rs-sim = "cargo run --release -p sciart -- sim"
 rs-run = "cargo run --release -p sciart -- run"
+# Truecolor PNG frames for art review: `pixi run rs-preview <scene> --size 120x40 --t 0,5,20 --theme astro --out /tmp/p/<scene>`.
+rs-preview = "cargo run -q --release -p sciart-generators --example preview --"
 rs-install = "cargo install --path crates/sciart"
 rs-install-mouse = "cargo install --path crates/sciart --features mouse"

@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
- T+00.0 s  ALT     0 m  VEL    0 m/s                                            
+ T-00:02  ALT   0.0 km  VEL    0 m/s  q  0.0 kPa                                
                                                                                 
                                                                                 
                                                                                 
-                                    LIFTOFF                                     
+                                      T-2                                       
                                                                                 
                                                                                 
                                                                                 
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                                                                
-                                   *                                            
-                                   HX  .                                        
-                                   HX   ^  .                                    
-                                   HX  /#\                                      
-                              oo   HX  |#|                                      
-                           o@  @o  HX  =+=          o@oo                        
-                           o@o@@oo HX .|#|. .*@o@oo@@o                          
-                                o* **##/#\ #*@o@o@@@                            
-=====================================##*#*##====================================
- Rocket launch - stages drop away .  .  *  .  .  .  .  .  .  .  .  .  .  .  .  .
+                               ===                                              
+                               ===                                              
+                               = =     ||                                       
+                               ===     |||                                      
+                               ===     |||                                      
+                               ===     |||                                      
+                               ===     ===                                      
+                               = =     |||                                      
+                               ===     |||             ooooo                    
+                oooooooooooo   ===     |||          ooooooooooooo               
+               oooooooooooooooo===     |||     oooooooooooooooooo               
+                ooooo*ooooooooo=o=o    |||   ooooooooooooo*oooooo               
+               ooooooooooo**********o  |||o***********oooooooooo                
+================ooooooooooooooooooooo==|||oo*ooooooooooooooooooo================
+============================o=======================oo======o===================
+ Rocket launch - stage drops away ==============================================

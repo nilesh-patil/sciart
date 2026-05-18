@@ -13,24 +13,28 @@
 //! `update` runs the Jones steps and then tone-maps a lightly time-smoothed copy of the
 //! trail into `Pixels`; `render` only blits (the M10 raster convention).
 
+use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use rand::Rng;
 use rand::seq::SliceRandom;
 use sciart_core::draw;
 use sciart_core::grid::{self, SampleMap};
-use sciart_core::ink::{self, seq_value};
+use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::title::{self, Title};
+use sciart_core::title;
 
 pub static META: Meta = Meta {
     name: "physarum",
     category: Category::Biology,
     description: "A slime mould spreading a lace of veins that thickens into a transport network",
     title: "Slime mould · trails reinforce",
-    captions: &[],
+    captions: &CAPTIONS,
 };
+
+/// Captions by beat: explore, fade, rest (consolidate shows the title's own mechanism).
+const CAPTIONS: [&str; 3] = ["veins seek food", "network starves", "fresh oat flakes"];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(Physarum::new())
@@ -66,6 +70,7 @@ const BEATS: [(&str, f64); 4] = [
     ("rest", 2.0),
 ];
 const EXPLORE: usize = 0;
+const CONSOLIDATE: usize = 1;
 const FADE: usize = 2;
 const REST: usize = 3;
 const FADE_SECS: f64 = BEATS[FADE].1;
@@ -84,11 +89,47 @@ const SHOWN_TAU: f64 = 0.15;
 /// The old flakes fade out over the last second of the fade, so rest opens on an empty
 /// plate.
 const FLAKE_OUT: f64 = 1.0;
-/// Pixels below this tone (`T < T_ref / 2`) stay blank: the plate is the terminal's own
-/// dark. A lower floor lights the diffuse attractant around every tube, which fattens
-/// the veins into blobs.
-const U_FLOOR: f64 = 0.45;
+/// Tubes start at this tone (`V ≈ 0.76·T_ref`), high enough that only a vein's
+/// channel is drawn, not the diffuse attractant around it. Between `U_HALO` and it that
+/// attractant shows as a dark rim about one pixel wide; below `U_HALO` the plate is the
+/// terminal's own dark. The rim stays in the ramp's near-black end, so it antialiases
+/// the half-block edges instead of fattening the veins into blobs.
+const U_FLOOR: f64 = 0.55;
+const U_HALO: f64 = 0.50;
+/// Sulfur ramp values: the rim spans `HALO_LO..=HALO_HI` (dark olive), the tubes
+/// `CORE_LO..=1` (chrome yellow to pale lemon at the junctions).
+const HALO_LO: f64 = 0.06;
+const HALO_HI: f64 = 0.30;
+const CORE_LO: f64 = 0.55;
+/// `CORE_LO`'s ink level, `round(0.40 · 255)`: the dimmest tube pixel.
+const CORE_LO_LEVEL: u8 = 140;
+/// Tube tones are raised to this power: a yellow body around a pale channel, with the
+/// thin trunks still luminous.
+const CORE_GAMMA: f64 = 1.2;
+/// ASCII grades `. : + #` step by this above the tube floor, so `#` marks the top 10 %
+/// of the tone range, as with the M10 floor.
+const ASCII_STEP: f64 = (0.9 - U_FLOOR) / 3.0;
+/// Shuttle streaming, stylised (SPEC-002 Streaming): while the network consolidates, tube
+/// tones pulse by ±`STREAM_DEPTH` in a wave running out from the inoculum,
+/// `STREAM_WAVE` of the plate's shorter side long, every `STREAM_PERIOD` s. Real
+/// peristalsis takes 1–2 minutes a cycle and reverses; at this ≈ 1000–2000× time-lapse a
+/// cycle would last 50–100 ms, close to the frame rate, so the wave is slowed and runs
+/// one way. It eases in and out over `STREAM_EASE` s at
+/// the ends of the beat, so the bloom and the starving network hold still.
+const STREAM_DEPTH: f64 = 0.2;
+const STREAM_EASE: f64 = 2.0;
+const STREAM_WAVE: f64 = 0.3;
+const STREAM_PERIOD: f64 = 3.0;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// Oat flakes: small oat-beige motes, an art-directed `Blackbody` tint (level 105 ≈
+/// 4 000 K; not a temperature), so the food belongs to the organism's warm world. The
+/// level stays below the tubes' pale-lemon peak, so in mono the organism stays the
+/// brightest thing on the plate; fading the level darkens a flake through the blackbody's
+/// dim reds into the plate.
+const FLAKE: Role = Role::Blackbody;
+const FLAKE_LEVEL: f64 = 105.0;
+/// A flake's display pixels from its centre: a 2 × 2 mote, square on screen.
+const FLAKE_PX: [(i32, i32); 4] = [(0, 0), (1, 0), (0, 1), (1, 1)];
 
 /// `(cos, sin)` of the 16 headings, `k · 22.5°` with y down.
 pub(crate) const DIRS: [(f32, f32); 16] = {
@@ -407,7 +448,7 @@ impl Colony {
         for _ in 0..n.min(MAX_AGENTS) {
             for _ in 0..32 {
                 let d = r * rng.random::<f32>().sqrt();
-                let (s, c) = (std::f32::consts::TAU * rng.random::<f32>()).sin_cos();
+                let (s, c) = (std::f32::consts::TAU * rng.random::<f32>()).sin_cos_det();
                 let (x, y) = (plan.centre.0 + d * c, plan.centre.1 + d * s);
                 let (sx, sy) = site(x, y);
                 if self.occ.get(sx, sy) == Some(&false) {
@@ -606,12 +647,15 @@ pub(crate) struct Physarum {
     shown: Grid<f32>,
     map: SampleMap,
     pixels: Pixels,
-    /// The drawn flakes' display pixels and ink, for the ASCII `@` marks.
+    /// The drawn flakes' display pixels and ink, for the ASCII `o` marks.
     flakes: [(i32, i32); MAX_FOOD],
     n_flakes: usize,
     flake_ink: Ink,
     cells: Size,
     label: StackText<24>,
+    /// `title::stable_readout_room` at this size: the label never comes and goes with
+    /// the beat.
+    readout_room: usize,
     ready: bool,
 }
 
@@ -635,6 +679,7 @@ impl Physarum {
             flake_ink: Ink::BLANK,
             cells: Size::new(1, 1),
             label: StackText::new(),
+            readout_room: 0,
             ready: false,
         }
     }
@@ -723,21 +768,32 @@ impl Physarum {
         }
     }
 
-    /// Tone-map the drawn field onto the display pixels and lay the oat flakes over it.
+    /// Tone-map the drawn field onto the display pixels, with the shuttle-streaming
+    /// pulse on the tubes, and lay the oat flakes over it.
     fn rasterise(&mut self) {
         let size = self.pixels.pixel_size();
-        let scale = 1.0 / (2.5 * self.t_ref.max(1e-6));
-        // `u = √(v)` is below the floor exactly when `v` is below its square, so the
+        // `u = √(v)` is below the halo exactly when `v` is below its square, so the
         // dark plate skips the square root.
-        let floor = (U_FLOOR * U_FLOOR) as f32;
-        let (map, shown) = (&self.map, &self.shown);
+        let halo = (U_HALO * U_HALO) as f32;
+        let (map, shown, scale) = (&self.map, &self.shown, self.scale());
+        // The pulse runs out from the colony's inoculum, in display pixels.
+        let (cx, cy) = remap(self.colony.plan.centre, self.colony.lattice(), size);
+        let short = f64::from(size.width().min(size.height()).max(1));
+        let k = TAU / (STREAM_WAVE * short);
+        let phase0 = TAU * self.time() / STREAM_PERIOD;
+        let depth = STREAM_DEPTH * self.streaming();
         self.pixels.shade(|x, y| {
             let v = map.sample(shown, x, y) * scale;
-            if v < floor {
-                Ink::BLANK
-            } else {
-                ink::seq(0.2 + 0.8 * f64::from(v.sqrt().min(1.0)))
+            if v < halo {
+                return Ink::BLANK;
             }
+            let u = f64::from(v.sqrt());
+            // Outside consolidate (most of the cycle) there is no pulse to compute.
+            if u < U_FLOOR || depth == 0.0 {
+                return organism_ink(u);
+            }
+            let r = f64::from((x as f32 - cx).hypot(y as f32 - cy));
+            organism_ink(stream(u, depth, k * r - phase0))
         });
         // The colony's flakes show while it lives and fade out over the last second of
         // the fade; the next colony's fade in over rest, on an empty plate.
@@ -750,22 +806,38 @@ impl Physarum {
             ),
             _ => (self.colony.plan, 1.0),
         };
-        let level = ink::level(255.0 * level);
+        let level = ink::level(FLAKE_LEVEL * level);
         if level == 0 {
             self.n_flakes = 0;
             return;
         }
-        let ink = Ink::new(Role::Structure, level);
+        let ink = Ink::new(FLAKE, level);
         let lattice = self.colony.lattice();
         self.flake_ink = ink;
         self.n_flakes = plan.food().len();
         for (slot, &f) in self.flakes.iter_mut().zip(plan.food()) {
             let (px, py) = flake_pixel(f, lattice, size);
-            for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+            for (dx, dy) in FLAKE_PX {
                 self.pixels.set(px + dx, py + dy, ink);
             }
             *slot = (px, py);
         }
+    }
+
+    /// The streaming envelope, 0 to 1: on through `consolidate`, eased in and out over
+    /// `STREAM_EASE` s at its ends, off otherwise.
+    fn streaming(&self) -> f64 {
+        let beat = self.timeline.at(self.time());
+        if beat.index != CONSOLIDATE {
+            return 0.0;
+        }
+        let edge = beat.local.min(BEATS[CONSOLIDATE].1 - beat.local);
+        ease::smoothstep(edge / STREAM_EASE)
+    }
+
+    /// `S` → `u²`: the drawn field over `2.5·T_ref`.
+    fn scale(&self) -> f32 {
+        1.0 / (2.5 * self.t_ref.max(1e-6))
     }
 
     fn relabel(&mut self) {
@@ -779,28 +851,35 @@ fn shows_label(size: Size) -> bool {
     size.width() >= 40 && size.height() >= 12
 }
 
-/// The tone `u ∈ [0, 1]` a trail pixel stands for (0 for an empty pixel).
-fn tone(ink: Ink) -> f64 {
-    if ink.role == Role::Seq {
-        (seq_value(ink) - 0.2) / 0.8
-    } else {
-        0.0
-    }
+/// The organism's ramp: the chrome yellow of a real *Physarum* plasmodium, stylised
+/// into a near-black-to-lemon ramp (SPEC-002 Inks).
+const RAMP: Ramp = Ramp::Sulfur;
+const ORGANISM: Role = Role::Ramp(RAMP);
+
+/// A tube tone `u ≥ U_FLOOR` at streaming phase `phase`: pulsed by ±`depth`, never
+/// below the tube floor.
+fn stream(u: f64, depth: f64, phase: f64) -> f64 {
+    (u * (1.0 + depth * phase.sin_det())).max(U_FLOOR)
 }
 
-/// ASCII fallback per cell (GEN-R10): the brighter pixel's tone graded `. : + #` in
-/// steps of 0.15 above the visible floor. Food pixels count as blank here; `render`
-/// marks each flake with a single `@` instead of the plus it covers in half blocks.
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let (u, ink) = if tone(top) >= tone(bottom) {
-        (tone(top), top)
-    } else {
-        (tone(bottom), bottom)
-    };
-    if ink.role != Role::Seq {
+/// The tube tone `u ≥ U_FLOOR` an ink of [`organism_ink`] stands for (to its level's
+/// rounding), or `None` for a halo, flake or blank pixel.
+fn tube_tone(px: Ink) -> Option<f64> {
+    if px.role != ORGANISM || px.level < CORE_LO_LEVEL {
         return None;
     }
-    let ch = match ((u - U_FLOOR) / 0.15) as u32 {
+    let t = ((ink::seq_value(px) - CORE_LO) / (1.0 - CORE_LO)).clamp(0.0, 1.0);
+    Some(ease::lerp(U_FLOOR, 1.0, t.powf(CORE_GAMMA.recip())))
+}
+
+/// ASCII fallback per cell (GEN-R10): the brighter tube pixel's tone, read back from its
+/// ink, graded `. : + #` in steps of `ASCII_STEP` above the tube floor, in that pixel's ink. The
+/// halo and the food pixels count as blank; `render` marks each flake with a single `o`
+/// instead of the mote it covers in half blocks.
+fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
+    let (ut, ub) = (tube_tone(top), tube_tone(bottom));
+    let (u, ink) = if ut >= ub { (ut?, top) } else { (ub?, bottom) };
+    let ch = match ((u - U_FLOOR) / ASCII_STEP) as u32 {
         0 => '.',
         1 => ':',
         2 => '+',
@@ -809,9 +888,30 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     Some((ch, ink))
 }
 
+/// The ink of a pixel at tone `u ≥ U_HALO`: a dark halo below the tube floor, then the
+/// tube ramp up to pale lemon at `u = 1`.
+fn organism_ink(u: f64) -> Ink {
+    let v = if u < U_FLOOR {
+        ease::lerp(HALO_LO, HALO_HI, (u - U_HALO) / (U_FLOOR - U_HALO))
+    } else {
+        let t = ((u - U_FLOOR) / (1.0 - U_FLOOR)).min(1.0);
+        ease::lerp(CORE_LO, 1.0, t.powf(CORE_GAMMA))
+    };
+    ink::ramp(RAMP, v)
+}
+
 impl Generator for Physarum {
     fn meta(&self) -> &'static Meta {
         &META
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        match self.timeline.at(self.time()).index {
+            EXPLORE => Some(CAPTIONS[0]),
+            FADE => Some(CAPTIONS[1]),
+            REST => Some(CAPTIONS[2]),
+            _ => None,
+        }
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
@@ -837,6 +937,7 @@ impl Generator for Physarum {
             self.show_now();
         }
         self.cells = size;
+        self.readout_room = title::stable_readout_room(size, &META);
         self.map.rebuild(lattice, display);
         self.pixels.resize(plate);
         self.relabel();
@@ -862,14 +963,12 @@ impl Generator for Physarum {
             .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
         if canvas.mode() == GlyphMode::Ascii {
             for &(px, py) in &self.flakes[..self.n_flakes] {
-                canvas.put(px, py.div_euclid(2), Glyph::ascii('@'), self.flake_ink);
+                canvas.put(px, py.div_euclid(2), Glyph::ascii('o'), self.flake_ink);
             }
         }
         // Bottom-right, clear of the title (GEN-R13), with one dark cell either side so the
         // label never looks glued to a tube.
-        if shows_label(self.cells)
-            && self.label.len() <= title::readout_room(self.cells, &Title::of(self))
-        {
+        if shows_label(self.cells) && self.label.len() <= self.readout_room {
             let y = i32::from(self.cells.height()) - 1;
             draw::label_right(canvas, y, self.label.as_str(), LABEL_INK);
         }
@@ -1007,7 +1106,8 @@ mod tests {
         for (k, (c, s)) in DIRS.iter().enumerate() {
             let a = k as f64 * std::f64::consts::TAU / 16.0;
             assert!(
-                (f64::from(*c) - a.cos()).abs() < 1e-6 && (f64::from(*s) - a.sin()).abs() < 1e-6
+                (f64::from(*c) - a.cos_det()).abs() < 1e-6
+                    && (f64::from(*s) - a.sin_det()).abs() < 1e-6
             );
         }
         for start in 0..16u8 {
@@ -1230,7 +1330,10 @@ mod tests {
     fn phy_a5_flakes_follow_the_colony_across_loop_seams() {
         // Every frame over two full cycles (< 2 s in a debug build): the drawn flakes are
         // the growing colony's own while it feeds, the next layout only fades in on the
-        // empty plate, and no frame flashes or cuts a layout at full brightness.
+        // empty plate, and no frame flashes or cuts a layout at full brightness. A flake
+        // is a warm pale mote (the oat's own colour, not a UI grey), dimmer than the
+        // tubes' peak, so the organism outshines its food.
+        assert!(ink::level(FLAKE_LEVEL) < organism_ink(1.0).level);
         let (mut p, mut ctx) = scene(Size::new(40, 24), 42);
         let drawn = |p: &Physarum| {
             let level = if p.n_flakes == 0 {
@@ -1244,6 +1347,9 @@ mod tests {
         while p.time() < 2.0 * 48.0 + 1.0 {
             p.update(STEP, &mut ctx);
             let (flakes, level) = drawn(&p);
+            if p.n_flakes > 0 {
+                assert_eq!(p.flake_ink.role, Role::Blackbody);
+            }
             let t = p.time();
             let beat = p.timeline.at(t);
             if beat.index < FADE {
@@ -1257,7 +1363,7 @@ mod tests {
                     .collect();
                 assert_eq!(
                     (&flakes, level),
-                    (&want, 255),
+                    (&want, ink::level(FLAKE_LEVEL)),
                     "t = {t}: the colony's own flakes"
                 );
             }
@@ -1347,7 +1453,7 @@ mod tests {
             for dy in -3..=3 {
                 for dx in -3..=3 {
                     let ink = p.pixels.get(px + dx, py + dy).unwrap_or(Ink::BLANK);
-                    assert_ne!(ink.role, Role::Seq, "halo at ({}, {})", px + dx, py + dy);
+                    assert_ne!(ink.role, ORGANISM, "halo at ({}, {})", px + dx, py + dy);
                 }
             }
         }
@@ -1356,11 +1462,11 @@ mod tests {
             p.render(&mut canvas);
             let lines = canvas.to_lines();
             if mode == GlyphMode::Ascii {
-                // One `@` per flake, at the flake's own cell.
-                let ats: usize = lines.iter().map(|l| l.matches('@').count()).sum();
-                assert_eq!(ats, flakes.len(), "{lines:#?}");
+                // One `o` per flake, at the flake's own cell.
+                let os: usize = lines.iter().map(|l| l.matches('o').count()).sum();
+                assert_eq!(os, flakes.len(), "{lines:#?}");
                 for &(px, py) in &flakes {
-                    assert_eq!(canvas.get(px, py / 2).map(|c| c.ch), Some('@'));
+                    assert_eq!(canvas.get(px, py / 2).map(|c| c.ch), Some('o'));
                 }
             }
             // The label is right-aligned (GEN-R13) and keeps one dark cell on either side.
@@ -1458,5 +1564,124 @@ mod tests {
         }
         let churn = changed as f64 / lit as f64;
         assert!(churn <= 0.15, "{churn} of lit cells change per frame");
+    }
+
+    #[test]
+    fn phy_a8_sulfur_tubes_with_a_one_pixel_halo() {
+        let organism = Role::Ramp(Ramp::Sulfur);
+        assert_eq!(ORGANISM, organism);
+        let (halo_top, core_bottom) = (ink::ramp(RAMP, HALO_HI), ink::ramp(RAMP, CORE_LO));
+        assert!(halo_top.level < core_bottom.level);
+        for (size, t) in [(Size::new(80, 24), 5.0), (Size::new(200, 50), 20.0)] {
+            let (mut p, mut ctx) = scene(size, 42);
+            run_to(&mut p, &mut ctx, t);
+            let ps = p.pixels.pixel_size();
+            let (w, h) = (i32::from(ps.width()), i32::from(ps.height()));
+            let at = |x: i32, y: i32| p.pixels.get(x, y).unwrap_or(Ink::BLANK);
+            let (mut halo, mut near, mut core) = (0, 0, 0);
+            for y in 0..h {
+                for x in 0..w {
+                    let px = at(x, y);
+                    if px == Ink::BLANK || px == p.flake_ink {
+                        continue;
+                    }
+                    assert_eq!(px.role, organism, "{size:?} ({x}, {y})");
+                    // Two bands: a dim halo and bright tubes, nothing in between.
+                    let is_core = px.level >= core_bottom.level;
+                    assert!(is_core || px.level <= halo_top.level, "{size:?} {px:?}");
+                    if is_core {
+                        core += 1;
+                        continue;
+                    }
+                    halo += 1;
+                    // The halo is one pixel wide: a core pixel among its 8 neighbours.
+                    let hugs = (-1..=1).any(|dy| {
+                        (-1..=1).any(|dx| {
+                            at(x + dx, y + dy).level >= core_bottom.level
+                                && at(x + dx, y + dy).role == organism
+                        })
+                    });
+                    near += usize::from(hugs);
+                }
+            }
+            assert!(core > 0 && halo > 0, "{size:?}: core {core} halo {halo}");
+            assert!(
+                near * 10 >= halo * 9,
+                "{size:?}: {near} of {halo} halo pixels hug a tube"
+            );
+        }
+    }
+
+    #[test]
+    fn phy_a9_captions_follow_the_life_cycle() {
+        let (mut p, mut ctx) = scene(Size::new(80, 24), 42);
+        let mut seen = Vec::new();
+        while p.time() < 48.0 {
+            p.update(0.25, &mut ctx);
+            let want = match p.timeline.at(p.time()).index {
+                EXPLORE => Some("veins seek food"),
+                FADE => Some("network starves"),
+                REST => Some("fresh oat flakes"),
+                _ => None,
+            };
+            assert_eq!(p.caption(), want, "t = {}", p.time());
+            if let Some(c) = want {
+                assert!(META.captions.contains(&c));
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 3);
+    }
+
+    #[test]
+    fn phy_a10_tubes_pulse_with_shuttle_streaming() {
+        // The pulse: none at depth 0, within ±depth, never below the tube floor, and the
+        // ASCII grade reads a tube's tone back from its ink.
+        for k in 0..=100 {
+            let u = ease::lerp(U_FLOOR, 1.0, f64::from(k) / 100.0);
+            assert_eq!(stream(u, 0.0, 1.0), u);
+            for phase in [0.0, 1.0, 2.5, 4.0, 5.5] {
+                let v = stream(u, STREAM_DEPTH, phase);
+                assert!(v >= U_FLOOR && (v - u).abs() <= STREAM_DEPTH * u + 1e-12);
+            }
+            let back = tube_tone(organism_ink(u)).expect("a tube ink");
+            assert!((back - u).abs() < 0.012, "{u} -> {back}");
+        }
+        assert_eq!(
+            tube_tone(organism_ink(0.5 * (U_HALO + U_FLOOR))),
+            None,
+            "the halo is not a tube"
+        );
+        assert_eq!(CORE_LO_LEVEL, ink::ramp(RAMP, CORE_LO).level);
+        // On only while the network consolidates: the bloom and the fade hold still.
+        let size = Size::new(80, 24);
+        let (mut p, mut ctx) = scene(size, 42);
+        for (t, on) in [(1.0, false), (9.0, false), (13.0, true), (25.0, true)] {
+            run_to(&mut p, &mut ctx, t);
+            assert_eq!(p.streaming() > 0.5, on, "t = {t}");
+        }
+        // A wave, not a flicker: with the field frozen, half a period later most tube
+        // pixels change level while the halo keeps its own.
+        let before = p.pixels.clone();
+        p.steps += (0.5 * STREAM_PERIOD / STEP).round() as u64;
+        p.rasterise();
+        let (mut tubes, mut moved) = (0, 0);
+        let px = p.pixels.pixel_size();
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let (a, b) = (before.get(x, y).unwrap(), p.pixels.get(x, y).unwrap());
+                if tube_tone(a).is_some() {
+                    tubes += 1;
+                    moved += usize::from(a != b);
+                } else if a.role == ORGANISM {
+                    assert_eq!(a, b, "halo pixel ({x}, {y}) pulsed");
+                }
+            }
+        }
+        assert!(moved * 2 > tubes, "{moved} of {tubes} tube pixels pulsed");
+        run_to(&mut p, &mut ctx, 43.0);
+        assert_eq!(p.streaming(), 0.0, "the starving network does not stream");
     }
 }

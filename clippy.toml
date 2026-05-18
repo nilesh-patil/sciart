@@ -12,4 +12,12 @@ disallowed-methods = [
     { path = "std::string::String::leak", reason = "own the value instead (TEST-R8)" },
     { path = "std::mem::forget", reason = "let it drop; memory must not leak (TEST-R8)" },
     { path = "std::mem::ManuallyDrop::new", reason = "let it drop; memory must not leak (TEST-R8)" },
+    # GEN-R6 / CORE-R90 / ADR-0016: LLVM fuses a sin + cos pair into one `sincos` by
+    # inlining context, and its sine differs in the last bit; use `sciart_core::trig`.
+    { path = "f64::sin", reason = "use Trig::sin_det: build-profile independent (CORE-R90)" },
+    { path = "f64::cos", reason = "use Trig::cos_det: build-profile independent (CORE-R90)" },
+    { path = "f64::sin_cos", reason = "use Trig::sin_cos_det: build-profile independent (CORE-R90)" },
+    { path = "f32::sin", reason = "use Trig::sin_det: build-profile independent (CORE-R90)" },
+    { path = "f32::cos", reason = "use Trig::cos_det: build-profile independent (CORE-R90)" },
+    { path = "f32::sin_cos", reason = "use Trig::sin_cos_det: build-profile independent (CORE-R90)" },
 ]
