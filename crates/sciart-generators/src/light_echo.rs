@@ -32,15 +32,15 @@ pub fn build() -> Box<dyn Generator> {
 /// Speed of light in half-heights per second.
 pub(crate) const C: f64 = 0.034;
 /// Loop: dark before the flash, then the echo (s). Loop time 0 is the flash.
-const PRE: f64 = 1.0;
-const ECHO: f64 = 33.0;
+const PRE: f64 = 0.5;
+const ECHO: f64 = 21.0;
 pub(crate) const LOOP: f64 = PRE + ECHO;
 /// The outburst's duration (s) and its three peaks: time, width, height.
 pub(crate) const BURST: f64 = 6.0;
 const PEAKS: [(f64, f64, f64); 3] = [(0.7, 0.55, 1.0), (2.4, 0.8, 0.7), (4.2, 0.95, 0.8)];
 /// Outburst colour temperature: hot at first, cooling towards a red supergiant.
-const T_HOT: f64 = 14_000.0;
-const T_COOL: f64 = 2_600.0;
+const T_HOT: f64 = 8_000.0;
+const T_COOL: f64 = 3_000.0;
 const COOL_TAU: f64 = 2.2;
 /// Dust sheets: depths in front of the star, ripple amplitude, and the dust-free cavity.
 const SHEETS: [f64; 4] = [0.12, 0.3, 0.55, 0.85];
@@ -53,14 +53,28 @@ const G: f64 = 0.6;
 const MAX_NODES: usize = 24_000;
 /// Unlit dust: brightest level (SPEC-002: ≤ 20).
 const DUST_LEVEL: f64 = 20.0;
+/// Flashes whose echoes are drawn: age offset (s) and weight. The newest is weight 1;
+/// the one before keeps expanding, fading, while the next flash lights up.
+const GENERATIONS: [(f64, f32); 3] = [(0.0, 1.0), (LOOP, 0.55), (2.0 * LOOP, 0.25)];
 /// Light-curve tables.
 const LUT: usize = 512;
-/// Echo levels drawn in true blackbody colour, and the temperature above which the
-/// fainter echo takes the hot ramp.
-const BLACKBODY_FROM: u8 = 185;
-const HOT_FROM: f64 = 6_000.0;
+/// Echo levels drawn in true blackbody colour (the rest ride the Ember ramp).
+const BLACKBODY_FROM: u8 = 165;
 /// Inverse-square dilution, softened (stylised): weight `∝ 1 / r^DILUTION`.
 const DILUTION: f64 = 1.0;
+
+/// `(L, T)` at `t_e` from the table `curve` (`LUT` entries over `[0, BURST]`), linearly
+/// interpolated so band edges stay smooth; 0 outside the burst.
+fn lerp_curve(curve: &[(f32, f32)], te: f64) -> (f32, f32) {
+    if !(0.0..=BURST).contains(&te) || curve.len() < LUT {
+        return (0.0, 0.0);
+    }
+    let x = te / BURST * (LUT - 1) as f64;
+    let i = (x as usize).min(LUT - 2);
+    let f = (x - i as f64) as f32;
+    let (a, b) = (curve[i], curve[i + 1]);
+    (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f)
+}
 
 /// Light curve `L(t_e)` of the outburst, 0 outside `[0, BURST]`.
 pub(crate) fn light_curve(te: f64) -> f64 {
@@ -160,9 +174,8 @@ pub struct LightEcho {
     seeded: bool,
     /// Loop time: `−PRE` at the loop's start, 0 at the flash.
     t: f64,
-    loops: u64,
-    salts: [u64; 2],
-    dust: [Dust; 2],
+    salt: u64,
+    dust: Dust,
     /// `L` and `T` tabulated over `[0, BURST]`.
     curve: Vec<(f32, f32)>,
     /// Echo brightness and colour temperature per node this frame.
@@ -178,44 +191,38 @@ pub struct LightEcho {
 impl LightEcho {
     fn seed(&mut self, ctx: &mut Ctx) {
         self.seeded = true;
-        self.salts = [ctx.rng.random(), ctx.rng.random()];
+        self.salt = ctx.rng.random();
         self.curve = (0..LUT)
             .map(|i| {
                 let te = BURST * i as f64 / (LUT - 1) as f64;
                 (light_curve(te) as f32, temperature(te) as f32)
             })
             .collect();
-        self.tone = Tone::asinh(0.35, 6.0);
+        self.tone = Tone::asinh(0.12, 1.3);
         self.t = ctx.rng.random_range(4.0..8.0);
     }
 
-    fn set(&self) -> usize {
-        ((self.loops / 2) % 2) as usize
-    }
-
+    /// `L` and `T` at `t_e`, linearly interpolated in the table (0 outside the burst).
     fn curve_at(&self, te: f64) -> (f32, f32) {
-        if !(0.0..=BURST).contains(&te) {
-            return (0.0, 0.0);
-        }
-        let x = te / BURST * (LUT - 1) as f64;
-        self.curve[(x.round() as usize).min(LUT - 1)]
+        lerp_curve(&self.curve, te)
     }
 
-    /// Echo brightness and temperature at every node for the current time.
+    /// Echo brightness and temperature at every node for the current time: the newest
+    /// flash's echo plus the fading echoes of the flashes before it (`GENERATIONS`).
     fn illuminate(&mut self) {
         let t = self.t;
-        let dust = &self.dust[self.set()];
         let (light, kelvin) = (self.light.as_mut_slice(), self.kelvin.as_mut_slice());
-        let scale = (LUT - 1) as f64 / BURST;
-        for ((cell, l), k) in dust.samples.iter().zip(light).zip(kelvin) {
+        for ((cell, l), k) in self.dust.samples.iter().zip(light).zip(kelvin) {
             let (mut sum, mut tsum) = (0.0f32, 0.0f32);
-            for s in cell {
-                let te = t - f64::from(s.lag) / C;
-                if (0.0..=BURST).contains(&te) && s.weight > 0.0 {
-                    let (lc, tc) = self.curve[((te * scale).round() as usize).min(LUT - 1)];
-                    let v = s.weight * lc;
-                    sum += v;
-                    tsum += v * tc;
+            for &(age, weight) in &GENERATIONS {
+                for s in cell {
+                    let te = t + age - f64::from(s.lag) / C;
+                    if (0.0..=BURST).contains(&te) && s.weight > 0.0 {
+                        let (lc, tc) = lerp_curve(&self.curve, te);
+                        let v = s.weight * lc * weight;
+                        sum += v;
+                        tsum += v * tc;
+                    }
                 }
             }
             *l = sum;
@@ -226,7 +233,7 @@ impl LightEcho {
     fn raster(&mut self) {
         self.illuminate();
         let (map, light, kelvin, tone) = (&self.map, &self.light, &self.kelvin, &self.tone);
-        let unlit = &self.dust[self.set()].unlit;
+        let unlit = &self.dust.unlit;
         let direct = light.size() == self.pixels.pixel_size();
         let w = usize::from(light.width());
         self.pixels.shade(|x, y| {
@@ -246,12 +253,7 @@ impl LightEcho {
                 if level >= BLACKBODY_FROM {
                     return ink::blackbody(f64::from(kv));
                 }
-                let ramp = if f64::from(kv) >= HOT_FROM {
-                    Ramp::Ice
-                } else {
-                    Ramp::Ember
-                };
-                return Ink::new(Role::Ramp(ramp), level.max(dust));
+                return Ink::new(Role::Ramp(Ramp::Ember), level.max(dust));
             }
             if dust > 0 {
                 Ink::new(Role::Ramp(Ramp::Starlight), dust)
@@ -305,7 +307,8 @@ impl Generator for LightEcho {
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let lattice = lattice_for(px, MAX_NODES, 1.0);
-        for (d, &salt) in self.dust.iter_mut().zip(&self.salts) {
+        {
+            let (d, salt) = (&mut self.dust, self.salt);
             d.build(salt, lattice);
         }
         self.light.resize(lattice, 0.0);
@@ -320,7 +323,6 @@ impl Generator for LightEcho {
         self.t += dt.max(0.0);
         while self.t >= ECHO {
             self.t -= LOOP;
-            self.loops += 1;
         }
         self.raster();
     }
@@ -376,14 +378,13 @@ mod tests {
     #[test]
     fn echo_a3_the_dust_never_moves() {
         let (mut g, mut ctx) = built(Size::new(120, 40));
-        let dust = g.dust[g.set()].unlit.clone();
-        let samples: Vec<f32> = g.dust[g.set()].samples.iter().map(|c| c[1].lag).collect();
+        let dust = g.dust.unlit.clone();
+        let samples: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
         }
-        assert_eq!(g.set(), 0);
-        assert_eq!(g.dust[0].unlit, dust);
-        let again: Vec<f32> = g.dust[0].samples.iter().map(|c| c[1].lag).collect();
+        assert_eq!(g.dust.unlit, dust);
+        let again: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
         assert_eq!(again, samples);
     }
 
@@ -400,18 +401,20 @@ mod tests {
         let (mut g, _) = built(Size::new(80, 24));
         g.t = 12.0;
         g.illuminate();
-        let dust = &g.dust[g.set()];
+        let dust = &g.dust;
         let mut checked = 0;
         for (i, cell) in dust.samples.iter().enumerate() {
-            let lit: Vec<&Sample> = cell
-                .iter()
-                .filter(|s| {
-                    let te = g.t - f64::from(s.lag) / C;
-                    (0.0..=BURST).contains(&te) && s.weight > 0.0 && g.curve_at(te).0 > 0.0
-                })
-                .collect();
-            if lit.len() == 1 {
-                let te = g.t - f64::from(lit[0].lag) / C;
+            // Every lit (sheet, flash) pair; a node with exactly one shows its colour.
+            let mut lit = Vec::new();
+            for &(age, _) in &GENERATIONS {
+                for s in cell {
+                    let te = g.t + age - f64::from(s.lag) / C;
+                    if (0.0..=BURST).contains(&te) && s.weight > 0.0 && g.curve_at(te).0 > 0.0 {
+                        lit.push(te);
+                    }
+                }
+            }
+            if let [te] = lit[..] {
                 let want = f64::from(g.curve_at(te).1);
                 let got = f64::from(g.kelvin.as_slice()[i]);
                 assert!((got - want).abs() <= 1e-3 * want, "{got} vs {want}");
@@ -422,14 +425,21 @@ mod tests {
     }
 
     #[test]
-    fn echo_a5_nothing_is_lit_before_the_flash() {
+    fn echo_a5_nothing_is_lit_by_a_flash_before_it_happens() {
+        // Before loop time 0 the newest flash has not happened: every node's emission
+        // time for it is negative, so it adds nothing; only older echoes can show.
         let (mut g, mut ctx) = built(Size::new(80, 24));
         while g.t > -PRE + 0.1 {
             g.update(SIM_DT, &mut ctx);
         }
         while g.t < 0.0 {
-            assert!(g.light.as_slice().iter().all(|&v| v == 0.0), "t = {}", g.t);
+            for cell in &g.dust.samples {
+                for s in cell {
+                    assert_eq!(g.curve_at(g.t - f64::from(s.lag) / C).0, 0.0);
+                }
+            }
             g.update(SIM_DT, &mut ctx);
         }
+        assert_eq!(lerp_curve(&g.curve, -1e-9), (0.0, 0.0));
     }
 }

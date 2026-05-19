@@ -14,7 +14,7 @@ use rand::Rng;
 use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
-use sciart_core::rng::value_noise;
+use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 
 pub static META: Meta = Meta {
@@ -58,11 +58,15 @@ pub(crate) const DOCK: f64 = -0.03;
 pub(crate) const DV: f64 = (HOLD - START) * N / (6.0 * PI * HOPS);
 /// Radial exaggeration on screen.
 const X_EXAG: f64 = 5.0;
+/// Top of the Earth's limb, as a share of the height.
+const LIMB_TOP: f64 = 0.88;
 /// How long a burn's arrow shows (s).
 const BURN_SHOW: f64 = 1.2;
 /// Trail length (s) and samples.
 const TRAIL: f64 = 4.0;
 const TRAIL_N: usize = 48;
+/// Exhaust dots in a thruster puff.
+const PUFF_DOTS: i32 = 18;
 
 /// LVLH state `(x, y, ẋ, ẏ)`.
 pub(crate) type State = [f64; 4];
@@ -103,16 +107,38 @@ pub(crate) fn chaser(t: f64) -> State {
 }
 
 /// A recent burn: its time and Δv direction along track (−1 retrograde, +1 prograde).
+/// Every burn: its loop time and Δv direction along track.
+const BURNS: [(f64, f64); 4] = [
+    (T_PHASE, -1.0),
+    (T_RAISE, 1.0),
+    (T_APPROACH, 1.0),
+    (T_APPROACH + APPROACH, -1.0),
+];
+
+/// Station sprite, left to right from the centre: offset, glyph, part.
+#[derive(Debug, Clone, Copy)]
+enum Part {
+    Truss,
+    Panel,
+    Module,
+}
+const STATION: [(i32, Glyph, Part); 9] = [
+    (-4, Glyph::new('▓', '#'), Part::Panel),
+    (-3, Glyph::new('▓', '#'), Part::Panel),
+    (-2, Glyph::new('═', '='), Part::Truss),
+    (-1, Glyph::new('═', '='), Part::Truss),
+    (0, Glyph::new('█', 'H'), Part::Module),
+    (1, Glyph::new('═', '='), Part::Truss),
+    (2, Glyph::new('═', '='), Part::Truss),
+    (3, Glyph::new('▓', '#'), Part::Panel),
+    (4, Glyph::new('▓', '#'), Part::Panel),
+];
+
 fn burn(t: f64) -> Option<(f64, f64)> {
     let t = t.rem_euclid(LOOP);
-    [
-        (T_PHASE, -1.0),
-        (T_RAISE, 1.0),
-        (T_APPROACH, 1.0),
-        (T_APPROACH + APPROACH, -1.0),
-    ]
-    .into_iter()
-    .find(|&(at, _)| t >= at && t < at + BURN_SHOW)
+    BURNS
+        .into_iter()
+        .find(|&(at, _)| t >= at && t < at + BURN_SHOW)
 }
 
 #[derive(Debug, Default)]
@@ -148,33 +174,39 @@ impl OrbitalRendezvous {
         // bright atmosphere at the edge.
         let ps = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()));
-        let r = 2.2 * pw;
-        let c = (0.5 * pw, 0.83 * ph + r);
-        let drift = 0.6 * self.t;
+        let r = 3.0 * pw;
+        let c = (0.5 * pw, LIMB_TOP * ph + r);
+        let drift = 0.9 * self.t;
         let salt = self.salt;
-        for y in ((0.8 * ph) as i32).max(0)..i32::from(ps.height()) {
+        let deep = 0.12 * ph;
+        for y in ((LIMB_TOP * ph) as i32 - 3).max(0)..i32::from(ps.height()) {
             for x in 0..i32::from(ps.width()) {
-                let d = (f64::from(x) + 0.5 - c.0).hypot(f64::from(y) + 0.5 - c.1);
-                let depth = r - d;
-                if depth < -1.5 {
+                let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                let depth = r - (fx - c.0).hypot(fy - c.1);
+                if depth < -2.5 {
                     continue;
                 }
                 let ink = if depth < 0.0 {
-                    ink::ramp(Ramp::Cobalt, 0.35 * (1.5 + depth) / 1.5)
-                } else if depth < 1.2 {
-                    ink::ramp(Ramp::Cobalt, 0.85)
+                    // The airglow above the limb, fading out over 2.5 pixels.
+                    let v = 0.55 * (1.0 + depth / 2.5).powi(2);
+                    if v * 255.0 < ink::MIN_VISIBLE_LEVEL {
+                        continue;
+                    }
+                    ink::ramp(Ramp::Ice, v)
+                } else if depth < 1.0 {
+                    // The bright atmosphere at the limb, antialiased into the ocean.
+                    ink::ramp(Ramp::Ice, 0.72 - 0.2 * depth)
                 } else {
-                    let cloud = value_noise(salt, f64::from(x) + drift, f64::from(y) * 2.0, 5.0);
-                    if cloud > 0.62 {
-                        Ink::new(
-                            Role::Ramp(Ramp::Starlight),
-                            ink::level(175.0 + 180.0 * (cloud - 0.62)),
-                        )
+                    // Clouds: domain-warped noise, streaming with the orbit.
+                    let (u, v) = (fx + drift, fy * 2.2);
+                    let wx = value_noise(salt ^ 1, u, v, 9.0) - 0.5;
+                    let cloud = value_noise(salt, u + 9.0 * wx, v, 4.0);
+                    let ocean = 0.34 + 0.2 * (1.0 - depth / deep).max(0.0);
+                    if cloud > 0.63 {
+                        let k = ((cloud - 0.63) / 0.2).min(1.0);
+                        Ink::new(Role::Ramp(Ramp::Starlight), ink::level(150.0 + 95.0 * k))
                     } else {
-                        ink::ramp(
-                            Ramp::Cobalt,
-                            0.32 + 0.25 * (1.0 - depth / (0.2 * ph)).max(0.0),
-                        )
+                        ink::ramp(Ramp::Ice, ocean)
                     }
                 };
                 self.pixels.set(x, y, ink);
@@ -194,10 +226,10 @@ impl OrbitalRendezvous {
         let pixels = &mut self.pixels;
         disc_pixels(c, 0.45 * r, |x, y, cover| {
             if cover > 0.3 {
-                pixels.set(x, y, ink::ramp(Ramp::Cobalt, 0.6));
+                pixels.set(x, y, ink::ramp(Ramp::Ice, 0.55));
             }
         });
-        let orbit = Ink::new(Role::Ramp(Ramp::Ferroin), 60);
+        let orbit = Ink::new(Role::Ramp(Ramp::Starlight), 70);
         let (dcx, dcy) = Dots::from_cells(c.0, c.1 / 2.0);
         let rd = 2.0 * r;
         for i in 0..72 {
@@ -228,9 +260,9 @@ impl OrbitalRendezvous {
         }
         self.earth();
         // Planned path, faint; the recent trail, bright.
-        let plan = Ink::new(Role::Ramp(Ramp::Aurora), 45);
+        let plan = Ink::new(Role::Ramp(Ramp::Aurora), 135);
         for (i, &(x, y)) in self.plan.iter().enumerate() {
-            if i % 2 == 0 {
+            if i % 3 != 2 {
                 self.dots.plot(x, y, plan);
             }
         }
@@ -244,8 +276,28 @@ impl OrbitalRendezvous {
             let (cx, cy) = self.to_cells(s[0], s[1]);
             let (x, y) = Dots::from_cells(cx, cy);
             let fade = 1.0 - back / TRAIL;
-            self.dots
-                .plot(x, y, ink::ramp(Ramp::Aurora, 0.35 + 0.55 * fade));
+            self.dots.disc(
+                x,
+                y,
+                0.4 + 0.5 * fade,
+                ink::ramp(Ramp::Aurora, 0.5 + 0.5 * fade),
+            );
+        }
+        // Thruster puff while a burn fires: a spreading cone of exhaust dots opposite the
+        // Δv, fading as it grows.
+        if let Some((at, dir)) = burn(self.t) {
+            let age = (self.t.rem_euclid(LOOP) - at).max(0.0);
+            let s = chaser(self.t);
+            let (cx, cy) = self.to_cells(s[0], s[1]);
+            let (x0, y0) = Dots::from_cells(cx + 0.5, cy + 0.5);
+            let puff = ink::ramp(Ramp::Sulfur, 0.9 - 0.5 * (age / BURN_SHOW));
+            for k in 0..PUFF_DOTS {
+                let u = hash01(cell_key(k, 7));
+                let v = hash01(cell_key(k, 9)) - 0.5;
+                let reach = (2.0 + 9.0 * age) * (0.3 + 0.7 * u);
+                self.dots
+                    .plot(x0 - dir * (3.0 + reach), y0 + v * reach * 0.9, puff);
+            }
         }
         self.inset();
     }
@@ -284,7 +336,6 @@ impl Generator for OrbitalRendezvous {
         let ps = self.pixels.pixel_size();
         self.stars.clear();
         for k in 0..(size.area() / 50) as i32 {
-            use sciart_core::rng::{cell_key, hash01};
             let x = (hash01(cell_key(k, 51)) * f64::from(ps.width())) as i32;
             let y = (hash01(cell_key(k, 53)) * f64::from(ps.height()) * 0.8) as i32;
             let l = 18 + (hash01(cell_key(k, 57)).powi(4) * 120.0) as u8;
@@ -305,20 +356,48 @@ impl Generator for OrbitalRendezvous {
         // The station and the chaser as sprites over the line work.
         let (sx, sy) = self.to_cells(0.0, 0.0);
         let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
-        let station = Ink::new(Role::Ramp(Ramp::Ferroin), 200);
-        canvas.put(sx - 1, sy, Glyph::new('═', '-'), station);
-        canvas.put(sx, sy, Glyph::new('╬', '#'), station);
-        canvas.put(sx + 1, sy, Glyph::new('═', '-'), station);
+        // The station: a truss with two solar-panel wings a side, modules at the centre.
+        let truss = Ink::new(Role::Ramp(Ramp::Ferroin), 200);
+        let panel = Ink::new(Role::Ramp(Ramp::Ferroin), 140);
+        let module = Ink::new(Role::Ramp(Ramp::Starlight), 220);
+        for (dx, glyph, ink) in STATION {
+            let ink = match ink {
+                Part::Truss => truss,
+                Part::Panel => panel,
+                Part::Module => module,
+            };
+            canvas.put(sx + dx, sy, glyph, ink);
+        }
+        for dx in [-3, 3] {
+            canvas.put(sx + dx, sy - 1, Glyph::new('▄', '_'), panel);
+            canvas.put(sx + dx, sy + 1, Glyph::new('▀', '-'), panel);
+        }
         let s = chaser(self.t);
         let (cx, cy) = self.to_cells(s[0], s[1]);
         let (cx, cy) = (cx.floor() as i32, cy.floor() as i32);
         if (cx, cy) != (sx, sy) {
+            // A two-cell craft: service module and a bright nose.
+            let body = Ink::new(Role::Ramp(Ramp::Aurora), 170);
+            if (cx - 1, cy) != (sx + 4, sy) {
+                canvas.put(cx - 1, cy, Glyph::new('▐', '['), body);
+            }
             canvas.put(
                 cx,
                 cy,
                 Glyph::new('▶', '>'),
-                Ink::new(Role::Ramp(Ramp::Aurora), 235),
+                Ink::new(Role::Ramp(Ramp::Aurora), 240),
             );
+        }
+        // Where each burn fired so far this loop: a small star on the path.
+        for (at, _) in BURNS {
+            if self.t.rem_euclid(LOOP) >= at {
+                let b = chaser(at);
+                let (bx, by) = self.to_cells(b[0], b[1]);
+                let (bx, by) = (bx.floor() as i32, by.floor() as i32);
+                if (bx, by) != (cx, cy) && canvas.get(bx, by).is_some_and(|c| c.ch != '═') {
+                    canvas.put(bx, by, Glyph::new('✶', '*'), Ink::new(Role::Accent, 150));
+                }
+            }
         }
         // A burn: Δv arrow beside the chaser (the plume points the other way).
         if let Some((_, dir)) = burn(self.t) {
