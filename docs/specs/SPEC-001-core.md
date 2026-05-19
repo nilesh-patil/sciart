@@ -183,3 +183,7 @@ Three more semantic roles for fields (still never RGB, ADR-0004), and a tone-map
 ### Title helpers (M12)
 
 - **CORE-R83** `title::stable_readout_room(size, &Meta) -> usize` is the least `readout_room` (CORE-R76) over the scene's title with no caption and with each of `meta.captions`, taken at width `w` and at every wider width up to the largest `Title::full_fits_from()` of those titles (CORE-R73). So it never exceeds the room of any caption at `w`, and it is non-decreasing in `w`: a narrower terminal can fall back to the shorter phenomenon-only title and free room, and this helper does not pass that room on. From that upper width each title's span is fixed and its room only grows, so the minimum is reached. Captioned scenes size title-row readouts by it in `resize`, so a readout never comes and goes with the beat. It does not allocate.
+
+### Value noise (M13)
+
+- **CORE-R97** `rng::value_noise(salt, x, y, cell) -> f64` is smooth 2-D value noise in `[0, 1]`: lattice corners at multiples of `cell` carry `hash01(salt ^ cell_key(i, j))` (CORE-R70), blended bilinearly with `ease::smoothstep` weights, so at a lattice corner it equals that corner's hash exactly and it is continuous everywhere. It is stateless and deterministic (same arguments ⇒ same bits), never panics or allocates. Lifted from `stellar_nursery` for the M13 cosmos scenes, which previously would each have carried a copy.
