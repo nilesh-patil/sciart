@@ -165,10 +165,10 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
 - [ ] Sun & Planets: saturn_rings, comet_tails + 4 (jupiter_storms, solar_eruption, …)
 - [ ] Earth & Sky: total_solar_eclipse, rainbow + 4 (hurricane, meteor shower, …)
 - [x] Voyages: jwst_unfolding, orbital_rendezvous
-- [ ] Forces & Waves: kelvin_helmholtz, quantum_double_slit
-- [ ] Reactions: 2 C-only scenes chosen by the curator
+- [x] Forces & Waves: kelvin_helmholtz, quantum_double_slit
+- [x] Reactions: catalytic_surface, radical_chain
 - [ ] Living Systems: lenia, firefly_sync
-- [ ] States of Matter: spinodal_decomposition, lichtenberg_discharge
+- [x] States of Matter: spinodal_decomposition, lichtenberg_discharge
 - [ ] Physics of Life: heart_fibrillation, motility_clustering
 - [ ] Molecules of Life: dicty_aggregation, seashell_pigmentation
 - [ ] Life from Matter: chemical_garden, molecular_motors
