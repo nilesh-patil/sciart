@@ -162,7 +162,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
 - [ ] Curator + critic pass over `M11-research/` plus a fresh astronomy research pass; confirm the picks, including Reactions and the 12 extra sky scenes
 - [ ] Shared `pub(crate)` models in sciart-generators: excitable medium (BZ, heart, dicty), Laplacian growth (lichtenberg, fractal_growth), Cahn–Hilliard (spinodal, protocell); lift `lbm` into core only with kelvin_helmholtz
 - [x] Deep Cosmos: spiral_galaxy, cosmic_web, supernova_remnant, relativistic_jet, light_echo, planetary_nebula
-- [ ] Sun & Planets: saturn_rings, comet_tails + 4 (jupiter_storms, solar_eruption, …)
+- [x] Sun & Planets: saturn_rings, comet_tails, jupiter_storms, solar_eruption, io_volcanoes, comet_breakup
 - [ ] Earth & Sky: total_solar_eclipse, rainbow + 4 (hurricane, meteor shower, …)
 - [x] Voyages: jwst_unfolding, orbital_rendezvous
 - [x] Forces & Waves: kelvin_helmholtz, quantum_double_slit
