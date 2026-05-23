@@ -160,18 +160,18 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 ## M13 — New scenes (planned)
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6, §7 · branch `feat/m13-new-scenes` (may split per category group).
 - [ ] Curator + critic pass over `M11-research/` plus a fresh astronomy research pass; confirm the picks, including Reactions and the 12 extra sky scenes
-- [ ] Shared `pub(crate)` models in sciart-generators: excitable medium (BZ, heart, dicty), Laplacian growth (lichtenberg, fractal_growth), Cahn–Hilliard (spinodal, protocell); lift `lbm` into core only with kelvin_helmholtz
+- [x] Shared `pub(crate)` models in `src/shared/` (GEN-R3, GEN-R16): excitable (belousov_zhabotinsky, heart_fibrillation, dicty_aggregation), laplacian_growth (lichtenberg_discharge), cahn_hilliard (spinodal_decomposition), vortex_advect, plume, skyline, earth_globe; `lbm` lifted into core with kelvin_helmholtz (CORE-R98..R100). fractal_growth keeps its own DLA walker.
 - [x] Deep Cosmos: spiral_galaxy, cosmic_web, supernova_remnant, relativistic_jet, light_echo, planetary_nebula
 - [x] Sun & Planets: saturn_rings, comet_tails, jupiter_storms, solar_eruption, io_volcanoes, comet_breakup
 - [x] Earth & Sky: total_solar_eclipse, rainbow, hurricane, meteor_shower, noctilucent_clouds, star_trails
 - [x] Voyages: jwst_unfolding, orbital_rendezvous
 - [x] Forces & Waves: kelvin_helmholtz, quantum_double_slit
 - [x] Reactions: catalytic_surface, radical_chain
-- [ ] Living Systems: lenia, firefly_sync
+- [x] Living Systems: lenia, firefly_sync
 - [x] States of Matter: spinodal_decomposition, lichtenberg_discharge
-- [ ] Physics of Life: heart_fibrillation, motility_clustering
-- [ ] Molecules of Life: dicty_aggregation, seashell_pigmentation
-- [ ] Life from Matter: chemical_garden, molecular_motors
+- [x] Physics of Life: heart_fibrillation, motility_clustering
+- [x] Molecules of Life: dicty_aggregation, seashell_pigmentation
+- [x] Life from Matter: chemical_garden, molecular_motors
 - [ ] Every new scene: SPEC-002 section, title, category by ADR-0013, < 2 ms worst frame at 200×50, leak guards green; review; local `--no-ff` merge into `main`
 
 ## M9 — Future (unscheduled)
