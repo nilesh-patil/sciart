@@ -73,6 +73,39 @@ fn gen_r3_every_scene_module_file_is_registered_and_vice_versa() {
 }
 
 #[test]
+fn gen_r16_no_scene_imports_another_scene() {
+    // GEN-R16: inside the crate, scenes and shared models may reach only `crate::shared`.
+    // Any other `crate::<module>` path would be a scene (or lib.rs internals), which ties
+    // one scene's look to another's edits.
+    let mut hits = Vec::new();
+    for file in rust_sources_deep(&crate_dir().join("src")) {
+        if file.ends_with("src/lib.rs") {
+            continue;
+        }
+        let text = fs::read_to_string(&file).expect("read source");
+        for (n, line) in text.lines().enumerate() {
+            let mut rest = line;
+            while let Some(at) = rest.find("crate::") {
+                let after = &rest[at + "crate::".len()..];
+                let module: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if module != "shared" {
+                    hits.push(format!("{}:{}: crate::{module}", file.display(), n + 1));
+                }
+                rest = after;
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "GEN-R16: scenes may import only sciart_core and crate::shared:\n{}",
+        hits.join("\n")
+    );
+}
+
+#[test]
 fn gen_r15_spec_headings_carry_each_scenes_category_label() {
     // SPEC-002 is where each scene's category (ADR-0013) is written down; this keeps the
     // headings `### <name>  (<category label>, <milestones>)` in step with `Meta.category`.

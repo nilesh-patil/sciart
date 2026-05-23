@@ -32,7 +32,7 @@ use sciart_core::prelude::*;
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::text::StackText;
 
-use crate::satellite_orbit::Globe;
+use crate::shared::earth_globe::Globe;
 
 pub static META: Meta = Meta {
     name: "moon_landing",
