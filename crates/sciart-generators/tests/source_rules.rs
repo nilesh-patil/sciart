@@ -19,6 +19,7 @@ fn workspace_root() -> PathBuf {
     crate_dir().join("../..")
 }
 
+/// The `.rs` files directly in `dir` (not its subdirectories), sorted.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     let mut out: Vec<_> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -29,22 +30,37 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The `.rs` files in `dir` and every directory below it, sorted.
+fn rust_sources_deep(dir: &Path) -> Vec<PathBuf> {
+    let mut out = rust_sources(dir);
+    let mut subdirs: Vec<_> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| p.is_dir())
+        .collect();
+    subdirs.sort();
+    for sub in subdirs {
+        out.extend(rust_sources_deep(&sub));
+    }
+    out
+}
+
+fn stems(files: &[PathBuf]) -> BTreeSet<String> {
+    files
+        .iter()
+        .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
+        .collect()
+}
+
 #[test]
 fn gen_r3_every_scene_module_file_is_registered_and_vice_versa() {
     // GEN-R3: one module file + one registry line. A file without a registry line
-    // would silently escape the contract/property/snapshot suites.
-    // Shared models are declared `pub(crate) mod <name>;` in lib.rs, outside the registry.
-    let lib = fs::read_to_string(crate_dir().join("src/lib.rs")).expect("lib.rs");
-    let shared: BTreeSet<String> = lib
-        .lines()
-        .filter_map(|l| l.trim().strip_prefix("pub(crate) mod ")?.strip_suffix(';'))
-        .map(str::to_owned)
-        .collect();
-    let files: BTreeSet<String> = rust_sources(&crate_dir().join("src"))
-        .iter()
-        .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
-        .filter(|stem| stem != "lib" && !shared.contains(stem))
-        .collect();
+    // would silently escape the contract/property/snapshot suites. Scenes are the files
+    // directly in src/; models shared by several scenes live in src/shared/ and are never
+    // registered.
+    let mut files = stems(&rust_sources(&crate_dir().join("src")));
+    files.remove("lib");
+    let shared = stems(&rust_sources_deep(&crate_dir().join("src/shared")));
     let registered: BTreeSet<String> = registry().iter().map(|e| e.meta.name.to_owned()).collect();
     assert!(
         shared.is_disjoint(&registered),
@@ -183,7 +199,15 @@ fn gen_r7_core_and_generators_never_touch_clock_or_global_rng() {
         workspace_root().join("crates/sciart-core/src"),
     ];
     let mut hits = Vec::new();
-    for file in dirs.iter().flat_map(|d| rust_sources(d)) {
+    // Recursive, so src/shared/ (and any future submodule) is held to the same rule.
+    let files: Vec<PathBuf> = dirs.iter().flat_map(|d| rust_sources_deep(d)).collect();
+    assert!(
+        files
+            .iter()
+            .any(|f| f.parent().is_some_and(|p| p.ends_with("src/shared"))),
+        "GEN-R7: the scan must reach src/shared/"
+    );
+    for file in files {
         let text = fs::read_to_string(&file).expect("read source");
         // CORE-R90: `trig.rs` is the one module allowed to call libm's sin/cos.
         let trig = file.ends_with("sciart-core/src/trig.rs");

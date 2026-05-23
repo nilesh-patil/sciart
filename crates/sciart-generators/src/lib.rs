@@ -21,12 +21,11 @@ macro_rules! registry {
     };
 }
 
-/// Shared `pub(crate)` models used by several scenes (not scenes themselves; GEN-R3).
-pub(crate) mod cahn_hilliard;
-pub(crate) mod laplacian_growth;
-
-/// Models shared by several M13 scenes (`pub(crate)`, not scenes, so not registered).
+/// Models shared by several scenes, in `src/shared/`: `pub(crate)`, not scenes, so never
+/// registered (GEN-R3), and scanned by the GEN-R7 source rule like every scene file.
 mod shared {
+    pub(crate) mod cahn_hilliard;
+    pub(crate) mod laplacian_growth;
     pub(crate) mod plume;
     pub(crate) mod vortex_advect;
 }
