@@ -14,8 +14,9 @@
 //! through each act ([`steps_per_s`]), keeping the domains visibly moving without any
 //! frame doing more than [`MAX_STEPS`] steps.
 //!
-//! Inks: `Role::Div`, the two phases at the two ends of the diverging map and the
-//! interfaces through its dark midpoint, so each domain is outlined by its own boundary.
+//! Inks: a two-phase alloy, one phase in `Ramp(Ferroin)` (wine-magenta) and the other
+//! in `Ramp(Starlight)` (cream), each ramp falling smoothly to its near-black foot
+//! across the interfaces, so each domain is outlined by a soft dark boundary.
 
 use rand::Rng;
 use sciart_core::prelude::*;
@@ -53,7 +54,7 @@ const EMERGE_S: f64 = 2.0;
 /// of a domain's deep interior and how much brighter its rim glows, the sheen gain and
 /// clamp for the fixed upper-left light, and the |v| below which a pixel stays empty.
 const DEPTH_BLUR: usize = 2;
-const EDGE: (f32, f32) = (0.2, 0.8);
+const EDGE: (f32, f32) = (0.0, 0.9);
 /// Top of the interface ramp while the pattern is young (see [`shade_field`]).
 const EDGE_YOUNG: f32 = 0.5;
 const INTERIOR: f32 = 0.46;
@@ -183,10 +184,22 @@ pub(crate) fn shade_field(
     }
 }
 
-/// The ink of a display value `v` ([`shade_field`]): Div; NaN reads as 0.
+/// The ink of a display value `v` ([`shade_field`]): the sign picks the phase's ramp
+/// ([`PHASE_A`] above zero, [`PHASE_B`] below), `|v|` its level; NaN reads as 0.
 pub(crate) fn shade_ink(v: f32) -> Ink {
-    ink::div(f64::from(if v.is_nan() { 0.0 } else { v }))
+    let v = f64::from(if v.is_nan() { 0.0 } else { v });
+    // Each phase's own band of its ramp: Ferroin stops short of its azure top (so the
+    // phase stays magenta-violet); Starlight is lifted toward its cream end.
+    if v >= 0.0 {
+        ink::ramp(PHASE_A, v * 0.7)
+    } else {
+        ink::ramp(PHASE_B, (-v * 1.2).min(1.0))
+    }
 }
+
+/// The two phases' ramps: a magenta alloy phase and a cream one.
+pub(crate) const PHASE_A: Ramp = Ramp::Ferroin;
+pub(crate) const PHASE_B: Ramp = Ramp::Starlight;
 
 /// Whether the domains have formed: some |ψ| is past half of ψ*. Before that, pixels
 /// near zero stay empty so the fresh quench is the terminal's own black; after it, the
@@ -217,10 +230,11 @@ fn lut_index(v: f32) -> usize {
 /// blank on the interfaces.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let p = raster::stronger(top, bottom);
-    if p.role != Role::Div {
-        return None;
-    }
-    let v = ink::div_value(p);
+    let v = match p.role {
+        Role::Ramp(PHASE_A) => ink::seq_value(p),
+        Role::Ramp(PHASE_B) => -ink::seq_value(p),
+        _ => return None,
+    };
     let ch = match v {
         v if v >= 0.55 => '#',
         v if v >= 0.3 => '+',

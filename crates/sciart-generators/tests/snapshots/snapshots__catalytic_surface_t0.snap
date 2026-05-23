@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-ooo  o cc ccc ooo ooocooc oooo oo c oo ooooo  oooooo oo co oo ccoooooo  oooo  oo
-  ooooo c ccc  oo  oooooooooooo ooo  ccoooo oooooooo ooo   oo oo  oooooooooo    
-oooooooooo o ooo  c o  oooooooooooooocoooo   oooooo o    c   ooooooooooo o coo c
-c   o ooooo oooooo cooooooooooooo  oooooooo ooocccc o    ooooo   oooooooooo cccc
-oocoooo ooooooooooo o  ooo o c ocooooo oooo oooo  c o oo o ooooo c ooo  c oooo  
-ooooooo oooooo   o oooooo o cccoooooo o o c  ooo  cooooooooooo o   o oocoo ooooo
-oooooooo o ooo   o ooooocoo ooooooo oooooo   oo coo  ooooooooo    oooo c oooo   
- oooo oo  cc o c oooooo  cooooooooo o c ooooooo c    oooooo c   ooo  oooooooo   
-oooooo   cc ooo o   ooco ooooooo o oooocoooo oooooooooo  o   ooooooocoo ooooooc 
-  oooo    oo  cc ooooooooooo c o oooo o  ooooo ooooooooooo oooo o ooooooo oooooo
-oc oooc  c  c oooo oo   oo o    ooooooooooo  ooo co  oo ooo ooooooo c o   oooooo
-o   ooooooccc  cooooooooooo  oooooooo ooooo c  oooooo oo oooooo ooo c   o  ooooo
-ooo c ooo cc oo     ooooooo oooc o ooooooo  cc oooo oooo   oo c oooooooo  oo ooo
-oooooooooo o   o  c  oo c cc oooocc o   ooo c c o ooooo oooo  oooooooooooo  o  o
-ooo o oo oooooooooo     o o   ooc o o ccooooooooooooooooooooooooo oooo ooo   c o
-oo oooooooo ooo o oo ooooo  coooooooooooooooooooooooooooooooooooo  ooooo  oooooo
-o ooo oo ooooooooo o  o  o o  oo  c  o oo oc ooooooo oooooooooooooo oooooooooooo
-o oooooooccooooooo oo oooooooooooo ooc  ooo oooo ooooooooooo  cooo ooo ooooo ooo
-ooooooooo ooo oo o oooo ooooo  oc o cc ooo    ooo  oooo   ooo  coooooooooo occoo
-oo oooooooooo  o ooooo ooo  ooo  ooc oo o oo  o  c oooo    oo o  ooooooo        
-ooooooo ooooooooooooo c oooocc  o c o  c c        ooooc o ooooo oooo c oo oo   o
- oo   ooooo  ooooooo oo ooooccc  o oo o  ccco cooo o ooooooo  c oooo oooooooo o 
-  ooo o oooo oooo oo oo o  oo ooooooo  ooo  oo  ooooo oooooo o ooooooo co o cc  
- Catalysis - reactive oo  o o  o coooo oo  o ooooo CO fraction y=0.46  CO2 3173
+::::.:::::::::::::::::::::::::::::::::::::::::::::::......::::.::...:..:::::::::
+::::.:::::.:::::::::::::::::::::::::::::::::::::::::::::::::::...:::::::::::::::
+::::::::...:::::::::::::::::::::..::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+:::::::::::::::::.::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::....::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+:::::::::::::::::::::...::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::..::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+:::::::::::::::::::::::::::.::::::::::::::::::::::::::::::::::::.:::::::::::::::
+:::::::::::::::::::::::::::....:::::::::::::::::::::::::::::::::::::::::::::::::
+:::::::::::::::::::::::::::::...:::::::::::::::::::::::::::::::::::::.::::::::::
+::::::::::::::::::::.....::::::::::::::::::::::::::::::::::::::::::::...::::::::
+::::::::::::::::::::....::::::::::::::::::::::::::::::::::::::::::::....::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::....::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::::
+::::::::::::::::::::::::.:::::::::::::::::::::::::::::::::...:::::::::::::::::::
+::::::::::::::::::::::::::::::::::::::::::::::::::::::::::...:::::::::::::::::::
+ Catalysis - reactive :::::::::::::::::::::::::::: CO fraction y=0.54  CO2 9685

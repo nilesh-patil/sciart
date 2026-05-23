@@ -20,10 +20,12 @@
 //! interfaces carry vorticity of opposite sign, so the upper row of billows spins one way
 //! and the lower row the other.
 //!
-//! Lattice units: `U = 0.08` (Ma ≈ 0.14), `τ = 0.52` (ν ≈ 0.0067), `δ = H/20`, so the
-//! layer Reynolds number `Uδ/ν` is ≈ 50–60: low enough to stay laminar enough to read,
-//! high enough to roll up. Four lattice steps per update (240 per simulated second) give
-//! an e-folding time of ≈ 1 s, billows within ≈ 4 s and pairing by ≈ 12 s.
+//! Lattice units: `U = 0.1` (Ma ≈ 0.17), `τ = 0.508` (ν ≈ 0.0027), `δ = max(H/28, 2.5)`,
+//! so the layer Reynolds number `Uδ/ν` is ≈ 95–200 with the aspect bucket (121 at
+//! 200×50): laminar enough to read, high enough to roll up cleanly. Four lattice steps
+//! per update (240 per simulated second) give billows within ≈ 3 s and pairing by
+//! ≈ 9 s. Small displays get a smaller lattice (never more nodes than pixels), so they
+//! show fewer, larger billows instead of minified ones.
 //!
 //! The act lasts [`ACT_S`]; then (or when the watchdog finds a non-finite or out-of-band
 //! node) the layers are laid down afresh with new phases.
@@ -32,10 +34,12 @@
 //!
 //! A passive dye marks the middle band (1) against the outer bands (0); it rides the
 //! lattice velocity by a semi-Lagrangian step each update ([`advect_dye`]). Half-block
-//! pixels are `Role::Div`: the dye's side of ½ picks the hue (one fluid warm, the other
-//! cool), the vorticity `ω` its brightness (calm fluid dim, the billows bright), and
-//! the interface itself, where the dye is ½, is dark: the diverging map's zero. So each
-//! rolled-up sheet reads as a dark spiral line through bright, spinning fluid.
+//! pixels pick their ramp by the dye's side of ½, dusk-rose cloud (`Ramp(Eosin)`) for
+//! the middle band over indigo sky (`Ramp(Cobalt)`) for the outer bands, and their level
+//! by the vorticity `ω` (calm fluid dim, the billows bright). Toward the interface,
+//! where the dye is ½, both ramps fall smoothly to near-black, so each rolled-up sheet
+//! reads as a soft dark spiral line through bright, spinning fluid (bilinear, no
+//! stair-stepped cut).
 
 use std::fmt::Write as _;
 
@@ -60,6 +64,8 @@ pub fn build() -> Box<dyn Generator> {
 /// Lattice node budget and aspect bucket (ADR-0012): every display in one bucket runs
 /// identical physics, and the cost does not grow with the terminal.
 const MAX_NODES: usize = 16_384;
+/// Floor of the node budget on tiny displays, so the flow still has two billows.
+const MIN_NODES: usize = 1_200;
 const BUCKET: f64 = 1.25;
 /// Square-pixel aspects the lattice follows; beyond them it keeps the end value.
 const ASPECT: (f64, f64) = (0.75, 4.0);
@@ -82,14 +88,16 @@ const STEPS_PER_UPDATE: usize = 4;
 /// Updates run inside the first `resize` of a lattice (one simulated second).
 const PREROLL_UPDATES: usize = 60;
 /// Length of one act (simulated seconds) and the watchdog cadence and bands.
-const ACT_S: f64 = 45.0;
+const ACT_S: f64 = 36.0;
 const CHECK_EVERY: f64 = 1.0;
 const RHO_OK: (f32, f32) = (0.8, 1.2);
+/// Share of the laid-down shear the row-mean flow must keep for the act to go on.
+const LAYERED_MIN: f64 = 0.25;
 const U_MAX: f32 = 0.3;
 /// Vorticity that saturates the colour, in units of the seed layer's peak U/δ, and the
 /// fraction of it below which a pixel stays dark.
 const VORT_SAT: f64 = 0.7;
-const VORT_FLOOR: f64 = 0.03;
+const VORT_FLOOR: f64 = 0.01;
 /// Brightness of calm, unspun fluid, as a share of full.
 const CALM: f64 = 0.1;
 /// Nodes per pixel above which the picture is box-filtered before sampling.
@@ -97,6 +105,9 @@ const MINIFY: f64 = 1.3;
 /// Interface sharpening of the dye per update.
 const SHARPEN: f32 = 0.015;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// The middle band's ramp (dusk-rose cloud) and the outer bands' (indigo sky).
+const CLOUD: Ramp = Ramp::Eosin;
+const SKY: Ramp = Ramp::Cobalt;
 /// ASCII fallback by strength.
 const ASCII: [char; 6] = ['.', ':', '-', '=', '#', '@'];
 
@@ -117,7 +128,10 @@ pub(crate) fn lattice_size(display: Size) -> Size {
     let (w, h) = (f64::from(display.width()), f64::from(display.height()));
     let aspect = (w / (2.0 * h)).clamp(ASPECT.0, ASPECT.1);
     let snapped = BUCKET.powi((aspect.ln() / BUCKET.ln()).round() as i32);
-    grid::lattice_for_aspect(snapped, MAX_NODES)
+    // Never more nodes than half-block pixels: a minified lattice would alias its thin
+    // sheets, so a small display simulates a smaller block (fewer, larger billows).
+    let pixels = usize::from(display.width()) * 2 * usize::from(display.height());
+    grid::lattice_for_aspect(snapped, MAX_NODES.min(pixels.max(MIN_NODES)))
 }
 
 pub(crate) fn flow_for(lattice: Size) -> Flow {
@@ -190,10 +204,10 @@ pub(crate) fn vorticity(lat: &Lattice, out: &mut Grid<f32>) {
 /// ASCII cell for two Div pixels: the stronger by `|level − 128|`, as a strength char.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let p = sciart_core::raster::stronger(top, bottom);
-    if p.role != Role::Div {
+    if p.role != Role::Ramp(CLOUD) && p.role != Role::Ramp(SKY) {
         return None;
     }
-    let m = ink::div_value(p).abs();
+    let m = ink::seq_value(p);
     let i = ((m * ASCII.len() as f64) as usize).min(ASCII.len() - 1);
     Some((ASCII[i], p))
 }
@@ -247,7 +261,13 @@ pub(crate) fn advect_dye(lat: &Lattice, dye: &Grid<f32>, out: &mut Grid<f32>, n:
             }
         }
         // Clamped to the enclosing cell's corners: monotone, so no new extrema ring.
-        let v = v.clamp(lo, hi);
+        // A non-finite neighbourhood (a blown-up step before the watchdog's restart)
+        // reads as the interface, never as NaN.
+        let v = if lo <= hi && v.is_finite() {
+            v.clamp(lo, hi)
+        } else {
+            0.5
+        };
         *o = (v + SHARPEN * v * (1.0 - v) * (2.0 * v - 1.0)).clamp(0.0, 1.0);
     }
 }
@@ -301,11 +321,11 @@ pub(crate) fn shade_value(c: f64, s: f64) -> f64 {
 
 /// The Div ink of a picture value, blank below the floor.
 pub(crate) fn value_ink(v: f64) -> Ink {
-    if v.abs() >= VORT_FLOOR {
-        ink::div(v)
-    } else {
-        Ink::BLANK
+    if v.is_nan() || v.abs() < VORT_FLOOR {
+        return Ink::BLANK;
     }
+    let ramp = if v > 0.0 { CLOUD } else { SKY };
+    ink::ramp(ramp, v.abs())
 }
 
 /// [`value_ink`] of [`shade_value`].
@@ -416,6 +436,22 @@ impl KelvinHelmholtz {
         self.lat.healthy(RHO_OK) && fast(self.lat.ux()) && fast(self.lat.uy())
     }
 
+    /// Whether the flow still remembers its layers: the row-mean `u` projected on the
+    /// laid-down shear profile. On small periodic blocks the merged vortices can
+    /// reorganise into a vertical jet; the act then ends (the turbulence-and-reset beat).
+    fn layered(&self) -> bool {
+        let Some(f) = self.flow else { return true };
+        let ux = self.lat.ux().as_slice();
+        let (mut dot, mut norm) = (0.0, 0.0);
+        for (y, row) in ux.chunks_exact(f.w.max(1)).enumerate() {
+            let mean = row.iter().map(|&u| f64::from(u)).sum::<f64>() / f.w as f64;
+            let base = shear(&f, y as f64);
+            dot += mean * base;
+            norm += base * base;
+        }
+        norm == 0.0 || dot / norm >= LAYERED_MIN
+    }
+
     fn rasterise(&mut self) {
         vorticity(&self.lat, &mut self.vort);
         // The signed picture value per node (one pass over the capped lattice), then one
@@ -445,7 +481,7 @@ impl KelvinHelmholtz {
             .shade(|x, y| value_ink(f64::from(map.sample(src, x, y))));
     }
 
-    /// `Re 56` on the title row, right-aligned, when there is room (GEN-R13).
+    /// `Re 121` on the title row, right-aligned, when there is room (GEN-R13).
     fn readout(&self, canvas: &mut Canvas) {
         let Some(f) = self.flow else { return };
         let nu = (TAU - 0.5) / 3.0;
@@ -508,6 +544,8 @@ impl Generator for KelvinHelmholtz {
             self.since_check = 0.0;
             if !self.healthy() {
                 self.resets += 1;
+                self.restart(&mut ctx.rng);
+            } else if !self.layered() {
                 self.restart(&mut ctx.rng);
             }
         }
@@ -665,10 +703,12 @@ mod tests {
         let (upper, lower) = (at(0.25 * f.h as f64), at(0.75 * f.h as f64));
         assert!(upper * lower < 0.0, "{upper} {lower}");
         // Calm fluid is dim, spinning fluid bright, the interface (c = ½) dark.
-        let calm = ink::div_value(pixel_ink(1.0, 0.0));
-        assert!(calm > 0.0 && calm < 0.2, "{calm}");
-        assert!(ink::div_value(pixel_ink(1.0, 1.0)) > 0.9);
-        assert!(ink::div_value(pixel_ink(0.0, 1.0)) < -0.9);
+        let calm = pixel_ink(1.0, 0.0);
+        assert_eq!(calm.role, Role::Ramp(CLOUD));
+        assert!(ink::seq_value(calm) > 0.0 && ink::seq_value(calm) < 0.2);
+        let (cloud, sky) = (pixel_ink(1.0, 1.0), pixel_ink(0.0, 1.0));
+        assert!(cloud.role == Role::Ramp(CLOUD) && ink::seq_value(cloud) > 0.9);
+        assert!(sky.role == Role::Ramp(SKY) && ink::seq_value(sky) > 0.9);
         assert_eq!(pixel_ink(0.5, 1.0), Ink::BLANK);
         assert_eq!(pixel_ink(f64::NAN, 0.0), Ink::BLANK);
     }
