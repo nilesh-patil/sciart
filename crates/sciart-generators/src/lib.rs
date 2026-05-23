@@ -28,6 +28,7 @@ mod shared {
     pub(crate) mod earth_globe;
     pub(crate) mod laplacian_growth;
     pub(crate) mod plume;
+    pub(crate) mod skyline;
     pub(crate) mod vortex_advect;
 }
 
@@ -64,10 +65,12 @@ registry![
     liesegang_rings,
     light_echo,
     mars_rover,
+    meteor_shower,
     molecular_dynamics,
     molecule_viewer,
     moon_landing,
     moon_phases,
+    noctilucent_clouds,
     orbital_rendezvous,
     particle_accelerator,
     physarum,
@@ -76,6 +79,7 @@ registry![
     quantum_double_slit,
     radical_chain,
     radioactive_decay,
+    rainbow,
     relativistic_jet,
     rocket_launch,
     satellite_orbit,
@@ -86,11 +90,13 @@ registry![
     spacetime_grid,
     spinodal_decomposition,
     spiral_galaxy,
+    star_trails,
     starfield,
     stellar_nursery,
     strange_attractors,
     supernova_remnant,
     three_body,
+    total_solar_eclipse,
     vortex_street,
     voyager_journey,
     wave_interference,

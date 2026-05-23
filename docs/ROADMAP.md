@@ -163,7 +163,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
 - [ ] Shared `pub(crate)` models in sciart-generators: excitable medium (BZ, heart, dicty), Laplacian growth (lichtenberg, fractal_growth), Cahn–Hilliard (spinodal, protocell); lift `lbm` into core only with kelvin_helmholtz
 - [x] Deep Cosmos: spiral_galaxy, cosmic_web, supernova_remnant, relativistic_jet, light_echo, planetary_nebula
 - [x] Sun & Planets: saturn_rings, comet_tails, jupiter_storms, solar_eruption, io_volcanoes, comet_breakup
-- [ ] Earth & Sky: total_solar_eclipse, rainbow + 4 (hurricane, meteor shower, …)
+- [x] Earth & Sky: total_solar_eclipse, rainbow, hurricane, meteor_shower, noctilucent_clouds, star_trails
 - [x] Voyages: jwst_unfolding, orbital_rendezvous
 - [x] Forces & Waves: kelvin_helmholtz, quantum_double_slit
 - [x] Reactions: catalytic_surface, radical_chain
