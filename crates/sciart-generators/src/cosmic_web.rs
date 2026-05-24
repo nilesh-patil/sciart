@@ -58,6 +58,8 @@ const HALO: f32 = 3.2;
 /// and the voids end in black on a smooth ramp (no dither).
 const FLOOR: f32 = 0.82;
 const GAMMA: f32 = 1.2;
+/// Fog below this level is drawn in Cobalt blue, the web above it in Plasma violet.
+const FOG_BLUE: u8 = 46;
 /// Halo nodes: gold-white, hotter (whiter) the denser.
 const HALO_K: (f64, f64) = (4_200.0, 7_500.0);
 
@@ -397,7 +399,15 @@ impl CosmicWeb {
             if f64::from(level) < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
             } else {
-                Ink::new(Role::Ramp(Ramp::Plasma), level)
+                // The faintest fog in Cobalt's indigo-blue, the web in Plasma's violet, so
+                // the frame sits bluer than lichtenberg_discharge's violet. The switch is
+                // at a level so dark that the two ramps' hues barely differ there.
+                let ramp = if level < FOG_BLUE {
+                    Ramp::Cobalt
+                } else {
+                    Ramp::Plasma
+                };
+                Ink::new(Role::Ramp(ramp), level)
             }
         });
     }

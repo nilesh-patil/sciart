@@ -64,7 +64,7 @@ const LAYER_SHARE: f64 = (1.0 - BOOMS) / 5.0;
 const FORE: [(f64, f64); 4] = [(-10.5, 0.0), (-3.6, 7.1), (3.6, 7.1), (10.5, 0.0)];
 const AFT: [(f64, f64); 4] = [(-10.5, 0.0), (10.5, 0.0), (3.6, -7.1), (-3.6, -7.1)];
 /// Visual spacing between tensioned layers (m; exaggerated).
-const LAYER_GAP: f64 = 0.32;
+const LAYER_GAP: f64 = 0.22;
 /// Mirror: segment circumradius (m), the drawn share of it (the rest is the dark gap),
 /// and the primary's centre height, stowed and lifted.
 const SEG: f64 = 0.76;
@@ -76,14 +76,18 @@ const SM_DIST: f64 = 7.0;
 /// Camera: base yaw, sway, pitch, eye distance (m).
 const YAW: f64 = 0.38;
 const SWAY: f64 = 0.22;
-const PITCH: f64 = 0.3;
+const PITCH: f64 = 0.17;
 const EYE: f64 = 70.0;
 /// Polygon cap per frame.
 const MAX_POLYS: usize = 48;
 /// Depth slack (m) for line work lying on a surface.
 const DEPTH_EPS: f64 = 0.05;
-/// The gold of the mirror (beryllium coated in gold): orange-gold to pale gold.
+/// The gold of the mirror (beryllium coated in gold): the top of Ember, pale gold
+/// (level ~215 ≈ #E8C66A) to a near-white specular.
 const GOLD: Ramp = Ramp::Ember;
+const GOLD_LEVEL: f64 = 214.0;
+/// Seconds between glints crossing the frame.
+const GLINT_PERIOD: f64 = 14.0;
 
 /// How far each part is deployed at loop time `t`, 0 (stowed) to 1. `layers[k]` counts
 /// from the telescope side (k = 0, layer 5) to the Sun side (k = 4, layer 1).
@@ -255,7 +259,7 @@ fn fill_convex(pixels: &mut Pixels, zbuf: &mut [f32], p: &Poly, spec: &impl Fn(f
             match p.shade {
                 Shade::Flat => {}
                 Shade::Specular => level += spec(cx, cy),
-                Shade::Sheen => level += 0.4 * spec(cx, cy),
+                Shade::Sheen => level += 0.5 * spec(cx, cy),
             }
             let level = level.clamp(ink::MIN_VISIBLE_LEVEL, 255.0);
             pixels.set(ix, iy, ink::ramp(p.ramp, level / 255.0));
@@ -336,9 +340,9 @@ impl JwstUnfolding {
     fn shield_half(d: &Deploy, k: usize, fore: bool) -> [V3; 4] {
         let tension = d.layers[k];
         // Folded up against the telescope until the pallets drop.
-        let fold = (1.0 - d.pallets) * FRAC_PI_2 * 0.96;
+        let fold = (1.0 - d.pallets) * FRAC_PI_2 * 0.8;
         let (s, c) = fold.sin_cos_det();
-        let width = ease::lerp(0.16, 1.0, d.booms);
+        let width = ease::lerp(0.24, 1.0, d.booms);
         let depth = ease::lerp(0.55, 1.0, d.pallets);
         let y = -LAYER_GAP * k as f64 * ease::lerp(0.15, 1.0, tension);
         let outline = if fore { FORE } else { AFT };
@@ -446,48 +450,72 @@ impl JwstUnfolding {
             ..Poly::default()
         };
         self.push(&pr, &bus, bus_poly);
-        // Solar array, stowed along the bus until the fairing opens.
+        // Solar array: a thin panel hinged on the bus's side, swung out once the fairing
+        // is off.
+        let reach = 0.8 + 3.2 * d.fairing;
         let array = [
-            [1.4, -1.9, 1.2],
-            [1.4 + 5.2 * d.fairing, -1.9, 1.2],
-            [1.4 + 5.2 * d.fairing, -1.2, 1.2],
-            [1.4, -1.2, 1.2],
+            [1.4, -1.75, 1.3],
+            [1.4 + reach, -1.75, 1.3],
+            [1.4 + reach, -1.4, 1.3],
+            [1.4, -1.4, 1.3],
         ];
         let array_poly = Poly {
             ramp: Ramp::Cobalt,
-            level: 95.0,
+            level: 120.0,
+            grad: (1.2, 0.0),
             ..Poly::default()
         };
         self.push(&pr, &array, array_poly);
-        // Sunshield layers: Kapton, magenta to lavender with a sheen across each layer.
+        // Sunshield. Stowed, the folded pallets are grey-silver slabs; once the booms
+        // pull the membranes out, the top layer (layer 5, which the camera sees) is a
+        // silver-pink Kapton sheet with a slow sheen, and the four layers under it show
+        // only as violet slivers of shadowed underside along the near edge.
+        let membrane = d.booms > 0.0;
         for k in 0..5 {
             let tension = d.layers[k];
-            let base = if tension > 0.0 {
-                ease::lerp(95.0, 165.0 - 12.0 * k as f64, tension)
+            let (ramp, base) = if !membrane {
+                (Ramp::Starlight, 132.0 - 8.0 * k as f64)
+            } else if k == 0 {
+                (Ramp::Eosin, ease::lerp(178.0, 214.0, tension))
             } else {
-                80.0 - 6.0 * k as f64
+                (
+                    Ramp::Plasma,
+                    ease::lerp(70.0, 108.0, tension) - 6.0 * k as f64,
+                )
             };
             for fore in [true, false] {
                 let q = Self::shield_half(&d, k, fore);
                 let template = Poly {
-                    ramp: Ramp::Plasma,
+                    ramp,
                     level: base,
-                    grad: (0.9, -0.5),
-                    shade: Shade::Sheen,
+                    grad: (0.35, -0.6),
+                    shade: if k == 0 && membrane {
+                        Shade::Sheen
+                    } else {
+                        Shade::Flat
+                    },
                     ..Poly::default()
                 };
+                let before = self.polys.len();
                 self.push(&pr, &q, template);
+                // Seen from above, a lower layer is always behind the one over it; the
+                // mean-depth sort alone can put a near half of one before a far half of
+                // the next and punch notches into the top sheet.
+                if membrane && self.polys.len() > before {
+                    self.polys[before].depth -= 0.8 * k as f64;
+                }
             }
         }
-        // Primary mirror segments.
+        // Primary mirror segments: pale gold, each a touch brighter or dimmer (their
+        // coatings and tilts differ), darker while a wing is still folded back.
         for (q, r) in segments() {
             let (pts, wing) = Self::segment(&d, q, r);
             let fold = wing.map_or(0.0, |s| 1.0 - d.wings[s]);
-            let jitter = hash01(cell_key(q, r)) * 16.0;
+            let jitter = (hash01(cell_key(q, r)) - 0.5) * 18.0;
             let template = Poly {
                 ramp: GOLD,
-                level: 168.0 + jitter - 70.0 * fold,
-                grad: (-0.6, -0.9),
+                level: GOLD_LEVEL + jitter - 55.0 * fold,
+                grad: (-0.25, -0.4),
                 shade: Shade::Specular,
                 ..Poly::default()
             };
@@ -503,10 +531,15 @@ impl JwstUnfolding {
             self.pixels
                 .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
         }
-        // A bright band sweeping across the gold.
-        let sweep = self.t * 9.0 % 160.0 - 40.0;
-        let spec =
-            move |x: f64, y: f64| 90.0 * (-((0.7 * x + 0.5 * y - sweep) / 5.0).powi(2)).exp();
+        // A glint sweeping slowly across the gold (and a sheen across the Kapton): a
+        // narrow diagonal band crossing the frame every `GLINT_PERIOD` seconds.
+        let ps = self.pixels.pixel_size();
+        let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()));
+        let sweep = -0.3 + 1.8 * (self.t / GLINT_PERIOD).fract();
+        let spec = move |x: f64, y: f64| {
+            let u = 0.7 * x / pw + 0.5 * y / ph - sweep;
+            60.0 * (-(u / 0.06).powi(2)).exp()
+        };
         for p in &self.polys {
             fill_convex(&mut self.pixels, &mut self.zbuf, p, &spec);
         }
@@ -514,7 +547,11 @@ impl JwstUnfolding {
         self.dots.clear();
         if d.fairing > 0.3 {
             for k in 0..5 {
-                let edge = ink::ramp(Ramp::Plasma, 0.62 + 0.3 * d.layers[k]);
+                let edge = if d.booms > 0.0 {
+                    ink::ramp(Ramp::Plasma, 0.62 + 0.3 * d.layers[k])
+                } else {
+                    ink::ramp(Ramp::Starlight, 0.8)
+                };
                 for fore in [true, false] {
                     let q = Self::shield_half(&d, k, fore);
                     for i in 0..4 {
@@ -715,8 +752,8 @@ impl Generator for JwstUnfolding {
         self.dots.resize(size);
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
         self.centre = (0.5 * w, 0.64 * h);
-        // Fit the 21 m shield across and ~12 m of height.
-        self.scale = (0.9 * w / (22.0 * geom::ASPECT)).min(0.85 * h / 10.5);
+        // Fit the 21 m shield to ~60–65 % of the width and ~12 m of height.
+        self.scale = (0.68 * w / (22.0 * geom::ASPECT)).min(0.8 * h / 10.5);
         let ps = self.pixels.pixel_size();
         self.stars.clear();
         for k in 0..(size.area() / 45) as i32 {
@@ -851,6 +888,39 @@ mod tests {
                 _ => ORBIT,
             };
             assert_eq!(g.caption(), Some(want), "t = {}", g.t);
+        }
+    }
+
+    #[test]
+    fn jwst_a6_pale_gold_mirror_over_a_shield_of_about_two_thirds_width() {
+        for (w, h) in [(80, 24), (120, 40), (200, 50)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(42, size);
+            let mut g = JwstUnfolding::default();
+            g.resize(size, &mut ctx);
+            // The end of the wings beat: fully deployed.
+            g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
+            g.update(0.0, &mut ctx);
+            let ps = g.pixels.pixel_size();
+            let (mut gold, mut pale, mut x0, mut x1) = (0, 0, i32::MAX, i32::MIN);
+            for y in 0..i32::from(ps.height()) {
+                for x in 0..i32::from(ps.width()) {
+                    let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                    if ink.role == Role::Ramp(GOLD) {
+                        gold += 1;
+                        pale += usize::from(ink.level >= 190);
+                    }
+                    if matches!(ink.role, Role::Ramp(Ramp::Eosin | Ramp::Plasma)) {
+                        (x0, x1) = (x0.min(x), x1.max(x));
+                    }
+                }
+            }
+            assert!(
+                gold > 0 && pale * 10 >= gold * 9,
+                "{w}x{h}: {pale}/{gold} pale"
+            );
+            let share = f64::from(x1 - x0 + 1) / f64::from(ps.width());
+            assert!((0.55..0.72).contains(&share), "{w}x{h}: shield {share}");
         }
     }
 

@@ -11,7 +11,7 @@ use std::f64::consts::PI;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, disc_pixels, halo_kernel};
-use sciart_core::rng::{cell_key, hash01};
+use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 use sciart_core::{Tone, draw, ink, title};
 
@@ -57,7 +57,7 @@ const FEATURES: [(f64, f64); 7] = [
 /// Jet on screen: start of the jet (fraction of width), length (fraction of width),
 /// position angle (radians, up from the right), half-opening and the base half-width
 /// (pixels per jet length).
-const CORE_X: f64 = 0.27;
+const CORE_X: f64 = 0.3;
 const JET_LEN: f64 = 0.54;
 const JET_PA: f64 = 0.12;
 const OPENING: f64 = 0.036;
@@ -81,28 +81,54 @@ const KNOT_HALO: [(i32, i32, f32); 25] = halo_kernel(2);
 /// Synchrotron colours: the jet violet to white at its brightest, the lobes teal.
 const JET: Ramp = Ramp::Plasma;
 const LOBE: Ramp = Ramp::Ice;
-/// Lobe centre (jet lengths past the core), half-length and half-width (jet lengths),
-/// the counter-lobe's distance and relative glow, and the lobes' level cap.
-const LOBE_AT: f64 = 1.02;
-const LOBE_LEN: f64 = 0.13;
-const LOBE_WIDTH: f64 = 0.1;
-const COUNTER_LOBE: f64 = 0.36;
-const COUNTER_GLOW: f64 = 0.3;
+/// Radio plumes (jet lengths): the main lobe's half-width and how far its cocoon flows
+/// back toward the core; the counter-lobe's hotspot distance, size and relative glow; the
+/// backflow speed of the turbulence (jet lengths per second); and the lobes' level cap.
+const LOBE_WIDTH: f64 = 0.17;
+const LOBE_BACK: f64 = 0.42;
+const COUNTER_AT: f64 = 0.44;
+const COUNTER_SIZE: f64 = 0.7;
+const COUNTER_GLOW: f64 = 0.45;
+const BACKFLOW: f64 = 0.012;
 const LOBE_MAX: u8 = 125;
-/// The terminal hotspot (jet lengths).
+/// Lobe pixels this far out (share of the local half-width) turn violet at the edge.
+const LOBE_EDGE: f32 = 0.72;
+const LOBE_EDGE_RAMP: Ramp = Ramp::Plasma;
+/// The faint radio bridge from the core to the counter-lobe (unbeamed cocoon material).
+const BRIDGE: f64 = 0.1;
+const BRIDGE_WIDTH: f64 = 0.008;
+/// The terminal hotspot (jet lengths), compact and bright.
 const HOTSPOT: f64 = 0.95;
+const HOTSPOT_CORE: [(i32, i32, f32); 9] = halo_kernel(1);
 
-/// Lobe emissivity at offset `(u, v)` from its centre (jet lengths, `u` along the jet):
-/// a diffuse cocoon brightening to a bow-shock arc on its leading edge.
-fn lobe(u: f64, v: f64) -> f64 {
-    let q = ((u / LOBE_LEN).powi(2) + (v / LOBE_WIDTH).powi(2)).sqrt();
-    if q >= 1.2 {
-        return 0.0;
+/// Radio-plume emissivity at offset `(u, v)` from its hotspot (jet lengths; `u` along
+/// the jet's travel, negative back toward the core), and how far out it is across the
+/// plume (0 on the axis, 1 at the edge). A turbulent cocoon: narrow at the head, widest
+/// part-way back, fading toward the core, its texture (domain-warped value noise) drifting
+/// back toward the core with the backflow; a bow-shock arc just ahead of the hotspot.
+pub(crate) fn plume(u: f64, v: f64, t: f64, salt: u64, size: f64) -> (f64, f64) {
+    let (width, back) = (LOBE_WIDTH * size, LOBE_BACK * size);
+    let x = -u / back;
+    if !(-0.25..=1.0).contains(&x) {
+        return (0.0, 1.0);
     }
-    let cocoon = 0.09 * (1.0 - (q / 1.2).powi(2));
-    let front = ease::smoothstep(u / LOBE_LEN + 0.2);
-    let arc = 0.22 * front * (-((q - 0.95) / 0.12).powi(2)).exp();
-    cocoon + arc
+    let w = width * (x + 0.25).max(0.0).sqrt() * (1.0 - 0.55 * x.max(0.0).powi(2));
+    let q = v.abs() / w.max(1e-9);
+    // The bow shock: a thin arc ahead of the hotspot.
+    let rho = u.hypot(0.8 * v) / size;
+    let arc =
+        0.15 * ease::smoothstep(u / (0.03 * size) + 0.3) * (-((rho - 0.055) / 0.012).powi(2)).exp();
+    if q >= 1.25 {
+        return (arc, 1.0);
+    }
+    let (fu, fv) = ((u + BACKFLOW * t) / size, v / size);
+    let warp = value_noise(salt ^ 0x5eed, 9.0 * fu, 9.0 * fv, 1.0) - 0.5;
+    let n = value_noise(salt, 24.0 * fu + 3.0 * warp, 24.0 * fv - 3.0 * warp, 1.0);
+    let turbulence = 0.3 + 1.4 * n * n;
+    let tail = 1.0 - ease::smoothstep((x - 0.55) / 0.45);
+    let body = 0.17 * (1.0 - (q / 1.25).powi(2)).powf(1.5) * tail * turbulence;
+    let head = 0.3 * (-(u / (0.035 * size)).powi(2) - (v / (0.045 * size)).powi(2)).exp();
+    (body + head + arc, q / 1.25)
 }
 
 /// Apparent transverse speed in units of `c` (JET-A1).
@@ -166,6 +192,9 @@ pub struct RelativisticJet {
     glow: Glow,
     /// The radio lobes (unbeamed).
     lobe_glow: Glow,
+    /// Per pixel: how far out across its plume a lobe pixel lies (for the violet edge).
+    lobe_q: Vec<f32>,
+    salt: u64,
     tone: Tone,
     pixels: Pixels,
     readout_room: usize,
@@ -175,6 +204,7 @@ impl RelativisticJet {
     fn seed(&mut self, ctx: &mut Ctx) {
         self.seeded = true;
         self.knots = ParticlePool::with_capacity(KNOTS);
+        self.salt = ctx.rng.random();
         self.tone = Tone::asinh(0.12, 2.4);
         // Start mid-stream: a few knots already on their way.
         self.t = 0.0;
@@ -260,9 +290,10 @@ impl RelativisticJet {
         let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
         // Jet body over its bounding box, both sides of the core.
         self.lobe_glow.clear();
-        let reach = self.half_width(1.0) + LOBE_WIDTH * self.len + 2.0;
-        let a = self.at(1.0 + LOBE_LEN * 1.3, 0.0);
-        let b = self.at(-COUNTER_LOBE - LOBE_LEN * 1.3, 0.0);
+        let reach = self.half_width(1.0) + 1.3 * LOBE_WIDTH * self.len + 2.0;
+        let a = self.at(HOTSPOT + 0.1, 0.0);
+        let b = self.at(-COUNTER_AT - 0.1, 0.0);
+        self.lobe_q.fill(1.0);
         let (x0, x1) = (a.0.min(b.0) - reach, a.0.max(b.0) + reach);
         let (y0, y1) = (a.1.min(b.1) - reach, a.1.max(b.1) + reach);
         let (ax, ay) = self.axis;
@@ -284,15 +315,32 @@ impl RelativisticJet {
                         .splat_bilinear(f64::from(x), f64::from(y), v as f32);
                 }
                 // Lobes are not beamed: the counter-lobe shows, fainter, where the
-                // counter-jet cannot.
-                let lobe = if along >= 0.0 {
-                    lobe(along - LOBE_AT, d / self.len)
+                // counter-jet cannot, joined to the core by a faint radio bridge. Only
+                // the main lobe gets the violet edge (the counter side must stay free
+                // of jet-violet ink, JET-A3).
+                let (lobe, q) = if along >= 0.0 {
+                    plume(along - HOTSPOT, d / self.len, self.t, self.salt, 1.0)
                 } else {
-                    COUNTER_GLOW * lobe(-along - COUNTER_LOBE, -d / self.len)
+                    let (v, _) = plume(
+                        -along - COUNTER_AT,
+                        -d / self.len,
+                        self.t,
+                        self.salt ^ 1,
+                        COUNTER_SIZE,
+                    );
+                    let s = -along;
+                    let bridge = BRIDGE
+                        * ease::smoothstep(s / 0.08)
+                        * (1.0 - ease::smoothstep((s - COUNTER_AT + 0.05) / 0.1))
+                        * (-(d / self.len / BRIDGE_WIDTH).powi(2)).exp();
+                    (COUNTER_GLOW * v + bridge, 0.0)
                 };
                 if lobe > 0.0 {
                     self.lobe_glow
                         .splat_bilinear(f64::from(x), f64::from(y), lobe as f32);
+                    if let Some(slot) = self.lobe_q.get_mut(y as usize * pw as usize + x as usize) {
+                        *slot = q as f32;
+                    }
                 }
             }
         }
@@ -313,9 +361,11 @@ impl RelativisticJet {
         let (tx, ty) = self.at(HOTSPOT, 0.0);
         let pulse = 0.85 + 0.15 * (0.9 * self.t).sin_det();
         self.glow
-            .splat(2.0 * tx, 2.0 * ty, &KNOT_HALO, (1.1 * pulse) as f32);
+            .splat(2.0 * tx, 2.0 * ty, &KNOT_HALO, (0.45 * pulse) as f32);
+        self.glow
+            .splat(2.0 * tx, 2.0 * ty, &HOTSPOT_CORE, (2.2 * pulse) as f32);
         let (host, tone, values) = (&self.host, &self.tone, self.glow.values());
-        let lobes = self.lobe_glow.values();
+        let (lobes, lobe_q) = (self.lobe_glow.values(), &self.lobe_q);
         let width = usize::from(px.width());
         self.pixels.shade(|x, y| {
             let i = y as usize * width + x as usize;
@@ -330,7 +380,8 @@ impl RelativisticJet {
             {
                 Ink::new(Role::Ramp(JET), jet)
             } else if lobe >= h && f64::from(lobe) >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(LOBE), lobe)
+                let edge = lobe_q.get(i).is_some_and(|&q| q > LOBE_EDGE);
+                Ink::new(Role::Ramp(if edge { LOBE_EDGE_RAMP } else { LOBE }), lobe)
             } else if f64::from(h) >= ink::MIN_VISIBLE_LEVEL {
                 Ink::new(Role::Ramp(Ramp::Starlight), h)
             } else {
@@ -369,6 +420,9 @@ impl Generator for RelativisticJet {
         self.glow.resize(size);
         self.lobe_glow.resize(size);
         let px = self.pixels.pixel_size();
+        self.lobe_q.clear();
+        self.lobe_q
+            .resize(usize::from(px.width()) * usize::from(px.height()), 1.0);
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
         self.half = h / 2.0;
         self.core = (CORE_X * w, 0.55 * h);
@@ -513,6 +567,35 @@ mod tests {
                 assert_ne!(ink.role, Role::Ramp(JET), "counter-jet at {x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn jet_a6_lobes_are_plumes_trailing_back_from_the_hotspot() {
+        // Half-width (the first v where the plume ends) at a point along it.
+        let half = |u: f64| {
+            (0..400)
+                .map(|i| f64::from(i) * 0.001)
+                .find(|&v| plume(u, v, 0.0, 7, 1.0).1 >= 1.0)
+                .unwrap_or(0.4)
+        };
+        assert!(
+            half(-0.15) > 1.5 * half(0.02),
+            "{} vs {}",
+            half(-0.15),
+            half(0.02)
+        );
+        // Nothing far ahead of the hotspot, and the plume closes toward the core.
+        assert_eq!(plume(0.2, 0.0, 0.0, 7, 1.0).0, 0.0);
+        assert_eq!(plume(-LOBE_BACK * 1.01, 0.0, 0.0, 7, 1.0).0, 0.0);
+        // The hotspot end is the brightest part; the texture drifts with the backflow.
+        let head = plume(0.0, 0.0, 0.0, 7, 1.0).0;
+        let body = (1..40).map(|i| plume(-0.01 * f64::from(i) - 0.1, 0.0, 0.0, 7, 1.0).0);
+        assert!(body.fold(0.0, f64::max) < head);
+        let moved = (0..40).any(|i| {
+            let u = -0.1 - 0.005 * f64::from(i);
+            (plume(u, 0.02, 0.0, 7, 1.0).0 - plume(u, 0.02, 5.0, 7, 1.0).0).abs() > 1e-3
+        });
+        assert!(moved);
     }
 
     #[test]
