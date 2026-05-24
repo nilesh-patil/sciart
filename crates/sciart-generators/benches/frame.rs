@@ -17,13 +17,15 @@ use sciart_generators::{find, registry};
 const SIZES: [(u16, u16); 2] = [(200, 50), (400, 100)];
 
 /// Worst frames: scene and the simulated second of a slow frame (M12 probe, seed 42).
-const WORST: [(&str, f64); 7] = [
+const WORST: [(&str, f64); 9] = [
     ("aurora", 22.5),            // substorm breakup
+    ("chemical_garden", 80.0),   // vent act: a new chimney bakes (budgeted per frame)
     ("constellation_map", 96.5), // Cassiopeia fading in: the dust is redrawn per frame
     ("doppler_effect", 26.0),    // sound -> light: light prefill over fading sound
     ("doppler_effect", 48.0),    // light -> sound: sound prefill over fading light
     ("electron_orbitals", 33.2), // transition beat
     ("liesegang_rings", 75.5),   // band precipitation burst
+    ("planetary_nebula", 94.5),  // ionised nebula: the widest shaded disc
     ("radioactive_decay", 6.7),  // N_B peak: most marks on the lattice
 ];
 /// Frames timed around each worst time; the slowest counts. A hand-over lands in one of

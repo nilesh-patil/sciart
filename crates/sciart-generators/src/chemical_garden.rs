@@ -130,6 +130,8 @@ pub(crate) struct Tank {
     seeds: [(f64, f64); 6],
     n_seeds: usize,
     vent: bool,
+    /// How many gardens have been planted: a new one invalidates the baked tube layer.
+    plants: u32,
 }
 
 impl Default for Tank {
@@ -141,6 +143,7 @@ impl Default for Tank {
             seeds: [(0.0, 0.0); 6],
             n_seeds: 0,
             vent: false,
+            plants: 0,
         }
     }
 }
@@ -172,6 +175,7 @@ impl Tank {
         self.tips.clear();
         self.segments.clear();
         self.particles.clear();
+        self.plants = self.plants.wrapping_add(1);
         self.vent = vent;
         if vent {
             // A chimney already standing: a tapered stack of mineral wall, its crown
@@ -305,6 +309,13 @@ struct Garden {
     act: usize,
     timeline: Timeline,
     pixels: Pixels,
+    /// The floor and the tubes that no longer change, drawn once (GEN-R8): a tube is
+    /// final once its fresh-membrane tint has faded (`age ≥ 6 s`). Segments are appended
+    /// in time order and all age together, so the final ones are always a prefix of the
+    /// list; `baked` of them are in `tubes`, for garden number `baked_plant`.
+    tubes: Pixels,
+    baked: usize,
+    baked_plant: Option<u32>,
     glow: Glow,
     tone: Tone,
     /// Pixel rows the tank spans (above the title row).
@@ -320,6 +331,9 @@ impl Default for Garden {
             act: usize::MAX,
             timeline: Timeline::new(&[(CAPTIONS[0], GARDEN_S), (CAPTIONS[1], VENT_S)]),
             pixels: Pixels::default(),
+            tubes: Pixels::default(),
+            baked: 0,
+            baked_plant: None,
             glow: Glow::default(),
             tone: Tone::asinh(0.5, 12.0),
             rows: 1.0,
@@ -329,54 +343,99 @@ impl Default for Garden {
 }
 
 const TUBE: Ramp = Ramp::Cobalt;
+/// Stamped pixels a frame may spend baking final tubes (GEN-R8). A new vent chimney is
+/// ~120 wide segments at once: at 500×150 it bakes over ~10 frames (a sixth of a second)
+/// instead of one 8 ms frame; at 200×50 it still bakes in one.
+const BAKE_BUDGET: usize = 400_000;
 /// The glow a smoke parcel exposes around its pixel.
 const SMOKE_HALO: [(i32, i32, f32); 25] = sciart_core::raster::halo_kernel(2);
 
+/// How much of a tube's fresh-membrane tint is left: 0 once it is 6 s old.
+fn freshness(s: &Segment) -> f64 {
+    (1.0 - f64::from(s.age) / 6.0).max(0.0)
+}
+
+/// Stamp tube segment `s` into `pixels` (`pw` × `ph` tank pixels): a thick stroke, fresh
+/// membrane pale, old tube deep cobalt, the rim darker than the axis.
+/// Returns the pixels it visited, the stamp's cost.
+fn stamp_tube(pixels: &mut Pixels, s: &Segment, pw: f64, ph: f64) -> usize {
+    let (ax, ay) = (s.a[0] * pw, s.a[1] * ph);
+    let (bx, by) = (s.b[0] * pw, s.b[1] * ph);
+    let r = (s.w * pw).max(0.6);
+    let fresh = freshness(s);
+    let len = (bx - ax).hypot(by - ay);
+    let n = (len * 2.0).ceil().max(1.0) as i32;
+    for k in 0..=n {
+        let t = f64::from(k) / f64::from(n);
+        let (cx, cy) = (ax + (bx - ax) * t, ay + (by - ay) * t);
+        let reach = r.ceil() as i32;
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                let (x, y) = (cx as i32 + dx, cy as i32 + dy);
+                let ox = f64::from(x) + 0.5 - cx;
+                let d = (f64::from(dx).powi(2) + f64::from(dy).powi(2)).sqrt();
+                if d <= r + 0.3 {
+                    // Round tube: the rim darker than the axis.
+                    let across = (ox / (r + 0.5)).abs().min(1.0);
+                    let lvl = 90.0 + 70.0 * (1.0 - across) + 80.0 * fresh;
+                    pixels.set(x, y, Ink::new(Role::Ramp(TUBE), ink::level(lvl)));
+                }
+            }
+        }
+    }
+    let side = 2 * r.ceil() as usize + 1;
+    (n as usize + 1) * side * side
+}
+
 impl Garden {
-    fn rasterise(&mut self) {
-        self.pixels.clear();
+    /// Bring `tubes` up to date: redraw the floor for a new garden or size, then stamp
+    /// the segments that have turned final since the last frame, in list order, until
+    /// `budget` stamped pixels are spent (at least one segment per call).
+    fn bake(&mut self, budget: usize) {
+        let ps = self.tubes.pixel_size();
+        let (pw, ph) = (f64::from(ps.width()), self.rows);
+        if self.baked_plant != Some(self.tank.plants) {
+            self.baked_plant = Some(self.tank.plants);
+            self.baked = 0;
+            self.tubes.clear();
+            // The floor: a band of sediment.
+            let floor = (FLOOR_Y * ph) as i32;
+            for y in floor..ph as i32 {
+                for x in 0..i32::from(ps.width()) {
+                    let n = sciart_core::rng::hash01(sciart_core::rng::cell_key(x, y));
+                    self.tubes.set(
+                        x,
+                        y,
+                        Ink::new(Role::Ramp(Ramp::Starlight), 40 + (n * 30.0) as u8),
+                    );
+                }
+            }
+        }
+        let mut spent = 0;
+        while let Some(s) = self.tank.segments.get(self.baked) {
+            if freshness(s) > 0.0 || (spent > 0 && spent >= budget) {
+                break;
+            }
+            spent += stamp_tube(&mut self.tubes, s, pw, ph);
+            self.baked += 1;
+        }
+    }
+
+    fn rasterise(&mut self, budget: usize) {
+        self.bake(budget);
+        let tubes = &self.tubes;
+        self.pixels
+            .shade(|x, y| tubes.get(x, y).unwrap_or(Ink::BLANK));
         let ps = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(ps.width()), self.rows);
         let to_px = |x: f64, y: f64| (x * pw, y * ph);
-        // The floor: a band of sediment.
-        let floor = (FLOOR_Y * ph) as i32;
-        for y in floor..ph as i32 {
-            for x in 0..i32::from(ps.width()) {
-                let n = sciart_core::rng::hash01(sciart_core::rng::cell_key(x, y));
-                self.pixels.set(
-                    x,
-                    y,
-                    Ink::new(Role::Ramp(Ramp::Starlight), 40 + (n * 30.0) as u8),
-                );
-            }
-        }
-        // Tubes: thick strokes, fresh membrane pale, old tube deep cobalt.
-        for s in &self.tank.segments {
-            let (ax, ay) = to_px(s.a[0], s.a[1]);
-            let (bx, by) = to_px(s.b[0], s.b[1]);
-            let r = (s.w * pw).max(0.6);
-            let fresh = (1.0 - f64::from(s.age) / 6.0).max(0.0);
-            let len = (bx - ax).hypot(by - ay);
-            let n = (len * 2.0).ceil().max(1.0) as i32;
-            for k in 0..=n {
-                let t = f64::from(k) / f64::from(n);
-                let (cx, cy) = (ax + (bx - ax) * t, ay + (by - ay) * t);
-                let reach = r.ceil() as i32;
-                for dy in -reach..=reach {
-                    for dx in -reach..=reach {
-                        let (x, y) = (cx as i32 + dx, cy as i32 + dy);
-                        let (ox, _) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
-                        let d = (f64::from(dx).powi(2) + f64::from(dy).powi(2)).sqrt();
-                        if d <= r + 0.3 {
-                            // Round tube: the rim darker than the axis.
-                            let across = (ox / (r + 0.5)).abs().min(1.0);
-                            let lvl = 90.0 + 70.0 * (1.0 - across) + 80.0 * fresh;
-                            self.pixels
-                                .set(x, y, Ink::new(Role::Ramp(TUBE), ink::level(lvl)));
-                        }
-                    }
-                }
-            }
+        // Tubes still changing colour, drawn over the baked ones in list order.
+        // A final tube not baked yet (over this frame's budget) joins in a frame or two.
+        for s in self.tank.segments[self.baked..]
+            .iter()
+            .filter(|s| freshness(s) > 0.0)
+        {
+            stamp_tube(&mut self.pixels, s, pw, ph);
         }
         // Seed crystals.
         for &(sx, sy) in &self.tank.seeds[..self.tank.n_seeds] {
@@ -504,6 +563,8 @@ impl Generator for Garden {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.pixels.resize(size);
+        self.tubes.resize(size);
+        self.baked_plant = None;
         self.glow.resize(size);
         // The tank fills the rows above the title row.
         self.rows = f64::from(2 * size.height().saturating_sub(1).max(1));
@@ -512,7 +573,7 @@ impl Generator for Garden {
             self.act = GARDEN;
             self.tank.plant(false, &mut ctx.rng);
         }
-        self.rasterise();
+        self.rasterise(usize::MAX);
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -534,7 +595,7 @@ impl Generator for Garden {
                 self.tank.plant(self.act == VENT, &mut ctx.rng);
             }
         }
-        self.rasterise();
+        self.rasterise(BAKE_BUDGET);
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -546,6 +607,32 @@ impl Generator for Garden {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gen_r8_baked_tubes_match_a_full_redraw() {
+        // Two gardens on the same seed; one forgets its baked layer every frame, which is
+        // the old draw-everything path. Through a whole garden act, a vent act and the
+        // next garden (tubes turning final, resets), the pictures must be identical.
+        let size = Size::new(120, 40);
+        let (mut a, mut b) = (Garden::default(), Garden::default());
+        let (mut ca, mut cb) = (Ctx::new(7, size), Ctx::new(7, size));
+        a.resize(size, &mut ca);
+        b.resize(size, &mut cb);
+        let ps = a.pixels.pixel_size();
+        for frame in 0..(65 * 60) {
+            a.update(SIM_DT, &mut ca);
+            b.baked_plant = None;
+            b.update(SIM_DT, &mut cb);
+            if frame % 7 == 0 {
+                for y in 0..i32::from(ps.height()) {
+                    for x in 0..i32::from(ps.width()) {
+                        assert_eq!(a.pixels.get(x, y), b.pixels.get(x, y), "frame {frame}");
+                    }
+                }
+            }
+        }
+        assert!(a.baked > 0, "some tubes were baked");
+    }
 
     #[test]
     fn grd_a1_pressure_rises_between_bursts_and_drops_after() {
