@@ -609,7 +609,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn gen_r8_baked_tubes_match_a_full_redraw() {
+    fn baked_tubes_match_a_full_redraw() {
         // Two gardens on the same seed; one forgets its baked layer every frame, which is
         // the old draw-everything path. Through a whole garden act, a vent act and the
         // next garden (tubes turning final, resets), the pictures must be identical.
