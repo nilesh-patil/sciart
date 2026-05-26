@@ -2,7 +2,7 @@
 //! until the whole tree pulses as one (SPEC-002 `firefly_sync`).
 //!
 //! Mirollo–Strogatz pulse-coupled oscillators: each firefly's phase `φ` rises at `1/T`
-//! (`T` = 1 s ± 5 %); on reaching 1 it flashes and resets to 0. A flash bumps every
+//! (`T` = 0.6 s ± 5 %, as *Pteroptyx*); on reaching 1 it flashes and resets to 0. A flash bumps every
 //! neighbour within [`RADIUS`] along the concave charging curve: its state
 //! `x = f(φ) = ln(1 + (eᵇ − 1)φ)/b` rises by `ε`, and a neighbour pushed to `x ≥ 1` flashes
 //! at once (absorption), which is what locks groups together. Neighbours are fixed (the
@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ASCII_RAMP, STROKE_KERNEL};
+use sciart_core::raster::ASCII_RAMP;
 use sciart_core::{Tone, draw, ink, title};
 
 pub static META: Meta = Meta {
@@ -40,7 +40,7 @@ const EPS: f64 = 0.01;
 /// Coupling radius in mask units (the mask is 2 wide by 1 tall).
 const RADIUS: f64 = 0.06;
 /// Mean period and its spread.
-const PERIOD: f64 = 1.0;
+const PERIOD: f64 = 0.6;
 const PERIOD_SPREAD: f64 = 0.05;
 /// Model sub-steps per simulated second.
 const SUB_PER_S: f64 = 240.0;
@@ -59,18 +59,20 @@ const BLOBS: usize = 14;
 
 // ---- Display ----
 
-const FLASH_S: f32 = 0.12;
-const AFTERGLOW_S: f32 = 0.6;
-/// A firefly is a point of light with a faint halo: centre 1, neighbours 1/3.
-const HALO: [(i32, i32, f32); 9] = {
-    let mut k = STROKE_KERNEL;
-    let mut i = 0;
-    while i < k.len() {
-        k[i].2 = if i == 0 { 1.0 } else { k[i].2 * 0.9 };
-        i += 1;
-    }
-    k
-};
+const FLASH_S: f32 = 0.08;
+const AFTERGLOW_S: f32 = 0.3;
+/// A firefly is a one-pixel lamp with a soft ring: centre 1, edge neighbours ~0.3.
+const HALO: [(i32, i32, f32); 9] = sciart_core::raster::halo_kernel(1);
+/// Weight of the slow halo term (decaying over [`AFTERGLOW_S`]) against the flash.
+const AFTERGLOW: f32 = 0.12;
+/// Canopy pixels per displayed firefly at least: on small screens only every k-th
+/// firefly is drawn, so flashes stay separate points instead of a solid wash.
+const PIXELS_PER_FLY: f64 = 3.0;
+/// The water shows the crown's flashes as a shimmering, squashed reflection: its top row
+/// mirrors the crown's underside at `REFLECT_FROM` (mask y), each water row a further
+/// `REFLECT_SQUASH` rows up (artistic: the true mirror image would fall off screen).
+const REFLECT_FROM: f64 = 0.46;
+const REFLECT_SQUASH: f64 = 1.4;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const SPARK_INK: Ink = Ink::new(Role::Ramp(Ramp::Sulfur), 170);
 /// Order-parameter samples in the inset, one per second.
@@ -260,12 +262,30 @@ impl Tree {
         // Prop roots arch out and down from three trunks into the water.
         for (k, r) in t.roots.iter_mut().enumerate() {
             let trunk = [0.78, 1.0, 1.22][k % 3] + rng.random_range(-0.03..0.03);
-            let out = rng.random_range(0.06..0.2) * if k % 2 == 0 { 1.0 } else { -1.0 };
-            let start = [trunk, rng.random_range(0.5..0.62)];
-            let ctrl = [trunk + 0.35 * out, start[1] - 0.05];
+            // Each trunk fans its roots out like the ribs of a half-open umbrella, the
+            // higher roots reaching further: outer trunks splay outward only, the middle
+            // one a little both ways, so roots never close into loops.
+            let rank = (k / 3) as f64;
+            let side = match k % 3 {
+                0 => -(0.5 + 0.2 * rank),
+                2 => 0.5 + 0.2 * rank,
+                _ => 0.45 * if k % 2 == 0 { 1.0 } else { -1.0 },
+            };
+            let out = rng.random_range(0.1..0.16) * side;
+            let start = [trunk, 0.6 - 0.035 * rank + rng.random_range(0.0..0.03)];
+            let ctrl = [trunk + 0.75 * out, start[1] + 0.25 * (WATER_Y - start[1])];
             *r = [start, ctrl, [trunk + out, WATER_Y + 0.01]];
         }
         t
+    }
+
+    /// How deep `(x, y)` lies inside the canopy: `1 − r²` of the deepest ellipse
+    /// (positive inside, negative outside).
+    fn canopy_depth(&self, x: f64, y: f64) -> f64 {
+        self.blobs.iter().fold(f64::NEG_INFINITY, |m, b| {
+            let (dx, dy) = ((x - b[0]) / b[2], (y - b[1]) / b[3]);
+            m.max(1.0 - (dx * dx + dy * dy))
+        })
     }
 
     fn in_canopy(&self, x: f64, y: f64) -> bool {
@@ -305,6 +325,8 @@ struct Fireflies {
     cells: Size,
     readout_room: usize,
     boat_x: Option<f64>,
+    /// Draw every `stride`-th firefly (small screens).
+    stride: usize,
 }
 
 impl Default for Fireflies {
@@ -318,14 +340,24 @@ impl Default for Fireflies {
             next_sample: 0.0,
             base: Pixels::default(),
             glow: Glow::default(),
-            tone: Tone::asinh(0.6, 1.4),
+            tone: Tone::asinh(0.8, 1.6),
             pixels: Pixels::default(),
             cells: Size::new(1, 1),
             readout_room: 0,
             boat_x: None,
+            stride: 1,
         }
     }
 }
+
+/// A firefly's light `s` seconds after it flashed: a sharp flash and a soft halo that
+/// fades over ~0.3 s [FLY-A6].
+pub(crate) fn brightness(s: f32) -> f32 {
+    (-s / FLASH_S).exp() + AFTERGLOW * (-s / AFTERGLOW_S).exp()
+}
+
+/// Tone levels below this show the scenery, not the glow.
+const FLASH_FLOOR: u8 = 34;
 
 /// Where the boat is at time `t` (mask x), if crossing.
 fn boat_at(t: f64) -> Option<f64> {
@@ -343,46 +375,57 @@ impl Fireflies {
         let tree = &self.tree;
         let water_px = WATER_Y * ph;
         let noise = sciart_core::rng::value_noise;
-        // The moon, upper right, lights the scene: the canopy's top edges, a glitter path
-        // on the water.
-        let (moon_x, moon_y, moon_r) = (0.82 * pw, 0.13 * ph, (0.045 * ph).max(1.2));
+        // The moon, upper right, lights the scene: the crowns' rims on its side, a
+        // glitter path on the water.
+        let (moon_x, moon_y, moon_r) = (0.82 * pw, 0.13 * ph, (0.055 * ph).max(1.5));
+        // Leaf clumps a few pixels across at any size.
+        let leaf = (pw / 60.0).clamp(1.5, 4.0);
+        let sky = |my: f64| 10.0 + 14.0 * (my / WATER_Y).powi(2);
         self.base.shade(|x, y| {
             let (mx, my) = ((f64::from(x) + 0.5) / pw * 2.0, (f64::from(y) + 0.5) / ph);
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
             if my < WATER_Y {
-                if tree.in_canopy(mx, my) {
-                    // Moonlit foliage: dim clumps, the upper edge of each crown brighter.
-                    let leaf = noise(3, fx, fy, 2.5);
-                    let lit = !tree.in_canopy(mx, my - 2.0 / ph);
-                    let lvl = 13.0 + 12.0 * leaf + if lit { 22.0 } else { 0.0 };
+                // Leafy crown: the ellipses' edge frayed by noise into a ragged fringe of
+                // leaves, textured with clumps and darker gaps, dark enough that a flash
+                // stands out.
+                let fray = 0.3 * (noise(5, fx, fy, leaf) - 0.5);
+                if tree.canopy_depth(mx, my) > fray {
+                    let clump = noise(3, fx, fy, 2.0 * leaf);
+                    let fine = noise(4, fx, fy, 0.7 * leaf);
+                    let above = tree.canopy_depth(mx, my - 2.5 / ph);
+                    let moonward = ((mx - 0.6) / 0.9).clamp(0.0, 1.0);
+                    let rim = if above <= fray { 14.0 * moonward } else { 0.0 };
+                    let lvl = 5.0 + 16.0 * clump * clump + 7.0 * fine + rim;
                     return Ink::new(Role::Ramp(Ramp::Aurora), ink::level(lvl));
                 }
-                let d = (fx - moon_x).hypot((fy - moon_y) * 1.0);
-                if d <= moon_r {
-                    return Ink::new(Role::Ramp(Ramp::Starlight), 235);
+                // The moon: a softly edged disc with faint maria, in a wide glow.
+                let d = (fx - moon_x).hypot(fy - moon_y);
+                let cover = (moon_r + 0.5 - d).clamp(0.0, 1.0);
+                if cover > 0.0 {
+                    let mare = noise(7, fx, fy, 0.8 * moon_r);
+                    let lit = 240.0 - 45.0 * mare;
+                    return Ink::new(
+                        Role::Ramp(Ramp::Starlight),
+                        ink::level(90.0 + (lit - 90.0) * cover),
+                    );
                 }
-                if d <= 4.0 * moon_r {
-                    let halo = 30.0 * (1.0 - (d - moon_r) / (3.0 * moon_r));
-                    let sky = 12.0 + 13.0 * (my / WATER_Y).powi(2);
-                    return Ink::new(Role::Ramp(Ramp::Cobalt), ink::level(sky + halo));
-                }
-                // Stars: sparse, faint.
+                let halo = 36.0 * (-(d - moon_r) / (1.3 * moon_r)).exp();
+                // Stars: sparse, faint, only where the moon's glow does not drown them.
                 let h = sciart_core::rng::hash01(sciart_core::rng::cell_key(x, y));
-                if my < 0.45 && h > 0.997 {
+                if my < 0.45 && h > 0.997 && halo < 3.0 {
                     return Ink::new(Role::Ramp(Ramp::Starlight), 60 + (h * 9000.0) as u8 % 60);
                 }
                 // Sky: darkest at the zenith, a faint glow at the horizon.
-                let lvl = 12.0 + 13.0 * (my / WATER_Y).powi(2);
-                Ink::new(Role::Ramp(Ramp::Cobalt), ink::level(lvl))
+                Ink::new(Role::Ramp(Ramp::Cobalt), ink::level(sky(my) + halo))
             } else {
                 let depth = (f64::from(y) - water_px) / (ph - water_px).max(1.0);
                 // Long low ripples, and the moon's glitter path below it.
                 let ripple = noise(9, fx / 5.0, fy * 1.5, 1.0);
-                let path = (fx - moon_x).abs() < moon_r * (1.5 + 2.0 * depth);
-                if path && ripple > 0.62 {
+                let path = (fx - moon_x).abs() < moon_r * (1.2 + 2.0 * depth);
+                if path && ripple > 0.6 {
                     return Ink::new(
                         Role::Ramp(Ramp::Starlight),
-                        ink::level(45.0 + 140.0 * (ripple - 0.62)),
+                        ink::level(45.0 + 150.0 * (ripple - 0.6)),
                     );
                 }
                 Ink::new(
@@ -391,7 +434,9 @@ impl Fireflies {
                 )
             }
         });
-        // Trunks and prop roots, stroked in black over the sky.
+        // Solid trunks, tapering upward into the crown, and prop roots arching out into
+        // the water, as a black silhouette over the sky.
+        let thick = (0.006 * pw).max(0.6);
         for (n, r) in self.tree.roots.iter().enumerate() {
             let steps = (2.0 * (pw + ph)) as i32;
             for k in 0..=steps {
@@ -401,15 +446,22 @@ impl Fireflies {
                         + 2.0 * t * (1.0 - t) * r[1][i]
                         + t * t * r[2][i]
                 };
-                let (px, py) = ((q(0) / 2.0 * pw) as i32, (q(1) * ph) as i32);
-                self.base.set(px, py, Ink::BLANK);
+                let (px, py) = (q(0) / 2.0 * pw, q(1) * ph);
+                // Roots are thickest where they leave the trunk.
+                let half = (thick * (1.0 - 0.6 * t)).max(0.5);
+                for dx in (px - half).round() as i32..=(px + half - 0.5).round() as i32 {
+                    self.base.set(dx, py as i32, Ink::BLANK);
+                }
             }
             if n < 3 {
-                // The trunk: from inside the crown down to where its roots splay.
-                let x = (r[0][0] / 2.0 * pw) as i32;
-                for y in (0.42 * ph) as i32..=(r[0][1] * ph) as i32 {
-                    self.base.set(x, y, Ink::BLANK);
-                    self.base.set(x + 1, y, Ink::BLANK);
+                let xc = r[0][0] / 2.0 * pw;
+                let (top, foot) = (0.36 * ph, r[0][1] * ph);
+                for y in top as i32..=foot as i32 {
+                    let u = ((f64::from(y) - top) / (foot - top).max(1.0)).clamp(0.0, 1.0);
+                    let half = thick * (1.0 + 0.8 * u);
+                    for x in (xc - half).round() as i32..=(xc + half).round() as i32 {
+                        self.base.set(x, y, Ink::BLANK);
+                    }
                 }
             }
         }
@@ -427,6 +479,16 @@ impl Fireflies {
                 }
             }
         }
+        // Draw every k-th firefly where the canopy is small, so flashes stay points.
+        let canopy = (0..i32::from(ps.height()))
+            .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                self.base
+                    .get(x, y)
+                    .is_some_and(|i| i.role == Role::Ramp(Ramp::Aurora))
+            })
+            .count();
+        self.stride = ((N as f64 * PIXELS_PER_FLY / canopy.max(1) as f64).ceil() as usize).max(1);
     }
 
     fn rasterise(&mut self) {
@@ -434,11 +496,11 @@ impl Fireflies {
         let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()));
         self.glow.clear();
         if let Some(sw) = &self.swarm {
-            for (p, &s) in sw.pos.iter().zip(&sw.since) {
-                // The flash, then a faint afterglow (the eye's persistence in a long
-                // exposure), so a wave of flashes leaves a visible wake.
-                let b = (-s / FLASH_S).exp() + 0.18 * (-s / AFTERGLOW_S).exp();
-                if b > 0.02 {
+            for (p, &s) in sw.pos.iter().zip(&sw.since).step_by(self.stride) {
+                // A sharp flash and a soft halo that fades over ~0.3 s: between flashes
+                // the crown is dark, so a synchronised flash lights the whole tree at once.
+                let b = brightness(s);
+                if b > 0.05 {
                     // Glow positions are in dots: two per pixel each way.
                     self.glow.splat(p[0] * pw, 2.0 * p[1] * ph, &HALO, b);
                 }
@@ -453,11 +515,19 @@ impl Fireflies {
             let light = if y < water {
                 glow.get(x, y).unwrap_or(0.0)
             } else {
-                // A rippled, dimmed reflection of the glow above the waterline.
+                // A rippled reflection of the flashes, stretched and dimmer with depth.
                 let (ripple, _) = (f64::from(y) * 1.3 + t * 2.0).sin_cos_det();
                 let sx = x + (ripple * 1.5).round() as i32;
-                let my = 2 * water - y - 1;
-                let mut l = 0.6 * glow.get(sx, my).unwrap_or(0.0);
+                let my = water
+                    - 1
+                    - ((f64::from(y - water) * REFLECT_SQUASH) as i32)
+                    - (f64::from(water) - REFLECT_FROM * ph) as i32;
+                let fade = 0.55 - 0.3 * f64::from(y - water) / (ph - f64::from(water)).max(1.0);
+                let mirror = glow
+                    .get(sx, my)
+                    .unwrap_or(0.0)
+                    .max(0.7 * glow.get(sx, my + 1).unwrap_or(0.0));
+                let mut l = fade as f32 * mirror;
                 if let Some(bx) = boat {
                     // The lantern's wake: a streak trailing the boat on the surface rows.
                     let d = bx - x;
@@ -468,7 +538,7 @@ impl Fireflies {
                 l
             };
             let level = tone.level(light);
-            if level >= 44 {
+            if level >= FLASH_FLOOR {
                 Ink::new(Role::Ramp(Ramp::Sulfur), level)
             } else {
                 under
@@ -674,6 +744,19 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn fly_a6_the_crown_is_dark_between_synchronised_flashes() {
+        let tone = Fireflies::default().tone;
+        assert!(tone.level(brightness(0.0)) > 190, "a flash is bright");
+        assert!(
+            tone.level(brightness(0.1)) >= FLASH_FLOOR,
+            "the halo lingers briefly"
+        );
+        // Past half the period nothing of a flash is left on screen, so a synchronised
+        // tree goes dark between its pulses.
+        assert!(tone.level(brightness(0.5 * PERIOD as f32)) < FLASH_FLOOR);
     }
 
     #[test]

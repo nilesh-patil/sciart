@@ -50,7 +50,7 @@ const SUB_PER_S: f64 = 240.0;
 const DISPERSE_V: f64 = 0.5;
 const DISPERSE_DR: f64 = 6.0;
 /// Area fractions of the dilute and crowded acts.
-const PHI_DILUTE: f64 = 0.12;
+const PHI_DILUTE: f64 = 0.08;
 const PHI_CROWD: f64 = 0.6;
 /// Smallest swimmer on screen, in pixels (sets the box scale at small sizes).
 const MIN_SIGMA_PX: f64 = 2.6;
@@ -74,15 +74,36 @@ const DISPERSE: usize = 2;
 /// ones fade out over it at the start of a new cycle.
 const ARRIVE_S: f64 = 3.0;
 
-/// Clustered swimmers: Starlight, brighter where denser and more tightly packed (a
-/// jammed core glows, its rim fades into the gas).
-const CLUSTER_ROLE: Role = Role::Ramp(Ramp::Starlight);
-/// Free swimmers: one cold hue (SPEC-002 Inks, as built; heading shows in the rod).
-const GAS_ROLE: Role = Role::Ramp(Ramp::Ice);
-
-/// The glow a clustered swimmer exposes around its pixel.
-const CLUSTER_HALO: [(i32, i32, f32); 25] = sciart_core::raster::halo_kernel(2);
+/// Every swimmer is a short braille rod in one ramp (deep teal → emerald → lime-white):
+/// its heading sets the hue within a band and its crowding lifts the band, so a free
+/// swimmer is a dim teal stroke and a jammed one a bright lime one (SPEC-002 round 3).
+const ROD_ROLE: Role = Role::Ramp(Ramp::Aurora);
+/// Rod length in swimmer diameters (a rod-shaped cell; the model is still discs).
+const ROD_LEN: f64 = 1.25;
+/// Level bands `(low, span)` for a free and a fully jammed swimmer.
+const FREE_BAND: (f64, f64) = (74.0, 56.0);
+const JAM_BAND: (f64, f64) = (186.0, 69.0);
+/// The heading that reads brightest within a band (a unit vector, down-right on screen).
+const HUE_DIR: (f64, f64) = (0.6, 0.8);
+/// The density glow under crowds: the same ramp, kept dark so the rods stay on top.
+const GLOW_ROLE: Role = Role::Ramp(Ramp::Aurora);
+const GLOW_MAX: u32 = 100;
+const GLOW_FLOOR: u8 = 24;
+/// Swimmers with at least this many contacts light the glow (a crowd, not a collision).
+const GLOW_CONTACTS: u8 = 3;
+/// The glow a crowded swimmer adds around itself.
+const CLUSTER_HALO: [(i32, i32, f32); 49] = sciart_core::raster::halo_kernel(3);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+
+/// A rod's level: its heading picks the hue inside a band that rises with crowding, from
+/// `FREE_BAND` (no contacts) to `JAM_BAND` (8 or more) [MIPS-A6].
+pub(crate) fn rod_level(ux: f64, uy: f64, contacts: u8) -> u8 {
+    let hue = (0.5 + 0.5 * (ux * HUE_DIR.0 + uy * HUE_DIR.1)).clamp(0.0, 1.0);
+    let jam = ease::smoothstep(f64::from(contacts.min(8)) / 8.0);
+    let lo = ease::lerp(FREE_BAND.0, JAM_BAND.0, jam);
+    let span = ease::lerp(FREE_BAND.1, JAM_BAND.1, jam);
+    sciart_core::ink::level(lo + span * hue)
+}
 
 /// One swimmer, in box units (diameters).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -268,6 +289,7 @@ struct Motility {
     time: f64,
     owed: f64,
     timeline: Timeline,
+    dots: Dots,
     pixels: Pixels,
     glow: Glow,
     tone: Tone,
@@ -290,9 +312,10 @@ impl Default for Motility {
                 (CAPTIONS[1], CROWD_S),
                 (CAPTIONS[2], DISPERSE_S),
             ]),
+            dots: Dots::default(),
             pixels: Pixels::default(),
             glow: Glow::default(),
-            tone: Tone::asinh(0.3, 3.0),
+            tone: Tone::asinh(0.8, 14.0),
             cells: Size::new(1, 1),
             readout_room: 0,
             clustered: 0,
@@ -353,61 +376,66 @@ impl Motility {
     }
 
     fn rasterise(&mut self) {
-        self.pixels.clear();
+        self.dots.clear();
         self.glow.clear();
-        let inv = 1.0 / self.scale;
-        let r_px = 0.5 * inv;
+        // Dots per box unit: a pixel is 2 dots wide and a diameter `1 / scale` pixels.
+        let dpu = 2.0 / self.scale;
+        let half = 0.5 * ROD_LEN * dpu;
         self.clustered = 0;
         for s in &self.world.swimmers[..self.world.active] {
-            let (px, py) = (s.x * inv, s.y * inv);
+            let (x, y) = (s.x * dpu, s.y * dpu);
             if s.contacts >= CLUSTER_CONTACTS {
                 self.clustered += 1;
-                // Clustered swimmers expose a soft glow (dot coordinates: two per
-                // pixel), so a cluster reads as one luminous body, densest at its core.
-                let w = f32::from(s.contacts.min(8)) / 6.0;
-                self.glow.splat(2.0 * px, 2.0 * py, &CLUSTER_HALO, w);
+            }
+            // Crowded swimmers warm a dark density glow under the rods, so a cluster
+            // reads as one body of packed, aligned cells rather than a flat fill.
+            if s.contacts >= GLOW_CONTACTS {
+                let w = f32::from(s.contacts.min(8) - GLOW_CONTACTS + 1) / 5.0;
+                self.glow.splat(x, y, &CLUSTER_HALO, w);
+            }
+            let ink = Ink::new(ROD_ROLE, rod_level(s.ux, s.uy, s.contacts));
+            let (hx, hy) = (half * s.ux, half * s.uy);
+            self.dots.line(x - hx, y - hy, x + hx, y + hy, ink);
+        }
+        let pw = usize::from(self.glow.pixel_size().width());
+        blur121(self.glow.values_mut(), pw);
+        self.glow.to_pixels(&mut self.pixels, &self.tone, |l| {
+            // The faint fringe stays black (the blur already softened the rim).
+            let level = (u32::from(l) * GLOW_MAX / 255) as u8;
+            if level < GLOW_FLOOR {
+                Ink::BLANK
             } else {
-                // A free swimmer: a rod along its heading in one cold hue, its head
-                // bright and its tail dim, so the gas reads as streaming cells.
-                let (sn, cs) = (s.uy, s.ux);
-                let len = (2.2 * r_px).max(2.0);
-                for k in 0..=3 {
-                    let t = f64::from(k) / 3.0 - 0.5;
-                    let ink = Ink::new(GAS_ROLE, 70 + 40 * k as u8);
-                    let (x, y) = (px + t * len * cs, py + t * len * sn);
-                    if self
-                        .pixels
-                        .get(x as i32, y as i32)
-                        .is_none_or(|i| i.role != CLUSTER_ROLE)
-                    {
-                        self.pixels.set(x as i32, y as i32, ink);
-                    }
-                }
+                Ink::new(GLOW_ROLE, level)
             }
-        }
-        let ps = self.pixels.pixel_size();
-        for y in 0..i32::from(ps.height()) {
-            for x in 0..i32::from(ps.width()) {
-                let g = self.glow.get(x, y).unwrap_or(0.0);
-                let level = self.tone.level(g);
-                if level >= 70 {
-                    self.pixels.set(x, y, Ink::new(CLUSTER_ROLE, level));
-                }
-            }
-        }
+        });
     }
 }
 
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let lit = |i: Ink| i.role != Role::Background;
-    let ink = match (lit(top), lit(bottom)) {
-        (false, false) => return None,
-        (true, _) if top.role == CLUSTER_ROLE => top,
-        (_, true) if bottom.role == CLUSTER_ROLE => bottom,
-        (true, _) => top,
-        (false, true) => bottom,
-    };
-    Some((if ink.role == CLUSTER_ROLE { 'o' } else { '.' }, ink))
+/// One in-place `[1 2 1] / 4` pass along rows and then columns of a `w`-wide buffer
+/// (edges clamped), so a crowd's glow ends in a soft rim instead of pixel steps.
+fn blur121(buf: &mut [f32], w: usize) {
+    if w == 0 {
+        return;
+    }
+    let h = buf.len() / w;
+    for row in buf.chunks_exact_mut(w) {
+        let mut prev = row[0];
+        for x in 0..w {
+            let cur = row[x];
+            let next = row[(x + 1).min(w - 1)];
+            row[x] = 0.25 * (prev + 2.0 * cur + next);
+            prev = cur;
+        }
+    }
+    for x in 0..w {
+        let mut prev = buf[x];
+        for y in 0..h {
+            let cur = buf[y * w + x];
+            let next = buf[(y + 1).min(h - 1) * w + x];
+            buf[y * w + x] = 0.25 * (prev + 2.0 * cur + next);
+            prev = cur;
+        }
+    }
 }
 
 impl Generator for Motility {
@@ -422,6 +450,7 @@ impl Generator for Motility {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.cells = size;
         self.readout_room = title::stable_readout_room(size, &META);
+        self.dots.resize(size);
         self.pixels.resize(size);
         self.glow.resize(size);
         let (box_size, scale, full) = box_for(self.pixels.pixel_size());
@@ -476,8 +505,10 @@ impl Generator for Motility {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        // The glow is a half-block backdrop (none in ASCII, where the rods' dot-count
+        // fallback carries the picture); the rods keep it behind their braille.
+        self.pixels.blit(canvas, |_, _, _, _| None);
+        self.dots.blit_over(canvas, &self.pixels);
         let h = i32::from(self.cells.height());
         if h < 4 {
             return;
@@ -587,6 +618,16 @@ mod tests {
                 assert!(g.world.active <= g.world.swimmers.len() && g.world.swimmers.len() <= CAP);
             }
         }
+    }
+
+    #[test]
+    fn mips_a6_jammed_rods_are_brighter_and_heading_sets_hue() {
+        for (ux, uy) in [(1.0, 0.0), (0.0, 1.0), (-0.6, -0.8), (0.6, 0.8)] {
+            // Every jammed rod outshines every free one, whatever the heading.
+            assert!(rod_level(ux, uy, 8) > rod_level(0.6, 0.8, 0));
+        }
+        assert!(rod_level(0.6, 0.8, 0) > rod_level(-0.6, -0.8, 0) + 50);
+        assert!(rod_level(0.6, 0.8, 8) > rod_level(-0.6, -0.8, 8) + 50);
     }
 
     #[test]
