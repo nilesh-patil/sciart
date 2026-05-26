@@ -14,9 +14,10 @@
 //! through each act ([`steps_per_s`]), keeping the domains visibly moving without any
 //! frame doing more than [`MAX_STEPS`] steps.
 //!
-//! Inks: a two-phase alloy, one phase in `Ramp(Ferroin)` (wine-magenta) and the other
-//! in `Ramp(Starlight)` (cream), each ramp falling smoothly to its near-black foot
-//! across the interfaces, so each domain is outlined by a soft dark boundary.
+//! Inks: a two-phase alloy, one phase in `Ramp(Ice)` (deep teal-blue) and the other in
+//! `Ramp(Starlight)` (cream), each ramp falling smoothly to its near-black foot across
+//! the interfaces (by sub-node distance to the zero level set), so each domain is
+//! outlined by an even, antialiased dark seam.
 
 use rand::Rng;
 use sciart_core::prelude::*;
@@ -47,7 +48,7 @@ const BUCKET: f64 = 1.25;
 /// per `update`.
 const RATE: (f64, f64) = (120.0, 360.0);
 const MAX_STEPS: usize = 6;
-/// Seconds over which an act ramps up from half its step rate.
+/// Seconds over which an act eases down from twice its opening step rate.
 const EMERGE_S: f64 = 2.0;
 /// Shading (see [`shade_field`]): the blur radius of the depth field (lattice cells, two
 /// box passes), the interface ramp (|ψ|/ψ* from dark core to full colour), the Div value
@@ -55,6 +56,10 @@ const EMERGE_S: f64 = 2.0;
 /// clamp for the fixed upper-left light, and the |v| below which a pixel stays empty.
 const DEPTH_BLUR: usize = 2;
 const EDGE: (f32, f32) = (0.0, 0.9);
+/// The dark seam on an interface, by distance to the zero level set in lattice nodes
+/// (`|ψ|/|∇ψ|`, sub-node): black at the line, full colour past `SEAM.1`. A distance, not
+/// a threshold on ψ, so the seam is an even, antialiased line at any angle.
+const SEAM: (f32, f32) = (0.1, 1.7);
 /// Top of the interface ramp while the pattern is young (see [`shade_field`]).
 const EDGE_YOUNG: f32 = 0.5;
 const INTERIOR: f32 = 0.46;
@@ -79,9 +84,9 @@ pub(crate) fn lattice_size(display: Size) -> Size {
 /// `L ∝ t^{1/3}` would otherwise freeze the picture late in the act.
 pub(crate) fn steps_per_s(local: f64) -> f64 {
     let f = (local / ACT_S).clamp(0.0, 1.0);
-    // The first seconds run slower, so the domains visibly emerge out of the dark quench
-    // instead of appearing in a few frames.
-    let emerge = 0.5 + 0.5 * (local / EMERGE_S).clamp(0.0, 1.0);
+    // The first seconds run faster (twice the act's opening rate, easing back), so the
+    // quench's dim mush gives way to formed worms within the first second.
+    let emerge = 2.0 - (local / EMERGE_S).clamp(0.0, 1.0);
     (RATE.0 + (RATE.1 - RATE.0) * f) * emerge
 }
 
@@ -178,7 +183,14 @@ pub(crate) fn shade_field(
             // Height rising toward down-right faces the upper-left light.
             let slope = 0.5 * ((depth(xe, y) - depth(xw, y)) + (depth(x, ys) - depth(x, yn)));
             let sheen = (SHEEN.0 * slope).clamp(SHEEN.1, SHEEN.2);
-            let m = smooth(s.abs(), edge) * (INTERIOR + RIM * (1.0 - d) + sheen);
+            // Distance (nodes) to the interface from the local gradient.
+            let (pc, pe, pw) = (p[y * w + x], p[y * w + xe], p[y * w + xw]);
+            let (pn, ps) = (p[yn * w + x], p[ys * w + x]);
+            let g = (0.5 * (pe - pw)).hypot(0.5 * (ps - pn)).max(1e-4);
+            let seam = smooth(pc.abs() / g, SEAM);
+            // Young, the amplitude ramp dims the whole mush; formed, only the seam.
+            let amp = smooth(s.abs(), edge) * (1.0 - f) + f;
+            let m = seam * amp * (INTERIOR + RIM * (1.0 - d) + sheen);
             o[y * w + x] = s.signum() * m.clamp(0.0, 1.0);
         }
     }
@@ -188,17 +200,18 @@ pub(crate) fn shade_field(
 /// ([`PHASE_A`] above zero, [`PHASE_B`] below), `|v|` its level; NaN reads as 0.
 pub(crate) fn shade_ink(v: f32) -> Ink {
     let v = f64::from(if v.is_nan() { 0.0 } else { v });
-    // Each phase's own band of its ramp: Ferroin stops short of its azure top (so the
-    // phase stays magenta-violet); Starlight is lifted toward its cream end.
+    // Each phase's own band of its ramp: Ice stops short of its white top (so the phase
+    // stays a deep teal-blue, apart from kelvin_helmholtz's rose); Starlight is lifted
+    // toward its cream end.
     if v >= 0.0 {
-        ink::ramp(PHASE_A, v * 0.7)
+        ink::ramp(PHASE_A, v * 0.62)
     } else {
         ink::ramp(PHASE_B, (-v * 1.2).min(1.0))
     }
 }
 
-/// The two phases' ramps: a magenta alloy phase and a cream one.
-pub(crate) const PHASE_A: Ramp = Ramp::Ferroin;
+/// The two phases' ramps: a teal-blue phase and a cream one (oil and water).
+pub(crate) const PHASE_A: Ramp = Ramp::Aurora;
 pub(crate) const PHASE_B: Ramp = Ramp::Starlight;
 
 /// Whether the domains have formed: some |ψ| is past half of ψ*. Before that, pixels
@@ -488,5 +501,61 @@ mod tests {
         assert_eq!(lattice_size(Size::new(40, 12)), Size::new(40, 24));
         assert!(steps_per_s(0.0) < steps_per_s(ACT_S));
         assert!(steps_per_s(ACT_S) / 60.0 <= MAX_STEPS as f64);
+    }
+
+    #[test]
+    fn spin_a6_interfaces_are_even_antialiased_seams_and_the_mush_forms_fast() {
+        // A formed straight interface at 30°: the display magnitude depends on the
+        // distance to the zero line only, rising smoothly from black over ≈ 1–2 nodes.
+        let (w, h) = (48u16, 48u16);
+        let mut psi = Grid::new(Size::new(w, h), 0.0f32);
+        let (nx, ny) = (0.5f32, 0.866f32);
+        for y in 0..h {
+            for x in 0..w {
+                let d = (f32::from(x) - 24.0) * nx + (f32::from(y) - 24.0) * ny;
+                psi.set(i32::from(x), i32::from(y), PSI_STAR * (d / 1.2).tanh());
+            }
+        }
+        let (mut out, mut blur, mut tmp) = (Grid::default(), Grid::default(), Grid::default());
+        shade_field(&psi, &mut out, &mut blur, &mut tmp);
+        let mut by_dist: Vec<(f32, f32)> = Vec::new();
+        for y in 16..32u16 {
+            for x in 16..32u16 {
+                let d = (f32::from(x) - 24.0) * nx + (f32::from(y) - 24.0) * ny;
+                if d.abs() < 1.5 {
+                    by_dist.push((
+                        d.abs(),
+                        out.get(i32::from(x), i32::from(y))
+                            .copied()
+                            .unwrap_or(0.0)
+                            .abs(),
+                    ));
+                }
+            }
+        }
+        by_dist.sort_by(|a, b| a.0.total_cmp(&b.0));
+        // Dark at the line, rising with the distance: the mean magnitude per 0.25-node
+        // distance bin increases (the sheen and lattice sampling only add a small spread).
+        let bins: Vec<f32> = (0..5)
+            .map(|b| {
+                let lo = 0.25 * b as f32;
+                let vs: Vec<f32> = by_dist
+                    .iter()
+                    .filter(|p| p.0 >= lo && p.0 < lo + 0.25)
+                    .map(|p| p.1)
+                    .collect();
+                vs.iter().sum::<f32>() / vs.len().max(1) as f32
+            })
+            .collect();
+        assert!(bins[0] < 0.1, "{bins:?}");
+        assert!(bins.windows(2).all(|w| w[1] > w[0]), "{bins:?}");
+        // The phases stay apart from kelvin_helmholtz's Eosin/Cobalt pair.
+        assert!(PHASE_A != Ramp::Eosin && PHASE_A != Ramp::Ferroin);
+        // The quench starts fast, so the t = 1 s frame is formed.
+        let (mut g, mut ctx) = scene(120, 40, 42);
+        for _ in 0..60 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        assert!(formed(&g.psi));
     }
 }

@@ -100,6 +100,8 @@ const VORT_SAT: f64 = 0.7;
 const VORT_FLOOR: f64 = 0.01;
 /// Brightness of calm, unspun fluid, as a share of full.
 const CALM: f64 = 0.1;
+/// Highlight compression of the picture (see [`value_ink`]).
+const HIGHLIGHT: f64 = 0.24;
 /// Nodes per pixel above which the picture is box-filtered before sampling.
 const MINIFY: f64 = 1.3;
 /// Interface sharpening of the dye per update.
@@ -319,13 +321,17 @@ pub(crate) fn shade_value(c: f64, s: f64) -> f64 {
     (CALM + (1.0 - CALM) * spin) * side.abs().sqrt().copysign(side)
 }
 
-/// The Div ink of a picture value, blank below the floor.
+/// The ink of a picture value, blank below the floor. The highlights are compressed
+/// (`a·(1 − HIGHLIGHT·a²)`, top at 1 − HIGHLIGHT): the vortex cores of the late, merged
+/// billows spin hard over wide areas, and at the ramps' pale tops they read as
+/// blown-out blobs; mid-tones are almost untouched.
 pub(crate) fn value_ink(v: f64) -> Ink {
     if v.is_nan() || v.abs() < VORT_FLOOR {
         return Ink::BLANK;
     }
     let ramp = if v > 0.0 { CLOUD } else { SKY };
-    ink::ramp(ramp, v.abs())
+    let a = v.abs().min(1.0);
+    ink::ramp(ramp, a * (1.0 - HIGHLIGHT * a * a))
 }
 
 /// [`value_ink`] of [`shade_value`].
@@ -707,8 +713,11 @@ mod tests {
         assert_eq!(calm.role, Role::Ramp(CLOUD));
         assert!(ink::seq_value(calm) > 0.0 && ink::seq_value(calm) < 0.2);
         let (cloud, sky) = (pixel_ink(1.0, 1.0), pixel_ink(0.0, 1.0));
-        assert!(cloud.role == Role::Ramp(CLOUD) && ink::seq_value(cloud) > 0.9);
-        assert!(sky.role == Role::Ramp(SKY) && ink::seq_value(sky) > 0.9);
+        // Bright but not blown out: the highlights stop short of the ramps' pale tops.
+        for (p, role) in [(cloud, CLOUD), (sky, SKY)] {
+            assert!(p.role == Role::Ramp(role), "{p:?}");
+            assert!((0.7..0.8).contains(&ink::seq_value(p)), "{p:?}");
+        }
         assert_eq!(pixel_ink(0.5, 1.0), Ink::BLANK);
         assert_eq!(pixel_ink(f64::NAN, 0.0), Ink::BLANK);
     }

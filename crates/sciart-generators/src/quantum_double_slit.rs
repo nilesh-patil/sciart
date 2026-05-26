@@ -121,8 +121,9 @@ const CLICKS_PER_FRAME: usize = 24;
 /// A click flashes at full level and settles to `CLICK_REST` over `CLICK_FADE_S`.
 const CLICK_REST: f64 = 185.0;
 const CLICK_FADE_S: f32 = 1.2;
-/// Wave visibility by act: act 2 dims the wave so the clicks carry the picture.
-const WAVE_VIS: [f32; 3] = [1.0, 0.4, 1.0];
+/// Wave visibility by act: act 2 holds the fan almost at full brightness (a dimmed fan
+/// read as the scene fading out); the brighter histogram glow carries the bands.
+const WAVE_VIS: [f32; 3] = [1.0, 0.92, 1.0];
 /// Tone: `v = Re ψ/√peak` drawn as `sign(v)·√|v|`, blank below `CUTOFF`. Each side of
 /// the wall has its own peak, so the weak transmitted fan is exposed like the incident
 /// packet; the peaks decay with this half-life so a spreading wave stays visible.
@@ -1273,5 +1274,15 @@ mod tests {
                 "{w}x{h}: fan lights {lit} of {ph} rows at t = 1.5 s"
             );
         }
+    }
+
+    #[test]
+    fn qds_a7_the_fan_holds_its_brightness_through_the_acts() {
+        // The one-at-a-time act keeps the wave within 10 % of full exposure, so the fan
+        // never reads as fading out; the histogram glow carries the bands.
+        assert!(
+            WAVE_VIS.iter().all(|&v| (0.9..=1.0).contains(&v)),
+            "{WAVE_VIS:?}"
+        );
     }
 }
