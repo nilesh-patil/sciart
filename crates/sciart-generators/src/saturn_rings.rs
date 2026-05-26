@@ -4,11 +4,13 @@
 //! and A rings, the Cassini Division, the Encke and Keeler gaps, the Huygens ringlet),
 //! seen through `1 − e^{−τ/μ}`. Every ring pixel is inverted to ring-plane `(r, λ)`; its
 //! clumpy texture is value noise in `(r, λ − Ω(r)·t)` with the Keplerian `Ω ∝ r^{−3/2}`,
-//! so the rings shear honestly. Daphnis, in the Keeler gap, raises edge waves that decay
-//! downstream; spokes corotate with the planet's magnetic field across the B ring; the
-//! globe (oblate, banded, lit from the side) hides the far rings and throws its shadow
-//! on them, and the rings shadow the globe in turn. The globe is shaded once per resize;
-//! the rings are re-shaded every frame in `update`.
+//! so the rings' clumps shear honestly. Pan, in the Encke gap, raises edge waves and a
+//! wake of density ripples that decay downstream; Mimas orbits outside the rings (its 2:1
+//! resonance holds the Cassini Division's inner edge); spokes corotate with the planet's
+//! magnetic field across the B ring; the globe (oblate, softly banded, limb-darkened, lit
+//! from the side) hides the far rings and throws its shadow on them, and the rings shadow
+//! the globe in turn. The globe is shaded once per resize; the rings are re-shaded every
+//! frame in `update`.
 //!
 //! Units: lengths in Saturn equatorial radii (60 268 km), time in simulated seconds with
 //! the ring motion time-lapsed ×2000.
@@ -19,10 +21,10 @@ use rand::Rng;
 use sciart_core::geom::wrap_angle;
 use sciart_core::ink;
 use sciart_core::prelude::*;
-use sciart_core::raster::ascii_ramp_cell;
+use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
 use sciart_core::rng::{cell_key, hash01};
+use sciart_core::timeline::ease;
 
-use crate::shared::vortex_advect::value_noise_wrap_x;
 use sciart_core::rng::value_noise;
 
 pub static META: Meta = Meta {
@@ -53,24 +55,45 @@ const R_IN: f64 = 1.20;
 const R_OUT: f64 = 2.34;
 const LUT: usize = 2048;
 
-/// Gap radii (the gap widths are exaggerated so they show at terminal resolution).
-pub(crate) const CASSINI: (f64, f64) = (1.951, 2.027);
+/// Gap radii (the gap widths are exaggerated so they show at terminal resolution; the
+/// Cassini Division is widened outward by ~15 %).
+pub(crate) const CASSINI: (f64, f64) = (1.951, 2.04);
 pub(crate) const ENCKE: (f64, f64) = (2.203, 2.224);
 pub(crate) const KEELER: (f64, f64) = (2.247, 2.259);
 const A_OUTER: f64 = 2.2695;
-/// Daphnis edge waves: amplitude (R_S, exaggerated), decay length and wavenumber in
+/// Pan's orbit, mid-Encke gap (R_S).
+pub(crate) const PAN_R: f64 = 0.5 * (ENCKE.0 + ENCKE.1);
+/// Pan's edge waves: amplitude (R_S, exaggerated), decay length and wavenumber in
 /// radians downstream of the moon.
-const WAVE_AMP: f64 = 0.010;
+const WAVE_AMP: f64 = 0.012;
 const WAVE_DECAY: f64 = 1.0;
 const WAVE_K: f64 = 16.0;
+/// Pan's wake: radial reach either side of the gap (R_S), its brightness contrast and
+/// its decay (rad downstream). Exaggerated so a terminal shows it.
+const WAKE_REACH: f64 = 0.09;
+const WAKE_AMP: f64 = 0.55;
+const WAKE_DECAY: f64 = 1.4;
+/// Mimas: orbital radius (R_S, 185 540 km) and drawn radius (R_S; ×10 so it shows).
+pub(crate) const MIMAS_R: f64 = 3.078;
+const MIMAS_SIZE: f64 = 0.033;
+/// Clumps: azimuthal lattice cells per turn and radial cells per R_S of the ring
+/// texture, and its contrast. Coarse in radius so the rings do not read as grain.
+const CLUMP_AZ: i32 = 20;
+const CLUMP_R: f64 = 9.0;
+const CLUMP_AMP: f64 = 0.5;
+const CLUMP_LIFE: f64 = 10.0;
 /// Spokes alive at most, their radial band and life (s).
-const SPOKES: usize = 8;
+const SPOKES: usize = 10;
 const SPOKE_BAND: (f64, f64) = (1.58, 1.92);
 const SPOKE_LIFE: (f64, f64) = (6.0, 10.0);
 /// Deepest spoke darkening (exaggerated so they read).
-const SPOKE_DIM: f64 = 0.6;
-/// The globe's ramp: butterscotch zones and tan belts.
-const GLOBE: Ramp = Ramp::Ember;
+const SPOKE_DIM: f64 = 0.5;
+/// The globe's ramp: cream-butterscotch zones and tan belts, a muted earth tone.
+const GLOBE: Ramp = Ramp::Sienna;
+/// The lowest Sienna level the globe uses (a muted tan-brown); dimmer globe is drawn in
+/// low Starlight. And the globe coverage below which a limb pixel stays space.
+const GLOBE_FLOOR: f64 = 0.5;
+const GLOBE_EDGE: f64 = 0.4;
 /// Background stars per 1000 pixels.
 const STAR_DENSITY: f64 = 2.5;
 
@@ -132,7 +155,124 @@ fn albedo(r: f64) -> f64 {
     }
 }
 
-/// Edge-wave displacement (R_S) at angle `lag` downstream of Daphnis (RING-A5): a
+/// Clump texture multiplier at ring radius `r`, angle `λ` and time `t` (RING-A2, A9).
+/// Clumps (self-gravity wakes) are value noise that moves at the Keplerian rate, so the
+/// inner rings overtake the outer; like real wakes they dissolve and re-form, here over
+/// `CLUMP_LIFE` s, two staggered generations cross-faded by `sin²`, so the shear never
+/// winds them into radial grain. Coarse in radius: radially adjacent pixels vary smoothly
+/// (the fine radial structure is the τ profile's).
+#[cfg(test)]
+pub(crate) fn clump(r: f64, lambda: f64, t: f64) -> f64 {
+    let mut layers = [ClumpLayer::default(); 2];
+    for (k, layer) in layers.iter_mut().enumerate() {
+        layer.refresh(t, k);
+    }
+    clump_at(&layers, r, lambda)
+}
+
+/// Lattice rows of the clump noise: `r·CLUMP_R` stays below 23 on the rings (r < 2.55).
+const CLUMP_ROWS: usize = 24;
+const CLUMP_CELLS: usize = CLUMP_AZ as usize * CLUMP_ROWS;
+
+/// One clump generation: its cross-fade weight, age (s) and value-noise lattice. The
+/// lattice (`hash01` per corner, wrapping in azimuth) is rebuilt only when a new
+/// generation is born, so a ring pixel costs four table reads, not six hashes.
+#[derive(Debug, Clone, Copy)]
+struct ClumpLayer {
+    weight: f64,
+    age: f64,
+    salt: u64,
+    lattice: [f32; CLUMP_CELLS],
+}
+
+impl Default for ClumpLayer {
+    fn default() -> Self {
+        Self {
+            weight: 0.0,
+            age: 0.0,
+            // No generation hashes to this, so the first refresh builds the lattice.
+            salt: u64::MAX,
+            lattice: [0.0; CLUMP_CELLS],
+        }
+    }
+}
+
+impl ClumpLayer {
+    /// Generation `layer` (0 or 1, staggered by half a life) at time `t`.
+    fn refresh(&mut self, t: f64, layer: usize) {
+        let shifted = t.max(0.0) + 0.5 * CLUMP_LIFE * layer as f64;
+        let epoch = (shifted / CLUMP_LIFE).floor();
+        self.age = shifted - epoch * CLUMP_LIFE;
+        self.weight = (PI * self.age / CLUMP_LIFE).sin_det().powi(2);
+        let salt = 0x7E47 ^ (epoch as u64).wrapping_mul(0x9E37_79B9) ^ ((layer as u64) << 40);
+        if salt != self.salt {
+            self.salt = salt;
+            for (k, v) in self.lattice.iter_mut().enumerate() {
+                let (i, j) = (k % CLUMP_AZ as usize, k / CLUMP_AZ as usize);
+                *v = hash01(salt ^ cell_key(i as i32, j as i32)) as f32;
+            }
+        }
+    }
+
+    /// Smoothstep-blended value noise at azimuth `x` (lattice cells, wrapping every
+    /// `CLUMP_AZ`) and radius `y` (lattice cells).
+    #[inline]
+    fn noise(&self, x: f64, y: f64) -> f64 {
+        let n = CLUMP_AZ as usize;
+        let x = x.rem_euclid(f64::from(CLUMP_AZ));
+        let y = y.clamp(0.0, (CLUMP_ROWS - 1) as f64 - 1e-9);
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = (x - x0, y - y0);
+        let (sx, sy) = (fx * fx * (3.0 - 2.0 * fx), fy * fy * (3.0 - 2.0 * fy));
+        let (i, j) = ((x0 as usize) % n, y0 as usize);
+        let i1 = (i + 1) % n;
+        let at = |i: usize, j: usize| f64::from(self.lattice[j * n + i]);
+        let top = at(i, j) + sx * (at(i1, j) - at(i, j));
+        let bottom = at(i, j + 1) + sx * (at(i1, j + 1) - at(i, j + 1));
+        top + sy * (bottom - top)
+    }
+}
+
+#[inline]
+fn clump_at(layers: &[ClumpLayer; 2], r: f64, lambda: f64) -> f64 {
+    let omega = kepler_rate(r);
+    let mut sum = 0.0;
+    for layer in layers {
+        if layer.weight < 1e-3 {
+            continue;
+        }
+        // Each generation is born at a random orientation, then shears.
+        let phase = (lambda - omega * layer.age) / TAU;
+        sum += layer.weight * layer.noise(phase * f64::from(CLUMP_AZ), r * CLUMP_R);
+    }
+    1.0 - 0.5 * CLUMP_AMP + CLUMP_AMP * (0.5 + 1.4 * (sum - 0.5)).clamp(0.0, 1.0)
+}
+
+/// Zonal band profile by planetographic latitude (rad), about −1..0.5: the bright
+/// equatorial zone, the darker equatorial belts near ±19°, fainter temperate belts
+/// near ±39° and a fine ripple between them (RING-A6).
+fn saturn_bands(lat: f64) -> f64 {
+    let a = lat.abs();
+    let g = |c: f64, w: f64| (-((a - c) / w).powi(2)).exp();
+    0.55 * g(0.0, 0.12) - g(0.33, 0.08) - 0.6 * g(0.68, 0.07) + 0.12 * (lat * 30.0).sin_det()
+}
+
+/// Pan's wake (RING-A8): brightness multiplier of ring material at radius `r` and angle
+/// `lag` downstream of the moon (rad, in the sense the material drifts past it). Streaks
+/// of azimuthal wavelength `3π·|Δr|` (the classic moonlet wake), decaying with `lag`
+/// and with distance from the gap.
+pub(crate) fn wake(r: f64, lag: f64) -> f64 {
+    let dr = (r - PAN_R).abs().max(0.008);
+    if dr > WAKE_REACH {
+        return 1.0;
+    }
+    let lag = lag.rem_euclid(TAU);
+    let env = (-lag / WAKE_DECAY).exp() * (1.0 - dr / WAKE_REACH);
+    let k = 2.0 * r / (3.0 * dr);
+    1.0 + WAKE_AMP * env * (k * lag).sin_det()
+}
+
+/// Edge-wave displacement (R_S) at angle `lag` downstream of Pan (RING-A5): a
 /// decaying wave train; the envelope is `WAVE_AMP·e^{−lag/WAVE_DECAY}`.
 pub(crate) fn edge_wave(lag: f64) -> f64 {
     let lag = lag.rem_euclid(TAU);
@@ -200,7 +340,7 @@ struct RingPx {
     /// Brightness before texture and spokes.
     b0: f32,
     /// Shadow × lighting factor, kept (non-zero) only near the Keeler gap, whose
-    /// brightness is recomputed each frame for Daphnis's waves.
+    /// brightness is recomputed each frame for Pan's waves and wake.
     k: f32,
     /// Globe coverage under the pixel, negated on the far side of the rings (behind
     /// the globe's centre plane). 24 bytes a pixel: this table is the scene's largest
@@ -231,6 +371,8 @@ pub struct SaturnRings {
     ring_px: Vec<RingPx>,
     pixels: Pixels,
     spokes: Vec<Spoke>,
+    /// The two live clump generations (RING-A9).
+    clumps: [ClumpLayer; 2],
     size: Size,
 }
 
@@ -258,6 +400,7 @@ impl SaturnRings {
             ring_px: Vec::new(),
             pixels: Pixels::default(),
             spokes: Vec::with_capacity(SPOKES),
+            clumps: [ClumpLayer::default(); 2],
             size: Size::new(1, 1),
         }
     }
@@ -274,15 +417,6 @@ impl SaturnRings {
         };
         let c = (r - R_IN) * bins;
         (at(c + half) - at(c - half)) / (2.0 * half)
-    }
-
-    fn brightness(&self, r: f64) -> f64 {
-        let k = ((r - R_IN) / (R_OUT - R_IN) * LUT as f64).floor();
-        if (0.0..LUT as f64).contains(&k) {
-            f64::from(self.profile[k as usize])
-        } else {
-            0.0
-        }
     }
 
     /// Screen offsets of pixel `(x, y)` from the centre in Saturn radii (`up` positive).
@@ -312,19 +446,39 @@ impl SaturnRings {
         Some([p0[0], p0[1] + t * d[1], p0[2] + t * d[2]])
     }
 
-    /// Share of four sub-pixel rays through pixel `(x, y)` that hit the globe.
+    /// Share of the pixel `(x, y)` the globe covers: four sub-pixel rays, refined to a
+    /// 4×4 grid where they disagree or the limb is within a pixel, so the limb steps in
+    /// sixteenths rather than quarters.
     fn globe_cover(&self, x: i32, y: i32) -> f64 {
         let (sx, up) = self.screen(x, y);
         let q = 0.25 / self.view.scale;
-        [(-q, -q), (q, -q), (-q, q), (q, q)]
+        let hits = [(-q, -q), (q, -q), (-q, q), (q, q)]
             .iter()
             .filter(|&&(dx, dy)| Self::globe_point(sx + dx, up + dy).is_some())
-            .count() as f64
-            / 4.0
+            .count();
+        // The screen outline is an ellipse with semi-axes 1 and ≈ 0.91: within a pixel of
+        // it only when the normalised radius is near 1.
+        let e = sx.hypot(up / 0.91);
+        let near = (e - 1.0).abs() < 1.5 / self.view.scale;
+        if !near && (hits == 0 || hits == 4) {
+            return hits as f64 / 4.0;
+        }
+        let step = 1.0 / (4.0 * self.view.scale);
+        let mut n = 0;
+        for j in 0..4 {
+            for i in 0..4 {
+                let dx = (f64::from(i) - 1.5) * step;
+                let dy = (f64::from(j) - 1.5) * step;
+                n += usize::from(Self::globe_point(sx + dx, up + dy).is_some());
+            }
+        }
+        n as f64 / 16.0
     }
 
     fn shade_globe(&mut self) {
         let l = sun();
+        let (st, ct) = TILT.sin_cos_det();
+        let view = [0.0, -ct, st];
         let size = self.globe.pixel_size();
         self.globe.clear();
         for y in 0..i32::from(size.height()) {
@@ -350,29 +504,51 @@ impl SaturnRings {
                 let n = [p[0], p[1], p[2] / (POLAR * POLAR)];
                 let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
                 let lit = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / nn;
-                if lit <= 0.0 {
+                // A soft terminator: the day side fades out over a few degrees instead of
+                // stepping to black.
+                let day = ease::smoothstep((lit + 0.06) / 0.28);
+                if day <= 0.0 {
                     continue; // night side: black against black space
                 }
-                // Zonal bands by planetographic latitude: pale butterscotch zones, tan
-                // belts, a darker polar hood; fine streaks within them.
+                // Limb darkening by the cosine to the viewer (RING-A6).
+                let mu = ((n[1] * view[1] + n[2] * view[2]) / nn).max(0.0);
+                // Floored so the limb stays a muted tan: Sienna's low levels are
+                // rust-orange and would ring the globe.
+                let limb = 0.64 + 0.36 * mu.sqrt();
+                // Soft zonal bands by planetographic latitude: cream zones, butterscotch
+                // and tan belts, a duskier polar hood; faint streaks within them.
                 let lat = (p[2] / POLAR).clamp(-1.0, 1.0).asin();
                 let lon = p[0].atan2(-p[1]);
-                let bands = 0.55 * (lat * 9.0 + 0.4).sin_det() + 0.3 * (lat * 21.0).sin_det();
-                let streak = value_noise(0x5A70, 3.0 * lon, 90.0 * lat, 1.0) - 0.5;
-                let polar = (lat.abs() / 1.15).min(1.0);
+                let bands = saturn_bands(lat);
+                let streak = value_noise(0x5A70, 3.0 * lon, 40.0 * lat, 1.0) - 0.5;
+                let polar = (lat.abs() / 1.2).min(1.0);
                 let tone =
-                    0.96 + 0.09 * bands * (1.0 - polar) + 0.04 * streak - 0.22 * polar * polar;
-                // The rings' shadow on the southern globe (the Sun is north of them).
+                    1.06 + 0.12 * bands * (1.0 - polar) + 0.025 * streak - 0.2 * polar * polar;
+                // The rings' shadow on the southern globe (the Sun is north of them),
+                // averaged over the pixel so the band's edges are soft.
                 let mut shadow = 1.0;
                 if p[2] < 0.0 {
                     let s = -p[2] / l[2];
                     let r = (p[0] + s * l[0]).hypot(p[1] + s * l[1]);
-                    shadow = 1.0 - 0.8 * self.brightness(r);
+                    shadow = 1.0 - 0.7 * self.brightness_over(r, 2.5 / self.view.scale);
                 }
-                // Anti-aliased limb by sub-pixel coverage.
-                let v = tone * (0.45 + 0.55 * lit.powf(0.6)) * shadow * (0.45 + 0.55 * cover);
-                if v * 255.0 >= ink::MIN_VISIBLE_LEVEL {
-                    self.globe.set(x, y, ink::ramp(GLOBE, v));
+                let light = day * (0.6 + 0.4 * lit.max(0.0).sqrt());
+                // The limb fades into space within one pixel: pixels the globe covers
+                // less than `GLOBE_EDGE` of stay space, the rest dim only slightly with
+                // coverage, so the edge never passes through Sienna's orange low end.
+                if cover < GLOBE_EDGE {
+                    continue;
+                }
+                let v = tone * limb * light * shadow * (0.8 + 0.2 * cover);
+                // Dim globe (terminator, the rings' shadow) goes to a low neutral
+                // Starlight rather than down Sienna's rust-orange ramp (RING-A6).
+                let ink = if v >= GLOBE_FLOOR {
+                    ink::ramp(GLOBE, v)
+                } else {
+                    ink::ramp(Ramp::Starlight, 0.6 * v)
+                };
+                if f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL {
+                    self.globe.set(x, y, ink);
                 }
             }
         }
@@ -400,12 +576,19 @@ impl SaturnRings {
                     continue;
                 }
                 let foot = (rx.abs() + ry.abs() / sin_t) / (r * self.view.scale);
-                let mut k = light;
-                if in_planet_shadow([rx, ry, 0.0]) {
-                    k *= 0.06;
-                }
+                // The globe's shadow, averaged over four sub-pixel points so its edge is
+                // soft rather than stepped.
+                let q = 0.25 / self.view.scale;
+                let shadowed = [(-q, -q), (q, -q), (-q, q), (q, q)]
+                    .iter()
+                    .filter(|&&(dx, dy)| in_planet_shadow([rx + dx, ry + dy / sin_t, 0.0]))
+                    .count() as f64
+                    / 4.0;
+                let k = light * (1.0 - 0.94 * shadowed);
                 let b0 = self.brightness_over(r, foot) * k;
-                let keeler = (KEELER.0 - 0.03..KEELER.1 + 0.03).contains(&r);
+                // Near Pan's gap the brightness is recomputed each frame for its edge
+                // waves and wake.
+                let keeler = (r - PAN_R).abs() < WAKE_REACH + 0.02;
                 if b0 <= 0.0 && !keeler {
                     continue;
                 }
@@ -434,7 +617,7 @@ impl SaturnRings {
         let r0 = rng.random_range(SPOKE_BAND.0..SPOKE_BAND.0 + 0.1);
         self.spokes.push(Spoke {
             lambda,
-            half: rng.random_range(0.04..0.09),
+            half: rng.random_range(0.1..0.2),
             r0,
             r1: rng.random_range(r0 + 0.14..SPOKE_BAND.1),
             age: 0.0,
@@ -454,44 +637,57 @@ impl SaturnRings {
             let d = wrap_angle(lambda - s.angle(self.t)).abs();
             if d < half {
                 let edge = 1.0 - d / half;
-                dim = dim.max(SPOKE_DIM * s.strength() * edge.sqrt());
+                // A soft-edged, fuzzy wedge.
+                dim = dim.max(SPOKE_DIM * s.strength() * ease::smoothstep(edge));
             }
         }
         dim
     }
 
     fn shade_rings(&mut self) {
+        for (k, layer) in self.clumps.iter_mut().enumerate() {
+            layer.refresh(self.t, k);
+        }
         let globe = &self.globe;
         self.pixels
             .shade(|x, y| globe.get(x, y).unwrap_or(Ink::BLANK));
         let t = self.t;
-        let daphnis = kepler_rate(0.5 * (KEELER.0 + KEELER.1)) * t + 1.3;
+        let pan = pan_angle(t);
+        // Half the Encke gap, the waves' reach and a footprint of up to 3 pixels
+        // (foreshortened by 1/sin tilt on the near and far sides).
+        let edge_reach =
+            0.5 * (ENCKE.1 - ENCKE.0) + WAVE_AMP + 1.5 / (TILT.sin_det() * self.view.scale);
         let w = usize::from(self.pixels.pixel_size().width()).max(1);
         for k in 0..self.ring_px.len() {
             let p = self.ring_px[k];
             let (r, lambda) = (f64::from(p.r), f64::from(p.lambda));
             let mut b = f64::from(p.b0);
             if p.k > 0.0 {
-                // Daphnis's waves displace the Keeler gap's edges: leading on the
-                // faster inner edge, trailing on the slower outer one (RING-A5).
-                let lag = if r < 0.5 * (KEELER.0 + KEELER.1) {
-                    lambda - daphnis
+                // Pan's waves displace the Encke gap's edges and its wake ripples the
+                // ring beside it: ahead of the moon on the faster inner side, behind it
+                // on the slower outer one (RING-A5, RING-A8).
+                let lag = if r < PAN_R {
+                    lambda - pan
                 } else {
-                    daphnis - lambda
+                    pan - lambda
                 };
-                let (s, c) = lambda.sin_cos_det();
-                let foot = (c.abs() + s.abs() / TILT.sin_det()) / self.view.scale;
-                b = self.brightness_over(r - edge_wave(lag), foot) * f64::from(p.k);
+                // Only pixels whose footprint can reach a displaced edge need the
+                // profile re-averaged; the rest keep their static brightness.
+                if (r - PAN_R).abs() < edge_reach {
+                    let (s, c) = lambda.sin_cos_det();
+                    let foot = (c.abs() + s.abs() / TILT.sin_det()) / self.view.scale;
+                    b = self.brightness_over(r - edge_wave(lag), foot) * f64::from(p.k);
+                }
+                b *= wake(r, lag);
             }
             if b <= 0.0 {
                 continue;
             }
-            // Clumpy texture sheared at the Keplerian rate (RING-A2).
-            let phase = (lambda - kepler_rate(r) * t).rem_euclid(TAU) / TAU;
-            let tex = value_noise_wrap_x(0x7E47, phase * 64.0, r * 32.0, 64);
-            b *= 0.72 + 0.5 * tex;
+            // Clumps sheared at the Keplerian rate (RING-A2, RING-A9).
+            b *= clump_at(&self.clumps, r, lambda);
             b *= 1.0 - self.spoke_dim(r, lambda);
-            let ring_lum = (0.06 + 0.8 * b).min(1.0);
+            // A soft shoulder instead of a clip, so the opaque B ring keeps its clumps.
+            let ring_lum = (0.05 + 0.84 * b / (1.0 + 0.12 * b)).min(1.0);
             let (x, y) = ((p.idx as usize % w) as i32, (p.idx as usize / w) as i32);
             let under = self.globe.get(x, y).unwrap_or(Ink::BLANK);
             let (cover, far) = (f64::from(p.cover.abs()), p.cover < 0.0);
@@ -501,7 +697,8 @@ impl SaturnRings {
             let alpha = if far {
                 1.0 - cover
             } else {
-                let opaque = ((b - 0.08) / 0.3).clamp(0.0, 1.0);
+                // From the static brightness, so clumps never flip who owns the pixel.
+                let opaque = ((f64::from(p.b0) - 0.08) / 0.3).clamp(0.0, 1.0);
                 opaque + (1.0 - opaque) * (1.0 - cover)
             };
             let under_lum = if under.role == Role::Ramp(GLOBE) {
@@ -514,30 +711,62 @@ impl SaturnRings {
             // brightness, so the globe's edge steps smoothly.
             let ink = if alpha >= 0.5 || under.role != Role::Ramp(GLOBE) {
                 ink::ramp(Ramp::Starlight, lum)
-            } else {
+            } else if lum >= GLOBE_FLOOR {
                 ink::ramp(GLOBE, lum)
+            } else {
+                // Never Sienna's rust-orange low end (RING-A6).
+                ink::ramp(Ramp::Starlight, 0.6 * lum)
             };
             if lum * 255.0 >= ink::MIN_VISIBLE_LEVEL {
                 self.pixels.set(x, y, ink);
             }
         }
-        // Daphnis itself: a lone bright dot in the Keeler gap.
-        let sin_t = TILT.sin_det();
-        let rd = 0.5 * (KEELER.0 + KEELER.1);
-        let (s, c) = daphnis.sin_cos_det();
-        let (px, py) = (
-            self.view.cx + self.view.scale * rd * c,
-            self.view.cy - self.view.scale * rd * s * sin_t,
-        );
-        let hidden = s > 0.0 && Self::globe_point(rd * c, rd * s * sin_t).is_some();
-        if !hidden {
-            self.pixels.set(
-                px.floor() as i32,
-                py.floor() as i32,
-                ink::ramp(Ramp::Starlight, 1.0),
-            );
-        }
+        // Pan, a bright point in its gap, and Mimas, a small lit disc outside the rings
+        // (both enlarged so they show).
+        self.draw_moon(PAN_R, pan, 0.45);
+        let size = (MIMAS_SIZE * self.view.scale).max(0.8);
+        self.draw_moon(MIMAS_R, mimas_angle(t), size);
     }
+
+    /// A moon at ring-plane radius `r`, angle `lambda`, drawn as an anti-aliased disc of
+    /// `size` pixels lit from the Sun's side, hidden where the globe is in front of it.
+    fn draw_moon(&mut self, r: f64, lambda: f64, size: f64) {
+        let (st, ct) = TILT.sin_cos_det();
+        let (s, c) = lambda.sin_cos_det();
+        let (sx, up) = (r * c, r * s * st);
+        if s > 0.0 && Self::globe_point(sx, up).is_some() {
+            return; // behind the globe
+        }
+        let v = self.view;
+        let centre = (v.cx + v.scale * sx, v.cy - v.scale * up);
+        let l = sun();
+        let pixels = &mut self.pixels;
+        disc_pixels(centre, size, |x, y, cover| {
+            // The disc's outward normal from its screen offset: right, up, towards us.
+            let nx = ((f64::from(x) + 0.5 - centre.0) / size).clamp(-1.0, 1.0);
+            let ny = ((centre.1 - f64::from(y) - 0.5) / size).clamp(-1.0, 1.0);
+            let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
+            let n = [nx, ny * st - nz * ct, ny * ct + nz * st];
+            let lit = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0);
+            let lum = cover * (0.45 + 0.55 * lit);
+            let old = pixels.get(x, y).unwrap_or(Ink::BLANK);
+            let ink = ink::ramp(Ramp::Starlight, lum.max(0.35 * cover));
+            if old.role != Role::Ramp(Ramp::Starlight) || ink.level > old.level {
+                pixels.set(x, y, ink);
+            }
+        });
+    }
+}
+
+/// Pan's orbital angle at time `t` (Keplerian, RING-A8).
+pub(crate) fn pan_angle(t: f64) -> f64 {
+    kepler_rate(PAN_R) * t - 2.6
+}
+
+/// Mimas's orbital angle at time `t` (Keplerian, RING-A7): it starts on the near side,
+/// low and left, so it crosses the view in the first half-minute.
+pub(crate) fn mimas_angle(t: f64) -> f64 {
+    kepler_rate(MIMAS_R) * t - 2.3
 }
 
 impl Generator for SaturnRings {
@@ -662,5 +891,137 @@ mod tests {
         let (near, mid, far) = (envelope(0.05), envelope(1.0), envelope(3.0));
         assert!(near > mid && mid > far, "{near} {mid} {far}");
         assert!(near > 0.5 * WAVE_AMP);
+    }
+
+    fn scene(w: u16, h: u16, t: f64) -> SaturnRings {
+        let mut g = SaturnRings::new();
+        let mut ctx = Ctx::new(42, Size::new(w, h));
+        g.resize(Size::new(w, h), &mut ctx);
+        let steps = (t * 60.0).round() as usize;
+        for _ in 0..steps {
+            g.update(1.0 / 60.0, &mut ctx);
+        }
+        g
+    }
+
+    #[test]
+    fn ring_a6_globe_is_pale_butterscotch_limb_darkened_and_soft_edged() {
+        let g = scene(120, 40, 0.0);
+        let v = g.view;
+        // The globe's bright middle (above the rings) is pale cream in Sienna.
+        let row = (v.cy - 0.55 * v.scale) as i32;
+        let mid = (-4..=4)
+            .filter_map(|dx| g.globe.get(v.cx as i32 + dx, row))
+            .max_by_key(|i| i.level)
+            .expect("on screen");
+        assert_eq!(mid.role, Role::Ramp(Ramp::Sienna), "{mid:?}");
+        assert!(mid.level >= 200, "centre level {}", mid.level);
+        // Limb darkening: along the row, the lit right limb is darker than the middle.
+        let limb_x = (0..i32::from(g.globe.pixel_size().width()))
+            .rev()
+            .find(|&x| g.globe.get(x, row).is_some_and(|i| i.role == mid.role))
+            .expect("globe row");
+        let inner = g.globe.get(limb_x - 2, row).expect("inside").level;
+        assert!(inner + 6 < mid.level, "inner {inner} vs mid {}", mid.level);
+        // No rust rim: every Sienna pixel of the globe, limb included, stays at or above
+        // the muted-tan floor; dimmer globe is low Starlight.
+        let edge = g.globe.get(limb_x, row).expect("edge");
+        assert!(edge.level <= inner, "edge {edge:?} vs inner {inner}");
+        let floor = ink::ramp(GLOBE, GLOBE_FLOOR).level;
+        let size = g.globe.pixel_size();
+        for y in 0..i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let px = g.globe.get(x, y).unwrap();
+                if px.role == Role::Ramp(GLOBE) {
+                    assert!(px.level >= floor, "({x}, {y}): {px:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ring_a7_mimas_orbits_keplerian_and_holds_the_cassini_edge() {
+        // Kepler: Mimas turns at Ω(r) and more slowly than any ring.
+        let rate = mimas_angle(1.0) - mimas_angle(0.0);
+        assert!((rate - kepler_rate(MIMAS_R)).abs() < 1e-12);
+        assert!(rate < kepler_rate(A_OUTER));
+        // Its 2:1 inner Lindblad resonance, r = r_M·2^{−2/3}, sits at the B ring's
+        // outer edge, the Cassini Division's inner boundary (within 1 %).
+        let res = MIMAS_R * 2f64.powf(-2.0 / 3.0);
+        assert!(
+            (res / CASSINI.0 - 1.0).abs() < 0.01,
+            "{res} vs {}",
+            CASSINI.0
+        );
+        // It is on screen, and moves, between t = 1 and t = 30.
+        let lit = |g: &SaturnRings| -> Vec<(i32, i32)> {
+            let (st, v) = (TILT.sin_det(), g.view);
+            let a = mimas_angle(g.t);
+            let (s, c) = a.sin_cos_det();
+            vec![(
+                (v.cx + v.scale * MIMAS_R * c) as i32,
+                (v.cy - v.scale * MIMAS_R * s * st) as i32,
+            )]
+        };
+        let (a, b) = (scene(120, 40, 1.0), scene(120, 40, 30.0));
+        for g in [&a, &b] {
+            let (x, y) = lit(g)[0];
+            let px = g.pixels.get(x, y).expect("Mimas on screen");
+            assert_eq!(px.role, Role::Ramp(Ramp::Starlight));
+            assert!(px.level >= 90, "Mimas level {}", px.level);
+        }
+        assert_ne!(lit(&a), lit(&b));
+    }
+
+    #[test]
+    fn ring_a8_pan_wake_ripples_decay_downstream_and_away_from_the_gap() {
+        let swing = |r: f64, lag: f64| {
+            (0..200)
+                .map(|k| (wake(r, lag + f64::from(k) * 0.002) - 1.0).abs())
+                .fold(0.0, f64::max)
+        };
+        let r = PAN_R - 0.03;
+        let (near, far) = (swing(r, 0.05), swing(r, 3.0));
+        assert!(near > 0.15 && near > 4.0 * far, "{near} {far}");
+        assert!(swing(PAN_R - 0.07, 0.05) < near);
+        assert_eq!(wake(PAN_R - 2.0 * WAKE_REACH, 0.1), 1.0);
+        // Wake streaks tighten towards the moon: wavelength 3π·|Δr|.
+        let zeros = |r: f64| {
+            (0..400)
+                .filter(|&k| {
+                    let (a, b) = (f64::from(k) * 0.001, f64::from(k + 1) * 0.001);
+                    (wake(r, a) - 1.0).signum() != (wake(r, b) - 1.0).signum()
+                })
+                .count()
+        };
+        assert!(zeros(PAN_R - 0.02) > zeros(PAN_R - 0.06));
+    }
+
+    #[test]
+    fn ring_a9_clumps_are_smooth_in_radius_and_drift_by_t30() {
+        // Low-pass in radius: one 200×50 pixel on the ansa is ≈ 0.02 R_S.
+        for k in 0..200 {
+            let r = 1.3 + f64::from(k) * 0.005;
+            let lambda = f64::from(k) * 0.37;
+            let d = (clump(r + 0.02, lambda, 3.0) - clump(r, lambda, 3.0)).abs();
+            assert!(d < 0.3 * CLUMP_AMP, "r {r}: {d}");
+        }
+        // The rings visibly change between t = 1 and t = 30 (clumps, spokes, moons).
+        let (a, b) = (scene(120, 40, 1.0), scene(120, 40, 30.0));
+        let size = a.pixels.pixel_size();
+        let (mut ring, mut changed) = (0, 0);
+        for y in 0..i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let (p, q) = (a.pixels.get(x, y).unwrap(), b.pixels.get(x, y).unwrap());
+                if p.role == Role::Ramp(Ramp::Starlight) && p.level > 60 {
+                    ring += 1;
+                    changed += usize::from(p.level.abs_diff(q.level) >= 12);
+                }
+            }
+        }
+        assert!(
+            changed * 3 >= ring,
+            "{changed} of {ring} ring pixels changed"
+        );
     }
 }

@@ -18,8 +18,9 @@ use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::raster::ascii_ramp_cell;
-use sciart_core::{Grid, ease, ink};
+use sciart_core::{Grid, ease};
 
+use crate::shared::jovian;
 use crate::shared::vortex_advect::{self, Flow, XEdge, value_noise_wrap_x};
 
 pub static META: Meta = Meta {
@@ -48,9 +49,10 @@ const U0: f64 = 0.11;
 /// chromophore outside the Great Red Spot, per second.
 const RELAX: f32 = 0.035;
 const RED_DECAY: f32 = 0.3;
-/// Great Red Spot: half-axes (2:1), turnover period and its lane.
-const GRS_A: f64 = 0.17;
-const GRS_B: f64 = 0.085;
+/// Great Red Spot: half-axes (1.4:1, its shape today; it was ~2:1 in the Voyager era) and
+/// turnover period.
+pub(crate) const GRS_A: f64 = 0.14;
+pub(crate) const GRS_B: f64 = 0.1;
 const GRS_PERIOD: f64 = 6.0;
 /// Small eddies alive at once and their life, seconds.
 const EDDIES: usize = 30;
@@ -59,6 +61,17 @@ const EDDY_LIFE: (f64, f64) = (5.0, 10.0);
 const SHADOW_SPEED: f64 = 1.0 / 30.0;
 /// Steps run in the first resize, so the first frame already shows curls.
 const SPIN_UP: usize = 100;
+/// Hot-spot sources: on the fastest eastward jet at the edge of the belt below the top
+/// zone, where the jet draws their blue-grey clearings out into festoons. Longitudes as
+/// fractions of the period (drifting slowly, `H`/s), half-axes in `H`, and the decay
+/// rate of the clearing dye per second.
+const HOT_Y: f64 = (TAU - PHI) / K;
+const HOT_X: [f64; 3] = [0.12, 0.47, 0.78];
+const HOT_AB: (f64, f64) = (0.036, 0.024);
+const HOT_DRIFT: f64 = 0.015;
+const HOT_DECAY: f32 = 0.8;
+/// Half-height (`H`) of the lane the clearing dye can reach (sources ± eddy spread).
+const HOT_LANE: f64 = 0.12;
 /// Largest vortex box half-width in lattice cells (stack tables in `fill_flow`).
 const MAX_BOX: i64 = 96;
 
@@ -150,8 +163,11 @@ pub struct JupiterStorms {
     /// Zone/belt dye and red chromophore, with their scratch grids.
     dye: Grid<f32>,
     red: Grid<f32>,
+    /// Blue-grey clearing dye (hot spots drawn out into festoons).
+    hot: Grid<f32>,
     scratch_dye: Grid<f32>,
     scratch_red: Grid<f32>,
+    scratch_hot: Grid<f32>,
     /// The banded pattern the dye relaxes to (static per lattice).
     target: Grid<f32>,
     flow: Flow,
@@ -160,6 +176,8 @@ pub struct JupiterStorms {
     vortices: Vec<Vortex>,
     map: SampleMap,
     pixels: Pixels,
+    /// Two rows of dye samples (previous, current) for the relief in `shade`.
+    rows: Vec<f32>,
     warmed: bool,
     /// Simulated seconds shown (drives Io's shadow).
     t: f64,
@@ -171,14 +189,17 @@ impl JupiterStorms {
             lattice: Size::new(1, 1),
             dye: Grid::default(),
             red: Grid::default(),
+            hot: Grid::default(),
             scratch_dye: Grid::default(),
             scratch_red: Grid::default(),
+            scratch_hot: Grid::default(),
             target: Grid::default(),
             flow: Flow::default(),
             jets: Vec::new(),
             vortices: Vec::with_capacity(8 + EDDIES),
             map: SampleMap::default(),
             pixels: Pixels::default(),
+            rows: Vec::new(),
             warmed: false,
             t: 0.0,
         }
@@ -325,35 +346,55 @@ impl JupiterStorms {
         }
         self.fill_flow();
         let dtf = dt as f32;
-        let (dye, red) = (&self.dye, &self.red);
-        let (nd, nr) = (
+        let (dye, red, hot) = (&self.dye, &self.red, &self.hot);
+        let (nd, nr, nh) = (
             self.scratch_dye.as_mut_slice(),
             self.scratch_red.as_mut_slice(),
+            self.scratch_hot.as_mut_slice(),
         );
         vortex_advect::departures(&self.flow, dtf, XEdge::Wrap, |k, x, y| {
             nd[k] = vortex_advect::sample(dye, x, y, XEdge::Wrap);
             nr[k] = vortex_advect::sample(red, x, y, XEdge::Wrap);
+            nh[k] = vortex_advect::sample(hot, x, y, XEdge::Wrap);
         });
         std::mem::swap(&mut self.dye, &mut self.scratch_dye);
         std::mem::swap(&mut self.red, &mut self.scratch_red);
+        std::mem::swap(&mut self.hot, &mut self.scratch_hot);
 
         // Sources: relaxation to the bands; the red chromophore is made in the Great Red
         // Spot's core and bleaches elsewhere.
         let relax = 1.0 - (-RELAX * dtf).exp();
         let bleach = (-RED_DECAY * dtf).exp();
+        let clear = (-HOT_DECAY * dtf).exp();
+        let hot_shift = HOT_DRIFT * self.t;
         let w = usize::from(self.lattice.width());
         let scale = f64::from(self.lattice.height());
         let (target, vortices) = (self.target.as_slice(), &self.vortices);
-        for (k, (d, r)) in self
+        for (k, ((d, r), hs)) in self
             .dye
             .as_mut_slice()
             .iter_mut()
             .zip(self.red.as_mut_slice())
+            .zip(self.hot.as_mut_slice())
             .enumerate()
         {
             *d += (target[k] - *d) * relax;
             *r *= bleach;
+            *hs *= clear;
             let (x, y) = ((k % w) as f64 / scale, (k / w) as f64 / scale);
+            let qy = ((y - HOT_Y) / HOT_AB.1).powi(2);
+            if qy < 1.0 {
+                for fx in HOT_X {
+                    let mut dx = x - (fx * period + hot_shift);
+                    dx -= period * (dx / period).round();
+                    // A soft-edged source (1 − q, not a hard ellipse) so the clearing
+                    // has no lattice-stepped outline.
+                    let q = (dx / HOT_AB.0).powi(2) + qy;
+                    if q < 1.0 {
+                        *hs += ((1.0 - q) as f32 - *hs).max(0.0) * relax * 40.0;
+                    }
+                }
+            }
             // The long-lived storms come first in the list, the eddies after them.
             for v in vortices.iter().take_while(|v| v.kind != Kind::Eddy) {
                 let mut dx = x - v.x;
@@ -391,7 +432,9 @@ impl JupiterStorms {
         if fresh {
             self.dye.resize(lattice, 0.0);
             self.red.resize(lattice, 0.0);
+            self.hot.resize(lattice, 0.0);
         } else {
+            grid::regrid_bilinear(&mut self.hot, lattice, &mut self.scratch_hot);
             grid::regrid_bilinear(&mut self.dye, lattice, &mut self.scratch_dye);
             grid::regrid_bilinear(&mut self.red, lattice, &mut self.scratch_red);
             let k = self.period() / old_period;
@@ -401,6 +444,7 @@ impl JupiterStorms {
         }
         self.scratch_dye.resize(lattice, 0.0);
         self.scratch_red.resize(lattice, 0.0);
+        self.scratch_hot.resize(lattice, 0.0);
         self.target.resize(lattice, 0.0);
         self.flow.resize(lattice);
         let (w, h) = (usize::from(lattice.width()), usize::from(lattice.height()));
@@ -424,64 +468,101 @@ impl JupiterStorms {
     fn shade(&mut self) {
         let px = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
+        let w = usize::from(px.width());
         // The limb: a large circle whose top grazes the frame; beyond it, space.
         let r_limb = 1.7 * pw.max(ph);
         let (lcx, lcy) = (0.5 * pw, 0.06 * ph + r_limb);
-        // Io's shadow crossing the clouds (as in JunoCam frames): black umbra, a thin
-        // penumbra, drifting east with Io's orbit.
+        // Io's shadow crossing the clouds (as in JunoCam frames): a black umbra with a
+        // 1-pixel penumbra, drifting east with Io's orbit.
         let r_sh = (0.045 * ph).max(1.5);
         let span = pw + 4.0 * r_sh;
         let sx = (0.3 * pw + SHADOW_SPEED * pw * self.t).rem_euclid(span) - 2.0 * r_sh;
         let sy = 0.3 * ph;
-        let (dye, red, map) = (&self.dye, &self.red, &self.map);
+        // The Great Red Spot's oval in pixels (x wraps with the longitude period), its
+        // drawn half-axes 0.8 of the vortex's, feathered over its smaller semi-axis.
+        let grs = self.vortices.first().copied();
+        let (kx, ky) = (pw / self.period(), ph);
+        let semi = grs.map_or(1.0, |v| (0.8 * v.a * kx).min(0.8 * v.b * ky));
+        // Rows the spot and its collar can reach (collar ≤ 0.45 semi-axes + feather).
+        let spot_rows = grs.map_or((f64::INFINITY, f64::NEG_INFINITY), |v| {
+            let r = 0.8 * v.b * ky * 1.45 + 3.0;
+            (v.y * ky - r, v.y * ky + r)
+        });
+        let (dye, red, hot, map) = (&self.dye, &self.red, &self.hot, &self.map);
+        // Per-row state, recomputed at `x == 0`: the limb's `dy²`, whether the row meets
+        // Io's shadow, the spot or the hot-spot lane; and the previous row's dye samples
+        // (the relief's upper-left neighbour), so each pixel samples the dye only once.
+        let rows = &mut self.rows;
+        let (prev, cur) = rows.split_at_mut(w);
+        let mut row = (0.0, false, false, false);
         self.pixels.shade(|x, y| {
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-            let ds = (fx - sx).hypot(fy - sy) / r_sh;
-            if ds < 1.0 {
+            let xi = x as usize;
+            if xi == 0 {
+                prev.copy_from_slice(cur);
+                cur.fill(f32::NAN);
+                row = (
+                    (fy - lcy) * (fy - lcy),
+                    (fy - sy).abs() < r_sh + 1.0,
+                    (spot_rows.0..=spot_rows.1).contains(&fy),
+                    (fy / ky - HOT_Y).abs() < HOT_LANE,
+                );
+            }
+            let (dy2, in_shadow_rows, in_spot_rows, in_hot_rows) = row;
+            let mut pen = 1.0;
+            if in_shadow_rows {
+                let ds = (fx - sx).hypot(fy - sy);
+                pen = ease::smoothstep((ds - r_sh + 0.5).clamp(0.0, 1.0));
+                if pen <= 0.0 {
+                    return Ink::BLANK;
+                }
+            }
+            let depth = r_limb - ((fx - lcx) * (fx - lcx) + dy2).sqrt();
+            if depth <= 0.0 {
                 return Ink::BLANK;
             }
-            let penumbra = if ds < 1.6 {
-                0.35 + 0.65 * (ds - 1.0) / 0.6
-            } else {
-                1.0
-            };
-            let d = (fx - lcx).hypot(fy - lcy);
-            let depth = r_limb - d;
-            if depth < 0.0 {
-                return Ink::BLANK;
-            }
-            if depth < 1.2 {
-                // The thin blue haze layer on the limb.
-                return ink::ramp(Ramp::Cobalt, 0.3 + 0.35 * depth.max(0.0));
-            }
-            // Darker and hazier towards the limb (μ from the depth inside the circle).
+            // Darker and hazier towards the limb (μ from the depth inside the circle); the
+            // outermost 1.5 pixels fade to black, so the limb is antialiased, not stepped.
             let mu = (depth / (0.35 * ph)).clamp(0.0, 1.0).sqrt();
-            let shade = (0.45 + 0.55 * mu) * penumbra;
+            let aa = ease::smoothstep((depth / 1.5).min(1.0));
+            let shade = (0.45 + 0.55 * mu) * pen * aa;
             let a = map.sample(dye, x, y);
-            let r = map.sample(red, x, y);
+            cur[xi] = a;
             // Relief: brighter where the dye rises to the upper left (sunlit side of a
             // cloud edge), the embossed look of enhanced JunoCam frames.
-            let up = map.sample(dye, x - 1, y - 1);
-            let relief = f64::from(a - up) * 3.2;
-            let a = f64::from(a);
-            let r = f64::from(r).min(1.0);
-            if r > 0.1 {
-                // The Great Red Spot: brick red in the core, easing through salmon to a
-                // pale orange rim, so it melts into the zone around it; the wound-up
-                // dye and the relief give it internal spiral texture.
-                let deep = ease::smoothstep(((r - 0.1) / 0.6).min(1.0));
-                let v = (0.6 - 0.3 * deep + 0.1 * (a - 0.5) + 0.5 * relief) * shade;
-                return ink::ramp(Ramp::Ember, v.clamp(0.2, 0.85));
-            }
-            if a > 0.5 {
-                // Zones: fine streaks (the static mottle is carried off by the jets, so
-                // this adds grain the lattice is too coarse to hold).
-                let v = (0.45 + 1.0 * (a - 0.5) + relief) * shade;
-                ink::ramp(Ramp::Starlight, v.clamp(0.1, 1.0))
+            let up = if xi > 0 { prev[xi - 1] } else { f32::NAN };
+            let relief = if up.is_nan() {
+                0.0
             } else {
-                let v = (0.1 + 0.7 * a + relief) * shade;
-                ink::ramp(Ramp::Cobalt, v.clamp(0.08, 0.8))
+                f64::from(a - up) * 1.2
+            };
+            let a = f64::from(a);
+            let mut level = jovian::cloud_level(a, relief);
+            // The Great Red Spot: a brick-to-rust oval textured by the wound-up chromophore
+            // (its outline from the vortex, not the dye, whose edge the lattice steps), in
+            // a pale collar, both feathered into the flow.
+            if in_spot_rows && let Some(v) = grs {
+                let dx = v.dx(fx / kx, pw / kx) / (0.8 * v.a);
+                let dy = (fy / ky - v.y) / (0.8 * v.b);
+                let rho = (dx * dx + dy * dy).sqrt();
+                let (inside, collar) = jovian::spot_weights(rho, semi);
+                if inside > 0.0 || collar > 0.0 {
+                    let r = if inside > 0.0 {
+                        f64::from(map.sample(red, x, y))
+                    } else {
+                        0.0
+                    };
+                    let spot = jovian::spot_level(r, a, relief);
+                    level = jovian::spot_blend(level, spot, inside, collar);
+                    return jovian::sienna(level, shade);
+                }
             }
+            // The clearing dye lives in a narrow lane round its sources.
+            if in_hot_rows {
+                let h = f64::from(map.sample(hot, x, y));
+                return jovian::hot_spot(level, h, shade);
+            }
+            jovian::sienna(level, shade)
         });
     }
 }
@@ -503,6 +584,12 @@ impl Generator for JupiterStorms {
             }
         }
         self.pixels.resize(size);
+        self.rows.clear();
+        self.rows
+            .resize(2 * usize::from(self.pixels.pixel_size().width()), f32::NAN);
+        self.rows.clear();
+        self.rows
+            .resize(2 * usize::from(self.pixels.pixel_size().width()), f32::NAN);
         self.map.rebuild(self.lattice, self.pixels.pixel_size());
         self.shade();
     }
@@ -630,6 +717,84 @@ mod tests {
         assert!(v_east < 0.0 && v_west > 0.0, "{v_east} {v_west}");
         // It sits between a westward jet to the north and an eastward one to the south.
         assert!(jet(grs.y - grs.b) < 0.0 && jet(grs.y + grs.b) > 0.0);
+    }
+
+    #[test]
+    fn jup_a6_the_planet_is_sienna_with_blue_only_in_hot_spots() {
+        let (mut g, mut ctx) = scene();
+        for _ in 0..120 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let px = g.pixels.pixel_size();
+        let (mut sienna, mut blue, mut disc) = (0usize, 0usize, 0usize);
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let Some(i) = g.pixels.get(x, y) else {
+                    continue;
+                };
+                match i.role {
+                    Role::Background => {}
+                    Role::Ramp(Ramp::Sienna) => sienna += 1,
+                    Role::Ramp(Ramp::Ice) => blue += 1,
+                    other => panic!("unexpected ink {other:?} at ({x}, {y})"),
+                }
+                disc += usize::from(i.role != Role::Background);
+            }
+        }
+        assert!(sienna * 10 >= disc * 8, "sienna {sienna} of {disc}");
+        assert!(blue > 0 && blue * 25 <= disc, "blue {blue} of {disc}");
+    }
+
+    #[test]
+    fn jup_a8_red_spot_is_a_darker_oval_in_a_paler_collar() {
+        let (mut g, mut ctx) = scene();
+        g.update(SIM_DT, &mut ctx);
+        let px = g.pixels.pixel_size();
+        let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
+        let grs = g.vortices[0];
+        let kx = pw / g.period();
+        let level = |fx: f64, fy: f64| {
+            let i = g.pixels.get(fx as i32, fy as i32).expect("on screen");
+            assert_eq!(i.role, Role::Ramp(Ramp::Sienna));
+            i.level
+        };
+        let (cx, cy) = (grs.x * kx, grs.y * ph);
+        // Centre, and just outside the drawn rim (0.8 of the half-axes) above and below.
+        let centre = level(cx, cy);
+        let rim = 0.8 * grs.b * ph;
+        let collar = level(cx, cy - rim - 2.0).max(level(cx, cy + rim + 2.0));
+        assert!(centre + 40 < collar, "centre {centre}, collar {collar}");
+    }
+
+    #[test]
+    fn jup_a9_io_shadow_has_a_soft_edge() {
+        // Somewhere across the shadow's edge there is a pixel neither black nor at full
+        // brightness: the 1-pixel penumbra.
+        let (mut g, mut ctx) = scene();
+        g.update(SIM_DT, &mut ctx);
+        let px = g.pixels.pixel_size();
+        let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
+        let r_sh = (0.045 * ph).max(1.5);
+        let span = pw + 4.0 * r_sh;
+        let sx = (0.3 * pw + SHADOW_SPEED * pw * g.t).rem_euclid(span) - 2.0 * r_sh;
+        let sy = 0.3 * ph;
+        let (y, x0) = (sy as i32, (sx + r_sh - 1.0) as i32);
+        let edge: Vec<_> = (x0..x0 + 3).filter_map(|x| g.pixels.get(x, y)).collect();
+        assert!(edge.iter().any(|i| i.role == Role::Background));
+        assert!(
+            edge.iter()
+                .any(|i| i.role != Role::Background && i.level < 90),
+            "{edge:?}"
+        );
+    }
+
+    #[test]
+    fn jup_a7_great_red_spot_has_todays_shape() {
+        // ~1.4:1 (it was ~2:1 in the Voyager era and has been rounding since).
+        let (g, _) = scene();
+        let grs = g.vortices[0];
+        let e = grs.a / grs.b;
+        assert!((1.3..=1.5).contains(&e), "elongation {e}");
     }
 
     #[test]

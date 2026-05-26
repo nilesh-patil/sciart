@@ -15,7 +15,7 @@
 //! Units: Jupiter radii for the orbit, pile radii for the comet (drawn magnified), and the
 //! pile's dynamical time `τ` (`G·M_comet/ρ³ = 1`) for both.
 
-use std::f64::consts::{FRAC_PI_2, TAU};
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use rand::Rng;
 use sciart_core::prelude::*;
@@ -23,6 +23,7 @@ use sciart_core::raster::{ascii_ramp_cell, halo_kernel};
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::{Tone, ease, ink};
 
+use crate::shared::jovian;
 use crate::shared::plume::Plume;
 use sciart_core::rng::value_noise;
 
@@ -38,10 +39,12 @@ pub fn build() -> Box<dyn Generator> {
     Box::new(CometBreakup::new())
 }
 
+/// The approach is short, so the tide is already visibly stretching the pile by t ≈ 5 s
+/// (BRK-A6).
 const ACTS: [(&str, f64); 5] = [
-    ("approach", 6.0),
-    ("Roche limit", 10.0),
-    ("string of pearls", 10.0),
+    ("approach", 2.0),
+    ("Roche limit", 12.0),
+    ("string of pearls", 12.0),
     ("impacts", 16.0),
     ("scars", 6.0),
 ];
@@ -65,8 +68,8 @@ const PERIJOVE: f64 = 1.33;
 const ORBIT_TILT: f64 = 1.6;
 /// Orbit time (τ, perijove at 0) at the start of the loop, and τ per simulated second in
 /// each act.
-const T_START: f64 = -3.0;
-const RATES: [f64; 3] = [0.22, 0.45, 1.2];
+const T_START: f64 = -2.6;
+const RATES: [f64; 3] = [0.7, 0.9, 1.1];
 /// Verlet sub-step (τ) and the most simulated τ one frame may advance.
 const DT_SUB: f64 = 0.01;
 const MAX_ADVANCE: f64 = 0.03;
@@ -79,8 +82,8 @@ const MAG: f64 = 0.16;
 const PLUME_CAP: usize = 3000;
 const PLUME_H: f64 = 0.32;
 const PLUME_FLIGHT: f64 = 3.0;
-/// Length of the flash at each strike, seconds.
-const FLASH: f64 = 0.8;
+/// How long the radial glow at each strike lasts, seconds.
+const FLASH: f64 = 2.5;
 /// Jupiter's rotation rate on screen (time-lapsed), rad/s; the impacts' latitude.
 pub(crate) const SPIN: f64 = 0.1;
 const IMPACT_LAT: f64 = -0.5;
@@ -178,8 +181,11 @@ pub struct CometBreakup {
     seed: u64,
     frame: (f64, f64),
     view: View,
+    /// Nuclei, comae and dust tails (Starlight), and the faint ion tails (Ice).
     glow: Glow,
     tone: Tone,
+    ion: Glow,
+    ion_tone: Tone,
     /// Impact fireballs and flashes.
     fire: Glow,
     fire_tone: Tone,
@@ -215,6 +221,8 @@ impl CometBreakup {
             view: View::default(),
             glow: Glow::default(),
             tone: Tone::asinh(0.5, 6.0),
+            ion: Glow::default(),
+            ion_tone: Tone::asinh(0.3, 3.0),
             fire: Glow::default(),
             fire_tone: Tone::asinh(0.4, 3.0),
             last_strike: f64::NEG_INFINITY,
@@ -384,8 +392,12 @@ impl CometBreakup {
     fn run_in(&self, k: usize, local: f64) -> Option<[f64; 2]> {
         let lead = self.fragments.first()?.along;
         let gap = (lead - self.fragments[k].along).max(0.0);
+        // Spacing on the run-in: the chain's own, shrunk if needed so the last fragment
+        // strikes by 13 s into the act (BRK-A4).
+        let span = lead - self.fragments[self.n_frag.max(1) - 1].along;
+        let spacing = 0.06f64.min(4.3 / span.max(1e-9));
         // Distance from the site in R_J: the chain arrives at 0.35 R_J/s.
-        let d = 0.25 + 0.06 * gap - 0.35 * local;
+        let d = 0.25 + spacing * gap - 0.35 * local;
         if d <= 0.0 {
             return None;
         }
@@ -457,16 +469,32 @@ impl CometBreakup {
         let beat = self.timeline.at(self.t);
         // Follow the chain out during the pearls act, then come home for the impacts.
         let com = orbit(self.tau);
+        // Half-way between Jupiter and the comet on the approach, so both are in frame
+        // from the first second; onto the pile early in the breakup, where the stretching
+        // shows (BRK-A6).
         let follow = match beat.index {
-            BREAKUP => ease::smoothstep(((beat.progress - 0.35) / 0.5).clamp(0.0, 1.0)),
+            0 => FOLLOW_APPROACH,
+            BREAKUP => {
+                let u = ease::smoothstep((beat.progress / 0.3).clamp(0.0, 1.0));
+                FOLLOW_APPROACH + (1.0 - FOLLOW_APPROACH) * u
+            }
             PEARLS => 1.0,
             _ => 0.0,
         };
         let home = [0.9, 0.0];
+        // While following, zoom out as the chain lengthens so the whole string of pearls
+        // stays in frame (never below 40 % of the home scale).
+        let reach = self
+            .pos
+            .iter()
+            .map(|p| p[0].hypot(p[1]))
+            .fold(1.0, f64::max);
+        let fit = 0.46 * w.min(1.8 * h) / (MAG * reach);
+        let scale = scale + follow * (fit.clamp(0.4 * scale, scale) - scale);
         self.view = View {
             wx: home[0] + follow * (com[0] - home[0]),
             wy: home[1] + follow * (com[1] - home[1]),
-            fx: 0.4 * w,
+            fx: (0.4 + 0.1 * follow) * w,
             fy: 0.5 * h,
             scale,
         };
@@ -477,20 +505,49 @@ impl CometBreakup {
         let v = self.view;
         let beat = self.timeline.at(self.t);
         self.glow.clear();
+        self.ion.clear();
+        const CORE: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
         const COMA: [(i32, i32, f32); 25] = halo_kernel::<25>(2);
+        const HALO: [(i32, i32, f32); 81] = halo_kernel::<81>(4);
         let com = orbit(self.tau);
+        // Tails behind every few grains (so each fragment trails its own), sampled once per
+        // pixel of length and fading with distance: a broad, pale dust tail, and a longer,
+        // straighter, fainter ion tail pointing straight away from the Sun.
+        let to_px = |dir: [f64; 2], len: f64| [dir[0] * len * v.scale, -dir[1] * len * v.scale];
+        let (dust_px, ion_px) = (to_px(TAIL_DIR, TAIL_LEN), to_px(ION_DIR, ION_LEN));
+        let steps = |p: [f64; 2]| (p[0].hypot(p[1]).ceil() as usize).clamp(2, 256);
+        let tail =
+            |glow: &mut Glow, kernel: &[(i32, i32, f32)], to: [f64; 2], x: f64, y: f64, w: f64| {
+                let n = steps(to);
+                for j in 1..=n {
+                    let s = j as f64 / n as f64;
+                    let k = w * (1.0 - s).powf(1.5) / n as f64 * 14.0;
+                    let (tx, ty) = (x + s * to[0], y + s * to[1]);
+                    glow.splat(2.0 * tx, 2.0 * ty, kernel, k as f32);
+                }
+            };
         if beat.index <= PEARLS {
-            for p in self.pos.iter() {
+            for (k, p) in self.pos.iter().enumerate() {
                 let w = [com[0] + MAG * p[0], com[1] + MAG * p[1]];
                 let (x, y) = v.px(w);
-                self.glow.splat(2.0 * x, 2.0 * y, &COMA, 0.25);
+                // Nucleus grains: tight, so only the dense core saturates.
+                self.glow.splat(2.0 * x, 2.0 * y, &CORE, 0.14);
+                if k % TAIL_EVERY == 0 {
+                    // The coma: a faint, wide halo round the nucleus grains.
+                    self.glow.splat(2.0 * x, 2.0 * y, &HALO, 0.012);
+                    tail(&mut self.glow, &COMA, dust_px, x, y, 0.04);
+                    tail(&mut self.ion, &CORE, ion_px, x, y, 0.03);
+                }
             }
         } else if beat.index == IMPACTS {
             for k in self.struck..self.n_frag {
                 if let Some(p) = self.run_in(k, beat.local) {
                     let (x, y) = v.px(p);
                     let w = 0.4 + 2.0 * (self.fragments[k].size as f64 / N as f64).sqrt();
-                    self.glow.splat(2.0 * x, 2.0 * y, &COMA, w as f32);
+                    self.glow.splat(2.0 * x, 2.0 * y, &CORE, 0.8 * w as f32);
+                    self.glow.splat(2.0 * x, 2.0 * y, &HALO, 0.04 * w as f32);
+                    tail(&mut self.glow, &COMA, dust_px, x, y, 0.25 * w);
+                    tail(&mut self.ion, &CORE, ion_px, x, y, 0.12 * w);
                 }
             }
         }
@@ -499,32 +556,28 @@ impl CometBreakup {
         let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
         let (jx, jy) = v.px([0.0, 0.0]);
         let jr = v.scale;
-        let tone = &self.tone;
-        let glow = self.glow.values();
+        let (tone, ion_tone) = (&self.tone, &self.ion_tone);
+        let (glow, ion) = (self.glow.values(), self.ion.values());
         for y in 0..ph {
             for x in 0..pw {
                 let i = (y * pw + x) as usize;
                 let lv = tone.level(glow[i]);
+                let li = ion_tone.level(ion[i]);
                 let (dx, dy) = (
                     (f64::from(x) + 0.5 - jx) / jr,
                     (f64::from(y) + 0.5 - jy) / jr,
                 );
                 let d2 = dx * dx + dy * dy;
-                let ink = if lv > 14 {
-                    ink::ramp(Ramp::Ice, f64::from(lv) / 255.0)
+                // Dust and coma pale (Starlight), the ion tail a faint blue under them.
+                // Both ramps share lightness at equal level, so taking the brighter keeps the
+                // hand-over from dust to ion tail seamless.
+                let ion_v = ION_PEAK * f64::from(li) / 255.0;
+                let ink = if lv > 14 && f64::from(lv) / 255.0 >= ion_v {
+                    ink::ramp(Ramp::Starlight, f64::from(lv) / 255.0)
+                } else if ion_v > 14.0 / 255.0 {
+                    ink::ramp(Ramp::Ice, ion_v)
                 } else if d2 < 1.0 {
-                    // Jupiter: pale zones (Starlight) and tan-brown belts (Ember), with
-                    // wavy, turbulent edges; limb-darkened.
-                    let mu = (1.0 - d2).sqrt();
-                    let wave = value_noise(0x3B1, 9.0 * dx + 0.6 * self.t, 5.0 * dy, 1.0) - 0.5;
-                    let lat = -dy + 0.015 * wave;
-                    let bands = (lat * 10.5 + 0.3).sin_det() + 0.35 * (lat * 23.0 + 1.0).sin_det();
-                    let lit = 0.35 + 0.65 * mu.powf(0.5);
-                    if bands > -0.45 {
-                        ink::ramp(Ramp::Starlight, (0.6 + 0.12 * bands) * lit)
-                    } else {
-                        ink::ramp(Ramp::Ember, (0.42 + 0.05 * bands) * lit)
-                    }
+                    jupiter_cloud(dx, dy, d2, jr, self.t)
                 } else if hash01(0x5E ^ cell_key(x, y)) < 0.0015 {
                     ink::ramp(Ramp::Starlight, 0.3)
                 } else {
@@ -570,15 +623,11 @@ impl CometBreakup {
                         let Some(under) = self.pixels.get(x, y) else {
                             continue;
                         };
-                        if dark > 0.0
-                            && matches!(under.role, Role::Ramp(Ramp::Starlight | Ramp::Ember))
-                        {
+                        // Scars darken the clouds (all Sienna, the red spot too), never
+                        // the stars or the comet.
+                        if under.role == Role::Ramp(Ramp::Sienna) && dark > 0.0 {
                             let lv = f64::from(under.level) / 255.0 * (1.0 - dark);
-                            let ramp = match under.role {
-                                Role::Ramp(r) => r,
-                                _ => Ramp::Starlight,
-                            };
-                            self.pixels.set(x, y, ink::ramp(ramp, lv.max(0.03)));
+                            self.pixels.set(x, y, ink::ramp(Ramp::Sienna, lv.max(0.03)));
                         }
                     }
                 }
@@ -595,7 +644,7 @@ impl CometBreakup {
         let site = impact_site();
         let up = [site[0], site[1]];
         let tangent = [-up[1], up[0]];
-        const SPARK: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
+
         for gr in self.plume.iter() {
             let p = [
                 site[0] + up[0] * f64::from(gr.pos[2]) + tangent[0] * f64::from(gr.pos[0]),
@@ -606,26 +655,120 @@ impl CometBreakup {
             }
             let (x, y) = v.px(p);
             let heat = (-f64::from(gr.age) / 1.4).exp() as f32;
-            self.fire.splat(2.0 * x, 2.0 * y, &SPARK, 0.6 * heat);
-        }
-        if (0.0..FLASH).contains(&since) {
-            const FLASH_K: [(i32, i32, f32); 49] = halo_kernel::<49>(3);
-            let (x, y) = v.px([site[0] * 1.03, site[1] * 1.03]);
-            let k = (1.0 - since / FLASH) as f32;
-            self.fire.splat(2.0 * x, 2.0 * y, &FLASH_K, 6.0 * k * k);
+            // Young grains are all at the vent: ramp them in so they do not sum to a
+            // saturated blob before the plume has spread.
+            let spread = ease::smoothstep((f64::from(gr.age) / 0.4).min(1.0)) as f32;
+            self.fire
+                .splat(2.0 * x, 2.0 * y, &COMA, 0.035 * heat * spread);
         }
         let fw = usize::from(self.fire.pixel_size().width()).max(1);
+        if (0.0..FLASH).contains(&since) {
+            // A soft radial glow over the limb at the strike, bright at first and fading
+            // (a Gaussian drawn directly, so it has no kernel's stepped edge).
+            let (cx, cy) = v.px([site[0] * 1.03, site[1] * 1.03]);
+            let r0 = (GLOW_R * v.scale).max(1.5);
+            let k = 1.0 * (-since / GLOW_FADE).exp() * (1.0 - since / FLASH);
+            let reach = 2.2 * r0;
+            let fh = self.fire.values().len() / fw;
+            let (x0, x1) = ((cx - reach).floor().max(0.0) as usize, (cx + reach).ceil());
+            let (y0, y1) = ((cy - reach).floor().max(0.0) as usize, (cy + reach).ceil());
+            let buf = self.fire.values_mut();
+            for y in y0..(y1.max(0.0) as usize).min(fh) {
+                for x in x0..(x1.max(0.0) as usize).min(fw) {
+                    let (ddx, ddy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
+                    let g = (-(ddx * ddx + ddy * ddy) / (r0 * r0)).exp();
+                    buf[y * fw + x] += (k * g) as f32;
+                }
+            }
+        }
+        // The glow is warm white fading to black (Starlight by intensity, so it has no
+        // dull-red rim), a near-white Blackbody only at its saturated heart; over the
+        // clouds a faint glow lightens them instead of replacing them, so it fades smoothly
+        // into the disc.
         for (i, &f) in self.fire.values().iter().enumerate() {
             let lv = self.fire_tone.level(f);
-            if lv < 24 {
+            if lv < 6 {
                 continue;
             }
             let (x, y) = ((i % fw) as i32, (i / fw) as i32);
-            let kelvin = 1500.0 + 6500.0 * f64::from(lv) / 255.0;
-            self.pixels.set(x, y, ink::blackbody(kelvin));
+            let under = self.pixels.get(x, y).unwrap_or(Ink::BLANK);
+            let ink = if lv >= FIRE_HEART {
+                let u = f64::from(lv - FIRE_HEART) / f64::from(255 - FIRE_HEART);
+                ink::blackbody(5200.0 + 1300.0 * u)
+            } else if under.role == Role::Ramp(Ramp::Sienna) && lv < GLOW_ON_CLOUD {
+                let u = f64::from(under.level) / 255.0;
+                let lit = f64::from(lv) / f64::from(GLOW_ON_CLOUD);
+                ink::ramp(Ramp::Sienna, u + (0.97 - u) * lit)
+            } else {
+                let v = f64::from(lv) / 255.0;
+                if f64::from(under.level) / 255.0 >= v && under.role != Role::Background {
+                    continue;
+                }
+                ink::ramp(Ramp::Starlight, v)
+            };
+            self.pixels.set(x, y, ink);
         }
     }
 }
+
+/// The Great Red Spot on the disc: planet longitude (rad), sine latitude, half-widths.
+const GRS_LON: f64 = 0.9;
+const GRS_S: f64 = -0.37;
+const GRS_HALF: (f64, f64) = (0.24, 0.07);
+
+/// Jupiter's clouds at disc point `(dx, dy)` (disc radii, `y` down, `d2 = dx² + dy²` < 1),
+/// `jr` pixels per radius, `t` seconds: the shared belt/zone profile (the same Sienna
+/// palette as `jupiter_storms`), its edges made wavy and mottled by value noise fixed in
+/// planet longitude so the texture turns with the planet (and the scars), the Great Red
+/// Spot, limb darkening, and the outermost pixel antialiased into space.
+fn jupiter_cloud(dx: f64, dy: f64, d2: f64, jr: f64, t: f64) -> Ink {
+    let mu = (1.0 - d2).sqrt();
+    let s = (-dy).clamp(-1.0, 1.0);
+    let cl = (1.0 - s * s).max(1e-9).sqrt();
+    let lon = (dx / cl).clamp(-1.0, 1.0).asin() + SPIN * t;
+    let turb = value_noise(0x3B1, 2.5 * lon, 12.0 * s, 1.0) - 0.5;
+    let fine = value_noise(0x3B2, 7.0 * lon, 45.0 * s, 1.0) - 0.5;
+    let a = jovian::band_profile(s + 0.035 * turb) + 0.22 * fine;
+    // Limb darkening all the way down (no floor), so the edge sinks into dark sienna and
+    // then fades into space over its outer 1.5 pixels: no bright or orange rim.
+    let aa = ease::smoothstep(((1.0 - d2.sqrt()) * jr / 1.5).min(1.0));
+    let lit = mu.powf(0.9) * aa;
+    let mut level = jovian::cloud_level(a, 0.0);
+    // The Great Red Spot (a small oval in its collar, shared look with jupiter_storms).
+    let dl = (lon - GRS_LON + PI).rem_euclid(TAU) - PI;
+    let (sx, sy) = (dl / GRS_HALF.0, (s - GRS_S) / GRS_HALF.1);
+    let rho = sx.hypot(sy);
+    if rho < 2.0 {
+        // At this scale the spot is a few pixels: feather in its own units (rim over
+        // 0.7–1.3 radii, a faint collar out to 1.9) rather than in pixels.
+        let inside = 1.0 - ease::smoothstep(((rho - 0.7) / 0.6).clamp(0.0, 1.0));
+        let collar =
+            0.6 * (1.0 - inside) * (1.0 - ease::smoothstep(((rho - 1.2) / 0.7).clamp(0.0, 1.0)));
+        let spot = jovian::spot_level(0.5 + fine, a, 0.0);
+        level = jovian::spot_blend(level, spot, inside, collar);
+    }
+    jovian::sienna(level, lit)
+}
+
+/// How far the view leans from Jupiter towards the comet during the approach.
+const FOLLOW_APPROACH: f64 = 0.55;
+/// Dust tails: direction (unit, world, away from a Sun off to the lower left), length in
+/// R_J, samples per pixel of length, and one tail per `TAIL_EVERY` grains.
+const TAIL_DIR: [f64; 2] = [0.6, 0.8];
+const TAIL_LEN: f64 = 0.8;
+const TAIL_EVERY: usize = 3;
+/// Ion tail: straight away from the Sun (unit, world), length (R_J), and the brightest
+/// Ice level it reaches (it stays faint).
+const ION_DIR: [f64; 2] = [0.2, 0.98];
+const ION_LEN: f64 = 1.4;
+const ION_PEAK: f64 = 0.42;
+/// The impact's radial glow: radius (R_J) and length of the flash (s, e-folding).
+const GLOW_R: f64 = 0.16;
+const GLOW_FADE: f64 = 0.7;
+/// Below this tone level a glow over the clouds lightens them instead of replacing them.
+const GLOW_ON_CLOUD: u8 = 140;
+/// Tone level from which the glow is drawn as a near-white Blackbody (its heart).
+const FIRE_HEART: u8 = 238;
 
 /// Fireball gravity in R_J/s² for the drawn height and flight time.
 fn plume_g() -> f64 {
@@ -699,6 +842,7 @@ impl Generator for CometBreakup {
             self.reset();
         }
         self.glow.resize(size);
+        self.ion.resize(size);
         self.fire.resize(size);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
@@ -813,6 +957,81 @@ mod tests {
                 "leading first"
             );
         }
+    }
+
+    #[test]
+    fn brk_a6_the_tide_visibly_stretches_the_pile_by_five_seconds() {
+        let (mut g, mut rng) = fresh();
+        run_to(&mut g, &mut rng, 5.0);
+        let ratio = axis_ratio(&g.pos);
+        assert!(ratio >= 2.0, "axis ratio {ratio} at t = 5 s");
+    }
+
+    #[test]
+    fn brk_a6_the_comet_has_a_coma_and_tail_from_the_start() {
+        let (mut g, mut rng) = fresh();
+        run_to(&mut g, &mut rng, 0.1);
+        g.compose();
+        let v = g.view;
+        let (nx, ny) = v.px(orbit(g.tau));
+        let d = 0.45 * TAIL_LEN * v.scale;
+        let at = |sx: f64, sy: f64| {
+            g.pixels
+                .get((nx + sx * d).floor() as i32, (ny - sy * d).floor() as i32)
+                .map(|i| i.role)
+        };
+        // A pale dust tail (Starlight) away from the Sun, none on the sunward side.
+        let dust = Some(Role::Ramp(Ramp::Starlight));
+        assert_eq!(at(TAIL_DIR[0], TAIL_DIR[1]), dust, "no dust tail");
+        let sunward = at(-TAIL_DIR[0], -TAIL_DIR[1]);
+        assert!(
+            sunward == Some(Role::Background)
+                || sunward == dust && {
+                    let (x, y) = ((nx - TAIL_DIR[0] * d) as i32, (ny + TAIL_DIR[1] * d) as i32);
+                    g.pixels.get(x, y).is_some_and(|i| i.level < 40)
+                },
+            "tail on the sunward side: {sunward:?}"
+        );
+        // A white nucleus and a faint blue ion tail further out along the anti-Sun line.
+        let core = g
+            .pixels
+            .get(nx as i32, ny as i32)
+            .expect("nucleus on screen");
+        assert_eq!(core.role, Role::Ramp(Ramp::Starlight));
+        assert!(core.level > 200, "nucleus {core:?}");
+        let di = 0.5 * ION_LEN * v.scale;
+        let ion = (-1..=1).filter_map(|o| {
+            let x = (nx + ION_DIR[0] * di) as i32 + o;
+            g.pixels.get(x, (ny - ION_DIR[1] * di) as i32)
+        });
+        let ion: Vec<_> = ion.collect();
+        assert!(
+            ion.iter()
+                .any(|i| i.role == Role::Ramp(Ramp::Ice)
+                    && f64::from(i.level) <= 255.0 * ION_PEAK + 1.0),
+            "no faint ion tail: {ion:?}"
+        );
+    }
+
+    #[test]
+    fn brk_a7_jupiter_shares_the_sienna_cloud_palette() {
+        let (g, _) = fresh();
+        let (jx, jy) = g.view.px([0.0, 0.0]);
+        let r = g.view.scale;
+        let mut sienna = 0;
+        let mut total = 0;
+        for y in (jy - 0.8 * r) as i32..(jy + 0.8 * r) as i32 {
+            for x in (jx - 0.5 * r) as i32..(jx + 0.5 * r) as i32 {
+                if let Some(i) = g.pixels.get(x, y) {
+                    total += 1;
+                    sienna += usize::from(i.role == Role::Ramp(Ramp::Sienna));
+                }
+            }
+        }
+        assert!(
+            total > 20 && sienna * 10 >= total * 8,
+            "{sienna} of {total}"
+        );
     }
 
     #[test]
