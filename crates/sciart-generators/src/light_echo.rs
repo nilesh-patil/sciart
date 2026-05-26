@@ -62,13 +62,40 @@ const LUT: usize = 512;
 /// leaves the dust's own grey, so the far rings end cleanly instead of in dark-red
 /// streaks), and the emission temperature from which the light is blue-white (Ice).
 const HIGHLIGHT_MAX: u8 = 236;
-const ECHO_FLOOR: u8 = 38;
+const ECHO_FLOOR: u8 = 52;
 pub(crate) const HOT_FROM: f32 = 5_500.0;
 /// Echo weight fades out beyond this sky radius (half-heights) over `VIGNETTE_SPAN`.
 const VIGNETTE_AT: f64 = 0.95;
 const VIGNETTE_SPAN: f64 = 0.5;
 /// Inverse-square dilution, softened (stylised): weight `∝ 1 / r^DILUTION`.
 const DILUTION: f64 = 1.0;
+/// Passes of the separable `[1 2 1]` blur over the echo before tone mapping (ECHO-A7):
+/// two passes are a 5-tap binomial, so the lit sheets read as soft dust, not blocks.
+const BLUR_PASSES: usize = 3;
+/// Sub-floor echo light shown as lit dust grey at this share of its level (≤ 27).
+const FRINGE: f64 = 0.6;
+
+/// In-place separable `[1 2 1] / 4` blur of a `w × h` field (edges clamped), `tmp` the
+/// same size.
+fn blur121(buf: &mut [f32], tmp: &mut [f32], w: usize, h: usize) {
+    if w == 0 || h == 0 || buf.len() < w * h || tmp.len() < w * h {
+        return;
+    }
+    for y in 0..h {
+        let row = &buf[y * w..(y + 1) * w];
+        let out = &mut tmp[y * w..(y + 1) * w];
+        for x in 0..w {
+            let (l, r) = (row[x.saturating_sub(1)], row[(x + 1).min(w - 1)]);
+            out[x] = 0.25 * (l + r) + 0.5 * row[x];
+        }
+    }
+    for y in 0..h {
+        let (up, down) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        for x in 0..w {
+            buf[y * w + x] = 0.25 * (tmp[up * w + x] + tmp[down * w + x]) + 0.5 * tmp[y * w + x];
+        }
+    }
+}
 
 /// `(L, T)` at `t_e` from the table `curve` (`LUT` entries over `[0, BURST]`), linearly
 /// interpolated so band edges stay smooth; 0 outside the burst.
@@ -189,6 +216,10 @@ pub struct LightEcho {
     /// Echo brightness and colour temperature per node this frame.
     light: Grid<f32>,
     kelvin: Grid<f32>,
+    /// The blurred echo (brightness, and brightness × temperature) and blur scratch.
+    soft: Grid<f32>,
+    soft_t: Vec<f32>,
+    scratch: Vec<f32>,
     map: SampleMap,
     tone: Tone,
     pixels: Pixels,
@@ -238,20 +269,48 @@ impl LightEcho {
         }
     }
 
+    /// Low-pass the echo (ECHO-A7): brightness and brightness-weighted temperature are
+    /// blurred together, so the colour of a softened edge is its light's mean temperature.
+    fn soften(&mut self) {
+        let (w, h) = (
+            usize::from(self.light.width()),
+            usize::from(self.light.height()),
+        );
+        let soft = self.soft.as_mut_slice();
+        soft.copy_from_slice(self.light.as_slice());
+        for ((st, &l), &k) in self
+            .soft_t
+            .iter_mut()
+            .zip(self.light.as_slice())
+            .zip(self.kelvin.as_slice())
+        {
+            *st = l * k;
+        }
+        for _ in 0..BLUR_PASSES {
+            blur121(soft, &mut self.scratch, w, h);
+            blur121(&mut self.soft_t, &mut self.scratch, w, h);
+        }
+    }
+
     fn raster(&mut self) {
         self.illuminate();
-        let (map, light, kelvin, tone) = (&self.map, &self.light, &self.kelvin, &self.tone);
+        self.soften();
+        let (map, soft, soft_t, tone) = (&self.map, &self.soft, &self.soft_t, &self.tone);
         let unlit = &self.dust.unlit;
-        let direct = light.size() == self.pixels.pixel_size();
-        let w = usize::from(light.width());
+        let direct = soft.size() == self.pixels.pixel_size();
+        let w = usize::from(soft.width());
+        let kelvin_at = |i: usize| {
+            let l = soft.as_slice()[i];
+            if l > 1e-9 { soft_t[i] / l } else { 0.0 }
+        };
         self.pixels.shade(|x, y| {
             let (v, kv, dust) = if direct {
                 let i = y as usize * w + x as usize;
-                (light.as_slice()[i], kelvin.as_slice()[i], unlit[i])
+                (soft.as_slice()[i], kelvin_at(i), unlit[i])
             } else {
                 let (nx, ny) = map.nearest(x, y);
                 let i = ny as usize * w + nx as usize;
-                (map.sample(light, x, y), kelvin.as_slice()[i], unlit[i])
+                (map.sample(soft, x, y), kelvin_at(i), unlit[i])
             };
             // Highlights roll off on the asinh curve and stop short of white, so the
             // brightest bands keep their gradation instead of clipping to flat steps.
@@ -266,6 +325,18 @@ impl LightEcho {
                 };
                 return Ink::new(Role::Ramp(ramp), level.max(dust));
             }
+            // Echo light too faint for colour lifts the dust's own grey instead: a soft
+            // fringe that feathers each lit sheet into the dark rather than a hard edge.
+            let fringe = if kv > 0.0 {
+                ink::level(f64::from(level) * FRINGE)
+            } else {
+                0
+            };
+            let dust = if f64::from(fringe) >= ink::MIN_VISIBLE_LEVEL {
+                dust.max(fringe)
+            } else {
+                dust
+            };
             if dust > 0 {
                 Ink::new(Role::Ramp(Ramp::Starlight), dust)
             } else {
@@ -324,6 +395,12 @@ impl Generator for LightEcho {
         }
         self.light.resize(lattice, 0.0);
         self.kelvin.resize(lattice, 0.0);
+        self.soft.resize(lattice, 0.0);
+        let n = usize::from(lattice.width()) * usize::from(lattice.height());
+        self.soft_t.clear();
+        self.soft_t.resize(n, 0.0);
+        self.scratch.clear();
+        self.scratch.resize(n, 0.0);
         self.map.rebuild(lattice, px);
         self.centre = (f64::from(px.width()) / 2.0, f64::from(px.height()) / 2.0);
         self.half_px = f64::from(px.height()) / 2.0;
@@ -421,6 +498,58 @@ mod tests {
         }
         // Both the hot (early) and the cool (late) light show, the cool light dominating.
         assert!(ice > 50 && ember > ice, "ice {ice}, ember {ember}");
+    }
+
+    /// Mean level step between 4-neighbouring echo pixels, and the share of echo pixels
+    /// with fewer than two echo 4-neighbours (ragged specks).
+    fn roughness(g: &LightEcho) -> (f64, f64) {
+        let px = g.pixels.pixel_size();
+        let echo = |x: i32, y: i32| {
+            g.pixels
+                .get(x, y)
+                .filter(|i| matches!(i.role, Role::Ramp(Ramp::Ice | Ramp::Ember)))
+                .map(|i| f64::from(i.level))
+        };
+        let (mut step, mut pairs, mut lit, mut specks) = (0.0, 0, 0, 0);
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let Some(l) = echo(x, y) else { continue };
+                lit += 1;
+                let mut nb = 0;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    if let Some(m) = echo(x + dx, y + dy) {
+                        nb += 1;
+                        if dx + dy > 0 {
+                            step += (l - m).abs();
+                            pairs += 1;
+                        }
+                    }
+                }
+                if nb < 2 {
+                    specks += 1;
+                }
+            }
+        }
+        (
+            step / f64::from(pairs.max(1)),
+            f64::from(specks) / f64::from(lit.max(1)),
+        )
+    }
+
+    #[test]
+    fn echo_a7_lit_dust_is_smooth_not_blocky_or_ragged() {
+        let (mut g, _) = built(Size::new(120, 40));
+        for t in [3.0, 8.0, 14.0, 20.0] {
+            g.t = t;
+            g.raster();
+            let (step, specks) = roughness(&g);
+            assert!(step <= 19.0, "t={t}: mean neighbour step {step:.1}");
+            assert!(
+                specks <= 0.025,
+                "t={t}: {:.1} % ragged specks",
+                100.0 * specks
+            );
+        }
     }
 
     #[test]

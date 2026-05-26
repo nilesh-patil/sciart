@@ -61,17 +61,28 @@ pub(crate) const DV: f64 = (HOLD - START) * N / (6.0 * PI * HOPS);
 /// altitude and of the hops' lowest dip, so the path spans ~70 % of the width and of the
 /// height above the limb whatever the size (the radial axis is exaggerated to fit).
 const LIMB_TOP: f64 = 0.85;
-const START_COL: f64 = 0.13;
-const STATION_COL: f64 = 0.83;
+const START_COL: f64 = 0.08;
+const STATION_COL: f64 = 0.76;
 const TOP_ROW: f64 = 0.2;
 const DIP_ROW: f64 = 0.75;
 /// How long a burn's arrow and plume flash show (s).
 const BURN_SHOW: f64 = 1.2;
 /// The recent trail with a glow under it (s).
 const TRAIL: f64 = 4.0;
-/// Planned-path samples, and the dotted plan's spacing (dots of arc length).
+/// Planned-path samples (the dim solid "still to fly" line and the flown trail).
 const PLAN_N: usize = 1200;
-const PLAN_GAP: f64 = 3.0;
+/// Burn labels: the model's Δv in m/s for a 20 km starting gap and a 92.6-min orbit
+/// (RDV-A9), as fixed strings so `render` never formats; `dv_ms` backs the numbers.
+#[cfg(test)]
+const GAP_M: f64 = 20_000.0;
+#[cfg(test)]
+const PERIOD_REAL: f64 = 5_556.0;
+const DV_LABELS: [(&str, &str); 2] = [
+    ("Δv −0.48 m/s", "dv -0.48 m/s"),
+    ("Δv +0.48 m/s", "dv +0.48 m/s"),
+];
+/// Cells kept clear left of the station's centre: its sprite reaches `STATION_LEFT`.
+const STATION_LEFT: i32 = -4;
 /// Exhaust dots in a thruster puff.
 const PUFF_DOTS: i32 = 18;
 /// The inertial inset needs this many columns and rows (below it, a disc of a few
@@ -92,6 +103,12 @@ pub(crate) fn cw(s: State, t: f64) -> State {
         3.0 * N * sn * x0 + cs * vx0 + 2.0 * sn * vy0,
         -6.0 * N * (1.0 - cs) * x0 - 2.0 * sn * vx0 + (4.0 * cs - 3.0) * vy0,
     ]
+}
+
+/// A model Δv (gap units per model second) in m/s for the labels' assumed scale.
+#[cfg(test)]
+pub(crate) fn dv_ms(dv: f64) -> f64 {
+    dv * GAP_M * PERIOD / PERIOD_REAL
 }
 
 /// The chaser's LVLH state at loop time `t`.
@@ -125,23 +142,29 @@ const BURNS: [(f64, f64); 4] = [
     (T_APPROACH + APPROACH, -1.0),
 ];
 
-/// Station sprite, left to right from the centre: offset, glyph, part.
+/// Station sprite, 8 cells along V-bar (RDV-A8): offset from the centre, row, glyph,
+/// part. The pressurised stack runs along track with the docking port facing the
+/// chaser, truss joints carry solar-array wings above and below.
 #[derive(Debug, Clone, Copy)]
 enum Part {
+    Port,
     Truss,
     Panel,
     Module,
 }
-const STATION: [(i32, Glyph, Part); 9] = [
-    (-4, Glyph::new('▓', '#'), Part::Panel),
-    (-3, Glyph::new('▓', '#'), Part::Panel),
-    (-2, Glyph::new('═', '='), Part::Truss),
-    (-1, Glyph::new('═', '='), Part::Truss),
-    (0, Glyph::new('█', 'H'), Part::Module),
-    (1, Glyph::new('═', '='), Part::Truss),
-    (2, Glyph::new('═', '='), Part::Truss),
-    (3, Glyph::new('▓', '#'), Part::Panel),
-    (4, Glyph::new('▓', '#'), Part::Panel),
+const STATION: [(i32, i32, Glyph, Part); 12] = [
+    (STATION_LEFT, 0, Glyph::new('═', '='), Part::Port),
+    (-3, 0, Glyph::new('▐', '['), Part::Module),
+    (-2, 0, Glyph::new('█', '#'), Part::Module),
+    (-1, 0, Glyph::new('╋', '+'), Part::Truss),
+    (0, 0, Glyph::new('█', 'H'), Part::Module),
+    (1, 0, Glyph::new('╋', '+'), Part::Truss),
+    (2, 0, Glyph::new('█', '#'), Part::Module),
+    (3, 0, Glyph::new('▌', ']'), Part::Module),
+    (-1, -1, Glyph::new('▓', '#'), Part::Panel),
+    (1, -1, Glyph::new('▓', '#'), Part::Panel),
+    (-1, 1, Glyph::new('▓', '#'), Part::Panel),
+    (1, 1, Glyph::new('▓', '#'), Part::Panel),
 ];
 
 fn burn(t: f64) -> Option<(f64, f64)> {
@@ -151,13 +174,18 @@ fn burn(t: f64) -> Option<(f64, f64)> {
         .find(|&(at, _)| t >= at && t < at + BURN_SHOW)
 }
 
-/// Chaser sprite, left to right from the nose cell: offset, glyph, part.
-const CHASER: [(i32, Glyph, CraftPart); 4] = [
-    (-3, Glyph::new('━', '='), CraftPart::Array),
-    (-2, Glyph::new('▐', '['), CraftPart::Hull),
+/// Chaser sprite, 6 cells (RDV-A8), left to right from the nose cell: offset, glyph,
+/// part.
+const CHASER: [(i32, Glyph, CraftPart); 6] = [
+    (-5, Glyph::new('━', '-'), CraftPart::Array),
+    (-4, Glyph::new('━', '='), CraftPart::Array),
+    (-3, Glyph::new('▐', '['), CraftPart::Hull),
+    (-2, Glyph::new('█', '#'), CraftPart::Hull),
     (-1, Glyph::new('█', '#'), CraftPart::Hull),
     (0, Glyph::new('▶', '>'), CraftPart::Nose),
 ];
+/// The chaser's tail cell (its array's end), from the nose.
+const CHASER_TAIL: i32 = -5;
 #[derive(Debug, Clone, Copy)]
 enum CraftPart {
     Array,
@@ -174,9 +202,6 @@ pub struct OrbitalRendezvous {
     dots: Dots,
     /// The whole loop's path in dot coordinates, `PLAN_N` samples evenly in time.
     plan: Vec<(f64, f64)>,
-    /// The plan resampled every `PLAN_GAP` dots of arc length, with each dot's loop
-    /// time: the dotted "still to fly" path.
-    plan_dots: Vec<(f64, f64, f64)>,
     stars: Vec<(i32, i32, u8)>,
     salt: u64,
     /// Screen: cells, the station's cell position, and cells per unit along track
@@ -210,7 +235,21 @@ impl OrbitalRendezvous {
     fn chaser_cell(&self, t: f64) -> (f64, f64) {
         let s = chaser(t);
         let (cx, cy) = self.to_cells(s[0], s[1]);
-        (cx.min(self.origin.0 - 5.0), cy)
+        (cx.min(self.origin.0 + f64::from(STATION_LEFT) - 1.0), cy)
+    }
+
+    /// The cell where a burn at loop time `at` fired.
+    fn burn_cell(&self, at: f64) -> (i32, i32) {
+        let (bx, by) = self.chaser_cell(at);
+        (bx.floor() as i32, by.floor() as i32)
+    }
+
+    /// Left end and row of burn `k`'s Δv label: two rows above the burn, centred on it,
+    /// kept on screen and clear of the station's sprite (which ends one column short).
+    fn dv_label_at(&self, k: usize, bx: i32, by: i32) -> (i32, i32) {
+        let len = DV_LABELS.get(k).map_or(0, |l| l.0.chars().count()) as i32;
+        let right = self.origin.0.floor() as i32 + STATION_LEFT - 2 - len;
+        ((bx - len / 2).min(right).max(0), (by - 2).max(0))
     }
 
     fn earth(&mut self) {
@@ -265,22 +304,66 @@ impl OrbitalRendezvous {
     /// Inertial inset (top right): Earth, the station's circular orbit and both craft,
     /// the chaser's radius and lead exaggerated. Only where the disc has enough pixels
     /// to read as round.
-    fn inset(&mut self) {
+    /// The inset's centre and orbit radius (dots), when it is drawn (RDV-A7).
+    fn inset_geometry(&self) -> Option<(f64, f64, f64)> {
         if self.w < INSET_MIN.0 || self.h < INSET_MIN.1 {
-            return;
+            return None;
         }
         // Orbit radius in dots (square); a pixel is 2 × 2 dots.
-        let rd = 0.3 * self.h;
-        let (dcx, dcy) = (2.0 * self.w - 1.3 * rd - 4.0, 1.2 * rd + 2.0);
+        let rd = 0.4 * self.h;
+        Some((2.0 * self.w - 1.2 * rd - 4.0, 1.15 * rd + 2.0, rd))
+    }
+
+    /// Whether background pixel `(x, y)` lies clear of the Δv labels and the inset, so
+    /// no star shows through as a block behind text or inside the globe's frame.
+    fn star_clear(&self, x: i32, y: i32) -> bool {
+        for (k, (at, _)) in BURNS.into_iter().take(DV_LABELS.len()).enumerate() {
+            let (bx, by) = self.burn_cell(at);
+            let (lx, ly) = self.dv_label_at(k, bx, by);
+            if y / 2 == ly && (lx - 1..=lx + 12).contains(&x) {
+                return false;
+            }
+        }
+        match self.inset_geometry() {
+            Some((dcx, dcy, rd)) => {
+                let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                (2.0 * px - dcx).hypot(2.0 * py - dcy) > rd + 3.0
+            }
+            None => true,
+        }
+    }
+
+    fn inset(&mut self) {
+        let Some((dcx, dcy, rd)) = self.inset_geometry() else {
+            return;
+        };
+        // The Earth fills most of the orbit (radius 0.72 of it: a low orbit, its height
+        // exaggerated).
+        let re = 0.36 * rd;
+        let (pcx, pcy) = (dcx / 2.0, dcy / 2.0);
+        let salt = self.salt;
         let pixels = &mut self.pixels;
-        disc_pixels((dcx / 2.0, dcy / 2.0), 0.24 * rd, |x, y, cover| {
-            // A lit hemisphere: brighter toward the Sun (upper left), antialiased edge.
-            pixels.set(x, y, ink::ramp(Ramp::Ice, cover * 0.55));
+        disc_pixels((pcx, pcy), re, |x, y, cover| {
+            // A lit globe: Lambert toward the Sun (upper left), a soft terminator, ocean
+            // with a little cloud, and an antialiased edge.
+            let (u, v) = (
+                (f64::from(x) + 0.5 - pcx) / re,
+                (f64::from(y) + 0.5 - pcy) / re,
+            );
+            let z = (1.0 - u * u - v * v).max(0.0).sqrt();
+            let lit = (-0.6 * u - 0.45 * v + 0.66 * z).max(0.0);
+            let cloud = value_noise(salt ^ 5, 3.0 * u, 3.0 * v, 1.0);
+            let albedo = 0.45 + 0.4 * ((cloud - 0.55) / 0.2).clamp(0.0, 1.0);
+            let shade = 0.1 + 0.9 * lit.powf(0.8);
+            let val = cover * (albedo * shade).min(0.9);
+            if val * 255.0 >= ink::MIN_VISIBLE_LEVEL {
+                pixels.set(x, y, ink::ramp(Ramp::Ice, val));
+            }
         });
         let orbit = Ink::new(Role::Ramp(Ramp::Starlight), 60);
-        for i in 0..96 {
+        for i in 0..160 {
             if i % 2 == 0 {
-                let a = TAU * f64::from(i) / 96.0;
+                let a = TAU * f64::from(i) / 160.0;
                 let (s, co) = a.sin_cos_det();
                 self.dots.plot(dcx + rd * co, dcy + rd * s, orbit);
             }
@@ -308,13 +391,6 @@ impl OrbitalRendezvous {
         }
         self.earth();
         let now = self.t.rem_euclid(LOOP);
-        // Still to fly: a dim dotted line.
-        let plan = Ink::new(Role::Ramp(Ramp::Aurora), 105);
-        for &(x, y, at) in &self.plan_dots {
-            if at > now {
-                self.dots.plot(x, y, plan);
-            }
-        }
         // Flown: a solid line, brightest near the chaser and fading with age, over a
         // soft glow along the last few seconds.
         let step = LOOP / PLAN_N as f64;
@@ -346,6 +422,14 @@ impl OrbitalRendezvous {
             }
             prev = Some((x, y));
         }
+        // Still to fly: a dim solid line from the chaser on (drawn after the trail, so it
+        // never covers it; `Dots` keeps the brighter ink where they meet).
+        let plan = Ink::new(Role::Ramp(Ramp::Aurora), 78);
+        let mut prev = (hx, hy);
+        for &(x, y) in self.plan.iter().skip(flown + 1) {
+            self.dots.line(prev.0, prev.1, x, y, plan);
+            prev = (x, y);
+        }
         // A burn: the plume flashes (a hot glow at the burn marker that swells and
         // fades) and a spreading cone of exhaust dots streams opposite the Δv.
         if let Some((at, dir)) = burn(self.t) {
@@ -354,7 +438,11 @@ impl OrbitalRendezvous {
             let (cx, cy) = self.chaser_cell(self.t);
             // The engine end: ahead of the nose for a retrograde burn, behind the array
             // for a prograde one.
-            let nozzle = if dir < 0.0 { cx + 1.5 } else { cx - 3.5 };
+            let nozzle = if dir < 0.0 {
+                cx + 1.5
+            } else {
+                cx + f64::from(CHASER_TAIL) - 0.5
+            };
             let (x0, y0) = Dots::from_cells(nozzle, cy + 0.5);
             let flash_r = 0.8 + 1.4 * (age / BURN_SHOW).sqrt();
             let pixels = &mut self.pixels;
@@ -403,21 +491,10 @@ impl Generator for OrbitalRendezvous {
             (DIP_ROW - TOP_ROW) * self.h / dip,
         );
         self.plan.clear();
-        self.plan_dots.clear();
-        let mut carry = 0.0;
         for i in 0..PLAN_N {
             let at = LOOP * i as f64 / PLAN_N as f64;
-            let s = chaser(at);
-            let (cx, cy) = self.to_cells(s[0], s[1]);
-            let p = Dots::from_cells(cx.min(self.origin.0 - 5.0), cy + 0.5);
-            if let Some(&(qx, qy)) = self.plan.last() {
-                carry += (p.0 - qx).hypot(p.1 - qy);
-            }
-            if i == 0 || carry >= PLAN_GAP {
-                carry = 0.0;
-                self.plan_dots.push((p.0, p.1, at));
-            }
-            self.plan.push(p);
+            let (cx, cy) = self.chaser_cell(at);
+            self.plan.push(Dots::from_cells(cx, cy + 0.5));
         }
         let ps = self.pixels.pixel_size();
         self.stars.clear();
@@ -425,7 +502,9 @@ impl Generator for OrbitalRendezvous {
             let x = (hash01(cell_key(k, 51)) * f64::from(ps.width())) as i32;
             let y = (hash01(cell_key(k, 53)) * f64::from(ps.height()) * 0.8) as i32;
             let l = 18 + (hash01(cell_key(k, 57)).powi(4) * 120.0) as u8;
-            self.stars.push((x, y, l));
+            if self.star_clear(x, y) {
+                self.stars.push((x, y, l));
+            }
         }
         self.raster();
     }
@@ -442,34 +521,42 @@ impl Generator for OrbitalRendezvous {
         // The station and the chaser as sprites over the line work.
         let (sx, sy) = self.to_cells(0.0, 0.0);
         let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
-        // The station: a truss with two solar-panel wings a side, modules at the centre.
-        let truss = Ink::new(Role::Ramp(Ramp::Ferroin), 200);
-        let panel = Ink::new(Role::Ramp(Ramp::Ferroin), 140);
-        let module = Ink::new(Role::Ramp(Ramp::Starlight), 220);
-        for (dx, glyph, ink) in STATION {
-            let ink = match ink {
-                Part::Truss => truss,
-                Part::Panel => panel,
-                Part::Module => module,
+        // The station: modules along V-bar, truss joints with solar-array wings.
+        for (dx, dy, glyph, part) in STATION {
+            let ink = match part {
+                Part::Port => Ink::new(Role::Ramp(Ramp::Starlight), 170),
+                Part::Truss => Ink::new(Role::Ramp(Ramp::Ferroin), 200),
+                Part::Panel => Ink::new(Role::Ramp(Ramp::Ferroin), 150),
+                Part::Module => {
+                    Ink::new(Role::Ramp(Ramp::Starlight), if dx == 0 { 225 } else { 200 })
+                }
             };
-            canvas.put(sx + dx, sy, glyph, ink);
-        }
-        for dx in [-3, 3] {
-            canvas.put(sx + dx, sy - 1, Glyph::new('▄', '_'), panel);
-            canvas.put(sx + dx, sy + 1, Glyph::new('▀', '-'), panel);
+            canvas.put(sx + dx, sy + dy, glyph, ink);
         }
         let (cx, cy) = self.chaser_cell(self.t);
         let (cx, cy) = (cx.floor() as i32, cy.floor() as i32);
-        // Where each burn fired so far this loop: a small star on the path.
+        // Where each burn fired so far this loop: a small star on the path; the two CW
+        // burns also get their Δv above it (RDV-A9).
         let now = self.t.rem_euclid(LOOP);
-        for (at, _) in BURNS {
-            if now >= at {
-                let (bx, by) = self.chaser_cell(at);
-                let (bx, by) = (bx.floor() as i32, by.floor() as i32);
-                let on_craft = by == cy && (cx - 3..=cx).contains(&bx);
-                if !on_craft && canvas.get(bx, by).is_some_and(|c| c.ch != '═') {
-                    canvas.put(bx, by, Glyph::new('✶', '*'), Ink::new(Role::Accent, 160));
-                }
+        for (k, (at, _)) in BURNS.into_iter().enumerate() {
+            if now < at {
+                continue;
+            }
+            let (bx, by) = self.burn_cell(at);
+            let on_craft = by == cy && (cx + CHASER_TAIL..=cx).contains(&bx);
+            if !on_craft && bx < sx + STATION_LEFT {
+                canvas.put(bx, by, Glyph::new('✶', '*'), Ink::new(Role::Accent, 160));
+            }
+            if let Some(&(uni, ascii)) = DV_LABELS.get(k) {
+                let (lx, ly) = self.dv_label_at(k, bx, by);
+                sciart_core::draw::text_mode(
+                    canvas,
+                    lx,
+                    ly,
+                    uni,
+                    ascii,
+                    Ink::new(Role::Accent, 150),
+                );
             }
         }
         // The chaser: a solar array, a two-cell hull and a bright nose, pointing
@@ -489,7 +576,7 @@ impl Generator for OrbitalRendezvous {
         if let Some((_, dir)) = burn(self.t) {
             let accent = Ink::new(Role::Accent, 220);
             let (arrow, at) = if dir < 0.0 {
-                (Glyph::new('←', '<'), cx - 5)
+                (Glyph::new('←', '<'), cx + CHASER_TAIL - 2)
             } else {
                 (Glyph::new('→', '>'), cx + 2)
             };
@@ -611,6 +698,73 @@ mod tests {
             );
             // The chaser's nose never enters the station sprite.
             assert!(x1 < g.origin.0 - 4.0);
+        }
+    }
+
+    #[test]
+    fn rdv_a8_zoomed_on_v_bar_with_readable_sprites_and_a_solid_plan() {
+        let span = |offs: &mut dyn Iterator<Item = i32>| {
+            let v: Vec<i32> = offs.collect();
+            v.iter().max().unwrap() - v.iter().min().unwrap() + 1
+        };
+        let station = span(&mut STATION.iter().map(|p| p.0));
+        let craft = span(&mut CHASER.iter().map(|p| p.0));
+        assert!((6..=8).contains(&station), "station {station} cells");
+        assert!((6..=8).contains(&craft), "chaser {craft} cells");
+        for (w, h) in [(80, 24), (120, 40), (200, 50)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(3, size);
+            let mut g = OrbitalRendezvous::default();
+            g.resize(size, &mut ctx);
+            let share = g.origin.0 / f64::from(w);
+            assert!(
+                (0.74..=0.78).contains(&share),
+                "{w}x{h}: station at {share}"
+            );
+            // The plan still to fly is a solid line: every sample's dot is lit.
+            g.t = 0.2;
+            g.raster();
+            for &(x, y) in &g.plan[1..] {
+                assert!(
+                    g.dots.is_lit(x.round() as i32, y.round() as i32),
+                    "{w}x{h}: gap at {x},{y}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rdv_a9_burns_carry_their_dv_label_clear_of_the_station() {
+        // The labels' numbers are the model's Δv at the stated scale.
+        let want = format!("{:.2}", dv_ms(DV));
+        assert_eq!(want, "0.48");
+        for (uni, ascii) in DV_LABELS {
+            assert!(
+                uni.ends_with(&format!("{want} m/s")) && ascii.ends_with(&format!("{want} m/s"))
+            );
+        }
+        assert!(DV_LABELS[0].1.contains('-') && DV_LABELS[1].1.contains('+'));
+        for (w, h) in [(80, 24), (120, 40), (200, 50), (500, 150)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(3, size);
+            let mut g = OrbitalRendezvous::default();
+            g.resize(size, &mut ctx);
+            g.t = LOOP - 0.5;
+            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+            g.render(&mut canvas);
+            let sx = g.origin.0.floor() as i32;
+            for (k, (at, _)) in BURNS.into_iter().take(2).enumerate() {
+                let (bx, by) = g.burn_cell(at);
+                let (lx, ly) = g.dv_label_at(k, bx, by);
+                let row: String = (lx..lx + 12)
+                    .map(|x| canvas.get(x, ly).map_or(' ', |c| c.ch))
+                    .collect();
+                assert_eq!(row, DV_LABELS[k].1, "{w}x{h} burn {k}");
+                assert!(
+                    lx + 12 < sx + STATION_LEFT,
+                    "{w}x{h}: label into the station"
+                );
+            }
         }
     }
 
