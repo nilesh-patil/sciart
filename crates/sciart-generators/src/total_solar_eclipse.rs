@@ -16,6 +16,7 @@ use rand::Rng;
 use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::raster::{self, Glow, Tone, halo_kernel};
+use sciart_core::rng::hash01;
 use sciart_core::stellar;
 use sciart_core::timeline::ease;
 
@@ -61,16 +62,31 @@ const CORONA_F: f64 = 0.01;
 const STREAMERS: (usize, usize) = (6, 10);
 const FALLOFF: f64 = 2.5;
 /// Corona tone (knee, white) and its peak `Ramp(Starlight)` level.
-const CORONA_TONE: (f32, f32) = (0.08, 1.5);
+const CORONA_TONE: (f32, f32) = (0.35, 2.2);
 /// How much the Moon's approaching shadow darkens its side of the sky in partial phases.
 const SHADOW: f64 = 0.6;
-/// Corona levels below this tint the sky blue instead of drawing grey.
-const CORONA_BLUE: f64 = 34.0;
-/// Sky: twilight `Ramp(Cobalt)` level in totality and at full sunlight, and the glare
-/// around the uncovered Sun.
-const SKY_DARK: f64 = 12.0;
-const SKY_LIT: f64 = 40.0;
-const GLARE: f64 = 70.0;
+/// The one ramp for the air, its glare, the corona and the beads' halo: navy twilight at
+/// the bottom, pale steel-blue in the middle, pearl white at the top.
+const SKY: Ramp = Ramp::Ice;
+/// Sky: twilight level in totality and at full sunlight, and the glare around the
+/// uncovered Sun.
+const SKY_DARK: f64 = 10.0;
+const SKY_LIT: f64 = 34.0;
+const GLARE: f64 = 95.0;
+/// Tone mapping of the summed light: linear to the knee, then an exponential roll-off to
+/// the ceiling, so bright cores never clip flat.
+const KNEE: f64 = 150.0;
+/// The corona draws pearl where its light exceeds a multiple of the air's, drawn per
+/// coronal ray from this range: the pearl-to-blue change frays into radial filaments, as
+/// the corona's own rays fade into the scattered blue, instead of one stepped contour.
+const PEARL: (f64, f64) = (1.2, 4.5);
+/// Angular bins of those rays round the Sun.
+const RAYS: usize = 150;
+/// The corona's toned level tapers from full at the first radius to none at the second (R).
+const TAPER: (f64, f64) = (1.3, 4.2);
+const CEIL: f64 = 245.0;
+/// Sky levels below this stay blank in ASCII (the daylit sky with its glare is ~100).
+const ASCII_SKY: u8 = 110;
 /// Horizon glow: peak `Ramp(Ember)` level and its height (share of the picture).
 const GLOW_PEAK: f64 = 140.0;
 const GLOW_H: f64 = 0.1;
@@ -82,6 +98,8 @@ const PROM_PEAK: f64 = 200.0;
 const BEAD: [(i32, i32, f32); 25] = halo_kernel(2);
 const DIAMOND: [(i32, i32, f32); 121] = halo_kernel(5);
 const BEAD_TONE: (f32, f32) = (0.05, 1.0);
+/// Beads are drawn this far outside the lunar limb (px).
+const BEAD_LIFT: f64 = 0.8;
 /// Hills on the horizon.
 const HILLS: Terrain = Terrain {
     ridge: (0.8, 3.0),
@@ -256,6 +274,17 @@ impl Corona {
     }
 }
 
+/// Summed light (level units) → level: linear below [`KNEE`], rolling off smoothly toward
+/// [`CEIL`] above it (continuous in value and slope).
+pub(crate) fn soft_clip(v: f64) -> f64 {
+    if v <= KNEE {
+        v.max(0.0)
+    } else {
+        let room = CEIL - KNEE;
+        KNEE + room * (1.0 - (-(v - KNEE) / room).exp())
+    }
+}
+
 /// `a` wrapped onto `(−π, π]`.
 fn wrap(a: f64) -> f64 {
     sciart_core::geom::wrap_angle(a)
@@ -285,6 +314,8 @@ pub struct Eclipse {
     land: Vec<u8>,
     /// Per pixel: the glare's falloff round the Sun, `exp(−(r − 1)/1.5)` as a byte.
     glare: Vec<u8>,
+    /// Per pixel: its coronal ray's pearl threshold (0..255 over [`PEARL`]).
+    ray: Vec<u8>,
     /// A few bright planets and stars that come out in totality (px, level).
     lights: Vec<(i32, i32, u8)>,
     beads: Glow,
@@ -340,7 +371,12 @@ impl Eclipse {
                 a
             };
             for &(gap, p) in pts.iter().filter(|(g, _)| *g > 0.0) {
-                let px = self.to_px(p);
+                // The bead sits just outside the lunar limb (its glare is masked by the
+                // Moon's disc), so its core is a pixel beyond the limb, never on the disc.
+                let (ox, oy) = (p.0 - m.0, p.1 - m.1);
+                let len = ox.hypot(oy).max(1e-9);
+                let lift = (MOON_R - len + BEAD_LIFT / self.radius.max(1e-9)) / len;
+                let px = self.to_px((p.0 + ox * lift, p.1 + oy * lift));
                 let wgt = (gap / VALLEY) as f32;
                 self.beads
                     .splat(2.0 * px.0 + 0.5, 2.0 * px.1 + 0.5, &BEAD, wgt);
@@ -361,11 +397,13 @@ impl Eclipse {
                 );
             }
         }
-        let sky = SKY_DARK + (SKY_LIT - SKY_DARK) * f.sqrt();
+        // The sky dims with the light left (a log-ish eye response), toward deep twilight.
+        let sky = SKY_DARK + (SKY_LIT - SKY_DARK) * f.powf(0.8);
         let approach = if self.d < 0.0 { 1.0 } else { -1.0 };
         let glow_k = GLOW_PEAK * (1.0 - f).powf(1.5);
         let (corona, prom, glow, land) = (&self.corona, &self.prom, &self.glow, &self.land);
         let glare = &self.glare;
+        let rays = &self.ray;
         let beads = self.beads.values();
         let bt = &self.bead_tone;
         self.picture.shade(|x, y| {
@@ -392,85 +430,81 @@ impl Eclipse {
             };
             // The photosphere, where the Moon leaves it.
             let lit = sun_cov * (1.0 - moon_cov);
-            // The disc: limb-darkened `Blackbody` (the darkening's colour shift softened, so
-            // the limb is warm, not an orange ring); partly covered rim pixels, at the Sun's
-            // or the Moon's edge, fade as pale `Starlight` instead, so the rim is
-            // anti-aliased by brightness rather than by a cooler, redder colour.
             if lit > 0.9 {
                 let rr = (fx - sun.0).hypot(fy - sun.1) / r;
                 let mu = (1.0 - rr * rr).max(0.0).sqrt();
                 let i = stellar::limb_darkening(mu, LIMB_DARK).sqrt();
                 return ink::blackbody(stellar::brightness_temperature(T_SUN, i));
             }
-            if lit > 0.08 {
-                return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(60.0 + 190.0 * lit));
-            }
-            // Beads and the diamond ring's flare: white light over everything but the disc.
-            let b = bt.level(beads.get(i).copied().unwrap_or(0.0));
-            if b >= 200 {
+            // Light in front of the Moon's limb (it is anti-aliased by `clear`): the beads'
+            // glare, the corona and the prominences stop at the dark disc, which stays whole.
+            let clear = (1.0 - moon_cov) * open;
+            let b = f64::from(bt.level(beads.get(i).copied().unwrap_or(0.0))) * clear;
+            if b >= 200.0 {
                 return Ink::new(Role::Blackbody, ink::blackbody(T_SUN).level);
             }
-            // Corona and prominences outside the Moon (its limb anti-aliased).
-            let clear = (1.0 - moon_cov) * open;
-            // The corona's toned level, dimmed by visibility and the Moon's limb.
-            let c = ink::level(f64::from(corona.get(i).copied().unwrap_or(0)) * vis * clear);
+            let c = f64::from(corona.get(i).copied().unwrap_or(0)) * vis * clear;
             let p = f64::from(prom.get(i).copied().unwrap_or(0)) / 255.0 * vis * clear * PROM_PEAK;
-            if p >= 30.0 && p > f64::from(c) * 0.6 {
+            if p >= 30.0 && p > c * 0.6 {
                 return Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(p));
             }
-            // Sky: twilight blue with glare round the uncovered Sun, a sunset glow low down.
-            // The Moon's shadow sweeps in from the side it comes from: that half of the sky
+            // Sky: twilight with glare round the uncovered Sun, a sunset glow low down. The
+            // Moon's shadow sweeps in from the side it comes from: that half of the sky
             // darkens first, the other half last, and back again after totality.
             let side = (fx / w as f64 * 2.0 - 1.0) * -approach;
             let shade = 1.0 - SHADOW * (1.0 - f).powf(0.6) * (0.5 + 0.5 * side) * f.sqrt().min(1.0);
-            let blue = (sky * shade
-                + GLARE * f * f64::from(glare.get(i).copied().unwrap_or(0)) / 255.0)
-                * (1.0 - moon_cov * sun_cov.min(1.0))
-                * open;
+            let air =
+                sky * shade + GLARE * f * f64::from(glare.get(i).copied().unwrap_or(0)) / 255.0;
+            // The new Moon: a black silhouette closing in, its edge anti-aliased against the
+            // air (and the corona, dimmed above by `clear`).
+            let air = air * (1.0 - moon_cov);
+            // The partly covered rim pixels of the crescent add their light too.
+            let rim = if lit > 0.02 { 60.0 + 190.0 * lit } else { 0.0 };
+            // One ramp for the air, the glare, the corona and the beads' halo, added in
+            // light and tone-mapped: the corona's power law fades into the sky with no
+            // threshold and no hue edge, and the brightest core rolls off instead of
+            // clipping.
+            let light = soft_clip((air + c + b + rim) * open);
             let ember = glow_k * f64::from(glow.get(y as usize).copied().unwrap_or(0.0)) * open;
-            // The brightest light wins. Ramps share their lightness at equal levels, so where
-            // the tapering corona meets the sky of the same brightness the change is a hue
-            // shift only: no edge, no speckle.
-            let halo = f64::from(b.max(c));
-            // The corona's faint outer reaches scatter into the twilight: below
-            // `CORONA_BLUE` they brighten the blue sky instead of drawing grey, so the grey
-            // corona ends well inside, on a smooth near-circular hue edge.
-            let blue = if halo < CORONA_BLUE {
-                blue.max(halo)
-            } else {
-                blue
-            };
-            if halo >= CORONA_BLUE && halo >= blue.max(ember) {
-                return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(halo));
-            }
-            if ember >= 12.0 && ember >= blue {
+            if ember >= 12.0 && ember >= light {
                 return Ink::new(Role::Ramp(Ramp::Ember), ink::level(ember));
             }
-            // The Moon's dark disc (drawn dark against the sky too, a silhouette closing in).
-            if moon_cov >= 0.5 && halo < 12.0 {
+            if open < 0.5 || (moon_cov >= 0.5 && rim == 0.0) {
                 return Ink::BLANK;
             }
-            if open >= 0.5 {
-                Ink::new(Role::Ramp(Ramp::Cobalt), ink::level(blue.max(12.0)))
+            // Pearl where the corona (or a bead's halo) outshines the air, twilight blue
+            // where the air wins. Ramps share their lightness at equal levels and the light
+            // is summed first, so this is a hue change at unchanged lightness, and it falls
+            // where both halves are dim (about twice the twilight's level): no edge.
+            let pearl = PEARL.0
+                + (PEARL.1 - PEARL.0) * f64::from(rays.get(i).copied().unwrap_or(0)) / 255.0;
+            let ramp = if c + b + rim > pearl * air {
+                Ramp::Starlight
             } else {
-                Ink::BLANK
-            }
+                SKY
+            };
+            Ink::new(Role::Ramp(ramp), ink::level(light.max(8.0)))
         });
-        // Planets and bright stars come out as the sky darkens.
-        // Venus first (brightest), then the others, as the light fails.
+        self.stars(f);
+    }
+
+    /// Planets and bright stars come out as the sky darkens: Venus first (brightest), then
+    /// the others, as the light fails.
+    fn stars(&mut self, f: f64) {
         let show = ease::smoothstep((0.12 - f) / 0.12);
-        if show > 0.0 {
-            for &(x, y, level) in &self.lights {
-                let l = f64::from(level) * show.powf(1.0 + (255.0 - f64::from(level)) / 40.0);
-                if l >= 40.0
-                    && self
-                        .picture
-                        .get(x, y)
-                        .is_some_and(|p| p.role == Role::Ramp(Ramp::Cobalt) || p == Ink::BLANK)
-                {
-                    self.picture
-                        .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l)));
-                }
+        if show <= 0.0 {
+            return;
+        }
+        for &(x, y, level) in &self.lights {
+            let l = f64::from(level) * show.powf(1.0 + (255.0 - f64::from(level)) / 40.0);
+            if l >= 40.0
+                && self
+                    .picture
+                    .get(x, y)
+                    .is_some_and(|p| p.role == Role::Ramp(SKY) && f64::from(p.level) < 0.5 * l)
+            {
+                self.picture
+                    .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l)));
             }
         }
     }
@@ -503,6 +537,7 @@ impl Generator for Eclipse {
         let deg = (0.5 * px_h / 30.0).max(0.1);
         let hills = Skyline::new(&mut ctx.rng, w, deg, HILLS);
         let horizon = 0.97 * px_h;
+        let ray_salt: u64 = ctx.rng.random();
         let model = &self.corona_model;
         let proms = &self.proms;
         let tone = Tone::asinh(CORONA_TONE.0, CORONA_TONE.1);
@@ -511,6 +546,7 @@ impl Generator for Eclipse {
         self.glow.clear();
         self.land.clear();
         self.glare.clear();
+        self.ray.clear();
         for y in 0..2 * h {
             for x in 0..w {
                 let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
@@ -521,7 +557,7 @@ impl Generator for Eclipse {
                 // where both are near black, not in a speckled fringe.
                 // Toned once here; its level tapers to nothing by 4.8 R☉, so the corona
                 // meets the dark sky where both are near black instead of on an edge.
-                let taper = ease::smoothstep((4.8 - rr) / 2.8);
+                let taper = ease::smoothstep((TAPER.1 - rr) / (TAPER.1 - TAPER.0));
                 let level = f64::from(tone.level(model.at(rr, a) as f32)) * taper;
                 self.corona.push(level.round() as u8);
                 // Prominences: arches of glowing gas standing on the limb.
@@ -545,6 +581,14 @@ impl Generator for Eclipse {
                     .push((hills.cover(x as i32, y as i32, horizon) * 255.0).round() as u8);
                 self.glare
                     .push(((-(rr - 1.0).max(0.0) / 1.5).exp() * 255.0).round() as u8);
+                // Neighbouring rays share a threshold, blended across bins so a ray is a
+                // soft filament, not a hard wedge.
+                let u = (a / TAU + 0.5) * RAYS as f64;
+                let k = u.floor();
+                let key = |j: f64| hash01((j.rem_euclid(RAYS as f64) as u64) ^ ray_salt);
+                let t = ease::smoothstep(u - k);
+                let h = key(k) * (1.0 - t) + key(k + 1.0) * t;
+                self.ray.push((h * 255.0).round() as u8);
             }
         }
         self.bead_tone = Tone::asinh(BEAD_TONE.0, BEAD_TONE.1);
@@ -584,7 +628,9 @@ impl Generator for Eclipse {
         self.picture.blit(canvas, |_, _, top, bottom| {
             let pick = raster::stronger(top, bottom);
             // The dim twilight sky and glow stay blank in ASCII: the Sun and corona read.
-            (pick.role != Role::Ramp(Ramp::Cobalt) && pick.role != Role::Ramp(Ramp::Ember))
+            let dim = (pick.role == Role::Ramp(SKY) && pick.level < ASCII_SKY)
+                || pick.role == Role::Ramp(Ramp::Ember);
+            (!dim)
                 .then(|| raster::ascii_ramp_cell(top, bottom))
                 .flatten()
         });
@@ -712,6 +758,95 @@ mod tests {
             assert!(META.captions.contains(&want), "{i}");
             g.update(SIM_DT, &mut ctx);
         }
+    }
+
+    /// Advance `g` to loop time `t`.
+    fn run_to(g: &mut Eclipse, ctx: &mut Ctx, t: f64) {
+        while g.t < t {
+            g.update(SIM_DT, ctx);
+        }
+    }
+
+    #[test]
+    fn ecl_a6_corona_is_tone_mapped_into_the_sky_without_an_edge() {
+        // The tone curve is continuous and monotone, and never reaches its ceiling.
+        let mut prev = soft_clip(0.0);
+        for i in 1..2000 {
+            let v = soft_clip(f64::from(i) * 0.5);
+            assert!(v >= prev && v - prev <= 0.5 + 1e-9 && v < CEIL, "{i}");
+            prev = v;
+        }
+        // In totality, walking out from the limb, the light falls smoothly into the sky:
+        // no step between neighbouring pixels anywhere beyond the Moon.
+        let (mut g, mut ctx) = built(Size::new(120, 40));
+        run_to(&mut g, &mut ctx, 19.0);
+        let (cx, cy, r) = (g.centre.0, g.centre.1, g.radius);
+        for k in 0..24 {
+            let a = TAU * f64::from(k) / 24.0;
+            let (s, c) = a.sin_cos_det();
+            let mut last: Option<u8> = None;
+            let mut d = MOON_R * r + 2.0;
+            while d < 5.0 * r {
+                let (x, y) = ((cx + d * c) as i32, (cy + d * s) as i32);
+                if let Some(p) = g.picture.get(x, y)
+                    && matches!(p.role, Role::Ramp(Ramp::Starlight | SKY))
+                {
+                    if let Some(l) = last {
+                        assert!(
+                            l.abs_diff(p.level) <= 48,
+                            "ray {k} at {d}: {l} → {}",
+                            p.level
+                        );
+                    }
+                    last = Some(p.level);
+                }
+                d += 1.0;
+            }
+        }
+    }
+
+    #[test]
+    fn ecl_a7_sky_dims_toward_twilight_and_the_moon_stays_whole() {
+        let (mut g, mut ctx) = built(Size::new(120, 40));
+        let corner = |g: &Eclipse| g.picture.get(4, 4).map_or(0, |p| p.level);
+        let mut prev = corner(&g);
+        let mut t = 0.0;
+        while t < 8.0 {
+            t += 0.5;
+            run_to(&mut g, &mut ctx, t);
+            let l = corner(&g);
+            assert!(l <= prev, "t = {t}: {prev} → {l}");
+            prev = l;
+        }
+        assert!(prev <= 16, "twilight level {prev}");
+        // Through the beads and diamond ring the Moon's disc stays dark: glare never
+        // spills onto it.
+        while g.t < 12.0 {
+            g.update(SIM_DT, &mut ctx);
+            let m = g.to_px(g.moon());
+            let rr = MOON_R * g.radius - 1.5;
+            for y in (m.1 - rr) as i32..=(m.1 + rr) as i32 {
+                for x in (m.0 - rr) as i32..=(m.0 + rr) as i32 {
+                    let (dx, dy) = (f64::from(x) + 0.5 - m.0, f64::from(y) + 0.5 - m.1);
+                    if dx.hypot(dy) < rr {
+                        let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
+                        assert!(p.level <= 16, "t = {} ({x},{y}) {p:?}", g.t);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn ecl_a8_stylised_timing_matches_the_spec() {
+        // Partial phases 8 s against 14 s of totality, and the Moon moving ~180× faster in
+        // the partial phases than through totality (the real motion is uniform).
+        let contact = MOON_R - 1.0;
+        let partial = (START - contact) / PHASES[0].1;
+        let total = 2.0 * (contact - VALLEY) / PHASES[2].1;
+        let ratio = partial / total;
+        assert!((150.0..=210.0).contains(&ratio), "{ratio}");
+        assert_eq!((PHASES[0].1, PHASES[2].1), (8.0, 14.0));
     }
 
     #[test]

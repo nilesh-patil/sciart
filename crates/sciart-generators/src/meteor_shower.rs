@@ -16,7 +16,7 @@ use sciart_core::geom;
 use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::raster::{self, Glow, Tone, halo_kernel};
-use sciart_core::rng::{cell_key, hash01};
+use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 
 use crate::shared::skyline::{Skyline, Terrain};
@@ -51,10 +51,19 @@ const RATE_SWELL: (f64, f64) = (0.45, 37.0);
 const SPEED: f64 = 59.0 * 3.5;
 /// Paths are drawn this much longer than the ablation layer allows, so a streak spans a
 /// readable stretch of a terminal sky (stylised).
-const STRETCH: f64 = 2.0;
-/// Ablation heights (km): begin (brighter meteors start higher), end.
-const BEGIN_KM: (f64, f64) = (130.0, 150.0);
-const END_KM: (f64, f64) = (58.0, 72.0);
+const STRETCH: f64 = 5.0;
+/// Ablation heights of Perseids (km): begin (brighter meteors start higher), end
+/// (brighter ones burn deeper).
+const BEGIN_KM: (f64, f64) = (105.0, 125.0);
+const END_KM: (f64, f64) = (80.0, 95.0);
+/// Share of meteors that start within `NEAR_RADIANT` degrees of the radiant: short,
+/// foreshortened streaks that make it visible as the point they all fan out of.
+const NEAR_SHARE: f64 = 0.3;
+const NEAR_RADIANT: f64 = 22.0;
+/// The radiant's mark: a faint ring of dots (radius in dots) and its level.
+const RING: (f64, u8) = (3.5, 80);
+/// The streak's glow: green light stroked along the tail into the trains' layer.
+const WAKE_GLOW: f32 = 0.4;
 /// Framing: half field of view across (deg), the horizon's row as a share of the height,
 /// the radiant's height below the top edge (share of the height) and its offset from the
 /// centre (share of the width).
@@ -92,9 +101,10 @@ const TRAIN_TONE: (f32, f32) = (0.1, 3.0);
 const DITHER: u8 = 28;
 const TRAIN_FLOOR: u8 = 22;
 /// The head's share of a streak, drawn white-hot (`Ramp(Starlight)` 255); behind it the
-/// wake cools in `Blackbody` from `WAKE_K.1` to `WAKE_K.0` at the tail's end.
+/// wake is green (`Ramp(Aurora)`) down to `WAKE_SPLIT` of the tail, then yellow
+/// (`Ramp(Sulfur)`) to its end.
 const HOT: f64 = 0.88;
-const WAKE_K: (f64, f64) = (3000.0, 6500.0);
+const WAKE_SPLIT: f64 = 0.45;
 /// Stars: per cell, spectral mix, and the Milky Way's peak `Ramp(Starlight)` level.
 const STAR_DENSITY: f64 = 0.07;
 const CLASSES: [(f64, f64, f64); 5] = [
@@ -104,19 +114,19 @@ const CLASSES: [(f64, f64, f64); 5] = [
     (0.88, 7000.0, 10_000.0),
     (1.00, 11_000.0, 22_000.0),
 ];
-const MILKY_PEAK: f64 = 30.0;
+const MILKY_PEAK: f64 = 40.0;
 /// The Milky Way and airglow end in the terminal's black: below `SKY_FADE.1` a pixel is
 /// kept with a probability falling to 0 at `SKY_FADE.0` (a narrow dissolve, CORE-R89).
 const SKY_FADE: (f64, f64) = (10.0, 14.0);
 /// The far shore: a spruce ridge.
 const LAND: Terrain = Terrain {
-    ridge: (0.5, 1.8),
-    trees: Some((2.0, 6.5)),
-    gap: (0.5, 2.2),
-    clearing: 0.2,
+    ridge: (0.9, 2.6),
+    trees: Some((1.4, 5.2)),
+    gap: (0.7, 2.9),
+    clearing: 0.4,
 };
 /// Horizon airglow at the horizon (`Ramp(Starlight)` level) and its e-folding height (deg).
-const AIRGLOW: (f64, f64) = (34.0, 11.0);
+const AIRGLOW: (f64, f64) = (44.0, 9.0);
 
 /// A magnitude for a uniform `u ∈ (0, 1]`: `P(m ≤ M) = r^{M − MAG_FAINT}` (MET-A3),
 /// clamped at a fireball.
@@ -288,8 +298,18 @@ impl MeteorShower {
         let (w, h) = (f64::from(ps.width()), f64::from(ps.height()));
         let horizon = self.lens.horizon().min(h);
         // A start seen anywhere above the land (plus a margin off the frame's sides).
-        let x = rng.random_range(-0.1 * w..1.1 * w);
-        let y = rng.random_range(-0.1 * h..(horizon - 0.06 * h).max(1.0));
+        let (mut x, mut y) = (
+            rng.random_range(-0.1 * w..1.1 * w),
+            rng.random_range(-0.1 * h..(horizon - 0.06 * h).max(1.0)),
+        );
+        if rng.random_bool(NEAR_SHARE)
+            && let Some(r) = self.lens.project(self.radiant)
+        {
+            // Close to the radiant, in any direction from it.
+            let (s, c) = rng.random_range(0.0..TAU).sin_cos_det();
+            let d = self.lens.px_per_deg() * NEAR_RADIANT * rng.random::<f64>().sqrt();
+            (x, y) = (r.0 + d * c, (r.1 + d * s).min(horizon - 0.06 * h));
+        }
         let d = self.lens.unproject(x, y);
         if d[2] < 0.05 {
             return;
@@ -412,6 +432,13 @@ impl MeteorShower {
             let (a, b) = (dot(a), dot(b));
             self.blaze
                 .splat(b.0, b.1, &BLAZE, BLAZE_GAIN * light as f32);
+            // A soft green glow a cell or two wide along the bright end of the tail.
+            let mid = (a.0 + (b.0 - a.0) * 0.45, a.1 + (b.1 - a.1) * 0.45);
+            if above(mid.0, mid.1) && above(b.0, b.1) {
+                let g = WAKE_GLOW * (light as f32).min(3.0);
+                self.train_light.stroke(mid, b, &raster::STROKE_KERNEL, g);
+                self.train_light.stroke(mid, b, &HALO2, 0.05 * g);
+            }
             let len = (b.0 - a.0).hypot(b.1 - a.1);
             let n = (len.ceil() as usize).clamp(1, 2048);
             // A unit step across the track, for the wide stretch behind a bright head.
@@ -420,9 +447,9 @@ impl MeteorShower {
             } else {
                 (0.0, 1.0)
             };
-            let wide = (0.35 + 0.2 * light).min(0.7);
+            let wide = (0.5 + 0.2 * light).min(0.85);
             // Brighter meteors keep a longer solid stretch behind the head.
-            let solid = (0.5 + 0.3 * light).min(0.95);
+            let solid = (0.72 + 0.25 * light).min(0.97);
             for i in 0..=n {
                 let f = i as f64 / n as f64;
                 let (x, y) = (a.0 + (b.0 - a.0) * f, a.1 + (b.1 - a.1) * f);
@@ -431,10 +458,16 @@ impl MeteorShower {
                 if keep < hash01(cell_key(x.round() as i32, y.round() as i32) ^ 0x5eed) {
                     continue;
                 }
+                // White-hot at the head, then the green of magnesium and oxygen, cooling to
+                // the yellow of sodium and iron toward the tail's end.
                 let ink = if f >= HOT {
                     Ink::new(Role::Ramp(Ramp::Starlight), 255)
+                } else if f >= WAKE_SPLIT {
+                    let k = (f - WAKE_SPLIT) / (HOT - WAKE_SPLIT);
+                    Ink::new(Role::Ramp(Ramp::Aurora), ink::level(175.0 + 60.0 * k))
                 } else {
-                    ink::blackbody(WAKE_K.0 * (WAKE_K.1 / WAKE_K.0).powf(f / HOT))
+                    let k = f / WAKE_SPLIT;
+                    Ink::new(Role::Ramp(Ramp::Sulfur), ink::level(120.0 + 70.0 * k))
                 };
                 if !above(x, y) {
                     continue;
@@ -513,8 +546,13 @@ impl MeteorShower {
         let (sky, land) = (&self.sky, &self.land);
         self.picture.shade(|x, y| {
             let i = y as usize * w + x as usize;
+            // Below the land's top only the sky's anti-aliased edge shows (its level is
+            // already weighted by how much of the pixel is open): trains and glare stop.
             if land.get(x as usize).is_none_or(|&top| y as u16 >= top) {
-                return Ink::BLANK;
+                return match sky.get(i).copied().unwrap_or(0) {
+                    0 => Ink::BLANK,
+                    l => Ink::new(Role::Ramp(Ramp::Starlight), l),
+                };
             }
             let dither = |level: u8, floor: u8| {
                 level >= floor.saturating_add(DITHER)
@@ -549,6 +587,7 @@ impl MeteorShower {
         let band_x = rng.random_range(0.25..0.5) * w as f64;
         let tilt = rng.random_range(0.15..0.45);
         let clumps: [f64; 3] = std::array::from_fn(|_| rng.random_range(0.0..TAU));
+        let dust_seed: u64 = rng.random();
         let band_w = 0.09 * w as f64;
         self.sky.clear();
         self.land.clear();
@@ -573,7 +612,14 @@ impl MeteorShower {
                 // The Great Rift: a dark lane off the band's centre whose depth comes and goes.
                 let depth = 0.55 * ease::smoothstep(0.5 + 0.8 * wave(1, 3.3));
                 let lane = 1.0 - depth * (-((u - 0.25 - 0.2 * wave(2, 5.0)) / 0.3).powi(2)).exp();
-                let band = MILKY_PEAK * (-0.5 * u * u).exp() * (0.8 + 0.4 * clump) * lane;
+                // Dust lanes: dark filaments threaded along the band, strongest near its
+                // spine (noise stretched along the band so they read as lanes, not blots).
+                let along = (horizon - fy) * 0.35;
+                let dust = value_noise(dust_seed, u * 3.0, along / band_w * 1.2, 1.0);
+                let fine = value_noise(dust_seed ^ 0xd5, u * 7.0, along / band_w * 3.0, 1.0);
+                let lanes = ease::smoothstep((0.62 * dust + 0.38 * fine - 0.42) / 0.2);
+                let dusty = 1.0 - 0.7 * lanes * (-0.5 * (u / 1.2).powi(2)).exp();
+                let band = MILKY_PEAK * (-0.5 * u * u).exp() * (0.8 + 0.4 * clump) * lane * dusty;
                 let open = 1.0 - f64::from(skyline.cover(x as i32, y as i32, horizon));
                 let level = ((air + band) * open).round();
                 let keep = level >= SKY_FADE.1
@@ -610,6 +656,15 @@ impl MeteorShower {
                 for (dx, dy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
                     self.stars.plot(x + dx, y + dy, star);
                 }
+            }
+        }
+        // The radiant's mark: a faint ring of dots round the point every streak leads to.
+        if let Some(r) = lens.project(self.radiant) {
+            let ink = Ink::new(Role::Ramp(Ramp::Starlight), RING.1);
+            for k in 0..16 {
+                let (sn, cs) = (TAU * f64::from(k) / 16.0).sin_cos_det();
+                self.stars
+                    .plot(2.0 * r.0 + RING.0 * cs, 2.0 * r.1 + RING.0 * sn, ink);
             }
         }
     }
@@ -701,8 +756,10 @@ impl Generator for MeteorShower {
             let rate = RATE * (1.0 + RATE_SWELL.0 * (TAU * self.t / RATE_SWELL.1).sin_det());
             self.next_at += -(1.0 - ctx.rng.random::<f64>()).ln() / rate.max(0.05);
         }
-        self.fly(dt, &mut ctx.rng);
+        // Trains first (they redraw their layer), then the meteors, whose tails add their
+        // glow to it.
         self.drift(dt);
+        self.fly(dt, &mut ctx.rng);
         self.compose();
     }
 
@@ -716,6 +773,13 @@ impl Generator for MeteorShower {
                 .flatten()
         });
         self.stars.blit_over(canvas, &self.picture);
+        // The radiant, named beside its ring.
+        if let Some(r) = self.lens.project(self.radiant) {
+            let (x, y) = ((r.0 + RING.0 / 2.0 + 1.5) as i32, (r.1 / 2.0) as i32);
+            if x + 9 < i32::from(canvas.size().width()) {
+                draw::label(canvas, x, y, "radiant", Ink::new(Role::Text, 60));
+            }
+        }
         if unicode {
             self.streaks.blit_over(canvas, &self.picture);
             return;
@@ -877,6 +941,56 @@ mod tests {
                 (lo.min(d), hi.max(d))
             });
         assert!(spread.1 - spread.0 > 0.1, "{spread:?}");
+    }
+
+    #[test]
+    fn met_a6_perseid_ablation_heights() {
+        let (mut g, mut ctx) = built(Size::new(200, 50));
+        let mut n = 0;
+        for _ in 0..400 {
+            g.meteors.clear();
+            g.spawn(&mut ctx.rng);
+            if let Some(m) = g.meteors.iter().next() {
+                // Real heights: the drawn path is `STRETCH` × the ablation layer's.
+                let (begin, end) = (m.start[2], m.point(m.len / STRETCH)[2]);
+                assert!(
+                    (BEGIN_KM.0 - 1e-9..=BEGIN_KM.1 + 1e-9).contains(&begin),
+                    "{begin}"
+                );
+                assert!((END_KM.0 - 1e-6..=END_KM.1 + 1e-6).contains(&end), "{end}");
+                n += 1;
+            }
+        }
+        assert!(n > 300, "{n}");
+    }
+
+    #[test]
+    fn met_a7_visible_radiant_and_hot_head_green_yellow_tails() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = built(size);
+        let r = g.lens.project(g.radiant).expect("radiant in front");
+        assert!(
+            r.0 > 0.0 && r.0 < 120.0 && r.1 > 0.0 && r.1 < g.lens.horizon(),
+            "{r:?}"
+        );
+        let (mut green, mut yellow) = (0, 0);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        for _ in 0..(4.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            canvas.clear();
+            g.render(&mut canvas);
+            for c in canvas.cells() {
+                if ('\u{2801}'..='\u{28ff}').contains(&c.ch) {
+                    match c.ink.role {
+                        Role::Ramp(Ramp::Aurora) => green += 1,
+                        Role::Ramp(Ramp::Sulfur) => yellow += 1,
+                        Role::Blackbody | Role::Ramp(Ramp::Starlight) => {}
+                        other => panic!("{other:?}"),
+                    }
+                }
+            }
+        }
+        assert!(green > 20 && yellow > 5, "{green} {yellow}");
     }
 
     #[test]
