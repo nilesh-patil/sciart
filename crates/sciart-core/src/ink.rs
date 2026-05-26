@@ -66,11 +66,18 @@ pub enum Ramp {
     /// patterns that read as tissue (M12, `gray_scott`), a rose that is neither Ferroin's
     /// plum, Plasma's violet nor HAlpha's crimson.
     Eosin,
+    /// Dark sienna → rust → tan → cream: the ammonia-cloud belts and zones of Jupiter-family
+    /// planets and Saturn's butterscotch (M13), an earth tone far softer than Ember's fire.
+    Sienna,
+    /// Near-black → grey → cyan → green → yellow → orange → pale rose-white: a meteorological
+    /// infrared enhancement curve (M13, `hurricane`) — warm surfaces stay grey, colder cloud
+    /// tops step through colour, the coldest overshooting tops are palest.
+    Infrared,
 }
 
 impl Ramp {
     /// Every ramp, in declaration order.
-    pub const ALL: [Ramp; 10] = [
+    pub const ALL: [Ramp; 12] = [
         Ramp::Ember,
         Ramp::Ice,
         Ramp::Ferroin,
@@ -81,6 +88,8 @@ impl Ramp {
         Ramp::Sulfur,
         Ramp::Cobalt,
         Ramp::Eosin,
+        Ramp::Sienna,
+        Ramp::Infrared,
     ];
 
     /// A unique lower-case name.
@@ -96,6 +105,8 @@ impl Ramp {
             Ramp::Sulfur => "sulfur",
             Ramp::Cobalt => "cobalt",
             Ramp::Eosin => "eosin",
+            Ramp::Sienna => "sienna",
+            Ramp::Infrared => "infrared",
         }
     }
 }
