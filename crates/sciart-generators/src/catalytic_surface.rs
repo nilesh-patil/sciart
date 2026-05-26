@@ -66,7 +66,7 @@ pub(crate) const CO: u8 = 2;
 const Y_REACTIVE: f64 = 0.46;
 /// `y` at the jet (the centre of the surface) in the sweep's holds.
 const Y_JET: f64 = 0.545;
-const Y_CO: f64 = 0.66;
+const Y_CO: f64 = 0.65;
 const Y_ADVANCE: f64 = 0.53;
 const Y_OXYGEN: f64 = 0.43;
 /// The gas is fed as a jet onto the centre and CO is used up on its way out, so `y`
@@ -131,12 +131,21 @@ const FRONT_RAMP: Ramp = Ramp::Sulfur;
 /// Bare platinum: near-black, so vacancy-rich metal reads as the surface's shadow.
 const BARE: Ink = Ink::new(Role::Ramp(FLASH_RAMP), 8);
 /// Smoothed O coverage of the reactive surface near `y₁` (≈ y 0.42) and of the O layer
-/// (≈ y 0.36; the desorption channel keeps a few vacancies): the O shade rises between them, and
-/// the layer's edge (the midpoint) is drawn as a bright rim.
+/// (≈ y 0.36; the desorption channel keeps a few vacancies): the O shade rises between them.
 const O_REACTIVE: f64 = 0.80;
 const O_LAYER: f64 = 0.95;
-/// Peak lift of the O layer's rim on the Aurora ramp.
-const RIM: f64 = 0.14;
+/// Lift of the O layer over the reactive surface on the Aurora ramp.
+const LAYER_LIFT: f64 = 0.07;
+/// The loop opens part-way through "O returns", where the jet's `y` is ≈ 0.59, on a
+/// surface already split the way that `y` splits it: a CO disc about the jet out to where
+/// the local `y` falls to `y₂` ([`Y_2`]; ≈ 0.46 of the half-diagonal, ≈ 40 % of the
+/// sites) and O around it. Rust and teal domains then meet along a sparking front from the
+/// first frame, and the disc recedes as `y` keeps falling, as it does every loop.
+const OPEN_T: f64 = 19.0;
+const Y_2: f64 = 0.525;
+/// Share of sites filled in the opening domains (the rest are vacancies).
+const OPEN_FILL: f64 = 0.9;
+const OPEN_SALT: u64 = 0x0c0_5eed;
 /// Share of CO₂ events drawn as sparks, their fade time (s: 5 % left after 0.3 s), and
 /// the spark value below which a site only lifts its domain.
 const SPARK_SHARE: f64 = 0.012;
@@ -166,7 +175,7 @@ pub(crate) fn domain_ink(o: f32, c: f32) -> Ink {
     // Quiet grounds: O a deep dark teal, CO a muted amber; purer domains a touch
     // brighter, so islands read by tone as well as hue. The sparks are the bright thing.
     if o >= c {
-        // The O layer and its rim are added from the wide field ([`layer_lift`]).
+        // The O layer is lifted from the wide field ([`layer_lift`]).
         ink::ramp(O_RAMP, 0.06 + 0.06 * o)
     } else {
         ink::ramp(CO_RAMP, 0.10 + 0.13 * c)
@@ -175,12 +184,12 @@ pub(crate) fn domain_ink(o: f32, c: f32) -> Ink {
 
 /// Extra level on the O ramp from the *wide* O coverage (a ≈ 17-site tent average, so
 /// single vacancy clusters don't draw contours): the O layer sits brighter than the
-/// reactive surface, and its advancing edge (the midpoint) is a bright rim.
+/// reactive surface. Its edge is not outlined: a bright rim there read as faint cyan
+/// contour rings over the layer, with no chemistry behind them.
 pub(crate) fn layer_lift(o_wide: f32) -> u8 {
     let o = f64::from(o_wide);
     let t = ease::smoothstep(((o - O_REACTIVE) / (O_LAYER - O_REACTIVE)).clamp(0.0, 1.0));
-    let rim = (1.0 - (2.0 * t - 1.0).abs()).powi(2);
-    ((0.07 * t + RIM * rim) * 255.0).round() as u8
+    (LAYER_LIFT * t * 255.0).round() as u8
 }
 
 /// The reaction-front ink where O and CO meet: `Starlight` rising with the mix `4·o·c`
@@ -194,7 +203,7 @@ pub(crate) fn domain_front(o: f32, c: f32) -> Ink {
     ink::ramp(FRONT_RAMP, 0.3 + 0.2 * t)
 }
 
-/// Coverage levels per axis of the shading table (fine enough for the O rim).
+/// Coverage levels per axis of the shading table (fine enough for the O layer's shading).
 const LUT_N: usize = 65;
 
 /// The domain ink of a pixel, with the reaction front where O and CO meet (`4·o·c` is 1
@@ -430,7 +439,7 @@ pub struct CatalyticSurface {
     rows: Vec<u16>,
     /// [`layer_lift`] tabulated on `LUT_N` levels of the wide O coverage.
     lift: [u8; LUT_N],
-    /// The O coverage averaged wide (for the layer and its rim).
+    /// The O coverage averaged wide (for the O layer's lift).
     o_wide: Grid<f32>,
     /// Smoothed local O and CO coverage per site, and the blur's buffer.
     o_cov: Grid<f32>,
@@ -657,10 +666,38 @@ impl Generator for CatalyticSurface {
             self.rng = SplitMix64::from_rng(&mut ctx.rng);
             self.zgb = Zgb::new(lattice);
             self.zgb.set_grade(GRADE);
+            // Open mid-window, on a CO disc with O around it (see OPEN_T).
+            self.t = OPEN_T;
+            let y = self.y();
+            for (i, (s, &g)) in self
+                .zgb
+                .sites
+                .as_mut_slice()
+                .iter_mut()
+                .zip(&self.zgb.grade)
+                .enumerate()
+            {
+                // The local y is the jet's plus the gradient offset (−GRADE·r); a fixed
+                // per-site hash picks the vacancies.
+                *s = if rng::hash01(OPEN_SALT ^ i as u64) >= OPEN_FILL {
+                    EMPTY
+                } else if y + f64::from(g) > Y_2 {
+                    CO
+                } else {
+                    OX
+                };
+            }
             let n = self.zgb.sites.len() as u32;
             for _ in 0..PREROLL_SWEEPS {
-                self.run(n, Y_JET);
+                self.run(n, y);
                 self.zgb.clear_events();
+            }
+            // A tenth of a second of frames, exposed (and cleared) as `update` does, so
+            // the front already sparks in the first frame.
+            for _ in 0..6 {
+                self.zgb.clear_events();
+                self.run((f64::from(n) * SWEEPS_PER_S * SIM_DT) as u32, y);
+                self.expose_events((-SIM_DT / GLOW_TAU).exp() as f32);
             }
         } else if self.zgb.sites.size() != lattice {
             grid::regrid_nearest(&mut self.zgb.sites, lattice, &mut self.scratch);
@@ -836,6 +873,32 @@ mod tests {
     }
 
     #[test]
+    fn cat_a8_the_loop_opens_mid_window_on_balanced_domains_with_sparks() {
+        for seed in [1, 42] {
+            let size = Size::new(80, 24);
+            let mut ctx = Ctx::new(seed, size);
+            let mut g = CatalyticSurface::default();
+            g.resize(size, &mut ctx);
+            let y = g.y();
+            assert!((0.52..=0.6).contains(&y), "opening y {y}");
+            let n = g.zgb.sites.len() as f64;
+            let count = |s: u8| g.zgb.sites.as_slice().iter().filter(|&&v| v == s).count() as f64;
+            let (co, ox) = (count(CO) / n, count(OX) / n);
+            // Both domains are large: CO holds 35–55 % of the occupied sites.
+            let share = co / (co + ox);
+            assert!(
+                (0.35..=0.55).contains(&share),
+                "seed {seed}: CO share {share}"
+            );
+            assert!(
+                g.sparks.as_slice().iter().any(|&s| s > 0.0),
+                "sparks at t = 0"
+            );
+            assert_eq!(g.caption(), Some("reactive"));
+        }
+    }
+
+    #[test]
     fn cat_a5_captions_follow_the_state_of_the_surface() {
         assert_eq!(regime((0.85, 0.0)), 0);
         assert_eq!(regime((0.3, 0.1)), 1);
@@ -890,16 +953,14 @@ mod tests {
     }
 
     #[test]
-    fn cat_a7_the_o_layer_has_a_bright_rim_and_sparks_are_soft_round_flashes() {
-        let (inside, rim, reactive) = (
-            layer_lift(O_LAYER as f32),
-            layer_lift(0.5 * (O_REACTIVE + O_LAYER) as f32),
-            layer_lift(O_REACTIVE as f32),
-        );
-        assert!(
-            rim > inside && inside > reactive,
-            "{reactive} {rim} {inside}"
-        );
+    fn cat_a7_the_o_layer_is_brighter_without_an_outline_and_sparks_are_soft_round_flashes() {
+        // The layer's lift rises monotonically from the reactive surface to the layer: no
+        // rim peaks at its edge (it drew faint contour rings).
+        let lifts: Vec<u8> = (0..=20)
+            .map(|k| layer_lift((O_REACTIVE + (O_LAYER - O_REACTIVE) * f64::from(k) / 20.0) as f32))
+            .collect();
+        assert!(lifts.windows(2).all(|w| w[0] <= w[1]), "{lifts:?}");
+        assert!(layer_lift(O_LAYER as f32) > layer_lift(O_REACTIVE as f32));
         // One spark blurred twice by 3 × 3 boxes: a round tent, its peak rescaled to 1,
         // with the diagonal neighbours lit as the axial ones are (not a plus sign).
         let mut g = Grid::new(Size::new(9, 9), 0.0f32);

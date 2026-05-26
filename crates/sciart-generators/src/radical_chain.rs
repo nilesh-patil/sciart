@@ -94,8 +94,6 @@ const CELL_FUEL: f32 = 4.5;
 const K_BURNT: f64 = 6.0;
 /// Fresh gas flowing in once the vent has dropped below the limit (per second).
 const REFILL: f64 = 1.5;
-/// Pressure at which the spark strikes (just over the limit, during the rise).
-const SPARK_P: f64 = 1.2;
 /// Radicals the ignition spark releases at its hot spot.
 const SPARK_RADICALS: usize = 30;
 /// Longest internal step (the runtime's dt is 1/60 s).
@@ -104,6 +102,8 @@ const MAX_SUBSTEPS: usize = 15;
 
 /// Timeline: (label, seconds); pressure in units of the first explosion limit.
 const PHASES: [(&str, f64); 4] = [("slow", 2.5), ("rise", 1.5), ("burn", 6.5), ("vent", 5.5)];
+/// Index of the burn beat in [`PHASES`]: the spark strikes as it begins.
+const BURN: usize = 2;
 /// The vent drops the pressure over the first `1/VENT_FAST` of its beat, so fresh gas
 /// (and its slow chains) is back well before the loop ends.
 const VENT_FAST: f64 = 3.0;
@@ -621,12 +621,14 @@ impl Generator for RadicalChain {
         &META
     }
 
+    /// The caption follows the state (CHN-A9): below the limit the chains die out
+    /// (`slow reaction`); above it they multiply (`chain branching`) until the explosion
+    /// has latched (`explosion`), which lasts until the vent takes p back below the limit.
     fn caption(&self) -> Option<&'static str> {
-        let beat = self.beat();
-        Some(if self.exploded {
-            CAPTIONS[2]
-        } else if beat.index == 0 || pressure(&beat) < 1.0 {
+        Some(if pressure(&self.beat()) < 1.0 {
             CAPTIONS[0]
+        } else if self.exploded {
+            CAPTIONS[2]
         } else {
             CAPTIONS[1]
         })
@@ -722,8 +724,9 @@ impl Generator for RadicalChain {
             chain.refuel();
             chain.water.fill(0.0);
         }
-        if beat.index >= 1 && p > SPARK_P && self.sparked != cycle {
-            // The ignition spark: one hot spot off-centre, so the runaway starts there and
+        if beat.index == BURN && self.sparked != cycle {
+            // The ignition spark, at the start of the burn (so the explosion caption and
+            // the flash coincide): one hot spot off-centre, so the runaway starts there and
             // the flame front propagates across the vessel instead of flaring everywhere.
             self.sparked = cycle;
             spark(chain, &mut self.rng);
@@ -924,19 +927,45 @@ mod tests {
     }
 
     #[test]
-    fn chn_captions_follow_the_state() {
+    fn chn_a9_captions_follow_the_state_and_the_spark_strikes_at_the_burn() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(42, size);
         let mut g = RadicalChain::default();
         g.resize(size, &mut ctx);
         assert_eq!(g.caption(), Some("slow reaction"));
+        let loop_s: f64 = PHASES.iter().map(|p| p.1).sum();
         let mut seen = [false; 3];
-        for _ in 0..(20.0 / SIM_DT) as usize {
+        let mut latched_in = Vec::new();
+        let mut was = false;
+        for _ in 0..(2.0 * loop_s / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            let beat = g.beat();
+            let p = pressure(&beat);
             let c = g.caption().expect("caption");
+            let want = if p < 1.0 {
+                "slow reaction"
+            } else if g.exploded {
+                "explosion"
+            } else {
+                "chain branching"
+            };
+            assert_eq!(c, want, "t {:.2}: p {p:.2}, exploded {}", g.t, g.exploded);
+            // The spark belongs to the burn: none before it in a loop.
+            if beat.index < BURN {
+                assert_ne!(g.sparked, g.cycle, "t {:.2}: sparked before the burn", g.t);
+            }
+            if g.exploded && !was {
+                latched_in.push(beat.index);
+            }
+            was = g.exploded;
             seen[CAPTIONS.iter().position(|&x| x == c).expect("listed")] = true;
         }
         assert_eq!(seen, [true; 3]);
+        assert_eq!(
+            latched_in,
+            vec![BURN, BURN],
+            "the explosion latches in each burn"
+        );
     }
 
     #[test]
