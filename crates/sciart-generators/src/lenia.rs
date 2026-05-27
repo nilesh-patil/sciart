@@ -10,7 +10,9 @@
 //! The world steps at 12 Hz from the fixed 60 Hz update; the display lerps between the
 //! last two states, so gliders move smoothly. Every [`DAMAGE_S`] seconds a disc is cut out
 //! of the heaviest creature and it regrows; a watchdog reseeds if the total mass leaves
-//! `[0.3, 3]×` the seeded mass.
+//! `[0.3, 1.6]×` the seeded mass. Acts of [`CYCLE_S`] seconds alternate a parallel shoal
+//! with staged meetings (one glider engulfs another, or two brush past); a lost glider is
+//! replaced by a birth a few seconds later.
 
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
@@ -47,16 +49,44 @@ const MAX_NODES: usize = 6144;
 const BUCKET: f64 = 1.25;
 /// Seconds between damage beats.
 const DAMAGE_S: f64 = 12.0;
-/// Seconds per shoal: then the dish fades, and a new shoal on a new heading hatches.
-const SHOAL_S: f64 = 50.0;
+/// Seconds per act: then the dish fades and the next act hatches on a new heading.
+const CYCLE_S: f64 = 30.0;
 const FADE_S: f64 = 1.5;
+
+/// What a cycle stages (SPEC-002 Round 3): a parallel shoal, or two gliders aimed at each
+/// other, whose meeting (deterministic, so chosen once, LNA-A6/A7) is clean.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Act {
+    /// Up to three gliders on one heading: they never meet.
+    Shoal,
+    /// Crossing courses a quarter turn apart: one glider engulfs the other.
+    Engulf,
+    /// Opposite courses, offset sideways: they brush past and both swim on.
+    Glance,
+}
+const ACTS: [Act; 4] = [Act::Shoal, Act::Engulf, Act::Shoal, Act::Glance];
+/// Orbium's velocity at quarter turn 0, in nodes per second (measured, at 12 steps/s).
+const V0: (f64, f64) = (2.70, 6.86);
+/// Seconds until a staged pair meets, and the sideways offsets (nodes) of each meeting.
+const MEET_S: f64 = 2.5;
+const ENGULF_OFF: f64 = -8.0;
+const GLANCE_OFF: f64 = 12.0;
+/// Smallest lattice side on which each meeting is staged (it needs the room to aim).
+const ENGULF_MIN: u16 = 48;
+const GLANCE_MIN: u16 = 56;
+/// A lost glider is replaced by a birth this many seconds later, fading in over
+/// `BIRTH_FADE` seconds within `BIRTH_R` nodes of its hatching place.
+const BIRTH_DELAY: f64 = 3.0;
+const BIRTH_FADE: f64 = 1.2;
+const BIRTH_R: f64 = 14.0;
 /// Radius of the damage disc in nodes, and its distance from the creature's heaviest
 /// node: a bite from the rim, which an Orbium survives (a disc through the
 /// core kills it).
 const DAMAGE_R: f32 = 4.0;
 const DAMAGE_OFFSET: f32 = 8.0;
-/// Watchdog band for the total mass, as a multiple of the seeded mass.
-const MASS_BAND: (f32, f32) = (0.3, 3.0);
+/// Watchdog band for the total mass, as a multiple of the seeded mass: the upper bound
+/// catches a runaway merger (a growing chimera) early.
+const MASS_BAND: (f32, f32) = (0.3, 1.6);
 /// Lattice area per seeded glider.
 const AREA_PER_GLIDER: usize = 2000;
 const MAX_GLIDERS: usize = 3;
@@ -111,6 +141,15 @@ pub(crate) fn kernel() -> Vec<(i32, i32, f32)> {
         t.2 /= sum;
     }
     taps
+}
+
+/// An Orbium's velocity at quarter turn `turn` (the stamp turns `(u, v) → (−v, u)`).
+fn velocity(turn: u8) -> (f64, f64) {
+    let (mut x, mut y) = V0;
+    for _ in 0..turn % 4 {
+        (x, y) = (-y, x);
+    }
+    (x, y)
 }
 
 /// Lenia's growth mapping.
@@ -223,6 +262,30 @@ impl World {
         }
     }
 
+    /// Stage a meeting of two gliders at `(cx, cy)`, [`MEET_S`] seconds from now: `A`
+    /// heading `turn`, `B` a quarter (engulf) or half (glance) turn on, offset sideways
+    /// from a head-on course. The whole set-up turns with `turn`, so the (deterministic)
+    /// outcome does too.
+    pub(crate) fn stage(&mut self, act: Act, (cx, cy): (i32, i32), turn: u8) {
+        let (tb, off) = match act {
+            Act::Shoal => return,
+            Act::Engulf => (turn + 1, ENGULF_OFF),
+            Act::Glance => (turn + 2, GLANCE_OFF),
+        };
+        let (va, vb) = (velocity(turn), velocity(tb));
+        let (rx, ry) = (vb.0 - va.0, vb.1 - va.1);
+        let rl = rx.hypot(ry).max(1e-9);
+        let (px, py) = (-ry / rl, rx / rl);
+        let (mx, my) = (f64::from(cx), f64::from(cy));
+        let at = |x: f64, y: f64| (x.round() as i32, y.round() as i32);
+        self.stamp_orbium(at(mx - va.0 * MEET_S, my - va.1 * MEET_S), turn % 4, false);
+        self.stamp_orbium(
+            at(mx - vb.0 * MEET_S + px * off, my - vb.1 * MEET_S + py * off),
+            tb % 4,
+            false,
+        );
+    }
+
     /// The heaviest node (ties to the first), the centre of the damage beat.
     fn heaviest(&self) -> (i32, i32) {
         let w = i32::from(self.a.width());
@@ -309,6 +372,12 @@ struct Lenia {
     turns: u8,
     /// Gliders seeded.
     gliders: usize,
+    /// What this cycle staged.
+    act: Act,
+    /// When the next birth (the replacement of a lost glider) is due.
+    hatch_at: Option<f64>,
+    /// The last birth: node and time, for its fade-in.
+    birth: Option<((i32, i32), f64)>,
     scratch: Grid<f32>,
     map: SampleMap,
     pixels: Pixels,
@@ -325,6 +394,9 @@ impl Default for Lenia {
             seeded: false,
             turns: 0,
             gliders: 1,
+            act: Act::Shoal,
+            hatch_at: None,
+            birth: None,
             scratch: Grid::default(),
             map: SampleMap::default(),
             pixels: Pixels::default(),
@@ -333,22 +405,34 @@ impl Default for Lenia {
 }
 
 impl Lenia {
-    /// Clear the world and seed gliders at random places and headings.
+    /// Clear the world and seed this cycle's act at a random place and heading.
     fn seed(&mut self, rng: &mut impl Rng) {
         self.world.a.fill(0.0);
+        self.hatch_at = None;
+        self.birth = None;
         let size = self.world.a.size();
         let (w, h) = (i32::from(size.width()), i32::from(size.height()));
-        let k = (size.area() / AREA_PER_GLIDER).clamp(1, MAX_GLIDERS);
-        self.gliders = k;
-        // One heading (and no mirroring, which would flip the heading) for the shoal:
-        // gliders that swim in parallel at the same
-        // speed keep their spacing and never merge into a chimera. They start on a
-        // diagonal so they are apart along both axes.
         self.turns = rng.random_range(0..4);
         let (x0, y0) = (rng.random_range(0..w.max(1)), rng.random_range(0..h.max(1)));
-        for i in 0..k as i32 {
-            let c = (x0 + i * w / k as i32, y0 + i * h / k as i32);
-            self.world.stamp_orbium(c, self.turns, false);
+        let side = size.width().min(size.height());
+        self.act = match ACTS[(self.time / CYCLE_S) as usize % ACTS.len()] {
+            Act::Engulf if side >= ENGULF_MIN => Act::Engulf,
+            Act::Glance if side >= GLANCE_MIN => Act::Glance,
+            _ => Act::Shoal,
+        };
+        if self.act == Act::Shoal {
+            // One heading (and no mirroring, which would flip the heading) for the shoal:
+            // gliders that swim in parallel at the same speed keep their spacing and never
+            // merge into a chimera. They start on a diagonal, apart along both axes.
+            let k = (size.area() / AREA_PER_GLIDER).clamp(1, MAX_GLIDERS);
+            self.gliders = k;
+            for i in 0..k as i32 {
+                let c = (x0 + i * w / k as i32, y0 + i * h / k as i32);
+                self.world.stamp_orbium(c, self.turns, false);
+            }
+        } else {
+            self.gliders = 2;
+            self.world.stage(self.act, (x0, y0), self.turns);
         }
         self.world
             .prev
@@ -362,42 +446,68 @@ impl Lenia {
         let m = self.world.mass() / self.seed_mass;
         if !(MASS_BAND.0..=MASS_BAND.1).contains(&m) {
             self.seed(rng);
-        } else if self.gliders > 1 && m < 1.0 - 0.7 / self.gliders as f32 {
-            // A glider died (a fatal bite): a new one hatches in the emptiest place,
-            // so the dish never thins out to a lone survivor.
-            let c = self.world.emptiest();
-            self.world.stamp_orbium(c, self.turns, false);
+        } else if self.gliders > 1 && m < 1.0 - 0.7 / self.gliders as f32 && self.hatch_at.is_none()
+        {
+            // A glider died (engulfed, or a fatal bite): a new one is born a little later
+            // in the emptiest place, so the dish never thins out to a lone survivor.
+            self.hatch_at = Some(self.time + BIRTH_DELAY);
         }
+    }
+
+    fn hatch(&mut self) {
+        self.hatch_at = None;
+        let c = self.world.emptiest();
+        self.world.stamp_orbium(c, self.turns, false);
+        self.birth = Some((c, self.time));
     }
 
     fn rasterise(&mut self) {
         let f = self.owed.clamp(0.0, 1.0) as f32;
-        let local = self.time % SHOAL_S;
+        let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
-            .min(ease::smoothstep((SHOAL_S - local) / FADE_S)) as f32;
+            .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
         let fade = if self.time < FADE_S { 1.0 } else { fade };
+        // A newborn fades in (display only): pixels near its hatching place are dimmed
+        // by its age, so it condenses out of the dark instead of popping in.
+        let px = self.pixels.pixel_size();
+        let lat = self.world.a.size();
+        let sx = f64::from(px.width()) / f64::from(lat.width());
+        let sy = f64::from(px.height()) / f64::from(lat.height());
+        let birth = self.birth.and_then(|((bx, by), t0)| {
+            let age = (self.time - t0) / BIRTH_FADE;
+            (age < 1.0).then(|| {
+                let (cx, cy) = ((f64::from(bx) + 0.5) * sx, (f64::from(by) + 0.5) * sy);
+                (cx, cy, BIRTH_R * sx, ease::smoothstep(age.max(0.0)) as f32)
+            })
+        });
         let (map, a, p) = (&self.map, &self.world.a, &self.world.prev);
         self.pixels.shade(|x, y| {
             let (va, vp) = (map.sample(a, x, y), map.sample(p, x, y));
-            let v = (vp + (va - vp) * f) * fade;
+            let mut v = (vp + (va - vp) * f) * fade;
+            if let Some((cx, cy, r, k)) = birth {
+                let d = (f64::from(x) + 0.5 - cx).hypot((f64::from(y) + 0.5 - cy) * sx / sy);
+                if d < r {
+                    v *= k;
+                }
+            }
             lenia_ink(v)
         });
     }
 }
 
-/// Two hues for one creature (SPEC-002 Inks, as built): the thin outer membrane and
-/// halo cold (Ice, glowing cyan), the dense core warm and pale (Aurora, lime-white),
-/// crossing at matching lightness so the body reads as one luminous animal.
+/// Two warm hues for one creature (SPEC-002 Inks, Round 3): the thin outer membrane and
+/// halo rose (Eosin), the dense core amber to pale gold (Ember), crossing at matching
+/// lightness so the body reads as one luminous animal.
 fn lenia_ink(v: f32) -> Ink {
     let v = f64::from(v);
     if v < 0.02 {
         Ink::BLANK
     } else if v < 0.3 {
-        ink::ramp(Ramp::Ice, 0.12 + 0.5 * (v / 0.3).powf(0.7))
+        ink::ramp(Ramp::Eosin, 0.14 + 0.46 * (v / 0.3).powf(0.7))
     } else {
         ink::ramp(
-            Ramp::Aurora,
-            0.55 + 0.45 * ((v - 0.3) / 0.7).min(1.0).powf(0.8),
+            Ramp::Ember,
+            0.58 + 0.42 * ((v - 0.3) / 0.7).min(1.0).powf(0.8),
         )
     }
 }
@@ -456,16 +566,19 @@ impl Generator for Lenia {
             return;
         }
         let dt = dt.min(0.25);
-        let cycle = (self.time / SHOAL_S).floor();
+        let cycle = (self.time / CYCLE_S).floor();
         self.time += dt;
-        if (self.time / SHOAL_S).floor() > cycle {
-            // A new shoal on a new heading: the dish never settles into one picture.
+        if (self.time / CYCLE_S).floor() > cycle {
+            // The next act on a new heading: the dish never settles into one picture.
             self.seed(&mut ctx.rng);
         }
         self.owed += dt * STEPS_PER_S;
         while self.owed >= 1.0 {
             self.owed -= 1.0;
             self.world_step(&mut ctx.rng);
+        }
+        if self.hatch_at.is_some_and(|t| self.time >= t) {
+            self.hatch();
         }
         if self.time >= self.next_damage {
             self.next_damage += DAMAGE_S;
@@ -557,6 +670,111 @@ mod tests {
     fn lna_growth_peaks_at_mu() {
         assert_eq!(growth(MU), 1.0);
         assert!(growth(0.0) < -0.99 && growth(0.5) < -0.99);
+    }
+
+    /// Connected creatures (nodes > 0.1, 4-connected, wrapping).
+    fn blobs(w: &World) -> usize {
+        let (ww, hh) = (i32::from(w.a.width()), i32::from(w.a.height()));
+        let mut seen = vec![false; w.a.len()];
+        let mut n = 0;
+        let mut stack = Vec::new();
+        for i in 0..w.a.len() {
+            if seen[i] || w.a.as_slice()[i] <= 0.1 {
+                continue;
+            }
+            n += 1;
+            stack.push(i);
+            seen[i] = true;
+            let mut size = 0;
+            while let Some(j) = stack.pop() {
+                size += 1;
+                let (x, y) = (j as i32 % ww, j as i32 / ww);
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    let k = ((y + dy).rem_euclid(hh) * ww + (x + dx).rem_euclid(ww)) as usize;
+                    if !seen[k] && w.a.as_slice()[k] > 0.1 {
+                        seen[k] = true;
+                        stack.push(k);
+                    }
+                }
+            }
+            if size < 8 {
+                n -= 1;
+            }
+        }
+        n
+    }
+
+    /// Mass (relative to the pair) and creature count `secs` after a staged encounter.
+    fn after_encounter(size: Size, act: Act, turn: u8, secs: f64) -> (f32, usize) {
+        let mut w = World::new(size);
+        let c = (i32::from(size.width()) / 2, i32::from(size.height()) / 2);
+        w.stage(act, c, turn);
+        let m0 = w.mass();
+        for _ in 0..steps(secs) {
+            w.step();
+        }
+        (w.mass() / m0, blobs(&w))
+    }
+
+    #[test]
+    fn lna_a6_an_aimed_collision_ends_with_one_clean_survivor() {
+        for (size, turn) in [
+            (Size::new(96, 64), 0),
+            (Size::new(88, 60), 0),
+            (Size::new(96, 64), 2),
+            (Size::new(80, 64), 1),
+            (Size::new(80, 48), 3),
+        ] {
+            for secs in [6.0, 10.0] {
+                let (m, n) = after_encounter(size, Act::Engulf, turn, secs);
+                assert!(
+                    n == 1 && (0.4..0.6).contains(&m),
+                    "{size:?} turn {turn} at {secs} s: {n} creatures, mass {m:.2}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn lna_a7_a_glancing_meeting_leaves_both_alive() {
+        for (size, turn) in [(Size::new(96, 64), 0), (Size::new(88, 60), 0)] {
+            let (m, n) = after_encounter(size, Act::Glance, turn, 8.0);
+            assert!(n == 2 && m > 0.9, "{size:?}: {n} creatures, mass {m:.2}");
+        }
+    }
+
+    #[test]
+    fn lna_a8_a_lost_glider_is_replaced_by_a_birth_after_a_delay() {
+        let mut ctx = Ctx::new(8, Size::new(160, 50));
+        let mut g = Lenia::default();
+        g.resize(Size::new(160, 50), &mut ctx);
+        // Kill every creature but the heaviest.
+        let (hx, hy) = g.world.heaviest();
+        let (w, h) = (i32::from(g.world.a.width()), i32::from(g.world.a.height()));
+        for (i, v) in g.world.a.as_mut_slice().iter_mut().enumerate() {
+            let (x, y) = (i as i32 % w, i as i32 / w);
+            let (dx, dy) = ((x - hx).rem_euclid(w), (y - hy).rem_euclid(h));
+            if dx.min(w - dx).max(dy.min(h - dy)) > 12 {
+                *v = 0.0;
+            }
+        }
+        g.world
+            .prev
+            .as_mut_slice()
+            .copy_from_slice(g.world.a.as_slice());
+        let m_one = g.world.mass();
+        g.update(0.1, &mut ctx);
+        assert!(g.hatch_at.is_some(), "a birth is scheduled");
+        let born = g.hatch_at.unwrap_or(0.0);
+        while g.time < born - 0.2 {
+            g.update(1.0 / 60.0, &mut ctx);
+        }
+        assert!(g.world.mass() < 1.3 * m_one, "no birth before the delay");
+        while g.time < born + 0.5 {
+            g.update(1.0 / 60.0, &mut ctx);
+        }
+        assert!(g.world.mass() > 1.6 * m_one, "a glider hatched");
+        assert!(g.birth.is_some());
     }
 
     #[test]

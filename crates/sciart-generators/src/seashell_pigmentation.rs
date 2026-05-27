@@ -90,6 +90,9 @@ const REGIMES: [Params; 3] = [WAVES, TENTS, STRIPES];
 
 /// Lip cells at most.
 pub(crate) const MAX_CELLS: usize = 400;
+/// Lip cells at least: two one-way pulses 50 cells apart (closer, a pulse runs into its
+/// leader's refractory wake and dies).
+const MIN_CELLS: usize = 100;
 /// Model iterations per growth step (row).
 pub(crate) const ITERS_PER_ROW: usize = 36;
 /// Activator ceiling, a guard only (SHL-A1).
@@ -259,10 +262,10 @@ fn body_half(t: f64) -> f64 {
     if !(0.0..=1.0).contains(&t) {
         return 0.0;
     }
-    let shoulder = ease::smoothstep((t / 0.12).min(1.0));
-    // A cone, full at the shoulder and blunt at the lip, so the newest rows (at the
-    // lip) are always wide enough to see.
-    (0.35 + 0.65 * shoulder) * (1.0 - 0.6 * t.powf(1.5))
+    // A rounded shoulder, then a straight-sided cone to a blunt lip, so the newest rows
+    // (at the lip) are always wide enough to see.
+    let shoulder = (1.0 - (1.0 - (t / 0.1).min(1.0)).powi(2)).sqrt();
+    (0.72 + 0.28 * shoulder) * (1.0 - 0.66 * t)
 }
 
 impl Shell {
@@ -274,7 +277,7 @@ impl Shell {
         match index {
             0 => {
                 // Evenly spaced one-way pulses: parallel oblique lines.
-                let k = (n / 50).clamp(1, 8);
+                let k = (n / 50).clamp(2, 8);
                 for j in 0..k {
                     self.lip
                         .one_way_pulse(j * n / k + rng.random_range(0..(n / k / 4).max(1)));
@@ -321,64 +324,122 @@ impl Shell {
         let (cx, top, height, half) = self.body;
         let n = self.lip.a.len();
         let (rows, cap, newest, laid) = (&self.rows, self.rows_cap, self.newest, self.laid);
-        let spire_h = 0.16 * height;
+        let spire_h = SPIRE * height;
         // The shell grows over its regime: the lip advances, carrying the newest rows
         // (the pattern stays attached to the shell, laid down at the lip).
         let grown = (self.time % REGIME_S) / REGIME_S;
-        let length = height * (0.72 + 0.28 * grown);
+        let length = height * (GROWN_MIN + (1.0 - GROWN_MIN) * grown);
+        // The lip's glowing edge: the rows laid in the last moments, still wet.
+        let wet = (1.6 / length).min(0.2);
         self.pixels.shade(|x, y| {
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-            // The spire: a small stepped cone above the shoulder.
-            if fy < top && fy >= top - spire_h {
+            let dx = fx - cx;
+            // Spire: a low stepped cone with a concave profile (the whorls of *Conus*).
+            let spire = {
                 let t = (top - fy) / spire_h;
-                let hw = half * 0.42 * (1.0 - t);
-                let whorl = f64::from(u8::from((t * 4.0).fract() < 0.18));
-                if (fx - cx).abs() <= hw {
-                    let lvl = 150.0 - 70.0 * whorl - 40.0 * ((fx - cx).abs() / hw.max(1.0));
-                    return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl));
-                }
-                return Ink::BLANK;
-            }
+                let hw = spire_half(t) * half;
+                let slope = (spire_half(t + 0.02) - spire_half(t - 0.02)) * half / (0.04 * spire_h);
+                let cover = coverage(hw - dx.abs(), slope) * (top - fy + 0.5).clamp(0.0, 1.0);
+                (t, hw, cover)
+            };
             let t = (fy - top) / length;
-            let hw = half * body_half(t);
-            let u = (fx - cx) / hw.max(1e-6);
-            if !(0.0..=1.0).contains(&t) || u.abs() > 1.0 {
+            let hw = half * body_half(t.clamp(0.0, 1.0));
+            let slope =
+                half * (body_half(t + 0.01) - body_half(t - 0.01)) / (0.02 * length).max(1e-6);
+            // Pixel coverage of the silhouette (sides, shoulder and lip), so the outline is
+            // antialiased on the sub-cell pixel lattice instead of stepping.
+            let body_cover = if (-0.05..=1.05).contains(&t) {
+                coverage(hw - dx.abs(), slope)
+                    * (fy - top + 0.5).clamp(0.0, 1.0)
+                    * (top + length - fy + 0.5).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (st, shw, spire_cover) = spire;
+            if spire_cover > body_cover {
+                // Whorl sutures as thin sepia lines; a highlight on the lit (left) flank.
+                let u = dx / shw.max(0.5);
+                let suture = ((st * 3.5).fract() - 0.5).abs();
+                let suture = ease::smoothstep(((0.1 - (0.5 - suture)) / 0.1).clamp(0.0, 1.0));
+                let lit = lambert(u.clamp(-1.0, 1.0));
+                let lvl = (120.0 + 120.0 * lit) * (1.0 - 0.45 * suture) * spire_cover;
+                return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl));
+            }
+            if body_cover <= 0.0 {
                 return Ink::BLANK;
             }
-            // Round body: light falls off towards the silhouette.
-            let shade = (1.0 - u * u).sqrt();
-            // Edge coverage: the fraction of this pixel inside the silhouette, so the
-            // outline fades over one pixel instead of stepping.
-            let cover = ((1.0 - u.abs()) * hw).clamp(0.0, 1.0);
-            let light = (0.45 + 0.55 * shade) * (0.35 + 0.65 * cover);
+            let t = t.clamp(0.0, 1.0);
+            let u = (dx / hw.max(1e-6)).clamp(-1.0, 1.0);
+            let light = lambert(u) * body_cover;
             // Rows from the lip (bottom) upward, newest first.
             let back = ((1.0 - t) * length) as usize;
             let pigment = if back < laid.min(cap) {
                 let r = (newest + cap - back) % cap;
                 // The lip wraps round the body: cell across the visible half.
                 let cell = (((u + 1.0) * 0.5) * n as f64) as usize;
-                rows[r * n + cell.min(n - 1)]
+                f64::from(rows[r * n + cell.min(n - 1)])
             } else {
                 0.0
             };
-            if pigment > 0.25 {
-                // The wine-to-violet part of the ramp: the purple-brown of Oliva porphyria,
-                // darkest (wine) in the fresh line, lighter violet in the fading band.
-                let k = ease::smoothstep((f64::from(pigment) - 0.25) / 0.9);
-                Ink::new(
-                    Role::Ramp(Ramp::Ferroin),
-                    ink::level((175.0 - 100.0 * k) * light),
-                )
+            let at_lip = t > 1.0 - wet;
+            // Pigment only where the pixel is mostly shell: a brown glow cannot fade to
+            // black, so the antialiased rim stays shell-coloured.
+            if pigment > PIG_MIN && body_cover >= 0.6 {
+                if at_lip {
+                    // Fresh pigment at the growing edge glows, so the lip is seen to paint.
+                    return Ink::new(Role::Ramp(Ramp::Ember), ink::level(210.0 * body_cover));
+                }
+                // Chestnut in the fresh line, umber in the fading band: a dim 1.6–2.5 kK
+                // glow is the dark orange we see as brown (false colour).
+                let k = ease::smoothstep((pigment - PIG_MIN) / 0.9);
+                let kelvin = 2500.0 - 900.0 * k;
+                ink::blackbody(kelvin * (0.6 + 0.4 * light))
             } else {
-                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(200.0 * light))
+                let lvl = if at_lip {
+                    255.0 * body_cover
+                } else {
+                    222.0 * light
+                };
+                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl))
             }
         });
     }
 }
 
+/// Pigment below this is shell ground.
+const PIG_MIN: f64 = 0.25;
+/// The spire's height as a fraction of the body's.
+const SPIRE: f64 = 0.15;
+/// The body's length at the start of a regime, as a fraction of its full length.
+const GROWN_MIN: f64 = 0.8;
+
+/// Half-width of the spire at fraction `t` of its height (0 at the shoulder, 1 at the
+/// apex), in units of the body's half-width: concave, as on a cone shell.
+fn spire_half(t: f64) -> f64 {
+    if !(0.0..=1.0).contains(&t) {
+        return 0.0;
+    }
+    0.74 * (1.0 - t).powf(1.6)
+}
+
+/// Pixel coverage of an edge at horizontal distance `d` inside it whose width changes by
+/// `slope` pixels per pixel of height: the signed distance, clamped to one pixel.
+fn coverage(d: f64, slope: f64) -> f64 {
+    (d / (1.0 + slope * slope).sqrt() + 0.5).clamp(0.0, 1.0)
+}
+
+/// Light on a round body at `u` across it (−1 left, 1 right), lit from the upper left:
+/// diffuse falloff to the silhouette plus a narrow specular band.
+fn lambert(u: f64) -> f64 {
+    let nz = (1.0 - u * u).max(0.0).sqrt();
+    let diffuse = (0.55 * nz - 0.45 * u).max(0.0) / 0.71;
+    let spec = (-((u + 0.42) / 0.12).powi(2)).exp();
+    (0.4 + 0.52 * diffuse + 0.07 * spec).min(1.0)
+}
+
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let lit = |i: Ink| i.role != Role::Background;
-    let pig = |i: Ink| i.role == Role::Ramp(Ramp::Ferroin);
+    let pig = |i: Ink| i.role == Role::Blackbody;
     match (lit(top), lit(bottom)) {
         (false, false) => None,
         _ if pig(top) => Some(('#', top)),
@@ -402,13 +463,15 @@ impl Generator for Shell {
         let px = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
         // The shell stands in the art rows above the title row.
+        // Spire and full-grown body fill ~88 % of the art rows (~80 % early in a regime).
         let usable = (ph - 3.0).max(2.0);
-        let height = usable * 0.8;
-        let top = usable * 0.17;
-        let half = (height * 0.36).min(pw * 0.45).max(1.0);
+        let height = usable * 0.88 / (1.0 + SPIRE);
+        let top = usable * 0.04 + SPIRE * height;
+        let half = (height * 0.38).min(pw * 0.45).max(1.0);
         self.body = (pw / 2.0, top, height, half);
-        // The lip spans the body's widest front (edge regridded to the width).
-        let n = ((6.0 * half).round() as usize).clamp(8, MAX_CELLS);
+        // The lip spans the body's widest front (edge regridded to the width); at least
+        // `MIN_CELLS`, so a small shell still holds several wave spacings.
+        let n = ((6.0 * half).round() as usize).clamp(MIN_CELLS, MAX_CELLS);
         self.rows_cap = (height.round() as usize).max(1);
         self.rows.clear();
         self.rows.resize(self.rows_cap * n, 0.0);
@@ -555,5 +618,58 @@ mod tests {
             assert_eq!(g.caption(), Some(*c));
             assert_eq!(g.lip.p, REGIMES[k]);
         }
+    }
+
+    #[test]
+    fn shl_a6_several_lines_at_80x24() {
+        // Every one-way pulse keeps running (their spacing exceeds the refractory wake),
+        // so even a small shell carries more than one line.
+        let mut ctx = Ctx::new(6, Size::new(80, 24));
+        let mut g = Shell::default();
+        g.resize(Size::new(80, 24), &mut ctx);
+        assert_eq!(g.lip.p, WAVES);
+        for _ in 0..120 {
+            g.update(0.1, &mut ctx);
+            assert_eq!(g.lip.p, WAVES);
+        }
+        assert!(g.lip.peaks(0.5) >= 2, "{} lines", g.lip.peaks(0.5));
+    }
+
+    #[test]
+    fn shl_a7_shell_fills_most_of_the_height_with_a_smooth_outline() {
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(7, size);
+        let mut g = Shell::default();
+        g.resize(size, &mut ctx);
+        while g.time < 10.0 {
+            g.update(0.25, &mut ctx);
+        }
+        let px = g.pixels.pixel_size();
+        let lit_rows = (0..i32::from(px.height()))
+            .filter(|&y| {
+                (0..i32::from(px.width())).any(|x| {
+                    g.pixels
+                        .get(x, y)
+                        .is_some_and(|i| i.role != Role::Background)
+                })
+            })
+            .count();
+        let art = f64::from(px.height()) - 3.0;
+        let frac = lit_rows as f64 / art;
+        assert!(
+            (0.75..=0.95).contains(&frac),
+            "shell spans {frac:.2} of the height"
+        );
+        // Antialiased silhouette: partially covered pixels exist along the flank rows.
+        let mid = i32::from(px.height()) / 2;
+        let row: Vec<u8> = (0..i32::from(px.width()))
+            .filter_map(|x| g.pixels.get(x, mid))
+            .filter(|i| i.role != Role::Background)
+            .map(|i| i.level)
+            .collect();
+        assert!(
+            row.first().is_some_and(|&l| l < 90),
+            "soft left edge {row:?}"
+        );
     }
 }

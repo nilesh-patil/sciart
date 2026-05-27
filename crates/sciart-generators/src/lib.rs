@@ -61,6 +61,7 @@ registry![
     gravitational_lensing,
     gray_scott,
     heart_fibrillation,
+    hp_protein_folding,
     hurricane,
     io_volcanoes,
     ising_model,
