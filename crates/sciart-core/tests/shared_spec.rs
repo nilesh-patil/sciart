@@ -384,3 +384,30 @@ proptest! {
         prop_assert_eq!(k as u32 as i32, y);
     }
 }
+
+#[test]
+fn core_r97_value_noise_hits_corner_hashes() {
+    // At a lattice corner the smoothstep weights are 0/1, so the value is that corner's hash.
+    for (i, j) in [(0, 0), (3, -2), (-7, 5)] {
+        let (x, y) = (f64::from(i) * 2.5, f64::from(j) * 2.5);
+        assert_eq!(
+            rng::value_noise(9, x, y, 2.5),
+            rng::hash01(9 ^ rng::cell_key(i, j))
+        );
+    }
+}
+
+proptest! {
+ #[test]
+ fn core_r97_value_noise_is_bounded_continuous_and_stable(
+ salt in any::<u64>(), x in -1e4f64..1e4, y in -1e4f64..1e4, cell in 0.1f64..20.0,
+ ) {
+ let v = rng::value_noise(salt, x, y, cell);
+ prop_assert!((0.0..=1.0).contains(&v));
+ prop_assert_eq!(v.to_bits(), rng::value_noise(salt, x, y, cell).to_bits());
+ // Smoothstep-bilinear: the gradient is at most 1.5 per cell along each axis.
+ let e = 1e-4 * cell;
+ let dv = (rng::value_noise(salt, x + e, y + e, cell) - v).abs();
+ prop_assert!(dv <= 3.0 * 1e-4 + 1e-12, "jump {dv}");
+ }
+}

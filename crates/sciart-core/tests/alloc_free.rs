@@ -557,3 +557,34 @@ fn core_r28_default_pool_is_empty_with_capacity_zero_and_allocates_nothing() {
     assert!(pool.is_empty());
     assert_eq!(pool.capacity(), 0);
 }
+
+#[test]
+fn core_r99_r100_lbm_step_and_complex_tridiag_do_not_allocate() {
+    let mut lat = sciart_core::lbm::Lattice::new(Size::new(40, 20), |x, y| x == 10 && y == 5);
+    lat.equilibrate();
+    let ((), stats) = measure(|| {
+        for _ in 0..5 {
+            lat.step_periodic(1.8, 0.1);
+            lat.stream_collide(1.8, 0.1, false);
+            lat.swap();
+        }
+        lat.equilibrate();
+        black_box(lat.healthy((0.5, 1.5)));
+        black_box(lat.mass());
+    });
+    assert_free("lbm step", stats);
+
+    use sciart_core::ode::C64;
+    let n = 32;
+    let (sub, sup) = (vec![C64::new(-1.0, 0.5); n], vec![C64::new(-1.0, -0.5); n]);
+    let diag = vec![C64::new(4.0, 1.0); n];
+    let (mut rhs, mut s1, mut s2) = (vec![C64::ONE; n], vec![C64::ZERO; n], vec![C64::ZERO; n]);
+    let (ok, stats) = measure(|| {
+        let a = ode::tridiag_solve_c(&sub, &diag, &sup, &mut rhs, &mut s1);
+        let b = ode::tridiag_factor_c(&sub, &diag, &sup, &mut s1, &mut s2);
+        ode::tridiag_apply_c(&sub, &s1, &s2, &mut rhs);
+        a && b
+    });
+    assert!(ok);
+    assert_free("complex tridiag", stats);
+}

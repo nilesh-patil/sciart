@@ -30,7 +30,7 @@ and each keeps `Ink` at two bytes.
   rises from a dark red (L* ≈ 12) to white near 6500 K and then stays blue-white (L* ≥ 75), so
   hotter never reads as dimmer on the red side.
 - **`Role::Ramp(Ramp)`**: a sequential field in a named ramp (`ink::ramp(ramp, v)`, `v ∈ [0, 1]`,
-  read back with `ink::seq_value`). Ten ramps (six at M11; M12 added `Starlight`, `Sulfur`, `Cobalt` and `Eosin`), one hue family each, all with a near-black low end
+  read back with `ink::seq_value`). Twelve ramps (six at M11; M12 added `Starlight`, `Sulfur`, `Cobalt` and `Eosin`; M13 added `Sienna` and `Infrared`), one hue family each, all with a near-black low end
   (L* ≈ 4) and lightness increasing evenly to a pale top (L* ≥ 93):
 
   | Ramp | Hue path | Meant for |
@@ -45,6 +45,8 @@ and each keeps `Ink` at two bytes.
  | `Sulfur` | near-black olive → chrome yellow → pale lemon | the *Physarum* plasmodium, pollen and sulfur yellows; added in M12 so a yellow organism need not borrow Ember's orange |
   | `Cobalt` | ultramarine → cobalt → silver-blue | cobalt glass and pigment, a cool mineral precipitate (`liesegang_rings`); a blue that is neither Ice's cyan nor Ferroin's azure top; added in M12 |
   | `Eosin` | wine-rose → eosin rose-pink → pale pink-lilac | an H&E stain, for patterns that read as tissue (`gray_scott`); added in M12 |
+ | `Sienna` | dark sienna → rust → tan → cream | Jupiter's belts and zones, Saturn's butterscotch, planetary cloud bands (`jupiter_storms`, `comet_breakup`, `saturn_rings`); added in M13 because Ember (fire) was standing in for cloud bands; a muted chroma (0.11) in Ember's warm hue family, so it alone is exempt from the distinct-top-hue rule and is instead held ≥ 0.2 below Ember's saturation |
+ | `Infrared` | grey → cyan → green → yellow → orange → pale rose-white | a meteorological IR enhancement curve (`hurricane`): the low 30 % stays grey (warm sea and low cloud), colour only on cold cloud tops; lightness still rises monotonically, so a true saturated red is out of reach and the warmest colour is orange; added in M13 |
 
   Each ramp is a 256-level table built once from OKLCh: lightness linear in level, hue linear
   between the two ends, chroma lowered only where sRGB cannot hold it.

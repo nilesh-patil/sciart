@@ -1,5 +1,6 @@
 //! Fixed-step ODE integration for deterministic physics scenes (SPEC-001 CORE-R37,
-//! CORE-R44) and a tridiagonal solver for implicit diffusion (CORE-R59).
+//! CORE-R44) and tridiagonal solvers for implicit diffusion (CORE-R59) and complex
+//! Crank–Nicolson steps (CORE-R100).
 //!
 //! RK4 state is a const-generic `[f64; N]` so every stage lives on the stack: no
 //! allocation, no trait objects, and the closure is monomorphised into a tight loop.
@@ -206,4 +207,194 @@ pub fn tridiag_solve(
         rhs[i] -= scratch[i] * rhs[i + 1];
     }
     true
+}
+
+/// A plain complex number for [`tridiag_solve_c`] and its callers (CORE-R100): `Copy`,
+/// two `f64`s, the textbook formulas and nothing else (no dependency).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct C64 {
+    pub re: f64,
+    pub im: f64,
+}
+
+impl C64 {
+    pub const ZERO: C64 = C64 { re: 0.0, im: 0.0 };
+    pub const ONE: C64 = C64 { re: 1.0, im: 0.0 };
+    pub const I: C64 = C64 { re: 0.0, im: 1.0 };
+
+    #[inline]
+    pub const fn new(re: f64, im: f64) -> Self {
+        Self { re, im }
+    }
+
+    #[inline]
+    pub fn conj(self) -> Self {
+        Self::new(self.re, -self.im)
+    }
+
+    /// `|z|²`.
+    #[inline]
+    pub fn norm_sqr(self) -> f64 {
+        self.re * self.re + self.im * self.im
+    }
+
+    /// `k·z` for real `k`.
+    #[inline]
+    pub fn scale(self, k: f64) -> Self {
+        Self::new(self.re * k, self.im * k)
+    }
+
+    /// Whether both parts are finite.
+    #[inline]
+    pub fn is_finite(self) -> bool {
+        self.re.is_finite() && self.im.is_finite()
+    }
+}
+
+impl std::ops::Add for C64 {
+    type Output = C64;
+    #[inline]
+    fn add(self, o: C64) -> C64 {
+        C64::new(self.re + o.re, self.im + o.im)
+    }
+}
+
+impl std::ops::Sub for C64 {
+    type Output = C64;
+    #[inline]
+    fn sub(self, o: C64) -> C64 {
+        C64::new(self.re - o.re, self.im - o.im)
+    }
+}
+
+impl std::ops::Neg for C64 {
+    type Output = C64;
+    #[inline]
+    fn neg(self) -> C64 {
+        C64::new(-self.re, -self.im)
+    }
+}
+
+impl std::ops::Mul for C64 {
+    type Output = C64;
+    #[inline]
+    fn mul(self, o: C64) -> C64 {
+        C64::new(
+            self.re * o.re - self.im * o.im,
+            self.re * o.im + self.im * o.re,
+        )
+    }
+}
+
+impl std::ops::Div for C64 {
+    type Output = C64;
+    /// `a / b = a·conj(b) / |b|²`; a zero `b` gives non-finite parts.
+    #[inline]
+    fn div(self, o: C64) -> C64 {
+        (self * o.conj()).scale(1.0 / o.norm_sqr())
+    }
+}
+
+/// [`tridiag_solve`] over [`C64`] (CORE-R100): solve `sub[i]·x[i−1] + diag[i]·x[i] +
+/// sup[i]·x[i+1] = rhs[i]` in place into `rhs`, `scratch` holding the eliminated
+/// super-diagonal. Mismatched lengths or a zero (or non-finite) pivot return `false`
+/// with `rhs` untouched.
+pub fn tridiag_solve_c(
+    sub: &[C64],
+    diag: &[C64],
+    sup: &[C64],
+    rhs: &mut [C64],
+    scratch: &mut [C64],
+) -> bool {
+    let n = rhs.len();
+    if [sub.len(), diag.len(), sup.len(), scratch.len()] != [n; 4] {
+        return false;
+    }
+    // Pass 1: c'[i] = sup[i] / m_i with m_i = diag[i] − sub[i]·c'[i−1].
+    let mut c_prev = C64::ZERO;
+    for i in 0..n {
+        let m = if i == 0 {
+            diag[0]
+        } else {
+            diag[i] - sub[i] * c_prev
+        };
+        if m.norm_sqr() == 0.0 || !m.is_finite() {
+            return false;
+        }
+        c_prev = sup[i] / m;
+        scratch[i] = c_prev;
+    }
+    for i in 0..n {
+        let (m, d_prev) = if i == 0 {
+            (diag[0], C64::ZERO)
+        } else {
+            (diag[i] - sub[i] * scratch[i - 1], rhs[i - 1])
+        };
+        rhs[i] = (rhs[i] - sub[i] * d_prev) / m;
+    }
+    for i in (0..n.saturating_sub(1)).rev() {
+        rhs[i] = rhs[i] - scratch[i] * rhs[i + 1];
+    }
+    true
+}
+
+/// Factor a complex tridiagonal matrix once for [`tridiag_apply_c`] (CORE-R100):
+/// `inv_pivot[i] = 1/m_i` and `c_prime[i] = sup[i]/m_i`. Mismatched lengths or a zero
+/// (or non-finite) pivot return `false` with both outputs untouched.
+pub fn tridiag_factor_c(
+    sub: &[C64],
+    diag: &[C64],
+    sup: &[C64],
+    inv_pivot: &mut [C64],
+    c_prime: &mut [C64],
+) -> bool {
+    let n = diag.len();
+    if [sub.len(), sup.len(), inv_pivot.len(), c_prime.len()] != [n; 4] {
+        return false;
+    }
+    // Check every pivot before writing, so a failure leaves the outputs as they were.
+    let mut c_prev = C64::ZERO;
+    for i in 0..n {
+        let m = if i == 0 {
+            diag[0]
+        } else {
+            diag[i] - sub[i] * c_prev
+        };
+        if m.norm_sqr() == 0.0 || !m.is_finite() {
+            return false;
+        }
+        c_prev = sup[i] / m;
+    }
+    let mut c_prev = C64::ZERO;
+    for i in 0..n {
+        let m = if i == 0 {
+            diag[0]
+        } else {
+            diag[i] - sub[i] * c_prev
+        };
+        let inv = C64::ONE / m;
+        c_prev = sup[i] * inv;
+        inv_pivot[i] = inv;
+        c_prime[i] = c_prev;
+    }
+    true
+}
+
+/// Solve with a matrix factored by [`tridiag_factor_c`], in place into `rhs`: two
+/// complex multiply-adds per unknown. Mismatched lengths do nothing (CORE-R100).
+#[inline]
+pub fn tridiag_apply_c(sub: &[C64], inv_pivot: &[C64], c_prime: &[C64], rhs: &mut [C64]) {
+    let n = rhs.len();
+    if [sub.len(), inv_pivot.len(), c_prime.len()] != [n; 3] || n == 0 {
+        return;
+    }
+    let mut d_prev = rhs[0] * inv_pivot[0];
+    rhs[0] = d_prev;
+    for i in 1..n {
+        d_prev = (rhs[i] - sub[i] * d_prev) * inv_pivot[i];
+        rhs[i] = d_prev;
+    }
+    for i in (0..n - 1).rev() {
+        rhs[i] = rhs[i] - c_prime[i] * rhs[i + 1];
+    }
 }

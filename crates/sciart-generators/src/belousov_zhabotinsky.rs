@@ -39,6 +39,8 @@ use sciart_core::prelude::*;
 use sciart_core::title;
 use sciart_core::{draw, ease};
 
+use crate::shared::excitable::{self, Barkley, Front, FrontStroke, unit};
+
 pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
     category: Category::Chemistry,
@@ -66,10 +68,6 @@ const EPS: f32 = 0.02;
 const H: f32 = 0.5;
 /// Sub-step in time units.
 const TAU: f32 = 0.0125;
-/// Diffusion weight of one explicit stage, `τ·D/h²` with `D = 1`.
-const DIFF: f32 = TAU / (H * H);
-/// Reaction weight `τ/ε`.
-const REACT: f32 = TAU / EPS;
 /// Sub-steps per simulated second: `RATE = 1.5` tu/s over `τ`.
 const SUB_PER_S: u64 = 120;
 /// Nagumo front speed at `v = 0`, `√(2/ε)(½ − b/a)` su/tu, the BZ-A3 reference.
@@ -77,7 +75,7 @@ const SUB_PER_S: u64 = 120;
 const C_NAGUMO: f32 = 4.2;
 
 // Every stage must be a convex combination / shrinking factor (module docs, BZ-A1).
-const _: () = assert!(10.0 / 3.0 * DIFF <= 1.0 && REACT <= 1.0 && TAU <= 1.0);
+const _: () = assert!(MODEL.is_bounded());
 
 // ---- Story (SPEC-002 Model, Motion) ----
 
@@ -137,17 +135,6 @@ const S_MIN: f32 = 0.06;
 /// Reseeded fronts brighten over this many seconds (display only, SPEC-002 Motion).
 const FADE_IN_S: f64 = 0.5;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-
-/// One broken front: a straight segment `a → b`, excited on the `n` side.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Front {
-    pub(crate) a: [f64; 2],
-    pub(crate) b: [f64; 2],
-    /// Unit normal: the direction the front propagates.
-    pub(crate) n: [f64; 2],
-    /// `b` was extended to the wall, leaving `a` as the only free end.
-    pub(crate) anchored: bool,
-}
 
 /// Everything one cycle's seeding draws (BZ-A7): fronts and normalised pacemakers.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -210,24 +197,18 @@ impl Default for Bz {
     }
 }
 
+/// Barkley's model with the EZ-Spiral constants (module docs), from the shared
+/// excitable-medium kernel.
+const MODEL: Barkley = Barkley {
+    a: A,
+    eps: EPS,
+    h: H,
+    tau: TAU,
+};
+
 /// One Lie-split sub-step of Barkley's model in place (module docs). `lap` is scratch.
 pub(crate) fn bz_step(u: &mut Grid<f32>, v: &mut Grid<f32>, lap: &mut Grid<f32>, b: f32) {
-    grid::laplacian9(u, lap, Edges::Clip);
-    let fields = u.as_mut_slice().iter_mut().zip(v.as_mut_slice());
-    for ((u, v), &l) in fields.zip(lap.as_slice()) {
-        let ud = *u + DIFF * l;
-        let u_th = (*v + b) / A;
-        let g = REACT * (1.0 - ud) * (ud - u_th);
-        // Below threshold the decay is taken implicitly (a shrinking factor, never
-        // negative); above it the growth is explicit (bounded by 1 since τ/ε ≤ 1).
-        let ur = if ud < u_th {
-            ud / (1.0 - g)
-        } else {
-            ud + g * ud
-        };
-        *v += TAU * (ur - *v);
-        *u = ur;
-    }
+    MODEL.step(u, v, lap, |_| b);
 }
 
 /// `b` at cycle-local sub-step `local`: `b₀` while the waves run, then a smoothstep
@@ -249,67 +230,21 @@ pub(crate) fn pacemaker_fires(local: u64) -> bool {
 
 /// Excite every recovered node (`v < 0.1`) within 2.5 nodes of `(cx, cy)`.
 pub(crate) fn fire_pacemaker(u: &mut Grid<f32>, v: &Grid<f32>, cx: f64, cy: f64) {
-    let r = PM_RADIUS.ceil() as i32;
-    let (x0, y0) = (cx.round() as i32, cy.round() as i32);
-    for y in y0 - r..=y0 + r {
-        for x in x0 - r..=x0 + r {
-            let (dx, dy) = (f64::from(x) - cx, f64::from(y) - cy);
-            let recovered = v.get(x, y).is_some_and(|&v| v < PM_V_MAX);
-            if dx * dx + dy * dy <= PM_RADIUS * PM_RADIUS && recovered {
-                u.set(x, y, 1.0);
-            }
-        }
-    }
+    excitable::excite_disc(u, v, (cx, cy), PM_RADIUS, PM_V_MAX);
 }
 
-/// Paint `front` into the fields: a `FRONT_W`-node strip of `u = 1` on the `n` side of
-/// the segment, backed by a `TAIL_W`-node strip whose `v` ramps down away from it.
+/// Paint `front` into the fields with BZ's strip widths (the shared
+/// [`excitable::paint_front`]).
 pub(crate) fn paint_front(u: &mut Grid<f32>, v: &mut Grid<f32>, f: &Front) {
-    let (d, len) = unit(f.a, f.b);
-    let n = f.n;
-    // Bounding box of the painted band, clipped to the lattice.
-    let xs = [f.a[0], f.b[0]].map(|x| [x + n[0] * FRONT_W, x - n[0] * TAIL_W]);
-    let ys = [f.a[1], f.b[1]].map(|y| [y + n[1] * FRONT_W, y - n[1] * TAIL_W]);
-    let span = |c: [[f64; 2]; 2], hi: u16| {
-        let lo = c.iter().flatten().fold(f64::INFINITY, |m, &x| m.min(x));
-        let top = c.iter().flatten().fold(f64::NEG_INFINITY, |m, &x| m.max(x));
-        (
-            lo.floor().max(0.0) as i32,
-            top.ceil().min(f64::from(hi) - 1.0) as i32,
-        )
-    };
-    let (x0, x1) = span(xs, u.width());
-    let (y0, y1) = span(ys, u.height());
-    for y in y0..=y1 {
-        for x in x0..=x1 {
-            let rel = [f64::from(x) - f.a[0], f64::from(y) - f.a[1]];
-            let along = rel[0] * d[0] + rel[1] * d[1];
-            let q = rel[0] * n[0] + rel[1] * n[1];
-            if !(0.0..=len).contains(&along) {
-                continue;
-            }
-            if (0.0..FRONT_W).contains(&q) {
-                u.set(x, y, 1.0);
-                v.set(x, y, 0.0);
-            } else if (-TAIL_W..0.0).contains(&q) {
-                let t = -q / TAIL_W;
-                u.set(x, y, 0.0);
-                v.set(x, y, ease::lerp(TAIL_V.0, TAIL_V.1, t) as f32);
-            }
-        }
-    }
+    excitable::paint_front(u, v, f, &BZ_STROKE);
 }
 
-/// Unit vector from `a` to `b` and the distance (a zero-length segment points along x).
-fn unit(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
-    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    let len = dx.hypot(dy);
-    if len > 0.0 {
-        ([dx / len, dy / len], len)
-    } else {
-        ([1.0, 0.0], 0.0)
-    }
-}
+/// BZ's painted front: `FRONT_W` excited nodes backed by a `TAIL_W`-node tail.
+const BZ_STROKE: FrontStroke = FrontStroke {
+    front_w: FRONT_W,
+    tail_w: TAIL_W,
+    tail_v: TAIL_V,
+};
 
 /// Distance from `p` to the segment `a → b`.
 fn point_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {

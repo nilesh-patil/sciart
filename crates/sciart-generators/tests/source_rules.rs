@@ -19,6 +19,7 @@ fn workspace_root() -> PathBuf {
     crate_dir().join("../..")
 }
 
+/// The `.rs` files directly in `dir` (not its subdirectories), sorted.
 fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     let mut out: Vec<_> = fs::read_dir(dir)
         .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
@@ -29,19 +30,78 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
     out
 }
 
+/// The `.rs` files in `dir` and every directory below it, sorted.
+fn rust_sources_deep(dir: &Path) -> Vec<PathBuf> {
+    let mut out = rust_sources(dir);
+    let mut subdirs: Vec<_> = fs::read_dir(dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|e| e.expect("dir entry").path())
+        .filter(|p| p.is_dir())
+        .collect();
+    subdirs.sort();
+    for sub in subdirs {
+        out.extend(rust_sources_deep(&sub));
+    }
+    out
+}
+
+fn stems(files: &[PathBuf]) -> BTreeSet<String> {
+    files
+        .iter()
+        .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
+        .collect()
+}
+
 #[test]
 fn gen_r3_every_scene_module_file_is_registered_and_vice_versa() {
     // GEN-R3: one module file + one registry line. A file without a registry line
-    // would silently escape the contract/property/snapshot suites.
-    let files: BTreeSet<String> = rust_sources(&crate_dir().join("src"))
-        .iter()
-        .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
-        .filter(|stem| stem != "lib")
-        .collect();
+    // would silently escape the contract/property/snapshot suites. Scenes are the files
+    // directly in src/; models shared by several scenes live in src/shared/ and are never
+    // registered.
+    let mut files = stems(&rust_sources(&crate_dir().join("src")));
+    files.remove("lib");
+    let shared = stems(&rust_sources_deep(&crate_dir().join("src/shared")));
     let registered: BTreeSet<String> = registry().iter().map(|e| e.meta.name.to_owned()).collect();
+    assert!(
+        shared.is_disjoint(&registered),
+        "GEN-R3: a shared model cannot also be a registered scene"
+    );
     assert_eq!(
         files, registered,
         "GEN-R3: src/<name>.rs files and registry![...] entries must match one-to-one"
+    );
+}
+
+#[test]
+fn gen_r16_no_scene_imports_another_scene() {
+    // GEN-R16: inside the crate, scenes and shared models may reach only `crate::shared`.
+    // Any other `crate::<module>` path would be a scene (or lib.rs internals), which ties
+    // one scene's look to another's edits.
+    let mut hits = Vec::new();
+    for file in rust_sources_deep(&crate_dir().join("src")) {
+        if file.ends_with("src/lib.rs") {
+            continue;
+        }
+        let text = fs::read_to_string(&file).expect("read source");
+        for (n, line) in text.lines().enumerate() {
+            let mut rest = line;
+            while let Some(at) = rest.find("crate::") {
+                let after = &rest[at + "crate::".len()..];
+                let module: String = after
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if module != "shared" {
+                    hits.push(format!("{}:{}: crate::{module}", file.display(), n + 1));
+                }
+                rest = after;
+            }
+        }
+    }
+    assert!(
+        hits.is_empty(),
+        "GEN-R16: scenes may import only sciart_core and crate::shared:\n{}",
+        hits.join("\n")
     );
 }
 
@@ -172,7 +232,15 @@ fn gen_r7_core_and_generators_never_touch_clock_or_global_rng() {
         workspace_root().join("crates/sciart-core/src"),
     ];
     let mut hits = Vec::new();
-    for file in dirs.iter().flat_map(|d| rust_sources(d)) {
+    // Recursive, so src/shared/ (and any future submodule) is held to the same rule.
+    let files: Vec<PathBuf> = dirs.iter().flat_map(|d| rust_sources_deep(d)).collect();
+    assert!(
+        files
+            .iter()
+            .any(|f| f.parent().is_some_and(|p| p.ends_with("src/shared"))),
+        "GEN-R7: the scan must reach src/shared/"
+    );
+    for file in files {
         let text = fs::read_to_string(&file).expect("read source");
         // CORE-R90: `trig.rs` is the one module allowed to call libm's sin/cos.
         let trig = file.ends_with("sciart-core/src/trig.rs");

@@ -1,6 +1,6 @@
 # ADR-0013: Physics × chemistry × biology taxonomy (supersedes the M1/M10 categories)
 
-- **Status**: Accepted
+- **Status**: Accepted; amended 2026-09-29 (M13, see Addendum)
 - **Date**: 2026-09-27
 
 ## Context
@@ -16,7 +16,8 @@ combination of the physics (P), chemistry (C) and biology (B) axes. Classify by 
 that matches:
 
 1. **Setting** (checked in this order). A human spacecraft or mission → Voyages; otherwise a
-   view from Earth's surface or atmosphere → Earth & Sky; otherwise the Sun, or any planet, moon
+   view from Earth's surface or atmosphere, or of Earth's weather or atmosphere from above
+   (M13 addendum) → Earth & Sky; otherwise the Sun, or any planet, moon
    or comet (ours or another star's) → Sun & Planets; otherwise a deep-space subject → Deep
    Cosmos. The order settles scenes that match several settings: moon_landing and mars_rover
    are missions before they are the Moon or Mars, moon_phases is a view from Earth before it is
@@ -65,3 +66,11 @@ The assignment of the 41 existing scenes is the table in `docs/design/M11-titles
 The P×C×B lattice alone, with astronomy as P (it would swamp Forces & Waves); the lattice plus a
 "Patterns & Chaos" category (overlaps P and has no rule of its own); keeping the old categories
 with more added (no rule, so every new scene is a judgement call).
+
+## Addendum (2026-09-29, M13): Earth seen from above
+
+The Earth & Sky setting rule now reads: a view from Earth's surface or atmosphere, **or of Earth's
+weather or atmosphere from above** → Earth & Sky. `hurricane` (a storm seen from orbit) is the
+case that prompted it: its subject is Earth's atmosphere, not a planet as an astronomical body, so
+it sits with aurora and noctilucent clouds rather than in Sun & Planets. The order of the setting
+check is unchanged: a scene about a human spacecraft or mission is still Voyages first.
