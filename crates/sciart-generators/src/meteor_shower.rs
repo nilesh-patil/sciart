@@ -63,7 +63,7 @@ const NEAR_RADIANT: f64 = 22.0;
 /// The radiant's mark: a faint ring of dots (radius in dots) and its level.
 const RING: (f64, u8) = (3.5, 80);
 /// The streak's glow: green light stroked along the tail into the trains' layer.
-const WAKE_GLOW: f32 = 0.4;
+const WAKE_GLOW: f32 = 0.22;
 /// Framing: half field of view across (deg), the horizon's row as a share of the height,
 /// the radiant's height below the top edge (share of the height) and its offset from the
 /// centre (share of the width).
@@ -93,13 +93,15 @@ const BLAZE_FLOOR: u8 = 45;
 /// Train: points along the track, life range (s), fade time scale, and the wind: two
 /// layers' amplitude (km/s, time-lapsed) and vertical wavelength (km).
 const TRAIN_POINTS: usize = 24;
-const TRAIN_LIFE: (f64, f64) = (4.0, 10.0);
-const WIND: [(f64, f64); 2] = [(1.4, 7.0), (0.9, 12.5)];
+const TRAIN_LIFE: (f64, f64) = (1.8, 3.2);
+const WIND: [(f64, f64); 2] = [(3.5, 7.0), (2.2, 12.5)];
 /// The trains' tone (knee, white); below `TRAIN_FLOOR` a train is not drawn, and for
 /// `DITHER` levels above it, dithered into the dark.
 const TRAIN_TONE: (f32, f32) = (0.1, 3.0);
 const DITHER: u8 = 28;
 const TRAIN_FLOOR: u8 = 22;
+/// Trains are drawn at this share of their toned level: faint, so the streaks are the hero.
+const TRAIN_DIM: (u16, u16) = (1, 2);
 /// The head's share of a streak, drawn white-hot (`Ramp(Starlight)` 255); behind it the
 /// wake is green (`Ramp(Aurora)`) down to `WAKE_SPLIT` of the tail, then yellow
 /// (`Ramp(Sulfur)`) to its end.
@@ -114,7 +116,7 @@ const CLASSES: [(f64, f64, f64); 5] = [
     (0.88, 7000.0, 10_000.0),
     (1.00, 11_000.0, 22_000.0),
 ];
-const MILKY_PEAK: f64 = 40.0;
+const MILKY_PEAK: f64 = 50.0;
 /// The Milky Way and airglow end in the terminal's black: below `SKY_FADE.1` a pixel is
 /// kept with a probability falling to 0 at `SKY_FADE.0` (a narrow dissolve, CORE-R89).
 const SKY_FADE: (f64, f64) = (10.0, 14.0);
@@ -165,6 +167,27 @@ pub(crate) fn train_fade(age: f64, life: f64) -> f64 {
         return 0.0;
     }
     (-2.5 * age / life).exp() * ease::smoothstep(life - age)
+}
+
+/// Stroke the dot-space segment `a → b` into `glow` as a thin anti-aliased thread: bilinear
+/// splats every half pixel (`Glow::splat_bilinear`), so it is one to two pixels wide
+/// (a pixel is a cell across) with no stair steps, `scale` per pixel of length.
+fn thin_stroke(glow: &mut Glow, a: (f64, f64), b: (f64, f64), scale: f32) {
+    // Dot `d` sits in the pixel whose centre is `(d − 0.5) / 2`.
+    let (a, b) = (
+        ((a.0 - 0.5) / 2.0, (a.1 - 0.5) / 2.0),
+        ((b.0 - 0.5) / 2.0, (b.1 - 0.5) / 2.0),
+    );
+    let len = (b.0 - a.0).hypot(b.1 - a.1);
+    if !len.is_finite() {
+        return;
+    }
+    let n = (2.0 * len).ceil().clamp(1.0, 4096.0) as usize;
+    let w = scale * len.max(0.5) as f32 / n as f32;
+    for k in 0..n {
+        let u = (k as f64 + 0.5) / n as f64;
+        glow.splat_bilinear(a.0 + u * (b.0 - a.0), a.1 + u * (b.1 - a.1), w);
+    }
 }
 
 /// A rectilinear camera facing north, pitched up, in pixel units.
@@ -342,7 +365,7 @@ impl MeteorShower {
             * (1.0 + 0.15 * (TRAIN_MAG - m.mag).max(0.0)).min(1.6);
         self.trains.spawn(Train {
             pts,
-            amp: 0.7 * flux(m.mag).powf(0.25),
+            amp: 0.5 * flux(m.mag).powf(0.25),
             age: 0.0,
             life: life.min(TRAIN_LIFE.1 * 1.4),
             wind: std::array::from_fn(|_| rng.random_range(0.0..TAU)),
@@ -436,8 +459,7 @@ impl MeteorShower {
             let mid = (a.0 + (b.0 - a.0) * 0.45, a.1 + (b.1 - a.1) * 0.45);
             if above(mid.0, mid.1) && above(b.0, b.1) {
                 let g = WAKE_GLOW * (light as f32).min(3.0);
-                self.train_light.stroke(mid, b, &raster::STROKE_KERNEL, g);
-                self.train_light.stroke(mid, b, &HALO2, 0.05 * g);
+                thin_stroke(&mut self.train_light, mid, b, g);
             }
             let len = (b.0 - a.0).hypot(b.1 - a.1);
             let n = (len.ceil() as usize).clamp(1, 2048);
@@ -523,14 +545,13 @@ impl MeteorShower {
                         (2.0 * a.0 + 0.5, 2.0 * a.1 + 0.5),
                         (2.0 * b.0 + 0.5, 2.0 * b.1 + 0.5),
                     );
-                    self.train_light.stroke(
+                    // A faint thread a pixel or two wide, dimming as it spreads.
+                    thin_stroke(
+                        &mut self.train_light,
                         a,
                         b,
-                        &raster::STROKE_KERNEL,
-                        scale * taper * (1.0 - 0.6 * spread),
+                        scale * taper * (1.0 - 0.4 * spread),
                     );
-                    self.train_light
-                        .stroke(a, b, &HALO2, scale * taper * 0.06 * spread);
                 }
                 prev = q;
             }
@@ -565,7 +586,10 @@ impl MeteorShower {
             if b >= BLAZE_FLOOR && b >= t {
                 Ink::new(Role::Ramp(Ramp::Starlight), b)
             } else if dither(t, TRAIN_FLOOR) {
-                Ink::new(Role::Ramp(Ramp::Aurora), (u16::from(t) * 3 / 4) as u8)
+                Ink::new(
+                    Role::Ramp(Ramp::Aurora),
+                    (u16::from(t) * TRAIN_DIM.0 / TRAIN_DIM.1) as u8,
+                )
             } else {
                 match sky.get(i).copied().unwrap_or(0) {
                     0 => Ink::BLANK,
@@ -618,8 +642,15 @@ impl MeteorShower {
                 let dust = value_noise(dust_seed, u * 3.0, along / band_w * 1.2, 1.0);
                 let fine = value_noise(dust_seed ^ 0xd5, u * 7.0, along / band_w * 3.0, 1.0);
                 let lanes = ease::smoothstep((0.62 * dust + 0.38 * fine - 0.42) / 0.2);
-                let dusty = 1.0 - 0.7 * lanes * (-0.5 * (u / 1.2).powi(2)).exp();
-                let band = MILKY_PEAK * (-0.5 * u * u).exp() * (0.8 + 0.4 * clump) * lane * dusty;
+                let dusty = 1.0 - 0.8 * lanes * (-0.5 * (u / 1.2).powi(2)).exp();
+                // A broad glow with a brighter spine, clumped into star clouds.
+                let profile = 0.6 * (-0.5 * u * u).exp() + 0.4 * (-0.5 * (u / 0.38).powi(2)).exp();
+                // Star clouds: patchy value noise at two scales along and across the band,
+                // so it is knotted with bright clouds rather than one smooth ribbon.
+                let knots = 0.6 * value_noise(dust_seed ^ 0x3c, u * 1.6, along / band_w * 0.9, 1.0)
+                    + 0.4 * value_noise(dust_seed ^ 0x3d, u * 4.0, along / band_w * 2.4, 1.0);
+                let clouds = (0.55 + 0.45 * clump + 1.1 * (knots - 0.5)).max(0.2);
+                let band = MILKY_PEAK * profile * clouds * lane * dusty;
                 let open = 1.0 - f64::from(skyline.cover(x as i32, y as i32, horizon));
                 let level = ((air + band) * open).round();
                 let keep = level >= SKY_FADE.1
@@ -669,8 +700,6 @@ impl MeteorShower {
         }
     }
 }
-
-const HALO2: [(i32, i32, f32); 25] = halo_kernel(2);
 
 impl Generator for MeteorShower {
     fn meta(&self) -> &'static Meta {
@@ -729,8 +758,8 @@ impl Generator for MeteorShower {
                     m.mag = -1.5;
                     self.spawn_train(&m, &mut ctx.rng);
                     if let Some(t) = self.trains.iter_mut().next() {
-                        t.age = 1.0;
-                        t.life = t.life.max(8.0);
+                        t.age = 0.4;
+                        t.life = TRAIN_LIFE.1;
                     }
                 }
                 (_, Some((_, mut m))) => {
@@ -941,6 +970,41 @@ mod tests {
                 (lo.min(d), hi.max(d))
             });
         assert!(spread.1 - spread.0 > 0.1, "{spread:?}");
+    }
+
+    #[test]
+    fn met_a8_trains_are_thin_faint_short_lived_and_stop_at_the_treeline() {
+        // Thin: a stroked thread lights at most two pixel rows across its length.
+        let mut glow = Glow::new(Size::new(40, 10));
+        thin_stroke(&mut glow, (10.0, 20.3), (60.0, 20.3), 1.0);
+        let rows = (0..20)
+            .filter(|&y| (0..40).any(|x| glow.values()[y * 40 + x] > 1e-3))
+            .count();
+        assert!((1..=2).contains(&rows), "{rows} rows");
+        // Short-lived: a train fades out within ~4.5 s (the O I afterglow, time-lapsed).
+        assert!(TRAIN_LIFE.1 * 1.4 <= 4.5);
+        // Faint and never over the land, over several seconds of the shower.
+        let (mut g, mut ctx) = built(Size::new(120, 40));
+        for step in 0..(6.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            if step % 20 != 0 {
+                continue;
+            }
+            let ps = g.picture.pixel_size();
+            for y in 0..i32::from(ps.height()) {
+                for x in 0..i32::from(ps.width()) {
+                    let Some(ink) = g.picture.get(x, y) else {
+                        continue;
+                    };
+                    if ink.role != Role::Ramp(Ramp::Aurora) {
+                        continue;
+                    }
+                    assert!(ink.level <= 128, "bright train {ink:?}");
+                    let top = g.land[x as usize];
+                    assert!((y as u16) < top, "train over the land at {x},{y}");
+                }
+            }
+        }
     }
 
     #[test]

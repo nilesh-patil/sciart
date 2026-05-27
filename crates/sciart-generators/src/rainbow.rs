@@ -11,11 +11,14 @@
 //! violet Descartes angles, so the bands are smooth rather than a few solid hues) and the
 //! smooth scattered light of the sunlit rain.
 //!
-//! Colour: each spectral band is a named ramp (red `HAlpha`, orange `Ember`, yellow
-//! `Sulfur`, green `Aurora`, cyan `Ice`, blue `Cobalt`, violet `Plasma`) and the storm sky
-//! is neutral `Starlight`. Every ramp has the same lightness at the same level (RND-R12),
-//! so a pixel's lightness is a continuous blend of sky and bow and only its hue switches
-//! where the bow takes over: the bands fade softly into the slate cloud, no dither.
+//! Colour: where the bow is at full strength it is drawn in the theme's isoluminant hue
+//! loop (`Role::Phase`), its hue following the wavelength continuously, so the bands blend
+//! into one another with no stepped stripes, at a pastel chroma. Phase's fixed lightness
+//! matches the named ramps near level 186, so where the bow is weaker (its soft edges, gaps
+//! between rain curtains, the Sun behind a cloud, the fainter secondary) it continues in the
+//! nearest spectral ramp at a lower level (red `HAlpha`, orange `Ember`, yellow `Sulfur`,
+//! green `Aurora`, blue `Cobalt`, violet `Plasma`). The sunlit rain inside the primary is a
+//! pale grey-blue `Ice`, the storm cloud outside a slate `Div`.
 
 use std::f64::consts::{PI, TAU};
 
@@ -65,6 +68,22 @@ const FRINGES: [f64; 2] = [1.019, 3.248];
 /// Share of a band's peak light above which its hue shows (below it: the sky's). A
 /// property of the angle, not of the moment, so a fading bow dims but keeps its width.
 const HUE_SWITCH: f64 = 0.3;
+/// The bow's full level (where `Phase`'s lightness sits on the ramps), the gain from the
+/// band's light to its strength, and the level from which it is drawn in `Phase`.
+const BOW_LEVEL: f64 = 186.0;
+const BOW_GAIN: f64 = 1.35;
+const PHASE_FROM: f64 = 170.0;
+/// The bow's strength: its floor with the rain and Sun at their dimmest, and the share of
+/// full sunlit rain at which it is at full strength.
+const BOW_FLOOR: f64 = 0.35;
+const BOW_FULL: f64 = 0.6;
+/// The sunlit rain inside the primary in `Ramp(Ice)`, pale at these levels: its base, the
+/// gain with sunlit rain, the extra near the bow and the drop toward the horizon.
+const RAIN_LIT: (f64, f64, f64, f64) = (158.0, 20.0, 22.0, 30.0);
+/// Sun breaks: the Sun behind the viewer passes in and out of cloud (value noise in time,
+/// cell in s), dimming the bow and the sunlit rain to this share.
+const SUN_CELL: f64 = 6.0;
+const SUN_LOW: f64 = 0.4;
 /// Storm-cloud `Ramp(Starlight)` levels: top of the frame and at the horizon.
 const SKY_BASE: (f64, f64) = (20.0, 40.0);
 /// Slate sky as `Div` below zero: offset, per level, and the deepest (bluest) value.
@@ -177,17 +196,44 @@ fn weight(nm: f64) -> f64 {
     (-((nm - 560.0) / 120.0).powi(2)).exp()
 }
 
-/// The ramp that carries a wavelength's colour, red → violet.
+/// The ramp that carries a wavelength's colour where the bow is weak, red → violet. Cyan
+/// has no ramp of its own (`Ice` is the sunlit rain's); `Phase` carries it at full strength.
 pub(crate) fn spectral_ramp(nm: f64) -> Ramp {
     match nm {
         n if n >= 636.0 => Ramp::HAlpha,
         n if n >= 596.0 => Ramp::Ember,
         n if n >= 566.0 => Ramp::Sulfur,
-        n if n >= 500.0 => Ramp::Aurora,
-        n if n >= 482.0 => Ramp::Ice,
+        n if n >= 492.0 => Ramp::Aurora,
         n if n >= 440.0 => Ramp::Cobalt,
         _ => Ramp::Plasma,
     }
+}
+
+/// The `Phase` level (a hue on the theme's isoluminant loop, which starts at OKLab hue
+/// 30°) of a wavelength: its OKLab hue, piecewise linear through the spectral colours,
+/// spaced so red, orange, yellow, green, blue and violet take similar shares of the band
+/// (as the eye sees a bow; the drawn band is linear in wavelength).
+pub(crate) fn spectral_phase(nm: f64) -> u8 {
+    // (nm, OKLab hue in degrees), red → violet.
+    const HUES: [(f64, f64); 7] = [
+        (700.0, 25.0),
+        (650.0, 55.0),
+        (600.0, 100.0),
+        (550.0, 140.0),
+        (500.0, 215.0),
+        (450.0, 262.0),
+        (400.0, 300.0),
+    ];
+    let nm = nm.clamp(400.0, 700.0);
+    let mut hue = HUES[HUES.len() - 1].1;
+    for w in HUES.windows(2) {
+        let ((n0, h0), (n1, h1)) = (w[0], w[1]);
+        if nm <= n0 && nm >= n1 {
+            hue = h0 + (h1 - h0) * (n0 - nm) / (n0 - n1);
+            break;
+        }
+    }
+    sciart_core::ink::phase((hue - 30.0).to_radians()).level
 }
 
 /// Per angle: bow light (0..1 of a full band), the wavelength seen (nm; its ramp) and the
@@ -201,8 +247,8 @@ pub(crate) struct Sample {
     pub ramp: Ramp,
     /// Whether the band's hue shows here (its light above [`HUE_SWITCH`] of its peak).
     pub hue: bool,
-    /// The level the band's colour is drawn at ([`band_level`]).
-    pub level: f32,
+    /// The wavelength's hue on the `Phase` loop ([`spectral_phase`]).
+    pub phase: u8,
     pub sky: f32,
 }
 
@@ -213,7 +259,7 @@ impl Default for Sample {
             nm: 550.0,
             ramp: Ramp::Starlight,
             hue: false,
-            level: 0.0,
+            phase: 0,
             sky: 0.0,
         }
     }
@@ -285,7 +331,7 @@ pub(crate) fn light_at(theta: f64) -> Sample {
         nm: nm as f32,
         ramp,
         hue: bow > HUE_SWITCH * peak,
-        level: band_level(nm) as f32,
+        phase: spectral_phase(nm),
         sky: sky as f32,
     }
 }
@@ -295,11 +341,6 @@ pub(crate) fn light_at(theta: f64) -> Sample {
 /// lightness), lightening with the level.
 fn slate(lvl: f64) -> Ink {
     sciart_core::ink::div(-(SLATE.0 + SLATE.1 * (lvl - 12.0).max(0.0)).min(SLATE.2))
-}
-
-/// Level a band's colour is drawn at: brightest in the yellow-green, as the eye sees it.
-fn band_level(nm: f64) -> f64 {
-    128.0 + 58.0 * weight(nm)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -364,6 +405,13 @@ impl Rainbow {
         (elev.to_radians(), seam * swell)
     }
 
+    /// Sunlight on the rain at time `t` (`SUN_LOW`..1): the Sun behind the viewer passes
+    /// in and out of broken cloud, brightening and dimming the whole bow over seconds.
+    pub(crate) fn sun_at(salt: u64, t: f64) -> f64 {
+        let n = value_noise(salt ^ 0x5a11, t, 0.0, SUN_CELL);
+        SUN_LOW + (1.0 - SUN_LOW) * ease::smoothstep((n - 0.2) / 0.6)
+    }
+
     /// Rain-curtain density (0..1) at curtain coordinate `x − slant·y` (px) and time `t`:
     /// two octaves of drifting value noise, sharpened so veils have gaps between them.
     fn curtain_at(salt: u64, x: f64, width: f64, t: f64) -> f64 {
@@ -398,6 +446,7 @@ impl Rainbow {
     fn paint(&mut self) {
         let (elev, rain) = Self::sky_state(self.t);
         let (se, ce) = elev.sin_cos_det();
+        let sun = Self::sun_at(self.salt, self.t);
         let ps = self.picture.pixel_size();
         let w = usize::from(ps.width());
         let horizon = self.horizon;
@@ -444,22 +493,36 @@ impl Rainbow {
             // sunlit rain (brightest where the curtains are dense and the shafts fall).
             let low = (py / horizon.max(1.0)).clamp(0.0, 1.0);
             let m = f64::from(mottle.get(i).copied().unwrap_or(0.0)) * (1.0 - low);
-            let sky_in = f64::from(s.sky) * rain * (0.55 + 0.45 * veil);
+            let lit = rain * sun * (0.55 + 0.45 * veil);
+            let shafts = SHAFT_GAIN * beam * sun * (0.4 + f64::from(s.sky));
+            // Outside the primary: the storm cloud's slate base.
             let base = SKY_BASE.0 + (SKY_BASE.1 - SKY_BASE.0) * low * low + MOTTLE.0 * m;
-            let sky = base
-                + LIT.0 * sky_in
-                + LIT.1 * veil * rain
-                + SHAFT_GAIN * beam * (0.4 + f64::from(s.sky));
-            // The bow brightens and fades along its arc with the rain it shines in.
-            let a = (f64::from(s.bow) * rain * (0.55 + 0.45 * veil) * (1.0 + 0.25 * beam))
-                .clamp(0.0, 1.0);
-            let target = f64::from(s.level).max(sky + 30.0);
+            let cloud = base + LIT.1 * veil * rain * sun + shafts;
+            // Inside: the sunlit rain, luminous near the bow and easing down to the
+            // horizon; lightness blends continuously from the cloud across the red rim.
+            let rain_lit = RAIN_LIT.0 + RAIN_LIT.1 * lit + RAIN_LIT.2 * f64::from(s.sky) * lit
+                - RAIN_LIT.3 * low * low
+                + 0.5 * MOTTLE.0 * m
+                + shafts;
+            let inside = ease::smoothstep((f64::from(s.sky) - 0.2) / 0.4);
+            let sky = cloud + (rain_lit - cloud) * inside;
+            // The bow brightens and fades along its arc with the rain it shines in, and as a
+            // whole with the sunlight on the rain.
+            let strength = BOW_FLOOR + (1.0 - BOW_FLOOR) * (lit / BOW_FULL).min(1.0);
+            let a = (f64::from(s.bow) * BOW_GAIN * strength * (1.0 + 0.25 * beam)).clamp(0.0, 1.0);
+            let target = BOW_LEVEL.max(sky + 30.0);
             let lvl = (sky + (target - sky) * a) * open;
             if s.hue && a > 0.04 {
-                Ink::new(Role::Ramp(s.ramp), sciart_core::ink::level(lvl))
-            } else if s.sky > 0.45 {
-                // The sunlit rain inside the primary: pale neutral grey.
-                Ink::new(Role::Ramp(Ramp::Starlight), sciart_core::ink::level(lvl))
+                if lvl >= PHASE_FROM {
+                    // At full strength: a continuous hue at Phase's (fixed) lightness.
+                    Ink::new(Role::Phase, s.phase)
+                } else {
+                    Ink::new(Role::Ramp(s.ramp), sciart_core::ink::level(lvl))
+                }
+            } else if inside > 0.5 {
+                // The sunlit rain inside the primary: pale grey-blue (`Ice` is least
+                // saturated high on its ramp, where the sunlit rain sits).
+                Ink::new(Role::Ramp(Ramp::Ice), sciart_core::ink::level(lvl))
             } else {
                 slate(lvl)
             }
@@ -582,7 +645,10 @@ impl Generator for Rainbow {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let is_bow = |ink: Ink| matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight);
+        let is_bow = |ink: Ink| {
+            ink.role == Role::Phase
+                || matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight && r != Ramp::Ice)
+        };
         self.picture.blit(canvas, |_, _, top, bottom| {
             match (is_bow(top), is_bow(bottom)) {
                 (true, true) => Some(('#', top)),
@@ -714,7 +780,21 @@ mod tests {
             d -= 0.02;
         }
         use Ramp::*;
-        assert_eq!(seen, [HAlpha, Ember, Sulfur, Aurora, Ice, Cobalt, Plasma]);
+        assert_eq!(seen, [HAlpha, Ember, Sulfur, Aurora, Cobalt, Plasma]);
+        // At full strength the hue runs continuously red → violet on the Phase loop: small
+        // steps, always forward, and most of the way round (no stepped stripes).
+        let mut prev = at(deg(r1)).phase;
+        let mut turned = 0u32;
+        let mut d = deg(r1) - 0.02;
+        while d > deg(v1) {
+            let p = at(d).phase;
+            let step = p.wrapping_sub(prev);
+            assert!(step <= 6, "hue step {step} at {d}°");
+            turned += u32::from(step);
+            prev = p;
+            d -= 0.02;
+        }
+        assert!((170..=200).contains(&turned), "hue turned {turned}/256");
     }
 
     #[test]
@@ -724,18 +804,24 @@ mod tests {
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
         let bright = |g: &Rainbow| {
-            // Mean level of bow pixels in the left and right thirds.
+            // Mean level of bow pixels in the left, middle and right thirds (a `Phase`
+            // pixel is at the bow's full level).
             let ps = g.picture.pixel_size();
             let (w, h) = (i32::from(ps.width()), i32::from(ps.height()));
             let mut sums = [(0.0, 0.0); 3];
             for y in 0..h {
                 for x in 0..w {
                     let ink = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                    if matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight) {
-                        let k = (3 * x / w) as usize;
-                        sums[k].0 += f64::from(ink.level);
-                        sums[k].1 += 1.0;
-                    }
+                    let lvl = match ink.role {
+                        Role::Phase => BOW_LEVEL,
+                        Role::Ramp(r) if r != Ramp::Starlight && r != Ramp::Ice => {
+                            f64::from(ink.level)
+                        }
+                        _ => continue,
+                    };
+                    let k = (3 * x / w) as usize;
+                    sums[k].0 += lvl;
+                    sums[k].1 += 1.0;
                 }
             }
             sums.map(|(s, n)| if n > 0.0 { s / n } else { 0.0 })
@@ -766,15 +852,72 @@ mod tests {
             g.picture.get(x, row(36.0)).unwrap_or(Ink::BLANK),
             g.picture.get(x, row(46.5)).unwrap_or(Ink::BLANK),
         );
-        // Inside the primary: pale sunlit rain; Alexander's band: dark slate (the cool
-        // side of `Div`, just below zero), a darker sky than inside.
-        assert_eq!(inside.role, Role::Ramp(Ramp::Starlight));
-        assert!(inside.level >= 55, "{inside:?}");
+        // Inside the primary: pale grey-blue sunlit rain, high on `Ice` where it is least
+        // saturated; Alexander's band: dark slate (the cool side of `Div`, just below
+        // zero), a darker sky than inside.
+        assert_eq!(inside.role, Role::Ramp(Ramp::Ice));
+        assert!(inside.level >= 140, "{inside:?}");
+        // It eases down toward the horizon rather than being one flat dome.
+        let low = g
+            .picture
+            .get(x, row(elev.to_degrees() + 2.0))
+            .unwrap_or(Ink::BLANK);
+        assert_eq!(low.role, Role::Ramp(Ramp::Ice));
+        assert!(low.level + 8 <= inside.level, "{low:?} vs {inside:?}");
         assert_eq!(band.role, Role::Div);
         let v = sciart_core::ink::div_value(band);
         assert!((-SLATE.2 - 0.01..0.0).contains(&v), "{band:?}");
         // Darker: slate this close to zero is below Starlight 40 in lightness.
         assert!(v > -0.06, "{band:?}");
+    }
+
+    #[test]
+    fn bow_a9_sun_breaks_brighten_and_dim_the_whole_bow() {
+        // The sunlight on the rain wanders within [SUN_LOW, 1], swinging widely within
+        // ~10 s, and a dim spell takes the bow out of full (Phase) strength.
+        let mut lo: f64 = 1.0;
+        let mut hi: f64 = 0.0;
+        let mut widest: f64 = 0.0;
+        for i in 0..600 {
+            let t = f64::from(i) * 0.1;
+            let s = Rainbow::sun_at(9, t);
+            assert!((SUN_LOW - 1e-9..=1.0 + 1e-9).contains(&s), "{s} at {t}");
+            lo = lo.min(s);
+            hi = hi.max(s);
+            let later = Rainbow::sun_at(9, t + 10.0);
+            widest = widest.max((later - s).abs());
+        }
+        assert!(hi - lo > 0.4 && widest > 0.3, "{lo}..{hi}, {widest}");
+        let phase_pixels = |sun_low: bool| {
+            let size = Size::new(120, 40);
+            let mut ctx = Ctx::new(5, size);
+            let mut g = Rainbow::default();
+            g.resize(size, &mut ctx);
+            // Find a moment of full and of dimmest sunlight within the first minute.
+            let target = if sun_low { lo } else { hi };
+            let t = (0..600)
+                .map(|i| f64::from(i) * 0.1)
+                .min_by(|a, b| {
+                    let (fa, fb) = (Rainbow::sun_at(g.salt, *a), Rainbow::sun_at(g.salt, *b));
+                    (fa - target).abs().total_cmp(&(fb - target).abs())
+                })
+                .unwrap_or(0.0);
+            g.t = t;
+            g.refresh();
+            g.paint();
+            let ps = g.picture.pixel_size();
+            let mut n = 0;
+            for y in 0..i32::from(ps.height()) {
+                for x in 0..i32::from(ps.width()) {
+                    if g.picture.get(x, y).is_some_and(|k| k.role == Role::Phase) {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        let (bright, dim) = (phase_pixels(false), phase_pixels(true));
+        assert!(bright > 0 && dim * 10 < bright * 9, "{bright} vs {dim}");
     }
 
     #[test]
