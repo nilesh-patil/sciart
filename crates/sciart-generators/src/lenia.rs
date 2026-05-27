@@ -12,7 +12,9 @@
 //! of the heaviest creature and it regrows; a watchdog reseeds if the total mass leaves
 //! `[0.3, 1.6]×` the seeded mass. Acts of [`CYCLE_S`] seconds alternate a parallel shoal
 //! with staged meetings (one glider engulfs another, or two brush past); a lost glider is
-//! replaced by a birth a few seconds later.
+//! replaced by a birth a few seconds later. Every reseed (act change or watchdog)
+//! cross-fades: the old creatures keep swimming as a ghost while the new ones condense,
+//! so no frame is empty.
 
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
@@ -49,9 +51,12 @@ const MAX_NODES: usize = 6144;
 const BUCKET: f64 = 1.25;
 /// Seconds between damage beats.
 const DAMAGE_S: f64 = 12.0;
-/// Seconds per act: then the dish fades and the next act hatches on a new heading.
+/// Seconds per act: then the next act hatches on a new heading.
 const CYCLE_S: f64 = 30.0;
-const FADE_S: f64 = 1.5;
+/// Cross-fade at every reseed (LNA-A9): the new creatures condense over the first half,
+/// while the old ones (still swimming, as a ghost world) dissolve over the second half,
+/// so the dish is never empty.
+const XFADE_S: f64 = 2.0;
 
 /// What a cycle stages (SPEC-002 Round 3): a parallel shoal, or two gliders aimed at each
 /// other, whose meeting (deterministic, so chosen once, LNA-A6/A7) is clean.
@@ -378,6 +383,10 @@ struct Lenia {
     hatch_at: Option<f64>,
     /// The last birth: node and time, for its fade-in.
     birth: Option<((i32, i32), f64)>,
+    /// The creatures of the previous act (or a reseeded colony), still stepping while
+    /// they dissolve, and when that cross-fade began (LNA-A9).
+    ghost: World,
+    ghost_at: Option<f64>,
     scratch: Grid<f32>,
     map: SampleMap,
     pixels: Pixels,
@@ -397,6 +406,8 @@ impl Default for Lenia {
             act: Act::Shoal,
             hatch_at: None,
             birth: None,
+            ghost: World::default(),
+            ghost_at: None,
             scratch: Grid::default(),
             map: SampleMap::default(),
             pixels: Pixels::default(),
@@ -407,6 +418,20 @@ impl Default for Lenia {
 impl Lenia {
     /// Clear the world and seed this cycle's act at a random place and heading.
     fn seed(&mut self, rng: &mut impl Rng) {
+        // The outgoing creatures become the ghost that cross-fades out (LNA-A9); buffers
+        // are sized in `resize`, so this copies without allocating (GEN-R11).
+        self.ghost_at = None;
+        if self.ghost.a.size() == self.world.a.size() && self.world.mass() > 1e-3 {
+            self.ghost
+                .a
+                .as_mut_slice()
+                .copy_from_slice(self.world.a.as_slice());
+            self.ghost
+                .prev
+                .as_mut_slice()
+                .copy_from_slice(self.world.prev.as_slice());
+            self.ghost_at = Some(self.time);
+        }
         self.world.a.fill(0.0);
         self.hatch_at = None;
         self.birth = None;
@@ -443,6 +468,13 @@ impl Lenia {
 
     fn world_step(&mut self, rng: &mut impl Rng) {
         self.world.step();
+        if let Some(t0) = self.ghost_at {
+            if self.time - t0 < XFADE_S {
+                self.ghost.step();
+            } else {
+                self.ghost_at = None;
+            }
+        }
         let m = self.world.mass() / self.seed_mass;
         if !(MASS_BAND.0..=MASS_BAND.1).contains(&m) {
             self.seed(rng);
@@ -463,10 +495,19 @@ impl Lenia {
 
     fn rasterise(&mut self) {
         let f = self.owed.clamp(0.0, 1.0) as f32;
-        let local = self.time % CYCLE_S;
-        let fade = ease::smoothstep(local / FADE_S)
-            .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
-        let fade = if self.time < FADE_S { 1.0 } else { fade };
+        // Cross-fade weights (LNA-A9): new creatures in over the first half, the ghost
+        // out over the second, so one of them is always at full strength.
+        let (k_in, ghost) = match self.ghost_at {
+            Some(t0) => {
+                let u = 2.0 * (self.time - t0) / XFADE_S;
+                let k_out = 1.0 - ease::smoothstep(u - 1.0);
+                (
+                    ease::smoothstep(u) as f32,
+                    (k_out > 0.0).then_some((&self.ghost, k_out as f32)),
+                )
+            }
+            None => (1.0, None),
+        };
         // A newborn fades in (display only): pixels near its hatching place are dimmed
         // by its age, so it condenses out of the dark instead of popping in.
         let px = self.pixels.pixel_size();
@@ -483,12 +524,16 @@ impl Lenia {
         let (map, a, p) = (&self.map, &self.world.a, &self.world.prev);
         self.pixels.shade(|x, y| {
             let (va, vp) = (map.sample(a, x, y), map.sample(p, x, y));
-            let mut v = (vp + (va - vp) * f) * fade;
+            let mut v = (vp + (va - vp) * f) * k_in;
             if let Some((cx, cy, r, k)) = birth {
                 let d = (f64::from(x) + 0.5 - cx).hypot((f64::from(y) + 0.5 - cy) * sx / sy);
                 if d < r {
                     v *= k;
                 }
+            }
+            if let Some((g, k)) = ghost {
+                let (ga, gp) = (map.sample(&g.a, x, y), map.sample(&g.prev, x, y));
+                v = v.max((gp + (ga - gp) * f) * k);
             }
             lenia_ink(v)
         });
@@ -542,6 +587,12 @@ impl Generator for Lenia {
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
+        if self.ghost.a.size() != lat {
+            // A cross-fade in flight is dropped on a lattice change (the ghost is only
+            // display, and resizes are rare).
+            self.ghost = World::new(lat);
+            self.ghost_at = None;
+        }
         if !self.seeded {
             self.seeded = true;
             self.world = World::new(lat);
@@ -775,6 +826,41 @@ mod tests {
         }
         assert!(g.world.mass() > 1.6 * m_one, "a glider hatched");
         assert!(g.birth.is_some());
+    }
+
+    /// Lit creature pixels: shaded at least mid-level (a body, not a faint halo).
+    fn lit_pixels(g: &Lenia) -> usize {
+        let px = g.pixels.pixel_size();
+        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| {
+                g.pixels
+                    .get(x, y)
+                    .is_some_and(|i| i.role != Role::Background && i.level >= 110)
+            })
+            .count()
+    }
+
+    #[test]
+    fn lna_a9_never_blank_across_acts_births_and_reseeds() {
+        // Two full act loops (shoal → engulf → shoal → glance, 4 × 30 s), sampled every
+        // 0.25 s: at act changes the next act must already be showing (LNA-A9).
+        let secs = 2.0 * ACTS.len() as f64 * CYCLE_S;
+        for size in [Size::new(80, 24), Size::new(120, 40)] {
+            let mut ctx = Ctx::new(42, size);
+            let mut g = Lenia::default();
+            g.resize(size, &mut ctx);
+            let mut frame = 0usize;
+            while g.time < secs {
+                g.update(1.0 / 60.0, &mut ctx);
+                frame += 1;
+                if frame % 15 == 0 {
+                    let n = lit_pixels(&g);
+                    assert!(n >= 20, "{size:?} t = {:.2} s: {n} lit pixels", g.time);
+                }
+            }
+        }
     }
 
     #[test]

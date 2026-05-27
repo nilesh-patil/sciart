@@ -18,7 +18,7 @@
 //! between rain curtains, the Sun behind a cloud, the fainter secondary) it continues in the
 //! nearest spectral ramp at a lower level (red `HAlpha`, orange `Ember`, yellow `Sulfur`,
 //! green `Aurora`, blue `Cobalt`, violet `Plasma`). The sunlit rain inside the primary is a
-//! pale grey-blue `Ice`, the storm cloud outside a slate `Div`.
+//! dim neutral grey `Starlight`, the storm cloud outside a slate `Div`.
 
 use std::f64::consts::{PI, TAU};
 
@@ -77,9 +77,10 @@ const PHASE_FROM: f64 = 170.0;
 /// full sunlit rain at which it is at full strength.
 const BOW_FLOOR: f64 = 0.35;
 const BOW_FULL: f64 = 0.6;
-/// The sunlit rain inside the primary in `Ramp(Ice)`, pale at these levels: its base, the
+/// The sunlit rain inside the primary in `Ramp(Starlight)`, a calm grey (not a cyan): its
+/// base, the
 /// gain with sunlit rain, the extra near the bow and the drop toward the horizon.
-const RAIN_LIT: (f64, f64, f64, f64) = (158.0, 20.0, 22.0, 30.0);
+const RAIN_LIT: (f64, f64, f64, f64) = (64.0, 10.0, 12.0, 14.0);
 /// Sun breaks: the Sun behind the viewer passes in and out of cloud (value noise in time,
 /// cell in s), dimming the bow and the sunlit rain to this share.
 const SUN_CELL: f64 = 6.0;
@@ -197,7 +198,7 @@ fn weight(nm: f64) -> f64 {
 }
 
 /// The ramp that carries a wavelength's colour where the bow is weak, red → violet. Cyan
-/// has no ramp of its own (`Ice` is the sunlit rain's); `Phase` carries it at full strength.
+/// has no ramp of its own; `Phase` carries it at full strength.
 pub(crate) fn spectral_ramp(nm: f64) -> Ramp {
     match nm {
         n if n >= 636.0 => Ramp::HAlpha,
@@ -520,9 +521,9 @@ impl Rainbow {
                     Ink::new(Role::Ramp(s.ramp), sciart_core::ink::level(lvl))
                 }
             } else if inside > 0.5 {
-                // The sunlit rain inside the primary: pale grey-blue (`Ice` is least
-                // saturated high on its ramp, where the sunlit rain sits).
-                Ink::new(Role::Ramp(Ramp::Ice), sciart_core::ink::level(lvl))
+                // The sunlit rain inside the primary: a dim, nearly neutral grey
+                // (`Starlight` stays grey while faint), brighter than the cloud but calm.
+                Ink::new(Role::Ramp(Ramp::Starlight), sciart_core::ink::level(lvl))
             } else {
                 slate(lvl)
             }
@@ -646,8 +647,7 @@ impl Generator for Rainbow {
 
     fn render(&self, canvas: &mut Canvas) {
         let is_bow = |ink: Ink| {
-            ink.role == Role::Phase
-                || matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight && r != Ramp::Ice)
+            ink.role == Role::Phase || matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight)
         };
         self.picture.blit(canvas, |_, _, top, bottom| {
             match (is_bow(top), is_bow(bottom)) {
@@ -814,9 +814,7 @@ mod tests {
                     let ink = g.picture.get(x, y).unwrap_or(Ink::BLANK);
                     let lvl = match ink.role {
                         Role::Phase => BOW_LEVEL,
-                        Role::Ramp(r) if r != Ramp::Starlight && r != Ramp::Ice => {
-                            f64::from(ink.level)
-                        }
+                        Role::Ramp(r) if r != Ramp::Starlight => f64::from(ink.level),
                         _ => continue,
                     };
                     let k = (3 * x / w) as usize;
@@ -852,17 +850,17 @@ mod tests {
             g.picture.get(x, row(36.0)).unwrap_or(Ink::BLANK),
             g.picture.get(x, row(46.5)).unwrap_or(Ink::BLANK),
         );
-        // Inside the primary: pale grey-blue sunlit rain, high on `Ice` where it is least
-        // saturated; Alexander's band: dark slate (the cool side of `Div`, just below
-        // zero), a darker sky than inside.
-        assert_eq!(inside.role, Role::Ramp(Ramp::Ice));
-        assert!(inside.level >= 140, "{inside:?}");
+        // Inside the primary: sunlit rain as a calm, dim grey `Starlight` (brighter than the
+        // cloud, far below the bow); Alexander's band: dark slate (the cool side of `Div`,
+        // just below zero), a darker sky than inside.
+        assert_eq!(inside.role, Role::Ramp(Ramp::Starlight));
+        assert!((55..=95).contains(&inside.level), "{inside:?}");
         // It eases down toward the horizon rather than being one flat dome.
         let low = g
             .picture
             .get(x, row(elev.to_degrees() + 2.0))
             .unwrap_or(Ink::BLANK);
-        assert_eq!(low.role, Role::Ramp(Ramp::Ice));
+        assert_eq!(low.role, Role::Ramp(Ramp::Starlight));
         assert!(low.level + 8 <= inside.level, "{low:?} vs {inside:?}");
         assert_eq!(band.role, Role::Div);
         let v = sciart_core::ink::div_value(band);
