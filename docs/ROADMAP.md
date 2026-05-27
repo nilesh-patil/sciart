@@ -157,9 +157,9 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [ ] Local `--no-ff` merge of `feat/m12-upgrades` into `main`
 - [ ] M12 closing follow-ups (minor): aurora's crimson fringe is continuous but stair-steps along the curtain base at t ≈ 5 s (review 7.5–8/10; smooth it sub-cell) · globular_cluster motion (review 7.5/10) · exoplanet_transit star reads flat (7.5) · pulsar spikes at t = 5 s (7.5) · satellite_orbit label crowding · constellation_map Cassiopeia wash · double_pendulum: round 2 intended twin B's bob to stop being a half-disc while merged, but the code (and SPEC-002, which follows it) still clips it to its right half (decide and align) · dna_helix zoom transition at t ≈ 6–8 s · 500×150 worst frames over 2 ms: doppler_effect 4.7, aurora 4.1, stellar_nursery 4.0, moon_phases 3.9, cosmic_microwave_background 3.7, solar_surface 3.2, strange_attractors 2.7, molecule_viewer 2.6, rocket_launch 2.4, wave_interference 2.3, liesegang_rings 2.2, electron_orbitals 2.1, spacetime_grid 2.2, mars_rover 2.1 ms · near-ceiling live bytes at 500×150 (TEST-R7 4 MiB): galaxy_collision 3.95, solar_surface 3.93, electron_orbitals 3.86 MiB · stale test names `dp_a5_…half_green_half_crimson_bobs`, `orb_a8_…over_the_glow`, and MD-A9 covering both caption and relative colour (MD-A10 is now the atom bodies and halo; split the caption out to MD-A11 with a test rename)
 
-## M13 — New scenes (planned)
+## M13 — New scenes ✅
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6, §7 · branch `feat/m13-new-scenes` (may split per category group).
-- [ ] Curator + critic pass over `M11-research/` plus a fresh astronomy research pass; confirm the picks, including Reactions and the 12 extra sky scenes
+- [x] Curator + critic pass over `M11-research/` plus a fresh astronomy research pass; confirm the picks, including Reactions and the 12 extra sky scenes
 - [x] Shared `pub(crate)` models in `src/shared/` (GEN-R3, GEN-R16): excitable (belousov_zhabotinsky, heart_fibrillation, dicty_aggregation), laplacian_growth (lichtenberg_discharge), cahn_hilliard (spinodal_decomposition), vortex_advect, plume, skyline, earth_globe; `lbm` lifted into core with kelvin_helmholtz (CORE-R98..R100). fractal_growth keeps its own DLA walker.
 - [x] Deep Cosmos: spiral_galaxy, cosmic_web, supernova_remnant, relativistic_jet, light_echo, planetary_nebula
 - [x] Sun & Planets: saturn_rings, comet_tails, jupiter_storms, solar_eruption, io_volcanoes, comet_breakup
@@ -172,8 +172,23 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
 - [x] Physics of Life: heart_fibrillation, motility_clustering
 - [x] Molecules of Life: dicty_aggregation, seashell_pigmentation
 - [x] Life from Matter: molecular_motors, hp_protein_folding (added in the Life B round)
-- [ ] Every new scene: SPEC-002 section, title, category by ADR-0013, < 2 ms worst frame at 200×50, leak guards green; review; local `--no-ff` merge into `main`
+- [x] Every new scene: SPEC-002 section, title, category by ADR-0013, < 2 ms worst frame at 200×50, leak guards green; review (final art pass: scores and follow-ups below; see [docs/design/M13-scenes.md](design/M13-scenes.md))
+- [ ] Local `--no-ff` merge of `feat/m13-new-scenes` into `main`
 - [ ] M13 follow-ups: lift the 1-2-1 blur duplicated in motility_clustering and dicty_aggregation (`blur121`) into core `Glow` · radical_chain: CHN-A5 (vent cool-down) passes only for K_T3 = 0.1 and on one seed; make it robust across seeds and nearby constants · catalytic_surface: CAT-A6 production stalls on some seeds (seed 4 seen while tuning the mid-window opening); make the loop robust across seeds · seashell_pigmentation draws its browns as false-colour Blackbody at 1.6–2.5 kK; switch to `Ramp::Sienna` (added in 7b6a9bf)
+  - Art follow-ups from the final art pass (scenes below 8/10; scene, score, weakness):
+    - orbital_rendezvous 7: the hero craft is small in an empty frame
+    - comet_tails 7.5: the ion tail and the Sun clip at the frame edge
+    - io_volcanoes 6.5: static over t = 1..30 s, speckled plume canopy, blocky ring band
+    - comet_breakup 7: the impact is not visible, fragments smeared
+    - rainbow 6.5: stair-stepped bands, rain streaks read as noise (the garish cyan interior was fixed in 0d16892: a dim `Starlight` grey)
+    - total_solar_eclipse 7.5: blocky corona star with a hard edge
+    - meteor_shower 7.5: small meteors, flat Milky Way
+    - noctilucent_clouds 7: saturated cyan, ripple texture, hard orange horizon
+    - catalytic_surface 7.5: rust swallows the frame by t = 30 s
+    - motility_clustering 7.5: dim and sparse over t = 1..5 s
+    - firefly_sync 7: flashes are per-cell speckle, not glowing points
+    - lenia: re-scored 8 after the LNA-A9 cross-fade (no blank frames between acts)
+  - Minor: stair-stepped outlines in heart_fibrillation (heart), seashell_pigmentation, hurricane arms, chemical_garden tubes, jupiter_storms limb · hp_protein_folding: reword the spec's C tag to "C: molecular structure as the subject"
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
