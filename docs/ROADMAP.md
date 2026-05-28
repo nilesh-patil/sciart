@@ -190,5 +190,15 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
     - lenia: re-scored 8 after the LNA-A9 cross-fade (no blank frames between acts)
   - Minor: stair-stepped outlines in heart_fibrillation (heart), seashell_pigmentation, hurricane arms, chemical_garden tubes, jupiter_storms limb · hp_protein_folding: reword the spec's C tag to "C: molecular structure as the subject"
 
+## M14 — Resource diet
+Design: [docs/design/M14-resource-diet.md](design/M14-resource-diet.md) · branch `perf/m14-resource-diet`.
+- [ ] Cost probe `rs-cost` with bytes/frame, paint and diff time, blockiness and darkness metrics; baseline table (RND-R13)
+- [ ] Colour hysteresis in `paint` (RND-R14) · table-driven paint, no invisible escapes (RND-R15)
+- [ ] Allocation-free frame loop (RT-R14) · one buffered write per frame, synchronized update (RT-R15)
+- [ ] Fine texture: smooth upsampling of coarse lattices, blockiness ceilings (GEN-R17)
+- [ ] Dark ground: black backgrounds across scenes, darkness floors (GEN-R18)
+- [ ] Scene hot spots: nothing over 1 ms mean at 200×50 or 2 ms worst at 500×150 without a reason; resize ≤ 10 ms (GEN-R8, GEN-R19)
+- [ ] Art + perf review (≤ 2 rounds), before/after tables, local `--no-ff` merge
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
