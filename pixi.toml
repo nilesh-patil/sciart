@@ -19,6 +19,8 @@ rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-snap-release"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --release -p sciart-generators --example worst_frame --"
+# RND-R13 per-scene CPU, terminal bytes and art metrics: `pixi run rs-cost [scene ...] [--size WxH] [--secs N] [--sort bytes]`.
+rs-cost = "cargo run -q --release -p sciart --example cost --"
 rs-list = "cargo run -q -p sciart -- list"
 rs-sim = "cargo run --release -p sciart -- sim"
 rs-run = "cargo run --release -p sciart -- run"
