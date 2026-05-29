@@ -319,8 +319,13 @@ impl Spinodal {
         );
         let (map, shade, inks) = (&self.map, &self.shade, &self.inks);
         let formed = formed(&self.psi);
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut sr) = (-1, map.row(shade, 0));
         self.pixels.shade(|x, y| {
-            let v = map.sample(shade, x, y);
+            if y != ry {
+                (ry, sr) = (y, map.row(shade, y));
+            }
+            let v = sr.at(x);
             if !formed && (v.is_nan() || v.abs() < EMPTY) {
                 return Ink::BLANK;
             }

@@ -483,8 +483,14 @@ impl KelvinHelmholtz {
             &self.shade
         };
         let map = &self.map;
-        self.pixels
-            .shade(|x, y| value_ink(f64::from(map.sample(src, x, y))));
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut sr) = (-1, map.row(src, 0));
+        self.pixels.shade(|x, y| {
+            if y != ry {
+                (ry, sr) = (y, map.row(src, y));
+            }
+            value_ink(f64::from(sr.at(x)))
+        });
     }
 
     /// `Re 121` on the title row, right-aligned, when there is room (GEN-R13).

@@ -336,6 +336,154 @@ proptest! {
             prop_assert_eq!(Some(map.nearest(x, y)), picked.get(x, y).copied());
         }
     }
+
+    #[test]
+    fn core_r104_row_sampler_is_bit_identical_to_sample(
+        sw in 1u16..40, sh in 1u16..40, dw in 1u16..60, dh in 1u16..60, seed in any::<u64>(),
+    ) {
+        let (ss, ds) = (Size::new(sw, sh), Size::new(dw, dh));
+        let mut src = Grid::new(ss, 0.0f32);
+        let mut s = seed;
+        for v in src.as_mut_slice() {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = (s >> 40) as f32 / 4096.0 - 2048.0;
+        }
+        let mut map = SampleMap::default();
+        map.rebuild(ss, ds);
+        // Off-range rows and columns clamp exactly as `sample` does.
+        for y in -2..i32::from(dh) + 2 {
+            let row = map.row(&src, y);
+            for x in -2..i32::from(dw) + 2 {
+                prop_assert_eq!(
+                    row.at(x).to_bits(), map.sample(&src, x, y).to_bits(), "({}, {})", x, y
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn core_r104_row_sampler_of_an_empty_map_or_wrong_source_is_zero() {
+    let src = ramp_grid(Size::new(4, 3));
+    assert_eq!(SampleMap::default().row(&src, 0).at(0), 0.0);
+    let mut map = SampleMap::default();
+    map.rebuild(Size::new(4, 3), Size::new(9, 7));
+    let other = ramp_grid(Size::new(2, 2));
+    assert_eq!(map.row(&other, 3).at(3), 0.0);
+}
+
+// ---------------------------------------------------------------- CORE-R102
+
+fn noise_grid(size: Size, seed: u64) -> Grid<f32> {
+    let mut g = Grid::new(size, 0.0f32);
+    let mut s = seed;
+    for v in g.as_mut_slice() {
+        s = s
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        *v = (s >> 40) as f32 / (1u64 << 24) as f32 * 4.0 - 2.0;
+    }
+    g
+}
+
+#[test]
+fn core_r102_cubic_is_exact_at_source_centres_for_equal_sizes() {
+    let src = noise_grid(Size::new(13, 7), 3);
+    let mut map = SampleMap::default();
+    map.rebuild(src.size(), src.size());
+    for ((x, y), &v) in src.iter() {
+        assert_eq!(
+            map.sample_cubic(&src, x, y).to_bits(),
+            v.to_bits(),
+            "({x}, {y})"
+        );
+        assert_eq!(map.row_cubic(&src, y).at(x).to_bits(), v.to_bits());
+    }
+}
+
+#[test]
+fn core_r102_cubic_reproduces_a_linear_ramp_away_from_the_edges() {
+    let size = Size::new(16, 12);
+    let mut src = Grid::new(size, 0.0f32);
+    for y in 0..12 {
+        for x in 0..16 {
+            src.set(x, y, 0.75 * x as f32 - 0.5 * y as f32 + 2.0);
+        }
+    }
+    let dst = Size::new(80, 60); // 5× magnification
+    let mut map = SampleMap::default();
+    map.rebuild(size, dst);
+    for y in 0..60 {
+        for x in 0..80 {
+            let sx = grid::centre_of(f64::from(x), 80, 16);
+            let sy = grid::centre_of(f64::from(y), 60, 12);
+            // Taps two cells in from every edge are unclamped.
+            if !(1.0..=13.0).contains(&sx) || !(1.0..=9.0).contains(&sy) {
+                continue;
+            }
+            let want = (0.75 * sx - 0.5 * sy + 2.0) as f32;
+            let got = map.sample_cubic(&src, x, y);
+            assert!((got - want).abs() < 1e-4, "({x}, {y}): {got} vs {want}");
+        }
+    }
+}
+
+#[test]
+fn core_r102_cubic_of_an_empty_map_or_wrong_source_is_zero() {
+    let src = ramp_grid(Size::new(4, 3));
+    assert_eq!(SampleMap::default().sample_cubic(&src, 0, 0), 0.0);
+    assert_eq!(SampleMap::default().row_cubic(&src, 0).at(0), 0.0);
+    let mut map = SampleMap::default();
+    map.rebuild(Size::new(4, 3), Size::new(9, 7));
+    let other = ramp_grid(Size::new(2, 2));
+    assert_eq!(map.sample_cubic(&other, 3, 3), 0.0);
+    assert_eq!(map.row_cubic(&other, 3).at(3), 0.0);
+    // Off-range coordinates clamp onto the region, as `sample` does.
+    assert_eq!(
+        map.sample_cubic(&src, -3, 100).to_bits(),
+        map.sample_cubic(&src, 0, 6).to_bits()
+    );
+}
+
+#[test]
+fn core_r102_magnification_is_the_larger_axis_ratio() {
+    let mut map = SampleMap::default();
+    assert_eq!(map.magnification(), 0.0);
+    map.rebuild(Size::new(50, 40), Size::new(200, 100));
+    assert_eq!(map.magnification(), 4.0);
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn core_r102_cubic_never_leaves_the_central_four_values(
+        sw in 1u16..30, sh in 1u16..30, dw in 1u16..90, dh in 1u16..90, seed in any::<u64>(),
+    ) {
+        let (ss, ds) = (Size::new(sw, sh), Size::new(dw, dh));
+        let src = noise_grid(ss, seed);
+        let mut map = SampleMap::default();
+        map.rebuild(ss, ds);
+        let at = |x: usize, y: usize| src.as_slice()[y * usize::from(sw) + x];
+        let taps = |d: i32, dn: u16, sn: u16| {
+            let s = grid::centre_of(f64::from(d), usize::from(dn), usize::from(sn))
+                .clamp(0.0, f64::from(sn - 1));
+            let i0 = s as usize;
+            (i0, (i0 + 1).min(usize::from(sn) - 1))
+        };
+        for y in 0..i32::from(dh) {
+            let row = map.row_cubic(&src, y);
+            for x in 0..i32::from(dw) {
+                let v = map.sample_cubic(&src, x, y);
+                prop_assert_eq!(v.to_bits(), row.at(x).to_bits());
+                let ((x0, x1), (y0, y1)) = (taps(x, dw, sw), taps(y, dh, sh));
+                let c = [at(x0, y0), at(x1, y0), at(x0, y1), at(x1, y1)];
+                let lo = c.iter().copied().fold(f32::INFINITY, f32::min);
+                let hi = c.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                prop_assert!(v.is_finite() && lo <= v && v <= hi, "({}, {}): {} not in [{}, {}]", x, y, v, lo, hi);
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------- CORE-R53

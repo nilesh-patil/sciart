@@ -471,8 +471,13 @@ impl Heart {
         });
         let (map, u, v, edge) = (&self.map, &self.u, &self.v, &self.edge);
         let (vw, vh) = (i32::from(vs.width()), i32::from(vs.height()));
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut ur, mut vr) = (i32::MIN, map.row(u, 0), map.row(v, 0));
         self.pixels.shade(|x, y| {
             let (lx, ly) = (x - vx, y - vy);
+            if y != ry {
+                (ry, ur, vr) = (y, map.row(u, ly), map.row(v, ly));
+            }
             if !(0..vw).contains(&lx) || !(0..vh).contains(&ly) {
                 return Ink::BLANK;
             }
@@ -490,7 +495,7 @@ impl Heart {
                     ink::level((120.0 + 135.0 * flash) * cover),
                 );
             }
-            let (uu, vv) = (map.sample(u, lx, ly), map.sample(v, lx, ly));
+            let (uu, vv) = (ur.at(lx), vr.at(lx));
             let ink = tissue_ink(uu, vv);
             if ink == REST_INK {
                 let rest = f64::from(REST_INK.level) * cover;

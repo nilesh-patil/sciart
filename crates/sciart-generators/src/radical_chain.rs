@@ -566,29 +566,28 @@ impl RadicalChain {
         let (map, glow, tone, mask, ember) =
             (&self.map, &self.glow, &self.tone, &self.mask, &self.ember);
         let pw = i32::from(self.size.width());
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (temp, water) = (&chain.temp, &chain.water);
+        let (mut ry, mut tr, mut er, mut wr) = (
+            i32::MIN,
+            map.row(temp, 0),
+            map.row(ember, 0),
+            map.row(water, 0),
+        );
         self.pixels.shade(|x, y| {
             match mask.get((y * pw + x) as usize) {
                 Some(&INSIDE) => {}
                 _ => return Ink::BLANK,
             }
             let (lx, ly) = (x - f.x0, y - f.y0);
-            let heat = if hot {
-                map.sample(&chain.temp, lx, ly) - 1.0
-            } else {
-                0.0
-            };
-            let after = if glowing {
-                EMBER_W * map.sample(ember, lx, ly)
-            } else {
-                0.0
-            };
+            if y != ry {
+                (ry, tr, er, wr) = (y, map.row(temp, ly), map.row(ember, ly), map.row(water, ly));
+            }
+            let heat = if hot { tr.at(lx) - 1.0 } else { 0.0 };
+            let after = if glowing { EMBER_W * er.at(lx) } else { 0.0 };
             let light = glow.get(x, y).unwrap_or(0.0) + 2.0 * heat.max(0.0) + after;
             let lv = tone.level(light);
-            let wv = if wet {
-                map.sample(&chain.water, lx, ly) / water_top
-            } else {
-                0.0
-            };
+            let wv = if wet { wr.at(lx) / water_top } else { 0.0 };
             let water = if wv > 0.004 {
                 ink::ramp(WATER, WATER_MAX * f64::from(wv.sqrt()))
             } else {

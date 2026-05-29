@@ -397,8 +397,7 @@ impl Motility {
             let (hx, hy) = (half * s.ux, half * s.uy);
             self.dots.line(x - hx, y - hy, x + hx, y + hy, ink);
         }
-        let pw = usize::from(self.glow.pixel_size().width());
-        blur121(self.glow.values_mut(), pw);
+        self.glow.blur121();
         self.glow.to_pixels(&mut self.pixels, &self.tone, |l| {
             // The faint fringe stays black (the blur already softened the rim).
             let level = (u32::from(l) * GLOW_MAX / 255) as u8;
@@ -408,33 +407,6 @@ impl Motility {
                 Ink::new(GLOW_ROLE, level)
             }
         });
-    }
-}
-
-/// One in-place `[1 2 1] / 4` pass along rows and then columns of a `w`-wide buffer
-/// (edges clamped), so a crowd's glow ends in a soft rim instead of pixel steps.
-fn blur121(buf: &mut [f32], w: usize) {
-    if w == 0 {
-        return;
-    }
-    let h = buf.len() / w;
-    for row in buf.chunks_exact_mut(w) {
-        let mut prev = row[0];
-        for x in 0..w {
-            let cur = row[x];
-            let next = row[(x + 1).min(w - 1)];
-            row[x] = 0.25 * (prev + 2.0 * cur + next);
-            prev = cur;
-        }
-    }
-    for x in 0..w {
-        let mut prev = buf[x];
-        for y in 0..h {
-            let cur = buf[y * w + x];
-            let next = buf[(y + 1).min(h - 1) * w + x];
-            buf[y * w + x] = 0.25 * (prev + 2.0 * cur + next);
-            prev = cur;
-        }
     }
 }
 

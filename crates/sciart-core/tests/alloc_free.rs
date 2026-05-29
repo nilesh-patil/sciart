@@ -372,7 +372,7 @@ fn core_r81_tone_and_to_pixels_do_not_allocate() {
 }
 
 #[test]
-fn core_r85_r92_glow_does_not_allocate_after_resize() {
+fn core_r85_r92_r103_glow_does_not_allocate_after_resize() {
     let size = Size::new(200, 50);
     let mut glow = Glow::new(size);
     let mut pixels = Pixels::new(size);
@@ -385,9 +385,11 @@ fn core_r85_r92_glow_does_not_allocate_after_resize() {
             glow.splat_bilinear(f64::from(i) * 0.37, f64::from(i % 90) * 0.9, 1.0);
         }
         black_box(glow.values_mut()[0]);
+        glow.blur121();
         glow.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
         glow.resize(Size::new(100, 20));
         glow.clear();
+        glow.blur121();
     });
     assert_free("Glow", stats);
 }
@@ -407,7 +409,7 @@ fn core_r84_blit_over_does_not_allocate() {
 }
 
 #[test]
-fn core_r52_sample_map_does_not_allocate_after_rebuild() {
+fn core_r52_r102_r104_sample_map_does_not_allocate_after_rebuild() {
     let src = Grid::new(Size::new(120, 60), 0.5f32);
     let mut map = SampleMap::default();
     map.rebuild(src.size(), Size::new(200, 100));
@@ -416,7 +418,8 @@ fn core_r52_sample_map_does_not_allocate_after_rebuild() {
         for y in 0..100 {
             for x in 0..200 {
                 sum += map.sample(&src, x, y);
-                sum += map.nearest(x, y).0 as f32;
+                sum += map.nearest(x, y).0 as f32 + map.row(&src, y).at(x);
+                sum += map.sample_cubic(&src, x, y) + map.row_cubic(&src, y).at(x);
             }
         }
         // Rebuilding within the existing tables' capacity reuses them.

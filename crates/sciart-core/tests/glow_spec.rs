@@ -242,3 +242,86 @@ fn core_r96_stroke_exposes_one_splat_per_pixel_of_length() {
     g.stroke((0.0, 0.0), (1e12, 0.0), &point, 1.0);
     assert!(g.values().iter().sum::<f32>() <= 2048.0);
 }
+
+/// Reference `[1 2 1]/4 ⊗ [1 2 1]/4` with clamped edges, out of place (CORE-R103).
+fn blur_reference(src: &[f32], w: usize, h: usize) -> Vec<f32> {
+    let at = |x: isize, y: isize| {
+        let x = x.clamp(0, w as isize - 1) as usize;
+        let y = y.clamp(0, h as isize - 1) as usize;
+        src[y * w + x]
+    };
+    let mut rows = vec![0.0; w * h];
+    for y in 0..h as isize {
+        for x in 0..w as isize {
+            rows[y as usize * w + x as usize] =
+                0.25 * (at(x - 1, y) + at(x + 1, y)) + 0.5 * at(x, y);
+        }
+    }
+    let at = |x: usize, y: isize| rows[y.clamp(0, h as isize - 1) as usize * w + x];
+    let mut out = vec![0.0; w * h];
+    for y in 0..h as isize {
+        for x in 0..w {
+            out[y as usize * w + x] = 0.25 * (at(x, y - 1) + at(x, y + 1)) + 0.5 * at(x, y);
+        }
+    }
+    out
+}
+
+#[test]
+fn core_r103_blur121_spreads_an_impulse_into_the_binomial_kernel() {
+    let mut g = Glow::new(Size::new(5, 3)); // 5×6 pixels
+    g.values_mut()[2 * 5 + 2] = 16.0;
+    g.blur121();
+    let want = [[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]];
+    for y in 0..6i32 {
+        for x in 0..5i32 {
+            let (dx, dy) = (x - 2, y - 2);
+            let v = if dx.abs() <= 1 && dy.abs() <= 1 {
+                want[(dy + 1) as usize][(dx + 1) as usize]
+            } else {
+                0.0
+            };
+            assert_eq!(g.get(x, y), Some(v), "pixel ({x}, {y})");
+        }
+    }
+    // Interior mass is conserved; a constant field is a fixed point (clamped edges).
+    assert_eq!(g.values().iter().sum::<f32>(), 16.0);
+    let mut flat = Glow::new(Size::new(4, 2));
+    flat.values_mut().fill(3.0);
+    flat.blur121();
+    assert!(flat.values().iter().all(|&v| v == 3.0));
+}
+
+#[test]
+fn core_r103_blur121_degenerate_sizes_do_not_panic() {
+    for (w, h) in [(1, 1), (1, 5), (7, 1)] {
+        let mut g = Glow::new(Size::new(w, h));
+        g.values_mut().fill(2.0);
+        g.blur121();
+        assert!(g.values().iter().all(|&v| v == 2.0));
+    }
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(64))]
+    #[test]
+    fn core_r103_blur121_matches_the_separable_reference(
+        w in 1u16..24, h in 1u16..10, seed in any::<u64>(), shrink in 1u16..24,
+    ) {
+        let mut g = Glow::new(Size::new(w, h));
+        // Resize down after a larger size: the scratch row must follow the width.
+        g.resize(Size::new(w.min(shrink), h));
+        let px = g.pixel_size();
+        let (pw, ph) = (usize::from(px.width()), usize::from(px.height()));
+        let mut s = seed;
+        for v in g.values_mut() {
+            s = s.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            *v = (s >> 40) as f32 / (1u64 << 24) as f32 * 8.0;
+        }
+        let want = blur_reference(g.values(), pw, ph);
+        g.blur121();
+        for (i, (&a, &b)) in g.values().iter().zip(&want).enumerate() {
+            prop_assert!((a - b).abs() <= 1e-5 * b.abs().max(1.0), "pixel {i}: {a} vs {b}");
+        }
+    }
+}
