@@ -1947,6 +1947,8 @@ dependencies = [
  "crossterm",
  "ratatui",
  "sciart-core",
+ "unicode-width",
+ "vt100",
 ]
 
 [[package]]

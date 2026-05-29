@@ -15,12 +15,12 @@
 //! - `diff+enc`: diff + escape encoding + the buffer swap/reset, µs;
 //! - `B/frame`, `p95`: bytes written per frame, mean and 95th percentile;
 //! - `cells`: changed cells per frame;
-//! - `blk@5`, `blk@20`, `blk2@20` (2×2 squares, not ratcheted), `dark@5`, `dark@20`, `luma@20`: the GEN-R17/R18 art metrics of the
+//! - `blk@5`, `blk@20`, `blk2@20` (2×2 squares, not ratcheted), `dark@5`, `dark@20`, `luma@20`, `col@5`, `col@20` (colourfulness), `con@5`, `con@20` (RMS contrast): the GEN-R17/R18/R21 art metrics of the
 //!   `astro` frame at t = 5 s and 20 s (`sciart_render::metrics`), when `--secs` reaches
 //!   them.
 //!
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
-//! descending), `dark` (dark@20, ascending) or `name` (default: registry order).
+//! descending), `dark` (dark@20, ascending), `col` (col@20, ascending) or `name` (default: registry order).
 #![allow(clippy::disallowed_methods)] // wall-clock timing is the point of this tool
 
 use std::process::ExitCode;
@@ -35,7 +35,7 @@ use sciart_generators::Entry;
 use sciart_render::metrics::{ArtMetrics, art_metrics};
 use sciart_render::{Theme, paint};
 
-const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] [--sort bytes|cpu|blk|dark|name]";
+const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] [--sort bytes|cpu|blk|dark|col|name]";
 /// The app's default 30 FPS over the fixed 60 Hz update (ADR-0003).
 const STEPS_PER_FRAME: u64 = 2;
 /// Art metrics are sampled at these simulated times (GEN-R17, GEN-R18).
@@ -90,7 +90,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--sort" => {
                 let v = value()?;
-                if !["bytes", "cpu", "blk", "dark", "name"].contains(&v.as_str()) {
+                if !["bytes", "cpu", "blk", "dark", "col", "name"].contains(&v.as_str()) {
                     return Err(format!("bad --sort {v}\n{USAGE}"));
                 }
                 args.sort = v;
@@ -202,6 +202,7 @@ fn main() -> ExitCode {
     let mut rows: Vec<Row> = args.scenes.iter().map(|e| probe(e, &args)).collect();
     let blk20 = |r: &Row| r.metrics[1].map_or(0.0, |m| m.blockiness);
     let dark20 = |r: &Row| r.metrics[1].map_or(1.0, |m| m.darkness);
+    let col20 = |r: &Row| r.metrics[1].map_or(0.0, |m| m.colourfulness);
     match args.sort.as_str() {
         "bytes" => rows.sort_by(|a, b| b.bytes_mean.total_cmp(&a.bytes_mean)),
         "cpu" => rows.sort_by(|a, b| {
@@ -210,6 +211,7 @@ fn main() -> ExitCode {
         }),
         "blk" => rows.sort_by(|a, b| blk20(b).total_cmp(&blk20(a))),
         "dark" => rows.sort_by(|a, b| dark20(a).total_cmp(&dark20(b))),
+        "col" => rows.sort_by(|a, b| col20(a).total_cmp(&col20(b))),
         _ => {}
     }
     println!(
@@ -223,7 +225,7 @@ fn main() -> ExitCode {
         STEPS_PER_FRAME
     );
     println!(
-        "{:<28} {:>8} {:>7} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7}",
+        "{:<28} {:>8} {:>7} {:>8} {:>8} {:>8} {:>6} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>6} {:>6}",
         "scene",
         "upd+rnd",
         "paint",
@@ -236,14 +238,21 @@ fn main() -> ExitCode {
         "blk2@20",
         "dark@5",
         "dark@20",
-        "luma@20"
+        "luma@20",
+        "col@5",
+        "col@20",
+        "con@5",
+        "con@20"
     );
     let metric = |m: Option<ArtMetrics>, f: fn(ArtMetrics) -> f64| {
         m.map_or_else(|| "-".to_owned(), |m| format!("{:.3}", f(m)))
     };
+    let metric1 = |m: Option<ArtMetrics>, f: fn(ArtMetrics) -> f64| {
+        m.map_or_else(|| "-".to_owned(), |m| format!("{:.1}", f(m)))
+    };
     for r in &rows {
         println!(
-            "{:<28} {:>8.1} {:>7.1} {:>8.1} {:>8.0} {:>8} {:>6.0} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7}",
+            "{:<28} {:>8.1} {:>7.1} {:>8.1} {:>8.0} {:>8} {:>6.0} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>6} {:>6}",
             r.name,
             r.update_us,
             r.paint_us,
@@ -257,6 +266,10 @@ fn main() -> ExitCode {
             metric(r.metrics[0], |m| m.darkness),
             metric(r.metrics[1], |m| m.darkness),
             metric(r.metrics[1], |m| m.mean_luma),
+            metric1(r.metrics[0], |m| m.colourfulness),
+            metric1(r.metrics[1], |m| m.colourfulness),
+            metric(r.metrics[0], |m| m.contrast),
+            metric(r.metrics[1], |m| m.contrast),
         );
     }
     let n = rows.len().max(1) as f64;

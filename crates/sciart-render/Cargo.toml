@@ -11,6 +11,10 @@ authors.workspace = true
 sciart-core.workspace = true
 crossterm.workspace = true
 ratatui.workspace = true
+unicode-width.workspace = true
+
+[dev-dependencies]
+vt100.workspace = true
 
 [lints]
 workspace = true
