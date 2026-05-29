@@ -858,6 +858,8 @@ pub struct MarsRover {
     /// Daylight in the sky, in [0, 1], and on the rover and the dust, in [0.35, 1].
     day: f64,
     light: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for MarsRover {
@@ -877,6 +879,7 @@ impl Default for MarsRover {
             tops: Vec::new(),
             day: 1.0,
             light: 1.0,
+            dirty: false,
         }
     }
 }
@@ -998,7 +1001,7 @@ impl Generator for MarsRover {
                 ctx.rng.random_range(60..255u8),
             )
         }));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1016,7 +1019,13 @@ impl Generator for MarsRover {
         for _ in 0..n {
             self.substep(&w, h, ctx);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1734,10 +1743,12 @@ mod tests {
         let mut ctx = Ctx::new(11, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let w = g.world.unwrap();
         let l = g.layout;
         for _ in 0..(CYCLE / 0.25) as usize {
             g.update(0.25, &mut ctx);
+            g.prepare();
             let rx = g.rover_x(&w);
             let pose = solve_pose(|x| w.near.eval(x), rx);
             let cam = camera(&l, rx, g.t);
@@ -1841,8 +1852,10 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.t < t {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
@@ -2051,10 +2064,12 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         let mut veiled = 0;
         while g.t < 40.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             canvas.clear();
             g.render(&mut canvas);
             for y in 0..50 {
@@ -2124,9 +2139,11 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         while g.t < SOL {
             g.update(1.0 / 6.0, &mut ctx);
+            g.prepare();
             if g.t < 60.0 {
                 continue;
             }
@@ -2193,9 +2210,11 @@ mod tests {
         let mut ctx = Ctx::new(3, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let w = g.world.unwrap();
         for _ in 0..20 {
             g.update(0.5, &mut ctx);
+            g.prepare();
             let cam = camera(&g.layout, g.rover_x(&w), g.t);
             for c in 0..120 {
                 let (tops, _) = g.layer_tops(&w, cam, c);
@@ -2216,8 +2235,10 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(10.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
@@ -2248,9 +2269,11 @@ mod tests {
         let mut ctx = Ctx::new(9, size);
         let mut g = MarsRover::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let run_to = |g: &mut MarsRover, ctx: &mut Ctx, t: f64| {
             while g.t < t {
                 g.update(SIM_DT, ctx);
+                g.prepare();
             }
         };
         run_to(&mut g, &mut ctx, 8.0);
@@ -2284,12 +2307,15 @@ mod tests {
         let mut g = MarsRover::default();
         let mut ctx = Ctx::new(3, Size::new(80, 24));
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let before = g.world.expect("seeded in first resize");
         for (w, h) in [(200, 50), (1, 1), (37, 11)] {
             for _ in 0..30 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             g.resize(Size::new(w, h), &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.world, Some(before));
     }

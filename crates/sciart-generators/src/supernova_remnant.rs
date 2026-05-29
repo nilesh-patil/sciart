@@ -278,6 +278,8 @@ pub struct SupernovaRemnant {
     rows: Vec<f32>,
     pixels: Pixels,
     stars: Vec<(i32, i32, u8)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SupernovaRemnant {
@@ -621,7 +623,7 @@ impl Generator for SupernovaRemnant {
             let l = 20 + (hash01(cell_key(k, 11)).powi(4) * 150.0) as u8;
             self.stars.push((x, y, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -631,7 +633,13 @@ impl Generator for SupernovaRemnant {
             self.explode(ctx);
         }
         self.light_knots();
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -648,6 +656,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = SupernovaRemnant::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -688,6 +697,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..600 {
             g.update(SIM_DT * 3.0, &mut ctx);
+            g.prepare();
             let rr = reverse_frac(g.tau.min(EXPAND));
             assert!(g.finger.iter().all(|&p| {
                 let rc = contact_frac(f64::from(p));
@@ -705,6 +715,7 @@ mod tests {
         let mut last: Vec<f64> = vec![0.0; g.knots.len()];
         for _ in 0..(EXPAND / SIM_DT) as usize - 2 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let tau = g.tau.min(EXPAND);
             let rr = reverse_frac(tau);
             for (k, prev) in g.knots.iter().zip(&mut last) {
@@ -726,6 +737,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(200, 50));
         for _ in 0..300 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let rf = g.rf_px();
         let px = g.pixels.pixel_size();
@@ -755,8 +767,10 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut g = SupernovaRemnant::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..600 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let radii = |g: &SupernovaRemnant| -> (f64, f64) {
                 let s = (0..ANGLES).map(|j| SupernovaRemnant::shape(&g.wobble, j));
@@ -774,6 +788,7 @@ mod tests {
             // Slowly: one frame later the shape moved by far less than a pixel's share.
             let before = g.wobble.clone();
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let moved = before
                 .iter()
                 .zip(&g.wobble)
@@ -790,6 +805,7 @@ mod tests {
         let mut prev_tau = g.tau;
         for _ in 0..(2.5 * LOOP / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.knots.len() <= KNOTS);
             if g.tau < prev_tau {
                 // Just restarted: the centre is a flash, every knot dark again.

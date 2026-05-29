@@ -240,6 +240,8 @@ pub struct CosmicWeb {
     map: SampleMap,
     tone: Tone,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl CosmicWeb {
@@ -442,7 +444,7 @@ impl Generator for CosmicWeb {
         self.scratch.resize(lattice, 0.0);
         self.sharp.resize(lattice, 0.0);
         self.next_done = 0;
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -466,7 +468,13 @@ impl Generator for CosmicWeb {
             let chunk = n.div_ceil((LOOP * 40.0) as usize).max(1);
             self.fill_next(chunk);
         }
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -483,6 +491,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = CosmicWeb::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -610,9 +619,11 @@ mod tests {
         g.next_done = 0;
         while g.t + SIM_DT < LOOP {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (w, h) = g.dims();
         g.update(SIM_DT * 2.0, &mut ctx);
+        g.prepare();
         assert_eq!(g.cycle, 1);
         for &(i, j) in &[(1usize, 2usize), (w - 2, h - 1)] {
             let (sx, sy, _) = g.disp[j * w + i];

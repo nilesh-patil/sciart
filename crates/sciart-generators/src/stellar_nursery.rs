@@ -414,6 +414,8 @@ pub struct StellarNursery {
     /// Cells of the shining stars' `✦` glyphs.
     shining: [(i32, i32); MAX_STARS],
     n_shining: usize,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// Protostars at once (the scene keeps 3–5).
@@ -453,6 +455,7 @@ impl Default for StellarNursery {
             dots: Dots::default(),
             shining: [(0, 0); MAX_STARS],
             n_shining: 0,
+            dirty: false,
         }
     }
 }
@@ -1309,8 +1312,7 @@ impl Generator for StellarNursery {
         // Each hub keeps ≈ cap/n parcels in flight, each arriving after ≈ T_ARRIVE, so it
         // accretes ≈ (cap/n)·m/T_ARRIVE per second; m gives an ACC_TIME build-up at any size.
         self.gas_mass = M_IGN * T_ARRIVE * n as f64 / (ACC_TIME * cap as f64);
-        self.shade();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1323,8 +1325,14 @@ impl Generator for StellarNursery {
             self.substep(h, &mut ctx.rng);
         }
         self.refresh_tables();
-        self.shade();
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1361,6 +1369,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = StellarNursery::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -1408,6 +1417,7 @@ mod tests {
                     })
                     .collect();
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 for p in &g.gas {
                     if let Some(&(star, generation, d0)) = before.get(&p.id) {
                         assert_eq!((star, generation), (p.star, p.generation), "target changed");
@@ -1461,6 +1471,7 @@ mod tests {
             for _ in 0..(60 * 60) {
                 let before = g.stars.clone();
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 for (a, b) in before.iter().zip(&g.stars) {
                     if a.generation != b.generation {
                         assert_eq!(b.phase, Phase::Accreting, "replacement starts embedded");
@@ -1502,12 +1513,14 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             let gas_cap = ((GAS_PER_AREA * size.area() as f64) as usize).clamp(8, GAS_MAX);
             assert_eq!(g.gas.capacity(), gas_cap);
             assert!(g.jets.capacity() <= JET_MAX);
             for i in 0..600 {
                 let dt = if (i + k) % 7 == 0 { 0.25 } else { SIM_DT };
                 g.update(dt, &mut ctx);
+                g.prepare();
                 assert!(g.gas.len() <= g.gas.capacity() && g.gas.capacity() <= GAS_MAX);
                 assert!(g.jets.len() <= g.jets.capacity());
             }
@@ -1523,6 +1536,7 @@ mod tests {
         let mut b = Vec::new();
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             b.push(g.stars[0].brightness());
         }
         assert!(b.windows(2).all(|w| w[1] >= w[0]), "ramp must be monotone");
@@ -1531,6 +1545,7 @@ mod tests {
         assert!(!g.jets.is_empty(), "an ignited star launches jets");
         for _ in 0..((SHINE + FADE) * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let s = g.stars[0];
         assert_eq!(s.generation, gen0 + 1, "replaced after shining and fading");
@@ -1818,6 +1833,7 @@ mod tests {
             let (mut g, mut ctx) = scene(seed, 120, 40);
             for step in 0..(8 * 60) {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if step % 120 != 0 {
                     continue;
                 }
@@ -1906,6 +1922,7 @@ mod tests {
             let (mut g, mut ctx) = scene(seed, 120, 40);
             for _ in 0..(20 * 60) {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let mut levels = Vec::new();
             for y in 0..80 {

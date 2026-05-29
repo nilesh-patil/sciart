@@ -767,6 +767,8 @@ pub struct MoonLanding {
     /// Terrain height and cast shadow per pixel column, sized in `resize`.
     heights: Vec<f64>,
     shadow: Vec<bool>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl MoonLanding {
@@ -800,6 +802,7 @@ impl MoonLanding {
             dots: Dots::default(),
             heights: Vec::new(),
             shadow: Vec::new(),
+            dirty: false,
         }
     }
 
@@ -898,7 +901,7 @@ impl Generator for MoonLanding {
             self.ready = true;
             self.restart(ctx);
         }
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -927,7 +930,13 @@ impl Generator for MoonLanding {
             }
         }
         self.flicker = ctx.rng.random();
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1504,9 +1513,11 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut g = MoonLanding::new();
             g.resize(size, &mut ctx);
+            g.prepare();
             let mut i = 0;
             while g.descent.touchdown.is_none() {
                 g.update(steps[i % steps.len()], &mut ctx);
+                g.prepare();
                 i += 1;
                 assert!(i < 10_000);
             }
@@ -1591,12 +1602,14 @@ mod tests {
         let mut ctx = Ctx::new(11, size);
         let mut g = MoonLanding::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let steps = [0.25, SIM_DT, 0.11, 0.004];
         let mut t = 0.0;
         let mut i = 0;
         while t < 80.0 {
             let dt = steps[i % steps.len()];
             g.update(dt, &mut ctx);
+            g.prepare();
             t += dt;
             i += 1;
             let lm = &g.descent.lm;
@@ -1610,10 +1623,12 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = MoonLanding::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut seen = vec![g.caption().unwrap()];
         // Two loops, stopping a second short of the third descent.
         for _ in 0..((2.0 * g.timeline.total() - 1.0) / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let caption = g.caption().unwrap();
             let want = match g.beat().index {
                 PH_FLAG | PH_EARTH => CAPTIONS[2],
@@ -1638,6 +1653,7 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = MoonLanding::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let total = g.timeline.total();
         assert!((total - 36.0).abs() < 1e-9);
         let first = g.descent.clone();
@@ -1646,6 +1662,7 @@ mod tests {
         let mut landed_in = None;
         while t < 2.0 * total + 1.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             t += SIM_DT;
             let b = g.beat();
             if *seen.last().unwrap() != b.index {
@@ -1722,6 +1739,7 @@ mod tests {
         let mut ctx = Ctx::new(9, size);
         let mut g = MoonLanding::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (x0, y0, r0) = g.earth();
         assert!(y0 + r0 < 0.45 * 40.0, "high in the sky");
         assert!(
@@ -1730,6 +1748,7 @@ mod tests {
         );
         for _ in 0..((g.timeline.total() - 1.0) / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.side == 1.0 || g.side == -1.0 {
                 let (x, y, r) = g.earth();
                 assert_eq!((y, r), (y0, r0), "the Earth never rises or sets here");
@@ -1761,6 +1780,7 @@ mod tests {
             let mut ctx = Ctx::new(1, size);
             let mut g = MoonLanding::new();
             g.resize(size, &mut ctx);
+            g.prepare();
             g.side = side;
             let globe = g.earth_globe();
             // The disc point under the Sun (screen offsets, y down), turned with the globe.
@@ -1856,6 +1876,7 @@ mod tests {
         let mut ctx = Ctx::new(4, size);
         let mut g = MoonLanding::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let plain = (88..100)
             .flat_map(|y| (0..200).map(move |x| (x, y)))
             .filter(|&(x, y)| g.px.get(x, y) == Some(Ink::BLANK))
@@ -1874,10 +1895,12 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut g = MoonLanding::new();
             g.resize(size, &mut ctx);
+            g.prepare();
             let ph = 2 * i32::from(size.height());
             for f in 0..(DESCENT + 6.0) as usize * 4 {
                 for _ in 0..15 {
                     g.update(SIM_DT, &mut ctx);
+                    g.prepare();
                 }
                 let view = g.view(sprite_for(g.width, g.height));
                 for (c, &h) in g.heights.iter().enumerate() {
@@ -1912,10 +1935,12 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut g = MoonLanding::new();
             g.resize(size, &mut ctx);
+            g.prepare();
             let mut canvas = Canvas::new(size, GlyphMode::Unicode);
             let mut checked = 0;
             while g.t < DESCENT + 3.0 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 let Some(td) = g.descent.touchdown else {
                     continue;
                 };

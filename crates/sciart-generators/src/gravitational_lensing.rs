@@ -222,6 +222,8 @@ pub struct GravitationalLensing {
     centre: (f64, f64),
     theta_e_px: f64,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl GravitationalLensing {
@@ -349,7 +351,7 @@ impl Generator for GravitationalLensing {
             self.beta.push((bx as f32, by as f32));
             *l = floor_cut(lens_light(tx.hypot(ty)), faintest) as f32;
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -360,7 +362,13 @@ impl Generator for GravitationalLensing {
             self.pass_t = geom::wrap(self.pass_t, PASS);
             self.new_pass(ctx);
         }
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -424,6 +432,7 @@ mod tests {
     fn scene(size: Size) -> GravitationalLensing {
         let mut g = GravitationalLensing::default();
         g.resize(size, &mut Ctx::new(9, size));
+        g.prepare();
         g
     }
 
@@ -433,6 +442,7 @@ mod tests {
         let mut ctx = Ctx::new(1, Size::new(1, 1));
         for _ in 0..90 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (hero, envelope) = g.hero();
         let (ox, oy) = (DRIFT * g.t * g.drift_dir.0, DRIFT * g.t * g.drift_dir.1);
@@ -486,6 +496,7 @@ mod tests {
         let mut run = 0.0;
         for _ in 0..(90.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let (hero, envelope) = g.hero();
             let axis = envelope * hero_profile((-hero.0, -hero.1), g.cos_inc, g.pa, 0.0);
             assert_eq!(g.caption().is_some(), axis >= RING_LIGHT);
@@ -595,6 +606,7 @@ mod tests {
             let size = Size::new(120, 40);
             let mut g = GravitationalLensing::default();
             g.resize(size, &mut Ctx::new(seed, size));
+            g.prepare();
             let brightest = g.field.as_slice().iter().fold(0.0f32, |m, &v| m.max(v));
             assert!(
                 f64::from(brightest) <= 0.75,

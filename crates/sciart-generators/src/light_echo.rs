@@ -225,6 +225,8 @@ pub struct LightEcho {
     pixels: Pixels,
     centre: (f64, f64),
     half_px: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl LightEcho {
@@ -404,7 +406,7 @@ impl Generator for LightEcho {
         self.map.rebuild(lattice, px);
         self.centre = (f64::from(px.width()) / 2.0, f64::from(px.height()) / 2.0);
         self.half_px = f64::from(px.height()) / 2.0;
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -412,7 +414,13 @@ impl Generator for LightEcho {
         while self.t >= ECHO {
             self.t -= LOOP;
         }
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -429,6 +437,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = LightEcho::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -470,6 +479,7 @@ mod tests {
         let samples: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.dust.unlit, dust);
         let again: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
@@ -595,6 +605,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(80, 24));
         while g.t > -PRE + 0.1 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         while g.t < 0.0 {
             for cell in &g.dust.samples {
@@ -603,6 +614,7 @@ mod tests {
                 }
             }
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(lerp_curve(&g.curve, -1e-9), (0.0, 0.0));
     }

@@ -343,6 +343,8 @@ pub struct CometTails {
     dust_tone: Tone,
     ion_tone: Tone,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl CometTails {
@@ -367,6 +369,7 @@ impl CometTails {
             dust_tone: Tone::asinh(0.12, 7.0),
             ion_tone: Tone::asinh(0.3, 8.0),
             pixels: Pixels::default(),
+            dirty: false,
         }
     }
 
@@ -702,14 +705,20 @@ impl Generator for CometTails {
                 self.step(SIM_DT, &mut ctx.rng);
             }
         }
-        self.compose();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt, &mut ctx.rng);
         }
-        self.compose();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.compose();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -775,9 +784,11 @@ mod tests {
         let mut g = CometTails::new();
         let mut ctx = Ctx::new(42, Size::new(100, 30));
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         let mut t = 0.0;
         while t < seconds {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             t += SIM_DT;
         }
         g
@@ -829,8 +840,10 @@ mod tests {
         let mut g = CometTails::new();
         let mut ctx = Ctx::new(7, Size::new(80, 24));
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         while g.t < g.next_disconnect - 0.1 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let cut = g.next_disconnect;
         let near = |g: &CometTails| {
@@ -845,12 +858,14 @@ mod tests {
         assert!(near(&g) > 10);
         while g.t < cut + 1.3 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.t > cut + 0.3 {
                 assert_eq!(near(&g), 0, "root refilled at {}", g.t - cut);
             }
         }
         while g.t < cut + PAUSE + 1.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(near(&g) > 10, "tail did not regrow");
     }
@@ -860,6 +875,7 @@ mod tests {
         let mut g = CometTails::new();
         let mut ctx = Ctx::new(5, Size::new(40, 12));
         g.resize(Size::new(40, 12), &mut ctx);
+        g.prepare();
         let mut rng = SplitMix64::new(1);
         for _ in 0..600 {
             g.step(0.25, &mut rng);
@@ -901,12 +917,14 @@ mod tests {
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut cuts = vec![];
         let mut last_cut = f64::NEG_INFINITY;
         let mut checked = 0;
         for k in 0..(70.0 / SIM_DT) as usize {
             let before = g.next_disconnect;
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.next_disconnect != before {
                 last_cut = g.t;
                 cuts.push(g.t);

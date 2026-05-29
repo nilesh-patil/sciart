@@ -714,6 +714,8 @@ pub struct ConstellationMap {
     /// into `:` as heavy as the figure.
     sky: Dots,
     ticks: [Tick; 2 * MAX_LABELS],
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl ConstellationMap {
@@ -1108,13 +1110,19 @@ impl Generator for ConstellationMap {
         self.sky.resize(size);
         self.stars.resize(size);
         self.glow.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
         self.build_ahead(dt);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1260,6 +1268,7 @@ mod tests {
     fn scene(size: Size) -> ConstellationMap {
         let mut g = ConstellationMap::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         g.bg.clear();
         g
     }
@@ -1599,6 +1608,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ConstellationMap::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         g.build_all();
         let shown = |k: usize| g.bg.iter().filter(|s| s.levels[k] > 0).count();
         assert!(
@@ -1842,7 +1852,9 @@ mod tests {
             let (mut lazy, mut eager) = (ConstellationMap::default(), ConstellationMap::default());
             let (mut c1, mut c2) = (Ctx::new(5, size), Ctx::new(5, size));
             lazy.resize(size, &mut c1);
+            lazy.prepare();
             eager.resize(size, &mut c2);
+            eager.prepare();
             eager.build_all();
             assert!(
                 lazy.built.iter().filter(|&&b| b > 0).count() == 1,
@@ -1854,12 +1866,16 @@ mod tests {
                     let other = Size::new(90, 30);
                     for (g, c) in [(&mut lazy, &mut c1), (&mut eager, &mut c2)] {
                         g.resize(other, c);
+                        g.prepare();
                         g.resize(size, c);
+                        g.prepare();
                     }
                     eager.build_all();
                 }
                 lazy.update(dt, &mut c1);
+                lazy.prepare();
                 eager.update(dt, &mut c2);
+                eager.prepare();
                 if i % 7 == 0 {
                     let (mut a, mut b) = (
                         Canvas::new(size, GlyphMode::Unicode),
@@ -1882,9 +1898,11 @@ mod tests {
         let mut g = ConstellationMap::default();
         let mut ctx = Ctx::new(1, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let units = g.chart_units();
         let before: usize = g.built.iter().sum();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let after: usize = g.built.iter().sum();
         assert_eq!(after - before, build_slice(units, SIM_DT));
         assert!(build_slice(units, SIM_DT) * 240 >= units, "a chart in 4 s");

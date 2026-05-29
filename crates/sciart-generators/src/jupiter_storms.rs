@@ -181,6 +181,8 @@ pub struct JupiterStorms {
     warmed: bool,
     /// Simulated seconds shown (drives Io's shadow).
     t: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl JupiterStorms {
@@ -202,6 +204,7 @@ impl JupiterStorms {
             rows: Vec::new(),
             warmed: false,
             t: 0.0,
+            dirty: false,
         }
     }
 
@@ -591,7 +594,7 @@ impl Generator for JupiterStorms {
         self.rows
             .resize(2 * usize::from(self.pixels.pixel_size().width()), f32::NAN);
         self.map.rebuild(self.lattice, self.pixels.pixel_size());
-        self.shade();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -599,7 +602,13 @@ impl Generator for JupiterStorms {
             self.t += dt;
             self.step(dt, &mut ctx.rng);
         }
-        self.shade();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -617,6 +626,7 @@ mod tests {
         let mut g = JupiterStorms::new();
         let mut ctx = Ctx::new(42, Size::new(100, 40));
         g.resize(Size::new(100, 40), &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -724,6 +734,7 @@ mod tests {
         let (mut g, mut ctx) = scene();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let px = g.pixels.pixel_size();
         let (mut sienna, mut blue, mut disc) = (0usize, 0usize, 0usize);
@@ -749,6 +760,7 @@ mod tests {
     fn jup_a8_red_spot_is_a_darker_oval_in_a_paler_collar() {
         let (mut g, mut ctx) = scene();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let px = g.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
         let grs = g.vortices[0];
@@ -772,6 +784,7 @@ mod tests {
         // brightness: the 1-pixel penumbra.
         let (mut g, mut ctx) = scene();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let px = g.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
         let r_sh = (0.045 * ph).max(1.5);
@@ -804,6 +817,7 @@ mod tests {
         let mut g = JupiterStorms::new();
         let mut ctx = Ctx::new(1, Size::new(500, 150));
         g.resize(Size::new(500, 150), &mut ctx);
+        g.prepare();
         assert!(g.lattice.area() <= CAP, "{:?}", g.lattice);
         assert_eq!(g.dye.size(), g.lattice);
     }

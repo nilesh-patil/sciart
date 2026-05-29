@@ -498,6 +498,8 @@ pub struct MoonPhases {
     pixels: Pixels,
     /// (u, v, twinkle phase, twinkle rate) with `u, v ∈ [0, 1)`.
     stars: Vec<(f64, f64, f64, f64)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// What a disc pixel shows.
@@ -680,12 +682,18 @@ impl Generator for MoonPhases {
                 .collect();
         }
         self.pixels.resize(size);
-        self.rasterise(phase_at(self.t), libration(self.t));
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
-        self.rasterise(phase_at(self.t), libration(self.t));
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise(phase_at(self.t), libration(self.t));
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -725,6 +733,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut m = MoonPhases::default();
         m.resize(size, &mut Ctx::new(3, size));
+        m.prepare();
         m
     }
 

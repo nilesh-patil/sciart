@@ -402,6 +402,8 @@ pub struct SolarEruption {
     /// Streaks along the CME front, indexed by the front normal's `x` component.
     front_tex: [f32; 64],
     size: Size,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SolarEruption {
@@ -431,6 +433,7 @@ impl SolarEruption {
                 value_noise(0xF207, k as f64 / 1.6, 0.5, 1.0) as f32
             }),
             size: Size::new(1, 1),
+            dirty: false,
         };
         for (k, line) in g.lines.iter_mut().enumerate() {
             // A few bright loops over many faint ones, as in any EUV image of an arcade.
@@ -994,14 +997,20 @@ impl Generator for SolarEruption {
                 });
             }
         }
-        self.compose();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt, &mut ctx.rng);
         }
-        self.compose();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.compose();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1244,9 +1253,11 @@ mod tests {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let mid = ACTS[..CME].iter().map(|a| a.1).sum::<f64>() + 3.0;
         while g.t < mid {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);

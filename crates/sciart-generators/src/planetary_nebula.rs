@@ -152,6 +152,8 @@ pub struct PlanetaryNebula {
     /// Per pixel: [`wind_texture`] quantised to bytes (warp, clumps).
     wind: Vec<(u8, u8)>,
     stars: Vec<(i32, i32, u8)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl PlanetaryNebula {
@@ -518,12 +520,18 @@ impl Generator for PlanetaryNebula {
             let l = 20 + (hash01(cell_key(k, 31)).powi(4) * 140.0) as u8;
             self.stars.push((x, y, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -549,6 +557,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = PlanetaryNebula::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -614,6 +623,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(200, 50));
         g.t = 30.0;
         g.update(0.0, &mut ctx);
+        g.prepare();
         let px = g.pixels.pixel_size();
         let (mut nii, mut near) = (0, 0);
         let drift = FLIER_DRIFT * (g.tau() - T_WIND).max(0.0);
@@ -684,6 +694,7 @@ mod tests {
         };
         for _ in 0..(55.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let tau = g.tau();
             // Skip the instants right at a boundary.
             if [T_WIND, T_IONISED, LOOP]

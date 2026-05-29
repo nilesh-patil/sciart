@@ -335,6 +335,8 @@ pub struct Eclipse {
     /// Uncovered fraction and Moon offset now.
     f: f64,
     d: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Eclipse {
@@ -612,7 +614,7 @@ impl Generator for Eclipse {
         self.d = moon_offset(&tl, self.t);
         self.f = uncovered(self.d, &self.limb);
         self.timeline = Some(tl);
-        self.paint();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -621,7 +623,13 @@ impl Generator for Eclipse {
             self.d = moon_offset(tl, self.t);
         }
         self.f = uncovered(self.d, &self.limb);
-        self.paint();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.paint();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -653,6 +661,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = Eclipse::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -706,6 +715,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(80, 30));
         for _ in 0..(46.0 * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.f >= CORONA_F {
                 let corona = g.picture.pixel_size().area();
                 let mut n = 0;
@@ -757,6 +767,7 @@ mod tests {
             assert_eq!(g.caption(), Some(want));
             assert!(META.captions.contains(&want), "{i}");
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
     }
 
@@ -764,6 +775,7 @@ mod tests {
     fn run_to(g: &mut Eclipse, ctx: &mut Ctx, t: f64) {
         while g.t < t {
             g.update(SIM_DT, ctx);
+            g.prepare();
         }
     }
 
@@ -823,6 +835,7 @@ mod tests {
         // spills onto it.
         while g.t < 12.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let m = g.to_px(g.moon());
             let rr = MOON_R * g.radius - 1.5;
             for y in (m.1 - rr) as i32..=(m.1 + rr) as i32 {
