@@ -449,11 +449,23 @@ impl SaturnRings {
         Some([p0[0], p0[1] + t * d[1], p0[2] + t * d[2]])
     }
 
+    /// Whether screen point `(sx, up)` is so far outside the globe that no ray within a
+    /// pixel of it can hit, nor can it be "near" the limb in `globe_cover` (GEN-R19: most
+    /// of the frame skips the ray casts). The globe's outline lies inside the unit circle
+    /// (equatorial radius 1, the polar axis shorter), and the refinement grid reaches
+    /// ≤ 0.53 px from the centre; `near` needs the normalised radius within 1.5 px of 1.
+    fn far_from_globe(&self, sx: f64, up: f64) -> bool {
+        sx.hypot(up) > 1.0 + 1.5 / self.view.scale
+    }
+
     /// Share of the pixel `(x, y)` the globe covers: four sub-pixel rays, refined to a
     /// 4×4 grid where they disagree or the limb is within a pixel, so the limb steps in
     /// sixteenths rather than quarters.
     fn globe_cover(&self, x: i32, y: i32) -> f64 {
         let (sx, up) = self.screen(x, y);
+        if self.far_from_globe(sx, up) {
+            return 0.0;
+        }
         let q = 0.25 / self.view.scale;
         let hits = [(-q, -q), (q, -q), (-q, q), (q, q)]
             .iter()
@@ -487,8 +499,10 @@ impl SaturnRings {
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let (sx, up) = self.screen(x, y);
-                let cover = self.globe_cover(x, y);
-                let Some(p) = Self::globe_point(sx, up).or_else(|| {
+                let far = self.far_from_globe(sx, up);
+                let cover = if far { 0.0 } else { self.globe_cover(x, y) };
+                let hit = if far { None } else { Self::globe_point(sx, up) };
+                let Some(p) = hit.or_else(|| {
                     // A limb pixel whose centre misses: shade it at the nearest hit.
                     (cover > 0.0).then(|| {
                         let q = 0.25 / self.view.scale;

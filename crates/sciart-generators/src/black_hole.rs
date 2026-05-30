@@ -728,14 +728,21 @@ impl BlackHole {
         // strongly lensing stretches its texel, and the images do not trade places as the
         // sky turns.
         self.sky.resize(lw * lh, [NO_STAR; SS * SS]);
-        escapes.sort_unstable_by(|a, b| {
-            (a.0.cmp(&b.0))
-                .then(a.1.total_cmp(&b.1))
-                .then(a.2.cmp(&b.2))
-        });
-        for run in escapes.chunk_by(|a, b| a.0 == b.0) {
-            let (key, _, slot) = run[0];
-            let slot = slot as usize;
+        // Ordered by (key, distance, slot), packed into one integer so the sort compares
+        // plain words (GEN-R19): the distance's bits are mapped so that unsigned order is
+        // `f32::total_cmp` order.
+        let mut packed: Vec<u128> = escapes
+            .iter()
+            .map(|&(key, d, slot)| {
+                let bits = d.to_bits();
+                let d = if bits >> 31 == 1 { !bits } else { bits | 1 << 31 };
+                (u128::from(key) << 64) | (u128::from(d) << 32) | u128::from(slot)
+            })
+            .collect();
+        drop(escapes);
+        packed.sort_unstable();
+        for run in packed.chunk_by(|a, b| a >> 64 == b >> 64) {
+            let (key, slot) = ((run[0] >> 64) as u32, run[0] as u32 as usize);
             self.sky[slot / (SS * SS)][slot % (SS * SS)] = key / 2;
         }
         // The hit count is only known after tracing: drop the doubling slack (TEST-R7).
