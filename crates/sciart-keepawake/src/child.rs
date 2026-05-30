@@ -35,8 +35,15 @@ impl ChildGuard {
 
 impl Backend for ChildGuard {
     fn status(&self) -> String {
+        let mut out = String::new();
+        // Writing to a `String` cannot fail.
+        let _ = self.write_status(&mut out);
+        out
+    }
+
+    fn write_status(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
         let state = if self.exited { "exited" } else { "on" };
-        format!("{}:{state}", self.label)
+        write!(out, "{}:{state}", self.label)
     }
 
     fn poll(&mut self, _elapsed: f64) {

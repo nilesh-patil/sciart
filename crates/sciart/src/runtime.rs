@@ -80,6 +80,8 @@ pub struct Runtime {
     stage: Option<Stage>,
     /// Copy of the last complete frame; survives generator panics (RT-R3).
     frame: Canvas,
+    /// See [`Runtime::epoch`].
+    epoch: u64,
     clock: FixedStep,
     rng: ChaCha8Rng,
     size: Size,
@@ -120,6 +122,7 @@ impl Runtime {
             current: None,
             stage: None,
             frame: Canvas::new(size, mode),
+            epoch: 0,
             clock: FixedStep::new(SIM_DT, MAX_STEPS),
             rng,
             size,
@@ -160,12 +163,13 @@ impl Runtime {
             return;
         };
         let steps = self.clock.advance(elapsed);
-        let frame = &mut self.frame;
+        // The stage keeps its last complete frame (CORE-R21), which `frame()` shows, so
+        // no per-tick copy is needed (RT-R14).
         let outcome = guarded(|| {
             for _ in 0..steps {
                 stage.step(SIM_DT);
             }
-            frame.clone_from(stage.render());
+            stage.render();
         });
         if let Err(msg) = outcome {
             self.fail_current(&msg);
@@ -186,8 +190,27 @@ impl Runtime {
         }
     }
 
+    /// The frame to show: the stage's last complete frame, or with no stage (RT-R4) the
+    /// last good frame kept when the stage was dropped.
     pub fn frame(&self) -> &Canvas {
-        &self.frame
+        self.stage.as_ref().map_or(&self.frame, Stage::frame)
+    }
+
+    /// Increments whenever the shown generator is rebuilt or dropped (switch, `Reset`,
+    /// quarantine): the painter's colour memory must not outlive it (RND-R14).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Keep the stage's last complete frame before the stage goes away, unless the stage
+    /// never got to the current size (a panicking `resize`): then the blank frame that
+    /// `resize` left stays, as before.
+    fn keep_frame(&mut self) {
+        if let Some(stage) = &self.stage
+            && stage.frame().size() == self.size
+        {
+            self.frame.clone_from(stage.frame());
+        }
     }
 
     pub fn status(&self) -> Status {
@@ -288,8 +311,9 @@ impl Runtime {
             return;
         };
         stage.set_title_visible(visible);
-        let frame = &mut self.frame;
-        if let Err(msg) = guarded(|| frame.clone_from(stage.render())) {
+        if let Err(msg) = guarded(|| {
+            stage.render();
+        }) {
             self.fail_current(&msg);
         }
     }
@@ -323,11 +347,13 @@ impl Runtime {
         self.at = self.order.iter().position(|&j| j == i);
         self.clock.reset();
         self.since_switch = 0.0;
-        let frame = &mut self.frame;
+        self.epoch += 1;
+        // If the new stage fails before its first frame, the old one's stays up (RT-R3).
+        self.keep_frame();
         let built = guarded(|| {
             let mut stage = Stage::new((entry.build)(), seed, size, mode);
             stage.set_title_visible(title_visible);
-            frame.clone_from(stage.render());
+            stage.render();
             stage
         });
         match built {
@@ -356,7 +382,9 @@ impl Runtime {
             self.notices
                 .push(format!("{name} panicked: {msg} (quarantined)"));
         }
+        self.keep_frame();
         self.stage = None;
+        self.epoch += 1;
         self.switch_to_next();
     }
 

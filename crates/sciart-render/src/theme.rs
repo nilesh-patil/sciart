@@ -289,6 +289,172 @@ fn hsv(h: f64, s: f64, v: f64) -> Rgb {
     Rgb(c(r), c(g), c(b))
 }
 
+// ----- Paint tables (RND-R15) -----
+//
+// `Theme::color` is the definition; these tables are built from it once, so a painted
+// colour is byte-identical to it by construction and costs one index per cell.
+
+/// Roles: the 16 fixed ones, then one per `Ramp`.
+pub(crate) const ROLE_COUNT: usize = 16 + sciart_core::Ramp::ALL.len();
+
+/// Dense index of a role into [`Lut`]; `None` for a role without a table.
+pub(crate) fn role_index(role: Role) -> Option<usize> {
+    Some(match role {
+        Role::Background => 0,
+        Role::Dim => 1,
+        Role::Star => 2,
+        Role::Sun => 3,
+        Role::Planet => 4,
+        Role::Particle => 5,
+        Role::Wave => 6,
+        Role::Hot => 7,
+        Role::Cold => 8,
+        Role::Structure => 9,
+        Role::Accent => 10,
+        Role::Text => 11,
+        Role::Seq => 12,
+        Role::Div => 13,
+        Role::Phase => 14,
+        Role::Blackbody => 15,
+        Role::Ramp(r) => 16 + r as usize,
+        // `Role` is non-exhaustive: a role added later is coloured by `Theme::color`.
+        _ => return None,
+    })
+}
+
+/// The inverse of [`role_index`].
+fn role_at(i: usize) -> Role {
+    const FIXED: [Role; 16] = [
+        Role::Background,
+        Role::Dim,
+        Role::Star,
+        Role::Sun,
+        Role::Planet,
+        Role::Particle,
+        Role::Wave,
+        Role::Hot,
+        Role::Cold,
+        Role::Structure,
+        Role::Accent,
+        Role::Text,
+        Role::Seq,
+        Role::Div,
+        Role::Phase,
+        Role::Blackbody,
+    ];
+    FIXED
+        .get(i)
+        .copied()
+        .unwrap_or_else(|| Role::Ramp(sciart_core::Ramp::ALL[i - FIXED.len()]))
+}
+
+/// Whether `theme` colours `role` per cell position (rainbow's hashed hues), so it has no
+/// 256-entry table.
+pub(crate) fn per_cell(theme: Theme, role: Role) -> bool {
+    theme == Theme::Rainbow
+        && !matches!(
+            role,
+            Role::Text | Role::Seq | Role::Div | Role::Phase | Role::Blackbody | Role::Ramp(_)
+        )
+}
+
+/// Every (role, level) colour of one theme; per-cell roles hold a placeholder.
+pub(crate) struct Lut {
+    pub(crate) colors: [[Rgb; 256]; ROLE_COUNT],
+}
+
+/// The table of `theme`, built on first use.
+pub(crate) fn lut(theme: Theme) -> &'static Lut {
+    fn build(theme: Theme) -> Lut {
+        let mut colors = [[Rgb(0, 0, 0); 256]; ROLE_COUNT];
+        for (i, table) in colors.iter_mut().enumerate() {
+            let role = role_at(i);
+            if per_cell(theme, role) {
+                continue;
+            }
+            for (level, c) in table.iter_mut().enumerate() {
+                // `level < 256`: the cast is exact.
+                *c = theme.color(Ink::new(role, level as u8), 0, 0);
+            }
+        }
+        Lut { colors }
+    }
+    static ASTRO: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Astro));
+    static RAINBOW: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Rainbow));
+    static MONO: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Mono));
+    match theme {
+        Theme::Astro => &ASTRO,
+        Theme::Rainbow => &RAINBOW,
+        Theme::Mono => &MONO,
+    }
+}
+
+/// The position-dependent part of rainbow's per-cell hue (`hsv(cell_hue(x, y), 1, v)`),
+/// precomputed per cell on resize: the sextant and the two factors `hsv` multiplies `v`
+/// by, as the same floating-point values, so the result is byte-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct HuePos {
+    sextant: u8,
+    q: f64,
+    t: f64,
+}
+
+pub(crate) fn hue_pos(x: u16, y: u16) -> HuePos {
+    let h = cell_hue(x, y);
+    let i = (h * 6.0).floor();
+    let f = h * 6.0 - i;
+    // `hsv` with s = 1: `f * s` and `(1 - f) * s` are exact, `p = v * 0 = 0`.
+    HuePos {
+        sextant: i as u8 % 6,
+        q: 1.0 - f,
+        t: 1.0 - (1.0 - f),
+    }
+}
+
+/// Rainbow's object-role colour at a precomputed position (RND-R2, RND-R15).
+pub(crate) fn rainbow_at(pos: HuePos, level: u8) -> Rgb {
+    let v = 0.35 + 0.65 * (f64::from(level) / 255.0);
+    let (q, t) = (v * pos.q, v * pos.t);
+    let c = |x: f64| (x * 255.0).round() as u8;
+    let (v, q, t, p) = (c(v), c(q), c(t), 0);
+    match pos.sextant {
+        0 => Rgb(v, t, p),
+        1 => Rgb(q, v, p),
+        2 => Rgb(p, v, t),
+        3 => Rgb(p, q, v),
+        4 => Rgb(t, p, v),
+        _ => Rgb(v, p, q),
+    }
+}
+
+#[cfg(test)]
+mod lut_tests {
+    use super::*;
+
+    #[test]
+    fn rnd_r15_tables_are_byte_identical_to_theme_color() {
+        for theme in Theme::ALL {
+            let table = lut(theme);
+            for i in 0..ROLE_COUNT {
+                let role = role_at(i);
+                assert_eq!(role_index(role), Some(i));
+                for level in 0..=255u8 {
+                    let ink = Ink::new(role, level);
+                    for (x, y) in [(0, 0), (3, 7), (199, 49), (499, 149)] {
+                        let want = theme.color(ink, x, y);
+                        let got = if per_cell(theme, role) {
+                            rainbow_at(hue_pos(x, y), level)
+                        } else {
+                            table.colors[i][usize::from(level)]
+                        };
+                        assert_eq!(got, want, "{theme:?} {role:?} {level} at ({x},{y})");
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

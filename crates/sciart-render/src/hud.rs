@@ -11,8 +11,7 @@ use std::fmt::{self, Write};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Style, Stylize};
-use ratatui::text::Line;
+use ratatui::style::Style;
 use ratatui::widgets::Widget;
 use sciart_core::title::{Form, Title, ascii_of};
 
@@ -125,11 +124,19 @@ impl Hud<'_> {
     /// titles through `ascii_of`), and ratatui clips anything wider regardless. Measuring runs
     /// through a counting sink, so the only allocation is the returned `String`.
     pub fn fit(&self, width: usize) -> String {
+        let mut out = String::new();
+        self.fit_into(width, &mut out);
+        out
+    }
+
+    /// [`Hud::fit`] into `out` (replacing its contents), so the app can reuse one buffer and
+    /// the HUD allocates nothing per frame (RT-R14).
+    pub fn fit_into(&self, width: usize, out: &mut String) {
+        out.clear();
         let name = self.title.map_or(Name::Id, |t| Name::Title(t, Form::Full));
         for plan in LADDER {
-            let len = self.measure(plan, name);
-            if len <= width {
-                return self.render_to_string(plan, name, len);
+            if self.measure(plan, name) <= width {
+                return self.write_into(out, plan, name);
             }
         }
 
@@ -138,9 +145,8 @@ impl Hud<'_> {
         let last = LADDER[LADDER.len() - 1];
         if let Some(title) = self.title {
             for name in [Name::Title(title, Form::Phenomenon), Name::Id] {
-                let len = self.measure(last, name);
-                if len <= width {
-                    return self.render_to_string(last, name, len);
+                if self.measure(last, name) <= width {
+                    return self.write_into(out, last, name);
                 }
             }
         }
@@ -153,13 +159,9 @@ impl Hud<'_> {
                 _ => Name::Hidden,
             }
         };
-        let len = self.measure(last, name);
-        let mut out = self.render_to_string(last, name, len);
-        if len > width {
-            // Even the flags alone do not fit: last resort, cut the text itself.
-            elide_in_place(&mut out, width);
-        }
-        out
+        self.write_into(out, last, name);
+        // Even the flags alone may not fit: last resort, cut the text itself.
+        elide_in_place(out, width);
     }
 
     fn measure(&self, plan: Plan, name: Name) -> usize {
@@ -169,14 +171,12 @@ impl Hud<'_> {
         counter.0
     }
 
-    fn render_to_string(&self, plan: Plan, name: Name, len: usize) -> String {
-        let mut out = String::with_capacity(len);
+    fn write_into(&self, out: &mut String, plan: Plan, name: Name) {
         // Writing to a `String` cannot fail.
-        let _ = self.write(&mut out, plan, name);
-        out
+        let _ = self.write(out, plan, name);
     }
 
-    /// The single source of truth for the layout: `measure` and `render_to_string` both run it,
+    /// The single source of truth for the layout: `measure` and `write_into` both run it,
     /// so the measured width is by construction the rendered width.
     fn write(&self, out: &mut impl Write, plan: Plan, name: Name) -> fmt::Result {
         let mut f = Fields { out, first: true };
@@ -295,8 +295,10 @@ impl Write for Counter {
     }
 }
 
-impl Widget for &Hud<'_> {
-    fn render(self, area: Rect, buf: &mut Buffer) {
+impl Hud<'_> {
+    /// Draw the HUD on the last row of `area` (RND-R4, RND-R9), fitting the text into
+    /// `scratch`: with a reused `scratch` it allocates nothing (RT-R14).
+    pub fn render_into(&self, area: Rect, buf: &mut Buffer, scratch: &mut String) {
         if area.height == 0 || area.width == 0 {
             return;
         }
@@ -307,9 +309,27 @@ impl Widget for &Hud<'_> {
             .set_symbol(" ")
             .set_style(Style::new().reversed());
         let width = area.width - 1;
-        Line::from(self.fit(usize::from(width)))
-            .reversed()
-            .render(Rect::new(x + 1, y, width, 1), buf);
+        self.fit_into(usize::from(width), scratch);
+        if scratch.is_empty() {
+            return;
+        }
+        // What `Line::from(text).reversed()` draws, without building a `Line`: the whole
+        // row reversed, the text from its left edge.
+        let row = Rect::new(x + 1, y, width, 1).intersection(buf.area);
+        buf.set_style(row, Style::new().reversed());
+        buf.set_stringn(
+            row.x,
+            row.y,
+            scratch.as_str(),
+            usize::from(row.width),
+            Style::new(),
+        );
+    }
+}
+
+impl Widget for &Hud<'_> {
+    fn render(self, area: Rect, buf: &mut Buffer) {
+        self.render_into(area, buf, &mut String::new());
     }
 }
 
