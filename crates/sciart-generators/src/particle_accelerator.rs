@@ -491,11 +491,14 @@ pub struct ParticleAccelerator {
     /// energy deposits, fading with time constant `GLOW_TAU`.
     exposure: Glow,
     tone: Tone,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for ParticleAccelerator {
     fn default() -> Self {
         Self {
+            dirty: true,
             t: 0.0,
             stage: Size::new(1, 1),
             size: Size::new(1, 1),
@@ -1123,7 +1126,7 @@ impl Generator for ParticleAccelerator {
         // Collider tracks live in metres and chamber tracks in stage heights, so both
         // survive a resize; only the glow is in pixels, and restarts dark.
         self.exposure.resize(self.stage);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1161,7 +1164,15 @@ impl Generator for ParticleAccelerator {
                 }
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1180,6 +1191,7 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = ParticleAccelerator::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -1188,6 +1200,7 @@ mod tests {
         let mut i = 0;
         while g.t < t {
             g.update(dts[i % dts.len()].min(t - g.t + 1e-9), ctx);
+            g.prepare();
             i += 1;
         }
     }
@@ -1255,6 +1268,7 @@ mod tests {
         let mut seen = [0u32; 2];
         for i in 0..(2.0 * period / 0.1) as usize {
             g.update(if i % 3 == 0 { 0.25 } else { 0.05 }, &mut ctx);
+            g.prepare();
             let (act, _) = act_at(g.t);
             let want = if act == Act::Collider {
                 CAPTION_COLLIDER
@@ -1434,6 +1448,7 @@ mod tests {
         let mut max_gen = 0;
         while g.t < ACT_COLLIDER - 0.01 {
             g.update(dts[i % dts.len()], &mut ctx);
+            g.prepare();
             i += 1;
             assert!(g.tracks.len() <= g.tracks.capacity());
             assert!(g.towers.len() <= g.towers.capacity());
@@ -1546,8 +1561,10 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             for i in 0..200 {
                 g.update(if i % 5 == 0 { 0.25 } else { SIM_DT }, &mut ctx);
+                g.prepare();
             }
             let mut c = Canvas::new(size, GlyphMode::Ascii);
             g.render(&mut c);

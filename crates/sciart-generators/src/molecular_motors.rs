@@ -276,11 +276,14 @@ struct Motors {
     cells: Size,
     readout_room: usize,
     rng: SplitMix64,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Motors {
     fn default() -> Self {
         Self {
+            dirty: true,
             kinesin: Kinesin::new(),
             rotor: Rotor::new(),
             cargo: [-14.0, CARGO_Y],
@@ -720,7 +723,7 @@ impl Generator for Motors {
             self.rng = SplitMix64::from_rng(&mut ctx.rng);
             self.scatter_dots(Self::dots_for(atp_at(0.0)));
         }
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -735,7 +738,15 @@ impl Generator for Motors {
             self.time += H;
             self.step_model(H);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -867,10 +878,12 @@ mod tests {
         let mut ctx = Ctx::new(7, Size::new(120, 40));
         let mut g = Motors::default();
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         let mut seen = 0;
         while g.time < 8.0 {
             let before = g.kinesin.steps;
             g.update(1.0 / 60.0, &mut ctx);
+            g.prepare();
             let new = (g.kinesin.steps - before) as usize;
             seen += new;
             if new > 0 {
@@ -888,13 +901,16 @@ mod tests {
         let mut ctx = Ctx::new(5, Size::new(80, 24));
         let mut g = Motors::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         assert_eq!(g.caption(), Some("kinesin walks"));
         while g.time < KINESIN_S + 1.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.caption(), Some("synthase turns"));
         while g.time < KINESIN_S + SYNTHASE_S + 1.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.caption(), Some("kinesin walks"));
     }

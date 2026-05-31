@@ -735,7 +735,11 @@ impl BlackHole {
             .iter()
             .map(|&(key, d, slot)| {
                 let bits = d.to_bits();
-                let d = if bits >> 31 == 1 { !bits } else { bits | 1 << 31 };
+                let d = if bits >> 31 == 1 {
+                    !bits
+                } else {
+                    bits | 1 << 31
+                };
                 (u128::from(key) << 64) | (u128::from(d) << 32) | u128::from(slot)
             })
             .collect();

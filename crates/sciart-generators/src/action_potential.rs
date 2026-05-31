@@ -906,6 +906,8 @@ struct ActionPotential {
     dots: Dots,
     art: Dots,
     cells: Size,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for ActionPotential {
@@ -915,6 +917,7 @@ impl Default for ActionPotential {
             trace.push(V_REST as f32);
         }
         Self {
+            dirty: true,
             cable: Cable::default(),
             meter: VelocityMeter::default(),
             trace,
@@ -1513,7 +1516,7 @@ impl Generator for ActionPotential {
         self.ions.clear();
         self.readout_room = title::stable_readout_room(size, &META);
         self.rebuild_geometry();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1546,7 +1549,15 @@ impl Generator for ActionPotential {
         });
         self.spawn_ions(n as u32);
         self.spawn_leak(dt);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1855,6 +1866,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut ap = ActionPotential::default();
         ap.resize(size, &mut ctx);
+        ap.prepare();
         (ap, ctx)
     }
 
@@ -1864,9 +1876,11 @@ mod tests {
         let (mut b, mut ctx_b) = scene();
         for _ in 0..60 {
             a.update(1.0 / 60.0, &mut ctx_a);
+            a.prepare();
         }
         for _ in 0..4 {
             b.update(0.25, &mut ctx_b);
+            b.prepare();
         }
         assert_eq!((a.step, b.step), (400, 400));
         let bits = |c: &Cable| [c.v, c.m, c.h, c.n].map(|x| x.map(f64::to_bits));
@@ -1908,6 +1922,7 @@ mod tests {
         let mut read = |until: f64, ap: &mut ActionPotential| {
             while t < until - 1e-9 {
                 ap.update(0.25, &mut ctx);
+                ap.prepare();
                 t += 0.25;
             }
             ap.meter.speed
@@ -1974,6 +1989,7 @@ mod tests {
                 let size = Size::new(w, h);
                 let mut ap = ActionPotential::default();
                 ap.resize(size, &mut Ctx::new(seed, size));
+                ap.prepare();
                 let d = &ap.dendrites;
                 assert!(d.iter().filter(|s| s.depth == 0).count() == 3);
                 for (i, p) in d.iter().enumerate() {
@@ -2000,9 +2016,11 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut ap = ActionPotential::default();
         ap.resize(size, &mut ctx);
+        ap.prepare();
         let mut done = 0.0;
         while done < t - 1e-9 {
             ap.update(SIM_DT, &mut ctx);
+            ap.prepare();
             done += SIM_DT;
         }
         let mut canvas = Canvas::new(size, GlyphMode::Ascii);
@@ -2132,6 +2150,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut ap = ActionPotential::default();
         ap.resize(size, &mut ctx);
+        ap.prepare();
         let tree = ap.tree.expect("grown on the first resize");
         let grown = tree.branches[..tree.len].iter().filter(|b| b.depth == 0);
         assert_eq!(grown.count(), 3);
@@ -2148,6 +2167,7 @@ mod tests {
         let size = Size::new(w, 12);
         let mut ap = ActionPotential::default();
         ap.resize(size, &mut Ctx::new(1, size));
+        ap.prepare();
         ap.step = (t * SUB_PER_S as f64) as u64;
         ap.meter.speed = speed;
         let mut canvas = Canvas::new(size, GlyphMode::Ascii);
@@ -2195,6 +2215,7 @@ mod tests {
         let mut seen = Vec::new();
         for _ in 0..(18 * 4) {
             ap.update(0.25, &mut ctx);
+            ap.prepare();
             let beat = ap.timeline.at(ap.step as f64 / SUB_PER_S as f64).label;
             let want = match beat {
                 "single" => None,
@@ -2219,8 +2240,10 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut ap = ActionPotential::default();
         ap.resize(size, &mut ctx);
+        ap.prepare();
         while (ap.step as f64) < t * SUB_PER_S as f64 - 1e-6 {
             ap.update(SIM_DT, &mut ctx);
+            ap.prepare();
         }
         ap
     }
@@ -2283,8 +2306,10 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut ap = ActionPotential::default();
         ap.resize(size, &mut ctx);
+        ap.prepare();
         while (ap.step as f64) < 5.0 * SUB_PER_S as f64 - 1e-6 {
             ap.update(SIM_DT, &mut ctx);
+            ap.prepare();
         }
         let rest = ink::seq_value(tone_ink(0.0));
         let (mut spike, mut wake, mut peak) = (0.0, 0.0, 0.0_f64);

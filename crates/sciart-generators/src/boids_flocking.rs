@@ -642,11 +642,14 @@ pub(crate) struct Boids {
     /// `title::stable_readout_room` at this size: the label never flickers with the beat.
     readout_room: usize,
     ready: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Boids {
     fn new() -> Self {
         Self {
+            dirty: true,
             n: 0,
             sigma: 1.0,
             w: 1.0,
@@ -927,6 +930,15 @@ impl Boids {
     /// escape wave has banked its birds, pale at the wave front. The falcon's streak goes
     /// into its own layer, tapering from tail to head. Everything is clipped to the sky,
     /// so a tail, wing or streak never reaches the label row.
+    /// Stamp `wave_at` while any bird is alarmed (the caption's clock). Called wherever the
+    /// state changes, so the caption does not depend on how often frames are drawn.
+    fn note_alarm(&mut self) {
+        let step = self.step as u32;
+        if (0..self.n).any(|i| self.alarm.age(i, step).is_some()) {
+            self.wave_at = self.time();
+        }
+    }
+
     fn rasterise(&mut self) {
         self.birds.clear();
         self.alarm_cell.fill(CALM);
@@ -945,7 +957,6 @@ impl Boids {
         let step = self.step as u32;
         self.thick.clear();
         let (birds, thick, alarm_cell) = (&mut self.birds, &mut self.thick, &mut self.alarm_cell);
-        let mut alarmed = false;
         for i in 0..self.n {
             let p = self.pos[i];
             let dir = heading(self.vel[i]);
@@ -953,7 +964,6 @@ impl Boids {
             // The front is every bird that just fired; behind it only a bird banked far
             // enough to show its wings turns dark (SPEC-002 Escape wave).
             let age = self.alarm.age(i, step);
-            alarmed |= age.is_some();
             let state = match age {
                 Some(age) if age < FLASH => FRONT,
                 Some(_) if banked => BANKED,
@@ -992,9 +1002,6 @@ impl Boids {
                 plot(add(mid, wing), false);
                 plot(sub(mid, wing), false);
             }
-        }
-        if alarmed {
-            self.wave_at = self.time();
         }
         for cy in 0..rows {
             for cx in 0..w {
@@ -1231,7 +1238,8 @@ impl Generator for Boids {
         self.label.clear();
         let _ = write!(self.label, "N {n}  k={K}");
         self.readout_room = title::stable_readout_room(size, &META);
-        self.rasterise();
+        self.note_alarm();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1246,7 +1254,16 @@ impl Generator for Boids {
         for _ in 0..substeps {
             self.substep(&mut rng);
         }
-        self.rasterise();
+        self.note_alarm();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1337,6 +1354,7 @@ mod tests {
         let mut b = Boids::new();
         b.falcon_enabled = falcon;
         b.resize(size, &mut ctx);
+        b.prepare();
         (b, ctx)
     }
 
@@ -1520,6 +1538,7 @@ mod tests {
         let (mut b, mut ctx) = scene(Size::new(80, 24), 3, true);
         for _ in 0..120 {
             b.update(H, &mut ctx);
+            b.prepare();
             assert_eq!(b.n, 192);
         }
     }
@@ -1529,10 +1548,12 @@ mod tests {
         let (mut b, mut ctx) = scene(Size::new(200, 50), 5, true);
         for _ in 0..60 {
             b.update(H, &mut ctx);
+            b.prepare();
         }
         let before: Vec<V2> = b.pos[..192].to_vec();
         let (kx, ky) = (160.0 / 400.0, 96.0 / 200.0);
         b.resize(Size::new(80, 24), &mut ctx);
+        b.prepare();
         assert_eq!(b.n, 192);
         for (p, q) in b.pos[..192].iter().zip(&before) {
             assert!((p[0] - q[0] * kx).abs() < 1e-9 && (p[1] - q[1] * ky).abs() < 1e-9);
@@ -1540,6 +1561,7 @@ mod tests {
 
         let small: Vec<V2> = b.pos[..192].to_vec();
         b.resize(Size::new(200, 50), &mut ctx);
+        b.prepare();
         assert_eq!(b.n, 1000);
         let (kx, ky) = (400.0 / 160.0, 200.0 / 96.0);
         let reach = 3.0 * R_S * b.sigma;
@@ -1601,6 +1623,7 @@ mod tests {
         let (mut ratios, mut dense, mut lit) = (Vec::new(), 0, 0);
         while b.time() < 40.0 {
             b.update(H, &mut ctx);
+            b.prepare();
             if b.time() >= 8.0 && b.step % 30 == 0 {
                 ratios.push(axis_ratio(&b.pos[..b.n]));
                 canvas.clear();
@@ -1698,6 +1721,7 @@ mod tests {
                 let mut canvas = Canvas::new(size, GlyphMode::Unicode);
                 while b.time() < 60.0 {
                     b.update(2.0 * H, &mut ctx);
+                    b.prepare();
                     if b.step % 30 != 0 {
                         continue;
                     }
@@ -1879,6 +1903,7 @@ mod tests {
         let (mut b, mut ctx) = scene(size, 42, true);
         while b.time() < t - 1e-9 {
             b.update(H, &mut ctx);
+            b.prepare();
         }
         let mut canvas = Canvas::new(size, mode);
         b.render(&mut canvas);
@@ -2071,6 +2096,7 @@ mod tests {
         let (mut seen, mut last_alarm, mut run, mut runs) = (Vec::new(), f64::MIN, 0.0, 0);
         while b.time() < 36.0 {
             b.update(H, &mut ctx);
+            b.prepare();
             let step = b.step as u32;
             if (0..b.n).any(|i| b.alarm.age(i, step).is_some()) {
                 last_alarm = b.time();
@@ -2130,6 +2156,7 @@ mod tests {
         let (mut pale, mut black, mut frames) = (0, 0, 0);
         while b.time() < 9.5 {
             b.update(H, &mut ctx);
+            b.prepare();
             if b.time() < 5.0 || b.step % 6 != 0 {
                 continue;
             }

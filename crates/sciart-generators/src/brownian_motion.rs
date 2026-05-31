@@ -341,11 +341,14 @@ pub struct BrownianMotion {
     label_row: Option<i32>,
     /// Chars the readout may take on its row, right of the title (GEN-R13).
     room: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for BrownianMotion {
     fn default() -> Self {
         Self {
+            dirty: true,
             t: 0.0,
             tick_clock: 0.0,
             grain: [0.0; 4],
@@ -705,7 +708,7 @@ impl Generator for BrownianMotion {
             });
         }
         self.refresh_label();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -730,7 +733,15 @@ impl Generator for BrownianMotion {
             self.move_molecules(dt / subs, part);
         }
         self.refresh_label();
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -921,8 +932,10 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             for i in 0..1200 {
                 g.update(dts[i % dts.len()], &mut ctx);
+                g.prepare();
                 let (gx, gy) = g.to_view(g.grain_pos());
                 let b = g.grain_box;
                 let eps = 1e-9;
@@ -951,12 +964,14 @@ mod tests {
         let mut ctx = seeded(17);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         let b = g.grain_box;
         let half = (0.5 * (b.x1 - b.x0), 0.5 * (b.y1 - b.y0));
         let (mut far, mut inner, mut n) = (0.0f64, 0, 0);
         let start = g.grain_pos();
         for _ in 0..(300.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let (ex, ey) = (g.grain[0] - g.cam.0, g.grain[1] - g.cam.1);
             let e = (ex.abs() / half.0).max(ey.abs() / half.1);
             far = far.max(e);
@@ -980,6 +995,7 @@ mod tests {
         let mut ctx = seeded(8);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         // 20 s of track: a full-length hot trail, ≥ LAG_MIN lags and an estimate, labelled
         // with its unit and the track's age.
         assert_eq!(g.trail.len(), 1 + (PREROLL * 32.0).round() as usize);
@@ -1040,8 +1056,10 @@ mod tests {
         let mut ctx = seeded(8);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         for _ in 0..(150.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         // ~75 independent 2 s windows: s.e. ≈ 12 %; 40 % is a loose, non-flaky sanity bound.
         let d = g.d_hat().expect("estimate after 150 s");
@@ -1061,8 +1079,10 @@ mod tests {
             let size = Size::new(w, 20);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..(if w % 10 == 0 { 200 } else { 2 }) {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let label = g.label.clone();
             let room = title::readout_room(size, &Title::new(META.title, None));
@@ -1093,8 +1113,10 @@ mod tests {
         }
         // 80 columns, beside the full title, show every part, time included.
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for _ in 0..200 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.label.contains(" rows^2/s  true 4.00  t "), "{}", g.label);
     }
@@ -1125,6 +1147,7 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let (gx, gy) = g.to_view(g.grain_pos());
         g.molecules.clear();
         let reach = g.grain_r + CONTACT_PAD;
@@ -1152,6 +1175,7 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let (gx, gy) = g.to_view(g.grain_pos());
         g.molecules.clear();
         let reach = g.grain_r + CONTACT_PAD;
@@ -1165,6 +1189,7 @@ mod tests {
         });
         // A huge dt is clamped to 0.25 s, so the frame's work stays bounded (GEN-R4).
         g.update(1e9, &mut ctx);
+        g.prepare();
         assert!((g.t - PREROLL - MAX_DT).abs() < 1e-12, "{}", g.t);
         let m = *g.molecules.iter().next().expect("one molecule");
         assert!(m.glow > 0.0 && m.vx > 0.0, "tunnelled: {m:?}");
@@ -1207,11 +1232,13 @@ mod tests {
         let mut ctx = seeded(6);
         let mut g = BrownianMotion::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         assert!(g.epoch > 3.0 && g.epoch < EPOCH_MAX, "{}", g.epoch);
         let mut restarts = 0;
         for _ in 0..(3.0 * g.epoch / SIM_DT) as usize {
             let age = g.ring_age;
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.ring_age <= g.epoch);
             if g.ring_age < age {
                 restarts += 1;
@@ -1231,8 +1258,10 @@ mod tests {
         let mut g = BrownianMotion::default();
         let size = Size::new(120, 40);
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(30.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.trail.len(), TRAIL_LEN);
         // The grain is drawn where the stage puts it: near the view's centre.

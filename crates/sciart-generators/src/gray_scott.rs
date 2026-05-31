@@ -542,11 +542,14 @@ pub struct GrayScott {
     size: Size,
     /// The body ramp's top v, eased towards [`exposure_target`] (CHEM-A7).
     v_top: f32,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl GrayScott {
     pub(crate) fn new(slot: Option<usize>) -> Self {
         Self {
+            dirty: true,
             t: 0.0,
             t0: 0.0,
             slot,
@@ -730,7 +733,7 @@ impl Generator for GrayScott {
         self.v_top = exposure_target(self.v.as_slice());
         self.pixels.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -768,7 +771,15 @@ impl Generator for GrayScott {
         let ease = 1.0 - (-dt / EXPOSURE_TAU_S).exp();
         let target = exposure_target(self.v.as_slice());
         self.v_top += (target - self.v_top) * ease as f32;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -802,6 +813,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = GrayScott::new(slot);
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -818,6 +830,7 @@ mod tests {
             for i in 0..120 {
                 let dt = [0.25, 0.0, 1.0 / 60.0, 0.173][i % 4];
                 g.update(dt, &mut ctx);
+                g.prepare();
                 for &x in g.u.as_slice().iter().chain(g.v.as_slice()) {
                     assert!(x.is_finite() && (0.0..=1.0).contains(&x), "seed {seed}");
                 }
@@ -883,6 +896,7 @@ mod tests {
     fn run_to(g: &mut GrayScott, ctx: &mut Ctx, t: f64) {
         while g.t < t - 0.5 * SIM_DT {
             g.update(SIM_DT, ctx);
+            g.prepare();
         }
     }
 
@@ -1190,22 +1204,28 @@ mod tests {
         let (mut g, mut ctx) = scene(Some(0), 3, 300, 75);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (u, v) = (g.u.clone(), g.v.clone());
         g.resize(Size::new(400, 100), &mut ctx);
+        g.prepare();
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         assert!(g.u == u && g.v == v);
 
         // A new lattice resamples; the pattern survives and keeps its contrast (5 s in, so
         // the 2 s check ends inside the 8 s mitosis hold).
         for _ in 0..180 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (mean0, std0) = (mean(g.v.as_slice()), variance(g.v.as_slice()).sqrt());
         assert_eq!(g.reseeds, 0);
         g.resize(Size::new(120, 50), &mut ctx);
+        g.prepare();
         assert_eq!(g.u.size(), Size::new(80, 63));
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         assert_eq!(g.reseeds, 0, "the round trip must not reseed");
         let mean1 = mean(g.v.as_slice());
         assert!(
@@ -1214,6 +1234,7 @@ mod tests {
         );
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let std1 = variance(g.v.as_slice()).sqrt();
         assert!((std1 / std0 - 1.0).abs() < 0.3, "std v {std0} → {std1}");
@@ -1224,7 +1245,9 @@ mod tests {
         );
         for (w, h) in [(1, 1), (3, 2), (200, 50), (5, 90), (1, 1)] {
             g.resize(Size::new(w, h), &mut ctx);
+            g.prepare();
             g.update(0.25, &mut ctx);
+            g.prepare();
             g.render(&mut Canvas::new(Size::new(w, h), GlyphMode::Unicode));
         }
     }
@@ -1348,6 +1371,7 @@ mod tests {
         let (mut g, mut ctx) = scene(Some(slot), 1, 40, 12);
         g.t = secs;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         g.caption().expect("every walk point has a caption")
     }
 
@@ -1498,6 +1522,7 @@ mod tests {
         g.v.fill(0.0);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.v.as_slice().iter().any(|&x| x > 0.05));
         assert!(g.reseeds >= 1);

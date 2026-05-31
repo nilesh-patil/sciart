@@ -607,11 +607,14 @@ struct IsingModel {
     inks: [[Ink; 2 * CLASSES]; 2],
     pixels: Pixels,
     size: Size,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl IsingModel {
     fn new() -> Self {
         Self {
+            dirty: true,
             schedule: schedule(),
             t: 0.0,
             acc: 0.0,
@@ -702,7 +705,7 @@ impl Generator for IsingModel {
         self.rows.clear();
         self.rows
             .extend((0..i32::from(px.height())).map(|y| map.nearest(0, y).1 as u16));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -736,7 +739,15 @@ impl Generator for IsingModel {
                 .attempts(whole as u64, &thresholds(t), &mut self.rng);
         }
         self.phase = beat.index;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {

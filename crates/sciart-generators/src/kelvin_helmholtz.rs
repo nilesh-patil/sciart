@@ -381,11 +381,14 @@ pub struct KelvinHelmholtz {
     t: f64,
     since_check: f64,
     resets: u32,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for KelvinHelmholtz {
     fn default() -> Self {
         Self {
+            dirty: true,
             size: Size::new(1, 1),
             flow: None,
             lat: Lattice::default(),
@@ -542,7 +545,7 @@ impl Generator for KelvinHelmholtz {
         let px = self.pixels.pixel_size();
         self.minified = f64::from(lattice.width()) > MINIFY * f64::from(px.width())
             || f64::from(lattice.height()) > MINIFY * f64::from(px.height());
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -564,7 +567,15 @@ impl Generator for KelvinHelmholtz {
         if self.t >= ACT_S {
             self.restart(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -582,6 +593,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = KelvinHelmholtz::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -616,6 +628,7 @@ mod tests {
         let (mut g, mut ctx) = scene(3, Size::new(80, 24));
         let mut twin = g.lat.clone();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         for _ in 0..STEPS_PER_UPDATE {
             twin.step_periodic(g.omegas.0, g.omegas.1);
         }
@@ -629,6 +642,7 @@ mod tests {
         // Skip the first 0.5 s (the seed relaxes onto the eigenmode), fit 0.5–2.5 s.
         for frame in 0..150u32 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if frame >= 30 && frame % 5 == 0 {
                 ts.push(f64::from(frame) * SIM_DT);
                 ls.push(ripple(&g).ln());
@@ -652,6 +666,7 @@ mod tests {
         let at = |g: &mut KelvinHelmholtz, ctx: &mut Ctx, s: f64| {
             while g.t < s {
                 g.update(SIM_DT, ctx);
+                g.prepare();
             }
             vortices(g)
         };
@@ -668,6 +683,7 @@ mod tests {
         let m0 = g.lat.mass();
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let rel = (g.lat.mass() - m0).abs() / m0;
         assert!(rel < 1e-6, "relative mass drift {rel}");
@@ -698,12 +714,15 @@ mod tests {
         let (mut g, mut ctx) = scene(2, Size::new(200, 50));
         for _ in 0..30 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let before = g.lat.populations().to_vec();
         g.resize(Size::new(210, 52), &mut ctx);
+        g.prepare();
         assert_eq!(g.lat.populations(), &before[..]);
         g.t = ACT_S - 0.5 * SIM_DT;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert!(g.t < SIM_DT && ripple(&g) < 0.05 * U);
     }
 

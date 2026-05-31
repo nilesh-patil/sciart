@@ -305,7 +305,11 @@ impl Starfield {
         self.cols.clear();
         self.cols.extend((0..size.width()).map(|px| {
             let x = f64::from(px) + 0.5;
-            (mw.sigma(x, w, h), mw.bulge_at(x, w), MilkyWay::centre(x, w, h))
+            (
+                mw.sigma(x, w, h),
+                mw.bulge_at(x, w),
+                MilkyWay::centre(x, w, h),
+            )
         }));
         let (cols, frame) = (&self.cols, mw.galaxy_frame(w, h));
         self.glow.shade(|px, py| {

@@ -710,6 +710,8 @@ struct LiesegangRings {
     pixels: Pixels,
     /// ASCII class per pixel, same layout as `pixels`.
     classes: Grid<Class>,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 /// Acts begun up to scene time `t`: loops times [`ACTS`] plus the live act's index.
@@ -724,6 +726,7 @@ impl LiesegangRings {
             bands: Bands::default(),
         };
         Self {
+            dirty: true,
             schedule: schedule(),
             start,
             t: 0.0,
@@ -955,7 +958,7 @@ impl Generator for LiesegangRings {
         self.windows.extend(self.layout.windows());
         self.pixels.resize(size);
         self.classes.resize(self.pixels.pixel_size(), Class::Empty);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -983,7 +986,15 @@ impl Generator for LiesegangRings {
                 self.scan();
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1038,6 +1049,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut s = LiesegangRings::new(Some(act));
         s.resize(size, &mut ctx);
+        s.prepare();
         (s, ctx)
     }
 
@@ -1059,6 +1071,7 @@ mod tests {
             let dt = 0.25 * dts.next_f64();
             let run = s.run;
             s.update(dt, &mut ctx);
+            s.prepare();
             let growing = s.run == run && phase(s.schedule.at(s.t)) != DISSOLVE;
             for (tube, old) in columns(&s).iter().zip(&prev) {
                 let col = &tube.col;
@@ -1183,8 +1196,10 @@ mod tests {
             let (mut s, mut ctx) = scene_in(opening, Size::new(80, 24), 5);
             while phase(s.schedule.at(s.t + SIM_DT)) != DISSOLVE {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
             }
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
             let live = |s: &LiesegangRings| match opening {
                 Act::Rack => s.tubes.to_vec(),
                 Act::Dish => vec![s.dish.clone()],
@@ -1194,6 +1209,7 @@ mod tests {
             let run = s.run;
             while run_of(&s.schedule, s.t + SIM_DT) == run {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
                 for ((tube, old), m) in live(&s).iter().zip(&start).zip(&mut mass) {
                     let col = &tube.col;
                     assert_eq!((col.a, col.b, col.nuc), (old.col.a, old.col.b, old.col.nuc));
@@ -1210,6 +1226,7 @@ mod tests {
             }
 
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
             assert_eq!(s.run, run + 1);
             assert_ne!(s.act(), opening);
             let b0 = s.tubes[0].col.b0;
@@ -1237,6 +1254,7 @@ mod tests {
                 let until = opening as usize as f64 * ACT_S + 49.9;
                 while s.t + SIM_DT < until {
                     s.update(SIM_DT, &mut ctx);
+                    s.prepare();
                 }
                 assert_eq!(phase(s.schedule.at(s.t)), DISSOLVE);
                 assert_eq!(s.act(), opening);
@@ -1346,6 +1364,7 @@ mod tests {
                 let (mut s, mut ctx) = scene_in(opening, size, 42);
                 for _ in 0..120 {
                     s.update(SIM_DT, &mut ctx);
+                    s.prepare();
                 }
                 assert_eq!(s.layout.gel_px, 2 * (i32::from(h) - 3).max(0));
                 let px = s.pixels.pixel_size();
@@ -1417,6 +1436,7 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut s = LiesegangRings::new(None);
             s.resize(size, &mut ctx);
+            s.prepare();
             let act = s.act() as usize;
             assert_eq!(s.t, act as f64 * ACT_S + PREGROWN_S[act], "seed {seed}");
             seen[act] = true;
@@ -1551,6 +1571,7 @@ mod tests {
         let (mut s, mut ctx) = scene(Size::new(80, 24), 42);
         while s.t + SIM_DT < 41.9 {
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
         }
         let full = header(&s);
         assert!(full.contains("x(n+1)/x(n)"), "{full:?}");
@@ -1562,6 +1583,7 @@ mod tests {
         // The dissolve front erases each tube's measured bands, and its ratio with them.
         while s.t + SIM_DT < 49.9 {
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
         }
         assert_eq!(header(&s).trim(), "", "numbers over clear tubes");
     }
@@ -1605,11 +1627,14 @@ mod tests {
         while a.t < 55.0 {
             let dt = 0.25 * dts.next_f64();
             a.update(dt, &mut ctx_a);
+            a.prepare();
             b.update(dt, &mut ctx_b);
+            b.prepare();
             if a.t > 45.0 && k < sizes.len() {
                 let size = Size::new(sizes[k].0, sizes[k].1);
                 ctx_b.set_size(size);
                 b.resize(size, &mut ctx_b);
+                b.prepare();
                 k += 1;
             }
         }

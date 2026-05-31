@@ -327,11 +327,14 @@ struct Fireflies {
     boat_x: Option<f64>,
     /// Draw every `stride`-th firefly (small screens).
     stride: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Fireflies {
     fn default() -> Self {
         Self {
+            dirty: true,
             swarm: None,
             tree: Tree::default(),
             time: 0.0,
@@ -592,7 +595,7 @@ impl Generator for Fireflies {
         self.pixels.resize(size);
         self.glow.resize(size);
         self.paint_base();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -629,7 +632,15 @@ impl Generator for Fireflies {
             self.next_sample = self.time.floor() + 1.0;
             self.history.push(sw.order() as f32);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -764,13 +775,16 @@ mod tests {
         let mut ctx = Ctx::new(42, Size::new(120, 40));
         let mut g = Fireflies::default();
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         while g.time < FIRST_BOAT_S - 0.5 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let before = g.swarm.as_ref().map_or(0.0, Swarm::order);
         assert!(before > 0.9, "synchronised before the boat: {before}");
         while g.time < FIRST_BOAT_S + BOAT_S + 0.1 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let after = g.swarm.as_ref().map_or(1.0, Swarm::order);
         assert!(after < 0.4, "R after the boat {after}");

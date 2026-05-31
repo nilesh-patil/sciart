@@ -413,6 +413,8 @@ struct Folding {
     rows: Vec<[f32; 2]>,
     cells: Size,
     readout_room: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Folding {
@@ -423,6 +425,7 @@ impl Default for Folding {
             *d = (f64::from(p.0), f64::from(p.1));
         }
         Self {
+            dirty: true,
             chain,
             disp,
             cam: (f64::from(G / 2), f64::from(G / 2), 1.0),
@@ -627,7 +630,7 @@ impl Generator for Folding {
         self.rows.resize(usize::from(ps.height()), [0.0; 2]);
         // The chain is size-independent; the camera snaps to frame it at the new size.
         self.cam = self.cam_target();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -683,7 +686,15 @@ impl Generator for Folding {
                 self.cam.2 + (target.2 - self.cam.2) * kz
             },
         );
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -768,6 +779,7 @@ mod tests {
     fn run_to(g: &mut Folding, ctx: &mut Ctx, t: f64) {
         while g.time < t {
             g.update(1.0 / 60.0, ctx);
+            g.prepare();
         }
     }
 
@@ -777,10 +789,12 @@ mod tests {
             let mut ctx = Ctx::new(seed, Size::new(80, 24));
             let mut g = Folding::default();
             g.resize(Size::new(80, 24), &mut ctx);
+            g.prepare();
             let mut rg_hot = 0.0;
             let mut n = 0.0;
             while g.time < ACT_S[0] {
                 g.update(1.0 / 60.0, &mut ctx);
+                g.prepare();
                 if g.time > 2.0 {
                     rg_hot += g.chain.rg_h();
                     n += 1.0;
@@ -801,6 +815,7 @@ mod tests {
         let mut ctx = Ctx::new(4, Size::new(80, 24));
         let mut g = Folding::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         run_to(&mut g, &mut ctx, ACT_S[0] + ACT_S[1] + 2.0);
         let (mut h, mut p, mut nh, mut np) = (0u32, 0u32, 0u32, 0u32);
         for i in 0..N {
@@ -821,6 +836,7 @@ mod tests {
         let mut ctx = Ctx::new(5, Size::new(80, 24));
         let mut g = Folding::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut start = 0.0;
         for (k, c) in CAPTIONS.iter().enumerate() {
             run_to(&mut g, &mut ctx, start + 1.0);
