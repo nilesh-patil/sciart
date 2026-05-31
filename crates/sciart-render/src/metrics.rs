@@ -1,5 +1,5 @@
 //! Art metrics over a painted frame (RND-R13; GEN-R17 blockiness, GEN-R18 darkness,
-//! GEN-R21 colourfulness and contrast).
+//! GEN-R21 clean minimal style: lit coverage, chroma mass, edge weight, neon cap).
 //!
 //! All work on the half-block *pixel grid* of a painted ratatui [`Buffer`]: every cell is
 //! two pixels, top and bottom. A `▀` cell is its foreground on top and its background
@@ -42,13 +42,27 @@ pub struct ArtMetrics {
     pub darkness: f64,
     /// Mean luma of the ground pixels, default background counting as 0, in `[0, 1]`.
     pub mean_luma: f64,
-    /// Hasler–Süsstrunk colourfulness of the shown, non-black pixels (GEN-R21), in
-    /// 8-bit channel units (0 for grey; ~30 is "moderately", ~80 "extremely" colourful).
-    pub colourfulness: f64,
-    /// RMS contrast: standard deviation of the shown luma over all pixels (GEN-R21), in
-    /// `[0, 0.5]`.
-    pub contrast: f64,
+    /// GEN-R21 measures, on the preview grid (see [`clean_grid`]).
+    pub clean: Clean,
 }
+
+/// The GEN-R21 clean-style measures of one frame (ADR-0017).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct Clean {
+    /// Share of pixels that are lit (max channel > [`DARK_MAX`]), in `[0, 1]`.
+    pub coverage: f64,
+    /// Mean OKLCh chroma over all pixels, unlit ones counting 0: how much loud colour.
+    pub chroma_mass: f64,
+    /// Lit pixels per boundary pixel of the lit mask: ~1 for points and thin lines, the
+    /// mean half-width of a filled shape in grid pixels (tens for big blobs).
+    pub edge_weight: f64,
+    /// 90th percentile of OKLCh chroma over the lit pixels (0 with 50 or fewer lit): the
+    /// neon cap, at most [`NEON_CAP`] for every scene.
+    pub chroma_p90: f64,
+}
+
+/// GEN-R21's global ceiling on [`Clean::chroma_p90`].
+pub const NEON_CAP: f64 = 0.20;
 
 /// Rec. 709 luma of gamma-encoded sRGB, in `[0, 1]`: cheap, and ordered like perceived
 /// brightness closely enough for these metrics.
@@ -229,43 +243,168 @@ pub fn darkness(ground: impl ExactSizeIterator<Item = Option<Rgb>>) -> (f64, f64
     (dark as f64 / n as f64, sum / n as f64)
 }
 
-/// GEN-R21 Hasler–Süsstrunk colourfulness of the shown colours that are not black
-/// (`σ_rgyb + 0.3·μ_rgyb` with `rg = R − G`, `yb = (R + G)/2 − B`); 0 with none.
-pub fn colourfulness(shown: impl Iterator<Item = Option<Rgb>>) -> f64 {
-    let (mut n, mut s_rg, mut s_yb, mut q_rg, mut q_yb) = (0usize, 0.0, 0.0, 0.0, 0.0);
-    for Rgb(r, g, b) in shown.flatten().filter(|c| !is_black(*c)) {
-        let (r, g, b) = (f64::from(r), f64::from(g), f64::from(b));
-        let (rg, yb) = (r - g, 0.5 * (r + g) - b);
-        n += 1;
-        s_rg += rg;
-        s_yb += yb;
-        q_rg += rg * rg;
-        q_yb += yb * yb;
-    }
-    if n == 0 {
-        return 0.0;
-    }
-    let n = n as f64;
-    let (m_rg, m_yb) = (s_rg / n, s_yb / n);
-    let var = (q_rg / n - m_rg * m_rg).max(0.0) + (q_yb / n - m_yb * m_yb).max(0.0);
-    var.sqrt() + 0.3 * m_rg.hypot(m_yb)
+/// OKLCh chroma of a linear-light-free sRGB triple in `[0, 255]` (Björn Ottosson's OKLab).
+pub fn oklch_chroma(rgb: [f64; 3]) -> f64 {
+    let lin = |c: f64| {
+        let c = c / 255.0;
+        if c <= 0.040_45 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        }
+    };
+    let [r, g, b] = rgb.map(lin);
+    let l = (0.412_221_470_8 * r + 0.536_332_536_3 * g + 0.051_445_992_9 * b).cbrt();
+    let m = (0.211_903_498_2 * r + 0.680_699_545_1 * g + 0.107_396_956_6 * b).cbrt();
+    let s = (0.088_302_461_9 * r + 0.281_718_837_6 * g + 0.629_978_700_5 * b).cbrt();
+    let a = 1.977_998_495_1 * l - 2.428_592_205_0 * m + 0.450_593_709_9 * s;
+    let bb = 0.025_904_037_1 * l + 0.782_771_766_2 * m - 0.808_675_766_0 * s;
+    a.hypot(bb)
 }
 
-/// GEN-R21 RMS contrast: the standard deviation of the shown luma over every pixel, the
-/// default background counting as black.
-pub fn contrast(shown: impl ExactSizeIterator<Item = Option<Rgb>>) -> f64 {
-    let n = shown.len();
-    if n == 0 {
-        return 0.0;
+/// Grid pixels per cell of [`clean_grid`]: the `rs-preview` image (8×16 px per cell)
+/// pooled 2×2, as the GEN-R21 reference measurements were taken.
+pub const CLEAN_CELL: (usize, usize) = (4, 8);
+/// The preview's terminal colours: default background and default foreground.
+const TERM_BG: [f64; 3] = [12.0, 12.0, 18.0];
+const TERM_FG: [f64; 3] = [204.0, 204.0, 204.0];
+
+/// The frame as the `rs-preview` image pooled 2×2 (4×8 grid pixels per cell), last row
+/// (the title) excluded, row-major; returns `(width, pixels)`.
+///
+/// Mirrors the preview's drawing: the cell background everywhere, `▀`/`▄`/`█` as solid
+/// halves, braille dots as 2×2 image pixels centred in 4×4 slots (so each dot covers a
+/// quarter of 2×2 grid pixels), and any other glyph as the preview's fallback mark, a
+/// 4×6 image-pixel block (the font's strokes are not modelled; glyphs are sparse).
+pub fn clean_grid(buf: &Buffer) -> (usize, Vec<[f64; 3]>) {
+    let (cw, ch) = CLEAN_CELL;
+    let (w, h) = (usize::from(buf.area.width), usize::from(buf.area.height));
+    let rows = h.saturating_sub(1);
+    let gw = w * cw;
+    let mut grid = vec![TERM_BG; gw * rows * ch];
+    let rgb = |c: Color, default: [f64; 3]| match c {
+        Color::Rgb(r, g, b) => [f64::from(r), f64::from(g), f64::from(b)],
+        _ => default,
+    };
+    // Blend `fg` over grid pixel (x, y) with coverage `k`.
+    let mix = |grid: &mut Vec<[f64; 3]>, x: usize, y: usize, fg: [f64; 3], k: f64| {
+        let p = &mut grid[y * gw + x];
+        for c in 0..3 {
+            p[c] += (fg[c] - p[c]) * k;
+        }
+    };
+    for cy in 0..rows {
+        for cx in 0..w {
+            let cell = &buf.content[cy * w + cx];
+            let (bg, fg) = (rgb(cell.bg, TERM_BG), rgb(cell.fg, TERM_FG));
+            let (x0, y0) = (cx * cw, cy * ch);
+            let mut fill = |x: std::ops::Range<usize>, y: std::ops::Range<usize>, c, k| {
+                for yy in y {
+                    for xx in x.clone() {
+                        mix(&mut grid, x0 + xx, y0 + yy, c, k);
+                    }
+                }
+            };
+            fill(0..cw, 0..ch, bg, 1.0);
+            let sym = cell.symbol();
+            let first = sym.chars().next().unwrap_or(' ');
+            match first {
+                ' ' => {}
+                '▀' => fill(0..cw, 0..ch / 2, fg, 1.0),
+                '▄' => fill(0..cw, ch / 2..ch, fg, 1.0),
+                '█' => fill(0..cw, 0..ch, fg, 1.0),
+                '\u{2801}'..='\u{28FF}' => {
+                    const BITS: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+                    let mask = (u32::from(first) - 0x2800) as u8;
+                    for (dx, column) in BITS.iter().enumerate() {
+                        for (dy, &bit) in column.iter().enumerate() {
+                            if mask & bit != 0 {
+                                // Image px 4d+1..4d+3 cover a quarter of grid px 2d, 2d+1.
+                                fill(2 * dx..2 * dx + 2, 2 * dy..2 * dy + 2, fg, 0.25);
+                            }
+                        }
+                    }
+                }
+                '\u{2800}' => {}
+                _ => {
+                    // Image block x 2..6, y 5..11: grid x 1..3 fully; grid y 3, 4 fully,
+                    // 2 and 5 half.
+                    fill(1..3, 3..5, fg, 1.0);
+                    fill(1..3, 2..3, fg, 0.5);
+                    fill(1..3, 5..6, fg, 0.5);
+                }
+            }
+        }
     }
-    let (mut s, mut q) = (0.0, 0.0);
-    for c in shown {
-        let l = c.map_or(0.0, luma);
-        s += l;
-        q += l * l;
+    (gw, grid)
+}
+
+/// The GEN-R21 measures of a [`clean_grid`] `w` wide.
+pub fn clean_of(w: usize, grid: &[[f64; 3]]) -> Clean {
+    let n = grid.len();
+    if n == 0 || w == 0 {
+        return Clean::default();
     }
-    let (s, q) = (s / n as f64, q / n as f64);
-    (q - s * s).max(0.0).sqrt()
+    let h = n / w;
+    let lit: Vec<bool> = grid
+        .iter()
+        .map(|p| p[0].max(p[1]).max(p[2]) > f64::from(DARK_MAX))
+        .collect();
+    let mut chroma: Vec<f64> = Vec::new();
+    let mut last: Option<([f64; 3], f64)> = None;
+    for (p, _) in grid.iter().zip(&lit).filter(|(_, l)| **l) {
+        // Runs of one colour are the common case: reuse the last conversion.
+        let c = match last {
+            Some((q, c)) if q == *p => c,
+            _ => oklch_chroma(*p),
+        };
+        last = Some((*p, c));
+        chroma.push(c);
+    }
+    let lit_n = chroma.len();
+    let mut boundary = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            let i = y * w + x;
+            if !lit[i] {
+                continue;
+            }
+            let interior = x > 0
+                && x + 1 < w
+                && y > 0
+                && y + 1 < h
+                && lit[i - 1]
+                && lit[i + 1]
+                && lit[i - w]
+                && lit[i + w];
+            if !interior {
+                boundary += 1;
+            }
+        }
+    }
+    let mass = chroma.iter().sum::<f64>() / n as f64;
+    let p90 = if lit_n > 50 {
+        // numpy's default percentile: linear interpolation between order statistics.
+        chroma.sort_unstable_by(f64::total_cmp);
+        let pos = 0.9 * (lit_n - 1) as f64;
+        let (i, t) = (pos.floor() as usize, pos - pos.floor());
+        let hi = chroma[(i + 1).min(lit_n - 1)];
+        chroma[i] + (hi - chroma[i]) * t
+    } else {
+        0.0
+    };
+    Clean {
+        coverage: lit_n as f64 / n as f64,
+        chroma_mass: mass,
+        edge_weight: lit_n as f64 / boundary.max(1) as f64,
+        chroma_p90: p90,
+    }
+}
+
+/// GEN-R21 measures of a painted frame.
+pub fn clean(buf: &Buffer) -> Clean {
+    let (w, grid) = clean_grid(buf);
+    clean_of(w, &grid)
 }
 
 /// All art metrics of a painted frame (RND-R13).
@@ -278,8 +417,7 @@ pub fn art_metrics(buf: &Buffer) -> ArtMetrics {
         blockiness_2x2: blockiness_n(w, &px, 2),
         darkness,
         mean_luma,
-        colourfulness: colourfulness(grid.iter().map(|p| p.shown)),
-        contrast: contrast(grid.iter().map(|p| p.shown)),
+        clean: clean(buf),
     }
 }
 
@@ -376,28 +514,88 @@ mod tests {
     }
 
     #[test]
-    fn gen_r21_colourfulness_is_zero_for_grey_and_grows_with_chroma() {
-        let greys = [Some(GREY), Some(Rgb(200, 200, 200)), None];
-        assert_eq!(colourfulness(greys.into_iter()), 0.0);
-        // Black pixels are ignored: they would only dilute the mean chroma.
-        let red = [Some(Rgb(200, 0, 0)); 4];
-        let red_on_black = [Some(Rgb(200, 0, 0)), Some(Rgb(0, 0, 0)), None];
-        let (a, b) = (
-            colourfulness(red.into_iter()),
-            colourfulness(red_on_black.into_iter()),
-        );
-        assert!((a - b).abs() < 1e-9);
-        // Uniform red: σ = 0, μ_rg = 200, μ_yb = 100.
-        assert!((a - 0.3 * 200f64.hypot(100.0)).abs() < 1e-9);
-        let mixed = [Some(Rgb(200, 0, 0)), Some(Rgb(0, 0, 200))];
-        assert!(colourfulness(mixed.into_iter()) > a, "two hues beat one");
+    fn gen_r21_chroma_is_zero_for_grey_and_matches_oklab_references() {
+        assert!(oklch_chroma([120.0; 3]) < 1e-6 && oklch_chroma([255.0; 3]) < 1e-6);
+        // OKLab reference values: sRGB red C ≈ 0.2577, blue ≈ 0.3132.
+        assert!((oklch_chroma([255.0, 0.0, 0.0]) - 0.2577).abs() < 1e-3);
+        assert!((oklch_chroma([0.0, 0.0, 255.0]) - 0.3132).abs() < 1e-3);
+    }
+
+    /// A `w × h` clean grid of `bg` with the given lit pixels in `fg`.
+    fn clean_with(w: usize, h: usize, fg: [f64; 3], lit: impl Fn(usize, usize) -> bool) -> Clean {
+        let grid: Vec<[f64; 3]> = (0..w * h)
+            .map(|i| if lit(i % w, i / w) { fg } else { TERM_BG })
+            .collect();
+        clean_of(w, &grid)
     }
 
     #[test]
-    fn gen_r21_contrast_is_the_luma_standard_deviation() {
-        assert_eq!(contrast([Some(GREY); 6].into_iter()), 0.0);
-        let half = [Some(Rgb(255, 255, 255)), None];
-        assert!((contrast(half.into_iter()) - 0.5).abs() < 1e-9);
+    fn gen_r21_thin_lines_weigh_one_and_blobs_weigh_their_half_width() {
+        let red = [200.0, 30.0, 30.0];
+        let line = clean_with(40, 40, red, |x, y| y == 20 && x > 2);
+        assert!((line.edge_weight - 1.0).abs() < 1e-12);
+        assert!((line.coverage - 37.0 / 1600.0).abs() < 1e-12);
+        let blob = clean_with(40, 40, red, |x, y| {
+            (5..35).contains(&x) && (5..35).contains(&y)
+        });
+        // 30×30 square: 900 lit, 116 on the boundary.
+        assert!((blob.edge_weight - 900.0 / 116.0).abs() < 1e-9);
+        assert!(
+            blob.chroma_mass > line.chroma_mass * 20.0,
+            "mass grows with area"
+        );
+        assert!(
+            blob.chroma_p90 > 0.15 && line.chroma_p90 == 0.0,
+            "37 lit: no percentile"
+        );
+        let empty = clean_with(10, 10, red, |_, _| false);
+        assert_eq!(
+            empty,
+            Clean {
+                edge_weight: 0.0,
+                ..Clean::default()
+            }
+        );
+    }
+
+    #[test]
+    fn gen_r21_neon_cap_needs_more_than_fifty_lit_pixels() {
+        let few = clean_with(20, 20, [255.0, 0.0, 255.0], |x, y| y == 0 && x < 50);
+        assert_eq!(few.chroma_p90, 0.0, "20 lit pixels: no percentile");
+        let many = clean_with(100, 2, [255.0, 0.0, 255.0], |_, y| y == 0);
+        assert!(
+            many.chroma_p90 > NEON_CAP,
+            "magenta is neon: {}",
+            many.chroma_p90
+        );
+    }
+
+    #[test]
+    fn gen_r21_clean_grid_mirrors_the_preview() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 3, 2));
+        buf[(0, 0)].set_char('▀').set_fg(Color::Rgb(200, 0, 0));
+        buf[(1, 0)].set_char('⠁').set_fg(Color::Rgb(255, 255, 255)); // dot 1: top left
+        buf[(2, 0)].set_char('x').set_fg(Color::Rgb(100, 100, 100));
+        buf[(0, 1)].set_char('T').set_fg(Color::Rgb(255, 255, 255)); // title row: dropped
+        let (w, g) = clean_grid(&buf);
+        assert_eq!((w, g.len()), (12, 12 * 8));
+        assert_eq!(g[0], [200.0, 0.0, 0.0]);
+        assert_eq!(
+            g[4 * 12],
+            TERM_BG,
+            "bottom half of ▀ is the default background"
+        );
+        let dot = g[4];
+        assert!(
+            (dot[0] - (255.0 + 3.0 * 12.0) / 4.0).abs() < 1e-9,
+            "a quarter-covered dot"
+        );
+        assert_eq!(g[12 + 5], dot, "the dot spans 2×2 grid pixels");
+        assert_eq!(g[2 * 12 + 4], TERM_BG);
+        assert_eq!(g[3 * 12 + 9], [100.0; 3], "glyph mark");
+        let c = clean_of(w, &g);
+        // Lit: 16 red + 4 dot pixels (73 > 28) + 4 full mark + 4 half mark (56 > 28).
+        assert!((c.coverage - 28.0 / 96.0).abs() < 1e-12, "{}", c.coverage);
     }
 
     #[test]
@@ -443,6 +641,10 @@ mod tests {
         let m = art_metrics(&buf);
         assert_eq!(m.blockiness, 0.0);
         assert_eq!(m.darkness, 1.0 / 8.0, "only the empty top of the ▄ cell");
-        assert!(m.colourfulness > 0.0 && m.contrast > 0.0);
+        assert_eq!(
+            m.clean,
+            Clean::default(),
+            "a one-row frame is all title row"
+        );
     }
 }
