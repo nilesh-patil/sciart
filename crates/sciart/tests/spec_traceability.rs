@@ -19,10 +19,6 @@ const MANUAL: &[(&str, &str)] = &[
         "release-mode timing budget: `pixi run rs-bench` (criterion); debug-mode tests cannot measure it reliably",
     ),
     (
-        "GEN-R19",
-        "release-mode resize timing: `pixi run rs-worst --size 500x150` reports resize ms; debug-mode tests cannot measure it reliably",
-    ),
-    (
         "TEST-R2",
         "process: snapshot diffs are reviewed by a human (`cargo insta review`)",
     ),
