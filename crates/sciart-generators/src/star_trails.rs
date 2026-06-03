@@ -85,18 +85,18 @@ const CLASSES: [(f64, f64, f64); 5] = [
 ];
 /// Colour saturation, as in a processed photograph: temperatures are pushed away from
 /// the 6500 K white point by this power, and clamped onto the drawable range.
-const SATURATE: f64 = 1.7;
+const SATURATE: f64 = 1.15;
 const KELVIN_RANGE: (f64, f64) = (2700.0, 30_000.0);
-/// Sky levels: the night sky's floor (the ramp's darkest drawable
-/// level, a hair above black) and the extra skyglow at the horizon with its e-folding
-/// height (deg): enough light for the treeline to stand out as a silhouette. Every sky
-/// pixel is drawn, so the glow ramps smoothly down to the floor with no dithered edge.
-const SKY_FLOOR: f64 = 9.0;
-const GLOW_LEVEL: f64 = 44.0;
-const GLOW_DEG: f64 = 10.0;
-/// The night sky's ramp: blue-black overhead, a deep blue skyglow toward the horizon (and
-/// the faint trails' haze added in the same ramp, so it lightens without a hue edge).
-const SKY_RAMP: Ramp = Ramp::Cobalt;
+/// Sky levels (ADR-0017): the night sky is black; `SKY_FLOOR` only marks a pixel as sky
+/// (0 is land). A barely-lit skyglow sits on the horizon (`GLOW_LEVEL`, e-folding over
+/// `GLOW_DEG`), just enough for the treeline to show as a silhouette.
+const SKY_FLOOR: f64 = 1.0;
+const GLOW_LEVEL: f64 = 22.0;
+const GLOW_DEG: f64 = 2.5;
+/// The sky's and the faint trails' haze ramp: a neutral grey on black, and the level
+/// under which a sky pixel is drawn black.
+const SKY_RAMP: Ramp = Ramp::Starlight;
+const SKY_BLACK: f64 = 12.0;
 
 /// The Earth's rotation angle after `t` seconds of the time-lapse.
 pub(crate) fn rotation(t: f64) -> f64 {
@@ -266,7 +266,11 @@ impl StarTrails {
                 b => {
                     let t = f64::from(tone.level(haze.get(i).copied().unwrap_or(0.0)));
                     let l = f64::from(b) + FAINT_SHARE * t * keep;
-                    Ink::new(Role::Ramp(SKY_RAMP), ink::level(l))
+                    if l < SKY_BLACK {
+                        Ink::BLANK
+                    } else {
+                        Ink::new(Role::Ramp(SKY_RAMP), ink::level(l))
+                    }
                 }
             }
         });
@@ -623,14 +627,14 @@ mod tests {
     }
 
     #[test]
-    fn trl_a6_blue_black_sky_brightening_to_the_horizon_and_no_trail_over_trees() {
+    fn trl_a6_black_sky_with_a_barely_lit_horizon_and_no_trail_over_trees() {
         let size = Size::new(120, 40);
         let (mut g, mut ctx) = built(size);
         for _ in 0..1800 {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
         }
-        // The sky: one blue ramp, darkest at the top, brightest just above the land.
+        // The sky: black overhead, a barely-lit glow just above the land (ADR-0017).
         let w = usize::from(g.sky.pixel_size().width());
         let col = w / 2;
         let levels: Vec<u8> = g.base.iter().skip(col).step_by(w).copied().collect();
@@ -641,9 +645,13 @@ mod tests {
             .take_while(|&b| b > 0)
             .last()
             .unwrap_or(0);
-        assert!(top <= 16 && low >= top + 20, "{top} → {low}");
+        assert!(top <= 2 && low > top && low <= 24, "{top} → {low}");
         let top_ink = g.sky.get(col as i32, 0).unwrap_or(Ink::BLANK);
-        assert_eq!(top_ink.role, Role::Ramp(SKY_RAMP));
+        // Black, or a faint trail's grey haze.
+        assert!(
+            top_ink == Ink::BLANK || top_ink.role == Role::Ramp(SKY_RAMP),
+            "{top_ink:?}"
+        );
         // No braille trail cell where both of its pixels are land.
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);

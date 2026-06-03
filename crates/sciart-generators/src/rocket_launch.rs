@@ -1,4 +1,4 @@
-//! A two-stage launch from the pad to the edge of space (SPEC-002 `rocket_launch`).
+//! A two-stage night launch from the pad to the edge of space (SPEC-002 `rocket_launch`).
 //!
 //! The vehicle is Falcon 9–class (approximate public figures): a 2-D point mass over a
 //! flat Earth with inverse-square gravity and the centrifugal relief of horizontal speed,
@@ -9,19 +9,19 @@
 //! RK4; the scene replays it on a time-lapse clock (1× on the pad, up to ~8× in the
 //! climb), so every frame is a lookup.
 //!
-//! The camera pulls back with altitude so the whole arc stays in frame. The sky darkens
-//! with the air above and pales toward the horizon (ROC-A5); the plume is a white-hot
-//! flame that widens as the air thins and shows shock diamonds only low down, and the
-//! smoke trail spreads and thins as it ages (ROC-A6); a Δv bar splits the engine's work
-//! into speed gained, gravity loss, drag and steering losses (ROC-A7). Smoke and pad steam
-//! are a tone-mapped pixel-resolution buffer blended into the sky [`Pixels`]; everything
-//! is rasterised in `update`. Text sits on dark chips, legible over any sky (ROC-A9).
+//! The camera pulls back with altitude so the whole arc stays in frame. The look is the
+//! M11 night launch (ADR-0017): a black sky with sparse stars, the horizon a 1-px dim
+//! line; the vehicle a thin pale-grey braille silhouette; the plume its `Blackbody` core
+//! only, widening as the air thins, with white-hot shock diamonds low down (the accent);
+//! the smoke trail and pad steam sparse dim braille that spreads and thins as it ages
+//! (ROC-A5, ROC-A6). The Δv ledger (ROC-A7) is kept in the model. Telemetry is dim grey
+//! text on row 0 (ROC-A9).
 
 use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use rand::Rng;
-use sciart_core::ink::{self, blackbody, ramp};
+use sciart_core::ink::{self, blackbody};
 use sciart_core::ode::rk4_step;
 use sciart_core::particles::gaussian2;
 use sciart_core::prelude::*;
@@ -141,9 +141,13 @@ pub(crate) const H: usize = 1;
 pub(crate) const VX: usize = 2;
 pub(crate) const VH: usize = 3;
 pub(crate) const M: usize = 4;
+#[cfg(test)]
 pub(crate) const IDEAL: usize = 5;
+#[cfg(test)]
 pub(crate) const GRAV: usize = 6;
+#[cfg(test)]
 pub(crate) const DRAG: usize = 7;
+#[cfg(test)]
 pub(crate) const STEER: usize = 8;
 pub(crate) type State = [f64; 9];
 
@@ -320,13 +324,6 @@ pub(crate) fn met_at(t: f64) -> f64 {
 // Look: sky, plume, smoke (ROC-A5, ROC-A6).
 // ---------------------------------------------------------------------------------------
 
-/// Sky brightness (Ice ramp value) at altitude `h`: the thinner the air above, the less
-/// blue it scatters. Art-directed: a `√p` fall (single scattering would go roughly as `p`)
-/// keeps the blue in frame longer, black by ~60 km.
-pub(crate) fn sky_level(h: f64) -> f64 {
-    0.60 * pressure_ratio(h).sqrt()
-}
-
 /// Plume half-width over the nozzle radius at ambient pressure ratio `p`: pressure-matched
 /// at sea level, then ballooning as the ambient pressure falls (under-expansion).
 pub(crate) fn plume_width(p: f64) -> f64 {
@@ -389,42 +386,44 @@ const STEAM_RATE: f64 = 90.0;
 // Scene.
 // ---------------------------------------------------------------------------------------
 
-/// The closest view spans this much altitude (m): pad, tower and a 70 m vehicle.
+/// The closest view spans this much altitude (m): the pad and a 70 m vehicle.
 const VIEW_MIN: f64 = 150.0;
-/// Day-sky gradient over the frame (ROC-A5): the level is `sky_level(h)` times
-/// `SKY_ZENITH + SKY_HORIZON·exp(−rise / SKY_FALL)`, `rise` the height above the horizon as a
-/// share of the frame: a deep-blue zenith paling to near-white at the horizon.
-const SKY_ZENITH: f64 = 0.5;
-const SKY_HORIZON: f64 = 0.95;
-const SKY_FALL: f64 = 0.3;
-/// The Sun (ROC-A10): its place on screen as shares of the pixel height (x, y), its
-/// radius and glare radius in the same units, and the glare's peak added to the haze.
-const SUN_AT: (f64, f64) = (0.42, 0.34);
-const SUN_R: f64 = 0.035;
-
-/// The Sun's centre in pixels for a view `rows` pixels tall: `SUN_AT`, snapped to a pixel
-/// centre so the disc is symmetric (ROC-A10).
-fn sun_centre(rows: f64) -> (f64, f64) {
-    (
-        (SUN_AT.0 * rows).floor() + 0.5,
-        (SUN_AT.1 * rows).floor() + 0.5,
-    )
-}
-const SUN_GLOW_R: f64 = 0.22;
-const SUN_GLARE: f64 = 0.55;
 const VEHICLE_M: f64 = 70.0;
+/// One background star per this many cells: a sparse night sky.
+const CELLS_PER_STAR: usize = 90;
+/// The horizon (ROC-A5): a 1-px dim line where the ground meets the black sky, the pad a
+/// brighter segment on it (half-width, m); the ground below is black (ADR-0017).
+const HORIZON: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 42);
+const PAD: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 90);
+const PAD_HALF: f64 = 15.0;
+/// The vehicle and its dark interstage band as solid pale pixels, the spent stage a
+/// dimmer sliver, and the launch tower a 1-px dim grey line (ROC-A6).
+const BODY: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 235);
+const BAND: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 60);
+const SPENT: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 150);
+const TOWER: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 70);
 /// Launch tower: x offset from the pad centre and height (m).
 const TOWER_X: f64 = -24.0;
 const TOWER_H: f64 = 85.0;
-/// Coastline, downrange of the pad (m).
-const COAST: f64 = 1_800.0;
-/// One background star per this many cells (seen only once the sky is dark).
-const CELLS_PER_STAR: usize = 45;
-/// Δv bar size (cells) and the smallest canvas that shows it.
-const BAR_W: i32 = 30;
-const BAR_MIN_W: u16 = 100;
+/// Smoke and steam dots: `Starlight` level for thin and for dense smoke, and the share of
+/// a dense smoke pixel's four braille dots that are lit.
+const SMOKE_LEVEL: (f64, f64) = (32.0, 80.0);
+const SMOKE_FILL: f64 = 0.35;
+/// Flame temperature (K) where the core fades and at the nozzle on its axis; the shock
+/// diamonds are white-hot, the scene's one accent.
+const FLAME_K: (f64, f64) = (2600.0, 5200.0);
+const DIAMOND_K: f64 = 6000.0;
+/// Flame heat below which the gas is left dark: the plume is drawn as its core only.
+const FLAME_CUT: f64 = 0.3;
+/// The plume's core in air: its first share of the length, at most this many pixels
+/// either side of the axis; past it, gas dots.
+const AIR_CORE: f64 = 0.45;
+const CORE_HALF: f64 = 0.3;
+/// Telemetry and callouts: dim grey.
+const TEXT: Ink = Ink::new(Role::Text, 100);
 
 /// Total ideal Δv of the stack (m/s): both stages' rocket equations, at vacuum Isp.
+#[cfg(test)]
 fn dv_budget() -> f64 {
     ISP1_VAC * G0 * (M_LIFTOFF / (M_LIFTOFF - PROP1)).ln()
         + ISP2 * G0 * (M_UPPER / (M_UPPER - PROP2)).ln()
@@ -459,27 +458,34 @@ impl Camera {
     fn world_x(&self, px: f64) -> f64 {
         self.x0 + px / self.k
     }
-    fn world_h(&self, py: f64) -> f64 {
-        self.top - py / self.k
-    }
+}
+
+/// The horizon's pixel row in column `px` (the pixel holding the ground line, which
+/// curves away with the Earth) and its ink, the pad brighter; `None` off the frame.
+fn horizon(cam: &Camera, px: i32) -> Option<(i32, Ink)> {
+    let x = cam.world_x(f64::from(px) + 0.5);
+    let ground = cam.px(x, -x * x / (2.0 * RE)).1;
+    let row = ground.floor();
+    let ink = if x.abs() < PAD_HALF { PAD } else { HORIZON };
+    (row >= 0.0 && row < cam.rows).then_some((row as i32, ink))
 }
 
 #[derive(Debug)]
 pub struct RocketLaunch {
     ascent: Ascent,
     timeline: Timeline,
-    budget: f64,
     t: f64,
     size: Size,
-    /// This frame's camera, kept for the ASCII fallback.
+    /// This frame's camera.
     cam: Camera,
+    /// Flame and horizon, as half-block pixels.
     px: Pixels,
-    /// Smoke and steam at pixel resolution, re-deposited every frame. A local buffer, not
-    /// a `raster::Glow`: each puff is a disc of its own radius (`Glow::splat` takes one
-    /// fixed kernel), and the result is blended with the pixel under it, not written by
-    /// `Glow::to_pixels`.
+    /// Smoke and steam density at pixel resolution, re-deposited every frame: each puff
+    /// is a disc of its own radius (`Glow::splat` takes one fixed kernel). Drawn as
+    /// sparse braille dots.
     smoke: Vec<f32>,
     tone: Tone,
+    /// Vehicle, spent stage, vacuum gas, smoke and stars, as braille.
     dots: Dots,
     stars: Vec<(i32, i32, u8)>,
     steam: ParticlePool<Puff>,
@@ -502,7 +508,6 @@ impl RocketLaunch {
                 ("staging", STAGING),
                 ("upper", UPPER),
             ]),
-            budget: dv_budget(),
             t: 0.0,
             size: Size::new(1, 1),
             cam: Camera {
@@ -559,19 +564,42 @@ impl RocketLaunch {
         let met = self.met();
         let s = self.ascent.at(met);
         let cam = self.camera(s.y[X], s.y[H]);
-        let (pw, ph) = {
-            let p = self.px.pixel_size();
-            (i32::from(p.width()), i32::from(p.height()))
-        };
-        // Sky and ground, pixel by pixel.
+        let pw = i32::from(self.px.pixel_size().width());
         self.cam = cam;
-        for py in 0..ph {
-            for px in 0..pw {
-                self.px.set(px, py, backdrop(&cam, px, py).0);
+        self.px.clear();
+        self.dots.clear();
+        for x in 0..pw {
+            if let Some((y, ink)) = horizon(&cam, x) {
+                self.px.set(x, y, ink);
             }
         }
-        self.draw_tower(&cam);
-        // Smoke trail and pad steam, tone-mapped and composited over the sky.
+        // The tower: a 1-px line beside the pad while it is in frame.
+        let (tx, ty) = cam.px(TOWER_X, TOWER_H);
+        let (_, t0) = cam.px(TOWER_X, 0.0);
+        let tx = tx.floor() as i32;
+        for y in ty.floor() as i32..t0.floor() as i32 {
+            self.px.set(tx, y, TOWER);
+        }
+        self.draw_vehicle(&cam, met, &s);
+        // The spent stage, a dim sliver falling away, drawn only once it is 3 px clear of
+        // the upper stage's flame, its gas and its body: until then it is lost in the plume
+        // (ROC-A6).
+        if let Some([bx, bh]) = self.ascent.booster_at(met) {
+            let (x, y) = cam.px(bx, bh);
+            let len = (self.vehicle_px(&cam) * 0.6).max(2.0);
+            let tumble = (met - SEP) * 0.9;
+            let hot = |x: i32, y: i32| self.px.get(x, y).is_some_and(flame);
+            let clear = stroke(x, y, tumble, len)
+                .all(|(x, y)| (-3..=3).all(|dy| (-3..=3).all(|dx| !hot(x + dx, y + dy))));
+            if clear {
+                for (x, y) in stroke(x, y, tumble, len) {
+                    self.px.set(x, y, SPENT);
+                }
+            }
+        }
+        // Smoke trail and pad steam: sparse dim dots over the dark sky, each pixel's four
+        // dots lit by a fixed hash against its density, so the texture holds still while
+        // it spreads and fades.
         self.smoke.fill(0.0);
         self.deposit_trail(&cam, met);
         self.deposit_steam(&cam);
@@ -581,87 +609,41 @@ impl RocketLaunch {
             if level == 0 {
                 continue;
             }
-            let (px, py) = ((i % width) as i32, (i / width) as i32);
-            let alpha = f64::from(level) / 255.0;
-            let Some(under) = self.px.get(px, py) else {
-                continue;
-            };
-            // Smoke is a pale veil: over the sky (one ramp) it lifts the level toward
-            // white by its density; over black space it is a faint glow of its density
-            // (black is the ramp's own bottom); over the ground, which it cannot mix
-            // with, it covers a share of the pixels given by its density.
-            let smoke = match under.role {
-                Role::Ramp(Ramp::Ice) => {
-                    let sky = f64::from(under.level) / 255.0;
-                    Some(ramp(Ramp::Ice, sky + (0.95 - sky).max(0.0) * 0.9 * alpha))
-                }
-                Role::Background => (alpha > 0.05).then(|| ramp(Ramp::Ice, 0.06 + 0.45 * alpha)),
-                _ => (alpha > noise(px, py)).then(|| ramp(Ramp::Ice, 0.35 + 0.55 * alpha)),
-            };
-            if let Some(ink) = smoke {
-                self.px.set(px, py, ink);
-            }
-        }
-        self.dots.clear();
-        self.draw_vehicle(&cam, met, &s);
-        // The spent stage, a dim sliver falling away, drawn only once it is 3 px clear of
-        // the upper stage's flame and its gas: until then it is lost in the plume (ROC-A6).
-        if let Some([bx, bh]) = self.ascent.booster_at(met) {
-            let (x, y) = cam.px(bx, bh);
-            let len = (self.vehicle_px(&cam) * 0.6).max(2.0);
-            let tumble = (met - SEP) * 0.9;
-            let flame = |i: Ink| matches!(i.role, Role::Blackbody | Role::Ramp(Ramp::Ember));
-            let hot = |x: i32, y: i32| {
-                self.px.get(x, y).is_some_and(flame)
-                    || self.dots.cell_mask(x, y / 2).is_some_and(|m| m != 0)
-            };
-            let clear = stroke(x, y, tumble, len)
-                .all(|(x, y)| (-3..=3).all(|dy| (-3..=3).all(|dx| !hot(x + dx, y + dy))));
-            if clear {
-                for (x, y) in stroke(x, y, tumble, len) {
-                    self.px.set(x, y, Ink::new(Role::Structure, 120));
-                }
-            }
-        }
-        // Stars show only where the sky has gone black, and not in the plume's gas.
-        for &(x, y, level) in &self.stars {
-            let (cx, cy) = (x / Dots::CELL_W, y / 2);
-            let gas = self
-                .dots
-                .cell_mask(cx, y / Dots::CELL_H)
-                .is_some_and(|m| m != 0);
-            if !gas
-                && self
-                    .px
-                    .get(cx, cy)
-                    .is_some_and(|i| i.role == Role::Background)
+            let (x, y) = ((i % width) as i32, (i / width) as i32);
+            // Only in cells whose two pixels are both dark, so a dot never replaces a
+            // flame or body half block.
+            let cy = y - y.rem_euclid(2);
+            if (cy..cy + 2).any(|py| self.px.get(x, py) != Some(Ink::BLANK))
+                || self.below_horizon(x, y)
             {
+                continue;
+            }
+            let alpha = f64::from(level) / 255.0;
+            let ink = Ink::new(
+                Role::Ramp(Ramp::Starlight),
+                ink::level(ease::lerp(SMOKE_LEVEL.0, SMOKE_LEVEL.1, alpha)),
+            );
+            for k in 0..4 {
+                let (dx, dy) = (2 * x + (k & 1), 2 * y + (k >> 1));
+                if hash01(0x5307 ^ cell_key(dx, dy)) < SMOKE_FILL * alpha {
+                    self.dots.set(dx, dy, ink);
+                }
+            }
+        }
+        // Stars: in the sky only, and not in a cell something else already uses.
+        for &(x, y, level) in &self.stars {
+            let (cx, cy) = (x / Dots::CELL_W, y / Dots::CELL_H);
+            let busy = self.dots.cell_mask(cx, cy).is_some_and(|m| m != 0)
+                || (2 * cy..2 * cy + 2).any(|py| self.px.get(cx, py) != Some(Ink::BLANK));
+            if !busy && !self.below_horizon(cx, 2 * cy + 1) {
                 self.dots.set(x, y, Ink::new(Role::Star, level));
             }
         }
     }
 
-    /// Lattice tower beside the pad, to scale.
-    fn draw_tower(&mut self, cam: &Camera) {
-        let (x0, y0) = cam.px(TOWER_X - 4.0, TOWER_H);
-        let (x1, y1) = cam.px(TOWER_X + 4.0, 0.0);
-        if x1 - x0 < 0.6 {
-            return;
-        }
-        let steel = Ink::new(Role::Structure, 120);
-        for py in y0.floor() as i32..y1.ceil() as i32 {
-            for px in x0.floor() as i32..x1.ceil() as i32 {
-                let edge = px == x0.floor() as i32 || px + 1 == x1.ceil() as i32;
-                // Cross-bracing: a diagonal every few metres.
-                let h = cam.world_h(f64::from(py));
-                let x = cam.world_x(f64::from(px));
-                let brace =
-                    ((h + (x - TOWER_X) * 1.5).rem_euclid(8.0)) < 8.0 / (cam.k * 8.0).max(1.0);
-                if edge || brace {
-                    self.px.set(px, py, steel);
-                }
-            }
-        }
+    /// Whether pixel `(x, y)` is on or below the horizon line.
+    fn below_horizon(&self, x: i32, y: i32) -> bool {
+        horizon(&self.cam, x).is_some_and(|(row, _)| y >= row)
     }
 
     /// Deposit the smoke trail behind the rocket: puffs every ~¾ pixel of screen path,
@@ -688,7 +670,7 @@ impl RocketLaunch {
             prev = Some((x, y));
             // Low smoke lingers, high smoke is thin and fades fast; the weight is spread
             // over the puff's area, so it thins as it grows. Above ~45 km (p < 1 %) the
-            // exhaust leaves no trail worth drawing: it would be a dim bar over black.
+            // exhaust leaves no trail worth drawing.
             let fade =
                 (-age / (40.0 + 160.0 * p)).exp() * (0.25 + 0.75 * p) * ease::smoothstep(p / 0.01);
             puff(&mut self.smoke, width, x, y, r, fade as f32);
@@ -705,7 +687,8 @@ impl RocketLaunch {
         }
     }
 
-    /// Plume, then the vehicle body, at its pitch.
+    /// Plume, then the vehicle body at its pitch: a braille silhouette one to three dots
+    /// (at most a pixel and a half) across, pale grey, with a dim interstage band.
     fn draw_vehicle(&mut self, cam: &Camera, met: f64, s: &Sample) {
         let th = pitch(met.max(0.0), s.y[VX], s.y[VH]);
         let (bx, by) = cam.px(s.y[X], s.y[H]);
@@ -721,6 +704,33 @@ impl RocketLaunch {
         } else {
             (bx, by)
         };
+        // Half-pixel steps along the axis: a solid body of half-block pixels, one or two
+        // across (ADR-0017 rule 6: the subject is crisp and bright).
+        let steps = (body * 2.0).ceil() as i32;
+        for i in 0..=steps {
+            let u = f64::from(i) / 2.0;
+            let f = u / body.max(1e-9);
+            // Nose cone over the top 8 %.
+            let w = if f > 0.92 {
+                width * (1.0 - f) / 0.08
+            } else {
+                width
+            };
+            let ink = if !upper && (0.60..0.66).contains(&f) {
+                BAND
+            } else {
+                BODY
+            };
+            let n = (w.round() as i32).clamp(1, 2);
+            for j in 0..n {
+                let v = f64::from(j) - (f64::from(n) - 1.0) / 2.0;
+                self.px.set(
+                    (bx + u * sn + v * cs).floor() as i32,
+                    (by - u * cs + v * sn).floor() as i32,
+                    ink,
+                );
+            }
+        }
         let (thrust, _) = engine(met, s.y[H]);
         let firing = thrust > 0.0 || (-IGNITION..0.0).contains(&met);
         if firing {
@@ -733,42 +743,13 @@ impl RocketLaunch {
             let vacuum = met >= SES;
             self.draw_plume(nozzle, if vacuum { body } else { len }, s.y[H], vacuum);
         }
-        let white = Ink::new(Role::Star, 235);
-        let band = Ink::new(Role::Dim, 60);
-        let steps = (body * 2.0).ceil() as i32;
-        for i in 0..=steps {
-            let u = f64::from(i) / 2.0;
-            let f = u / body.max(1e-9);
-            // Nose cone over the top 8 %, a dark interstage band on the full stack.
-            let w = if f > 0.92 {
-                width * (1.0 - f) / 0.08
-            } else {
-                width
-            };
-            let ink = if !upper && (0.60..0.66).contains(&f) {
-                band
-            } else {
-                white
-            };
-            let n = (w.ceil() as i32).max(1);
-            for j in 0..n {
-                let v = f64::from(j) - (f64::from(n) - 1.0) / 2.0;
-                self.px.set(
-                    (bx + u * sn + v * cs).floor() as i32,
-                    (by - u * cs + v * sn).floor() as i32,
-                    ink,
-                );
-            }
-        }
     }
 
-    /// The exhaust from `nozzle` (ROC-A6): a dark engine bell, then a flame white-hot along
-    /// its axis near the bell, cooling through yellow and orange into a deep Ember fringe
-    /// and widening as the air thins, with blackbody-white shock diamonds low down, in a
-    /// halo that pales the sky around it. On the pad it stops at the ground and splashes
-    /// sideways along it (the flame trench is off screen). The upper stage's vacuum plume
-    /// is a short opaque core and then thin gas, drawn as braille dots whose density
-    /// follows its heat, so the stars show through the fan.
+    /// The exhaust from `nozzle` (ROC-A6): its `Blackbody` core only, hottest along the
+    /// axis at the nozzle and cooling toward the tip and the edges, widening as the air
+    /// thins, with white-hot shock diamonds low down; on the pad it stops at the ground.
+    /// The upper stage's vacuum plume is a short core and then thin gas, drawn as braille
+    /// dots whose density follows its heat, so the stars show through the fan.
     fn draw_plume(&mut self, nozzle: Nozzle, len: f64, h: f64, vacuum: bool) {
         let Nozzle {
             x: bx,
@@ -792,136 +773,72 @@ impl RocketLaunch {
         };
         let frame = (self.flicker * 1e6) as u64;
         // Half-pixel steps along and across, so a tilted flame has no holes.
-        for i in 2..=(plen * 2.0).floor() as i32 {
+        for i in 1..=(plen * 2.0).floor() as i32 {
             let u = f64::from(i) / 2.0;
             // In [0, 1]: past the tip every weight below would change sign.
             let f = u / plen;
-            // At least three pixels across at the nozzle, whatever the body's width.
-            let half = (0.5 * width).max(1.0) * (1.0 + (spread - 1.0) * f.powf(0.6));
-            // In air, a halo ~1.5 px wide that shrinks down the flame.
-            let halo = if vacuum { 0.0 } else { 1.5 * (1.0 - f) };
+            let half = (0.5 * width).max(0.75) * (1.0 + (spread - 1.0) * f.powf(0.6));
             // Shock diamonds: short lozenges on the axis, a pixel or more inside the flame's
             // edge, tapering to a point at each end of their window.
             let lozenge = diamonds.map_or(0.0, |d| {
                 let k = (f / d).fract();
                 let dk = k.min(1.0 - k) / 0.18;
                 if f < 0.75 && dk < 1.0 {
-                    (half - 1.0) * (1.0 - dk)
+                    0.5 * (1.0 - dk)
                 } else {
                     0.0
                 }
             });
-            let n = (4.0 * (half + halo)).ceil() as i32;
+            let n = (4.0 * half).ceil() as i32;
             for j in -n / 2..=n / 2 {
                 let v = f64::from(j) / 2.0;
                 let (xf, yf) = at(u, v);
                 let (x, y) = (xf.floor() as i32, yf.floor() as i32);
                 let a = v.abs();
+                if a > half {
+                    continue;
+                }
+                // Flame that reaches the pad runs out along the row above it, both ways,
+                // as far as it would have gone down: it stops at the ground, a bright line
+                // across the pad at ignition and liftoff.
+                let pooled = y >= ground;
+                let (x, y) = if pooled {
+                    let run = 0.8 * f64::from(y - ground + 1);
+                    let side = if i % 2 == 0 { 1.0 } else { -1.0 };
+                    ((bx + side * run).floor() as i32, ground - 1)
+                } else {
+                    (x, y)
+                };
+                if pooled && self.px.get(x, y).is_some_and(flame) {
+                    continue;
+                }
                 let edge = a / half;
                 let heat = (1.0 - f) * (1.0 - 0.5 * edge * edge);
-                if y >= ground {
-                    if a <= half && heat >= 0.08 {
-                        let from = xf - bx + v.signum() * (0.5 * width + 2.0);
-                        self.splash(bx, from, y - ground, ground - 1, heat);
+                // Past its short core the plume is thin gas, in air as in vacuum: the core
+                // stays a narrow bright line, never a filled wedge (ADR-0017).
+                let core = if vacuum { VACUUM_CORE } else { AIR_CORE };
+                if !(f < core && a <= CORE_HALF.min(half)) {
+                    // Thin gas: a dot per sample by a chance that follows the heat.
+                    if heat >= 0.08 && !pooled {
+                        let (dx, dy) = ((2.0 * xf).floor() as i32, (2.0 * yf).floor() as i32);
+                        if hash01(frame ^ cell_key(dx, dy)) < 0.8 * heat.sqrt() {
+                            let k = ease::lerp(FLAME_K.0, FLAME_K.1, 0.3 * heat);
+                            self.dots.set(dx, dy, blackbody(k));
+                        }
                     }
                     continue;
                 }
-                let ink = if a > half {
-                    if halo <= 0.0 {
-                        continue;
-                    }
-                    let glow = (1.0 - f) * (1.0 - (a - half) / halo);
-                    match self.halo(x, y, glow) {
-                        Some(ink) => ink,
-                        None => continue,
-                    }
-                } else if heat < 0.08 {
-                    // Ragged, cooling edges: the faintest gas is left to the sky.
+                if heat < FLAME_CUT {
                     continue;
-                } else if f < 0.25 && a <= 0.35 * half {
-                    ramp(Ramp::Ember, 1.0)
-                } else if vacuum {
-                    if f < VACUUM_CORE && a <= 0.5 * half {
-                        ramp(Ramp::Ember, 0.7 + 0.3 * heat)
-                    } else {
-                        // Thin gas: a dot per sample by a chance that follows the heat.
-                        let (dx, dy) = ((2.0 * xf).floor() as i32, (2.0 * yf).floor() as i32);
-                        if hash01(frame ^ cell_key(dx, dy)) < 0.8 * heat.sqrt() {
-                            self.dots.set(dx, dy, ramp(Ramp::Ember, 0.5 + 0.45 * heat));
-                        }
-                        continue;
-                    }
-                } else if a < lozenge {
-                    blackbody(6000.0)
+                }
+                let ink = if a < lozenge {
+                    blackbody(DIAMOND_K)
                 } else {
-                    ramp(Ramp::Ember, 0.40 + 0.55 * heat)
+                    let hot = (heat - FLAME_CUT) / (1.0 - FLAME_CUT);
+                    blackbody(ease::lerp(FLAME_K.0, FLAME_K.1, hot))
                 };
                 self.px.set(x, y, ink);
             }
-        }
-        // The bell, over the flame's first pixel: a dark band between the white body and
-        // the white-hot core, so the two never merge.
-        let n = (width.ceil() as i32).max(1);
-        for u in [0.5, 1.0] {
-            for j in 0..n {
-                let (x, y) = at(u, f64::from(j) - f64::from(n - 1) / 2.0);
-                self.px
-                    .set(x.floor() as i32, y.floor() as i32, Ink::new(Role::Dim, 70));
-            }
-        }
-    }
-
-    /// Flame that reaches the ground `depth` pixels below its top row, `from` pixels off the
-    /// axis at column `axis` (already clear of the body), turned sideways onto `row`, the
-    /// sky row just above the ground: it runs out along the ground, white-hot where it
-    /// lands, cooling and curling up into the steam as it goes (ROC-A6).
-    fn splash(&mut self, axis: f64, from: f64, depth: i32, row: i32, heat: f64) {
-        let run = 0.6 * f64::from(depth);
-        let cool = heat * (1.0 - run / (run + 12.0));
-        if cool < 0.08 {
-            return;
-        }
-        let ink = if cool > 0.8 {
-            ramp(Ramp::Ember, 1.0)
-        } else {
-            ramp(Ramp::Ember, 0.40 + 0.55 * cool)
-        };
-        let side = if from < 0.0 { -1.0 } else { 1.0 };
-        let out = (axis + from + side * run).floor() as i32;
-        let row = row - (run / 5.0) as i32;
-        self.px.set(out, row, ink);
-        // Two pixels thick while it is hot, one as it thins out.
-        if cool > 0.35 {
-            self.px.set(out, row - 1, ink);
-        }
-    }
-
-    /// The flame's halo at pixel `(x, y)` with strength `glow` (≤ 1): the sky or smoke there
-    /// paled toward white, never below what it already is, so overlapping halo samples do
-    /// not add up; over black space a faint warm glow; `None` where it leaves the pixel.
-    fn halo(&self, x: i32, y: i32, glow: f64) -> Option<Ink> {
-        if glow <= 0.0 {
-            return None;
-        }
-        let under = self.px.get(x, y)?;
-        match under.role {
-            Role::Ramp(Ramp::Ice) => {
-                let (sky, _) = backdrop(&self.cam, x, y);
-                let base = if sky.role == under.role {
-                    sky.level
-                } else {
-                    under.level
-                };
-                let s = f64::from(base) / 255.0;
-                let lift = ramp(Ramp::Ice, s + (0.95 - s) * 0.6 * glow);
-                Some(if lift.level > under.level {
-                    lift
-                } else {
-                    under
-                })
-            }
-            Role::Background if glow > 0.2 => Some(ramp(Ramp::Ember, 0.15 + 0.3 * glow)),
-            _ => None,
         }
     }
 
@@ -973,82 +890,9 @@ impl RocketLaunch {
     }
 }
 
-/// The sky or ground behind pixel `(px, py)`, and whether it is sky (ROC-A5).
-///
-/// The sky's blue dims with the air above each pixel and pales toward the horizon, where
-/// the eye looks through more air (a Rayleigh-like haze, by the pixel's height above the
-/// ground line as a share of the frame). The ground curves away with the Earth: pad,
-/// scrub, beach and the Atlantic downrange. Over the sea the limb is anti-aliased (the edge
-/// pixel mixes sky and sea by its share of each) and the coast is dithered over a few
-/// pixels, so the curved horizon does not step.
-fn backdrop(cam: &Camera, px: i32, py: i32) -> (Ink, bool) {
-    let x = cam.world_x(f64::from(px) + 0.5);
-    let ground_h = -x * x / (2.0 * RE);
-    let ground_py = cam.px(x, ground_h).1;
-    // Share of this pixel below the ground line.
-    let cover = (f64::from(py) + 1.0 - ground_py).clamp(0.0, 1.0);
-    let sky = || {
-        let alt = cam.world_h(f64::from(py) + 0.5);
-        let rise = ((ground_py - f64::from(py) - 0.5) / cam.rows).max(0.0);
-        let haze = SKY_ZENITH + SKY_HORIZON * (-rise / SKY_FALL).exp();
-        // The Sun low in the east (ROC-A10): a white disc at a fixed place on screen (at
-        // infinity it does not move as the camera climbs) in a glare that brightens the
-        // blue round it, fading with the air as the sky does.
-        let (sx, sy) = sun_centre(cam.rows);
-        // A round disc: centred on a pixel centre, every pixel at least half covered
-        // (CORE-R95), at least 2 px in radius.
-        let r_px = (SUN_R * cam.rows).max(2.0);
-        if raster::disc_cover(px, py, (sx, sy), r_px) >= 0.5 {
-            return Ink::new(Role::Ramp(Ramp::Ice), 255);
-        }
-        let d = (f64::from(px) + 0.5 - sx).hypot(f64::from(py) + 0.5 - sy) / cam.rows;
-        let glare = SUN_GLARE * (-(d / SUN_GLOW_R).powi(2)).exp();
-        // A smooth ramp down to the last visible level (CORE-R66), held there solid over
-        // the next half of the fall, then black: the air ends on its faintest blue, with
-        // no speckle (ROC-A5).
-        let level = 255.0 * sky_level(alt) * (haze + glare);
-        if level >= ink::MIN_VISIBLE_LEVEL {
-            Ink::new(Role::Ramp(Ramp::Ice), ink::level(level))
-        } else if level > 0.5 * ink::MIN_VISIBLE_LEVEL {
-            Ink::new(Role::Ramp(Ramp::Ice), ink::level(ink::MIN_VISIBLE_LEVEL))
-        } else {
-            Ink::BLANK
-        }
-    };
-    if cover == 0.0 {
-        return (sky(), true);
-    }
-    let n = noise(px, py);
-    // The coast blends over ±3 pixels.
-    let sea = (x - COAST) * cam.k / 6.0 + 0.5 > n;
-    let ground = if sea {
-        ramp(Ramp::Ice, 0.22)
-    } else if (x - COAST + 30.0).abs() < 30.0 {
-        ramp(Ramp::Ember, 0.40)
-    } else if x.abs() < 45.0 && f64::from(py) - ground_py < 4.0 * cam.k {
-        Ink::new(Role::Structure, 150)
-    } else {
-        ramp(Ramp::Aurora, 0.14)
-    };
-    if cover == 1.0 {
-        return (ground, false);
-    }
-    // The limb pixel: the sea mixes with the sky in one ramp; land, which cannot, rounds.
-    match (sky(), ground.role) {
-        (s, Role::Ramp(Ramp::Ice)) if s.role == Role::Ramp(Ramp::Ice) => {
-            let (a, b) = (f64::from(s.level), f64::from(ground.level));
-            (ramp(Ramp::Ice, ease::lerp(a, b, cover) / 255.0), false)
-        }
-        (s, _) if cover < 0.5 => (s, true),
-        _ => (ground, false),
-    }
-}
-
-/// The top of the air, where the sky's `level` has fallen below the last visible one:
-/// A stable per-pixel threshold in [0, 1): white noise, without the regular rows of an
-/// ordered dither.
-fn noise(x: i32, y: i32) -> f64 {
-    hash01(cell_key(x, y))
+/// A flame pixel: the plume's `Blackbody` core.
+fn flame(i: Ink) -> bool {
+    i.role == Role::Blackbody
 }
 
 /// The pixels of a one-pixel bar `len` long from its base `(x, y)` along heading `th`
@@ -1061,7 +905,7 @@ fn stroke(x: f64, y: f64, th: f64, len: f64) -> impl Iterator<Item = (i32, i32)>
     })
 }
 
-/// A [`draw::label`] centred on row `y`: text on a dark chip.
+/// A [`draw::label`] centred on row `y`.
 fn label_centred(canvas: &mut Canvas, y: i32, s: &str, ink: Ink) {
     let x = (i32::from(canvas.size().width()) - s.chars().count() as i32) / 2;
     draw::label(canvas, x - 1, y, s, ink);
@@ -1099,7 +943,7 @@ impl Generator for RocketLaunch {
         self.smoke.clear();
         self.smoke.resize(2 * size.area(), 0.0);
         self.dots.resize(size);
-        self.tone = Tone::asinh(0.05, 1.2);
+        self.tone = Tone::asinh(0.15, 1.5);
         let dot = self.dots.dot_size();
         let n = size.area() / CELLS_PER_STAR;
         self.stars.clear();
@@ -1107,7 +951,7 @@ impl Generator for RocketLaunch {
             (
                 ctx.rng.random_range(0..i32::from(dot.width())),
                 ctx.rng.random_range(0..i32::from(dot.height())),
-                ctx.rng.random_range(40..170u8),
+                ctx.rng.random_range(40..130u8),
             )
         }));
         self.ready = true;
@@ -1152,30 +996,17 @@ impl Generator for RocketLaunch {
         if !self.ready {
             return;
         }
-        self.dots.blit(canvas);
-        self.px.blit(canvas, |x, y, top, bottom| {
-            // ASCII: the bare sky stays blank and the bare ground is `=`; only what stands
-            // in front of them (smoke, flame, vehicle, tower) gets a mark.
-            let (sky, is_sky) = backdrop(&self.cam, x, 2 * y + 1);
-            if bottom == sky && top == backdrop(&self.cam, x, 2 * y).0 {
-                return (!is_sky).then_some(('=', sky));
-            }
-            let ink = if bottom == sky || bottom.role == Role::Background {
-                top
-            } else {
-                bottom
-            };
+        // ASCII: the flame `#`, the vehicle and tower `|`, the horizon `_`.
+        self.px.blit(canvas, |_, _, top, bottom| {
+            let ink = raster::stronger(top, bottom);
             match ink.role {
                 Role::Background => None,
-                Role::Ramp(Ramp::Ice) => Some(('o', ink)),
                 Role::Blackbody => Some(('#', ink)),
-                Role::Star => Some(('|', ink)),
-                Role::Ramp(Ramp::Ember) => Some(('*', ink)),
-                _ => Some(('=', ink)),
+                _ if matches!(ink, BODY | BAND | TOWER | SPENT) => Some(('|', ink)),
+                _ => Some(('_', ink)),
             }
         });
-        // Text on dark chips (its cells keep no background), legible over any sky in
-        // every theme (ROC-A9).
+        self.dots.blit_over(canvas, &self.px);
         if self.size.height() >= 8 {
             self.draw_text(canvas);
         }
@@ -1198,19 +1029,18 @@ fn clock_secs(met: f64) -> u32 {
 }
 
 impl RocketLaunch {
-    /// Countdown, event callouts, telemetry and the Δv bar.
+    /// Countdown and event callouts, and the telemetry, in dim grey (ROC-A9).
     fn draw_text(&self, canvas: &mut Canvas) {
         let (w, h) = (i32::from(self.size.width()), i32::from(self.size.height()));
         let met = self.met();
         let s = self.ascent.at(met);
-        let ink = Ink::new(Role::Text, 235);
         let y = h / 5;
         if met < 0.0 {
             // T−3 … T−1 over the last seconds, the clock the whole way.
             let n = clock_secs(met);
             let mut buf = StackText::<8>::new();
             let _ = write!(buf, "T-{n}");
-            label_centred(canvas, y, buf.as_str(), ink);
+            label_centred(canvas, y, buf.as_str(), TEXT);
         } else {
             let callout = match met {
                 m if m < 2.5 => "LIFTOFF",
@@ -1221,14 +1051,11 @@ impl RocketLaunch {
                 _ => "",
             };
             if !callout.is_empty() && callout.len() as i32 + 4 <= w {
-                label_centred(canvas, y, callout, ink);
+                label_centred(canvas, y, callout, TEXT);
             }
         }
         if w >= 44 {
             self.telemetry(canvas, met, &s);
-        }
-        if self.size.width() >= BAR_MIN_W {
-            self.dv_bar(canvas, &s);
         }
     }
 
@@ -1253,46 +1080,7 @@ impl RocketLaunch {
             let _ = write!(buf, "  x{lapse:.0}");
         }
         if buf.len() + 2 <= usize::from(self.size.width()) {
-            draw::label(canvas, 0, 0, buf.as_str(), Ink::new(Role::Text, 220));
-        }
-    }
-
-    /// Top-right Δv bar: of the stack's ideal Δv, how much became speed, and how much was
-    /// paid to gravity, drag and steering (ROC-A7).
-    fn dv_bar(&self, canvas: &mut Canvas, s: &Sample) {
-        let w = i32::from(self.size.width());
-        let x0 = w - BAR_W - 2;
-        draw::label(canvas, x0 - 1, 1, "delta-v", Ink::new(Role::Text, 200));
-        let speed = s.y[IDEAL] - s.y[GRAV] - s.y[DRAG] - s.y[STEER];
-        let parts = [
-            (speed, ramp(Ramp::Ember, 0.8)),
-            (s.y[GRAV], ramp(Ramp::Plasma, 0.6)),
-            (s.y[DRAG], ramp(Ramp::Ice, 0.7)),
-            (s.y[STEER], ramp(Ramp::Aurora, 0.7)),
-        ];
-        let full = Glyph::new('█', '#');
-        let empty = Glyph::new('░', '.');
-        let mut x = 0;
-        let mut acc = 0.0;
-        for (v, ink) in parts {
-            acc += v.max(0.0);
-            let end = ((acc / self.budget) * f64::from(BAR_W))
-                .round()
-                .min(f64::from(BAR_W)) as i32;
-            while x < end {
-                canvas.put(x0 + x, 2, full, ink);
-                x += 1;
-            }
-        }
-        while x < BAR_W {
-            canvas.put(x0 + x, 2, empty, Ink::new(Role::Dim, 60));
-            x += 1;
-        }
-        // Legend, coloured like the bar.
-        let mut lx = x0;
-        for (name, (_, ink)) in ["speed", "gravity", "drag", "steer"].iter().zip(parts) {
-            draw::label(canvas, lx - 1, 3, name, ink);
-            lx += name.len() as i32 + 1;
+            draw::label(canvas, 0, 0, buf.as_str(), TEXT);
         }
     }
 }
@@ -1394,18 +1182,6 @@ mod tests {
         assert!((55.0..90.0).contains(&met), "max-Q at T+{met}");
         assert!((9e3..16e3).contains(&s.y[H]), "at {} km", s.y[H] / 1e3);
         assert!((20e3..45e3).contains(&s.q), "{} kPa", s.q / 1e3);
-    }
-
-    #[test]
-    fn roc_a5_sky_darkens_with_altitude_to_black() {
-        let mut prev = f64::INFINITY;
-        for i in 0..200 {
-            let v = sky_level(f64::from(i) * 500.0);
-            assert!(v < prev);
-            prev = v;
-        }
-        assert!(sky_level(0.0) > 0.5);
-        assert!(sky_level(60e3) < 0.03, "black by 60 km");
     }
 
     #[test]
@@ -1524,21 +1300,39 @@ mod tests {
         g
     }
 
+    /// Every pixel of `g`'s half-block layer with its ink.
+    fn pixels(g: &RocketLaunch) -> impl Iterator<Item = (i32, i32, Ink)> + '_ {
+        let size = g.px.pixel_size();
+        (0..i32::from(size.height())).flat_map(move |y| {
+            (0..i32::from(size.width())).map(move |x| (x, y, g.px.get(x, y).unwrap()))
+        })
+    }
+
     #[test]
-    fn roc_a5_the_day_sky_pales_toward_the_horizon() {
-        let g = scene_at(Size::new(120, 40), 2.0);
-        // Column 4: open sky from the top down to the ground.
-        let top = g.px.get(4, 0).unwrap();
-        let low = (0..80)
-            .map(|y| g.px.get(4, y).unwrap())
-            .take_while(|i| i.role == Role::Ramp(Ramp::Ice))
-            .last()
-            .unwrap();
-        assert_eq!(top.role, Role::Ramp(Ramp::Ice));
-        assert!(
-            low.level > top.level + 40,
-            "zenith {top:?}, horizon {low:?}"
-        );
+    fn roc_a5_the_night_sky_is_black_over_a_one_pixel_horizon() {
+        // ADR-0017: the sky and the ground are black; the only lit backdrop pixel in a
+        // column is the horizon line (the pad brighter on it).
+        for t in [
+            2.0,
+            COUNTDOWN + LIFTOFF + 6.0,
+            COUNTDOWN + LIFTOFF + CLIMB + 10.0,
+        ] {
+            let g = scene_at(Size::new(120, 40), t);
+            let mut line = 0;
+            for (x, y, ink) in pixels(&g) {
+                if flame(ink) || ink == Ink::BLANK || matches!(ink, BODY | BAND | TOWER | SPENT) {
+                    continue;
+                }
+                let row = horizon(&g.cam, x).map(|(r, _)| r);
+                assert_eq!(Some(y), row, "t {t}: {ink:?} off the horizon at {x},{y}");
+                assert!(matches!(ink, HORIZON | PAD), "t {t}: {ink:?} at {x},{y}");
+                line += 1;
+            }
+            // The horizon is in frame on the pad and while the climb is low.
+            if t < COUNTDOWN + LIFTOFF + CLIMB {
+                assert!(line > 100, "t {t}: horizon of {line} px");
+            }
+        }
     }
 
     #[test]
@@ -1552,103 +1346,28 @@ mod tests {
         // Thinner air lets it spread wider.
         assert!(smoke_radius(20.0, 0.1) > smoke_radius(20.0, 1.0));
         assert!(smoke_radius(60.0, 1.0) > 4.0 * smoke_radius(0.0, 1.0));
-    }
-
-    #[test]
-    fn roc_a6_the_plume_is_white_hot_at_the_nozzle() {
-        let g = scene_at(Size::new(120, 40), COUNTDOWN + 1.5);
-        let size = g.px.pixel_size();
-        let hottest = (0..i32::from(size.height()))
-            .flat_map(|y| (0..i32::from(size.width())).map(move |x| (x, y)))
-            .filter_map(|(x, y)| g.px.get(x, y))
-            .any(|i| i == ramp(Ramp::Ember, 1.0));
-        assert!(hottest, "no white-hot core");
-    }
-
-    #[test]
-    fn roc_a10_a_low_sun_glares_in_the_morning_sky() {
-        let g = scene_at(Size::new(120, 40), 5.0);
-        let rows = g.cam.rows;
-        let (sx, sy) = sun_centre(rows);
-        // Round: four-fold symmetric about its centre.
-        for (dx, dy) in [(3.0, 0.0), (0.0, 3.0), (2.0, 2.0)] {
-            let lit = |x: f64, y: f64| backdrop(&g.cam, x as i32, y as i32).0.level == 255;
-            let all = [
-                (dx, dy),
-                (-dx, dy),
-                (dx, -dy),
-                (-dx, -dy),
-                (dy, dx),
-                (-dy, -dx),
-            ]
+        // Drawn as sparse dim dots: never more than about half of a dense pixel's dots.
+        let g = scene_at(Size::new(120, 40), COUNTDOWN + LIFTOFF + 8.0);
+        let mut canvas = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let smoke: Vec<_> = canvas
+            .cells()
             .iter()
-            .map(|&(a, b)| lit(sx + a, sy + b))
-            .collect::<Vec<_>>();
-            assert!(
-                all.iter().all(|&l| l == all[0]),
-                "asymmetric at {dx},{dy}: {all:?}"
-            );
-        }
-        let at = |x: f64, y: f64| backdrop(&g.cam, x as i32, y as i32).0;
-        assert_eq!(at(sx, sy), Ink::new(Role::Ramp(Ramp::Ice), 255));
-        // The glare brightens the blue round the disc, falling off with distance.
-        let near = at(sx + 0.08 * rows, sy).level;
-        let mid = at(sx + 0.2 * rows, sy).level;
-        let far = at(sx + 0.6 * rows, sy).level;
-        assert!(near > mid && mid > far, "{near} {mid} {far}");
-        assert_eq!(at(sx, sy + 0.1 * rows).role, Role::Ramp(Ramp::Ice));
+            .filter(|c| c.ink.role == Role::Ramp(Ramp::Starlight) && c.ink.level <= 80)
+            .collect();
+        assert!(smoke.len() > 20, "{} smoke cells", smoke.len());
     }
 
     #[test]
-    fn roc_a5_the_sky_fades_to_black_as_a_smooth_ramp() {
-        // High on the climb the whole fade from blue to black is in frame.
-        for t in [
-            COUNTDOWN + LIFTOFF + CLIMB + 4.0,
-            COUNTDOWN + LIFTOFF + CLIMB + 18.0,
-        ] {
-            let g = scene_at(Size::new(200, 50), t);
-            let size = g.px.pixel_size();
-            let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
-            let mut blanks = 0;
-            let faintest = ink::level(ink::MIN_VISIBLE_LEVEL);
-            // Pixel rows where the faintest blue and black mix: the stippled edge.
-            let mut mixed = vec![(false, false); ph as usize];
-            for x in (pw * 3 / 4)..pw {
-                // Up the column from the ground: never brighter, never a jump, except the
-                // faintest blue stippled into the black at the top of the air.
-                let mut prev: Option<u8> = None;
-                for y in (0..ph).rev() {
-                    let (sky, is_sky) = backdrop(&g.cam, x, y);
-                    let ink = g.px.get(x, y).unwrap();
-                    if !is_sky || ink != sky {
-                        prev = None;
-                        continue;
-                    }
-                    let level = if ink == Ink::BLANK { 0 } else { ink.level };
-                    blanks += usize::from(ink == Ink::BLANK);
-                    if level == 0 {
-                        mixed[y as usize].0 = true;
-                    } else if level <= faintest {
-                        mixed[y as usize].1 = true;
-                    }
-                    // In the fade to black (the last 40 levels) no step bigger than the
-                    // last visible level (CORE-R66), and no speck: once black going up,
-                    // the air stays black.
-                    if let Some(p) = prev {
-                        assert!(p > 0 || level == 0, "t {t}: speck of blue at {x},{y}");
-                        assert!(
-                            level <= p || level <= faintest,
-                            "t {t}: column {x} brightens at {y}"
-                        );
-                        let step = p.abs_diff(level);
-                        assert!(p > 40 || step <= 13, "t {t}: a step of {step} at {x},{y}");
-                    }
-                    prev = Some(level);
-                }
-            }
-            assert!(blanks > 100, "t {t}: black space in frame");
-            let _ = mixed;
-        }
+    fn roc_a6_the_plume_is_a_blackbody_core_hottest_at_the_nozzle() {
+        let g = scene_at(Size::new(120, 40), COUNTDOWN + 1.5);
+        let hot = blackbody(FLAME_K.1 - 200.0).level;
+        let flames: Vec<Ink> = pixels(&g).map(|p| p.2).filter(|&i| flame(i)).collect();
+        assert!(flames.iter().any(|i| i.level >= hot), "no hot core");
+        // Core only: no pixel cooler than the flame's own cool end (and no diamonds on
+        // the pad, none brighter than white-hot).
+        let (cool, white) = (blackbody(FLAME_K.0).level, blackbody(DIAMOND_K).level);
+        assert!(flames.iter().all(|i| (cool..=white).contains(&i.level)));
     }
 
     #[test]
@@ -1663,28 +1382,17 @@ mod tests {
     }
 
     #[test]
-    fn roc_a6_the_hot_core_never_touches_the_white_body() {
+    fn roc_a6_the_vehicle_is_a_solid_pale_pixel_silhouette() {
         for t in [
-            COUNTDOWN + 1.5,
+            2.0,
             COUNTDOWN + LIFTOFF + 4.0,
             COUNTDOWN + LIFTOFF + CLIMB + 18.0,
         ] {
-            let g = scene_at(Size::new(120, 40), t);
-            let size = g.px.pixel_size();
-            let body = Ink::new(Role::Star, 235);
-            let mut cores = 0;
-            for y in 0..i32::from(size.height()) {
-                for x in 0..i32::from(size.width()) {
-                    if g.px.get(x, y) != Some(ramp(Ramp::Ember, 1.0)) {
-                        continue;
-                    }
-                    cores += 1;
-                    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                        assert_ne!(g.px.get(x + dx, y + dy), Some(body), "t {t}: {x},{y}");
-                    }
-                }
-            }
-            assert!(cores > 0, "t {t}: no white-hot core");
+            let size = Size::new(120, 40);
+            let g = scene_at(size, t);
+            // Solid half-block pixels, bright pale grey: the one subject.
+            let body = pixels(&g).filter(|p| p.2 == BODY).count();
+            assert!(body >= 4, "t {t}: {body} body pixels");
         }
     }
 
@@ -1695,33 +1403,32 @@ mod tests {
         let mut g = RocketLaunch::new();
         g.resize(size, &mut ctx);
         g.prepare();
-        let flame = |i: Ink| matches!(i.role, Role::Blackbody | Role::Ramp(Ramp::Ember));
-        let spent = Ink::new(Role::Structure, 120);
-        let (w, h) = (80, 48);
+        let mut seen = false;
         for step in 0..(60.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
             if step % 10 != 0 || g.met() < SES {
                 continue;
             }
-            for y in 0..h {
-                for x in 0..w {
-                    if g.px.get(x, y) != Some(spent) {
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            for cy in 0..24 {
+                for cx in 0..80 {
+                    let spent = (2 * cy..2 * cy + 2).any(|y| g.px.get(cx, y) == Some(SPENT));
+                    if !spent {
                         continue;
                     }
-                    for dy in -2..=2 {
+                    seen = true;
+                    for dy in -2..=3 {
                         for dx in -2..=2 {
-                            let near = g.px.get(x + dx, y + dy).is_some_and(flame);
-                            assert!(!near, "MET {:.0}: stage at {x},{y} in the plume", g.met());
+                            let near = g.px.get(cx + dx, 2 * cy + dy).is_some_and(flame);
+                            assert!(!near, "MET {:.0}: stage at {cx},{cy} in the plume", g.met());
                         }
                     }
                 }
             }
         }
-    }
-
-    fn flame(i: Ink) -> bool {
-        matches!(i.role, Role::Blackbody | Role::Ramp(Ramp::Ember))
+        assert!(seen, "the spent stage never showed");
     }
 
     #[test]
@@ -1731,11 +1438,7 @@ mod tests {
             assert!(g.met() > SES + 20.0, "the upper stage is firing");
             let mut canvas = Canvas::new(size, GlyphMode::Unicode);
             g.render(&mut canvas);
-            let pixels = g.px.pixel_size();
-            let opaque = (0..i32::from(pixels.height()))
-                .flat_map(|y| (0..i32::from(pixels.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| g.px.get(x, y).is_some_and(flame))
-                .count();
+            let opaque = pixels(&g).filter(|p| flame(p.2)).count();
             let gas: Vec<Ink> = canvas
                 .cells()
                 .iter()
@@ -1750,8 +1453,8 @@ mod tests {
             );
             // Stars show through: the gas is dots, not a filled wedge.
             assert!(gas.len() >= 4, "{size:?}: gas cells {}", gas.len());
-            // Even its faint edge is a warm yellow-orange, never the brown bottom of Ember.
-            let floor = ramp(Ramp::Ember, 0.5).level;
+            // Even its faint edge is the flame's own colour, never below its cool end.
+            let floor = blackbody(FLAME_K.0).level;
             for ink in gas {
                 assert!(ink.level >= floor, "{size:?}: {ink:?}");
             }
@@ -1759,52 +1462,47 @@ mod tests {
     }
 
     #[test]
-    fn roc_a6_the_pad_flame_stops_at_the_ground_and_splashes_sideways() {
+    fn roc_a6_the_pad_flame_stops_at_the_ground() {
         let size = Size::new(120, 40);
         let g = scene_at(size, COUNTDOWN - 1.0);
-        let pixels = g.px.pixel_size();
-        let pad = g.cam.px(0.0, 0.0).0;
-        let (mut splash, mut any) = (0, 0);
-        for y in 0..i32::from(pixels.height()) {
-            for x in 0..i32::from(pixels.width()) {
-                if !g.px.get(x, y).is_some_and(flame) {
-                    continue;
-                }
-                any += 1;
-                let (_, is_sky) = backdrop(&g.cam, x, y);
-                assert!(is_sky, "flame below the ground at {x},{y}");
-                splash += usize::from((f64::from(x) - pad).abs() > 4.0);
+        let mut any = 0;
+        for (x, y, ink) in pixels(&g) {
+            if !flame(ink) {
+                continue;
             }
+            any += 1;
+            let row = horizon(&g.cam, x).map_or(i32::MAX, |(r, _)| r);
+            assert!(y <= row, "flame below the ground at {x},{y}");
         }
-        assert!(any > 0 && splash >= 4, "flame {any}, splash {splash}");
+        assert!(any > 0, "no flame on the pad");
     }
 
     #[test]
-    fn roc_a6_shock_diamonds_are_lozenges_inside_the_core() {
+    fn roc_a6_shock_diamonds_are_white_hot_points_on_the_axis() {
         let g = scene_at(Size::new(200, 50), COUNTDOWN + LIFTOFF + 4.0);
         assert!(diamond_spacing(pressure_ratio(g.ascent.at(g.met()).y[H])).is_some());
-        let pixels = g.px.pixel_size();
+        let white = blackbody(DIAMOND_K);
         let mut diamonds = 0;
-        for y in 0..i32::from(pixels.height()) {
-            for x in 0..i32::from(pixels.width()) {
-                if g.px.get(x, y).is_some_and(|i| i.role == Role::Blackbody) {
-                    diamonds += 1;
-                    // Flame on both sides: narrower than the flame, not a full-width bar.
-                    for dx in [-1, 1] {
-                        let side = g.px.get(x + dx, y);
-                        assert!(
-                            side.is_some_and(flame),
-                            "diamond at {x},{y} reaches the edge"
-                        );
-                    }
-                }
+        for (x, y, ink) in pixels(&g) {
+            if ink != white {
+                continue;
             }
+            diamonds += 1;
+            // A point, not a bar across the flame; and inside the flame.
+            assert!(g.px.get(x - 1, y) != Some(white) || g.px.get(x + 1, y) != Some(white));
+            let beside = (-1..=1)
+                .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                .any(|(dx, dy)| {
+                    g.px.get(x + dx, y + dy)
+                        .is_some_and(|i| flame(i) && i != white)
+                });
+            assert!(beside, "diamond at {x},{y} outside the flame");
         }
         assert!(diamonds > 0, "no shock diamonds low down");
     }
 
     #[test]
-    fn roc_a9_text_sits_on_dark_chips_and_the_legend_names_every_loss() {
+    fn roc_a9_the_telemetry_is_dim_grey_text_on_row_0() {
         let size = Size::new(160, 48);
         let g = scene_at(size, 2.0);
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
@@ -1813,29 +1511,47 @@ mod tests {
         assert!(rows[0].trim_start().starts_with("T-"), "{}", rows[0]);
         for x in 0..20 {
             let cell = canvas.get(x, 0).unwrap();
-            assert_eq!(cell.bg, Ink::BLANK, "telemetry cell {x} over the sky");
-        }
-        for name in ["speed", "gravity", "drag", "steer"] {
-            assert!(rows[3].contains(name), "legend lacks {name}: {}", rows[3]);
+            assert_eq!(cell.bg, Ink::BLANK, "telemetry cell {x}");
+            assert!(cell.ch == ' ' || cell.ink == TEXT, "{cell:?}");
         }
     }
 
     #[test]
-    fn roc_a5_a6_palette_blue_sky_blackbody_flame_and_black_space() {
+    fn roc_a10_a_sparse_night_frame_with_one_accent() {
+        // ADR-0017: black sky, no tower, Sun or Δv bar; only greys, the Blackbody flame
+        // and the white stars; and little of the frame lit.
         let mut stage = Stage::new(build(), 42, Size::new(160, 48), GlyphMode::Unicode);
-        let mut seen_blue = false;
+        stage.set_title_visible(false);
         let mut seen_flame = false;
-        let mut seen_black_top = false;
         for _ in 0..62 {
             for _ in 0..60 {
                 stage.step(SIM_DT);
             }
             let f = stage.render();
-            let has = |r: Role| f.cells().iter().any(|c| c.ink.role == r || c.bg.role == r);
-            seen_blue |= has(Role::Ramp(Ramp::Ice));
-            seen_flame |= has(Role::Blackbody);
-            seen_black_top |= f.get(80, 5).is_some_and(|c| c.bg.role == Role::Background);
+            let mut lit = 0;
+            for c in f.cells() {
+                for ink in [c.ink, c.bg] {
+                    assert!(
+                        matches!(
+                            ink.role,
+                            Role::Background
+                                | Role::Ramp(Ramp::Starlight)
+                                | Role::Blackbody
+                                | Role::Star
+                                | Role::Text
+                        ),
+                        "{ink:?}"
+                    );
+                    seen_flame |= ink.role == Role::Blackbody;
+                }
+                lit += usize::from(c.ch != ' ' || c.bg != Ink::BLANK);
+            }
+            assert!(
+                lit * 100 < f.cells().len() * 14,
+                "{lit} of {} cells lit",
+                f.cells().len()
+            );
         }
-        assert!(seen_blue && seen_flame && seen_black_top);
+        assert!(seen_flame);
     }
 }
