@@ -31,7 +31,12 @@ and the art review judges the rest.
    title stays (ADR-0014). A label or readout stays only where it explains the science (a planet's
    name, a measured quantity), in dim grey (`Role::Text`, low level).
 5. **Calm motion.** Motion shows the physics. No flashing, strobing or busy background animation.
-6. **Minimal is also cheap.** Black cells cost nothing to send, fewer layers cost less CPU, and a
+6. **Legible subject: clean is not faint.** The scene's one subject reads at a glance at 80×24 and 200×50.
+  Its brightest pixels reach near-white or the accent (L* ≥ 70), a hero object is solid (filled, or
+  strokes of 2 pixels or more), and every act shows it. Cut the other elements so the subject stands out;
+  never dim or thin the subject itself. (Added after M14 review round 1, where a rocket drawn as a faint
+  dotted line and clouds that peaked at L* 30 were clean but lifeless.)
+7. **Minimal is also cheap.** Black cells cost nothing to send, fewer layers cost less CPU, and a
    quiet frame changes fewer cells per frame. Style and the M14 resource goals point the same way.
 
 For the 41 scenes that existed at M11, the art review compares the M11 look (`627cde6`) with
