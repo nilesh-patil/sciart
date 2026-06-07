@@ -43,6 +43,24 @@ pub struct FrameBackend<W: Write> {
     /// The terminal's current rendition (fg, bg, modifiers). It carries over from frame
     /// to frame, so a frame that starts in the colour the last one ended in sends no SGR.
     pen: (Color, Color, Modifier),
+    /// Cells of the terminal as last seen by `size()` (which `Terminal::draw` calls first
+    /// every frame): what [`FrameBackend::reserve_frame`] sizes the buffer for.
+    seen_cells: std::cell::Cell<usize>,
+}
+
+/// Upper bound on the bytes one changed cell can add to a frame (RT-R14, RT-R15):
+/// cursor move `CSI 65535;65535H` (14) + one SGR with a modifier reset, all nine modifier
+/// codes and both 24-bit colours `CSI 0;1;…;9;38;2;255;255;255;48;2;255;255;255m` (56) +
+/// the symbol, 4 bytes for any one `char` (canvas cells and the ASCII HUD). A longer
+/// grapheme (only possible in free text) may still grow the buffer once.
+pub const MAX_CELL_BYTES: usize = 14 + 56 + 4;
+/// Per-frame bytes outside the cells: sync begin/end (16), cursor hide/show (12), a clear
+/// (4) and a rendition reset (4), rounded up.
+pub const FRAME_OVERHEAD_BYTES: usize = 64;
+
+/// The most bytes a frame of `cells` cells can take ([`MAX_CELL_BYTES`] per cell).
+pub const fn frame_bound(cells: usize) -> usize {
+    cells * MAX_CELL_BYTES + FRAME_OVERHEAD_BYTES
 }
 
 impl<W: Write> FrameBackend<W> {
@@ -56,6 +74,7 @@ impl<W: Write> FrameBackend<W> {
             in_sync: false,
             cursor_hidden: false,
             pen: (Color::Reset, Color::Reset, Modifier::empty()),
+            seen_cells: std::cell::Cell::new(0),
         }
     }
 
@@ -84,6 +103,24 @@ impl<W: Write> FrameBackend<W> {
     /// Bytes queued for the next flush.
     pub fn pending(&self) -> &[u8] {
         &self.buf
+    }
+
+    /// Grow the buffer, once per terminal size, to hold the worst-case frame, so no draw
+    /// can reallocate mid-run however much of the screen changes (RT-R14).
+    fn reserve_frame(&mut self) {
+        let cells = match self.size {
+            Some(s) => usize::from(s.width) * usize::from(s.height),
+            None => self.seen_cells.get(),
+        };
+        let bound = frame_bound(cells);
+        if self.buf.capacity() < bound {
+            self.buf.reserve_exact(bound - self.buf.len());
+        }
+    }
+
+    /// Bytes the frame buffer can hold without growing.
+    pub fn capacity(&self) -> usize {
+        self.buf.capacity()
     }
 
     fn begin_frame(&mut self) {
@@ -130,6 +167,7 @@ impl<W: Write> Backend for FrameBackend<W> {
     where
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
+        self.reserve_frame();
         let (mut fg, mut bg, mut modifier) = self.pen;
         // Where the terminal cursor is after the last print, when known.
         let mut cursor: Option<(u16, u16)> = None;
@@ -242,6 +280,8 @@ impl<W: Write> Backend for FrameBackend<W> {
             Some(size) => Ok(size),
             None => {
                 let (width, height) = crossterm::terminal::size()?;
+                self.seen_cells
+                    .set(usize::from(width) * usize::from(height));
                 Ok(Size { width, height })
             }
         }
@@ -563,6 +603,47 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// Every cell changes glyph, both colours (all three channels at three digits) and
+    /// every modifier, against a previous frame that differs everywhere.
+    fn worst(buf: &mut Buffer, t: u8) {
+        let all = Modifier::all();
+        for (i, cell) in buf.content.iter_mut().enumerate() {
+            let v = 200 + ((i as u8).wrapping_add(t) % 50);
+            cell.set_char(if (i + usize::from(t)) % 2 == 0 {
+                '▀'
+            } else {
+                '⣿'
+            })
+            .set_fg(Color::Rgb(v, 255 - t, 100 + t))
+            .set_bg(Color::Rgb(255 - t, v, 199 - t));
+            cell.modifier = if (i + usize::from(t)) % 2 == 0 {
+                all
+            } else {
+                Modifier::REVERSED
+            };
+        }
+    }
+
+    #[test]
+    fn rt_r14_rt_r15_a_worst_case_frame_fits_the_reserved_buffer() {
+        let (w, h) = (97u16, 31u16);
+        let mut term = terminal(w, h);
+        term.draw(|f| worst(f.buffer_mut(), 0)).expect("draw");
+        let cap = term.backend().capacity();
+        assert!(cap >= frame_bound(usize::from(w) * usize::from(h)));
+        for t in 1..4 {
+            let before = term.backend().writer().bytes.len();
+            term.draw(|f| worst(f.buffer_mut(), t)).expect("draw");
+            let frame = term.backend().writer().bytes.len() - before;
+            assert!(frame <= cap, "frame {t}: {frame} bytes > reserved {cap}");
+            assert_eq!(
+                term.backend().capacity(),
+                cap,
+                "frame {t}: the buffer never grows"
+            );
         }
     }
 

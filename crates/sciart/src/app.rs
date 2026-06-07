@@ -244,6 +244,40 @@ mod tests {
         }
     }
 
+    /// Every cell of the screen changes glyph, fg, bg and modifiers from the last frame.
+    fn worst(buf: &mut ratatui::buffer::Buffer, t: u8) {
+        use ratatui::style::{Color, Modifier};
+        for (i, cell) in buf.content.iter_mut().enumerate() {
+            let v = 200 + ((i as u8).wrapping_add(t) % 50);
+            let odd = (i + usize::from(t)) % 2 == 1;
+            cell.set_char(if odd { '⣿' } else { '▀' })
+                .set_fg(Color::Rgb(v, 255 - t, 100 + t))
+                .set_bg(Color::Rgb(255 - t, v, 199 - t));
+            cell.modifier = if odd {
+                Modifier::REVERSED
+            } else {
+                Modifier::all()
+            };
+        }
+    }
+
+    #[test]
+    fn rt_r14_a_frame_bigger_than_any_before_does_not_allocate() {
+        // A quiet first frame, then the worst frame the backend can be asked to send: the
+        // frame buffer was sized for it up front, so it must not grow mid-run.
+        let mut term = terminal();
+        term.draw(|f| {
+            f.buffer_mut()[(0, 0)].set_char('x');
+        })
+        .expect("draw");
+        let ((), stats) = measure(|| {
+            for t in 0..4 {
+                term.draw(|f| worst(f.buffer_mut(), t)).expect("draw");
+            }
+        });
+        assert_eq!(stats.total(), 0, "{stats:?}");
+    }
+
     #[test]
     fn rt_r14_a_paused_frame_and_a_hud_toggle_settle_to_zero() {
         let mut rt = runtime(&["starfield"]);
