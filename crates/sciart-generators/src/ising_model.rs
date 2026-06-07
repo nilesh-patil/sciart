@@ -13,23 +13,20 @@
 //! as `ℓ ∝ t^{1/3}` (spinodal decomposition).
 //!
 //! The lattice is capped at 16 384 spins (`grid::lattice_for`, ADR-0012) and shown as one
-//! half-block pixel per spin at or below the cap, nearest-sampled above it. Up spins are
-//! ivory (the Starlight ramp) and down spins steel blue (Ice), a light/dark pair that is
-//! colour-blind safe (false colour). Wall spins sink toward the
-//! background by alignment, and interior spins brighten with their chamfer distance from
-//! the nearest wall ([`chamfer`]), so domains read as lit pillows with dark seams and
-//! ordering visibly brightens the screen. Thermal specks (clusters under [`SPECK`] spins)
-//! are quiet flecks of their own colour that carve no hollow into their domain. In the
-//! Kawasaki act the shading saturates within two sites of a wall and never drops below
-//! [`SWAP_FLOOR`], so the thin labyrinth gets a bevel and its two phases stay apart in
-//! Mono. The raster is rebuilt in `update`/`resize`; `render` only blits it and writes the
-//! label and thermometer (the M10 raster convention).
+//! half-block pixel per spin at or below the cap, nearest-sampled above it (the lattice
+//! is the art). On black (ADR-0017): down spins are the terminal's black, up spins a dim
+//! neutral grey (`Role::Text`, the one neutral grey ramp; Starlight read khaki), and the domain walls, up spins with a down
+//! neighbour, a 1-px brighter line that is brightest along straight walls (three aligned
+//! neighbours) and dim on ragged ones, so ordering reads as clean pale contours and the
+//! hot boil as a quiet grey haze. Thermal specks (clusters under [`SPECK`] spins) are
+//! quiet flecks that draw no wall. The raster is rebuilt in `prepare` (GEN-R20); `render`
+//! only blits it and writes the label.
 
 use std::fmt::Write as _;
 
+use sciart_core::ease;
 use sciart_core::grid::{lattice_for, regrid_nearest};
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "ising_model",
@@ -90,20 +87,13 @@ const ASCII_RAMP: [Glyph; 5] = [
     Glyph::ascii('+'),
     Glyph::ascii('#'),
 ];
-const LABEL_INK: Ink = Ink::new(Role::Text, 200);
-/// The thermometer after the label: `GAUGE` cells over T/T_c ∈ [0.5, 1.5], T_c in the
-/// middle, drawn when the canvas is at least `GAUGE_MIN_W` wide.
-const GAUGE: usize = 12;
-const GAUGE_MIN_W: u16 = 48;
-const GAUGE_OFF: Ink = Ink::new(Role::Text, 70);
-/// Up spins in the Starlight ramp (ivory), down spins in Ice (steel blue) (false colour,
-/// ADR-0015): a light/dark pair that reads without hue, so it is colour-blind safe and
-/// keeps the two phases far apart in Mono (interiors at ≈ 0.86 vs ≈ 0.3 of the ramp,
-/// RND-R11). The model is symmetric under s → −s; only the drawing is not.
-const UP_RAMP: Ramp = Ramp::Starlight;
-const DOWN_RAMP: Ramp = Ramp::Ice;
-const UP_GAIN: f64 = 1.1;
-const DOWN_GAIN: f64 = 0.38;
+const LABEL_INK: Ink = Ink::new(Role::Text, 110);
+/// Up spins' role (a neutral grey, false colour): the interior level, and the wall
+/// levels by aligned-neighbour count 0–3 (ADR-0017: the walls carry the light, straight
+/// walls brightest). Down spins are black.
+const UP_ROLE: Role = Role::Text;
+const INTERIOR_LEVEL: u8 = 20;
+const WALL_LEVELS: [u8; 4] = [8, 14, 110, 200];
 
 /// Heat-bath probability that a spin with local field `h = Σ_nn sⱼ` becomes +1 at
 /// temperature `t`: `p₊ = 1 / (1 + e^{−2h/T})` (ISING-A1). `t` is clamped to
@@ -169,14 +159,6 @@ pub(crate) fn swap_speedup(local: f64) -> f64 {
     1.0 + (SWAP_SPEEDUP - 1.0) * (local / SWAP_RAMP).clamp(0.0, 1.0)
 }
 
-/// Filled cells of the [`GAUGE`]-cell thermometer for `t_rel = T/T_c`: `round((t_rel −
-/// 0.5)·GAUGE)`, clamped; T_c fills exactly half.
-pub(crate) fn gauge_fill(t_rel: f64) -> usize {
-    ((t_rel - 0.5) * GAUGE as f64)
-        .round()
-        .clamp(0.0, GAUGE as f64) as usize
-}
-
 /// The corner readout, `T/Tc 0.93  |m| 0.71`, or `None` where it does not fit (the `|m|`
 /// part needs 24 columns, the rest 12 columns and 4 rows) (ISING-A6). With `m_abs = None`
 /// (the Kawasaki act, where swaps pin M) the second part reads `M fixed`: a rule, not a
@@ -196,133 +178,32 @@ pub(crate) fn label(t_rel: f64, m_abs: Option<f64>, size: Size) -> Option<StackT
     Some(s)
 }
 
-/// `|v|` of a wall spin with `n_al ∈ 0..=3` aligned neighbours, and of a spin with all
-/// four aligned at the wall's edge (SPEC-002 Inks). Convex, not linear: even at 1.25 T_c
-/// most spins have 3–4 aligned neighbours, so only a table that saves its brightness for
-/// the domain interior lets the hot phase sink toward the background.
-const ALIGNED: [f64; 5] = [0.06, 0.12, 0.22, 0.38, 0.45];
-/// Interior spins brighten with their distance from the nearest wall site, up to
-/// [`INTERIOR_PEAK`] at [`DEPTH_CAP`] (chamfer units, 2 per site): domains read as lit
-/// pillows with dark seams, and big ordered domains glow most.
-const INTERIOR_PEAK: f64 = 0.78;
+/// The depth [`Lattice::classify`] seeds interior sites with (only its classes are drawn).
 const DEPTH_CAP: u8 = 20;
-/// The Kawasaki act's labyrinth is only a few sites wide, so there the shading peaks at
-/// this depth (2 sites) instead: a bevel, not a flat two-tone camouflage.
-const BEVEL: u8 = 4;
-/// Same-sign clusters smaller than this are thermal specks: their walls seed no depth, so
-/// a few flipped spins never punch a dark hollow into a big domain.
+/// Same-sign clusters smaller than this are thermal specks: they draw no wall, so a few
+/// flipped spins never outline a hole in a big domain.
 const SPECK: usize = 6;
-/// A speck's shade class, that of a domain's rim (`|v|` 0.45): a quiet fleck of its own
-/// spin's colour (a grey fleck in a blue domain, a dark blue one in ivory), not
-/// a black hole in the domain. The ramps' low ends are near black, so lower is no fleck.
+/// A speck's shade class: drawn as an interior spin, a quiet fleck of its own colour.
 const SPECK_CLASS: u8 = 4;
-/// The Kawasaki act's labyrinth is only a few sites wide, so its walls would drag both
-/// phases to the same mid grey in Mono: there every `|v|` is lifted to at least this, so
-/// up stays ≥ 100 levels above down at every class (`(UP_GAIN − DOWN_GAIN)·0.6·255 ≈ 110`).
-const SWAP_FLOOR: f64 = 0.6;
 /// [`Lattice::classify`]'s cluster marks.
 const UNSEEN: u8 = 0;
 const SMALL: u8 = 1;
 const LARGE: u8 = 2;
 /// [`Lattice::classify`]'s class for a site that is not on a wall.
 const WALL_INTERIOR: u8 = u8::MAX;
-/// Shade classes per spin sign: `n_al` for wall spins (`0..4`), then `4 + depth`.
-const CLASSES: usize = 4 + DEPTH_CAP as usize + 1;
 
-/// `|v|` of shade class `c` ([`CLASSES`]) when the shading peaks at depth `peak`.
-pub(crate) fn class_value(c: usize, peak: u8) -> f64 {
-    match c {
-        0..4 => ALIGNED[c],
-        _ => {
-            let d = ((c - 4) as f64 / f64::from(peak.max(1))).min(1.0);
-            ALIGNED[4] + (INTERIOR_PEAK - ALIGNED[4]) * ease::smoothstep(d)
-        }
+/// The ink of a site with spin `s` and shade class `class`: black for down spins, and for
+/// up spins a wall level by aligned count (`0..4`) or the interior level.
+pub(crate) fn site_ink(s: i8, class: u8) -> Ink {
+    if s <= 0 {
+        return Ink::BLANK;
+    }
+    match class {
+        c @ 0..4 => Ink::new(UP_ROLE, WALL_LEVELS[usize::from(c)]),
+        _ => Ink::new(UP_ROLE, INTERIOR_LEVEL),
     }
 }
 
-/// The ink of every shade class, indexed by `(s > 0)·CLASSES + class`: up
-/// `ramp(UP_RAMP, UP_GAIN·v)`, down `ramp(DOWN_RAMP, DOWN_GAIN·v)`, for shading that peaks at
-/// depth `peak`, with `v` lifted linearly from `[0, INTERIOR_PEAK]` onto
-/// `[floor, INTERIOR_PEAK]`. Built once per scene.
-fn inks(peak: u8, floor: f64) -> [Ink; 2 * CLASSES] {
-    std::array::from_fn(|i| {
-        let v = floor + (1.0 - floor / INTERIOR_PEAK) * class_value(i % CLASSES, peak);
-        if i >= CLASSES {
-            ink::ramp(UP_RAMP, UP_GAIN * v)
-        } else {
-            ink::ramp(DOWN_RAMP, DOWN_GAIN * v)
-        }
-    })
-}
-
-/// Signed spin value of a pixel ink, `±v` (0 for an empty pixel): the inverse of
-/// [`inks`], for the ASCII fallback.
-fn signed(ink: Ink) -> f64 {
-    match ink.role {
-        Role::Ramp(UP_RAMP) => ink::seq_value(ink) / UP_GAIN,
-        Role::Ramp(DOWN_RAMP) => -ink::seq_value(ink) / DOWN_GAIN,
-        _ => 0.0,
-    }
-}
-
-/// Chamfer (2–3) distance from every site to the nearest wall site (one with an
-/// antiparallel neighbour, `depth = 0` on entry), capped at [`DEPTH_CAP`]: a forward and
-/// a backward raster pass (Borgefors 1986). The lattice edge is not wrapped: across the
-/// torus seam a domain only reads a little brighter, as if its wall were further away.
-pub(crate) fn chamfer(depth: &mut [u8], w: usize) {
-    if w == 0 {
-        return;
-    }
-    let h = depth.len() / w;
-    if h == 0 {
-        return;
-    }
-    // Each pass relaxes a row against the finished row before it, then along itself: the
-    // same order as the per-pixel mask, on row slices the compiler can bounds-check once.
-    sweep(&mut depth[..w], false);
-    for y in 1..h {
-        let (done, rest) = depth.split_at_mut(y * w);
-        relax_row(&mut rest[..w], &done[(y - 1) * w..]);
-        sweep(&mut rest[..w], false);
-    }
-    sweep(&mut depth[(h - 1) * w..h * w], true);
-    for y in (0..h - 1).rev() {
-        let (rest, done) = depth.split_at_mut((y + 1) * w);
-        relax_row(&mut rest[y * w..], &done[..w]);
-        sweep(&mut rest[y * w..], true);
-    }
-}
-
-/// One chamfer row against its finished neighbour row `near` (same width): straight
-/// neighbour cost 2, diagonals 3.
-fn relax_row(row: &mut [u8], near: &[u8]) {
-    let w = row.len();
-    for x in 0..w {
-        let mut d = row[x].min(near[x].saturating_add(2));
-        if x > 0 {
-            d = d.min(near[x - 1].saturating_add(3));
-        }
-        if x + 1 < w {
-            d = d.min(near[x + 1].saturating_add(3));
-        }
-        row[x] = d;
-    }
-}
-
-/// The in-row part of a chamfer pass: left to right, or right to left with `back`.
-fn sweep(row: &mut [u8], back: bool) {
-    if back {
-        for x in (1..row.len()).rev() {
-            row[x - 1] = row[x - 1].min(row[x].saturating_add(2));
-        }
-    } else {
-        for x in 1..row.len() {
-            row[x] = row[x].min(row[x - 1].saturating_add(2));
-        }
-    }
-}
-
-/// A periodic spin lattice with its wrapped-neighbour tables and tracked magnetisation.
 #[derive(Debug, Default)]
 pub(crate) struct Lattice {
     spins: Grid<i8>,
@@ -506,7 +387,7 @@ impl Lattice {
         ]
     }
 
-    /// Shade class of every site, for [`chamfer`] and the ink table (SPEC-002 Inks).
+    /// Shade class of every site, for the inks (SPEC-002 Inks).
     /// Sites in same-sign clusters of fewer than [`SPECK`] spins are specks: class
     /// [`SPECK_CLASS`], and neighbours count them as aligned, so they seed no wall. Any other site with an
     /// antiparallel non-speck neighbour is a wall, class = its effective aligned count
@@ -598,13 +479,10 @@ struct IsingModel {
     /// lookup per pixel.
     site_inks: Vec<Ink>,
     /// Per-site scratch rebuilt each frame by [`Lattice::classify`]: cluster marks, shade
-    /// classes and the distance from the nearest wall ([`chamfer`]).
+    /// classes and its (unused) depth seeds.
     speck: Vec<u8>,
     class: Vec<u8>,
     depth: Vec<u8>,
-    /// [`inks`] for the Glauber act (peak at [`DEPTH_CAP`]) and the Kawasaki act (peak at
-    /// [`BEVEL`]), each indexed by `(s > 0)·CLASSES + class`.
-    inks: [[Ink; 2 * CLASSES]; 2],
     pixels: Pixels,
     size: Size,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
@@ -629,7 +507,6 @@ impl IsingModel {
             speck: Vec::new(),
             class: Vec::new(),
             depth: Vec::new(),
-            inks: [inks(DEPTH_CAP, 0.0), inks(BEVEL, SWAP_FLOOR)],
             pixels: Pixels::default(),
             size: Size::new(0, 0),
         }
@@ -639,22 +516,16 @@ impl IsingModel {
         t_over_tc(self.schedule.at(self.t))
     }
 
-    /// Shade every site (wall spins by alignment, interior spins by their distance from
-    /// the nearest wall), then paint each display pixel from its nearest site.
+    /// Shade every site (down black, up walls by alignment, up interiors flat), then
+    /// paint each display pixel from its nearest site.
     fn rasterise(&mut self) {
         let size = self.lattice.size();
         let w = usize::from(size.width());
         self.lattice
             .classify(&mut self.speck, &mut self.class, &mut self.depth);
-        chamfer(&mut self.depth, w);
         let spins = self.lattice.spins.as_slice();
-        let inks = &self.inks[usize::from(self.phase == SPINODAL)];
-        for (i, ink) in self.site_inks.iter_mut().enumerate() {
-            let class = match self.class[i] {
-                WALL_INTERIOR => 4 + usize::from(self.depth[i]),
-                c => usize::from(c),
-            };
-            *ink = inks[usize::from(spins[i] > 0) * CLASSES + class];
+        for ((ink, &s), &c) in self.site_inks.iter_mut().zip(spins).zip(&self.class) {
+            *ink = site_ink(s, c);
         }
         let (rows, cols, site_inks) = (&self.rows, &self.cols, &self.site_inks);
         self.pixels.shade(|x, y| {
@@ -752,43 +623,27 @@ impl Generator for IsingModel {
 
     fn render(&self, canvas: &mut Canvas) {
         self.pixels.blit(canvas, |_, _, top, bottom| {
-            // Cell mean of the two signed pixel values, normalised by the interior value
-            // so domain interiors reach the ASCII ramp's ends.
-            let m = 0.5 * (signed(top) + signed(bottom));
-            let glyph = draw::ramp(0.5 * (m / ALIGNED[4] + 1.0), &ASCII_RAMP);
-            Some((glyph.ascii, if m >= 0.0 { top } else { bottom }))
+            // The brighter half decides: walls `#`, interiors `+`, specks and ragged walls
+            // `:`; down spins stay blank.
+            let ink = sciart_core::raster::stronger(top, bottom);
+            let glyph = match ink.level {
+                0 => return None,
+                l if l >= WALL_LEVELS[2] => ASCII_RAMP[4],
+                l if l >= INTERIOR_LEVEL => ASCII_RAMP[3],
+                _ => ASCII_RAMP[2],
+            };
+            Some((glyph.ascii, ink))
         });
         let m_abs = (self.phase != SPINODAL).then(|| {
             f64::from(self.lattice.magnetisation().unsigned_abs())
                 / self.lattice.len().max(1) as f64
         });
-        let t_rel = self.t_rel();
-        if let Some(text) = label(t_rel, m_abs, self.size) {
-            // A one-space margin either side makes the label a small dark chip (`put`
-            // clears the pixel background).
+        if let Some(text) = label(self.t_rel(), m_abs, self.size) {
+            // A one-space margin either side makes the label a small dark chip.
             let s = text.as_str();
             canvas.text(0, 0, " ", LABEL_INK);
             canvas.text(1, 0, s, LABEL_INK);
-            let mut x = 1 + s.len() as i32;
-            canvas.text(x, 0, " ", LABEL_INK);
-            if self.size.width() >= GAUGE_MIN_W {
-                // The thermometer: filled up to T/T_c, with T_c marked in the middle.
-                canvas.text(x + 1, 0, " ", LABEL_INK);
-                x += 2;
-                let fill = gauge_fill(t_rel);
-                for k in 0..=GAUGE {
-                    let (glyph, ink) = if k == GAUGE / 2 {
-                        (Glyph::new('┃', '|'), LABEL_INK)
-                    } else if k < fill + usize::from(k > GAUGE / 2) {
-                        (Glyph::new('━', '='), LABEL_INK)
-                    } else {
-                        (Glyph::new('─', '-'), GAUGE_OFF)
-                    };
-                    canvas.put(x, 0, glyph, ink);
-                    x += 1;
-                }
-                canvas.text(x, 0, " ", LABEL_INK);
-            }
+            canvas.text(1 + s.len() as i32, 0, " ", LABEL_INK);
         }
     }
 
@@ -1194,33 +1049,17 @@ mod tests {
     }
 
     #[test]
-    fn ising_a8_domains_shade_by_depth_and_walls_stay_dark() {
-        // Interior shades brighten with depth; every wall class is darker than any interior.
-        for peak in [DEPTH_CAP, BEVEL] {
-            let values: Vec<f64> = (0..CLASSES).map(|c| class_value(c, peak)).collect();
-            assert!(values[4..].windows(2).all(|w| w[1] >= w[0]), "{values:?}");
-            assert!(values[..4].iter().all(|&v| v < values[4]), "{values:?}");
-            assert!((values[4 + usize::from(peak)] - INTERIOR_PEAK).abs() < 1e-12);
-        }
-        // The Kawasaki act's bevel: two sites from a wall is already the full interior.
-        assert!(class_value(4 + usize::from(BEVEL), BEVEL) > class_value(4 + 4, DEPTH_CAP));
-        // Up and down stay far apart in Mono (one grey per level): interiors differ by a
-        // quarter of the range, and in the Kawasaki act, whose labyrinth is mostly wall,
-        // so does every class.
-        let (glauber, kawasaki) = (inks(DEPTH_CAP, 0.0), inks(BEVEL, SWAP_FLOOR));
-        for table in [&glauber, &kawasaki] {
-            assert_eq!(table[CLASSES - 1].role, Role::Ramp(DOWN_RAMP));
-            assert_eq!(table[2 * CLASSES - 1].role, Role::Ramp(UP_RAMP));
-            assert!(table[2 * CLASSES - 1].level >= table[CLASSES - 1].level + 100);
-            // The floor lifts the walls, never the interior peak.
-            assert_eq!(table[2 * CLASSES - 1], glauber[2 * CLASSES - 1]);
-        }
-        for c in 0..CLASSES {
-            let (down, up) = (kawasaki[c].level, kawasaki[CLASSES + c].level);
-            assert!(up >= down + 100, "class {c}: {up} vs {down}");
-        }
-        // Specks are quiet flecks of their own colour, not black.
-        assert!(class_value(usize::from(SPECK_CLASS), DEPTH_CAP) >= 0.2);
+    fn ising_a8_down_is_black_and_walls_carry_the_light() {
+        // ADR-0017: down spins are black; up interiors a dim grey; walls brighter, the
+        // straighter the brighter; specks draw as interior flecks.
+        assert_eq!(site_ink(-1, 3), Ink::BLANK);
+        assert_eq!(site_ink(-1, WALL_INTERIOR), Ink::BLANK);
+        let interior = site_ink(1, WALL_INTERIOR);
+        assert_eq!(interior, Ink::new(UP_ROLE, INTERIOR_LEVEL));
+        assert_eq!(site_ink(1, SPECK_CLASS), interior);
+        let walls: Vec<u8> = (0..4).map(|c| site_ink(1, c).level).collect();
+        assert!(walls.windows(2).all(|w| w[1] > w[0]), "{walls:?}");
+        assert!(walls[3] > 2 * interior.level && walls[3] >= 180);
 
         // A lone flipped spin and a 2×2 speck are specks and leave their neighbours
         // interior; a 2×3 cluster (SPECK sites) is a domain with walls; a straight wall is
@@ -1244,7 +1083,6 @@ mod tests {
         let n = l.len();
         let (mut speck, mut class, mut depth) = (vec![0; n], vec![0; n], vec![0; n]);
         l.classify(&mut speck, &mut class, &mut depth);
-        chamfer(&mut depth, 16);
         let at = |x: usize, y: usize| y * 16 + x;
         assert_eq!(class[at(3, 3)], SPECK_CLASS);
         assert_eq!(class[at(4, 8)], SPECK_CLASS);
@@ -1261,78 +1099,13 @@ mod tests {
             assert_eq!(class[at(x, y)], WALL_INTERIOR, "({x}, {y})");
         }
         assert_eq!(class[at(7, 1)], 2, "the 2x3 block's corner is a wall");
-        assert_eq!(depth[at(7, 1)], 0);
         assert_eq!((class[at(11, 5)], class[at(12, 5)]), (3, 3));
-        assert_eq!(
-            (depth[at(11, 5)], depth[at(10, 5)], depth[at(9, 5)]),
-            (0, 2, 4)
-        );
         // The torus wraps: column 0 is next to the down stripe's column 15.
         assert_eq!(class[at(0, 5)], 3);
     }
 
     #[test]
-    fn ising_a10_phases_differ_in_lightness_not_just_hue() {
-        // Colour-blind safe and Mono-proof: up interiors are pale (≥ 0.8 of the ramp),
-        // down interiors dark (≤ 0.35), in two ramps that are neither red nor green.
-        let glauber = inks(DEPTH_CAP, 0.0);
-        let (down, up) = (glauber[CLASSES - 1], glauber[2 * CLASSES - 1]);
-        assert!(f64::from(up.level) >= 0.8 * 255.0, "{up:?}");
-        assert!(f64::from(down.level) <= 0.35 * 255.0, "{down:?}");
-        for ramp in [UP_RAMP, DOWN_RAMP] {
-            assert!(!matches!(ramp, Ramp::HAlpha | Ramp::Aurora | Ramp::Ember));
-        }
-        // The ASCII decoder inverts the tables.
-        for (i, ink) in glauber.iter().enumerate() {
-            let v = class_value(i % CLASSES, DEPTH_CAP);
-            let want = if i >= CLASSES { v } else { -v };
-            assert!(
-                (signed(*ink) - want).abs() < 0.02,
-                "{i}: {} vs {want}",
-                signed(*ink)
-            );
-        }
-    }
-
-    #[test]
-    fn ising_a8_chamfer_is_the_exact_2_3_distance_to_the_nearest_wall() {
-        // Against the closed form: the 2–3 chamfer distance from (x, y) to a wall site is
-        // 3·min(|dx|, |dy|) + 2·(max − min), and every site starts at DEPTH_CAP or 0.
-        let mut rng = SplitMix64::new(5);
-        for (w, h) in [(1, 1), (1, 7), (9, 1), (23, 17)] {
-            let seed: Vec<u8> = (0..w * h)
-                .map(|_| {
-                    if rng.next_u64() % 29 == 0 {
-                        0
-                    } else {
-                        DEPTH_CAP
-                    }
-                })
-                .collect();
-            let mut depth = seed.clone();
-            chamfer(&mut depth, w);
-            for (i, &got) in depth.iter().enumerate() {
-                let (x, y) = ((i % w) as i64, (i / w) as i64);
-                let want = (0..w * h)
-                    .filter(|&j| seed[j] == 0)
-                    .map(|j| {
-                        let (dx, dy) = ((x - (j % w) as i64).abs(), (y - (j / w) as i64).abs());
-                        3 * dx.min(dy) + 2 * (dx.max(dy) - dx.min(dy))
-                    })
-                    .fold(i64::from(DEPTH_CAP), i64::min);
-                assert_eq!(i64::from(got), want, "{w}x{h} at ({x}, {y})");
-            }
-        }
-    }
-
-    #[test]
-    fn ising_a9_thermometer_marks_t_c_at_its_middle() {
-        assert_eq!(gauge_fill(1.0), GAUGE / 2);
-        assert_eq!(gauge_fill(0.60), 1);
-        assert_eq!(gauge_fill(1.25), 9);
-        assert_eq!(gauge_fill(0.0), 0);
-        assert_eq!(gauge_fill(9.0), GAUGE);
-        assert_eq!(gauge_fill(f64::NAN), 0);
+    fn ising_a9_label_reads_t_over_t_c_and_m() {
         let row = |w: u16| {
             let size = Size::new(w, 24);
             let (s, _) = scene(size);
@@ -1341,9 +1114,12 @@ mod tests {
             c.to_lines()[0].clone()
         };
         assert!(row(80).starts_with(" T/Tc 0.60  |m| 0."), "{}", row(80));
-        assert!(row(80).contains("  =-----|------ "), "{}", row(80));
-        let r = row(47);
-        assert!(!r.contains("-|-") && !r.contains('='), "{r}");
+        // No thermometer (ADR-0017: the readout alone explains the science).
+        assert!(
+            !row(80).contains("-|-") && !row(80).contains('='),
+            "{}",
+            row(80)
+        );
         // The Kawasaki act pins M, so the readout states the rule instead of a number.
         let text = label(0.6, None, Size::new(80, 24)).unwrap();
         assert_eq!(text.as_str(), "T/Tc 0.60  M fixed");
@@ -1360,14 +1136,14 @@ mod tests {
         );
     }
 
-    /// Mean ramp level over every pixel of the raster, 0..1.
+    /// Mean level over every pixel of the raster, 0..1.
     fn mean_level(s: &IsingModel) -> f64 {
         let px = s.pixels.pixel_size();
         let (w, h) = (i32::from(px.width()), i32::from(px.height()));
         let mut sum = 0.0;
         for y in 0..h {
             for x in 0..w {
-                sum += signed(s.pixels.get(x, y).unwrap()).abs();
+                sum += f64::from(s.pixels.get(x, y).unwrap().level) / 255.0;
             }
         }
         sum / f64::from(w * h)
@@ -1388,5 +1164,17 @@ mod tests {
         run_to(&mut s, 30.0);
         let hot = mean_level(&s);
         assert!(hot <= 0.65 * ordered, "hot {hot} vs ordered {ordered}");
+    }
+
+    #[test]
+    fn ising_a10_phases_differ_in_lightness_not_hue() {
+        // Colour-blind safe and Mono-proof: down is black, up a neutral grey, and no ramp
+        // is red or green.
+        assert_eq!(site_ink(-1, WALL_INTERIOR), Ink::BLANK);
+        assert!(site_ink(1, WALL_INTERIOR).level >= 15);
+        assert!(!matches!(
+            UP_ROLE,
+            Role::Ramp(Ramp::HAlpha | Ramp::Aurora | Ramp::Ember)
+        ));
     }
 }
