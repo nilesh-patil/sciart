@@ -25,7 +25,7 @@ and the art review judges the rest.
 3. **Small pixels, thin lines.** Structure is drawn at sub-cell resolution: braille dots,
    half-block pixels, or 1-pixel `Glow::stroke` lines anti-aliased by intensity, not by thickness.
    There are no cell-sized stamps for small things, no multi-cell outlines or borders, and no flat
-   blocks where a field varies (GEN-R17). Glows have tight falloff, so a point stays a point.
+   blocks where a field varies (GEN-R17). Glows have tight falloff, so a point stays a point. Values fade smoothly to black (smoothstep); no ordered, checker or stipple dither, which reads as a mechanical screen pattern and frays edges (added after M14 review of cosmic_microwave_background).
 4. **Less.** One subject per scene. Remove decorative frames, boxes, legends, redundant particles,
    extra captions and ornamental layers that don't explain the science. The bottom-left science
    title stays (ADR-0014). A label or readout stays only where it explains the science (a planet's
