@@ -1,7 +1,11 @@
 # pixi environments
 .pixi/*
 !.pixi/config.toml
-tools-py/art_generators/__pycache__/*
+
+# Python caches
+__pycache__/
+.pytest_cache/
+
 
 # macOS metadata
 .DS_Store

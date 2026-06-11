@@ -6,7 +6,9 @@ def generate(width, height):
     """Generates exoplanet transit with light curve visualization."""
     grid = [[" " for _ in range(width)] for _ in range(height)]
 
-    star_radius = min(width // 8, height // 4)
+    # Clamp to >= 1: the radius is used as a divisor and small terminals
+    # would otherwise collapse it to 0
+    star_radius = max(1, min(width // 8, height // 4))
     star_x, star_y = width // 3, height // 2
 
     planet_radius = max(2, star_radius // 4)
