@@ -1,8 +1,8 @@
 //! A micron-sized grain (like the particles Brown saw released from pollen) jittering among
-//! fast solvent molecules, leaving a fading random-walk trail inside a growing
-//! rms-displacement ring, with a live diffusion-constant readout (SPEC-002
-//! `brownian_motion`). The ring's radius is `√⟨r²(t)⟩` of free Langevin (OU) motion, which
-//! tends to `√(4Dt)` for `t ≫ 1/γ`.
+//! fast solvent molecules, leaving a fading random-walk trail, with a live
+//! diffusion-constant readout (SPEC-002 `brownian_motion`). The readout's estimator divides
+//! by `⟨r²(t)⟩` of free Langevin (OU) motion, which tends to `4Dt` for `t ≫ 1/γ`. (The M12
+//! dotted rms-displacement ring was dropped at M14 as decoration, ADR-0017 rule 4.)
 //!
 //! Physics: the grain's velocity is an Ornstein–Uhlenbeck process
 //! `dv = −γ v dt + σ dW` (Langevin equation without a potential). Position and velocity are
@@ -15,13 +15,12 @@
 //! stage glides (exponential ease, [`STAGE_TAU`]) until it is centred again, so the hero
 //! never hugs a wall. The solvent is a homogeneous bath seen through the moving window:
 //! molecules live in view coordinates, periodic across the screen ([`wrap`]), and shift
-//! with the stage. The trail and the ring are world coordinates and glide with it.
+//! with the stage. The trail is in world coordinates and glides with it.
 //!
-//! Raster (M12): solvent, trail and ring are braille [`Dots`] and the grain a shaded
+//! Raster (M12): solvent and trail are braille [`Dots`] and the grain a shaded
 //! half-block [`Pixels`] sphere, both rasterised in `update`/`resize`; `render` only blits
 //! and writes the readout.
 
-use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use rand::Rng;
@@ -44,7 +43,7 @@ pub fn build() -> Box<dyn Generator> {
 }
 
 /// Friction rate γ, 1/s. The velocity memory 1/γ = 0.5 s is stretched ~10⁶× (a real micron
-/// grain in water forgets its velocity in ~0.1 µs), so the ballistic start of the ring is
+/// grain in water forgets its velocity in ~0.1 µs), so the ballistic jitter of the path is
 /// visible (SPEC-002 Stylised).
 const GAMMA: f64 = 2.0;
 /// Diffusion constant, rows²/s: `√(4 D · 1 s) = 4` rows of rms 2-D displacement per √s.
@@ -76,11 +75,9 @@ const MOL_STREAK: f64 = 0.06;
 /// Largest frame step honoured (GEN-R4's range); bounds the per-frame cost.
 const MAX_DT: f64 = 0.25;
 /// Every resize starts from a pre-rolled past: this much exact OU track (trail and MSD
-/// lags) is simulated before the first frame, so the trail, the ring and the estimate
-/// all show from t = 0. The velocity starts stationary, so this is an honest past.
+/// lags) is simulated before the first frame, so the trail and the estimate both show
+/// from t = 0. The velocity starts stationary, so this is an honest past.
 const PREROLL: f64 = 20.0;
-/// The first ring epoch is this far along at t = 0, centred where the grain was then.
-const RING_PREROLL: f64 = 2.0;
 /// Above this glow a molecule is drawn as a 5-dot bead instead of one dot.
 const GLOW_BEAD: f64 = 0.35;
 /// Brightest a flash is drawn: below the trail's hot head (BRO-A6).
@@ -99,12 +96,6 @@ const CONTACT_PAD: f64 = 0.35;
 /// Grain radius as a fraction of the box's short side (rows), and its limits.
 const GRAIN_FRAC: f64 = 0.06;
 const GRAIN_R: (f64, f64) = (0.6, 3.5);
-/// Rms-displacement ring epochs: at most this long, and the ring stops growing at this fraction of
-/// the box's half short side (BRO-A5).
-const EPOCH_MAX: f64 = 16.0;
-const RING_REACH: f64 = 0.8;
-/// The ring fades in and out over this long at each end of its epoch, s.
-const RING_FADE: f64 = 0.8;
 /// The stage starts to recentre when the grain is more than this fraction of the view's
 /// half extent (per axis) from the centre, and stops once it is within `STAGE_DONE` of
 /// that band; it closes the gap with time constant `STAGE_TAU`, s.
@@ -112,10 +103,11 @@ const STAGE_BAND: f64 = 0.45;
 const STAGE_DONE: f64 = 0.15;
 const STAGE_TAU: f64 = 0.9;
 
-/// False colours (BRO-A6): a quiet neutral solvent, a pale violet grain and its path in
-/// ice (cyan → white), the hero.
+/// False colours (BRO-A6): a quiet neutral solvent, a muted grey-white grain (the same
+/// near-neutral Starlight ramp, lit far brighter) and its path in ice (cyan → white), the
+/// one accent (M14, ADR-0017 rule 2: no violet grain).
 const SOLVENT: Ramp = Ramp::Starlight;
-const GRAIN: Ramp = Ramp::Plasma;
+const GRAIN: Ramp = Ramp::Starlight;
 const PATH: Ramp = Ramp::Ice;
 
 /// Exact one-axis transition of the OU process over a step `h` (BRO-A1, BRO-A2).
@@ -224,29 +216,8 @@ struct Molecule {
     glow: f64,
 }
 
-/// Length of the epoch of the rms-displacement ring for a box of half short side `half` rows: the
-/// time for the free-space rms displacement to reach `RING_REACH·half`, capped at
-/// `EPOCH_MAX` (BRO-A5). While the ring is well inside the box the walls barely matter.
-pub(crate) fn epoch_len(half: f64) -> f64 {
-    let reach = RING_REACH * half.max(0.0);
-    // 4D·t ≈ msd_ou(t) + 4D/γ for t ≫ 1/γ; solve the exact curve by bisection instead.
-    let (mut lo, mut hi) = (0.0, EPOCH_MAX);
-    if msd_ou(hi) <= reach * reach {
-        return EPOCH_MAX;
-    }
-    for _ in 0..60 {
-        let mid = 0.5 * (lo + hi);
-        if msd_ou(mid) < reach * reach {
-            lo = mid;
-        } else {
-            hi = mid;
-        }
-    }
-    lo
-}
-
 /// Trail ramp value for a segment `age` s old (BRO-A6): the newest `TRAIL_HOT` s glow
-/// from 1 (white) down to 0.85 (pale cyan), above the ring, the solvent and its flashes;
+/// from 1 (white) down to 0.85 (pale cyan), above the solvent and its flashes;
 /// older path fades from 0.7 to 0.3 at the 32 s tail.
 pub(crate) fn trail_value(age: f64) -> f64 {
     let span = TRAIL_LEN as f64 * TICK / TRAIL_PER_TICK as f64;
@@ -270,12 +241,6 @@ fn stroke(dots: &mut Dots, p: (f64, f64), q: (f64, f64), ink: Ink, bold: bool) {
         };
         dots.line(p.0 + ox, p.1 + oy, q.0 + ox, q.1 + oy, ink);
     }
-}
-
-/// Ring brightness factor at `age` s into an epoch of `len` s: faded in and out.
-fn ring_fade(age: f64, len: f64) -> f64 {
-    let f = |u: f64| (u / RING_FADE).clamp(0.0, 1.0);
-    f(age).min(f(len - age))
 }
 
 /// A rectangle in rows (x already divided by ASPECT).
@@ -328,13 +293,8 @@ pub struct BrownianMotion {
     lag: Trail<(f64, f64)>,
     msd_sum: f64,
     msd_count: u64,
-    /// The rms-displacement ring: its centre (folded grain position at the epoch start), age and
-    /// epoch length (BRO-A5).
-    ring_origin: (f64, f64),
-    ring_age: f64,
-    epoch: f64,
     molecules: ParticlePool<Molecule>,
-    /// Solvent, trail and ring; the grain. Rasterised in `update`/`resize`.
+    /// Solvent and trail; the grain. Rasterised in `update`/`resize`.
     dots: Dots,
     pixels: Pixels,
     label: String,
@@ -361,9 +321,6 @@ impl Default for BrownianMotion {
             lag: Trail::new(LAG_TICKS + 1),
             msd_sum: 0.0,
             msd_count: 0,
-            ring_origin: (0.0, 0.0),
-            ring_age: 0.0,
-            epoch: EPOCH_MAX,
             molecules: ParticlePool::default(),
             dots: Dots::default(),
             pixels: Pixels::default(),
@@ -529,47 +486,11 @@ impl BrownianMotion {
         }
     }
 
-    /// Start a new ring epoch at the grain's current position (BRO-A5).
-    fn new_epoch(&mut self) {
-        self.ring_origin = self.grain_pos();
-        self.ring_age = 0.0;
-    }
-
-    /// Radius of the rms-displacement ring, rows: the exact free-space rms displacement
-    /// of Langevin motion after the ring's age, `√msd_ou(age)`, which tends to `√(4Dt)`
-    /// once `age ≫ 1/γ` (BRO-A5).
-    fn ring_radius(&self) -> f64 {
-        msd_ou(self.ring_age).sqrt()
-    }
-
     /// Draw everything but the readout (the raster convention, ADR-0010).
     fn rasterise(&mut self) {
         self.dots.clear();
         // First dot row not drawn: the readout's (GEN-R13).
         let floor = self.label_row.map_or(i32::MAX, |row| row * Dots::CELL_H);
-
-        // The ring: a thin dotted circle, one dot in two, around the epoch's start.
-        let fade = ring_fade(self.ring_age, self.epoch);
-        let r = self.ring_radius();
-        if fade > 0.0 && r > 0.5 {
-            let ink = ink::ramp(GRAIN, 0.2 + 0.25 * fade);
-            let (cx, cy) = dot_of(self.to_view(self.ring_origin));
-            let rd = r * f64::from(Dots::CELL_H);
-            let n = (TAU * rd).ceil().min(4096.0) as usize;
-            for k in (0..n).step_by(2) {
-                let (s, c) = (TAU * k as f64 / n as f64).sin_cos_det();
-                let (x, y) = ((cx + rd * c).round(), (cy + rd * s).round());
-                if (y as i32) < floor {
-                    self.dots.plot(x, y, ink);
-                }
-            }
-            // A small cross marks where the epoch started.
-            for d in -2..=2 {
-                let d = f64::from(d);
-                self.dots.plot(cx + d, cy, ink);
-                self.dots.plot(cx, cy + d, ink);
-            }
-        }
 
         // Solvent: one dim dot per molecule, a little brighter when fast, flashing after
         // a hit: a quiet ground for the path.
@@ -678,20 +599,6 @@ impl Generator for BrownianMotion {
         // The stage opens centred on the grain.
         self.cam = self.grain_pos();
         self.recentring = false;
-        let g = self.grain_box;
-        self.epoch = epoch_len(0.5 * (g.x1 - g.x0).min(g.y1 - g.y0));
-        // The first ring epoch began RING_PREROLL s ago (at most half an epoch), centred
-        // on the grain's position then, which the trail recorded.
-        let per_s = TRAIL_PER_TICK as f64 / TICK;
-        let back = (RING_PREROLL.min(0.5 * self.epoch) * per_s).round() as usize;
-        self.ring_age = back as f64 / per_s;
-        self.ring_origin = self
-            .trail
-            .iter()
-            .rev()
-            .nth(back)
-            .copied()
-            .unwrap_or_else(|| self.grain_pos());
 
         let n = ((MOL_PER_CELL * size.area() as f64) as usize).min(MOL_MAX);
         self.molecules.set_capacity(n);
@@ -720,10 +627,6 @@ impl Generator for BrownianMotion {
         self.advance_grain(dt, &mut ctx.rng);
         let shift = self.track(dt);
         self.t += dt;
-        self.ring_age += dt;
-        if self.ring_age >= self.epoch {
-            self.new_epoch();
-        }
         // Substeps short enough that a 3σ-fast molecule moves at most half the contact
         // reach, so none tunnels through the grain at a large dt.
         let reach = self.grain_r + CONTACT_PAD;
@@ -1007,10 +910,7 @@ mod tests {
             g.label
         );
         assert!(g.label.ends_with("  t 20s"), "{}", g.label);
-        // The ring is RING_PREROLL s into its epoch, centred where the grain was then.
-        assert!((g.ring_age - RING_PREROLL).abs() < 1e-12, "{}", g.ring_age);
-        assert_eq!(Some(&g.ring_origin), g.trail.iter().rev().nth(64));
-        assert!(g.ring_radius() > 3.0 && ring_fade(g.ring_age, g.epoch) == 1.0);
+        // (M14: the rms ring and its pre-rolled epoch are gone, ADR-0017 rule 4.)
         // The estimator itself still waits for LAG_MIN lag samples.
         g.msd_count = LAG_MIN - 1;
         assert_eq!(g.d_hat(), None);
@@ -1019,15 +919,15 @@ mod tests {
     }
 
     #[test]
-    fn bro_a6_newest_trail_outshines_the_ring_and_the_flashes() {
+    fn bro_a6_newest_trail_outshines_the_flashes() {
         // Hot head: 1 → 0.85 over 10 s, then a dimmer, monotone fade to 0.3 at the tail.
         assert_eq!(trail_value(0.0), 1.0);
         let span = TRAIL_LEN as f64 * TICK / TRAIL_PER_TICK as f64;
         assert!((trail_value(span) - 0.3).abs() < 1e-12);
         let vs: Vec<f64> = (0..=320).map(|i| trail_value(f64::from(i) * 0.1)).collect();
         assert!(vs.windows(2).all(|w| w[1] <= w[0]), "not monotone");
-        // Above the flash cap (0.6) and the ring's brightest (0.2 + 0.25), which the 0.85
-        // floor of the hot head clears; the solvent ground stays at or under 0.2.
+        // Above the flash cap (0.6), which the 0.85 floor of the hot head clears; the
+        // solvent ground stays at or under 0.2. (M14: no ring any more.)
         assert!(vs[..100].iter().all(|&v| v >= 0.85), "{:?}", &vs[..100]);
         const { assert!(GLOW_TOP < 0.85 && MOL_BASE + MOL_SPEED <= 0.2 + 1e-12) };
     }
@@ -1196,9 +1096,10 @@ mod tests {
     }
 
     #[test]
-    fn bro_a5_ring_encloses_63_percent_of_free_walkers() {
-        // The ring is the free-space rms displacement √msd_ou(t); an OU walker started from
-        // its stationary velocity has a 2-D Gaussian displacement, so it lies inside with
+    fn bro_a5_rms_displacement_encloses_63_percent_of_free_walkers() {
+        // M14: the ring is no longer drawn, but its model stays the readout's reference:
+        // the free-space rms displacement √msd_ou(t). An OU walker started from its
+        // stationary velocity has a 2-D Gaussian displacement, so it lies inside with
         // probability 1 − e^{−1} ≈ 0.632 at every age.
         let n = 4000;
         let mut ctx = seeded(31);
@@ -1216,39 +1117,6 @@ mod tests {
             // s.e. √(p(1−p)/n) ≈ 0.0076: 4 s.e.
             assert!((p - (1.0 - (-1.0f64).exp())).abs() < 0.031, "t {t}: {p}");
         }
-    }
-
-    #[test]
-    fn bro_a5_epochs_stay_inside_the_box_and_restart_at_the_grain() {
-        for half in [0.0, 1.0, 5.0, 11.0, 24.0, 1e6] {
-            let e = epoch_len(half);
-            assert!((0.0..=EPOCH_MAX).contains(&e), "{half}: {e}");
-            if e < EPOCH_MAX {
-                let r = msd_ou(e).sqrt();
-                assert!((r - RING_REACH * half).abs() < 1e-6, "{half}: {r}");
-            }
-        }
-        assert_eq!(epoch_len(1e6), EPOCH_MAX);
-        let mut ctx = seeded(6);
-        let mut g = BrownianMotion::default();
-        g.resize(Size::new(80, 24), &mut ctx);
-        g.prepare();
-        assert!(g.epoch > 3.0 && g.epoch < EPOCH_MAX, "{}", g.epoch);
-        let mut restarts = 0;
-        for _ in 0..(3.0 * g.epoch / SIM_DT) as usize {
-            let age = g.ring_age;
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-            assert!(g.ring_age <= g.epoch);
-            if g.ring_age < age {
-                restarts += 1;
-                assert_eq!(g.ring_origin, g.grain_pos());
-            }
-        }
-        assert!(restarts >= 2, "{restarts}");
-        assert_eq!(ring_fade(0.0, 8.0), 0.0);
-        assert_eq!(ring_fade(4.0, 8.0), 1.0);
-        assert_eq!(ring_fade(8.0, 8.0), 0.0);
     }
 
     #[test]

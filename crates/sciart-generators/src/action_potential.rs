@@ -198,7 +198,11 @@ const SPIKE: Ramp = Ramp::Plasma;
 /// after-hyperpolarisation (tones above `−WAKE_FLOOR`, V ≳ −73 mV) keeps the glow, and
 /// only the deep, recent wake sinks toward black, reaching it at tone `−WAKE_SPAN`
 /// (≈ −76 mV, the undershoot's minimum): a dark notch just behind the spike.
-const U_REST: f64 = 0.16;
+/// M14 (ADR-0017 rules 1-2): the resting glow sits just above visibility (level 16, was
+/// 0.16 ≈ 41), so the resting tissue is a near-black indigo whisper (L ≈ 0.21, chroma
+/// ≈ 0.09) instead of a saturated violet fill, and the travelling spike is the one
+/// accent. An exact level, so rest round-trips through `ink_tone` (AP-A11).
+const U_REST: f64 = 16.0 / 255.0;
 const WAKE_FLOOR: f64 = 0.3;
 const WAKE_SPAN: f64 = 0.48;
 /// Filled regions brighten the resting glow by up to `REST_SHADE` of itself toward the
