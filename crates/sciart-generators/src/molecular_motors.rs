@@ -503,49 +503,44 @@ impl Motors {
         // ATP molecules drifting in solution.
         for d in &self.dots {
             let (x, y) = (pw * (d.x + 1.0) / 2.0, ph * (d.y + 1.0) / 2.0);
-            if (y - track_y).abs() > 7.0 * s {
+            // Not on or inside the tube (M14: the tube is only its walls, so its inside
+            // would otherwise show molecules through it).
+            if y < track_y - 7.0 * s {
                 self.pixels
-                    .set(x as i32, y as i32, Ink::new(Role::Ramp(Ramp::Sulfur), 150));
+                    .set(x as i32, y as i32, Ink::new(Role::Ramp(Ramp::Sulfur), 110));
             }
         }
-        // Microtubule: a dim tube body (lit from above) so the lattice has no black gaps,
-        // then three protofilaments of αβ-tubulin (4 nm beads, α darker, β paler), each
-        // row shifted along the axis as in the lattice's helical pitch, the far rows
-        // dimmer; value noise gives each dimer its own shade, so the texture moves with
-        // the track. Beads are antialiased and low in contrast: a soft, woven surface.
+        // Microtubule (M14, ADR-0017): a thin lattice, not a row of shaded balls. The tube's
+        // two walls are 1-px grey lines, and the track's surface row carries one pixel per
+        // 4 nm tubulin monomer, β paler than α, so the 8 nm dimer rhythm the heads step
+        // along still reads and moves with the track.
         let tube = Role::Ramp(Ramp::Starlight);
-        let (y_top, y_bot) = (to_px(0.0, 2.4, cam).1, to_px(0.0, 14.6, cam).1);
-        for py in y_top.floor() as i32..=y_bot.ceil() as i32 {
-            let fy = f64::from(py) + 0.5;
-            let cover = ((fy - y_top).min(y_bot - fy) + 0.5).clamp(0.0, 1.0);
-            let t = ((fy - y_top) / (y_bot - y_top).max(1.0)).clamp(0.0, 1.0);
-            let lvl = cover * (26.0 + 30.0 * (1.0 - t));
-            for px in 0..i32::from(ps.width()) {
-                self.pixels.set(px, py, Ink::new(tube, ink::level(lvl)));
-            }
+        let (y_top, y_bot) = (
+            to_px(0.0, 2.4, cam).1,
+            to_px(0.0, 14.6, cam).1.min(ph - 1.0),
+        );
+        for px in 0..i32::from(ps.width()) {
+            self.pixels.set(px, y_top as i32, Ink::new(tube, 60));
+            self.pixels.set(px, y_bot as i32, Ink::new(tube, 40));
         }
         let first = ((cam - pw / 2.0 / s) / 4.0).floor() as i64 - 3;
         let last = ((cam + pw / 2.0 / s) / 4.0).ceil() as i64 + 3;
-        for (row, (y, shift, depth)) in [(12.5, 2.6, 0.62), (8.5, 1.3, 0.8), (4.5, 0.0, 1.0)]
-            .into_iter()
-            .enumerate()
-        {
-            for k in first..=last {
-                let x = k as f64 * 4.0 + 2.0 + shift;
-                let beta = k.rem_euclid(2) == 0;
-                let grain = sciart_core::rng::value_noise(11 + row as u64, x, 0.0, 9.0);
-                let lvl = depth * (if beta { 132.0 } else { 100.0 }) * (0.88 + 0.24 * grain);
-                soft_disc(&mut self.pixels, to_px(x, y, cam), 2.1 * s, tube, |l, d| {
-                    lvl * (0.62 + 0.38 * l) * (1.0 - 0.25 * d * d)
-                });
-            }
+        for k in first..=last {
+            let x = k as f64 * 4.0 + 2.0;
+            let beta = k.rem_euclid(2) == 0;
+            let (px, _) = to_px(x, 0.0, cam);
+            self.pixels.set(
+                px as i32,
+                y_top as i32 + 1,
+                Ink::new(tube, if beta { 110 } else { 70 }),
+            );
         }
         // Footprints: each site a head bound to glows faintly and fades, so the walk
         // leaves a trail of 8 nm steps along the track.
         for &(x, at) in &self.trail[..self.trail_len] {
             let age = (self.time - at) / TRAIL_S;
             if (0.0..1.0).contains(&age) {
-                let glow = 60.0 + 110.0 * (1.0 - age).powi(2);
+                let glow = 40.0 + 60.0 * (1.0 - age).powi(2);
                 soft_disc(
                     &mut self.pixels,
                     to_px(x, 3.4, cam),
@@ -572,21 +567,13 @@ impl Motors {
             let light = 0.5 + 0.5 * (-(ox + oy) / (1.5 * r)).clamp(-1.0, 1.0);
             let bump = |c: f64, w: f64| (-((d - c) / w).powi(2)).exp();
             let leaflet = bump(0.91, 0.075);
+            // M14: the membrane only, a thin grey ring; the lumen is left black.
             if leaflet > 0.3 {
-                let lvl = (80.0 + 90.0 * light) * leaflet.min(1.0);
-                blend(&mut self.pixels, x, y, cover, Role::Ramp(Ramp::Ice), lvl);
-            } else {
-                // Two octaves of soft noise: a grainy, translucent lumen.
-                let fine = sciart_core::rng::value_noise(5, ox / s, oy / s, 0.8);
-                let coarse = sciart_core::rng::value_noise(6, ox / s, oy / s, 2.6);
-                let granule = ease::smoothstep((0.6 * fine + 0.4 * coarse - 0.35) / 0.4);
-                let sheen = (-(((ox / r + 0.4).powi(2) + (oy / r + 0.4).powi(2)) / 0.03)).exp();
-                let lvl =
-                    22.0 + 26.0 * light + 50.0 * granule * (0.6 + 0.4 * light) + 110.0 * sheen;
+                let lvl = (50.0 + 60.0 * light) * leaflet.min(1.0);
                 blend(&mut self.pixels, x, y, cover, tube, lvl);
             }
         });
-        let tether = Ink::new(Role::Ramp(Ramp::Aurora), 130);
+        let tether = Ink::new(Role::Ramp(Ramp::Aurora), 90);
         let hip_px = to_px(hip.0, hip.1, cam);
         soft_segment(
             &mut self.pixels,
@@ -599,13 +586,15 @@ impl Motors {
             let bound = k.free.is_none_or(|(f, _)| f != i);
             let (x, y) = to_px(h[0], h[1], cam);
             soft_segment(&mut self.pixels, hip_px, (x, y), 0.45, tether);
-            let top = if bound { 235.0 } else { 185.0 };
+            // M14: dim Aurora heads, the bound one a little brighter.
+            let top = if bound { 170.0 } else { 130.0 };
             soft_disc(
                 &mut self.pixels,
                 (x, y),
-                4.0 * s,
+                3.2 * s,
                 Role::Ramp(Ramp::Aurora),
-                |l, _| top * (0.55 + 0.45 * l),
+                // A small specular glint on the lit side carries the legibility (rule 6).
+                |l, _| top * (0.55 + 0.45 * l) + 85.0 * l.powi(4),
             );
         }
     }

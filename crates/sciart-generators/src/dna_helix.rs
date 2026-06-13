@@ -388,7 +388,8 @@ const FORK_MIN_ROWS: f64 = 1.95;
 /// From this zoom-1 backbone radius (rows) the near strands are drawn 3 dots wide: on
 /// large views a 1-dot thread is outweighed by the full-cell `┃` rungs, and the depth
 /// cue needs the area.
-const BOLD_MIN_ROWS: f64 = 4.5;
+/// M14 (ADR-0017): strands are 1-dot lines at every size, so no view is bold.
+const BOLD_MIN_ROWS: f64 = f64::INFINITY;
 /// From this backbone radius (rows, at the current zoom) bold near strands are 4 dots wide.
 const THICK_ROWS: f64 = 9.0;
 
@@ -677,10 +678,10 @@ impl Geo {
     }
 }
 
-/// Backbone depth cue: 85 far … 235 near (DNA-A2). The backbones are the helix's
-/// silhouette, so the near strand is the brightest thing in the frame.
+/// Backbone depth cue: 90 far … 210 near (DNA-A2; M14: 1-dot strands, so the
+/// fresh nucleotides and the helicase are the bright accents).
 pub(crate) fn backbone_level(z_local: f64) -> f64 {
-    85.0 + 150.0 * ((z_local + R) / (2.0 * R)).clamp(0.0, 1.0)
+    90.0 + 120.0 * ((z_local + R) / (2.0 * R)).clamp(0.0, 1.0)
 }
 
 /// Rung half level at its backbone end: `max(0.8 × backbone level, 100)`.
@@ -770,14 +771,15 @@ const OLD: Role = Role::Ramp(Ramp::Ice);
 const NEW: Role = Role::Ramp(Ramp::HAlpha);
 /// Rungs at this fraction of their backbone end's level, floored at `RUNG_FLOOR`: the
 /// ladder stays under the backbones, while near and far rungs still differ.
-const RUNG: f64 = 0.8;
-const RUNG_FLOOR: f64 = 100.0;
+const RUNG: f64 = 0.75;
+const RUNG_FLOOR: f64 = 70.0;
 /// Helicase collar radius, in R: a ring that reads at a glance (a hexameric DnaB ring is
 /// ≈ 12 nm across, about 3× the duplex, so this is still an understatement) while
 /// clamping only the upper strand (Crick is 1.78 R below the apex). It is a filled
 /// doughnut, traced at these fractions of the radius.
 const RING: f64 = 0.6;
-const RING_BAND: [f64; 9] = [0.4, 0.48, 0.55, 0.63, 0.7, 0.78, 0.85, 0.93, 1.0];
+/// M14 (ADR-0017): a thin ring (its rim only), not a filled block.
+const RING_BAND: [f64; 2] = [0.9, 1.0];
 /// Points around the collar; at 200×50 its ≈ 35-dot circumference is fully joined.
 const RING_SAMPLES: usize = 48;
 /// The motor at the fork: the frame's one chrome-yellow object, apart from the ice and
@@ -846,13 +848,15 @@ fn rung_chord(a: (f64, f64), b: (f64, f64)) -> Option<[i32; 4]> {
 /// A rung's upright stroke: a half-cell bar (one braille dot wide) behind the axis, and
 /// in front of it a full-cell slab (two dots wide), so the ladder reads as stacked
 /// base-pair plates, near ones solid, while staying under the 3-dot backbones.
-const BAR: Glyph = Glyph::new('▐', '|');
-const SLAB: Glyph = Glyph::new('█', '|');
+/// M14 (ADR-0017): 1-px rungs, a thin line in front of the axis and a dashed one behind.
+const BAR: Glyph = Glyph::new('╎', '|');
+const SLAB: Glyph = Glyph::new('│', '|');
 /// The left half-cell beside a far bar on wide rungs: `▐▌` reads as one 2-dot bar.
 const BAR_PAIR: Glyph = Glyph::new('▌', '|');
 /// Rungs are doubled once pairs lie at least this many columns apart (the zoomed-in
 /// opening on tall views), where a one-column rung reads thin and sparse.
-const WIDE_RUNG_COLS: f64 = 6.0;
+/// M14: never (rungs stay 1 px).
+const WIDE_RUNG_COLS: f64 = f64::INFINITY;
 
 /// The cells of a rung, as `(x, y, glyph, ink)`, one per row: an upright one straight
 /// down its middle column, a slanted one as a Bresenham chord with `┃` for a step down a
@@ -1679,24 +1683,15 @@ mod tests {
     }
 
     #[test]
-    fn dna_a2_near_strands_are_bold_on_large_views() {
-        // Each strand spends half its length in front of its axis, so without bolding
-        // the near and far layers light about as many dots.
-        for (size, bold) in [
-            (Size::new(200, 50), true),
-            (Size::new(120, 36), true),
-            (Size::new(80, 24), false),
-            (Size::new(40, 12), false),
-        ] {
-            assert_eq!(View::new(size).bold, bold, "{size:?}");
+    fn dna_a2_strands_are_one_dot_lines_at_every_size() {
+        // M14 (ADR-0017): no view is bold, so near and far strands are both 1-dot
+        // lines and light about as many dots.
+        for size in [Size::new(200, 50), Size::new(120, 36), Size::new(80, 24)] {
+            assert!(!View::new(size).bold, "{size:?}");
             for t in [0.5, 2.0, 9.0, 20.0] {
                 let scene = scene_at(size, t);
                 let ratio = lit_dots(&scene.near) as f64 / lit_dots(&scene.far) as f64;
-                if bold {
-                    assert!(ratio >= 1.5, "{size:?} t = {t}: near/far {ratio:.2}");
-                } else {
-                    assert!(ratio <= 1.3, "{size:?} t = {t}: near/far {ratio:.2}");
-                }
+                assert!(ratio <= 1.3, "{size:?} t = {t}: near/far {ratio:.2}");
             }
         }
     }
@@ -1931,40 +1926,19 @@ mod tests {
     }
 
     #[test]
-    fn dna_a9_zoomed_in_rungs_are_twice_as_wide() {
-        // At the opening zoom on a tall view pairs are ≥ 6 columns apart, so each upright
-        // rung takes a second column (`█` near, `▌` beside a far `▐`); zoomed out, not.
-        let size = Size::new(120, 40);
-        let wide = scene_at(size, 2.0);
-        assert!(wide.rungs.iter().filter(|r| r.wide).count() >= 4);
-        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-        wide.render(&mut canvas);
-        let mut pairs = 0;
-        for r in wide.rungs.iter().filter(|r| r.wide) {
-            rung_cells(r, |x, y, glyph, _| {
-                if glyph == SLAB || glyph == BAR {
-                    let next = canvas.get(x + 1, y).map(|c| c.ch);
-                    let want = if glyph == SLAB {
-                        SLAB.unicode
-                    } else {
-                        BAR_PAIR.unicode
-                    };
-                    pairs += usize::from(next == Some(want));
-                }
-            });
+    fn dna_a9_rungs_stay_one_column_wide() {
+        // M14 (ADR-0017): rungs are 1-px lines at every zoom, never doubled.
+        for t in [2.0, 12.0] {
+            let scene = scene_at(Size::new(120, 40), t);
+            assert!(scene.rungs.iter().all(|r| !r.wide), "t = {t}");
         }
-        assert!(pairs >= 8, "{pairs} doubled rung cells");
-        assert_eq!(BAR_PAIR.ascii, '|');
-        let narrow = scene_at(size, 12.0);
-        assert!(narrow.rungs.iter().all(|r| !r.wide));
     }
 
     #[test]
-    fn dna_a9_rungs_are_two_dots_wide_and_the_helicase_is_sulfur() {
-        // Near rungs fill their cell (two braille dots across), far rungs half of it, so
-        // the ladder reads as solid base-pair slabs under the 3-dot backbones.
-        assert_eq!(SLAB, Glyph::new('█', '|'));
-        assert_eq!(BAR, Glyph::new('▐', '|'));
+    fn dna_a9_rungs_are_thin_lines_and_the_helicase_is_sulfur() {
+        // M14: near rungs a thin solid line, far rungs a thin dashed one.
+        assert_eq!(SLAB, Glyph::new('│', '|'));
+        assert_eq!(BAR, Glyph::new('╎', '|'));
         // The motor is the frame's one chrome-yellow object, apart from every strand
         // and pair ramp.
         assert_eq!(RING_ROLE, Role::Ramp(Ramp::Sulfur));

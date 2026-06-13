@@ -333,7 +333,7 @@ impl Shell {
         let grown = (self.time % REGIME_S) / REGIME_S;
         let length = height * (GROWN_MIN + (1.0 - GROWN_MIN) * grown);
         // The lip's glowing edge: the rows laid in the last moments, still wet.
-        let wet = (1.6 / length).min(0.2);
+        let wet = (3.2 / length).min(0.2);
         self.pixels.shade(|x, y| {
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
             let dx = fx - cx;
@@ -365,7 +365,7 @@ impl Shell {
                 let suture = ((st * 3.5).fract() - 0.5).abs();
                 let suture = ease::smoothstep(((0.1 - (0.5 - suture)) / 0.1).clamp(0.0, 1.0));
                 let lit = lambert(u.clamp(-1.0, 1.0));
-                let lvl = (120.0 + 120.0 * lit) * (1.0 - 0.45 * suture) * spire_cover;
+                let lvl = (70.0 + 40.0 * lit) * (1.0 - 0.45 * suture) * spire_cover;
                 return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl));
             }
             if body_cover <= 0.0 {
@@ -392,16 +392,18 @@ impl Shell {
                     // Fresh pigment at the growing edge glows, so the lip is seen to paint.
                     return Ink::new(Role::Ramp(Ramp::Ember), ink::level(210.0 * body_cover));
                 }
-                // Chestnut in the fresh line, umber in the fading band: a dim 1.6–2.5 kK
-                // glow is the dark orange we see as brown (false colour).
+                // M14 (ADR-0017): pigment is darker than the shell, as on a real cone:
+                // `Ramp(Sienna)` 30–70, the densest line darkest, shaded with the shell.
                 let k = ease::smoothstep((pigment - PIG_MIN) / 0.9);
-                let kelvin = 2500.0 - 900.0 * k;
-                ink::blackbody(kelvin * (0.6 + 0.4 * light))
+                let lvl = (70.0 - 40.0 * k) * (0.6 + 0.4 * light);
+                Ink::new(PIGMENT, ink::level(lvl))
             } else {
                 let lvl = if at_lip {
                     255.0 * body_cover
                 } else {
-                    222.0 * light
+                    // M14: a dim cream shell (Starlight 70–110 by the light) under the
+                    // darker pigment; the wet lip is the bright accent.
+                    (60.0 + 55.0 * lambert(u)) * body_cover
                 };
                 Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl))
             }
@@ -411,6 +413,8 @@ impl Shell {
 
 /// Pigment below this is shell ground.
 const PIG_MIN: f64 = 0.25;
+/// The pigment's ramp (M14).
+const PIGMENT: Role = Role::Ramp(Ramp::Sienna);
 /// The spire's height as a fraction of the body's.
 const SPIRE: f64 = 0.15;
 /// The body's length at the start of a regime, as a fraction of its full length.
@@ -442,7 +446,7 @@ fn lambert(u: f64) -> f64 {
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let lit = |i: Ink| i.role != Role::Background;
-    let pig = |i: Ink| i.role == Role::Blackbody;
+    let pig = |i: Ink| i.role == PIGMENT;
     match (lit(top), lit(bottom)) {
         (false, false) => None,
         _ if pig(top) => Some(('#', top)),

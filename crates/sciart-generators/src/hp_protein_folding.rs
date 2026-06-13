@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink, raster, title};
+use sciart_core::{draw, ink, title};
 
 pub static META: Meta = Meta {
     name: "hp_protein_folding",
@@ -387,13 +387,17 @@ pub(crate) fn schedule(local: f64) -> (f64, usize) {
 const BEAD_EASE_S: f64 = 0.05;
 const CAM_FOLLOW_S: f64 = 0.1;
 const CAM_ZOOM_S: f64 = 0.8;
-/// Bead core and halo radii, in lattice steps.
-const H_R: f64 = 0.34;
-const P_R: f64 = 0.3;
-const HALO_R: f64 = 0.62;
-const BACKBONE: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 140);
-const WATER: Role = Role::Ramp(Ramp::Cobalt);
-const H_ROLE: Role = Role::Ramp(Ramp::Sulfur);
+/// M14 (ADR-0017): residues are 2 × 2-pixel dots at any zoom (the chain stops this many
+/// pixels from a bead's centre), no halos and no water shimmer; the chain is a 1-dot
+/// braille line between them.
+const BEAD_R: f64 = 1.0;
+const BACKBONE: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 110);
+/// H residues glow a dim `Blackbody` from 1500 K, warmer with each H·H contact (buried
+/// cores read hot); P residues are neutral grey.
+const H_ROLE: Role = Role::Blackbody;
+const P_ROLE: Role = Role::Text;
+const H_KELVIN: (f64, f64, f64) = (1500.0, 450.0, 4200.0);
+const P_LEVEL: f64 = 150.0;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 #[derive(Debug)]
@@ -442,29 +446,6 @@ impl Default for Folding {
     }
 }
 
-/// Blend `level` in `role` into pixel `(x, y)` by `cover`: over blank or same-ramp pixels
-/// the levels mix (the ramps run to near-black, so this reads as partial coverage); over
-/// another ink the pixel is taken only when mostly covered.
-fn blend(px: &mut Pixels, x: i32, y: i32, cover: f64, ink: Ink) {
-    let Some(under) = px.get(x, y) else {
-        return;
-    };
-    let base = if under.role == ink.role {
-        f64::from(under.level)
-    } else if under.role == Role::Background || cover >= 0.5 {
-        0.0
-    } else {
-        return;
-    };
-    let k = if under.role == ink.role || under.role == Role::Background {
-        cover
-    } else {
-        1.0
-    };
-    let level = base + (f64::from(ink.level) - base) * k;
-    px.set(x, y, Ink::new(ink.role, ink::level(level)));
-}
-
 impl Folding {
     fn local(&self) -> f64 {
         self.time % ACT_S.iter().sum::<f64>()
@@ -507,83 +488,26 @@ impl Folding {
     fn rasterise(&mut self) {
         self.pixels.clear();
         self.dots.clear();
-        // Water: two slow interference patterns, kept faint and sparse (caustic ridges).
-        let t = self.time;
-        for (x, c) in self.cols.iter_mut().enumerate() {
-            let x = x as f64;
-            *c = [
-                (0.21 * x + 0.9 * t).sin_det() as f32,
-                (0.13 * x - 0.6 * t).sin_det() as f32,
-            ];
-        }
-        for (y, r) in self.rows.iter_mut().enumerate() {
-            let y = y as f64;
-            *r = [
-                (0.17 * y - 0.7 * t).sin_det() as f32,
-                (0.29 * y + 0.5 * t).sin_det() as f32,
-            ];
-        }
-        let (cols, rows) = (&self.cols, &self.rows);
-        self.pixels.shade(|x, y| {
-            let (Some(c), Some(r)) = (cols.get(x as usize), rows.get(y as usize)) else {
-                return Ink::BLANK;
-            };
-            let s = f64::from(c[0] * r[0] + c[1] * r[1]);
-            let lvl = 16.0 * ease::smoothstep((s - 0.9) / 1.0);
-            if lvl < 3.0 {
-                Ink::BLANK
-            } else {
-                Ink::new(WATER, ink::level(lvl))
-            }
-        });
-        let sp = self.cam.2;
-        // Halos first: P's hydration shell (cool), H's warm glow.
-        for i in 0..N {
-            let c = self.to_px(self.disp[i]);
-            let h = self.chain.is_h(i);
-            raster::disc_pixels(c, HALO_R * sp, |x, y, cover| {
-                let d = (f64::from(x) + 0.5 - c.0).hypot(f64::from(y) + 0.5 - c.1)
-                    / (HALO_R * sp).max(0.5);
-                let fall = (1.0 - d).max(0.0).powi(2);
-                let ink = if h {
-                    ink::blackbody(1100.0 + 1300.0 * fall)
-                } else {
-                    Ink::new(WATER, ink::level(62.0 * fall))
-                };
-                blend(&mut self.pixels, x, y, cover, ink);
-            });
-        }
         // Cores, lit from the upper left; buried H glows brighter.
         for i in 0..N {
             let c = self.to_px(self.disp[i]);
             let h = self.chain.is_h(i);
-            let r = if h { H_R } else { P_R } * sp;
-            let top = if h {
-                150.0 + 42.0 * self.chain.contacts_of(i) as f64
+            let ink = if h {
+                let (k0, dk, k1) = H_KELVIN;
+                ink::blackbody((k0 + dk * self.chain.contacts_of(i) as f64).min(k1))
             } else {
-                200.0
+                Ink::new(P_ROLE, ink::level(P_LEVEL))
             };
-            let role = if h { H_ROLE } else { WATER };
-            raster::disc_pixels(c, r, |x, y, cover| {
-                let (ox, oy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
-                let shade = 0.5 + 0.5 * (-(ox + oy) / (1.5 * r + 1.0)).clamp(-1.0, 1.0);
-                let lvl = top.min(245.0) * (0.62 + 0.38 * shade);
-                blend(
-                    &mut self.pixels,
-                    x,
-                    y,
-                    cover,
-                    Ink::new(role, ink::level(lvl)),
-                );
-            });
+            // A regular 2 × 2-pixel dot centred on the bead.
+            let (x0, y0) = ((c.0 - 0.5).round() as i32, (c.1 - 0.5).round() as i32);
+            for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+                self.pixels.set(x0 + dx + 1, y0 + dy + 1, ink);
+            }
         }
         // Backbone: a braille line between beads, stopping at their rims.
         for i in 0..N - 1 {
             let (a, b) = (self.to_px(self.disp[i]), self.to_px(self.disp[i + 1]));
-            let (ra, rb) = (
-                if self.chain.is_h(i) { H_R } else { P_R } * sp,
-                if self.chain.is_h(i + 1) { H_R } else { P_R } * sp,
-            );
+            let (ra, rb) = (BEAD_R, BEAD_R);
             // Dots are half a pixel in both axes.
             let (a, b) = ((2.0 * a.0, 2.0 * a.1), (2.0 * b.0, 2.0 * b.1));
             let len = (b.0 - a.0).hypot(b.1 - a.1);
@@ -599,11 +523,11 @@ impl Folding {
     }
 }
 
-/// ASCII: H `@`, P `o`; halos, water and dim pixels blank.
+/// ASCII: H `@`, P `o`.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let pick = |i: Ink| match i.role {
         H_ROLE => Some(('@', i)),
-        WATER if i.level >= 120 => Some(('o', i)),
+        P_ROLE => Some(('o', i)),
         _ => None,
     };
     pick(top).or_else(|| pick(bottom))

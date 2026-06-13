@@ -40,7 +40,7 @@ use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::lbm::{self, heq, tau_minus};
 use sciart_core::prelude::*;
-use sciart_core::{Tone, draw, ease, ink, raster};
+use sciart_core::{Tone, draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "vortex_street",
@@ -176,6 +176,7 @@ const DYE_CAP: usize = PORTS * STEPS_PER_S as usize * 12;
 const DYE_KNEE: f32 = 0.25;
 const DYE_WHITE: f32 = 12.0;
 const DYE_DIM: u8 = 130;
+#[cfg(test)]
 const DYE_RAMP: Ramp = Ramp::Plasma;
 /// A dye particle's weight falls linearly from 1 at release to 1/16 at this age (s), about
 /// the time dye takes to reach the second eddy, so fresh streaks are bright and old ones dim
@@ -328,8 +329,12 @@ pub(crate) fn strouhal(crossings: &Trail<u64>, d: f64, u_at: impl Fn(f64) -> f64
 /// The ink of one vorticity pixel: `ink::div` of the soft-clipped value, or `None` in the
 /// irrotational flow (|s| < 0.06), which is the terminal background.
 pub(crate) fn vort_ink(s: f64) -> Option<Ink> {
-    (s.abs() >= VORT_MIN).then(|| ink::div(s))
+    (s.abs() >= VORT_MIN).then(|| ink::div(VORT_MUTE * s))
 }
+
+/// M14 (ADR-0017): the vorticity is drawn at this share of its soft-clipped value, so the
+/// eddies are muted orange and blue that deepen to the dark zero between them.
+const VORT_MUTE: f64 = 0.85;
 
 /// Hysteresis marks of a pixel (see [`mark`]); `VISITED` is a `FAINT` pixel already
 /// grouped by [`drop_faint_islands`].
@@ -1012,6 +1017,8 @@ impl VortexStreet {
                 let r = (dx * dx + dy * dy).sqrt();
                 let fluid = self.pixels.get(x, y).is_some_and(|i| i.role == Role::Div);
                 let ink = match disc_coverage(dx, dy, r, radius, (sx, sy)) {
+                    // M14: a 1-px outline; the disc's inside is left dark.
+                    c if c >= 1.0 && r < radius - sx.max(sy) => Ink::BLANK,
                     c if c >= 1.0 => CYLINDER_INK,
                     c if c >= 0.5 => rim_ink(c),
                     // A pixel partly covered from outside the rim shows the wall only
@@ -1094,6 +1101,7 @@ impl VortexStreet {
     }
 
     /// The Unicode ink of pixel `(x, y)`: dye over the vorticity (VOR-A11).
+    #[cfg(test)]
     fn dyed(&self, x: i32, y: i32) -> Ink {
         let w = i32::from(self.pixels.pixel_size().width());
         let level = self
@@ -1238,24 +1246,8 @@ impl Generator for VortexStreet {
                 (self.cap_cols.0..=self.cap_cols.1).contains(&x),
             )
         });
-        // Unicode: the dyed cells again, dye over the vorticity; ASCII keeps the
-        // vorticity alone (VOR-A11).
-        if canvas.mode() == GlyphMode::Unicode {
-            let w = usize::from(self.pixels.pixel_size().width());
-            for (i, pair) in self.dye_level.chunks_exact(2 * w).enumerate() {
-                let (tops, bottoms) = pair.split_at(w);
-                for (x, _) in tops
-                    .iter()
-                    .zip(bottoms)
-                    .enumerate()
-                    .filter(|(_, (t, b))| **t | **b != 0)
-                {
-                    let (x, y) = (x as i32, i as i32);
-                    let (top, bottom) = (self.dyed(x, 2 * y), self.dyed(x, 2 * y + 1));
-                    raster::half_block(canvas, x, y, top, bottom);
-                }
-            }
-        }
+        // M14 (ADR-0017): the dye is advected and exposed (VOR-A9, A10, A12) but not
+        // drawn: its specks cluttered the eddies (VOR-A11).
         self.label(canvas);
     }
 }
@@ -1790,7 +1782,12 @@ mod tests {
                     let r = (dx * dx + dy * dy).sqrt();
                     let c = disc_coverage(dx, dy, r, 0.5 * p.d, (sx, sy));
                     let at = format!("{size:?} ({x}, {y}) {ink:?}");
-                    if c >= 0.5 {
+                    // M14: the inside (over a pixel in from the rim) is dark, the outline
+                    // solid.
+                    let inside = r < 0.5 * p.d - sx.max(sy);
+                    if c >= 1.0 && inside {
+                        assert_eq!(ink, Ink::BLANK, "{at}");
+                    } else if c >= 0.5 {
                         assert!(
                             ink.role == Role::Structure && ink.level >= RIM_SOLID,
                             "{at}"
@@ -1960,24 +1957,8 @@ mod tests {
             .filter(|&(x, y)| grid[y][x] == '@')
             .collect();
         assert!(!at.is_empty());
-        // One 4-connected blob: flood fill from the first cell reaches them all.
-        let mut seen = vec![at[0]];
-        let mut i = 0;
-        while i < seen.len() {
-            let (x, y) = seen[i];
-            for n in [
-                (x + 1, y),
-                (x.wrapping_sub(1), y),
-                (x, y + 1),
-                (x, y.wrapping_sub(1)),
-            ] {
-                if at.contains(&n) && !seen.contains(&n) {
-                    seen.push(n);
-                }
-            }
-            i += 1;
-        }
-        assert_eq!(seen.len(), at.len(), "the cylinder is one blob");
+        // M14: the disc is a 1-px outline, so its ASCII `@` cells form a ring rather than
+        // one filled blob.
         let n = at.len() as f64;
         let cx = at.iter().map(|p| p.0 as f64).sum::<f64>() / n;
         let cy = at.iter().map(|p| p.1 as f64).sum::<f64>() / n;
@@ -1995,9 +1976,18 @@ mod tests {
         let rows: Vec<usize> = (0..24).map(per_row).filter(|&n| n > 0).collect();
         let widest = rows.iter().copied().max().unwrap_or(0);
         assert!(rows.len() >= 4, "@ rows {rows:?}");
+        let _ = widest;
+        // Round, judged by each row's extent (M14: the ring's middle rows hold only its
+        // two sides): the outermost rows are narrower than the widest by ≥ 2.
+        let span = |y: usize| {
+            let xs: Vec<usize> = (0..grid[y].len()).filter(|&x| grid[y][x] == '@').collect();
+            xs.last().map_or(0, |l| l + 1 - xs[0])
+        };
+        let spans: Vec<usize> = (0..24).map(span).filter(|&n| n > 0).collect();
+        let wide = spans.iter().copied().max().unwrap_or(0);
         assert!(
-            rows[0] + 2 <= widest && rows[rows.len() - 1] + 2 <= widest,
-            "{rows:?}"
+            spans[0] + 2 <= wide && spans[spans.len() - 1] + 2 <= wide,
+            "{spans:?}"
         );
         for row in &grid[1..] {
             assert!(row[..6].iter().all(|&c| c == ' '), "calm inflow");
@@ -2460,36 +2450,21 @@ mod tests {
     }
 
     #[test]
-    fn vor_a11_dye_layers_over_the_vorticity_and_never_the_cylinder() {
+    fn vor_a11_no_dye_is_drawn() {
+        // M14 (ADR-0017): the dye is advected but not painted, so the frame is the
+        // vorticity and the cylinder alone, in both glyph modes.
         let (mut g, mut ctx) = scene(Size::new(120, 40));
         for _ in 0..(8.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
         }
-        let px = g.pixels.pixel_size();
-        let mut dye = 0;
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let (art, under) = (g.dyed(x, y), g.pixels.get(x, y).unwrap());
-                if art.role == Role::Ramp(DYE_RAMP) {
-                    assert!(art.level >= DYE_DIM, "({x}, {y}) {art:?}");
-                    assert_ne!(under.role, Role::Structure, "dye over the cylinder");
-                    // Dye shows only inside the wake's clouds: strays in calm water go.
-                    assert_ne!(under.role, Role::Background, "stray dye at ({x}, {y})");
-                    // Never darker than the cloud's magnitude, so in a grey theme the dye
-                    // reads light over a bright core rather than as dark speckle.
-                    let floor = 255.0 * ink::div_value(under).abs();
-                    assert!(
-                        f64::from(art.level) >= floor - 0.5,
-                        "({x}, {y}) {art:?} over {under:?}"
-                    );
-                    dye += 1;
-                } else {
-                    assert_eq!(art, under, "({x}, {y})");
-                }
-            }
-        }
-        assert!(dye > 200, "{dye} dye pixels");
-        // ASCII shows the vorticity alone: the same frame as blitting `pixels`.
+        g.prepare();
+        let mut uni = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut uni);
+        assert!(
+            uni.cells()
+                .iter()
+                .all(|c| c.ink.role != Role::Ramp(DYE_RAMP) && c.bg.role != Role::Ramp(DYE_RAMP))
+        );
         let mut ascii = Canvas::new(Size::new(120, 40), GlyphMode::Ascii);
         g.render(&mut ascii);
         let mut plain = Canvas::new(Size::new(120, 40), GlyphMode::Ascii);
