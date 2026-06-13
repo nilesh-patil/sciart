@@ -94,6 +94,44 @@ const GLOBE: Ramp = Ramp::Sienna;
 /// low Starlight. And the globe coverage below which a limb pixel stays space.
 const GLOBE_FLOOR: f64 = 0.5;
 const GLOBE_EDGE: f64 = 0.4;
+/// ADR-0017: muted, no near-white. Lit globe brightness `v` is drawn in `Sienna` at
+/// `GLOBE_TOP·v/GLOBE_BRIGHT` (proportional, so limb darkening and the belts keep their
+/// contrast; at most 185, pale butterscotch, and from about 100 at `GLOBE_FLOOR`, a dark
+/// tan: Sienna's lower part is rust), and ring brightness `v` at `RING_TOP·v` of
+/// `Starlight` (at most 170, so the B ring's clumps keep the frame legible, GEN-R21); the
+/// Cassini division stays black.
+const GLOBE_TOP: f64 = 185.0 / 255.0;
+const RING_TOP: f64 = 170.0 / 255.0;
+/// The globe brightness drawn at `GLOBE_LEVEL.1`: the lit zones' (the brightest reach ~0.9).
+const GLOBE_BRIGHT: f64 = 0.9;
+/// Where the globe's shoulder starts, as a share of `GLOBE_BRIGHT`.
+const KNEE: f64 = 0.7;
+/// Share of the frame the ring system spans (ADR-0017: dark ground around it).
+const FILL: f64 = 0.74;
+/// The `Sienna` level (0–1) of lit globe brightness `v`: proportional up to a knee at
+/// `KNEE·GLOBE_BRIGHT`, then a smooth `tanh` shoulder to `GLOBE_TOP`, so the brightest
+/// zones keep their gradient instead of clipping into a flat plateau.
+fn globe_level(v: f64) -> f64 {
+    let x = (v / GLOBE_BRIGHT).max(0.0);
+    let y = if x <= KNEE {
+        x
+    } else {
+        KNEE + (1.0 - KNEE) * ((x - KNEE) / (1.0 - KNEE)).tanh()
+    };
+    GLOBE_TOP * y
+}
+
+/// The inverse of [`globe_level`]: the brightness a globe `Sienna` level stands for.
+fn globe_brightness(level: f64) -> f64 {
+    let y = (level / GLOBE_TOP).clamp(0.0, 1.0 - 1e-9);
+    let x = if y <= KNEE {
+        y
+    } else {
+        KNEE + (1.0 - KNEE) * ((y - KNEE) / (1.0 - KNEE)).atanh()
+    };
+    GLOBE_BRIGHT * x
+}
+
 /// Background stars per 1000 pixels.
 const STAR_DENSITY: f64 = 2.5;
 
@@ -539,8 +577,7 @@ impl SaturnRings {
                 let bands = saturn_bands(lat);
                 let streak = value_noise(0x5A70, 3.0 * lon, 40.0 * lat, 1.0) - 0.5;
                 let polar = (lat.abs() / 1.2).min(1.0);
-                let tone =
-                    1.06 + 0.12 * bands * (1.0 - polar) + 0.025 * streak - 0.2 * polar * polar;
+                let tone = 1.06 + 0.2 * bands * (1.0 - polar) + 0.05 * streak - 0.2 * polar * polar;
                 // The rings' shadow on the southern globe (the Sun is north of them),
                 // averaged over the pixel so the band's edges are soft.
                 let mut shadow = 1.0;
@@ -560,9 +597,9 @@ impl SaturnRings {
                 // Dim globe (terminator, the rings' shadow) goes to a low neutral
                 // Starlight rather than down Sienna's rust-orange ramp (RING-A6).
                 let ink = if v >= GLOBE_FLOOR {
-                    ink::ramp(GLOBE, v)
+                    ink::ramp(GLOBE, globe_level(v))
                 } else {
-                    ink::ramp(Ramp::Starlight, 0.6 * v)
+                    ink::ramp(Ramp::Starlight, RING_TOP * 0.6 * v)
                 };
                 if f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL {
                     self.globe.set(x, y, ink);
@@ -718,8 +755,9 @@ impl SaturnRings {
                 let opaque = ((f64::from(p.b0) - 0.08) / 0.3).clamp(0.0, 1.0);
                 opaque + (1.0 - opaque) * (1.0 - cover)
             };
+            // The globe's brightness back from its muted level.
             let under_lum = if under.role == Role::Ramp(GLOBE) {
-                f64::from(under.level) / 255.0
+                globe_brightness(f64::from(under.level) / 255.0)
             } else {
                 0.0
             };
@@ -727,14 +765,14 @@ impl SaturnRings {
             // One ink per pixel: the ramp of whichever owns more of it, at the blended
             // brightness, so the globe's edge steps smoothly.
             let ink = if alpha >= 0.5 || under.role != Role::Ramp(GLOBE) {
-                ink::ramp(Ramp::Starlight, lum)
+                ink::ramp(Ramp::Starlight, RING_TOP * lum)
             } else if lum >= GLOBE_FLOOR {
-                ink::ramp(GLOBE, lum)
+                ink::ramp(GLOBE, globe_level(lum))
             } else {
                 // Never Sienna's rust-orange low end (RING-A6).
-                ink::ramp(Ramp::Starlight, 0.6 * lum)
+                ink::ramp(Ramp::Starlight, RING_TOP * 0.6 * lum)
             };
-            if lum * 255.0 >= ink::MIN_VISIBLE_LEVEL {
+            if f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL {
                 self.pixels.set(x, y, ink);
             }
         }
@@ -797,7 +835,7 @@ impl Generator for SaturnRings {
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
-        let scale = (0.485 * w / R_OUT).min(0.44 * h / POLAR.max(R_OUT * TILT.sin_det()));
+        let scale = FILL * (0.485 * w / R_OUT).min(0.44 * h / POLAR.max(R_OUT * TILT.sin_det()));
         self.view = View {
             cx: 0.5 * w,
             cy: 0.5 * h,
@@ -934,26 +972,36 @@ mod tests {
     fn ring_a6_globe_is_pale_butterscotch_limb_darkened_and_soft_edged() {
         let g = scene(120, 40, 0.0);
         let v = g.view;
-        // The globe's bright middle (above the rings) is pale cream in Sienna.
+        // The globe's bright middle (above the rings) is pale butterscotch in Sienna, muted
+        // (at most 185, ADR-0017).
         let row = (v.cy - 0.55 * v.scale) as i32;
         let mid = (-4..=4)
             .filter_map(|dx| g.globe.get(v.cx as i32 + dx, row))
             .max_by_key(|i| i.level)
             .expect("on screen");
         assert_eq!(mid.role, Role::Ramp(Ramp::Sienna), "{mid:?}");
-        assert!(mid.level >= 200, "centre level {}", mid.level);
+        assert!(
+            (160..=185).contains(&mid.level),
+            "centre level {}",
+            mid.level
+        );
         // Limb darkening: along the row, the lit right limb is darker than the middle.
         let limb_x = (0..i32::from(g.globe.pixel_size().width()))
             .rev()
             .find(|&x| g.globe.get(x, row).is_some_and(|i| i.role == mid.role))
             .expect("globe row");
         let inner = g.globe.get(limb_x - 2, row).expect("inside").level;
-        assert!(inner + 6 < mid.level, "inner {inner} vs mid {}", mid.level);
+        // (Relative: the muted globe spans fewer levels, ADR-0017.)
+        assert!(
+            f64::from(inner) < 0.985 * f64::from(mid.level),
+            "inner {inner} vs mid {}",
+            mid.level
+        );
         // No rust rim: every Sienna pixel of the globe, limb included, stays at or above
         // the muted-tan floor; dimmer globe is low Starlight.
         let edge = g.globe.get(limb_x, row).expect("edge");
         assert!(edge.level <= inner, "edge {edge:?} vs inner {inner}");
-        let floor = ink::ramp(GLOBE, GLOBE_FLOOR).level;
+        let floor = ink::ramp(GLOBE, globe_level(GLOBE_FLOOR)).level;
         let size = g.globe.pixel_size();
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {

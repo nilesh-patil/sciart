@@ -1,5 +1,6 @@
 //! Travelling through a star field (SPEC-002 `starfield`): near stars stream past, far ones
-//! creep, and the Milky Way stays fixed at infinity. No twinkle: there is no air in space.
+//! creep, and the Milky Way, a fixed band of faint resolved stars, stays at infinity. No
+//! twinkle: there is no air in space. ADR-0017: no glow wash, no galaxy, dim points.
 
 use std::f64::consts::TAU;
 
@@ -46,7 +47,7 @@ const GLYPHS: [Glyph; 3] = [
     Glyph::new('★', '*'),
 ];
 /// Levels of the two faint (dot) buckets, drawn colourless as the eye sees faint stars.
-const FAINT_LEVELS: [u8; 2] = [80, 150];
+const FAINT_LEVELS: [u8; 2] = [70, 130];
 const BUCKETS: usize = FAINT_LEVELS.len() + GLYPHS.len();
 /// Luminosity function: `P(bucket ≥ k) = LF_RATIO^{−k}`.
 const LF_RATIO: f64 = 3.0;
@@ -68,11 +69,7 @@ const BAND_SIGMA: f64 = 0.05;
 const BAND_EDGE: f64 = 3.2;
 const BAND_FADE: f64 = 0.4;
 const BAND_TILT: f64 = 0.35;
-/// Unresolved glow: its peak level in `Ramp(Starlight)` (pale warm white at the brightest
-/// star clouds), and the level below which it dissolves into the sky (CORE-R89).
-const GLOW_PEAK: f64 = 100.0;
-const GLOW_FRINGE: u8 = 6;
-/// Clumping of the glow along the band: relative depth, and the wavelengths (fraction of
+/// Clumping of the band's light along it: relative depth, and the wavelengths (fraction of
 /// the width) of the three sinusoids that make it.
 const CLUMP: f64 = 0.6;
 const CLUMP_WAVES: [f64; 3] = [0.37, 0.19, 0.11];
@@ -91,19 +88,9 @@ const LANE_GLOW: f64 = 0.15;
 /// scattered in proportion to the band's light, so they crowd the bright clouds.
 const BAND_DENSITY: f64 = 0.2;
 const BAND_MAX: usize = 8000;
-const BAND_LEVEL: (f64, f64) = (60.0, 150.0);
+const BAND_LEVEL: (f64, f64) = (40.0, 110.0);
 /// The brightest the band's light gets, relative to its peak.
 const LIGHT_MAX: f64 = (1.0 + CLUMP) * (1.0 + BULGE);
-/// The focal point (STAR-A7): a spiral galaxy like M31 off the band, at infinity so it
-/// never moves. Semi-major axis as a share of the width (at most `GALAXY_A.1` of the pixel
-/// height), axis ratio (a disc seen ~70° from face-on), and a bright core over an
-/// exponential disc in `Ramp(Starlight)` peaking at `GALAXY_PEAK`, blended with the band
-/// by the brighter. Its place and tilt are seeded.
-const GALAXY_A: (f64, f64) = (0.11, 0.32);
-const GALAXY_AXES: f64 = 0.34;
-const GALAXY_PEAK: f64 = 240.0;
-const GALAXY_CORE: f64 = 0.14;
-const GALAXY_DISC: f64 = 1.7;
 #[derive(Debug, Clone)]
 struct Star {
     /// Cell coordinates; `y` is continuous so faint stars sit on any dot row.
@@ -122,13 +109,8 @@ pub struct Starfield {
     width: f64,
     /// The Milky Way's layout, per size.
     milky_way: MilkyWay,
-    /// The unresolved Milky Way, shaded once per size: it is at infinity, so it never
-    /// moves.
-    glow: Pixels,
-    /// Resolved Milky Way stars in dot units, as fixed as the glow.
+    /// Resolved Milky Way stars in dot units: at infinity, so they never move.
     band: Vec<(f64, f64, Ink)>,
-    /// Scratch for `paint_glow`: per column the band's σ, star-cloud weight and centre row.
-    cols: Vec<(f64, f64, f64)>,
     /// Band stars plus the moving faint stars, rasterised every step.
     sky: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
@@ -182,9 +164,6 @@ struct MilkyWay {
     lane: f64,
     /// Position of the bright star cloud along the band (fraction of the width).
     bulge: f64,
-    /// Which end of the frame holds the galaxy (upper right or lower left), and its tilt.
-    galaxy_right: bool,
-    galaxy_tilt: f64,
 }
 
 impl MilkyWay {
@@ -193,57 +172,7 @@ impl MilkyWay {
             clumps: std::array::from_fn(|_| rng.random_range(0.0..TAU)),
             lane: rng.random_range(0.0..TAU),
             bulge: rng.random_range(0.2..0.8),
-            galaxy_right: rng.random_bool(0.5),
-            galaxy_tilt: rng.random_range(-0.1..0.35),
         }
-    }
-
-    /// The galaxy's centre and semi-axes in pixels (x in cells, y in half rows), in the
-    /// quarter of the frame farthest from the band (STAR-A7).
-    fn galaxy(&self, w: f64, h: f64) -> ((f64, f64), f64, f64) {
-        let (fx, off) = if self.galaxy_right {
-            (0.8, -0.37)
-        } else {
-            (0.2, 0.37)
-        };
-        let x = fx * w;
-        let y = (MilkyWay::centre(x, w, h) + off * h).clamp(0.15 * h, 0.8 * h);
-        let a = (GALAXY_A.0 * w).min(GALAXY_A.1 * 2.0 * h).max(1.0);
-        ((x, 2.0 * y), a, a * GALAXY_AXES)
-    }
-
-    /// The galaxy's light at pixel centre `(x, y)`, in units of `GALAXY_PEAK`: a Gaussian
-    /// core over an exponential disc, ending smoothly at 1.6 semi-major axes.
-    #[cfg(test)]
-    fn galaxy_light(&self, x: f64, y: f64, w: f64, h: f64) -> f64 {
-        let frame = self.galaxy_frame(w, h);
-        let (re, v) = Self::galaxy_re(&frame, x, y);
-        Self::galaxy_light_re(re, v, frame.2)
-    }
-
-    /// The galaxy's geometry for `galaxy_re`: centre, semi-axes and the tilt's (sin, cos).
-    fn galaxy_frame(&self, w: f64, h: f64) -> ((f64, f64), f64, f64, (f64, f64)) {
-        let (centre, a, b) = self.galaxy(w, h);
-        (centre, a, b, self.galaxy_tilt.sin_cos_det())
-    }
-
-    /// Elliptical radius (semi-major axes) of pixel centre `(x, y)`, and its minor-axis
-    /// offset `v`.
-    fn galaxy_re(frame: &((f64, f64), f64, f64, (f64, f64)), x: f64, y: f64) -> (f64, f64) {
-        let &((cx, cy), a, b, (s, c)) = frame;
-        let (dx, dy) = (x - cx, y - cy);
-        let (u, v) = (dx * c + dy * s, -dx * s + dy * c);
-        ((u / a).hypot(v / b), v)
-    }
-
-    /// The galaxy's light at elliptical radius `re` (minor offset `v`, semi-minor `b`).
-    fn galaxy_light_re(re: f64, v: f64, b: f64) -> f64 {
-        let core = (-(re / GALAXY_CORE).powi(2)).exp();
-        let disc = (-GALAXY_DISC * re).exp() * ease::smoothstep((1.6 - re) / 0.7);
-        // A dust lane along the near side of the inclined disc, clear of the core.
-        let lane = 1.0
-            - 0.55 * (-((v / b - 0.3) / 0.14).powi(2)).exp() * ease::smoothstep((re - 0.2) / 0.2);
-        (0.6 * core + 0.75 * disc * lane).min(1.0)
     }
 
     /// Row (cells) of the band's centre line at column `x`.
@@ -293,49 +222,6 @@ impl MilkyWay {
 }
 
 impl Starfield {
-    /// Shade the unresolved glow from the band's light, its faint fringe dissolved.
-    fn paint_glow(&mut self, size: Size) {
-        let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-        let mw = self.milky_way;
-        self.glow.resize(size);
-        // GEN-R19: per column the band's σ and star-cloud weight, and the galaxy's frame,
-        // once; the band's light is exactly 0 beyond `BAND_EDGE` σ and the galaxy's below
-        // half a level beyond 1.6 semi-major axes (its disc ends there, its core is
-        // `e^{−130}`), so those pixels skip the sums: the same levels as evaluating them.
-        self.cols.clear();
-        self.cols.extend((0..size.width()).map(|px| {
-            let x = f64::from(px) + 0.5;
-            (
-                mw.sigma(x, w, h),
-                mw.bulge_at(x, w),
-                MilkyWay::centre(x, w, h),
-            )
-        }));
-        let (cols, frame) = (&self.cols, mw.galaxy_frame(w, h));
-        self.glow.shade(|px, py| {
-            let (x, y) = (f64::from(px) + 0.5, (f64::from(py) + 0.5) / 2.0);
-            let (sigma, bulge, centre) = cols[px as usize];
-            let off = y - centre;
-            let u = (off / sigma).abs();
-            let light = if u >= BAND_EDGE {
-                0.0
-            } else {
-                mw.light_at(x, off, u, bulge, w, h)
-            };
-            let (re, v) = MilkyWay::galaxy_re(&frame, x, 2.0 * y);
-            let galaxy = if re >= 1.6 {
-                0.0
-            } else {
-                GALAXY_PEAK * MilkyWay::galaxy_light_re(re, v, frame.2)
-            };
-            match ink::level((GLOW_PEAK * light).max(galaxy)) {
-                0 => Ink::BLANK,
-                level => Ink::new(Role::Ramp(Ramp::Starlight), level),
-            }
-        });
-        self.glow.dissolve(GLOW_FRINGE);
-    }
-
     /// Scatter the resolved Milky Way stars in proportion to the band's light (by
     /// rejection), so they crowd the bright clouds and thin out in the dust lane.
     fn scatter_band(&mut self, size: Size, rng: &mut impl Rng) {
@@ -409,7 +295,6 @@ impl Generator for Starfield {
             })
             .collect();
         self.milky_way = MilkyWay::new(&mut ctx.rng);
-        self.paint_glow(size);
         self.scatter_band(size, &mut ctx.rng);
         self.sky.resize(size);
         self.dirty = true;
@@ -429,18 +314,14 @@ impl Generator for Starfield {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let unicode = canvas.mode() == GlyphMode::Unicode;
-        // The glow has no ASCII form: the resolved band stars carry the band there.
-        self.glow.blit(canvas, |_, _, _, _| None);
-        self.sky.blit_over(canvas, &self.glow);
+        self.sky.blit(canvas);
         for s in self.stars.iter().filter(|s| s.bucket >= FAINT_LEVELS.len()) {
-            let (x, y) = (s.x as i32, s.y as i32);
-            let bg = if unicode {
-                self.glow.cell_bg(x, y)
-            } else {
-                Ink::BLANK
-            };
-            canvas.put_bg(x, y, GLYPHS[s.bucket - FAINT_LEVELS.len()], s.ink, bg);
+            canvas.put(
+                s.x as i32,
+                s.y as i32,
+                GLYPHS[s.bucket - FAINT_LEVELS.len()],
+                s.ink,
+            );
         }
     }
 }
@@ -575,16 +456,10 @@ mod tests {
     fn star_a5_milky_way_is_static_and_banded_with_a_dark_lane() {
         let size = Size::new(200, 50);
         let (mut g, mut ctx) = built(size);
-        let (band, glow) = (g.band.clone(), g.glow.clone());
+        let band = g.band.clone();
         g.update(3.0, &mut ctx);
         g.prepare();
         assert_eq!(band, g.band, "the band stars moved");
-        let px = g.glow.pixel_size();
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                assert_eq!(glow.get(x, y), g.glow.get(x, y), "the glow moved");
-            }
-        }
         // Resolved stars crowd the band.
         let (w, h) = (200.0, 50.0);
         let off = |&(dx, dy, _): &(f64, f64, Ink)| {
@@ -616,131 +491,53 @@ mod tests {
             "mean light at the band stars {at_stars:.2} vs over the band {:.2}",
             sum / n
         );
-        // The glow is a band: bright on its line, empty far off it; the lane darkens it.
-        let level = |x: f64, y: f64| {
-            g.glow
-                .get(x as i32, (2.0 * y) as i32)
-                .filter(|i| i.role != Role::Background)
-                .map_or(0, |i| i.level)
-        };
-        let mut lane_darker = 0;
-        for x in (5..195).step_by(10) {
-            let x = f64::from(x) + 0.5;
-            let c = MilkyWay::centre(x, w, h);
-            let lane = level(x, c + mw.lane_offset(x, w, h));
-            let shoulder = level(x, c + mw.lane_offset(x, w, h) + 2.5 * LANE * h);
-            // (Unless the galaxy, STAR-A7, lies there.)
-            let y = c + 4.0 * BAND_SIGMA * h;
-            if mw.galaxy_light(x, 2.0 * y, w, h) == 0.0 {
-                assert_eq!(level(x, y), 0, "glow far off the band");
-            }
-            assert_eq!(
-                level(x, c - 4.0 * BAND_SIGMA * h),
-                0,
-                "glow far off the band"
-            );
-            lane_darker += usize::from(lane < shoulder);
-            assert!(g.glow.get(x as i32, (2.0 * c) as i32).is_some());
-        }
-        assert!(
-            lane_darker >= 17,
-            "lane darker at only {lane_darker}/19 columns"
-        );
-        // Narrow, bright and soft-edged: the visible band spans at most a third of each column,
-        // its core reaches a pale level, and down any column the light falls from a clearly
-        // visible level to nothing over at least 3 pixels, never on a cliff.
-        const VISIBLE: u8 = 20;
-        let mut peak = 0;
-        for x in 0..200 {
-            // Columns through the galaxy (STAR-A7) are not the band's.
-            let galaxy = |py: i32| mw.galaxy_light(f64::from(x) + 0.5, f64::from(py) + 0.5, w, h);
-            let col: Vec<u8> = (0..100)
-                .map(|py| {
-                    g.glow
-                        .get(x, py)
-                        .filter(|&i| i != Ink::BLANK && galaxy(py) == 0.0)
-                        .map_or(0, |i| i.level)
+        // The dust lane thins the band's stars: fewer in the lane than in an equally
+        // wide strip on its shoulder (M14: by star counts, no glow).
+        let strip = |shift: f64| {
+            band.iter()
+                .filter(|&&(dx, dy, _)| {
+                    let (x, y) = ((dx + 0.5) / 2.0, (dy + 0.5) / 4.0);
+                    let lane = MilkyWay::centre(x, w, h) + mw.lane_offset(x, w, h) + shift;
+                    (y - lane).abs() < 0.5 * LANE * h
                 })
-                .collect();
-            peak = peak.max(*col.iter().max().unwrap());
-            if (0..100).any(|py| galaxy(py) > 0.0) {
-                continue;
-            }
-            let lit = col.iter().filter(|&&l| l >= VISIBLE).count();
-            assert!(lit * 3 <= col.len(), "column {x}: {lit} of 100 pixels lit");
-            // From the band's outermost pixels at ≥ 2× the fringe, outwards, to the first
-            // empty one (the dust lane may cut the middle cleanly; the edges must fade).
-            let strong = |l: &u8| *l >= VISIBLE;
-            let edges = [
-                (col.iter().position(strong), -1_i32),
-                (col.iter().rposition(strong), 1),
-            ];
-            for (i, dir) in edges {
-                let Some(i) = i.map(|i| i as i32) else {
-                    continue;
-                };
-                let at = |k: i32| col.get(usize::try_from(i + dir * k).ok()?).copied();
-                if let Some(empty) = (1..100).find(|&k| at(k).is_none_or(|l| l == 0))
-                    && at(empty).is_some()
-                {
-                    assert!(empty >= 3, "column {x}: a cliff at pixel {i}");
-                }
-            }
-        }
-        assert!(peak >= 150, "the band peaks at {peak}");
-        // Its colour is the Milky Way's own warm white, not a false-colour tint.
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let role = g.glow.get(x, y).unwrap().role;
-                assert!(
-                    matches!(role, Role::Background | Role::Ramp(Ramp::Starlight)),
-                    "{role:?}"
-                );
-            }
-        }
+                .count()
+        };
+        let (lane, shoulder) = (strip(0.0), strip(2.5 * LANE * h));
+        assert!(2 * lane < shoulder, "lane {lane} vs shoulder {shoulder}");
+        // Band stars stay faint: the field's bright stars are the glyphs.
+        assert!(
+            band.iter()
+                .all(|&(_, _, i)| f64::from(i.level) <= BAND_LEVEL.1 + 1.0)
+        );
     }
 
     #[test]
-    fn star_a7_a_fixed_galaxy_off_the_band_is_the_focal_point() {
+    fn star_a7_no_wash_and_no_galaxy_only_points() {
+        // ADR-0017: the frame is black ground with points and streaks: no cell carries a
+        // background colour and no ink is a glow ramp, at any seed.
         for (seed, (w, h)) in [(3, (120, 40)), (8, (200, 50)), (11, (80, 24))] {
             let size = Size::new(w, h);
             let mut ctx = Ctx::new(seed, size);
             let mut g = Starfield::default();
             g.resize(size, &mut ctx);
+            g.update(1.0, &mut ctx);
             g.prepare();
-            let (wf, hf) = (f64::from(w), f64::from(h));
-            let ((cx, cy), a, b) = g.milky_way.galaxy(wf, hf);
-            assert!(a > b && b > 0.0);
-            // Clear of the band: no band light at its centre or along its major axis.
-            let y = cy / 2.0;
-            assert_eq!(
-                g.milky_way
-                    .light(cx, y - MilkyWay::centre(cx, wf, hf), wf, hf),
-                0.0
-            );
-            // Its core is as bright as the band's brightest cloud, and it falls off outward.
-            let px = g.glow.pixel_size();
-            let lvl = |x: i32, y: i32| g.glow.get(x, y).map_or(0, |i| i.level);
-            let max = (0..i32::from(px.height()))
-                .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
-                .map(|(x, y)| lvl(x, y))
-                .max()
-                .unwrap();
-            let core = lvl(cx as i32, cy as i32);
-            assert!(
-                f64::from(core) >= 0.75 * f64::from(max),
-                "seed {seed}: {core} vs {max}"
-            );
-            let rim = lvl(
-                (cx + 0.9 * a).min(f64::from(px.width()) - 1.0) as i32,
-                cy as i32,
-            );
-            assert!(rim < core, "seed {seed}: {rim} vs {core}");
-            // And it stays put: the glow does not move (STAR-A5), so neither does it.
-            let before = g.glow.get(cx as i32, cy as i32);
-            g.update(2.0, &mut ctx);
-            g.prepare();
-            assert_eq!(before, g.glow.get(cx as i32, cy as i32));
+            let mut c = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut c);
+            for cell in c.cells() {
+                assert_eq!(cell.bg, Ink::BLANK, "seed {seed}");
+                assert!(
+                    matches!(
+                        cell.ink.role,
+                        Role::Background | Role::Star | Role::Blackbody
+                    ),
+                    "seed {seed}: {:?}",
+                    cell.ink
+                );
+            }
+            // Faint stars and band stars stay dim (≤ 130).
+            assert!(g.band.iter().all(|&(_, _, i)| i.level <= 130));
+            assert!(FAINT_LEVELS.iter().all(|&l| l <= 130));
         }
     }
 
