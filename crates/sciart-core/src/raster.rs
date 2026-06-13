@@ -16,7 +16,7 @@
 //! (GEN-R11). A scene draws into one, then `blit`s it onto the canvas; a cell holds a
 //! single glyph, so one region uses one raster.
 
-use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink, rng};
+use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink};
 
 /// Bit of dot `(dx, dy)` within its braille cell, indexed `[dx][dy]`: standard Unicode
 /// dot numbering 1-2-3-7 down the left column and 4-5-6-8 down the right, dot `n` being
@@ -993,29 +993,30 @@ impl Pixels {
         }
     }
 
-    /// Dissolve a glow's faint fringe into the empty sky (CORE-R89), so it ends in the
-    /// terminal's black instead of a ramp's tinted floor. A pixel of intensity `i` (as for
-    /// [`stronger`]) below `floor` is emptied when `i < floor / 2`, and in the band
-    /// `[floor / 2, floor)` kept only where `2·i / floor − 1 > hash01(cell_key(x, y))`.
-    /// The threshold is white noise, not an ordered dither, so the thinning fringe reads as
-    /// scattered light rather than a checkerboard, and the half-floor cut keeps that band
-    /// narrow. Pixels at or above `floor`, and `Phase` pixels (no intensity), are untouched;
-    /// `floor = 0` changes nothing. Deterministic and allocation-free.
+    /// Fade a glow's faint fringe smoothly into the empty sky (CORE-R89, M14), so it ends
+    /// in the terminal's black instead of a ramp's tinted floor, with no dither. A pixel of
+    /// intensity `i` (as for [`stronger`]) below `floor` is emptied when `i < floor / 2`,
+    /// and in the band `[floor / 2, floor)` its intensity becomes
+    /// `i·smoothstep((i − floor/2)/(floor/2))` (a `Div` pixel keeps its sign about 128),
+    /// emptied if that rounds to 0. The fade is a pure function of the pixel's own
+    /// intensity, continuous and non-decreasing in it, so a uniform field stays uniform: no
+    /// ordered or noise pattern. Pixels at or above `floor`, and `Phase` pixels (no
+    /// intensity), are untouched; `floor = 0` changes nothing. Allocation-free.
     pub fn dissolve(&mut self, floor: u8) {
-        let w = usize::from(self.cells.width());
         let half = f64::from(floor) / 2.0;
-        for (y, row) in self.px.chunks_exact_mut(w.max(1)).enumerate() {
-            for (x, px) in row.iter_mut().enumerate() {
-                let i = intensity(*px);
-                if is_empty(*px) || px.role == Role::Phase || i >= floor {
-                    continue;
-                }
-                // Both fit: x < w ≤ u16::MAX, y < 2·h ≤ 2·u16::MAX.
-                let keep = (f64::from(i) - half) / half;
-                if keep <= rng::hash01(rng::cell_key(x as i32, y as i32)) {
-                    *px = Ink::BLANK;
-                }
+        for px in &mut self.px {
+            let i = intensity(*px);
+            if is_empty(*px) || px.role == Role::Phase || i >= floor {
+                continue;
             }
+            let u = ((f64::from(i) - half) / half).clamp(0.0, 1.0);
+            let faded = (f64::from(i) * u * u * (3.0 - 2.0 * u)).round() as u8;
+            *px = match (faded, px.role) {
+                (0, _) => Ink::BLANK,
+                (f, Role::Div) if px.level >= 128 => Ink::new(Role::Div, 128 + f),
+                (f, Role::Div) => Ink::new(Role::Div, 128 - f),
+                (f, role) => Ink::new(role, f),
+            };
         }
     }
 
