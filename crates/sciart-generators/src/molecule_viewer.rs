@@ -335,7 +335,7 @@ fn mass(el: El) -> f64 {
 /// Ball radius as a fraction of the Bondi (1964) van der Waals radius. It keeps ≥ 0.5 Å
 /// of visible stick on C60's 1.40–1.46 Å bonds, so the cage reads as rings of balls
 /// rather than a heap of blobs.
-const BALL: f64 = 0.20;
+const BALL: f64 = 0.16;
 
 fn ball_radius(el: El) -> f64 {
     BALL * el.vdw()
@@ -685,18 +685,11 @@ const SPECULAR: f64 = 0.95;
 /// Carbon is CPK charcoal: the white of hydrogen at this fraction, dark enough that
 /// methane's four white hydrogens read apart from their carbon.
 const CARBON: f64 = 0.45;
-/// The electron-cloud haze behind the model (MOL-A8), in false colour: each atom adds
-/// `HAZE_ATOM·(1 − (d/R)²)³` out to its van der Waals radius `R` on screen, so the cloud
-/// is densest where bonded atoms share it; the sum is capped at `HAZE_PEAK`, far below
-/// the balls, and it grows with the molecule (`s²`). Plasma violet keeps it apart from
-/// every CPK colour.
-const HAZE: Ramp = Ramp::Plasma;
-const HAZE_ATOM: f64 = 0.13;
-const HAZE_PEAK: f64 = 0.22;
+/// Bonds are thin neutral grey strokes (ADR-0017): at most this radius in pixels, at
+/// this `Text` level at full light.
+const STICK_MAX_PX: f64 = 0.8;
+const STICK_GREY: f64 = 120.0;
 
-/// Lambert intensity and specularity of a unit-sphere point seen at screen offset
-/// `(nx, ny)` of its radius (screen y down): `I = 0.3 + 0.7·max(0, n·L)` and whether
-/// `n·H > 0.95` (Blinn–Phong).
 pub(crate) fn shade(nx: f64, ny: f64) -> (f64, bool) {
     let n = [nx, -ny, (1.0 - nx * nx - ny * ny).max(0.0).sqrt()];
     let ndl = dot(n, LIGHT);
@@ -707,14 +700,16 @@ pub(crate) fn shade(nx: f64, ny: f64) -> (f64, bool) {
 }
 
 /// The ink of element `el` at brightness `v ∈ [0, 1]` (CPK, false colour where it must
-/// be, ADR-0015): H white and C grey (`Text`, which every theme keeps neutral), N in the
-/// Ice ramp, O in the H-alpha ramp.
+/// be, ADR-0015; muted, ADR-0017): H pale and C grey (`Text`, which every theme keeps
+/// neutral), N a dim blue (Ice), O a dim red (H-alpha); the specular highlight
+/// (`v` = 1) still reaches each ramp's pale top.
 pub(crate) fn element_ink(el: El, v: f64) -> Ink {
+    let body = |top: f64| if v >= 1.0 { 1.0 } else { top * v };
     match el {
-        El::H => Ink::new(Role::Text, level(255.0 * v)),
+        El::H => Ink::new(Role::Text, level(255.0 * body(0.8))),
         El::C => Ink::new(Role::Text, level(255.0 * CARBON * v)),
-        El::N => ink::ramp(Ramp::Ice, v),
-        El::O => ink::ramp(Ramp::HAlpha, v),
+        El::N => ink::ramp(Ramp::Ice, body(0.8)),
+        El::O => ink::ramp(Ramp::HAlpha, body(0.72)),
     }
 }
 
@@ -727,8 +722,6 @@ pub(crate) struct Raster {
     z: Vec<f32>,
     /// What each pixel shows: atom `i` as `i + 1`, a bond as [`STICK_OWNER`], 0 nothing.
     owner: Vec<u8>,
-    /// Scratch for [`Raster::haze`]: the summed cloud per pixel.
-    cloud: Vec<f32>,
     w: i32,
     h: i32,
 }
@@ -742,8 +735,6 @@ impl Raster {
         self.z.resize(px.area(), f32::NEG_INFINITY);
         self.owner.clear();
         self.owner.resize(px.area(), 0);
-        self.cloud.clear();
-        self.cloud.resize(px.area(), 0.0);
     }
 
     /// What pixel `(x, y)` shows ([`Raster::owner`]); 0 off the raster.
@@ -774,57 +765,6 @@ impl Raster {
         }
     }
 
-    /// The electron-cloud haze (MOL-A8) on every pixel nothing is drawn on: summed per
-    /// atom into `cloud` over the atom's van der Waals disc, then inked where visible.
-    /// The haze never touches `z` or `owner`, so it stays background to everything else.
-    fn haze(&mut self, model: &Model, proj: &[Proj], s: f64) {
-        let gain = s * s;
-        if gain * HAZE_PEAK * 255.0 < ink::MIN_VISIBLE_LEVEL {
-            return;
-        }
-        self.cloud.fill(0.0);
-        for (p, atom) in proj.iter().zip(&model.atoms) {
-            let (cx, cy) = p.px();
-            // Pixels are square, rows are 2 pixels: the vdW radius in pixels.
-            let r = 2.0 * atom.el.vdw() * p.r / ball_radius(atom.el);
-            if r < 0.5 {
-                continue;
-            }
-            let inv = 1.0 / (r * r);
-            let (x0, x1) = (
-                ((cx - r).floor() as i32).max(0),
-                ((cx + r).ceil() as i32).min(self.w),
-            );
-            let (y0, y1) = (
-                ((cy - r).floor() as i32).max(0),
-                ((cy + r).ceil() as i32).min(self.h),
-            );
-            for y in y0..y1 {
-                let dy = f64::from(y) + 0.5 - cy;
-                let row = (y * self.w) as usize;
-                for x in x0..x1 {
-                    let dx = f64::from(x) + 0.5 - cx;
-                    let q = 1.0 - (dx * dx + dy * dy) * inv;
-                    if q > 0.0 {
-                        self.cloud[row + x as usize] += (HAZE_ATOM * q * q * q) as f32;
-                    }
-                }
-            }
-        }
-        for y in 0..self.h {
-            for x in 0..self.w {
-                let i = (y * self.w + x) as usize;
-                if self.owner[i] != 0 || self.cloud[i] <= 0.0 {
-                    continue;
-                }
-                let v = gain * f64::from(self.cloud[i]).min(HAZE_PEAK);
-                if v * 255.0 >= ink::MIN_VISIBLE_LEVEL {
-                    self.pixels.set(x, y, ink::ramp(HAZE, v));
-                }
-            }
-        }
-    }
-
     /// A shaded ball: Lambert body, Blinn–Phong highlight at `255·s²`, depth-cued.
     fn ball(&mut self, el: El, owner: u8, p: &Proj, r_a: f64, s: f64) {
         let (cx, cy) = p.px();
@@ -847,15 +787,8 @@ impl Raster {
     }
 
     /// A shaded stick `strand` between `a` and `b` at `k` rows per Å and gallery scale
-    /// `s`, each half in its atom's colour.
-    fn stick(
-        &mut self,
-        (a, ea): (&Proj, El),
-        (b, eb): (&Proj, El),
-        strand: Strand,
-        k: f64,
-        s: f64,
-    ) {
+    /// `s`: a thin neutral grey stroke (ADR-0017).
+    fn stick(&mut self, (a, _): (&Proj, El), (b, _): (&Proj, El), strand: Strand, k: f64, s: f64) {
         let Strand { rad, off, dashes } = strand;
         let ((ax, ay), (bx, by)) = (a.px(), b.px());
         let (dx, dy) = (bx - ax, by - ay);
@@ -868,7 +801,7 @@ impl Raster {
         let (ux, uy) = (-dy / len, dx / len);
         let px_per_a = 2.0 * k;
         let (ax, ay) = (ax + ux * off * px_per_a, ay + uy * off * px_per_a);
-        let r = (rad * px_per_a).max(MIN_STICK_PX);
+        let r = (rad * px_per_a).clamp(MIN_STICK_PX, STICK_MAX_PX);
         let (x0, x1) = (ax.min(ax + dx) - r, ax.max(ax + dx) + r);
         let (y0, y1) = (ay.min(ay + dy) - r, ay.max(ay + dy) + r);
         for y in y0.floor() as i32..y1.ceil() as i32 {
@@ -890,10 +823,9 @@ impl Raster {
                 }
                 let nz = (1.0 - across * across).max(0.0).sqrt();
                 let (i, _) = shade(across * ux, across * uy);
-                let el = if t < 0.5 { ea } else { eb };
                 let depth = a.depth + t * (b.depth - a.depth);
                 let cue = growth_level(s, depth_level(nu_mix(a, b, t))) / 255.0;
-                let ink = element_ink(el, STICK_LEVEL * cue * i);
+                let ink = Ink::new(Role::Text, level(STICK_GREY * STICK_LEVEL * cue * i));
                 self.plot(x, y, depth + rad * nz, ink, STICK_OWNER);
             }
         }
@@ -980,7 +912,6 @@ pub(crate) fn paint(raster: &mut Raster, model: &Model, proj: &[Proj], view: &Vi
         // At most MAX_ATOMS (60) atoms, so `i + 1` fits a u8 below STICK_OWNER.
         raster.ball(atom.el, i as u8 + 1, p, ball_top(p, k) - p.depth, s);
     }
-    raster.haze(model, proj, s);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1099,8 +1030,7 @@ impl Generator for MoleculeViewer {
             } else {
                 bottom
             };
-            // The haze is Unicode-only: ASCII's tiers would turn it into a field of `:`.
-            let body = ink.role != Role::Background && ink.role != Role::Ramp(HAZE);
+            let body = ink.role != Role::Background;
             (body && ink.level >= ASCII_MIN_LEVEL).then(|| {
                 let tier = usize::from(ink.level) * ASCII_BODY.len() / 256;
                 (ASCII_BODY[tier], ink)
@@ -1510,52 +1440,25 @@ mod tests {
     }
 
     #[test]
-    fn mol_a8_electron_cloud_haze_fills_the_background_out_to_van_der_waals() {
+    fn mol_a8_no_haze_the_background_is_black() {
+        // ADR-0017: the electron-cloud haze is gone; every pixel nothing is drawn on is
+        // the terminal's black, and bonds are thin neutral grey.
         let m = by_name("methane");
         let size = Size::new(120, 40);
-        let (r, proj) = painted(&m, size, &FACE_ON);
-        let k = proj[0].r / ball_radius(m.atoms[0].el);
-        let (mut haze, mut peak) = (0, 0u8);
+        let (r, _) = painted(&m, size, &FACE_ON);
         for y in 0..r.h {
             for x in 0..r.w {
                 let ink = r.pixels.get(x, y).unwrap();
-                // Ball and stick pixels keep their element inks; only background carries
-                // the haze, and it never marks a pixel as drawn.
-                if r.owner(x, y) != 0 {
-                    assert_ne!(ink.role, Role::Ramp(HAZE), "({x}, {y})");
-                    continue;
+                match r.owner(x, y) {
+                    0 => assert_eq!(ink, Ink::BLANK, "({x}, {y})"),
+                    STICK_OWNER => assert_eq!(ink.role, Role::Text, "({x}, {y})"),
+                    _ => {}
                 }
-                if ink == Ink::BLANK {
-                    continue;
-                }
-                assert_eq!(ink.role, Role::Ramp(HAZE), "({x}, {y})");
-                assert!(ink.level >= ink::level(ink::MIN_VISIBLE_LEVEL));
-                peak = peak.max(ink.level);
-                haze += 1;
-                // Within some atom's van der Waals radius on screen.
-                let within = proj.iter().zip(&m.atoms).any(|(p, a)| {
-                    let (cx, cy) = p.px();
-                    let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
-                    d <= 2.0 * a.el.vdw() * k * MAX_MAGNIFY + 1.0
-                });
-                assert!(within, "({x}, {y})");
             }
         }
-        // A cloud, not a fog: it covers a real area, and stays well under the atoms.
-        assert!(haze > 400, "{haze} haze pixels");
-        assert!(f64::from(peak) <= 255.0 * HAZE_PEAK + 0.5, "{peak}");
-        // It grows with the molecule (s²), like everything else (MOL-A5).
-        let (small, _) = painted(&m, size, &Pose { s: 0.3, ..FACE_ON });
-        let dim = (0..small.h)
-            .flat_map(|y| (0..small.w).map(move |x| (x, y)))
-            .filter_map(|(x, y)| small.pixels.get(x, y))
-            .filter(|i| i.role == Role::Ramp(HAZE))
-            .map(|i| i.level)
-            .max()
-            .unwrap_or(0);
-        assert!(dim < peak / 4, "{dim} vs {peak}");
-        // CPK: hydrogen white, carbon a clearly darker grey.
+        // CPK: hydrogen pale, carbon a clearly darker grey.
         assert!(element_ink(El::C, 1.0).level <= 128);
+        assert!(element_ink(El::H, 0.9).level <= 190);
     }
 
     #[test]

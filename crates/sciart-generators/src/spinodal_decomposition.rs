@@ -14,14 +14,14 @@
 //! through each act ([`steps_per_s`]), keeping the domains visibly moving without any
 //! frame doing more than [`MAX_STEPS`] steps.
 //!
-//! Inks: a two-phase alloy, one phase in `Ramp(Ice)` (deep teal-blue) and the other in
-//! `Ramp(Starlight)` (cream), each ramp falling smoothly to its near-black foot across
-//! the interfaces (by sub-node distance to the zero level set), so each domain is
-//! outlined by an even, antialiased dark seam.
+//! Inks (ADR-0017): lines only, on black. Both phases are the terminal's black and the
+//! interfaces between them a 1-px pale `Ramp(Starlight)` line, anti-aliased by each
+//! pixel's distance to the zero level set (`|ψ| / |∇ψ|`), so the labyrinth and the
+//! droplets read as fine contours. (A flat fill for one phase read as large plateaus.)
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::{grid, ink, raster};
+use sciart_core::{grid, raster};
 
 use crate::shared::cahn_hilliard::{self, OONO_PURI, Scratch};
 
@@ -50,22 +50,11 @@ const RATE: (f64, f64) = (120.0, 360.0);
 const MAX_STEPS: usize = 6;
 /// Seconds over which an act eases down from twice its opening step rate.
 const EMERGE_S: f64 = 2.0;
-/// Shading (see [`shade_field`]): the blur radius of the depth field (lattice cells, two
-/// box passes), the interface ramp (|ψ|/ψ* from dark core to full colour), the Div value
-/// of a domain's deep interior and how much brighter its rim glows, the sheen gain and
-/// clamp for the fixed upper-left light, and the |v| below which a pixel stays empty.
-const DEPTH_BLUR: usize = 2;
-const EDGE: (f32, f32) = (0.0, 0.9);
-/// The dark seam on an interface, by distance to the zero level set in lattice nodes
-/// (`|ψ|/|∇ψ|`, sub-node): black at the line, full colour past `SEAM.1`. A distance, not
-/// a threshold on ψ, so the seam is an even, antialiased line at any angle.
-const SEAM: (f32, f32) = (0.1, 1.7);
-/// Top of the interface ramp while the pattern is young (see [`shade_field`]).
-const EDGE_YOUNG: f32 = 0.5;
-const INTERIOR: f32 = 0.46;
-const RIM: f32 = 0.34;
-const SHEEN: (f32, f32, f32) = (0.9, -0.12, 0.18);
-const EMPTY: f32 = 0.02;
+/// Inks: the interface line's level and half-width in pixels.
+const LINE_LEVEL: f32 = 210.0;
+const LINE_W: f32 = 1.1;
+/// The display ramp for both.
+const RAMP: Ramp = Ramp::Starlight;
 /// Box radius of the one smoothing pass over the quench noise, so the mixture unmixes
 /// from a smooth, dark field rather than from white-noise speckle.
 const QUENCH_BLUR: usize = 1;
@@ -134,126 +123,63 @@ pub(crate) fn blur_wrap(src: &Grid<f32>, dst: &mut Grid<f32>, tmp: &mut Grid<f32
     }
 }
 
-/// Smooth step on `[a, b]`.
-#[inline]
-fn smooth(x: f32, (a, b): (f32, f32)) -> f32 {
-    let t = ((x - a) / (b - a)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
-
-/// The signed display value (a Div value) of every lattice node, into `out`:
-///
-/// - the sign is the phase; the magnitude ramps up smoothly across each interface from a
-///   dark core ([`EDGE`]), so boundaries stay crisp black lines;
-/// - depth: `d = |blurred ψ/ψ*|` is ≈ 1 deep inside a domain and falls toward its edge,
-///   so the interior sits at the deeper [`INTERIOR`] and the rim glows lighter
-///   (`+ RIM·(1 − d)`), which reads as the meniscus of a liquid domain;
-/// - sheen: `d` is treated as a height, lit from the upper left, so slopes facing the
-///   light brighten and the far side darkens: blobs read as rounded.
-///
-/// A young quench (|ψ| ≪ ψ*) is dark everywhere and brightens as the domains form.
-pub(crate) fn shade_field(
-    psi: &Grid<f32>,
-    out: &mut Grid<f32>,
-    blur: &mut Grid<f32>,
-    tmp: &mut Grid<f32>,
-) {
+/// `|∇ψ|` per node (central differences, periodic) into `out`, and the formedness of the
+/// pattern: the mean `|ψ|/ψ*` mapped from 0.3 (a young mush) to 0.8 (formed domains) onto
+/// `[0, 1]`.
+pub(crate) fn slope_field(psi: &Grid<f32>, out: &mut Grid<f32>) -> f32 {
     let (w, h) = (usize::from(psi.width()), usize::from(psi.height()));
-    blur_wrap(psi, out, tmp, DEPTH_BLUR);
-    blur_wrap(out, blur, tmp, DEPTH_BLUR);
     if out.size() != psi.size() {
         out.resize(psi.size(), 0.0);
     }
     if w == 0 || h == 0 {
-        return;
+        return 0.0;
     }
-    let (p, b, o) = (psi.as_slice(), blur.as_slice(), out.as_mut_slice());
-    let depth = |x: usize, y: usize| (b[y * w + x] / PSI_STAR).abs().min(1.0);
-    // A young pattern (small amplitude everywhere) gets a soft ramp from zero, so it
-    // emerges as smooth dim worms; as it forms, the ramp tightens to the crisp dark core.
-    let amean = p.iter().map(|x| x.abs()).sum::<f32>() / (p.len() as f32 * PSI_STAR);
-    let f = ((amean - 0.3) / 0.5).clamp(0.0, 1.0);
-    let edge = (EDGE.0 * f, EDGE_YOUNG + (EDGE.1 - EDGE_YOUNG) * f);
+    let (p, o) = (psi.as_slice(), out.as_mut_slice());
     for y in 0..h {
         let (yn, ys) = ((y + h - 1) % h, (y + 1) % h);
         for x in 0..w {
             let (xw, xe) = ((x + w - 1) % w, (x + 1) % w);
-            let s = (p[y * w + x] / PSI_STAR).clamp(-1.0, 1.0);
-            let d = depth(x, y);
-            // Height rising toward down-right faces the upper-left light.
-            let slope = 0.5 * ((depth(xe, y) - depth(xw, y)) + (depth(x, ys) - depth(x, yn)));
-            let sheen = (SHEEN.0 * slope).clamp(SHEEN.1, SHEEN.2);
-            // Distance (nodes) to the interface from the local gradient.
-            let (pc, pe, pw) = (p[y * w + x], p[y * w + xe], p[y * w + xw]);
-            let (pn, ps) = (p[yn * w + x], p[ys * w + x]);
-            let g = (0.5 * (pe - pw)).hypot(0.5 * (ps - pn)).max(1e-4);
-            let seam = smooth(pc.abs() / g, SEAM);
-            // Young, the amplitude ramp dims the whole mush; formed, only the seam.
-            let amp = smooth(s.abs(), edge) * (1.0 - f) + f;
-            let m = seam * amp * (INTERIOR + RIM * (1.0 - d) + sheen);
-            o[y * w + x] = s.signum() * m.clamp(0.0, 1.0);
+            let gx = 0.5 * (p[y * w + xe] - p[y * w + xw]);
+            let gy = 0.5 * (p[ys * w + x] - p[yn * w + x]);
+            o[y * w + x] = (gx * gx + gy * gy).sqrt();
         }
     }
+    let amean = p.iter().map(|x| x.abs()).sum::<f32>() / (p.len() as f32 * PSI_STAR);
+    ((amean - 0.3) / 0.5).clamp(0.0, 1.0)
 }
 
-/// The ink of a display value `v` ([`shade_field`]): the sign picks the phase's ramp
-/// ([`PHASE_A`] above zero, [`PHASE_B`] below), `|v|` its level; NaN reads as 0.
-pub(crate) fn shade_ink(v: f32) -> Ink {
-    let v = f64::from(if v.is_nan() { 0.0 } else { v });
-    // Each phase's own band of its ramp: Ice stops short of its white top (so the phase
-    // stays a deep teal-blue, apart from kelvin_helmholtz's rose); Starlight is lifted
-    // toward its cream end.
-    if v >= 0.0 {
-        ink::ramp(PHASE_A, v * 0.62)
+/// The ink of a pixel with order parameter `psi`, local slope `g` (per node), `px` pixels
+/// per node and formedness `f`: the interface line within [`LINE_W`] pixels of `ψ = 0`,
+/// growing in as the pattern forms, else black.
+pub(crate) fn pixel_ink(psi: f32, g: f32, px: f32, f: f32) -> Ink {
+    if !(psi.is_finite() && g.is_finite()) {
+        return Ink::BLANK;
+    }
+    let d = psi.abs() / g.max(1e-4) * px;
+    let line = if d < LINE_W {
+        let k = 1.0 - d / LINE_W;
+        LINE_LEVEL * k * k * (3.0 - 2.0 * k) * (0.25 + 0.75 * f)
     } else {
-        ink::ramp(PHASE_B, (-v * 1.2).min(1.0))
+        0.0
+    };
+    let level = (line + 0.5) as u8;
+    if level < 8 {
+        Ink::BLANK
+    } else {
+        Ink::new(Role::Ramp(RAMP), level)
     }
 }
 
-/// The two phases' ramps: a teal-blue phase and a cream one (oil and water).
-pub(crate) const PHASE_A: Ramp = Ramp::Aurora;
-pub(crate) const PHASE_B: Ramp = Ramp::Starlight;
-
-/// Whether the domains have formed: some |ψ| is past half of ψ*. Before that, pixels
-/// near zero stay empty so the fresh quench is the terminal's own black; after it, the
-/// interface cores are the Div map's dark zero, a continuous line rather than a dither
-/// of empty and dim pixels.
-pub(crate) fn formed(psi: &Grid<f32>) -> bool {
-    psi.as_slice().iter().any(|x| x.abs() > 0.5 * PSI_STAR)
-}
-
-/// Entries of the display-value → ink table over `[−1, 1]`.
-const LUT_N: usize = 512;
-
-/// [`shade_ink`] tabulated.
-fn ink_table() -> [Ink; LUT_N] {
-    std::array::from_fn(|i| shade_ink(2.0 * i as f32 / (LUT_N - 1) as f32 - 1.0))
-}
-
-/// The nearest table entry for `v` (NaN reads as 0).
-#[inline]
-fn lut_index(v: f32) -> usize {
-    let half = 0.5 * (LUT_N - 1) as f32;
-    let u = (v + 1.0) * half;
-    let u = if u.is_nan() { half } else { u };
-    (u.round().max(0.0) as usize).min(LUT_N - 1)
-}
-
-/// ASCII: the stronger pixel, `#`/`+` for the positive phase, `:`/`.` for the negative,
-/// blank on the interfaces.
+/// ASCII: the stronger pixel: the interface `#`, `+` or `.` by level, the phases blank.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let p = raster::stronger(top, bottom);
-    let v = match p.role {
-        Role::Ramp(PHASE_A) => ink::seq_value(p),
-        Role::Ramp(PHASE_B) => -ink::seq_value(p),
-        _ => return None,
-    };
-    let ch = match v {
-        v if v >= 0.55 => '#',
-        v if v >= 0.3 => '+',
-        v if v <= -0.55 => ':',
-        v if v <= -0.3 => '.',
-        _ => return None,
+    if p.role != Role::Ramp(RAMP) {
+        return None;
+    }
+    let ch = match p.level {
+        l if f32::from(l) >= 0.7 * LINE_LEVEL => '#',
+        l if f32::from(l) >= 0.35 * LINE_LEVEL => '+',
+        _ => '.',
     };
     Some((ch, p))
 }
@@ -266,7 +192,6 @@ pub struct Spinodal {
     regrid_scratch: Grid<f32>,
     pixels: Pixels,
     map: SampleMap,
-    inks: [Ink; LUT_N],
     /// Display value per lattice node ([`shade_field`]) and its working grids.
     shade: Grid<f32>,
     blur: Grid<f32>,
@@ -290,7 +215,6 @@ impl Default for Spinodal {
             regrid_scratch: Grid::default(),
             pixels: Pixels::new(Size::new(1, 1)),
             map: SampleMap::default(),
-            inks: ink_table(),
             shade: Grid::default(),
             blur: Grid::default(),
             blur_tmp: Grid::default(),
@@ -314,26 +238,29 @@ impl Spinodal {
     }
 
     fn rasterise(&mut self) {
-        shade_field(
-            &self.psi,
-            &mut self.shade,
-            &mut self.blur,
-            &mut self.blur_tmp,
-        );
-        let (map, shade, inks) = (&self.map, &self.shade, &self.inks);
-        let formed = formed(&self.psi);
-        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
-        let (mut ry, mut sr) = (-1, map.row(shade, 0));
-        self.pixels.shade(|x, y| {
-            if y != ry {
-                (ry, sr) = (y, map.row(shade, y));
-            }
-            let v = sr.at(x);
-            if !formed && (v.is_nan() || v.abs() < EMPTY) {
-                return Ink::BLANK;
-            }
-            inks[lut_index(v)]
-        });
+        // `shade` holds |∇ψ| per node (it is only scratch here).
+        let f = slope_field(&self.psi, &mut self.shade);
+        let (map, psi, slope) = (&self.map, &self.psi, &self.shade);
+        let px = map.magnification().max(1e-3);
+        // GEN-R17: ψ bilinear up to 2× magnification, Catmull-Rom above (CORE-R102); the
+        // slope is smooth, so bilinear. Rows rebuilt per pixel row (CORE-R104).
+        if px > 2.0 {
+            let (mut ry, mut pr, mut gr) = (-1, map.row_cubic(psi, 0), map.row(slope, 0));
+            self.pixels.shade(|x, y| {
+                if y != ry {
+                    (ry, pr, gr) = (y, map.row_cubic(psi, y), map.row(slope, y));
+                }
+                pixel_ink(pr.at(x), gr.at(x), px, f)
+            });
+        } else {
+            let (mut ry, mut pr, mut gr) = (-1, map.row(psi, 0), map.row(slope, 0));
+            self.pixels.shade(|x, y| {
+                if y != ry {
+                    (ry, pr, gr) = (y, map.row(psi, y), map.row(slope, y));
+                }
+                pixel_ink(pr.at(x), gr.at(x), px, f)
+            });
+        }
     }
 }
 
@@ -525,9 +452,9 @@ mod tests {
     }
 
     #[test]
-    fn spin_a6_interfaces_are_even_antialiased_seams_and_the_mush_forms_fast() {
-        // A formed straight interface at 30°: the display magnitude depends on the
-        // distance to the zero line only, rising smoothly from black over ≈ 1–2 nodes.
+    fn spin_a6_interfaces_are_even_antialiased_lines_and_the_mush_forms_fast() {
+        // ADR-0017: both phases black and the interface a bright line whose level falls
+        // smoothly with the distance to ψ = 0, at any angle.
         let (w, h) = (48u16, 48u16);
         let mut psi = Grid::new(Size::new(w, h), 0.0f32);
         let (nx, ny) = (0.5f32, 0.866f32);
@@ -537,47 +464,33 @@ mod tests {
                 psi.set(i32::from(x), i32::from(y), PSI_STAR * (d / 1.2).tanh());
             }
         }
-        let (mut out, mut blur, mut tmp) = (Grid::default(), Grid::default(), Grid::default());
-        shade_field(&psi, &mut out, &mut blur, &mut tmp);
-        let mut by_dist: Vec<(f32, f32)> = Vec::new();
+        let mut slope = Grid::default();
+        let f = slope_field(&psi, &mut slope);
+        let at = |x: u16, y: u16| {
+            let i = usize::from(y) * usize::from(w) + usize::from(x);
+            pixel_ink(psi.as_slice()[i], slope.as_slice()[i], 1.0, f).level
+        };
+        let mut by_dist: Vec<(f32, u8)> = Vec::new();
         for y in 16..32u16 {
             for x in 16..32u16 {
                 let d = (f32::from(x) - 24.0) * nx + (f32::from(y) - 24.0) * ny;
-                if d.abs() < 1.5 {
-                    by_dist.push((
-                        d.abs(),
-                        out.get(i32::from(x), i32::from(y))
-                            .copied()
-                            .unwrap_or(0.0)
-                            .abs(),
-                    ));
+                if d.abs() < 1.0 {
+                    by_dist.push((d.abs(), at(x, y)));
                 }
             }
         }
         by_dist.sort_by(|a, b| a.0.total_cmp(&b.0));
-        // Dark at the line, rising with the distance: the mean magnitude per 0.25-node
-        // distance bin increases (the sheen and lattice sampling only add a small spread).
-        let bins: Vec<f32> = (0..5)
-            .map(|b| {
-                let lo = 0.25 * b as f32;
-                let vs: Vec<f32> = by_dist
-                    .iter()
-                    .filter(|p| p.0 >= lo && p.0 < lo + 0.25)
-                    .map(|p| p.1)
-                    .collect();
-                vs.iter().sum::<f32>() / vs.len().max(1) as f32
-            })
-            .collect();
-        assert!(bins[0] < 0.1, "{bins:?}");
-        assert!(bins.windows(2).all(|w| w[1] > w[0]), "{bins:?}");
-        // The phases stay apart from kelvin_helmholtz's Eosin/Cobalt pair.
-        assert!(PHASE_A != Ramp::Eosin && PHASE_A != Ramp::Ferroin);
+        let (near, far) = (by_dist[0].1, by_dist[by_dist.len() - 1].1);
+        assert!(near > 150 && near > far, "{by_dist:?}");
+        // Deep in either phase: black.
+        assert_eq!(pixel_ink(PSI_STAR, 0.01, 1.0, 1.0), Ink::BLANK);
+        assert_eq!(pixel_ink(-PSI_STAR, 0.01, 1.0, 1.0), Ink::BLANK);
         // The quench starts fast, so the t = 1 s frame is formed.
         let (mut g, mut ctx) = scene(120, 40, 42);
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
         }
-        assert!(formed(&g.psi));
+        assert!(g.psi.as_slice().iter().any(|x| x.abs() > 0.5 * PSI_STAR));
     }
 }
