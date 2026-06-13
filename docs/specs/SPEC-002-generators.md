@@ -473,8 +473,8 @@ bounded (GEN-R8); particles are respawned rather than reallocated. Positions are
 ### black_hole  (Deep Cosmos, M5, M12)
 - **Intent**: a Luminet-style black hole (Luminet 1979; *Interstellar*): a black shadow, the thin
   lensing ring (secondary image) hugging it, and an inclined accretion disk whose far side is lensed up
-  over the shadow and, as a lower arc, under it; the approaching (left) side burns white-gold, the
-  receding side dull ember; the hot gas visibly streams in sheared spiral clumps; behind it a quiet field
+  over the shadow and, as a lower arc, under it; *(M14, ADR-0017: fine and dark)* the approaching (left) side burns white-gold, the
+  receding side a thin dim ember band; the hot gas visibly streams in sheared spiral clumps; behind it a quiet field
   of steady point stars, crowding along a Milky Way band, lensed round the hole. The disk is the
   brightest thing on screen.
 - **Model** (units `G = c = M = 1`): Schwarzschild null geodesics from the Binet equation
@@ -483,7 +483,7 @@ bounded (GEN-R8); particles are respawned rather than reallocated. Positions are
   end angle (capture at `u = ½` or escape at `u = 0`); beyond `b = 48` the first-order weak-field orbit
   and the second-order deflection are used. A camera ray at impact parameter `b` and screen angle `ψ`
   crosses the disk plane (inclination 80°) at `γ_n = γ₀(ψ) + nπ`, `γ₀ = atan2(cos i, −sin ψ sin i)`; the
-  thin, opaque disk (`6 ≤ r ≤ 24`, ISCO to outer edge) is hit by the first crossing that lands on it —
+  thin, opaque disk (`6 ≤ r ≤ 14`, ISCO to outer edge; *M14*, was 24) is hit by the first crossing that lands on it —
   order 0 (direct image) or order 1 (the secondary image: the lensing ring above the shadow, the
   brightest photon subring, and the lower arc below it). The fainter n ≥ 2 subrings are omitted. Per hit
   the redshift is `g = √(1 − 3/r) / (1 + Ω b cos ψ sin i)`, `Ω = r^{-3/2}`: `√(1 − 3/r)` is the
@@ -501,40 +501,40 @@ bounded (GEN-R8); particles are respawned rather than reallocated. Positions are
   `ln r + 0.02 age`, turned by `ω(r)(1 − e^{−0.03 age})/0.03`), so differential rotation shears it into
   spiral streaks before it is replaced. Escaping rays look up the sky in the direction they came from
   (observer at `D = 60`: screen angle `b / D`, source angle `b / D − α(b)` with `α = φ_end − π`). Stars:
-  2400 seeded points (a quarter crowd a tilted great circle, the Milky Way band), one per texel of a
-  1024 × 512 equirectangular map, levels 40–150. Of the supersamples that see a texel on one side of
+  1200 seeded points (*M14*, was 2400; a quarter crowd a tilted great circle, the Milky Way band), one per texel of a
+  1024 × 512 equirectangular map, levels 40–110. Of the supersamples that see a texel on one side of
   the hole (`ψ ≥ 0` or `ψ < 0`; a star's direct and lensed images lie on opposite sides), only the one
   nearest the texel's centre carries its star, so each image is a single pixel and, as the sky turns by
   whole texels, never drops out between texels. Tracing runs in `resize` on a lattice capped at 24 000 nodes (ADR-0012;
   200 × 50 is traced 1:1); each step advects the clump texture, sums the hit list and looks up the sky.
-  The camera fit uses the disk image's traced extent: the outer edge spans 90 % of the width, with one
+  The camera fit uses the disk image's traced extent: the outer edge spans 60 % of the width (*M14*, was 90 %), with one
   cell clear above and two below (title row).
 - **Stylisation (stated)**: colour contrast is exaggerated: the display temperature is
-  `T_peak · F^{3/4} = T_peak (gT/T_peak)³` with `T_peak = 6 000 K`; from 600 K to 4 500 K it is mapped
-  onto 1 000–4 500 K (the coolest blackbody level up) and lifted in log T by the power 0.8, so the dim
-  receding and outer disk glows as a continuous ember envelope round its clumps; above 4 500 K it is
-  rolled off in log T as `x/(1 + x)` towards 10 000 K (never clipping), so the disk runs from white
+  `T_peak · F^{3/4} = T_peak (gT/T_peak)³` with `T_peak = 6 000 K`; from 1 050 K (*M14*, was 600 K) to 4 500 K it is mapped
+  onto 1 000–4 500 K (the coolest blackbody level up) and lifted in log T by the power 0.8; *(M14)* below 1 050 K the gas is not drawn, a tight falloff, so the dim
+  receding side shows only as a thin dim ember band that closes the ellipse; above 4 500 K it is
+  rolled off in log T as `x/(1 + x)` towards 6 000 K (*M14*, was 10 000 K; never clipping), so the disk runs from white
   through gold to ember in visible colours (real disks peak in the UV or X-rays and their colour
   contrast is far smaller). The
   redshift `g` is computed exactly, but the display cubes its colour effect along with the radial
   temperature contrast, so the Doppler colour asymmetry is exaggerated by the same power; the ordering —
   approaching side brighter and bluer, the gravitational redshift towards the ISCO — is physical. Colour
-  is false. The lensing ring is drawn at full coverage wherever it touches a pixel, so it reads as a
+  is false. The lensing ring is drawn *(M14)* as a fine `Ramp(Starlight)` thread, up to 130 by its sub-pixel coverage (3 × the share of a node's 6 × 6 ring samples on the image), and only where the disk there is dimmer than level 90, so it reads as a
   one-pixel line (it is thinner than a pixel). Stars are points whose lensed images keep their brightness
   (magnification is not shown); sky rays deflected by more than π (the sky's own photon subrings, within
   ~0.15 M of the shadow's edge) are not traced and are drawn dark. The Milky Way is shown only as a
   crowding of stars, not as diffuse light. The outer 45 % of the disk is feathered to zero emission. The clumps are
   illustrative turbulence, regenerated every 6 s. The star field drifts slowly round the disk axis (once
-  per 150 s). The disk is infinitely thin and opaque; plunging gas inside the ISCO is not drawn; the sky
+  per 300 s; *M14*, was 150 s). The disk is infinitely thin and opaque; plunging gas inside the ISCO is not drawn; the sky
   mixes an observer at infinity (for the disk) with one at `D = 60` (for the sky angles).
 - **Motion**: clumps stream and shear with the differential rotation (inner orbit 2.5 s); the lensed
   star field drifts round the hole.
 - **Resize**: lattice, hit list, per-node star texels and sample map; the geodesic table, image extent,
   star map and clump noise are size-independent and survive.
-- **Inks**: disk `Blackbody` (the display temperature), stars `Star` (levels 40–150, below the disk's
+- **Inks**: disk `Blackbody` (the display temperature), the photon ring `Ramp(Starlight)` ≤ 130, stars `Star` (levels 40–110, below the disk's
   hottest level in every theme), shadow and empty sky blank. ASCII
   fallback: `raster::ascii_ramp_cell` (CORE-R91), the stronger (CORE-R87) half-pixel's level on `.:-=+*#%@`.
-- **Acceptance**: `BH-A1` ω strictly decreases with r and the ISCO period is 2.5 s; `BH-A2` *(changed)* the shadow is black: no ray with `b < b_c` receives sky light, and the only disk light inside the shadow is the direct image of the near half (the far half is seen only outside it); `BH-A3` *(changed)* the approaching half is bluer and brighter: `g(ψ = π) > g(ψ = 0)` at every radius and the mean Blackbody level of the left half of the image exceeds the right's; `BH-A4` *(changed)* the clumps ride the disk flow: a parcel orbiting at Kepler ω while drifting in at `dr/dt = −0.02 r` maps back to its birth position through the layer's closed-form transport, the two layers' weights satisfy `w₀² + w₁² = 1`, and the clump multiplier averages 1 with at least 5 % of bins below 0.6 and above 1.6; `BH-A5` *(new)* the geodesic table is right: rays are captured iff `b < 3√3` (outside the table's resolution there), for `b ≥ 20` the deflection matches `4/b + 15π/(4b²) + 128/(3b³)` within 1 %, and early on every ray is the straight line `u = sin φ / b` to first order; `BH-A6` *(new)* the order-1 (secondary) image lies outside the shadow; above the hole (`sin ψ ≥ 0`) it is a thin lensing ring, `b < b_c + 0.8`, drawn without gaps (at 120 × 40 and 200 × 50 every pixel it passes through above the shadow, where its gas is hot enough to show, is lit), and below it the wider lower arc; `BH-A7` *(new)* through the poles of the image (`cos ψ = 0`) there is no line-of-sight Doppler shift: `g = √(1 − 3/r)`, gravitational redshift times the transverse (time-dilation) Doppler shift; the emitted temperature peaks at `r = 49/36 · r_isco` and is 0 at the ISCO; `BH-A8` *(new)* the sky is a quiet field of steady point stars: over a full turn of the star field, stars light at most 5 % of the frame's pixels; however strongly lensed, a star shows in at most two nodes (one per image); and at 80 × 24, 120 × 40 and 200 × 50 over 20 s, a star image that vanishes with no star within two pixels has lasted at least 0.55 s on average; `BH-A9` *(new)* the disk is the hero and never clips: the display temperature starts at the coolest blackbody level, rises strictly and continuously (also at 4 500 K), lifts the dim disk (2 000 K shows above 2 600 K) and stays below 10 000 K, fewer than 5 % of the disk's pixels come within 3 % of it, and the disk's hottest level exceeds every star's (at 80 × 24, 120 × 40 and 200 × 50).
+- **Acceptance**: `BH-A1` ω strictly decreases with r and the ISCO period is 2.5 s; `BH-A2` *(changed)* the shadow is black: no ray with `b < b_c` receives sky light, and the only disk light inside the shadow is the direct image of the near half (the far half is seen only outside it); `BH-A3` *(changed)* the approaching half is bluer and brighter: `g(ψ = π) > g(ψ = 0)` at every radius and the mean Blackbody level of the left half of the image exceeds the right's; `BH-A4` *(changed)* the clumps ride the disk flow: a parcel orbiting at Kepler ω while drifting in at `dr/dt = −0.02 r` maps back to its birth position through the layer's closed-form transport, the two layers' weights satisfy `w₀² + w₁² = 1`, and the clump multiplier averages 1 with at least 5 % of bins below 0.6 and above 1.6; `BH-A5` *(new)* the geodesic table is right: rays are captured iff `b < 3√3` (outside the table's resolution there), for `b ≥ 20` the deflection matches `4/b + 15π/(4b²) + 128/(3b³)` within 1 %, and early on every ray is the straight line `u = sin φ / b` to first order; `BH-A6` *(new)* the order-1 (secondary) image lies outside the shadow; above the hole (`sin ψ ≥ 0`) it is a thin lensing ring, `b < b_c + 0.8`, drawn without gaps (at 120 × 40 and 200 × 50 every pixel it passes through above the shadow, where its gas is hot enough to show, is lit, *M14*: as the `Starlight` ring line or disk light), and below it the wider lower arc; `BH-A7` *(new)* through the poles of the image (`cos ψ = 0`) there is no line-of-sight Doppler shift: `g = √(1 − 3/r)`, gravitational redshift times the transverse (time-dilation) Doppler shift; the emitted temperature peaks at `r = 49/36 · r_isco` and is 0 at the ISCO; `BH-A8` *(new)* the sky is a quiet field of steady point stars: over a full turn of the star field, stars light at most 5 % of the frame's pixels; however strongly lensed, a star shows in at most two nodes (one per image); and at 80 × 24, 120 × 40 and 200 × 50 over 20 s, a star image that vanishes with no star within two pixels has lasted at least 0.55 s on average; `BH-A9` *(new)* the disk is the hero and never clips: the display temperature starts at the coolest blackbody level, rises strictly and continuously (also at 4 500 K), and stays below 6 000 K, fewer than 5 % of the disk's pixels come within 3 % of it, and the disk's hottest level exceeds every star's (at 80 × 24, 120 × 40 and 200 × 50).
 
 ### galaxy_collision  (Deep Cosmos, M5, M12)
 - **Intent** *(M14, ADR-0017: M11's sparse look on the M12 dynamics)*: two disk galaxies swing past each other and pull out tidal tails and a bridge (Toomre & Toomre 1972), drawn as a sparse field of star dots on black: a warm and a cool dotted spiral disk whose arms turn, bright streams of dots in the tails and bridge, and a bright nucleus in each.
