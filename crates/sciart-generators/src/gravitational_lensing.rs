@@ -28,7 +28,7 @@ pub static META: Meta = Meta {
 /// Caption while the hero galaxy's light covers the lens axis (LENS-A6).
 const RING: &str = "Einstein ring";
 /// Hero surface brightness on the axis from which the closed ring counts as shown.
-const RING_LIGHT: f64 = 0.05;
+const RING_LIGHT: f64 = 0.1;
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(GravitationalLensing::default())
@@ -46,40 +46,45 @@ const MAX_NODES: usize = 24_000;
 const TEX: usize = 192;
 const PERIOD: f64 = 6.0;
 const FIELD: usize = 28;
-const FIELD_FAINT: f64 = 0.03;
-const FIELD_SPAN: f64 = 0.5;
+const FIELD_FAINT: f64 = 0.3;
+const FIELD_SPAN: f64 = 0.6;
+/// Background galaxy sizes (θE): tiny, so each reads as a dot of a pixel or two
+/// (ADR-0017).
+const FIELD_SIZE: (f64, f64) = (0.03, 0.06);
 const DRIFT: f64 = 0.12;
 
 /// Hero galaxy: radius (θE), time between passes (s), the crossing's half-length (θE)
 /// and the largest impact parameter as a fraction of the hero's minor semi-axis
 /// `HERO_R · cos i`, so the axis passes well inside its bright disk and every pass
 /// closes the ring (LENS-A6).
-const HERO_R: f64 = 0.6;
+const HERO_R: f64 = 0.18;
 const PASS: f64 = 14.0;
 const SWEEP: f64 = 2.2;
-const IMPACT: f64 = 0.35;
+const IMPACT: f64 = 0.06;
 /// The pass slows near closest approach: position `SWEEP (x (1 − k) + k x³)` for
 /// `x ∈ [−1, 1]`, so the closed ring holds for several seconds (LENS-A6).
-const LINGER: f64 = 0.6;
+const LINGER: f64 = 0.9;
 /// Relative contrast of the hero's spiral arms.
 const ARMS: f64 = 0.55;
 
 /// Lens light: a Sérsic n = 2 core with effective radius `LENS_RE` θE and centre
-/// `LENS_PEAK`, plus a faint `r⁻²` halo, the sum tapered to zero between `FADE.0` and
-/// `FADE.1` θE, inside the critical curve, so a dark gap is left for the Einstein ring
-/// (stylised, SPEC-002). The taper brings it smoothly down to the faintest visible level,
-/// where it stops (LENS-A8): a soft glow into the ramp's darkest red, with no stipple.
-const LENS_RE: f64 = 0.2;
+/// `LENS_PEAK` (the `r⁻²` halo is off, `HALO_PEAK` 0: ADR-0017), tapered to zero between
+/// `FADE.0` and `FADE.1` θE, well inside the critical curve, so a dark gap is left for the
+/// Einstein ring (stylised, SPEC-002). The taper brings it smoothly down to the faintest
+/// visible level, where it stops (LENS-A8): a small dim smudge, with no stipple.
+const LENS_RE: f64 = 0.1;
 const LENS_PEAK: f64 = 1.5;
-const HALO_PEAK: f64 = 0.06;
+const HALO_PEAK: f64 = 0.0;
 const HALO_CORE: f64 = 0.2;
-const FADE: (f64, f64) = (0.3, 0.6);
+const FADE: (f64, f64) = (0.12, 0.25);
+/// ADR-0017: the lens galaxy is a dim `Starlight` smudge of a few pixels (its tone scaled
+/// to at most `LENS_LEVEL`), and the lensed light `Ice` at most `ARC_LEVEL` (the arcs' cores
+/// reach its pale, low-chroma top, rule 6; the rest stays muted).
+const LENS_LEVEL: f64 = 55.0;
+const ARC_LEVEL: f64 = 255.0;
 
 // Pixels are square: a cell is one pixel wide and two tall.
 const _: () = assert!(ASPECT == 2.0);
-/// Critical-curve dashes around the circle, and their ink.
-const DASHES: f64 = 36.0;
-const CURVE: Ink = Ink::new(Role::Structure, 40);
 
 /// Source and lens brightness in `[0, 1]` map to ramp levels through an asinh stretch.
 const KNEE: f32 = 0.08;
@@ -159,7 +164,7 @@ fn paint_field(rng: &mut impl Rng) -> Grid<f32> {
     let texel = PERIOD / TEX as f64;
     for _ in 0..FIELD {
         let (cx, cy) = (rng.random_range(0.0..PERIOD), rng.random_range(0.0..PERIOD));
-        let a = rng.random_range(0.04..0.14);
+        let a = rng.random_range(FIELD_SIZE.0..FIELD_SIZE.1);
         let q = rng.random_range(0.35..1.0);
         let (s, c) = rng.random_range(0.0..PI).sin_cos_det();
         let peak = FIELD_FAINT + FIELD_SPAN * rng.random_range(0.0f64..1.0).powi(3);
@@ -179,6 +184,26 @@ fn paint_field(rng: &mut impl Rng) -> Grid<f32> {
         }
     }
     tex
+}
+
+/// A light cross blur of `src` into `dst`, `½·centre + ⅛·(four neighbours)` (edges
+/// clamped), so a thin arc sampled at node centres reads as a smooth anti-aliased line
+/// rather than beads (ADR-0017).
+fn blur_cross(src: &Grid<f32>, dst: &mut Grid<f32>) {
+    let (w, h) = (usize::from(src.width()), usize::from(src.height()));
+    if w == 0 || h == 0 || dst.size() != src.size() {
+        return;
+    }
+    let src = src.as_slice();
+    let dst = dst.as_mut_slice();
+    for y in 0..h {
+        let (up, down) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        for x in 0..w {
+            let (l, r) = (x.saturating_sub(1), (x + 1).min(w - 1));
+            dst[y * w + x] = 0.5 * src[y * w + x]
+                + 0.125 * (src[y * w + l] + src[y * w + r] + src[up * w + x] + src[down * w + x]);
+        }
+    }
 }
 
 /// Bilinear, periodic sample of the field at source position `(x, y)` (θE units).
@@ -215,6 +240,10 @@ pub struct GravitationalLensing {
     beta: Vec<(f32, f32)>,
     /// Source brightness and (static) lens light per node.
     source: Grid<f32>,
+    /// The hero's light per node, and the source light as shown: the field plus the
+    /// hero's light lightly blurred (anti-aliasing).
+    hero_light: Grid<f32>,
+    shown: Grid<f32>,
     lens: Grid<f32>,
     map: SampleMap,
     tone: Tone,
@@ -279,19 +308,37 @@ impl GravitationalLensing {
             DRIFT * self.t * self.drift_dir.1,
         );
         let reach2 = (HERO_R * HERO_R) as f32;
-        for (s, &(bx, by)) in self.source.as_mut_slice().iter_mut().zip(&self.beta) {
+        for ((s, h), &(bx, by)) in self
+            .source
+            .as_mut_slice()
+            .iter_mut()
+            .zip(self.hero_light.as_mut_slice())
+            .zip(&self.beta)
+        {
             let (bx, by) = (f64::from(bx), f64::from(by));
-            let mut v = sample_field(&self.field, bx - ox, by - oy);
+            let field = sample_field(&self.field, bx - ox, by - oy);
             let q = (bx - hero.0, by - hero.1);
-            if envelope > 0.0 && ((q.0 * q.0 + q.1 * q.1) as f32) < reach2 {
-                v += (envelope * hero_profile(q, self.cos_inc, self.pa, ARMS)) as f32;
-            }
-            *s = v;
+            *h = if envelope > 0.0 && ((q.0 * q.0 + q.1 * q.1) as f32) < reach2 {
+                (envelope * hero_profile(q, self.cos_inc, self.pa, ARMS)) as f32
+            } else {
+                0.0
+            };
+            *s = field + *h;
         }
-        let (map, source, lens, tone) = (&self.map, &self.source, &self.lens, &self.tone);
+        // Only the hero's thin arcs are blurred (anti-aliased); the dot galaxies stay sharp.
+        blur_cross(&self.hero_light, &mut self.shown);
+        for ((d, &s), &h) in self
+            .shown
+            .as_mut_slice()
+            .iter_mut()
+            .zip(self.source.as_slice())
+            .zip(self.hero_light.as_slice())
+        {
+            *d += s - h;
+        }
+        let (map, source, lens, tone) = (&self.map, &self.shown, &self.lens, &self.tone);
         let direct = source.size() == self.pixels.pixel_size();
         let width = usize::from(source.width());
-        let (c, te) = (self.centre, self.theta_e_px);
         self.pixels.shade(|x, y| {
             let (s, l) = if direct {
                 let i = y as usize * width + x as usize;
@@ -300,19 +347,16 @@ impl GravitationalLensing {
                 (map.sample(source, x, y), map.sample(lens, x, y))
             };
             let (level, ramp) = if s >= l {
-                (tone.level(s), Ramp::Ice)
+                (f64::from(tone.level(s)) * ARC_LEVEL / 255.0, Ramp::Ice)
             } else {
-                (tone.level(l), Ramp::Ember)
+                (
+                    f64::from(tone.level(l)) * LENS_LEVEL / 255.0,
+                    Ramp::Starlight,
+                )
             };
             // Ramps are tinted even at level 0: faint light ends by removing ink (CORE-R66).
-            if f64::from(level) >= ink::MIN_VISIBLE_LEVEL {
-                return Ink::new(Role::Ramp(ramp), level);
-            }
-            // The critical curve, dashed, only where nothing else shines.
-            let (dx, dy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
-            let on_curve = ((dx * dx + dy * dy).sqrt() - te).abs() < 0.5;
-            if on_curve && geom::wrap(dy.atan2(dx) / TAU * DASHES, 1.0) < 0.5 {
-                CURVE
+            if level >= ink::MIN_VISIBLE_LEVEL {
+                Ink::new(Role::Ramp(ramp), ink::level(level))
             } else {
                 Ink::BLANK
             }
@@ -341,6 +385,8 @@ impl Generator for GravitationalLensing {
         self.theta_e_px = 2.0 * draw::fit_radius(size, EINSTEIN_FRAC);
         let lattice = lattice_for(px, MAX_NODES, 1.0);
         self.source.resize(lattice, 0.0);
+        self.shown.resize(lattice, 0.0);
+        self.hero_light.resize(lattice, 0.0);
         self.lens.resize(lattice, 0.0);
         self.map.rebuild(lattice, px);
         self.beta.clear();
@@ -540,64 +586,46 @@ mod tests {
     }
 
     #[test]
-    fn lens_a8_the_lens_glow_fades_smoothly_to_the_floor() {
+    fn lens_a8_the_lens_is_a_small_dim_smudge_that_fades_smoothly() {
+        // ADR-0017: the lens galaxy is a few pixels of dim `Starlight`, at most
+        // `LENS_LEVEL`, lit at the centre and fading outward with no stipple, well inside
+        // the critical curve.
         let size = Size::new(200, 50);
         let mut g = scene(size);
         g.field.fill(0.0);
         g.pass_t = 0.0; // no hero
         g.raster();
         let (c, te) = (g.centre, g.theta_e_px);
-        // Share of lens-lit pixels in thin annuli, and their mean level: solid, then none,
-        // the level falling annulus by annulus to near the floor before the glow ends.
-        let share = |r0: f64| {
-            let (mut lit, mut all, mut sum) = (0, 0, 0.0);
-            let px = g.pixels.pixel_size();
-            for y in 0..i32::from(px.height()) {
-                for x in 0..i32::from(px.width()) {
-                    let (dx, dy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
-                    let r = dx.hypot(dy) / te;
-                    if (r0..r0 + 0.025).contains(&r) {
-                        all += 1;
-                        let ink = g.pixels.get(x, y).unwrap();
-                        if ink.role == Role::Ramp(Ramp::Ember) {
-                            lit += 1;
-                            sum += f64::from(ink.level);
-                        }
-                    }
+        let px = g.pixels.pixel_size();
+        let mut by_r: Vec<(f64, u8)> = Vec::new();
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let ink = g.pixels.get(x, y).unwrap();
+                if ink.role != Role::Ramp(Ramp::Starlight) {
+                    continue;
+                }
+                let (dx, dy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
+                let r = dx.hypot(dy) / te;
+                assert!(r < FADE.1 + 0.05, "lens light at {r} θE");
+                assert!(f64::from(ink.level) <= LENS_LEVEL + 1.0, "{ink:?}");
+                by_r.push((r, ink.level));
+            }
+        }
+        assert!(
+            !by_r.is_empty() && by_r.len() < 40,
+            "{} lens pixels",
+            by_r.len()
+        );
+        // Fading outward: a pixel nearer the centre is never dimmer than one ≥ 1.5 px
+        // further out.
+        let step = 1.5 / te;
+        for &(r0, l0) in &by_r {
+            for &(r1, l1) in &by_r {
+                if r1 > r0 + step {
+                    assert!(l1 <= l0 + 1, "{r0}:{l0} vs {r1}:{l1}");
                 }
             }
-            (
-                f64::from(lit) / f64::from(all.max(1)),
-                sum / f64::from(lit.max(1)),
-            )
-        };
-        // Annuli 0.025 θE wide from 0.2 θE: a solid core fading, then a dark gap from
-        // 0.65 θE to the critical curve that the Einstein ring owns.
-        let rings: Vec<(f64, f64)> = (0..30).map(|k| share(0.2 + 0.025 * f64::from(k))).collect();
-        assert!(rings[0].0 > 0.99, "{rings:?}");
-        assert!(
-            rings[18..].iter().all(|&(s, _)| s == 0.0),
-            "no gap: {rings:?}"
-        );
-        // No stipple: an annulus is lit all round or not at all (bar the one the edge
-        // crosses), and the level only falls outward.
-        let partial = rings
-            .iter()
-            .filter(|&&(s, _)| (0.1..0.9).contains(&s))
-            .count();
-        assert!(partial <= 1, "stipple: {rings:?}");
-        let lit: Vec<f64> = rings.iter().filter(|r| r.0 > 0.0).map(|r| r.1).collect();
-        for w in lit.windows(2) {
-            assert!(w[1] <= w[0] + 1.0, "{lit:?}");
         }
-        // It ends close to the floor, not on a bright edge.
-        let last = *lit.last().unwrap();
-        assert!(
-            last <= ink::MIN_VISIBLE_LEVEL + 10.0,
-            "ends at level {last}"
-        );
-        assert_eq!(floor_cut(0.5, 1.0), 0.0);
-        assert_eq!(floor_cut(1.5, 1.0), 1.5);
     }
 
     #[test]
@@ -609,7 +637,7 @@ mod tests {
             g.prepare();
             let brightest = g.field.as_slice().iter().fold(0.0f32, |m, &v| m.max(v));
             assert!(
-                f64::from(brightest) <= 0.75,
+                f64::from(brightest) <= 1.0,
                 "seed {seed}: field peak {brightest}"
             );
             let px = g.pixels.pixel_size();
