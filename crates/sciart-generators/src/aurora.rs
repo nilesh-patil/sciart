@@ -113,14 +113,16 @@ const RED_LIT: f32 = 0.2;
 /// The red fringe is drawn in the `HAlpha` ramp at levels up to this, its dark crimson
 /// end, which is how the 630 nm crown reads over green in photographs. The pink hem, the
 /// same ramp's rose, runs from `HEM_LEVEL`, above it, to `HEM_LEVEL_MAX`.
-const RED_LEVEL_MAX: f64 = 100.0;
+const RED_LEVEL_MAX: f64 = 52.0;
 /// The crown starts at this crimson rather than the core floor: the ramp's darkest
 /// maroon, next to the green, read as brown mud rather than red light.
-const RED_LEVEL_MIN: f64 = 56.0;
+const RED_LEVEL_MIN: f64 = 40.0;
 const RED: Role = Role::Ramp(Ramp::HAlpha);
 /// Green 557.7 nm light: the `Aurora` ramp, deep teal where faint (false colour: the faint
 /// green mixed with blue N₂⁺ 427.8 nm, as photographs show it) to lime-white in the rays.
 const GREEN: Role = Role::Ramp(Ramp::Aurora);
+/// M14 (ADR-0017): the green is muted, at most this level (lime, not lime-white).
+const GREEN_TOP: f64 = 170.0;
 /// Red-dominant light shows only where the green's own tone is at least this: the
 /// crown caps each ray and fold with crimson and so follows the curtains' envelope.
 /// Diffuse red far above the green would be cut flat by the top fade (a lid) and stand
@@ -128,10 +130,13 @@ const GREEN: Role = Role::Ramp(Ramp::Aurora);
 const CROWN_GREEN: f32 = 0.03;
 /// The hem: at most half the ramp (a soft rose glow, not a neon line), brighter where the
 /// curtain above it is (AUR-A10).
-const HEM_LEVEL: f64 = 110.0;
-const HEM_LEVEL_MAX: f64 = 128.0;
+/// M14 (ADR-0017): a dim crimson fringe just above the red crown's levels, not a line.
+const HEM_LEVEL: f64 = 62.0;
+const HEM_LEVEL_MAX: f64 = 70.0;
 /// Crimson level of the sky pixel just under the hem, about 0.2 of the ramp.
-const HEM_BELOW_FADE: [u8; 1] = [51];
+const HEM_BELOW_FADE: [u8; 1] = [30];
+/// M14: the pink fringe under the curtains is not drawn.
+const SHOW_HEM: bool = false;
 /// The curtains' ripple (AUR-A10): relative amplitude, wavenumber (rad per column) and
 /// angular speed (rad/s): a slow brightness wave travelling along the arc, as the rays
 /// of a real curtain ripple sideways.
@@ -170,7 +175,8 @@ const SKYGLOW: Role = Role::Ramp(GLOW_RAMP);
 const LAKE_GAIN: f32 = 0.25;
 const LAKE_DEPTH_FADE: f32 = 0.6;
 /// Ripple crests dim a lake row by up to this share, as bands rather than gaps.
-const CREST_DIM: f32 = 0.45;
+/// M14 (ADR-0017): 0, so the reflection shows no ripple stripes.
+const CREST_DIM: f32 = 0.0;
 /// A sky run whose brightest pixel is below this level is not mirrored (see
 /// `View::reflect`).
 const LAKE_MIN_LEVEL: u8 = 40;
@@ -1030,7 +1036,7 @@ impl Glow {
         } else if red {
             (RED, RED_LEVEL_MIN, RED_LEVEL_MAX)
         } else {
-            (GREEN, ink::MIN_VISIBLE_LEVEL, 255.0)
+            (GREEN, ink::MIN_VISIBLE_LEVEL, GREEN_TOP)
         };
         Some(Ink::new(role, ink::level(lo + (hi - lo) * v)))
     }
@@ -1602,10 +1608,16 @@ impl View {
         for x in 0..self.w as i32 {
             for y in 0..self.y_h as i32 {
                 if let Some(i) = self.pixels.get(x, y).filter(|&i| is_hem(i)) {
-                    let green = ((f32::from(i.level) - HEM_LEVEL as f32) / span * 255.0) as u8;
+                    let green =
+                        ((f32::from(i.level) - HEM_LEVEL as f32) / span * GREEN_TOP as f32) as u8;
                     self.pixels.set(x, y, Ink::new(GREEN, green.max(i.level)));
                 }
             }
+        }
+        // M14 (ADR-0017): the fringe is dropped; its stepped 1-cell band along every
+        // curtain base read as a hard line. The hem pixels have gone back to green above.
+        if !SHOW_HEM {
+            return;
         }
         // Pass 1: the border row of each column (−1 where none), so a lone column, with no
         // neighbour on the border within a row, takes no fringe (no confetti).
@@ -2524,7 +2536,8 @@ mod tests {
         }
         let frac = f64::from(lit) / f64::from(sky);
         assert!((0.15..=0.70).contains(&frac), "lit fraction {frac:.3}");
-        assert!(hems > 0, "no pink hem at the expansion peak");
+        // M14: the fringe is dropped (AUR-A10).
+        assert_eq!(hems, 0, "pink hem at the expansion peak");
         for x in 0..v.w {
             for y in v.y_h..v.rows {
                 let ink = px(x, y);
@@ -2574,7 +2587,10 @@ mod tests {
             glow(GREEN_LIT, 0.2, false).ink(),
             Some(Ink::new(GREEN, FLOOR))
         );
-        assert_eq!(glow(1.0, 0.2, false).ink(), Some(Ink::new(GREEN, 255)));
+        assert_eq!(
+            glow(1.0, 0.2, false).ink(),
+            Some(Ink::new(GREEN, GREEN_TOP as u8))
+        );
         // Red-dominant light has its own, higher threshold and stays a deep crimson
         // (`RED` ≤ RED_LEVEL_MAX); the hem is bright `RED` from HEM_LEVEL.
         const { assert!(RED_LIT > GREEN_LIT) };
@@ -2964,34 +2980,17 @@ mod tests {
     }
 
     #[test]
-    fn aur_a10_the_hem_blends_up_the_lake_mirrors_no_red_and_the_curtains_ripple() {
-        let mut blended = 0;
-        for steps in [20, 32, 48] {
+    fn aur_a10_no_hem_the_lake_mirrors_no_red_and_the_curtains_ripple() {
+        // M14 (ADR-0017): no fringe pixel anywhere, and the water mirrors no red.
+        for steps in [20, 32, 48, 56] {
             let (a, _) = census(steps);
             let v = &a.view;
             let px = |x: i32, y: i32| v.pixels.get(x, y).unwrap_or(Ink::BLANK);
-            for y in 1..v.y_h as i32 {
+            for y in 0..v.lake_end() as i32 {
                 for x in 0..v.w as i32 {
-                    if !is_hem(px(x, y)) {
-                        continue;
-                    }
-                    // A soft glow (≤ half the ramp) under the curtain, which stays whole
-                    // over it; under it only the faint crimson fade.
-                    assert!(px(x, y).level <= 128, "hem at {x},{y} too bright");
-                    let above = px(x, y - 1);
-                    assert!(
-                        above.role != RED || is_hem(above),
-                        "crimson over hem {x},{y}"
-                    );
-                    blended += usize::from(above.role == GREEN);
-                    let below = px(x, y + 1);
-                    assert!(
-                        below.role != RED || is_hem(below) || below.level <= HEM_BELOW_FADE[0],
-                        "bright red below {x},{y}"
-                    );
+                    assert!(!is_hem(px(x, y)), "hem at {x},{y}");
                 }
             }
-            // The water mirrors no red.
             for y in v.y_h..v.lake_end() {
                 for x in 0..v.w {
                     assert_ne!(
@@ -3001,38 +3000,6 @@ mod tests {
                     );
                 }
             }
-        }
-        assert!(blended > 5, "{blended} hem pixels blend");
-        assert!(f64::from(HEM_BELOW_FADE[0]) <= 0.25 * 255.0);
-        // Continuous: wherever the pink curtain's lower border is lit, its column carries
-        // the fringe; no dashes along a lit border.
-        for steps in [44, 52, 56] {
-            let (a, _) = census(steps);
-            let v = &a.view;
-            let (mut lit_cols, mut hem_cols) = (0, 0);
-            for x in 0..v.w {
-                let layers = &v.layers[x][..usize::from(v.nlayers[x])];
-                let Some(lowest) = layers
-                    .iter()
-                    .filter(|l| l.pink > 0.0)
-                    .map(|l| l.y_low)
-                    .max()
-                else {
-                    continue;
-                };
-                let band = (lowest - 4).max(0)..=(lowest + 1).min(v.y_h as i32 - 1);
-                let at = |y: i32| v.pixels.get(x as i32, y).unwrap_or(Ink::BLANK);
-                if band.clone().any(|y| at(y).role == GREEN || is_hem(at(y))) {
-                    lit_cols += 1;
-                    hem_cols += usize::from(band.clone().any(|y| is_hem(at(y))));
-                }
-            }
-            assert!(lit_cols > 10, "t = {}: {lit_cols} lit border columns", a.t);
-            assert!(
-                hem_cols * 10 >= lit_cols * 9,
-                "t = {}: fringe in {hem_cols} of {lit_cols} lit border columns",
-                a.t
-            );
         }
         // The ripple is a bounded wave that travels.
         let (mut a, _) = census(20);
@@ -3220,7 +3187,8 @@ mod tests {
                     assert!(level <= HEM_LEVEL_MAX + 0.5, "hem level {level}");
                 }
             }
-            assert!(hems > 0, "no hem at t = {}", a.t);
+            // M14: the fringe is dropped (AUR-A10).
+            assert_eq!(hems, 0, "hem at t = {}", a.t);
         }
     }
 
