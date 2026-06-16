@@ -86,7 +86,7 @@ const LANE_WANDER: f64 = 0.02;
 const LANE_GLOW: f64 = 0.15;
 /// Resolved band stars: dots per cell, their cap and their `Star` levels. They are
 /// scattered in proportion to the band's light, so they crowd the bright clouds.
-const BAND_DENSITY: f64 = 0.2;
+const BAND_DENSITY: f64 = 0.1;
 const BAND_MAX: usize = 8000;
 const BAND_LEVEL: (f64, f64) = (40.0, 110.0);
 /// The brightest the band's light gets, relative to its peak.
@@ -238,7 +238,9 @@ impl Starfield {
             if rng.random::<f64>() >= light {
                 continue;
             }
-            let level = BAND_LEVEL.0 + (BAND_LEVEL.1 - BAND_LEVEL.0) * light * rng.random::<f64>();
+            // Most faint, a few brighter (a steep spread), so the dots never read as an even grid.
+            let level = BAND_LEVEL.0
+                + (BAND_LEVEL.1 - BAND_LEVEL.0) * light.sqrt() * rng.random::<f64>().powi(3);
             let (dx, dy) = Dots::from_cells(x, MilkyWay::centre(x, w, h) + off);
             self.band
                 .push((dx, dy, Ink::new(Role::Star, ink::level(level))));

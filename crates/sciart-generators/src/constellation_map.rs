@@ -64,18 +64,21 @@ const TYPE_RATE: f64 = 18.0;
 
 /// Strokes stop this far (rows, aspect-corrected) short of the stars they join (CON-A6).
 const STROKE_GAP: f64 = 0.9;
-const STROKE_LEVEL: f64 = 50.0;
+const STROKE_LEVEL: f64 = 65.0;
 /// Figure strokes: a faint warm grey, one braille dot wide, so the stars carry the chart
 /// (ADR-0017).
 const STROKE_ROLE: Role = Role::Ramp(Ramp::Starlight);
 /// A figure star is a point whose radius (px) steps down with magnitude through
 /// `STAR_TIERS` (`(brightest magnitude, radius)`; fainter than all is `STAR_R_RANGE.0`)
-/// (CON-A4): a round 2 × 2 blot to 2.5th magnitude, one pixel below (ADR-0017: 1–2 px).
+/// (CON-A4): a tiny plus (a pixel and its four neighbours, like a star's diffraction
+/// cross) to 2.5th magnitude, one pixel below (ADR-0017: points).
 const STAR_TIERS: [(f64, f64); 1] = [(2.5, 1.0)];
 const STAR_R_RANGE: (f64, f64) = (0.5, 1.0);
-/// Below this radius a star is one pixel; below `STAR_CORNER_BELOW` a 2 × 2 blot.
+/// Below this radius a star is one pixel, else a plus.
 const STAR_ONE_PX: f64 = 0.75;
-const STAR_CORNER_BELOW: f64 = 1.6;
+/// Text (labels, name, epithet, graticule labels) shows only while the chart's fade is at
+/// least this: text colours keep a floor, so they would linger after the stars have gone.
+const TEXT_FADE: f64 = 0.25;
 /// Stars this bright (magnitude) scintillate: their colour temperature flickers by
 /// ±`TWINKLE` at 1–3 Hz (CON-A11).
 const BLOOM_MAG: f64 = 1.5;
@@ -501,28 +504,20 @@ pub(crate) fn star_radius(mag: f64) -> f64 {
         .map_or(STAR_R_RANGE.0, |&(_, r)| r)
 }
 
-/// Where a star glyph cell `p` (cells) puts its disc of radius `r` (px): a pixel corner
-/// under `STAR_CORNER_BELOW` (a round 2 × 2 blot, or one pixel for the faintest), else the
-/// centre of the cell's top pixel.
-fn star_centre(p: Point, r: f64) -> Point {
-    let (x, y) = (p.0.round(), 2.0 * p.1.round());
-    if r < STAR_ONE_PX {
-        (x + 0.5, y + 0.5)
-    } else if r < STAR_CORNER_BELOW {
-        (x + 1.0, y + 1.0)
-    } else {
-        (x + 0.5, y + 0.5)
-    }
+/// Where a star glyph cell `p` (cells) puts its point: the centre of the cell's top
+/// pixel, whatever its size (`r` is kept for the call sites' symmetry).
+fn star_centre(p: Point, _r: f64) -> Point {
+    (p.0.round() + 0.5, 2.0 * p.1.round() + 0.5)
 }
 
-/// The pixels of a star of radius `r` at `c` (from [`star_centre`]): one pixel or a
-/// 2 × 2 blot, round at both sizes (CON-A4).
+/// The pixels of a star of radius `r` at `c` (from [`star_centre`]): one pixel, or a plus
+/// of five (CON-A4).
 fn star_pixels(c: Point, r: f64, mut f: impl FnMut(i32, i32)) {
+    let (x, y) = (c.0.floor() as i32, c.1.floor() as i32);
     if r < STAR_ONE_PX {
-        f(c.0.floor() as i32, c.1.floor() as i32);
+        f(x, y);
     } else {
-        let (x, y) = (c.0 as i32, c.1 as i32);
-        for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+        for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
             f(x + dx, y + dy);
         }
     }
@@ -1017,7 +1012,7 @@ impl Generator for ConstellationMap {
             return;
         };
         let fig = &FIGURES[idx];
-        if unicode {
+        if unicode && fade >= TEXT_FADE {
             self.draw_ticks(canvas, fade);
         }
 
@@ -1050,7 +1045,7 @@ impl Generator for ConstellationMap {
             }
         }
 
-        if local < TRACE {
+        if local < TRACE || fade < TEXT_FADE {
             return;
         }
         // After tracing: label the α star and type out the name beneath the figure.
@@ -1291,7 +1286,7 @@ mod tests {
                 assert_eq!(a.get(x, y).unwrap().ink, want, "{}", s.name);
             }
         }
-        // Points grow with brightness, one pixel to a 2 × 2 blot, and are round.
+        // Points grow with brightness, one pixel to a plus of five, and are symmetric.
         assert!(star_radius(0.0) >= star_radius(1.5) && star_radius(1.5) > star_radius(3.0));
         assert_eq!(star_radius(6.0), STAR_R_RANGE.0);
         for mag in [-0.5, 0.1, 0.5, 1.2, 1.8, 2.5, 3.3, 4.5] {
@@ -1303,9 +1298,8 @@ mod tests {
             let (y0, y1) = (px.iter().map(|p| p.1).min(), px.iter().map(|p| p.1).max());
             let (w, h) = (x1.unwrap() - x0.unwrap() + 1, y1.unwrap() - y0.unwrap() + 1);
             assert_eq!(w, h, "mag {mag}: {px:?}");
-            // A plus of side s has 2s − 1 pixels; a round disc fills most of its box.
             assert!(
-                n == 1 || n as i32 * 10 >= 7 * w * h,
+                (n == 1 && w == 1) || (n == 5 && w == 3),
                 "mag {mag}: {n} of {w}×{h}"
             );
         }
@@ -1474,7 +1468,7 @@ mod tests {
 
     #[test]
     fn con_a9_figure_stars_are_small_points() {
-        // Every figure star is at most a 2 × 2 blot: no bloom round even the brightest.
+        // Every figure star is at most a plus of five: no bloom round even the brightest.
         let size = Size::new(200, 50);
         let mut g = scene(size);
         for (k, fig) in FIGURES.iter().enumerate() {
@@ -1483,7 +1477,7 @@ mod tests {
                 .flat_map(|y| (0..200).map(move |x| (x, y)))
                 .filter(|&(x, y)| g.stars.get(x, y).is_some_and(|i| i != Ink::BLANK))
                 .count();
-            assert!(lit <= 4 * fig.stars.len(), "{}: {lit} px", fig.name);
+            assert!(lit <= 5 * fig.stars.len(), "{}: {lit} px", fig.name);
             for (s, &p) in fig.stars.iter().zip(&g.pos[k]) {
                 let r = star_radius(s.mag);
                 assert!(r <= 1.0, "{}", s.name);
@@ -1502,7 +1496,29 @@ mod tests {
         }
         // Figure lines are the faint grey of ADR-0017; labels stay dim.
         assert_eq!(STROKE_ROLE, Role::Ramp(Ramp::Starlight));
-        const { assert!(STROKE_LEVEL <= 60.0 && NAME_LEVEL <= 150.0 && EPITHET_LEVEL <= NAME_LEVEL) };
+        const { assert!(STROKE_LEVEL <= 70.0 && NAME_LEVEL <= 150.0 && EPITHET_LEVEL <= NAME_LEVEL) };
+    }
+
+    #[test]
+    fn con_a7_text_leaves_with_the_stars() {
+        // At a hand-over (fade ≈ 0) no text lingers: every chart ends and starts dark, so
+        // no half-drawn frame shows a name without its stars (M14 critic).
+        let size = Size::new(120, 40);
+        let mut g = scene(size);
+        let (y, _) = title::span(size, &Title::new(META.title, None)).unwrap();
+        for k in 1..=FIGURES.len() {
+            let c = at(&mut g, k as f64 * SHOW - 0.01, GlyphMode::Unicode);
+            let lines = c.to_lines();
+            for (row, line) in lines.iter().enumerate() {
+                if row as i32 == y {
+                    continue;
+                }
+                assert!(
+                    !line.chars().any(char::is_alphanumeric),
+                    "chart {k} row {row}: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]
