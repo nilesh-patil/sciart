@@ -96,8 +96,13 @@ const LOOP_TOP: f64 = 235.0;
 /// Exposure of the loop glow: the thin (3 × 3) strokes gather less light per pixel than
 /// the old wide ones.
 const LOOP_GAIN: f64 = 1.5;
-const HA_TOP: f64 = 230.0;
-const EDGE: f64 = 0.25;
+/// H-alpha material (critic round 2): the rope's strands at most `HA_TOP`, only the
+/// densest core (toned above `CORE_FROM`) rising to `HA_PEAK`, so the rope is no longer
+/// the largest saturated fill.
+const HA_TOP: f64 = 150.0;
+const HA_PEAK: f64 = 210.0;
+const CORE_FROM: f64 = 0.85;
+const EDGE: f64 = 0.35;
 const BODY: f64 = 0.5;
 
 /// The level of toned glow `g` (0–1) in a ramp whose top is `top`.
@@ -105,9 +110,9 @@ fn stroke_level(g: f64, top: f64) -> f64 {
     top * ease::smoothstep(g / EDGE) * (BODY + (1.0 - BODY) * g)
 }
 const FRONT_TOP: f64 = 120.0;
-const RIM_LEVEL: f64 = 70.0;
+const RIM_LEVEL: f64 = 55.0;
 /// Rim width (pixels) of the limb's chromosphere line.
-const RIM_PX: f64 = 1.2;
+const RIM_PX: f64 = 0.8;
 
 /// Point in the corona: `x` along the limb, `y` height, in `L`.
 type P = [f64; 2];
@@ -689,8 +694,16 @@ impl SolarEruption {
         w: f64,
     ) {
         // 1–2 px strokes (ADR-0017): a 3 × 3 kernel at every size.
-        const THIN: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
-        let (kernel, gain): (&[(i32, i32, f32)], f64) = (&THIN, 1.0);
+        // A line kernel (critic round 2): the neighbours across the stroke take a little
+        // light, the corners none, so a loop is about a pixel thin with soft edges.
+        const THIN: [(i32, i32, f32); 5] = [
+            (0, 0, 1.0),
+            (-1, 0, 0.15),
+            (1, 0, 0.15),
+            (0, -1, 0.15),
+            (0, 1, 0.15),
+        ];
+        let (kernel, gain): (&[(i32, i32, f32)], f64) = (&THIN, 1.4);
         let at = |p: &[f32; 2]| pose.apply(m, [flip * f64::from(p[0]), f64::from(p[1])]);
         let mut prev = at(&pts[0]);
         let mut a = v.px(prev[0], prev[1]);
@@ -952,7 +965,9 @@ impl SolarEruption {
                 } else {
                     (0, 0, 0)
                 };
-                let ha = stroke_level(f64::from(cool) / 255.0, HA_TOP);
+                let gc = f64::from(cool) / 255.0;
+                let ha = stroke_level(gc, HA_TOP)
+                    + (HA_PEAK - HA_TOP) * ease::smoothstep((gc - CORE_FROM) / (1.0 - CORE_FROM));
                 let euv = stroke_level(f64::from(loops) / 255.0, LOOP_TOP);
                 let front = FRONT_TOP * f64::from(white) / 255.0;
                 let ink = if cool >= loops && cool >= white && ha >= ink::MIN_VISIBLE_LEVEL {
@@ -1289,7 +1304,7 @@ mod tests {
                         assert!(f64::from(ink.level) <= LOOP_TOP + 1.0, "{ink:?}");
                     }
                     Role::Ramp(Ramp::HAlpha) => {
-                        assert!(f64::from(ink.level) <= HA_TOP + 1.0, "{ink:?}");
+                        assert!(f64::from(ink.level) <= HA_PEAK + 1.0, "{ink:?}");
                         pink += 1;
                     }
                     _ => panic!("{ink:?}"),
@@ -1328,7 +1343,7 @@ mod tests {
                         assert_eq!(ink, Ink::BLANK, "t {:.1} ({x}, {y})", g.t);
                     } else if above < 0.0 && ink.role == Role::Ramp(Ramp::HAlpha) {
                         rim += usize::from(k == 0);
-                        assert!(f64::from(ink.level) <= HA_TOP + 1.0);
+                        assert!(f64::from(ink.level) <= HA_PEAK + 1.0);
                     }
                 }
             }
