@@ -66,7 +66,7 @@ const BLUR_PASSES: usize = 3;
 /// The glow's soft knee (share of the central surface brightness): `g²/(g + p)`, so light
 /// well below it fades quadratically to black instead of being cut. One blurred body peaks
 /// at ≈ 0.013, so lone halo bodies (drawn as stars) leave only a trace.
-const GLOW_KNEE_P: f64 = 0.04;
+const GLOW_KNEE_P: f64 = 0.1;
 /// Share of the glow taken from the bodies' own light at the centre, tapering as
 /// `1/(1 + R²/a²)` outwards; the rest is the smooth Plummer surface brightness
 /// `(1 + R²/a²)⁻²` about the light's centre, so the outline stays round while the core
@@ -97,7 +97,7 @@ const GLOW_KNEE: f32 = 0.3;
 const GLOW_WHITE: f32 = 0.9;
 /// Contrast of the glow: above 1 it keeps the faint outskirts near black, so the halo reads
 /// as resolved stars on the night sky rather than a disc.
-const GLOW_GAMMA: f64 = 1.25;
+const GLOW_GAMMA: f64 = 2.0;
 /// Stars are lost in the core's glare where the glow exceeds `GLARE_G` of the central
 /// surface brightness (`R ≈ a`), each at its own hashed depth into the glare, so the core
 /// has no hard rim of stars.

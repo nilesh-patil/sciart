@@ -711,8 +711,21 @@ impl CometBreakup {
             };
             self.pixels.set(x, y, ink);
         }
+        // M14 (ADR-0017): the strike itself, a small white point at the limb for its
+        // first `STRIKE_WHITE` s, the frame's brightest accent.
+        if (0.0..STRIKE_WHITE).contains(&since) {
+            let (cx, cy) = v.px([site[0] * 1.03, site[1] * 1.03]);
+            let (x0, y0) = (cx.floor() as i32, cy.floor() as i32);
+            for (dx, dy) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
+                self.pixels
+                    .set(x0 + dx, y0 + dy, Ink::new(Role::Ramp(Ramp::Starlight), 255));
+            }
+        }
     }
 }
+
+/// How long the strike's white point shows (s).
+const STRIKE_WHITE: f64 = 0.6;
 
 /// The Great Red Spot on the disc: planet longitude (rad), sine latitude, half-widths.
 const GRS_LON: f64 = 0.9;
