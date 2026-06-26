@@ -34,8 +34,9 @@ pub fn build() -> Box<dyn Generator> {
 
 /// Wave speed in both acts, rows/s (light is slowed to it for display).
 const C: f64 = 10.0;
-/// Emission period of the sound act, and the light source's proper period, s.
-const PERIOD: f64 = 0.3;
+/// Emission period of the sound act, and the light source's proper period, s. M14: 0.45
+/// (was 0.3), a third fewer rings on screen (ADR-0017 rule 4) and a third less to draw.
+const PERIOD: f64 = 0.45;
 /// The light act's speed β = v/c and its Lorentz factor.
 const BETA: f64 = 0.8;
 const GAMMA: f64 = 5.0 / 3.0;
@@ -78,9 +79,22 @@ const SPACING: f64 = 0.7;
 const MAX_SAMPLES: usize = 12_000;
 /// Entries of the light act's rest-angle → Blackbody-level table.
 const LUT: usize = 129;
-/// The sound act's ramp (DOP-A6): Aurora, teal at the dim rear fronts to lime-white at the
-/// Mach pile-up; green, because the gallery already leans cold blue.
-const SOUND_RAMP: Ramp = Ramp::Aurora;
+/// The sound act's ramp (DOP-A6). M14 (ADR-0017): `Ice`, kept dim: ordinary fronts sit at
+/// most at `FRONT_MAX` (steel blue on black) and only the pile-up where fronts crowd
+/// (the Mach-1 wall and the cone, pitch → ∞) climbs to the ramp's pale top, the one bright
+/// thing in the sound act. Was a bright green Aurora everywhere.
+const SOUND_RAMP: Ramp = Ramp::Ice;
+/// Level of an ordinary front at the most shifted pitch the cruise reaches
+/// ([`PITCH_KNEE`], ×2 ahead at Mach 0.5), and of the faintest far front.
+const FRONT_MAX: f64 = 90.0;
+const FRONT_FLOOR: f64 = 15.0;
+/// [`pitch_value`] above which a front is part of the pile-up and brightens toward white.
+const PITCH_KNEE: f64 = 0.85;
+/// A fresh front is loudest (a 2-D wave's amplitude falls with radius), so a front within
+/// `FRESH` screen diagonals of its emission point is lifted toward white, fully at r = 0:
+/// the source always sits in a few bright new rings, the act's legible subject (ADR-0017
+/// rule 6), while the rest of the pattern stays dim.
+const FRESH: f64 = 0.15;
 const SOUND_SOURCE: Glyph = Glyph::new('◉', '@');
 const LIGHT_SOURCE: Glyph = Glyph::new('✦', '*');
 const WAKE: [Glyph; 2] = [Glyph::new('━', '='), Glyph::new('─', '-')];
@@ -203,11 +217,10 @@ pub(crate) fn axis_crossings<'a>(
     (ahead, behind)
 }
 
-/// Light a front point `p` (dot units) two dots thick, the second one dot inward along the
-/// front's outward direction `(c, s)`: single-dot braille lines read as haze.
-fn stroke(dots: &mut Dots, p: (f64, f64), (c, s): (f64, f64), ink: Ink) {
+/// Light a front point `p` (dot units): one dot, a 1-pixel line (M14, ADR-0017 rule 3; was
+/// two dots thick).
+fn stroke(dots: &mut Dots, p: (f64, f64), ink: Ink) {
     dots.plot(p.0, p.1, ink);
-    dots.plot(p.0 - c, p.1 - s, ink);
 }
 
 /// Rows the screen is grown by before clipping fronts to it: a sample just off screen can
@@ -365,6 +378,24 @@ pub(crate) fn pitch_value(m: f64, cos: f64) -> f64 {
     (0.45 + 1.2 * (1.0 - s) / (1.0 + s)).clamp(0.1, 1.0)
 }
 
+/// Level (0..=255) of a sound-front dot at pitch value `v` ([`pitch_value`]) and radius
+/// fade `fade` (1 new, 0 at [`REACH`]): up to [`FRONT_MAX`] for ordinary fronts, rising to
+/// 255 over the pile-up above [`PITCH_KNEE`] (DOP-A8, M14).
+pub(crate) fn front_level(v: f64, fade: f64) -> f64 {
+    let top = if v <= PITCH_KNEE {
+        FRONT_MAX * v / PITCH_KNEE
+    } else {
+        FRONT_MAX + (255.0 - FRONT_MAX) * ((v - PITCH_KNEE) / (1.0 - PITCH_KNEE)).min(1.0)
+    };
+    FRONT_FLOOR + (top - FRONT_FLOOR).max(0.0) * fade.clamp(0.0, 1.0)
+}
+
+/// [`front_level`] `l` lifted toward 255 by a front's freshness `heat ∈ [0, 1]`
+/// ([`FRESH`]).
+pub(crate) fn fresh_level(l: f64, heat: f64) -> f64 {
+    l + (255.0 - l).max(0.0) * heat.clamp(0.0, 1.0)
+}
+
 /// Upper bound on live fronts for a screen diagonal of `diag` rows (DOP-A2): the fronts
 /// out to [`REACH`] diagonals of both acts, as both are live while one fades out.
 pub(crate) fn max_fronts(diag: f64) -> f64 {
@@ -391,11 +422,14 @@ pub struct DopplerEffect {
     light_inks: [Ink; LUT],
     dots: Dots,
     ready: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl DopplerEffect {
     fn new() -> Self {
         Self {
+            dirty: true,
             timeline: Timeline::new(&BEATS),
             t: 0.0,
             sx: 0.0,
@@ -551,12 +585,14 @@ impl DopplerEffect {
             y1 + CLIP_MARGIN,
         );
         let vis = self.visibility();
+        let fresh = (FRESH * self.diag).max(1e-9);
         for f in &self.fronts {
             let r = f.radius(t);
             if r < 0.25 {
                 continue;
             }
             let (fade, shown) = ((1.0 - r / reach).clamp(0.0, 1.0), vis.of(f.wave, f.m));
+            let heat = (1.0 - r / fresh).clamp(0.0, 1.0);
             // Samples per radian of the circle, and the lab arc that can meet the screen.
             let per_rad = r * DOTS_PER_ROW / SPACING;
             let (start, span) = self.visible_arc(f.x0, f.y0, r);
@@ -586,11 +622,12 @@ impl DopplerEffect {
                         walk(start, step, k0, k1, |c, s| {
                             // Up the ramp with the pitch heard that way (DOP-A8). A fading
                             // front loses its dots one by one, never all at once.
-                            let level = shown * (25.0 + 230.0 * fade * pitch_value(f.m, c));
+                            let l = front_level(pitch_value(f.m, c), fade);
+                            let level = shown * fresh_level(l, heat);
                             if level >= ink::MIN_VISIBLE_LEVEL {
                                 let (x, y) = dot(f.x0 + r * c, f.y0 + r * s);
                                 let ink = ink::ramp(SOUND_RAMP, level / 255.0);
-                                stroke(&mut self.dots, (x, y), (c, s), ink);
+                                stroke(&mut self.dots, (x, y), ink);
                             }
                         });
                     }
@@ -628,12 +665,7 @@ impl DopplerEffect {
                             let (lc, ls) = (aberrate(BETA, c), s / (GAMMA * den));
                             let i = ((c + 1.0) * 0.5 * (LUT - 1) as f64).round() as usize;
                             let (x, y) = dot(f.x0 + r * lc, f.y0 + r * ls);
-                            stroke(
-                                &mut self.dots,
-                                (x, y),
-                                (lc, ls),
-                                self.light_inks[i.min(LUT - 1)],
-                            );
+                            stroke(&mut self.dots, (x, y), self.light_inks[i.min(LUT - 1)]);
                         });
                     }
                 }
@@ -699,7 +731,7 @@ impl Generator for DopplerEffect {
         }
         let bound = max_fronts(self.diag) as usize;
         self.fronts.reserve(bound.saturating_sub(self.fronts.len()));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -730,7 +762,15 @@ impl Generator for DopplerEffect {
         self.anchor += (self.target_anchor() - self.anchor) * (1.0 - (-dt / ANCHOR_TAU).exp());
         self.prune();
         debug_assert!(self.fronts.len() as f64 <= max_fronts(self.diag));
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -783,6 +823,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = DopplerEffect::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -800,9 +841,11 @@ mod tests {
         // cruise beat (Mach 0.5) lasts 6 s.
         for _ in 0..(4.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let stepped: Vec<_> = g.fronts.iter().filter(|f| f.t0 > 0.0).copied().collect();
-        assert!(stepped.len() >= 10, "{} fronts", stepped.len());
+        // About 4 s / PERIOD emissions (8 at the M14 period of 0.45 s).
+        assert!(stepped.len() >= 8, "{} fronts", stepped.len());
         let (ahead, behind) = axis_crossings(&stepped, g.t, g.sx);
         assert_eq!(ahead.len(), stepped.len());
         assert_eq!(behind.len(), stepped.len());
@@ -819,6 +862,7 @@ mod tests {
         let (mut g, mut ctx) = fresh(400, 50);
         for _ in 0..12 {
             g.update(0.23, &mut ctx);
+            g.prepare();
         }
         let (ahead, behind) = axis_crossings(&g.fronts, g.t, g.sx);
         assert!(ahead.len() >= 5);
@@ -837,9 +881,11 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             // 3000 steps × ≈ 1/40 s covers the whole 48 s loop, Mach 1 included.
             for i in 0..3000 {
                 g.update(if i % 7 == 0 { 0.25 } else { SIM_DT }, &mut ctx);
+                g.prepare();
                 assert!(
                     g.fronts.len() as f64 <= max_fronts(g.diag),
                     "{w}x{h}: {} fronts > {}",
@@ -858,6 +904,7 @@ mod tests {
         // Into the supersonic hold (18–26 s), then 5 s more at constant Mach 1.6.
         while g.t < 23.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (m, wave) = g.speed();
         assert_eq!((m, wave), (M_FAST, Wave::Sound));
@@ -941,6 +988,7 @@ mod tests {
         // 15 s into the light act: its fronts fill the screen, the sound ones are gone.
         while g.t < 26.0 + 15.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.fronts.iter().all(|f| f.wave == Wave::Light));
         let ((n_ahead, t_ahead), (n_behind, t_behind)) = halves(&g);
@@ -953,15 +1001,19 @@ mod tests {
 
     #[test]
     fn dop_a6_acts_walk_the_captions_and_inks() {
-        assert_eq!(
-            SOUND_RAMP,
-            Ramp::Aurora,
-            "the sound act is green, not another blue"
-        );
+        // M14 (ADR-0017): the sound act is a dim Ice, not a bright green; only fresh
+        // fronts and the pile-up climb toward white.
+        assert_eq!(SOUND_RAMP, Ramp::Ice);
+        assert!(front_level(PITCH_KNEE, 1.0) <= FRONT_MAX + 1e-9);
+        assert!(front_level(0.3, 1.0) < FRONT_MAX);
+        assert_eq!(front_level(1.0, 1.0), 255.0);
+        assert_eq!(fresh_level(40.0, 0.0), 40.0);
+        assert_eq!(fresh_level(40.0, 1.0), 255.0);
         let (mut g, mut ctx) = fresh(120, 40);
         let mut seen: Vec<&str> = Vec::new();
         for _ in 0..(2.0 * 48.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let c = g.caption().unwrap();
             if seen.last() != Some(&c) {
                 seen.push(c);
@@ -1002,6 +1054,7 @@ mod tests {
             let (mut g, mut ctx) = fresh(w, h);
             for i in 0..(50.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 let frac = (g.sx - g.cam()) / g.width;
                 assert!(
                     (ANCHOR_SLOW - 1e-9..=ANCHOR_FAST + 1e-9).contains(&frac),
@@ -1118,6 +1171,7 @@ mod tests {
         let (mut g, mut ctx) = fresh(120, 40);
         while g.t < 3.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut frame = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
         g.render(&mut frame);
@@ -1132,9 +1186,14 @@ mod tests {
             assert!(v.len() > 50, "{} cells", v.len());
             v.iter().sum::<f64>() / v.len() as f64
         };
-        let (ahead, behind) = (mean(&|x| x > src + 4), mean(&|x| x < src - 4));
+        // Clear of the fresh rings around the source (FRESH, lifted toward white whatever
+        // the pitch), so only the pitch colouring is compared.
+        let m = (FRESH * g.diag * ASPECT).ceil() as i32 + 4;
+        let (ahead, behind) = (mean(&|x| x > src + m), mean(&|x| x < src - m));
+        // M14: ordinary fronts are capped at FRONT_MAX (90), so the gap is smaller than
+        // the old +60 on a full-height ramp; still clearly ordered by pitch.
         assert!(
-            ahead > behind + 60.0,
+            ahead > behind + 30.0,
             "ahead {ahead:.0} vs behind {behind:.0}"
         );
     }
@@ -1145,6 +1204,7 @@ mod tests {
             let (mut g, mut ctx) = fresh(w, h);
             while g.t < 26.0 - SIM_DT {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if g.t < 18.0 {
                     continue;
                 }
@@ -1183,6 +1243,7 @@ mod tests {
             for _ in 0..(48.0 / SIM_DT) as usize {
                 let before: Vec<Front> = g.fronts.iter().copied().collect();
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 cams.push((g.t, g.cam(), g.speed().1));
                 for f in before {
                     let live = f.radius(g.t) <= REACH * g.diag && g.shown(f.wave, f.m) > 0.0;
@@ -1284,6 +1345,7 @@ mod tests {
             // A whole 48 s loop and into the next, so both hand-overs are covered.
             for step in 1..=(50.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if step % 30 != 0 && !(2870..2890).contains(&step) {
                     continue;
                 }
@@ -1331,6 +1393,7 @@ mod tests {
             while g.t < 48.0 {
                 for _ in 0..6 {
                     g.update(SIM_DT, &mut ctx);
+                    g.prepare();
                 }
                 let mut frame = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
                 g.render(&mut frame);

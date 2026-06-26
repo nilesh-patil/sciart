@@ -558,6 +558,8 @@ pub struct FractalGrowth {
     /// The lattice's top-left dot in the display (CRY-A5): the capped lattice is centred,
     /// except that the forest's sits on the bottom of the art area, its cathode's place.
     origin: (i32, i32),
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 /// The ghost's decay time: a root (strength 1) reaches [`GHOST_CUT`] exactly at [`FADE`].
@@ -607,6 +609,7 @@ impl Tint {
 impl Default for FractalGrowth {
     fn default() -> Self {
         Self {
+            dirty: true,
             dla: Dla::default(),
             act: Act::Frost,
             phase: Phase::Grow,
@@ -837,7 +840,7 @@ impl Generator for FractalGrowth {
             .map(|act| title::readout_room(size, &Title::new(META.title, Some(act.caption()))));
         self.ghost.clear();
         self.reseed(ctx);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -890,7 +893,15 @@ impl Generator for FractalGrowth {
                 self.ghost.clear();
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -977,6 +988,7 @@ mod tests {
         let size = Size::new(80, 24);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         assert_eq!(g.dla.attach.size(), Size::new(160, 92));
     }
 
@@ -1056,6 +1068,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = FractalGrowth::default();
             g.resize(size, &mut Ctx::new(1, size));
+            g.prepare();
             let display = g.dots.dot_size();
             let lattice = g.dla.attach.size();
             assert!(lattice.area() <= MAX_NODES, "{w}x{h}: {lattice:?}");
@@ -1088,6 +1101,7 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (pool_cap, queue_cap) = (g.dla.cells.capacity(), g.queue.capacity());
         let (lw, lh) = g.dla.dims();
         // The window of the live act (the forest's sits lower).
@@ -1098,6 +1112,7 @@ mod tests {
         let mut acts = [false; 2];
         for _ in 0..(70.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             // An act that has handed over is the ghost behind the next one.
             let ghost_forest = g.ghost_ramp == Act::Forest.ramp();
             acts[usize::from(ghost_forest)] |= !g.ghost.is_empty();
@@ -1247,9 +1262,11 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut seen = Vec::new();
         for _ in 0..(90.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if seen.last() != Some(&g.caption()) {
                 seen.push(g.caption());
             }
@@ -1272,11 +1289,13 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (mut handed, mut faded, mut held) = (false, false, false);
         let mut prev = g.dla.cells.len();
         for _ in 0..(70.0 / SIM_DT) as usize {
             let (before, act) = (g.phase, g.act);
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.phase != Phase::Grow || g.dla.cells.len() != prev {
                 assert!(connected_to_seed(&g.dla), "{:?}", g.phase);
             }
@@ -1311,11 +1330,13 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (mut switches, mut min_lit, mut frames) = (0, usize::MAX, 0);
         for _ in 0..(62.0 / SIM_DT) as usize {
             let act = g.act;
             let old_n = g.dla.cells.len();
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.act != act {
                 switches += 1;
                 // Every old site is in the ghost, and the readout restarts with the new act.
@@ -1359,6 +1380,7 @@ mod tests {
         for (size, room) in [(Size::new(80, 24), 40), (Size::new(40, 12), 20)] {
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             assert_eq!(g.room[0], room, "{size:?}");
         }
         g.dla.p_stick = 0.62;
@@ -1391,8 +1413,10 @@ mod tests {
         let mut ctx = Ctx::new(2, size);
         let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.phase == Phase::Grow {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if g.dla.cells.len() < DF_MIN_N {
                 assert_eq!(g.df, None, "N {}", g.dla.cells.len());
             }
@@ -1411,9 +1435,11 @@ mod tests {
             let mut ctx = Ctx::new(3, size);
             let mut g = FractalGrowth::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let mut acts = [false; 2];
             for k in 0..(60.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 acts[usize::from(g.act == Act::Forest)] = true;
                 if k % 30 != 0 {
                     continue;
@@ -1481,11 +1507,13 @@ mod tests {
             let mut ctx = Ctx::new(8, size);
             let mut g = FractalGrowth::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             g.act = Act::Forest;
             g.reseed(&mut ctx);
             assert!(g.dla.roots <= g.dla.cells.capacity(), "{w}x{h}");
             for _ in 0..30 {
                 g.update(0.25, &mut ctx);
+                g.prepare();
                 assert!(g.dla.cells.len() >= g.dla.roots, "{w}x{h}");
             }
         }

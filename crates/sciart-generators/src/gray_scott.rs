@@ -136,17 +136,17 @@ const EXPOSURE_TAU_S: f64 = 1.5;
 const EXPOSURE_BINS: usize = 64;
 /// Body ramp: the level at the pattern edge (a dim wine rim, above the halo) and the
 /// exponent that keeps the bright top of the ramp for the spine.
-const BODY_EDGE: f64 = 0.26;
+const BODY_EDGE: f64 = 0.16;
 const GAMMA: f64 = 2.0;
 /// Substrate depletion `1 − u` where the dim halo starts to fade in, where it saturates,
 /// and its peak ramp position.
 const HALO_MIN: f32 = 0.2;
 const HALO_FULL: f32 = 0.6;
-const HALO_PEAK: f32 = 0.1;
-/// The culture's palette (CHEM-A7): false colour, u and v have no hue. Eosin (wine-rose →
-/// rose-pink → pale pink) reads as stained tissue and keeps the dish apart from the
-/// gallery's Aurora greens (aurora).
-const PALETTE: Ramp = Ramp::Eosin;
+/// ADR-0017: the depleted substrate is not drawn (the floor is black), so the halo is off.
+const HALO_PEAK: f32 = 0.0;
+/// The culture's palette (CHEM-A7, ADR-0017): u and v have no hue, so a neutral pale
+/// starlight on black (M14; Eosin's saturated rose was loud over large areas).
+const PALETTE: Ramp = Ramp::Starlight;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Feed rate F and kill rate k.
@@ -542,11 +542,14 @@ pub struct GrayScott {
     size: Size,
     /// The body ramp's top v, eased towards [`exposure_target`] (CHEM-A7).
     v_top: f32,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl GrayScott {
     pub(crate) fn new(slot: Option<usize>) -> Self {
         Self {
+            dirty: true,
             t: 0.0,
             t0: 0.0,
             slot,
@@ -659,15 +662,31 @@ impl GrayScott {
     /// Rasterise u, v into the pixels (bilinear, CORE-R52); u is sampled only off the
     /// pattern, where the halo needs it.
     fn rasterise(&mut self) {
-        let (map, u, v, levels, top) = (&self.map, &self.u, &self.v, &self.levels, self.v_top);
-        self.pixels.shade(|x, y| {
-            let s = map.sample(v, x, y);
-            v_ink(levels, || map.sample(u, x, y), s, top).unwrap_or(Ink::BLANK)
-        });
+        let (map, v, levels, top) = (&self.map, &self.v, &self.levels, self.v_top);
+        // v only (the halo is off). GEN-R17: bilinear up to 2× magnification, Catmull-Rom
+        // above (CORE-R102); row samplers are rebuilt when the shader reaches the next
+        // pixel row (CORE-R104).
+        if map.magnification() > 2.0 {
+            let (mut ry, mut vr) = (-1, map.row_cubic(v, 0));
+            self.pixels.shade(|x, y| {
+                if y != ry {
+                    (ry, vr) = (y, map.row_cubic(v, y));
+                }
+                v_ink(levels, || 1.0, vr.at(x), top).unwrap_or(Ink::BLANK)
+            });
+        } else {
+            let (mut ry, mut vr) = (-1, map.row(v, 0));
+            self.pixels.shade(|x, y| {
+                if y != ry {
+                    (ry, vr) = (y, map.row(v, y));
+                }
+                v_ink(levels, || 1.0, vr.at(x), top).unwrap_or(Ink::BLANK)
+            });
+        }
     }
 
-    /// The title-row readout (CHEM-A9): `Pearson F=.037 k=.065`, or `F=.037 k=.065` when
-    /// that is all `title::readout_room` holds, else nothing; right-aligned, so it never
+    /// The title-row readout (CHEM-A9): `F=.037 k=.065` when `title::readout_room` holds
+    /// it, else nothing (ADR-0017: the numbers, no decoration); right-aligned, so it never
     /// reaches the title. F and k are written from integer thousandths into a stack buffer.
     fn readout(&self, canvas: &mut Canvas) {
         let c = preset_at(&self.walk, self.t + self.t0).c;
@@ -675,7 +694,6 @@ impl GrayScott {
         let (f, k) = (thousandths(c.f), thousandths(c.k));
         let mut text = StackText::<24>::new();
         let _ = match title::readout_room(self.size, &Title::of(self)) {
-            21.. => write!(text, "Pearson F=.{f:03} k=.{k:03}"),
             13.. => write!(text, "F=.{f:03} k=.{k:03}"),
             _ => return,
         };
@@ -725,7 +743,7 @@ impl Generator for GrayScott {
         self.v_top = exposure_target(self.v.as_slice());
         self.pixels.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -763,7 +781,15 @@ impl Generator for GrayScott {
         let ease = 1.0 - (-dt / EXPOSURE_TAU_S).exp();
         let target = exposure_target(self.v.as_slice());
         self.v_top += (target - self.v_top) * ease as f32;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -797,6 +823,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = GrayScott::new(slot);
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -813,6 +840,7 @@ mod tests {
             for i in 0..120 {
                 let dt = [0.25, 0.0, 1.0 / 60.0, 0.173][i % 4];
                 g.update(dt, &mut ctx);
+                g.prepare();
                 for &x in g.u.as_slice().iter().chain(g.v.as_slice()) {
                     assert!(x.is_finite() && (0.0..=1.0).contains(&x), "seed {seed}");
                 }
@@ -878,6 +906,7 @@ mod tests {
     fn run_to(g: &mut GrayScott, ctx: &mut Ctx, t: f64) {
         while g.t < t - 0.5 * SIM_DT {
             g.update(SIM_DT, ctx);
+            g.prepare();
         }
     }
 
@@ -975,10 +1004,11 @@ mod tests {
                 assert!(per_quarter <= 0.35, "{id}: {per_quarter} change per 0.25 s");
             }
             if slot != 0 {
-                // The moving regimes never settle: still churning at the end of the hold.
+                // The moving regimes never settle: still churning at the end of the hold
+                // (the cells of the pattern itself; the halo's `.` no longer counts).
                 let f20 = frame_at(20.0).0;
                 let (.., change) = stats(&frame_at(23.9).0, Some(&f20));
-                assert!(change >= 0.3, "{id}: {change} changed in 20–24 s");
+                assert!(change >= 0.25, "{id}: {change} changed in 20–24 s");
             }
         });
     }
@@ -1185,22 +1215,28 @@ mod tests {
         let (mut g, mut ctx) = scene(Some(0), 3, 300, 75);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (u, v) = (g.u.clone(), g.v.clone());
         g.resize(Size::new(400, 100), &mut ctx);
+        g.prepare();
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         assert!(g.u == u && g.v == v);
 
         // A new lattice resamples; the pattern survives and keeps its contrast (5 s in, so
         // the 2 s check ends inside the 8 s mitosis hold).
         for _ in 0..180 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (mean0, std0) = (mean(g.v.as_slice()), variance(g.v.as_slice()).sqrt());
         assert_eq!(g.reseeds, 0);
         g.resize(Size::new(120, 50), &mut ctx);
+        g.prepare();
         assert_eq!(g.u.size(), Size::new(80, 63));
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         assert_eq!(g.reseeds, 0, "the round trip must not reseed");
         let mean1 = mean(g.v.as_slice());
         assert!(
@@ -1209,6 +1245,7 @@ mod tests {
         );
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let std1 = variance(g.v.as_slice()).sqrt();
         assert!((std1 / std0 - 1.0).abs() < 0.3, "std v {std0} → {std1}");
@@ -1219,7 +1256,9 @@ mod tests {
         );
         for (w, h) in [(1, 1), (3, 2), (200, 50), (5, 90), (1, 1)] {
             g.resize(Size::new(w, h), &mut ctx);
+            g.prepare();
             g.update(0.25, &mut ctx);
+            g.prepare();
             g.render(&mut Canvas::new(Size::new(w, h), GlyphMode::Unicode));
         }
     }
@@ -1233,36 +1272,30 @@ mod tests {
                 for i in 0..=100 {
                     let v = i as f32 * 0.005;
                     let ink = v_ink(&levels, || u, v, top);
-                    // The halo level 0.1·clamp((1 − u − 0.2)/0.4) rounds to 0 below 1/255.
-                    let halo = 0.1 * ((1.0 - u - 0.2) / 0.4).clamp(0.0, 1.0);
-                    let quiet = v < V_EDGE && halo * 255.0 < 0.5;
+                    // ADR-0017: no halo, the substrate is black.
+                    let quiet = v < V_EDGE;
                     assert_eq!(ink.is_none(), quiet, "u {u} v {v}");
                     if let Some(ink) = ink {
-                        assert_eq!(ink.role, Role::Ramp(Ramp::Eosin));
+                        assert_eq!(ink.role, Role::Ramp(PALETTE));
                         assert!(ink.level >= last, "level falls at u {u} v {v}");
                         last = ink.level;
                     }
                 }
             }
-            // Exposed: a dim wine rim at the pattern edge, the pale-pink top at v_top.
+            // Exposed: a dark rim at the pattern edge, the pale-pink top at v_top.
             let level = |v: f32| v_ink(&levels, || 1.0, v, top).map_or(0, |i| i.level);
-            assert!((60..=90).contains(&level(V_EDGE)), "edge {}", level(V_EDGE));
+            assert!((35..=50).contains(&level(V_EDGE)), "edge {}", level(V_EDGE));
             assert_eq!(level(top), 255, "top {top}");
             assert!(
                 level(0.5 * (V_EDGE + top)) <= 140,
                 "the top is kept for the spine"
             );
         }
-        // The halo fades in from 0 at the threshold (no hard black notch) to 0.1 at full
-        // depletion, monotonically, below the body's rim; the pattern never reads u.
-        let mut last = 0;
+        // No halo at any depletion (the floor is black); the pattern never reads u.
         for i in 0..=100 {
             let u = 1.0 - i as f32 * 0.01;
-            let level = v_ink(&levels, || u, 0.0, 0.3).map_or(0, |ink| ink.level);
-            assert!(level >= last && level <= last + 1, "halo jumps at u {u}");
-            last = level;
+            assert_eq!(v_ink(&levels, || u, 0.0, 0.3), None, "halo at u {u}");
         }
-        assert_eq!(last, ink::ramp(PALETTE, 0.1).level);
         assert!(v_ink(&levels, || unreachable!(), 0.2, 0.3).is_some());
 
         // Exposure: the EXPOSURE_SHARE percentile of the pattern nodes, to within a bin,
@@ -1290,7 +1323,7 @@ mod tests {
             let body: Vec<u8> = (0..i32::from(px.height()))
                 .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
                 .filter_map(|(x, y)| g.pixels.get(x, y))
-                .filter(|i| i.level >= 66)
+                .filter(|i| i.level >= 41)
                 .map(|i| i.level)
                 .collect();
             let ridge = body.iter().filter(|&&l| l >= 200).count() as f64 / body.len() as f64;
@@ -1305,8 +1338,8 @@ mod tests {
         assert_eq!(ascii_cell(eosin(12), Ink::BLANK), None);
         assert_eq!(ascii_cell(Ink::BLANK, eosin(13)), Some(('.', eosin(13))));
         assert_eq!(ascii_cell(eosin(31), eosin(20)), Some(('.', eosin(31))));
-        assert_eq!(ascii_cell(eosin(65), Ink::BLANK), Some(('.', eosin(65))));
-        assert_eq!(ascii_cell(eosin(66), eosin(20)), Some((':', eosin(66))));
+        assert_eq!(ascii_cell(eosin(40), Ink::BLANK), Some(('.', eosin(40))));
+        assert_eq!(ascii_cell(eosin(41), eosin(20)), Some((':', eosin(41))));
         assert_eq!(ascii_cell(eosin(66), eosin(255)), Some(('@', eosin(255))));
         assert_eq!(ascii_cell(Ink::BLANK, Ink::BLANK), None);
 
@@ -1326,7 +1359,7 @@ mod tests {
             for ink in [c.ink, c.bg] {
                 assert!(matches!(
                     ink.role,
-                    Role::Ramp(Ramp::Eosin) | Role::Text | Role::Background
+                    Role::Ramp(PALETTE) | Role::Text | Role::Background
                 ));
             }
         }
@@ -1343,6 +1376,7 @@ mod tests {
         let (mut g, mut ctx) = scene(Some(slot), 1, 40, 12);
         g.t = secs;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         g.caption().expect("every walk point has a caption")
     }
 
@@ -1373,7 +1407,6 @@ mod tests {
         for (w, h) in [(80, 24), (60, 12), (40, 12), (30, 12), (20, 8)] {
             let (room, row, canvas) = readout(w, h);
             let want = match room {
-                21.. => "Pearson F=.018 k=.051",
                 13.. => "F=.018 k=.051",
                 _ => "",
             };
@@ -1493,6 +1526,7 @@ mod tests {
         g.v.fill(0.0);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.v.as_slice().iter().any(|&x| x > 0.05));
         assert!(g.reseeds >= 1);

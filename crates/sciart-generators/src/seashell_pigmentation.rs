@@ -230,11 +230,14 @@ struct Shell {
     pixels: Pixels,
     /// Shell geometry in pixels: centre x, body top, body height, half-width.
     body: (f64, f64, f64, f64),
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
         Self {
+            dirty: true,
             lip: Lip::default(),
             rows: Vec::new(),
             rows_cap: 1,
@@ -330,7 +333,7 @@ impl Shell {
         let grown = (self.time % REGIME_S) / REGIME_S;
         let length = height * (GROWN_MIN + (1.0 - GROWN_MIN) * grown);
         // The lip's glowing edge: the rows laid in the last moments, still wet.
-        let wet = (1.6 / length).min(0.2);
+        let wet = (3.2 / length).min(0.2);
         self.pixels.shade(|x, y| {
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
             let dx = fx - cx;
@@ -362,7 +365,7 @@ impl Shell {
                 let suture = ((st * 3.5).fract() - 0.5).abs();
                 let suture = ease::smoothstep(((0.1 - (0.5 - suture)) / 0.1).clamp(0.0, 1.0));
                 let lit = lambert(u.clamp(-1.0, 1.0));
-                let lvl = (120.0 + 120.0 * lit) * (1.0 - 0.45 * suture) * spire_cover;
+                let lvl = (70.0 + 40.0 * lit) * (1.0 - 0.45 * suture) * spire_cover;
                 return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl));
             }
             if body_cover <= 0.0 {
@@ -389,16 +392,18 @@ impl Shell {
                     // Fresh pigment at the growing edge glows, so the lip is seen to paint.
                     return Ink::new(Role::Ramp(Ramp::Ember), ink::level(210.0 * body_cover));
                 }
-                // Chestnut in the fresh line, umber in the fading band: a dim 1.6–2.5 kK
-                // glow is the dark orange we see as brown (false colour).
+                // M14 (ADR-0017): pigment is darker than the shell, as on a real cone:
+                // `Ramp(Sienna)` 30–70, the densest line darkest, shaded with the shell.
                 let k = ease::smoothstep((pigment - PIG_MIN) / 0.9);
-                let kelvin = 2500.0 - 900.0 * k;
-                ink::blackbody(kelvin * (0.6 + 0.4 * light))
+                let lvl = (70.0 - 40.0 * k) * (0.6 + 0.4 * light);
+                Ink::new(PIGMENT, ink::level(lvl))
             } else {
                 let lvl = if at_lip {
                     255.0 * body_cover
                 } else {
-                    222.0 * light
+                    // M14: a dim cream shell (Starlight 70–110 by the light) under the
+                    // darker pigment; the wet lip is the bright accent.
+                    (60.0 + 55.0 * lambert(u)) * body_cover
                 };
                 Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl))
             }
@@ -408,6 +413,8 @@ impl Shell {
 
 /// Pigment below this is shell ground.
 const PIG_MIN: f64 = 0.25;
+/// The pigment's ramp (M14).
+const PIGMENT: Role = Role::Ramp(Ramp::Sienna);
 /// The spire's height as a fraction of the body's.
 const SPIRE: f64 = 0.15;
 /// The body's length at the start of a regime, as a fraction of its full length.
@@ -439,7 +446,7 @@ fn lambert(u: f64) -> f64 {
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let lit = |i: Ink| i.role != Role::Background;
-    let pig = |i: Ink| i.role == Role::Blackbody;
+    let pig = |i: Ink| i.role == PIGMENT;
     match (lit(top), lit(bottom)) {
         (false, false) => None,
         _ if pig(top) => Some(('#', top)),
@@ -480,7 +487,7 @@ impl Generator for Shell {
         let index = self.timeline.at(self.time).index;
         self.lip.reset(n, REGIMES[index], &mut ctx.rng);
         self.new_shell(index, &mut ctx.rng);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -498,7 +505,15 @@ impl Generator for Shell {
             self.owed -= 1.0;
             self.grow_row(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -591,10 +606,12 @@ mod tests {
         let mut ctx = Ctx::new(4, Size::new(80, 24));
         let mut g = Shell::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for _ in 0..40 {
             let (before, owed) = (g.total_rows, g.owed);
             let dt = 0.1;
             g.update(dt, &mut ctx);
+            g.prepare();
             let expected = (owed + dt / g.row_s).floor() as u64;
             assert_eq!(g.total_rows - before, expected);
             if expected > 0 {
@@ -611,9 +628,11 @@ mod tests {
         let mut ctx = Ctx::new(5, Size::new(80, 24));
         let mut g = Shell::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for (k, c) in CAPTIONS.iter().enumerate() {
             while g.time < k as f64 * REGIME_S + 1.0 {
                 g.update(0.25, &mut ctx);
+                g.prepare();
             }
             assert_eq!(g.caption(), Some(*c));
             assert_eq!(g.lip.p, REGIMES[k]);
@@ -627,9 +646,11 @@ mod tests {
         let mut ctx = Ctx::new(6, Size::new(80, 24));
         let mut g = Shell::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         assert_eq!(g.lip.p, WAVES);
         for _ in 0..120 {
             g.update(0.1, &mut ctx);
+            g.prepare();
             assert_eq!(g.lip.p, WAVES);
         }
         assert!(g.lip.peaks(0.5) >= 2, "{} lines", g.lip.peaks(0.5));
@@ -641,8 +662,10 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = Shell::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.time < 10.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let px = g.pixels.pixel_size();
         let lit_rows = (0..i32::from(px.height()))

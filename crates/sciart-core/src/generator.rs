@@ -103,6 +103,14 @@ pub trait Generator: Send {
     fn meta(&self) -> &'static Meta;
     fn resize(&mut self, size: Size, ctx: &mut Ctx);
     fn update(&mut self, dt: f64, ctx: &mut Ctx);
+
+    /// Called by `Stage::render` exactly once right before every `render` (CORE-R101):
+    /// the place to rasterise simulation state into the scene's buffers once per drawn
+    /// frame rather than once per step (the runtime takes about two 60 Hz steps per
+    /// 30 FPS frame; GEN-R20). Must not advance the simulation or draw from `ctx.rng`,
+    /// and must not allocate (GEN-R11). Default: nothing.
+    fn prepare(&mut self) {}
+
     fn render(&self, canvas: &mut Canvas);
 
     /// The live act's caption, which replaces the title's mechanism; an entry of

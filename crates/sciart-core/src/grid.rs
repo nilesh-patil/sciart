@@ -332,14 +332,14 @@ fn bilinear_taps(d: usize, dn: usize, sn: usize) -> (usize, usize, f32) {
 }
 
 /// `a + (b − a)·f`, returning `a` itself at `f = 0` so constants survive bit-exactly.
-#[inline]
+#[inline(always)]
 fn lerp32(a: f32, b: f32, f: f32) -> f32 {
     if f == 0.0 { a } else { a + (b - a) * f }
 }
 
 /// Bilinear blend of a 2×2 neighbourhood: along x on both rows, then along y. The one
 /// formula shared by [`resample_bilinear`] and [`SampleMap::sample`] (CORE-R52).
-#[inline]
+#[inline(always)]
 fn bilerp(top0: f32, top1: f32, bottom0: f32, bottom1: f32, fx: f32, fy: f32) -> f32 {
     lerp32(lerp32(top0, top1, fx), lerp32(bottom0, bottom1, fx), fy)
 }
@@ -386,6 +386,80 @@ pub struct SampleMap {
     src: (u16, u16),
     xs: Vec<Tap>,
     ys: Vec<Tap>,
+    /// Catmull-Rom taps per axis (CORE-R102).
+    cxs: Vec<Cubic>,
+    cys: Vec<Cubic>,
+    magnification: f32,
+}
+
+/// One axis of a [`SampleMap`]'s cubic mode: four edge-clamped source indices around
+/// the sample point and their Catmull-Rom weights (CORE-R102).
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Cubic {
+    i: [u16; 4],
+    w: [f32; 4],
+}
+
+impl Cubic {
+    fn new(d: usize, dn: usize, sn: usize) -> Self {
+        // The bilinear pair is taps 1 and 2; the outer two are one further out, clamped.
+        let s = centre_of(d as f64, dn, sn).clamp(0.0, (sn.max(1) - 1) as f64);
+        let i1 = s as usize; // s ≥ 0, so truncation is floor
+        let last = sn.max(1) - 1;
+        let t = s - i1 as f64;
+        let (t2, t3) = (t * t, t * t * t);
+        let w = [
+            0.5 * (-t3 + 2.0 * t2 - t),
+            0.5 * (3.0 * t3 - 5.0 * t2 + 2.0),
+            0.5 * (-3.0 * t3 + 4.0 * t2 + t),
+            0.5 * (t3 - t2),
+        ];
+        // Every index is < sn ≤ u16::MAX, so the narrowing is lossless.
+        Self {
+            i: [
+                i1.saturating_sub(1) as u16,
+                i1 as u16,
+                (i1 + 1).min(last) as u16,
+                (i1 + 2).min(last) as u16,
+            ],
+            w: w.map(|w| w as f32),
+        }
+    }
+}
+
+/// One destination row of a [`SampleMap`]'s cubic mode over one source grid
+/// (CORE-R102), from [`SampleMap::row_cubic`].
+#[derive(Debug, Clone, Copy)]
+pub struct CubicRow<'a> {
+    xs: &'a [Cubic],
+    rows: [&'a [f32]; 4],
+    wy: [f32; 4],
+}
+
+impl CubicRow<'_> {
+    /// Catmull-Rom value at destination column `x` (clamped onto the region): 16
+    /// multiply-adds, clamped to the four central source values' range.
+    #[inline(always)]
+    pub fn at(&self, x: i32) -> f32 {
+        let Some(last) = self.xs.len().checked_sub(1) else {
+            return 0.0;
+        };
+        if self.rows[0].is_empty() {
+            return 0.0;
+        }
+        let tx = self.xs[usize::try_from(x).map_or(0, |i| i.min(last))];
+        let [a, b, c, d] = tx.i.map(usize::from);
+        let across = |r: &[f32]| tx.w[0] * r[a] + tx.w[1] * r[b] + tx.w[2] * r[c] + tx.w[3] * r[d];
+        let v = self.wy[0] * across(self.rows[0])
+            + self.wy[1] * across(self.rows[1])
+            + self.wy[2] * across(self.rows[2])
+            + self.wy[3] * across(self.rows[3]);
+        let (r1, r2) = (self.rows[1], self.rows[2]);
+        let lo = r1[b].min(r1[c]).min(r2[b]).min(r2[c]);
+        let hi = r1[b].max(r1[c]).max(r2[b]).max(r2[c]);
+        // `max` then `min` also maps a NaN sum onto the range's low end.
+        v.max(lo).min(hi)
+    }
 }
 
 impl SampleMap {
@@ -399,10 +473,63 @@ impl SampleMap {
         self.xs.extend((0..dw).map(|x| Tap::new(x, dw, sw)));
         self.ys.clear();
         self.ys.extend((0..dh).map(|y| Tap::new(y, dh, sh)));
+        self.cxs.clear();
+        self.cxs.extend((0..dw).map(|x| Cubic::new(x, dw, sw)));
+        self.cys.clear();
+        self.cys.extend((0..dh).map(|y| Cubic::new(y, dh, sh)));
+        let ratio = |d: usize, s: usize| if s == 0 { 0.0 } else { d as f32 / s as f32 };
+        self.magnification = if dw == 0 || dh == 0 {
+            0.0
+        } else {
+            ratio(dw, sw).max(ratio(dh, sh))
+        };
+    }
+
+    /// How many destination cells span one source cell, along the more magnified axis
+    /// (0 for the empty map). GEN-R17: bilinear up to 2, [`sample_cubic`](Self::sample_cubic)
+    /// above it.
+    #[inline]
+    pub fn magnification(&self) -> f32 {
+        self.magnification
+    }
+
+    /// Separable Catmull-Rom value of `src` at destination cell `(x, y)` (clamped onto
+    /// the region), CORE-R102: 4 × 4 taps with weights from the `rebuild` tables (no
+    /// transcendental maths), clamped to the range of the four central source values so
+    /// it never overshoots into a new colour. Exact at source centres for equal sizes;
+    /// a wrong-size source or the empty map gives 0, as [`sample`](Self::sample).
+    #[inline]
+    pub fn sample_cubic(&self, src: &Grid<f32>, x: i32, y: i32) -> f32 {
+        self.row_cubic(src, y).at(x)
+    }
+
+    /// Row `y` (clamped) of [`sample_cubic`](Self::sample_cubic) with its four source
+    /// rows and weights looked up once (CORE-R102, as [`row`](Self::row)).
+    #[inline(always)]
+    pub fn row_cubic<'a>(&'a self, src: &'a Grid<f32>, y: i32) -> CubicRow<'a> {
+        let mut out = CubicRow {
+            xs: &[],
+            rows: [&[]; 4],
+            wy: [0.0; 4],
+        };
+        if (src.width, src.height) != self.src {
+            return out;
+        }
+        let Some(last) = self.cys.len().checked_sub(1) else {
+            return out;
+        };
+        let ty = self.cys[usize::try_from(y).map_or(0, |i| i.min(last))];
+        let w = usize::from(src.width);
+        for (row, &i) in out.rows.iter_mut().zip(&ty.i) {
+            *row = &src.cells[usize::from(i) * w..][..w];
+        }
+        out.xs = &self.cxs;
+        out.wy = ty.w;
+        out
     }
 
     /// Taps for destination `(x, y)`, clamped onto the table.
-    #[inline]
+    #[inline(always)]
     fn taps(&self, x: i32, y: i32) -> Option<(Tap, Tap)> {
         let pick = |t: &[Tap], i: i32| {
             let last = t.len().checked_sub(1)?;
@@ -417,7 +544,7 @@ impl SampleMap {
     ///
     /// `src` must have the size passed to [`rebuild`](Self::rebuild); any other size
     /// (a caller bug) and the empty map give 0.
-    #[inline]
+    #[inline(always)]
     pub fn sample(&self, src: &Grid<f32>, x: i32, y: i32) -> f32 {
         if (src.width, src.height) != self.src {
             return 0.0;
@@ -432,12 +559,77 @@ impl SampleMap {
         bilerp(r0[x0], r0[x1], r1[x0], r1[x1], tx.f, ty.f)
     }
 
+    /// Row `y` of the destination region (clamped onto it) as a [`MapRow`]: its two
+    /// source rows and weight looked up once, so sampling a whole row costs one x-tap
+    /// per cell (CORE-R104). `row(src, y).at(x)` is bit-identical to
+    /// [`sample(src, x, y)`](Self::sample), including 0 for the empty map or a source of
+    /// another size.
+    #[inline(always)]
+    pub fn row<'a>(&'a self, src: &'a Grid<f32>, y: i32) -> MapRow<'a> {
+        let empty = MapRow {
+            xs: &[],
+            r0: &[],
+            r1: &[],
+            fy: 0.0,
+        };
+        if (src.width, src.height) != self.src {
+            return empty;
+        }
+        let Some(last) = self.ys.len().checked_sub(1) else {
+            return empty;
+        };
+        let ty = self.ys[usize::try_from(y).map_or(0, |i| i.min(last))];
+        let w = usize::from(src.width);
+        let row = |i: u16| &src.cells[usize::from(i) * w..][..w];
+        MapRow {
+            xs: &self.xs,
+            r0: row(ty.i0),
+            r1: row(ty.i1),
+            fy: ty.f,
+        }
+    }
+
     /// The source cell nearest to destination cell `(x, y)` (clamped onto the region),
     /// the one [`resample_nearest`] copies; `(0, 0)` for the empty map (CORE-R52).
-    #[inline]
+    #[inline(always)]
     pub fn nearest(&self, x: i32, y: i32) -> (i32, i32) {
         self.taps(x, y)
             .map_or((0, 0), |(tx, ty)| (i32::from(tx.near), i32::from(ty.near)))
+    }
+}
+
+/// One destination row of a [`SampleMap`] over one source grid (CORE-R104), from
+/// [`SampleMap::row`]: hoist it out of the x loop (or rebuild it when `y` changes inside
+/// a [`Pixels::shade`](crate::raster::Pixels::shade) closure).
+#[derive(Debug, Clone, Copy)]
+pub struct MapRow<'a> {
+    xs: &'a [Tap],
+    r0: &'a [f32],
+    r1: &'a [f32],
+    fy: f32,
+}
+
+impl MapRow<'_> {
+    /// Bilinear value at destination column `x` (clamped onto the region), bit-identical
+    /// to [`SampleMap::sample`] for this row.
+    #[inline(always)]
+    pub fn at(&self, x: i32) -> f32 {
+        let Some(last) = self.xs.len().checked_sub(1) else {
+            return 0.0;
+        };
+        if self.r0.is_empty() {
+            return 0.0;
+        }
+        let tx = self.xs[usize::try_from(x).map_or(0, |i| i.min(last))];
+        let (x0, x1) = (usize::from(tx.i0), usize::from(tx.i1));
+        bilerp(
+            self.r0[x0],
+            self.r0[x1],
+            self.r1[x0],
+            self.r1[x1],
+            tx.f,
+            self.fy,
+        )
     }
 }
 

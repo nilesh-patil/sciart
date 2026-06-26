@@ -49,8 +49,10 @@
 //! density, so the fan's weak outer lobes still read), and where the view resolves the
 //! carrier a light shimmer of `Re ψ/|ψ|` rides on it, so wavefronts visibly stream
 //! through the steady fan of lobes and dark nodal rays. Faint density fades smoothly to
-//! black (no hard cut). Walls and the screen are Starlight; clicks are warm-white braille
-//! dots over a glowing histogram of where they landed.
+//! black (no hard cut), and the glow stays muted, `Aurora` 32–140 (ADR-0017). The slit
+//! wall (or barrier) is a 1-px Starlight line at its front face and the screen a dashed
+//! 1-px line; the screen strip is black, and clicks are white braille dots that build
+//! the fringes by their density alone.
 
 use std::f64::consts::TAU;
 
@@ -122,7 +124,7 @@ const CLICKS_PER_FRAME: usize = 24;
 const CLICK_REST: f64 = 185.0;
 const CLICK_FADE_S: f32 = 1.2;
 /// Wave visibility by act: act 2 holds the fan almost at full brightness (a dimmed fan
-/// read as the scene fading out); the brighter histogram glow carries the bands.
+/// read as the scene fading out); the clicks carry the bands.
 const WAVE_VIS: [f32; 3] = [1.0, 0.92, 1.0];
 /// Tone: `v = Re ψ/√peak` drawn as `sign(v)·√|v|`, blank below `CUTOFF`. Each side of
 /// the wall has its own peak, so the weak transmitted fan is exposed like the incident
@@ -134,14 +136,10 @@ const PEAK_HALF_LIFE_S: f64 = 4.0;
 /// The source side (incident + reflected standing wave) is exposed at this share of the
 /// fan's brightness, so the diffraction fan carries the picture.
 const SOURCE_EXPOSURE: f64 = 0.55;
-/// Click histogram along the screen (fractions of the view height) and its glow levels.
-const HIST_BINS: usize = 160;
-const GLOW_LEVELS: (f64, f64) = (18.0, 170.0);
-/// The glow reaches full strength once this many clicks are in, so a few early clicks
-/// do not paint noise bands.
-const GLOW_FULL_CLICKS: f64 = 500.0;
-/// Binomial smoothing of the histogram: 9 taps (σ = √2 bins ≈ 1 % of the screen).
-const GLOW_TAPS: [f64; 9] = [1.0, 8.0, 28.0, 56.0, 70.0, 56.0, 28.0, 8.0, 1.0];
+/// The wave's ramp top and floor levels (ADR-0017: muted; below the floor it tapers
+/// smoothly to black by half the floor).
+const WAVE_TOP: f64 = 140.0;
+const WAVE_FLOOR: f64 = 32.0;
 /// The wave's glow ramp and the carrier shimmer's depth.
 const WAVE: Ramp = Ramp::Aurora;
 const SHIMMER: f64 = 0.25;
@@ -295,8 +293,69 @@ pub(crate) struct Adi {
     off: Vec<C64>,
     line: Vec<C64>,
     col: Vec<C64>,
+    /// `LANES` lines interleaved (`[i·LANES + k]`), source and result, for the batched
+    /// sweeps.
+    quad_src: Vec<C64>,
+    quad_dst: Vec<C64>,
     a: f64,
     flip: bool,
+}
+
+/// Lines solved together in the ADI sweeps: the tridiagonal recurrences are latency-bound
+/// chains, so interleaving independent lines lets them overlap. Each line's arithmetic is
+/// exactly the scalar path's, so ψ is bit-identical.
+const LANES: usize = 8;
+
+/// `(1 − iA)` of `LANES` interleaved lines of `n` from `src` into `dst`, Dirichlet ends:
+/// [`Adi::explicit`] per lane.
+#[inline(always)]
+fn explicit_lanes(a: f64, e: impl Fn(usize, usize) -> C64, src: &[C64], dst: &mut [C64], n: usize) {
+    for i in 0..n {
+        for k in 0..LANES {
+            let left = if i > 0 {
+                src[(i - 1) * LANES + k]
+            } else {
+                C64::ZERO
+            };
+            let right = if i + 1 < n {
+                src[(i + 1) * LANES + k]
+            } else {
+                C64::ZERO
+            };
+            dst[i * LANES + k] = e(i, k) * src[i * LANES + k] + times_i((left + right).scale(a));
+        }
+    }
+}
+
+/// [`tridiag_apply_c`] on `LANES` interleaved lines of `n` in `buf`, each with its own
+/// factors `inv[k]`, `cp[k]` and the shared sub-diagonal `sub`.
+#[inline(always)]
+fn apply_lanes(
+    sub: &[C64],
+    inv: &[&[C64]; LANES],
+    cp: &[&[C64]; LANES],
+    buf: &mut [C64],
+    n: usize,
+) {
+    if n == 0 || sub.len() < n || inv.iter().chain(cp).any(|l| l.len() < n) {
+        return;
+    }
+    let mut d = [C64::ZERO; LANES];
+    for k in 0..LANES {
+        d[k] = buf[k] * inv[k][0];
+        buf[k] = d[k];
+    }
+    for i in 1..n {
+        for k in 0..LANES {
+            d[k] = (buf[i * LANES + k] - sub[i] * d[k]) * inv[k][i];
+            buf[i * LANES + k] = d[k];
+        }
+    }
+    for i in (0..n - 1).rev() {
+        for k in 0..LANES {
+            buf[i * LANES + k] = buf[i * LANES + k] - cp[k][i] * buf[(i + 1) * LANES + k];
+        }
+    }
 }
 
 impl Adi {
@@ -321,6 +380,8 @@ impl Adi {
             off: vec![C64::new(0.0, -a); m],
             line: vec![C64::ZERO; m],
             col: vec![C64::ZERO; m],
+            quad_src: vec![C64::ZERO; LANES * m],
+            quad_dst: vec![C64::ZERO; LANES * m],
             a,
             flip: false,
         };
@@ -397,7 +458,31 @@ impl Adi {
     fn sweep_x(&mut self) {
         let (w, a) = (self.w, self.a);
         let f = &self.sets[self.active];
-        for y in 0..self.h {
+        let batched = self.h / LANES * LANES;
+        for y0 in (0..batched).step_by(LANES) {
+            let (src, dst) = (
+                &mut self.quad_src[..LANES * w],
+                &mut self.quad_dst[..LANES * w],
+            );
+            for k in 0..LANES {
+                let row = &self.psi[(y0 + k) * w..(y0 + k + 1) * w];
+                for (x, &v) in row.iter().enumerate() {
+                    src[x * LANES + k] = v;
+                }
+            }
+            explicit_lanes(a, |x, k| f.e[(y0 + k) * w + x], src, dst, w);
+            let rows = |k: usize| (y0 + k) * w..(y0 + k + 1) * w;
+            let inv = std::array::from_fn(|k| &f.inv_x[rows(k)]);
+            let cp = std::array::from_fn(|k| &f.cp_x[rows(k)]);
+            apply_lanes(&self.off[..w], &inv, &cp, dst, w);
+            for k in 0..LANES {
+                let row = &mut self.psi[rows(k)];
+                for (x, v) in row.iter_mut().enumerate() {
+                    *v = dst[x * LANES + k];
+                }
+            }
+        }
+        for y in batched..self.h {
             let r = y * w..(y + 1) * w;
             let e = &f.e[r.clone()];
             let line = &mut self.line[..w];
@@ -415,7 +500,27 @@ impl Adi {
     fn sweep_y(&mut self) {
         let (w, h, a) = (self.w, self.h, self.a);
         let f = &self.sets[self.active];
-        for x in 0..w {
+        let batched = w / LANES * LANES;
+        for x0 in (0..batched).step_by(LANES) {
+            let (src, dst) = (
+                &mut self.quad_src[..LANES * h],
+                &mut self.quad_dst[..LANES * h],
+            );
+            for y in 0..h {
+                src[y * LANES..(y + 1) * LANES]
+                    .copy_from_slice(&self.psi[y * w + x0..y * w + x0 + LANES]);
+            }
+            explicit_lanes(a, |y, k| f.e[y * w + x0 + k], src, dst, h);
+            let cols = |k: usize| (x0 + k) * h..(x0 + k + 1) * h;
+            let inv = std::array::from_fn(|k| &f.inv_y[cols(k)]);
+            let cp = std::array::from_fn(|k| &f.cp_y[cols(k)]);
+            apply_lanes(&self.off[..h], &inv, &cp, dst, h);
+            for y in 0..h {
+                self.psi[y * w + x0..y * w + x0 + LANES]
+                    .copy_from_slice(&dst[y * LANES..(y + 1) * LANES]);
+            }
+        }
+        for x in batched..w {
             for y in 0..h {
                 self.col[y] = self.psi[y * w + x];
             }
@@ -600,8 +705,6 @@ pub struct QuantumDoubleSlit {
     beam_flux: f64,
     fast: f64,
     clicks: ParticlePool<Click>,
-    /// Clicks per screen bin since the screen was last cleared.
-    hist: [u32; HIST_BINS],
     debt: f64,
     /// Exposure peaks of `|ψ|²` left and right of the wall.
     peak: [f64; 2],
@@ -615,11 +718,14 @@ pub struct QuantumDoubleSlit {
     strip_x: i32,
     pixels: Pixels,
     dots: Dots,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl QuantumDoubleSlit {
     fn new() -> Self {
         Self {
+            dirty: true,
             size: Size::new(1, 1),
             geo: Geometry::for_aspect(1.0),
             adi: Adi::default(),
@@ -636,7 +742,6 @@ impl QuantumDoubleSlit {
             beam_flux: 0.0,
             fast: 0.0,
             clicks: ParticlePool::with_capacity(CLICK_CAP),
-            hist: [0; HIST_BINS],
             debt: 0.0,
             peak: [0.0; 2],
             col_node: Vec::new(),
@@ -728,10 +833,7 @@ impl QuantumDoubleSlit {
         while self.debt >= 1.0 && n < CLICKS_PER_FRAME {
             let fy = (cdf.sample(rng.random()) / g.view_h as f64) as f32;
             let fx = rng.random::<f32>();
-            if self.clicks.spawn(Click { fx, fy, age: 0.0 }) {
-                let bin = ((fy * HIST_BINS as f32) as usize).min(HIST_BINS - 1);
-                self.hist[bin] += 1;
-            }
+            self.clicks.spawn(Click { fx, fy, age: 0.0 });
             self.debt -= 1.0;
             n += 1;
         }
@@ -784,6 +886,16 @@ impl QuantumDoubleSlit {
         let (view, carrier) = (self.view_px, self.carrier);
         let tunnel = act == 2;
         let cutoff = if tunnel { 0.5 * CUTOFF } else { CUTOFF };
+        // Below this `a` a pixel is blank for sure: `t` is under both the knee's zero
+        // (`cutoff/2`) or under the taper's zero (`raw ≤ WAVE_TOP·vis·t < WAVE_FLOOR/2`);
+        // shrunk by 0.1 % so rounding never flips a lit pixel.
+        let t_blank = (0.5 * cutoff).max(0.5 * WAVE_FLOOR / (WAVE_TOP * vis));
+        let a_blank = 0.999
+            * if tunnel {
+                t_blank.powf(4.0 / 3.0)
+            } else {
+                t_blank.powf(1.0 / 0.8)
+            };
         self.pixels.shade(|x, y| {
             if x == view {
                 return if y % 2 == 0 { SCREEN_INK } else { Ink::BLANK };
@@ -794,11 +906,23 @@ impl QuantumDoubleSlit {
             };
             let (gx, gy) = (usize::from(gx).min(gw - 1), usize::from(gy).min(gh - 1));
             let (gx1, gy1) = ((gx + 1).min(gw - 1), (gy + 1).min(gh - 1));
-            let near = (if fx < 0.5 { gx } else { gx1 }) + gw * if fy < 0.5 { gy } else { gy1 };
-            match solid[near] {
-                Solid::Wall => return WALL_INK,
-                Solid::Barrier => return BARRIER_INK,
-                Solid::Free => {}
+            let near_x = |gx: usize, fx: f32| if fx < 0.5 { gx } else { (gx + 1).min(gw - 1) };
+            let row = gw * if fy < 0.5 { gy } else { gy1 };
+            let kind = solid[near_x(gx, fx) + row];
+            if kind != Solid::Free {
+                // Only the obstacle's front face, a 1-px line (ADR-0017).
+                let behind = x
+                    .checked_sub(1)
+                    .and_then(|l| cols.get(l as usize))
+                    .map(|&(lx, lf)| solid[near_x(usize::from(lx).min(gw - 1), lf) + row]);
+                if behind == Some(kind) {
+                    return Ink::BLANK;
+                }
+                return if kind == Solid::Wall {
+                    WALL_INK
+                } else {
+                    BARRIER_INK
+                };
             }
             // Bilinear in ψ, so the carrier's crests stay smooth between nodes.
             let (fx, fy) = (f64::from(fx), f64::from(fy));
@@ -821,6 +945,10 @@ impl QuantumDoubleSlit {
             // act uses `v^¾` either way, lower cut, so the weak transmitted wave shows at
             // its true, smaller share.
             let a = v.min(1.0);
+            // Certainly blank (see `a_blank`): skip the power law.
+            if a < a_blank {
+                return Ink::BLANK;
+            }
             let t = if tunnel {
                 a.sqrt() * a.sqrt().sqrt()
             } else {
@@ -828,14 +956,17 @@ impl QuantumDoubleSlit {
             };
             // A soft knee instead of a hard cut: faint density fades out, no speckle.
             let knee = ((t - 0.5 * cutoff) / cutoff).clamp(0.0, 1.0);
-            let level = vis * t * knee * knee * shimmer;
-            if level * 255.0 < ink::MIN_VISIBLE_LEVEL {
+            // Below the floor the level tapers smoothly to black over [floor/2, floor]
+            // (a hard cut stair-stepped the fan's edges, and no dither, M14).
+            let raw = WAVE_TOP * vis * t * knee * knee * shimmer;
+            let u = ((raw - 0.5 * WAVE_FLOOR) / (0.5 * WAVE_FLOOR)).clamp(0.0, 1.0);
+            let level = raw * u * u * (3.0 - 2.0 * u);
+            if level < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
             } else {
-                ink::ramp(WAVE, level)
+                Ink::new(Role::Ramp(WAVE), ink::level(level))
             }
         });
-        self.glow_histogram();
         self.dots.clear();
         let (strip, dh) = (self.strip_x, 4 * i32::from(self.size.height()));
         let width = (2 * i32::from(self.size.width()) - strip - 3).max(1);
@@ -846,50 +977,6 @@ impl QuantumDoubleSlit {
             let level = CLICK_REST + (255.0 - CLICK_REST) * f64::from(fresh);
             self.dots
                 .set(x, y, ink::ramp(Ramp::Starlight, level / 255.0));
-        }
-    }
-}
-
-impl QuantumDoubleSlit {
-    /// The click histogram as a soft Starlight glow across the strip, one level per pixel
-    /// row: binomially smoothed, toned against the fullest row and faded in with the
-    /// click count, so the fringes read as bands behind the dots, not as early noise.
-    fn glow_histogram(&mut self) {
-        let (x0, x1) = (self.view_px + 1, i32::from(self.size.width()));
-        let ph = 2 * i32::from(self.size.height());
-        let total: u32 = self.hist.iter().sum();
-        if total == 0 || x0 >= x1 {
-            return;
-        }
-        let norm: f64 = GLOW_TAPS.iter().sum();
-        let mut smooth = [0.0f64; HIST_BINS];
-        for (b, out) in smooth.iter_mut().enumerate() {
-            *out = GLOW_TAPS
-                .iter()
-                .enumerate()
-                .map(|(k, w)| {
-                    let i = (b + k).saturating_sub(4).min(HIST_BINS - 1);
-                    w * f64::from(self.hist[i])
-                })
-                .sum::<f64>()
-                / norm;
-        }
-        let top = smooth.iter().fold(0.0f64, |m, &v| m.max(v));
-        let strength = (f64::from(total) / GLOW_FULL_CLICKS).min(1.0);
-        for y in 0..ph {
-            // The bins this pixel row covers, averaged.
-            let lo = (y as usize * HIST_BINS) / ph as usize;
-            let hi = (((y + 1) as usize * HIST_BINS) / ph as usize).clamp(lo + 1, HIST_BINS);
-            let v = smooth[lo..hi].iter().sum::<f64>() / (hi - lo) as f64 / top;
-            let level = GLOW_LEVELS.0 + (GLOW_LEVELS.1 - GLOW_LEVELS.0) * v * strength;
-            if v <= 0.02 || level < ink::MIN_VISIBLE_LEVEL {
-                continue;
-            }
-            // Even levels only: odd ones mark the wall, barrier and screen (see `ascii_cell`).
-            let ink = Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level) & !1);
-            for x in x0..x1 {
-                self.pixels.set(x, y, ink);
-            }
         }
     }
 }
@@ -935,7 +1022,7 @@ impl Generator for QuantumDoubleSlit {
             self.start();
         }
         self.layout(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -949,7 +1036,6 @@ impl Generator for QuantumDoubleSlit {
             self.set_act(act);
             if act != 1 {
                 self.clicks.clear();
-                self.hist = [0; HIST_BINS];
                 self.debt = 0.0;
             }
         }
@@ -975,7 +1061,15 @@ impl Generator for QuantumDoubleSlit {
         let now = self.peaks();
         let decay = (-dt * std::f64::consts::LN_2 / PEAK_HALF_LIFE_S).exp();
         self.peak = [0, 1].map(|i| now[i].max(self.peak[i] * decay));
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1194,10 +1288,12 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = QuantumDoubleSlit::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut seen = Vec::new();
         let mut before_tunnel = 0;
         for f in 0..(3.0 * ACT_S * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let c = g.caption();
             if seen.last() != Some(&c) {
                 seen.push(c);
@@ -1255,8 +1351,10 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = QuantumDoubleSlit::new();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..90 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             // Rows of the right quarter of the view (next to the screen) that show wave.
             let (view, ph) = (g.view_px, 2 * i32::from(h));
@@ -1279,7 +1377,7 @@ mod tests {
     #[test]
     fn qds_a7_the_fan_holds_its_brightness_through_the_acts() {
         // The one-at-a-time act keeps the wave within 10 % of full exposure, so the fan
-        // never reads as fading out; the histogram glow carries the bands.
+        // never reads as fading out; the clicks carry the bands.
         assert!(
             WAVE_VIS.iter().all(|&v| (0.9..=1.0).contains(&v)),
             "{WAVE_VIS:?}"

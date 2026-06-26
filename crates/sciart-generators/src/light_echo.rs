@@ -11,7 +11,7 @@
 use rand::Rng;
 use sciart_core::grid::lattice_for;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
+use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::value_noise;
 
 use sciart_core::timeline::ease;
@@ -37,7 +37,9 @@ const ECHO: f64 = 21.0;
 pub(crate) const LOOP: f64 = PRE + ECHO;
 /// The outburst's duration (s) and its three peaks: time, width, height.
 pub(crate) const BURST: f64 = 6.0;
-const PEAKS: [(f64, f64, f64); 3] = [(0.7, 0.55, 1.0), (2.4, 0.8, 0.7), (4.2, 0.95, 0.8)];
+/// M14 (ADR-0017): sharp peaks, so each lit sheet is a thin shell (its width is the speed
+/// of light times the peak's), not a broad band (were 0.55–0.95 s wide).
+const PEAKS: [(f64, f64, f64); 3] = [(0.7, 0.2, 1.0), (2.4, 0.25, 0.7), (4.2, 0.3, 0.8)];
 /// Outburst colour temperature: hot at first, cooling towards a red supergiant.
 const T_HOT: f64 = 8_000.0;
 const T_COOL: f64 = 3_000.0;
@@ -51,19 +53,40 @@ const CAVITY: f64 = 0.22;
 const G: f64 = 0.6;
 /// Lattice cap (ADR-0012).
 const MAX_NODES: usize = 24_000;
-/// Unlit dust: brightest level (SPEC-002: ≤ 20).
-const DUST_LEVEL: f64 = 20.0;
+/// Unlit dust: brightest level (M14: 0, the unlit dust is not drawn; ADR-0017).
+const DUST_LEVEL: f64 = 0.0;
 /// Flashes whose echoes are drawn: age offset (s) and weight. The newest is weight 1;
 /// the one before keeps expanding, fading, while the next flash lights up.
 const GENERATIONS: [(f64, f32); 3] = [(0.0, 1.0), (LOOP, 0.55), (2.0 * LOOP, 0.25)];
 /// Light-curve tables.
 const LUT: usize = 512;
-/// Echo inks: the highest level (short of white), the faintest echo drawn (fainter light
-/// leaves the dust's own grey, so the far rings end cleanly instead of in dark-red
-/// streaks), and the emission temperature from which the light is blue-white (Ice).
-const HIGHLIGHT_MAX: u8 = 236;
-const ECHO_FLOOR: u8 = 52;
+/// Echo inks (M14, ADR-0017): scattered light in `Ramp(Starlight)` up to `HIGHLIGHT_MAX`,
+/// fading smoothly to black (no floor, no dust grey); light emitted hotter than `HOT_FROM`
+/// (the first, blue-white peak) is a faint `Ramp(Ice)` tint on its crests (`ICE_FROM`).
+const HIGHLIGHT_MAX: u8 = 240;
 pub(crate) const HOT_FROM: f32 = 5_500.0;
+/// Exposure of the scattered light, like a camera's auto-exposure: `update` estimates the
+/// peak scattering weight lit now, on every `EXPOSE_STRIDE`-th lattice node (a fixed
+/// subsample), with the light curve at its envelope (1 anywhere in the burst), so the
+/// exposure follows the shells' geometric dilution and not the flash's own peaks (which
+/// then brighten and fade the frame, as they should), and eases the gain toward
+/// `EXPOSE·WHITE / peak` with time constant `EXPOSE_TAU` in simulated seconds, so it is smooth in time and independent of the render cadence
+/// (GEN-R20); the gain is clamped to `ECHO_GAIN`, so the shells stay legible as the echo
+/// spreads and dims (GEN-R21) and the dark before the flash is never amplified into noise.
+const WHITE: f32 = 2.2;
+const EXPOSE: f32 = 6.0;
+const ECHO_GAIN: (f32, f32) = (1.0, 6.0);
+const EXPOSE_STRIDE: usize = 13;
+const EXPOSE_TAU: f64 = 1.5;
+/// Hot light shows its blue only on the shells' crests, from this level up (ADR-0017: the
+/// pale end of `Ice`, a faint tint; below it the light is neutral).
+const ICE_FROM: f64 = 170.0;
+/// Contrast on the toned light: a shell's soft skirts fall to black, its crest stays
+/// legible (thin shells, GEN-R21).
+const ECHO_GAMMA: f64 = 3.0;
+/// The star after the outburst: a white point (ADR-0017 brief; V838 Mon itself became a
+/// red supergiant, drawn so in M12).
+const STAR_AFTER_K: f64 = 6_000.0;
 /// Echo weight fades out beyond this sky radius (half-heights) over `VIGNETTE_SPAN`.
 const VIGNETTE_AT: f64 = 0.95;
 const VIGNETTE_SPAN: f64 = 0.5;
@@ -71,9 +94,7 @@ const VIGNETTE_SPAN: f64 = 0.5;
 const DILUTION: f64 = 1.0;
 /// Passes of the separable `[1 2 1]` blur over the echo before tone mapping (ECHO-A7):
 /// two passes are a 5-tap binomial, so the lit sheets read as soft dust, not blocks.
-const BLUR_PASSES: usize = 3;
-/// Sub-floor echo light shown as lit dust grey at this share of its level (≤ 27).
-const FRINGE: f64 = 0.6;
+const BLUR_PASSES: usize = 2;
 
 /// In-place separable `[1 2 1] / 4` blur of a `w × h` field (edges clamped), `tmp` the
 /// same size.
@@ -222,9 +243,16 @@ pub struct LightEcho {
     scratch: Vec<f32>,
     map: SampleMap,
     tone: Tone,
+    /// Toned level → drawn level (contrast gamma, scaled to `HIGHLIGHT_MAX`): built once,
+    /// so no `powf` per pixel.
+    contrast: Vec<f32>,
+    /// The smoothed exposure gain (see `EXPOSE`).
+    gain: f32,
     pixels: Pixels,
     centre: (f64, f64),
     half_px: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl LightEcho {
@@ -237,13 +265,41 @@ impl LightEcho {
                 (light_curve(te) as f32, temperature(te) as f32)
             })
             .collect();
-        self.tone = Tone::asinh(0.15, 2.2);
+        self.tone = Tone::asinh(0.15, WHITE);
+        self.contrast = (0..=255)
+            .map(|l| ((f64::from(l) / 255.0).powf(ECHO_GAMMA) * f64::from(HIGHLIGHT_MAX)) as f32)
+            .collect();
         self.t = ctx.rng.random_range(4.0..8.0);
     }
 
     /// `L` and `T` at `t_e`, linearly interpolated in the table (0 outside the burst).
     fn curve_at(&self, te: f64) -> (f32, f32) {
         lerp_curve(&self.curve, te)
+    }
+
+    /// The exposure gain the echo at time `t` asks for: from the peak scattering weight
+    /// lit now over a fixed subsample of nodes, at the light curve's envelope (see
+    /// `EXPOSE`).
+    fn target_gain(&self) -> f32 {
+        let t = self.t;
+        let mut peak = 0.0f32;
+        for cell in self.dust.samples.iter().step_by(EXPOSE_STRIDE) {
+            let mut sum = 0.0f32;
+            for &(age, weight) in &GENERATIONS {
+                for s in cell {
+                    let te = t + age - f64::from(s.lag) / C;
+                    if (0.0..=BURST).contains(&te) && s.weight > 0.0 {
+                        sum += s.weight * weight;
+                    }
+                }
+            }
+            peak = peak.max(sum);
+        }
+        if peak > 0.0 {
+            (EXPOSE * WHITE / peak).clamp(ECHO_GAIN.0, ECHO_GAIN.1)
+        } else {
+            ECHO_GAIN.1
+        }
     }
 
     /// Echo brightness and temperature at every node for the current time: the newest
@@ -296,6 +352,8 @@ impl LightEcho {
         self.illuminate();
         self.soften();
         let (map, soft, soft_t, tone) = (&self.map, &self.soft, &self.soft_t, &self.tone);
+        let contrast = &self.contrast;
+        let gain = self.gain;
         let unlit = &self.dust.unlit;
         let direct = soft.size() == self.pixels.pixel_size();
         let w = usize::from(soft.width());
@@ -312,31 +370,18 @@ impl LightEcho {
                 let i = ny as usize * w + nx as usize;
                 (map.sample(soft, x, y), kelvin_at(i), unlit[i])
             };
-            // Highlights roll off on the asinh curve and stop short of white, so the
-            // brightest bands keep their gradation instead of clipping to flat steps.
-            let level = tone.level(v).min(HIGHLIGHT_MAX);
-            if level >= ECHO_FLOOR && kv > 0.0 {
+            // Highlights roll off on the asinh curve, scaled into the muted range, so the
+            // shells keep their gradation and fade smoothly into the dark.
+            let level = f64::from(contrast[usize::from(tone.level(gain * v))]);
+            if kv > 0.0 && level >= ink::MIN_VISIBLE_LEVEL {
                 // Colour is the outburst's temperature when this light left the star: the
-                // hot first peak blue-white (Ice), the cooling later light amber (Ember).
-                let ramp = if kv >= HOT_FROM {
-                    Ramp::Ice
+                // hot first peak a faint blue (Ice), the rest neutral scattered light.
+                return if kv >= HOT_FROM && level >= ICE_FROM {
+                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(level))
                 } else {
-                    Ramp::Ember
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level))
                 };
-                return Ink::new(Role::Ramp(ramp), level.max(dust));
             }
-            // Echo light too faint for colour lifts the dust's own grey instead: a soft
-            // fringe that feathers each lit sheet into the dark rather than a hard edge.
-            let fringe = if kv > 0.0 {
-                ink::level(f64::from(level) * FRINGE)
-            } else {
-                0
-            };
-            let dust = if f64::from(fringe) >= ink::MIN_VISIBLE_LEVEL {
-                dust.max(fringe)
-            } else {
-                dust
-            };
             if dust > 0 {
                 Ink::new(Role::Ramp(Ramp::Starlight), dust)
             } else {
@@ -349,31 +394,20 @@ impl LightEcho {
     /// The star: blazing during the outburst, then a red supergiant.
     fn star(&mut self) {
         let (l, k) = self.curve_at(self.t);
-        let kelvin = if self.t < 0.0 {
-            5_500.0
-        } else if self.t <= BURST {
-            f64::from(k)
+        let kelvin = if (0.0..=BURST).contains(&self.t) {
+            f64::from(k).max(STAR_AFTER_K)
         } else {
-            3_000.0
+            STAR_AFTER_K
         };
-        let glow = f64::from(l);
-        let radius = 0.8 + 0.05 * self.half_px * glow;
-        let (pixels, c) = (&mut self.pixels, self.centre);
-        if glow > 0.02 {
-            disc_pixels(c, radius, |x, y, cover| {
-                let d = (f64::from(x) + 0.5 - c.0).hypot(f64::from(y) + 0.5 - c.1) / radius;
-                let v = 255.0 * cover * (1.0 - d.min(1.0)).powf(1.5) * glow.min(1.0);
-                if v >= ink::MIN_VISIBLE_LEVEL {
-                    pixels.set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), ink::level(v)));
-                }
-            });
-        }
-        let core = if glow > 0.3 { 1.3 } else { 0.7 };
-        disc_pixels(c, core, |x, y, cover| {
-            if cover > 0.3 {
-                pixels.set(x, y, ink::blackbody(kelvin));
+        // A point; during the outburst's peaks a small plus (ADR-0017: no glow disc).
+        let (x, y) = (self.centre.0.floor() as i32, self.centre.1.floor() as i32);
+        let ink = ink::blackbody(kelvin);
+        self.pixels.set(x, y, ink);
+        if l > 0.3 {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                self.pixels.set(x + dx, y + dy, ink);
             }
-        });
+        }
     }
 }
 
@@ -404,15 +438,26 @@ impl Generator for LightEcho {
         self.map.rebuild(lattice, px);
         self.centre = (f64::from(px.width()) / 2.0, f64::from(px.height()) / 2.0);
         self.half_px = f64::from(px.height()) / 2.0;
-        self.raster();
+        // The exposure starts where the light is, with no ramp after a resize.
+        self.gain = self.target_gain();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
-        self.t += dt.max(0.0);
+        let dt = dt.max(0.0);
+        self.t += dt;
         while self.t >= ECHO {
             self.t -= LOOP;
         }
-        self.raster();
+        let k = 1.0 - (-dt / EXPOSE_TAU).exp();
+        self.gain += (self.target_gain() - self.gain) * k as f32;
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -429,6 +474,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = LightEcho::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -470,6 +516,7 @@ mod tests {
         let samples: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.dust.unlit, dust);
         let again: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
@@ -479,9 +526,12 @@ mod tests {
     #[test]
     fn echo_a6_highlights_roll_off_and_hot_light_is_blue_white() {
         let (mut g, _) = built(Size::new(120, 40));
+        // M14: hot light a blue (Ice) tint, the rest neutral scattered light (Starlight).
         let (mut ice, mut ember) = (0, 0);
         for t in [1.0, 3.0, 6.0, 12.0] {
             g.t = t;
+            // A jump in time: the exposure settles where the light is (`update` eases it).
+            g.gain = g.target_gain();
             g.raster();
             let px = g.pixels.pixel_size();
             for y in 0..i32::from(px.height()) {
@@ -489,7 +539,7 @@ mod tests {
                     let ink = g.pixels.get(x, y).unwrap();
                     match ink.role {
                         Role::Ramp(Ramp::Ice) => ice += 1,
-                        Role::Ramp(Ramp::Ember) => ember += 1,
+                        Role::Ramp(Ramp::Starlight) => ember += 1,
                         _ => continue,
                     }
                     assert!(ink.level <= HIGHLIGHT_MAX, "clipped at {x},{y} t={t}");
@@ -497,17 +547,19 @@ mod tests {
             }
         }
         // Both the hot (early) and the cool (late) light show, the cool light dominating.
-        assert!(ice > 50 && ember > ice, "ice {ice}, ember {ember}");
+        // M14: the hot light's blue shows only on the crests (a faint tint).
+        assert!(ice > 10 && ember > 10 * ice, "ice {ice}, ember {ember}");
     }
 
     /// Mean level step between 4-neighbouring echo pixels, and the share of echo pixels
-    /// with fewer than two echo 4-neighbours (ragged specks).
+    /// with fewer than two echo 8-neighbours (ragged specks; M14: 8-neighbours, since a
+    /// thin shell running diagonally touches its neighbours only at corners).
     fn roughness(g: &LightEcho) -> (f64, f64) {
         let px = g.pixels.pixel_size();
         let echo = |x: i32, y: i32| {
             g.pixels
                 .get(x, y)
-                .filter(|i| matches!(i.role, Role::Ramp(Ramp::Ice | Ramp::Ember)))
+                .filter(|i| matches!(i.role, Role::Ramp(Ramp::Ice | Ramp::Starlight)))
                 .map(|i| f64::from(i.level))
         };
         let (mut step, mut pairs, mut lit, mut specks) = (0.0, 0, 0, 0);
@@ -525,6 +577,9 @@ mod tests {
                         }
                     }
                 }
+                for (dx, dy) in [(1, 1), (-1, 1), (1, -1), (-1, -1)] {
+                    nb += usize::from(echo(x + dx, y + dy).is_some());
+                }
                 if nb < 2 {
                     specks += 1;
                 }
@@ -541,15 +596,43 @@ mod tests {
         let (mut g, _) = built(Size::new(120, 40));
         for t in [3.0, 8.0, 14.0, 20.0] {
             g.t = t;
+            // A jump in time: the exposure settles where the light is (`update` eases it).
+            g.gain = g.target_gain();
             g.raster();
             let (step, specks) = roughness(&g);
-            assert!(step <= 19.0, "t={t}: mean neighbour step {step:.1}");
+            // M14: thin shells (1–3 px) rise and fall within a few pixels, so the bound
+            // is looser than for the old broad bands; ragged specks stay rare.
+            assert!(step <= 40.0, "t={t}: mean neighbour step {step:.1}");
             assert!(
                 specks <= 0.025,
                 "t={t}: {:.1} % ragged specks",
                 100.0 * specks
             );
         }
+    }
+
+    #[test]
+    fn echo_a8_exposure_is_smooth_in_time_and_cadence_free() {
+        // M14: the gain eases with time constant `EXPOSE_TAU` in simulated time: one step
+        // moves it by at most `1 − e^{−dt/τ}` of the way, and stepping 1/60 s or 1/30 s
+        // lands on the same gain within a few per cent after a second.
+        let size = Size::new(120, 40);
+        let (mut a, mut ca) = built(size);
+        let (mut b, mut cb) = built(size);
+        let k = 1.0 - (-SIM_DT / EXPOSE_TAU).exp();
+        for _ in 0..600 {
+            let (g0, target) = (a.gain, a.target_gain());
+            a.update(SIM_DT, &mut ca);
+            let bound = (f64::from((a.target_gain() - g0).abs())
+                .max(f64::from((target - g0).abs()))
+                * k) as f32;
+            assert!((a.gain - g0).abs() <= bound + 1e-4, "{g0} -> {}", a.gain);
+        }
+        for _ in 0..300 {
+            b.update(2.0 * SIM_DT, &mut cb);
+        }
+        let rel = (a.gain - b.gain).abs() / a.gain.max(1e-6);
+        assert!(rel < 0.05, "{} vs {}", a.gain, b.gain);
     }
 
     #[test]
@@ -595,6 +678,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(80, 24));
         while g.t > -PRE + 0.1 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         while g.t < 0.0 {
             for cell in &g.dust.samples {
@@ -603,6 +687,7 @@ mod tests {
                 }
             }
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(lerp_curve(&g.curve, -1e-9), (0.0, 0.0));
     }

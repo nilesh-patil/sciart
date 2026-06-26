@@ -50,18 +50,32 @@ const PAN: f64 = 0.35;
 const HOLD_FROM: f64 = 0.94;
 /// Scene start in loop time: growth ≈ 0.3.
 const START: f64 = 2.3;
-/// Tone curve over density in particles per node (mean 1), and the halo threshold.
+/// Tone curve over density above the floor, scaled so the frame's top quantile maps to
+/// `WHITE`.
 const KNEE: f32 = 1.4;
 const WHITE: f32 = 7.0;
-const HALO: f32 = 3.2;
-/// Density subtracted before toning, so the mean fog sits at the ramp's near-black foot
-/// and the voids end in black on a smooth ramp (no dither).
-const FLOOR: f32 = 0.82;
-const GAMMA: f32 = 1.2;
-/// Fog below this level is drawn in Cobalt blue, the web above it in Plasma violet.
-const FOG_BLUE: u8 = 46;
-/// Halo nodes: gold-white, hotter (whiter) the denser.
-const HALO_K: (f64, f64) = (4_200.0, 7_500.0);
+/// The black floor (ADR-0017): density below the frame's `LIT_SHARE` quantile (and below
+/// the mean density, `FLOOR`) is black, so only the densest structure shows, thin; the level then rises to
+/// the `TOP_SHARE` quantile through the tone and `GAMMA`, ending smoothly at the visible
+/// floor (no dither). In the early fog the quantiles close in, so its faint mottling
+/// shows rather than a black frame.
+const FLOOR: f32 = 1.0;
+const GAMMA: f32 = 2.5;
+const LIT_SHARE: f32 = 0.22;
+const TOP_SHARE: f32 = 0.003;
+/// Fine histogram over low densities for the floor and top quantiles.
+const LOW_BINS: usize = 2048;
+const LOW_MAX: f32 = 32.0;
+/// Share of the frame drawn as nodes.
+const NODE_SHARE: f32 = 0.004;
+/// The web in `Ramp(Plasma)`: faint links at `LINK_LEVEL` easing in from black, filament
+/// cores up to `WEB_LEVEL`; the knots continue the ramp from there to a pale lavender-white
+/// `KNOT_TOP`, reached only at the densest `PEAK_SHARE` of the frame (a 1–2 px point with
+/// a soft falloff into its filament, no plateau).
+const LINK_LEVEL: f32 = 20.0;
+const WEB_LEVEL: f32 = 110.0;
+const KNOT_TOP: f64 = 250.0;
+const PEAK_SHARE: f32 = 0.0015;
 
 /// One potential mode: wavevector in box periods (integers, so it tiles the box), its
 /// amplitude, phase at cycle 0 and phase step per cycle.
@@ -107,29 +121,30 @@ pub(crate) fn displaced(qx: f32, qy: f32, s: (f32, f32), k: f32, at: f32) -> (f3
     (qx + k * s.0, qy + k * s.1)
 }
 
-/// Density bins of [`halo_threshold`]'s histogram and its range (particles per node).
-const HIST_BINS: usize = 128;
-const HIST_MAX: f32 = 32.0;
-
-/// The density of the densest 1 % of nodes (the haloes), found from a fixed histogram so
-/// it costs one pass and no allocation; never below `HALO`, so an uncollapsed fog has
-/// no haloes.
-fn halo_threshold(values: &[f32]) -> f32 {
-    let mut hist = [0u32; HIST_BINS];
+/// The densities above which the shares `fracs` of `values` lie, from one fine histogram
+/// (`LOW_BINS` bins over `[0, LOW_MAX]`, values beyond in the top bin), interpolated
+/// linearly inside the bin: smooth in time, so the adaptive floor and scale never step
+/// from frame to frame (no pumping), and independent of the render cadence (GEN-R20).
+fn quantiles<const N: usize>(values: &[f32], fracs: [f32; N]) -> [f32; N] {
+    let mut hist = [0u32; LOW_BINS];
     for &v in values {
-        let b = ((v / HIST_MAX) * HIST_BINS as f32) as usize;
-        hist[b.min(HIST_BINS - 1)] += 1;
+        let b = ((v / LOW_MAX) * LOW_BINS as f32).max(0.0) as usize;
+        hist[b.min(LOW_BINS - 1)] += 1;
     }
-    let mut above = 0usize;
-    let target = values.len() / 100;
-    for (b, &n) in hist.iter().enumerate().rev() {
-        above += n as usize;
-        if above > target {
-            let v = (b + 1) as f32 * HIST_MAX / HIST_BINS as f32;
-            return v.max(HALO);
+    let width = LOW_MAX / LOW_BINS as f32;
+    fracs.map(|frac| {
+        let target = values.len() as f32 * frac;
+        let mut above = 0.0f32;
+        for (b, &n) in hist.iter().enumerate().rev() {
+            let n = n as f32;
+            if n > 0.0 && above + n >= target {
+                let into = ((target - above) / n).clamp(0.0, 1.0);
+                return (b as f32 + 1.0 - into) * width;
+            }
+            above += n;
         }
-    }
-    HALO
+        0.0
+    })
 }
 
 /// Separable tables for one cycle's modes over a `w × h` lattice: `cos`/`sin` of
@@ -240,6 +255,8 @@ pub struct CosmicWeb {
     map: SampleMap,
     tone: Tone,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl CosmicWeb {
@@ -379,7 +396,16 @@ impl CosmicWeb {
     fn raster(&mut self) {
         self.deposit(growth(self.t));
         self.smooth();
-        let halo = halo_threshold(self.density.as_slice());
+        // The knots: the densest 0.4 % of the frame (halos; proto-halos in the fog).
+        let [halo, floor, top, peak] = quantiles(
+            self.density.as_slice(),
+            [NODE_SHARE, LIT_SHARE, TOP_SHARE, PEAK_SHARE],
+        );
+        let halo = halo.max(1.0);
+        let peak = peak.max(halo + 0.1);
+        let floor = floor.max(FLOOR);
+        let top = top.max(floor + 0.2);
+        let span = WHITE / (top - floor);
         let (map, density, tone) = (&self.map, &self.density, &self.tone);
         let direct = density.size() == self.pixels.pixel_size();
         let w = usize::from(density.width());
@@ -390,24 +416,18 @@ impl CosmicWeb {
                 map.sample(density, x, y)
             };
             if v >= halo {
-                let k = f64::from((v - halo) / halo).clamp(0.0, 1.0);
-                return ink::blackbody(ease::lerp(HALO_K.0, HALO_K.1, k));
+                let k = ease::smoothstep(f64::from((v - halo) / (peak - halo)));
+                let level = ease::lerp(f64::from(WEB_LEVEL), KNOT_TOP, k);
+                return Ink::new(Role::Ramp(Ramp::Plasma), ink::level(level));
             }
-            // A gamma below the tone darkens the fog so the filaments carry the frame.
-            let t = f32::from(tone.level(v - FLOOR)) / 255.0;
-            let level = (255.0 * t.powf(GAMMA)) as u8;
+            // Faint links ease in from black; a gamma keeps the filaments' cores thin.
+            let t = f32::from(tone.level((v - floor) * span)) / 255.0;
+            let link = LINK_LEVEL * ease::smoothstep(f64::from(t / 0.12)) as f32;
+            let level = link + (WEB_LEVEL - LINK_LEVEL) * t.powf(GAMMA);
             if f64::from(level) < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
             } else {
-                // The faintest fog in Cobalt's indigo-blue, the web in Plasma's violet, so
-                // the frame sits bluer than lichtenberg_discharge's violet. The switch is
-                // at a level so dark that the two ramps' hues barely differ there.
-                let ramp = if level < FOG_BLUE {
-                    Ramp::Cobalt
-                } else {
-                    Ramp::Plasma
-                };
-                Ink::new(Role::Ramp(ramp), level)
+                Ink::new(Role::Ramp(Ramp::Plasma), level as u8)
             }
         });
     }
@@ -442,7 +462,7 @@ impl Generator for CosmicWeb {
         self.scratch.resize(lattice, 0.0);
         self.sharp.resize(lattice, 0.0);
         self.next_done = 0;
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -466,7 +486,13 @@ impl Generator for CosmicWeb {
             let chunk = n.div_ceil((LOOP * 40.0) as usize).max(1);
             self.fill_next(chunk);
         }
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -483,6 +509,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = CosmicWeb::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -610,9 +637,11 @@ mod tests {
         g.next_done = 0;
         while g.t + SIM_DT < LOOP {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (w, h) = g.dims();
         g.update(SIM_DT * 2.0, &mut ctx);
+        g.prepare();
         assert_eq!(g.cycle, 1);
         for &(i, j) in &[(1usize, 2usize), (w - 2, h - 1)] {
             let (sx, sy, _) = g.disp[j * w + i];

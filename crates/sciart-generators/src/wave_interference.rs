@@ -1,13 +1,14 @@
 //! A ripple tank: two coherent sources whose rings interfere into bright antinodal bands
-//! and still, dark nodal hyperbolas, with a detector screen showing the fringes
-//! (SPEC-002 `wave_interference`).
+//! and still, dark nodal hyperbolas, with a detector screen's intensity profile showing
+//! the fringes (SPEC-002 `wave_interference`). On black (ADR-0017): only the crests are
+//! lit, as thin pale-blue bands; troughs, still water and the nodal lines are black, and
+//! the sources are single white points.
 
 use std::f64::consts::TAU;
 
 use sciart_core::geom::ASPECT;
 use sciart_core::ink::{self, Ramp};
 use sciart_core::prelude::*;
-use sciart_core::raster::stronger;
 use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
@@ -35,27 +36,23 @@ const VIGNETTE: f64 = 0.8;
 /// Brightness below which a pixel is left to the terminal background: the nodal lines.
 const DARK: f64 = 0.05;
 const PALETTE: Ramp = Ramp::Ice;
-const SOURCE_INK: Ink = Ink::new(Role::Accent, 255);
+const SOURCE_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 255);
+/// Crest level at full brightness (a pale blue, the accent), and the level below which a
+/// crest's falloff is left black rather than a navy haze.
+const CREST_TOP: f64 = 200.0;
+const CREST_FLOOR: u8 = 28;
 /// ASCII rings by brightness, blank below [`DARK`].
 const ASCII_RAMP: [char; 5] = ['.', 'o', 'O', '0', '@'];
 /// Blank cells kept after the science title on the last row (`WAVE-A3`).
 const TITLE_GAP: usize = 3;
 /// Blank columns between the field and the detector screen (`WAVE-A6`).
 const SCREEN_GAP: usize = 2;
-/// Screen film and profile levels `SCREEN_LOW + SCREEN_SPAN·I`: topping out at 180, about
-/// 30 % under the brightest crest, so the detector reads as an instrument beside the tank,
-/// not its hero.
+/// Profile levels `SCREEN_LOW + SCREEN_SPAN·I`, never under `PROFILE_LOW`, so its node
+/// rows still read as a line; topping out at 180, under the brightest crest.
 const SCREEN_LOW: f64 = 40.0;
 const SCREEN_SPAN: f64 = 140.0;
-/// The profile curve never drops below this level, so its node rows still read as a line.
-const PROFILE_LOW: f64 = 90.0;
-/// The intensity bar under the profile, `FILL_LOW + FILL_SPAN·I` (WAVE-A8, WAVE-A9): a solid
-/// bar per row, as long and as bright as that row's intensity, still under the curve and
-/// the film (≤ 140 against their 180), so the curve's edge carries the shape.
-const FILL_LOW: f64 = 40.0;
-const FILL_SPAN: f64 = 100.0;
-/// The screen is `1/SCREEN_FRAC` of the width, at least `SCREEN_MIN` columns: wide enough
-/// for the bars to read as a histogram of the fringes (WAVE-A9).
+const PROFILE_LOW: f64 = 120.0;
+/// The screen strip is `1/SCREEN_FRAC` of the width, at least `SCREEN_MIN` columns.
 const SCREEN_FRAC: usize = 12;
 const SCREEN_MIN: usize = 4;
 
@@ -84,21 +81,28 @@ fn wave(d1: f64, d2: f64, k: f64, (sw, cw): (f64, f64)) -> (f64, f64) {
     (s * cw - c * sw, (s * s + c * c).sqrt())
 }
 
-/// Ripple-tank brightness in [0, 1]: `vignette · (E/2)^1.5 · (0.6 + 0.4 a/E)`. It is 0
-/// wherever the envelope is 0 (WAVE-A4), and the 1.5 power widens the dark nodal lanes;
-/// on an antinodal band (E = 2) it swings from 0.2 (trough) to 1 (crest).
+/// Ripple-tank brightness in [0, 1] (ADR-0017: crests only): `vignette · (E/2)^1.5 ·
+/// max(0, a/E)²`. It is 0 wherever the envelope is 0 (WAVE-A4) and at every trough and
+/// zero crossing, so only the crests light, as thin bands; on an antinodal band (E = 2) it
+/// swings from 0 to the vignette.
 pub(crate) fn brightness(a: f64, e: f64, vignette: f64) -> f64 {
     if e < 1e-9 {
         return 0.0;
     }
     let half = 0.5 * e;
-    (vignette * half * half.sqrt() * (0.6 + 0.4 * a / e)).clamp(0.0, 1.0)
+    let crest = (a / e).max(0.0);
+    (vignette * half * half.sqrt() * crest * crest).clamp(0.0, 1.0)
 }
 
-/// Screen bar length in pixels for time-averaged intensity `i ∈ [0, 1]` on a strip
-/// `width` pixels wide (WAVE-A6).
-pub(crate) fn bar_len(i: f64, width: usize) -> usize {
-    (i.clamp(0.0, 1.0) * width as f64).round() as usize
+/// The ink of a field pixel at brightness `v`: a crest in the palette up to
+/// [`CREST_TOP`], black below [`CREST_FLOOR`].
+pub(crate) fn crest_ink(v: f64) -> Ink {
+    let level = ink::level(CREST_TOP * v);
+    if v < DARK || level < CREST_FLOOR {
+        Ink::BLANK
+    } else {
+        Ink::new(Role::Ramp(PALETTE), level)
+    }
 }
 
 #[derive(Debug, Default)]
@@ -117,6 +121,8 @@ pub struct WaveInterference {
     pixels: Pixels,
     /// The screen's intensity profile, a braille curve over the fill (WAVE-A8).
     profile: Dots,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl WaveInterference {
@@ -151,43 +157,20 @@ impl WaveInterference {
             for px in 0..fw {
                 let (d1, d2) = self.distances(Self::at(px, py));
                 let (a, e) = wave(d1, d2, k, phase);
-                let v = brightness(a, e, f64::from(self.vignette[py * fw + px]));
-                let ink = if v < DARK {
-                    Ink::BLANK
-                } else {
-                    ink::ramp(PALETTE, v)
-                };
+                let ink = crest_ink(brightness(a, e, f64::from(self.vignette[py * fw + px])));
                 for y in rows {
                     self.pixels.set(px as i32, y, ink);
-                }
-            }
-            // The screen (WAVE-A6, WAVE-A8): the rightmost column is the film, lit by the
-            // time-averaged intensity at the field's edge, and left of it a faint fill
-            // grows leftward from the film with length ∝ I, under the profile curve.
-            let (x0, sw) = self.screen;
-            if sw > 0 {
-                let i = self.intensity(py as f64 + 0.5);
-                let film = x0 + sw - 1;
-                let len = bar_len(i, sw - 1);
-                let fill = ink::ramp(PALETTE, (FILL_LOW + FILL_SPAN * i) / 255.0);
-                for x in x0..film {
-                    let ink = if x >= film - len { fill } else { Ink::BLANK };
-                    for y in rows {
-                        self.pixels.set(x as i32, y, ink);
-                    }
-                }
-                let lit = ink::ramp(PALETTE, (SCREEN_LOW + SCREEN_SPAN * i) / 255.0);
-                for y in rows {
-                    self.pixels.set(film as i32, y, lit);
                 }
             }
         }
         self.trace_profile();
         for (sx, sy) in self.sources {
-            let (px, py) = ((sx * ASPECT).round() as i32, (sy * 2.0).round() as i32);
-            for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
-                self.pixels.set(px + dx, py + dy, SOURCE_INK);
-            }
+            // A single white point each.
+            let (px, py) = (
+                (sx * ASPECT - 0.5).round() as i32,
+                (sy * 2.0 - 0.5).round() as i32,
+            );
+            self.pixels.set(px, py, SOURCE_INK);
         }
         let (cols, row) = &self.quiet;
         for x in cols.clone() {
@@ -206,7 +189,7 @@ impl WaveInterference {
     }
 
     /// The profile curve (WAVE-A8): one point per braille dot row, `I` of the way from the
-    /// film's left edge to the screen's, joined row to row, at `PROFILE_LOW..180` by `I`.
+    /// strip's right edge to its left, joined row to row, at `PROFILE_LOW..180` by `I`.
     /// Static in time (`I` is a time average), but redrawn with the sweeping sources.
     fn trace_profile(&mut self) {
         self.profile.clear();
@@ -294,7 +277,7 @@ impl Generator for WaveInterference {
                     y,
                 )
             });
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -303,7 +286,15 @@ impl Generator for WaveInterference {
             return;
         }
         self.t += dt;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -312,10 +303,8 @@ impl Generator for WaveInterference {
                 return Some(('*', SOURCE_INK));
             }
             if self.is_screen(x) {
-                // ASCII: the film as `|`, the fill left to the profile's dots.
-                let (x0, sw) = self.screen;
-                let film = (x0 + sw - 1) as i32;
-                return (x == film).then_some(('|', stronger(top, bottom)));
+                // The screen strip holds only the profile's dots.
+                return None;
             }
             ascii_field(top, bottom)
         });
@@ -333,6 +322,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut g = WaveInterference::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         g.t = t;
         g.rasterise();
         g
@@ -344,10 +334,12 @@ mod tests {
         let mut ctx = Ctx::new(1, Size::new(80, 24));
         for dt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1] {
             g.update(dt, &mut ctx);
+            g.prepare();
             assert_eq!(g.t, 1.5, "dt = {dt}");
         }
         // A good step afterwards still advances the clock.
         g.update(0.25, &mut ctx);
+        g.prepare();
         assert_eq!(g.t, 1.75);
     }
 
@@ -415,11 +407,7 @@ mod tests {
                     let wt = OMEGA * period * f64::from(i) / 12.0;
                     let (a, e) = wave(d1, d2, g.k, wt.sin_cos_det());
                     let v = brightness(a, e, vig);
-                    let l = if v < DARK {
-                        0
-                    } else {
-                        ink::ramp(PALETTE, v).level
-                    };
+                    let l = crest_ink(v).level;
                     (lo.min(l), hi.max(l))
                 });
                 let e = wave(d1, d2, g.k, (0.0, 1.0)).1;
@@ -429,7 +417,7 @@ mod tests {
                     assert!(p == Ink::BLANK || p == SOURCE_INK, "({px}, {py}) {p:?}");
                     nodes += 1;
                 } else if e > 1.9 && vig > 0.8 {
-                    assert!(hi - lo >= 140, "antinode ({px}, {py}): {lo}..{hi}");
+                    assert!(hi - lo >= 120, "antinode ({px}, {py}): {lo}..{hi}");
                     swings += 1;
                 }
             }
@@ -461,40 +449,7 @@ mod tests {
     }
 
     #[test]
-    fn wave_a9_the_screen_is_an_intensity_bar_chart() {
-        // A twelfth of the width, and per row a solid bar from the film whose length and
-        // level both follow I: bright fringes fill most of the bar width brightly, nodes
-        // leave it (almost) empty.
-        let g = scene(120, 40, 0.0);
-        let (x0, sw) = g.screen;
-        assert_eq!(sw, 10);
-        let film = x0 + sw - 1;
-        let (mut bright, mut dark) = (0, 0);
-        for py in 0..80 {
-            let i = g.intensity(f64::from(py) + 0.5);
-            let bar: Vec<Ink> = (x0..film)
-                .filter_map(|x| g.pixels.get(x as i32, py))
-                .filter(|p| *p != Ink::BLANK)
-                .collect();
-            if i > 0.9 {
-                bright += 1;
-                assert!(
-                    bar.len() >= (sw - 1) * 8 / 10,
-                    "row {py}: {} of {}",
-                    bar.len(),
-                    sw - 1
-                );
-                assert!(bar.iter().all(|p| p.level >= 130), "row {py}");
-            } else if i < 0.05 {
-                dark += 1;
-                assert!(bar.len() <= 1, "row {py}: {}", bar.len());
-            }
-        }
-        assert!(bright > 0 && dark > 0, "{bright} {dark}");
-    }
-
-    #[test]
-    fn wave_a6_screen_shows_the_fringes_right_of_the_field() {
+    fn wave_a6_a9_the_screen_is_a_profile_line_right_of_the_field() {
         let g = scene(120, 40, 0.0);
         let (x0, sw) = g.screen;
         assert_eq!(
@@ -504,42 +459,20 @@ mod tests {
         );
         assert_eq!(x0 + sw, 120);
         assert!(sw >= 3);
-        for i in 0..=10 {
-            let i = f64::from(i) / 10.0;
-            assert!(bar_len(i, sw) <= bar_len(i + 0.1, sw));
-        }
-        let (mut bright, mut dark) = (None, None);
+        // ADR-0017: no bars or film; the strip holds only the profile curve (WAVE-A8), and
+        // the gap columns are black.
         for py in 0..80 {
-            let (d1, d2) = g.distances(WaveInterference::at(g.field_w, py));
-            let i = 0.25 * wave(d1, d2, g.k, (0.0, 1.0)).1.powi(2);
-            let len = (x0..x0 + sw)
-                .filter(|&x| g.pixels.get(x as i32, py as i32) != Some(Ink::BLANK))
-                .count();
-            if i > 0.9 {
-                bright = Some(len);
-            } else if i < 0.1 {
-                dark = Some(len);
-            }
-            // The gap columns are never lit, and the screen tops out at
-            // SCREEN_LOW + SCREEN_SPAN = 180 (plus rounding), about 30 % under the
-            // brightest crest (level 255), so the detector never outshines the field.
-            for x in g.field_w..x0 {
-                assert_eq!(g.pixels.get(x as i32, py as i32), Some(Ink::BLANK));
-            }
-            for x in x0..x0 + sw {
-                let p = g.pixels.get(x as i32, py as i32).unwrap();
-                assert!(p.level <= 181, "screen ({x}, {py}) {p:?}");
+            for x in g.field_w..x0 + sw {
+                assert_eq!(g.pixels.get(x as i32, py), Some(Ink::BLANK), "({x}, {py})");
             }
         }
-        let (bright, dark) = (bright.expect("an antinode row"), dark.expect("a node row"));
-        assert!(bright > dark, "{bright} vs {dark}");
         // Never in the title span.
         let (y, cols) = title::span(Size::new(120, 40), &Title::new(META.title, None)).unwrap();
         assert!(cols.end < x0 as i32 && y == 39);
     }
 
     #[test]
-    fn wave_a7_field_is_ice_and_sources_accent() {
+    fn wave_a7_crests_are_ice_on_black_and_sources_white_points() {
         let g = scene(120, 40, 1.0);
         let (mut ice, mut src) = (0, 0);
         for py in 0..80 {
@@ -551,12 +484,16 @@ mod tests {
                 }
             }
         }
-        assert_eq!(src, 8, "two 2×2 sources");
-        assert!(ice > 120 * 80 / 3, "{ice}");
+        assert_eq!(src, 2, "two single-pixel sources");
+        assert!(ice > 120 * 80 / 12, "{ice}");
+        // Crests only: every lit field pixel is at most CREST_TOP, and troughs are black.
+        assert_eq!(crest_ink(brightness(-1.0, 2.0, 1.0)), Ink::BLANK);
+        assert_eq!(crest_ink(brightness(0.0, 2.0, 1.0)), Ink::BLANK);
+        assert_eq!(crest_ink(brightness(2.0, 2.0, 1.0)).level, CREST_TOP as u8);
     }
 
     #[test]
-    fn wave_a8_screen_profile_is_a_smooth_curve_over_a_faint_fill() {
+    fn wave_a8_screen_profile_is_a_smooth_curve() {
         let g = scene(120, 40, 0.0);
         let (x0, sw) = g.screen;
         let film = (x0 + sw - 1) as i32;
@@ -592,16 +529,6 @@ mod tests {
                     assert_eq!(cell.ink.role, Role::Ramp(Ramp::Ice), "({x},{y})");
                     assert!(cell.ink.level <= 181, "({x},{y}) {:?}", cell.ink);
                 }
-            }
-        }
-        // The fill stays far under the curve: it never tops FILL_LOW + FILL_SPAN.
-        for py in 0..80 {
-            for x in x0..x0 + sw - 1 {
-                let p = g.pixels.get(x as i32, py).unwrap();
-                assert!(
-                    p.level <= (FILL_LOW + FILL_SPAN) as u8 + 1,
-                    "({x},{py}) {p:?}"
-                );
             }
         }
     }

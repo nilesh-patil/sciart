@@ -16,7 +16,6 @@ use std::f64::consts::TAU;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, half_block};
-use sciart_core::rng::{cell_key, hash01};
 use sciart_core::{Grid, ink};
 
 use crate::shared::vortex_advect::{self, Flow, XEdge};
@@ -79,29 +78,28 @@ const TURRET_SPIN: f64 = 0.35;
 const TABLE: usize = 512;
 /// Steps run in the first resize, so the first frame is a mature storm.
 const SPIN_UP: usize = 180;
-/// Seconds of dithered dissolve between the visible and infrared pictures.
+/// Lattice cap for the spin-up (GEN-R19).
+const SPIN_UP_CAP: usize = CAP / 24;
+/// Seconds of the cross-fade between the visible and infrared pictures: a dip through
+/// black, the one fading out while the IR weight rises to ½, the other fading in after
+/// (M14, ADR-0017: no per-pixel dither).
 const DISSOLVE: f64 = 1.5;
 
-/// The open sea (`Ramp(Ice)`): its level floor, swell texture depth and the extra
-/// brightness at the centre of the sunglint, whose mirror point sits at `GLINT` (a share
-/// of the frame width, `H` down) with a Gaussian radius `GLINT_R` (`H`) (HUR-A6).
-const SEA: f64 = 0.085;
-const SEA_SWELL: f64 = 0.035;
-const SEA_GLINT: f64 = 0.22;
-const GLINT: (f64, f64) = (0.3, 0.3);
-const GLINT_R: f64 = 0.26;
-/// Thin cloud below this `Ramp` value is drawn as lighter sea blue, above it as grey-white.
-const HAZE_TOP: f64 = 0.26;
 /// Lattices at most this tall (80×24 and smaller) are too coarse for the tight inner
 /// bands: the secondary band and fine texture drop out and the picture is box-blurred
 /// once (HUR-A8).
 const SMALL: u16 = 64;
-/// Steps between swell refreshes (0.1 s): the swell moves 0.02 noise cells meanwhile.
+/// Steps between cirrus refreshes (0.1 s).
 const SWELL_EVERY: u32 = 6;
+/// Visible light (ADR-0017): the open sea is black; cloud is neutral `Starlight` up to
+/// `CLOUD_TOP` of the ramp, and black below `CLOUD_BLACK` levels.
+const CLOUD_TOP: f64 = 0.8;
+const CLOUD_BLACK: f64 = 14.0;
 /// The enhanced-infrared picture (HUR-A4): the warm sea's level, and the level the
 /// cloud-top curve starts from.
-const IR_SEA: f64 = 0.1;
 const IR_LOW: f64 = 0.16;
+/// The muted enhancement curve's top (the teal, level ~115).
+const IR_TOP: f64 = 0.45;
 /// Cloud-top height factor in the IR act: 1 inside `IR_CORE` (`H`, the overcast), falling
 /// linearly to `IR_BANDS` at `IR_OUTER`.
 const IR_CORE: f64 = CDO_OUT * R_MAX_WIND;
@@ -147,6 +145,23 @@ fn wind_from(dx: f64, dy: f64, vt: f64, vr: f64) -> (f64, f64) {
     ((vt * dy - vr * dx) / r, (-vt * dx - vr * dy) / r)
 }
 
+/// The convective texture tile, fixed and size-independent: built once per process and
+/// shared (GEN-R19; ~130 k noise lookups kept out of every build).
+fn turret_tile() -> &'static [f32] {
+    static TILE: std::sync::OnceLock<Box<[f32]>> = std::sync::OnceLock::new();
+    TILE.get_or_init(|| {
+        (0..TURRET_N * TURRET_N)
+            .map(|k| {
+                let (x, y) = ((k % TURRET_N) as f64, (k / TURRET_N) as f64);
+                // Two octaves of cauliflower-like bumps, a few pixels across.
+                let n =
+                    0.65 * value_noise(0x7EE7, x, y, 12.0) + 0.35 * value_noise(0x7EE8, x, y, 5.0);
+                (n * n * 1.6 - 0.5) as f32
+            })
+            .collect()
+    })
+}
+
 /// A 1-2-1 blur in x and then y (edges clamped), through `tmp` (same size as `g`).
 fn box_blur(g: &mut Grid<f32>, tmp: &mut Grid<f32>) {
     let (w, h) = (usize::from(g.width()), usize::from(g.height()));
@@ -175,26 +190,21 @@ pub struct Hurricane {
     timeline: Timeline,
     lattice: Size,
     cloud: Grid<f32>,
-    /// Cloud-top brightness `1 − e^{−1.5·c}`, and the sea's `Ramp(Ice)` value (swell,
-    /// glint, curvature; refreshed every `SWELL_EVERY` steps), per node.
+    /// Cloud-top brightness `1 − e^{−1.5·c}` per node.
     bright: Grid<f32>,
-    swell: Grid<f32>,
     /// Cirrus outflow brightness per node, refreshed with the swell.
     cirrus: Grid<f32>,
     /// Steps since the swell was refreshed.
     swell_age: u32,
-    /// The sea's `Ramp(Ice)` level per pixel (HUR-A6), resampled from `swell` a sixth
-    /// of the rows per frame (`sea_row` is the next), so no frame pays for all of it. A
-    /// byte per pixel: the ramp has 256 levels anyway.
-    sea: Vec<u8>,
-    sea_row: usize,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
     /// A coarse lattice (`height ≤ SMALL`): smoothed picture, fewer inner bands.
     small: bool,
     /// Enhanced-IR `Ramp(Infrared)` value by brightness level, before the height factor.
     ir_lut: [f32; 256],
     /// Convective texture (cumulus towers, `[−½, ½]`) on a `TURRET_N²` tile over the
     /// storm disc, fixed per storm, turning slowly with it.
-    turrets: Box<[f32]>,
+    turrets: &'static [f32],
     scratch: Grid<f32>,
     flow: Flow,
     /// `(tangential, inflow)` wind over `[0, 2·R_STORM]`, `H`/s.
@@ -212,21 +222,11 @@ impl Hurricane {
             lattice: Size::new(1, 1),
             cloud: Grid::default(),
             bright: Grid::default(),
-            swell: Grid::default(),
             cirrus: Grid::default(),
             swell_age: SWELL_EVERY,
-            sea: Vec::new(),
-            sea_row: 0,
+            dirty: false,
             small: false,
-            turrets: (0..TURRET_N * TURRET_N)
-                .map(|k| {
-                    let (x, y) = ((k % TURRET_N) as f64, (k / TURRET_N) as f64);
-                    // Two octaves of cauliflower-like bumps, a few pixels across.
-                    let n = 0.65 * value_noise(0x7EE7, x, y, 12.0)
-                        + 0.35 * value_noise(0x7EE8, x, y, 5.0);
-                    (n * n * 1.6 - 0.5) as f32
-                })
-                .collect(),
+            turrets: turret_tile(),
             ir_lut: std::array::from_fn(|k| {
                 // Brightness stands in for cloud-top height, hence coldness: thin low
                 // cloud stays in the curve's grey, the eyewall and convective cores reach
@@ -400,6 +400,26 @@ impl Hurricane {
         }
     }
 
+    /// The cirrus and the cloud-top brightness for the current cloud, as a step leaves
+    /// them: after a regrid the picture is right before the next step.
+    fn refresh_bright(&mut self) {
+        self.fill_swell();
+        for ((b, &c), &ci) in self
+            .bright
+            .as_mut_slice()
+            .iter_mut()
+            .zip(self.cloud.as_slice())
+            .zip(self.cirrus.as_slice())
+        {
+            let storm = 1.0 - (-1.5 * c).exp();
+            *b = storm + ci * (1.0 - storm);
+        }
+        box_blur(&mut self.bright, &mut self.scratch);
+        if self.small {
+            box_blur(&mut self.bright, &mut self.scratch);
+        }
+    }
+
     fn rebuild_lattice(&mut self, lattice: Size) {
         if lattice == self.lattice && !self.cloud.is_empty() {
             return;
@@ -413,17 +433,10 @@ impl Hurricane {
         self.small = lattice.height() <= SMALL;
         self.scratch.resize(lattice, 0.0);
         self.bright.resize(lattice, 0.0);
-        self.swell.resize(lattice, 0.0);
         self.cirrus.resize(lattice, 0.0);
-        // A regridded lattice needs its swell before the next picture.
+        // A regridded lattice needs its cirrus before the next picture.
         self.swell_age = SWELL_EVERY;
         self.flow.resize(lattice);
-    }
-
-    /// The sun's mirror point on the sea, in `H`: up and to the west (left), where the
-    /// low sun that lights the towers' western faces glints off the ocean (HUR-A6).
-    fn glint_centre(&self) -> (f64, f64) {
-        (GLINT.0 * self.width(), GLINT.1)
     }
 
     /// Weight of the infrared picture now: 0 visible, 1 infrared, dissolving between.
@@ -464,33 +477,17 @@ impl Hurricane {
         f64::from(top + fv * (bottom - top))
     }
 
-    /// The sea per node at the current time (HUR-A6), in `H` so it keeps its scale when
-    /// the lattice changes: deep blue with a little swell, lighter in the sunglint (whose
-    /// sparkle follows the swell), and a faint darkening toward the frame's edges for the
-    /// Earth's curvature. Also the cirrus outflow.
+    /// The cirrus outflow per node at the current time, in `H` so it keeps its scale when
+    /// the lattice changes.
     fn fill_swell(&mut self) {
         self.swell_age = 0;
         let w = usize::from(self.lattice.width()).max(1);
         let scale = f64::from(self.lattice.height().max(1));
         let t = self.t;
         let (cx, cy) = self.centre(t);
-        let (gx0, gy0) = self.glint_centre();
-        let width = self.width();
         let cot = 1.0 / OUTFLOW_PITCH.tan();
-        for (k, (sw, ci)) in self
-            .swell
-            .as_mut_slice()
-            .iter_mut()
-            .zip(self.cirrus.as_mut_slice())
-            .enumerate()
-        {
+        for (k, ci) in self.cirrus.as_mut_slice().iter_mut().enumerate() {
             let (x, y) = ((k % w) as f64 / scale, (k / w) as f64 / scale);
-            let swell = value_noise(0x0CEA, x * 14.0 + 0.2 * t, y * 14.0, 1.0);
-            let (gx, gy) = ((x - gx0) / GLINT_R, (y - gy0) / (0.8 * GLINT_R));
-            let g = (-(gx * gx + gy * gy)).exp() * (0.75 + 0.5 * swell);
-            let (ex, ey) = (2.0 * x / width - 1.0, 2.0 * y - 1.0);
-            let limb = 1.0 - 0.25 * (0.5 * (ex * ex + ey * ey)).min(1.0);
-            *sw = ((SEA + SEA_SWELL * swell + SEA_GLINT * g) * limb) as f32;
             // Cirrus outflow: thin streaks fanning out clockwise (anticyclonic aloft)
             // round the storm's outer edge, patchy, turning slowly.
             let (dx, dy) = (x - cx, y - cy);
@@ -508,46 +505,31 @@ impl Hurricane {
         }
     }
 
-    /// Resample `rows` pixel rows of the sea from the node sea, from `sea_row` on.
-    fn refresh_sea(&mut self, rows: usize) {
-        let size = self.pixels.pixel_size();
-        let (pw, ph) = (usize::from(size.width()), usize::from(size.height()));
-        if pw == 0 || ph == 0 {
-            return;
-        }
-        let (map, swell) = (&self.map, &self.swell);
-        for _ in 0..rows.min(ph) {
-            let y = self.sea_row % ph;
-            for (x, s) in self.sea[y * pw..(y + 1) * pw].iter_mut().enumerate() {
-                let v = map.sample(swell, x as i32, y as i32);
-                *s = (v * 255.0).round().clamp(0.0, 255.0) as u8;
-            }
-            self.sea_row = (y + 1) % ph;
-        }
-    }
-
     fn shade(&mut self) {
-        // A sixth of the rows per frame: the whole sea every `SWELL_EVERY` steps.
-        let rows = usize::from(self.pixels.pixel_size().height()).div_ceil(SWELL_EVERY as usize);
-        self.refresh_sea(rows);
         let ir = self.ir_weight();
         let size = self.pixels.pixel_size();
         let ph = f64::from(size.height());
-        let pw = i32::from(size.width());
         let rot = (TURRET_SPIN * self.t).sin_cos_det();
         let centre = self.centre(self.t);
         // Convective texture fades out on a coarse picture, where it only speckles.
         let (texture, relief) = if self.small { (0.0, 0.8) } else { (1.0, 1.6) };
-        let (bright, sea_px, map, ir_lut, turrets) = (
-            &self.bright,
-            &self.sea,
-            &self.map,
-            &self.ir_lut,
-            &self.turrets,
-        );
+        let (bright, map, ir_lut, turrets) = (&self.bright, &self.map, &self.ir_lut, self.turrets);
+        // Catmull-Rom from the capped lattice (GEN-R17): smooth arms, no stair steps. The
+        // taps are looked up once per pixel row (and the next, for the relief).
+        let mut rows = (-1, map.row_cubic(bright, 0), map.row_cubic(bright, 1));
         self.pixels.shade(|x, y| {
-            let b = map.sample(bright, x, y);
-            let use_ir = ir > 0.0 && (ir >= 1.0 || hash01(0x1A ^ cell_key(x, y)) < ir);
+            if y != rows.0 {
+                rows = (y, map.row_cubic(bright, y), map.row_cubic(bright, y + 1));
+            }
+            let b = rows.1.at(x);
+            // Dip through black: the visible picture fades out over the first half of the
+            // cross-fade, the infrared one fades in over the second.
+            let use_ir = ir >= 0.5;
+            let gain = if use_ir {
+                2.0 * ir - 1.0
+            } else {
+                1.0 - 2.0 * ir
+            };
             if use_ir {
                 // Enhanced IR (HUR-A4): the warm sea dark grey, low cloud grey, the
                 // coldest (thickest, highest) tops through cyan, green and yellow to
@@ -556,27 +538,38 @@ impl Hurricane {
                 // lower in the outer bands, so the bands stay in the green-yellow part of
                 // the curve (HUR-A10).
                 if f64::from(b) <= CLEAR {
-                    return ink::ramp(Ramp::Infrared, IR_SEA);
+                    return Ink::BLANK;
                 }
                 let r = ((f64::from(x) + 0.5) / ph - centre.0)
                     .hypot((f64::from(y) + 0.5) / ph - centre.1);
                 let height =
                     1.0 - (1.0 - IR_BANDS) * ((r - IR_CORE) / (IR_OUTER - IR_CORE)).clamp(0.0, 1.0);
                 let v = f64::from(ir_lut[((b * 255.0) as usize).min(255)]);
-                return ink::ramp(Ramp::Infrared, IR_LOW + (v - IR_LOW) * height);
+                // ADR-0017: muted, the grey low cloud rising only into the curve's teal
+                // for the coldest tops (no orange or rose).
+                let v = IR_LOW + (v - IR_LOW) / (1.0 - IR_LOW) * (IR_TOP - IR_LOW);
+                // Thin cloud fades into the black sea as in the visible picture.
+                let ir = (IR_LOW + (v - IR_LOW) * height) * veil(f64::from(b));
+                if ir * 255.0 < CLOUD_BLACK {
+                    return Ink::BLANK;
+                }
+                let ir = ir * gain;
+                if ir * 255.0 < CLOUD_BLACK {
+                    return Ink::BLANK;
+                }
+                return ink::ramp(Ramp::Infrared, ir);
             }
-            let sea = f64::from(sea_px.get((y * pw + x) as usize).copied().unwrap_or(0)) / 255.0;
             let b = f64::from(b);
             if b <= CLEAR {
-                return ink::ramp(Ramp::Ice, sea);
+                return Ink::BLANK;
             }
-            // Cloud (HUR-A7): starts from the sea's own lightness and only brightens it,
-            // so thin cloud is a grey veil over the blue, never a dark rim.
+            // Cloud (HUR-A7): a neutral grey over the black sea, thin cloud a translucent
+            // veil fading into it, never a dark rim.
             let v = if b > THICK {
                 // Relief: tops facing the low sun in the west brighter, lee sides darker;
                 // the convective towers add bumps (and their own sunlit and shadowed
                 // sides) where the cloud is thick.
-                let lee = f64::from(map.sample(bright, x + 1, y + 1));
+                let lee = f64::from(rows.2.at(x + 1));
                 let bump = Self::turret(turrets, centre, x, y, rot, ph);
                 let bump_lee = Self::turret(turrets, centre, x + 1, y + 1, rot, ph);
                 let conv = texture * (b / 0.5).min(1.0);
@@ -586,17 +579,13 @@ impl Hurricane {
                 let lit = cloud_v(b) * (1.0 + 0.1 * conv * bump)
                     + relief * body * (b - lee)
                     + 0.15 * conv * (bump - bump_lee);
-                sea + (lit - sea) * veil(b)
+                lit * veil(b)
             } else {
-                sea + (cloud_v(b) - sea) * veil(b)
+                cloud_v(b) * veil(b)
             };
-            // The ramps share lightness per level (CORE-R80), so switching from the sea's
-            // Ice to the cloud's Starlight keeps L*. The faintest haze stays in Ice, a
-            // lighter blue (a grey that dark reads as smoke on the sea), and turns grey at
-            // `HAZE_TOP`, below the level where Ice turns cyan.
-            let v = v.clamp(sea, 1.0);
-            if v < HAZE_TOP {
-                ink::ramp(Ramp::Ice, v)
+            let v = CLOUD_TOP * v.clamp(0.0, 1.0) * gain;
+            if v * 255.0 < CLOUD_BLACK {
+                Ink::BLANK
             } else {
                 ink::ramp(Ramp::Starlight, v)
             }
@@ -623,14 +612,7 @@ fn veil(b: f64) -> f64 {
 /// ASCII fallback: the cloud by brightness, the open sea left blank so the storm's shape
 /// stays legible in characters.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let cloud = |i: Ink| {
-        if i.role == Role::Ramp(Ramp::Ice) {
-            Ink::BLANK
-        } else {
-            i
-        }
-    };
-    ascii_ramp_cell(cloud(top), cloud(bottom))
+    ascii_ramp_cell(top, bottom)
 }
 
 impl Generator for Hurricane {
@@ -640,32 +622,38 @@ impl Generator for Hurricane {
 
     fn resize(&mut self, size: Size, _ctx: &mut Ctx) {
         let display = Size::new(size.width(), size.height().saturating_mul(2).max(1));
-        self.rebuild_lattice(grid::lattice_for(display, CAP, BUCKET));
+        let lattice = grid::lattice_for(display, CAP, BUCKET);
         if !self.warmed {
+            // GEN-R19: the spin-up runs on a coarse lattice (a 24th of the nodes) and is
+            // regridded up: the storm settles into the fine lattice over its first frames.
             self.warmed = true;
+            self.rebuild_lattice(grid::lattice_for(display, SPIN_UP_CAP, BUCKET));
             for _ in 0..SPIN_UP {
                 self.step(SIM_DT);
             }
             self.t = 0.0;
         }
+        self.rebuild_lattice(lattice);
+        self.refresh_bright();
         self.pixels.resize(size);
         self.map.rebuild(self.lattice, self.pixels.pixel_size());
         if self.swell_age >= SWELL_EVERY {
             self.fill_swell();
         }
-        // The whole sea now; afterwards a sixth of it per frame.
-        let p = self.pixels.pixel_size();
-        self.sea.resize(p.area(), 0);
-        self.sea_row = 0;
-        self.refresh_sea(usize::from(p.height()));
-        self.shade();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt);
         }
-        self.shade();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -745,8 +733,10 @@ mod tests {
         let mut g = Hurricane::new();
         let mut ctx = Ctx::new(42, Size::new(120, 40));
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g
     }
@@ -784,9 +774,11 @@ mod tests {
         let mut g = storm();
         let mut ctx = Ctx::new(1, Size::new(60, 20));
         g.resize(Size::new(60, 20), &mut ctx);
+        g.prepare();
         let mid_ir = ACTS[0].1 + 0.5 * ACTS[1].1;
         while g.t < mid_ir {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.caption(), Some("infrared"));
         let mut canvas = Canvas::new(Size::new(60, 20), GlyphMode::Unicode);
@@ -794,12 +786,15 @@ mod tests {
         let mut top = 0u8;
         for cell in canvas.cells() {
             for ink in [cell.ink, cell.bg] {
-                assert_eq!(ink.role, Role::Ramp(Ramp::Infrared), "{ink:?}");
+                assert!(
+                    matches!(ink.role, Role::Ramp(Ramp::Infrared) | Role::Background),
+                    "{ink:?}"
+                );
                 top = top.max(ink.level);
             }
         }
-        // The coldest tops reach the coloured part of the curve.
-        assert!(top > 160, "coldest top at level {top}");
+        // The coldest tops reach the curve's teal, no further (ADR-0017).
+        assert!((100..=120).contains(&top), "coldest top at level {top}");
     }
 
     /// The visible picture at `size`, `t` simulated seconds into the visible act.
@@ -807,8 +802,10 @@ mod tests {
         let mut g = Hurricane::new();
         let mut ctx = Ctx::new(3, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.t < t {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let p = g.pixels.pixel_size();
         let inks = (0..i32::from(p.height()))
@@ -819,62 +816,25 @@ mod tests {
     }
 
     #[test]
-    fn hur_a6_the_storm_sits_on_a_blue_ocean_with_sunglint() {
-        let (g, inks) = visible(Size::new(120, 40), 2.0);
-        let p = g.pixels.pixel_size();
-        let w = usize::from(p.width());
-        let mut ocean = 0;
-        for ink in &inks {
-            assert!(
-                matches!(ink.role, Role::Ramp(Ramp::Ice | Ramp::Starlight)),
-                "{ink:?}"
-            );
-            ocean += usize::from(ink.role == Role::Ramp(Ramp::Ice));
-        }
-        // No blank space: the sea fills what the storm leaves.
-        assert!(ocean * 5 > inks.len(), "ocean {ocean} of {}", inks.len());
-        // The glint: open ocean near the sun's mirror point is brighter than far from it.
-        let ph = f64::from(p.height());
-        let (gx, gy) = g.glint_centre();
-        let (mut near, mut nn, mut far, mut nf) = (0.0, 0, 0.0, 0);
-        for (k, ink) in inks.iter().enumerate() {
-            if ink.role != Role::Ramp(Ramp::Ice) {
-                continue;
-            }
-            let (x, y) = ((k % w) as f64 / ph, (k / w) as f64 / ph);
-            let d = (x - gx).hypot(y - gy);
-            if d < 0.12 {
-                near += f64::from(ink.level);
-                nn += 1;
-            } else if d > 0.6 {
-                far += f64::from(ink.level);
-                nf += 1;
-            }
-        }
-        assert!(nn > 0 && nf > 0, "near {nn}, far {nf}");
-        let (near, far) = (near / f64::from(nn), far / f64::from(nf));
-        assert!(near > far + 10.0, "glint {near:.0} vs open sea {far:.0}");
-    }
-
-    #[test]
-    fn hur_a7_no_cloud_pixel_is_darker_than_the_open_sea() {
-        // The old picture had a navy rim round every band, which read as a galaxy's dust
-        // lane: cloud may only lighten the sea it lies over (the ramps share lightness per
-        // level, CORE-R80).
+    fn hur_a6_a7_the_storm_is_grey_cloud_on_a_black_sea() {
+        // ADR-0017, GEN-R18: the open sea and the eye are black; cloud is a neutral grey
+        // no brighter than `CLOUD_TOP`, fading into the black at its thin edges.
         for size in [Size::new(120, 40), Size::new(80, 24)] {
             let (_, inks) = visible(size, 3.0);
-            let floor = inks
-                .iter()
-                .filter(|i| i.role == Role::Ramp(Ramp::Ice))
-                .map(|i| i.level)
-                .min()
-                .unwrap_or(0);
-            for ink in inks
-                .iter()
-                .filter(|i| i.role == Role::Ramp(Ramp::Starlight))
-            {
-                assert!(ink.level >= floor, "{size:?}: {ink:?} below sea {floor}");
+            let mut black = 0;
+            for ink in &inks {
+                assert!(
+                    matches!(ink.role, Role::Background | Role::Ramp(Ramp::Starlight)),
+                    "{size:?}: {ink:?}"
+                );
+                assert!(f64::from(ink.level) <= CLOUD_TOP * 255.0 + 1.0, "{ink:?}");
+                black += usize::from(*ink == Ink::BLANK);
             }
+            assert!(
+                black * 4 > inks.len(),
+                "{size:?}: black sea {black} of {}",
+                inks.len()
+            );
         }
     }
 
@@ -983,9 +943,11 @@ mod tests {
         let mut g = storm();
         let mut ctx = Ctx::new(1, Size::new(120, 40));
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         let mid_ir = ACTS[0].1 + 0.5 * ACTS[1].1;
         while g.t < mid_ir {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let p = g.pixels.pixel_size();
         let inks: Vec<Ink> = (0..i32::from(p.height()))
@@ -999,7 +961,7 @@ mod tests {
         bands.sort_by(f64::total_cmp);
         let band_top = mean(&bands[bands.len() * 3 / 4..]);
         assert!(
-            core > band_top + 100.0,
+            core > band_top + 25.0,
             "overcast {core:.0} vs bands {band_top:.0}"
         );
     }
@@ -1009,6 +971,7 @@ mod tests {
         let mut g = Hurricane::new();
         let mut ctx = Ctx::new(1, Size::new(500, 150));
         g.resize(Size::new(500, 150), &mut ctx);
+        g.prepare();
         assert!(g.lattice.area() <= CAP, "{:?}", g.lattice);
         assert_eq!(g.cloud.size(), g.lattice);
     }

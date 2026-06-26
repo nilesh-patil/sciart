@@ -69,6 +69,19 @@ const PALETTE: Ramp = Ramp::Cobalt;
 /// Ramp position of the densest precipitate: silver-blue, below the ramp's near-white
 /// top, so a mature band never reads as white light.
 const BAND_TOP: f64 = 0.85;
+/// M14 (ADR-0017): the precipitate is muted, `Cobalt` up to `BAND_LEVEL` at `BAND_TOP`.
+const BAND_LEVEL: f64 = 215.0;
+
+/// The ink of precipitate at ramp value `v ∈ [0, BAND_TOP]`: scaled onto
+/// `[0, BAND_LEVEL]`, black where that is not visible.
+fn band_ink(v: f64) -> Ink {
+    let level = BAND_LEVEL * (v / BAND_TOP).clamp(0.0, 1.0);
+    if level < ink::MIN_VISIBLE_LEVEL {
+        Ink::BLANK
+    } else {
+        Ink::new(Role::Ramp(PALETTE), ink::level(level))
+    }
+}
 
 /// Nodes per column; node `i` sits at depth `x = i + 1`, the reservoir ghost at `x = 0`.
 pub(crate) const NODES: usize = 160;
@@ -136,13 +149,14 @@ const D_VIS: f64 = 0.02;
 /// loop (d ≈ 2·10⁻⁴ at the view bottom) must leave clear gel, not a faint class.
 const D_FAINT: f64 = 0.002;
 /// The junction zone is dimmed by this factor so the eye goes to the bands.
-const JUNCTION_DIM: f64 = 0.3;
-const HAZE: f64 = 0.25;
-const LIQUID_INK: Ink = Ink::new(Role::Wave, 60);
+const JUNCTION_DIM: f64 = 0.09;
+/// M14 (ADR-0017): no supersaturation haze; the clear gel is black.
+const HAZE: f64 = 0.0;
+const LIQUID_INK: Ink = Ink::new(Role::Wave, 40);
 /// Tube walls and the dish rim.
-const WALL_INK: Ink = Ink::new(Role::Structure, 100);
-const RATIO_INK: Ink = Ink::new(Role::Text, 170);
-const LEGEND_INK: Ink = Ink::new(Role::Text, 110);
+const WALL_INK: Ink = Ink::new(Role::Structure, 50);
+const RATIO_INK: Ink = Ink::new(Role::Text, 120);
+const LEGEND_INK: Ink = Ink::new(Role::Text, 90);
 /// ASCII band threshold on the box-filtered d.
 const D_BAND: f64 = 0.04;
 
@@ -710,6 +724,8 @@ struct LiesegangRings {
     pixels: Pixels,
     /// ASCII class per pixel, same layout as `pixels`.
     classes: Grid<Class>,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 /// Acts begun up to scene time `t`: loops times [`ACTS`] plus the live act's index.
@@ -724,6 +740,7 @@ impl LiesegangRings {
             bands: Bands::default(),
         };
         Self {
+            dirty: true,
             schedule: schedule(),
             start,
             t: 0.0,
@@ -823,7 +840,7 @@ impl LiesegangRings {
                     };
                     let (d, c) = (d.mean(lo, hi), c.mean(lo, hi));
                     if let Some((v, class)) = gel_pixel(d, c, lo < junction) {
-                        set(x, y, ink::ramp(PALETTE, v * shade), class);
+                        set(x, y, band_ink(v * shade), class);
                     }
                 }
             }
@@ -871,10 +888,7 @@ impl LiesegangRings {
                     // gap under a pixel dims it rather than leaving dotted specks
                     // (LIES-A13).
                     let half = |lo: f64, hi: f64| pixel(lo, hi).map_or(0.0, |p| p.0);
-                    (
-                        ink::ramp(PALETTE, 0.5 * (half(lo, mid) + half(mid, hi))),
-                        class,
-                    )
+                    (band_ink(0.5 * (half(lo, mid) + half(mid, hi))), class)
                 };
                 self.pixels.set(x, y, ink);
                 self.classes.set(x, y, class);
@@ -893,7 +907,8 @@ impl LiesegangRings {
         let mut gauges: [Option<(i32, &Tube, f64)>; 5] = [None; 5];
         match self.act() {
             Act::Rack if lay.inner >= 4 => {
-                for (slot, preset) in lay.tubes() {
+                // M14: one dim ratio, over the first tube.
+                if let Some((slot, preset)) = lay.tubes().next() {
                     gauges[slot] = Some((lay.ratio_col(slot), &self.tubes[preset], lay.view));
                 }
             }
@@ -955,7 +970,7 @@ impl Generator for LiesegangRings {
         self.windows.extend(self.layout.windows());
         self.pixels.resize(size);
         self.classes.resize(self.pixels.pixel_size(), Class::Empty);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -983,7 +998,15 @@ impl Generator for LiesegangRings {
                 self.scan();
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1038,6 +1061,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut s = LiesegangRings::new(Some(act));
         s.resize(size, &mut ctx);
+        s.prepare();
         (s, ctx)
     }
 
@@ -1059,6 +1083,7 @@ mod tests {
             let dt = 0.25 * dts.next_f64();
             let run = s.run;
             s.update(dt, &mut ctx);
+            s.prepare();
             let growing = s.run == run && phase(s.schedule.at(s.t)) != DISSOLVE;
             for (tube, old) in columns(&s).iter().zip(&prev) {
                 let col = &tube.col;
@@ -1183,8 +1208,10 @@ mod tests {
             let (mut s, mut ctx) = scene_in(opening, Size::new(80, 24), 5);
             while phase(s.schedule.at(s.t + SIM_DT)) != DISSOLVE {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
             }
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
             let live = |s: &LiesegangRings| match opening {
                 Act::Rack => s.tubes.to_vec(),
                 Act::Dish => vec![s.dish.clone()],
@@ -1194,6 +1221,7 @@ mod tests {
             let run = s.run;
             while run_of(&s.schedule, s.t + SIM_DT) == run {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
                 for ((tube, old), m) in live(&s).iter().zip(&start).zip(&mut mass) {
                     let col = &tube.col;
                     assert_eq!((col.a, col.b, col.nuc), (old.col.a, old.col.b, old.col.nuc));
@@ -1210,6 +1238,7 @@ mod tests {
             }
 
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
             assert_eq!(s.run, run + 1);
             assert_ne!(s.act(), opening);
             let b0 = s.tubes[0].col.b0;
@@ -1237,6 +1266,7 @@ mod tests {
                 let until = opening as usize as f64 * ACT_S + 49.9;
                 while s.t + SIM_DT < until {
                     s.update(SIM_DT, &mut ctx);
+                    s.prepare();
                 }
                 assert_eq!(phase(s.schedule.at(s.t)), DISSOLVE);
                 assert_eq!(s.act(), opening);
@@ -1346,6 +1376,7 @@ mod tests {
                 let (mut s, mut ctx) = scene_in(opening, size, 42);
                 for _ in 0..120 {
                     s.update(SIM_DT, &mut ctx);
+                    s.prepare();
                 }
                 assert_eq!(s.layout.gel_px, 2 * (i32::from(h) - 3).max(0));
                 let px = s.pixels.pixel_size();
@@ -1359,7 +1390,12 @@ mod tests {
                             Class::Glass => Role::Structure,
                             _ => Role::Ramp(Ramp::Cobalt),
                         };
-                        assert_eq!(ink.role, want, "{opening:?} {w}x{h} ({x}, {y})");
+                        // M14: precipitate too faint to see is left black.
+                        let faded = want == Role::Ramp(Ramp::Cobalt) && ink == Ink::BLANK;
+                        assert!(
+                            ink.role == want || faded,
+                            "{opening:?} {w}x{h} ({x}, {y}): {ink:?}"
+                        );
                         if want == Role::Ramp(Ramp::Cobalt) {
                             assert!(ink.level <= top, "{opening:?} {w}x{h} ({x}, {y}): {ink:?}");
                         }
@@ -1417,6 +1453,7 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut s = LiesegangRings::new(None);
             s.resize(size, &mut ctx);
+            s.prepare();
             let act = s.act() as usize;
             assert_eq!(s.t, act as f64 * ACT_S + PREGROWN_S[act], "seed {seed}");
             seen[act] = true;
@@ -1551,17 +1588,16 @@ mod tests {
         let (mut s, mut ctx) = scene(Size::new(80, 24), 42);
         while s.t + SIM_DT < 41.9 {
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
         }
         let full = header(&s);
         assert!(full.contains("x(n+1)/x(n)"), "{full:?}");
-        assert_eq!(
-            full.matches('.').count(),
-            3,
-            "three ratios in hold: {full:?}"
-        );
+        // M14: one dim ratio, over the first tube.
+        assert_eq!(full.matches('.').count(), 1, "one ratio in hold: {full:?}");
         // The dissolve front erases each tube's measured bands, and its ratio with them.
         while s.t + SIM_DT < 49.9 {
             s.update(SIM_DT, &mut ctx);
+            s.prepare();
         }
         assert_eq!(header(&s).trim(), "", "numbers over clear tubes");
     }
@@ -1570,8 +1606,8 @@ mod tests {
     fn lies_a8_ascii_haze_is_lighter_than_precipitate() {
         use Class::{Band, Empty, Faint, Haze};
         let class = |d, c, junction| gel_pixel(d, c, junction).map(|p| p.1);
-        // Clear gel carrying only the supersaturation haze is its own, lightest class.
-        assert_eq!(class(0.0, 0.8 * C_STAR, false), Some(Haze));
+        // M14: the supersaturation haze is not drawn, so clear gel stays black.
+        assert_eq!(class(0.0, 0.8 * C_STAR, false), None);
         assert_eq!(class(0.0, 0.4 * C_STAR, false), None);
         assert_eq!(class(0.01, 0.8 * C_STAR, false), Some(Faint));
         assert_eq!(class(0.1, 0.0, true), Some(Faint), "junction zone");
@@ -1605,11 +1641,14 @@ mod tests {
         while a.t < 55.0 {
             let dt = 0.25 * dts.next_f64();
             a.update(dt, &mut ctx_a);
+            a.prepare();
             b.update(dt, &mut ctx_b);
+            b.prepare();
             if a.t > 45.0 && k < sizes.len() {
                 let size = Size::new(sizes[k].0, sizes[k].1);
                 ctx_b.set_size(size);
                 b.resize(size, &mut ctx_b);
+                b.prepare();
                 k += 1;
             }
         }

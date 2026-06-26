@@ -22,10 +22,10 @@
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
+use sciart_core::ease;
 use sciart_core::geom::{ASPECT, v3, wrap_angle};
-use sciart_core::ink::{self, ramp};
+use sciart_core::ink;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease};
 
 use crate::shared::earth_globe::{Globe, to_view};
 
@@ -327,26 +327,36 @@ const CELLS_PER_STAR: usize = 55;
 
 /// Orbit and satellite inks: paths in their class's ramp (front brighter), white sunlit
 /// satellites.
-const PATH_FRONT: f64 = 0.62;
-const PATH_BACK: f64 = 0.36;
-/// Paths crossing the globe are dimmer, so they read as in front of it without hiding
-/// the ground.
-const PATH_OVER: f64 = 0.58;
+/// ADR-0017 (M14): only the ISS's and the geostationary orbits are drawn, as 1-px
+/// `Ramp(Starlight)` lines (levels below; were each class's own ramp at 0.36–0.62).
+const PATH_FRONT: u8 = 50;
+const PATH_BACK: u8 = 30;
+/// Paths crossing the globe, so they read as in front of it without hiding the ground.
+const PATH_OVER: u8 = 36;
 const SAT_LIT: Ink = Ink::new(Role::Star, 255);
-/// Dot offsets of a satellite's head around its position: a 4×4 block less its corners.
-const HEAD: [(i32, i32); 11] = [
-    (1, 0),
-    (0, 1),
-    (1, 1),
-    (-1, 0),
-    (-1, 1),
-    (2, 0),
-    (2, 1),
+/// Dot offsets of a satellite's head around its position: a solid 4×4-dot square, the
+/// size of 2 × 2 half-block pixels (critic round 2: legible white heads, rule 6).
+const HEAD: [(i32, i32); 15] = [
+    (-1, -1),
     (0, -1),
     (1, -1),
+    (2, -1),
+    (-1, 0),
+    (1, 0),
+    (2, 0),
+    (-1, 1),
+    (0, 1),
+    (1, 1),
+    (2, 1),
+    (-1, 2),
     (0, 2),
     (1, 2),
+    (2, 2),
 ];
+/// City lights are drawn at this share of their level (ADR-0017: dim city lights). The
+/// rest of the globe keeps its levels: compressing them widens the smooth ocean's level
+/// terraces into flat squares (GEN-R17).
+const CITY_MUTE: f64 = 0.5;
 /// A satellite in Earth's shadow: still there, but unlit.
 const SAT_ECLIPSED: Ink = Ink::new(Role::Dim, 230);
 /// Each satellite trails the last `TRAIL` scene seconds of its orbit, in `TRAIL_STEPS`
@@ -355,7 +365,7 @@ const SAT_ECLIPSED: Ink = Ink::new(Role::Dim, 230);
 /// the path under it (a braille cell shows its strongest dot's ink).
 const TRAIL: f64 = 0.4;
 const TRAIL_STEPS: usize = 8;
-const TRAIL_LEVEL: (f64, f64) = (250.0, 170.0);
+const TRAIL_LEVEL: (f64, f64) = (150.0, 40.0);
 
 #[derive(Debug)]
 pub struct SatelliteOrbit {
@@ -376,6 +386,8 @@ pub struct SatelliteOrbit {
     stars: Vec<(i32, i32, u8)>,
     /// Cell of each labelled satellite this frame, when it is on show.
     labels: [Option<(Kind, i32, i32)>; 5],
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for SatelliteOrbit {
@@ -398,6 +410,7 @@ impl Default for SatelliteOrbit {
             dots: Dots::default(),
             stars: Vec::new(),
             labels: [None; 5],
+            dirty: false,
         }
     }
 }
@@ -451,6 +464,7 @@ impl SatelliteOrbit {
             south_up: false,
         }
         .paint(&mut self.globe);
+        self.mute_globe();
         for &(x, y, level) in &self.stars {
             // Stars only where the globe and its glow leave the sky black.
             let behind = self.globe.get(x / Dots::CELL_W, y / 2);
@@ -463,8 +477,8 @@ impl SatelliteOrbit {
         for k in 0..FLEET {
             let s = self.sats[k];
             let first = k == 0 || self.sats[k - 1].kind != s.kind;
-            if first && s.kind != Kind::Starlink {
-                self.draw_path(&s.el, s.kind.ramp(), tr);
+            if first && matches!(s.kind, Kind::Iss | Kind::Geo) {
+                self.draw_path(&s.el, tr);
             }
         }
         // Trails before heads, so no trail dims another satellite's head. The Starlink
@@ -507,6 +521,36 @@ impl SatelliteOrbit {
         }
     }
 
+    /// Mute the painted globe: city lights (`Ember`) at `CITY_MUTE` of their level, and
+    /// the `Blackbody` sand, whose level is a temperature, a muted `Sienna` tan at the same
+    /// lighting.
+    fn mute_globe(&mut self) {
+        let size = self.globe.pixel_size();
+        for y in 0..i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let Some(ink) = self.globe.get(x, y) else {
+                    continue;
+                };
+                let muted = match ink.role {
+                    Role::Ramp(Ramp::Ember) => {
+                        let level = (f64::from(ink.level) * CITY_MUTE).max(ink::MIN_VISIBLE_LEVEL);
+                        Ink::new(ink.role, ink::level(level))
+                    }
+                    Role::Blackbody => {
+                        // `surface_ink` draws sand at `255·(0.14 + 0.26·light)`.
+                        let light = ((f64::from(ink.level) / 255.0 - 0.14) / 0.26).clamp(0.0, 1.0);
+                        Ink::new(
+                            Role::Ramp(Ramp::Sienna),
+                            ink::level(255.0 * (0.3 + 0.25 * light)),
+                        )
+                    }
+                    _ => continue,
+                };
+                self.globe.set(x, y, muted);
+            }
+        }
+    }
+
     /// Dot coordinates of drawn view point `v` (Re).
     fn dot(&self, v: [f64; 3]) -> (f64, f64) {
         let (x, y) = self.cell(v);
@@ -516,7 +560,7 @@ impl SatelliteOrbit {
     /// One orbit as a braille polyline, hidden behind the globe's disc: bright in front
     /// of its plane, dim behind it, and dimmer still across the disc so the ground shows
     /// through (those cells take the globe's colour behind them in `render`).
-    fn draw_path(&mut self, el: &Elements, tint: Ramp, tr: f64) {
+    fn draw_path(&mut self, el: &Elements, tr: f64) {
         let mut prev: Option<([f64; 3], (f64, f64))> = None;
         for k in 0..=ORBIT_SAMPLES {
             let v = drawn(point_at(el, tr, TAU * k as f64 / ORBIT_SAMPLES as f64));
@@ -532,7 +576,8 @@ impl SatelliteOrbit {
                 } else {
                     PATH_BACK
                 };
-                self.dots.line(px, py, x, y, ramp(tint, level));
+                self.dots
+                    .line(px, py, x, y, Ink::new(Role::Ramp(Ramp::Starlight), level));
             }
             prev = Some((v, (x, y)));
         }
@@ -553,10 +598,12 @@ impl SatelliteOrbit {
             {
                 let f = k as f64 / TRAIL_STEPS as f64;
                 let level = ease::lerp(TRAIL_LEVEL.0, TRAIL_LEVEL.1, f);
+                // A white trail (M14), dimmed in Earth's shadow.
+                let _ = tint;
                 let ink = if in_shadow(p, self.sun) {
-                    Ink::new(Role::Dim, ink::level(level))
+                    Ink::new(Role::Dim, ink::level(0.5 * level))
                 } else {
-                    ramp(tint, level / 255.0)
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level))
                 };
                 self.dots.line(px, py, x, y, ink);
             }
@@ -593,7 +640,7 @@ impl Generator for SatelliteOrbit {
                 ctx.rng.random_range(40..150u8),
             )
         }));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -603,7 +650,13 @@ impl Generator for SatelliteOrbit {
         if dt.is_finite() && dt > 0.0 {
             self.t += dt;
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -636,7 +689,12 @@ impl Generator for SatelliteOrbit {
             const LABEL_GAP: i32 = 7;
             let mut placed = [(0, 0, -1); 5];
             let mut n = 0;
-            for &(kind, x, y) in self.labels.iter().flatten() {
+            for &(kind, x, y) in self
+                .labels
+                .iter()
+                .flatten()
+                .filter(|l| matches!(l.0, Kind::Iss | Kind::Geo))
+            {
                 let text = kind.label();
                 let len = text.len() as i32;
                 let clear = |gx: i32, gy: i32, placed: &[(i32, i32, i32)]| {
@@ -650,7 +708,8 @@ impl Generator for SatelliteOrbit {
                 let spots = [(x + 2, y), (x + 2, y - 1), (x + 2, y + 1), (x - 2 - len, y)];
                 if let Some(&(gx, gy)) = spots.iter().find(|&&(gx, gy)| clear(gx, gy, &placed[..n]))
                 {
-                    draw::label(canvas, gx, gy, text, Ink::new(Role::Text, 210));
+                    // Bare dim grey text, no chip (ADR-0017).
+                    canvas.text(gx, gy, text, Ink::new(Role::Text, 110));
                     if n < placed.len() {
                         placed[n] = (gy, gx - 1, gx + len);
                         n += 1;
@@ -673,6 +732,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = SatelliteOrbit::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -694,6 +754,7 @@ mod tests {
         let mut seen_hidden = false;
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let p = eci(&of(&g, Kind::Iss).el, g.real_time());
             let v = drawn(p);
             if hidden(v) {
@@ -774,6 +835,7 @@ mod tests {
         }
         for _ in 0..(DAY / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         for (s, l0) in geos.iter().zip(start) {
             assert!(wrap_angle(sub(&g, s) - l0).abs() < 1e-6, "GEO drifted");
@@ -911,8 +973,8 @@ mod tests {
             south_up: false,
         };
         // Sub-solar point: a bright day ink; the far side of the terminator: near-black.
-        let day = globe.shade(sun[0] * 0.95, -sun[1] * 0.95, 0.5).unwrap();
-        let night = globe.shade(-sun[0] * 0.95, sun[1] * 0.95, 0.5).unwrap();
+        let day = globe.shade(sun[0] * 0.95, -sun[1] * 0.95).unwrap();
+        let night = globe.shade(-sun[0] * 0.95, sun[1] * 0.95).unwrap();
         assert!(day.level > 90, "{day:?}");
         assert!(
             night.level < 40 || night.role == Role::Ramp(Ramp::Ember),
@@ -921,29 +983,32 @@ mod tests {
         // Night-side city cells glow in Ember; day-side ones are just land.
         let n = v3::unit([0.2, 0.1, 0.97]);
         let tokyo = (139.7_f64.to_radians(), 35.7_f64.to_radians());
-        let lit = surface_ink(n, tokyo, n, 1.0, 0.5);
-        let dark = surface_ink(n, tokyo, v3::scale(n, -1.0), 1.0, 0.5);
+        let lit = surface_ink(n, tokyo, n, 1.0);
+        let dark = surface_ink(n, tokyo, v3::scale(n, -1.0), 1.0);
         assert_eq!(dark.role, Role::Ramp(Ramp::Ember));
         assert_eq!(lit.role, Role::Ramp(Ramp::Aurora));
         // Deserts are sand. A globe too small for detail
         // shows neither deserts nor city lights.
         let sahara = (10.0_f64.to_radians(), 23.0_f64.to_radians());
-        let sand = surface_ink(n, sahara, n, 1.0, 0.5);
+        let sand = surface_ink(n, sahara, n, 1.0);
         assert_eq!(sand.role, Role::Blackbody);
         assert_eq!(
-            surface_ink(n, sahara, n, 0.0, 0.5).role,
+            surface_ink(n, sahara, n, 0.0).role,
             Role::Ramp(Ramp::Aurora)
         );
-        let unlit = surface_ink(n, tokyo, v3::scale(n, -1.0), 0.3, 0.5);
+        let unlit = surface_ink(n, tokyo, v3::scale(n, -1.0), 0.3);
         assert_ne!(unlit.role, Role::Ramp(Ramp::Ember));
         // Lights on a mid-sized globe stay a mid Ember, not a bright block.
-        let small = surface_ink(n, tokyo, v3::scale(n, -1.0), 0.6, 0.5);
-        assert!(small.level <= ramp(Ramp::Ember, 0.6).level, "{small:?}");
+        let small = surface_ink(n, tokyo, v3::scale(n, -1.0), 0.6);
+        assert!(
+            small.level <= ink::ramp(Ramp::Ember, 0.6).level,
+            "{small:?}"
+        );
         // Sand is a day-side colour: it never tints the terminator or the night.
         // A Sun 3° above the horizon.
         let dusk = v3::unit([0.989, 0.005, -0.1535]);
         for s in [v3::scale(n, -1.0), dusk] {
-            assert_ne!(surface_ink(n, sahara, s, 1.0, 0.3).role, Role::Blackbody);
+            assert_ne!(surface_ink(n, sahara, s, 1.0).role, Role::Blackbody);
         }
         // The limb glows outside the disc on the sunward side only.
         let toward = [sun[0], -sun[1]];
@@ -952,7 +1017,7 @@ mod tests {
         // at the edge and fades out, with no dark band between a bright ring and it.
         let ice = |d: f64| {
             globe
-                .shade(d * toward[0] / len, d * toward[1] / len, 0.5)
+                .shade(d * toward[0] / len, d * toward[1] / len)
                 .filter(|i| i.role == Role::Ramp(Ramp::Ice))
                 .map(|i| i.level)
         };
@@ -972,12 +1037,12 @@ mod tests {
         let out = 1.0 + 0.5 / globe.r;
         assert!(
             globe
-                .shade(out * toward[0] / len, out * toward[1] / len, 0.5)
+                .shade(out * toward[0] / len, out * toward[1] / len)
                 .is_some()
         );
         assert!(
             globe
-                .shade(-out * toward[0] / len, -out * toward[1] / len, 0.5)
+                .shade(-out * toward[0] / len, -out * toward[1] / len)
                 .is_none()
         );
     }
@@ -994,6 +1059,7 @@ mod tests {
         assert_eq!(train.len(), STARLINK_N);
         for _ in 0..240 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let tr = g.real_time();
         for pair in train.windows(2) {
@@ -1003,6 +1069,44 @@ mod tests {
                 .acos();
             assert!((ang - STARLINK_GAP).abs() < 1e-6, "gap {ang}");
         }
+    }
+
+    #[test]
+    fn sat_a14_the_globe_has_no_dither_and_no_flat_terraces() {
+        // M14 (ADR-0017, GEN-R17): a surface point's colour is a function of where it is
+        // (the desert a smooth spatial threshold, no per-pixel hash), and the textured
+        // ocean and land never settle into 4 × 4 flat squares.
+        let n = v3::unit([0.3, 0.2, 0.93]);
+        let sahara_edge = (10f64.to_radians(), 18f64.to_radians());
+        let a = surface_ink(n, sahara_edge, n, 1.0);
+        assert_eq!(a, surface_ink(n, sahara_edge, n, 1.0));
+        let (mut g, mut ctx) = scene(200, 50, 3);
+        for _ in 0..30 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let px = g.globe.pixel_size();
+        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+        let (mut windows, mut flat) = (0, 0);
+        for y in 0..h - 3 {
+            for x in 0..w - 3 {
+                let first = g.globe.get(x, y).unwrap();
+                if !matches!(first.role, Role::Ramp(Ramp::Ice | Ramp::Aurora)) || first.level < 40 {
+                    continue;
+                }
+                let cells: Vec<Ink> = (0..4)
+                    .flat_map(|dy| (0..4).map(move |dx| (dx, dy)))
+                    .map(|(dx, dy)| g.globe.get(x + dx, y + dy).unwrap())
+                    .collect();
+                if cells.iter().any(|c| c.role != first.role) {
+                    continue;
+                }
+                windows += 1;
+                flat += usize::from(cells.iter().all(|&c| c == first));
+            }
+        }
+        assert!(windows > 100, "{windows} lit ocean/land windows");
+        assert!(20 * flat <= windows, "{flat} of {windows} windows flat");
     }
 
     #[test]
@@ -1024,6 +1128,7 @@ mod tests {
         (0..(secs / SIM_DT) as usize)
             .map(|_| {
                 g.update(SIM_DT, ctx);
+                g.prepare();
                 let mut canvas = Canvas::new(g.size, GlyphMode::Unicode);
                 g.render(&mut canvas);
                 canvas
@@ -1078,8 +1183,9 @@ mod tests {
             assert_eq!(cell.ink, SAT_LIT, "ISS head at {head:?}");
             let tail = g.cell(vb);
             let cell = canvas.get(tail.0 as i32, tail.1 as i32).unwrap();
+            // M14: a white (`Starlight`) trail, dimmer than the head.
             assert!(
-                cell.ink.role == Role::Ramp(Kind::Iss.ramp()) && cell.ink.level < 255,
+                cell.ink.role == Role::Ramp(Ramp::Starlight) && cell.ink.level < 255,
                 "ISS trail at {tail:?}: {cell:?}"
             );
             checked += 1;
@@ -1091,27 +1197,24 @@ mod tests {
     }
 
     #[test]
-    fn sat_a12_orbit_classes_are_tinted_by_ramp() {
-        assert_eq!(Kind::Iss.ramp(), Kind::Starlink.ramp(), "one LEO tint");
-        let tints = [Kind::Iss.ramp(), Kind::Gps.ramp(), Kind::Geo.ramp()];
-        assert!(tints[0] != tints[1] && tints[1] != tints[2] && tints[0] != tints[2]);
-        assert_eq!(
-            Kind::Molniya.ramp(),
-            Kind::Geo.ramp(),
-            "high orbits share a tint"
-        );
+    fn sat_a12_only_two_orbits_as_faint_starlight_lines() {
+        // ADR-0017 (M14): no class tints; the ISS's and the geostationary orbits only, as
+        // 1-px `Starlight` lines at most `PATH_FRONT`, the brighter braille being trails.
         let (mut g, mut ctx) = scene(200, 50, 3);
         let canvas = frames(&mut g, &mut ctx, 0.5).pop().unwrap();
-        for ramp in tints {
-            let n = canvas
-                .cells()
-                .iter()
-                .filter(|c| {
-                    ('\u{2801}'..='\u{28FF}').contains(&c.ch) && c.ink.role == Role::Ramp(ramp)
-                })
-                .count();
-            assert!(n > 10, "{ramp:?}: {n} braille cells");
+        let braille = |c: &&Cell| ('\u{2801}'..='\u{28FF}').contains(&c.ch);
+        let cells: Vec<&Cell> = canvas.cells().iter().filter(braille).collect();
+        for c in &cells {
+            assert!(
+                !matches!(c.ink.role, Role::Ramp(Ramp::Aurora | Ramp::Plasma)),
+                "{c:?}"
+            );
         }
+        let faint = cells
+            .iter()
+            .filter(|c| c.ink.role == Role::Ramp(Ramp::Starlight) && c.ink.level <= PATH_FRONT)
+            .count();
+        assert!(faint > 30, "{faint} faint orbit cells");
     }
 
     #[test]
@@ -1120,6 +1223,7 @@ mod tests {
         let mut pairs = 0;
         for _ in 0..240 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let tr = g.real_time();
             let heads: Vec<[f64; 3]> = g
                 .sats
@@ -1184,11 +1288,12 @@ mod tests {
                     continue;
                 };
                 labelled = true;
-                // On a chip: a blank cell either side (CORE-R67).
-                for x in [i as i32 - 1, i as i32 + 3] {
-                    let cell = c.get(x, y as i32).expect("on screen");
-                    assert_eq!((cell.ch, cell.bg), (' ', Ink::BLANK), "chip at {x},{y}");
-                }
+                // M14: bare dim grey text, no chip.
+                let cell = c.get(i as i32, y as i32).expect("on screen");
+                assert!(
+                    cell.ink.role == Role::Text && cell.ink.level <= 110,
+                    "label at {i},{y}: {cell:?}"
+                );
             }
         }
         assert!(labelled);
@@ -1207,14 +1312,11 @@ mod tests {
                 .iter()
                 .any(|c| c.ink.role == role || c.bg.role == role)
         };
-        for role in [
-            Role::Ramp(Ramp::Ice),
-            Role::Ramp(Ramp::Aurora),
-            Role::Ramp(Ramp::Plasma),
-            Role::Star,
-        ] {
+        for role in [Role::Ramp(Ramp::Ice), Role::Ramp(Ramp::Aurora), Role::Star] {
             assert!(has(role), "{role:?} missing");
         }
+        // M14: no orbit tints, and the sand is a muted `Sienna`, not `Blackbody`.
+        assert!(!has(Role::Ramp(Ramp::Plasma)) && !has(Role::Blackbody));
         // Braille orbits and half-block globe.
         assert!(
             frame

@@ -35,8 +35,15 @@ impl ChildGuard {
 
 impl Backend for ChildGuard {
     fn status(&self) -> String {
+        let mut out = String::new();
+        // Writing to a `String` cannot fail.
+        let _ = self.write_status(&mut out);
+        out
+    }
+
+    fn write_status(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
         let state = if self.exited { "exited" } else { "on" };
-        format!("{}:{state}", self.label)
+        write!(out, "{}:{state}", self.label)
     }
 
     fn poll(&mut self, _elapsed: f64) {
@@ -83,8 +90,15 @@ mod tests {
     #[test]
     fn ka_r3_self_exit_is_noticed_by_poll() {
         let mut guard = ChildGuard::spawn("quick", "true", &[]).unwrap();
-        thread::sleep(Duration::from_millis(300));
-        guard.poll(0.0);
+        // Poll rather than sleep a fixed time: on a loaded machine (or with an AV scanner
+        // vetting every exec) `true` can take well over 300 ms to exit.
+        for _ in 0..100 {
+            thread::sleep(Duration::from_millis(50));
+            guard.poll(0.0);
+            if guard.status() == "quick:exited" {
+                break;
+            }
+        }
         assert_eq!(guard.status(), "quick:exited");
     }
 

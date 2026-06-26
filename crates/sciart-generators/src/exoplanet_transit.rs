@@ -76,7 +76,8 @@ const STRIP_LO: f64 = 1.35;
 const NOISE: f64 = 0.07;
 /// The model curve in lavender, apart from the peach star and the blue planet; "now" in
 /// white.
-const MODEL_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 200);
+/// M14: a dim 1-px model curve.
+const MODEL_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 120);
 const NOW_INK: Ink = Ink::new(Role::Star, 255);
 const OBS_INK: Ink = Ink::new(Role::Structure, 150);
 const BASELINE_INK: Ink = Ink::new(Role::Dim, 30);
@@ -174,6 +175,8 @@ pub struct ExoplanetTransit {
     pixels: Pixels,
     dots: Dots,
     size: Size,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl ExoplanetTransit {
@@ -194,6 +197,7 @@ impl ExoplanetTransit {
             pixels: Pixels::default(),
             dots: Dots::default(),
             size: Size::new(1, 1),
+            dirty: false,
         };
         s.depth = 1.0 - s.flux_at_d(IMPACT);
         s
@@ -468,12 +472,18 @@ impl Generator for ExoplanetTransit {
         self.pixels.resize(size);
         self.shade_star();
         self.dots.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -631,6 +641,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = ExoplanetTransit::new();
             g.resize(size, &mut Ctx::new(5, size));
+            g.prepare();
             assert!(g.star.len() > 20);
             for k in 0..=200 {
                 let phi = PI / 2.0 + PI * f64::from(k) / 200.0;
@@ -650,6 +661,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ExoplanetTransit::new();
         g.resize(size, &mut Ctx::new(5, size));
+        g.prepare();
         g.t = phi / TAU * PERIOD;
         g.rasterise();
         let pos = orbit(phi);
@@ -706,6 +718,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ExoplanetTransit::new();
         g.resize(size, &mut Ctx::new(5, size));
+        g.prepare();
         let row = g.cy as i32;
         let mut last = u8::MAX;
         let mut lit = 0;
@@ -730,6 +743,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ExoplanetTransit::new();
         g.resize(size, &mut Ctx::new(5, size));
+        g.prepare();
         let s = g.strip.expect("strip at 200x50");
         assert_eq!(
             ((s.top + s.height - 1.0) / 4.0) as i32,
@@ -770,6 +784,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ExoplanetTransit::new();
         g.resize(size, &mut Ctx::new(5, size));
+        g.prepare();
         // Mid-transit: the planet's centre pixel is empty, the disc centre is star.
         g.t = 0.0;
         g.rasterise();
@@ -807,6 +822,7 @@ mod tests {
         let size = Size::new(80, 24);
         let mut g = ExoplanetTransit::new();
         g.resize(size, &mut Ctx::new(5, size));
+        g.prepare();
         let rp = g.rs * P;
         assert!((1.5..2.5).contains(&rp), "{rp}");
         for k in 0..8 {
@@ -863,6 +879,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = ExoplanetTransit::new();
             g.resize(size, &mut Ctx::new(5, size));
+            g.prepare();
             assert!(g.strip.is_none(), "{w}x{h}");
         }
     }
@@ -875,6 +892,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ExoplanetTransit::new();
         g.resize(size, &mut Ctx::new(5, size));
+        g.prepare();
         let centre = g.pixels.get(g.cx as i32, g.cy as i32).unwrap();
         for k in 0..16 {
             g.t = PERIOD * f64::from(k) / 16.0;

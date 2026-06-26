@@ -10,6 +10,10 @@
 //! lifts the tip by a random-walk step biased upward and precipitates a new tube segment;
 //! the pressure falls to zero and the new membrane gets a fresh strength. Tips branch now
 //! and then; precipitate flakes break off and sink.
+//!
+//! Drawn on black (ADR-0017): tubes are thin strokes anti-aliased by coverage in their
+//! salts' muted colours, lighter while fresh and at the growing tips; the floor is one
+//! dim line.
 
 use rand::Rng;
 use sciart_core::particles::gaussian;
@@ -81,8 +85,9 @@ pub(crate) struct Segment {
     pub(crate) fade: f32,
 }
 
-/// Metal-salt tube colours: copper blue-green, cobalt violet, iron rust, nickel green.
-pub(crate) const SALTS: [Ramp; 4] = [Ramp::Ice, Ramp::Plasma, Ramp::Ember, Ramp::Aurora];
+/// Metal-salt tube colours (muted, ADR-0017): copper blue, cobalt pink, iron rust, nickel
+/// green.
+pub(crate) const SALTS: [Ramp; 4] = [Ramp::Ice, Ramp::HAlpha, Ramp::Sienna, Ramp::Aurora];
 /// The vent chimney's mineral wall (iron sulfides and oxides): rust.
 const CHIMNEY_SALT: u8 = 2;
 /// An old garden fades out over this long while the new one sprouts.
@@ -389,14 +394,14 @@ struct Garden {
     time: f64,
     act: usize,
     timeline: Timeline,
-    /// The empty tank (water, light, sand), built in `resize`.
-    base: Pixels,
     pixels: Pixels,
     glow: Glow,
     tone: Tone,
     /// Pixel rows the tank spans (above the title row).
     rows: f64,
     started: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Garden {
@@ -406,232 +411,198 @@ impl Default for Garden {
             time: 0.0,
             act: usize::MAX,
             timeline: Timeline::new(&[(CAPTIONS[0], GARDEN_S), (CAPTIONS[1], VENT_S)]),
-            base: Pixels::default(),
             pixels: Pixels::default(),
             glow: Glow::default(),
             tone: Tone::asinh(0.5, 12.0),
             rows: 1.0,
             started: false,
+            dirty: true,
         }
     }
 }
 
-/// The tank's water: dark, a little lighter towards the lit side and the surface.
-const WATER: Ramp = Ramp::Cobalt;
-/// A gas bubble: a small ring over the water.
-const BUBBLE: Glyph = Glyph::new('o', 'o');
-const BUBBLE_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 190);
+/// Each salt's ramp span `(lo, hi)`: old membrane at `lo`, the fresh growing tube and the
+/// tip toward `hi` (ADR-0017: muted, so the tubes sit quietly on black).
+const SALT_LEVELS: [(f64, f64); 4] = [(90.0, 190.0), (80.0, 150.0), (90.0, 180.0), (90.0, 170.0)];
+/// Tube stroke radius in pixels: 1–3-pixel strokes, the chimney's wall the widest.
+const TUBE_R: (f64, f64) = (0.5, 1.0);
+const CHIMNEY_R: f64 = 1.5;
 /// Segments wider than this (tank units) are chimney wall.
 const CHIMNEY_W: f64 = 0.025;
-/// The sandy bed.
-const SAND: Ramp = Ramp::Starlight;
+/// The floor: one dim line.
+const FLOOR_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 40);
 /// The glow a smoke parcel exposes around its pixel.
-const SMOKE_HALO: [(i32, i32, f32); 25] = sciart_core::raster::halo_kernel(2);
+const SMOKE_HALO: [(i32, i32, f32); 9] = sciart_core::raster::halo_kernel(1);
 
-/// Whether `ink` is open water (or nothing), so particles and glows may draw there.
-#[inline]
-fn is_water(ink: Option<Ink>) -> bool {
-    ink.is_some_and(|i| i.role == Role::Background || i.role == Role::Ramp(WATER))
+/// Set pixel `(x, y)` to `ink` unless it already holds a brighter one.
+fn put_max(pixels: &mut Pixels, x: i32, y: i32, ink: Ink) {
+    if ink.level == 0 {
+        return;
+    }
+    if pixels.get(x, y).is_some_and(|old| old.level < ink.level) {
+        pixels.set(x, y, ink);
+    }
+}
+
+/// A capsule `a → b` of radius `r` (pixels), anti-aliased by coverage: each pixel's level
+/// is `level` times the share of it inside the stroke, so edges fade into the black
+/// instead of stepping (ADR-0017: thin lines, anti-aliased by intensity).
+fn capsule(pixels: &mut Pixels, a: (f64, f64), b: (f64, f64), r: f64, role: Role, level: f64) {
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    let reach = r + 1.0;
+    let (x0, x1) = (
+        (a.0.min(b.0) - reach).floor(),
+        (a.0.max(b.0) + reach).ceil(),
+    );
+    let (y0, y1) = (
+        (a.1.min(b.1) - reach).floor(),
+        (a.1.max(b.1) + reach).ceil(),
+    );
+    if !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) {
+        return;
+    }
+    for y in y0 as i32..=y1 as i32 {
+        for x in x0 as i32..=x1 as i32 {
+            let (px, py) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let t = if len2 > 0.0 {
+                (((px - a.0) * dx + (py - a.1) * dy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let d = (px - a.0 - t * dx).hypot(py - a.1 - t * dy);
+            let cover = (r + 0.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                put_max(pixels, x, y, Ink::new(role, ink::level(level * cover)));
+            }
+        }
+    }
 }
 
 impl Garden {
-    /// The tank without its contents: a water gradient lit softly from the left and
-    /// from above, and a rippled sandy bed. Built once per resize.
-    fn paint_tank(&mut self) {
-        let ps = self.base.pixel_size();
-        let (pw, ph) = (f64::from(ps.width()), self.rows);
-        let floor = FLOOR_Y * ph;
-        let noise = sciart_core::rng::value_noise;
-        self.base.shade(|x, y| {
-            let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-            let (u, v) = (fx / pw, fy / ph);
-            if fy >= ph {
-                // The title row stays clear.
-                return Ink::BLANK;
-            }
-            if fy >= floor {
-                // Sand: fine grain over soft ripples, darker deeper in the bed.
-                let ripple = noise(11, fx / 3.0, fy, 1.5);
-                let grain = sciart_core::rng::hash01(sciart_core::rng::cell_key(x, y));
-                let depth = ((fy - floor) / (ph - floor).max(1.0)).min(1.0);
-                let lvl =
-                    62.0 + 22.0 * ripple + 12.0 * grain - 22.0 * depth + 14.0 * (-u / 0.35).exp();
-                return Ink::new(Role::Ramp(SAND), ink::level(lvl));
-            }
-            // Water: the light comes in from the upper left.
-            let side = (-u / 0.3).exp();
-            let top = (1.0 - v).powi(2);
-            let lvl = 7.0 + 9.0 * top + 13.0 * side * (0.5 + 0.5 * top);
-            Ink::new(Role::Ramp(WATER), ink::level(lvl))
-        });
-    }
-
+    /// The tank on black: tubes as thin anti-aliased strokes in their salts' muted
+    /// colours, lighter while fresh and at the growing tips; the seed crystals small
+    /// points; the floor one dim line; the vent's smoke a faint grey glow, warm only at
+    /// the orifice. Rebuilt from the model in `prepare` (GEN-R20).
     fn rasterise(&mut self) {
-        let base = &self.base;
-        self.pixels
-            .shade(|x, y| base.get(x, y).unwrap_or(Ink::BLANK));
+        self.pixels.clear();
         let ps = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(ps.width()), self.rows);
         let to_px = |x: f64, y: f64| (x * pw, y * ph);
-        // Tubes: thick strokes in their salt's colour, lit from the left, fresh membrane
-        // pale; an old garden dims as it fades out.
+        // The floor line, under everything.
+        let floor = (FLOOR_Y * ph) as i32;
+        if f64::from(floor) < ph {
+            for x in 0..i32::from(ps.width()) {
+                self.pixels.set(x, floor, FLOOR_INK);
+            }
+        }
+        let salt = |i: u8| usize::from(i) % SALTS.len();
         for s in &self.tank.segments {
-            let (ax, ay) = to_px(s.a[0], s.a[1]);
-            let (bx, by) = to_px(s.b[0], s.b[1]);
-            let r = (s.w * pw).max(0.6);
+            let k = salt(s.salt);
+            let (lo, hi) = SALT_LEVELS[k];
             let fresh = (1.0 - f64::from(s.age) / 6.0).max(0.0);
             let fade = f64::from(s.fade.clamp(0.0, 1.0));
-            let role = Role::Ramp(SALTS[usize::from(s.salt) % SALTS.len()]);
-            let len = (bx - ax).hypot(by - ay);
-            // Discs every half radius cover the stroke; a wide chimney wall needs few.
-            let n = (len * 2.0 / r.max(1.0)).ceil().max(1.0) as i32;
-            for k in 0..=n {
-                let t = f64::from(k) / f64::from(n);
-                let (cx, cy) = (ax + (bx - ax) * t, ay + (by - ay) * t);
-                let reach = r.ceil() as i32;
-                for dy in -reach..=reach {
-                    for dx in -reach..=reach {
-                        let (x, y) = (cx as i32 + dx, cy as i32 + dy);
-                        let d = (f64::from(dx).powi(2) + f64::from(dy).powi(2)).sqrt();
-                        if d <= r + 0.3 {
-                            // Round tube lit from the left: bright left flank, dark right.
-                            let ox = f64::from(x) + 0.5 - cx;
-                            let across = (ox / (r + 0.5)).clamp(-1.0, 1.0);
-                            let lvl =
-                                95.0 + 55.0 * (1.0 - across.abs()) - 30.0 * across + 70.0 * fresh;
-                            // Mineral grain in the membrane; the chimney's thick wall is
-                            // darker, rough rock rather than a glassy tube.
-                            let grain =
-                                sciart_core::rng::hash01(sciart_core::rng::cell_key(x, y)) - 0.5;
-                            let (rock, rough) = if s.w > CHIMNEY_W {
-                                (0.42, 70.0)
-                            } else if self.tank.vent {
-                                (0.8, 30.0)
-                            } else {
-                                (1.0, 18.0)
-                            };
-                            let lvl = (lvl + rough * grain) * rock;
-                            let lvl = 20.0 + (lvl - 20.0) * fade;
-                            if fade < 1.0 && !is_water(self.pixels.get(x, y)) {
-                                // A fading tube never covers the growing garden.
-                                continue;
-                            }
-                            self.pixels.set(x, y, Ink::new(role, ink::level(lvl)));
-                        }
-                    }
-                }
-            }
-        }
-        // Seed crystals (the chimney stands on its own).
-        let seeds = if self.tank.vent { 0 } else { self.tank.n_seeds };
-        for (k, &(sx, sy)) in self.tank.seeds[..seeds].iter().enumerate() {
-            let (cx, cy) = to_px(sx, sy);
-            let role = Role::Ramp(SALTS[usize::from(self.tank.salts[k]) % SALTS.len()]);
-            let r = if self.tank.vent {
-                0.03 * pw
+            let r = if s.w > CHIMNEY_W {
+                CHIMNEY_R
             } else {
-                0.012 * pw + 1.0
+                (s.w * pw).clamp(TUBE_R.0, TUBE_R.1)
             };
-            let reach = r.ceil() as i32;
-            for dy in -reach..=0 {
-                for dx in -reach..=reach {
-                    if f64::from(dx * dx + dy * dy) <= r * r {
-                        let lvl = 110 + 20 * u8::from(dx < 0);
-                        self.pixels
-                            .set(cx as i32 + dx, cy as i32 + dy, Ink::new(role, lvl));
-                    }
-                }
+            let level = (lo + (hi - lo) * 0.6 * fresh) * fade;
+            capsule(
+                &mut self.pixels,
+                to_px(s.a[0], s.a[1]),
+                to_px(s.b[0], s.b[1]),
+                r,
+                Role::Ramp(SALTS[k]),
+                level,
+            );
+        }
+        // Seed crystals (the chimney stands on its own): small points.
+        if !self.tank.vent {
+            for (k, &(sx, sy)) in self.tank.seeds[..self.tank.n_seeds].iter().enumerate() {
+                let i = salt(self.tank.salts[k]);
+                let c = to_px(sx, sy);
+                capsule(
+                    &mut self.pixels,
+                    c,
+                    c,
+                    1.0,
+                    Role::Ramp(SALTS[i]),
+                    SALT_LEVELS[i].1,
+                );
             }
         }
-        // Tips: a glowing membrane bulb swelling with the pressure inside, with a soft
-        // halo in the water that brightens just before it bursts.
+        // Growing tips: the lightest point of each tube, swelling a little with the
+        // pressure inside before it bursts.
         for t in &self.tank.tips {
-            let (cx, cy) = to_px(t.x, t.y);
-            let role = Role::Ramp(SALTS[usize::from(t.salt) % SALTS.len()]);
+            let i = salt(t.salt);
             let swell = (t.p / t.strength).clamp(0.0, 1.0);
-            let r = (t.w * pw * (1.0 + 0.9 * swell)).max(0.8);
-            let halo = r + 1.5 + 1.5 * swell;
-            let reach = halo.ceil() as i32;
-            for dy in -reach..=reach {
-                for dx in -reach..=reach {
-                    let (x, y) = (cx as i32 + dx, cy as i32 + dy);
-                    let d = f64::from(dx * dx + dy * dy).sqrt();
-                    if d <= r {
-                        // The vent crown glows ember-hot but stays below white.
-                        let top = if self.tank.vent { 150.0 } else { 175.0 };
-                        let lvl = top + 80.0 * swell - 25.0 * d / r.max(1.0);
-                        self.pixels.set(x, y, Ink::new(role, ink::level(lvl)));
-                    } else if d <= halo && is_water(self.pixels.get(x, y)) {
-                        let k = 1.0 - (d - r) / (halo - r);
-                        let lvl = (40.0 + 50.0 * swell) * k * k;
-                        if lvl >= 22.0 {
-                            self.pixels.set(x, y, Ink::new(role, ink::level(lvl)));
-                        }
-                    }
-                }
-            }
+            let c = to_px(t.x, t.y);
+            let level = SALT_LEVELS[i].1 + 30.0 * swell;
+            capsule(
+                &mut self.pixels,
+                c,
+                c,
+                0.7 + 0.5 * swell,
+                Role::Ramp(SALTS[i]),
+                level,
+            );
         }
-        // The vent plume: smoke exposes a soft glow, hot at the orifice (Ember), cooling
-        // to grey smoke as it rises (Starlight), so the plume reads as one billowing body.
+        // The vent plume: a faint grey glow, warm only at the orifice.
         self.glow.clear();
-        for p in self.tank.particles.iter().filter(|p| p.kind == Kind::Smoke) {
-            let (x, y) = to_px(p.x, p.y);
-            self.glow
-                .splat(2.0 * x, 2.0 * y, &SMOKE_HALO, 0.25 * p.life);
-        }
         if self.tank.vent {
+            for p in self.tank.particles.iter().filter(|p| p.kind == Kind::Smoke) {
+                let (x, y) = to_px(p.x, p.y);
+                self.glow
+                    .splat(2.0 * x, 2.0 * y, &SMOKE_HALO, 0.25 * p.life);
+            }
             let orifice = to_px(0.5, 0.55);
+            let (glow, tone, rows) = (&self.glow, &self.tone, self.rows);
             for y in 0..i32::from(ps.height()) {
                 for x in 0..i32::from(ps.width()) {
-                    let level = self.tone.level(self.glow.get(x, y).unwrap_or(0.0));
-                    if level < 18 || !is_water(self.pixels.get(x, y)) {
+                    let level = tone.level(glow.get(x, y).unwrap_or(0.0));
+                    if level < 24 {
                         continue;
                     }
-                    let hot = (orifice.1 - f64::from(y)) < 0.08 * self.rows
-                        && (f64::from(x) - orifice.0).abs() < 0.05 * f64::from(ps.width());
+                    let hot = (orifice.1 - f64::from(y)) < 0.08 * rows
+                        && (f64::from(x) - orifice.0).abs() < 0.05 * pw;
                     let ink = if hot {
-                        Ink::new(Role::Ramp(Ramp::Ember), level.saturating_add(60).min(230))
+                        Ink::new(Role::Ramp(Ramp::Ember), level / 2 + 30)
                     } else {
-                        Ink::new(Role::Ramp(Ramp::Starlight), level / 2 + 10)
+                        Ink::new(Role::Ramp(Ramp::Starlight), level / 4 + 10)
                     };
-                    self.pixels.set(x, y, ink);
+                    put_max(&mut self.pixels, x, y, ink);
                 }
             }
         }
+        // Jets and sinking flakes: single dim pixels.
         for p in &self.tank.particles {
-            let (x, y) = to_px(p.x, p.y);
-            let role = Role::Ramp(SALTS[usize::from(p.salt) % SALTS.len()]);
-            let ink = match p.kind {
-                // Smoke is the glow above; bubbles are glyphs drawn in `render`.
+            let i = salt(p.salt);
+            let (lo, _) = SALT_LEVELS[i];
+            let level = match p.kind {
                 Kind::Smoke | Kind::Bubble => continue,
-                Kind::Jet => Ink::new(role, ink::level(60.0 + 140.0 * f64::from(p.life))),
-                Kind::Flake => Ink::new(role, 70),
+                Kind::Jet => lo * (0.5 + 0.5 * f64::from(p.life)),
+                Kind::Flake => 0.7 * lo,
             };
-            if is_water(self.pixels.get(x as i32, y as i32)) {
-                self.pixels.set(x as i32, y as i32, ink);
-            }
+            let (x, y) = to_px(p.x, p.y);
+            put_max(
+                &mut self.pixels,
+                x as i32,
+                y as i32,
+                Ink::new(Role::Ramp(SALTS[i]), ink::level(level)),
+            );
         }
     }
 }
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    // Water and sand stay blank in ASCII, so the tubes carry the picture.
-    let lit = |i: Ink| !matches!(i.role, Role::Background | Role::Ramp(WATER));
-    let ink = match (lit(top), lit(bottom)) {
-        (false, false) => return None,
-        (true, false) => top,
-        (false, true) => bottom,
-        (true, true) => {
-            if top.level >= bottom.level {
-                top
-            } else {
-                bottom
-            }
-        }
-    };
+    let ink = sciart_core::raster::stronger(top, bottom);
+    if ink.role == Role::Background {
+        return None;
+    }
     let ch = match ink.role {
-        Role::Ramp(SAND) if ink.level < 100 => '_',
-        Role::Ramp(Ramp::Starlight) => 'o',
+        Role::Ramp(Ramp::Starlight) if ink.level <= FLOOR_INK.level => '_',
+        Role::Ramp(Ramp::Starlight) => '.',
         _ if ink.level >= 90 => '|',
         _ => ',',
     };
@@ -649,17 +620,15 @@ impl Generator for Garden {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.pixels.resize(size);
-        self.base.resize(size);
         self.glow.resize(size);
         // The tank fills the rows above the title row.
         self.rows = f64::from(2 * size.height().saturating_sub(1).max(1));
-        self.paint_tank();
         if !self.started {
             self.started = true;
             self.act = GARDEN;
             self.tank.plant(false, &mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -684,33 +653,20 @@ impl Generator for Garden {
                 self.tank.plant(self.act == VENT, &mut ctx.rng);
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-        // Rising bubbles: small rings over the water, the water kept behind them.
-        let ps = self.pixels.pixel_size();
-        let (pw, ph) = (f64::from(ps.width()), self.rows);
-        for p in self
-            .tank
-            .particles
-            .iter()
-            .filter(|p| p.kind == Kind::Bubble)
-        {
-            let (x, y) = ((p.x * pw) as i32, (p.y * ph) as i32);
-            let (top, bottom) = (self.pixels.get(x, y & !1), self.pixels.get(x, y | 1));
-            if is_water(top) && is_water(bottom) {
-                let bg = self.pixels.cell_bg(x, y / 2);
-                let bg = if canvas.mode() == GlyphMode::Unicode {
-                    bg
-                } else {
-                    Ink::BLANK
-                };
-                canvas.put_bg(x, y / 2, BUBBLE, BUBBLE_INK, bg);
-            }
-        }
     }
 }
 
@@ -781,9 +737,11 @@ mod tests {
         let mut ctx = Ctx::new(4, Size::new(80, 24));
         let mut g = Garden::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         assert_eq!(g.caption(), Some("osmotic bursts"));
         while g.time < GARDEN_S + 1.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let c = g.caption().unwrap_or("");
         assert_eq!(c, "life's vents?");
@@ -817,13 +775,55 @@ mod tests {
         let mut ctx = Ctx::new(6, Size::new(80, 24));
         let mut g = Garden::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         while g.time < GARDEN_S + VENT_S + 12.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             if g.time > 3.0 {
                 assert!(
                     !g.tank.segments.is_empty(),
                     "empty tank at t = {:.2}",
                     g.time
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn grd_a7_thin_muted_tubes_on_a_black_tank() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            let mut ctx = Ctx::new(7, size);
+            let mut g = Garden::default();
+            g.resize(size, &mut ctx);
+            for t in [5.0, 20.0, 40.0] {
+                while g.time < t {
+                    g.update(1.0 / 60.0, &mut ctx);
+                }
+                g.prepare();
+                let ps = g.pixels.pixel_size();
+                let (mut lit, mut n) = (0, 0);
+                for y in 0..i32::from(ps.height()) {
+                    for x in 0..i32::from(ps.width()) {
+                        let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                        n += 1;
+                        if ink.role == Role::Background {
+                            continue;
+                        }
+                        lit += 1;
+                        // Muted: tubes stay at their ramps' low-to-mid levels.
+                        assert!(ink.level <= 225, "{size:?} t {t}: {ink:?}");
+                    }
+                }
+                let share = f64::from(lit) / f64::from(n);
+                assert!(
+                    share > 0.002 && share < 0.2,
+                    "{size:?} t {t}: lit {share:.3}"
+                );
+                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                g.render(&mut canvas);
+                assert!(
+                    canvas.cells().iter().all(|c| c.ch != 'o'),
+                    "no bubble glyphs"
                 );
             }
         }

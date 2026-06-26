@@ -29,7 +29,7 @@ pub use clock::FixedStep;
 pub use ctx::Ctx;
 pub use generator::{Category, Generator, Meta};
 pub use geom::{Camera, Projector};
-pub use grid::{Edges, Grid, Hood, SampleMap};
+pub use grid::{CubicRow, Edges, Grid, Hood, MapRow, SampleMap};
 pub use ink::{Ink, Ramp, Role};
 pub use particles::{InverseCdf, ParticlePool, SpatialHash, Trail};
 pub use raster::{Density, Dots, Glow, Pixels, Tone};

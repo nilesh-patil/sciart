@@ -1,4 +1,4 @@
-//! Jupiter's cloud tops in close-up, JunoCam style (SPEC-002 `jupiter_storms`).
+//! Jupiter's whole disc on black space (SPEC-002 `jupiter_storms`, ADR-0017).
 //!
 //! Two dyes ride a prescribed flow (`vortex_advect`, semi-Lagrangian on a capped
 //! lattice): the zone/belt dye, pale in the anticyclonic zones and blue-grey in the
@@ -7,7 +7,8 @@
 //! white ovals, anticyclones sitting in the zero of the jets whose shear matches their
 //! spin (so they roll like ball bearings), and short-lived small eddies that wind the
 //! dye into filaments. A weak relaxation back to the banded pattern keeps the belts from
-//! mixing out. The planet's limb curves across the top of the frame.
+//! mixing out. The flow lives on a longitude × latitude strip, mapped onto a limb-darkened
+//! disc whose view follows the Great Red Spot.
 //!
 //! Units: lengths in lattice heights (`H`), so the flow keeps its shape when the lattice
 //! is regridded (ADR-0012); speeds in `H` per simulated second.
@@ -15,7 +16,7 @@
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
 use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::{Grid, ease};
@@ -57,10 +58,10 @@ const GRS_PERIOD: f64 = 6.0;
 /// Small eddies alive at once and their life, seconds.
 const EDDIES: usize = 30;
 const EDDY_LIFE: (f64, f64) = (5.0, 10.0);
-/// Io's shadow crosses the frame width in `1 / SHADOW_SPEED` seconds.
-const SHADOW_SPEED: f64 = 1.0 / 30.0;
 /// Steps run in the first resize, so the first frame already shows curls.
 const SPIN_UP: usize = 100;
+/// Lattice cap for the spin-up (GEN-R19).
+const SPIN_UP_CAP: usize = CAP / 10;
 /// Hot-spot sources: on the fastest eastward jet at the edge of the belt below the top
 /// zone, where the jet draws their blue-grey clearings out into festoons. Longitudes as
 /// fractions of the period (drifting slowly, `H`/s), half-axes in `H`, and the decay
@@ -72,6 +73,19 @@ const HOT_DRIFT: f64 = 0.015;
 const HOT_DECAY: f32 = 0.8;
 /// Half-height (`H`) of the lane the clearing dye can reach (sources ± eddy spread).
 const HOT_LANE: f64 = 0.12;
+/// The disc (ADR-0017): radius as a share of the frame's smaller side, polar flattening,
+/// the view's sway about the spot (rad, rad/s), the clouds' brightness scale (Sienna
+/// ≤ ~200, cream zones) and the spot's.
+const DISC: f64 = 0.47;
+const OBLATE: f64 = 0.935;
+const SWAY: (f64, f64) = (0.5, 0.05);
+/// Io's shadow crosses the disc in `1 / SHADOW_SPEED` seconds.
+const SHADOW_SPEED: f64 = 1.0 / 20.0;
+/// Latitude (and longitude) one lattice height spans (rad), and the polar hood's level.
+const LAT_SPAN: f64 = 65.0 * PI / 180.0;
+const POLAR_LEVEL: f64 = 0.33;
+const DIM: f64 = 0.82;
+const SPOT_DIM: f64 = 0.8;
 /// Largest vortex box half-width in lattice cells (stack tables in `fill_flow`).
 const MAX_BOX: i64 = 96;
 
@@ -174,13 +188,14 @@ pub struct JupiterStorms {
     /// Jet speed per lattice row, cells per second.
     jets: Vec<f32>,
     vortices: Vec<Vortex>,
-    map: SampleMap,
     pixels: Pixels,
     /// Two rows of dye samples (previous, current) for the relief in `shade`.
     rows: Vec<f32>,
     warmed: bool,
     /// Simulated seconds shown (drives Io's shadow).
     t: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl JupiterStorms {
@@ -197,11 +212,11 @@ impl JupiterStorms {
             flow: Flow::default(),
             jets: Vec::new(),
             vortices: Vec::with_capacity(8 + EDDIES),
-            map: SampleMap::default(),
             pixels: Pixels::default(),
             rows: Vec::new(),
             warmed: false,
             t: 0.0,
+            dirty: false,
         }
     }
 
@@ -225,7 +240,7 @@ impl JupiterStorms {
             kind: Kind::RedSpot,
         });
         // White ovals: anticyclones in the other zone lanes (a "string of pearls").
-        for (m, x) in [(0.0, 0.2), (0.0, 0.75), (2.0, 0.1), (2.0, 0.45), (2.0, 0.8)] {
+        for (m, x) in [(0.0, 0.3), (2.0, 0.7)] {
             let (a, b) = (0.055, 0.04);
             self.vortices.push(Vortex {
                 x: x * period,
@@ -469,67 +484,63 @@ impl JupiterStorms {
         let px = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
         let w = usize::from(px.width());
-        // The limb: a large circle whose top grazes the frame; beyond it, space.
-        let r_limb = 1.7 * pw.max(ph);
-        let (lcx, lcy) = (0.5 * pw, 0.06 * ph + r_limb);
-        // Io's shadow crossing the clouds (as in JunoCam frames): a black umbra with a
-        // 1-pixel penumbra, drifting east with Io's orbit.
-        let r_sh = (0.045 * ph).max(1.5);
-        let span = pw + 4.0 * r_sh;
-        let sx = (0.3 * pw + SHADOW_SPEED * pw * self.t).rem_euclid(span) - 2.0 * r_sh;
-        let sy = 0.3 * ph;
-        // The Great Red Spot's oval in pixels (x wraps with the longitude period), its
-        // drawn half-axes 0.8 of the vortex's, feathered over its smaller semi-axis.
+        // The whole disc on black space (ADR-0017), slightly oblate, turning slowly.
+        let r = DISC * pw.min(ph);
+        let (cx, cy) = (0.5 * pw, 0.5 * ph);
+        let period = self.period();
+        // The view follows the Great Red Spot's longitude, swaying slowly about it, so the
+        // spot (the accent) stays on the visible hemisphere as the flow carries it.
+        let spin = self.vortices.first().map_or(0.0, |v| v.x * LAT_SPAN)
+            + SWAY.0 * (SWAY.1 * self.t).sin_det();
+        let lat_h = f64::from(self.lattice.height());
         let grs = self.vortices.first().copied();
-        let (kx, ky) = (pw / self.period(), ph);
-        let semi = grs.map_or(1.0, |v| (0.8 * v.a * kx).min(0.8 * v.b * ky));
-        // Rows the spot and its collar can reach (collar ≤ 0.45 semi-axes + feather).
-        let spot_rows = grs.map_or((f64::INFINITY, f64::NEG_INFINITY), |v| {
-            let r = 0.8 * v.b * ky * 1.45 + 3.0;
-            (v.y * ky - r, v.y * ky + r)
-        });
-        let (dye, red, hot, map) = (&self.dye, &self.red, &self.hot, &self.map);
-        // Per-row state, recomputed at `x == 0`: the limb's `dy²`, whether the row meets
-        // Io's shadow, the spot or the hot-spot lane; and the previous row's dye samples
-        // (the relief's upper-left neighbour), so each pixel samples the dye only once.
+        // The spot's smaller drawn semi-axis in pixels (a lattice height spans
+        // `LAT_SPAN·r` px at the centre).
+        let semi = grs.map_or(1.0, |v| 0.8 * v.a.min(v.b) * LAT_SPAN * r);
+        // Io's shadow crossing the disc (as in Juno and Hubble frames): a small black
+        // umbra with a 1-pixel penumbra, drifting across every `1 / SHADOW_SPEED` s.
+        let r_sh = (0.05 * r).max(1.0);
+        let span = 2.0 * r + 4.0 * r_sh;
+        let sx = cx - r - 2.0 * r_sh + ((0.35 + SHADOW_SPEED * self.t) * span).rem_euclid(span);
+        let sy = cy - 0.35 * r;
+        let (dye, red, hot) = (&self.dye, &self.red, &self.hot);
+        // The previous row's dye samples (the relief's upper-left neighbour).
         let rows = &mut self.rows;
         let (prev, cur) = rows.split_at_mut(w);
-        let mut row = (0.0, false, false, false);
         self.pixels.shade(|x, y| {
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
             let xi = x as usize;
             if xi == 0 {
                 prev.copy_from_slice(cur);
                 cur.fill(f32::NAN);
-                row = (
-                    (fy - lcy) * (fy - lcy),
-                    (fy - sy).abs() < r_sh + 1.0,
-                    (spot_rows.0..=spot_rows.1).contains(&fy),
-                    (fy / ky - HOT_Y).abs() < HOT_LANE,
-                );
             }
-            let (dy2, in_shadow_rows, in_spot_rows, in_hot_rows) = row;
-            let mut pen = 1.0;
-            if in_shadow_rows {
-                let ds = (fx - sx).hypot(fy - sy);
-                pen = ease::smoothstep((ds - r_sh + 0.5).clamp(0.0, 1.0));
-                if pen <= 0.0 {
-                    return Ink::BLANK;
-                }
-            }
-            let depth = r_limb - ((fx - lcx) * (fx - lcx) + dy2).sqrt();
-            if depth <= 0.0 {
+            let (nx, ny) = ((fx - cx) / r, (fy - cy) / (r * OBLATE));
+            let rho2 = nx * nx + ny * ny;
+            if rho2 >= 1.0 {
                 return Ink::BLANK;
             }
-            // Darker and hazier towards the limb (μ from the depth inside the circle); the
-            // outermost 1.5 pixels fade to black, so the limb is antialiased, not stepped.
-            let mu = (depth / (0.35 * ph)).clamp(0.0, 1.0).sqrt();
-            let aa = ease::smoothstep((depth / 1.5).min(1.0));
-            let shade = (0.45 + 0.55 * mu) * pen * aa;
-            let a = map.sample(dye, x, y);
+            let nz = (1.0 - rho2).sqrt();
+            let ds = (fx - sx).hypot(fy - sy);
+            let pen = ease::smoothstep((ds - r_sh + 0.5).clamp(0.0, 1.0));
+            if pen <= 0.0 {
+                return Ink::BLANK;
+            }
+            // Planetographic latitude and longitude on the cylinder the flow lives on.
+            let lat = (-ny).clamp(-1.0, 1.0).asin();
+            let lon = nx.atan2(nz) + spin;
+            // One lattice height spans `LAT_SPAN` of latitude about the equator (and as much
+            // longitude); beyond it the polar regions fade to a dim, featureless hood.
+            let lx = (lon / LAT_SPAN).rem_euclid(period);
+            let ly_raw = 0.5 - lat / LAT_SPAN;
+            let polar = ease::smoothstep((ly_raw.abs().max((1.0 - ly_raw).abs()) - 1.0) / 0.25);
+            let ly = ly_raw.clamp(0.0, 1.0);
+            let (gx, gy) = ((lx * lat_h) as f32, (ly * lat_h) as f32);
+            // Limb darkening, and the outermost 1.5 pixels feathered to black.
+            let edge = (1.0 - rho2.sqrt()) * r;
+            let aa = ease::smoothstep((edge / 1.5).min(1.0));
+            let shade = DIM * (0.35 + 0.65 * nz.sqrt()) * aa * pen;
+            let a = vortex_advect::sample(dye, gx, gy, XEdge::Wrap);
             cur[xi] = a;
-            // Relief: brighter where the dye rises to the upper left (sunlit side of a
-            // cloud edge), the embossed look of enhanced JunoCam frames.
             let up = if xi > 0 { prev[xi - 1] } else { f32::NAN };
             let relief = if up.is_nan() {
                 0.0
@@ -537,30 +548,33 @@ impl JupiterStorms {
                 f64::from(a - up) * 1.2
             };
             let a = f64::from(a);
-            let mut level = jovian::cloud_level(a, relief);
-            // The Great Red Spot: a brick-to-rust oval textured by the wound-up chromophore
-            // (its outline from the vortex, not the dye, whose edge the lattice steps), in
-            // a pale collar, both feathered into the flow.
-            if in_spot_rows && let Some(v) = grs {
-                let dx = v.dx(fx / kx, pw / kx) / (0.8 * v.a);
-                let dy = (fy / ky - v.y) / (0.8 * v.b);
+            let level = jovian::cloud_level(a, relief);
+            let level = level + (POLAR_LEVEL - level) * polar;
+            // The Great Red Spot, the one warm accent: its outline from the vortex,
+            // textured by the wound-up chromophore, in a pale collar.
+            if let Some(v) = grs {
+                let dx = v.dx(lx, period) / (0.8 * v.a);
+                let dy = (ly - v.y) / (0.8 * v.b);
                 let rho = (dx * dx + dy * dy).sqrt();
-                let (inside, collar) = jovian::spot_weights(rho, semi);
-                if inside > 0.0 || collar > 0.0 {
-                    let r = if inside > 0.0 {
-                        f64::from(map.sample(red, x, y))
-                    } else {
-                        0.0
-                    };
-                    let spot = jovian::spot_level(r, a, relief);
-                    level = jovian::spot_blend(level, spot, inside, collar);
-                    return jovian::sienna(level, shade);
+                if rho < 2.0 {
+                    let (inside, collar) = jovian::spot_weights(rho, semi);
+                    if inside > 0.0 || collar > 0.0 {
+                        let rr = if inside > 0.0 {
+                            f64::from(vortex_advect::sample(red, gx, gy, XEdge::Wrap))
+                        } else {
+                            0.0
+                        };
+                        let spot = jovian::spot_level(rr, a, relief);
+                        let level = jovian::spot_blend(level, spot, inside, collar);
+                        return jovian::sienna(level, shade / DIM * SPOT_DIM);
+                    }
                 }
             }
-            // The clearing dye lives in a narrow lane round its sources.
-            if in_hot_rows {
-                let h = f64::from(map.sample(hot, x, y));
-                return jovian::hot_spot(level, h, shade);
+            // The clearing dye darkens the belt edge (no blue: the spot is the one accent).
+            if (ly - HOT_Y).abs() < HOT_LANE {
+                let h = f64::from(vortex_advect::sample(hot, gx, gy, XEdge::Wrap));
+                let dark = ((h - 0.12) / 0.5).clamp(0.0, 0.6);
+                return jovian::sienna(level * (1.0 - dark), shade);
             }
             jovian::sienna(level, shade)
         });
@@ -573,25 +587,27 @@ impl Generator for JupiterStorms {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        let display = Size::new(size.width(), size.height().saturating_mul(2).max(1));
+        // The flow lives on a longitude × latitude strip four times as wide as tall: 260° of
+        // longitude, so the spot's next copy is always round the back.
+        let d = size.height().saturating_mul(2).min(size.width()).max(1);
+        let display = Size::new(d.saturating_mul(4), d);
         let lattice = grid::lattice_for(display, CAP, BUCKET);
-        self.rebuild_lattice(lattice);
         if !self.warmed {
+            // GEN-R19: the spin-up runs on a coarse lattice and is regridded up; the
+            // filaments sharpen on the fine lattice over the first frames.
             self.warmed = true;
+            self.rebuild_lattice(grid::lattice_for(display, SPIN_UP_CAP, BUCKET));
             self.seed_storms(&mut ctx.rng);
             for _ in 0..SPIN_UP {
                 self.step(SIM_DT, &mut ctx.rng);
             }
         }
+        self.rebuild_lattice(lattice);
         self.pixels.resize(size);
         self.rows.clear();
         self.rows
             .resize(2 * usize::from(self.pixels.pixel_size().width()), f32::NAN);
-        self.rows.clear();
-        self.rows
-            .resize(2 * usize::from(self.pixels.pixel_size().width()), f32::NAN);
-        self.map.rebuild(self.lattice, self.pixels.pixel_size());
-        self.shade();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -599,7 +615,13 @@ impl Generator for JupiterStorms {
             self.t += dt;
             self.step(dt, &mut ctx.rng);
         }
-        self.shade();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -617,6 +639,7 @@ mod tests {
         let mut g = JupiterStorms::new();
         let mut ctx = Ctx::new(42, Size::new(100, 40));
         g.resize(Size::new(100, 40), &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -720,70 +743,78 @@ mod tests {
     }
 
     #[test]
-    fn jup_a6_the_planet_is_sienna_with_blue_only_in_hot_spots() {
+    fn jup_a6_a_sienna_disc_on_black_space() {
+        // ADR-0017: the whole disc on black, all Sienna (no blue), the corners black.
         let (mut g, mut ctx) = scene();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let px = g.pixels.pixel_size();
-        let (mut sienna, mut blue, mut disc) = (0usize, 0usize, 0usize);
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let Some(i) = g.pixels.get(x, y) else {
-                    continue;
-                };
+        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+        let mut disc = 0usize;
+        for y in 0..h {
+            for x in 0..w {
+                let i = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
                 match i.role {
                     Role::Background => {}
-                    Role::Ramp(Ramp::Sienna) => sienna += 1,
-                    Role::Ramp(Ramp::Ice) => blue += 1,
+                    Role::Ramp(Ramp::Sienna) => disc += 1,
                     other => panic!("unexpected ink {other:?} at ({x}, {y})"),
                 }
-                disc += usize::from(i.role != Role::Background);
             }
         }
-        assert!(sienna * 10 >= disc * 8, "sienna {sienna} of {disc}");
-        assert!(blue > 0 && blue * 25 <= disc, "blue {blue} of {disc}");
+        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
+            assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK), "corner {x},{y}");
+        }
+        assert!(disc * 4 > (w * h) as usize / 2, "disc {disc} of {}", w * h);
     }
 
     #[test]
     fn jup_a8_red_spot_is_a_darker_oval_in_a_paler_collar() {
+        // The view follows the spot: at the sway's zero (t = 0) it sits on the disc's
+        // centre meridian, at its latitude.
         let (mut g, mut ctx) = scene();
         g.update(SIM_DT, &mut ctx);
+        g.t = 0.0;
+        g.dirty = true;
+        g.prepare();
         let px = g.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
+        let r = DISC * pw.min(ph);
         let grs = g.vortices[0];
-        let kx = pw / g.period();
+        let lat = (0.5 - grs.y) * LAT_SPAN;
+        let (cx, cy) = (0.5 * pw, 0.5 * ph - r * OBLATE * lat.sin_det());
         let level = |fx: f64, fy: f64| {
             let i = g.pixels.get(fx as i32, fy as i32).expect("on screen");
             assert_eq!(i.role, Role::Ramp(Ramp::Sienna));
             i.level
         };
-        let (cx, cy) = (grs.x * kx, grs.y * ph);
-        // Centre, and just outside the drawn rim (0.8 of the half-axes) above and below.
         let centre = level(cx, cy);
-        let rim = 0.8 * grs.b * ph;
+        let rim = 0.8 * grs.b * LAT_SPAN * r;
         let collar = level(cx, cy - rim - 2.0).max(level(cx, cy + rim + 2.0));
-        assert!(centre + 40 < collar, "centre {centre}, collar {collar}");
+        assert!(centre + 30 < collar, "centre {centre}, collar {collar}");
     }
 
     #[test]
-    fn jup_a9_io_shadow_has_a_soft_edge() {
-        // Somewhere across the shadow's edge there is a pixel neither black nor at full
-        // brightness: the 1-pixel penumbra.
+    fn jup_a9_the_limb_is_darkened_and_feathered() {
+        // Across the disc's edge the level falls through intermediate values into black:
+        // limb darkening and a 1.5-pixel feather, not a stepped rim.
         let (mut g, mut ctx) = scene();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let px = g.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
-        let r_sh = (0.045 * ph).max(1.5);
-        let span = pw + 4.0 * r_sh;
-        let sx = (0.3 * pw + SHADOW_SPEED * pw * g.t).rem_euclid(span) - 2.0 * r_sh;
-        let sy = 0.3 * ph;
-        let (y, x0) = (sy as i32, (sx + r_sh - 1.0) as i32);
-        let edge: Vec<_> = (x0..x0 + 3).filter_map(|x| g.pixels.get(x, y)).collect();
+        let r = DISC * pw.min(ph);
+        let y = (0.5 * ph) as i32;
+        let x0 = (0.5 * pw + r) as i32;
+        let edge: Vec<_> = (x0 - 3..=x0 + 1)
+            .filter_map(|x| g.pixels.get(x, y))
+            .collect();
         assert!(edge.iter().any(|i| i.role == Role::Background));
+        let centre = g.pixels.get((0.5 * pw) as i32, y).map_or(0, |i| i.level);
         assert!(
             edge.iter()
-                .any(|i| i.role != Role::Background && i.level < 90),
+                .any(|i| i.role != Role::Background && i.level < centre),
             "{edge:?}"
         );
     }
@@ -804,6 +835,7 @@ mod tests {
         let mut g = JupiterStorms::new();
         let mut ctx = Ctx::new(1, Size::new(500, 150));
         g.resize(Size::new(500, 150), &mut ctx);
+        g.prepare();
         assert!(g.lattice.area() <= CAP, "{:?}", g.lattice);
         assert_eq!(g.dye.size(), g.lattice);
     }

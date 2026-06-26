@@ -66,7 +66,7 @@ const BLUR_PASSES: usize = 3;
 /// The glow's soft knee (share of the central surface brightness): `g²/(g + p)`, so light
 /// well below it fades quadratically to black instead of being cut. One blurred body peaks
 /// at ≈ 0.013, so lone halo bodies (drawn as stars) leave only a trace.
-const GLOW_KNEE_P: f64 = 0.04;
+const GLOW_KNEE_P: f64 = 0.1;
 /// Share of the glow taken from the bodies' own light at the centre, tapering as
 /// `1/(1 + R²/a²)` outwards; the rest is the smooth Plummer surface brightness
 /// `(1 + R²/a²)⁻²` about the light's centre, so the outline stays round while the core
@@ -97,7 +97,7 @@ const GLOW_KNEE: f32 = 0.3;
 const GLOW_WHITE: f32 = 0.9;
 /// Contrast of the glow: above 1 it keeps the faint outskirts near black, so the halo reads
 /// as resolved stars on the night sky rather than a disc.
-const GLOW_GAMMA: f64 = 1.25;
+const GLOW_GAMMA: f64 = 2.0;
 /// Stars are lost in the core's glare where the glow exceeds `GLARE_G` of the central
 /// surface brightness (`R ≈ a`), each at its own hashed depth into the glare, so the core
 /// has no hard rim of stars.
@@ -461,6 +461,8 @@ pub(crate) struct GlobularCluster {
     n_giants: usize,
     /// Title-row readout, e.g. `N=500  3 crossings` (empty when it does not fit).
     readout: StackText<32>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// ASCII stand-in for a glow pixel pair, by the brighter pixel's level: the classic `#`
@@ -500,6 +502,7 @@ impl GlobularCluster {
             giants: [(0, 0); MAX_GIANTS],
             n_giants: 0,
             readout: StackText::new(),
+            dirty: false,
         }
     }
 
@@ -811,7 +814,7 @@ impl Generator for GlobularCluster {
         self.scale = draw::fit_radius(size, 0.92) / VIEW_RADIUS;
         self.pixels.resize(size);
         self.dots.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -829,7 +832,13 @@ impl Generator for GlobularCluster {
             let rh = self.cluster.half_mass_radius();
             self.rh += (rh - self.rh) * (1.0 - (-dt / RH_TAU).exp());
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1072,14 +1081,17 @@ mod tests {
         let mut ctx = Ctx::new(6, Size::new(80, 24));
         let mut g = GlobularCluster::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let before = g.cluster.clone();
         g.resize(Size::new(81, 24), &mut ctx);
+        g.prepare();
         assert_eq!(g.cluster.pos, before.pos);
         assert_eq!(g.cluster.vel, before.vel);
 
         for (size, n) in [(Size::new(200, 50), 500), (Size::new(40, 12), 96)] {
             let old = g.cluster.pos.clone();
             g.resize(size, &mut ctx);
+            g.prepare();
             let c = &g.cluster;
             assert_eq!(c.n(), n);
             let keep = 3 * n.min(old.len() / 3);
@@ -1107,6 +1119,7 @@ mod tests {
         let old = g.cluster.pos.clone();
         g.t = 121.49;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert_eq!(g.epoch, 1, "no reseed");
         assert_ne!(g.cluster.pos, old);
         assert_eq!(caps(&g.cluster), before);
@@ -1132,6 +1145,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = GlobularCluster::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
         let (cx, cy) = g.centre();
@@ -1340,6 +1354,7 @@ mod tests {
         // Trails: the long exposure lights more of the halo than the stars alone.
         let mut g = GlobularCluster::new();
         g.resize(size, &mut Ctx::new(42, size));
+        g.prepare();
         let halo_dots = |g: &GlobularCluster| {
             let d = g.dots.dot_size();
             (0..i32::from(d.height()))
@@ -1386,8 +1401,10 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = GlobularCluster::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(t / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         (g, ctx)
     }

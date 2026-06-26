@@ -11,7 +11,7 @@ use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, halo_kernel};
+use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
 use sciart_core::{InverseCdf, Tone, ink};
@@ -75,16 +75,24 @@ const KNOT_LIFE: f64 = 3.0;
 const KNOT_RATE: f64 = 13.0;
 const KNOT_PHI: f64 = 0.25;
 const KNOT_R: (f64, f64) = (0.25, 0.92);
-const KNOT_PEAK: f64 = 180.0;
-/// An H II region's soft glow, and its gain.
-const KNOT_HALO: [(i32, i32, f32); 25] = halo_kernel(2);
-const KNOT_GAIN: f32 = 1.15;
+/// ADR-0017: an H II region shows as one `Ramp(HAlpha)` pixel at up to `KNOT_PEAK`, and
+/// only the larger ones (`size ≥ KNOT_SHOWN`, about a third), so a few pink points dot
+/// the arms instead of blobs.
+const KNOT_PEAK: f64 = 100.0;
+const KNOT_SHOWN: f64 = 0.87;
 /// Young blue stars: share of the population and the arm-phase band they shine in.
 const YOUNG_SHARE: f64 = 0.12;
 const YOUNG_BAND: (f64, f64) = (-0.15, 0.7);
+/// Only the brighter young stars show (ADR-0017: the arms slightly blue, not dotted).
+const YOUNG_LUM: f32 = 0.2;
 /// Tone curve for the integrated starlight.
 const KNEE: f32 = 0.35;
 const WHITE: f32 = 9.0;
+/// ADR-0017: the unresolved light below `HAZE` times the mean disc light at that radius
+/// is black (no inter-arm haze; the arms and the bulge stand on a dark disc), and the
+/// toned light spans `Ramp(Starlight)` up to `LIGHT_TOP` (no white-out).
+const HAZE: f32 = 0.8;
+const LIGHT_TOP: f32 = 180.0 / 255.0;
 /// Field stars of our own Galaxy in front, per cell.
 const FIELD_PER_CELL: f64 = 1.0 / 90.0;
 
@@ -186,9 +194,10 @@ pub struct SpiralGalaxy {
     /// `dust(φ)` and the arm factor over one turn of `φ`.
     dust_lut: Vec<(f32, f32)>,
     glow: Glow,
-    knot_glow: Glow,
     tone: Tone,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SpiralGalaxy {
@@ -285,20 +294,10 @@ impl SpiralGalaxy {
             let outer = 1.0 - 0.7 * ease::smoothstep((f64::from(s.r) - 0.55) / 0.45);
             glow.splat_bilinear(px, py, s.lum * outer as f32);
         }
-        // H II knots: soft pink glows.
-        self.knot_glow.clear();
-        for k in self.knots.iter() {
-            let (x, y) = k.pos();
-            let (px, py) = self.to_screen(x, y);
-            let scale = (k.envelope() * k.size) as f32;
-            self.knot_glow
-                .splat(2.0 * px, 2.0 * py, &KNOT_HALO, scale * KNOT_GAIN);
-        }
         let rot = ((2.0 * OMEGA_P * t / TAU).rem_euclid(1.0) * PHASES as f64) as usize;
         let (tone, lut) = (&self.tone, &self.dust_lut);
         let (phase, rbin, radial) = (&self.phase, &self.rbin, &self.radial);
         let values = self.glow.values();
-        let knots = self.knot_glow.values();
         let width = usize::from(self.pixels.pixel_size().width());
         self.pixels.shade(|x, y| {
             let i = y as usize * width + x as usize;
@@ -309,11 +308,9 @@ impl SpiralGalaxy {
             let (bulge, disc, dust_w) = radial[usize::from(rb)];
             let d = d * dust_w;
             let light = (v + bulge + disc * arm) * (1.0 - DUST_OPACITY * d);
-            let level = tone.level(light);
-            let knot = (KNOT_PEAK * f64::from(knots.get(i).copied().unwrap_or(0.0)).min(1.0)) as u8;
-            if f64::from(knot) >= ink::MIN_VISIBLE_LEVEL && knot >= level / 2 {
-                Ink::new(Role::Ramp(Ramp::HAlpha), knot.max(level / 2))
-            } else if f64::from(level) < ink::MIN_VISIBLE_LEVEL {
+            // The haze floor: the mean disc light here (the arm factor averages 1).
+            let level = (f32::from(tone.level((light - HAZE * disc).max(0.0))) * LIGHT_TOP) as u8;
+            if f64::from(level) < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
             } else {
                 Ink::new(Role::Ramp(Ramp::Starlight), level)
@@ -322,7 +319,7 @@ impl SpiralGalaxy {
         // Young stars: blue-white points on the arms, just downstream of the shock; only
         // the arm-phase band's brighter half shows, so they scatter rather than line up.
         for (n, s) in self.all_stars[..self.n_stars].iter().enumerate() {
-            if s.kelvin == 0.0 || s.lum < 0.06 {
+            if s.kelvin == 0.0 || s.lum < YOUNG_LUM {
                 continue;
             }
             let (x, y) = star_pos(f64::from(s.r), f64::from(s.alpha0), f64::from(s.ecc), t);
@@ -337,6 +334,30 @@ impl SpiralGalaxy {
                 py.floor() as i32,
                 ink::blackbody(f64::from(s.kelvin)),
             );
+        }
+        // H II regions: a pink point each, the larger ones only, fading with their life.
+        for k in self.knots.iter() {
+            let level = KNOT_PEAK * k.envelope();
+            if k.size < KNOT_SHOWN || level < ink::MIN_VISIBLE_LEVEL {
+                continue;
+            }
+            let (x, y) = k.pos();
+            let (px, py) = self.to_screen(x, y);
+            let (px, py) = (px.floor() as i32, py.floor() as i32);
+            // Two knots born side by side would make a blob: the later one waits.
+            let pink = |dx: i32, dy: i32| {
+                self.pixels
+                    .get(px + dx, py + dy)
+                    .is_some_and(|i| i.role == Role::Ramp(Ramp::HAlpha))
+            };
+            if [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]
+                .iter()
+                .any(|&(dx, dy)| pink(dx, dy))
+            {
+                continue;
+            }
+            let ink = Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(level));
+            self.pixels.set(px, py, ink);
         }
         for &(x, y, l) in &self.field {
             if self.pixels.get(x, y) == Some(Ink::BLANK) {
@@ -358,7 +379,6 @@ impl Generator for SpiralGalaxy {
         }
         self.n_stars = ((size.area() as f64 * STARS_PER_CELL) as usize).clamp(1, MAX_STARS);
         self.glow.resize(size);
-        self.knot_glow.resize(size);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
@@ -411,7 +431,7 @@ impl Generator for SpiralGalaxy {
                 ease::smoothstep((r - 0.1) / 0.15) * (1.0 - ease::smoothstep((r - 0.8) / 0.25));
             ((k * bulge) as f32, (k * disc) as f32, dust_w as f32)
         }));
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -422,7 +442,13 @@ impl Generator for SpiralGalaxy {
         }
         self.knots.retain(|k| k.age < KNOT_LIFE);
         self.spawn_knots(dt, ctx);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -439,6 +465,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = SpiralGalaxy::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -558,11 +585,54 @@ mod tests {
     }
 
     #[test]
+    fn spg_a6_dark_between_the_arms_and_knots_are_single_points() {
+        // ADR-0017: no inter-arm haze, no pink blobs, no white-out.
+        let size = Size::new(200, 50);
+        let (mut g, mut ctx) = built(size, 3);
+        for _ in 0..120 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let px = g.pixels.pixel_size();
+        let (mut between, mut dark) = (0, 0);
+        for py in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let ink = g.pixels.get(x, py).unwrap();
+                match ink.role {
+                    Role::Ramp(Ramp::Starlight) => assert!(ink.level <= 180, "{ink:?}"),
+                    Role::Ramp(Ramp::HAlpha) => {
+                        assert!(f64::from(ink.level) <= KNOT_PEAK + 1.0, "{ink:?}");
+                        // A point: no H-alpha neighbour left, right, above or below.
+                        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                            let n = g.pixels.get(x + dx, py + dy).unwrap_or(Ink::BLANK);
+                            assert_ne!(n.role, Role::Ramp(Ramp::HAlpha), "blob at ({x}, {py})");
+                        }
+                    }
+                    _ => {}
+                }
+                let (u, v) = g.to_plane(x, py);
+                let r = u.hypot(v);
+                let phi = arm_phase(u, v, g.t);
+                if (0.3..0.7).contains(&r) && (phi.abs() - PI).abs() < 0.4 {
+                    between += 1;
+                    dark += usize::from(ink.level < 40 || ink.role == Role::Blackbody);
+                }
+            }
+        }
+        assert!(between > 200, "{between} inter-arm pixels");
+        assert!(
+            10 * dark >= 7 * between,
+            "{dark} of {between} inter-arm pixels dark"
+        );
+    }
+
+    #[test]
     fn spg_a5_knots_are_born_downstream_and_the_pool_is_capped() {
         let size = Size::new(120, 40);
         let (mut g, mut ctx) = built(size, 11);
         for _ in 0..1200 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.knots.len() <= KNOTS);
             for k in g.knots.iter() {
                 let (x, y) = k.pos();
