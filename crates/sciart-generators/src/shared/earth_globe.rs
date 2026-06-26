@@ -9,7 +9,6 @@ use sciart_core::ease;
 use sciart_core::geom::v3;
 use sciart_core::ink::{self, ramp};
 use sciart_core::prelude::*;
-use sciart_core::rng::{cell_key, hash01};
 
 /// ECI (any unit) → view axes: x right, y up, z toward the viewer.
 pub(crate) fn to_view(p: [f64; 3], elev: f64) -> [f64; 3] {
@@ -156,16 +155,14 @@ const TWILIGHT: f64 = 0.12;
 /// under the unit view Sun `sun` (SAT-A9). False colour in the scene's palette: oceans in
 /// Ice, land in Aurora, deserts in Blackbody sand, city lights in mid Ember, ice white.
 ///
-/// A pixel holds one ramp, so land and desert mix by dithering: the pixel is desert when
-/// `detail ·` [`desert_share`] beats its stable threshold `dither` ∈ [0, 1). `detail`
-/// ∈ [0, 1] says how much the globe's size can show: city lights need more than half.
-pub(crate) fn surface_ink(
-    n: [f64; 3],
-    (lon, lat): (f64, f64),
-    sun: [f64; 3],
-    detail: f64,
-    dither: f64,
-) -> Ink {
+/// A pixel holds one ramp, so a pixel is desert where `detail ·` [`desert_share`] (faded
+/// toward the terminator) passes ½: a smooth spatial threshold, the same for every pixel
+/// (M14, ADR-0017: no per-pixel dither). `detail` ∈ [0, 1] says how much the globe's size
+/// can show: city lights need more than half. Oceans and land carry a gentle texture
+/// fixed to the surface ([`surface_texture`]), so a smooth gradient never settles into
+/// flat level terraces (GEN-R17).
+pub(crate) fn surface_ink(n: [f64; 3], (lon, lat): (f64, f64), sun: [f64; 3], detail: f64) -> Ink {
+    let tex = surface_texture(lon, lat);
     let mu = v3::dot(n, sun);
     // 0 on the night side, 1 in full day, smooth across the terminator.
     let day = ease::smoothstep((mu + TWILIGHT) / (2.0 * TWILIGHT));
@@ -175,24 +172,40 @@ pub(crate) fn surface_ink(
         return match g {
             // A mid Ember, dimmer still on a smaller globe, where one pixel is a larger area.
             Ground::City if detail > 0.5 => ramp(Ramp::Ember, 0.3 + 0.3 * detail),
-            Ground::Ocean => ramp(Ramp::Ice, 0.04),
-            _ => ramp(Ramp::Aurora, 0.05),
+            Ground::Ocean => ramp(Ramp::Ice, 0.04 * tex),
+            _ => ramp(Ramp::Aurora, 0.05 * tex),
         };
     }
     match g {
         Ground::Ocean => {
             // Sun glint: the mirror direction of the Sun seen along the view axis.
             let glint = (2.0 * mu * n[2] - sun[2]).max(0.0).powi(24);
-            ramp(Ramp::Ice, 0.06 + 0.34 * light + 0.45 * glint * day)
+            ramp(Ramp::Ice, (0.06 + 0.34 * light) * tex + 0.45 * glint * day)
         }
         Ground::Ice => ramp(Ramp::Ice, 0.12 + 0.86 * light),
         // Sand: the tan stretch of the Blackbody ramp, paler than the land around it, in
         // full day only (dimmed, the ramp would redden it toward the terminator).
-        _ if detail * ease::smoothstep(2.0 * light - 0.6) * desert_share(lon, lat) > dither => {
+        _ if detail * ease::smoothstep(2.0 * light - 0.6) * desert_share(lon, lat) > 0.5 => {
             Ink::new(Role::Blackbody, ink::level(255.0 * (0.14 + 0.26 * light)))
         }
-        _ => ramp(Ramp::Aurora, 0.06 + 0.40 * light),
+        _ => ramp(Ramp::Aurora, (0.06 + 0.40 * light) * tex),
     }
+}
+
+/// Relative amplitude of [`surface_texture`] and its feature size (radians of arc).
+const TEXTURE_AMP: f64 = 0.08;
+const TEXTURE_CELL: f64 = 0.05;
+
+/// A gentle brightness texture fixed to the Earth's surface (turning with it), in
+/// `1 ± TEXTURE_AMP`: value noise over a linear projection of the surface point's unit
+/// vector, so it is continuous everywhere on the sphere (no seam at the date line or the
+/// poles); one noise sample per pixel.
+pub(crate) fn surface_texture(lon: f64, lat: f64) -> f64 {
+    let (sl, cl) = lat.sin_cos_det();
+    let (so, co) = lon.sin_cos_det();
+    let (x, y, z) = (cl * co, cl * so, sl);
+    let a = sciart_core::rng::value_noise(0x7E57, x + 0.37 * z, y - 0.61 * z, TEXTURE_CELL);
+    1.0 + TEXTURE_AMP * (2.0 * a - 1.0)
 }
 
 /// Pixels of atmosphere drawn outside the limb.
@@ -230,8 +243,7 @@ impl Globe {
             let ny = (f64::from(y) + 0.5 - self.cy) / self.r;
             for x in x0..x1 {
                 let nx = (f64::from(x) + 0.5 - self.cx) / self.r;
-                // Screen-anchored, so the dither does not sparkle as the Earth turns.
-                if let Some(ink) = self.shade(nx, ny, hash01(cell_key(x, y))) {
+                if let Some(ink) = self.shade(nx, ny) {
                     px.set(x, y, ink);
                 }
             }
@@ -259,9 +271,8 @@ impl Globe {
         (body[1].atan2(body[0]) - self.spin, lat)
     }
 
-    /// Ink at normalised disc offset `(nx, ny)` (ny down), or `None` off the globe;
-    /// `dither` ∈ [0, 1) is the pixel's threshold for mixing land and desert.
-    pub(crate) fn shade(&self, nx: f64, ny: f64, dither: f64) -> Option<Ink> {
+    /// Ink at normalised disc offset `(nx, ny)` (ny down), or `None` off the globe.
+    pub(crate) fn shade(&self, nx: f64, ny: f64) -> Option<Ink> {
         let (nx, ny) = self.frame(nx, ny);
         let d2 = nx * nx + ny * ny;
         if d2 >= 1.0 {
@@ -274,9 +285,9 @@ impl Globe {
             return (glow > 0.08).then(|| ramp(Ramp::Ice, 0.14 + 0.62 * glow));
         }
         let n = [nx, -ny, (1.0 - d2).sqrt()];
-        // A small globe has too few pixels for a desert's dithered edge or a city: one
-        // such pixel would dominate the disc, so both fade out below ~10 px radius.
+        // A small globe has too few pixels for a desert or a city: one such pixel would
+        // dominate the disc, so both fade out below ~10 px radius.
         let detail = ease::smoothstep((self.r - 6.0) / 10.0);
-        Some(surface_ink(n, self.lon_lat_of(n), self.sun, detail, dither))
+        Some(surface_ink(n, self.lon_lat_of(n), self.sun, detail))
     }
 }

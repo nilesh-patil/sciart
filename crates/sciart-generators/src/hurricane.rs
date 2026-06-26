@@ -16,7 +16,6 @@ use std::f64::consts::TAU;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, half_block};
-use sciart_core::rng::{cell_key, hash01};
 use sciart_core::{Grid, ink};
 
 use crate::shared::vortex_advect::{self, Flow, XEdge};
@@ -81,7 +80,9 @@ const TABLE: usize = 512;
 const SPIN_UP: usize = 180;
 /// Lattice cap for the spin-up (GEN-R19).
 const SPIN_UP_CAP: usize = CAP / 24;
-/// Seconds of dithered dissolve between the visible and infrared pictures.
+/// Seconds of the cross-fade between the visible and infrared pictures: a dip through
+/// black, the one fading out while the IR weight rises to ½, the other fading in after
+/// (M14, ADR-0017: no per-pixel dither).
 const DISSOLVE: f64 = 1.5;
 
 /// Lattices at most this tall (80×24 and smaller) are too coarse for the tight inner
@@ -521,7 +522,14 @@ impl Hurricane {
                 rows = (y, map.row_cubic(bright, y), map.row_cubic(bright, y + 1));
             }
             let b = rows.1.at(x);
-            let use_ir = ir > 0.0 && (ir >= 1.0 || hash01(0x1A ^ cell_key(x, y)) < ir);
+            // Dip through black: the visible picture fades out over the first half of the
+            // cross-fade, the infrared one fades in over the second.
+            let use_ir = ir >= 0.5;
+            let gain = if use_ir {
+                2.0 * ir - 1.0
+            } else {
+                1.0 - 2.0 * ir
+            };
             if use_ir {
                 // Enhanced IR (HUR-A4): the warm sea dark grey, low cloud grey, the
                 // coldest (thickest, highest) tops through cyan, green and yellow to
@@ -542,6 +550,10 @@ impl Hurricane {
                 let v = IR_LOW + (v - IR_LOW) / (1.0 - IR_LOW) * (IR_TOP - IR_LOW);
                 // Thin cloud fades into the black sea as in the visible picture.
                 let ir = (IR_LOW + (v - IR_LOW) * height) * veil(f64::from(b));
+                if ir * 255.0 < CLOUD_BLACK {
+                    return Ink::BLANK;
+                }
+                let ir = ir * gain;
                 if ir * 255.0 < CLOUD_BLACK {
                     return Ink::BLANK;
                 }
@@ -571,7 +583,7 @@ impl Hurricane {
             } else {
                 cloud_v(b) * veil(b)
             };
-            let v = CLOUD_TOP * v.clamp(0.0, 1.0);
+            let v = CLOUD_TOP * v.clamp(0.0, 1.0) * gain;
             if v * 255.0 < CLOUD_BLACK {
                 Ink::BLANK
             } else {
