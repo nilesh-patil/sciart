@@ -56,8 +56,15 @@ const DEP_FADE: f64 = 0.975;
 /// Plume filaments: grains leave in this many azimuthal rays (Pele's canopy shows
 /// radial streaks in Voyager and Galileo images).
 const RAYS: u32 = 28;
-/// Simulated seconds of eruption run in the first resize, so rings already show.
+/// Simulated steps of eruption run in the first resize, so rings already show.
 const WARM: usize = 1200;
+/// GEN-R19: the warm-up runs in strides of `WARM_STRIDE` steps. The flight is exact and
+/// each grain lands at its exact point, so the fallout rings do not depend on the stride;
+/// the grains still aloft when the scene opens were launched in small batches, which
+/// their spread of speeds and zenith angles disperses over flights ~11 s long, so the
+/// plume shows no batching either.
+const WARM_STRIDE: usize = 40;
+const _: () = assert!(WARM % WARM_STRIDE == 0, "the stride divides the warm-up");
 /// Dark calderas scattered over the globe, and how many of them hold glowing lava.
 const PATERAE: usize = 70;
 const LAVA: usize = 14;
@@ -136,7 +143,9 @@ const SUN: [f64; 3] = [0.45, -0.5, 0.74];
 /// fraction eases in over ≈ 60° of the dot product) times gentle limb darkening, compressed
 /// so the shaded limb stays sulfur, not olive.
 fn io_light(n: [f64; 3]) -> f64 {
-    let lam = dot(n, normalize(SUN));
+    // The Sun's unit vector, normalised once (the same value as per call; GEN-R19).
+    static SUN_UNIT: std::sync::OnceLock<[f64; 3]> = std::sync::OnceLock::new();
+    let lam = dot(n, *SUN_UNIT.get_or_init(|| normalize(SUN)));
     let day = ease::smoothstep(((lam + 0.25) / 1.0).clamp(0.0, 1.0));
     let limb = n[2].max(0.0).powf(0.35);
     0.52 + 0.48 * day * (0.65 + 0.35 * limb)
@@ -457,22 +466,24 @@ impl IoVolcanoes {
         }
         let mottle = fbm(0x10, 2.0 * u, 2.0 * w, 3);
         let frost = fbm(0x13, 1.1 * u + 7.0, 1.1 * w, 2);
-        let rust = fbm(0x17, 0.8 * u - 3.0, 1.0 * w + 1.0, 2);
         // Io's poles are darker and redder than its sulfur-yellow equator.
         let polar = ease::smoothstep(((lat.abs() - 0.75) / 0.5).clamp(0.0, 1.0));
         // Boundaries between the units are soft: the sulfur pales to lemon-cream for a few
         // pixels before a frost patch, which starts at a cream level; the highlands start
         // pale (tan, close to the plains' lightness) and deepen inward, mottled, only as
         // far as a capped rust, so every step across a unit edge is small (IO-A9).
-        let rusty = rust + 0.25 * polar + 0.18 * (mottle - 0.5);
         if frost > 0.74 {
             // SO₂ frost: pale grey fields with a soft edge.
             let f = ease::smoothstep(((frost - 0.74) / 0.16).clamp(0.0, 1.0));
-            ink::ramp(
+            return ink::ramp(
                 Ramp::Starlight,
                 ((GROUND.frost + 0.08 * f + 0.06 * (mottle - 0.5)) * lit).max(0.45),
-            )
-        } else if rusty > 0.74 {
+            );
+        }
+        // The rust field only matters outside the frost (GEN-R19: not sampled there).
+        let rust = fbm(0x17, 0.8 * u - 3.0, 1.0 * w + 1.0, 2);
+        let rusty = rust + 0.25 * polar + 0.18 * (mottle - 0.5);
+        if rusty > 0.74 {
             // Rust-brown highlands and the darker, redder poles.
             let d = ease::smoothstep(((rusty - 0.74) / 0.16).clamp(0.0, 1.0));
             ink::ramp(Ramp::Sienna, ((GROUND.rust - 0.06 * d) * lit).max(0.4))
@@ -707,16 +718,17 @@ impl Generator for IoVolcanoes {
         };
         if !self.warmed {
             self.warmed = true;
-            for _ in 0..WARM {
-                self.step(SIM_DT, &mut ctx.rng);
+            for _ in 0..WARM / WARM_STRIDE {
+                self.step(SIM_DT * WARM_STRIDE as f64, &mut ctx.rng);
             }
             self.t = 0.0;
         }
         self.shade_base();
         self.smooth_deposits();
         self.paint_deposits(None);
-        self.band = 0;
-        self.fallout_band();
+        // Every band is fresh: the next step repaints band 1 (repainting band 0 now, as the
+        // first `fallout_band` would, redoes the same work; GEN-R19).
+        self.band = 1;
         self.dirty = true;
     }
 
