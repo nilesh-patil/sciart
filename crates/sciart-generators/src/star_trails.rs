@@ -74,6 +74,8 @@ const FAINT_SHARE: f64 = 0.36;
 const ARC_GAIN: f64 = 0.35;
 /// Seconds of exposure already taken when the scene opens, so the first frame shows arcs.
 const PREROLL: f64 = 10.0;
+/// The preroll's time step (s).
+const PREROLL_STEP: f64 = 0.1;
 /// Naked-eye spectral mix `(cumulative fraction, lowest K, highest K)`: the bright stars
 /// are mostly hot B/A stars and cool K/M giants.
 const CLASSES: [(f64, f64, f64); 5] = [
@@ -428,9 +430,12 @@ impl Generator for StarTrails {
         self.cycle = 0;
         self.restart();
         // The exposure is already under way when the scene opens.
-        let steps = (PREROLL * 60.0) as usize;
+        // In `PREROLL_STEP` strides (GEN-R19): a bright trail is the max of the dots it
+        // crosses and a faint one gathers light per dot of arc, so the picture does not
+        // depend on the stride; at 0.1 s a step turns the sky by a fraction of a degree.
+        let steps = (PREROLL / PREROLL_STEP).round() as usize;
         for k in 0..=steps {
-            self.t = k as f64 / 60.0;
+            self.t = k as f64 * PREROLL_STEP;
             self.expose();
         }
         self.dirty = true;
