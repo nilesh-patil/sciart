@@ -1,5 +1,4 @@
-//! Three equal suns dancing periodic three-body orbits: figure-8, Lagrange, Broucke, moth
-//! (SPEC-002 `three_body`).
+//! Three equal suns dancing periodic three-body orbits: figure-8, Lagrange, Broucke, moth (SPEC-002 `three_body`).
 //!
 //! A gallery of five published periodic solutions of the planar equal-mass problem,
 //! each replayed from its initial conditions for a few periods on a fixed leapfrog
@@ -9,7 +8,6 @@
 use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::title::{Form, Title};
 use sciart_core::{geom, ode};
 
 pub static META: Meta = Meta {
@@ -28,15 +26,11 @@ pub fn build() -> Box<dyn Generator> {
 const SAMPLES: usize = 480;
 /// Leapfrog substeps per model time unit, at least; `qᵢ = ⌈RES·Tᵢ/SAMPLES⌉` (SPEC-002).
 const RES: f64 = 4096.0;
-/// Seconds each orbit fades out while its physics keeps running. The fade holds the
-/// orbit bright and drops it late (`1 − u³`), so the gallery is below a quarter
-/// brightness only for the fade's last 0.13 s.
+/// Seconds each orbit fades out while its physics keeps running.
 const FADE: f64 = 1.2;
-/// Seconds an orbit (heads, trails, triangle) takes to fade in at each run start, from
-/// `FADE_IN_FLOOR`: no orbit starts hard-on, and none opens on a blank frame (the floor is
-/// above a quarter, so the fade-in never adds to the dark gap).
+/// Seconds an orbit (heads, trails, triangle) takes to fade in at each run start, so no
+/// orbit starts hard-on.
 const FADE_IN: f64 = 0.3;
-const FADE_IN_FLOOR: f64 = 0.35;
 /// Fraction of its period the moth's trail spans at `MOTH_FULL_SCALE` and above: its
 /// single period folds into a knot, so only the newest loops are shown and the older
 /// ones dissolve.
@@ -47,28 +41,9 @@ const MOTH_FULL_SCALE: f64 = 8.0;
 const MOTH_MIN_TRAIL: f64 = 0.25;
 /// Level of Lagrange's triangle once its bodies are in (SPEC-002 Inks).
 const TRIANGLE_LEVEL: f64 = 80.0;
-/// Body `i` is drawn in `RAMPS[i]`, a false-colour triad (TB-A8): Hα crimson, cyan
-/// and violet (M12: Hα replaces Ember's orange, which the gallery already uses a lot;
-/// `double_pendulum` pairs Hα with Aurora, a different pair).
-const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
-// No glow under the lines (TB-A9, M14): the half-block halo each body used to expose
-// read as thick blocks on black; the lines and small heads carry the scene (ADR-0017
-// rules 1 and 3).
-
-/// ASCII heads; in Unicode a head is a small disc of `HEAD_R` dots (about 2 dots across),
-/// `HEAD_R_TALL` from `TALL_ROWS` up (TB-A8; M14: smaller bodies, ADR-0017 rule 3).
-const HEAD: Glyph = Glyph::ascii('@');
-const HEAD_R: f64 = 1.0;
-const HEAD_R_TALL: f64 = 1.5;
-const TALL_ROWS: u16 = 40;
-/// Head ramp value: the saturated middle of each ramp, since every ramp's top is near
-/// white and three white heads cannot be told apart. The newest trail is capped at the
-/// same value; a one-dot core at `CORE_V` is the only near-white part and keeps the head
-/// brightest (also in mono). With the small M14 heads the core usually sets the head
-/// cell's ink, so a body reads as a white-hot speck at the tip of its coloured trail
-/// (ADR-0017 rule 6: the subject stays bright).
-const HEAD_V: f64 = 0.7;
-const CORE_V: f64 = 0.95;
+/// Body `i` is drawn in `ROLES[i]` (SPEC-002 Inks).
+const ROLES: [Role; 3] = [Role::Hot, Role::Cold, Role::Accent];
+const HEAD: Glyph = Glyph::new('●', '@');
 /// Index of the Lagrange orbit, the one that gets its triangle drawn.
 const LAGRANGE: usize = 1;
 /// Each orbit's short name, in gallery order; the shown one is the title's caption
@@ -80,8 +55,6 @@ const CAPTIONS: [&str; 5] = ["figure-8", "Lagrange", "Broucke A1", "Broucke R4",
 pub(crate) struct Orbit {
     pub label: &'static str,
     pub short: &'static str,
-    /// Who found it and when: the whole label while the title already names the orbit.
-    pub attribution: &'static str,
     /// Interleaved `(x, y)` of bodies 1..3, COM-centred.
     pub pos: [f64; 6],
     pub vel: [f64; 6],
@@ -157,7 +130,6 @@ pub(crate) fn orbits() -> [Orbit; 5] {
     [
         Orbit {
             label: "figure-8  Moore 1993",
-            attribution: "Moore 1993",
             short: CAPTIONS[0],
             pos: [x1, y1, -x1, -y1, 0.0, 0.0],
             vel: [-vx3 / 2.0, -vy3 / 2.0, -vx3 / 2.0, -vy3 / 2.0, vx3, vy3],
@@ -169,7 +141,6 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Lagrange triangle  1772",
-            attribution: "1772",
             short: CAPTIONS[1],
             pos: lx,
             vel: lv,
@@ -181,7 +152,6 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Broucke A1  1975",
-            attribution: "1975",
             short: CAPTIONS[2],
             pos: [-0.989_262_004_3, 0.0, 2.209_617_724_1, 0.0, -1.220_355_719_7, 0.0],
             vel: [0.0, 1.916_924_418_5, 0.0, 0.191_026_873_8, 0.0, -2.107_951_292_4],
@@ -193,7 +163,6 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Broucke R4  1975",
-            attribution: "1975",
             short: CAPTIONS[3],
             pos: [0.873_304_709_1, 0.0, -0.625_403_028_8, 0.0, -0.247_901_680_3, 0.0],
             vel: [0.0, 1.010_776_443_6, 0.0, -1.683_353_345_8, 0.0, 0.672_576_902_2],
@@ -205,7 +174,6 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "moth I  Suvakov 2013",
-            attribution: "Suvakov 2013",
             short: CAPTIONS[4],
             pos: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             vel: [mvx, mvy, mvx, mvy, -2.0 * mvx, -2.0 * mvy],
@@ -308,18 +276,13 @@ pub(crate) fn view_for(size: Size, orbit: &Orbit) -> View {
     }
 }
 
-/// The orbit's label for a `size` canvas (SPEC-002 Label): just the attribution when the
-/// title already shows the orbit's name as its caption, else the full form, else the
-/// short form; each only if it fits in `w − 2` columns.
-pub(crate) fn label_for(size: Size, orbit: &Orbit) -> Option<&'static str> {
-    let room = usize::from(size.width().saturating_sub(2));
-    let named = Title::new(META.title, Some(orbit.short)).fit(size) == Some(Form::Full);
-    let forms: &[&'static str] = if named {
-        &[orbit.attribution]
-    } else {
-        &[orbit.label, orbit.short]
-    };
-    forms.iter().copied().find(|s| s.len() <= room)
+/// The orbit's label for a `w`-column canvas: the full form if it fits in `w − 2`
+/// columns, else the short form, else none (SPEC-002 Label).
+pub(crate) fn label_for(w: u16, orbit: &Orbit) -> Option<&'static str> {
+    let room = usize::from(w.saturating_sub(2));
+    [orbit.label, orbit.short]
+        .into_iter()
+        .find(|s| s.len() <= room)
 }
 
 /// The fraction of its period `orbit`'s trail spans in a view of `scale` rows per unit.
@@ -334,26 +297,21 @@ pub(crate) fn trail_span(orbit: &Orbit, scale: f64) -> f64 {
 }
 
 /// Trail brightness for a sample of age fraction `f ∈ [0, 1)` (0 = newest) on a trail
-/// spanning `span` of the period, at most `TRAIL_TOP` (M14: trails ≤ 150, so the heads
-/// are the bright subject). A full-period trail keeps a floor of 30, so the whole orbit
-/// stays sketched; a shorter one tapers to 0 at `f = span` and its old loops dissolve
-/// (SPEC-002 Inks).
+/// spanning `span` of the period. A full-period trail keeps a floor of 40, so the whole
+/// orbit stays sketched; a shorter one tapers to 0 at `f = span` and its old loops
+/// dissolve (SPEC-002 Inks).
 fn trail_level(f: f64, span: f64) -> f64 {
     if span >= 1.0 {
-        return TRAIL_FLOOR + (TRAIL_TOP - TRAIL_FLOOR) * (1.0 - f).max(0.0).powf(1.5);
+        return 40.0 + 160.0 * (1.0 - f).max(0.0).powf(1.5);
     }
     let rest = (1.0 - f / span).max(0.0);
-    (TRAIL_TOP - TRAIL_FLOOR) * rest.powf(1.5) + TRAIL_FLOOR * rest
+    160.0 * rest.powf(1.5) + 40.0 * rest
 }
-const TRAIL_TOP: f64 = 150.0;
-const TRAIL_FLOOR: f64 = 30.0;
 
-/// Ink multiplier of everything an orbit draws: faded in from `FADE_IN_FLOOR` over the
-/// first `FADE_IN` seconds of a run and out with the orbit (visual only; the physics is
-/// untouched).
+/// Ink multiplier of everything an orbit draws: faded in over the first `FADE_IN`
+/// seconds of a run and out with the orbit (visual only; the physics is untouched).
 fn orbit_fade(phase: &Phase) -> f64 {
-    let rise = ease::smoothstep((phase.tau / FADE_IN).min(1.0));
-    ease::lerp(FADE_IN_FLOOR, 1.0, rise) * phase.fade
+    ease::smoothstep((phase.tau / FADE_IN).min(1.0)) * phase.fade
 }
 
 /// Head brightness, `255·orbit_fade`.
@@ -374,7 +332,7 @@ pub(crate) struct Phase {
     pub seg: usize,
     /// Seconds since this orbit's run started (the physics keeps going in the fade).
     pub tau: f64,
-    /// Ink multiplier: 1 while running, `1 − u³` over the fade.
+    /// Ink multiplier: 1 while running, `1 − smoothstep(u)` over the fade.
     pub fade: f64,
 }
 
@@ -388,6 +346,8 @@ fn timeline(orbits: &[Orbit; 5]) -> Timeline {
 }
 
 pub(crate) struct ThreeBody {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     orbits: [Orbit; 5],
     timeline: Timeline,
     /// Own accumulated simulated time (GEN-R7).
@@ -399,14 +359,8 @@ pub(crate) struct ThreeBody {
     trails: [Trail<(f64, f64)>; 3],
     size: Size,
     view: View,
-    /// Head disc radius at the current size, dots.
-    head_r: f64,
     /// Trails (and Lagrange's triangle), rasterised in `update`/`resize`.
     dots: Dots,
-    /// Each orbit's label at the current size, chosen in `resize`.
-    labels: [Option<&'static str>; 5],
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
-    dirty: bool,
 }
 
 impl ThreeBody {
@@ -414,7 +368,7 @@ impl ThreeBody {
         let orbits = orbits();
         let size = Size::new(1, 1);
         Self {
-            dirty: true,
+            dirty: false,
             timeline: timeline(&orbits),
             t: 0.0,
             phase: Phase {
@@ -426,10 +380,8 @@ impl ThreeBody {
             bodies: Bodies::at_ics(&orbits[0]),
             trails: std::array::from_fn(|_| Trail::new(SAMPLES)),
             view: view_for(size, &orbits[0]),
-            head_r: HEAD_R,
             size,
             dots: Dots::default(),
-            labels: [None; 5],
             orbits,
         }
     }
@@ -447,7 +399,7 @@ impl ThreeBody {
             Phase {
                 seg,
                 tau: self.orbits[seg].run_secs() + beat.local,
-                fade: 1.0 - beat.progress.clamp(0.0, 1.0).powi(3),
+                fade: 1.0 - ease::smoothstep(beat.progress),
             }
         }
     }
@@ -485,28 +437,9 @@ impl ThreeBody {
         if self.phase.seg == LAGRANGE {
             self.triangle();
         }
-        self.heads();
     }
 
-    /// Each head as a saturated disc in its body's ramp with a bright one-dot core,
-    /// fading in and out with the orbit.
-    fn heads(&mut self) {
-        let level = head_level(&self.phase);
-        if level < MIN_VISIBLE_LEVEL {
-            return;
-        }
-        for (i, ramp) in RAMPS.iter().enumerate() {
-            let (x, y) = self.bodies.body(i);
-            let (dx, dy) = self.view.dot(x, y);
-            let fade = level / 255.0;
-            self.dots
-                .disc(dx, dy, self.head_r, ink::ramp(*ramp, HEAD_V * fade));
-            self.dots.plot(dx, dy, ink::ramp(*ramp, CORE_V * fade));
-        }
-    }
-
-    /// Each body's trail as 1-dot hairline segments, dimming with age (M14: no comet
-    /// thickening, ADR-0017 rule 3).
+    /// Each body's trail as dot-lattice segments, dimming with age.
     fn trails_onto_dots(&mut self) {
         let (view, fade) = (self.view, orbit_fade(&self.phase));
         let span = trail_span(&self.orbits[self.phase.seg], view.scale);
@@ -516,14 +449,13 @@ impl ThreeBody {
             // Consecutive samples, then newest sample → the head itself.
             let pairs = trail.iter().zip(trail.iter().skip(1).chain([&head]));
             for (k, (&a, &b)) in pairs.enumerate() {
-                let f = (len - 1 - k) as f64 / SAMPLES as f64;
-                let level = trail_level(f, span) * fade;
+                let level = trail_level((len - 1 - k) as f64 / SAMPLES as f64, span) * fade;
                 if level < MIN_VISIBLE_LEVEL {
                     continue;
                 }
-                let ink = ink::ramp(RAMPS[i], (level / 255.0).min(HEAD_V));
                 let (p, q) = (view.dot(a.0, a.1), view.dot(b.0, b.1));
-                self.dots.line(p.0, p.1, q.0, q.1, ink);
+                self.dots
+                    .line(p.0, p.1, q.0, q.1, Ink::new(ROLES[i], ink::level(level)));
             }
         }
     }
@@ -574,14 +506,8 @@ impl Generator for ThreeBody {
         // Physics and trails live in model units: only the view changes (SPEC-002).
         self.size = size;
         self.view = view_for(size, &self.orbits[self.phase.seg]);
-        self.head_r = if size.height() >= TALL_ROWS {
-            HEAD_R_TALL
-        } else {
-            HEAD_R
-        };
         self.dots.resize(size);
-        self.labels = self.orbits.map(|o| label_for(size, &o));
-        self.dirty = true;
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -601,7 +527,7 @@ impl Generator for ThreeBody {
         self.dirty = true;
     }
 
-    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
         if self.dirty {
             self.dirty = false;
@@ -610,24 +536,22 @@ impl Generator for ThreeBody {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // Lines and heads on black; no glow layer (TB-A9, M14).
         self.dots.blit(canvas);
         let level = head_level(&self.phase);
-        // Unicode heads are discs on the lattice; ASCII gets a clear `@`.
-        if level >= MIN_VISIBLE_LEVEL && canvas.mode() == GlyphMode::Ascii {
-            for (i, ramp) in RAMPS.iter().enumerate() {
+        if level >= MIN_VISIBLE_LEVEL {
+            for (i, role) in ROLES.iter().enumerate() {
                 let (x, y) = self.bodies.body(i);
                 let (cx, cy) = self.view.cell(x, y);
                 canvas.put(
                     cx.floor() as i32,
                     cy.floor() as i32,
                     HEAD,
-                    // The same saturated band as the Unicode discs, not the white top.
-                    ink::ramp(*ramp, HEAD_V * level / 255.0),
+                    Ink::new(*role, ink::level(level)),
                 );
             }
         }
-        if let Some(label) = self.labels[self.phase.seg] {
+        let orbit = &self.orbits[self.phase.seg];
+        if let Some(label) = label_for(canvas.size().width(), orbit) {
             canvas.text(1, 0, label, Ink::new(Role::Text, 150));
         }
     }
@@ -842,9 +766,7 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let (mut fine, mut coarse) = (ThreeBody::new(), ThreeBody::new());
         fine.resize(Size::new(80, 24), &mut ctx);
-        fine.prepare();
         coarse.resize(Size::new(80, 24), &mut ctx);
-        coarse.prepare();
         for _ in 0..70 {
             for _ in 0..60 {
                 fine.update(SIM_DT, &mut ctx);
@@ -874,7 +796,6 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
-        g.prepare();
         let mut start = 0.0;
         for seg in 0..=5 {
             // Land just inside run `seg` (seg 5 = the figure-8 again, next loop), from
@@ -898,7 +819,6 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
-        g.prepare();
         let mut seen = [false; 5];
         // One whole loop of the gallery (≈ 69.4 s, TB-A5).
         for _ in 0..70 * 4 {
@@ -933,42 +853,16 @@ mod tests {
                     }
                 }
             }
-            assert!(o.label.is_ascii() && o.short.is_ascii() && o.attribution.is_ascii());
-            // Too short for the title (fewer than 6 rows): the label carries the name.
-            let untitled = |w: u16| label_for(Size::new(w, 5), o);
-            assert_eq!(untitled(80), Some(o.label));
+            assert!(o.label.is_ascii() && o.short.is_ascii());
+            assert_eq!(label_for(80, o), Some(o.label));
             let full = o.label.len() as u16 + 2;
-            assert_eq!(untitled(full), Some(o.label));
-            assert_eq!(untitled(full - 1), Some(o.short));
-            assert_eq!(untitled(o.short.len() as u16 + 1), None);
+            assert_eq!(label_for(full, o), Some(o.label));
+            assert_eq!(label_for(full - 1, o), Some(o.short));
+            assert_eq!(label_for(o.short.len() as u16 + 1, o), None);
         }
         let mut stage = Stage::new(build(), 1, Size::new(80, 24), GlyphMode::Unicode);
-        let row: String = stage.render().to_lines()[0].chars().take(12).collect();
-        assert_eq!(row, " Moore 1993 ");
-    }
-
-    #[test]
-    fn tb_a6_the_label_does_not_repeat_the_orbit_named_by_the_title() {
-        for (size, o) in [Size::new(80, 24), Size::new(200, 50)]
-            .into_iter()
-            .flat_map(|s| orbits().map(|o| (s, o)))
-        {
-            // Every caption fits the full title at these sizes.
-            assert_eq!(
-                Title::new(META.title, Some(o.short)).fit(size),
-                Some(Form::Full)
-            );
-            assert_eq!(label_for(size, &o), Some(o.attribution), "{}", o.short);
-        }
-        // A title narrowed to its phenomenon drops the caption: the label names the orbit.
-        let o = &orbits()[0];
-        let title = Title::new(META.title, Some(o.short));
-        let narrow = (1..80)
-            .map(|w| Size::new(w, 24))
-            .find(|&s| title.fit(s) == Some(Form::Phenomenon))
-            .expect("some width shows only the phenomenon");
-        let label = label_for(narrow, o);
-        assert!(label.is_some_and(|l| l.starts_with(o.short)), "{label:?}");
+        let row: String = stage.render().to_lines()[0].chars().take(22).collect();
+        assert_eq!(row, " figure-8  Moore 1993 ");
     }
 
     #[test]
@@ -988,15 +882,14 @@ mod tests {
         for o in &orbits()[..4] {
             assert_eq!(trail_span(o, 0.25), 1.0);
         }
-        // Full-period trails keep the published ramp, floor 30 at the oldest sample and
-        // at most 150 (M14: dimmer trails, the heads are the subject).
+        // Full-period trails keep the published ramp, floor 40 at the oldest sample.
         for i in 0..SAMPLES {
             let f = i as f64 / SAMPLES as f64;
-            let expect = 30.0 + 120.0 * (1.0 - f).powf(1.5);
+            let expect = 40.0 + 160.0 * (1.0 - f).powf(1.5);
             assert!((trail_level(f, 1.0) - expect).abs() < 1e-12);
         }
-        // The moth's ramp starts at 150, falls strictly and is gone by the span's end.
-        assert_eq!(trail_level(0.0, MOTH_TRAIL), 150.0);
+        // The moth's ramp starts at 200, falls strictly and is gone by the span's end.
+        assert_eq!(trail_level(0.0, MOTH_TRAIL), 200.0);
         let fs: Vec<f64> = (0..=100)
             .map(|i| f64::from(i) / 100.0 * MOTH_TRAIL)
             .collect();
@@ -1012,7 +905,6 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
-        g.prepare();
         let before: f64 = g.orbits[..4].iter().map(|o| o.run_secs() + FADE).sum();
         g.t = before + g.orbits[4].run_secs() - 0.05 - SIM_DT;
         g.update(SIM_DT, &mut ctx);
@@ -1044,11 +936,9 @@ mod tests {
 
     #[test]
     fn tb_a7_heads_and_lagrange_triangle_fade_in_at_every_run_start() {
-        // Every run opens on its heads at a third of full brightness, never a blank frame,
-        // and rises to full by 0.3 s.
         let run = |tau: f64, fade: f64| head_level(&Phase { seg: 0, tau, fade });
-        assert_eq!(run(0.0, 1.0), 255.0 * FADE_IN_FLOOR);
-        assert!(run(0.0, 1.0) < run(0.1, 1.0) && run(0.1, 1.0) < run(0.2, 1.0));
+        assert_eq!(run(0.0, 1.0), 0.0);
+        assert!(run(0.1, 1.0) > 0.0 && run(0.1, 1.0) < run(0.2, 1.0));
         assert_eq!(run(FADE_IN, 1.0), 255.0);
         assert_eq!(run(5.0, 1.0), 255.0);
         assert_eq!(run(5.0, 0.5), 127.5);
@@ -1060,17 +950,16 @@ mod tests {
                 fade,
             })
         };
-        assert!((tri(0.0, 1.0) - 80.0 * FADE_IN_FLOOR).abs() < 1e-12);
-        assert!(tri(0.0, 1.0) < tri(0.1, 1.0) && tri(0.1, 1.0) < tri(0.2, 1.0));
+        assert_eq!(tri(0.0, 1.0), 0.0);
+        assert!(tri(0.1, 1.0) > 0.0 && tri(0.1, 1.0) < tri(0.2, 1.0));
         assert!((tri(FADE_IN, 1.0) - 80.0).abs() < 1e-12);
         assert!((tri(5.0, 0.5) - 40.0).abs() < 1e-12);
-        // Seen in dots: the Lagrange run's first frame already shows its heads (the
-        // trails are empty); by 0.3 s the triangle is there.
+        // Seen in dots: nothing is lit on the Lagrange run's first frame (empty trails,
+        // triangle still dark); by 0.3 s the triangle is there.
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
-        g.prepare();
         let start = g.orbits[0].run_secs() + FADE;
         let lit = |d: &Dots| {
             let s = d.dot_size();
@@ -1082,8 +971,7 @@ mod tests {
         g.t = start;
         g.update(SIM_DT, &mut ctx);
         g.prepare();
-        assert_eq!(g.phase.seg, LAGRANGE);
-        assert!(lit(&g.dots) > 0, "blank first frame");
+        assert_eq!((g.phase.seg, lit(&g.dots)), (LAGRANGE, 0));
         g.t = start + FADE_IN - SIM_DT;
         g.update(SIM_DT, &mut ctx);
         g.prepare();
@@ -1093,11 +981,11 @@ mod tests {
         g.triangle();
         assert!(lit(&g.dots) >= trails + 20, "no triangle at τ = 0.3 s");
 
-        // Seen in frames: all three heads on the scene's first frame and at 0.3 s.
+        // Seen in frames: no head on the scene's first frame, all three by 0.3 s.
         let mut stage = Stage::new(build(), 1, Size::new(80, 24), GlyphMode::Ascii);
         let heads =
             |lines: Vec<String>| -> usize { lines.iter().map(|l| l.matches('@').count()).sum() };
-        assert_eq!(heads(stage.render().to_lines()), 3);
+        assert_eq!(heads(stage.render().to_lines()), 0);
         for _ in 0..18 {
             stage.step(SIM_DT);
         }
@@ -1117,7 +1005,6 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
-        g.prepare();
         let start = g.orbits[0].run_secs() + FADE;
         for t in [1.0, 4.0, 9.0] {
             g.t = start + t - SIM_DT;
@@ -1143,142 +1030,5 @@ mod tests {
             }
             assert!(added >= 20, "only {added} triangle dots at t = {t}");
         }
-    }
-
-    #[test]
-    fn tb_a9_no_glow_layer_every_cell_background_stays_black() {
-        // M14 (ADR-0017): the per-body half-block halo is gone; the lines and heads sit
-        // directly on black in both glyph modes.
-        let size = Size::new(120, 40);
-        let mut ctx = Ctx::new(0, size);
-        let mut g = ThreeBody::new();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let lagrange = g.orbits[0].run_secs() + FADE;
-        for t in [5.0, lagrange + 6.0] {
-            g.t = t - SIM_DT;
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-            for mode in [GlyphMode::Unicode, GlyphMode::Ascii] {
-                let mut c = Canvas::new(size, mode);
-                g.render(&mut c);
-                assert!(
-                    c.cells().iter().all(|c| c.bg == Ink::BLANK),
-                    "t {t} {mode:?}"
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn tb_a8_heads_are_small_and_trails_are_hairlines() {
-        // M14 (ADR-0017 rule 3): a head lights only a small disc of dots and the trail
-        // behind it is a 1-dot line, not a tapering comet.
-        let size = Size::new(80, 24);
-        let mut ctx = Ctx::new(0, size);
-        let mut g = ThreeBody::new();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        for _ in 0..120 {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        for i in 0..3 {
-            let (x, y) = g.bodies.body(i);
-            let (hx, hy) = g.view.dot(x, y);
-            let lit_within = |r: i32| {
-                (-r..=r)
-                    .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
-                    .filter(|&(dx, dy)| {
-                        g.dots
-                            .is_lit(hx.round() as i32 + dx, hy.round() as i32 + dy)
-                    })
-                    .count()
-            };
-            // The head itself: at least a few dots, never a big blob.
-            let head = lit_within(1);
-            assert!(head >= 3, "body {i}: {head} head dots");
-            // Head + hairline in a 13×13 dot box: well under the old comet's ≥ 24.
-            let near = lit_within(6);
-            assert!(near <= 24, "body {i}: {near} dots near the head");
-        }
-    }
-
-    #[test]
-    fn tb_a8_each_body_keeps_its_own_ramp() {
-        let mut stage = Stage::new(build(), 3, Size::new(80, 24), GlyphMode::Unicode);
-        for _ in 0..(5.0 / SIM_DT) as usize {
-            stage.step(SIM_DT);
-        }
-        let frame = stage.render();
-        let roles: Vec<Role> = frame.cells().iter().map(|c| c.ink.role).collect();
-        for ramp in RAMPS {
-            assert!(roles.contains(&Role::Ramp(ramp)), "{ramp:?} missing");
-        }
-    }
-
-    #[test]
-    fn tb_a8_heads_keep_their_hue() {
-        // Around each head most lit cells sit in the saturated band of its own ramp, not
-        // at the near-white top every ramp shares.
-        let size = Size::new(120, 40);
-        let mut ctx = Ctx::new(0, size);
-        let mut g = ThreeBody::new();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        for _ in 0..(3.0 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-        g.render(&mut canvas);
-        let top = ink::seq(0.75).level;
-        for (i, ramp) in RAMPS.iter().enumerate() {
-            let (x, y) = g.bodies.body(i);
-            let (hx, hy) = g.view.dot(x, y);
-            let (cx, cy) = ((hx / 2.0) as i32, (hy / 4.0) as i32);
-            let cells: Vec<_> = (-1..=1)
-                .flat_map(|dy| (-1..=1).map(move |dx| (cx + dx, cy + dy)))
-                .filter_map(|(x, y)| canvas.get(x, y))
-                .filter(|c| c.ch != ' ' && c.ink.role == Role::Ramp(*ramp))
-                .collect();
-            let hued = cells.iter().filter(|c| c.ink.level <= top).count();
-            assert!(
-                // M14: heads are small now, so the core's cell (the one near-white
-                // part) may be half of just two lit cells; the rest stay hued.
-                hued >= 1 && hued + 1 >= cells.len(),
-                "body {i}: {hued} of {}",
-                cells.len()
-            );
-        }
-        // ASCII `@` heads use the same band, so colour terminals still tell them apart.
-        let mut canvas = Canvas::new(size, GlyphMode::Ascii);
-        g.render(&mut canvas);
-        let heads: Vec<Ink> = canvas
-            .cells()
-            .iter()
-            .filter(|c| c.ch == '@')
-            .map(|c| c.ink)
-            .collect();
-        assert_eq!(heads.len(), 3);
-        for (ink, ramp) in heads.iter().zip(RAMPS) {
-            assert!(RAMPS.map(Role::Ramp).contains(&ink.role), "{ink:?}");
-            assert!(ink.level <= top, "{ramp:?} head at {}", ink.level);
-        }
-    }
-
-    #[test]
-    fn tb_a7_orbits_fade_out_late_so_the_gallery_is_never_dark_for_long() {
-        let g = ThreeBody::new();
-        let end = g.orbits[0].run_secs();
-        // At 0.6 of the fade the orbit still shows at three quarters or more; below a
-        // quarter lasts only the last 0.13 s of the fade (the next run opens at a third).
-        assert!(g.phase_at(end + 0.6 * FADE).fade > 0.75);
-        let dark = (0..=1000)
-            .map(|k| end + f64::from(k) * (FADE + FADE_IN) / 1000.0)
-            .filter(|&t| orbit_fade(&g.phase_at(t)) < 0.25)
-            .count();
-        let seconds = dark as f64 * (FADE + FADE_IN) / 1000.0;
-        assert!(seconds < 0.15, "{seconds} s below a quarter");
     }
 }

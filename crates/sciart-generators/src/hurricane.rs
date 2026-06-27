@@ -13,10 +13,10 @@
 
 use std::f64::consts::TAU;
 
+use sciart_core::Grid;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, half_block};
-use sciart_core::{Grid, ink};
 
 use crate::shared::vortex_advect::{self, Flow, XEdge};
 use sciart_core::rng::value_noise;
@@ -91,15 +91,12 @@ const DISSOLVE: f64 = 1.5;
 const SMALL: u16 = 64;
 /// Steps between cirrus refreshes (0.1 s).
 const SWELL_EVERY: u32 = 6;
-/// Visible light (ADR-0017): the open sea is black; cloud is neutral `Starlight` up to
-/// `CLOUD_TOP` of the ramp, and black below `CLOUD_BLACK` levels.
+/// Visible light: the open sea is black; cloud lightness is scaled by `CLOUD_TOP` before
+/// its steps ([`vis_ink`]), and black below `CLOUD_BLACK` levels.
 const CLOUD_TOP: f64 = 0.8;
 const CLOUD_BLACK: f64 = 14.0;
-/// The enhanced-infrared picture (HUR-A4): the warm sea's level, and the level the
-/// cloud-top curve starts from.
+/// The enhanced-infrared picture (HUR-A4): where the cloud-top curve starts from.
 const IR_LOW: f64 = 0.16;
-/// The muted enhancement curve's top (the teal, level ~115).
-const IR_TOP: f64 = 0.45;
 /// Cloud-top height factor in the IR act: 1 inside `IR_CORE` (`H`, the overcast), falling
 /// linearly to `IR_BANDS` at `IR_OUTER`.
 const IR_CORE: f64 = CDO_OUT * R_MAX_WIND;
@@ -200,7 +197,7 @@ pub struct Hurricane {
     dirty: bool,
     /// A coarse lattice (`height ≤ SMALL`): smoothed picture, fewer inner bands.
     small: bool,
-    /// Enhanced-IR `Ramp(Infrared)` value by brightness level, before the height factor.
+    /// Enhanced-IR curve value by brightness level, before the height factor.
     ir_lut: [f32; 256],
     /// Convective texture (cumulus towers, `[−½, ½]`) on a `TURRET_N²` tile over the
     /// storm disc, fixed per storm, turning slowly with it.
@@ -514,7 +511,7 @@ impl Hurricane {
         // Convective texture fades out on a coarse picture, where it only speckles.
         let (texture, relief) = if self.small { (0.0, 0.8) } else { (1.0, 1.6) };
         let (bright, map, ir_lut, turrets) = (&self.bright, &self.map, &self.ir_lut, self.turrets);
-        // Catmull-Rom from the capped lattice (GEN-R17): smooth arms, no stair steps. The
+        // Catmull-Rom from the capped lattice (CORE-R102): smooth arms, no stair steps. The
         // taps are looked up once per pixel row (and the next, for the relief).
         let mut rows = (-1, map.row_cubic(bright, 0), map.row_cubic(bright, 1));
         self.pixels.shade(|x, y| {
@@ -545,19 +542,15 @@ impl Hurricane {
                 let height =
                     1.0 - (1.0 - IR_BANDS) * ((r - IR_CORE) / (IR_OUTER - IR_CORE)).clamp(0.0, 1.0);
                 let v = f64::from(ir_lut[((b * 255.0) as usize).min(255)]);
-                // ADR-0017: muted, the grey low cloud rising only into the curve's teal
-                // for the coldest tops (no orange or rose).
-                let v = IR_LOW + (v - IR_LOW) / (1.0 - IR_LOW) * (IR_TOP - IR_LOW);
-                // Thin cloud fades into the black sea as in the visible picture.
-                let ir = (IR_LOW + (v - IR_LOW) * height) * veil(f64::from(b));
-                if ir * 255.0 < CLOUD_BLACK {
+                // Coldness 0 (warm low cloud) … 1 (the coldest tops); thin cloud fades
+                // into the black sea as in the visible picture, and the act's cross-fade
+                // steps it down through the curve.
+                let cold = (v - IR_LOW) / (1.0 - IR_LOW) * height;
+                let fade = veil(f64::from(b)) * gain;
+                if fade * 255.0 < CLOUD_BLACK {
                     return Ink::BLANK;
                 }
-                let ir = ir * gain;
-                if ir * 255.0 < CLOUD_BLACK {
-                    return Ink::BLANK;
-                }
-                return ink::ramp(Ramp::Infrared, ir);
+                return ir_ink(cold * fade.min(1.0));
             }
             let b = f64::from(b);
             if b <= CLEAR {
@@ -584,16 +577,39 @@ impl Hurricane {
                 cloud_v(b) * veil(b)
             };
             let v = CLOUD_TOP * v.clamp(0.0, 1.0) * gain;
-            if v * 255.0 < CLOUD_BLACK {
-                Ink::BLANK
-            } else {
-                ink::ramp(Ramp::Starlight, v)
-            }
+            vis_ink(v)
         });
     }
 }
 
-/// Visible lightness (`Ramp(Starlight)` value) of cloud with top brightness `b`: cloud
+/// Visible cloud in flat grey-to-white steps (ADR-0018): the thin veil in `Dim`,
+/// the deck in `Structure`, sunlit tops in `Star`; below the faintest step
+/// the black sea.
+fn vis_ink(v: f64) -> Ink {
+    match v {
+        v if v < CLOUD_BLACK / 255.0 => Ink::BLANK,
+        v if v < 0.28 => Ink::new(Role::Dim, 0),
+        v if v < 0.5 => Ink::new(Role::Structure, 120),
+        v if v < 0.66 => Ink::new(Role::Star, 110),
+        _ => Ink::new(Role::Star, 220),
+    }
+}
+
+/// Enhanced infrared in flat semantic steps (HUR-A4, ADR-0018): warm low cloud dim,
+/// then colder tops through blue, cyan and green to yellow and the coldest in orange,
+/// the classic enhancement curve in M11's saturated roles. `cold` is 0 … 1.
+fn ir_ink(cold: f64) -> Ink {
+    match cold {
+        c if c < 0.18 => Ink::new(Role::Dim, 0),
+        c if c < 0.36 => Ink::new(Role::Cold, 90),
+        c if c < 0.52 => Ink::new(Role::Wave, 150),
+        c if c < 0.66 => Ink::new(Role::Particle, 130),
+        c if c < 0.8 => Ink::new(Role::Sun, 200),
+        _ => Ink::new(Role::Hot, 230),
+    }
+}
+
+/// Visible lightness (before [`vis_ink`]) of cloud with top brightness `b`: cloud
 /// reflectance saturates fast, so even a modest deck reads white-grey (a square root:
 /// one instruction per pixel, where `powf` cost a third of the frame at 500×150).
 #[inline]
@@ -770,7 +786,7 @@ mod tests {
     }
 
     #[test]
-    fn hur_a4_the_infrared_act_uses_the_enhancement_ramp_only() {
+    fn hur_a4_the_infrared_act_uses_the_stepped_enhancement_curve() {
         let mut g = storm();
         let mut ctx = Ctx::new(1, Size::new(60, 20));
         g.resize(Size::new(60, 20), &mut ctx);
@@ -783,18 +799,41 @@ mod tests {
         assert_eq!(g.caption(), Some("infrared"));
         let mut canvas = Canvas::new(Size::new(60, 20), GlyphMode::Unicode);
         g.render(&mut canvas);
-        let mut top = 0u8;
+        let steps: Vec<Ink> = [0.0, 0.3, 0.45, 0.6, 0.75, 0.95]
+            .into_iter()
+            .map(ir_ink)
+            .collect();
+        let mut hot = false;
         for cell in canvas.cells() {
             for ink in [cell.ink, cell.bg] {
                 assert!(
-                    matches!(ink.role, Role::Ramp(Ramp::Infrared) | Role::Background),
+                    ink.role == Role::Background || steps.contains(&ink),
                     "{ink:?}"
                 );
-                top = top.max(ink.level);
+                hot |= ink.role == Role::Hot;
             }
         }
-        // The coldest tops reach the curve's teal, no further (ADR-0017).
-        assert!((100..=120).contains(&top), "coldest top at level {top}");
+        // The coldest tops reach the curve's orange (ADR-0018: saturated steps).
+        assert!(hot, "no coldest tops");
+    }
+
+    #[test]
+    fn hur_a4_the_curve_runs_grey_blue_cyan_green_yellow_orange() {
+        let roles: Vec<Role> = [0.0, 0.3, 0.45, 0.6, 0.75, 0.95]
+            .into_iter()
+            .map(|c| ir_ink(c).role)
+            .collect();
+        assert_eq!(
+            roles,
+            [
+                Role::Dim,
+                Role::Cold,
+                Role::Wave,
+                Role::Particle,
+                Role::Sun,
+                Role::Hot
+            ]
+        );
     }
 
     /// The visible picture at `size`, `t` simulated seconds into the visible act.
@@ -817,19 +856,26 @@ mod tests {
 
     #[test]
     fn hur_a6_a7_the_storm_is_grey_cloud_on_a_black_sea() {
-        // ADR-0017, GEN-R18: the open sea and the eye are black; cloud is a neutral grey
-        // no brighter than `CLOUD_TOP`, fading into the black at its thin edges.
+        // ADR-0018: the open sea and the eye are black; cloud is flat grey-to-white
+        // steps (Structure, Star), at most four inks.
         for size in [Size::new(120, 40), Size::new(80, 24)] {
             let (_, inks) = visible(size, 3.0);
             let mut black = 0;
+            let mut used = std::collections::BTreeSet::new();
             for ink in &inks {
                 assert!(
-                    matches!(ink.role, Role::Background | Role::Ramp(Ramp::Starlight)),
+                    matches!(
+                        ink.role,
+                        Role::Background | Role::Dim | Role::Structure | Role::Star
+                    ),
                     "{size:?}: {ink:?}"
                 );
-                assert!(f64::from(ink.level) <= CLOUD_TOP * 255.0 + 1.0, "{ink:?}");
+                if *ink != Ink::BLANK {
+                    used.insert(ink.level);
+                }
                 black += usize::from(*ink == Ink::BLANK);
             }
+            assert!(used.len() <= 4, "{size:?}: {used:?}");
             assert!(
                 black * 4 > inks.len(),
                 "{size:?}: black sea {black} of {}",
@@ -861,7 +907,7 @@ mod tests {
                 }
                 let a = dy.atan2(dx).rem_euclid(TAU);
                 let bin = &mut bins[((a / TAU * 36.0) as usize).min(35)];
-                bin.0 += f64::from(ink.level);
+                bin.0 += rank(*ink);
                 bin.1 += 1;
             }
             let seq: Vec<f64> = bins
@@ -895,6 +941,18 @@ mod tests {
 
     /// Mean pixel level in 36 angular bins round the annulus `[r0, r1]` (radii of
     /// maximum wind) about the storm centre, over `inks` of pixel size `p`.
+    /// Brightness rank of a stepped cloud ink (visible or infrared), 50 per step.
+    fn rank(ink: Ink) -> f64 {
+        let vis = [0.1, 0.4, 0.6, 0.8].map(vis_ink);
+        let ir = [0.0, 0.3, 0.45, 0.6, 0.75, 0.95].map(ir_ink);
+        let k = vis
+            .iter()
+            .position(|&i| i == ink)
+            .or_else(|| ir.iter().position(|&i| i == ink))
+            .map_or(0, |k| k + 1);
+        50.0 * k as f64
+    }
+
     fn ring_bins(g: &Hurricane, inks: &[Ink], r0: f64, r1: f64) -> Vec<f64> {
         let p = g.pixels.pixel_size();
         let w = usize::from(p.width());
@@ -912,7 +970,7 @@ mod tests {
             }
             let a = dy.atan2(dx).rem_euclid(TAU);
             let bin = &mut bins[((a / TAU * 36.0) as usize).min(35)];
-            bin.0 += f64::from(ink.level);
+            bin.0 += rank(*ink);
             bin.1 += 1;
         }
         bins.iter()

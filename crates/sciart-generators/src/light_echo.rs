@@ -60,9 +60,9 @@ const DUST_LEVEL: f64 = 0.0;
 const GENERATIONS: [(f64, f32); 3] = [(0.0, 1.0), (LOOP, 0.55), (2.0 * LOOP, 0.25)];
 /// Light-curve tables.
 const LUT: usize = 512;
-/// Echo inks (M14, ADR-0017): scattered light in `Ramp(Starlight)` up to `HIGHLIGHT_MAX`,
-/// fading smoothly to black (no floor, no dust grey); light emitted hotter than `HOT_FROM`
-/// (the first, blue-white peak) is a faint `Ramp(Ice)` tint on its crests (`ICE_FROM`).
+/// Echo inks (ADR-0018, [`echo_ink`]): the contrast curve's level (up to `HIGHLIGHT_MAX`)
+/// in flat steps, black below the faintest; light emitted hotter than `HOT_FROM` (the
+/// first, blue-white peak) in blue steps, the cooler light of the later peaks in warm ones.
 const HIGHLIGHT_MAX: u8 = 240;
 pub(crate) const HOT_FROM: f32 = 5_500.0;
 /// Exposure of the scattered light, like a camera's auto-exposure: `update` estimates the
@@ -72,21 +72,45 @@ pub(crate) const HOT_FROM: f32 = 5_500.0;
 /// then brighten and fade the frame, as they should), and eases the gain toward
 /// `EXPOSE·WHITE / peak` with time constant `EXPOSE_TAU` in simulated seconds, so it is smooth in time and independent of the render cadence
 /// (GEN-R20); the gain is clamped to `ECHO_GAIN`, so the shells stay legible as the echo
-/// spreads and dims (GEN-R21) and the dark before the flash is never amplified into noise.
+/// spreads and dims and the dark before the flash is never amplified into noise.
 const WHITE: f32 = 2.2;
 const EXPOSE: f32 = 6.0;
 const ECHO_GAIN: (f32, f32) = (1.0, 6.0);
 const EXPOSE_STRIDE: usize = 13;
 const EXPOSE_TAU: f64 = 1.5;
-/// Hot light shows its blue only on the shells' crests, from this level up (ADR-0017: the
-/// pale end of `Ice`, a faint tint; below it the light is neutral).
-const ICE_FROM: f64 = 170.0;
 /// Contrast on the toned light: a shell's soft skirts fall to black, its crest stays
-/// legible (thin shells, GEN-R21).
+/// legible (thin shells).
 const ECHO_GAMMA: f64 = 3.0;
-/// The star after the outburst: a white point (ADR-0017 brief; V838 Mon itself became a
-/// red supergiant, drawn so in M12).
-const STAR_AFTER_K: f64 = 6_000.0;
+/// The star: a white point (V838 Mon itself became a red supergiant, drawn so in M12).
+const STAR: Ink = Ink::new(Role::Star, 255);
+/// Unlit dust (none while `DUST_LEVEL` is 0).
+const DUST: Ink = Ink::new(Role::Dim, 0);
+
+/// Scattered light at contrast level `level` (0–255) in three flat steps: blue-white
+/// (`Wave`, `Cold`) for light that left the star hot, sun-yellow to orange (`Sun`, `Hot`)
+/// for the cooler peaks; `None` below the faintest step.
+pub(crate) fn echo_ink(level: f64, hot: bool) -> Option<Ink> {
+    let step = match level {
+        l if l >= 150.0 => 2,
+        l if l >= 70.0 => 1,
+        l if l >= 18.0 => 0,
+        _ => return None,
+    };
+    let steps = if hot {
+        [
+            Ink::new(Role::Cold, 60),
+            Ink::new(Role::Cold, 200),
+            Ink::new(Role::Wave, 230),
+        ]
+    } else {
+        [
+            Ink::new(Role::Hot, 50),
+            Ink::new(Role::Hot, 190),
+            Ink::new(Role::Sun, 230),
+        ]
+    };
+    Some(steps[step])
+}
 /// Echo weight fades out beyond this sky radius (half-heights) over `VIGNETTE_SPAN`.
 const VIGNETTE_AT: f64 = 0.95;
 const VIGNETTE_SPAN: f64 = 0.5;
@@ -373,35 +397,22 @@ impl LightEcho {
             // Highlights roll off on the asinh curve, scaled into the muted range, so the
             // shells keep their gradation and fade smoothly into the dark.
             let level = f64::from(contrast[usize::from(tone.level(gain * v))]);
-            if kv > 0.0 && level >= ink::MIN_VISIBLE_LEVEL {
-                // Colour is the outburst's temperature when this light left the star: the
-                // hot first peak a faint blue (Ice), the rest neutral scattered light.
-                return if kv >= HOT_FROM && level >= ICE_FROM {
-                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(level))
-                } else {
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level))
-                };
+            if kv > 0.0 {
+                if let Some(ink) = echo_ink(level, kv >= HOT_FROM) {
+                    return ink;
+                }
             }
-            if dust > 0 {
-                Ink::new(Role::Ramp(Ramp::Starlight), dust)
-            } else {
-                Ink::BLANK
-            }
+            if dust > 0 { DUST } else { Ink::BLANK }
         });
         self.star();
     }
 
-    /// The star: blazing during the outburst, then a red supergiant.
+    /// The star: a white point, and during the outburst's peaks a small plus.
     fn star(&mut self) {
-        let (l, k) = self.curve_at(self.t);
-        let kelvin = if (0.0..=BURST).contains(&self.t) {
-            f64::from(k).max(STAR_AFTER_K)
-        } else {
-            STAR_AFTER_K
-        };
-        // A point; during the outburst's peaks a small plus (ADR-0017: no glow disc).
+        let (l, _) = self.curve_at(self.t);
+        // No glow disc: a point, the frame's brightest accent.
         let (x, y) = (self.centre.0.floor() as i32, self.centre.1.floor() as i32);
-        let ink = ink::blackbody(kelvin);
+        let ink = STAR;
         self.pixels.set(x, y, ink);
         if l > 0.3 {
             for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
@@ -526,7 +537,7 @@ mod tests {
     #[test]
     fn echo_a6_highlights_roll_off_and_hot_light_is_blue_white() {
         let (mut g, _) = built(Size::new(120, 40));
-        // M14: hot light a blue (Ice) tint, the rest neutral scattered light (Starlight).
+        // ADR-0018: hot light in blue steps (Cold, Wave), the rest warm (Hot, Sun).
         let (mut ice, mut ember) = (0, 0);
         for t in [1.0, 3.0, 6.0, 12.0] {
             g.t = t;
@@ -537,18 +548,28 @@ mod tests {
             for y in 0..i32::from(px.height()) {
                 for x in 0..i32::from(px.width()) {
                     let ink = g.pixels.get(x, y).unwrap();
-                    match ink.role {
-                        Role::Ramp(Ramp::Ice) => ice += 1,
-                        Role::Ramp(Ramp::Starlight) => ember += 1,
-                        _ => continue,
+                    match rank(ink) {
+                        Some((_, true)) => ice += 1,
+                        Some((_, false)) => ember += 1,
+                        None => assert!(
+                            matches!(ink.role, Role::Background | Role::Star),
+                            "{ink:?} at {x},{y} t={t}"
+                        ),
                     }
-                    assert!(ink.level <= HIGHLIGHT_MAX, "clipped at {x},{y} t={t}");
                 }
             }
         }
         // Both the hot (early) and the cool (late) light show, the cool light dominating.
-        // M14: the hot light's blue shows only on the crests (a faint tint).
-        assert!(ice > 10 && ember > 10 * ice, "ice {ice}, ember {ember}");
+        assert!(ice > 10 && ember > ice, "ice {ice}, ember {ember}");
+    }
+
+    /// Step (1–3) and hotness of an echo ink, `None` for anything else.
+    fn rank(ink: Ink) -> Option<(u8, bool)> {
+        [false, true].into_iter().find_map(|hot| {
+            (1u8..=3)
+                .find(|&k| echo_ink([20.0, 100.0, 200.0][usize::from(k - 1)], hot) == Some(ink))
+                .map(|k| (k, hot))
+        })
     }
 
     /// Mean level step between 4-neighbouring echo pixels, and the share of echo pixels
@@ -557,10 +578,11 @@ mod tests {
     fn roughness(g: &LightEcho) -> (f64, f64) {
         let px = g.pixels.pixel_size();
         let echo = |x: i32, y: i32| {
+            // One flat step is 40 levels' worth of change.
             g.pixels
                 .get(x, y)
-                .filter(|i| matches!(i.role, Role::Ramp(Ramp::Ice | Ramp::Starlight)))
-                .map(|i| f64::from(i.level))
+                .and_then(rank)
+                .map(|(k, _)| 40.0 * f64::from(k))
         };
         let (mut step, mut pairs, mut lit, mut specks) = (0.0, 0, 0, 0);
         for y in 0..i32::from(px.height()) {

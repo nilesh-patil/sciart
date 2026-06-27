@@ -774,7 +774,7 @@ mod tests {
 
     #[test]
     fn nlc_a7_the_sky_is_black_over_a_thin_warm_horizon_glow() {
-        // GEN-R18, ADR-0017: no twilight wash; a Blackbody glow a few pixels deep over the
+        // ADR-0017 (dark ground): no twilight wash; a Blackbody glow a few pixels deep over the
         // horizon, fading upward into black.
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..120 {

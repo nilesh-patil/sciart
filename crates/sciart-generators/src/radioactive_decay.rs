@@ -20,57 +20,28 @@
 //! (Chapman–Kolmogorov) and the populations are exactly binomial with the Bateman
 //! fractions at every time, for any sequence of step sizes (RAD-A2).
 //!
-//! Each nucleus is a square of 2 × 2 half-block pixels on a pitch of 3, so the lattice reads
-//! as separate nuclei on a quiet black ground rather than as one-pixel noise (RAD-A5). The
-//! parent and daughter differ in hue and grey level: A a warm `HAlpha` rose, B a teal
-//! `Ice`, while stable C sinks to a near-black `Plasma` ember of the ground, so the
-//! lattice fades out as it decays. Events are
-//! the brightest thing on the lattice (RAD-A8): a decay flashes its nucleus at the top of
-//! the daughter's ramp and eases back to the daughter's colour over [`FLASH`] s, long
-//! enough for the eye to follow, and a uniform sample of decays also burst (a small ring)
-//! and leave a braille track, drawn as if in a cloud chamber in a magnetic field: an α
-//! after A → B (short, straight, thick, mono-energetic), a β⁻ after B → C (always longer,
-//! thin, curling the other way and knocked about by scattering, with a continuous energy
-//! spectrum). An A → C within one step emits both.
-//! Part-way through each run the plot's y axis eases from linear to logarithmic, where
-//! every exponential is a straight line and B's line turns parallel to A's (transient
-//! equilibrium, RAD-A6). The measured counts are drawn bright over the dim analytic curves.
-//!
-//! Stylisation (stated in SPEC-002): the chain is fictional, with half-lives of seconds;
-//! track ranges, speeds, scattering and the field are display values, only a sample of
-//! decays is tracked, and colours are false.
-//!
-//! Raster convention: the nuclei go into `Pixels`, tracks, bursts and curves into `dots`,
-//! at the end of `update` and `resize`; `render` blits them (the dots over the lattice,
-//! which carries on as their cells' background) and writes the panel text. ASCII draws
-//! the lattice per cell instead.
+//! Each A → B emits an α (short, straight, mono-energetic track); each B → C emits a β⁻
+//! (longer, faint, strongly curling in the chamber's magnetic field, with a continuous
+//! energy spectrum). An A → C within one step emits both.
 
 use std::f64::consts::{LN_2, TAU};
-use std::fmt::Write as _;
 
 use rand::Rng;
 
-use sciart_core::ink;
+use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
-use sciart_core::rng::hash01;
-use sciart_core::timeline::ease;
-use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "radioactive_decay",
     category: Category::Physics,
     description: "A lattice of nuclei decaying through a chain beside live Bateman curves",
     title: "Decay chain · random yet lawful",
-    captions: &[CAPTION_LINEAR, CAPTION_LOG],
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(RadioactiveDecay::default())
 }
-
-/// Act captions (RAD-A6): the linear plot, then the log plot.
-const CAPTION_LINEAR: &str = "random yet lawful";
-const CAPTION_LOG: &str = "on a log scale";
 
 /// Half-lives, s (spec).
 const T_A: f64 = 8.0;
@@ -80,99 +51,52 @@ const RESET_FRAC: f64 = 0.02;
 /// The plot's time axis spans this multiple of the expected (analytic) reset time, so a
 /// run that ends a little late still lands on the axis.
 const AXIS_SLACK: f64 = 1.08;
-/// The y axis eases from linear to log over `LOG_EASE` s from `LOG_FROM` s into a run
-/// (RAD-A6), spanning `DECADES` decades below N₀.
-const LOG_FROM: f64 = 18.0;
-const LOG_EASE: f64 = 2.0;
-const DECADES: f64 = 3.0;
 
-/// Plot panel: 30 % of the width on the right, shown only when it gets ≥ 24×10 cells.
-const PANEL_FRAC: f64 = 0.30;
+/// Plot panel: ≈ 38 % of the width on the right, shown only when it gets ≥ 24×10 cells.
+const PANEL_FRAC: f64 = 0.38;
 const PANEL_MIN_W: i32 = 24;
 const PANEL_MIN_H: i32 = 10;
 
-/// A decay flashes its nucleus's pixel at the top of its decay's ramp (`FLASH_RAMPS`: α
-/// `Aurora`, β `Ember`) and eases down to `FLASH_LOW` of it over `FLASH` s (quadratic
-/// ease-out), then shows the daughter's settled ink, so the eye can follow each event; for
-/// the first `FLASH_HOT` s it is bright and ASCII shows `*` (RAD-A8).
-const FLASH: f32 = 0.3;
-const FLASH_HOT: f32 = 0.06;
-const FLASH_LOW: f64 = 0.25;
-/// Ordered by the daughter A, B, C: B is born of an α decay, C of a β⁻ (A never flashes).
-const FLASH_RAMPS: [Ramp; 3] = [Ramp::Aurora, Ramp::Aurora, Ramp::Ember];
-/// Nuclei are single pixels on a pitch of `PITCH` pixels (RAD-A5, ADR-0017): sparse dots
-/// on black, never a grid of squares.
-const NUC: i32 = 1;
-const PITCH: i32 = 3;
+/// Decay flash and afterglow, s.
+const FLASH: f32 = 0.14;
+const GLOW: f32 = 0.9;
 
-/// Tracks in pixels (square: one pixel is half a row tall and one column wide), each gone
-/// within `*_LIFE` s. α: mono-energetic, so every α has the same range, and heavy, so it
-/// runs nearly straight. Both are 1-dot strokes (ADR-0017).
-const ALPHA_SPEED: f64 = 25.0; // px/s
-const ALPHA_RUN: f64 = 0.2; // s → range 5 px
+/// α: mono-energetic, so every α has the same range; barely bent by the field.
+const ALPHA_SPEED: f64 = 11.0; // rows/s
+const ALPHA_RUN: f64 = 0.3; // s → range 3.3 rows
 const ALPHA_OMEGA: f64 = 0.6; // rad/s
-const ALPHA_LIFE: f64 = 0.35;
-/// β⁻: continuous spectrum (speed drawn per decay), always longer than an α (10–22.5 px),
-/// opposite charge ⇒ curls the other way, and light, so it is knocked about (multiple
-/// scattering): its heading takes a fixed random kick of up to ±`BETA_SCATTER` rad every
-/// `KINK` s of flight.
-const BETA_SPEED: (f64, f64) = (40.0, 90.0);
-const BETA_RUN: f64 = 0.25;
-const BETA_OMEGA: f64 = -5.0;
-const BETA_SCATTER: f64 = 0.35;
-const BETA_LIFE: f64 = 0.4;
-/// Flight time per straight piece of a track.
-const KINK: f64 = 0.02;
-/// Lattice pixels (not nuclei) per track slot: most decays only flash, so each tracked one
-/// stands out.
-/// Which decays get a free slot is a uniform sample of the step's decays (RAD-A8).
-const TRACKS_PER_PIXEL: usize = 800;
-/// Species palette (false colour), ordered A, B, C: `HAlpha`, `Ice`, `Plasma`. The plot's
-/// curves wear it at [`MEASURED`]; on the lattice (ADR-0017) A and B are muted dots of the
-/// same hues (`LATTICE`: a dusty rose and a dim teal-blue, so each species matches its
-/// curve), and stable C is not drawn, so the lattice fades out as it decays and only the
-/// flashes are bright.
-const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
-const LATTICE: [u8; 2] = [70, 70];
-/// Tracks in the flash hues: α `Aurora` (green), β `Ember`, at `TRACK_TOP` of the ramp
-/// while moving, fading to `TRACK_FLOOR` of that.
-const ALPHA_RAMP: Ramp = Ramp::Aurora;
-const BETA_RAMP: Ramp = Ramp::Ember;
-const TRACK_TOP: f64 = 0.95;
-const TRACK_FLOOR: f64 = 0.5;
-/// Ramp value of the plot's measured curves (1 dot, dim), and the analytic reference
-/// curves' dim `Structure` level.
-const MEASURED: f64 = 0.6;
-const ANALYTIC_LEVEL: u8 = 55;
-/// The legend chip of C, which the lattice does not draw: a dim tile of its ramp.
-const C_CHIP: f64 = 0.3;
+const ALPHA_LIFE: f64 = 0.8;
+/// β⁻: continuous spectrum (speed drawn per decay), opposite charge ⇒ curls the other way.
+const BETA_SPEED: (f64, f64) = (10.0, 30.0);
+const BETA_RUN: f64 = 0.35;
+const BETA_OMEGA: f64 = -5.5;
+const BETA_LIFE: f64 = 0.9;
 
-/// Legend chips per species: a nucleus in its lattice ink (ASCII its ASCII lattice glyph),
-/// then its curve's stroke (solid, dashed, dotted, as [`stroke_on`] draws them, so the
-/// species read apart in mono by stroke as well as grey).
-const MARKS: [Glyph; 3] = [
-    Glyph::new('█', '-'),
-    Glyph::new('█', 'o'),
-    Glyph::new('█', ','),
-];
-const STROKES: [Glyph; 3] = [
-    Glyph::new('─', '-'),
-    Glyph::new('╌', '='),
-    Glyph::new('┈', '.'),
-];
+/// Ink role per species `[A, B, C]`, shared by the lattice and the measured plot points.
+const SPECIES_ROLE: [Role; 3] = [Role::Hot, Role::Accent, Role::Dim];
+
+const NUC_A: Glyph = Glyph::new('●', '@');
+const NUC_B: Glyph = Glyph::new('◐', 'o');
+const NUC_C: Glyph = Glyph::new('○', '.');
+const FLASH_ALPHA: Glyph = Glyph::new('✸', '*');
+const FLASH_BETA: Glyph = Glyph::new('✦', '+');
+const BETA_DOT: Glyph = Glyph::new('·', '.');
+/// Track / curve segments by screen direction: horizontal, falling, vertical, rising.
 const SEG_H: Glyph = Glyph::new('─', '-');
+const SEG_FALL: Glyph = Glyph::new('╲', '\\');
 const SEG_V: Glyph = Glyph::new('│', '|');
+const SEG_RISE: Glyph = Glyph::new('╱', '/');
+/// Sub-row placement of a nearly flat curve inside its cell: upper, middle, lower third.
+const SUB_ROW: [Glyph; 3] = [
+    Glyph::new('‾', '-'),
+    Glyph::new('─', '-'),
+    Glyph::new('_', '_'),
+];
 const AXIS_CORNER: Glyph = Glyph::new('└', '+');
 const AXIS_TICK_X: Glyph = Glyph::new('┴', '+');
 const AXIS_TICK_Y: Glyph = Glyph::new('┤', '+');
-/// The y-axis ticks as population fractions with their labels (RAD-A6): N₀/2 on the
-/// linear plot (read the half-life off the A curve), each decade on the log plot. The
-/// labels sit just inside the axis, over the curves (a crossing curve loses a cell or two; the label stays legible) (a panel has ≥ 22 data
-/// columns, so a 3-character label always fits).
-const TICKS_LINEAR: [(f64, &str); 1] = [(0.5, "50%")];
-const TICKS_LOG: [(f64, &str); 2] = [(0.1, "10%"), (0.01, "1%")];
 /// `A ─α→ B ─β→ C`.
-const HEADER: [Glyph; 13] = [
+const TITLE: [Glyph; 13] = [
     Glyph::ascii('A'),
     Glyph::ascii(' '),
     Glyph::new('─', '-'),
@@ -336,56 +260,10 @@ fn census(cells: &[Nucleus]) -> [u32; 3] {
     n
 }
 
-/// Height of a population fraction `f` on the plot, 0 at the bottom and 1 at the top, for
-/// the axis blend `m` (0 linear, 1 log over `DECADES` decades; RAD-A6). On the log axis
-/// every exponential `e^{−λt}` is a straight line; `f ≤ 10^{−DECADES}` sits on the bottom.
-pub(crate) fn plot_y(f: f64, m: f64) -> f64 {
-    let f = if f.is_nan() { 0.0 } else { f.clamp(0.0, 1.0) };
-    let log = if f > 0.0 {
-        (1.0 + f.log10() / DECADES).max(0.0)
-    } else {
-        0.0
-    };
-    ease::lerp(f, log, m.clamp(0.0, 1.0))
-}
-
-/// The axis blend at run time `t` (RAD-A6): linear until `LOG_FROM`, then a smoothstep to
-/// log over `LOG_EASE` s.
-pub(crate) fn log_blend(t: f64) -> f64 {
-    ease::smoothstep(((t - LOG_FROM) / LOG_EASE).clamp(0.0, 1.0))
-}
-
-/// The settled ink of species `kind` (RAD-A5): stable C is not drawn at all, so the lattice
-/// fades out to the ground as it decays (its flash eases toward C's near-ground level).
-pub(crate) fn settled_ink(kind: Kind) -> Ink {
-    match kind {
-        Kind::C => Ink::BLANK,
-        k => Ink::new(Role::Ramp(RAMPS[k as usize]), LATTICE[k as usize]),
-    }
-}
-
-/// The ink of nucleus `n`'s pixel (RAD-A5, RAD-A8): its species' settled ink, or, within
-/// [`FLASH`] s of a decay, the decay's flash ramp eased from its top down to
-/// [`FLASH_LOW`]. A never flashes: nothing decays into it, and a restart is not a decay.
-pub(crate) fn nucleus_ink(n: &Nucleus) -> Ink {
-    let k = n.kind as usize;
-    if n.kind == Kind::A || n.since >= FLASH {
-        return settled_ink(n.kind);
-    }
-    let u = 1.0 - f64::from(n.since / FLASH);
-    ink::ramp(FLASH_RAMPS[k], FLASH_LOW + (1.0 - FLASH_LOW) * u * u)
-}
-
-/// Whether a nucleus is in the hot (bright) part of its flash (RAD-A8).
-fn flashing(n: &Nucleus) -> bool {
-    n.kind != Kind::A && n.since < FLASH_HOT
-}
-
-/// A charged-particle track in a cloud chamber with a uniform magnetic field: it turns at
-/// `omega` and takes a fixed random heading kick of up to ±`scatter` every [`KINK`] s,
-/// runs for `run` seconds (its range), then fades until `life`. The path depends only on
-/// the track, not on the frame steps, so it is the same for any `dt`. Coordinates are
-/// lattice pixels, which are square, so arcs are round.
+/// A charged-particle track in a cloud chamber with a uniform magnetic field: a circular
+/// arc of angular speed `omega`, run for `run` seconds (the particle's range), then left to
+/// fade until `life`. Position is closed-form in `age`, so it is exact for any `dt`.
+/// Coordinates are in rows (x already divided by [`ASPECT`]) so circles are round.
 #[derive(Debug, Clone, Copy)]
 struct Track {
     x0: f64,
@@ -393,16 +271,26 @@ struct Track {
     theta: f64,
     speed: f64,
     omega: f64,
-    scatter: f64,
     run: f64,
     life: f64,
     age: f64,
-    /// Seeds the scattering kicks.
-    key: u64,
     alpha: bool,
+    /// Origin cell, which the track never paints over (that is where the nucleus sits).
+    cell: (i32, i32),
 }
 
 impl Track {
+    /// Position after moving for `s` seconds: the arc
+    /// `x = x₀ + (v/ω)(sin(θ + ωs) − sin θ)`, `y = y₀ − (v/ω)(cos(θ + ωs) − cos θ)`.
+    fn pos(&self, s: f64) -> (f64, f64) {
+        let r = self.speed / self.omega;
+        let phi = self.theta + self.omega * s;
+        (
+            self.x0 + r * (phi.sin_det() - self.theta.sin_det()),
+            self.y0 - r * (phi.cos_det() - self.theta.cos_det()),
+        )
+    }
+
     /// Brightness factor: full while moving, then a linear fade.
     fn fade(&self) -> f64 {
         if self.age <= self.run {
@@ -411,164 +299,42 @@ impl Track {
             (1.0 - (self.age - self.run) / (self.life - self.run)).clamp(0.0, 1.0)
         }
     }
-
-    /// The track's ink at its current age: its ramp near the top while moving, fading to
-    /// [`TRACK_FLOOR`] of that.
-    fn ink(&self) -> Ink {
-        let ramp = if self.alpha { ALPHA_RAMP } else { BETA_RAMP };
-        let f = TRACK_FLOOR + (1.0 - TRACK_FLOOR) * self.fade();
-        ink::ramp(ramp, TRACK_TOP * f)
-    }
-
-    /// Call `f` with the path's corners (pixels) from the origin up to the distance flown
-    /// so far: one per [`KINK`] s, the last one where the particle is now.
-    fn walk(&self, mut f: impl FnMut(f64, f64)) {
-        let flown = self.age.min(self.run);
-        let (mut x, mut y, mut theta) = (self.x0, self.y0, self.theta);
-        f(x, y);
-        let mut s = 0.0;
-        let mut k = 0u64;
-        while s < flown {
-            let ds = KINK.min(flown - s);
-            let kick = self.scatter * (2.0 * hash01(self.key ^ k.wrapping_mul(0x9E37)) - 1.0);
-            theta += self.omega * ds + kick;
-            x += self.speed * ds * theta.cos_det();
-            y += self.speed * ds * theta.sin_det();
-            f(x, y);
-            s += ds;
-            k += 1;
-        }
-    }
-
-    /// Where the particle is now (pixels).
-    #[cfg(test)]
-    fn head(&self) -> (f64, f64) {
-        let mut p = (self.x0, self.y0);
-        self.walk(|x, y| p = (x, y));
-        p
-    }
 }
 
-/// Dot position of pixel coordinates `(x, y)`, the centre of pixel `(x, y)`'s 2 × 2 dots
-/// when both are integers: pixel `(x, y)` is cell `x`, half-row `y` (CORE-R64).
-fn px_dot(x: f64, y: f64) -> (f64, f64) {
-    Dots::from_cells(x + 0.5, (y + 0.5) / 2.0)
-}
-
-/// Draw `tr` over the lattice's `w × h` pixels, clipped to them: its path as a 1-dot
-/// braille stroke, starting a pixel out so the flash stays visible.
-fn draw_track(dots: &mut Dots, tr: &Track, w: i32, h: i32) {
-    if tr.fade() <= 0.0 {
-        return;
-    }
-    let (dw, dh) = (f64::from(2 * w), f64::from(2 * h));
-    let inside =
-        |(x, y): (f64, f64)| (-0.5..dw - 0.5).contains(&x) && (-0.5..dh - 0.5).contains(&y);
-    let ink = tr.ink();
-    let mut prev: Option<(f64, f64)> = None;
-    tr.walk(|x, y| {
-        let p = px_dot(x, y);
-        if !inside(p) || (x - tr.x0).hypot(y - tr.y0) < 1.5 {
-            prev = None;
-            return;
-        }
-        if let Some(q) = prev {
-            dots.line(q.0, q.1, p.0, p.1, ink);
-        }
-        prev = Some(p);
-    });
-}
-
-/// ASCII for lattice cell `(x, y)` from the nuclei under its two pixels (GEN-R10): a hot
-/// flash `*`, then B `o`, then A `-` (light glyphs, so the ground stays quiet); settled C
-/// (near ground), gaps and off-lattice cells are blank, and no nucleus uses the braille
-/// fallbacks
-/// `.` `:` `+` `#`, so tracks never read as nuclei.
-fn ascii_cell(lattice: &Grid<Nucleus>, geo: &LatticeGeo, x: i32, y: i32) -> Option<(char, Ink)> {
-    let mut best: Option<&Nucleus> = None;
-    let rank = |n: &Nucleus| match n.kind {
-        _ if flashing(n) => 4,
-        Kind::B => 3,
-        Kind::A => 2,
-        Kind::C => 1,
-    };
-    for py in [2 * y, 2 * y + 1] {
-        if let Some(n) = geo.nucleus_at(x, py).and_then(|(i, j)| lattice.get(i, j))
-            && best.is_none_or(|b| rank(n) > rank(b))
-        {
-            best = Some(n);
-        }
-    }
-    let n = best?;
-    let ch = match rank(n) {
-        4 => '*',
-        3 => 'o',
-        2 => '-',
-        _ => return None,
-    };
-    Some((ch, nucleus_ink(n)))
-}
-
-/// Where the nuclei sit on the lattice's pixels (RAD-A5): `nx × ny` squares of `NUC`
-/// pixels on a pitch of `PITCH`, the block centred in the `lat_w × lat_h` pixels.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-struct LatticeGeo {
-    nx: i32,
-    ny: i32,
-    ox: i32,
-    oy: i32,
-}
-
-impl LatticeGeo {
-    fn new(lat_w: i32, lat_h: i32) -> Self {
-        let fit = |len: i32| ((len - NUC) / PITCH + 1).max(1);
-        let (nx, ny) = (fit(lat_w), fit(lat_h));
-        let span = |n: i32| PITCH * (n - 1) + NUC;
-        Self {
-            nx,
-            ny,
-            ox: ((lat_w - span(nx)) / 2).max(0),
-            oy: ((lat_h - span(ny)) / 2).max(0),
-        }
-    }
-
-    /// Top-left pixel of nucleus `(i, j)`.
-    fn origin(&self, i: i32, j: i32) -> (i32, i32) {
-        (self.ox + PITCH * i, self.oy + PITCH * j)
-    }
-
-    /// The nucleus covering pixel `(x, y)`, if any (gaps have none).
-    fn nucleus_at(&self, x: i32, y: i32) -> Option<(i32, i32)> {
-        let (dx, dy) = (x - self.ox, y - self.oy);
-        if dx < 0 || dy < 0 || dx % PITCH >= NUC || dy % PITCH >= NUC {
-            return None;
-        }
-        let (i, j) = (dx / PITCH, dy / PITCH);
-        (i < self.nx && j < self.ny).then_some((i, j))
-    }
-}
-
-/// Whether the measured curve of species `k` is drawn at plot dot column `j`: A solid, B
-/// dashed, C dotted, so the three read apart where their hues cannot (mono).
-fn stroke_on(k: usize, j: usize) -> bool {
-    match k {
-        0 => true,
-        1 => j % 6 < 4,
-        // Pairs of dots, not single ones: a lone braille dot per column reads as faint.
-        _ => j % 4 < 2,
+/// Segment glyph for a screen-space direction `(dx, dy)` (y down).
+fn segment(dx: f64, dy: f64) -> Glyph {
+    // Fold the angle into [0, π): 0 = horizontal, π/2 = vertical.
+    let a = dy.atan2(dx).rem_euclid(std::f64::consts::PI);
+    let eighth = std::f64::consts::FRAC_PI_8;
+    if !(eighth..7.0 * eighth).contains(&a) {
+        SEG_H
+    } else if a < 3.0 * eighth {
+        SEG_FALL
+    } else if a < 5.0 * eighth {
+        SEG_V
+    } else {
+        SEG_RISE
     }
 }
 
 /// Write `n` in decimal at `(x, y)` without allocating, clipped at `x_max` (exclusive);
 /// returns the column after the last digit.
 fn put_num(canvas: &mut Canvas, x: i32, y: i32, n: u32, ink: Ink, x_max: i32) -> i32 {
-    let mut text = StackText::<10>::new();
-    // A u32 has at most 10 digits, so this never fails.
-    let _ = write!(text, "{n}");
+    let mut buf = [0u8; 10];
+    let mut i = buf.len();
+    let mut v = n;
+    loop {
+        i -= 1;
+        buf[i] = b'0' + (v % 10) as u8;
+        v /= 10;
+        if v == 0 {
+            break;
+        }
+    }
     let mut cx = x;
-    for ch in text.as_str().chars() {
+    for &b in &buf[i..] {
         if cx < x_max {
-            canvas.put(cx, y, Glyph::ascii(ch), ink);
+            canvas.put(cx, y, Glyph::ascii(char::from(b)), ink);
         }
         cx += 1;
     }
@@ -609,21 +375,9 @@ impl Panel {
         self.x0 + 1 + c as i32
     }
 
-    /// Braille dot columns across the data columns (two per cell).
-    fn dot_cols(&self) -> usize {
-        2 * self.cols
-    }
-
-    /// Dot x of dot column `j`.
-    fn dot_x(&self, j: usize) -> f64 {
-        f64::from(Dots::CELL_W * (self.x0 + 1)) + j as f64
-    }
-
-    /// Dot y of plot height `y ∈ [0, 1]` (1 on the top data row's top dot).
-    fn dot_y(&self, y: f64) -> f64 {
-        let top = f64::from(Dots::CELL_H * self.top);
-        let bottom = f64::from(Dots::CELL_H * (self.bottom + 1) - 1);
-        bottom - y.clamp(0.0, 1.0) * (bottom - top)
+    /// Fractional row of a population fraction `f ∈ [0, 1]` (1 at `top`, 0 at `bottom`).
+    fn row_of(&self, f: f64) -> f64 {
+        f64::from(self.bottom) - f.clamp(0.0, 1.0) * f64::from(self.bottom - self.top)
     }
 }
 
@@ -631,41 +385,32 @@ impl Panel {
 pub struct RadioactiveDecay {
     /// Time since the current run started, s.
     t: f64,
-    /// One nucleus per `NUC × NUC` pixel square on a `PITCH` grid (RAD-A5).
+    /// One nucleus per two columns (terminal cells are ~2:1 tall, so this is square).
     lattice: Grid<Nucleus>,
-    geo: LatticeGeo,
-    /// Lattice size in pixels.
+    /// Screen column of lattice column 0, and the lattice's exclusive right edge.
+    x_off: i32,
     lat_w: i32,
-    lat_h: i32,
     counts: [u32; 3],
     n0: u32,
     panel: Option<Panel>,
     /// Plot time span, s.
     t_axis: f64,
-    /// Measured `[N_A, N_B, N_C]` sampled at each plot dot column's time.
+    /// Measured `[N_A, N_B, N_C]` sampled at each plot column's time.
     hist: Vec<[u32; 3]>,
     tracks: ParticlePool<Track>,
-    /// A uniform sample of the current step's decays, `(nucleus index, from, to)`, at most
-    /// the track budget; reserved in `resize`.
+    /// Decays of the current step, `(cell index, from, to)`; reserved in `resize`.
     events: Vec<(u32, Kind, Kind)>,
     /// Completed runs (for tests / debugging).
     resets: u32,
-    /// The nuclei as half-block pixels; the tracks and the plot's curves over it in `dots`.
-    pixels: Pixels,
-    dots: Dots,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
-    dirty: bool,
 }
 
 impl Default for RadioactiveDecay {
     fn default() -> Self {
         Self {
-            dirty: true,
             t: 0.0,
             lattice: Grid::default(),
-            geo: LatticeGeo::default(),
+            x_off: 0,
             lat_w: 0,
-            lat_h: 0,
             counts: [0; 3],
             n0: 0,
             panel: None,
@@ -674,8 +419,6 @@ impl Default for RadioactiveDecay {
             tracks: ParticlePool::with_capacity(0),
             events: Vec::new(),
             resets: 0,
-            pixels: Pixels::default(),
-            dots: Dots::default(),
         }
     }
 }
@@ -692,161 +435,133 @@ impl RadioactiveDecay {
         self.counts = [self.n0, 0, 0];
         self.t = 0.0;
         self.hist.clear();
-        self.tracks.clear();
         self.record();
     }
 
-    /// Time of plot dot column `j` of `cols`.
-    fn col_time(&self, j: usize, cols: usize) -> f64 {
-        self.t_axis * j as f64 / (cols.max(2) - 1) as f64
+    /// Time of plot column `c`.
+    fn col_time(&self, c: usize, cols: usize) -> f64 {
+        self.t_axis * c as f64 / (cols.max(2) - 1) as f64
     }
 
-    /// Append measured samples for every plot dot column whose time has been reached.
+    /// Append measured samples for every plot column whose time has been reached.
     fn record(&mut self) {
         let Some(p) = self.panel else { return };
-        let cols = p.dot_cols();
-        while self.hist.len() < cols && self.col_time(self.hist.len(), cols) <= self.t + 1e-9 {
+        while self.hist.len() < p.cols && self.col_time(self.hist.len(), p.cols) <= self.t + 1e-9 {
             self.hist.push(self.counts);
         }
     }
 
-    /// Top-left lattice pixel of nucleus `i`.
-    fn pixel_of(&self, i: usize) -> (i32, i32) {
+    /// Screen cell of lattice index `i`.
+    fn cell_xy(&self, i: usize) -> (i32, i32) {
         let gw = usize::from(self.lattice.width()).max(1);
-        self.geo.origin((i % gw) as i32, (i / gw) as i32)
+        (self.x_off + 2 * (i % gw) as i32, (i / gw) as i32)
     }
 
-    /// Give the free track slots to decays drawn uniformly from `events` (a partial
-    /// Fisher–Yates shuffle), so a full pool favours no part of the lattice. Slots are
-    /// counted per track: an `A → C` event needs two, and when only one is left it keeps
-    /// its α and loses its β.
     fn spawn_tracks(&mut self, ctx: &mut Ctx) {
-        let n = self.events.len();
-        let mut free = self.tracks.capacity() - self.tracks.len();
-        for k in 0..n {
-            if free == 0 {
-                break;
-            }
-            let j = ctx.rng.random_range(k..n);
-            self.events.swap(k, j);
+        for k in 0..self.events.len() {
             let (i, from, to) = self.events[k];
-            let (px, py) = self.pixel_of(i as usize);
+            let (cx, cy) = self.cell_xy(i as usize);
             let alpha = from == Kind::A;
             let beta = to == Kind::C;
             // A → B: α; B → C: β⁻; A → C within one step: both.
             for is_alpha in [true, false] {
-                if (is_alpha && !alpha) || (!is_alpha && !beta) || free == 0 {
+                if (is_alpha && !alpha) || (!is_alpha && !beta) {
                     continue;
                 }
-                free -= 1;
                 let theta = ctx.rng.random::<f64>() * TAU;
-                let (speed, omega, scatter, run, life) = if is_alpha {
-                    (ALPHA_SPEED, ALPHA_OMEGA, 0.0, ALPHA_RUN, ALPHA_LIFE)
+                let (speed, run, omega, life) = if is_alpha {
+                    (ALPHA_SPEED, ALPHA_RUN, ALPHA_OMEGA, ALPHA_LIFE)
                 } else {
                     let v = ctx.rng.random_range(BETA_SPEED.0..BETA_SPEED.1);
-                    (v, BETA_OMEGA, BETA_SCATTER, BETA_RUN, BETA_LIFE)
+                    (v, BETA_RUN, BETA_OMEGA, BETA_LIFE)
                 };
-                // From the nucleus's centre, the corner its four pixels share.
-                let half = 0.5 * f64::from(NUC - 1);
                 self.tracks.spawn(Track {
-                    x0: f64::from(px) + half,
-                    y0: f64::from(py) + half,
+                    x0: f64::from(cx) / ASPECT,
+                    y0: f64::from(cy),
                     theta,
                     speed,
                     omega,
-                    scatter,
                     run,
                     life,
                     age: 0.0,
-                    key: ctx.rng.random(),
                     alpha: is_alpha,
+                    cell: (cx, cy),
                 });
             }
         }
     }
 
-    /// Draw the nuclei, their tracks and the plot's curves (the only per-frame raster work).
-    fn rasterise(&mut self) {
-        self.pixels.clear();
-        let gw = usize::from(self.lattice.width()).max(1);
-        for (i, n) in self.lattice.as_slice().iter().enumerate() {
-            let (x, y) = self.geo.origin((i % gw) as i32, (i / gw) as i32);
-            let ink = nucleus_ink(n);
-            for dy in 0..NUC {
-                for dx in 0..NUC {
-                    if x + dx < self.lat_w && y + dy < self.lat_h {
-                        self.pixels.set(x + dx, y + dy, ink);
-                    }
-                }
+    fn draw_track(&self, canvas: &mut Canvas, tr: &Track) {
+        let s_end = tr.age.min(tr.run);
+        let len_cells = tr.speed * s_end * ASPECT;
+        let n = ((len_cells * 2.0).ceil() as usize).clamp(1, 64);
+        let fade = tr.fade();
+        let h = i32::from(canvas.size().height());
+        let mut last = tr.cell;
+        for k in 1..=n {
+            let s = s_end * k as f64 / n as f64;
+            let (x, y) = tr.pos(s);
+            let (col, row) = ((x * ASPECT).round(), y.round());
+            if !(0.0..f64::from(self.lat_w)).contains(&col) || !(0.0..f64::from(h)).contains(&row) {
+                continue;
             }
-        }
-        self.dots.clear();
-        for tr in self.tracks.iter() {
-            draw_track(&mut self.dots, tr, self.lat_w, self.lat_h);
-        }
-        if let Some(p) = self.panel {
-            self.plot_curves(&p);
+            let cell = (col as i32, row as i32);
+            if cell == last || cell == tr.cell {
+                continue;
+            }
+            last = cell;
+            // Brighter toward the head, where the ionisation is freshest.
+            let along = 0.45 + 0.55 * k as f64 / n as f64;
+            let (glyph, base, span) = if tr.alpha {
+                let phi = tr.theta + tr.omega * s;
+                (segment(phi.cos_det() * ASPECT, phi.sin_det()), 70.0, 185.0)
+            } else {
+                (BETA_DOT, 50.0, 150.0)
+            };
+            let level = (base + span * fade * along) * fade.max(0.35);
+            canvas.put(cell.0, cell.1, glyph, Ink::new(Role::Particle, level as u8));
         }
     }
 
-    /// Analytic Bateman curves as dim reference lines, then the measured counts as dim
-    /// 1-dot curves in their species' inks and strokes, on the current axis blend
-    /// (RAD-A6, RAD-A7).
-    fn plot_curves(&mut self, p: &Panel) {
-        let m = log_blend(self.t);
-        let n0 = f64::from(self.n0.max(1));
-        let cols = p.dot_cols();
-        let analytic = Ink::new(Role::Structure, ANALYTIC_LEVEL);
-        let mut prev: Option<[f64; 3]> = None;
-        for j in 0..cols {
-            let (a, b, c) = bateman(self.col_time(j, cols));
-            let ys = [a, b, c].map(|f| p.dot_y(plot_y(f, m)));
-            let x = p.dot_x(j);
-            if let Some(py) = prev {
-                for k in 0..3 {
-                    self.dots.line(x - 1.0, py[k], x, ys[k], analytic);
-                }
-            }
-            prev = Some(ys);
-        }
-        for k in [2, 1, 0] {
-            let ink = ink::ramp(RAMPS[k], MEASURED);
-            let mut prev: Option<f64> = None;
-            for (j, h) in self.hist.iter().enumerate() {
-                // Nothing left of a species has no place on a log axis.
-                let y = (h[k] > 0 || m == 0.0).then(|| p.dot_y(plot_y(f64::from(h[k]) / n0, m)));
-                if let (Some(y), true) = (y, stroke_on(k, j)) {
-                    let x = p.dot_x(j);
-                    match prev {
-                        Some(py) if j > 0 && stroke_on(k, j - 1) => {
-                            self.dots.line(x - 1.0, py, x, y, ink);
-                        }
-                        _ => self.dots.plot(x, y, ink),
-                    }
-                }
-                prev = y;
-            }
-        }
-    }
-
-    /// The y-axis ticks on the current axis blend: `(row, label)` (RAD-A6).
-    fn y_ticks(&self, p: &Panel) -> impl Iterator<Item = (i32, &'static str)> {
-        let m = log_blend(self.t);
-        let ticks: &'static [(f64, &str)] = if m < 0.5 { &TICKS_LINEAR } else { &TICKS_LOG };
-        ticks.iter().map(move |&(f, label)| {
-            let row = (p.dot_y(plot_y(f, m)) / f64::from(Dots::CELL_H)).floor() as i32;
-            (row.clamp(p.top, p.bottom), label)
-        })
+    fn draw_nucleus(&self, canvas: &mut Canvas, i: usize, n: &Nucleus) {
+        let (x, y) = self.cell_xy(i);
+        // Afterglow ∈ [0, 1]: 1 right after the change, 0 once settled.
+        let glow = f64::from((1.0 - n.since / GLOW).clamp(0.0, 1.0));
+        // A little fixed per-site texture so the lattice reads as matter, not a pattern.
+        let grain =
+            ((x as u32).wrapping_mul(73_856_093) ^ (y as u32).wrapping_mul(19_349_663)) % 37;
+        let grain = f64::from(grain);
+        let (glyph, ink) = match n.kind {
+            Kind::A => (
+                NUC_A,
+                Ink::new(
+                    SPECIES_ROLE[0],
+                    (165.0 + grain + 50.0 * glow).min(255.0) as u8,
+                ),
+            ),
+            Kind::B if n.since < FLASH => (FLASH_ALPHA, Ink::new(Role::Hot, 255)),
+            Kind::B => (
+                NUC_B,
+                Ink::new(SPECIES_ROLE[1], (150.0 + grain + 70.0 * glow) as u8),
+            ),
+            Kind::C if n.since < FLASH => (FLASH_BETA, Ink::new(Role::Accent, 255)),
+            Kind::C => (
+                NUC_C,
+                Ink::new(SPECIES_ROLE[2], (55.0 + 0.6 * grain + 150.0 * glow) as u8),
+            ),
+        };
+        canvas.put(x, y, glyph, ink);
     }
 
     fn draw_panel(&self, canvas: &mut Canvas, p: &Panel) {
+        let n0 = f64::from(self.n0.max(1));
         let text = Ink::new(Role::Text, 200);
         // The time-axis labels can land on the title row, so they share its readout tone.
-        let faint = Ink::new(Role::Text, title::READOUT_LEVEL);
+        let faint = Ink::new(Role::Text, sciart_core::title::READOUT_LEVEL);
         let axis = Ink::new(Role::Structure, 110);
 
-        // Header and the live populations.
-        for (k, g) in HEADER.iter().enumerate() {
+        // Title and the live populations.
+        for (k, g) in TITLE.iter().enumerate() {
             let x = p.x0 + k as i32;
             if x < p.x1 {
                 canvas.put(x, 0, *g, text);
@@ -855,38 +570,27 @@ impl RadioactiveDecay {
         let secs = self.t.max(0.0) as u32;
         let digits = if secs >= 10 { 2 } else { 1 };
         let tx = p.x1 - 2 - digits - 2;
-        if tx > p.x0 + HEADER.len() as i32 + 1 {
+        if tx > p.x0 + TITLE.len() as i32 + 1 {
             canvas.text(tx, 0, "t=", faint);
             let end = put_num(canvas, tx + 2, 0, secs, faint, p.x1);
             canvas.text(end, 0, "s", faint);
         }
-        // Legend: each species as it looks on the lattice, then its curve's stroke in the
-        // curve's ink, then the count (Text), one space on.
-        // C is not drawn on the lattice, so its chip is a dim tile of its curve's ramp.
-        let lattice_ink = [
-            settled_ink(Kind::A),
-            settled_ink(Kind::B),
-            ink::ramp(RAMPS[2], C_CHIP),
-        ];
         let mut x = p.x0;
-        for k in 0..3 {
-            if x + 2 >= p.x1 {
+        for (k, g) in [NUC_A, NUC_B, NUC_C].into_iter().enumerate() {
+            if x + 1 >= p.x1 {
                 break;
             }
-            canvas.put(x, 1, MARKS[k], lattice_ink[k]);
-            canvas.put(x + 1, 1, STROKES[k], ink::ramp(RAMPS[k], MEASURED));
-            x = put_num(canvas, x + 3, 1, self.counts[k], text, p.x1) + 2;
+            // The legend key glyph wears its series' ink; the count stays Text.
+            canvas.put(x, 1, g, Ink::new(SPECIES_ROLE[k], 230));
+            x = put_num(canvas, x + 1, 1, self.counts[k], text, p.x1) + 2;
         }
 
-        // Axes: the y axis with ticks at N₀/2 (read the half-life off the A curve) on the
-        // linear plot and at each decade on the log plot; the x axis with ticks every T_A.
+        // Axes: y axis with a tick at N₀/2 (read the half-life off the A curve), x axis
+        // with ticks every T_A.
         for y in p.top..=p.bottom {
             canvas.put(p.x0, y, SEG_V, axis);
         }
-        for (row, label) in self.y_ticks(p) {
-            canvas.put(p.x0, row, AXIS_TICK_Y, axis);
-            canvas.text(p.col_x(0), row, label, faint);
-        }
+        canvas.put(p.x0, p.row_of(0.5).round() as i32, AXIS_TICK_Y, axis);
         let ax_row = p.bottom + 1;
         canvas.put(p.x0, ax_row, AXIS_CORNER, axis);
         for c in 0..p.cols {
@@ -916,6 +620,77 @@ impl RadioactiveDecay {
         if label_end + 1 < p.x1 {
             canvas.text(label_end + 1, ax_row + 1, "s", faint);
         }
+
+        // Analytic Bateman curves (thin lines), then measured points on top.
+        let half = 0.5 / scale;
+        for c in 0..p.cols {
+            let t = c as f64 / scale;
+            let (l, m, r) = (bateman(t - half), bateman(t), bateman(t + half));
+            for (fl, fm, fr, level) in [
+                (l.2, m.2, r.2, 80.0),
+                (l.1, m.1, r.1, 125.0),
+                (l.0, m.0, r.0, 125.0),
+            ] {
+                self.curve_cell(
+                    canvas,
+                    p,
+                    c,
+                    (fl, fm, fr),
+                    Ink::new(Role::Structure, level as u8),
+                );
+            }
+        }
+        // Measured points in their species' lattice ink, so each series matches its nuclei.
+        let marks = [NUC_A, NUC_B, NUC_C];
+        let levels = [200u8, 185, 150];
+        for (c, h) in self.hist.iter().enumerate() {
+            for k in [2, 1, 0] {
+                let y = p.row_of(f64::from(h[k]) / n0).round() as i32;
+                canvas.put(
+                    p.col_x(c),
+                    y,
+                    marks[k],
+                    Ink::new(SPECIES_ROLE[k], levels[k]),
+                );
+            }
+        }
+        // The live point at the current time, brightest.
+        let c = ((self.t * scale).round() as usize).min(p.cols.saturating_sub(1));
+        for k in [2, 1, 0] {
+            let y = p.row_of(f64::from(self.counts[k]) / n0).round() as i32;
+            canvas.put(p.col_x(c), y, marks[k], Ink::new(SPECIES_ROLE[k], 255));
+        }
+    }
+
+    /// One column of an analytic curve: the rows it spans across the column's width, drawn
+    /// as a sub-row tick when flat and as slope segments when steep.
+    fn curve_cell(&self, canvas: &mut Canvas, p: &Panel, c: usize, f: (f64, f64, f64), ink: Ink) {
+        let x = p.col_x(c);
+        let (yl, ym, yr) = (p.row_of(f.0), p.row_of(f.1), p.row_of(f.2));
+        let (lo, hi) = (yl.min(yr).round() as i32, yl.max(yr).round() as i32);
+        if lo == hi || (yr - yl).abs() < 0.9 {
+            let cell = ym.round();
+            let off = ym - cell; // ∈ [−0.5, 0.5]; negative = upper part of the cell
+            let g = SUB_ROW[if off < -1.0 / 6.0 {
+                0
+            } else if off > 1.0 / 6.0 {
+                2
+            } else {
+                1
+            }];
+            canvas.put(x, cell as i32, g, ink);
+        } else {
+            let g = if hi - lo >= 2 {
+                SEG_V
+            } else if yr > yl {
+                SEG_FALL
+            } else {
+                SEG_RISE
+            };
+            for y in lo..=hi {
+                canvas.put(x, y, g, ink);
+            }
+        }
     }
 }
 
@@ -924,43 +699,25 @@ impl Generator for RadioactiveDecay {
         &META
     }
 
-    fn caption(&self) -> Option<&'static str> {
-        Some(if log_blend(self.t) >= 0.5 {
-            CAPTION_LOG
-        } else {
-            CAPTION_LINEAR
-        })
-    }
-
     fn resize(&mut self, size: Size, _ctx: &mut Ctx) {
         let (w, h) = (i32::from(size.width()), i32::from(size.height()));
         self.panel = Panel::new(w, h);
         // Lattice to the left of the panel with one blank gutter column.
         self.lat_w = self.panel.map_or(w, |p| p.x0 - 2).max(1);
-        // Row h − 1 belongs to the title while it shows (RAD-A4, GEN-R13). The longer
-        // caption decides, so the lattice never changes with the act.
-        let titled = title::span(size, &Title::new(META.title, Some(CAPTION_LINEAR))).is_some();
-        let rows = if titled { h - 1 } else { h }.max(1);
-        self.lat_h = 2 * rows;
-        self.geo = LatticeGeo::new(self.lat_w, self.lat_h);
-        let lattice = Size::new(self.geo.nx as u16, self.geo.ny as u16);
-        self.lattice = Grid::new(lattice, Nucleus::FRESH);
+        let gw = ((self.lat_w + 1) / 2).max(1);
+        self.x_off = (self.lat_w - (2 * gw - 1)) / 2;
+        self.lattice = Grid::new(Size::new(gw as u16, h as u16), Nucleus::FRESH);
         self.n0 = self.lattice.len() as u32;
-        self.pixels.resize(size);
-        self.dots.resize(size);
 
         self.t_axis = AXIS_SLACK * reset_time();
-        let cols = self.panel.map_or(0, |p| p.dot_cols());
+        let cols = self.panel.map_or(0, |p| p.cols);
         self.hist = Vec::with_capacity(cols);
-        // Peak decay rate is N₀ λ_A ≈ 0.087 N₀ /s; tracks are a sample of it, budgeted by
-        // lattice area so their density on screen does not depend on the nucleus pitch.
-        let area = (self.lat_w * self.lat_h).max(0) as usize;
-        // Even, so a full step of `A → C` doubles fills it exactly (RAD-A8).
-        let cap = (area / TRACKS_PER_PIXEL).clamp(4, 60) & !1;
+        // Peak decay rate is N₀ λ_A ≈ 0.087 N₀ /s; tracks live < 1 s. Cap for GEN-R8.
+        let cap = (self.n0 as usize / 6).clamp(8, 480);
         self.tracks.set_capacity(cap);
+        self.tracks.clear();
         self.events = Vec::with_capacity(cap);
         self.restart();
-        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -968,37 +725,21 @@ impl Generator for RadioactiveDecay {
             return;
         }
         let tr = Transition::new(dt);
-        // Keys this step's reservoir draws: the closure cannot borrow `ctx.rng` while
-        // `step_nuclei` does.
-        let salt: u64 = ctx.rng.random();
-        // A lattice sweep draws once per live nucleus: a SplitMix64 seeded from `ctx.rng`
-        // keeps that cheap and deterministic (CORE-R57, RAD-A9).
-        let mut draws = SplitMix64::from_rng(&mut ctx.rng);
         let counts = &mut self.counts;
         let events = &mut self.events;
         let cap = events.capacity();
         events.clear();
-        let mut seen = 0u64;
         step_nuclei(
             self.lattice.as_mut_slice(),
             &tr,
             dt,
-            &mut draws,
+            &mut ctx.rng,
             |i, from, to| {
                 counts[from as usize] -= 1;
                 counts[to as usize] += 1;
-                // Tracks are decoration: beyond the budget a decay just flashes. The kept
-                // decays are a uniform sample (reservoir sampling, Algorithm R), not the
-                // first rows scanned, so tracks start anywhere on the lattice.
-                seen += 1;
-                let e = (i as u32, from, to);
+                // Tracks are decoration: beyond the budget a decay just flashes.
                 if events.len() < cap {
-                    events.push(e);
-                } else {
-                    let j = (hash01(salt ^ i as u64) * seen as f64) as usize;
-                    if j < cap {
-                        events[j] = e;
-                    }
+                    events.push((i as u32, from, to));
                 }
             },
         );
@@ -1016,24 +757,23 @@ impl Generator for RadioactiveDecay {
             self.resets += 1;
             self.restart();
         }
-        self.dirty = true;
-    }
-
-    /// Rasterise once per drawn frame, not once per step (GEN-R20).
-    fn prepare(&mut self) {
-        if self.dirty {
-            self.dirty = false;
-            self.rasterise();
-        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // ASCII has nothing finer than a cell, so there the lattice is drawn per cell
-        // from the nuclei themselves.
-        self.pixels.blit(canvas, |x, y, _, _| {
-            ascii_cell(&self.lattice, &self.geo, x, y)
-        });
-        self.dots.blit_over(canvas, &self.pixels);
+        let cells = self.lattice.as_slice();
+        // The lattice, then the tracks streaking across it like a cloud chamber, then the
+        // decay flashes on top so every decay is seen at its own nucleus.
+        for (i, n) in cells.iter().enumerate() {
+            self.draw_nucleus(canvas, i, n);
+        }
+        for tr in self.tracks.iter() {
+            self.draw_track(canvas, tr);
+        }
+        for (i, n) in cells.iter().enumerate() {
+            if n.kind != Kind::A && n.since < FLASH {
+                self.draw_nucleus(canvas, i, n);
+            }
+        }
         if let Some(p) = self.panel {
             self.draw_panel(canvas, &p);
         }
@@ -1250,37 +990,8 @@ mod tests {
     }
 
     #[test]
-    fn rad_a9_the_scene_itself_follows_bateman_within_4_sigma() {
-        let size = Size::new(200, 50);
-        let mut ctx = seeded(42);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let n0 = g.n0();
-        assert!(n0 > 1_000, "{n0} nuclei");
-        for step in 1..=(20.0 / SIM_DT).round() as usize {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-            if step % 60 == 0 {
-                let (fa, fb, _) = bateman(g.t);
-                let (ok_a, ma, sa) = within_4_sigma(g.counts[0], n0, fa);
-                let (ok_b, mb, sb) = within_4_sigma(g.counts[1], n0, fb);
-                assert!(
-                    ok_a,
-                    "t={:.1} N_A={} vs {ma:.1} ± {sa:.1}",
-                    g.t, g.counts[0]
-                );
-                assert!(
-                    ok_b,
-                    "t={:.1} N_B={} vs {mb:.1} ± {sb:.1}",
-                    g.t, g.counts[1]
-                );
-            }
-        }
-    }
-
-    #[test]
     fn rad_a3_populations_always_sum_to_n0() {
+        let mut stage = Stage::new(build(), 3, Size::new(90, 24), GlyphMode::Unicode);
         let mut ctx = seeded(5);
         let mut g = RadioactiveDecay::default();
         for (k, size) in [Size::new(90, 24), Size::new(7, 3), Size::new(200, 50)]
@@ -1288,15 +999,15 @@ mod tests {
             .enumerate()
         {
             g.resize(size, &mut ctx);
-            g.prepare();
             for i in 0..240 {
                 let dt = [SIM_DT, 0.25, 0.0, 0.11][(i + k) % 4];
                 g.update(dt, &mut ctx);
-                g.prepare();
                 assert_eq!(g.counts.iter().sum::<u32>(), g.n0(), "RAD-A3");
                 assert_eq!(g.counts, census(g.lattice.as_slice()));
             }
         }
+        stage.step(SIM_DT);
+        let _ = stage.render();
     }
 
     #[test]
@@ -1309,11 +1020,9 @@ mod tests {
         let mut ctx = seeded(9);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(100, 30), &mut ctx);
-        g.prepare();
         let n0 = f64::from(g.n0());
         for _ in 0..(90.0 / 0.25) as usize {
             g.update(0.25, &mut ctx);
-            g.prepare();
             // Invariant after every update: never left below the threshold (RAD-A3 too).
             let live = f64::from(g.counts[0] + g.counts[1]);
             assert!(live >= RESET_FRAC * n0);
@@ -1330,15 +1039,13 @@ mod tests {
         let mut ctx = seeded(1);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(100, 30), &mut ctx);
-        g.prepare();
         let p = g.panel.expect("100×30 has a plot panel");
         assert!(p.x1 - p.x0 >= PANEL_MIN_W);
         // The lattice stays left of the panel with a gutter.
-        let last = g.pixel_of(g.lattice.len() - 1);
+        let last = g.cell_xy(g.lattice.len() - 1);
         assert!(last.0 < p.x0 - 1 && g.lat_w < p.x0);
         for size in [Size::new(50, 30), Size::new(100, 9), Size::new(1, 1)] {
             g.resize(size, &mut ctx);
-            g.prepare();
             assert!(g.panel.is_none(), "{size:?}");
             assert!(g.n0() >= 1);
         }
@@ -1350,603 +1057,22 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
-        g.prepare();
         let mut seen = 0;
         for _ in 0..120 {
             g.update(0.25, &mut ctx);
-            g.prepare();
             assert!(g.tracks.len() <= g.tracks.capacity());
             seen += g.tracks.len();
-            // Tracks are braille strokes clipped to the lattice: no pixel right of it or
-            // below it is lit, and every dot left of the plot lies over the lattice.
-            for y in 0..72 {
-                for x in 0..120 {
-                    if x >= g.lat_w || y >= g.lat_h {
-                        assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK), "({x},{y})");
-                    }
-                }
-            }
-            let panel_x = g.panel.map_or(i32::MAX, |p| p.x0);
-            let dots = g.dots.dot_size();
-            for y in 0..i32::from(dots.height()) {
-                for x in 0..i32::from(dots.width()) {
-                    if g.dots.is_lit(x, y) && x / Dots::CELL_W < panel_x {
-                        assert!(
-                            x / Dots::CELL_W < g.lat_w && y / 2 < g.lat_h,
-                            "dot ({x},{y})"
-                        );
-                    }
+            // Nothing but the panel is drawn right of the lattice: tracks are clipped.
+            let panel = g.panel.take();
+            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+            g.render(&mut canvas);
+            g.panel = panel;
+            for y in 0..36 {
+                for x in g.lat_w..120 {
+                    assert_eq!(canvas.get(x, y).map(|c| c.ch), Some(' '), "({x},{y})");
                 }
             }
         }
         assert!(seen > 0, "decays emit tracks");
-    }
-
-    #[test]
-    fn rad_a4_the_title_row_is_left_to_the_title() {
-        let mut ctx = seeded(6);
-        for (w, h) in [(80u16, 24u16), (120, 36), (200, 50), (40, 5), (7, 3)] {
-            let size = Size::new(w, h);
-            let mut g = RadioactiveDecay::default();
-            g.resize(size, &mut ctx);
-            g.prepare();
-            let titled = title::span(size, &Title::new(META.title, Some(CAPTION_LINEAR))).is_some();
-            let rows = if titled { h - 1 } else { h };
-            assert_eq!(g.lat_h, 2 * i32::from(rows), "{w}x{h}");
-            let last = i32::from(h) - 1;
-            for _ in 0..40 {
-                g.update(0.25, &mut ctx);
-                g.prepare();
-                let panel = g.panel.take();
-                let mut canvas = Canvas::new(size, GlyphMode::Ascii);
-                g.render(&mut canvas);
-                g.panel = panel;
-                if titled {
-                    let row = &canvas.to_lines()[last as usize];
-                    assert!(row.trim().is_empty(), "{w}x{h}: {row:?}");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn rad_a5_each_nucleus_is_a_spaced_2x2_square_in_its_species_ink() {
-        let size = Size::new(100, 30);
-        let mut ctx = seeded(3);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let p = g.panel.unwrap();
-        // Lattice pixels lat_w × 2·29 (29 rows above the title row), nuclei on a pitch of 3.
-        assert_eq!((g.lat_w, g.lat_h), (p.x0 - 2, 58));
-        assert_eq!(
-            (i32::from(g.lattice.width()), i32::from(g.lattice.height())),
-            ((g.lat_w - NUC) / PITCH + 1, (58 - NUC) / PITCH + 1)
-        );
-        assert_eq!(g.n0() as usize, g.lattice.len());
-        for _ in 0..240 {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        g.rasterise();
-        // Every nucleus is one pixel in its ink (ADR-0017); every gap pixel is empty.
-        const { assert!(NUC == 1) };
-        let mut seen = [0; 3];
-        for (i, n) in g.lattice.as_slice().iter().enumerate() {
-            let (x, y) = g.pixel_of(i);
-            seen[n.kind as usize] += 1;
-            assert_eq!(g.pixels.get(x, y), Some(nucleus_ink(n)));
-            if n.since >= FLASH {
-                assert_eq!(nucleus_ink(n), settled_ink(n.kind));
-            }
-        }
-        assert!(seen.iter().all(|&n| n > 30), "{seen:?}");
-        for y in 0..g.lat_h {
-            for x in 0..g.lat_w {
-                if g.geo.nucleus_at(x, y).is_none() {
-                    assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK), "gap ({x},{y})");
-                }
-            }
-        }
-        // A flash starts at the top of its decay's ramp (α Aurora, β Ember); fresh A (a
-        // restart) never flashes.
-        let at = |kind, since| Nucleus { kind, since };
-        assert_eq!(nucleus_ink(&Nucleus::FRESH), settled_ink(Kind::A));
-        for kind in [Kind::B, Kind::C] {
-            let flash = nucleus_ink(&at(kind, 0.0));
-            assert_eq!(
-                (flash.role, flash.level),
-                (Role::Ramp(FLASH_RAMPS[kind as usize]), 255)
-            );
-        }
-        // Unicode draws half blocks and braille; ASCII mode is pure ASCII (GEN-R10), a
-        // hot flash `*` over B `o` over A `-`; settled C and gaps blank.
-        let mut c = Canvas::new(size, GlyphMode::Unicode);
-        g.render(&mut c);
-        assert!(matches!(
-            c.get(0, 0).unwrap().ch,
-            '▀' | '▄' | '\u{2800}'..='\u{28FF}' | ' '
-        ));
-        let mut a = Canvas::new(size, GlyphMode::Ascii);
-        g.tracks.clear();
-        g.rasterise();
-        g.render(&mut a);
-        assert!(a.to_lines().iter().all(|l| l.is_ascii()));
-        for y in 0..29 {
-            for x in 0..g.lat_w {
-                let ch = a.get(x, y).unwrap().ch;
-                let ns: Vec<&Nucleus> = [2 * y, 2 * y + 1]
-                    .iter()
-                    .filter_map(|&py| g.geo.nucleus_at(x, py))
-                    .filter_map(|(i, j)| g.lattice.get(i, j))
-                    .collect();
-                let has = |k| ns.iter().any(|n| n.kind == k);
-                let want = match () {
-                    _ if ns.iter().any(|n| flashing(n)) => '*',
-                    _ if has(Kind::B) => 'o',
-                    _ if has(Kind::A) => '-',
-                    _ => ' ',
-                };
-                assert_eq!(ch, want, "({x},{y})");
-            }
-        }
-    }
-
-    #[test]
-    fn rad_a10_species_read_apart_and_the_lattice_fades_as_it_decays() {
-        // ADR-0017: the lattice is muted dots on black in the species' curve hues, parent
-        // A a dusty `HAlpha` rose and daughter B a dim `Ice`, both at 60–90 and never
-        // brighter than A; stable C is not drawn, so a decayed lattice is dark and only
-        // flashes and tracks are bright.
-        let [a, b, c] = [Kind::A, Kind::B, Kind::C].map(settled_ink);
-        assert_eq!(a, Ink::new(Role::Ramp(Ramp::HAlpha), 70));
-        assert_eq!(b.role, Role::Ramp(Ramp::Ice));
-        assert!(
-            (60..=90).contains(&b.level) && b.level <= a.level,
-            "{a:?} {b:?}"
-        );
-        assert_eq!(c, Ink::BLANK);
-        // Flashes and tracks: α green, β ember; the plot's species curves keep their own
-        // hues, 1 dot and dim (≤ 0.7 of their ramps).
-        assert_eq!((ALPHA_RAMP, BETA_RAMP), (Ramp::Aurora, Ramp::Ember));
-        assert_eq!(FLASH_RAMPS[1..], [ALPHA_RAMP, BETA_RAMP]);
-        assert_eq!(RAMPS, [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma]);
-        const { assert!(MEASURED >= 0.5 && MEASURED <= 0.7) };
-    }
-
-    /// A lattice cell at or above this level reads as an event, not as ground (RAD-A8).
-    const BRIGHT_LEVEL: u8 = 215;
-
-    #[test]
-    fn rad_a8_the_ground_is_dim_and_only_events_are_bright() {
-        // A flash eases from the top of the ramp back to the settled ink over FLASH s: it is
-        // bright only while hot, and it only ever dims.
-        let b = |since: f32| {
-            nucleus_ink(&Nucleus {
-                kind: Kind::B,
-                since,
-            })
-            .level
-        };
-        assert_eq!(b(0.0), 255);
-        assert!(b(FLASH_HOT) < BRIGHT_LEVEL && b(FLASH_HOT * 0.5) >= BRIGHT_LEVEL);
-        assert_eq!(b(FLASH), settled_ink(Kind::B).level);
-        assert!((1..30).all(|k| b(FLASH * k as f32 / 30.0) <= b(FLASH * (k - 1) as f32 / 30.0)));
-        const { assert!(FLASH >= 0.25, "long enough for the eye to follow") };
-        // Tracks stand clear of the settled nuclei: fresh ≥ 1.2× B's (the brightest
-        // species), and at every age above A's.
-        let ground_a = settled_ink(Kind::A).level;
-        let ground_b = settled_ink(Kind::B).level;
-        let mut ctx = seeded(2);
-        let mut g = RadioactiveDecay::default();
-        g.resize(Size::new(120, 40), &mut ctx);
-        g.prepare();
-        while g.tracks.len() < 2 || g.tracks.iter().all(|t| t.alpha) {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        for tr in g.tracks.iter() {
-            let fresh = Track { age: 0.0, ..*tr }.ink().level;
-            let faded = Track {
-                age: tr.life - 1e-6,
-                ..*tr
-            }
-            .ink()
-            .level;
-            assert!(f64::from(fresh) >= 1.15 * f64::from(ground_b), "{fresh}");
-            assert!(faded > ground_a, "{faded}");
-        }
-        // β tracks are longer than α tracks, every one of them.
-        let range = |alpha: bool, speed: f64| {
-            let tr = Track {
-                x0: 0.0,
-                y0: 0.0,
-                theta: 0.3,
-                speed,
-                omega: if alpha { ALPHA_OMEGA } else { BETA_OMEGA },
-                scatter: if alpha { 0.0 } else { BETA_SCATTER },
-                run: if alpha { ALPHA_RUN } else { BETA_RUN },
-                life: 1.0,
-                age: 1.0,
-                key: 77,
-                alpha,
-            };
-            let mut len = 0.0;
-            let mut prev = (0.0, 0.0);
-            tr.walk(|x, y| {
-                len += (x - prev.0).hypot(y - prev.1);
-                prev = (x, y);
-            });
-            len
-        };
-        let alpha = range(true, ALPHA_SPEED);
-        assert!((alpha - ALPHA_SPEED * ALPHA_RUN).abs() < 1e-9);
-        assert!(range(false, BETA_SPEED.0) > 1.9 * alpha);
-        // The α runs straight; the β is knocked about.
-        let a = Track {
-            x0: 0.0,
-            y0: 0.0,
-            theta: 0.0,
-            speed: ALPHA_SPEED,
-            omega: ALPHA_OMEGA,
-            scatter: 0.0,
-            run: ALPHA_RUN,
-            life: 1.0,
-            age: 1.0,
-            key: 1,
-            alpha: true,
-        };
-        let (hx, hy) = a.head();
-        assert!(hy.atan2(hx).abs() < 0.1 && (hx.hypot(hy) - alpha).abs() < 0.05);
-        // Over a whole run at 120×40 fewer than 5 % of the lattice cells are bright on
-        // average (and never more than 10 %), tracks, bursts and flashes included.
-        let size = Size::new(120, 40);
-        let mut ctx = seeded(9);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let (w, rows) = (g.lat_w, g.lat_h / 2);
-        let cells = f64::from(w * rows);
-        let (mut sum, mut worst, mut frames) = (0.0, 0.0f64, 0);
-        let mut c = Canvas::new(size, GlyphMode::Unicode);
-        for i in 0..(50.0 / 0.1) as usize {
-            g.update(if i % 2 == 0 { SIM_DT } else { 0.1 }, &mut ctx);
-            g.prepare();
-            c.clear();
-            g.render(&mut c);
-            let bright = (0..rows)
-                .flat_map(|y| (0..w).map(move |x| (x, y)))
-                .filter(|&(x, y)| {
-                    let cell = c.get(x, y).unwrap();
-                    cell.ink.level >= BRIGHT_LEVEL || cell.bg.level >= BRIGHT_LEVEL
-                })
-                .count();
-            let f = bright as f64 / cells;
-            sum += f;
-            worst = worst.max(f);
-            frames += 1;
-        }
-        let mean = sum / f64::from(frames);
-        assert!(
-            mean < 0.05 && worst < 0.1 && mean > 0.0,
-            "mean {mean:.3}, worst {worst:.3}"
-        );
-        // Settled nuclei are never bright: only events are.
-        assert!(LATTICE.iter().all(|&v| v < BRIGHT_LEVEL));
-        // Tracks are in hues no species curve uses.
-        for ramp in [ALPHA_RAMP, BETA_RAMP] {
-            assert!(!RAMPS.contains(&ramp));
-        }
-        assert_ne!(ALPHA_RAMP, BETA_RAMP);
-    }
-
-    #[test]
-    fn rad_a8_tracked_decays_are_spread_over_the_whole_lattice() {
-        // At 200×50 the track budget is full most of the time, so which decays get a slot
-        // decides where tracks start: over 20 s their rows must centre on the lattice and
-        // fill every third of it, not hug the first rows scanned.
-        let mut ctx = seeded(42);
-        let mut g = RadioactiveDecay::default();
-        g.resize(Size::new(200, 50), &mut ctx);
-        g.prepare();
-        let h = f64::from(g.lat_h);
-        let mut rows = Vec::new();
-        for _ in 0..(20.0 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-            // Tracks spawned this step have not aged yet.
-            rows.extend(g.tracks.iter().filter(|t| t.age == 0.0).map(|t| t.y0 / h));
-        }
-        let n = rows.len() as f64;
-        assert!(n > 500.0, "{n} tracks");
-        let mean = rows.iter().sum::<f64>() / n;
-        assert!(
-            (mean - 0.5).abs() < 0.05,
-            "mean row {mean:.3} of the height"
-        );
-        for third in 0..3 {
-            let lo = f64::from(third) / 3.0;
-            let share = rows
-                .iter()
-                .filter(|&&y| (lo..lo + 1.0 / 3.0).contains(&y))
-                .count();
-            assert!(share as f64 >= 0.2 * n, "third {third}: {share} of {n}");
-        }
-    }
-
-    #[test]
-    fn rad_a8_the_lattice_fades_out_as_it_decays() {
-        // Settled C is not drawn, so late in a run most sites are dark ground: the mean
-        // level of the nucleus pixels falls well below its fresh value.
-        let size = Size::new(120, 40);
-        let mut ctx = seeded(5);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let mean = |g: &RadioactiveDecay| {
-            let n = g.lattice.len();
-            let sum: f64 = (0..n)
-                .map(|i| {
-                    let (x, y) = g.pixel_of(i);
-                    let px = g.pixels.get(x, y).unwrap();
-                    let n = g.lattice.as_slice()[i];
-                    if n.kind == Kind::C && n.since >= FLASH {
-                        assert_eq!(px, Ink::BLANK, "settled C {i} is not drawn");
-                    } else {
-                        assert_ne!(px, Ink::BLANK, "nucleus {i} is drawn");
-                    }
-                    if px == Ink::BLANK {
-                        0.0
-                    } else {
-                        f64::from(px.level)
-                    }
-                })
-                .sum();
-            sum / n as f64
-        };
-        let fresh = mean(&g);
-        assert_eq!(fresh, f64::from(settled_ink(Kind::A).level));
-        for _ in 0..(30.0 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        let c = f64::from(g.counts[2]) / f64::from(g.n0());
-        assert!(
-            c > 0.6 && mean(&g) < 0.4 * fresh,
-            "C {c:.2}, mean {}",
-            mean(&g)
-        );
-    }
-
-    #[test]
-    fn rad_a5_nuclei_are_separate_dots_on_a_quiet_ground() {
-        // At t = 0 every nucleus is an A dot; neighbouring dots are blank pixels apart in
-        // both directions and the block is centred in the lattice.
-        let size = Size::new(120, 40);
-        let mut ctx = seeded(4);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let geo = g.geo;
-        assert!(geo.nx >= 20 && geo.ny >= 20, "{geo:?}");
-        let (x0, y0) = geo.origin(0, 0);
-        let (x1, y1) = geo.origin(geo.nx - 1, geo.ny - 1);
-        assert!((x0 - (g.lat_w - (x1 + NUC))).abs() <= 1, "centred across");
-        assert!((y0 - (g.lat_h - (y1 + NUC))).abs() <= 1, "centred down");
-        for j in 0..geo.ny {
-            for i in 0..geo.nx {
-                let (x, y) = geo.origin(i, j);
-                assert_eq!(g.pixels.get(x, y), Some(settled_ink(Kind::A)));
-                assert_eq!(g.pixels.get(x + NUC, y), Some(Ink::BLANK));
-                assert_eq!(g.pixels.get(x, y + NUC), Some(Ink::BLANK));
-            }
-        }
-        // Nuclei cover about 1/9 of the lattice's pixels: the ground stays black.
-        let lit = (0..g.lat_h)
-            .flat_map(|y| (0..g.lat_w).map(move |x| (x, y)))
-            .filter(|&(x, y)| g.pixels.get(x, y) != Some(Ink::BLANK))
-            .count() as f64;
-        let share = lit / f64::from(g.lat_w * g.lat_h);
-        assert!((0.08..0.15).contains(&share), "{share}");
-    }
-
-    #[test]
-    fn rad_a8_legend_shows_each_species_as_on_the_lattice_and_its_stroke() {
-        let size = Size::new(120, 36);
-        let mut ctx = seeded(1);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let p = g.panel.unwrap();
-        let mut c = Canvas::new(size, GlyphMode::Unicode);
-        g.render(&mut c);
-        let row: String = (p.x0..p.x1).map(|x| c.get(x, 1).unwrap().ch).collect();
-        assert!(row.starts_with("█─ "), "{row:?}");
-        assert!(row.contains("█╌ 0") && row.contains("█┈ 0"), "{row:?}");
-        // The A chip wears the lattice's ink, its stroke the curve's.
-        assert_eq!(c.get(p.x0, 1).unwrap().ink, settled_ink(Kind::A));
-        assert_eq!(
-            c.get(p.x0 + 1, 1).unwrap().ink,
-            ink::ramp(RAMPS[0], MEASURED)
-        );
-        // Strokes: A solid, B dashed, C dotted, all different.
-        let pattern = |k| (0..12).map(|j| stroke_on(k, j)).collect::<Vec<_>>();
-        assert!(pattern(0).iter().all(|&on| on));
-        assert!(pattern(1) != pattern(0) && pattern(2) != pattern(1) && pattern(2) != pattern(0));
-        // The panel is at most 30 % of the width.
-        assert!(f64::from(p.x1 - p.x0) <= 0.3 * 120.0 + 0.5);
-    }
-
-    #[test]
-    fn rad_a6_the_log_act_straightens_every_exponential() {
-        // Linear first, then eased to log over LOG_EASE s from LOG_FROM.
-        assert_eq!(log_blend(0.0), 0.0);
-        assert_eq!(log_blend(LOG_FROM), 0.0);
-        assert_eq!(log_blend(LOG_FROM + LOG_EASE), 1.0);
-        assert!((log_blend(LOG_FROM + 0.5 * LOG_EASE) - 0.5).abs() < 1e-12);
-        for f in [0.0, 0.2, 0.5, 1.0] {
-            assert!((plot_y(f, 0.0) - f).abs() < 1e-15, "linear axis");
-        }
-        assert_eq!(plot_y(1.0, 1.0), 1.0);
-        assert!(
-            (plot_y(0.1, 1.0) - 2.0 / 3.0).abs() < 1e-12,
-            "one decade = 1/3"
-        );
-        assert_eq!(plot_y(1e-4, 1.0), 0.0);
-        assert_eq!(plot_y(0.0, 1.0), 0.0);
-        assert_eq!(plot_y(f64::NAN, 0.5), 0.0);
-        // On the log axis N_A is a straight line of slope −λ_A/(DECADES ln 10) …
-        let slope = |f: &dyn Fn(f64) -> f64, t: f64| {
-            (plot_y(f(t + 0.5), 1.0) - plot_y(f(t - 0.5), 1.0)) / 1.0
-        };
-        let fa = |t: f64| bateman(t).0;
-        let fb = |t: f64| bateman(t).1;
-        let want = -lam(T_A) / (DECADES * std::f64::consts::LN_10);
-        for t in [2.0, 10.0, 25.0, 40.0] {
-            assert!((slope(&fa, t) - want).abs() < 1e-9, "A at t={t}");
-        }
-        // … and once B is in transient equilibrium (T_B < T_A) its line runs parallel.
-        for t in [36.0, 44.0] {
-            assert!((slope(&fb, t) / want - 1.0).abs() < 0.02, "B at t={t}");
-        }
-        // The caption follows the axis, and a new run starts linear again.
-        let mut ctx = seeded(8);
-        let mut g = RadioactiveDecay::default();
-        g.resize(Size::new(100, 30), &mut ctx);
-        g.prepare();
-        let mut seen = [false; 2];
-        for _ in 0..(60.0 / 0.25) as usize {
-            g.update(0.25, &mut ctx);
-            g.prepare();
-            let want = if g.t >= LOG_FROM + 0.5 * LOG_EASE {
-                CAPTION_LOG
-            } else {
-                CAPTION_LINEAR
-            };
-            assert_eq!(g.caption(), Some(want), "t = {}", g.t);
-            seen[usize::from(want == CAPTION_LOG)] = true;
-        }
-        assert!(g.resets >= 1 && seen == [true, true]);
-        assert!(META.captions.contains(&CAPTION_LINEAR) && META.captions.contains(&CAPTION_LOG));
-    }
-
-    #[test]
-    fn rad_a6_y_ticks_are_labelled_as_fractions_of_n0() {
-        // Linear plot: `50%` on the N₀/2 tick; log plot: `10%` and `1%` on the decades.
-        // Labels sit just inside the axis on their tick's row, over the curves.
-        let size = Size::new(120, 36);
-        let mut ctx = seeded(6);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let p = g.panel.unwrap();
-        let text_at = |g: &RadioactiveDecay, want: &[&str]| {
-            let mut c = Canvas::new(size, GlyphMode::Ascii);
-            // Only the panel text: no curves over the labels.
-            let bare = RadioactiveDecay {
-                t: g.t,
-                panel: g.panel,
-                t_axis: g.t_axis,
-                ..RadioactiveDecay::default()
-            };
-            bare.render(&mut c);
-            for (row, label) in g.y_ticks(&p) {
-                let got: String = (0..label.len() as i32)
-                    .map(|k| c.get(p.col_x(0) + k, row).unwrap().ch)
-                    .collect();
-                assert_eq!(got, label);
-                assert_eq!(c.get(p.x0, row).unwrap().ch, '+', "tick at row {row}");
-            }
-            let labels: Vec<_> = g.y_ticks(&p).map(|(_, l)| l).collect();
-            assert_eq!(labels, want);
-        };
-        text_at(&g, &["50%"]);
-        for _ in 0..(25.0 / 0.25) as usize {
-            g.update(0.25, &mut ctx);
-            g.prepare();
-        }
-        text_at(&g, &["10%", "1%"]);
-        // Decades land a third of the plot apart on the log axis.
-        let rows: Vec<_> = g.y_ticks(&p).map(|(r, _)| r).collect();
-        let third = f64::from(p.bottom - p.top + 1) / 3.0;
-        assert!(
-            (f64::from(rows[1] - rows[0]) - third).abs() <= 1.0,
-            "{rows:?}"
-        );
-    }
-
-    #[test]
-    fn rad_a8_track_slots_are_counted_per_track() {
-        // Every event in a full step is an A → C double decay (two tracks each): the pool
-        // fills to exactly its capacity, and the last event keeps its α when one slot is left.
-        let mut ctx = seeded(7);
-        let mut g = RadioactiveDecay::default();
-        g.resize(Size::new(120, 40), &mut ctx);
-        g.prepare();
-        let cap = g.tracks.capacity();
-        assert!(cap % 2 == 0 && cap >= 4);
-        g.tracks.clear();
-        // One pre-existing track leaves an odd number of free slots.
-        g.events.clear();
-        g.events.push((0, Kind::A, Kind::B));
-        g.spawn_tracks(&mut ctx);
-        assert_eq!(g.tracks.len(), 1);
-        g.events.clear();
-        for i in 0..cap as u32 {
-            g.events.push((i, Kind::A, Kind::C));
-        }
-        g.spawn_tracks(&mut ctx);
-        assert_eq!(g.tracks.len(), cap);
-        let alphas = g.tracks.iter().filter(|t| t.alpha).count();
-        // 1 + (cap − 1) slots: ⌈(cap − 1)/2⌉ doubles, the last with only its α.
-        assert_eq!(alphas, 1 + (cap - 1).div_ceil(2));
-    }
-
-    #[test]
-    fn rad_a7_measured_points_sit_on_the_axis_blend_in_their_species_ink() {
-        let size = Size::new(120, 36);
-        let mut ctx = seeded(12);
-        let mut g = RadioactiveDecay::default();
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let p = g.panel.unwrap();
-        for steps in [600, 900] {
-            for _ in 0..steps {
-                g.update(SIM_DT, &mut ctx);
-                g.prepare();
-            }
-            let m = log_blend(g.t);
-            let n0 = f64::from(g.n0());
-            for (j, h) in g.hist.iter().enumerate() {
-                for (k, &count) in h.iter().enumerate() {
-                    if (count == 0 && m > 0.0) || !stroke_on(k, j) {
-                        continue;
-                    }
-                    let y = p.dot_y(plot_y(f64::from(count) / n0, m)).round() as i32;
-                    let x = p.dot_x(j) as i32;
-                    assert!(g.dots.is_lit(x, y), "series {k} column {j}");
-                }
-            }
-            // Curves stay inside the plot's data rows and columns (dots left of the panel
-            // are tracks over the lattice).
-            let dots = g.dots.dot_size();
-            for y in 0..i32::from(dots.height()) {
-                for x in Dots::CELL_W * p.x0..i32::from(dots.width()) {
-                    if g.dots.is_lit(x, y) {
-                        let (cx, cy) = (x / Dots::CELL_W, y / Dots::CELL_H);
-                        assert!(cx > p.x0 && cx < p.x1 && (p.top..=p.bottom).contains(&cy));
-                    }
-                }
-            }
-        }
-        // The measured cells wear the species ramps at the measured value.
-        let mut c = Canvas::new(size, GlyphMode::Unicode);
-        g.render(&mut c);
-        let ramps = (p.top..=p.bottom)
-            .flat_map(|y| (p.x0 + 1..p.x1).map(move |x| (x, y)))
-            .filter_map(|(x, y)| c.get(x, y))
-            .filter(|cell| matches!(cell.ink.role, Role::Ramp(_)))
-            .count();
-        assert!(ramps > 20, "{ramps} measured cells");
     }
 }

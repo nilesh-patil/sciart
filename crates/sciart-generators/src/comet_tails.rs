@@ -17,11 +17,11 @@
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
+use sciart_core::Tone;
 use sciart_core::particles::ParticlePool;
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, halo_kernel};
 use sciart_core::rng::{cell_key, hash01};
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "comet_tails",
@@ -95,16 +95,10 @@ const DETACH_KICK: f64 = 0.3;
 const FAR_BLUR: usize = 2;
 /// Kepler solve: Newton iterations per frame (warm start).
 const NEWTON_WARM: usize = 3;
-/// ADR-0017 (M14): the dust tail in `Starlight` up to `DUST_TOP` (only the coma, within
-/// `COMA_PX` of the nucleus, keeps its full level), the ion tail as thin rays in `Ice`
-/// up to `ION_TOP`; no Sun glow (it sat cut off in a corner).
-const DUST_TOP: f64 = 130.0;
-const ION_TOP: f64 = 150.0;
 /// One pixel: the ion rays and their knots are drawn without a spread (critic round 2).
 const POINT: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
-const COMA_PX: f64 = 6.0;
-/// The nucleus's level (its cross at 0.7 of it).
-const NUCLEUS_LEVEL: f64 = 240.0;
+/// The head's radius in pixels ([`coma_ink`]); no Sun glow (it sat cut off in a corner).
+const COMA_PX: f64 = 4.5;
 /// A new comet arrives this far into its approach, with its tails seeded (GEN-R19: no
 /// warm-up steps in `resize`).
 const ARRIVE: f64 = 4.0;
@@ -643,53 +637,62 @@ impl CometTails {
         let (dust, ions) = (self.dust_glow.values(), self.ion_glow.values());
         // The nucleus's pixel (the glow splats above take dot units, 2 per pixel).
         let (cx, cy) = (nx, ny);
+        // Loop envelope in three steps: the comet fades in and out step by step.
+        let fading = env < 0.5;
         for (i, px) in (0..dust.len().min(ions.len())).zip(0..) {
             let (x, y) = ((px % w) as i32, (px / w) as i32);
             let (ld, li) = (dt.level(env * dust[i]), it.level(env * ions[i]));
-            // The coma keeps its full level; the tail is muted (ADR-0017).
             let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
-            let coma = d < COMA_PX;
-            let dust_level = if coma {
-                // The head: a compact bright coma falling off from the nucleus.
-                let head = f64::from(env) * NUCLEUS_LEVEL * (1.0 - (d / COMA_PX).powi(2));
-                f64::from(ld).max(head)
+            let coma = (d < COMA_PX && env > 0.0).then(|| coma_ink(d, fading));
+            let ink = if let Some(c) = coma {
+                c
+            } else if let Some(ion) = ion_ink(li).filter(|_| u16::from(li) + 20 > u16::from(ld)) {
+                ion
+            } else if let Some(dust) = dust_ink(ld) {
+                dust
+            } else if hash01(0x57A ^ cell_key(x, y)) < 0.0015 {
+                STAR
             } else {
-                DUST_TOP * f64::from(ld) / 255.0
+                Ink::BLANK
             };
-            let ion_level = ION_TOP * f64::from(li) / 255.0;
-            let ink =
-                if !coma && ion_level >= ink::MIN_VISIBLE_LEVEL && ion_level + 12.0 > dust_level {
-                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(ion_level))
-                } else if dust_level >= ink::MIN_VISIBLE_LEVEL {
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(dust_level))
-                } else if hash01(0x57A ^ cell_key(x, y)) < 0.0015 {
-                    ink::ramp(Ramp::Starlight, 0.12 + 0.2 * hash01(0x57B ^ cell_key(x, y)))
-                } else {
-                    Ink::BLANK
-                };
             self.pixels.set(x, y, ink);
         }
-        // The nucleus: the head's brightest point, with a faint cross (fading with the
-        // loop's envelope).
-        let (x, y) = (cx.floor() as i32, cy.floor() as i32);
-        let head = f64::from(env) * NUCLEUS_LEVEL;
-        if head >= ink::MIN_VISIBLE_LEVEL {
-            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let l = (0.7 * head).max(f64::from(
-                    self.pixels.get(x + dx, y + dy).map_or(0, |i| i.level),
-                ));
-                self.pixels.set(
-                    x + dx,
-                    y + dy,
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l)),
-                );
-            }
-            self.pixels.set(
-                x,
-                y,
-                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(head)),
-            );
-        }
+    }
+}
+
+/// Background stars: small, dim white points.
+const STAR: Ink = Ink::new(Role::Star, 40);
+
+/// The head in flat rings (ADR-0018): a white nucleus, a pale coma, a sun-yellow rim;
+/// one step dimmer while the comet fades in or out.
+fn coma_ink(d: f64, fading: bool) -> Ink {
+    let k = usize::from(d >= 1.2) + usize::from(d >= 3.0) + usize::from(fading);
+    [
+        Ink::new(Role::Star, 255),
+        Ink::new(Role::Star, 150),
+        Ink::new(Role::Sun, 140),
+        Ink::new(Role::Sun, 40),
+    ][k.min(3)]
+}
+
+/// The dust tail in flat steps by tone level: pale where the young fan crowds, then
+/// sun-yellow, then a dim ochre edge.
+fn dust_ink(level: u8) -> Option<Ink> {
+    match level {
+        185.. => Some(Ink::new(Role::Star, 120)),
+        100.. => Some(Ink::new(Role::Sun, 110)),
+        75.. => Some(Ink::new(Role::Sun, 10)),
+        _ => None,
+    }
+}
+
+/// The ion rays in flat blue steps: cyan knots, blue rays, a faint blue tip.
+fn ion_ink(level: u8) -> Option<Ink> {
+    match level {
+        150.. => Some(Ink::new(Role::Wave, 190)),
+        60.. => Some(Ink::new(Role::Cold, 170)),
+        25.. => Some(Ink::new(Role::Cold, 40)),
+        _ => None,
     }
 }
 
@@ -1014,37 +1017,40 @@ mod tests {
     }
 
     #[test]
-    fn cmt_a8_no_sun_glow_and_muted_tails() {
-        // ADR-0017 (M14): no Sun glow (it sat cut off in a corner) and no Ember; the tails
-        // are muted: ion rays `Ice` ≤ `ION_TOP`, dust `Starlight` ≤ `DUST_TOP` away from
-        // the coma, which alone keeps its full level.
+    fn cmt_a8_no_sun_glow_and_stepped_m11_tails() {
+        // ADR-0018: no Sun glow (it sat cut off in a corner); a white head, the ion rays
+        // in flat blue steps (Cold, Wave), the dust tail in sun-yellow and pale steps.
+        let ion: Vec<Ink> = [255, 100, 30].into_iter().filter_map(ion_ink).collect();
+        let dust: Vec<Ink> = [255, 150, 80].into_iter().filter_map(dust_ink).collect();
         for t in [5.0, 12.0, 20.0] {
             let g = run(t);
             let px = g.pixels.pixel_size();
             let (w, h) = (i32::from(px.width()), i32::from(px.height()));
             let (nx, ny) = g.view.px(g.nucleus);
-            let (mut ice, mut dust) = (0, 0);
+            let (mut n_ion, mut n_dust) = (0, 0);
             for y in 0..h {
                 for x in 0..w {
                     let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                    assert_ne!(ink.role, Role::Blackbody, "t {t} ({x}, {y})");
                     let coma =
                         (f64::from(x) + 0.5 - nx).hypot(f64::from(y) + 0.5 - ny) < COMA_PX + 0.5;
-                    match ink.role {
-                        Role::Ramp(Ramp::Ice) => {
-                            ice += 1;
-                            assert!(f64::from(ink.level) <= ION_TOP + 1.0, "{ink:?}");
-                        }
-                        Role::Ramp(Ramp::Starlight) if !coma => {
-                            dust += 1;
-                            assert!(f64::from(ink.level) <= DUST_TOP + 1.0, "{ink:?}");
-                        }
-                        Role::Ramp(Ramp::Starlight) | Role::Background => {}
-                        other => panic!("t {t}: {other:?}"),
+                    if ion.contains(&ink) {
+                        n_ion += 1;
+                    } else if dust.contains(&ink) {
+                        n_dust += 1;
+                    } else {
+                        assert!(
+                            coma || ink == Ink::BLANK || ink == STAR,
+                            "t {t} ({x}, {y}): {ink:?}"
+                        );
                     }
                 }
             }
-            assert!(ice > 20 && dust > 20, "t {t}: ice {ice} dust {dust}");
+            assert!(
+                n_ion > 20 && n_dust > 20,
+                "t {t}: ion {n_ion} dust {n_dust}"
+            );
+            let head = g.pixels.get(nx as i32, ny as i32);
+            assert_eq!(head, Some(Ink::new(Role::Star, 255)), "t {t}: nucleus");
         }
     }
 }

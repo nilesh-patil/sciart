@@ -25,4 +25,4 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
- Murmuration - each bird tracks 7                                    N 192  k=7
+ Murmuration - match 7 neighbours                                    N 192  k=7

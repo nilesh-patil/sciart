@@ -1,20 +1,17 @@
 //! An ancient globular cluster of live gravitating stars, seen by a slowly turning telescope (SPEC-002 `globular_cluster`).
 //!
 //! Direct softened N-body (N ≤ 500) in Hénon units from a Plummer sphere, leapfrogged in
-//! real time. Each body stands for ~10³ stars, so its unresolved light is deposited on a
-//! fixed model-plane lattice and blurred into a glow that follows the bodies (and breathes
-//! as they cross the core); on top of it each body is drawn as one representative resolved
-//! star of a colour class (faint turn-off, red-giant branch, blue horizontal branch, or a
-//! bright giant).
+//! real time. Each body stands for ~10³ stars, so the unresolved core is drawn from the
+//! Plummer surface-brightness law, sized by the bodies' own half-mass radius.
 
 use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use rand::Rng;
+use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::title::{self, Title};
-use sciart_core::{Tone, draw, geom, ink, ode, raster, rng};
+use sciart_core::{draw, geom, ode, rng};
 
 pub static META: Meta = Meta {
     name: "globular_cluster",
@@ -53,70 +50,19 @@ const DENSITY_PASSES: usize = 4;
 const RH_TAU: f64 = 4.0;
 /// Model radius filling the frame's fit radius (≈ 93 % of the projected mass).
 const VIEW_RADIUS: f64 = 2.2;
-/// The glow lattice: `LAT × LAT` cells over the model plane `[−SPAN, SPAN]²` at the
-/// origin's depth. It is fixed in model units, so it is the same (and capped, ADR-0012) at
-/// every terminal size and costs the same to blur.
-const LAT: usize = 64;
-const SPAN: f64 = 2.0;
-/// Box-blur radius (lattice cells) and passes: three passes approximate a Gaussian of
-/// σ ≈ 2.4 cells ≈ 0.15 model units, a quarter of the Plummer scale radius, which smooths
-/// 500 bodies into light while the core still visibly shifts at each crossing (GC-A7).
-const BLUR_R: usize = 2;
-const BLUR_PASSES: usize = 3;
-/// The glow's soft knee (share of the central surface brightness): `g²/(g + p)`, so light
-/// well below it fades quadratically to black instead of being cut. One blurred body peaks
-/// at ≈ 0.013, so lone halo bodies (drawn as stars) leave only a trace.
-const GLOW_KNEE_P: f64 = 0.1;
-/// Share of the glow taken from the bodies' own light at the centre, tapering as
-/// `1/(1 + R²/a²)` outwards; the rest is the smooth Plummer surface brightness
-/// `(1 + R²/a²)⁻²` about the light's centre, so the outline stays round while the core
-/// still shifts and breathes with the bodies (GC-A7).
-const BODY_LIGHT: f64 = 0.5;
-/// Glow levels below this dissolve (CORE-R89): only the ramp's faint floor.
-const GLOW_FLOOR: u8 = 16;
-/// The halo resolves into stars (GC-A7): each body stands for ~10³ stars, so it carries
-/// `COMPANIONS` faint `GRAIN` dots at fixed 3-D offsets within `COMPANION_R` model units,
-/// drawn where the glow is below `GRAIN_TOP`. They orbit, turn and fade with their body.
-const COMPANIONS: usize = 3;
-const COMPANION_R: f64 = 0.2;
-const GRAIN_TOP: u8 = 150;
-const GRAIN: Ink = Ink::new(Role::Star, 40);
-/// Motion streaks (GC-A10): each coloured star outside the bright glow trails a faint
-/// line back to where it was `TRAIL_T` N-body time units ago (≈ 1 s, a seventh of a
-/// crossing). **Stylised**: a long exposure; the eye sees no trails.
-const TRAIL_T: f64 = 0.4;
-const TRAIL: Ink = Ink::new(Role::Star, 26);
-const TRAIL_MAX_G: f64 = 0.12;
-/// Seconds per turn of the telescope round the cluster.
-const TURN: f64 = 48.0;
-const GLOW_RAMP: Role = Role::Ramp(Ramp::Starlight);
-/// Tone curve of the glow, in units of the Plummer central surface brightness: the asinh
-/// knee keeps the inner halo visible; white sits just below the centre's (blurred) value,
-/// so only the innermost core reaches the pale top (GC-A7).
-const GLOW_KNEE: f32 = 0.3;
-const GLOW_WHITE: f32 = 0.9;
-/// Contrast of the glow: above 1 it keeps the faint outskirts near black, so the halo reads
-/// as resolved stars on the night sky rather than a disc.
-const GLOW_GAMMA: f64 = 2.0;
-/// Stars are lost in the core's glare where the glow exceeds `GLARE_G` of the central
-/// surface brightness (`R ≈ a`), each at its own hashed depth into the glare, so the core
-/// has no hard rim of stars.
-const GLARE_G: f64 = 0.25;
-/// A giant shows as a `✦` only where the glow is below `GIANT_G`; nearer the core it is an
-/// ordinary star.
-const GIANT_G: f64 = 0.25;
+/// The glow ends where `p` reaches 0: `g = 0.08` at `R = √(√12.5 − 1) a_g ≈ 1.5923 a_g`.
+const GLOW_EDGE: f64 = 1.5924;
 const GIANT: Glyph = Glyph::new('✦', '*');
-/// Temperatures (K): the red giants, and the colour classes of the other bodies (a visual
-/// tag; the dynamics stay equal-mass), as `(cumulative fraction, lowest, highest)`:
-/// turn-off and subgiant stars, the red-giant branch, the blue horizontal branch (GC-A8).
-const GIANT_K: f64 = 3900.0;
-/// `Star` level of a turn-off star's single dot: the faint majority.
-const TURNOFF_LEVEL: u8 = 140;
-const CLASSES: [(f64, f64, f64); 3] = [
-    (0.76, 5600.0, 6400.0),
-    (0.93, 4300.0, 4900.0),
-    (1.0, 9000.0, 12_000.0),
-];
+/// A giant stands out only where the unresolved glow lights less than this fraction
+/// of the dots (`R > 0.83 a_g`); nearer the core it is lost in the glare.
+const GIANT_MAX_GLOW: f64 = 0.5;
+/// Giant level `GIANT_MID ± GIANT_SWING`, twinkling with a per-giant period drawn
+/// from `GIANT_PERIODS` seconds.
+const GIANT_MID: f64 = 200.0;
+const GIANT_SWING: f64 = 30.0;
+const GIANT_PERIODS: (f64, f64) = (5.0, 9.0);
+/// The label's name part, also the label on canvases too narrow for the counts.
+const NAME: &str = "globular cluster";
 
 /// Timeline phase indices.
 const FADE: usize = 1;
@@ -284,50 +230,27 @@ pub(crate) fn density_centre(pos: &[f64], scratch: &mut Vec<f64>) -> [f64; 3] {
     if n > 0.0 { sum.map(|s| s / n) } else { sum }
 }
 
-/// Three-pass box blur of the `LAT × LAT` lattice `v` in place, rows then columns, with
-/// `tmp` as scratch; cells beyond the edge count as empty, so light is not piled up there.
-/// Each pass keeps the total except what spills over the edge.
-pub(crate) fn blur(v: &mut [f32], tmp: &mut [f32]) {
-    let norm = 1.0 / (2 * BLUR_R + 1) as f32;
-    // One running-sum pass along a line of `LAT` cells `stride` apart.
-    let line = |src: &[f32], dst: &mut [f32], start: usize, stride: usize| {
-        let mut sum: f32 = (0..BLUR_R.min(LAT)).map(|i| src[start + i * stride]).sum();
-        for i in 0..LAT {
-            if i + BLUR_R < LAT {
-                sum += src[start + (i + BLUR_R) * stride];
-            }
-            if i > BLUR_R {
-                sum -= src[start + (i - BLUR_R - 1) * stride];
-            }
-            dst[start + i * stride] = sum * norm;
-        }
-    };
-    for _ in 0..BLUR_PASSES {
-        for r in 0..LAT {
-            line(v, tmp, r * LAT, 1);
-        }
-        for c in 0..LAT {
-            line(tmp, v, c, LAT);
-        }
-    }
+/// `(R/a_g)²` of a point `(dx, dy)` cells from the centre, given `k2 = (scale·a_g)²`.
+fn x2_over(dx: f64, dy: f64, k2: f64) -> f64 {
+    ((dx / geom::ASPECT).powi(2) + dy * dy) / k2
 }
 
-/// A fixed uniform in `[0, 1)` per body `k` and `stream`, a pure function of the salt, so
-/// a star's colour and its place in a fade never flicker.
-pub(crate) fn body_hash(salt: u64, k: usize, stream: i32) -> f64 {
-    rng::hash01(salt ^ rng::cell_key(k as i32, stream))
+/// Plummer surface brightness `g = (1 + x²)^{−2}`, from `x² = (R/a_g)²`.
+fn surface(x2: f64) -> f64 {
+    let d = 1.0 + x2;
+    1.0 / (d * d)
 }
 
-/// Ink of body `k`'s resolved star (not a giant): turn-off stars, the faint majority, as a
-/// plain dim `Star` dot; the brighter red-giant-branch and horizontal-branch stars in
-/// their blackbody colour (GC-A8).
-fn class_ink(salt: u64, k: usize) -> Ink {
-    let u = body_hash(salt, k, 1);
-    if u < CLASSES[0].0 {
-        Ink::new(Role::Star, TURNOFF_LEVEL)
-    } else {
-        ink::blackbody(ink::class_kelvin(&CLASSES, u, body_hash(salt, k, 2)))
-    }
+/// Probability that glow of surface brightness `g` lights a dot (GC-A8): 1 in the
+/// saturated core (`R ≤ 0.52 a_g`), falling to 0 at `g = 0.08` (`R = 1.59 a_g`).
+fn lit_p(g: f64) -> f64 {
+    (1.7 * (g - 0.08) / 0.92).clamp(0.0, 1.0)
+}
+
+/// A fixed per-dot uniform in `[0, 1)`, a pure function of `(x, y, salt)` (GC-A8), so
+/// the glow speckle holds still from frame to frame.
+pub(crate) fn dot_hash(x: i32, y: i32, salt: u64) -> f64 {
+    rng::hash01(salt ^ rng::cell_key(x, y))
 }
 
 /// The N-body system: interleaved `(x, y, z)` per body, plus the leapfrog carry.
@@ -428,61 +351,36 @@ impl Cluster {
 }
 
 pub(crate) struct GlobularCluster {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     cluster: Cluster,
     timeline: Timeline,
     /// Own accumulated simulated time (GEN-R7): drives the camera and the timeline.
     t: f64,
     /// Rises passed so far: a change means "reseed now".
     epoch: i64,
-    /// N-body time since the last reseed, for the readout.
+    /// N-body time since the last reseed, for the label.
     age: f64,
     /// Half-mass radius smoothed over `RH_TAU`, sizing the glow.
     rh: f64,
-    /// Salt of the per-body hashes (colour class, fade order), drawn once from `ctx.rng`.
+    /// Salt of the per-dot glow hash, drawn once from `ctx.rng`.
     salt: u64,
     size: Size,
     /// Rows per model unit at the origin.
     scale: f64,
-    tone: Tone,
-    /// Bodies' light on the model-plane lattice (`LAT²`, row-major), blurred, and the
-    /// blur's scratch; both fixed-size, allocated once in `new`.
-    light: Box<[f32]>,
-    blur: Box<[f32]>,
-    /// The toned glow level of each lattice cell, for the current brightness.
-    toned: Box<[f32]>,
-    /// Factor from `light` to units of the Plummer central surface brightness.
-    light_unit: f64,
-    /// Unresolved light.
-    pixels: Pixels,
-    /// Resolved stars, laid over the glow.
     dots: Dots,
-    /// Giant glyph cells, rasterised with the dots.
-    giants: [(i32, i32); MAX_GIANTS],
+    /// Giant glyph cells and levels, rasterised with the dots.
+    giants: [(i32, i32, u8); MAX_GIANTS],
     n_giants: usize,
-    /// Title-row readout, e.g. `N=500  3 crossings` (empty when it does not fit).
-    readout: StackText<32>,
-    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
-    dirty: bool,
-}
-
-/// ASCII stand-in for a glow pixel pair, by the brighter pixel's level: the classic `#`
-/// core thinning through `+` and `:` to `.`.
-fn ascii_glow(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let ink = raster::stronger(top, bottom);
-    let ch = match ink.level {
-        _ if ink.role == Role::Background => return None,
-        200.. => '#',
-        130.. => '+',
-        80.. => ':',
-        40.. => '.',
-        _ => return None,
-    };
-    Some((ch, ink))
+    /// Per-giant twinkle `(period s, phase rad)`, drawn from the salt.
+    twinkle: [(f64, f64); MAX_GIANTS],
+    label: StackText<48>,
 }
 
 impl GlobularCluster {
     fn new() -> Self {
         Self {
+            dirty: false,
             cluster: Cluster::preallocated(),
             timeline: Timeline::new(&[("evolve", 120.0), ("fade", 1.5), ("rise", 1.5)]),
             t: 0.0,
@@ -492,17 +390,11 @@ impl GlobularCluster {
             salt: 0,
             size: Size::new(1, 1),
             scale: 1.0,
-            tone: Tone::asinh(GLOW_KNEE, GLOW_WHITE),
-            light: vec![0.0; LAT * LAT].into_boxed_slice(),
-            blur: vec![0.0; LAT * LAT].into_boxed_slice(),
-            toned: vec![0.0; LAT * LAT].into_boxed_slice(),
-            light_unit: 0.0,
-            pixels: Pixels::default(),
             dots: Dots::default(),
-            giants: [(0, 0); MAX_GIANTS],
+            giants: [(0, 0, 0); MAX_GIANTS],
             n_giants: 0,
-            readout: StackText::new(),
-            dirty: false,
+            twinkle: [(GIANT_PERIODS.0, 0.0); MAX_GIANTS],
+            label: StackText::new(),
         }
     }
 
@@ -511,7 +403,7 @@ impl GlobularCluster {
         self.timeline.cycle(t) + i64::from(self.timeline.at(t).index == RISE)
     }
 
-    /// Brightness multiplier: fades out before the reseed and back in after it.
+    /// Ink multiplier: fades out before the reseed and back in after it.
     fn brightness(&self) -> f64 {
         let beat = self.timeline.at(self.t);
         match beat.index {
@@ -540,257 +432,167 @@ impl GlobularCluster {
         (self.rh / RH_PER_A).max(1e-6)
     }
 
-    /// Readout, glow, stars and giants for the current state (the M10 raster
-    /// convention: `render` only blits).
+    /// `(scale·a_g)²`: `(R/a_g)² = ((dx/ASPECT)² + dy²)/k2` for cell offsets `(dx, dy)`.
+    fn glow_k2(&self) -> f64 {
+        let k = self.scale * self.a_g();
+        k * k
+    }
+
+    /// `(R/a_g)²` of a point `(dx, dy)` cells from the centre (the tests' probe; the
+    /// raster loops hoist `glow_k2`).
+    #[cfg(test)]
+    fn glow_x2(&self, dx: f64, dy: f64) -> f64 {
+        x2_over(dx, dy, self.glow_k2())
+    }
+
+    /// Draw label, glow, bodies and giants for the current state (the M10 raster
+    /// convention: `render` only blits). The label goes first, so the stars can keep
+    /// clear of it.
     fn rasterise(&mut self) {
-        self.write_readout();
+        self.dots.clear();
+        self.write_label();
         let b = self.brightness();
-        self.expose();
         self.glow(b);
         self.bodies(b);
     }
 
-    /// Continuous lattice coordinates of the cell-space point `(x, y)`.
-    fn lattice_xy(&self, x: f64, y: f64) -> (f64, f64) {
-        let (cx, cy) = self.centre();
-        let k = LAT as f64 / (2.0 * SPAN);
-        let u = (x - cx) / (geom::ASPECT * self.scale);
-        let v = (y - cy) / self.scale;
-        ((u + SPAN) * k - 0.5, (v + SPAN) * k - 0.5)
+    /// Cells kept clear for the label on row 0: column 0, the label, and one trailing
+    /// cell, so no star reads as part of the text (0 without a label).
+    fn label_cells(&self) -> i32 {
+        if self.label.is_empty() {
+            0
+        } else {
+            self.label.len() as i32 + 2
+        }
     }
 
-    /// Deposit every body's light onto the lattice (bilinear, weighted by its near-eye
-    /// fade) and blur it: the unresolved light of the ~10³ stars each body stands for, so
-    /// the glow follows the bodies and breathes as they cross the core (GC-A7).
-    fn expose(&mut self) {
-        self.light.fill(0.0);
+    /// Unresolved light: dot `d` is lit iff `p(R_d)·b > u(d)` (GC-A8). A cell whose
+    /// centre lies in the saturated core (`p = 1`) is filled whole, as a saturated
+    /// detector pixel is, so the core reads as a solid knot (GC-A7).
+    fn glow(&mut self, b: f64) {
+        let (cx, cy) = self.centre();
+        let k2 = self.glow_k2();
+        let keep_out = self.label_cells();
+        let reach = GLOW_EDGE * self.a_g() * self.scale; // rows
+        let (w, h) = (i32::from(self.size.width()), i32::from(self.size.height()));
+        let x_range = ((cx - reach * geom::ASPECT).floor() as i32).max(0)
+            ..=((cx + reach * geom::ASPECT).ceil() as i32).min(w - 1);
+        let y_range =
+            ((cy - reach).floor() as i32).max(0)..=((cy + reach).ceil() as i32).min(h - 1);
+        let (sub_w, sub_h) = (f64::from(Dots::CELL_W), f64::from(Dots::CELL_H));
+        for row in y_range {
+            for col in x_range.clone() {
+                if row == 0 && col < keep_out {
+                    continue;
+                }
+                let (fc, fr) = (f64::from(col), f64::from(row));
+                let saturated = lit_p(surface(x2_over(fc + 0.5 - cx, fr + 0.5 - cy, k2))) >= 1.0;
+                for sy in 0..Dots::CELL_H {
+                    for sx in 0..Dots::CELL_W {
+                        let dx = fc + (f64::from(sx) + 0.5) / sub_w - cx;
+                        let dy = fr + (f64::from(sy) + 0.5) / sub_h - cy;
+                        let g = surface(x2_over(dx, dy, k2));
+                        let (px, py) = (col * Dots::CELL_W + sx, row * Dots::CELL_H + sy);
+                        // A saturated dot is lit whatever its hash (`u < 1`): skip it.
+                        let lit = if saturated && b >= 1.0 {
+                            true
+                        } else {
+                            let p = if saturated { 1.0 } else { lit_p(g) } * b;
+                            p > 0.0 && p > dot_hash(px, py, self.salt)
+                        };
+                        if lit {
+                            let level = (90.0 + 165.0 * g) * b;
+                            self.dots
+                                .set(px, py, Ink::new(Role::Star, ink::level(level)));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Project every body through the turning camera; the first `g_n` are red giants
+    /// (a render-only tag: the dynamics stay equal-mass).
+    fn bodies(&mut self, b: f64) {
         let proj = self.camera().projector();
         let centre = self.centre();
-        for p in self.cluster.pos.chunks_exact(3) {
+        let k2 = self.glow_k2();
+        let keep_out = self.label_cells();
+        let n_giants = giant_count(self.cluster.n());
+        self.n_giants = 0;
+        for (k, p) in self.cluster.pos.chunks_exact(3).enumerate() {
             let Some((x, y, z)) = proj.project([p[0], p[1], p[2]], centre, self.scale) else {
                 continue;
             };
-            let (gx, gy) = self.lattice_xy(x, y);
-            if !(gx.is_finite() && gy.is_finite()) {
-                continue;
-            }
-            let (x0, y0) = (gx.floor(), gy.floor());
-            let (fx, fy) = (gx - x0, gy - y0);
-            let w = eye_fade(z);
-            for (dx, dy, k) in [
-                (0, 0, (1.0 - fx) * (1.0 - fy)),
-                (1, 0, fx * (1.0 - fy)),
-                (0, 1, (1.0 - fx) * fy),
-                (1, 1, fx * fy),
-            ] {
-                let (i, j) = (x0 as i64 + dx, y0 as i64 + dy);
-                if (0..LAT as i64).contains(&i) && (0..LAT as i64).contains(&j) {
-                    self.light[j as usize * LAT + i as usize] += (w * k) as f32;
-                }
-            }
-        }
-        blur(&mut self.light, &mut self.blur);
-        // Bodies per lattice cell → surface density (M = 1) in units of the Plummer
-        // central surface density `1/(π a²)`, `a` from the smoothed half-mass radius.
-        let cell = 2.0 * SPAN / LAT as f64;
-        let a = self.a_g();
-        self.light_unit =
-            std::f64::consts::PI * a * a / (self.cluster.n().max(1) as f64 * cell * cell);
-    }
-
-    /// The glow at cell-space point `(x, y)`, in units of the Plummer central surface
-    /// brightness (≈ 1 at the centre of a fresh cluster), sampled bilinearly.
-    fn glow_at(&self, x: f64, y: f64) -> f64 {
-        self.sample(&self.light, x, y) * self.light_unit
-    }
-
-    /// A `LAT²` lattice sampled bilinearly at cell-space point `(x, y)` (0 off it).
-    fn sample(&self, lattice: &[f32], x: f64, y: f64) -> f64 {
-        let (gx, gy) = self.lattice_xy(x, y);
-        if !(gx.is_finite() && gy.is_finite()) {
-            return 0.0;
-        }
-        let (x0, y0) = (gx.floor(), gy.floor());
-        let (fx, fy) = (gx - x0, gy - y0);
-        let at = |i: f64, j: f64| {
-            if (0.0..LAT as f64).contains(&i) && (0.0..LAT as f64).contains(&j) {
-                f64::from(lattice[j as usize * LAT + i as usize])
-            } else {
-                0.0
-            }
-        };
-        let top = at(x0, y0) * (1.0 - fx) + at(x0 + 1.0, y0) * fx;
-        let bottom = at(x0, y0 + 1.0) * (1.0 - fx) + at(x0 + 1.0, y0 + 1.0) * fx;
-        top * (1.0 - fy) + bottom * fy
-    }
-
-    /// Tone every lattice cell once per frame, so the pixels interpolate levels instead of
-    /// each paying a `powf`. The glow `g` blends the bodies' light with the round Plummer
-    /// profile about the light's centre (weighted by light², so the core, not a stray halo
-    /// body, sets it); `tone((knee(g)·b)^GLOW_GAMMA)` with the soft knee `g²/(g + p)`.
-    fn tone_lattice(&mut self, b: f64) {
-        let (mut sx, mut sy, mut sw) = (0.0, 0.0, 0.0);
-        for (i, &l) in self.light.iter().enumerate() {
-            let w = f64::from(l) * f64::from(l);
-            sx += w * (i % LAT) as f64;
-            sy += w * (i / LAT) as f64;
-            sw += w;
-        }
-        let half = (LAT as f64 - 1.0) / 2.0;
-        let (ci, cj) = if sw > 0.0 {
-            (sx / sw, sy / sw)
-        } else {
-            (half, half)
-        };
-        // Lattice cells per model unit, over the Plummer scale radius.
-        let k_a = LAT as f64 / (2.0 * SPAN) * self.a_g();
-        for (i, (t, &l)) in self.toned.iter_mut().zip(self.light.iter()).enumerate() {
-            let (di, dj) = (((i % LAT) as f64 - ci) / k_a, ((i / LAT) as f64 - cj) / k_a);
-            let q = 1.0 / (1.0 + di * di + dj * dj);
-            // The bodies' share tapers outwards (as the Plummer core does), where 500
-            // bodies are too few to trace a smooth edge.
-            let body = BODY_LIGHT * q;
-            let g = body * f64::from(l) * self.light_unit + (1.0 - body) * q * q;
-            let v = g * g / (g + GLOW_KNEE_P);
-            *t = f32::from(self.tone.level((v * b).powf(GLOW_GAMMA) as f32));
-        }
-    }
-
-    /// The toned glow level at cell-space point `(x, y)`.
-    fn glow_level(&self, x: f64, y: f64) -> u8 {
-        ink::level(self.sample(&self.toned, x, y))
-    }
-
-    /// The cluster's unresolved light in the Starlight ramp (GC-A7): a globular's
-    /// integrated colour is nearly uniform (B − V ≈ 0.7), so the glow has brightness but no
-    /// hue gradient. Each pixel shows its toned lattice level, the faint floor dissolved.
-    fn glow(&mut self, b: f64) {
-        self.tone_lattice(b);
-        self.pixels.clear();
-        self.dots.clear();
-        let (cx, cy) = self.centre();
-        let reach = SPAN * self.scale; // rows
-        let px = self.pixels.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        let xs = ((cx - reach * geom::ASPECT).floor() as i32).max(0)
-            ..=((cx + reach * geom::ASPECT).ceil() as i32).min(w - 1);
-        let ys = ((2.0 * (cy - reach)).floor() as i32).max(0)
-            ..=((2.0 * (cy + reach)).ceil() as i32).min(h - 1);
-        for py in ys {
-            let y = (f64::from(py) + 0.5) / 2.0;
-            for px in xs.clone() {
-                let level = self.glow_level(f64::from(px) + 0.5, y);
-                if level > 0 {
-                    self.pixels.set(px, py, Ink::new(GLOW_RAMP, level));
-                }
-            }
-        }
-        self.pixels.dissolve(GLOW_FLOOR);
-    }
-
-    /// Project every body through the turning camera as a star in its colour class; the
-    /// first `g_n` are red giants (a render-only tag: the dynamics stay equal-mass).
-    /// Stars in the core's glare are not drawn, and a fade thins the stars in a fixed
-    /// per-body order rather than dimming them.
-    fn bodies(&mut self, b: f64) {
-        self.n_giants = 0;
-        let proj = self.camera().projector();
-        let centre = self.centre();
-        let n_giants = giant_count(self.cluster.n());
-        for k in 0..self.cluster.n() {
-            let p = [
-                self.cluster.pos[3 * k],
-                self.cluster.pos[3 * k + 1],
-                self.cluster.pos[3 * k + 2],
-            ];
-            let Some((x, y, z)) = proj.project(p, centre, self.scale) else {
-                continue;
-            };
-            if body_hash(self.salt, k, 0) >= b * eye_fade(z) {
-                continue;
-            }
-            // The body's unresolved companions, in the halo only (the glow covers the core).
-            for j in 0..COMPANIONS {
-                let stream = 4 + 3 * j as i32;
-                let o = [0, 1, 2]
-                    .map(|a| COMPANION_R * (2.0 * body_hash(self.salt, k, stream + a) - 1.0));
-                let q = [p[0] + o[0], p[1] + o[1], p[2] + o[2]];
-                if let Some((qx, qy, _)) = proj.project(q, centre, self.scale)
-                    && self.glow_level(qx, qy) < GRAIN_TOP
-                {
-                    let (dx, dy) = Dots::from_cells(qx, qy);
-                    self.dots.plot(dx, dy, GRAIN);
-                }
-            }
-            let g = self.glow_at(x, y);
-            if g >= GLARE_G * (1.0 + 1.5 * body_hash(self.salt, k, 3)) {
-                continue;
-            }
-            let ink = if k < n_giants {
-                if g < GIANT_G {
-                    self.giants[self.n_giants] = (x.floor() as i32, y.floor() as i32);
+            let g = surface(x2_over(x - centre.0, y - centre.1, k2));
+            // A giant in the bright core is lost in its glare, as in a real exposure:
+            // it is drawn as an ordinary star there.
+            if k < n_giants && lit_p(g) < GIANT_MAX_GLOW {
+                let level = self.giant_level(k, self.t) * b;
+                let (col, row) = (x.floor() as i32, y.floor() as i32);
+                if level >= MIN_VISIBLE_LEVEL && !(row == 0 && col < keep_out) {
+                    self.giants[self.n_giants] = (col, row, ink::level(level));
                     self.n_giants += 1;
-                    continue;
                 }
-                ink::blackbody(GIANT_K)
-            } else {
-                class_ink(self.salt, k)
-            };
-            let (dx, dy) = Dots::from_cells(x, y);
-            // A faint streak back along its velocity over the last `TRAIL_T` (GC-A10), in
-            // the halo only: a long exposure that shows the orbits turning.
-            let v = [
-                self.cluster.vel[3 * k],
-                self.cluster.vel[3 * k + 1],
-                self.cluster.vel[3 * k + 2],
-            ];
-            let back = [0, 1, 2].map(|a| p[a] - TRAIL_T * v[a]);
-            if g < TRAIL_MAX_G
-                && ink.role == Role::Blackbody
-                && let Some((bx, by, _)) = proj.project(back, centre, self.scale)
-            {
-                let (tx, ty) = Dots::from_cells(bx, by);
-                self.dots.line(tx, ty - 0.5, dx, dy - 0.5, TRAIL);
+                continue;
             }
-            self.dots.plot(dx, dy - 0.5, ink);
-            // Coloured stars are a 2 × 2 dot block: a lone braille dot is too thin to show
-            // a colour, and they are the brighter stars; a turn-off star is one faint dot.
-            if ink.role == Role::Blackbody {
-                self.dots.plot(dx, dy + 0.5, ink);
-                self.dots.plot(dx + 1.0, dy - 0.5, ink);
-                self.dots.plot(dx + 1.0, dy + 0.5, ink);
+            let level =
+                (100.0 + 140.0 * g.sqrt() + 20.0 * (z / 2.0).clamp(-1.0, 1.0)) * eye_fade(z) * b;
+            let (dx, dy) = Dots::from_cells(x, y);
+            // `Dots::plot` rounds to the nearest dot; round here to test the keep-out.
+            let (px, py) = (dx.round() as i32, dy.round() as i32);
+            let by_label = py < Dots::CELL_H && px < keep_out * Dots::CELL_W;
+            if level >= MIN_VISIBLE_LEVEL && !by_label {
+                self.dots
+                    .plot(dx, dy, Ink::new(Role::Star, ink::level(level)));
             }
         }
     }
 
-    /// The slowly turning, gently nodding telescope (SPEC-002 Motion): once round in
-    /// `TURN` s, so the halo visibly swings past the core within a minute (GC-A10).
+    /// Giant `k`'s level at time `t` before the fade: a slow, quiet twinkle
+    /// `200 ± 30` with its own period and phase (visual only).
+    fn giant_level(&self, k: usize, t: f64) -> f64 {
+        let (period, phase) = self.twinkle[k];
+        GIANT_MID + GIANT_SWING * (TAU * t / period + phase).sin_det()
+    }
+
+    /// Per-giant twinkle periods and phases, a pure function of the salt (no extra
+    /// draws from `ctx.rng`).
+    fn build_twinkle(&mut self) {
+        let (lo, hi) = GIANT_PERIODS;
+        let mut rng = SplitMix64::new(self.salt);
+        for slot in &mut self.twinkle {
+            *slot = (lo + (hi - lo) * rng.next_f64(), TAU * rng.next_f64());
+        }
+    }
+
+    /// The slowly turning, gently nodding telescope (SPEC-002 Motion).
     fn camera(&self) -> Camera {
         Camera {
-            yaw: TAU * self.t / TURN,
+            yaw: TAU * self.t / 90.0,
             pitch: 0.30 + 0.15 * (TAU * self.t / 67.0).sin_det(),
             distance: EYE,
         }
     }
 
-    /// `N=500  3 crossings` (no crossings clause before the first), else `N=500`, else
-    /// nothing, whichever fits the title row's readout room (GC-A9, GEN-R13). The age
-    /// counts whole crossing times since the last reseed, so it changes every 7.1 s.
-    fn write_readout(&mut self) {
-        let room = title::readout_room(self.size, &Title::of(self));
-        self.readout.clear();
+    /// `globular cluster  N=500  3 crossings` (no crossings clause before the first) if
+    /// it takes at most half the width, else `globular cluster` if that fits in `w − 2`
+    /// columns, else nothing (SPEC-002 Label). The age counts whole crossing times
+    /// since the last reseed, so it changes only every 7.1 s.
+    fn write_label(&mut self) {
+        self.label.clear();
+        let w = usize::from(self.size.width());
         // `age ≥ 0`, and ≤ 17 crossings per evolve phase: the cast is exact.
         let crossings = (self.age / T_CR).floor() as u32;
-        let _ = write!(self.readout, "N={}", self.cluster.n());
+        let _ = write!(self.label, "{NAME}  N={}", self.cluster.n());
         if crossings > 0 {
             let plural = if crossings == 1 { "" } else { "s" };
-            let _ = write!(self.readout, "  {crossings} crossing{plural}");
+            let _ = write!(self.label, "  {crossings} crossing{plural}");
         }
-        if self.readout.len() > room {
-            self.readout.clear();
-            let _ = write!(self.readout, "N={}", self.cluster.n());
-            if self.readout.len() > room {
-                self.readout.clear();
+        if 2 * self.label.len() > w {
+            self.label.clear();
+            if NAME.len() + 2 <= w {
+                let _ = self.label.write_str(NAME);
             }
         }
     }
@@ -805,6 +607,7 @@ impl Generator for GlobularCluster {
         let n = n_for(size);
         if self.cluster.n() == 0 {
             self.salt = ctx.rng.random();
+            self.build_twinkle();
             self.cluster.plummer(&mut ctx.rng, n);
             self.rh = self.cluster.half_mass_radius();
         } else if n != self.cluster.n() {
@@ -812,9 +615,8 @@ impl Generator for GlobularCluster {
         }
         self.size = size;
         self.scale = draw::fit_radius(size, 0.92) / VIEW_RADIUS;
-        self.pixels.resize(size);
         self.dots.resize(size);
-        self.dirty = true;
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -835,31 +637,20 @@ impl Generator for GlobularCluster {
         self.dirty = true;
     }
 
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
-        if std::mem::take(&mut self.dirty) {
+        if self.dirty {
+            self.dirty = false;
             self.rasterise();
         }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_glow(top, bottom));
-        self.dots.blit_over(canvas, &self.pixels);
-        let unicode = canvas.mode() == GlyphMode::Unicode;
-        let giant = ink::blackbody(GIANT_K);
-        for &(x, y) in &self.giants[..self.n_giants] {
-            let bg = if unicode {
-                self.pixels.cell_bg(x, y)
-            } else {
-                Ink::BLANK
-            };
-            canvas.put_bg(x, y, GIANT, giant, bg);
+        self.dots.blit(canvas);
+        for &(x, y, level) in &self.giants[..self.n_giants] {
+            canvas.put(x, y, GIANT, Ink::new(Role::Hot, level));
         }
-        if !self.readout.is_empty() {
-            let y = i32::from(self.size.height()) - 1;
-            let ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-            draw::label_right(canvas, y, self.readout.as_str(), ink);
-        }
+        canvas.text(1, 0, self.label.as_str(), Ink::new(Role::Text, 140));
     }
 }
 
@@ -1081,17 +872,14 @@ mod tests {
         let mut ctx = Ctx::new(6, Size::new(80, 24));
         let mut g = GlobularCluster::new();
         g.resize(Size::new(80, 24), &mut ctx);
-        g.prepare();
         let before = g.cluster.clone();
         g.resize(Size::new(81, 24), &mut ctx);
-        g.prepare();
         assert_eq!(g.cluster.pos, before.pos);
         assert_eq!(g.cluster.vel, before.vel);
 
         for (size, n) in [(Size::new(200, 50), 500), (Size::new(40, 12), 96)] {
             let old = g.cluster.pos.clone();
             g.resize(size, &mut ctx);
-            g.prepare();
             let c = &g.cluster;
             assert_eq!(c.n(), n);
             let keep = 3 * n.min(old.len() / 3);
@@ -1126,85 +914,75 @@ mod tests {
         assert_eq!(g.cluster.n(), 500);
     }
 
-    /// Level-weighted mean pixel position of the glow.
-    fn glow_centroid(g: &GlobularCluster) -> (f64, f64) {
-        let (mut sx, mut sy, mut sw) = (0.0, 0.0, 0.0);
-        let px = g.pixels.pixel_size();
-        for py in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let w = f64::from(g.pixels.get(x, py).unwrap().level);
-                (sx, sy, sw) = (sx + w * f64::from(x), sy + w * f64::from(py), sw + w);
-            }
-        }
-        (sx / sw, sy / sw)
-    }
-
     #[test]
-    fn gc_a7_glow_follows_the_bodies_without_hue_or_rim_and_stars_are_coloured() {
+    fn gc_a7_core_is_solid_glow_is_bounded_and_giants_are_few() {
         let size = Size::new(200, 50);
         let mut ctx = Ctx::new(42, size);
         let mut g = GlobularCluster::new();
         g.resize(size, &mut ctx);
-        g.prepare();
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
         let (cx, cy) = g.centre();
-        // One hue everywhere: every glow pixel, core to fringe, is the neutral Starlight
-        // ramp (a globular's integrated colour has no radial gradient).
-        let (mut lit, mut edge) = (0, 0);
-        for py in 0..100 {
-            for px in 0..200 {
-                let ink = g.pixels.get(px, py).unwrap();
-                if ink == Ink::BLANK {
-                    continue;
-                }
-                lit += 1;
-                assert_eq!(ink.role, GLOW_RAMP, "glow pixel {px},{py}");
-                // No rim: a lit pixel next to the empty sky is faint.
-                let sky = [(1, 0), (-1, 0), (0, 1), (0, -1)]
-                    .iter()
-                    .any(|&(dx, dy)| g.pixels.get(px + dx, py + dy) == Some(Ink::BLANK));
-                if sky {
-                    edge += 1;
-                    assert!(ink.level < 90, "rim pixel {px},{py} at {}", ink.level);
+        let a_g = g.a_g();
+
+        let proj = g.camera().projector();
+        let body_dots: Vec<(i32, i32)> = g
+            .cluster
+            .pos
+            .chunks_exact(3)
+            .filter_map(|p| proj.project([p[0], p[1], p[2]], (cx, cy), g.scale))
+            .map(|(x, y, _)| {
+                (
+                    (2.0 * x - 0.5).round() as i32,
+                    (4.0 * y - 0.5).round() as i32,
+                )
+            })
+            .collect();
+        let dots = g.dots.dot_size();
+        for py in 0..i32::from(dots.height()) {
+            for px in 0..i32::from(dots.width()) {
+                let x2 = g.glow_x2(
+                    (f64::from(px) + 0.5) / 2.0 - cx,
+                    (f64::from(py) + 0.5) / 4.0 - cy,
+                );
+                if x2 > 1.6 * 1.6 && g.dots.is_lit(px, py) {
+                    assert!(body_dots.contains(&(px, py)), "stray glow dot at {px},{py}");
                 }
             }
         }
-        assert!(lit > 500 && edge > 50, "{lit} lit, {edge} at the edge");
-        // A bright centre, fading outwards: the centre pixel beats the mean at R ≈ a.
-        let centre = g.pixels.get(cx as i32, (2.0 * cy) as i32).unwrap().level;
-        assert!(centre >= 180, "centre at {centre}");
-        let ring = (g.a_g() * g.scale * geom::ASPECT) as i32;
-        let at_a = g
-            .pixels
-            .get(cx as i32 + ring, (2.0 * cy) as i32)
-            .unwrap()
-            .level;
-        assert!(at_a < centre, "{at_a} at R = a vs {centre}");
-        // Every star is a faint turn-off dot, or (braille cell or giant) a blackbody
-        // between the giants' 3900 K and the blue horizontal branch's 12 000 K.
-        let (mut stars, mut coloured) = (0, 0);
-        for cell in canvas.cells() {
-            if ('\u{2801}'..='\u{28ff}').contains(&cell.ch) || cell.ch == '✦' {
-                stars += 1;
-                // Turn-off stars and the halo's grain are plain `Star` dots.
+
+        let (mut inner, mut outer) = (Vec::new(), Vec::new());
+        let mut giants = 0;
+        for row in 0..50 {
+            for col in 0..200 {
+                let cell = canvas.get(col, row).unwrap();
+                let giant = cell.ink.role == Role::Hot;
+                giants += usize::from(giant);
+                let x2 = g.glow_x2(f64::from(col) + 0.5 - cx, f64::from(row) + 0.5 - cy);
+                if x2 <= 0.5 * 0.5 {
+                    assert!(
+                        cell.ch == '⣿' || giant,
+                        "core cell {col},{row} is {:?}",
+                        cell.ch
+                    );
+                }
                 if cell.ink.role == Role::Star {
-                    continue;
+                    if x2 <= 1.0 {
+                        inner.push(f64::from(cell.ink.level));
+                    } else if x2 > 3.0 * 3.0 {
+                        outer.push(f64::from(cell.ink.level));
+                    }
                 }
-                coloured += 1;
-                assert_eq!(cell.ink.role, Role::Blackbody, "{cell:?}");
-                let k = ink::blackbody_kelvin(cell.ink);
-                assert!((3800.0..12_500.0).contains(&k), "{k} K");
             }
         }
-        assert!(coloured > 20, "only {coloured} coloured star cells");
-        assert!(stars > 150, "only {stars} star cells");
-        // Giants: at most g_n, none in the bright core.
-        assert!(g.n_giants <= giant_count(g.cluster.n()));
-        for &(x, y) in &g.giants[..g.n_giants] {
-            let glow = g.glow_at(f64::from(x) + 0.5, f64::from(y) + 0.5);
-            assert!(glow < 2.0 * GIANT_G, "giant in the core at {x},{y}: {glow}");
-        }
+        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
+        assert!(!outer.is_empty());
+        assert!(
+            mean(&inner) >= mean(&outer) + 50.0,
+            "{} vs {}",
+            mean(&inner),
+            mean(&outer)
+        );
         assert_eq!(
             (giant_count(500), giant_count(384), giant_count(64)),
             (10, 7, 3)
@@ -1217,183 +995,46 @@ mod tests {
             assert_eq!(eye_fade(z), 0.0);
         }
         assert!(eye_fade(2.7) > eye_fade(2.9) && eye_fade(2.9) > eye_fade(3.2));
-        // The glow is the bodies' light: moving every body moves the glow with it.
-        let (x0, y0) = glow_centroid(&g);
-        for p in g.cluster.pos.chunks_exact_mut(3) {
-            p[0] += 0.4;
+        let g_n = giant_count(g.cluster.n());
+        assert!(giants <= g_n, "{giants} giants");
+        assert!(a_g > 0.3, "a_g = {a_g}");
+        // A giant projected where the glow lights ≥ half the dots (R < 0.83 a_g) is lost
+        // in the core's glare: no Hot glyph at its cell.
+        let mut lost = 0;
+        for p in g.cluster.pos.chunks_exact(3).take(g_n) {
+            let (x, y, _) = proj.project([p[0], p[1], p[2]], (cx, cy), g.scale).unwrap();
+            let x2 = g.glow_x2(x - cx, y - cy);
+            if x2 < 0.83 * 0.83 {
+                lost += 1;
+                let cell = canvas.get(x.floor() as i32, y.floor() as i32).unwrap();
+                assert_ne!(cell.ink.role, Role::Hot, "giant in the core at {x},{y}");
+            }
         }
-        g.rasterise();
-        let (x1, y1) = glow_centroid(&g);
         assert!(
-            (x1 - x0).abs() + (y1 - y0).abs() > 3.0,
-            "glow did not follow the bodies: ({x0:.1}, {y0:.1}) → ({x1:.1}, {y1:.1})"
+            lost > 0,
+            "no giant in the core at seed 42 (the clause is untested)"
         );
     }
 
     #[test]
-    fn gc_a7_glow_is_round_and_fades_out_softly() {
-        // The roundest object in the sky: from the glow's centroid, the distance out to
-        // the floor contour varies by at most 1.3× round the compass, and along each
-        // ray the light fades over several pixels rather than stepping off a cliff.
-        for t in [1.0, 10.0, 30.0] {
-            let (g, _) = scene_at(Size::new(120, 40), t);
-            let (cx, cy) = glow_centroid(&g);
-            let level = |x: f64, y: f64| {
-                g.pixels
-                    .get(x.floor() as i32, y.floor() as i32)
-                    .map_or(0, |i| if i == Ink::BLANK { 0 } else { i.level })
-            };
-            let (mut lo, mut hi) = (f64::INFINITY, 0.0_f64);
-            for k in 0..32 {
-                let (s, c) = (TAU * f64::from(k) / 32.0).sin_cos_det();
-                // Walk out to the last lit pixel (the fringe dissolves, so allow gaps).
-                let (mut r, mut last, mut contour) = (0.0, 0.0, 0.0);
-                let mut ramp = Vec::new();
-                while r < 60.0 {
-                    let l = level(cx + r * c, cy + r * s);
-                    if l > 0 {
-                        last = r;
-                    }
-                    // The floor contour: pixels at or above it are never dissolved.
-                    if l >= GLOW_FLOOR {
-                        contour = r;
-                    }
-                    ramp.push(l);
-                    r += 0.5;
-                }
-                lo = lo.min(contour);
-                hi = hi.max(contour);
-                // From four times the floor to nothing takes ≥ 3 pixels (6 half-pixel steps).
-                let from = ramp.iter().rposition(|&l| l >= 4 * GLOW_FLOOR);
-                if let Some(i) = from {
-                    let end = (last / 0.5) as usize;
-                    assert!(end >= i + 6, "t {t}, ray {k}: a cliff at {}", i / 2);
-                }
-            }
-            assert!(hi <= 1.3 * lo, "t {t}: radius {lo:.1}..{hi:.1}");
+    fn gc_a8_glow_probability_and_dot_hash() {
+        let glow_p = |x: f64| lit_p(surface(x * x));
+        // p = 1 up to g = 0.08 + 0.92/1.7, i.e. R = 0.5185 a_g (the spec's "0.52").
+        for i in 0..=518 {
+            assert_eq!(glow_p(f64::from(i) / 1000.0), 1.0);
         }
-    }
-
-    #[test]
-    fn gc_a7_halo_grain_rides_with_the_bodies() {
-        // The grain is the unresolved stars each body stands for: faint `GRAIN` dots that
-        // travel with their body (not a mask fixed to the screen), so every cell of grain
-        // lies within a companion's reach of a projected body.
-        let size = Size::new(120, 40);
-        let (g, _) = scene_at(size, 10.0);
-        let proj = g.camera().projector();
-        let bodies: Vec<(f64, f64)> = g
-            .cluster
-            .pos
-            .chunks_exact(3)
-            .filter_map(|p| proj.project([p[0], p[1], p[2]], g.centre(), g.scale))
-            .map(|(x, y, _)| (x, y))
+        let xs: Vec<f64> = (0..=1000)
+            .map(|i| 0.519 + 1.073 * f64::from(i) / 1000.0)
             .collect();
-        // A companion's offset is at most √3·COMPANION_R model units (rows at `scale`),
-        // plus the cell it lands in.
-        let reach = 3.0_f64.sqrt() * COMPANION_R * g.scale + 1.5;
-        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-        g.render(&mut canvas);
-        let mut grain = 0;
-        for y in 0..40 {
-            for x in 0..120 {
-                let cell = canvas.get(x, y).unwrap();
-                if !('\u{2801}'..='\u{28ff}').contains(&cell.ch) {
-                    continue;
-                }
-                // A cell of grain alone (a star in it would outshine the grain).
-                if cell.ink != GRAIN {
-                    continue;
-                }
-                grain += 1;
-                let (cx, cy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-                assert!(
-                    bodies.iter().any(|&(bx, by)| {
-                        (bx - cx).abs() <= reach * geom::ASPECT && (by - cy).abs() <= reach
-                    }),
-                    "grain cell {x},{y} far from every body"
-                );
-            }
+        for w in xs.windows(2) {
+            assert!(glow_p(w[1]) < glow_p(w[0]), "not decreasing at {}", w[0]);
         }
-        assert!(grain > 40, "only {grain} grain cells");
-    }
-
-    #[test]
-    fn gc_a10_the_cluster_visibly_moves_between_frames_seconds_apart() {
-        const { assert!(TURN <= 60.0) };
-        let size = Size::new(120, 40);
-        let mut stage = Stage::new(build(), 42, size, GlyphMode::Unicode);
-        let frame = |stage: &mut Stage| -> Vec<(char, Ink)> {
-            stage
-                .render()
-                .cells()
-                .iter()
-                .map(|c| (c.ch, c.ink))
-                .collect()
-        };
-        for _ in 0..300 {
-            stage.step(SIM_DT);
+        for x in [GLOW_EDGE, 2.0, 10.0] {
+            assert_eq!(glow_p(x), 0.0);
         }
-        let a = frame(&mut stage);
-        for _ in 0..(25 * 60) {
-            stage.step(SIM_DT);
-        }
-        let b = frame(&mut stage);
-        // Among the cells lit in either frame, most change: the halo swings round.
-        let lit = |c: &(char, Ink)| c.0 != ' ';
-        let either = a.iter().zip(&b).filter(|(x, y)| lit(x) || lit(y)).count();
-        let changed = a
-            .iter()
-            .zip(&b)
-            .filter(|(x, y)| (lit(x) || lit(y)) && x != y)
-            .count();
-        assert!(
-            changed * 2 > either,
-            "{changed} of {either} lit cells changed"
-        );
-        // Trails: the long exposure lights more of the halo than the stars alone.
-        let mut g = GlobularCluster::new();
-        g.resize(size, &mut Ctx::new(42, size));
-        g.prepare();
-        let halo_dots = |g: &GlobularCluster| {
-            let d = g.dots.dot_size();
-            (0..i32::from(d.height()))
-                .flat_map(|y| (0..i32::from(d.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| g.dots.is_lit(x, y))
-                .count()
-        };
-        let with = halo_dots(&g);
-        g.cluster.vel.iter_mut().for_each(|v| *v = 0.0);
-        g.rasterise();
-        let without = halo_dots(&g);
-        assert!(with > without + 20, "{with} vs {without} lit dots");
-    }
-
-    #[test]
-    fn gc_a8_colour_classes_follow_the_old_population_mix() {
-        let n = 4000;
-        let (mut turnoff, mut rgb, mut bhb) = (0, 0, 0);
-        for k in 0..n {
-            let ink = class_ink(7, k);
-            if ink == Ink::new(Role::Star, TURNOFF_LEVEL) {
-                turnoff += 1;
-                continue;
-            }
-            assert_eq!(ink.role, Role::Blackbody);
-            // Levels are log-spaced ~1.3 % apart in temperature: allow one level.
-            match ink::blackbody_kelvin(ink) {
-                4250.0..=4960.0 => rgb += 1,
-                8850.0..=12_200.0 => bhb += 1,
-                kelvin => panic!("{kelvin} K is in no class"),
-            }
-        }
-        let frac = |c: usize| c as f64 / n as f64;
-        assert!((frac(turnoff) - 0.76).abs() < 0.03, "{}", frac(turnoff));
-        assert!((frac(rgb) - 0.17).abs() < 0.03, "{}", frac(rgb));
-        assert!((frac(bhb) - 0.07).abs() < 0.03, "{}", frac(bhb));
-        assert_eq!(body_hash(3, 5, 1), body_hash(3, 5, 1));
-        assert_ne!(body_hash(3, 5, 1), body_hash(3, 5, 2));
-        assert_ne!(body_hash(3, 5, 1), body_hash(4, 5, 1));
+        assert_eq!(dot_hash(3, -7, 11), dot_hash(3, -7, 11));
+        assert_ne!(dot_hash(3, -7, 11), dot_hash(3, -7, 12));
+        assert!((0.0..1.0).contains(&dot_hash(-1, 5, 0)));
     }
 
     /// A scene resized to `size` and run for `t` simulated seconds.
@@ -1401,7 +1042,6 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = GlobularCluster::new();
         g.resize(size, &mut ctx);
-        g.prepare();
         for _ in 0..(t / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
@@ -1410,45 +1050,95 @@ mod tests {
     }
 
     #[test]
-    fn gc_a9_readout_counts_whole_crossings_and_fits_the_title_row() {
+    fn gc_a9_label_is_plain_words_in_whole_crossings_and_fits() {
         let (mut g, _) = scene_at(Size::new(80, 24), 0.0);
         g.age = 4.5 * T_CR;
-        g.write_readout();
-        assert_eq!(g.readout.as_str(), "N=384  4 crossings");
+        g.write_label();
+        assert_eq!(g.label.as_str(), "globular cluster  N=384  4 crossings");
         g.age = 1.99 * T_CR;
-        g.write_readout();
-        assert_eq!(g.readout.as_str(), "N=384  1 crossing");
+        g.write_label();
+        assert_eq!(g.label.as_str(), "globular cluster  N=384  1 crossing");
         // No "0 crossings" debug counter: the clause appears after the first crossing.
         g.age = 0.99 * T_CR;
-        g.write_readout();
-        assert_eq!(g.readout.as_str(), "N=384");
-        // Shortened, then dropped, as the room right of the title shrinks.
+        g.write_label();
+        assert_eq!(g.label.as_str(), "globular cluster  N=384");
+        // The counts show only where the label takes at most half the width, so it
+        // never turns into a banner; then the bare name while it fits in `w − 2`.
         g.age = 4.5 * T_CR;
-        for (w, h, expect) in [
-            (80, 24, "N=384  4 crossings"),
-            (40, 12, "N=384  4 crossings"),
-            (30, 10, "N=384"),
-            (8, 24, ""),
+        g.write_label();
+        let full = g.label.as_str().len() as u16;
+        for (w, expect) in [
+            (2 * full, "globular cluster  N=384  4 crossings"),
+            (2 * full - 1, "globular cluster"),
+            (40, "globular cluster"),
+            (18, "globular cluster"),
+            (17, ""),
+            (1, ""),
         ] {
-            g.size = Size::new(w, h);
-            g.write_readout();
-            assert_eq!(g.readout.as_str(), expect, "{w}x{h}");
-            let room = title::readout_room(g.size, &Title::of(&g));
-            assert!(g.readout.len() <= room);
+            g.size = Size::new(w, 24);
+            g.write_label();
+            assert_eq!(g.label.as_str(), expect, "w = {w}");
+        }
+        g.age = 0.0;
+        for (w, expect) in [(46, "globular cluster  N=384"), (45, "globular cluster")] {
+            g.size = Size::new(w, 24);
+            g.write_label();
+            assert_eq!(g.label.as_str(), expect, "w = {w}");
         }
         // Over a whole 120 s evolve phase the age never outgrows the buffer.
-        g.size = Size::new(200, 50);
+        g.size = Size::new(80, 24);
         g.age = 120.0 * RATE;
-        g.write_readout();
-        assert!(g.readout.as_str().ends_with(" crossings"));
+        g.write_label();
+        assert!(
+            g.label.as_str().ends_with(" crossings"),
+            "{}",
+            g.label.as_str()
+        );
+    }
 
-        // Drawn right-aligned on the title row at the readout level.
-        let (g, _) = scene_at(Size::new(80, 24), 8.0);
-        let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
-        g.render(&mut canvas);
-        let last = &canvas.to_lines()[23];
-        assert!(last.ends_with(" N=384  1 crossing "), "{last:?}");
-        let n = canvas.get(79 - 17, 23).unwrap();
-        assert_eq!((n.ch, n.ink.level), ('N', title::READOUT_LEVEL));
+    #[test]
+    fn gc_a9_nothing_touches_the_label_and_giants_glint() {
+        for (size, times) in [
+            (Size::new(30, 10), [0.0, 5.0, 12.0]),
+            (Size::new(40, 12), [0.0, 5.0, 12.0]),
+            (Size::new(80, 24), [0.0, 5.0, 12.0]),
+        ] {
+            let (mut g, mut ctx) = scene_at(size, 0.0);
+            let mut now = 0.0;
+            for t in times {
+                while now < t {
+                    g.update(SIM_DT, &mut ctx);
+                    g.prepare();
+                    now += SIM_DT;
+                }
+                let len = g.label.as_str().len() as i32;
+                assert!(len > 0, "{size:?}");
+                for px in 0..(len + 2) * Dots::CELL_W {
+                    for py in 0..Dots::CELL_H {
+                        assert!(
+                            !g.dots.is_lit(px, py),
+                            "dot {px},{py} by the label at {size:?}"
+                        );
+                    }
+                }
+                for &(x, y, _) in &g.giants[..g.n_giants] {
+                    assert!(y != 0 || x > len + 1, "giant at {x},{y} by the label");
+                }
+            }
+        }
+
+        // Each giant slot twinkles slowly and independently between 170 and 230.
+        let (g, _) = scene_at(Size::new(80, 24), 0.0);
+        for (k, &(period, _)) in g.twinkle.iter().enumerate() {
+            assert!((5.0..=9.0).contains(&period), "P = {period}");
+            let levels: Vec<f64> = (0..=540)
+                .map(|i| g.giant_level(k, f64::from(i) / 60.0))
+                .collect();
+            let lo = levels.iter().copied().fold(f64::INFINITY, f64::min);
+            let hi = levels.iter().copied().fold(0.0, f64::max);
+            assert!(lo >= 170.0 && hi <= 230.0, "slot {k}: {lo}..{hi}");
+            assert!(hi - lo >= 40.0, "slot {k} barely glints: {lo}..{hi}");
+        }
+        assert_ne!(g.twinkle[0], g.twinkle[1]);
     }
 }
