@@ -15,8 +15,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::ASCII_RAMP;
-use sciart_core::{Tone, draw, ink, title};
+use sciart_core::{draw, title};
 
 pub static META: Meta = Meta {
     name: "firefly_sync",
@@ -59,34 +58,25 @@ const BLOBS: usize = 14;
 
 // ---- Display ----
 
-const FLASH_S: f32 = 0.08;
+/// A flash: its peak, then a short dimmer afterglow, in two flat steps (M11 idiom).
+const FLASH_S: f32 = 0.16;
 const AFTERGLOW_S: f32 = 0.3;
-/// A firefly is a one-pixel lamp with a soft ring: centre 1, edge neighbours ~0.3.
-/// A flash's footprint: its own pixel and a faint 1-px cross around it, so a flash is a
-/// point, not a square blob.
-const HALO: [(i32, i32, f32); 5] = [
-    (0, 0, 1.0),
-    (1, 0, 0.12),
-    (-1, 0, 0.12),
-    (0, 1, 0.12),
-    (0, -1, 0.12),
-];
-/// Weight of the slow halo term (decaying over [`AFTERGLOW_S`]) against the flash.
-const AFTERGLOW: f32 = 0.12;
 /// Canopy pixels per displayed firefly at least: on small screens only every k-th
 /// firefly is drawn, so flashes stay separate points instead of a solid wash.
 const PIXELS_PER_FLY: f64 = 8.0;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-/// Inks (ADR-0017): black night; the tree a dim 1-px outline; the flashes the
-/// bioluminescent yellow-green of *Pteroptyx* (`Ramp(Sulfur)`, the accent); the boat's
-/// lantern a warm point.
-const OUTLINE: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 38);
+/// Inks in M11's roles (ADR-0018): black night; the tree a dim 1-px outline; the flashes
+/// green `Particle` points (the bioluminescent yellow-green of *Pteroptyx*), full at
+/// their peak and a step down in the afterglow; the boat's lantern a `Sun` point.
+const OUTLINE: Ink = Ink::new(Role::Dim, 70);
 /// Sync is never perfect: a few laggards glow dim between the pulses (every
 /// `N / LAGGARDS`-th drawn firefly), so the tree is never blank.
 const LAGGARDS: usize = 5;
-const LAGGARD_INK: Ink = Ink::new(Role::Ramp(Ramp::Sulfur), 90);
-const FLASH_ROLE: Role = Role::Ramp(Ramp::Sulfur);
-const LANTERN: Ink = Ink::new(Role::Ramp(Ramp::Ember), 230);
+const LAGGARD_INK: Ink = Ink::new(Role::Particle, 60);
+const FLASH_INK: Ink = Ink::new(Role::Particle, 255);
+const AFTERGLOW_INK: Ink = Ink::new(Role::Particle, 110);
+const LANTERN: Ink = Ink::new(Role::Sun, 255);
+const WAKE: Ink = Ink::new(Role::Hot, 90);
 
 /// Mirollo–Strogatz charging curve and its inverse.
 #[inline]
@@ -319,8 +309,6 @@ struct Fireflies {
     next_sample: f64,
     /// Scenery (the tree's outline) per pixel, built in `resize`.
     base: Pixels,
-    glow: Glow,
-    tone: Tone,
     pixels: Pixels,
     cells: Size,
     readout_room: usize,
@@ -342,8 +330,6 @@ impl Default for Fireflies {
             history: Trail::new(2),
             next_sample: 0.0,
             base: Pixels::default(),
-            glow: Glow::default(),
-            tone: Tone::asinh(0.8, 1.6),
             pixels: Pixels::default(),
             cells: Size::new(1, 1),
             readout_room: 0,
@@ -353,14 +339,17 @@ impl Default for Fireflies {
     }
 }
 
-/// A firefly's light `s` seconds after it flashed: a sharp flash and a soft halo that
-/// fades over ~0.3 s [FLY-A6].
-pub(crate) fn brightness(s: f32) -> f32 {
-    (-s / FLASH_S).exp() + AFTERGLOW * (-s / AFTERGLOW_S).exp()
+/// A firefly's light `s` seconds after it flashed, in flat steps: the flash, a dimmer
+/// afterglow over ~0.3 s, then dark [FLY-A6].
+pub(crate) fn flash_ink(s: f32) -> Option<Ink> {
+    if s < FLASH_S {
+        Some(FLASH_INK)
+    } else if s < AFTERGLOW_S {
+        Some(AFTERGLOW_INK)
+    } else {
+        None
+    }
 }
-
-/// Tone levels below this show the scenery, not the glow.
-const FLASH_FLOOR: u8 = 34;
 
 /// Where the boat is at time `t` (mask x), if crossing.
 fn boat_at(t: f64) -> Option<f64> {
@@ -372,7 +361,7 @@ fn boat_at(t: f64) -> Option<f64> {
 }
 
 impl Fireflies {
-    /// The scenery on black (ADR-0017): only the tree's silhouette, drawn as a dim 1-px
+    /// The scenery on black: only the tree's silhouette, drawn as a dim 1-px
     /// outline of its leafy crown, its trunks and its prop roots, down to the waterline.
     /// No sky, moon, stars or water.
     fn paint_base(&mut self) {
@@ -434,27 +423,25 @@ impl Fireflies {
     fn rasterise(&mut self) {
         let ps = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()));
-        self.glow.clear();
+        let base = &self.base;
+        self.pixels
+            .shade(|x, y| base.get(x, y).unwrap_or(Ink::BLANK));
+        // Each firefly is one pixel: between flashes the crown is dark, so a
+        // synchronised flash lights the whole tree at once.
         if let Some(sw) = &self.swarm {
             for (p, &s) in sw.pos.iter().zip(&sw.since).step_by(self.stride) {
-                // A sharp flash and a soft halo that fades over ~0.3 s: between flashes
-                // the crown is dark, so a synchronised flash lights the whole tree at once.
-                let b = brightness(s);
-                if b > 0.05 {
-                    // Glow positions are in dots: two per pixel each way.
-                    self.glow.splat(p[0] * pw, 2.0 * p[1] * ph, &HALO, b);
+                if let Some(ink) = flash_ink(s) {
+                    let (x, y) = ((p[0] / 2.0 * pw) as i32, (p[1] * ph) as i32);
+                    if self
+                        .pixels
+                        .get(x, y)
+                        .is_some_and(|i| i.role != Role::Particle || i.level < ink.level)
+                    {
+                        self.pixels.set(x, y, ink);
+                    }
                 }
             }
         }
-        let (base, glow, tone) = (&self.base, &self.glow, &self.tone);
-        self.pixels.shade(|x, y| {
-            let level = tone.level(glow.get(x, y).unwrap_or(0.0));
-            if level >= FLASH_FLOOR {
-                Ink::new(FLASH_ROLE, level)
-            } else {
-                base.get(x, y).unwrap_or(Ink::BLANK)
-            }
-        });
         // The laggards: dim points wherever no flash outshines them.
         if let Some(sw) = &self.swarm {
             let every = (sw.pos.len() / LAGGARDS).max(1);
@@ -463,7 +450,7 @@ impl Fireflies {
                 if self
                     .pixels
                     .get(x, y)
-                    .is_some_and(|i| i.level < LAGGARD_INK.level)
+                    .is_some_and(|i| i.role != Role::Particle)
                 {
                     self.pixels.set(x, y, LAGGARD_INK);
                 }
@@ -472,13 +459,8 @@ impl Fireflies {
         // The boat's lantern on the waterline, a warm point with a short 1-px wake.
         if let Some(bx) = self.boat_x {
             let (bx, water) = ((bx / 2.0 * pw) as i32, (WATER_Y * ph) as i32);
-            for d in 1..(pw * 0.12) as i32 {
-                let fade = 1.0 - f64::from(d) / (pw * 0.12);
-                self.pixels.set(
-                    bx - d,
-                    water,
-                    Ink::new(Role::Ramp(Ramp::Ember), ink::level(90.0 * fade)),
-                );
+            for d in 1..(pw * 0.06) as i32 {
+                self.pixels.set(bx - d, water, WAKE);
             }
             self.pixels.set(bx, water, LANTERN);
             self.pixels.set(bx, water - 1, LANTERN);
@@ -501,10 +483,10 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         }
     };
     match ink.role {
-        Role::Ramp(Ramp::Sulfur) if ink.level > 120 => Some(('*', ink)),
-        Role::Ramp(Ramp::Sulfur) => Some(('.', ink)),
-        Role::Ramp(Ramp::Starlight) => Some(('.', ink)),
-        _ => Some((ASCII_RAMP[0], Ink::BLANK)).filter(|_| false),
+        Role::Particle if ink.level > AFTERGLOW_INK.level => Some(('*', ink)),
+        Role::Sun => Some(('*', ink)),
+        Role::Hot => Some(('-', ink)),
+        _ => Some(('.', ink)),
     }
 }
 
@@ -523,7 +505,6 @@ impl Generator for Fireflies {
         }
         self.base.resize(size);
         self.pixels.resize(size);
-        self.glow.resize(size);
         self.paint_base();
         self.dirty = true;
     }
@@ -672,8 +653,8 @@ mod tests {
 
     #[test]
     fn fly_a7_flashes_on_a_black_night_with_a_dim_outline() {
-        // ADR-0017: no sky, moon or water; lit pixels are the tree's dim outline, the
-        // flashes (bright at their peak), or the lantern.
+        // ADR-0018: no sky, moon or water; lit pixels are the tree's dim outline, the
+        // flashes (two flat steps), or the lantern.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut g = Fireflies::default();
@@ -689,11 +670,12 @@ mod tests {
                     match i.role {
                         Role::Background => {}
                         _ if i == OUTLINE => outline += 1,
-                        r if r == FLASH_ROLE => {
+                        Role::Particle => {
+                            assert!([LAGGARD_INK, AFTERGLOW_INK, FLASH_INK].contains(&i));
                             flash += 1;
                             peak = peak.max(i.level);
                         }
-                        _ => assert_eq!(i.role, LANTERN.role, "({x}, {y}): {i:?}"),
+                        _ => assert!(i == LANTERN || i == WAKE, "({x}, {y}): {i:?}"),
                     }
                 }
             }
@@ -704,15 +686,15 @@ mod tests {
 
     #[test]
     fn fly_a6_the_crown_is_dark_between_synchronised_flashes() {
-        let tone = Fireflies::default().tone;
-        assert!(tone.level(brightness(0.0)) > 190, "a flash is bright");
-        assert!(
-            tone.level(brightness(0.1)) >= FLASH_FLOOR,
-            "the halo lingers briefly"
+        assert_eq!(flash_ink(0.0), Some(FLASH_INK), "a flash is bright");
+        assert_eq!(
+            flash_ink(0.2),
+            Some(AFTERGLOW_INK),
+            "the afterglow lingers briefly"
         );
         // Past half the period nothing of a flash is left on screen, so a synchronised
         // tree goes dark between its pulses.
-        assert!(tone.level(brightness(0.5 * PERIOD as f32)) < FLASH_FLOOR);
+        assert_eq!(flash_ink(0.5 * PERIOD as f32), None);
     }
 
     #[test]
