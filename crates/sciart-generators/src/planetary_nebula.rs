@@ -478,6 +478,16 @@ impl PlanetaryNebula {
                 NII_TOP * f64::from(tone.level(n as f32 * env).min(NII_MAX)) / f64::from(NII_MAX);
             let u = (RING_GAIN * r * f64::from(env)).clamp(0.0, 1.0);
             let lr = f64::from(curves().1[(u * 255.0).round() as usize]);
+            let min = ink::MIN_VISIBLE_LEVEL;
+            // The fast wind's hot bubble before the ionisation front has swept it: its
+            // thin swept-up rim in blue, cyan toward the ends of the axis (the cold
+            // partner to the red shells, ADR-0018).
+            if lo < min && ln < min && frame.r_b > 0.0 && frame.front < 1.0 && env > 0.5 {
+                let (q, c) = PlanetaryNebula::q_at(x, y, x.hypot(y), frame.r_b, frame.axis);
+                if (WIND_RIM.0..WIND_RIM.1).contains(&q) {
+                    return if c * c > 0.6 { WIND_TIP } else { WIND_SIDE };
+                }
+            }
             emission_ink(lo, ln, lr)
         });
         for &(x, y, l) in &self.stars {
@@ -489,25 +499,26 @@ impl PlanetaryNebula {
         self.star();
     }
 
-    /// The central star: a cool giant in act 1, then the exposed core heating up.
+    /// The central star: one white pixel, the frame's brightest point.
     fn star(&mut self) {
-        let tau = self.tau();
-        let heat = ease::smoothstep((tau - T_WIND + 1.0) / 6.0);
-        // One pixel: an orange giant, then a yellow and finally a white-hot core.
-        let ink = match heat {
-            h if h < 0.3 => Ink::new(Role::Hot, 255),
-            h if h < 0.7 => Ink::new(Role::Sun, 255),
-            _ => Ink::new(Role::Star, 255),
-        };
         let c = self.centre;
-        self.pixels.set(c.0.floor() as i32, c.1.floor() as i32, ink);
+        self.pixels
+            .set(c.0.floor() as i32, c.1.floor() as i32, STAR);
     }
 }
 
+/// The central star.
+const STAR: Ink = Ink::new(Role::Star, 255);
+/// The fast wind's swept-up rim before ionisation: its span in `q` (bubble radii), and
+/// its inks along the sides and toward the ends of the axis.
+const WIND_RIM: (f64, f64) = (0.9, 1.03);
+const WIND_SIDE: Ink = Ink::new(Role::Cold, 150);
+const WIND_TIP: Ink = Ink::new(Role::Wave, 200);
+
 /// The nebula in M11's flat, complementary steps (ADR-0018), from the curve levels of
 /// [O III] `lo`, [N II] `ln` and the dust rings `lr` (0–255): a red [N II] rim (`Hot`),
-/// green [O III] shells with cyan crests (`Particle`, `Wave`), the AGB rings as grey dust
-/// (`Structure`), black below the faintest step.
+/// green [O III] shells with cyan crests (`Particle`, `Wave`), the AGB shells (dust in
+/// the giant's reddened light) in two dim `Hot` steps, black below the faintest step.
 pub(crate) fn emission_ink(lo: f64, ln: f64, lr: f64) -> Ink {
     let min = ink::MIN_VISIBLE_LEVEL;
     if ln >= lo && ln >= min {
@@ -519,7 +530,14 @@ pub(crate) fn emission_ink(lo: f64, ln: f64, lr: f64) -> Ink {
             _ => Ink::new(Role::Particle, 0),
         }
     } else if lr >= 40.0 {
-        Ink::new(Role::Structure, if lr >= 90.0 { 140 } else { 10 })
+        Ink::new(
+            Role::Hot,
+            match lr {
+                l if l >= 120.0 => 170,
+                l if l >= 70.0 => 80,
+                _ => 10,
+            },
+        )
     } else {
         Ink::BLANK
     }
@@ -556,7 +574,7 @@ impl Generator for PlanetaryNebula {
             }
         }
         self.stars.clear();
-        for k in 0..(size.area() / 60) as i32 {
+        for k in 0..(size.area() / 200) as i32 {
             let x = (hash01(cell_key(k, 13)) * w) as i32;
             let y = (hash01(cell_key(k, 29)) * hh) as i32;
             let l = 20 + (hash01(cell_key(k, 31)).powi(4) * 140.0) as u8;
@@ -680,7 +698,7 @@ mod tests {
                     oiii += 1;
                     assert!(q < 1.0 + 0.1, "[O III] outside the bubble at q = {q}");
                 }
-                if ink.role == Role::Hot && ink.level < 255 {
+                if ink.role == Role::Hot && [220, 70].contains(&ink.level) {
                     nii += 1;
                     let (x, y) = (
                         f64::from(ix) + 0.5 - g.centre.0,
@@ -724,7 +742,7 @@ mod tests {
                                 | Role::Star
                                 | Role::Wave
                                 | Role::Particle
-                                | Role::Structure
+                                | Role::Cold
                         ),
                         "t {t}: {ink:?} at ({ix}, {iy})"
                     );

@@ -82,7 +82,7 @@ const RIM_MAX: u8 = 45;
 /// filaments' bodies sit at ≤ 130 and only the brightest knots reach the top.
 const EJECTA_TOP: f64 = 250.0;
 const EJECTA_GAMMA: f64 = 2.0;
-/// Ejecta at or below this level are grey `Structure` bodies; only the brighter
+/// Ejecta at or below this level are dim `Hot` bodies; only the brighter
 /// knots and fingertips take their element's colour (critic round 2).
 const BODY_TOP: u8 = 110;
 /// The young remnant's exposure lift (×(1 + `EARLY_LIFT`) at the start), fading out over
@@ -106,18 +106,15 @@ const RIM: Ink = Ink::new(Role::Cold, 70);
 const SILICON: Ink = Ink::new(Role::Sun, 210);
 const IRON: Ink = Ink::new(Role::Hot, 220);
 const OXYGEN: Ink = Ink::new(Role::Wave, 200);
-/// The filaments' bodies: two flat grey steps.
-const BODY: [Ink; 2] = [
-    Ink::new(Role::Structure, 10),
-    Ink::new(Role::Structure, 110),
-];
+/// The filaments' bodies: two flat dim orange steps (shocked gas).
+const BODY: [Ink; 2] = [Ink::new(Role::Hot, 0), Ink::new(Role::Hot, 45)];
 /// The central compact object, and the explosion's white heart.
 const COMPACT: Ink = Ink::new(Role::Star, 200);
 const FLASH: Ink = Ink::new(Role::Star, 255);
 
 /// Ink of a remnant pixel from the shock's level `l_rim` and the ejecta's curve level
 /// `l_ej` (0–255): black below the faintest step, the shock where it outshines the
-/// ejecta, grey filament bodies, and the element's colour on the knots.
+/// ejecta, dim orange filament bodies, and the element's colour on the knots.
 fn ejecta_ink(l_rim: u8, l_ej: u8, element: Element) -> Ink {
     if f64::from(l_rim.max(l_ej)) < ink::MIN_VISIBLE_LEVEL {
         Ink::BLANK
@@ -657,7 +654,7 @@ impl Generator for SupernovaRemnant {
             }
         }
         self.stars.clear();
-        let n = size.area() / 70;
+        let n = size.area() / 200;
         for k in 0..n as i32 {
             let x = (hash01(cell_key(k, 3)) * w) as i32;
             let y = (hash01(cell_key(k, 7)) * h) as i32;
@@ -806,8 +803,8 @@ mod tests {
     }
 
     #[test]
-    fn snr_a7_grey_bodies_coloured_knots_and_a_legible_start() {
-        // The ejecta's bodies are grey `Structure` steps (≤ `BODY_TOP`); only
+    fn snr_a7_dim_bodies_coloured_knots_and_a_legible_start() {
+        // The ejecta's bodies are dim `Hot` steps (≤ `BODY_TOP`); only
         // brighter knots and fingertips take an element colour. And the young remnant
         // reads from the first second.
         let (mut g, mut ctx) = built(Size::new(200, 50));
@@ -836,12 +833,13 @@ mod tests {
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(x, y).unwrap();
-                // ADR-0018: grey bodies, flat element colours on the knots, nothing else.
+                // ADR-0018: dim bodies, flat element colours on the knots, nothing else.
                 if [SILICON, IRON, OXYGEN].contains(&ink) {
                     coloured += 1;
                 } else {
                     assert!(
-                        matches!(ink.role, Role::Background | Role::Structure | Role::Star)
+                        matches!(ink.role, Role::Background | Role::Star)
+                            || BODY.contains(&ink)
                             || ink == RIM,
                         "({x}, {y}): {ink:?}"
                     );
