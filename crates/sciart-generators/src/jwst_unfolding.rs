@@ -88,7 +88,7 @@ const MAX_POLYS: usize = 48;
 const DEPTH_EPS: f64 = 0.05;
 /// The gold of the mirror (beryllium coated in gold): the top of Ember, pale gold
 /// (level ~215 ≈ #E8C66A) to a near-white specular.
-const GOLD: Ramp = Ramp::Ember;
+const GOLD: Role = Role::Sun;
 /// M14 (ADR-0017): a dim gold, the glint sweeping over it the bright accent.
 const GOLD_LEVEL: f64 = 200.0;
 /// Seconds between glints crossing the frame.
@@ -100,8 +100,19 @@ const BACKPLANE: u8 = 24;
 const HOLE: u8 = 34;
 /// Sunshield inks: silver Kapton on top, pale greys beneath, violet only on the shadowed
 /// edges (JWST-A8).
-const SILVER: Ramp = Ramp::Starlight;
-const SHADOW_EDGE: Ramp = Ramp::Plasma;
+const SILVER: Role = Role::Structure;
+const SHADOW_EDGE: Role = Role::Accent;
+
+/// A level (0–255) of `role` in four flat steps (ADR-0018: M11's stepped fills).
+pub(crate) fn step(role: Role, level: f64) -> Ink {
+    let l = match level {
+        l if l >= 185.0 => 230,
+        l if l >= 120.0 => 160,
+        l if l >= 60.0 => 90,
+        _ => 30,
+    };
+    Ink::new(role, l)
+}
 
 /// How far each part is deployed at loop time `t`, 0 (stowed) to 1. `layers[k]` counts
 /// from the telescope side (k = 0, layer 5) to the Sun side (k = 4, layer 1).
@@ -228,7 +239,7 @@ impl Honey {
         let (q, r) = hex_at(mx, my);
         let ring = q.abs().max(r.abs()).max((q + r).abs());
         if ring == 0 && self.panel == 0 {
-            return Some(Ink::new(Role::Ramp(Ramp::Starlight), HOLE));
+            return Some(Ink::new(Role::Star, HOLE));
         }
         if !(1..=2).contains(&ring) || panel_of(q) != self.panel {
             return None;
@@ -259,10 +270,10 @@ impl Honey {
                 dist = dist.min(px_dist);
             }
             if dist < 0.5 * GAP_PX {
-                return Some(Ink::new(Role::Ramp(Ramp::Starlight), BACKPLANE));
+                return Some(Ink::new(Role::Star, BACKPLANE));
             }
         }
-        Some(ink::ramp(GOLD, level / 255.0))
+        Some(step(GOLD, level))
     }
 }
 
@@ -282,7 +293,7 @@ struct Poly {
     z: [f64; 6],
     n: usize,
     depth: f64,
-    ramp: Ramp,
+    ramp: Role,
     level: f64,
     grad: (f64, f64),
     shade: Shade,
@@ -296,7 +307,7 @@ impl Default for Poly {
             z: [0.0; 6],
             n: 0,
             depth: 0.0,
-            ramp: Ramp::Starlight,
+            ramp: Role::Structure,
             level: 0.0,
             grad: (0.0, 0.0),
             shade: Shade::Flat,
@@ -377,7 +388,7 @@ fn fill_convex(pixels: &mut Pixels, zbuf: &mut [f32], p: &Poly, spec: &impl Fn(f
                 Shade::Sheen => level += 0.5 * spec(cx, cy),
             }
             let level = level.clamp(ink::MIN_VISIBLE_LEVEL, 255.0);
-            pixels.set(ix, iy, ink::ramp(p.ramp, level / 255.0));
+            pixels.set(ix, iy, step(p.ramp, level));
             if let Some(slot) = zbuf.get_mut(iy as usize * zw + ix as usize) {
                 *slot = z as f32;
             }
@@ -621,7 +632,7 @@ impl JwstUnfolding {
                 o[2] = 3.2 + spread * 0.4;
             }
             let template = Poly {
-                ramp: Ramp::Starlight,
+                ramp: Role::Structure,
                 level: 150.0,
                 grad: (-side * 6.0, -0.4),
                 ..Poly::default()
@@ -666,7 +677,7 @@ impl JwstUnfolding {
             ),
         ] {
             let bus_poly = Poly {
-                ramp: Ramp::Starlight,
+                ramp: Role::Structure,
                 level,
                 grad: (0.0, -1.2),
                 ..Poly::default()
@@ -688,7 +699,7 @@ impl JwstUnfolding {
             [1.4, -1.0, 1.2],
         ];
         let array_poly = Poly {
-            ramp: Ramp::Starlight,
+            ramp: Role::Structure,
             level: 120.0,
             grad: (1.2, 0.0),
             ..Poly::default()
@@ -750,8 +761,7 @@ impl JwstUnfolding {
         self.pixels.clear();
         self.zbuf.fill(f32::NEG_INFINITY);
         for &(x, y, l) in &self.stars {
-            self.pixels
-                .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
+            self.pixels.set(x, y, Ink::new(Role::Star, l));
         }
         // A glint sweeping slowly across the gold (and a sheen across the Kapton): a
         // narrow diagonal band crossing the frame every `GLINT_PERIOD` seconds.
@@ -772,9 +782,9 @@ impl JwstUnfolding {
                 // Silver edges on the top sheet and the stowed slabs; the layers beneath
                 // show their shadowed edges in violet.
                 let edge = if d.booms > 0.0 && k > 0 {
-                    ink::ramp(SHADOW_EDGE, 0.42 + 0.2 * d.layers[k])
+                    step(SHADOW_EDGE, 255.0 * (0.42 + 0.2 * d.layers[k]))
                 } else {
-                    ink::ramp(SILVER, 0.86)
+                    Ink::new(SILVER, 200)
                 };
                 for fore in [true, false] {
                     let q = Self::shield_half(&d, k, fore);
@@ -790,8 +800,8 @@ impl JwstUnfolding {
             }
             // The tower, and the secondary's tripod: dark struts that read against the
             // gold, a little lighter than the sky.
-            let tower = Ink::new(Role::Ramp(Ramp::Starlight), 150);
-            let strut = Ink::new(Role::Ramp(Ramp::Starlight), 120);
+            let tower = Ink::new(Role::Star, 150);
+            let strut = Ink::new(Role::Star, 120);
             let my = MIRROR_Y + TOWER_LIFT * d.tower;
             self.line(&pr, [0.0, -0.05, 0.2], [0.0, my - 4.3 * SEG, -0.5], tower);
             let sm = Self::secondary(&d);
@@ -807,12 +817,12 @@ impl JwstUnfolding {
                 let pixels = &mut self.pixels;
                 disc_pixels((x, y), 1.4, |ix, iy, cover| {
                     if cover > 0.2 {
-                        pixels.set(ix, iy, Ink::new(Role::Ramp(Ramp::Starlight), 70));
+                        pixels.set(ix, iy, Ink::new(Role::Star, 70));
                     }
                 });
                 disc_pixels((x, y), 0.8, |ix, iy, cover| {
                     if cover > 0.3 {
-                        pixels.set(ix, iy, Ink::new(Role::Ramp(GOLD), 240));
+                        pixels.set(ix, iy, Ink::new(GOLD, 240));
                     }
                 });
             }
@@ -854,8 +864,7 @@ impl JwstUnfolding {
         self.pixels.clear();
         self.dots.clear();
         for &(x, y, l) in &self.stars {
-            self.pixels
-                .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
+            self.pixels.set(x, y, Ink::new(Role::Star, l));
         }
         let ps = self.pixels.pixel_size();
         let (w, h) = (f64::from(ps.width()), f64::from(ps.height()));
@@ -867,7 +876,7 @@ impl JwstUnfolding {
             let lit = ((earth.0 - (f64::from(x) + 0.5)) / er).clamp(-1.0, 1.0);
             let v = (0.55 + 0.45 * lit) * cover;
             if v > 0.1 {
-                pixels.set(x, y, ink::ramp(Ramp::Cobalt, 0.25 + 0.7 * v));
+                pixels.set(x, y, step(Role::Cold, 255.0 * (0.25 + 0.7 * v)));
             }
         });
         // The Moon on its orbit.
@@ -876,7 +885,7 @@ impl JwstUnfolding {
         let moon = (earth.0 + mr * mc * 1.4, earth.1 + mr * ms * 0.6);
         disc_pixels(moon, (0.02 * h).max(0.7), |x, y, cover| {
             if cover > 0.3 {
-                pixels.set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), 170));
+                pixels.set(x, y, Ink::new(Role::Star, 170));
             }
         });
         // L2 and the halo loop around it, seen obliquely.
@@ -889,7 +898,7 @@ impl JwstUnfolding {
                 l2.1 + ay * s + 0.08 * h * (2.0 * a).sin_det(),
             )
         };
-        let faint = Ink::new(Role::Ramp(Ramp::Starlight), 60);
+        let faint = Ink::new(Role::Star, 60);
         let steps = 96;
         for i in (0..steps).step_by(2) {
             let (a0, a1) = (
@@ -901,7 +910,7 @@ impl JwstUnfolding {
             let (x1, y1) = Dots::from_cells(p1.0, p1.1 / 2.0);
             self.dots.line(x0, y0, x1, y1, faint);
         }
-        let cross = Ink::new(Role::Ramp(Ramp::Starlight), 90);
+        let cross = Ink::new(Role::Star, 90);
         let (cx, cy) = Dots::from_cells(l2.0, l2.1 / 2.0);
         self.dots.line(cx - 2.0, cy, cx + 2.0, cy, cross);
         self.dots.line(cx, cy - 2.0, cx, cy + 2.0, cross);
@@ -920,7 +929,7 @@ impl JwstUnfolding {
             }
         };
         let pos = place(progress);
-        let trail = Ink::new(Role::Ramp(GOLD), 120);
+        let trail = Ink::new(GOLD, 120);
         for i in (1..24).step_by(2) {
             let p = progress - f64::from(i) * 0.012;
             if p < 0.0 {
@@ -932,12 +941,12 @@ impl JwstUnfolding {
         }
         // The telescope: a silver kite (sunshield, facing the Sun) with a gold dot.
         let (px, py) = (pos.0.floor() as i32, pos.1.floor() as i32);
-        let shield = Ink::new(Role::Ramp(SILVER), 200);
+        let shield = Ink::new(SILVER, 200);
         for (dx, dy) in [(-1, 0), (-1, -1), (-1, 1), (-2, 0)] {
             self.pixels.set(px + dx, py + dy, shield);
         }
-        self.pixels.set(px, py, Ink::new(Role::Ramp(GOLD), 240));
-        self.pixels.set(px + 1, py, Ink::new(Role::Ramp(GOLD), 180));
+        self.pixels.set(px, py, Ink::new(GOLD, 240));
+        self.pixels.set(px + 1, py, Ink::new(GOLD, 180));
         // The Sun's glow on the left edge.
         for y in 0..ps.height() {
             let dy = (f64::from(y) + 0.5 - 0.5 * h) / (0.5 * h);
@@ -945,11 +954,8 @@ impl JwstUnfolding {
             for x in 0..6u16 {
                 let l = v * (1.0 - f64::from(x) / 6.0).powi(2) * 90.0;
                 if l >= ink::MIN_VISIBLE_LEVEL {
-                    self.pixels.set(
-                        i32::from(x),
-                        i32::from(y),
-                        Ink::new(Role::Ramp(Ramp::Sulfur), ink::level(l)),
-                    );
+                    self.pixels
+                        .set(i32::from(x), i32::from(y), step(Role::Sun, l));
                 }
             }
         }
@@ -1107,7 +1113,7 @@ mod tests {
                     && sx < f64::from(ps.width())
                     && sy < f64::from(ps.height());
                 let ink = g.pixels.get(sx as i32, sy as i32).unwrap_or(Ink::BLANK);
-                if on && ink.role == Role::Ramp(GOLD) {
+                if on && ink.role == GOLD {
                     shown += 1;
                 }
             }
@@ -1155,12 +1161,12 @@ mod tests {
             for y in 0..i32::from(ps.height()) {
                 for x in 0..i32::from(ps.width()) {
                     let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                    if ink.role == Role::Ramp(GOLD) {
+                    if ink.role == GOLD {
                         gold += 1;
-                        // M14: a dim gold, most of it at 110 or more.
+                        // Most of the gold on its upper steps (160, 230).
                         pale += usize::from(ink.level >= 110);
                     }
-                    if ink.role == Role::Ramp(SILVER) && ink.level >= 40 {
+                    if ink.role == SILVER && ink.level >= 30 {
                         (x0, x1) = (x0.min(x), x1.max(x));
                     }
                 }
@@ -1219,13 +1225,10 @@ mod tests {
                     let f = f64::from(i) / 40.0;
                     let (x, y) = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
                     let ink = g.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
-                    if ink.role == Role::Ramp(GOLD) {
+                    if ink.role == GOLD {
                         after_gap |= gap;
                         gold = true;
-                    } else if gold
-                        && ink.role == Role::Ramp(Ramp::Starlight)
-                        && ink.level <= BACKPLANE
-                    {
+                    } else if gold && ink.role == Role::Star && ink.level <= BACKPLANE {
                         gap = true;
                     }
                 }
@@ -1241,11 +1244,11 @@ mod tests {
             .project(&pr, JwstUnfolding::mirror_point(&d, None, 0.0, 0.0))
             .unwrap();
         let hole = g.pixels.get(hx as i32, hy as i32).unwrap();
-        assert_ne!(hole.role, Role::Ramp(GOLD), "hole at the centre");
+        assert_ne!(hole.role, GOLD, "hole at the centre");
         let (sx, sy, _) = g.project(&pr, JwstUnfolding::secondary(&d)).unwrap();
         assert_eq!(
             g.pixels.get(sx as i32, sy as i32).map(|i| i.role),
-            Some(Role::Ramp(GOLD))
+            Some(GOLD)
         );
     }
 
@@ -1259,14 +1262,11 @@ mod tests {
                 for x in 0..i32::from(ps.width()) {
                     let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
                     assert!(
-                        !matches!(
-                            ink.role,
-                            Role::Ramp(Ramp::Eosin | Ramp::HAlpha | Ramp::Plasma)
-                        ),
+                        !matches!(ink.role, Role::Accent | Role::Hot),
                         "{w}x{h}: pink/violet fill at {x},{y}"
                     );
                     // M14: a faint silver fill (the edges are braille lines).
-                    silver += usize::from(ink.role == Role::Ramp(SILVER) && ink.level >= 40);
+                    silver += usize::from(ink.role == SILVER && ink.level >= 30);
                 }
             }
             assert!(silver > 40, "{w}x{h}: silver top sheet {silver} px");

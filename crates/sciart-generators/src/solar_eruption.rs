@@ -84,14 +84,14 @@ const Y_MAX: f64 = 3.5;
 const BLOBS: usize = 200;
 /// Post-flare loops cool over this many seconds.
 const COOL: f64 = 9.0;
-/// ADR-0017 (M14; AIA's green was false colour): the hot loops glow in EUV, which has no
-/// visible colour, so they are a neutral `Ramp(Starlight)` up to `LOOP_TOP`; the cool
-/// plasma that shines in H-alpha (the prominence rope and its core, coronal rain, the flare
-/// ribbons) is `Ramp(HAlpha)` up to `HA_TOP`, the scene's one accent. A toned glow `g` is
-/// drawn at `top·smoothstep(g/EDGE)·(BODY + (1 − BODY)·g)`: a thin stroke's rim fades in
-/// from black within a pixel and its core stays legible (GEN-R21).
-/// The CME front is white light (Thomson-scattered), a dim `Ramp(Starlight)` shell up to
-/// `FRONT_TOP`. The disc is black with a thin `HAlpha` chromosphere at the limb.
+/// Levels (ADR-0018, drawn in flat steps by [`step_ink`]): the hot loops glow in EUV,
+/// which has no visible colour, so they are false-colour cyan (`EUV`, AIA-like) up to
+/// `LOOP_TOP`; the cool plasma that shines in H-alpha (the prominence rope and its core,
+/// coronal rain, the flare ribbons) is red (`HALPHA`) up to `HA_TOP`, the complementary
+/// accent. A toned glow `g` is taken to `top·smoothstep(g/EDGE)·(BODY + (1 − BODY)·g)`,
+/// so a thin stroke's rim falls to black within a pixel and its core stays bright.
+/// The CME front is white light (Thomson-scattered), a dim white shell (`WHITE`) up to
+/// `FRONT_TOP`. The disc is black with a thin red chromosphere at the limb.
 const LOOP_TOP: f64 = 235.0;
 /// Exposure of the loop glow: the thin (3 × 3) strokes gather less light per pixel than
 /// the old wide ones.
@@ -113,6 +113,33 @@ const FRONT_TOP: f64 = 120.0;
 const RIM_LEVEL: f64 = 55.0;
 /// Rim width (pixels) of the limb's chromosphere line.
 const RIM_PX: f64 = 0.8;
+
+/// Flat steps `(from level, ink)`, brightest first: the EUV loops (cyan to dim blue), the
+/// H-alpha material (red, its dense core bright) and the white-light CME front.
+pub(crate) const EUV: [(f64, Ink); 3] = [
+    (150.0, Ink::new(Role::Wave, 220)),
+    (60.0, Ink::new(Role::Wave, 100)),
+    (0.0, Ink::new(Role::Cold, 40)),
+];
+pub(crate) const HALPHA: [(f64, Ink); 3] = [
+    (160.0, Ink::new(Role::Hot, 240)),
+    (60.0, Ink::new(Role::Hot, 150)),
+    (0.0, Ink::new(Role::Hot, 40)),
+];
+pub(crate) const WHITE: [(f64, Ink); 2] = [
+    (70.0, Ink::new(Role::Star, 170)),
+    (40.0, Ink::new(Role::Star, 60)),
+];
+/// The chromosphere: one flat red line just inside the limb.
+const CHROMOSPHERE: Ink = Ink::new(Role::Hot, 90);
+
+/// The first step of `steps` whose floor `level` reaches.
+fn step_ink(level: f64, steps: &[(f64, Ink)]) -> Ink {
+    steps
+        .iter()
+        .find(|(from, _)| level >= *from)
+        .map_or(Ink::BLANK, |s| s.1)
+}
 
 /// Point in the corona: `x` along the limb, `y` height, in `L`.
 type P = [f64; 2];
@@ -971,11 +998,11 @@ impl SolarEruption {
                 let euv = stroke_level(f64::from(loops) / 255.0, LOOP_TOP);
                 let front = FRONT_TOP * f64::from(white) / 255.0;
                 let ink = if cool >= loops && cool >= white && ha >= ink::MIN_VISIBLE_LEVEL {
-                    Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(ha))
+                    step_ink(ha, &HALPHA)
                 } else if loops >= white && euv >= ink::MIN_VISIBLE_LEVEL {
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(euv))
+                    step_ink(euv, &EUV)
                 } else if front >= ink::MIN_VISIBLE_LEVEL {
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(front))
+                    step_ink(front, &WHITE)
                 } else {
                     // The black disc with its chromosphere rim; the corona is not drawn.
                     sky_ink[i]
@@ -1023,8 +1050,8 @@ impl Generator for SolarEruption {
                 // smoothly on both sides.
                 let rim = (1.0 - (above + 0.5 * RIM_PX).abs() / RIM_PX).max(0.0);
                 let level = RIM_LEVEL * rim * rim * (3.0 - 2.0 * rim);
-                self.sky_ink.push(if level >= ink::MIN_VISIBLE_LEVEL {
-                    Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(level))
+                self.sky_ink.push(if level >= 0.4 * RIM_LEVEL {
+                    CHROMOSPHERE
                 } else {
                     Ink::BLANK
                 });
@@ -1281,8 +1308,8 @@ mod tests {
         // Off the top of the frame by the act's end (the frame spans ≤ 2.2 L of height).
         assert!(last_top > 4.0, "{last_top}");
         assert!(bubble(RAIN, 0.5).is_none() && bubble(RISE, 0.5).is_none());
-        // M14 palette: neutral loops and white-light front (`Starlight`), H-alpha for the
-        // cool material and the chromosphere; nothing else, and nothing past its cap.
+        // M15 palette (ADR-0018): the flat EUV, H-alpha and white-light steps and the
+        // chromosphere line; nothing else.
         let mut g = SolarEruption::new();
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
@@ -1296,28 +1323,28 @@ mod tests {
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
         let mut pink = 0;
+        let steps: Vec<Ink> = EUV
+            .iter()
+            .chain(&HALPHA)
+            .chain(&WHITE)
+            .map(|s| s.1)
+            .collect();
         for c in canvas.cells() {
             for ink in [c.ink, c.bg] {
-                match ink.role {
-                    Role::Background => {}
-                    Role::Ramp(Ramp::Starlight) => {
-                        assert!(f64::from(ink.level) <= LOOP_TOP + 1.0, "{ink:?}");
-                    }
-                    Role::Ramp(Ramp::HAlpha) => {
-                        assert!(f64::from(ink.level) <= HA_PEAK + 1.0, "{ink:?}");
-                        pink += 1;
-                    }
-                    _ => panic!("{ink:?}"),
-                }
+                assert!(
+                    ink.role == Role::Background || ink == CHROMOSPHERE || steps.contains(&ink),
+                    "{ink:?}"
+                );
+                pink += usize::from(ink == HALPHA[0].1);
             }
         }
-        assert!(pink > 0, "the rope's core shows in H-alpha");
+        assert!(pink > 0, "the rope's core shows in bright H-alpha");
     }
 
     #[test]
     fn erup_a10_the_disc_is_black_under_a_thin_chromosphere() {
-        // ADR-0017: no chromosphere fill. Every pixel more than 2 px inside the limb is
-        // blank at every act; the rim just inside it is `HAlpha`, at most `RIM_LEVEL`.
+        // No chromosphere fill. Every pixel more than 2 px inside the limb is blank at
+        // every act; the rim just inside it is the flat red chromosphere line.
         let size = Size::new(120, 40);
         let mut g = SolarEruption::new();
         let mut ctx = Ctx::new(5, size);
@@ -1341,9 +1368,8 @@ mod tests {
                     let ink = g.pixels.get(x, y).unwrap();
                     if above < -2.0 {
                         assert_eq!(ink, Ink::BLANK, "t {:.1} ({x}, {y})", g.t);
-                    } else if above < 0.0 && ink.role == Role::Ramp(Ramp::HAlpha) {
+                    } else if above < 0.0 && ink == CHROMOSPHERE {
                         rim += usize::from(k == 0);
-                        assert!(f64::from(ink.level) <= HA_PEAK + 1.0);
                     }
                 }
             }

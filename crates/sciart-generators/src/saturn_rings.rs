@@ -19,7 +19,6 @@ use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
 use sciart_core::geom::wrap_angle;
-use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
 use sciart_core::rng::{cell_key, hash01};
@@ -88,48 +87,46 @@ const SPOKE_BAND: (f64, f64) = (1.58, 1.92);
 const SPOKE_LIFE: (f64, f64) = (6.0, 10.0);
 /// Deepest spoke darkening (exaggerated so they read).
 const SPOKE_DIM: f64 = 0.5;
-/// The globe's ramp: cream-butterscotch zones and tan belts, a muted earth tone.
-const GLOBE: Ramp = Ramp::Sienna;
-/// The lowest Sienna level the globe uses (a muted tan-brown); dimmer globe is drawn in
-/// low Starlight. And the globe coverage below which a limb pixel stays space.
-const GLOBE_FLOOR: f64 = 0.5;
+/// The globe coverage below which a limb pixel stays space.
 const GLOBE_EDGE: f64 = 0.4;
-/// ADR-0017: muted, no near-white. Lit globe brightness `v` is drawn in `Sienna` at
-/// `GLOBE_TOP·v/GLOBE_BRIGHT` (proportional, so limb darkening and the belts keep their
-/// contrast; at most 185, pale butterscotch, and from about 100 at `GLOBE_FLOOR`, a dark
-/// tan: Sienna's lower part is rust), and ring brightness `v` at `RING_TOP·v` of
-/// `Starlight` (at most 170, so the B ring's clumps keep the frame legible, GEN-R21); the
-/// Cassini division stays black.
-const GLOBE_TOP: f64 = 212.0 / 255.0;
-const RING_TOP: f64 = 170.0 / 255.0;
-/// The globe brightness drawn at `GLOBE_LEVEL.1`: the lit zones' (the brightest reach ~0.9).
-const GLOBE_BRIGHT: f64 = 0.9;
-/// Where the globe's shoulder starts, as a share of `GLOBE_BRIGHT`.
-const KNEE: f64 = 0.7;
-/// Share of the frame the ring system spans (ADR-0017: dark ground around it).
+/// Share of the frame the ring system spans (dark ground around it).
 const FILL: f64 = 0.74;
-/// The `Sienna` level (0–1) of lit globe brightness `v`: proportional up to a knee at
-/// `KNEE·GLOBE_BRIGHT`, then a smooth `tanh` shoulder to `GLOBE_TOP`, so the brightest
-/// zones keep their gradient instead of clipping into a flat plateau.
-fn globe_level(v: f64) -> f64 {
-    let x = (v / GLOBE_BRIGHT).max(0.0);
-    let y = if x <= KNEE {
-        x
-    } else {
-        KNEE + (1.0 - KNEE) * ((x - KNEE) / (1.0 - KNEE)).tanh()
-    };
-    GLOBE_TOP * y
+
+/// The globe's flat steps `(from brightness, ink)`, brightest first (ADR-0018): pale
+/// butterscotch zones and ochre belts in `Sun`, a dark rust terminator in `Hot`.
+pub(crate) const GLOBE_STEPS: [(f64, Ink); 4] = [
+    (0.78, Ink::new(Role::Sun, 190)),
+    (0.68, Ink::new(Role::Sun, 110)),
+    (0.5, Ink::new(Role::Sun, 40)),
+    (0.2, Ink::new(Role::Hot, 10)),
+];
+/// The rings' flat steps, brightest first: the B ring's bright white, grey A and C
+/// rings; below the last the ring is black (the Cassini division stays black).
+pub(crate) const RING_STEPS: [(f64, Ink); 4] = [
+    (0.72, Ink::new(Role::Star, 170)),
+    (0.5, Ink::new(Role::Structure, 170)),
+    (0.3, Ink::new(Role::Structure, 70)),
+    (0.14, Ink::new(Role::Structure, 0)),
+];
+
+/// The first step of `steps` that brightness `v` reaches.
+fn step(v: f64, steps: &[(f64, Ink)]) -> Option<Ink> {
+    steps.iter().find(|(from, _)| v >= *from).map(|s| s.1)
 }
 
-/// The inverse of [`globe_level`]: the brightness a globe `Sienna` level stands for.
-fn globe_brightness(level: f64) -> f64 {
-    let y = (level / GLOBE_TOP).clamp(0.0, 1.0 - 1e-9);
-    let x = if y <= KNEE {
-        y
-    } else {
-        KNEE + (1.0 - KNEE) * ((y - KNEE) / (1.0 - KNEE)).atanh()
-    };
-    GLOBE_BRIGHT * x
+/// The globe's ink at lit brightness `v`, or `None` (black) below its last step.
+pub(crate) fn globe_ink(v: f64) -> Option<Ink> {
+    step(v, &GLOBE_STEPS)
+}
+
+/// A ring pixel's ink at brightness `v`, or `None` (black) below its last step.
+pub(crate) fn ring_ink(v: f64) -> Option<Ink> {
+    step(v, &RING_STEPS)
+}
+
+/// The brightness a globe step stands for (its floor), 0 for anything else.
+fn globe_brightness(ink: Ink) -> f64 {
+    GLOBE_STEPS.iter().find(|s| s.1 == ink).map_or(0.0, |s| s.0)
 }
 
 /// Background stars per 1000 pixels.
@@ -551,8 +548,9 @@ impl SaturnRings {
                 }) else {
                     let h = hash01(0x5A7 ^ cell_key(x, y));
                     if h < STAR_DENSITY / 1000.0 {
-                        let lv = 0.25 + 0.5 * hash01(0x5A8 ^ cell_key(x, y));
-                        self.globe.set(x, y, ink::ramp(Ramp::Starlight, lv));
+                        let bright = hash01(0x5A8 ^ cell_key(x, y)) > 0.7;
+                        self.globe
+                            .set(x, y, Ink::new(Role::Star, if bright { 120 } else { 40 }));
                     }
                     continue;
                 };
@@ -596,12 +594,7 @@ impl SaturnRings {
                 let v = tone * limb * light * shadow * (0.8 + 0.2 * cover);
                 // Dim globe (terminator, the rings' shadow) goes to a low neutral
                 // Starlight rather than down Sienna's rust-orange ramp (RING-A6).
-                let ink = if v >= GLOBE_FLOOR {
-                    ink::ramp(GLOBE, globe_level(v))
-                } else {
-                    ink::ramp(Ramp::Starlight, RING_TOP * 0.6 * v)
-                };
-                if f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL {
+                if let Some(ink) = globe_ink(v) {
                     self.globe.set(x, y, ink);
                 }
             }
@@ -755,24 +748,17 @@ impl SaturnRings {
                 let opaque = ((f64::from(p.b0) - 0.08) / 0.3).clamp(0.0, 1.0);
                 opaque + (1.0 - opaque) * (1.0 - cover)
             };
-            // The globe's brightness back from its muted level.
-            let under_lum = if under.role == Role::Ramp(GLOBE) {
-                globe_brightness(f64::from(under.level) / 255.0)
-            } else {
-                0.0
-            };
+            // The globe's brightness back from its step.
+            let under_lum = globe_brightness(under);
             let lum = alpha * ring_lum + (1.0 - alpha) * under_lum;
-            // One ink per pixel: the ramp of whichever owns more of it, at the blended
-            // brightness, so the globe's edge steps smoothly.
-            let ink = if alpha >= 0.5 || under.role != Role::Ramp(GLOBE) {
-                ink::ramp(Ramp::Starlight, RING_TOP * lum)
-            } else if lum >= GLOBE_FLOOR {
-                ink::ramp(GLOBE, globe_level(lum))
+            // One ink per pixel: the steps of whichever owns more of it, at the blended
+            // brightness.
+            let ink = if alpha >= 0.5 || under_lum <= 0.0 {
+                ring_ink(lum)
             } else {
-                // Never Sienna's rust-orange low end (RING-A6).
-                ink::ramp(Ramp::Starlight, RING_TOP * 0.6 * lum)
+                globe_ink(lum)
             };
-            if f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL {
+            if let Some(ink) = ink {
                 self.pixels.set(x, y, ink);
             }
         }
@@ -803,10 +789,10 @@ impl SaturnRings {
             let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
             let n = [nx, ny * st - nz * ct, ny * ct + nz * st];
             let lit = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0);
+            // A white moon, its lit side brighter (two flat steps).
             let lum = cover * (0.45 + 0.55 * lit);
-            let old = pixels.get(x, y).unwrap_or(Ink::BLANK);
-            let ink = ink::ramp(Ramp::Starlight, lum.max(0.35 * cover));
-            if old.role != Role::Ramp(Ramp::Starlight) || ink.level > old.level {
+            if cover >= 0.3 {
+                let ink = Ink::new(Role::Star, if lum >= 0.6 { 240 } else { 130 });
                 pixels.set(x, y, ink);
             }
         });
@@ -931,7 +917,7 @@ mod tests {
         let far = |r: f64| (v.cx as i32, (v.cy - v.scale * r * st).floor() as i32);
         let (x, y) = far(1.8);
         let px = g.pixels.get(x, y).expect("on screen");
-        assert_eq!(px.role, Role::Ramp(GLOBE), "{px:?}");
+        assert!(globe_brightness(px) > 0.0, "{px:?}");
         // Anti-sunward far-side ring is in the shadow, its mirror image is lit.
         let l = sun();
         let anti = [-l[0], -l[1]];
@@ -969,48 +955,56 @@ mod tests {
     }
 
     #[test]
-    fn ring_a6_globe_is_pale_butterscotch_limb_darkened_and_soft_edged() {
+    fn ring_a6_globe_is_pale_butterscotch_limb_darkened_in_flat_steps() {
         let g = scene(120, 40, 0.0);
         let v = g.view;
-        // The globe's bright middle (above the rings) is pale butterscotch in Sienna, muted
-        // (at most 185, ADR-0017).
+        // The globe's bright middle (above the rings) is its palest butterscotch step.
         let row = (v.cy - 0.55 * v.scale) as i32;
         let mid = (-4..=4)
             .filter_map(|dx| g.globe.get(v.cx as i32 + dx, row))
-            .max_by_key(|i| i.level)
+            .max_by(|a, b| globe_brightness(*a).total_cmp(&globe_brightness(*b)))
             .expect("on screen");
-        assert_eq!(mid.role, Role::Ramp(Ramp::Sienna), "{mid:?}");
-        assert!(
-            (160..=185).contains(&mid.level),
-            "centre level {}",
-            mid.level
-        );
-        // Limb darkening: along the row, the lit right limb is darker than the middle.
-        let limb_x = (0..i32::from(g.globe.pixel_size().width()))
-            .rev()
-            .find(|&x| g.globe.get(x, row).is_some_and(|i| i.role == mid.role))
-            .expect("globe row");
-        let inner = g.globe.get(limb_x - 2, row).expect("inside").level;
-        // (Relative: the muted globe spans fewer levels, ADR-0017.)
-        assert!(
-            f64::from(inner) < 0.985 * f64::from(mid.level),
-            "inner {inner} vs mid {}",
-            mid.level
-        );
-        // No rust rim: every Sienna pixel of the globe, limb included, stays at or above
-        // the muted-tan floor; dimmer globe is low Starlight.
-        let edge = g.globe.get(limb_x, row).expect("edge");
-        assert!(edge.level <= inner, "edge {edge:?} vs inner {inner}");
-        let floor = ink::ramp(GLOBE, globe_level(GLOBE_FLOOR)).level;
+        assert_eq!(mid, GLOBE_STEPS[0].1, "{mid:?}");
+        // Limb darkening: walking out to the lit right limb the steps only darken, and
+        // the limb is a darker step than the middle.
+        let w = i32::from(g.globe.pixel_size().width());
+        let mut last = globe_brightness(mid);
+        let mut limb = last;
+        for x in v.cx as i32..w {
+            let Some(p) = g.globe.get(x, row) else { break };
+            let b = globe_brightness(p);
+            if b <= 0.0 {
+                break;
+            }
+            assert!(
+                b <= last + 0.17,
+                "({x}, {row}): brighter step toward the limb"
+            );
+            last = b;
+            limb = b;
+        }
+        assert!(limb < globe_brightness(mid), "limb {limb}");
+        // The globe is only its flat steps (M11's roles, no ramp).
         let size = g.globe.pixel_size();
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let px = g.globe.get(x, y).unwrap();
-                if px.role == Role::Ramp(GLOBE) {
-                    assert!(px.level >= floor, "({x}, {y}): {px:?}");
-                }
+                assert!(
+                    px.role == Role::Background
+                        || px.role == Role::Star
+                        || globe_brightness(px) > 0.0,
+                    "({x}, {y}): {px:?}"
+                );
             }
         }
+    }
+
+    /// Step of a ring ink, 1 faintest … 4 brightest; 0 for anything else.
+    fn ring_rank(p: Ink) -> usize {
+        RING_STEPS
+            .iter()
+            .position(|s| s.1 == p)
+            .map_or(0, |k| RING_STEPS.len() - k)
     }
 
     #[test]
@@ -1041,8 +1035,8 @@ mod tests {
         for g in [&a, &b] {
             let (x, y) = lit(g)[0];
             let px = g.pixels.get(x, y).expect("Mimas on screen");
-            assert_eq!(px.role, Role::Ramp(Ramp::Starlight));
-            assert!(px.level >= 90, "Mimas level {}", px.level);
+            assert_eq!(px.role, Role::Star);
+            assert!(px.level >= 130, "Mimas level {}", px.level);
         }
         assert_ne!(lit(&a), lit(&b));
     }
@@ -1087,9 +1081,9 @@ mod tests {
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let (p, q) = (a.pixels.get(x, y).unwrap(), b.pixels.get(x, y).unwrap());
-                if p.role == Role::Ramp(Ramp::Starlight) && p.level > 60 {
+                if ring_rank(p) > 0 {
                     ring += 1;
-                    changed += usize::from(p.level.abs_diff(q.level) >= 12);
+                    changed += usize::from(p != q);
                 }
             }
         }

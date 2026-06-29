@@ -56,13 +56,12 @@ const SWING: (f64, f64) = (12.0, 70.0);
 /// Wave packets: count and time-lapse (phase speed km/s on screen).
 const PACKETS: usize = 6;
 const PHASE_SPEED: f64 = 3.0;
-/// Ice brightness to `Ramp(Ice)` levels (ADR-0017: dim silver-blue on black), the ice
-/// below which the sky stays black (so the clouds read as filaments), and the tone's
-/// exponent.
-/// The ice is braille dots whose density follows it (full from `u ≥ CREST`), pale
-/// silver-blue `Ice` at `NLC_LEVEL` by density, so the sheet thins into black with no navy
-/// floor and the crests read as dense bright streaks (ADR-0017).
-const NLC_LEVEL: (f64, f64) = (160.0, 205.0);
+/// The ice is braille dots whose density follows it (full from `u ≥ CREST`), in two flat
+/// electric-blue steps (M11's `Wave`, ADR-0018): dim where the sheet is thin, bright on
+/// the dense crests (dot density from `ICE_CREST` of 255), so the sheet thins into black
+/// and the crests read as bright streaks. Below `ICE_FLOOR` the sky stays black.
+const ICE: [Ink; 2] = [Ink::new(Role::Wave, 90), Ink::new(Role::Wave, 220)];
+const ICE_CREST: u8 = 110;
 const ICE_FLOOR: f64 = 0.08;
 const CREST: f64 = 0.45;
 /// The field is stretched so its brightest node reaches this (at most ×`GAIN_MAX`): the
@@ -75,12 +74,21 @@ const BILLOW_FLOOR: f64 = 0.35;
 const ICE_LOW: (f64, f64) = (2.8, 3.6);
 /// The glow's top edge: its slow wave (± deg, over this many pixels) and fine fray (deg).
 const GLOW_WAVE: (f64, f64) = (0.9, 7.0);
-/// The warm horizon glow (ADR-0017): a few pixels of `Blackbody` light over the northern
-/// horizon, e-folding over `GLOW_PX` pixels, strongest under the Sun, cut to black below
-/// `GLOW_CUT` of its peak level (the 1800 K level).
+/// The warm horizon glow: a few pixels of light over the northern horizon, e-folding over
+/// `GLOW_PX` pixels, strongest under the Sun, cut to black below `GLOW_CUT` of its peak,
+/// in three flat `Hot` steps ([`glow_ink`]).
 const GLOW_PX: f64 = 1.6;
-const GLOW_K: f64 = 1800.0;
 const GLOW_CUT: f64 = 0.12;
+
+/// The twilight glow's strength `g` (0–1) in flat orange steps (ADR-0018).
+fn glow_ink(g: f64) -> Ink {
+    match g {
+        g if g >= 0.55 => Ink::new(Role::Hot, 200),
+        g if g >= 0.28 => Ink::new(Role::Hot, 90),
+        g if g >= GLOW_CUT => Ink::new(Role::Hot, 15),
+        _ => Ink::BLANK,
+    }
+}
 /// Stars are drowned by sky or ice brighter than this level.
 const STAR_DROWN: u8 = 55;
 /// ASCII: ice levels from here up are spread over the glyph ramp.
@@ -354,7 +362,6 @@ impl Noctilucent {
         faint.fill(0);
         let mut row = (-1, map.row_cubic(field, 0));
         let px_per_deg = f * PI / 180.0;
-        let glow_top = f64::from(ink::blackbody(GLOW_K).level);
         self.picture.shade(|x, y| {
             let i = y as usize * w + x as usize;
             let open = 1.0 - f64::from(cover.get(i).copied().unwrap_or(255)) / 255.0;
@@ -367,7 +374,7 @@ impl Noctilucent {
             // sinks (stylised: keeps the thin late band as bright as the early sheet).
             // Low down the ice's light crosses so much air that it is dimmed and reddened
             // into the glow: it fades out over the lowest degrees. Catmull-Rom from the
-            // lattice (GEN-R17), and black below the floor, so the clouds are filaments.
+            // lattice (CORE-R102), and black below the floor, so the clouds are filaments.
             let ice =
                 gain * f64::from({
                     // One row of Catmull-Rom taps per pixel row (CORE-R102).
@@ -396,11 +403,7 @@ impl Noctilucent {
             }
             let up = (above - wave * px_per_deg).max(0.0);
             let g = (-up / GLOW_PX).exp() * (0.35 + 0.65 * side) * (0.7 + 0.3 * dim);
-            if g >= GLOW_CUT {
-                Ink::new(Role::Blackbody, ink::level(glow_top * g))
-            } else {
-                Ink::BLANK
-            }
+            glow_ink(g)
         });
     }
 }
@@ -589,9 +592,7 @@ impl Noctilucent {
             for k in 0..4 {
                 let (dx, dy) = (2 * x + (k & 1), 2 * y + (k >> 1));
                 if hash01(0x1CE ^ cell_key(dx, dy)) * 255.0 < f64::from(d) {
-                    let level = NLC_LEVEL.0 + (NLC_LEVEL.1 - NLC_LEVEL.0) * f64::from(d) / 255.0;
-                    self.stars
-                        .set(dx, dy, Ink::new(Role::Ramp(Ramp::Ice), ink::level(level)));
+                    self.stars.set(dx, dy, ICE[usize::from(d >= ICE_CREST)]);
                 }
             }
         }
@@ -599,8 +600,8 @@ impl Noctilucent {
             let (px, py) = (((x - 0.5) / 2.0) as i32, ((y - 0.5) / 2.0) as i32);
             let under = self.picture.get(px, py).map_or(0, |p| p.level);
             if under < STAR_DROWN {
-                self.stars
-                    .plot(x, y, Ink::new(Role::Ramp(Ramp::Starlight), level));
+                let level = if level >= 120 { 150 } else { 50 };
+                self.stars.plot(x, y, Ink::new(Role::Star, level));
             }
         }
     }
@@ -714,7 +715,7 @@ mod tests {
     }
 
     #[test]
-    fn nlc_a5_ice_is_silver_blue_dots_on_black() {
+    fn nlc_a5_ice_is_blue_dots_on_black() {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..300 {
             g.update(SIM_DT, &mut ctx);
@@ -725,24 +726,21 @@ mod tests {
         for y in 0..i32::from(ps.height()) {
             for x in 0..i32::from(ps.width()) {
                 let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                assert!(
-                    matches!(p.role, Role::Background | Role::Blackbody),
-                    "{p:?}"
-                );
+                assert!(matches!(p.role, Role::Background | Role::Hot), "{p:?}");
             }
         }
         let mut canvas = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
         g.render(&mut canvas);
-        let ice: Vec<u8> = canvas
+        let ice: Vec<Ink> = canvas
             .cells()
             .iter()
-            .filter(|c| c.ink.role == Role::Ramp(Ramp::Ice))
-            .map(|c| c.ink.level)
+            .filter(|c| c.ink.role == Role::Wave)
+            .map(|c| c.ink)
             .collect();
         assert!(ice.len() > 50, "{}", ice.len());
-        // Pale silver-blue: the bright crests reach the top of the span (ADR-0017 rule 6).
-        assert!(ice.iter().all(|&l| f64::from(l) >= NLC_LEVEL.0 - 1.0));
-        assert!(ice.iter().any(|&l| f64::from(l) >= NLC_LEVEL.1 - 2.0));
+        // Two flat blue steps (ADR-0018), the bright crests among them.
+        assert!(ice.iter().all(|i| ICE.contains(i)));
+        assert!(ice.contains(&ICE[1]));
     }
 
     #[test]
@@ -760,7 +758,7 @@ mod tests {
                 for x in 0..i32::from(ps.width()) {
                     if g.picture
                         .get(x, y)
-                        .is_some_and(|p| matches!(p.role, Role::Ramp(Ramp::Ice | Ramp::Starlight)))
+                        .is_some_and(|p| matches!(p.role, Role::Wave | Role::Star))
                     {
                         ice += 1;
                     }
@@ -774,7 +772,7 @@ mod tests {
 
     #[test]
     fn nlc_a7_the_sky_is_black_over_a_thin_warm_horizon_glow() {
-        // ADR-0017 (dark ground): no twilight wash; a Blackbody glow a few pixels deep over the
+        // No twilight wash (ADR-0018): an orange `Hot` glow a few pixels deep over the
         // horizon, fading upward into black.
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..120 {
@@ -787,7 +785,7 @@ mod tests {
             let mut seen = false;
             for y in (0..horizon).rev() {
                 let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                if p.role != Role::Blackbody {
+                if p.role != Role::Hot {
                     continue;
                 }
                 seen = true;

@@ -95,10 +95,38 @@ const KELVIN_RANGE: (f64, f64) = (2700.0, 30_000.0);
 const SKY_FLOOR: f64 = 1.0;
 const GLOW_LEVEL: f64 = 22.0;
 const GLOW_DEG: f64 = 2.5;
-/// The sky's and the faint trails' haze ramp: a neutral grey on black, and the level
-/// under which a sky pixel is drawn black.
-const SKY_RAMP: Ramp = Ramp::Starlight;
+/// The level under which a sky pixel is drawn black.
 const SKY_BLACK: f64 = 12.0;
+
+/// The skyglow and the faint trails' haze (level `l`) in two flat steps (ADR-0018): the
+/// barely lit horizon in `Dim`, the faint rings where their light adds up in `Structure`.
+fn sky_ink(l: f64) -> Ink {
+    if l >= 40.0 {
+        Ink::new(Role::Structure, 40)
+    } else {
+        Ink::new(Role::Dim, 0)
+    }
+}
+
+/// A bright trail's colour by its star's temperature (the exposure keeps the blackbody
+/// level of the hottest trail through a dot, a model quantity): M11's stepped palette,
+/// cool giants orange, Sun-like yellow, F white, A cyan-white, B blue (ADR-0018).
+pub(crate) const TRAIL: [(f64, Ink); 5] = [
+    (4300.0, Ink::new(Role::Hot, 210)),
+    (5500.0, Ink::new(Role::Sun, 210)),
+    (7200.0, Ink::new(Role::Star, 220)),
+    (11_000.0, Ink::new(Role::Wave, 200)),
+    (f64::INFINITY, Ink::new(Role::Cold, 230)),
+];
+
+/// The trail ink for exposure level `level` (a blackbody level).
+fn trail_ink(level: u8) -> Ink {
+    let k = ink::blackbody_kelvin(Ink::new(Role::Blackbody, level));
+    TRAIL
+        .iter()
+        .find(|(below, _)| k < *below)
+        .map_or(TRAIL[4].1, |t| t.1)
+}
 
 /// The Earth's rotation angle after `t` seconds of the time-lapse.
 pub(crate) fn rotation(t: f64) -> f64 {
@@ -271,7 +299,7 @@ impl StarTrails {
                     if l < SKY_BLACK {
                         Ink::BLANK
                     } else {
-                        Ink::new(Role::Ramp(SKY_RAMP), ink::level(l))
+                        sky_ink(l)
                     }
                 }
             }
@@ -501,13 +529,7 @@ impl Generator for StarTrails {
                     } else {
                         Ink::BLANK
                     };
-                    canvas.put_bg(
-                        x,
-                        y,
-                        raster::braille(mask),
-                        Ink::new(Role::Blackbody, level),
-                        bg,
-                    );
+                    canvas.put_bg(x, y, raster::braille(mask), trail_ink(level), bg);
                 }
             }
         }
@@ -613,7 +635,7 @@ mod tests {
     }
 
     #[test]
-    fn trl_a5_trail_inks_are_blackbody() {
+    fn trl_a5_trail_inks_follow_star_colour() {
         let (mut g, mut ctx) = built(Size::new(80, 24));
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
@@ -624,7 +646,7 @@ mod tests {
         let mut n = 0;
         for c in canvas.cells() {
             if ('\u{2801}'..='\u{28ff}').contains(&c.ch) {
-                assert_eq!(c.ink.role, Role::Blackbody);
+                assert!(TRAIL.iter().any(|t| t.1 == c.ink), "{:?}", c.ink);
                 n += 1;
             }
         }
@@ -654,7 +676,7 @@ mod tests {
         let top_ink = g.sky.get(col as i32, 0).unwrap_or(Ink::BLANK);
         // Black, or a faint trail's grey haze.
         assert!(
-            top_ink == Ink::BLANK || top_ink.role == Role::Ramp(SKY_RAMP),
+            top_ink == Ink::BLANK || matches!(top_ink.role, Role::Dim | Role::Structure),
             "{top_ink:?}"
         );
         // No braille trail cell where both of its pixels are land.
