@@ -9,11 +9,11 @@
 use std::f64::consts::TAU;
 
 use rand::Rng;
+use sciart_core::Tone;
 use sciart_core::grid::lattice_for;
 use sciart_core::prelude::*;
 use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::timeline::ease;
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "cosmic_web",
@@ -54,7 +54,7 @@ const START: f64 = 2.3;
 /// `WHITE`.
 const KNEE: f32 = 1.4;
 const WHITE: f32 = 7.0;
-/// The black floor (ADR-0017): density below the frame's `LIT_SHARE` quantile (and below
+/// The black floor: density below the frame's `LIT_SHARE` quantile (and below
 /// the mean density, `FLOOR`) is black, so only the densest structure shows, thin; the level then rises to
 /// the `TOP_SHARE` quantile through the tone and `GAMMA`, ending smoothly at the visible
 /// floor (no dither). In the early fog the quantiles close in, so its faint mottling
@@ -68,14 +68,26 @@ const LOW_BINS: usize = 2048;
 const LOW_MAX: f32 = 32.0;
 /// Share of the frame drawn as nodes.
 const NODE_SHARE: f32 = 0.004;
-/// The web in `Ramp(Plasma)`: faint links at `LINK_LEVEL` easing in from black, filament
-/// cores up to `WEB_LEVEL`; the knots continue the ramp from there to a pale lavender-white
-/// `KNOT_TOP`, reached only at the densest `PEAK_SHARE` of the frame (a 1–2 px point with
-/// a soft falloff into its filament, no plateau).
+/// The web's brightness scale: faint links at `LINK_LEVEL` easing in from black, filament
+/// cores up to `WEB_LEVEL`; the knots from there to `KNOT_TOP`, reached only at the
+/// densest `PEAK_SHARE` of the frame.
 const LINK_LEVEL: f32 = 20.0;
 const WEB_LEVEL: f32 = 110.0;
 const KNOT_TOP: f64 = 250.0;
 const PEAK_SHARE: f32 = 0.0015;
+/// Drawn in M11's idiom (ADR-0018): the density as a `Seq` field in four flat steps
+/// `(brightness from, Seq level)`, links violet, filaments red, halos orange, the densest
+/// knots yellow.
+const WEB_STEPS: [(f32, u8); 4] = [(15.0, 60), (50.0, 115), (112.0, 180), (200.0, 235)];
+
+/// The `Seq` ink for a web brightness (0–255), or black below the first step.
+pub(crate) fn web_ink(level: f32) -> Ink {
+    WEB_STEPS
+        .iter()
+        .rev()
+        .find(|(from, _)| level >= *from)
+        .map_or(Ink::BLANK, |&(_, l)| Ink::new(Role::Seq, l))
+}
 
 /// One potential mode: wavevector in box periods (integers, so it tiles the box), its
 /// amplitude, phase at cycle 0 and phase step per cycle.
@@ -418,17 +430,12 @@ impl CosmicWeb {
             if v >= halo {
                 let k = ease::smoothstep(f64::from((v - halo) / (peak - halo)));
                 let level = ease::lerp(f64::from(WEB_LEVEL), KNOT_TOP, k);
-                return Ink::new(Role::Ramp(Ramp::Plasma), ink::level(level));
+                return web_ink(level as f32);
             }
             // Faint links ease in from black; a gamma keeps the filaments' cores thin.
             let t = f32::from(tone.level((v - floor) * span)) / 255.0;
             let link = LINK_LEVEL * ease::smoothstep(f64::from(t / 0.12)) as f32;
-            let level = link + (WEB_LEVEL - LINK_LEVEL) * t.powf(GAMMA);
-            if f64::from(level) < ink::MIN_VISIBLE_LEVEL {
-                Ink::BLANK
-            } else {
-                Ink::new(Role::Ramp(Ramp::Plasma), level as u8)
-            }
+            web_ink(link + (WEB_LEVEL - LINK_LEVEL) * t.powf(GAMMA))
         });
     }
 }
@@ -649,5 +656,32 @@ mod tests {
             assert!((f64::from(sx) - direct.0).abs() <= 1e-5 * direct.0.abs().max(1.0));
             assert!((f64::from(sy) - direct.1).abs() <= 1e-5 * direct.1.abs().max(1.0));
         }
+    }
+
+    #[test]
+    fn web_a7_the_web_is_a_stepped_seq_field_on_black() {
+        assert_eq!(web_ink(0.0), Ink::BLANK);
+        assert_eq!(web_ink(255.0), Ink::new(Role::Seq, 235));
+        let (mut g, mut ctx) = built(Size::new(120, 40));
+        for _ in 0..(12 * 60) {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let ps = g.pixels.pixel_size();
+        let (mut lit, mut n) = (0, 0);
+        for y in 0..i32::from(ps.height()) {
+            for x in 0..i32::from(ps.width()) {
+                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                n += 1;
+                if ink.role == Role::Background {
+                    continue;
+                }
+                lit += 1;
+                assert_eq!(ink.role, Role::Seq);
+                assert!(WEB_STEPS.iter().any(|s| s.1 == ink.level), "{ink:?}");
+            }
+        }
+        // Mostly black: the voids stay empty.
+        assert!(f64::from(lit) / f64::from(n) < 0.35, "lit {lit} of {n}");
     }
 }

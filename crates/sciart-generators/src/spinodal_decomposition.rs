@@ -14,10 +14,12 @@
 //! through each act ([`steps_per_s`]), keeping the domains visibly moving without any
 //! frame doing more than [`MAX_STEPS`] steps.
 //!
-//! Inks (ADR-0017): lines only, on black. Both phases are the terminal's black and the
-//! interfaces between them a 1-px pale `Ramp(Starlight)` line, anti-aliased by each
-//! pixel's distance to the zero level set (`|ψ| / |∇ψ|`), so the labyrinth and the
-//! droplets read as fine contours. (A flat fill for one phase read as large plateaus.)
+//! Inks (ADR-0018, M11's idiom): lines only, on black, in a complementary pair. Both
+//! phases are the terminal's black, and each interface is a thin flat line hugging the
+//! zero level set (`|ψ| / |∇ψ|` below [`LINE_W`] pixels): `Hot` on its `ψ > 0` side and
+//! `Cold` on its `ψ < 0` side, so the labyrinth and the droplets read as fine contours
+//! that still tell the two phases apart. (A flat fill for one phase read as large
+//! plateaus.)
 
 use rand::Rng;
 use sciart_core::prelude::*;
@@ -50,11 +52,19 @@ const RATE: (f64, f64) = (120.0, 360.0);
 const MAX_STEPS: usize = 6;
 /// Seconds over which an act eases down from twice its opening step rate.
 const EMERGE_S: f64 = 2.0;
-/// Inks: the interface line's level and half-width in pixels.
-const LINE_LEVEL: f32 = 210.0;
-const LINE_W: f32 = 1.1;
-/// The display ramp for both.
-const RAMP: Ramp = Ramp::Starlight;
+/// Inks: the interface line's half-width in pixels, and its two steps (the young mush,
+/// the formed pattern) for either phase's side.
+const LINE_W: f32 = 1.3;
+const PLUS_INKS: [Ink; 2] = [Ink::new(Role::Hot, 110), Ink::new(Role::Hot, 220)];
+const MINUS_INKS: [Ink; 2] = [Ink::new(Role::Cold, 110), Ink::new(Role::Cold, 220)];
+/// Formedness below which the interfaces are not drawn, and from which they are full.
+const FORMED: (f32, f32) = (0.3, 0.6);
+/// The quench's composition noise, before the domains form: while the formedness is below
+/// `SPECKLE_UNTIL`, a braille dot in the lowest step of its side's colour marks every
+/// blank pixel whose `ψ − ψ̄` exceeds `SPECKLE_SHARE` of the frame's largest, so the
+/// unmixing grows out of a visible speckle rather than a black frame.
+const SPECKLE_UNTIL: f32 = FORMED.0;
+const SPECKLE_SHARE: f32 = 0.3;
 /// Box radius of the one smoothing pass over the quench noise, so the mixture unmixes
 /// from a smooth, dark field rather than from white-noise speckle.
 const QUENCH_BLUR: usize = 1;
@@ -149,39 +159,37 @@ pub(crate) fn slope_field(psi: &Grid<f32>, out: &mut Grid<f32>) -> f32 {
 }
 
 /// The ink of a pixel with order parameter `psi`, local slope `g` (per node), `px` pixels
-/// per node and formedness `f`: the interface line within [`LINE_W`] pixels of `ψ = 0`,
-/// growing in as the pattern forms, else black.
+/// per node and formedness `f`: within [`LINE_W`] pixels of `ψ = 0`, the interface line
+/// in its side's colour, a step dimmer while the pattern is still forming; else black.
 pub(crate) fn pixel_ink(psi: f32, g: f32, px: f32, f: f32) -> Ink {
-    if !(psi.is_finite() && g.is_finite()) {
+    if !(psi.is_finite() && g.is_finite()) || f < FORMED.0 {
         return Ink::BLANK;
     }
-    let d = psi.abs() / g.max(1e-4) * px;
-    let line = if d < LINE_W {
-        let k = 1.0 - d / LINE_W;
-        LINE_LEVEL * k * k * (3.0 - 2.0 * k) * (0.25 + 0.75 * f)
+    if psi.abs() / g.max(1e-4) * px >= LINE_W {
+        return Ink::BLANK;
+    }
+    let step = usize::from(f >= FORMED.1);
+    if psi > 0.0 {
+        PLUS_INKS[step]
     } else {
-        0.0
-    };
-    let level = (line + 0.5) as u8;
-    if level < 8 {
-        Ink::BLANK
-    } else {
-        Ink::new(Role::Ramp(RAMP), level)
+        MINUS_INKS[step]
     }
 }
 
-/// ASCII: the stronger pixel: the interface `#`, `+` or `.` by level, the phases blank.
+/// ASCII: the stronger pixel: the interface `#` (formed) or `+`, the phases blank.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let p = raster::stronger(top, bottom);
-    if p.role != Role::Ramp(RAMP) {
+    if p.role == Role::Background {
         return None;
     }
-    let ch = match p.level {
-        l if f32::from(l) >= 0.7 * LINE_LEVEL => '#',
-        l if f32::from(l) >= 0.35 * LINE_LEVEL => '+',
-        _ => '.',
-    };
-    Some((ch, p))
+    Some((
+        if p.level >= PLUS_INKS[1].level {
+            '#'
+        } else {
+            '+'
+        },
+        p,
+    ))
 }
 
 #[derive(Debug)]
@@ -191,6 +199,8 @@ pub struct Spinodal {
     scratch: Scratch,
     regrid_scratch: Grid<f32>,
     pixels: Pixels,
+    /// The early composition speckle, over the pixels.
+    dots: Dots,
     map: SampleMap,
     /// Display value per lattice node ([`shade_field`]) and its working grids.
     shade: Grid<f32>,
@@ -214,6 +224,7 @@ impl Default for Spinodal {
             scratch: Scratch::default(),
             regrid_scratch: Grid::default(),
             pixels: Pixels::new(Size::new(1, 1)),
+            dots: Dots::new(Size::new(1, 1)),
             map: SampleMap::default(),
             shade: Grid::default(),
             blur: Grid::default(),
@@ -242,8 +253,8 @@ impl Spinodal {
         let f = slope_field(&self.psi, &mut self.shade);
         let (map, psi, slope) = (&self.map, &self.psi, &self.shade);
         let px = map.magnification().max(1e-3);
-        // GEN-R17: ψ bilinear up to 2× magnification, Catmull-Rom above (CORE-R102); the
-        // slope is smooth, so bilinear. Rows rebuilt per pixel row (CORE-R104).
+        // ψ bilinear up to 2× magnification, Catmull-Rom above (CORE-R102), so the line
+        // does not crease on large terminals; the slope is smooth, so bilinear. Rows rebuilt per pixel row (CORE-R104).
         if px > 2.0 {
             let (mut ry, mut pr, mut gr) = (-1, map.row_cubic(psi, 0), map.row(slope, 0));
             self.pixels.shade(|x, y| {
@@ -260,6 +271,36 @@ impl Spinodal {
                 }
                 pixel_ink(pr.at(x), gr.at(x), px, f)
             });
+        }
+        self.speckle(f);
+    }
+
+    /// The early composition noise as braille speckle (see [`SPECKLE_UNTIL`]).
+    fn speckle(&mut self, f: f32) {
+        self.dots.clear();
+        if f >= SPECKLE_UNTIL {
+            return;
+        }
+        let vals = self.psi.as_slice();
+        let n = vals.len().max(1) as f32;
+        let mean = vals.iter().sum::<f32>() / n;
+        let peak = vals.iter().fold(0.0f32, |m, &v| m.max((v - mean).abs()));
+        if !(peak.is_finite() && peak > 0.0) {
+            return;
+        }
+        let cut = SPECKLE_SHARE * peak;
+        let ps = self.pixels.pixel_size();
+        for y in 0..i32::from(ps.height()) {
+            for x in 0..i32::from(ps.width()) {
+                if self.pixels.get(x, y) != Some(Ink::BLANK) {
+                    continue;
+                }
+                let d = self.map.sample(&self.psi, x, y) - mean;
+                if d.abs() > cut {
+                    let ink = if d > 0.0 { PLUS_INKS[0] } else { MINUS_INKS[0] };
+                    self.dots.set(2 * x + (y & 1), 2 * y, ink);
+                }
+            }
         }
     }
 }
@@ -283,6 +324,7 @@ impl Generator for Spinodal {
         }
         self.size = size;
         self.pixels.resize(size);
+        self.dots.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
         self.dirty = true;
     }
@@ -320,6 +362,7 @@ impl Generator for Spinodal {
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        self.dots.blit_over(canvas, &self.pixels);
     }
 }
 
@@ -452,9 +495,9 @@ mod tests {
     }
 
     #[test]
-    fn spin_a6_interfaces_are_even_antialiased_lines_and_the_mush_forms_fast() {
-        // ADR-0017: both phases black and the interface a bright line whose level falls
-        // smoothly with the distance to ψ = 0, at any angle.
+    fn spin_a6_interfaces_are_thin_two_colour_lines_and_the_mush_forms_fast() {
+        // ADR-0018: both phases black and the interface a thin flat line, `Hot` on the
+        // ψ > 0 side and `Cold` on the other, at any angle.
         let (w, h) = (48u16, 48u16);
         let mut psi = Grid::new(Size::new(w, h), 0.0f32);
         let (nx, ny) = (0.5f32, 0.866f32);
@@ -468,20 +511,27 @@ mod tests {
         let f = slope_field(&psi, &mut slope);
         let at = |x: u16, y: u16| {
             let i = usize::from(y) * usize::from(w) + usize::from(x);
-            pixel_ink(psi.as_slice()[i], slope.as_slice()[i], 1.0, f).level
+            pixel_ink(psi.as_slice()[i], slope.as_slice()[i], 1.0, f)
         };
-        let mut by_dist: Vec<(f32, u8)> = Vec::new();
+        let (mut plus, mut minus) = (0, 0);
         for y in 16..32u16 {
             for x in 16..32u16 {
                 let d = (f32::from(x) - 24.0) * nx + (f32::from(y) - 24.0) * ny;
-                if d.abs() < 1.0 {
-                    by_dist.push((d.abs(), at(x, y)));
+                let ink = at(x, y);
+                if d.abs() < 0.3 {
+                    assert_ne!(ink, Ink::BLANK, "a gap on the line at ({x}, {y})");
+                }
+                if d.abs() > 1.5 {
+                    assert_eq!(ink, Ink::BLANK, "a thick line at ({x}, {y})");
+                }
+                match ink {
+                    i if i == PLUS_INKS[1] => plus += usize::from(d > 0.0),
+                    i if i == MINUS_INKS[1] => minus += usize::from(d < 0.0),
+                    i => assert_eq!(i, Ink::BLANK),
                 }
             }
         }
-        by_dist.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let (near, far) = (by_dist[0].1, by_dist[by_dist.len() - 1].1);
-        assert!(near > 150 && near > far, "{by_dist:?}");
+        assert!(plus > 5 && minus > 5, "both sides drawn: {plus} {minus}");
         // Deep in either phase: black.
         assert_eq!(pixel_ink(PSI_STAR, 0.01, 1.0, 1.0), Ink::BLANK);
         assert_eq!(pixel_ink(-PSI_STAR, 0.01, 1.0, 1.0), Ink::BLANK);
@@ -492,5 +542,38 @@ mod tests {
             g.prepare();
         }
         assert!(g.psi.as_slice().iter().any(|x| x.abs() > 0.5 * PSI_STAR));
+    }
+
+    #[test]
+    fn spin_a7_the_quench_shows_as_hot_and_cold_speckle_from_the_first_frame() {
+        for act in [0, 1] {
+            let size = Size::new(120, 40);
+            let mut ctx = Ctx::new(42, size);
+            let mut g = Spinodal {
+                act: (0, act),
+                ..Spinodal::default()
+            };
+            g.resize(size, &mut ctx);
+            g.prepare();
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let (mut hot, mut cold) = (0, 0);
+            for c in canvas.cells() {
+                match c.ink {
+                    i if i == PLUS_INKS[0] => hot += 1,
+                    i if i == MINUS_INKS[0] => cold += 1,
+                    i => assert_eq!(i, Ink::BLANK, "{c:?}"),
+                }
+            }
+            assert!(
+                hot > 100 && cold > 100,
+                "act {act}: {hot} hot, {cold} cold cells"
+            );
+            assert!(
+                hot + cold < 120 * 39 / 2,
+                "a speckle, not a fill: {}",
+                hot + cold
+            );
+        }
     }
 }

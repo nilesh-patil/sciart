@@ -4,18 +4,18 @@
 //! Six molecules take turns on a dark bench: water, methane, ethanol, benzene, caffeine
 //! and C60. Each grows out of a point, turns for 8.8 s in a lit perspective view, and
 //! collapses back before the next one grows. Everything is a closed-form function of
-//! scene time. `update` advances the clock, projects at most 60 atoms and paints them and
-//! their bonds as shaded spheres and cylinders into a z-buffered half-block raster;
-//! `render` only blits it and writes the readout.
+//! scene time; `update` only advances the clock and `render` projects, depth-sorts and
+//! paints at most 150 atoms and bonds from stack arrays.
 
 use std::f64::consts::TAU;
 
 use rand::Rng;
+use sciart_core::draw;
+use sciart_core::ease;
 use sciart_core::geom::v3::{dot, norm, sub};
-use sciart_core::ink::{self, level};
+use sciart_core::geom::{self, ASPECT};
+use sciart_core::ink::level;
 use sciart_core::prelude::*;
-use sciart_core::title::{self, Form, Title};
-use sciart_core::{draw, ease};
 
 use El::{C, H, N, O};
 use Order::{Aromatic, Double, Single};
@@ -52,6 +52,16 @@ impl El {
             El::C => 1.70,
             El::N => 1.55,
             El::O => 1.52,
+        }
+    }
+
+    /// CPK colours as roles: H white, C grey, N blue, O red.
+    fn role(self) -> Role {
+        match self {
+            El::H => Role::Text,
+            El::C => Role::Structure,
+            El::N => Role::Cold,
+            El::O => Role::Hot,
         }
     }
 
@@ -335,7 +345,7 @@ fn mass(el: El) -> f64 {
 /// Ball radius as a fraction of the Bondi (1964) van der Waals radius. It keeps ≥ 0.5 Å
 /// of visible stick on C60's 1.40–1.46 Å bonds, so the cage reads as rings of balls
 /// rather than a heap of blobs.
-const BALL: f64 = 0.16;
+const BALL: f64 = 0.20;
 
 fn ball_radius(el: El) -> f64 {
     BALL * el.vdw()
@@ -354,14 +364,8 @@ pub(crate) struct Model {
     pub bonds: Vec<Bond>,
     /// `max(|rᵢ| + r_ball,ᵢ, R_EFF_MIN)`: the radius the camera frames.
     pub r_eff: f64,
-    /// Label forms: full, without the mass, without the name, the formula alone (MOL-A6).
-    pub labels: [String; 4],
-}
-
-/// The label forms (indices into `Model::labels`) tried longest first: with the name, or
-/// without it while the title already names the molecule (SPEC-002 Label).
-fn tiers(named: bool) -> &'static [usize] {
-    if named { &[2, 3] } else { &[0, 1, 3] }
+    /// Label tiers, longest first: full, without the mass, the formula alone (MOL-A6).
+    pub labels: [String; 3],
 }
 
 impl Model {
@@ -372,9 +376,11 @@ impl Model {
         atoms: Vec<Atom>,
         bonds: Vec<Bond>,
     ) -> Self {
-        // Build-time guard for the scene's per-atom arrays and the u8 pixel owners;
-        // never reached on the frame path.
-        assert!(atoms.len() <= MAX_ATOMS, "{name}: raise MAX_ATOMS");
+        // Build-time guard for `Frame`'s stack arrays; never reached on the frame path.
+        assert!(
+            atoms.len() <= MAX_ATOMS && atoms.len() + bonds.len() <= MAX_ITEMS,
+            "{name}: raise MAX_ATOMS/MAX_ITEMS"
+        );
         let total: f64 = atoms.iter().map(|a| mass(a.el)).sum();
         let com: [f64; 3] = std::array::from_fn(|k| {
             atoms.iter().map(|a| mass(a.el) * a.pos[k]).sum::<f64>() / total
@@ -397,7 +403,6 @@ impl Model {
             labels: [
                 format!("{name}  {formula}  {mass_label} g/mol"),
                 format!("{name}  {formula}"),
-                format!("{formula}  {mass_label} g/mol"),
                 formula.to_owned(),
             ],
         }
@@ -413,14 +418,12 @@ impl Model {
         )
     }
 
-    /// The longest label tier that fits in `room` columns, or `""` (MOL-A6); `named`
-    /// leaves out the name, which the title's caption already shows.
-    pub fn label(&self, room: usize, named: bool) -> &str {
-        tiers(named)
+    /// The longest label tier that fits in `room` columns, or `""` (MOL-A6).
+    pub fn label(&self, room: usize) -> &str {
+        self.labels
             .iter()
-            .map(|&i| self.labels[i].as_str())
             .find(|l| l.chars().count() <= room)
-            .unwrap_or("")
+            .map_or("", String::as_str)
     }
 }
 
@@ -446,8 +449,9 @@ const CAPTIONS: [&str; MOLECULES] = [
     "caffeine",
     "buckminsterfullerene",
 ];
-/// C60 is the largest molecule. Pixel owners are `u8`, so this stays below 255.
+/// C60: 60 atoms + 90 bonds.
 const MAX_ATOMS: usize = C60_ATOMS;
+const MAX_ITEMS: usize = 150;
 
 // ---------------------------------------------------------------------------------------
 // Motion (MOL-A5).
@@ -504,21 +508,14 @@ pub(crate) fn pose(timeline: &Timeline, start: usize, t: f64) -> Pose {
 const EYE: f64 = 5.0;
 /// Perspective allowance in the scale. A sphere of radius `r_eff` seen from `EYE·r_eff`
 /// projects to at most `EYE/√(EYE² − 1)` ≈ 1.021 of its radius; the ≈ 3 % on top covers
-/// rounding to pixels (MOL-A3 checks the fit at eight sizes).
+/// floored bodies and rounded cells (MOL-A3 checks the fit at eight sizes). The looser
+/// on-axis bound `EYE/(EYE − 1)` = 1.25 left water and ethanol at ≈ 75 % of the frame.
+/// The body classes ([`BODY_MIN`], [`COMPACT_MAX`]) are tuned at this scale.
 const MAX_MAGNIFY: f64 = 1.05;
-/// Fraction of the art area the framing circle fills.
-const FILL: f64 = 0.95;
+/// Fraction of the drawing area the framing circle fills.
+const FILL: f64 = 0.86;
 
-/// Rows of the art area: all but the title row, which the readout shares (GEN-R13).
-fn art_rows(size: Size) -> u16 {
-    if size.height() >= 6 {
-        size.height() - 1
-    } else {
-        size.height()
-    }
-}
-
-/// Screen framing for one size: the art rows `[0, art_rows)`.
+/// Screen framing for one size: rows `[1, h)` below the label row.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct View {
     pub cx: f64,
@@ -529,12 +526,13 @@ pub(crate) struct View {
 
 impl View {
     pub fn new(size: Size) -> Self {
-        let (w, h) = (size.width(), art_rows(size).max(1));
+        let (w, h) = (size.width(), size.height());
         Self {
-            // Cell centres are integers: columns [0, w) centre on (w − 1)/2, rows likewise.
+            // Cell centres are integers: columns [0, w) centre on (w − 1)/2, rows [1, h)
+            // on h/2.
             cx: (f64::from(w) - 1.0) / 2.0,
-            cy: (f64::from(h) - 1.0) / 2.0,
-            fit: draw::fit_radius(Size::new(w, h), FILL),
+            cy: f64::from(h) / 2.0,
+            fit: draw::fit_radius(Size::new(w, h.saturating_sub(1).max(1)), FILL),
         }
     }
 }
@@ -542,22 +540,75 @@ impl View {
 /// One projected atom.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct Proj {
-    /// Centre in cells (column, row).
     pub x: f64,
     pub y: f64,
     /// Camera-space depth in Å, larger = nearer.
     pub depth: f64,
     /// Projected ball radius, rows.
     pub r: f64,
-    /// Depth cue `ν ∈ [0, 1]`, 1 = nearest ([`nu`]).
-    pub nu: f64,
+    /// Depth-cued level `s²·(100 + 155·ν)` before shading ([`growth_level`]).
+    pub level: f64,
+    /// `ν ≥ 0.5`: the near half.
+    pub near: bool,
+    /// How the atom is drawn; fixed per molecule and size.
+    pub body: Body,
+    /// Radius `draw::disc` paints the ball with ([`footprint`]).
+    pub foot: f64,
 }
 
-impl Proj {
-    /// Centre in pixel coordinates: pixel `(i, j)` spans `[i, i + 1) × [j, j + 1)`, and
-    /// cell `(c, r)` holds pixel column `c` and rows `2r, 2r + 1`.
-    fn px(&self) -> (f64, f64) {
-        (self.x + 0.5, 2.0 * self.y + 1.0)
+/// How an atom is drawn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum Body {
+    /// A single dot glyph (`●`/`•`).
+    #[default]
+    Dot,
+    /// A compact 3-cell shaded ball on its centre row.
+    Compact,
+    /// A shaded `draw::disc` ball.
+    Round,
+}
+
+/// Which atoms get shaded bodies, chosen once per molecule and size (MOL-A6) so that no
+/// atom flips between a ball and a dot as it turns, grows or shrinks: heavy atoms when
+/// the largest unmagnified heavy ball is at least [`BODY_MIN`] rows at full size, and
+/// hydrogens when their own ball is. Bodies of a class whose largest ball is under
+/// [`COMPACT_MAX`] rows are compact 3-cell balls: at about one row `draw::disc` paints a
+/// `+` of cells, which reads as a cross rather than a ball.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) struct Bodies {
+    pub heavy: Body,
+    pub hydrogen: Body,
+}
+
+impl Bodies {
+    pub fn new(view: &View, model: &Model) -> Self {
+        let k = scale(view, model, 1.0);
+        let class = |heavy: bool| {
+            let biggest = model
+                .atoms
+                .iter()
+                .filter(|a| (a.el != El::H) == heavy)
+                .map(|a| ball_radius(a.el) * k)
+                .fold(0.0, f64::max);
+            match biggest {
+                r if r < BODY_MIN => Body::Dot,
+                r if r < COMPACT_MAX => Body::Compact,
+                _ => Body::Round,
+            }
+        };
+        Self {
+            heavy: class(true),
+            hydrogen: class(false),
+        }
+    }
+
+    /// How `el` is drawn.
+    fn of(self, el: El) -> Body {
+        if el == El::H {
+            self.hydrogen
+        } else {
+            self.heavy
+        }
     }
 }
 
@@ -566,8 +617,7 @@ pub(crate) fn nu(depth: f64, r_eff: f64) -> f64 {
     ((depth + r_eff) / (2.0 * r_eff)).clamp(0.0, 1.0)
 }
 
-/// Depth cue as a level before shading (MOL-A3: strictly increasing in depth): far atoms
-/// recede to ≈ 40 % of the near ones.
+/// Unshaded level of an atom at depth cue `ν` (MOL-A3: strictly increasing in depth).
 pub(crate) fn depth_level(nu: f64) -> f64 {
     100.0 + 155.0 * nu
 }
@@ -599,7 +649,7 @@ pub(crate) fn scale(view: &View, model: &Model, s: f64) -> f64 {
 }
 
 /// One frame's projection: the camera's projector (two `sin_cos` pairs per frame, not
-/// per atom), the view centre, the scale and the model's framing radius.
+/// per atom), the view centre, the scale and the gallery scale.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Lens {
     proj: Projector,
@@ -607,6 +657,7 @@ pub(crate) struct Lens {
     /// Rows per Å ([`scale`]).
     k: f64,
     r_eff: f64,
+    s: f64,
 }
 
 impl Lens {
@@ -616,55 +667,52 @@ impl Lens {
             centre: (view.cx, view.cy),
             k: scale(view, model, s),
             r_eff: model.r_eff,
+            s,
         }
     }
 
     /// Project one atom; `None` only for a degenerate view.
-    pub fn project(&self, atom: &Atom) -> Option<Proj> {
+    pub fn project(&self, atom: &Atom, bodies: Bodies) -> Option<Proj> {
         let (x, y, depth) = self.proj.project(atom.pos, self.centre, self.k)?;
         let magnify = self.proj.magnification(depth);
+        let n = nu(depth, self.r_eff);
+        let r = ball_radius(atom.el) * self.k * magnify;
+        let body = bodies.of(atom.el);
         Some(Proj {
             x,
             y,
             depth,
-            r: ball_radius(atom.el) * self.k * magnify,
-            nu: nu(depth, self.r_eff),
+            r,
+            level: growth_level(self.s, depth_level(n)),
+            near: n >= 0.5,
+            body,
+            foot: footprint(body, r, self.s),
         })
     }
 }
 
-/// Project every atom of `model` at `pose` into `out` (MOL-A3). Every atom lies within
-/// `r_eff` of the centre and the eye is `5·r_eff` away, so projection never fails; the
-/// fallback only avoids a panic.
-pub(crate) fn project_all(model: &Model, view: &View, pose: &Pose, out: &mut [Proj]) {
-    let lens = Lens::new(&camera(pose, model.r_eff), view, model, pose.s);
-    for (p, atom) in out.iter_mut().zip(&model.atoms) {
-        *p = lens.project(atom).unwrap_or_default();
-    }
-}
-
 // ---------------------------------------------------------------------------------------
-// Painting: a z-buffered half-block raster (MOL-A4, MOL-A7).
+// Painting (MOL-A4, MOL-A6).
 // ---------------------------------------------------------------------------------------
 
-/// Stick radius, Å, and each strand of a double bond: two thinner sticks this far either
-/// side of the axis, so the bond order reads (MOL-A7).
-const STICK: f64 = 0.10;
-const DOUBLE_R: f64 = 0.6 * STICK;
-const DOUBLE_OFF: f64 = 1.25 * STICK;
-/// Strands split only once a strand is this many pixels in radius; thinner, they merge
-/// into one stick anyway.
-const SPLIT_MIN_PX: f64 = 0.6;
-/// Aromatic bonds: a solid stick plus a dashed thin strand on the ring's side, over the
-/// middle of the bond, `DASHES` dashes long (the 1.5 order).
-const DASH_FROM: f64 = 0.2;
-const DASHES: f64 = 3.0;
-/// [`Raster::owner`] of a stick pixel.
-const STICK_OWNER: u8 = u8::MAX;
-/// Sticks shade a little darker than balls, so balls read in front.
-const STICK_LEVEL: f64 = 0.8;
-/// The narrowest stick drawn, pixels: thinner ones would break into dots.
-const MIN_STICK_PX: f64 = 0.55;
+/// A molecule's heavy atoms (or its hydrogens) get shaded bodies when their largest
+/// unmagnified ball is at least this many rows at full size ([`Bodies`]). At 80×24 this
+/// lights ethanol (≈ 1.33 rows) and benzene (≈ 1.18) as well as water and methane, so
+/// only caffeine and C60 (≈ 0.7–0.8 rows) are dot-and-stick, which their size justifies.
+const BODY_MIN: f64 = 0.95;
+/// Smallest body radius at full size, rows: far or small atoms (N and O beside C) keep a
+/// few lit cells, so their colour still reads.
+const BODY_FLOOR: f64 = 0.8 * BODY_MIN;
+/// Bodies of a class whose largest unmagnified ball is under this many rows at full size
+/// are compact ([`Bodies`]): at 80×24 benzene's (≈ 1.18), while water, methane
+/// (≈ 2.3 rows) and ethanol (≈ 1.33) are round discs.
+const COMPACT_MAX: f64 = 1.2;
+/// `draw::disc` radius of a dot atom: under half a cell, so the centre cell only.
+const DOT: f64 = 0.25;
+/// Bonds at 0.8× their atom's level, so balls read in front of sticks.
+const STICK: f64 = 0.8;
+/// Double bonds split into two strokes only from this projected length (cells).
+const DOUBLE_MIN_LEN: i32 = 6;
 /// Light from the upper left, in front: `normalise(−0.45, 0.55, 0.70)`.
 const LIGHT: [f64; 3] = [
     -0.451_129_236_405_377,
@@ -678,18 +726,28 @@ const HALF: [f64; 3] = [
     0.298_873_514_648_473,
     0.922_430_645_079_596,
 ];
-/// Unlit surface keeps this much light, so a ball's shadow side still reads.
-const AMBIENT: f64 = 0.3;
-/// Surface whose `n·H` exceeds this is the specular highlight.
+/// Unlit sphere cells keep this much light, so a ball's shadow side still reads.
+const AMBIENT: f64 = 0.35;
+/// Cells whose `n·H` exceeds this are the specular highlight.
 const SPECULAR: f64 = 0.95;
-/// Carbon is CPK charcoal: the white of hydrogen at this fraction, dark enough that
-/// methane's four white hydrogens read apart from their carbon.
-const CARBON: f64 = 0.45;
-/// Bonds are thin neutral grey strokes (ADR-0017): at most this radius in pixels, at
-/// this `Text` level at full light.
-const STICK_MAX_PX: f64 = 0.8;
-const STICK_GREY: f64 = 120.0;
 
+/// Ball bodies by intensity, dim to bright. The dimmest ASCII tier is `:`, not `.`, so a
+/// ball's shadow rim stays distinct from the dotted rear bonds ([`REAR_BOND`]) that
+/// leave it.
+const BODY: [Glyph; 5] = [
+    Glyph::new('░', ':'),
+    Glyph::new('░', '+'),
+    Glyph::new('▒', '*'),
+    Glyph::new('▓', '#'),
+    Glyph::new('█', '@'),
+];
+const HIGHLIGHT: Glyph = Glyph::new('█', '@');
+/// Every cell of a bond whose ends are both in the far half.
+const REAR_BOND: Glyph = Glyph::new('·', '.');
+
+/// Shading of a sphere cell from `draw::disc`'s `(nx, ny)` (screen y down): Lambert
+/// intensity `I = 0.35 + 0.65·max(0, n·L)`, and whether the cell is specular
+/// (Blinn–Phong, `n·H > 0.95`).
 pub(crate) fn shade(nx: f64, ny: f64) -> (f64, bool) {
     let n = [nx, -ny, (1.0 - nx * nx - ny * ny).max(0.0).sqrt()];
     let ndl = dot(n, LIGHT);
@@ -699,218 +757,203 @@ pub(crate) fn shade(nx: f64, ny: f64) -> (f64, bool) {
     )
 }
 
-/// The ink of element `el` at brightness `v ∈ [0, 1]` (CPK, false colour where it must
-/// be, ADR-0015; muted, ADR-0017): H pale and C grey (`Text`, which every theme keeps
-/// neutral), N a dim blue (Ice), O a dim red (H-alpha); the specular highlight
-/// (`v` = 1) still reaches each ramp's pale top.
-pub(crate) fn element_ink(el: El, v: f64) -> Ink {
-    let body = |top: f64| if v >= 1.0 { 1.0 } else { top * v };
-    match el {
-        El::H => Ink::new(Role::Text, level(255.0 * body(0.8))),
-        El::C => Ink::new(Role::Text, level(255.0 * CARBON * v)),
-        El::N => ink::ramp(Ramp::Ice, body(0.8)),
-        El::O => ink::ramp(Ramp::HAlpha, body(0.72)),
+/// Radius `draw::disc` is called with for a ball: its projected radius, floored at
+/// `BODY_FLOOR·s`, when it gets a body; else [`DOT`], which paints the centre cell only.
+/// While a molecule grows or shrinks a body keeps its class; under half a cell
+/// `draw::disc` paints just the centre cell, with the body's own ramp glyph.
+fn footprint(body: Body, r: f64, s: f64) -> f64 {
+    match body {
+        Body::Dot => DOT,
+        Body::Compact | Body::Round => r.max(BODY_FLOOR * s),
     }
 }
 
-/// A half-block picture with a depth per pixel: nearer surfaces win, whatever order
-/// they are drawn in (MOL-A4).
-#[derive(Debug, Default)]
-pub(crate) struct Raster {
-    pixels: Pixels,
-    /// Surface depth (Å, larger = nearer) per pixel; `−∞` where nothing is drawn.
-    z: Vec<f32>,
-    /// What each pixel shows: atom `i` as `i + 1`, a bond as [`STICK_OWNER`], 0 nothing.
-    owner: Vec<u8>,
-    w: i32,
-    h: i32,
+/// Whether a compact body paints its 3-cell ball: from half a row up, like `draw::disc`
+/// leaves the centre cell alone below that.
+fn lozenge(p: &Proj) -> bool {
+    p.body == Body::Compact && p.foot >= 0.5
 }
 
-impl Raster {
-    fn resize(&mut self, cells: Size) {
-        self.pixels.resize(cells);
-        let px = self.pixels.pixel_size();
-        (self.w, self.h) = (i32::from(px.width()), i32::from(px.height()));
-        self.z.clear();
-        self.z.resize(px.area(), f32::NEG_INFINITY);
-        self.owner.clear();
-        self.owner.resize(px.area(), 0);
+/// Whether painting ball `p` writes cell `(x, y)`: every cell
+/// `draw::disc(p.x, p.y, p.foot)` paints (or, for a compact body, the cells either side
+/// of the centre on its row), plus the rounded centre cell, which [`paint_atom`] always
+/// writes (MOL-A4, MOL-A6).
+pub(crate) fn covers(p: &Proj, x: i32, y: i32) -> bool {
+    let (cx, cy) = (p.x.round(), p.y.round());
+    if f64::from(x) == cx && f64::from(y) == cy {
+        return true;
     }
+    if lozenge(p) {
+        return f64::from(y) == cy && (f64::from(x) - cx).abs() <= 1.0;
+    }
+    // Below half a row `disc` paints only the centre cell, already covered above.
+    p.foot >= 0.5 && draw::disc_covers(p.x, p.y, p.foot, x, y)
+}
 
-    /// What pixel `(x, y)` shows ([`Raster::owner`]); 0 off the raster.
-    fn owner(&self, x: i32, y: i32) -> u8 {
-        if (0..self.w).contains(&x) && (0..self.h).contains(&y) {
-            self.owner[(y * self.w + x) as usize]
+fn paint_atom(canvas: &mut Canvas, el: El, p: &Proj, s: f64) {
+    let role = el.role();
+    let (cx, cy) = (p.x.round(), p.y.round());
+    let letter = el.symbol(p.near);
+    if p.body == Body::Dot {
+        let dot = if el == El::H { '•' } else { '●' };
+        canvas.put(
+            cx as i32,
+            cy as i32,
+            Glyph::new(dot, letter),
+            Ink::new(role, level(p.level)),
+        );
+        return;
+    }
+    let cell = |nx: f64, ny: f64| -> (Glyph, Ink) {
+        let (i, specular) = shade(nx, ny);
+        if specular {
+            (HIGHLIGHT, Ink::new(role, level(growth_level(s, 255.0))))
         } else {
-            0
+            let glyph = draw::ramp((i - AMBIENT) / (1.0 - AMBIENT), &BODY);
+            (glyph, Ink::new(role, level(p.level * i)))
         }
-    }
-
-    fn clear(&mut self) {
-        self.pixels.clear();
-        self.z.fill(f32::NEG_INFINITY);
-        self.owner.fill(0);
-    }
-
-    /// Paint pixel `(x, y)` at depth `z` unless something nearer is already there.
-    #[inline]
-    fn plot(&mut self, x: i32, y: i32, z: f64, ink: Ink, owner: u8) {
-        if (0..self.w).contains(&x) && (0..self.h).contains(&y) {
-            let i = (y * self.w + x) as usize;
-            if z as f32 > self.z[i] {
-                self.z[i] = z as f32;
-                self.owner[i] = owner;
-                self.pixels.set(x, y, ink);
-            }
+    };
+    if lozenge(p) {
+        // A 3-cell ball on the centre row, shaded as a one-row sphere: `█▓░` lit from
+        // the left like the round balls.
+        for dx in [-1.0, 1.0] {
+            let (glyph, ink) = cell((cx + dx - p.x) / ASPECT, 0.0);
+            canvas.put((cx + dx) as i32, cy as i32, glyph, ink);
         }
+    } else {
+        draw::disc(canvas, p.x, p.y, p.foot, |_, nx, ny| Some(cell(nx, ny)));
     }
+    // The centre cell keeps its body glyph in Unicode and shows the element in ASCII.
+    let (nx, ny) = if lozenge(p) {
+        ((cx - p.x) / ASPECT, 0.0)
+    } else if p.foot < 0.5 {
+        (0.0, 0.0)
+    } else {
+        ((cx - p.x) / (p.foot * ASPECT), (cy - p.y) / p.foot)
+    };
+    let (glyph, ink) = cell(nx, ny);
+    canvas.put(cx as i32, cy as i32, Glyph::new(glyph.unicode, letter), ink);
+}
 
-    /// A shaded ball: Lambert body, Blinn–Phong highlight at `255·s²`, depth-cued.
-    fn ball(&mut self, el: El, owner: u8, p: &Proj, r_a: f64, s: f64) {
-        let (cx, cy) = p.px();
-        let r = (2.0 * p.r).max(0.5);
-        let cue = growth_level(s, depth_level(p.nu)) / 255.0;
-        for y in (cy - r).floor() as i32..(cy + r).ceil() as i32 {
-            for x in (cx - r).floor() as i32..(cx + r).ceil() as i32 {
-                let (nx, ny) = ((f64::from(x) + 0.5 - cx) / r, (f64::from(y) + 0.5 - cy) / r);
-                let d2 = nx * nx + ny * ny;
-                // Balls under a pixel wide still light their centre pixel.
-                if d2 > 1.0 && !(x == cx.floor() as i32 && y == cy.floor() as i32) {
-                    continue;
-                }
-                let (i, specular) = shade(nx.clamp(-1.0, 1.0), ny.clamp(-1.0, 1.0));
-                let v = if specular { s * s } else { cue * i };
-                let z = p.depth + r_a * (1.0 - d2).max(0.0).sqrt();
-                self.plot(x, y, z, element_ink(el, v), owner);
-            }
-        }
-    }
-
-    /// A shaded stick `strand` between `a` and `b` at `k` rows per Å and gallery scale
-    /// `s`: a thin neutral grey stroke (ADR-0017).
-    fn stick(&mut self, (a, _): (&Proj, El), (b, _): (&Proj, El), strand: Strand, k: f64, s: f64) {
-        let Strand { rad, off, dashes } = strand;
-        let ((ax, ay), (bx, by)) = (a.px(), b.px());
-        let (dx, dy) = (bx - ax, by - ay);
-        let len2 = dx * dx + dy * dy;
-        if len2 < 1e-9 {
+/// One stroke from `a` to `b` shifted by `(ox, oy)` cells: split at its midpoint into
+/// the two atoms' inks, skipping every cell either ball paints (MOL-A4). A `rear` bond
+/// (both ends in the far half) is dotted, `·` (ASCII `.`), so a cage's near face reads
+/// as `─│╱╲` rings over a faint dotted back lattice instead of tangling with it (MOL-A6).
+fn stroke(
+    canvas: &mut Canvas,
+    (a, ia): (&Proj, Ink),
+    (b, ib): (&Proj, Ink),
+    (ox, oy): (i32, i32),
+    rear: bool,
+) {
+    let (x0, y0) = (a.x.round() as i32 + ox, a.y.round() as i32 + oy);
+    let (x1, y1) = (b.x.round() as i32 + ox, b.y.round() as i32 + oy);
+    let len = (x1 - x0).abs().max((y1 - y0).abs());
+    geom::stroked_line(x0, y0, x1, y1, |k, x, y, (dx, dy)| {
+        if covers(a, x, y) || covers(b, x, y) {
             return;
         }
-        let len = len2.sqrt();
-        // Screen normal of the axis, and the offset strand's axis.
-        let (ux, uy) = (-dy / len, dx / len);
-        let px_per_a = 2.0 * k;
-        let (ax, ay) = (ax + ux * off * px_per_a, ay + uy * off * px_per_a);
-        let r = (rad * px_per_a).clamp(MIN_STICK_PX, STICK_MAX_PX);
-        let (x0, x1) = (ax.min(ax + dx) - r, ax.max(ax + dx) + r);
-        let (y0, y1) = (ay.min(ay + dy) - r, ay.max(ay + dy) + r);
-        for y in y0.floor() as i32..y1.ceil() as i32 {
-            for x in x0.floor() as i32..x1.ceil() as i32 {
-                let (qx, qy) = (f64::from(x) + 0.5 - ax, f64::from(y) + 0.5 - ay);
-                let t = ((qx * dx + qy * dy) / len2).clamp(0.0, 1.0);
-                if dashes > 0.0 {
-                    let u = (t - DASH_FROM) / (1.0 - 2.0 * DASH_FROM);
-                    if !(0.0..1.0).contains(&u) || (u * (2.0 * dashes - 1.0)).fract() > 0.5 {
-                        continue;
-                    }
-                }
-                // Signed offset across the axis, and distance from the capsule's segment
-                // (the axis, with round ends), both in radii.
-                let across = (qx * ux + qy * uy) / r;
-                let dist = (qx - t * dx).hypot(qy - t * dy) / r;
-                if dist > 1.0 {
-                    continue;
-                }
-                let nz = (1.0 - across * across).max(0.0).sqrt();
-                let (i, _) = shade(across * ux, across * uy);
-                let depth = a.depth + t * (b.depth - a.depth);
-                let cue = growth_level(s, depth_level(nu_mix(a, b, t))) / 255.0;
-                let ink = Ink::new(Role::Text, level(STICK_GREY * STICK_LEVEL * cue * i));
-                self.plot(x, y, depth + rad * nz, ink, STICK_OWNER);
-            }
-        }
-    }
+        let ink = if 2 * k <= len { ia } else { ib };
+        let glyph = if rear {
+            REAR_BOND
+        } else {
+            draw::step_glyph(dx, dy)
+        };
+        canvas.put(x, y, glyph, ink);
+    });
 }
 
-/// Depth (Å) of the front of ball `p` at `k` rows per Å: its centre plus its radius.
-fn ball_top(p: &Proj, k: f64) -> f64 {
-    p.depth + p.r / k.max(1e-12)
-}
-
-/// One strand of a bond: radius `rad` Å, shifted `off` Å across the axis on screen;
-/// `dashes > 0` draws only the middle `1 − 2·DASH_FROM` of it, in that many dashes.
-#[derive(Debug, Clone, Copy)]
-struct Strand {
-    rad: f64,
-    off: f64,
-    dashes: f64,
-}
-
-impl Strand {
-    const SOLID: Strand = Strand {
-        rad: STICK,
-        off: 0.0,
-        dashes: 0.0,
+fn paint_bond(canvas: &mut Canvas, model: &Model, bond: &Bond, proj: &[Proj]) {
+    let (a, b) = (&proj[usize::from(bond.a)], &proj[usize::from(bond.b)]);
+    let ink = |i: u8, p: &Proj| {
+        let role = model.atoms[usize::from(i)].el.role();
+        Ink::new(role, level(STICK * p.level))
     };
-
-    /// A thin strand `off` Å across the axis.
-    const fn thin(off: f64, dashes: f64) -> Strand {
-        Strand {
-            rad: DOUBLE_R,
-            off,
-            dashes,
-        }
+    let (ea, eb) = ((a, ink(bond.a, a)), (b, ink(bond.b, b)));
+    let rear = !a.near && !b.near;
+    let (dx, dy) = ((b.x - a.x).round() as i32, (b.y - a.y).round() as i32);
+    let split = bond.order == Order::Double
+        && dx.abs().max(dy.abs()) >= DOUBLE_MIN_LEN
+        && a.body != Body::Dot
+        && b.body != Body::Dot;
+    if !split {
+        stroke(canvas, ea, eb, (0, 0), rear);
+        return;
     }
+    // One cell either side of the axis, across the stroke.
+    let offset = if f64::from(dx.abs()) >= f64::from(dy.abs()) * ASPECT {
+        (0, 1)
+    } else {
+        (1, 0)
+    };
+    stroke(canvas, ea, eb, offset, rear);
+    stroke(canvas, ea, eb, (-offset.0, -offset.1), rear);
 }
 
-/// The depth cue along a bond, interpolated between its atoms'.
-fn nu_mix(a: &Proj, b: &Proj, t: f64) -> f64 {
-    a.nu + t * (b.nu - a.nu)
+/// One frame's projected atoms and painter's order.
+#[derive(Debug, Clone)]
+pub(crate) struct Frame {
+    pub proj: [Proj; MAX_ATOMS],
+    /// Items far → near: atoms `0..n_atoms`, then bonds.
+    pub order: [u16; MAX_ITEMS],
+    pub items: usize,
+    pub s: f64,
 }
 
-/// Paint `model` projected as `proj` at gallery scale `s` into `raster`: bonds (only from
-/// half size up, MOL-A5), then balls; the z-buffer sorts them (MOL-A4). Double bonds are
-/// two strands and aromatic bonds a stick plus a dashed strand on the ring side, whenever
-/// a strand is wide enough to see (MOL-A7).
-pub(crate) fn paint(raster: &mut Raster, model: &Model, proj: &[Proj], view: &View, s: f64) {
-    raster.clear();
-    let k = scale(view, model, s);
-    if s >= STICKS_FROM {
-        for bond in &model.bonds {
-            let (ia, ib) = (usize::from(bond.a), usize::from(bond.b));
-            let a = (&proj[ia], model.atoms[ia].el);
-            let b = (&proj[ib], model.atoms[ib].el);
-            let split = DOUBLE_R * 2.0 * k >= SPLIT_MIN_PX;
-            match bond.order {
-                Order::Double if split => {
-                    for side in [-1.0, 1.0] {
-                        raster.stick(a, b, Strand::thin(side * DOUBLE_OFF, 0.0), k, s);
-                    }
-                }
-                Order::Aromatic if split => {
-                    raster.stick(a, b, Strand::SOLID, k, s);
-                    // The dashed strand goes on the side of the view centre, inside the
-                    // ring for benzene in any orientation.
-                    let ((ax, ay), (bx, by)) = (a.0.px(), b.0.px());
-                    let (mx, my) = (
-                        0.5 * (ax + bx) - (view.cx + 0.5),
-                        0.5 * (ay + by) - (2.0 * view.cy + 1.0),
-                    );
-                    let side = if (ay - by) * mx + (bx - ax) * my > 0.0 {
-                        -1.0
-                    } else {
-                        1.0
-                    };
-                    let dashed = Strand::thin(side * 2.0 * DOUBLE_OFF, DASHES);
-                    raster.stick(a, b, dashed, k, s);
-                }
-                _ => raster.stick(a, b, Strand::SOLID, k, s),
-            }
-        }
+/// Sort item indices far → near by `(depth, index)`: a deterministic order with no heap
+/// use (MOL-A4).
+pub(crate) fn painter_order(depths: &[f32], order: &mut [u16]) {
+    for (i, o) in order.iter_mut().enumerate() {
+        *o = i as u16;
     }
-    for (i, (p, atom)) in proj.iter().zip(&model.atoms).enumerate() {
-        // At most MAX_ATOMS (60) atoms, so `i + 1` fits a u8 below STICK_OWNER.
-        raster.ball(atom.el, i as u8 + 1, p, ball_top(p, k) - p.depth, s);
+    order.sort_unstable_by(|&i, &j| {
+        depths[usize::from(i)]
+            .total_cmp(&depths[usize::from(j)])
+            .then(i.cmp(&j))
+    });
+}
+
+/// Project `model` at `pose`; `bodies` is its per-size class ([`Bodies::new`]).
+pub(crate) fn frame(model: &Model, view: &View, pose: &Pose, bodies: Bodies) -> Frame {
+    let lens = Lens::new(&camera(pose, model.r_eff), view, model, pose.s);
+    let mut f = Frame {
+        proj: [Proj::default(); MAX_ATOMS],
+        order: [0; MAX_ITEMS],
+        items: 0,
+        s: pose.s,
+    };
+    let mut depths = [0f32; MAX_ITEMS];
+    for (i, atom) in model.atoms.iter().enumerate() {
+        // Unreachable: every atom lies within `r_eff` of the centre and the eye is
+        // `5·r_eff` away, so `project` never fails. The fallback only avoids a panic; its
+        // bonds would still be stroked toward the corner.
+        f.proj[i] = lens.project(atom, bodies).unwrap_or(Proj {
+            x: -1.0,
+            y: -1.0,
+            ..Proj::default()
+        });
+        depths[i] = f.proj[i].depth as f32;
+    }
+    let n = model.atoms.len();
+    for (j, bond) in model.bonds.iter().enumerate() {
+        let (a, b) = (f.proj[usize::from(bond.a)], f.proj[usize::from(bond.b)]);
+        depths[n + j] = (0.5 * (a.depth + b.depth)) as f32;
+    }
+    f.items = n + model.bonds.len();
+    painter_order(&depths[..f.items], &mut f.order[..f.items]);
+    f
+}
+
+/// Paint the given items (indices into atoms, then bonds) in order.
+pub(crate) fn paint(canvas: &mut Canvas, model: &Model, frame: &Frame, items: &[u16]) {
+    let n = model.atoms.len();
+    for &i in items {
+        let i = usize::from(i);
+        if i < n {
+            paint_atom(canvas, model.atoms[i].el, &frame.proj[i], frame.s);
+        } else if frame.s >= STICKS_FROM {
+            paint_bond(canvas, model, &model.bonds[i - n], &frame.proj);
+        }
     }
 }
 
@@ -918,12 +961,7 @@ pub(crate) fn paint(raster: &mut Raster, model: &Model, proj: &[Proj], view: &Vi
 // The scene.
 // ---------------------------------------------------------------------------------------
 
-const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-/// ASCII body tiers by brightness (Unicode shows the half-block pixels themselves).
-const ASCII_BODY: [char; 5] = [':', '+', '*', '#', '@'];
-/// Pixels dimmer than this are left blank in ASCII, so a bond's shadow side and far
-/// atoms do not smear.
-const ASCII_MIN_LEVEL: u8 = 24;
+const LABEL_INK: Ink = Ink::new(Role::Text, 140);
 
 #[derive(Debug)]
 pub(crate) struct MoleculeViewer {
@@ -934,58 +972,24 @@ pub(crate) struct MoleculeViewer {
     /// Seeded first molecule, drawn on the first resize only.
     start: Option<usize>,
     view: View,
-    /// Whether the title shows each molecule's name at this size (`Form::Full`), so its
-    /// readout can leave the name out; set in `resize`.
-    named: [bool; MOLECULES],
-    /// This frame's projection and picture, rebuilt in `update`/`resize`.
-    proj: [Proj; MAX_ATOMS],
-    raster: Raster,
-    /// ASCII element symbols: the cell and char of every atom whose centre pixel it owns.
-    symbols: [(i32, i32, char); MAX_ATOMS],
-    n_symbols: usize,
-    label_row: Option<i32>,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
-    dirty: bool,
+    /// Each molecule's ball-or-dot classes at this size (MOL-A6), rebuilt in `resize`.
+    bodies: [Bodies; MOLECULES],
 }
 
 impl MoleculeViewer {
     pub fn new() -> Self {
         Self {
-            dirty: true,
             models: gallery(),
             timeline: gallery_timeline(),
             t: GROW,
             start: None,
             view: View::default(),
-            named: [false; MOLECULES],
-            proj: [Proj::default(); MAX_ATOMS],
-            raster: Raster::default(),
-            symbols: [(0, 0, ' '); MAX_ATOMS],
-            n_symbols: 0,
-            label_row: None,
+            bodies: [Bodies::default(); MOLECULES],
         }
     }
 
     pub fn pose(&self) -> Pose {
         pose(&self.timeline, self.start.unwrap_or(0), self.t)
-    }
-
-    /// Project, paint, and note which atoms show their symbol in ASCII (MOL-A6).
-    fn rasterise(&mut self) {
-        let pose = self.pose();
-        let model = &self.models[pose.molecule];
-        let n = model.atoms.len();
-        project_all(model, &self.view, &pose, &mut self.proj[..n]);
-        paint(&mut self.raster, model, &self.proj[..n], &self.view, pose.s);
-        self.n_symbols = 0;
-        for (i, (p, atom)) in self.proj[..n].iter().zip(&model.atoms).enumerate() {
-            let (px, py) = p.px();
-            let (x, y) = (px.floor() as i32, py.floor() as i32);
-            if self.raster.owner(x, y) == i as u8 + 1 {
-                self.symbols[self.n_symbols] = (x, y / 2, atom.el.symbol(p.nu >= 0.5));
-                self.n_symbols += 1;
-            }
-        }
     }
 }
 
@@ -996,61 +1000,23 @@ impl Generator for MoleculeViewer {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.view = View::new(size);
-        self.named =
-            CAPTIONS.map(|c| Title::new(META.title, Some(c)).fit(size) == Some(Form::Full));
-        self.label_row = (size.height() >= 6).then(|| i32::from(size.height()) - 1);
-        self.raster.resize(Size::new(size.width(), art_rows(size)));
+        self.bodies = std::array::from_fn(|i| Bodies::new(&self.view, &self.models[i]));
         if self.start.is_none() {
             self.start = Some(ctx.rng.random_range(0..MOLECULES));
         }
-        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
-        // A NaN clock would feed `Timeline::at(NaN)` for good; zero dt changes nothing.
-        if !dt.is_finite() || dt <= 0.0 {
-            return;
-        }
         self.t += dt;
-        self.dirty = true;
-    }
-
-    /// Rasterise once per drawn frame, not once per step (GEN-R20).
-    fn prepare(&mut self) {
-        if self.dirty {
-            self.dirty = false;
-            self.rasterise();
-        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.raster.pixels.blit(canvas, |_, _, top, bottom| {
-            let ink = if top.level >= bottom.level {
-                top
-            } else {
-                bottom
-            };
-            let body = ink.role != Role::Background;
-            (body && ink.level >= ASCII_MIN_LEVEL).then(|| {
-                let tier = usize::from(ink.level) * ASCII_BODY.len() / 256;
-                (ASCII_BODY[tier], ink)
-            })
-        });
-        if canvas.mode() == GlyphMode::Ascii {
-            for &(x, y, ch) in &self.symbols[..self.n_symbols] {
-                if let Some(&cell) = canvas.get(x, y) {
-                    canvas.put(x, y, Glyph::ascii(ch), cell.ink);
-                }
-            }
-        }
-        if let Some(row) = self.label_row {
-            let molecule = self.pose().molecule;
-            let room = title::readout_room(canvas.size(), &Title::of(self));
-            let label = self.models[molecule].label(room, self.named[molecule]);
-            if !label.is_empty() {
-                draw::label_right(canvas, row, label, LABEL_INK);
-            }
-        }
+        let pose = self.pose();
+        let model = &self.models[pose.molecule];
+        let frame = frame(model, &self.view, &pose, self.bodies[pose.molecule]);
+        paint(canvas, model, &frame, &frame.order[..frame.items]);
+        let room = usize::from(canvas.size().width()).saturating_sub(2);
+        canvas.text(1, 0, model.label(room), LABEL_INK);
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -1321,12 +1287,6 @@ mod tests {
         assert_eq!(cycles, 12);
     }
 
-    fn projected(m: &Model, view: &View, pose: &Pose) -> Vec<Proj> {
-        let mut p = vec![Proj::default(); m.atoms.len()];
-        project_all(m, view, pose, &mut p);
-        p
-    }
-
     #[test]
     fn mol_a3_motion_is_rigid_and_fits_the_frame() {
         let tl = gallery_timeline();
@@ -1342,7 +1302,7 @@ mod tests {
             Size::new(160, 40),
         ] {
             let view = View::new(size);
-            let (w, h) = (f64::from(size.width()), f64::from(art_rows(size)));
+            let (w, h) = (i32::from(size.width()), i32::from(size.height()));
             for k in 0..500 {
                 // Hold times only, spread over a 60 s cycle.
                 let slot = k % 6;
@@ -1360,7 +1320,7 @@ mod tests {
                     .iter()
                     .map(|a| {
                         let (x, y, z) = ortho.project(a.pos, (0.0, 0.0), 1.0).unwrap();
-                        [x / sciart_core::geom::ASPECT, -y, z]
+                        [x / ASPECT, -y, z]
                     })
                     .collect();
                 for i in 0..m.atoms.len() {
@@ -1369,11 +1329,19 @@ mod tests {
                         assert!((dist(rotated[i], rotated[j]) - d0).abs() < 1e-9);
                     }
                 }
-                // Every ball's pixel disc lies inside the art area (above the title row).
-                for p in projected(m, &view, &pose) {
-                    let ((x, y), r) = (p.px(), 2.0 * p.r);
-                    assert!(x - r >= 0.0 && x + r <= w, "{size:?} x {x} r {r}");
-                    assert!(y - r >= 0.0 && y + r <= 2.0 * h, "{size:?} y {y} r {r}");
+                // Every cell of every ball is on screen below the label row.
+                let lens = Lens::new(&camera(&pose, m.r_eff), &view, m, 1.0);
+                let bodies = Bodies::new(&view, m);
+                for a in &m.atoms {
+                    let p = lens.project(a, bodies).expect("atom projects");
+                    let (x0, y0) = (p.x.round() as i32, p.y.round() as i32);
+                    for y in y0 - 30..=y0 + 30 {
+                        for x in x0 - 60..=x0 + 60 {
+                            if covers(&p, x, y) {
+                                assert!((0..w).contains(&x) && (1..h).contains(&y), "{size:?}");
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -1388,11 +1356,13 @@ mod tests {
         for size in [Size::new(80, 24), Size::new(200, 50)] {
             let view = View::new(size);
             for (slot, m) in models.iter().enumerate() {
+                let bodies = Bodies::new(&view, m);
                 let mut reach: f64 = 0.0;
                 for k in 0..200 {
                     let t = f64::from(slot as u32) * SLOT + GROW + HOLD * f64::from(k) / 200.0;
-                    for p in projected(m, &view, &pose(&tl, 0, t)) {
-                        let d = ((p.x - view.cx) / sciart_core::geom::ASPECT).hypot(p.y - view.cy);
+                    let f = frame(m, &view, &pose(&tl, 0, t), bodies);
+                    for p in &f.proj[..m.atoms.len()] {
+                        let d = ((p.x - view.cx) / ASPECT).hypot(p.y - view.cy);
                         reach = reach.max(d + p.r);
                     }
                 }
@@ -1415,141 +1385,173 @@ mod tests {
         for k in 0..=40 {
             let z = -m.r_eff + 2.0 * m.r_eff * f64::from(k) / 40.0;
             let atom = at(El::O, 0.0, 0.0, z);
-            let p = lens.project(&atom).unwrap();
-            let cue = depth_level(p.nu);
+            let p = lens.project(&atom, Bodies::default()).unwrap();
+            let cue = depth_level(nu(p.depth, m.r_eff));
             assert!(cue > last.0 && p.r > last.1, "z = {z}");
             last = (cue, p.r);
         }
     }
 
-    /// A face-on pose (yaw 0, pitch 0) at full size.
-    const FACE_ON: Pose = Pose {
-        molecule: 0,
-        s: 1.0,
-        yaw: 0.0,
-        pitch: 0.0,
-    };
-
-    fn painted(m: &Model, size: Size, pose: &Pose) -> (Raster, Vec<Proj>) {
+    fn caffeine_frame(size: Size) -> (Model, Frame) {
+        let m = by_name("caffeine");
+        let pose = Pose {
+            molecule: 4,
+            s: 1.0,
+            yaw: 0.7,
+            pitch: 0.4,
+        };
         let view = View::new(size);
-        let proj = projected(m, &view, pose);
-        let mut r = Raster::default();
-        r.resize(Size::new(size.width(), art_rows(size)));
-        paint(&mut r, m, &proj, &view, pose.s);
-        (r, proj)
+        let f = frame(&m, &view, &pose, Bodies::new(&view, &m));
+        (m, f)
     }
 
     #[test]
-    fn mol_a8_no_haze_the_background_is_black() {
-        // ADR-0017: the electron-cloud haze is gone; every pixel nothing is drawn on is
-        // the terminal's black, and bonds are thin neutral grey.
-        let m = by_name("methane");
-        let size = Size::new(120, 40);
-        let (r, _) = painted(&m, size, &FACE_ON);
-        for y in 0..r.h {
-            for x in 0..r.w {
-                let ink = r.pixels.get(x, y).unwrap();
-                match r.owner(x, y) {
-                    0 => assert_eq!(ink, Ink::BLANK, "({x}, {y})"),
-                    STICK_OWNER => assert_eq!(ink.role, Role::Text, "({x}, {y})"),
-                    _ => {}
-                }
+    fn mol_a4_render_order_is_a_depth_sorted_permutation() {
+        let (m, f) = caffeine_frame(Size::new(200, 50));
+        let order = &f.order[..f.items];
+        assert_eq!(f.items, m.atoms.len() + m.bonds.len());
+        let mut seen = order.to_vec();
+        seen.sort_unstable();
+        assert!(seen.iter().enumerate().all(|(i, &o)| usize::from(o) == i));
+        let n = m.atoms.len();
+        let depth = |i: u16| -> f32 {
+            let i = usize::from(i);
+            if i < n {
+                f.proj[i].depth as f32
+            } else {
+                let b = m.bonds[i - n];
+                (0.5 * (f.proj[usize::from(b.a)].depth + f.proj[usize::from(b.b)].depth)) as f32
             }
+        };
+        for w in order.windows(2) {
+            let (a, b) = (depth(w[0]), depth(w[1]));
+            assert!(a < b || (a == b && w[0] < w[1]), "{w:?}");
         }
-        // CPK: hydrogen pale, carbon a clearly darker grey.
-        assert!(element_ink(El::C, 1.0).level <= 128);
-        assert!(element_ink(El::H, 0.9).level <= 190);
+        // Ties go by index.
+        let mut ties = [0u16; 4];
+        painter_order(&[1.0, 0.0, 1.0, 0.0], &mut ties);
+        assert_eq!(ties, [1, 3, 0, 2]);
     }
 
     #[test]
-    fn mol_a4_the_nearer_surface_wins_every_pixel() {
+    fn mol_a4_nearer_atom_wins_shared_cells_and_bonds_skip_balls() {
         // An oxygen and a nearer nitrogen whose balls overlap on screen, bonded.
         let atoms = vec![at(El::O, -0.15, 0.0, -0.5), at(El::N, 0.15, 0.0, 0.5)];
         let m = Model::new("pair", "NO", "0", atoms, vec![bd(0, 1, Order::Single)]);
         let size = Size::new(120, 40);
-        let (r, proj) = painted(&m, size, &FACE_ON);
-        let (far, near) = (proj[0], proj[1]);
-        assert!(near.depth > far.depth);
-        let inside = |p: &Proj, x: i32, y: i32| {
-            let (cx, cy) = p.px();
-            (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy) < 2.0 * p.r - 0.5
+        let pose = Pose {
+            molecule: 0,
+            s: 1.0,
+            yaw: 0.0,
+            pitch: 0.0,
         };
+        let view = View::new(size);
+        let f = frame(&m, &view, &pose, Bodies::new(&view, &m));
+        let (far, near) = (f.proj[0], f.proj[1]);
+        assert!(near.depth > far.depth);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        paint(&mut canvas, &m, &f, &f.order[..f.items]);
+        let (far_disc, near_disc) = (disc_marks(size, &far), disc_marks(size, &near));
         let mut shared = 0;
-        for y in 0..r.h {
-            for x in 0..r.w {
-                if inside(&far, x, y) && inside(&near, x, y) {
+        for y in 0..40 {
+            for x in 0..120 {
+                if marked(&far_disc, x, y) && marked(&near_disc, x, y) {
                     shared += 1;
-                    let ink = r.pixels.get(x, y).unwrap();
-                    assert_eq!(ink.role, Role::Ramp(Ramp::Ice), "({x}, {y})");
+                    assert_eq!(canvas.get(x, y).unwrap().ink.role, Role::Cold);
                 }
             }
         }
-        assert!(shared > 20, "the balls overlap ({shared})");
+        assert!(shared > 0, "the balls overlap");
 
-        // In every gallery molecule and orientation, each visible ball centre shows its
-        // own element: sticks never cover a ball.
+        // Bonds never paint a cell either end ball paints, in any orientation; the
+        // reference is `draw::disc` itself (or the 3-cell compact rule), not `covers`.
+        let models = gallery();
         let size = Size::new(200, 50);
-        let (mut shown, mut total) = (0, 0);
-        for (k, m) in gallery().iter().enumerate() {
-            for step in 0..12 {
+        for (k, m) in models.iter().enumerate() {
+            for step in 0..24 {
                 let pose = Pose {
                     molecule: k,
                     s: 1.0,
-                    yaw: f64::from(step) * 0.53,
+                    yaw: f64::from(step) * 0.27,
                     pitch: 0.3,
                 };
-                let (r, proj) = painted(m, size, &pose);
-                for (i, (p, a)) in proj.iter().zip(&m.atoms).enumerate() {
-                    let (x, y) = p.px();
-                    let (x, y) = (x.floor() as i32, y.floor() as i32);
-                    // A centre shows its own element, or something in front of it: a
-                    // nearer ball, or a stick running toward the viewer.
-                    match r.owner(x, y) {
-                        o if o == i as u8 + 1 => {
-                            let ink = r.pixels.get(x, y).unwrap();
-                            assert_eq!(ink.role, element_ink(a.el, 0.5).role);
-                            shown += 1;
-                        }
-                        STICK_OWNER => {}
-                        o => {
-                            let other = &proj[usize::from(o) - 1];
-                            assert!(other.depth > p.depth, "{}: atom {i}", m.labels[0]);
+                let view = View::new(size);
+                let f = frame(m, &view, &pose, Bodies::new(&view, m));
+                let n = m.atoms.len();
+                for (j, bond) in m.bonds.iter().enumerate() {
+                    let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+                    paint(&mut canvas, m, &f, &[(n + j) as u16]);
+                    let (a, b) = (&f.proj[usize::from(bond.a)], &f.proj[usize::from(bond.b)]);
+                    let (da, db) = (ball_marks(size, a), ball_marks(size, b));
+                    for y in 0..50 {
+                        for x in 0..200 {
+                            if canvas.get(x, y).unwrap().ch != ' ' {
+                                assert!(!marked(&da, x, y) && !marked(&db, x, y));
+                            }
                         }
                     }
-                    total += 1;
                 }
             }
         }
-        // Most centres are in view: balls in front of their sticks.
-        assert!(shown * 10 >= total * 8, "{shown} of {total}");
+    }
+
+    const MARK: (Glyph, Ink) = (Glyph::ascii('#'), Ink::new(Role::Text, 255));
+
+    /// The cells `draw::disc` paints for ball `p`, on a blank canvas.
+    fn disc_marks(size: Size, p: &Proj) -> Canvas {
+        let mut c = Canvas::new(size, GlyphMode::Ascii);
+        draw::disc(&mut c, p.x, p.y, p.foot, |_, _, _| Some(MARK));
+        c
+    }
+
+    /// The cells ball `p` paints: `draw::disc`'s, or for a compact body of at least
+    /// half a row its centre cell and the cells either side.
+    fn ball_marks(size: Size, p: &Proj) -> Canvas {
+        if !(p.body == Body::Compact && p.foot >= 0.5) {
+            return disc_marks(size, p);
+        }
+        let mut c = Canvas::new(size, GlyphMode::Ascii);
+        let (x, y) = (p.x.round() as i32, p.y.round() as i32);
+        for dx in -1..=1 {
+            c.put(x + dx, y, MARK.0, MARK.1);
+        }
+        c
+    }
+
+    fn marked(c: &Canvas, x: i32, y: i32) -> bool {
+        c.get(x, y).is_some_and(|c| c.ch == '#')
     }
 
     #[test]
-    fn mol_a7_double_and_aromatic_bonds_show_their_order() {
-        // Two carbons 1.4 Å apart along x, face-on: scan the column through the bond's
-        // middle for lit runs. A single bond is one run, a double bond two, and an
-        // aromatic bond a solid run plus a dashed strand that is lit only in places.
-        let size = Size::new(120, 40);
-        let runs = |order: Order| {
-            let atoms = vec![at(El::C, -0.7, 0.0, 0.0), at(El::C, 0.7, 0.0, 0.0)];
-            let m = Model::new("pair", "C2", "0", atoms, vec![bd(0, 1, order)]);
-            let (r, proj) = painted(&m, size, &FACE_ON);
-            let x = ((proj[0].px().0 + proj[1].px().0) / 2.0).floor() as i32;
-            // Drawn model pixels only: the haze (MOL-A8) is background.
-            let lit: Vec<bool> = (0..r.h).map(|y| r.owner(x, y) != 0).collect();
-            let n = lit.windows(2).filter(|w| w[1] && !w[0]).count() + usize::from(lit[0]);
-            (n, lit.iter().filter(|&&l| l).count())
-        };
-        assert_eq!(runs(Order::Single).0, 1);
-        assert_eq!(runs(Order::Double).0, 2);
-        let (aromatic, _) = runs(Order::Aromatic);
-        assert!((1..=2).contains(&aromatic), "{aromatic}");
-        // Palette (CPK): H and C neutral text greys, N Ice, O H-alpha.
-        assert_eq!(element_ink(El::H, 1.0), Ink::new(Role::Text, 255));
-        assert_eq!(element_ink(El::C, 1.0).role, Role::Text);
-        assert!(element_ink(El::C, 1.0).level < 200);
-        assert_eq!(element_ink(El::N, 0.5).role, Role::Ramp(Ramp::Ice));
-        assert_eq!(element_ink(El::O, 0.5).role, Role::Ramp(Ramp::HAlpha));
+    fn mol_a4_covers_matches_draw_disc() {
+        let size = Size::new(60, 30);
+        for body in [Body::Round, Body::Compact, Body::Dot] {
+            for r in [0.3, 0.5, 0.96, 1.2, 2.7, 5.0] {
+                for (i, j) in (0..16).map(|k| (k % 4, k / 4)) {
+                    let p = Proj {
+                        x: 30.0 + 0.25 * f64::from(i),
+                        y: 15.0 + 0.25 * f64::from(j),
+                        r,
+                        body,
+                        foot: footprint(body, r, 1.0),
+                        ..Proj::default()
+                    };
+                    let disc = ball_marks(size, &p);
+                    // What paint_atom writes: the disc plus its rounded centre cell.
+                    let mut atom = Canvas::new(size, GlyphMode::Ascii);
+                    paint_atom(&mut atom, El::C, &p, 1.0);
+                    let centre = (p.x.round() as i32, p.y.round() as i32);
+                    for y in 0..30 {
+                        for x in 0..60 {
+                            let want = marked(&disc, x, y) || (x, y) == centre;
+                            assert_eq!(covers(&p, x, y), want, "{p:?} ({x}, {y})");
+                            let painted = atom.get(x, y).unwrap().ch != ' ';
+                            assert_eq!(painted, want, "{p:?} ({x}, {y})");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]
@@ -1610,10 +1612,8 @@ mod tests {
             .map(|seed| {
                 let mut g = MoleculeViewer::new();
                 g.resize(size, &mut Ctx::new(seed, size));
-                g.prepare();
                 // A later resize keeps the start.
                 g.resize(Size::new(40, 12), &mut Ctx::new(seed + 100, size));
-                g.prepare();
                 g.pose().molecule
             })
             .collect();
@@ -1626,14 +1626,12 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = MoleculeViewer::new();
         g.resize(size, &mut ctx);
-        g.prepare();
         for _ in 0..MOLECULES * 2 {
             let m = g.pose().molecule;
             let caption = g.caption().unwrap();
             assert_eq!(caption, CAPTIONS[m]);
             assert!(g.models[m].labels[0].starts_with(caption), "{caption}");
             g.update(SLOT / 2.0, &mut ctx);
-            g.prepare();
         }
     }
 
@@ -1642,7 +1640,10 @@ mod tests {
         // Mid grow/shrink the atoms converge on the centroid: dimmed by s², with no
         // sticks below half size, the clump reads as a spark rather than a knot.
         let size = Size::new(80, 24);
-        for (k, m) in gallery().iter().enumerate() {
+        let view = View::new(size);
+        let models = gallery();
+        for (k, m) in models.iter().enumerate() {
+            let bodies = Bodies::new(&view, m);
             for s in [0.1, 0.3, 0.45, 0.55, 0.8, 1.0] {
                 let pose = Pose {
                     molecule: k,
@@ -1650,11 +1651,22 @@ mod tests {
                     yaw: 0.7,
                     pitch: 0.3,
                 };
-                let (r, _) = painted(m, size, &pose);
+                let f = frame(m, &view, &pose, bodies);
+                for (i, p) in f.proj[..m.atoms.len()].iter().enumerate() {
+                    let want = s * s * depth_level(nu(p.depth, m.r_eff));
+                    assert!(
+                        (p.level - want).abs() < 1e-9,
+                        "{} s = {s} atom {i}",
+                        m.labels[0]
+                    );
+                }
+                let mut c = Canvas::new(size, GlyphMode::Unicode);
+                paint(&mut c, m, &f, &f.order[..f.items]);
                 // Nothing, specular highlights included, outshines 255·s².
-                let top = (0..r.h)
-                    .flat_map(|y| (0..r.w).map(move |x| (x, y)))
-                    .map(|(x, y)| r.pixels.get(x, y).unwrap().level)
+                let top = c
+                    .cells()
+                    .iter()
+                    .map(|cell| cell.ink.level)
                     .max()
                     .unwrap_or(0);
                 assert!(
@@ -1662,11 +1674,12 @@ mod tests {
                     "{} s = {s}",
                     m.labels[0]
                 );
-                // Sticks: the bonded molecule paints more than its bare balls from half size.
-                let bare = Model::new("bare", "", "0", m.atoms.clone(), Vec::new());
-                let (b, _) = painted(&bare, size, &pose);
-                let lit = |r: &Raster| r.z.iter().filter(|z| z.is_finite()).count();
-                assert_eq!(lit(&r) > lit(&b), s >= 0.5, "{} s = {s}", m.labels[0]);
+                let n = m.atoms.len();
+                let bonds: Vec<u16> = (n..f.items).map(|j| j as u16).collect();
+                let mut sticks = Canvas::new(size, GlyphMode::Unicode);
+                paint(&mut sticks, m, &f, &bonds);
+                let drawn = sticks.cells().iter().any(|cell| cell.ch != ' ');
+                assert_eq!(drawn, s >= 0.5, "{} s = {s}", m.labels[0]);
             }
         }
     }
@@ -1674,100 +1687,253 @@ mod tests {
     #[test]
     fn mol_a6_label_tier_is_the_longest_that_fits() {
         let m = by_name("caffeine");
-        assert_eq!(m.label(80, false), "caffeine  C8H10N4O2  194.19 g/mol");
-        assert_eq!(m.label(33, false), "caffeine  C8H10N4O2  194.19 g/mol");
-        assert_eq!(m.label(32, false), "caffeine  C8H10N4O2");
-        assert_eq!(m.label(18, false), "C8H10N4O2");
-        assert_eq!(m.label(8, false), "");
-        // The title's caption names the molecule: the label keeps formula and mass.
-        assert_eq!(m.label(80, true), "C8H10N4O2  194.19 g/mol");
-        assert_eq!(m.label(23, true), "C8H10N4O2  194.19 g/mol");
-        assert_eq!(m.label(22, true), "C8H10N4O2");
-        for named in [false, true] {
-            for room in 0..60 {
-                let l = m.label(room, named);
-                assert!(l.chars().count() <= room);
-                // Every longer tier (they come longest first) would have been clipped.
-                for &i in tiers(named).iter().take_while(|&&i| m.labels[i] != l) {
-                    assert!(m.labels[i].chars().count() > room);
+        assert_eq!(m.label(80), "caffeine  C8H10N4O2  194.19 g/mol");
+        assert_eq!(m.label(33), "caffeine  C8H10N4O2  194.19 g/mol");
+        assert_eq!(m.label(32), "caffeine  C8H10N4O2");
+        assert_eq!(m.label(18), "C8H10N4O2");
+        assert_eq!(m.label(8), "");
+        for room in 0..60 {
+            let l = m.label(room);
+            assert!(l.chars().count() <= room);
+            // Every longer tier (they come longest first) would have been clipped.
+            for tier in m.labels.iter().take_while(|x| x.as_str() != l) {
+                assert!(tier.chars().count() > room);
+            }
+        }
+    }
+
+    /// Whether atom `i` of `f` paints as a single-cell dot (`●`/`•`) rather than a body.
+    fn is_dot(m: &Model, f: &Frame, i: usize, size: Size) -> bool {
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        paint(&mut c, m, f, &[i as u16]);
+        let p = f.proj[i];
+        let ch = c.get(p.x.round() as i32, p.y.round() as i32).map(|c| c.ch);
+        matches!(ch, Some('●' | '•'))
+    }
+
+    #[test]
+    fn mol_a6_ball_or_dot_is_fixed_per_molecule_and_size() {
+        let tl = gallery_timeline();
+        let models = gallery();
+        for size in [Size::new(80, 24), Size::new(200, 50), Size::new(120, 36)] {
+            let view = View::new(size);
+            // Per slot: each atom's class, fixed at its first sample.
+            let mut class: Vec<Vec<Option<bool>>> =
+                models.iter().map(|m| vec![None; m.atoms.len()]).collect();
+            for k in 0..500 {
+                // Whole slots, grow and shrink included, over a 60 s cycle.
+                let t = 60.0 * (f64::from(k) + 0.5) / 500.0;
+                let pose = pose(&tl, 0, t);
+                if pose.s < 0.02 {
+                    continue;
+                }
+                let m = &models[pose.molecule];
+                let f = frame(m, &view, &pose, Bodies::new(&view, m));
+                let mut heavy = None;
+                for (i, a) in m.atoms.iter().enumerate() {
+                    let p = f.proj[i];
+                    let on = (0.0..f64::from(size.width())).contains(&p.x.round())
+                        && (0.0..f64::from(size.height())).contains(&p.y.round());
+                    if !on {
+                        continue;
+                    }
+                    let dot = is_dot(m, &f, i, size);
+                    let first = *class[pose.molecule][i].get_or_insert(dot);
+                    assert_eq!(dot, first, "{size:?} t = {t}: {} atom {i}", m.labels[0]);
+                    // N and O keep their colour: all heavy atoms share one class.
+                    if a.el != El::H {
+                        assert_eq!(dot, *heavy.get_or_insert(dot), "{size:?} {}", m.labels[0]);
+                    }
                 }
             }
         }
     }
 
     #[test]
-    fn mol_a6_the_readout_is_right_aligned_and_leaves_out_the_name_the_title_shows() {
-        let size = Size::new(80, 24);
-        let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(3, size));
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-        for _ in 0..120 {
-            g.update(0.25, &mut ctx);
-            g.prepare();
-            canvas.clear();
-            g.render(&mut canvas);
-            let caption = g.caption().unwrap_or_default();
-            let lines = canvas.to_lines();
-            let last = &lines[23];
-            assert!(
-                !caption.is_empty() && !last.contains(caption),
-                "{caption}: {last}"
-            );
-            assert!(last.ends_with(" g/mol "), "{last}");
-            // The rest of the canvas is art: no text at the top any more.
-            assert!(!lines[0].contains("g/mol"));
+    fn mol_a6_small_molecules_are_lit_balls_at_80x24() {
+        let view = View::new(Size::new(80, 24));
+        let heavy: Vec<bool> = gallery()
+            .iter()
+            .map(|m| Bodies::new(&view, m).heavy != Body::Dot)
+            .collect();
+        // Water, methane, ethanol and benzene are lit; caffeine and C60 (≈ 0.7-row
+        // balls) stay dot-and-stick.
+        assert_eq!(heavy, [true, true, true, true, false, false]);
+        // The scene caches the classes per size.
+        let mut scene = MoleculeViewer::new();
+        scene.resize(Size::new(80, 24), &mut Ctx::new(1, Size::new(80, 24)));
+        for (m, b) in scene.models.iter().zip(scene.bodies) {
+            assert_eq!(b, Bodies::new(&scene.view, m));
         }
+        // Benzene keeps a visible C–C stick between its lit balls in every hold pose.
+        let (m, tl) = (by_name("benzene"), gallery_timeline());
+        let bodies = Bodies::new(&view, &m);
+        for k in 0..40 {
+            let t = GROW + HOLD * (f64::from(k) + 0.5) / 40.0;
+            let pose = Pose {
+                molecule: 3,
+                ..pose(&tl, 3, t)
+            };
+            let f = frame(&m, &view, &pose, bodies);
+            let n = m.atoms.len();
+            let sticks = m
+                .bonds
+                .iter()
+                .enumerate()
+                .filter(|(_, b)| m.atoms[usize::from(b.a)].el == El::C)
+                .filter(|(_, b)| m.atoms[usize::from(b.b)].el == El::C)
+                .filter(|&(j, _)| {
+                    let mut c = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+                    paint(&mut c, &m, &f, &[(n + j) as u16]);
+                    c.to_lines().iter().any(|l| l.chars().any(|ch| ch != ' '))
+                })
+                .count();
+            assert!(sticks >= 3, "t = {t}: {sticks} visible C–C sticks");
+        }
+    }
+
+    #[test]
+    fn mol_a6_small_bodies_are_compact_three_cell_balls() {
+        let compact = |size: Size| -> Vec<bool> {
+            let view = View::new(size);
+            gallery()
+                .iter()
+                .map(|m| Bodies::new(&view, m).heavy == Body::Compact)
+                .collect()
+        };
+        // At 80×24 benzene's ≈ 1.2-row balls; water, methane and ethanol are round discs,
+        // caffeine and C60 dots. At 40×12 water's and methane's ≈ 1.1-row balls.
+        assert_eq!(
+            compact(Size::new(80, 24)),
+            [false, false, false, true, false, false]
+        );
+        assert_eq!(
+            compact(Size::new(40, 12)),
+            [true, true, false, false, false, false]
+        );
+        let tl = gallery_timeline();
+        for (size, name) in [
+            (Size::new(80, 24), "benzene"),
+            (Size::new(40, 12), "water"),
+            (Size::new(40, 12), "methane"),
+        ] {
+            let view = View::new(size);
+            let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+            let m = by_name(name);
+            let bodies = Bodies::new(&view, &m);
+            for k in 0..20 {
+                let t = GROW + HOLD * (f64::from(k) + 0.5) / 20.0;
+                let f = frame(&m, &view, &pose(&tl, 0, t), bodies);
+                for (i, a) in m.atoms.iter().enumerate() {
+                    if a.el == El::H {
+                        continue;
+                    }
+                    let p = f.proj[i];
+                    assert_eq!(p.body, Body::Compact, "{name} atom {i}");
+                    let mut c = Canvas::new(size, GlyphMode::Unicode);
+                    paint(&mut c, &m, &f, &[i as u16]);
+                    let (cx, cy) = (p.x.round() as i32, p.y.round() as i32);
+                    // A `█▓░` lozenge on the centre row, never a `+` of cells.
+                    for y in 0..h {
+                        for x in 0..w {
+                            let want = y == cy && (x - cx).abs() <= 1;
+                            let painted = c.get(x, y).unwrap().ch != ' ';
+                            assert_eq!(painted, want, "{name} t = {t} atom {i} ({x}, {y})");
+                            assert_eq!(covers(&p, x, y), want);
+                        }
+                    }
+                    // Lit from the left, like the round balls.
+                    let lvl = |x: i32| c.get(x, cy).unwrap().ink.level;
+                    assert!(lvl(cx - 1) > lvl(cx + 1), "{name} t = {t} atom {i}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mol_a6_rear_bonds_are_dotted() {
+        let size = Size::new(80, 24);
+        // In ASCII a ball's dim rim never reads as a dotted rear stick running out of it.
+        assert!(BODY.iter().all(|g| g.ascii != REAR_BOND.ascii));
+        assert_eq!(REAR_BOND, Glyph::new('·', '.'));
+        let (m, view) = (by_name("buckminsterfullerene"), View::new(size));
+        let bodies = Bodies::new(&view, &m);
+        let (mut rear, mut front) = (0, 0);
+        for step in 0..12 {
+            let pose = Pose {
+                molecule: 5,
+                s: 1.0,
+                yaw: f64::from(step) * 0.5,
+                pitch: 0.3,
+            };
+            let f = frame(&m, &view, &pose, bodies);
+            let n = m.atoms.len();
+            for (j, bond) in m.bonds.iter().enumerate() {
+                let (a, b) = (f.proj[usize::from(bond.a)], f.proj[usize::from(bond.b)]);
+                let far = !a.near && !b.near;
+                for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {
+                    let mut c = Canvas::new(size, mode);
+                    paint(&mut c, &m, &f, &[(n + j) as u16]);
+                    for ch in c
+                        .to_lines()
+                        .iter()
+                        .flat_map(|l| l.chars().collect::<Vec<_>>())
+                    {
+                        // The back face is a faint dotted lattice in both modes; the
+                        // front face keeps its slope strokes.
+                        match (mode, ch) {
+                            (_, ' ') => {}
+                            (GlyphMode::Ascii, '.') | (GlyphMode::Unicode, '·') => {
+                                assert!(far, "front bond dotted");
+                            }
+                            (GlyphMode::Ascii, _) => {
+                                assert!(!far && "-|/\\".contains(ch), "{ch:?}");
+                            }
+                            (GlyphMode::Unicode, _) => {
+                                assert!(!far && "─│╱╲".contains(ch), "{ch:?}");
+                            }
+                        }
+                    }
+                }
+                if far { rear += 1 } else { front += 1 }
+            }
+        }
+        assert!(rear > 100 && front > 100, "{rear} {front}");
     }
 
     #[test]
     fn mol_a6_ascii_frames_show_element_symbols() {
         let size = Size::new(80, 24);
-        let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(1, size));
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let mut canvas = Canvas::new(size, GlyphMode::Ascii);
-        let mut seen = std::collections::BTreeSet::new();
-        for _ in 0..(60.0 / 0.5) as usize {
-            g.update(0.5, &mut ctx);
-            g.prepare();
-            canvas.clear();
-            g.render(&mut canvas);
-            let lines = canvas.to_lines();
-            assert!(lines.iter().all(|l| l.is_ascii()));
-            let pose = g.pose();
+        let mut scene = MoleculeViewer::new();
+        scene.resize(size, &mut Ctx::new(42, size));
+        for step in 0..120 {
+            scene.t = GROW + f64::from(step) * 0.5;
+            let pose = scene.pose();
             if pose.s < 1.0 {
                 continue;
             }
-            // Every atom that owns its centre pixel shows its symbol, upper-case when near.
-            for &(x, y, ch) in &g.symbols[..g.n_symbols] {
-                assert_eq!(canvas.get(x, y).unwrap().ch, ch);
-                seen.insert(ch);
+            let m = &scene.models[pose.molecule];
+            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+            scene.render(&mut canvas);
+            assert!(canvas.to_lines().iter().all(|l| l.is_ascii()));
+            let f = frame(m, &scene.view, &pose, scene.bodies[pose.molecule]);
+            let order = &f.order[..f.items];
+            for (k, &item) in order.iter().enumerate() {
+                let i = usize::from(item);
+                if i >= m.atoms.len() {
+                    continue;
+                }
+                let p = f.proj[i];
+                let (x, y) = (p.x.round() as i32, p.y.round() as i32);
+                let mut later = Canvas::new(size, GlyphMode::Ascii);
+                paint(&mut later, m, &f, &order[k + 1..]);
+                // The label row is drawn last too.
+                if y == 0 || later.get(x, y).is_some_and(|c| c.ch != ' ') {
+                    continue;
+                }
+                let near = nu(p.depth, m.r_eff) >= 0.5;
+                assert_eq!(canvas.get(x, y).unwrap().ch, m.atoms[i].el.symbol(near));
             }
-            assert!(g.n_symbols > 0);
         }
-        for ch in ['H', 'C', 'N', 'O', 'h', 'c'] {
-            assert!(seen.contains(&ch), "{ch} never shown: {seen:?}");
-        }
-    }
-
-    #[test]
-    fn mol_gen_r4_ignores_non_finite_and_non_positive_dt() {
-        // Hardening beyond GEN-R4's [0, 0.25]: a NaN dt would poison the clock for good.
-        let size = Size::new(80, 24);
-        let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(3, size));
-        g.resize(size, &mut ctx);
-        g.prepare();
-        g.update(1.5, &mut ctx);
-        g.prepare();
-        let t0 = g.t;
-        for dt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
-            g.update(dt, &mut ctx);
-            g.prepare();
-            assert_eq!(g.t, t0, "dt {dt}");
-        }
-        g.update(0.25, &mut ctx);
-        g.prepare();
-        assert_eq!(g.t, t0 + 0.25);
     }
 }

@@ -19,10 +19,11 @@
 //! - `cells`: changed cells per frame; `wr`: `write` calls (syscalls) per frame;
 //! - `blk@5`, `blk@20`, `blk2@20` (2×2 squares, not ratcheted), `dark@5`, `dark@20`,
 //!   `luma@20`, `cov@5`, `cov@20` (lit coverage), `cmass@5`, `cmass@20` (chroma mass),
-//!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; cap 0.20),
-//!   `p99L` (p99 lit-pixel luma at the worse time; floor 0.6): the
-//!   GEN-R17/R18/R21 art metrics of the exact `astro` frame at t = 5 s and 20 s
-//!   (`sciart_render::metrics`), when `--secs` reaches them.
+//!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; M14's cap
+//!   was 0.20), `p99L` (p99 lit-pixel luma at the worse time; M14's floor was 0.6): the
+//!   RND-R13 art metrics of the exact `astro` frame at t = 5 s and 20 s
+//!   (`sciart_render::metrics`), when `--secs` reaches them. Darkness, coverage, chroma
+//!   mass and edge weight are the GEN-R24 per-scene bands; the rest are informative.
 //!
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
 //! descending), `dark` (dark@20, ascending), `cov`, `cmass`, `edge`, `neon` (at 20 s,
@@ -288,16 +289,14 @@ fn run<B: Backend>(entry: &Entry, args: &Args, mut backend: B, sink: &Sink) -> R
 }
 
 /// Ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs`: the measured
-/// values with the table's slack (blockiness +0.02, darkness −0.02, lit coverage +0.02,
-/// chroma mass +0.003, edge weight +10 % + 0.2; lit-coverage floor −0.02), alphabetical.
+/// values with the table's slack (darkness −0.02, lit coverage +0.02, chroma mass +0.003,
+/// edge weight +10 % + 0.2), alphabetical (GEN-R24).
 fn emit_limits(rows: &[Row]) {
     let up_by = |v: f64, slack: f64, unit: f64| ((v + slack) / unit - 1e-9).ceil() * unit;
-    let up = |v: f64| up_by(v, 0.02, 1e-3);
     let dn = |v: f64| (((v - 0.02) * 1000.0 + 1e-9).floor() / 1000.0).max(0.0);
     let cov = |v: f64| up_by(v, 0.02, 1e-3).min(1.0);
     let mass = |v: f64| up_by(v, 0.003, 1e-4);
     let edge = |v: f64| up_by(v * 1.1, 0.2, 0.1);
-    let cov_floor = |v: f64| dn(v);
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by_key(|r| r.name);
     for r in sorted {
@@ -307,10 +306,8 @@ fn emit_limits(rows: &[Row]) {
         };
         let (ca, cb) = (a.clean, b.clean);
         println!(
-            "    (\"{}\", [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.4}, {:.4}], [{:.1}, {:.1}], [{:.3}, {:.3}]),",
+            "    (\"{}\", [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.4}, {:.4}], [{:.1}, {:.1}]),",
             r.name,
-            up(a.blockiness),
-            up(b.blockiness),
             dn(a.darkness),
             dn(b.darkness),
             cov(ca.coverage),
@@ -319,8 +316,6 @@ fn emit_limits(rows: &[Row]) {
             mass(cb.chroma_mass),
             edge(ca.edge_weight),
             edge(cb.edge_weight),
-            cov_floor(ca.coverage),
-            cov_floor(cb.coverage),
         );
     }
 }

@@ -74,8 +74,8 @@ const HOT_DECAY: f32 = 0.8;
 /// Half-height (`H`) of the lane the clearing dye can reach (sources ± eddy spread).
 const HOT_LANE: f64 = 0.12;
 /// The disc (ADR-0017): radius as a share of the frame's smaller side, polar flattening,
-/// the view's sway about the spot (rad, rad/s), the clouds' brightness scale (Sienna
-/// ≤ ~200, cream zones) and the spot's.
+/// the view's sway about the spot (rad, rad/s), the clouds' brightness scale (before
+/// the five steps) and the spot's.
 const DISC: f64 = 0.47;
 const OBLATE: f64 = 0.935;
 const SWAY: (f64, f64) = (0.5, 0.05);
@@ -566,7 +566,7 @@ impl JupiterStorms {
                         };
                         let spot = jovian::spot_level(rr, a, relief);
                         let level = jovian::spot_blend(level, spot, inside, collar);
-                        return jovian::sienna(level, shade / DIM * SPOT_DIM);
+                        return jovian::cloud_ink(level, shade / DIM * SPOT_DIM);
                     }
                 }
             }
@@ -574,9 +574,9 @@ impl JupiterStorms {
             if (ly - HOT_Y).abs() < HOT_LANE {
                 let h = f64::from(vortex_advect::sample(hot, gx, gy, XEdge::Wrap));
                 let dark = ((h - 0.12) / 0.5).clamp(0.0, 0.6);
-                return jovian::sienna(level * (1.0 - dark), shade);
+                return jovian::cloud_ink(level * (1.0 - dark), shade);
             }
-            jovian::sienna(level, shade)
+            jovian::cloud_ink(level, shade)
         });
     }
 }
@@ -743,8 +743,8 @@ mod tests {
     }
 
     #[test]
-    fn jup_a6_a_sienna_disc_on_black_space() {
-        // ADR-0017: the whole disc on black, all Sienna (no blue), the corners black.
+    fn jup_a6_a_stepped_m11_disc_on_black_space() {
+        // ADR-0018: the whole disc on black in the stepped cloud palette, corners black.
         let (mut g, mut ctx) = scene();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
@@ -758,7 +758,7 @@ mod tests {
                 let i = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
                 match i.role {
                     Role::Background => {}
-                    Role::Ramp(Ramp::Sienna) => disc += 1,
+                    _ if jovian::step_of(i).is_some() => disc += 1,
                     other => panic!("unexpected ink {other:?} at ({x}, {y})"),
                 }
             }
@@ -786,19 +786,22 @@ mod tests {
         let (cx, cy) = (0.5 * pw, 0.5 * ph - r * OBLATE * lat.sin_det());
         let level = |fx: f64, fy: f64| {
             let i = g.pixels.get(fx as i32, fy as i32).expect("on screen");
-            assert_eq!(i.role, Role::Ramp(Ramp::Sienna));
-            i.level
+            jovian::step_of(i).expect("a cloud step")
         };
         let centre = level(cx, cy);
+        assert_eq!(
+            g.pixels.get(cx as i32, cy as i32).map(|i| i.role),
+            Some(Role::Hot),
+            "the spot is rust"
+        );
         let rim = 0.8 * grs.b * LAT_SPAN * r;
         let collar = level(cx, cy - rim - 2.0).max(level(cx, cy + rim + 2.0));
-        assert!(centre + 30 < collar, "centre {centre}, collar {collar}");
+        assert!(centre < collar, "centre {centre}, collar {collar}");
     }
 
     #[test]
-    fn jup_a9_the_limb_is_darkened_and_feathered() {
-        // Across the disc's edge the level falls through intermediate values into black:
-        // limb darkening and a 1.5-pixel feather, not a stepped rim.
+    fn jup_a9_the_limb_is_darkened() {
+        // Across the disc's edge the clouds step down into black: limb darkening.
         let (mut g, mut ctx) = scene();
         g.update(SIM_DT, &mut ctx);
         g.prepare();
@@ -811,10 +814,11 @@ mod tests {
             .filter_map(|x| g.pixels.get(x, y))
             .collect();
         assert!(edge.iter().any(|i| i.role == Role::Background));
-        let centre = g.pixels.get((0.5 * pw) as i32, y).map_or(0, |i| i.level);
+        let rank = |i: Ink| jovian::step_of(i).unwrap_or(0);
+        let centre = g.pixels.get((0.5 * pw) as i32, y).map_or(0, rank);
         assert!(
             edge.iter()
-                .any(|i| i.role != Role::Background && i.level < centre),
+                .any(|&i| i.role != Role::Background && rank(i) < centre),
             "{edge:?}"
         );
     }

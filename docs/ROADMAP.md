@@ -203,5 +203,16 @@ Design: [docs/design/M14-resource-diet.md](design/M14-resource-diet.md) · branc
 - [x] Results: −49 % CPU per frame, −68 % bytes per frame, 57 → 1 writes per frame, blockiness halved, dark ground 0.68 → 0.89 (docs/design/M14-resource-diet.md)
 - [ ] M14 follow-ups: see "Follow-ups" in docs/design/M14-resource-diet.md (22 scenes > 2 ms worst at 500×150, mars_rover sky band blocks, logged art minors, bench `worst` table)
 
+## M15 — M11 look restored ✅
+Design: [docs/design/M15-m11-look.md](design/M15-m11-look.md) · [ADR-0018](adr/0018-m11-look-restored.md) · branch `feat/m15-m11-style`. Evidence: `samples/` (every scene at every milestone).
+- [x] Samples of every scene at M8, M10–M14; user verdict: M11's look was better (literal revert, flat fills, M11 sparseness, M13 scenes in M11's idiom, keep M14's perf)
+- [x] Tests first: M11 ink-frame fixture + fidelity (GEN-R22), M11 palette (GEN-R23), gallery resource budget (RT-R16); `art_metrics` as GEN-R24 per-scene bands
+- [x] Revert the 41 M11 scenes (Trig port, fractal_growth lattice cap, prepare hooks; frames identical) and their SPEC-002 sections
+- [x] Colour hysteresis band 2 → 4 (RND-R14): gallery back below M14's bytes per frame, inks unchanged
+- [x] Restyle the 35 M13 scenes in M11's idiom (critic review ≤ 2 rounds)
+- [x] Budgets and results: 0.56 ms CPU, 12.5 KB and 600 changed cells per frame (M14: 0.63 ms, 18.8 KB, 806); every scene < 2 ms worst at 200×50, < 5 ms at 500×150; samples at M15 (`samples/*-m15.png`)
+- [ ] Local `--no-ff` merge of `feat/m15-m11-style` into main
+- [ ] M15 follow-ups: see "Follow-ups" in docs/design/M15-m11-look.md
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).

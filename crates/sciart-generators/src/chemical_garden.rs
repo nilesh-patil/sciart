@@ -11,14 +11,13 @@
 //! the pressure falls to zero and the new membrane gets a fresh strength. Tips branch now
 //! and then; precipitate flakes break off and sink.
 //!
-//! Drawn on black (ADR-0017): tubes are thin strokes anti-aliased by coverage in their
-//! salts' muted colours, lighter while fresh and at the growing tips; the floor is one
-//! dim line.
+//! Drawn in M11's idiom (ADR-0018): on black, tubes are thin half-block strokes in their
+//! salts' semantic colours at two stepped levels (fresh, old), the growing tips brightest;
+//! the floor is one dim line and the vent plume single dim pixels, warm at the orifice.
 
 use rand::Rng;
 use sciart_core::particles::gaussian;
 use sciart_core::prelude::*;
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "chemical_garden",
@@ -85,9 +84,9 @@ pub(crate) struct Segment {
     pub(crate) fade: f32,
 }
 
-/// Metal-salt tube colours (muted, ADR-0017): copper blue, cobalt pink, iron rust, nickel
-/// green.
-pub(crate) const SALTS: [Ramp; 4] = [Ramp::Ice, Ramp::HAlpha, Ramp::Sienna, Ramp::Aurora];
+/// Metal-salt tube colours in M11's semantic roles (GEN-R23): copper blue, cobalt pink,
+/// iron rust, nickel green.
+pub(crate) const SALTS: [Role; 4] = [Role::Cold, Role::Accent, Role::Hot, Role::Particle];
 /// The vent chimney's mineral wall (iron sulfides and oxides): rust.
 const CHIMNEY_SALT: u8 = 2;
 /// An old garden fades out over this long while the new one sprouts.
@@ -395,8 +394,6 @@ struct Garden {
     act: usize,
     timeline: Timeline,
     pixels: Pixels,
-    glow: Glow,
-    tone: Tone,
     /// Pixel rows the tank spans (above the title row).
     rows: f64,
     started: bool,
@@ -412,8 +409,6 @@ impl Default for Garden {
             act: usize::MAX,
             timeline: Timeline::new(&[(CAPTIONS[0], GARDEN_S), (CAPTIONS[1], VENT_S)]),
             pixels: Pixels::default(),
-            glow: Glow::default(),
-            tone: Tone::asinh(0.5, 12.0),
             rows: 1.0,
             started: false,
             dirty: true,
@@ -421,18 +416,23 @@ impl Default for Garden {
     }
 }
 
-/// Each salt's ramp span `(lo, hi)`: old membrane at `lo`, the fresh growing tube and the
-/// tip toward `hi` (ADR-0017: muted, so the tubes sit quietly on black).
-const SALT_LEVELS: [(f64, f64); 4] = [(90.0, 190.0), (80.0, 150.0), (90.0, 180.0), (90.0, 170.0)];
-/// Tube stroke radius in pixels: 1–3-pixel strokes, the chimney's wall the widest.
+/// Stepped levels (M11 idiom): an old membrane, a fresh tube (younger than [`FRESH_S`]),
+/// a growing tip, and loose jet droplets and flakes.
+const OLD: u8 = 120;
+const FRESH: u8 = 200;
+const TIP: u8 = 255;
+const LOOSE: u8 = 90;
+const FRESH_S: f32 = 4.0;
+/// Tube stroke radius in pixels: 1–2-pixel strokes, the chimney's wall the widest.
 const TUBE_R: (f64, f64) = (0.5, 1.0);
-const CHIMNEY_R: f64 = 1.5;
+const CHIMNEY_R: f64 = 0.75;
 /// Segments wider than this (tank units) are chimney wall.
 const CHIMNEY_W: f64 = 0.025;
 /// The floor: one dim line.
-const FLOOR_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 40);
-/// The glow a smoke parcel exposes around its pixel.
-const SMOKE_HALO: [(i32, i32, f32); 9] = sciart_core::raster::halo_kernel(1);
+const FLOOR_INK: Ink = Ink::new(Role::Dim, 60);
+/// Vent smoke: single dim pixels, warm near the orifice.
+const SMOKE_INK: Ink = Ink::new(Role::Dim, 110);
+const WARM_INK: Ink = Ink::new(Role::Hot, 150);
 
 /// Set pixel `(x, y)` to `ink` unless it already holds a brighter one.
 fn put_max(pixels: &mut Pixels, x: i32, y: i32, ink: Ink) {
@@ -444,10 +444,9 @@ fn put_max(pixels: &mut Pixels, x: i32, y: i32, ink: Ink) {
     }
 }
 
-/// A capsule `a → b` of radius `r` (pixels), anti-aliased by coverage: each pixel's level
-/// is `level` times the share of it inside the stroke, so edges fade into the black
-/// instead of stepping (ADR-0017: thin lines, anti-aliased by intensity).
-fn capsule(pixels: &mut Pixels, a: (f64, f64), b: (f64, f64), r: f64, role: Role, level: f64) {
+/// A capsule `a → b` of radius `r` (pixels), filled flat: a pixel is set when its centre
+/// lies inside the stroke (M11's hard-edged pixels, no anti-aliasing ramp).
+fn capsule(pixels: &mut Pixels, a: (f64, f64), b: (f64, f64), r: f64, ink: Ink) {
     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
     let len2 = dx * dx + dy * dy;
     let reach = r + 1.0;
@@ -471,19 +470,19 @@ fn capsule(pixels: &mut Pixels, a: (f64, f64), b: (f64, f64), r: f64, role: Role
                 0.0
             };
             let d = (px - a.0 - t * dx).hypot(py - a.1 - t * dy);
-            let cover = (r + 0.5 - d).clamp(0.0, 1.0);
-            if cover > 0.0 {
-                put_max(pixels, x, y, Ink::new(role, ink::level(level * cover)));
+            if d <= r + 0.25 {
+                put_max(pixels, x, y, ink);
             }
         }
     }
 }
 
 impl Garden {
-    /// The tank on black: tubes as thin anti-aliased strokes in their salts' muted
-    /// colours, lighter while fresh and at the growing tips; the seed crystals small
-    /// points; the floor one dim line; the vent's smoke a faint grey glow, warm only at
-    /// the orifice. Rebuilt from the model in `prepare` (GEN-R20).
+    /// The tank on black: tubes as thin flat strokes in their salts' colours, brighter
+    /// while fresh, the growing tips brightest; the seed crystals small points; the floor
+    /// one dim line; the vent's smoke single dim pixels, warm at the orifice. An old
+    /// garden fading out drops a step, then another, then goes. Rebuilt from the model in
+    /// `prepare` (GEN-R20).
     fn rasterise(&mut self) {
         self.pixels.clear();
         let ps = self.pixels.pixel_size();
@@ -496,100 +495,72 @@ impl Garden {
                 self.pixels.set(x, floor, FLOOR_INK);
             }
         }
-        let salt = |i: u8| usize::from(i) % SALTS.len();
+        let salt = |i: u8| SALTS[usize::from(i) % SALTS.len()];
         for s in &self.tank.segments {
-            let k = salt(s.salt);
-            let (lo, hi) = SALT_LEVELS[k];
-            let fresh = (1.0 - f64::from(s.age) / 6.0).max(0.0);
-            let fade = f64::from(s.fade.clamp(0.0, 1.0));
             let r = if s.w > CHIMNEY_W {
                 CHIMNEY_R
             } else {
                 (s.w * pw).clamp(TUBE_R.0, TUBE_R.1)
             };
-            let level = (lo + (hi - lo) * 0.6 * fresh) * fade;
+            let level = if s.fade < 0.5 {
+                OLD / 2
+            } else if s.fade < 1.0 || s.age > FRESH_S {
+                OLD
+            } else {
+                FRESH
+            };
             capsule(
                 &mut self.pixels,
                 to_px(s.a[0], s.a[1]),
                 to_px(s.b[0], s.b[1]),
                 r,
-                Role::Ramp(SALTS[k]),
-                level,
+                Ink::new(salt(s.salt), level),
             );
         }
         // Seed crystals (the chimney stands on its own): small points.
         if !self.tank.vent {
             for (k, &(sx, sy)) in self.tank.seeds[..self.tank.n_seeds].iter().enumerate() {
-                let i = salt(self.tank.salts[k]);
                 let c = to_px(sx, sy);
                 capsule(
                     &mut self.pixels,
                     c,
                     c,
                     1.0,
-                    Role::Ramp(SALTS[i]),
-                    SALT_LEVELS[i].1,
+                    Ink::new(salt(self.tank.salts[k]), TIP),
                 );
             }
         }
-        // Growing tips: the lightest point of each tube, swelling a little with the
-        // pressure inside before it bursts.
+        // Growing tips: the brightest point of each tube, swelling a pixel before it
+        // bursts.
         for t in &self.tank.tips {
-            let i = salt(t.salt);
-            let swell = (t.p / t.strength).clamp(0.0, 1.0);
+            let r = if t.p / t.strength > 0.7 { 1.0 } else { 0.5 };
             let c = to_px(t.x, t.y);
-            let level = SALT_LEVELS[i].1 + 30.0 * swell;
-            capsule(
-                &mut self.pixels,
-                c,
-                c,
-                0.7 + 0.5 * swell,
-                Role::Ramp(SALTS[i]),
-                level,
-            );
+            capsule(&mut self.pixels, c, c, r, Ink::new(salt(t.salt), TIP));
         }
-        // The vent plume: a faint grey glow, warm only at the orifice.
-        self.glow.clear();
+        // The vent plume: single dim pixels, warm near the orifice.
         if self.tank.vent {
-            for p in self.tank.particles.iter().filter(|p| p.kind == Kind::Smoke) {
-                let (x, y) = to_px(p.x, p.y);
-                self.glow
-                    .splat(2.0 * x, 2.0 * y, &SMOKE_HALO, 0.25 * p.life);
-            }
             let orifice = to_px(0.5, 0.55);
-            let (glow, tone, rows) = (&self.glow, &self.tone, self.rows);
-            for y in 0..i32::from(ps.height()) {
-                for x in 0..i32::from(ps.width()) {
-                    let level = tone.level(glow.get(x, y).unwrap_or(0.0));
-                    if level < 24 {
-                        continue;
-                    }
-                    let hot = (orifice.1 - f64::from(y)) < 0.08 * rows
-                        && (f64::from(x) - orifice.0).abs() < 0.05 * pw;
-                    let ink = if hot {
-                        Ink::new(Role::Ramp(Ramp::Ember), level / 2 + 30)
-                    } else {
-                        Ink::new(Role::Ramp(Ramp::Starlight), level / 4 + 10)
-                    };
-                    put_max(&mut self.pixels, x, y, ink);
+            for p in self.tank.particles.iter().filter(|p| p.kind == Kind::Smoke) {
+                if p.life < 0.4 {
+                    continue;
                 }
+                let (x, y) = to_px(p.x, p.y);
+                let hot = (orifice.1 - y) < 0.08 * ph && (x - orifice.0).abs() < 0.05 * pw;
+                let ink = if hot { WARM_INK } else { SMOKE_INK };
+                put_max(&mut self.pixels, x as i32, y as i32, ink);
             }
         }
         // Jets and sinking flakes: single dim pixels.
         for p in &self.tank.particles {
-            let i = salt(p.salt);
-            let (lo, _) = SALT_LEVELS[i];
-            let level = match p.kind {
-                Kind::Smoke | Kind::Bubble => continue,
-                Kind::Jet => lo * (0.5 + 0.5 * f64::from(p.life)),
-                Kind::Flake => 0.7 * lo,
-            };
+            if matches!(p.kind, Kind::Smoke | Kind::Bubble) {
+                continue;
+            }
             let (x, y) = to_px(p.x, p.y);
             put_max(
                 &mut self.pixels,
                 x as i32,
                 y as i32,
-                Ink::new(Role::Ramp(SALTS[i]), ink::level(level)),
+                Ink::new(salt(p.salt), LOOSE),
             );
         }
     }
@@ -601,9 +572,9 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         return None;
     }
     let ch = match ink.role {
-        Role::Ramp(Ramp::Starlight) if ink.level <= FLOOR_INK.level => '_',
-        Role::Ramp(Ramp::Starlight) => '.',
-        _ if ink.level >= 90 => '|',
+        Role::Dim if ink.level <= FLOOR_INK.level => '_',
+        Role::Dim => '.',
+        _ if ink.level > LOOSE => '|',
         _ => ',',
     };
     Some((ch, ink))
@@ -620,7 +591,6 @@ impl Generator for Garden {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.pixels.resize(size);
-        self.glow.resize(size);
         // The tank fills the rows above the title row.
         self.rows = f64::from(2 * size.height().saturating_sub(1).max(1));
         if !self.started {
@@ -790,7 +760,7 @@ mod tests {
     }
 
     #[test]
-    fn grd_a7_thin_muted_tubes_on_a_black_tank() {
+    fn grd_a7_thin_stepped_tubes_on_a_black_tank() {
         for size in [Size::new(80, 24), Size::new(200, 50)] {
             let mut ctx = Ctx::new(7, size);
             let mut g = Garden::default();
@@ -810,8 +780,18 @@ mod tests {
                             continue;
                         }
                         lit += 1;
-                        // Muted: tubes stay at their ramps' low-to-mid levels.
-                        assert!(ink.level <= 225, "{size:?} t {t}: {ink:?}");
+                        // Stepped (M11 idiom): a handful of levels only.
+                        let steps = [
+                            FLOOR_INK.level,
+                            SMOKE_INK.level,
+                            WARM_INK.level,
+                            OLD / 2,
+                            OLD,
+                            FRESH,
+                            TIP,
+                            LOOSE,
+                        ];
+                        assert!(steps.contains(&ink.level), "{size:?} t {t}: {ink:?}");
                     }
                 }
                 let share = f64::from(lit) / f64::from(n);

@@ -1,15 +1,14 @@
 //! The granulated Sun turning slowly, with sunspots, limb loops and coronal rain
 //! (SPEC-002 `solar_surface`).
 //!
-//! A composite view (ADR-0017, quiet): the photosphere in white light as a blackbody
-//! brightness temperature (linear limb darkening, smooth value-noise granulation that
-//! cross-fades between generations, bipolar spot groups with Wilson-depressed umbrae and
-//! faculae) and, as in H-α, one thin cool dipole loop per active region that glows above
-//! the limb, carries coronal rain and absorbs as a filament on the disc. Every surface
-//! feature rides the Snodgrass–Ulrich differential rotation at 0.3 day per second;
-//! granulation and coronal rain run on display time. Heliographic state survives any
-//! resize; the view (disc normals, granulation generations) is rebuilt, and the disc is
-//! rasterised in `update`/`resize` so `render` only blits.
+//! A composite view: the photosphere in white light (linear limb darkening, weighted
+//! Worley granulation, bipolar spot groups with Wilson-depressed umbrae and faculae) and,
+//! as in H-α, a chromospheric rim with spicules and a sheared arcade of cool dipole loops
+//! that glow above the limb and absorb as filaments on the disc. Every surface feature rides the
+//! Snodgrass–Ulrich differential rotation at 0.3 day per second; granules and coronal
+//! rain run on display time. Heliographic state survives any resize; the view (disc
+//! normals, rim annulus, granule spatial hash) is rebuilt, and the disc is rasterised in
+//! `update`/`resize` so `render` only blits.
 
 use std::f64::consts::{PI, TAU};
 use std::fmt::Write as _;
@@ -25,7 +24,7 @@ pub static META: Meta = Meta {
     name: "solar_surface",
     category: Category::SunPlanets,
     description: "The granulated Sun turning slowly, with sunspots, limb loops and coronal rain",
-    title: "Solar surface · convection cells",
+    title: "Solar surface · boiling granules",
     captions: &[],
 };
 
@@ -42,30 +41,21 @@ const ROT: [f64; 3] = [14.713, -2.396, -1.787];
 /// Granule spacing at disc centre: `0.085 R` clamped to [3.6, 5] px, so a cell spans
 /// 2–3 terminal cells and lanes read as polygons rather than a blocky maze. At R = 46
 /// that is 3.9 px (59 Mm), ≈ 45× the real 1.3 Mm, which would be sub-pixel.
-const GRANULE_PER_R: f64 = 0.055;
-const GRANULE_PX: (f64, f64) = (2.2, 3.0);
-/// Granulation generation life (s): each generation of the value-noise pattern cross-fades
-/// into the next over this time, so cells grow and fade rather than pop (SUN-A7).
-const GRANULE_LIFE: f64 = 8.0;
-/// The granulation texture (ridged value noise): `n = 0.8·n(s_g) + 0.2·n(s_g/2)`, and
-/// `g = smoothstep(|2n − 1| / GRAIN_LANE)`, 0 on the narrow dark intergranular lanes where
-/// `n` crosses ½ and 1 in the bright granules between them; the intensity factor is
-/// `1 + GRAIN_CONTRAST(μ)·(2g − 1)` (±7 % at disc centre).
-const GRAIN_OCTAVES: [(f64, f64); 2] = [(0.8, 1.0), (0.2, 0.5)];
-const GRAIN_LANE: f64 = 0.4;
-const GRAIN_SALT: u64 = 0x6A11_1E5E;
-/// The photosphere's `Ember` value (ADR-0017; false colour, stylised): `v = PHOTO_TOP·
-/// I^PHOTO_POW`, so the disc centre is a warm gold just under the ramp's pale top, and the
-/// limb darkening is strong, through orange-red to near-black at the edge (I ≈ 0.4 →
-/// v ≈ 0.15); umbrae are a dark oxblood.
-const PHOTO_TOP: f64 = 0.8;
-const PHOTO_POW: f64 = 1.8;
+const GRANULE_PER_R: f64 = 0.085;
+const GRANULE_PX: (f64, f64) = (3.6, 5.0);
+/// Worley candidates are gathered within this many spacings: F2 − F1 only shapes the
+/// lanes below 0.3 s_g, and F1 rarely exceeds 1.2 s_g.
+const WORLEY_REACH: f64 = 1.5;
+const GRANULES_MIN: usize = 64;
+const GRANULES_MAX: usize = 2400;
+const GRANULE_LIFE: (f64, f64) = (6.0, 10.0);
+const GRANULE_FADE: f64 = 1.5;
 /// Below this radius (px) granulation and loops are unresolvable and skipped.
 const R_MIN_DETAIL: f64 = 4.0;
 /// Granulation contrast at disc centre: the real rms ≈ 0.13 in the visible, set just
 /// under it so granule cores top out below the ramp's clip and the mottle stays a fine
 /// texture under the spots and loops rather than a cracked-tile mosaic.
-const GRANULE_CONTRAST: f64 = 0.07;
+const GRANULE_CONTRAST: f64 = 0.12;
 
 /// Wilson depression in units of the penumbral radius: ≈ 2.5× the real d/ρ ≈ 0.04
 /// (0.4–0.8 Mm against ≈ 15 Mm). Spots are drawn 2–3× oversize, so in absolute depth
@@ -122,16 +112,10 @@ const NEST: [f64; LOOPS] = [1.0, 0.72, 0.48];
 /// loops show as nested arches rather than edge-on spikes. Real filament channels are
 /// sheared ≳ 70°, their field within ≈ 20° of the polarity inversion line.
 const SHEAR_DEG: (f64, f64) = (45.0, 65.0);
-/// Twist: each field line is bowed out of the arcade's plane by up to this share of its
-/// half-span, `ARCADE_TWIST·half·sin(π·a/half)` at `a` along it, one way on one leg and
-/// the other on the other, so from above the arcade and its filament form an S (a
-/// sigmoid, as twisted filament channels do) instead of a straight rod.
-const ARCADE_TWIST: f64 = 0.1;
-/// Filaments: the arcade's tallest loop darkens the disc only where it stands above this
-/// share of its apex height. The low legs would trace a ring around the spots; the
-/// elevated arch is one short dark thread, 1 px wide, along the loop plane, 25–45° off
-/// the inversion line (a real filament lies along it; see `SHEAR_DEG`). The nested
-/// arches below it would thicken the thread into a bar.
+/// Filaments: loops darken the disc only where they stand above this share of their
+/// apex height. The low legs would trace a ring around the spots; the elevated arches
+/// overlap as one short dark thread along the loop plane, 25–45° off the inversion
+/// line (a real filament lies along it; see `SHEAR_DEG`).
 const FILAMENT_RISE: f64 = 0.35;
 /// Loops with a lower apex (px) are not drawn.
 const MIN_LOOP_PX: f64 = 2.5;
@@ -142,68 +126,40 @@ const THIN_ARCADE_R: f64 = 30.0;
 const RESPAWN_LON: f64 = 150.0 * PI / 180.0;
 const RESPAWN_STEP: f64 = 60.0 * PI / 180.0;
 
-/// Values of the H-α features (`h_alpha_ink`, ADR-0017): one thin loop per region at level
-/// 110, with the rain knots adding up to `V_KNOT` as its moving highlight. There is no
-/// chromospheric rim, spicule fringe or prominence sheet.
-const V_LOOP: f64 = 110.0 / 255.0;
-const V_KNOT: f64 = 0.14;
-/// ASCII: an off-disc cell is a loop `.` from this value up ...
-const V_LOOP_ASCII: f64 = 0.8 * V_LOOP;
+/// Chromosphere: a 0.8 px rim and spicules up to `spicule_px(R)` above it, all within
+/// 2.6 px.
+const RIM_PX: f64 = 0.8;
+/// Spicule height: `SPICULE_PER_R·R`, at most `SPICULE_PX` (reached at R ≥ 46 px). Real
+/// spicules stand ≈ 10 Mm, 0.014 R☉; fixed in pixels they would be 15 % of a small disc's
+/// radius and break its limb into stray pixels and notches.
+const SPICULE_PER_R: f64 = 0.035;
+const SPICULE_PX: f64 = 1.6;
+const ANNULUS_PX: f64 = 2.6;
+/// ASCII rim: the cells holding a pixel within 1 px of the limb. Pixel-centre distances
+/// step by < 1 px, so every radius meets one and the ring closes.
+const ASCII_RIM_PX: f64 = 1.0;
+
+/// `Seq` values of the H-α features. Loops sit above the limb (0.43), spicules and rim
+/// but below the penumbra (0.67): orange cool plasma, apart from the limb fuzz, rather
+/// than a torn-off piece of the photosphere. Only the rain knots, adding up to
+/// `V_KNOT` (≈ 0.88, pale yellow), are the moving highlight.
+const V_RIM: f64 = 0.55;
+const V_SPICULE: (f64, f64) = (0.50, 0.42);
+const V_LOOP: f64 = 0.60;
+const V_KNOT: f64 = 0.28;
+/// ASCII: an off-disc cell is a loop `.` from this value up (above every rim and
+/// spicule value) ...
+const V_LOOP_ASCII: f64 = 0.5 * (V_RIM + V_LOOP);
 /// ... and a knot `o` from this value (the knot core) up.
 const V_KNOT_CORE: f64 = V_LOOP + 0.9 * V_KNOT;
 /// Filaments absorb to this fraction of the disc intensity behind them: a dark thread
 /// against the granulation, still well above the umbrae (0.22).
 const FILAMENT: f64 = 0.6;
-/// Long-slit spectrograph inset (SUN-A8): 400–700 nm across, the slit's length down,
-/// one cell row per slit position; its size in cells, and the clearance (disc radii)
-/// every inset pixel keeps from the disc centre, beyond the tallest loops (1.32 R).
-const SPECTRUM_NM: (f64, f64) = (400.0, 700.0);
-const INSET_W: (usize, usize) = (24, 40);
-const INSET_H: (usize, usize) = (4, 8);
-const INSET_CLEAR: f64 = 1.35;
-/// Hue turns of the violet end (the red end is turn 0 of the `Phase` loop).
-const VIOLET_TURNS: f64 = 0.78;
-/// Slit rows darker than this (an umbra) are drawn as a dark band.
-const SLIT_DARK: f32 = 0.45;
-/// Granulation under the slit brighter (darker) than its limb-darkened mean by this share
-/// is rising (sinking) gas: its lines shift blueward (redward), a sub-cell wiggle. A
-/// shifted row returns to rest only inside `DOPPLER_HOLD`, so a row near the threshold
-/// does not flicker between glyphs from frame to frame.
-const DOPPLER_SHARE: f32 = 0.02;
-const DOPPLER_HOLD: f32 = 0.01;
-/// Fraunhofer lines (nm) within the range: G (CH/Fe), H-γ, H-β (F), Mg b, Fe (E), Na D
-/// (D1/D2 blend at this resolution), H-α (C). Each is drawn as one thin glyph, a column
-/// about 7.5 nm wide at 40 cells: 20–70× its real width.
-const FRAUNHOFER_NM: [f64; 7] = [430.8, 434.0, 486.1, 518.4, 527.0, 589.3, 656.3];
-/// Absorption lines, the umbra's dark band and the slit's jaws: thin dark glyphs over the
-/// colour behind them.
-const DARK_INK: Ink = Ink::new(Role::Dim, 0);
-/// The slit's jaws: a dark hairline on the slit's column in only the first `JAW_CELLS`
-/// cells inside the limb, top and bottom, like the notches of a slit-jaw image. They tie
-/// the inset to the column it samples without a seam through the granulation (the disc
-/// fills the height at the default size, so they cannot sit outside it).
-const JAW_CELLS: i32 = 2;
-const SPECTRUM_LABEL: &str = "slit spectrum 400-700nm, false colour";
-const SPECTRUM_LABEL_SHORT: &str = "slit spectrum 400-700nm";
-
 /// IAU nominal solar effective temperature (K).
 const TEFF_K: u32 = 5772;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 // --- Physics (pure) -----------------------------------------------------------------
-
-/// The slit row's line shift (−1 blueward, 0, +1 redward) for granulation `excess` over
-/// its mean, given the row's previous shift: set beyond `±DOPPLER_SHARE`, held until
-/// the excess falls inside `±DOPPLER_HOLD` (SUN-A8).
-pub(crate) fn doppler_shift(prev: i8, excess: f32) -> i8 {
-    if excess > DOPPLER_SHARE || (prev == -1 && excess > DOPPLER_HOLD) {
-        -1
-    } else if excess < -DOPPLER_SHARE || (prev == 1 && excess < -DOPPLER_HOLD) {
-        1
-    } else {
-        0
-    }
-}
 
 /// Linear limb darkening `I(μ) = 1 − u(1 − μ)`, u = 0.6 (SUN-A1).
 pub(crate) fn limb_intensity(mu: f64) -> f64 {
@@ -318,9 +274,30 @@ pub(crate) fn dipole_loop(d_b: f64, l: f64) -> [[f64; 3]; LOOP_SAMPLES] {
     })
 }
 
+/// Maximum spicule height (px) above the rim for a disc of radius `r_px`.
+pub(crate) fn spicule_px(r_px: f64) -> f64 {
+    (SPICULE_PER_R * r_px).min(SPICULE_PX)
+}
+
 /// Granule spacing (px) at disc centre for a disc of radius `r_px` (SUN-A7).
 pub(crate) fn granule_spacing(r_px: f64) -> f64 {
     (GRANULE_PER_R * r_px).clamp(GRANULE_PX.0, GRANULE_PX.1)
+}
+
+/// Granule pool size for a disc of radius `r_px`: `4πR²/s_g²`, clamped (SUN-A7).
+pub(crate) fn granule_count(r_px: f64) -> usize {
+    let s_g = granule_spacing(r_px);
+    let n = (4.0 * PI * r_px * r_px / (s_g * s_g)).round();
+    (n.max(0.0) as usize).clamp(GRANULES_MIN, GRANULES_MAX)
+}
+
+/// Granulation brightness in [0, 1] from the weighted Worley distances: bright cores
+/// (`F1` small, weighted by the nearest cell's life `w1`) and dark lanes where
+/// `F2 − F1` vanishes (SUN-A7).
+pub(crate) fn granule_pattern(f1: f64, f2: f64, w1: f64, s_g: f64) -> f64 {
+    let lane = ease::smoothstep((f2 - f1) / (0.3 * s_g));
+    let core = 1.0 - (f1 / (0.9 * s_g)).min(1.0);
+    0.55 * lane + 0.45 * w1 * core * core
 }
 
 /// Granulation contrast at `μ`: `GRANULE_CONTRAST` at disc centre, falling as √μ and
@@ -329,37 +306,9 @@ pub(crate) fn granule_contrast(mu: f64) -> f64 {
     GRANULE_CONTRAST * mu.max(0.0).sqrt() * ease::smoothstep((mu - 0.1) / 0.1)
 }
 
-/// The photosphere's `Ember` value for intensity `i`: `PHOTO_TOP·i^PHOTO_POW`, at most 1.
-pub(crate) fn photosphere_value(i: f64) -> f64 {
-    (PHOTO_TOP * i.max(0.0).powf(PHOTO_POW)).min(1.0)
-}
-
-/// The intensity behind a photosphere ink: the inverse of [`photosphere_value`] (to the
-/// ramp's level resolution).
-pub(crate) fn photosphere_intensity(ink: Ink) -> f64 {
-    (ink::seq_value(ink) / PHOTO_TOP).powf(PHOTO_POW.recip())
-}
-
-/// The photosphere's ink for intensity `i`: `Ramp(Ember)` at [`photosphere_value`].
+/// The `Seq` ink for photospheric intensity `i`: `v = 0.12 + 0.78·i`.
 pub(crate) fn photosphere_ink(i: f64) -> Ink {
-    ink::ramp(Ramp::Ember, photosphere_value(i))
-}
-
-/// The granulation texture of generation `generation` at pixel `(x, y)` for spacing `s_g`
-/// (SUN-A7): ridged value noise, 0 on the lanes and 1 in the granules.
-fn granule_noise(generation: i64, x: f64, y: f64, s_g: f64) -> f32 {
-    let salt = GRAIN_SALT ^ (generation as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-    let mut n = 0.0;
-    for (k, &(w, scale)) in GRAIN_OCTAVES.iter().enumerate() {
-        n += w * sciart_core::rng::value_noise(salt ^ k as u64, x, y, scale * s_g);
-    }
-    ease::smoothstep(((2.0 * n - 1.0).abs() / GRAIN_LANE).min(1.0)) as f32
-}
-
-/// The ink of an H-α feature of value `v` (rim, spicules, loops, rain): the `HAlpha`
-/// ramp, the colour of the 656.3 nm line they are seen in.
-fn h_alpha_ink(v: f64) -> Ink {
-    ink::ramp(Ramp::HAlpha, v)
+    ink::seq(0.12 + 0.78 * i)
 }
 
 /// Heliographic unit vector (x west, y north, z toward the observer at λ = 0).
@@ -381,6 +330,45 @@ fn view_of(lon: f64, b0: f64) -> Projector {
 }
 
 // --- Heliographic state -------------------------------------------------------------
+
+/// A granulation feature point: it rides the surface and lives 6–10 s.
+#[derive(Debug, Clone, Copy)]
+struct Granule {
+    sin_lat: f64,
+    cos_lat: f64,
+    lon: f64,
+    omega: f64,
+    age: f64,
+    life: f64,
+}
+
+impl Granule {
+    /// A point uniform on the sphere; `age` in [0, life) so a fresh pool is steady.
+    fn spawn(rng: &mut impl Rng, age_frac: f64) -> Self {
+        let sin_lat: f64 = rng.random_range(-1.0..1.0);
+        let life = rng.random_range(GRANULE_LIFE.0..GRANULE_LIFE.1);
+        Self {
+            sin_lat,
+            cos_lat: (1.0 - sin_lat * sin_lat).sqrt(),
+            lon: rng.random_range(-PI..PI),
+            omega: omega_rad_per_sec(sin_lat.asin()),
+            age: age_frac * life,
+            life,
+        }
+    }
+
+    /// Advance by `dt`: longitude by the closed form `ω(φ)·dt` (SUN-A2), then age.
+    fn advance(&mut self, dt: f64) {
+        self.lon = geom::wrap_angle(self.lon + self.omega * dt);
+        self.age += dt;
+    }
+
+    /// Fade in and out over 1.5 s, so cells grow and shrink instead of popping.
+    fn weight(&self) -> f64 {
+        ease::smoothstep(self.age / GRANULE_FADE)
+            * ease::smoothstep((self.life - self.age) / GRANULE_FADE)
+    }
+}
 
 #[derive(Debug, Clone, Copy)]
 struct Spot {
@@ -545,8 +533,7 @@ impl Region {
         ];
         // The dipole sits 2δ deep, so its radial field peaks under the spots (±δ). The
         // arcade is that dipole's field lines turned about the vertical by the shear,
-        // either way: nested loops in one vertical plane over the inversion line, each
-        // bowed into an S by the twist.
+        // either way: nested loops in one vertical plane over the inversion line.
         let d_b = 2.0 * delta;
         let shear = rng.random_range(SHEAR_DEG.0..SHEAR_DEG.1).to_radians() * coin(rng);
         let (ss, cs) = shear.sin_cos_det();
@@ -556,12 +543,9 @@ impl Region {
             let h = (h_max * NEST[k]).max(0.04);
             let local = dipole_loop(d_b, d_b + h);
             let apex = local.iter().map(|&p| norm(p) - 1.0).fold(0.0, f64::max);
-            let half = local.iter().map(|p| p[0].abs()).fold(1e-9, f64::max);
             Loop {
-                pts: local.map(|[a, b, c]| {
-                    let b = b + ARCADE_TWIST * half * (PI * a / half).sin_det();
-                    axpy(a, arc_axis, axpy(b, arc_across, up.map(|u| c * u)))
-                }),
+                pts: local
+                    .map(|[a, b, c]| axpy(a, arc_axis, axpy(b, arc_across, up.map(|u| c * u)))),
                 apex,
                 knots: std::array::from_fn(|_| Knot::falling(rng)),
                 period: rng.random_range(5.0..9.0),
@@ -628,6 +612,26 @@ struct DiscPx {
     base: f32,
 }
 
+/// A pixel of the chromospheric annulus: distance past the limb, limb angle and the
+/// next pixel inward along the radius.
+#[derive(Debug, Clone, Copy)]
+struct RimPx {
+    x: u16,
+    y: u16,
+    above: f32,
+    theta: f32,
+    inward: (u16, u16),
+}
+
+/// A projected granule: screen position, squared distance weight and life weight.
+#[derive(Debug, Clone, Copy, Default)]
+struct Cell {
+    x: f32,
+    y: f32,
+    m2: f32,
+    w: f32,
+}
+
 /// Everything derived from the terminal size, plus the raster.
 #[derive(Debug, Default)]
 struct View {
@@ -637,14 +641,18 @@ struct View {
     cy: f64,
     r: f64,
     disc: Vec<DiscPx>,
+    /// Granulation factor per disc pixel (1 where unresolved).
+    grain: Vec<f32>,
+    rim: Vec<RimPx>,
+    /// Whole spicule lobe counts, so the pattern closes around the limb.
+    lobes: (f64, f64),
     /// Granule spacing (px).
     s_g: f64,
-    /// Two granulation generations per disc pixel: `grain[0]` is generation `generation`,
-    /// `grain[1]` the next, filled progressively (its first `filled` pixels) while the
-    /// current one shows, so no step pays for a whole pattern (GEN-R8, GEN-R19).
-    grain: [Vec<f32>; 2],
-    generation: i64,
-    filled: usize,
+    /// The visible granules projected this step, and their positions in a spatial
+    /// hash with cell size `s_g` (CORE-R54).
+    cells: Vec<Cell>,
+    pts: Vec<[f64; 2]>,
+    hash: SpatialHash,
     /// Photospheric intensity per pixel (NaN off the disc): what filaments absorb.
     disc_i: Vec<f32>,
     /// Disc pixels inside a spot (photosphere weight < ½), which filaments skip, so the
@@ -653,72 +661,6 @@ struct View {
     pixels: Pixels,
     /// Whether the day readout is drawn at all: small terminals keep every cell for the Sun.
     label: bool,
-    /// The spectrograph inset, when it fits clear of the Sun (SUN-A8).
-    inset: Option<Inset>,
-    /// The slit sampled at each inset row, in `rasterise`.
-    slit: [SlitRow; INSET_H.1],
-}
-
-/// The spectrograph inset in cells: left column, top row, width and height.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Inset {
-    x: usize,
-    y: usize,
-    w: usize,
-    h: usize,
-}
-
-/// One slit position: its photospheric intensity (NaN off the disc) and the Doppler
-/// shift of its lines, −1 blueward, 0 or +1 redward.
-#[derive(Debug, Clone, Copy)]
-struct SlitRow {
-    i: f32,
-    shift: i8,
-}
-
-impl Default for SlitRow {
-    fn default() -> Self {
-        Self {
-            i: f32::NAN,
-            shift: 0,
-        }
-    }
-}
-
-impl Inset {
-    /// The top-right inset for a `w × rows` pixel view with the disc at `(cx, cy)`,
-    /// radius `r`, if every pixel of it keeps `INSET_CLEAR·r` from the centre.
-    fn fit(w: usize, rows: usize, cx: f64, cy: f64, r: f64) -> Option<Self> {
-        let (cells_w, cells_h) = (w, rows / 2);
-        let iw = (cells_w / 5).clamp(INSET_W.0, INSET_W.1);
-        let ih = (cells_h / 6).clamp(INSET_H.0, INSET_H.1);
-        // One cell of margin at the right and top; the label row above it.
-        let inset = Self {
-            x: cells_w.checked_sub(iw + 1)?,
-            y: 1,
-            w: iw,
-            h: ih,
-        };
-        // Its extent in pixels (rows are two tall).
-        let (top, bottom) = (2 * inset.y, 2 * (inset.y + inset.h));
-        let nx = (cx.clamp(inset.x as f64, (inset.x + inset.w) as f64) - cx).abs();
-        let ny = (cy.clamp(top as f64, bottom as f64) - cy).abs();
-        (bottom + 2 <= rows && nx.hypot(ny) >= INSET_CLEAR * r).then_some(inset)
-    }
-
-    /// Wavelength (nm) at inset column `u`.
-    fn nm(&self, u: usize) -> f64 {
-        let span = (self.w.max(2) - 1) as f64;
-        SPECTRUM_NM.0 + (SPECTRUM_NM.1 - SPECTRUM_NM.0) * u as f64 / span
-    }
-
-    /// Whether column `u` holds a Fraunhofer line: the column nearest to the line.
-    fn is_line(&self, u: usize) -> bool {
-        let step = (SPECTRUM_NM.1 - SPECTRUM_NM.0) / (self.w.max(2) - 1) as f64;
-        FRAUNHOFER_NM
-            .iter()
-            .any(|&l| (l - self.nm(u)).abs() <= 0.5 * step)
-    }
 }
 
 impl View {
@@ -728,6 +670,7 @@ impl View {
         let (cx, cy) = (w as f64 / 2.0, rows as f64 / 2.0);
         let r = (0.46 * rows as f64).min(0.36 * w as f64);
         let mut disc = Vec::new();
+        let mut rim = Vec::new();
         for y in 0..rows {
             for x in 0..w {
                 let (dx, dy) = ((x as f64 + 0.5 - cx) / r, (y as f64 + 0.5 - cy) / r);
@@ -741,9 +684,29 @@ impl View {
                         n: [dx as f32, -dy as f32, mu as f32],
                         base: limb_intensity(mu) as f32,
                     });
+                } else {
+                    let rho = rho2.sqrt();
+                    let above = (rho - 1.0) * r;
+                    if above <= ANNULUS_PX {
+                        // One pixel back toward the centre, clamped onto the buffer.
+                        let step = |p: u16, d: f64, max: usize| {
+                            (f64::from(p) + 0.5 - d / rho)
+                                .floor()
+                                .clamp(0.0, (max - 1) as f64) as u16
+                        };
+                        rim.push(RimPx {
+                            x,
+                            y,
+                            above: above as f32,
+                            theta: (-dy).atan2(dx) as f32,
+                            inward: (step(x, dx, w), step(y, dy, rows)),
+                        });
+                    }
                 }
             }
         }
+        // Inner pixels first, so a spicule pixel can check the one below it.
+        rim.sort_by(|a, b| a.above.total_cmp(&b.above));
         let s_g = granule_spacing(r);
         Self {
             s_g,
@@ -751,16 +714,24 @@ impl View {
             cx,
             cy,
             r,
-            grain: [vec![0.5; disc.len()], vec![0.5; disc.len()]],
-            generation: 0,
-            filled: 0,
+            grain: vec![1.0; disc.len()],
             disc,
+            rim,
+            lobes: ((TAU * r / 3.0).round(), (TAU * r / 2.0).round()),
+            cells: Vec::with_capacity(GRANULES_MAX),
+            pts: Vec::with_capacity(GRANULES_MAX),
+            hash: {
+                // Size its scratch for the whole pool now: rebuilding allocates whenever
+                // the visible count beats its high-water mark (GEN-R11). Resize may
+                // allocate; a `SpatialHash::reserve` in CORE-R54 would replace this.
+                let mut hash = SpatialHash::new(w as f64, rows as f64, s_g);
+                hash.rebuild(&vec![[0.0; 2]; GRANULES_MAX]);
+                hash
+            },
             disc_i: vec![f32::NAN; w * rows],
             in_spot: vec![false; w * rows],
             pixels: Pixels::new(size),
             label: w >= 30 && h >= 10,
-            inset: Inset::fit(w, rows, cx, cy, r),
-            slit: [SlitRow::default(); INSET_H.1],
         }
     }
 
@@ -778,68 +749,90 @@ impl View {
         (self.cx + self.r * p[0], self.cy - self.r * p[1])
     }
 
-    /// Fill disc pixels `from..to` of `grain[slot]` with generation `generation`.
-    fn fill_grain(&mut self, slot: usize, generation: i64, from: usize, to: usize) {
-        let s_g = self.s_g;
-        for (dp, g) in self.disc[from..to]
-            .iter()
-            .zip(&mut self.grain[slot][from..to])
-        {
-            *g = granule_noise(
-                generation,
-                f64::from(dp.x) + 0.5,
-                f64::from(dp.y) + 0.5,
-                s_g,
-            );
+    /// Project the visible granules (μ > 0) and hash them.
+    fn project_granules(&mut self, granules: &[Granule], b0: f64) {
+        let tilt = view_of(0.0, b0);
+        self.cells.clear();
+        self.pts.clear();
+        for g in granules {
+            let (so, co) = g.lon.sin_cos_det();
+            let p = tilt.rotate([g.cos_lat * so, g.sin_lat, g.cos_lat * co]);
+            if p[2] > 0.0 {
+                let w = g.weight();
+                let m = 1.0 + 1.5 * (1.0 - w);
+                let (x, y) = self.screen(p);
+                self.cells.push(Cell {
+                    x: x as f32,
+                    y: y as f32,
+                    m2: (m * m) as f32,
+                    w: w as f32,
+                });
+                self.pts.push([x, y]);
+            }
         }
+        self.hash.rebuild(&self.pts);
     }
 
-    /// Both generations in full for time `t` (at a resize).
-    fn seed_grain(&mut self, t: f64) {
-        let generation = (t / GRANULE_LIFE).floor() as i64;
-        let n = self.disc.len();
-        self.generation = generation;
-        self.fill_grain(0, generation, 0, n);
-        self.fill_grain(1, generation + 1, 0, n);
-        self.filled = n;
+    /// Weighted Worley distances `(F1, F2, w₁)` at `(x, y)` from the hashed granules
+    /// within `radius`. Weights only lengthen distances (m ≥ 1), so every site within
+    /// weighted distance `radius` is among the candidates, and a distance not found is
+    /// at least `radius`: each F is returned as `min(F, radius)`, a lower bound that is
+    /// exact whenever it is below `radius`.
+    fn worley(hash: &SpatialHash, cells: &[Cell], x: f64, y: f64, radius: f64) -> (f64, f64, f64) {
+        let (mut d1, mut d2, mut w1) = (f32::MAX, f32::MAX, 0.0f32);
+        let (xf, yf) = (x as f32, y as f32);
+        hash.for_each_within([x, y], radius, |i| {
+            let c = cells[i];
+            let (dx, dy) = (c.x - xf, c.y - yf);
+            let d = (dx * dx + dy * dy) * c.m2;
+            // Branch-free running two smallest.
+            w1 = if d < d1 { c.w } else { w1 };
+            d2 = d2.min(d.max(d1));
+            d1 = d1.min(d);
+        });
+        (
+            f64::from(d1.sqrt()).min(radius),
+            f64::from(d2.sqrt()).min(radius),
+            f64::from(w1),
+        )
     }
 
-    /// Advance the granulation to time `t` after a step of `dt`: roll to the next
-    /// generation when its time comes (finishing it first if need be), then fill a share of
-    /// the one after, enough to be done a third of a life early.
-    fn advance_grain(&mut self, t: f64, dt: f64) {
-        let target = (t / GRANULE_LIFE).floor() as i64;
-        let n = self.disc.len();
-        while self.generation < target {
-            let next = self.generation + 1;
-            self.fill_grain(1, next, self.filled, n);
-            self.grain.swap(0, 1);
-            self.generation = next;
-            self.filled = 0;
+    /// Refresh the granulation factor `1 + C(μ)(2g − 1)` of the disc pixels, or of
+    /// every other pixel row (`parity`). The texture drifts ≈ 3.5 px/s, so refreshing
+    /// each row at 30 Hz is invisible and halves the Worley cost of a 60 Hz step.
+    fn granulate(&mut self, parity: Option<u16>) {
+        let (s_g, reach) = (self.s_g, WORLEY_REACH * self.s_g);
+        for (dp, grain) in self.disc.iter().zip(&mut self.grain) {
+            if parity.is_some_and(|p| dp.y % 2 != p) {
+                continue;
+            }
+            let mu = f64::from(dp.n[2]);
+            // Contrast vanishes toward the limb, so Worley is skipped there.
+            *grain = if mu >= 0.1 {
+                let (px, py) = (f64::from(dp.x) + 0.5, f64::from(dp.y) + 0.5);
+                // Exact below s_g; only the few pixels whose F2 reaches it widen the
+                // query, which gives the same result as one query within `reach`.
+                let near = Self::worley(&self.hash, &self.cells, px, py, s_g);
+                let (f1, f2, w1) = if near.1 < s_g {
+                    near
+                } else {
+                    Self::worley(&self.hash, &self.cells, px, py, reach)
+                };
+                let g = granule_pattern(f1, f2, w1, s_g);
+                (1.0 + granule_contrast(mu) * (2.0 * g - 1.0)) as f32
+            } else {
+                1.0
+            };
         }
-        let quota = ((n as f64 * 1.5 * dt / GRANULE_LIFE).ceil() as usize).max(1);
-        let to = (self.filled + quota).min(n);
-        self.fill_grain(1, self.generation + 1, self.filled, to);
-        self.filled = to;
     }
 
     /// Shade every disc pixel: limb darkening × spots × granulation (outside the spots
     /// only: convection is suppressed in the umbra and penumbra, so a spot is a clean
     /// dark ring on the mottle) × faculae.
-    fn shade_disc(&mut self, spots: &[SpotView], t: f64) {
-        // The cross-fade between the two generations (SUN-A7).
-        let f = ease::smoothstep(t / GRANULE_LIFE - self.generation as f64) as f32;
-        let detailed = self.detailed();
-        for (k, dp) in self.disc.iter().enumerate() {
+    fn shade_disc(&mut self, spots: &[SpotView]) {
+        for (dp, &grain) in self.disc.iter().zip(&self.grain) {
             let n = dp.n.map(f64::from);
             let mu = n[2];
-            let grain = if detailed && mu >= 0.1 {
-                let (a, b) = (self.grain[0][k], self.grain[1][k]);
-                let g = f64::from(a + (b - a) * f);
-                1.0 + granule_contrast(mu) * (2.0 * g - 1.0)
-            } else {
-                1.0
-            };
             let mut i = f64::from(dp.base);
             let (px, py) = (f64::from(dp.x) + 0.5, f64::from(dp.y) + 0.5);
             // The strongest facular field, gated by the photosphere weight of every
@@ -862,7 +855,7 @@ impl View {
                     gate *= outside;
                 }
             }
-            i *= 1.0 + (grain - 1.0) * gate;
+            i *= 1.0 + (f64::from(grain) - 1.0) * gate;
             // Faculae brighten near the limb only, as observed, and only outside spots.
             i *= 1.0 + 0.35 * (1.0 - mu) * faculae * gate;
             let at = usize::from(dp.y) * self.w + usize::from(dp.x);
@@ -870,6 +863,38 @@ impl View {
             self.in_spot[at] = gate < 0.5;
             self.pixels
                 .set(i32::from(dp.x), i32::from(dp.y), photosphere_ink(i));
+        }
+    }
+
+    /// The rim and the flickering spicules, in pixels the disc left empty. Spicules
+    /// grow out of the rim: a pixel more than 1 px above it lights only if the next
+    /// pixel inward is lit, so no speck floats free of the limb.
+    fn shade_rim(&mut self, t: f64, phase: [f64; 2]) {
+        let (n1, n2) = self.lobes;
+        let spicule = spicule_px(self.r);
+        for rp in &self.rim {
+            let above = f64::from(rp.above);
+            let v = if above <= RIM_PX {
+                V_RIM
+            } else {
+                let th = f64::from(rp.theta);
+                let wave = 0.5 * (n1 * th + 1.3 * t + phase[0]).sin_det()
+                    + 0.5 * (n2 * th - 0.9 * t + phase[1]).sin_det();
+                let height = spicule * wave.max(0.0);
+                let up = above - RIM_PX;
+                let (ix, iy) = (i32::from(rp.inward.0), i32::from(rp.inward.1));
+                let rooted = up <= 1.0
+                    || self
+                        .pixels
+                        .get(ix, iy)
+                        .is_some_and(|i| i.role != Role::Background);
+                if up > height || !rooted {
+                    continue;
+                }
+                ease::lerp(V_SPICULE.0, V_SPICULE.1, up / spicule)
+            };
+            self.pixels
+                .set(i32::from(rp.x), i32::from(rp.y), ink::seq(v));
         }
     }
 
@@ -907,97 +932,6 @@ impl View {
         }
     }
 
-    /// The pixel column the slit lies on: through the disc centre.
-    fn slit_x(&self) -> usize {
-        self.cx.floor() as usize
-    }
-
-    /// Sample the slit at each inset row, top to bottom across the disc (SUN-A8): the
-    /// photospheric intensity, and the Doppler shift of rising bright granules (blue) and
-    /// sinking dark lanes (red).
-    fn sample_slit(&mut self) {
-        let Some(inset) = self.inset else { return };
-        let slit = self.slit_x();
-        let rows = self.disc_i.len() / self.w.max(1);
-        let dx = (slit as f64 + 0.5 - self.cx) / self.r;
-        for (v, row) in self.slit.iter_mut().enumerate().take(inset.h) {
-            let py = self.cy - self.r + (v as f64 + 0.5) * 2.0 * self.r / inset.h as f64;
-            let i = if (0.0..rows as f64).contains(&py) {
-                self.disc_i[py as usize * self.w + slit]
-            } else {
-                f32::NAN
-            };
-            let dy = (py - self.cy) / self.r;
-            let mean = limb_intensity((1.0 - dx * dx - dy * dy).max(0.0).sqrt()) as f32;
-            let shift = doppler_shift(row.shift, i / mean - 1.0);
-            *row = SlitRow { i, shift };
-        }
-    }
-
-    /// The spectrum's colour at inset column `u`: a hue by wavelength, red at 700 nm to
-    /// violet at 400 nm (false colour: `Phase` is isoluminant).
-    fn spectrum_ink(inset: Inset, u: usize) -> Ink {
-        let turns = (SPECTRUM_NM.1 - inset.nm(u)) / (SPECTRUM_NM.1 - SPECTRUM_NM.0);
-        ink::phase(TAU * VIOLET_TURNS * turns)
-    }
-
-    /// The long-slit spectrum (SUN-A8): one cell row per slit position, a continuous
-    /// band of colour crossed by thin dark Fraunhofer lines, which wiggle with the
-    /// granulation under the slit; an umbra on the slit is a dark stripe (about a quarter
-    /// of the continuum) with heavier lines. Rows off the disc stay empty. Jaws above and
-    /// below the disc mark the slit.
-    fn draw_spectrum(&self, canvas: &mut Canvas) {
-        let Some(inset) = self.inset else { return };
-        let unicode = canvas.mode() == GlyphMode::Unicode;
-        for (v, row) in self.slit.iter().enumerate().take(inset.h) {
-            if row.i.is_nan() {
-                continue;
-            }
-            let umbra = row.i < SLIT_DARK;
-            let y = (inset.y + v) as i32;
-            for u in 0..inset.w {
-                let colour = Self::spectrum_ink(inset, u);
-                let x = (inset.x + u) as i32;
-                let line = inset.is_line(u);
-                if !unicode {
-                    let ch = if line {
-                        '|'
-                    } else if umbra {
-                        '-'
-                    } else {
-                        '='
-                    };
-                    canvas.put(x, y, Glyph::ascii(ch), colour);
-                    continue;
-                }
-                let ch = match (line, umbra, row.shift) {
-                    (true, true, _) => '┃',
-                    (true, false, -1) => '▏',
-                    (true, false, 1) => '▕',
-                    (true, false, _) => '│',
-                    (false, true, _) => '▓',
-                    (false, false, _) => ' ',
-                };
-                canvas.put_bg(x, y, Glyph::new(ch, '|'), DARK_INK, colour);
-            }
-        }
-        if !unicode {
-            return;
-        }
-        // The jaws: the first `JAW_CELLS` cells wholly on the disc from each end of the
-        // slit's column.
-        let x = self.slit_x() as i32;
-        let cells = (self.disc_i.len() / self.w.max(1) / 2) as i32;
-        let inside = |cy: &i32| self.on_disc(x, 2 * cy) && self.on_disc(x, 2 * cy + 1);
-        let top = (0..cells).filter(inside).take(JAW_CELLS as usize);
-        let bottom = (0..cells).rev().filter(inside).take(JAW_CELLS as usize);
-        for cy in top.chain(bottom) {
-            if let Some(colour) = self.pixels.get(x, 2 * cy) {
-                canvas.put_bg(x, cy, Glyph::new('│', '|'), DARK_INK, colour);
-            }
-        }
-    }
-
     /// Whether nested loop `k` (apex `apex` R☉) is drawn at this size: loops lower than
     /// `MIN_LOOP_PX` would fuse with the taller ones into a blob, and so would the middle
     /// arch on a disc smaller than `THIN_ARCADE_R`.
@@ -1010,8 +944,7 @@ impl View {
     fn draw_loops(&mut self, regions: &[Region], b0: f64) {
         for region in regions {
             let view = view_of(region.lon, b0);
-            // One thin loop per region (ADR-0017): the outer arch only.
-            for (k, lp) in region.loops.iter().enumerate().take(1) {
+            for (k, lp) in region.loops.iter().enumerate() {
                 if !self.loop_shown(k, lp.apex) {
                     continue;
                 }
@@ -1031,7 +964,7 @@ impl View {
                                     k.weight() * (-0.5 * z * z).exp()
                                 })
                                 .fold(0.0, f64::max);
-                            let ink = h_alpha_ink(V_LOOP + V_KNOT * knot);
+                            let ink = ink::seq(V_LOOP + V_KNOT * knot);
                             match prev {
                                 Some((x0, y0)) if (x - x0).abs().max((y - y0).abs()) > 1 => {
                                     for (lx, ly) in geom::line(x0, y0, x, y) {
@@ -1043,7 +976,7 @@ impl View {
                             prev = Some((x, y));
                         }
                         Sample::Filament => {
-                            if k == 0 && norm(p) - 1.0 > FILAMENT_RISE * lp.apex {
+                            if norm(p) - 1.0 > FILAMENT_RISE * lp.apex {
                                 self.absorb(x, y);
                             }
                             prev = None;
@@ -1082,8 +1015,10 @@ pub struct SolarSurface {
     lat_mean: f64,
     /// Placeholders until `seed` (never shown: `resize` seeds before the first frame).
     regions: [Region; REGIONS],
-    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
-    dirty: bool,
+    granules: Vec<Granule>,
+    spicule_phase: [f64; 2],
+    /// Update count, which picks the granulation rows to refresh.
+    steps: u64,
     /// Test hooks (SUN-A1, SUN-A5, SUN-A7).
     show_regions: bool,
     show_loops: bool,
@@ -1098,7 +1033,9 @@ impl SolarSurface {
             seeded: false,
             lat_mean: 0.0,
             regions: std::array::from_fn(|_| Region::placeholder()),
-            dirty: false,
+            granules: Vec::with_capacity(GRANULES_MAX),
+            spicule_phase: [0.0; 2],
+            steps: 0,
             show_regions: true,
             show_loops: true,
             view: View::default(),
@@ -1108,6 +1045,7 @@ impl SolarSurface {
     fn seed(&mut self, rng: &mut impl Rng) {
         self.b0 = rng.random_range(-7.25f64..7.25).to_radians();
         self.lat_mean = rng.random_range(10.0f64..25.0).to_radians();
+        self.spicule_phase = [rng.random_range(0.0..TAU), rng.random_range(0.0..TAU)];
         // The first region sits just inside the east limb with the tallest loops, so
         // they show at t = 0; the others follow ~120° apart.
         let lat_mean = self.lat_mean;
@@ -1128,6 +1066,24 @@ impl SolarSurface {
             Region::spawn(rng, lat, lon, h)
         });
         self.seeded = true;
+    }
+
+    /// Match the granule pool to the disc: only when the target moves by > 10 %, so
+    /// small resizes keep the texture; new points fade in.
+    fn fit_granules(&mut self, rng: &mut impl Rng) {
+        let target = granule_count(self.view.r);
+        let n = self.granules.len();
+        if n == 0 {
+            for _ in 0..target {
+                let age = rng.random_range(0.0..1.0);
+                self.granules.push(Granule::spawn(rng, age));
+            }
+        } else if target.abs_diff(n) * 10 > n {
+            self.granules.truncate(target);
+            while self.granules.len() < target {
+                self.granules.push(Granule::spawn(rng, 0.0));
+            }
+        }
     }
 
     /// The spots that face us (or nearly), with their Wilson-shifted umbrae; returns
@@ -1169,8 +1125,9 @@ impl SolarSurface {
         n
     }
 
-    /// Draw the frame.
-    fn rasterise(&mut self) {
+    /// Draw the frame; `all_rows` refreshes the whole granulation, otherwise every
+    /// other row (alternating by step).
+    fn rasterise(&mut self, all_rows: bool) {
         let mut spots = [SpotView::default(); REGIONS * 2];
         let n = if self.show_regions {
             self.spot_views(&mut spots)
@@ -1181,18 +1138,24 @@ impl SolarSurface {
         v.pixels.clear();
         v.disc_i.fill(f32::NAN);
         let detailed = v.detailed();
-        v.shade_disc(&spots[..n], self.t);
+        if detailed {
+            v.project_granules(&self.granules, self.b0);
+            v.granulate((!all_rows).then_some((self.steps % 2) as u16));
+        }
+        v.shade_disc(&spots[..n]);
+        v.shade_rim(self.t, self.spicule_phase);
         if detailed && self.show_loops && self.show_regions {
             v.draw_loops(&self.regions, self.b0);
         }
-        v.sample_slit();
     }
 
-    /// The ASCII fallback. On the disc, a brightness ramp over the pair's mean
-    /// photospheric intensity. Off it, by the brighter pixel: a knot core `o`, then loop
-    /// plasma `.`.
+    /// The ASCII fallback. On the disc, a brightness ramp over the pair's mean lit `Seq`
+    /// value. Off it, by the brighter pixel: a knot core `o`, then the one-cell rim `'`
+    /// (a pixel within `ASCII_RIM_PX` of the limb), then loop plasma `.`; spicule-only
+    /// cells stay blank, so the loops stand clear of the limb instead of merging into
+    /// its fuzz.
     fn ascii_cell(&self, cx: i32, cy: i32, top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-        let lit = [top, bottom].map(|i| (i.role != Role::Background).then_some(i));
+        let lit = [top, bottom].map(|i| (i.role != Role::Background).then(|| ink::seq_value(i)));
         let view = &self.view;
         let past_limb = |py: f64| {
             let (dx, dy) = (f64::from(cx) + 0.5 - view.cx, py - view.cy);
@@ -1200,37 +1163,40 @@ impl SolarSurface {
         };
         // The cell centre is the boundary between its two pixels.
         if past_limb(f64::from(2 * cy + 1)) <= 0.0 {
-            let (sum, count) = lit.iter().flatten().fold((0.0, 0.0), |(s, c), &i| {
-                (s + photosphere_intensity(i), c + 1.0)
-            });
+            let (sum, count) = lit
+                .iter()
+                .flatten()
+                .fold((0.0, 0.0), |(s, c), v| (s + v, c + 1.0));
             if count == 0.0 {
                 return None;
             }
-            let i = sum / count;
-            let ch = match i {
-                i if i >= 1.026 => '#',
-                i if i >= 0.923 => '*',
-                i if i >= 0.769 => '+',
-                i if i >= 0.59 => '=',
-                i if i >= 0.436 => ':',
-                i if i >= 0.308 => '.',
+            let v = sum / count;
+            let ch = match v {
+                v if v >= 0.92 => '#',
+                v if v >= 0.84 => '*',
+                v if v >= 0.72 => '+',
+                v if v >= 0.58 => '=',
+                v if v >= 0.46 => ':',
+                v if v >= 0.36 => '.',
                 _ => ' ',
             };
-            return Some((ch, photosphere_ink(i)));
+            return Some((ch, ink::seq(v)));
         }
-        let v = lit
-            .iter()
-            .flatten()
-            .map(|&i| ink::seq_value(i))
-            .reduce(f64::max)?;
+        let v = lit.iter().flatten().copied().reduce(f64::max)?;
+        let rim = [2 * cy, 2 * cy + 1].into_iter().any(|py| {
+            let d = past_limb(f64::from(py) + 0.5);
+            d > 0.0 && d <= ASCII_RIM_PX
+        });
         let ch = if v >= V_KNOT_CORE {
             'o'
+        } else if rim {
+            '\''
         } else if v >= V_LOOP_ASCII {
             '.'
         } else {
             return None;
         };
-        Some((ch, h_alpha_ink(v)))
+        Some((ch, ink::seq(v)))
     }
 
     /// `day 12.4  Teff 5772 K`, bottom-right and clear of the title (GEN-R13); `Teff`
@@ -1267,9 +1233,8 @@ impl Generator for SolarSurface {
             self.seed(&mut ctx.rng);
         }
         self.view = View::new(size);
-        self.view.seed_grain(self.t);
-        self.rasterise();
-        self.dirty = false;
+        self.fit_granules(&mut ctx.rng);
+        self.rasterise(true);
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1279,7 +1244,13 @@ impl Generator for SolarSurface {
             0.0
         };
         self.t += dt;
-        self.view.advance_grain(self.t, dt);
+        self.steps += 1;
+        for g in &mut self.granules {
+            g.advance(dt);
+            if g.age >= g.life {
+                *g = Granule::spawn(&mut ctx.rng, 0.0);
+            }
+        }
         for r in &mut self.regions {
             r.advance(dt);
             r.rain(dt, &mut ctx.rng);
@@ -1291,35 +1262,13 @@ impl Generator for SolarSurface {
                 *r = Region::spawn(&mut ctx.rng, lat, lon, h);
             }
         }
-        self.dirty = true;
-    }
-
-    fn prepare(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.rasterise();
-        }
+        self.rasterise(false);
     }
 
     fn render(&self, canvas: &mut Canvas) {
         self.view.pixels.blit(canvas, |cx, cy, top, bottom| {
             self.ascii_cell(cx, cy, top, bottom)
         });
-        self.view.draw_spectrum(canvas);
-        if let Some(inset) = self.view.inset {
-            // The false-colour note when the row has room for it.
-            let label = if SPECTRUM_LABEL.len() + 2 <= inset.w + 1 {
-                SPECTRUM_LABEL
-            } else {
-                SPECTRUM_LABEL_SHORT
-            };
-            draw::label(
-                canvas,
-                inset.x as i32 - 1,
-                inset.y as i32 - 1,
-                label,
-                LABEL_INK,
-            );
-        }
         self.draw_label(canvas);
     }
 }
@@ -1448,9 +1397,6 @@ mod tests {
         out
     }
 
-    /// Pixels this far past the limb count as clear of it.
-    const ANNULUS_PX: f64 = 2.6;
-
     /// A region's midpoint (region frame), halfway between its spots on the sphere.
     fn midpoint(r: &Region) -> [f64; 3] {
         let m = axpy(1.0, r.spots[0].centre, r.spots[1].centre);
@@ -1466,7 +1412,6 @@ mod tests {
         let mut ctx = Ctx::new(11, Size::new(w, h));
         let mut s = SolarSurface::new();
         s.resize(Size::new(w, h), &mut ctx);
-        s.prepare();
         (s, ctx)
     }
 
@@ -1474,11 +1419,11 @@ mod tests {
     fn quiet(w: u16, h: u16) -> SolarSurface {
         let (mut s, _) = scene(w, h);
         s.show_regions = false;
-        s.rasterise();
+        s.rasterise(true);
         s
     }
 
-    /// `(μ, photospheric intensity)` of every disc pixel.
+    /// `(μ, Seq value)` of every disc pixel.
     fn disc_values(s: &SolarSurface) -> Vec<(f64, f64)> {
         let v = &s.view;
         v.disc
@@ -1488,7 +1433,7 @@ mod tests {
                     .pixels
                     .get(i32::from(d.x), i32::from(d.y))
                     .unwrap_or(Ink::BLANK);
-                (f64::from(d.n[2]), photosphere_intensity(ink))
+                (f64::from(d.n[2]), ink::seq_value(ink))
             })
             .collect()
     }
@@ -1508,9 +1453,12 @@ mod tests {
             assert!(limb_intensity(mu + 0.01) > limb_intensity(mu));
         }
         let px = disc_values(&quiet(200, 50));
-        let centre = mean(px.iter().filter(|p| p.0 > 0.8).map(|p| p.1));
-        let limb = mean(px.iter().filter(|p| p.0 < 0.3).map(|p| p.1));
-        assert!(centre - limb >= 0.3, "centre {centre:.2} vs limb {limb:.2}");
+        let centre = mean(px.iter().filter(|p| p.0 > 0.8).map(|p| 255.0 * p.1));
+        let limb = mean(px.iter().filter(|p| p.0 < 0.3).map(|p| 255.0 * p.1));
+        assert!(
+            centre - limb >= 60.0,
+            "centre {centre:.1} vs limb {limb:.1}"
+        );
     }
 
     #[test]
@@ -1537,16 +1485,23 @@ mod tests {
         ];
         let (s0, _) = scene(80, 24);
         let region = s0.regions[1].clone();
+        let mut ctx = Ctx::new(3, Size::new(1, 1));
+        let granule = Granule {
+            life: 1e9,
+            ..Granule::spawn(&mut ctx.rng, 0.0)
+        };
         let expect = |lat: f64| omega_deg_per_day(lat) * 3.0;
         let moved = |from: f64, to: f64| geom::wrap_angle(to - from).to_degrees();
         for dts in &schedules {
             assert!((dts.iter().sum::<f64>() - 10.0).abs() < 1e-12);
-            let mut r = region.clone();
+            let (mut r, mut g) = (region.clone(), granule);
             for &dt in dts {
                 r.advance(dt);
+                g.advance(dt);
             }
             let dr = moved(region.lon, r.lon) - expect(lat_of(&region).to_degrees());
-            assert!(dr.abs() < 1e-9, "{dr:e}");
+            let dg = moved(granule.lon, g.lon) - expect(granule.sin_lat.asin().to_degrees());
+            assert!(dr.abs() < 1e-9 && dg.abs() < 1e-9, "{dr:e} {dg:e}");
         }
     }
 
@@ -1660,9 +1615,8 @@ mod tests {
             .collect();
         assert!(inside.len() >= 10, "only {} spot pixels", inside.len());
         let shade = |s: &mut SolarSurface, g: f32| {
-            s.view.grain[0].fill(g);
-            s.view.grain[1].fill(g);
-            s.view.shade_disc(&spots, 0.0);
+            s.view.grain.fill(g);
+            s.view.shade_disc(&spots);
             inside
                 .iter()
                 .map(|&i| {
@@ -1671,7 +1625,7 @@ mod tests {
                 })
                 .collect::<Vec<f32>>()
         };
-        let (plain, grainy) = (shade(&mut s, 0.5), shade(&mut s, 0.9));
+        let (plain, grainy) = (shade(&mut s, 1.0), shade(&mut s, 1.12));
         for (a, b) in plain.iter().zip(&grainy) {
             assert!((a - b).abs() < 1e-6, "granulation in a spot: {a} vs {b}");
         }
@@ -1744,7 +1698,7 @@ mod tests {
         let a = spot_at(&v, 5.0, -55.0, 5.0);
         let b = spot_at(&v, 5.0, -45.0, 4.0);
         let mut shade = |spots: &[SpotView]| {
-            v.shade_disc(spots, 0.0);
+            v.shade_disc(spots);
             v.disc_i.clone()
         };
         let (alone, ab, ba, plain) = (shade(&[a]), shade(&[a, b]), shade(&[b, a]), shade(&[]));
@@ -1790,9 +1744,9 @@ mod tests {
             reach: facular_reach(3f64.to_radians()),
             ..spot_at(&v, 10.0, -40.0, 3.0)
         };
-        v.shade_disc(&[], 0.0);
+        v.shade_disc(&[]);
         let plain = v.disc_i.clone();
-        v.shade_disc(&[spot], 0.0);
+        v.shade_disc(&[spot]);
         let (mut inside, mut changed) = (0, 0);
         for dp in &v.disc {
             let i = usize::from(dp.y) * v.w + usize::from(dp.x);
@@ -1868,19 +1822,10 @@ mod tests {
             assert!((44.9..=65.1).contains(&shear), "shear {shear}°");
             let mut prev: Option<(f64, f64)> = None;
             for lp in &r.loops {
-                // Every sample within the twist of the vertical plane through the region
-                // centre, bowed one way on one leg and the other way on the other: an S.
-                let off = |p: [f64; 3]| dot(axpy(-1.0, up, p), unit(normal));
-                let along = |p: [f64; 3]| dot(axpy(-1.0, up, p), unit(dir)).abs();
-                let half = lp.pts.iter().map(|&p| along(p)).fold(0.0, f64::max);
-                let mut bow = 0.0f64;
-                for (i, &p) in lp.pts.iter().enumerate() {
-                    assert!(off(p).abs() <= ARCADE_TWIST * half * 1.05 + 1e-9);
-                    let mirror = off(lp.pts[LOOP_SAMPLES - 1 - i]);
-                    assert!((off(p) + mirror).abs() < 1e-6 * half.max(1e-3), "not an S");
-                    bow = bow.max(off(p).abs());
+                for &p in &lp.pts {
+                    // Every sample in the vertical plane through the region centre.
+                    assert!(dot(axpy(-1.0, up, p), unit(normal)).abs() < 1e-9);
                 }
-                assert!(bow > 0.5 * ARCADE_TWIST * half, "no twist: {bow}");
                 let apex = lp.pts.iter().map(|&p| norm(p) - 1.0).fold(0.0, f64::max);
                 let span = norm(axpy(-1.0, lp.pts[0], lp.pts[LOOP_SAMPLES - 1]));
                 if let Some((a0, s0)) = prev {
@@ -1893,6 +1838,62 @@ mod tests {
 
     fn smooth_out(a: f64) -> f64 {
         ease::smoothstep((0.5 - a) / KNOT_FADE)
+    }
+
+    #[test]
+    fn sun_spicules_grow_out_of_the_rim() {
+        let (mut s, mut ctx) = scene(200, 50);
+        s.show_loops = false;
+        for _ in 0..40 {
+            s.update(0.25, &mut ctx);
+            s.rasterise(true);
+            let v = &s.view;
+            let lit = |x: i32, y: i32| {
+                v.pixels
+                    .get(x, y)
+                    .is_some_and(|i| i.role != Role::Background)
+            };
+            for rp in &v.rim {
+                let (x, y) = (i32::from(rp.x), i32::from(rp.y));
+                if f64::from(rp.above) > RIM_PX + 1.0 && lit(x, y) {
+                    let (ix, iy) = rp.inward;
+                    assert!(
+                        lit(i32::from(ix), i32::from(iy)),
+                        "floating spicule pixel {x},{y}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn sun_spicules_scale_with_the_disc() {
+        // Spicules stand 0.035 R high, capped at 1.6 px: full fuzz at 200×50, a thin
+        // fringe on small discs whose limb would otherwise look moth-eaten.
+        assert!((spicule_px(46.0) - 1.6).abs() < 1e-12);
+        assert!((spicule_px(22.0) - 0.77).abs() < 1e-12);
+        assert!((spicule_px(11.0) - 0.385).abs() < 1e-12);
+        for (w, h) in [(40u16, 12u16), (80, 24), (200, 50)] {
+            let (mut s, mut ctx) = scene(w, h);
+            s.show_loops = false;
+            let reach = RIM_PX + spicule_px(s.view.r);
+            for _ in 0..40 {
+                s.update(0.25, &mut ctx);
+                let v = &s.view;
+                for rp in &v.rim {
+                    let lit = v
+                        .pixels
+                        .get(i32::from(rp.x), i32::from(rp.y))
+                        .is_some_and(|i| i.role != Role::Background);
+                    assert!(
+                        !lit || f64::from(rp.above) <= reach + 1e-6,
+                        "{w}x{h}: spicule pixel {} px above the limb (R = {})",
+                        rp.above,
+                        v.r
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1929,7 +1930,7 @@ mod tests {
         let (on, _) = scene(200, 50);
         let (mut off, _) = scene(200, 50);
         off.show_loops = false;
-        off.rasterise();
+        off.rasterise(true);
         (on, off)
     }
 
@@ -2056,23 +2057,32 @@ mod tests {
         );
         let values: Vec<f64> = lit.into_iter().map(ink::seq_value).collect();
         for &v in &values {
-            // One thin loop at level 110; only the rain knots brighten it (ADR-0017).
             assert!(
-                (V_LOOP - 0.01..=V_LOOP + V_KNOT + 0.01).contains(&v),
+                (V_RIM + 0.03..=V_LOOP + V_KNOT + 0.01).contains(&v),
                 "loop value {v}"
             );
         }
+        // The loop body sits under the penumbra (0.12 + 0.78·0.70); only knots pass it.
+        let body = values.iter().copied().fold(1.0, f64::min);
+        assert!(body < 0.12 + 0.78 * 0.70, "loop body {body}");
     }
 
     #[test]
-    fn sun_ascii_loops_stand_clear_of_the_limb() {
-        // Off the disc the ASCII frame holds only loop plasma `.` and knot cores `o`: there
-        // is no rim ring (ADR-0017).
+    fn sun_ascii_rim_is_one_cell_and_loops_stand_clear_of_it() {
         let (s, _) = scene(80, 24);
         let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
         s.render(&mut canvas);
         let lines = canvas.to_lines();
         let v = &s.view;
+        // Cells holding a pixel within 1 px of the limb.
+        let mut rim_cell = vec![false; 80 * 24];
+        for rp in v
+            .rim
+            .iter()
+            .filter(|rp| f64::from(rp.above) <= ASCII_RIM_PX)
+        {
+            rim_cell[usize::from(rp.y / 2) * 80 + usize::from(rp.x)] = true;
+        }
         let mut loops = 0;
         for (cy, line) in lines.iter().enumerate().take(23) {
             for (cx, ch) in line.chars().enumerate() {
@@ -2081,13 +2091,16 @@ mod tests {
                     continue;
                 }
                 match ch {
-                    '.' | 'o' => loops += 1,
+                    '\'' => assert!(rim_cell[cy * 80 + cx], "' off the rim at {cx},{cy}"),
+                    '.' | 'o' => {
+                        loops += usize::from(!rim_cell[cy * 80 + cx]);
+                    }
                     ' ' => {}
                     _ => panic!("unexpected off-disc '{ch}' at {cx},{cy}"),
                 }
             }
         }
-        assert!(loops >= 5, "only {loops} loop cells");
+        assert!(loops >= 8, "only {loops} loop cells clear of the rim");
     }
 
     /// Whether disc pixel (x, y) lies inside a shown spot: the product of the spots'
@@ -2119,17 +2132,15 @@ mod tests {
         let mut ctx = Ctx::new(seed, Size::new(200, 50));
         let mut s = SolarSurface::new();
         s.resize(Size::new(200, 50), &mut ctx);
-        s.prepare();
         let rows = usize::from(s.view.pixels.pixel_size().height());
         let w = s.view.w;
         let mut absorbed_total = 0;
         for _ in 0..10 {
             for _ in 0..32 {
                 s.update(0.25, &mut ctx);
-                s.prepare();
             }
             s.show_loops = false;
-            s.rasterise();
+            s.rasterise(true);
             let off: Vec<Ink> = (0..rows * w)
                 .map(|i| {
                     s.view
@@ -2139,7 +2150,7 @@ mod tests {
                 })
                 .collect();
             s.show_loops = true;
-            s.rasterise();
+            s.rasterise(true);
             let spots = shown_spots(&s);
             // Pixels within 1 px of a Filament sample standing higher than 0.35 of its
             // loop's apex (apex measured from the samples themselves).
@@ -2191,6 +2202,41 @@ mod tests {
     }
 
     #[test]
+    fn sun_a7_worley_distances_are_lower_bounds_within_the_query() {
+        let s_g = 4.0;
+        let radius = 1.5 * s_g;
+        // A pixel 0.8 s_g into its bucket: a site 1.4 s_g east lies two buckets over,
+        // beyond a 1 s_g query but inside the 1.5 s_g one.
+        let (x0, y0) = (10.8 * s_g, 10.5 * s_g);
+        let cell = |x: f64, y: f64| Cell {
+            x: x as f32,
+            y: y as f32,
+            m2: 1.0,
+            w: 1.0,
+        };
+        let mut hash = SpatialHash::new(40.0 * s_g, 40.0 * s_g, s_g);
+        let cells = [cell(x0, y0), cell(x0 + 1.4 * s_g, y0)];
+        hash.rebuild(&cells.map(|c| [f64::from(c.x), f64::from(c.y)]));
+        let (f1, f2, _) = View::worley(&hash, &cells, x0, y0, radius);
+        assert!(
+            f1.abs() < 1e-4 && (f2 - 1.4 * s_g).abs() < 1e-4,
+            "{f1} {f2}"
+        );
+        // A lone site: the second distance is only known to exceed the query radius.
+        let cells = [cell(x0, y0)];
+        hash.rebuild(&[[x0, y0]]);
+        let (f1, f2, _) = View::worley(&hash, &cells, x0 + 0.5, y0, radius);
+        assert!(
+            (f1 - 0.5).abs() < 1e-4 && (f2 - radius).abs() < 1e-9,
+            "{f1} {f2}"
+        );
+        // Spacing grows with the disc so cells span 2–3 terminal cells.
+        assert_eq!(granule_spacing(10.0), 3.6);
+        assert!((granule_spacing(46.0) - 3.91).abs() < 1e-9);
+        assert_eq!(granule_spacing(200.0), 5.0);
+    }
+
+    #[test]
     fn sun_a6_regions_ride_spoerer_latitudes_and_respawn_unseen() {
         let (mut s, mut ctx) = scene(80, 24);
         let first = &s.regions[0];
@@ -2205,7 +2251,6 @@ mod tests {
         for _ in 0..1200 {
             let before = s.regions.clone();
             s.update(0.25, &mut ctx);
-            s.prepare();
             for (old, new) in before.iter().zip(&s.regions) {
                 let lat = lat_of(new).to_degrees().abs();
                 assert!((5.0..=30.0).contains(&lat), "latitude {lat}");
@@ -2232,64 +2277,52 @@ mod tests {
     }
 
     #[test]
-    fn sun_a7_granulation_generations_and_contrast() {
+    fn sun_a7_granule_pool_and_contrast() {
         let (mut s, mut ctx) = scene(200, 50);
         assert!((s.view.r - 46.0).abs() < 1e-9);
-        assert!((granule_spacing(46.0) - 2.53).abs() < 1e-9);
-        // The next generation is always complete before it takes over, and the pattern
-        // changes as the generations cross-fade.
-        let before = s.view.grain[0].clone();
-        for _ in 0..(2.0 * GRANULE_LIFE / 0.25) as usize {
+        // 4π·46²/3.91² with s_g = 0.085·R.
+        assert_eq!(granule_count(46.0), 1739);
+        for _ in 0..120 {
             s.update(0.25, &mut ctx);
-            s.prepare();
-            if s.view.filled < s.view.disc.len() {
-                let left = s.view.disc.len() - s.view.filled;
-                let steps_left = (GRANULE_LIFE * (1.0 + s.view.generation as f64) - s.t) / 0.25;
-                assert!(
-                    left as f64
-                        <= steps_left * 0.25 * 1.5 * s.view.disc.len() as f64 / GRANULE_LIFE + 1.0
-                );
+            assert_eq!(s.granules.len(), 1739);
+            assert!(s.granules.capacity() <= GRANULES_MAX);
+            for g in &s.granules {
+                assert!((GRANULE_LIFE.0..=GRANULE_LIFE.1).contains(&g.life));
             }
         }
-        assert_ne!(before, s.view.grain[0], "the granulation evolves");
-        for g in s.view.grain.iter().flatten() {
-            assert!((0.0..=1.0).contains(g));
-        }
         s.show_regions = false;
-        s.rasterise();
+        s.rasterise(true);
         let rms = |lo: f64, hi: f64| {
             let ratio: Vec<f64> = disc_values(&s)
                 .into_iter()
                 .filter(|p| p.0 > lo && p.0 < hi)
-                .map(|(mu, i)| i / limb_intensity(mu))
+                .map(|(mu, v)| ((v - 0.12) / 0.78) / limb_intensity(mu))
                 .collect();
             let m = mean(ratio.iter().copied());
             mean(ratio.iter().map(|r| (r - m) * (r - m))).sqrt()
         };
         let (centre, limb) = (rms(0.8, 1.01), rms(0.15, 0.3));
-        assert!((0.03..=0.12).contains(&centre), "centre rms {centre:.3}");
-        assert!(limb < 0.8 * centre, "limb rms {limb:.3} vs {centre:.3}");
-        // Granules parted by narrow lanes: most of the texture is granule, a fair share lane.
-        let g = &s.view.grain[0];
-        let n = g.len() as f64;
-        let lanes = g.iter().filter(|&&v| v < 0.3).count() as f64 / n;
-        let cells = g.iter().filter(|&&v| v > 0.7).count() as f64 / n;
-        assert!(
-            (0.08..0.4).contains(&lanes) && cells > 0.5,
-            "lanes {lanes:.2}, cells {cells:.2}"
-        );
+        assert!((0.06..=0.18).contains(&centre), "centre rms {centre:.3}");
+        assert!(limb < 0.6 * centre, "limb rms {limb:.3} vs {centre:.3}");
+        for (f1, dd) in [(0.45, 0.0), (0.45, 0.1), (0.9, 0.05), (2.0, 0.1)] {
+            let s_g = granule_spacing(46.0);
+            assert!(granule_pattern(f1 * s_g, (f1 + dd) * s_g, 1.0, s_g) < 0.26);
+        }
+        for (f1, dd, w) in [(0.0, 0.3, 0.0), (1.0, 0.5, 1.0), (0.2, 2.0, 0.5)] {
+            let s_g = granule_spacing(46.0);
+            assert!(granule_pattern(f1 * s_g, (f1 + dd) * s_g, w, s_g) >= 0.55);
+        }
     }
 
     #[test]
     fn sun_gen_r13_label_and_tiny_sizes() {
-        // Right-aligned, clear of the title: beside the full "Solar surface · convection
-        // cells" (32 cells, from 57 wide) the room is w − 38, 19 chars at 57, so Teff is
-        // dropped there.
+        // Right-aligned, clear of the title: beside the full "Solar surface · boiling
+        // granules" (32 cells, from 57 wide) the room is w − 38, 19 chars at 57, so Teff
+        // is dropped there.
         for (w, want) in [(80, " day 3.0  Teff 5772 K "), (57, " day 3.0 ")] {
             let (mut s, mut ctx) = scene(w, 24);
             for _ in 0..40 {
                 s.update(0.25, &mut ctx);
-                s.prepare();
             }
             let mut canvas = Canvas::new(Size::new(w, 24), GlyphMode::Ascii);
             s.render(&mut canvas);
@@ -2298,189 +2331,9 @@ mod tests {
         let (mut s, mut ctx) = scene(80, 24);
         for (w, h) in [(1, 1), (3, 2), (50, 12), (300, 1)] {
             s.resize(Size::new(w, h), &mut ctx);
-            s.prepare();
             s.update(0.25, &mut ctx);
-            s.prepare();
             let mut canvas = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
             s.render(&mut canvas);
-        }
-    }
-
-    #[test]
-    fn sun_a8_slit_spectrum_shows_lines_and_spot_bands_clear_of_the_sun() {
-        assert!(quiet(80, 24).view.inset.is_none());
-        let mut s = quiet(200, 50);
-        let inset = s.view.inset.expect("inset at 200x50");
-        let v = &s.view;
-        // Clear of the disc and loops (in pixels: rows are two tall), above the title.
-        for y in 2 * inset.y..2 * (inset.y + inset.h) {
-            for x in inset.x..inset.x + inset.w {
-                let d = (x as f64 + 0.5 - v.cx).hypot(y as f64 + 0.5 - v.cy);
-                assert!(d >= INSET_CLEAR * v.r, "({x}, {y}) at {d}");
-            }
-        }
-        assert!(inset.y + inset.h <= 50 - 2);
-        // Every line in range falls on its nearest column (G and H-γ, 3 nm apart, share
-        // one at this resolution).
-        let step = (SPECTRUM_NM.1 - SPECTRUM_NM.0) / (inset.w - 1) as f64;
-        for l in FRAUNHOFER_NM {
-            let u = ((l - SPECTRUM_NM.0) / step).round() as usize;
-            assert!(inset.is_line(u), "{l} nm");
-        }
-        let lines = (0..inset.w).filter(|&u| inset.is_line(u)).count();
-        assert!(lines >= FRAUNHOFER_NM.len() - 1 && lines <= FRAUNHOFER_NM.len());
-        let render = |s: &SolarSurface| {
-            let mut c = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
-            s.render(&mut c);
-            c
-        };
-        let cell = |c: &Canvas, u: usize, row: usize| {
-            *c.get((inset.x + u) as i32, (inset.y + row) as i32).unwrap()
-        };
-        // A continuous band: every cell of a disc row is coloured, and only the line
-        // columns carry a thin dark line.
-        let mid = inset.h / 2;
-        let c = render(&s);
-        for u in 0..inset.w {
-            let k = cell(&c, u, mid);
-            assert_eq!(k.bg.role, Role::Phase, "column {u}");
-            let thin = ['│', '▏', '▕'].contains(&k.ch);
-            assert_eq!(thin, inset.is_line(u), "column {u}: {:?}", k.ch);
-            if thin {
-                assert_eq!(k.ink, DARK_INK);
-            }
-        }
-        // Red at the right, violet at the left.
-        let hue = |u: usize| ink::phase_value(cell(&c, u, mid).bg);
-        assert!(hue(inset.w - 1) < 0.1 * TAU && hue(0) > 0.7 * TAU);
-        // An umbra on the slit is a dark stripe with heavy lines; the next row is not.
-        let row = 3;
-        s.view.slit[row] = SlitRow { i: 0.2, shift: 0 };
-        s.view.slit[row + 1] = SlitRow { i: 1.0, shift: -1 };
-        let c = render(&s);
-        for u in 0..inset.w {
-            let (k, next) = (cell(&c, u, row), cell(&c, u, row + 1));
-            assert_eq!(k.ch, if inset.is_line(u) { '┃' } else { '▓' }, "column {u}");
-            assert_eq!(k.bg.role, Role::Phase);
-            // Rising gas shifts the lines blueward.
-            assert_eq!(
-                next.ch,
-                if inset.is_line(u) { '▏' } else { ' ' },
-                "column {u}"
-            );
-        }
-        // Off the disc the slit sees nothing.
-        s.view.slit[0].i = f32::NAN;
-        let c = render(&s);
-        assert!((0..inset.w).all(|u| cell(&c, u, 0).bg.role == Role::Background));
-        // The slit is marked by its jaws just inside the limb, top and bottom: a dark
-        // hairline over the photosphere, and none across the middle of the disc.
-        let x = s.view.slit_x() as i32;
-        let jaws = (0..50)
-            .filter(|&y| {
-                c.get(x, y)
-                    .is_some_and(|k| k.ch == '│' && k.ink == DARK_INK)
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(jaws.len(), 2 * JAW_CELLS as usize, "{jaws:?}");
-        for &y in &jaws {
-            assert_eq!(
-                c.get(x, y).unwrap().bg.role,
-                Role::Ramp(Ramp::Ember),
-                "row {y}"
-            );
-        }
-        let (top, bottom) = (jaws[0], jaws[jaws.len() - 1]);
-        assert!(
-            jaws[1] - top < 2 && bottom - jaws[jaws.len() - 2] < 2,
-            "{jaws:?}"
-        );
-        assert!(!s.view.on_disc(x, 2 * top - 1) && !s.view.on_disc(x, 2 * bottom + 2));
-        // Sampled from the photosphere: the Doppler sign follows the granulation.
-        s.view.sample_slit();
-        assert!(s.view.slit[..inset.h].iter().any(|r| !r.i.is_nan()));
-    }
-
-    #[test]
-    fn sun_a8_doppler_shift_holds_until_the_excess_falls_back() {
-        assert_eq!(doppler_shift(0, 0.03), -1);
-        assert_eq!(doppler_shift(0, -0.03), 1);
-        assert_eq!(doppler_shift(0, 0.015), 0);
-        // Hysteresis: a shifted row near the threshold stays shifted...
-        assert_eq!(doppler_shift(-1, 0.015), -1);
-        assert_eq!(doppler_shift(1, -0.015), 1);
-        // ...until the excess falls inside the hold band, or flips sign past the threshold.
-        assert_eq!(doppler_shift(-1, 0.005), 0);
-        assert_eq!(doppler_shift(1, -0.005), 0);
-        assert_eq!(doppler_shift(-1, -0.03), 1);
-        // A wobble about the threshold changes the glyph once, not every frame.
-        let mut shift = 0;
-        let mut changes = 0;
-        for k in 0..40 {
-            let excess = 0.02 + 0.004 * if k % 2 == 0 { 1.0 } else { -1.0 };
-            let next = doppler_shift(shift, excess);
-            changes += i32::from(next != shift);
-            shift = next;
-        }
-        assert_eq!(changes, 1);
-    }
-
-    #[test]
-    fn sun_a11_one_thin_loop_per_region_whose_rain_streams() {
-        // ADR-0017: no prominence sheet; the outer arch alone, a thin Hα line whose rain
-        // knots move.
-        let (on, _) = scene(200, 50);
-        let lit = clear_of_the_limb(&on);
-        assert!(lit.len() >= 8, "{} loop pixels", lit.len());
-        for ink in &lit {
-            assert_eq!(ink.role, Role::Ramp(Ramp::HAlpha));
-        }
-        let (mut s, mut ctx) = scene(200, 50);
-        let before: Vec<Ink> = clear_of_the_limb(&s);
-        for _ in 0..4 {
-            s.update(0.25, &mut ctx);
-            s.prepare();
-        }
-        let after: Vec<Ink> = clear_of_the_limb(&s);
-        assert_ne!(before, after);
-    }
-
-    #[test]
-    fn sun_a10_space_around_the_disc_stays_black() {
-        // ADR-0017: no chromospheric ring or spicule fringe; with the loops off, every
-        // pixel off the disc is empty.
-        for (w, h) in [(200, 50), (80, 24)] {
-            let mut ctx = Ctx::new(11, Size::new(w, h));
-            let mut s = SolarSurface::new();
-            s.resize(Size::new(w, h), &mut ctx);
-            s.prepare();
-            s.show_loops = false;
-            s.rasterise();
-            let v = &s.view;
-            let rows = i32::from(v.pixels.pixel_size().height());
-            for y in 0..rows {
-                for x in 0..v.w as i32 {
-                    if !v.on_disc(x, y) {
-                        assert_eq!(v.pixels.get(x, y), Some(Ink::BLANK), "{w}x{h}: {x},{y}");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn sun_a9_granules_stand_out_and_umbrae_punch_through() {
-        // The photosphere's Ember values: granules well above the lanes, a warm gold centre
-        // under the ramp's pale top, a deep red limb and dark umbrae.
-        let v = photosphere_value;
-        assert!(v(1.07) - v(0.93) >= 0.15 * v(1.0), "granules against lanes");
-        assert!((0.7..=0.82).contains(&v(1.0)), "a warm gold centre");
-        assert!(v(0.4) < 0.2, "the limb sinks to a deep red");
-        assert!(v(0.22) < 0.07, "umbrae are dark");
-        for k in 0..=100 {
-            let i = 0.37 + 0.68 * f64::from(k) / 100.0;
-            let back = photosphere_intensity(photosphere_ink(i));
-            assert!((back - i).abs() < 0.03 * i + 0.02, "{i} -> {back}");
         }
     }
 }

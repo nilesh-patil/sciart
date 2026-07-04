@@ -19,9 +19,8 @@ use std::f64::consts::{PI, TAU};
 use rand::Rng;
 use sciart_core::particles::ParticlePool;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, halo_kernel};
+use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::{cell_key, hash01};
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "comet_tails",
@@ -91,20 +90,10 @@ const FIRST_CUT: f64 = 20.0;
 const DETACH_FADE: f64 = 4.0;
 /// Anti-solar speed the solar wind gives a disconnected tail, AU per simulated second.
 const DETACH_KICK: f64 = 0.3;
-/// Box-blur radius (pixels) of the far-dust layer, applied twice (near-Gaussian).
-const FAR_BLUR: usize = 2;
 /// Kepler solve: Newton iterations per frame (warm start).
 const NEWTON_WARM: usize = 3;
-/// ADR-0017 (M14): the dust tail in `Starlight` up to `DUST_TOP` (only the coma, within
-/// `COMA_PX` of the nucleus, keeps its full level), the ion tail as thin rays in `Ice`
-/// up to `ION_TOP`; no Sun glow (it sat cut off in a corner).
-const DUST_TOP: f64 = 130.0;
-const ION_TOP: f64 = 150.0;
-/// One pixel: the ion rays and their knots are drawn without a spread (critic round 2).
-const POINT: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
-const COMA_PX: f64 = 6.0;
-/// The nucleus's level (its cross at 0.7 of it).
-const NUCLEUS_LEVEL: f64 = 240.0;
+/// The head's radius in pixels ([`coma_ink`]); no Sun glow (it sat cut off in a corner).
+const COMA_PX: f64 = 4.5;
 /// A new comet arrives this far into its approach, with its tails seeded (GEN-R19: no
 /// warm-up steps in `resize`).
 const ARRIVE: f64 = 4.0;
@@ -246,38 +235,6 @@ fn tail_point(nucleus: [f64; 2], anti: [f64; 2], t: f64, s: f64, k: u8, j: f64) 
     ]
 }
 
-/// In-place separable box blur of radius `r` over a row-major `w × h` buffer, using
-/// `scratch` (at least `max(w, h)` long) for one line at a time; edges clamp. Mass is
-/// conserved away from the edges. Allocation-free.
-fn box_blur(buf: &mut [f32], w: usize, h: usize, r: usize, scratch: &mut [f32]) {
-    if w == 0 || h == 0 || buf.len() < w * h || scratch.len() < w.max(h) {
-        return;
-    }
-    let norm = 1.0 / (2 * r + 1) as f32;
-    // One line of `n` values at `start + i·stride`, blurred through `scratch`.
-    let mut line = |buf: &mut [f32], start: usize, stride: usize, n: usize| {
-        let at = |i: isize| start + (i.clamp(0, n as isize - 1) as usize) * stride;
-        let mut acc = 0.0f32;
-        for i in -(r as isize)..=(r as isize) {
-            acc += buf[at(i)];
-        }
-        for (i, out) in scratch.iter_mut().take(n).enumerate() {
-            *out = acc * norm;
-            let ii = i as isize;
-            acc += buf[at(ii + r as isize + 1)] - buf[at(ii - r as isize)];
-        }
-        for (i, s) in scratch.iter().take(n).enumerate() {
-            buf[start + i * stride] = *s;
-        }
-    };
-    for y in 0..h {
-        line(buf, y * w, 1, w);
-    }
-    for x in 0..w {
-        line(buf, x, w, h);
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 struct Grain {
     orbit: Orbit,
@@ -347,14 +304,10 @@ pub struct CometTails {
     ion_resume: f64,
     next_disconnect: f64,
     view: View,
-    dust_glow: Glow,
-    /// Grains older than 6 s, blurred before they join `dust_glow`.
-    far_glow: Glow,
-    /// One row or column of the blur (sized in `resize`).
-    scratch: Vec<f32>,
-    ion_glow: Glow,
-    dust_tone: Tone,
-    ion_tone: Tone,
+    /// The tails as braille line art (ADR-0018: lines and particles are dots): one dot
+    /// per dust grain, the ion streamers as dotted lines and their knots.
+    dots: Dots,
+    /// The head's flat rings and the sky stars (half-block pixels, under the dots).
     pixels: Pixels,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
@@ -375,12 +328,7 @@ impl CometTails {
             ion_resume: 0.0,
             next_disconnect: FIRST_CUT,
             view: View::default(),
-            dust_glow: Glow::default(),
-            far_glow: Glow::default(),
-            scratch: Vec::new(),
-            ion_glow: Glow::default(),
-            dust_tone: Tone::asinh(0.3, 20.0),
-            ion_tone: Tone::asinh(0.3, 8.0),
+            dots: Dots::default(),
             pixels: Pixels::default(),
             dirty: false,
         }
@@ -554,143 +502,117 @@ impl CometTails {
         let v = self.view;
         // Fade in and out at the loop's ends, where the next comet takes over.
         let tl = self.t.rem_euclid(LOOP);
-        let env = (tl / 0.4).min((LOOP - tl) / 0.4).clamp(0.0, 1.0) as f32;
-        const SOFT: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
-        const MID: [(i32, i32, f32); 25] = halo_kernel::<25>(2);
-        let sum = |k: &[(i32, i32, f32)]| k.iter().map(|e| e.2).sum::<f32>();
-        let n_mid = sum(&SOFT) / sum(&MID);
-        self.dust_glow.clear();
-        self.far_glow.clear();
-        self.ion_glow.clear();
-        let n = self.nucleus;
-        for g in self.dust.iter() {
-            let (x, y) = v.px([
-                n[0] + TAIL_EXAG * (g.pos[0] - n[0]),
-                n[1] + TAIL_EXAG * (g.pos[1] - n[1]),
-            ]);
-            // Fine grains (large β) scatter more light per unit mass and fill the fan.
-            let age = self.t - g.born;
-            let w = 0.45 * ((0.5 + g.beta) * (1.0 - age / DUST_LIFE).max(0.0)) as f32;
-            // Older grains have spread over more of the sky: they go into a layer that
-            // is blurred below, so the sparse far tail reads as a smooth haze, not
-            // speckle, while the young fan near the coma stays crisp.
-            let (x, y) = (2.0 * x, 2.0 * y);
-            if age < 2.0 {
-                self.dust_glow.splat(x, y, &SOFT, w);
-            } else if age < 6.0 {
-                self.dust_glow.splat(x, y, &MID, w * n_mid);
-            } else {
-                self.far_glow.splat(x, y, &SOFT, w);
+        let env = (tl / 0.4).min((LOOP - tl) / 0.4).clamp(0.0, 1.0);
+        let fading = env < 0.5;
+        let (nx, ny) = v.px(self.nucleus);
+        // Dots stay off the head, which the rings below draw.
+        let clear_of_head = |x: f64, y: f64| (x - nx).hypot(y - ny) >= COMA_PX;
+        self.dots.clear();
+        if env > 0.0 {
+            // The dust tail: one braille dot per grain, fanned and curving behind the
+            // orbit; young grains near the head in sun-yellow, older ones in dim orange.
+            let n = self.nucleus;
+            for g in self.dust.iter() {
+                let (x, y) = v.px([
+                    n[0] + TAIL_EXAG * (g.pos[0] - n[0]),
+                    n[1] + TAIL_EXAG * (g.pos[1] - n[1]),
+                ]);
+                if clear_of_head(x, y) {
+                    // Fine grains (large β) scatter more light per unit mass: bright too.
+                    let young = (self.t - g.born < DUST_YOUNG || g.beta > FINE) && !fading;
+                    self.dots
+                        .plot(2.0 * x, 2.0 * y, if young { DUST_NEAR } else { DUST_FAR });
+                }
             }
-        }
-        let far_px = self.far_glow.pixel_size();
-        let (fw, fh) = (usize::from(far_px.width()), usize::from(far_px.height()));
-        let far = self.far_glow.values_mut();
-        for _ in 0..2 {
-            box_blur(far, fw, fh, FAR_BLUR, &mut self.scratch);
-        }
-        for (d, f) in self.dust_glow.values_mut().iter_mut().zip(far.iter()) {
-            *d += f;
-        }
-        // The attached ion tail: each streamer stroked from the coma to the oldest
-        // attached parcel's run, bright at the root and fading down the tail.
-        let mut run = 0.0f64;
-        for ion in self.ions.iter().filter(|i| i.attached) {
-            run = run.max(ion_run(ion.age));
-        }
-        if run > 0.0 {
-            for k in 0..STREAMERS as u8 {
-                let mut a = v.px(self.tail_point(0.0, k, 0.0));
-                for i in 1..=STREAM_SEGS {
-                    let u = i as f64 / STREAM_SEGS as f64;
-                    let s = run * u * u;
-                    let b = v.px(self.tail_point(s, k, 0.0));
-                    let w = STREAM_W[usize::from(k)] * (1.0 / (1.0 + s / ION_FALL)) as f32;
-                    // A thin antialiased ray (M14: no soft body under it).
-                    let len = (b.0 - a.0).hypot(b.1 - a.1);
-                    let n = (2.0 * len).ceil().clamp(1.0, 1024.0) as usize;
-                    let per = 1.6 * w * (len / n as f64) as f32;
-                    for j in 0..n {
-                        let f = (j as f64 + 0.5) / n as f64;
-                        // Pixel `x` spans [x, x + 1); bilinear splats take centres.
-                        let (x, y) = (a.0 + f * (b.0 - a.0) - 0.5, a.1 + f * (b.1 - a.1) - 0.5);
-                        self.ion_glow
-                            .splat(2.0 * (x + 0.5), 2.0 * (y + 0.5), &POINT, per);
+            // The attached ion tail: each streamer a dotted line from the coma to the
+            // oldest attached parcel's run, cyan at the root, blue, then dim blue.
+            let mut run = 0.0f64;
+            for ion in self.ions.iter().filter(|i| i.attached) {
+                run = run.max(ion_run(ion.age));
+            }
+            if run > 0.0 {
+                for k in 0..STREAMERS as u8 {
+                    let faint = STREAM_W[usize::from(k)] < 0.5;
+                    let mut a = v.px(self.tail_point(0.0, k, 0.0));
+                    for i in 1..=STREAM_SEGS {
+                        let u = i as f64 / STREAM_SEGS as f64;
+                        let s = run * u * u;
+                        let b = v.px(self.tail_point(s, k, 0.0));
+                        if clear_of_head(b.0, b.1) {
+                            let ink = ray_ink(s, faint || fading);
+                            self.dots
+                                .line(2.0 * a.0, 2.0 * a.1, 2.0 * b.0, 2.0 * b.1, ink);
+                        }
+                        a = b;
                     }
-                    a = b;
+                }
+            }
+            // Parcels on top: knots of plasma running out along the rays, and the
+            // disconnected tail drifting off, dimming, then gone.
+            for ion in self.ions.iter() {
+                let (x, y) = v.px(self.ion_pos(ion));
+                let ink = if ion.attached && ion_run(ion.age) < 1.5 * ION_FALL {
+                    KNOT
+                } else if ion.attached {
+                    FAR_KNOT
+                } else if ion.since_cut < 0.6 * DETACH_FADE {
+                    ray_ink(ION_FALL, true)
+                } else {
+                    continue;
+                };
+                if clear_of_head(x, y) {
+                    self.dots.plot(2.0 * x, 2.0 * y, ink);
                 }
             }
         }
-        // Parcels on top: knots of plasma running out along the rays, and the
-        // disconnected tail drifting off and fading.
-        for ion in self.ions.iter() {
-            let (x, y) = v.px(self.ion_pos(ion));
-            let w = if ion.attached {
-                0.22 / (1.0 + ion_run(ion.age) / ION_FALL)
+        // The head's flat rings and the sky stars.
+        self.pixels.shade(|x, y| {
+            let d = (f64::from(x) + 0.5 - nx).hypot(f64::from(y) + 0.5 - ny);
+            if d < COMA_PX && env > 0.0 {
+                coma_ink(d, fading)
+            } else if hash01(0x57A ^ cell_key(x, y)) < 0.0015 {
+                STAR
             } else {
-                0.5 * (1.0 - ion.since_cut / DETACH_FADE).max(0.0)
-            };
-            self.ion_glow.splat(2.0 * x, 2.0 * y, &POINT, w as f32);
-        }
-        // Coma: a bright, compact halo round the nucleus.
-        const COMA: [(i32, i32, f32); 49] = halo_kernel::<49>(3);
-        let (nx, ny) = v.px(self.nucleus);
-        self.dust_glow.splat(2.0 * nx, 2.0 * ny, &COMA, 30.0);
-
-        let (dt, it) = (&self.dust_tone, &self.ion_tone);
-        let size = self.pixels.pixel_size();
-        let w = usize::from(size.width());
-        let (dust, ions) = (self.dust_glow.values(), self.ion_glow.values());
-        // The nucleus's pixel (the glow splats above take dot units, 2 per pixel).
-        let (cx, cy) = (nx, ny);
-        for (i, px) in (0..dust.len().min(ions.len())).zip(0..) {
-            let (x, y) = ((px % w) as i32, (px / w) as i32);
-            let (ld, li) = (dt.level(env * dust[i]), it.level(env * ions[i]));
-            // The coma keeps its full level; the tail is muted (ADR-0017).
-            let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
-            let coma = d < COMA_PX;
-            let dust_level = if coma {
-                // The head: a compact bright coma falling off from the nucleus.
-                let head = f64::from(env) * NUCLEUS_LEVEL * (1.0 - (d / COMA_PX).powi(2));
-                f64::from(ld).max(head)
-            } else {
-                DUST_TOP * f64::from(ld) / 255.0
-            };
-            let ion_level = ION_TOP * f64::from(li) / 255.0;
-            let ink =
-                if !coma && ion_level >= ink::MIN_VISIBLE_LEVEL && ion_level + 12.0 > dust_level {
-                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(ion_level))
-                } else if dust_level >= ink::MIN_VISIBLE_LEVEL {
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(dust_level))
-                } else if hash01(0x57A ^ cell_key(x, y)) < 0.0015 {
-                    ink::ramp(Ramp::Starlight, 0.12 + 0.2 * hash01(0x57B ^ cell_key(x, y)))
-                } else {
-                    Ink::BLANK
-                };
-            self.pixels.set(x, y, ink);
-        }
-        // The nucleus: the head's brightest point, with a faint cross (fading with the
-        // loop's envelope).
-        let (x, y) = (cx.floor() as i32, cy.floor() as i32);
-        let head = f64::from(env) * NUCLEUS_LEVEL;
-        if head >= ink::MIN_VISIBLE_LEVEL {
-            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let l = (0.7 * head).max(f64::from(
-                    self.pixels.get(x + dx, y + dy).map_or(0, |i| i.level),
-                ));
-                self.pixels.set(
-                    x + dx,
-                    y + dy,
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l)),
-                );
+                Ink::BLANK
             }
-            self.pixels.set(
-                x,
-                y,
-                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(head)),
-            );
-        }
+        });
     }
+}
+
+/// Background stars: small, dim white points.
+const STAR: Ink = Ink::new(Role::Star, 40);
+/// Dust grains (braille dots): the young fan near the head, and the older, wider tail.
+const DUST_YOUNG: f64 = 5.0;
+/// Grains with β above this are fine enough to stay bright down the tail.
+const FINE: f64 = 0.6;
+const DUST_NEAR: Ink = Ink::new(Role::Sun, 200);
+const DUST_FAR: Ink = Ink::new(Role::Hot, 110);
+/// Ion parcels riding the rays: cyan knots, blue once far down the tail.
+const KNOT: Ink = Ink::new(Role::Wave, 230);
+const FAR_KNOT: Ink = Ink::new(Role::Cold, 120);
+
+/// A ray's dotted line `s` AU down the tail: cyan at the root, blue down the tail, dim
+/// blue at its tip and on the fan's faint outer rays (and while the comet fades).
+fn ray_ink(s: f64, faint: bool) -> Ink {
+    if faint || s > 1.5 * ION_FALL {
+        Ink::new(Role::Cold, 40)
+    } else if s > 0.35 * ION_FALL {
+        Ink::new(Role::Cold, 170)
+    } else {
+        Ink::new(Role::Wave, 170)
+    }
+}
+
+/// The head in flat rings (ADR-0018): a white nucleus, a pale coma, a sun-yellow rim;
+/// one step dimmer while the comet fades in or out.
+fn coma_ink(d: f64, fading: bool) -> Ink {
+    let k = usize::from(d >= 1.2) + usize::from(d >= 3.0) + usize::from(fading);
+    [
+        Ink::new(Role::Star, 255),
+        Ink::new(Role::Star, 150),
+        Ink::new(Role::Sun, 140),
+        Ink::new(Role::Sun, 40),
+    ][k.min(3)]
 }
 
 impl Generator for CometTails {
@@ -699,13 +621,7 @@ impl Generator for CometTails {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        self.dust_glow.resize(size);
-        self.far_glow.resize(size);
-        let fp = self.far_glow.pixel_size();
-        self.scratch.clear();
-        self.scratch
-            .resize(usize::from(fp.width().max(fp.height())), 0.0);
-        self.ion_glow.resize(size);
+        self.dots.resize(size);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
@@ -748,6 +664,7 @@ impl Generator for CometTails {
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit_over(canvas, &self.pixels);
     }
 }
 
@@ -786,22 +703,6 @@ mod tests {
             let orbit = Orbit::new(r, v, MU * (1.0 - BETA.0));
             assert!(orbit.energy(r, v) > 0.0, "ν {nu}");
         }
-    }
-
-    #[test]
-    fn cmt_a9_far_dust_blur_spreads_and_conserves_light() {
-        // The far-dust haze: one bright pixel mid-buffer spreads to a 5×5 plateau (radius
-        // 2) with its total conserved, and a degenerate buffer is left alone.
-        let (w, h) = (11, 9);
-        let mut buf = vec![0.0f32; w * h];
-        buf[4 * w + 5] = 25.0;
-        let mut scratch = vec![0.0f32; 11];
-        box_blur(&mut buf, w, h, 2, &mut scratch);
-        let total: f32 = buf.iter().sum();
-        assert!((total - 25.0).abs() < 1e-4, "{total}");
-        assert!((buf[4 * w + 5] - 1.0).abs() < 1e-5 && (buf[2 * w + 3] - 1.0).abs() < 1e-5);
-        assert_eq!(buf[w + 5], 0.0);
-        box_blur(&mut buf, 0, 0, 2, &mut scratch);
     }
 
     fn run(seconds: f64) -> CometTails {
@@ -908,27 +809,54 @@ mod tests {
         }
     }
 
-    /// Ion light (tone level) at `s` AU down the tail's axis, or `None` off frame.
-    fn ion_level_at(g: &CometTails, s: f64) -> Option<u8> {
+    /// Brightness rank of an ion ink (0 none, 1 dim blue, 2 blue, 3 cyan).
+    fn ion_rank(i: Ink) -> u8 {
+        match (i.role, i.level) {
+            (Role::Wave, _) => 3,
+            (Role::Cold, l) if l > 100 => 2,
+            (Role::Cold, _) => 1,
+            _ => 0,
+        }
+    }
+
+    /// The dots alone, blitted: a lit dot's ink is its cell's.
+    fn dot_canvas(g: &CometTails) -> Canvas {
+        let size = g.pixels.pixel_size();
+        let mut c = Canvas::new(
+            Size::new(size.width(), size.height() / 2),
+            GlyphMode::Unicode,
+        );
+        g.dots.blit(&mut c);
+        c
+    }
+
+    /// Ink of the lit dot at dot `(x, y)`, if any.
+    fn dot_ink(g: &CometTails, c: &Canvas, x: i32, y: i32) -> Option<Ink> {
+        g.dots
+            .is_lit(x, y)
+            .then(|| c.get(x.div_euclid(2), y.div_euclid(4)).map(|cell| cell.ink))
+            .flatten()
+    }
+
+    /// Ion light (rank) at `s` AU down the tail's axis, or `None` off frame: the
+    /// brightest ion dot within a pixel and a half of the axis point (the kink wanders).
+    fn ion_level_at(g: &CometTails, c: &Canvas, s: f64) -> Option<u8> {
         let (x, y) = g.view.px(g.tail_point(s, (STREAMERS / 2) as u8, 0.0));
-        let px = g.dust_glow.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        let (xi, yi) = (x.floor() as i32, y.floor() as i32);
-        if !((0..w).contains(&xi) && (0..h).contains(&yi)) {
+        let px = g.pixels.pixel_size();
+        let (w, h) = (f64::from(px.width()), f64::from(px.height()));
+        if !((0.0..w).contains(&x) && (0.0..h).contains(&y)) {
             return None;
         }
-        // The brightest of the 3×3 pixels round the axis point (the kink wanders).
-        let vals = g.ion_glow.values();
-        let mut best = 0.0f32;
-        for dy in -1..=1 {
-            for dx in -1..=1 {
-                let (a, b) = (xi + dx, yi + dy);
-                if (0..w).contains(&a) && (0..h).contains(&b) {
-                    best = best.max(vals[(b * w + a) as usize]);
+        let (dx0, dy0) = ((2.0 * x) as i32, (2.0 * y) as i32);
+        let mut best = 0;
+        for dy in -3..=3 {
+            for dx in -3..=3 {
+                if let Some(i) = dot_ink(g, c, dx0 + dx, dy0 + dy) {
+                    best = best.max(ion_rank(i));
                 }
             }
         }
-        Some(g.ion_tone.level(best))
+        Some(best)
     }
 
     #[test]
@@ -964,10 +892,17 @@ mod tests {
                 "t {:.2}: {attached} attached parcels",
                 g.t
             );
+            let c = dot_canvas(&g);
+            let (nx, ny) = g.view.px(g.nucleus);
             for i in 1..=20 {
                 let s = 0.03 + 0.37 * f64::from(i) / 20.0;
-                match ion_level_at(&g, s) {
-                    Some(l) => assert!(l > 20, "t {:.2}: gap at {s:.2} AU (level {l})", g.t),
+                // Inside the head the rings are the light (no dots are drawn there).
+                let (x, y) = g.view.px(g.tail_point(s, (STREAMERS / 2) as u8, 0.0));
+                if (x - nx).hypot(y - ny) < COMA_PX + 1.5 {
+                    continue;
+                }
+                match ion_level_at(&g, &c, s) {
+                    Some(l) => assert!(l > 0, "t {:.2}: gap at {s:.2} AU", g.t),
                     None => break,
                 }
             }
@@ -980,71 +915,64 @@ mod tests {
     fn cmt_a7_ion_tail_is_streamers_fading_with_distance() {
         let g = run(3.0);
         // Fading: the axis light near the root outshines the light 1 AU down.
-        let near = ion_level_at(&g, 0.1).expect("root on frame");
-        if let Some(far) = ion_level_at(&g, 0.9) {
-            assert!(near > far + 25, "root {near} vs 1 AU {far}");
+        let canvas = dot_canvas(&g);
+        let near = ion_level_at(&g, &canvas, 0.1).expect("root on frame");
+        if let Some(far) = ion_level_at(&g, &canvas, 0.9) {
+            assert!(near > far, "root {near} vs 1 AU {far}");
         }
-        // Streamers: across the tail at 0.6 AU, the ion light has at least two separate
-        // peaks (distinct rays, not one smooth band).
+        // Streamers: across the tail at 0.6 AU the ion dots form at least two separate
+        // runs (distinct rays, not one band).
         let anti = g.anti_solar();
-        let s = 0.6;
-        let c = g.tail_point(s, (STREAMERS / 2) as u8, 0.0);
-        let px = g.ion_glow.pixel_size();
-        let w = i32::from(px.width());
-        let vals = g.ion_glow.values();
+        let c = g.tail_point(0.6, (STREAMERS / 2) as u8, 0.0);
         let mut prof = vec![];
-        for i in -40..=40 {
-            let d = f64::from(i) * 0.002;
-            let p = [c[0] - anti[1] * d, c[1] + anti[0] * d];
-            let (x, y) = g.view.px(p);
-            let (xi, yi) = (x.floor() as i32, y.floor() as i32);
-            if xi < 0 || yi < 0 || xi >= w || yi >= i32::from(px.height()) {
-                continue;
-            }
-            prof.push(vals[(yi * w + xi) as usize]);
+        for i in -80..=80 {
+            let d = f64::from(i) * 0.001;
+            let (x, y) = g.view.px([c[0] - anti[1] * d, c[1] + anti[0] * d]);
+            let lit = dot_ink(&g, &canvas, (2.0 * x) as i32, (2.0 * y) as i32)
+                .is_some_and(|i| ion_rank(i) > 0);
+            prof.push(lit);
         }
-        let top = prof.iter().cloned().fold(0.0f32, f32::max);
-        let mut peaks = 0;
-        for i in 1..prof.len().saturating_sub(1) {
-            if prof[i] > 0.3 * top && prof[i] > prof[i - 1] && prof[i] >= prof[i + 1] {
-                peaks += 1;
-            }
-        }
-        assert!(peaks >= 2, "one band: {prof:?}");
+        let runs = prof.windows(2).filter(|w| !w[0] && w[1]).count();
+        assert!(runs >= 2, "one band: {prof:?}");
     }
 
     #[test]
-    fn cmt_a8_no_sun_glow_and_muted_tails() {
-        // ADR-0017 (M14): no Sun glow (it sat cut off in a corner) and no Ember; the tails
-        // are muted: ion rays `Ice` ≤ `ION_TOP`, dust `Starlight` ≤ `DUST_TOP` away from
-        // the coma, which alone keeps its full level.
+    fn cmt_a8_no_sun_glow_and_braille_m11_tails() {
+        // ADR-0018: no Sun glow (it sat cut off in a corner); a white head in flat rings
+        // (pixels, beside the stars, nothing else); the tails braille dots: dust grains
+        // in Sun/Hot, the ion rays and knots in Cold/Wave.
         for t in [5.0, 12.0, 20.0] {
             let g = run(t);
             let px = g.pixels.pixel_size();
             let (w, h) = (i32::from(px.width()), i32::from(px.height()));
             let (nx, ny) = g.view.px(g.nucleus);
-            let (mut ice, mut dust) = (0, 0);
             for y in 0..h {
                 for x in 0..w {
                     let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                    assert_ne!(ink.role, Role::Blackbody, "t {t} ({x}, {y})");
                     let coma =
                         (f64::from(x) + 0.5 - nx).hypot(f64::from(y) + 0.5 - ny) < COMA_PX + 0.5;
-                    match ink.role {
-                        Role::Ramp(Ramp::Ice) => {
-                            ice += 1;
-                            assert!(f64::from(ink.level) <= ION_TOP + 1.0, "{ink:?}");
-                        }
-                        Role::Ramp(Ramp::Starlight) if !coma => {
-                            dust += 1;
-                            assert!(f64::from(ink.level) <= DUST_TOP + 1.0, "{ink:?}");
-                        }
-                        Role::Ramp(Ramp::Starlight) | Role::Background => {}
-                        other => panic!("t {t}: {other:?}"),
-                    }
+                    assert!(
+                        coma || ink == Ink::BLANK || ink == STAR,
+                        "t {t} ({x}, {y}): {ink:?}"
+                    );
                 }
             }
-            assert!(ice > 20 && dust > 20, "t {t}: ice {ice} dust {dust}");
+            let canvas = dot_canvas(&g);
+            let (mut n_ion, mut n_dust) = (0, 0);
+            for cell in canvas.cells().iter().filter(|c| c.ch != ' ') {
+                assert!(('\u{2801}'..='\u{28FF}').contains(&cell.ch), "{cell:?}");
+                match cell.ink.role {
+                    Role::Cold | Role::Wave => n_ion += 1,
+                    Role::Sun | Role::Hot => n_dust += 1,
+                    other => panic!("t {t}: {other:?}"),
+                }
+            }
+            assert!(
+                n_ion > 20 && n_dust > 20,
+                "t {t}: ion {n_ion} dust {n_dust}"
+            );
+            let head = g.pixels.get(nx as i32, ny as i32);
+            assert_eq!(head, Some(Ink::new(Role::Star, 255)), "t {t}: nucleus");
         }
     }
 }

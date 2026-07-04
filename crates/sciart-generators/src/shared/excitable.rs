@@ -1,11 +1,11 @@
-//! Excitable media shared by `belousov_zhabotinsky`, `dicty_aggregation` and
-//! `heart_fibrillation` (SPEC-002 Batch M13).
+//! Excitable media shared by `dicty_aggregation` and `heart_fibrillation` (SPEC-002
+//! Batch M13).
 //!
 //! Two kernels, one per kind of tissue:
 //!
 //! - [`Barkley`] (1991) on a rectangular [`Grid`] with the isotropic 9-point Laplacian:
 //!   a fast FitzHugh–Nagumo-type medium with sharp fronts whose semi-implicit update keeps
-//!   `u, v ∈ [0, 1]` exactly (BZ-A1, DICT-A5). The excitability `b` may vary per node.
+//!   `u, v ∈ [0, 1]` exactly (DICT-A5). The excitability `b` may vary per node.
 //! - [`AlievPanfilov`] (1996) on a masked [`Medium`] (any shape, no-flux walls at the mask
 //!   edge): the cardiac model whose restitution lets spirals break up (HRT).
 //!
