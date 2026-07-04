@@ -127,9 +127,16 @@ pub(crate) const HALPHA: [(f64, Ink); 3] = [
     (0.0, Ink::new(Role::Hot, 40)),
 ];
 pub(crate) const WHITE: [(f64, Ink); 2] = [
-    (70.0, Ink::new(Role::Star, 170)),
-    (40.0, Ink::new(Role::Star, 60)),
+    (70.0, Ink::new(Role::Accent, 190)),
+    (40.0, Ink::new(Role::Accent, 70)),
 ];
+/// The flare (ERUP-A11): loops hotter than `FLARE_HOT` (their `e^{−age/COOL}`) also stroke
+/// the flare layer, with the ribbons; its toned level draws `FLARE_YELLOW` from
+/// `FLARE_STEPS.0` and `FLARE_WHITE` from `FLARE_STEPS.1`, over everything else.
+const FLARE_HOT: f64 = 0.3;
+const FLARE_STEPS: (u8, u8) = (45, 120);
+pub(crate) const FLARE_WHITE: Ink = Ink::new(Role::Star, 255);
+pub(crate) const FLARE_YELLOW: Ink = Ink::new(Role::Sun, 240);
 /// The chromosphere: one flat red line just inside the limb.
 const CHROMOSPHERE: Ink = Ink::new(Role::Hot, 90);
 
@@ -442,11 +449,12 @@ pub struct SolarEruption {
     view: View,
     glow: Glow,
     cme: Glow,
+    /// The flare: newly reconnected hot loop tops and the footpoint ribbons (drawn white
+    /// and yellow, the brightest pixels of the scene).
+    flare: Glow,
     tone: Tone,
     cme_tone: Tone,
     pixels: Pixels,
-    /// Per pixel: the corona above the limb (≥ 0) or minus the disc level (< 0).
-    sky: Vec<f32>,
     /// The static ink of each pixel where nothing is drawn over the disc or corona.
     sky_ink: Vec<Ink>,
     /// Heights of the rope and the X-point; the ribbons' footpoint `x`.
@@ -475,10 +483,10 @@ impl SolarEruption {
             view: View::default(),
             glow: Glow::default(),
             cme: Glow::default(),
+            flare: Glow::default(),
             tone: Tone::asinh(0.35, 4.0),
             cme_tone: Tone::asinh(0.5, 5.0),
             pixels: Pixels::default(),
-            sky: Vec::new(),
             sky_ink: Vec::new(),
             h: H0,
             current: 0.0,
@@ -766,6 +774,7 @@ impl SolarEruption {
         let dense = (v.scale / 28.0).clamp(0.6, 1.0);
         self.glow.clear();
         self.cme.clear();
+        self.flare.clear();
         // Loops: each quiet strand heats and cools on its own cycle, as active-region loops
         // do; reconnected loops are hot, then cooling. Wide soft strokes let neighbouring
         // strands merge into a glowing arcade instead of beating against the pixel grid
@@ -791,6 +800,10 @@ impl SolarEruption {
             let pts = &line.pts[..line.len];
             let m = 1.0 - 0.55 * hot;
             Self::stroke_loop(&mut self.glow, &v, pts, loop_pose(k), m, 1.0, k, t, w);
+            if hot > FLARE_HOT {
+                let wf = dense * f64::from(line.gain) * 2.4 * hot;
+                Self::stroke_loop(&mut self.flare, &v, pts, loop_pose(k), m, 1.0, k, t, wf);
+            }
             // The sources are mirror-antisymmetric about the inversion line, so the field
             // is mirror-symmetric: a line that does not close back on the far polarity
             // (it leaves the domain) has a twin on the other side, drawn by reflection
@@ -818,7 +831,7 @@ impl SolarEruption {
                     let x = side * (self.ribbon_seen - 0.14 + 0.2 * u);
                     let (px, py) = v.px(x, 0.012);
                     let taper = (std::f64::consts::PI * u).sin_det() * (1.0 - 0.5 * u);
-                    self.cme
+                    self.flare
                         .splat(2.0 * px, 2.0 * py, &RIBBON, (0.9 * flash * taper) as f32);
                 }
             }
@@ -923,9 +936,10 @@ impl SolarEruption {
         let cme_tone = &self.cme_tone;
         let size = self.pixels.pixel_size();
         let (w, h) = (i32::from(size.width()), i32::from(size.height()));
-        let (glow, cme) = (self.glow.values(), self.cme.values());
+        let (glow, cme, flare) = (self.glow.values(), self.cme.values(), self.flare.values());
         let tex = &self.front_tex;
-        let (sky, sky_ink) = (&self.sky, &self.sky_ink);
+        let sky_ink = &self.sky_ink;
+        let limb_r = LIMB_R * v.scale;
         // The bubble's bounding box (where the front and cavity can reach), in pixels.
         let (bx0, bx1, by0, by1) = shell.map_or((0.0, -1.0, 0.0, -1.0), |(cx, cy, r, _)| {
             (cx - 1.6 * r, cx + 1.6 * r, cy - 1.6 * r, cy + 1.6 * r)
@@ -937,20 +951,18 @@ impl SolarEruption {
                 let i = (y * w + x) as usize;
                 let fx = f64::from(x) + 0.5;
                 let inside = row_in && fx >= bx0 && fx <= bx1;
-                let (g, c) = (glow[i], cme[i]);
+                let (g, c, fl) = (glow[i], cme[i], flare[i]);
                 // Most of the frame is empty corona or disc: its ink is static.
-                if !inside && g <= 0.0 && c <= 0.0 {
+                if !inside && g <= 0.0 && c <= 0.0 && fl <= 0.0 {
                     self.pixels.set(x, y, sky_ink[i]);
                     continue;
                 }
-                // `sky`: the corona's brightness above the limb (≥ 0), or minus the disc's
-                // ramp value on it (< 0), cached per pixel in `resize`.
-                let base = f64::from(sky[i]);
-                // Inside the bubble: dim the loops and corona (cavity), add the front.
+                // Inside the bubble, off the disc: dim the loops and corona (cavity), add
+                // the front.
                 let (mut dim, mut lit) = (1.0, 0.0);
                 if let Some((cx, cy, r, amp)) = shell
                     && inside
-                    && base >= 0.0
+                    && (fx - v.cx).hypot(fy - v.cy) >= limb_r
                 {
                     let (ex, ey) = (fx - cx, fy - cy);
                     let dn = ex.hypot(ey);
@@ -997,7 +1009,14 @@ impl SolarEruption {
                     + (HA_PEAK - HA_TOP) * ease::smoothstep((gc - CORE_FROM) / (1.0 - CORE_FROM));
                 let euv = stroke_level(f64::from(loops) / 255.0, LOOP_TOP);
                 let front = FRONT_TOP * f64::from(white) / 255.0;
-                let ink = if cool >= loops && cool >= white && ha >= ink::MIN_VISIBLE_LEVEL {
+                // The flare owns its pixels: hot loop tops and ribbons, white at their
+                // brightest, then yellow.
+                let flash = if fl > 0.0 { tone.level(fl) } else { 0 };
+                let ink = if flash >= FLARE_STEPS.1 {
+                    FLARE_WHITE
+                } else if flash >= FLARE_STEPS.0 {
+                    FLARE_YELLOW
+                } else if cool >= loops && cool >= white && ha >= ink::MIN_VISIBLE_LEVEL {
                     step_ink(ha, &HALPHA)
                 } else if loops >= white && euv >= ink::MIN_VISIBLE_LEVEL {
                     step_ink(euv, &EUV)
@@ -1022,6 +1041,7 @@ impl Generator for SolarEruption {
         self.size = size;
         self.glow.resize(size);
         self.cme.resize(size);
+        self.flare.resize(size);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
@@ -1031,21 +1051,16 @@ impl Generator for SolarEruption {
             cy: 0.84 * h + LIMB_R * scale,
             scale,
         };
-        // The static background: the disc's mottled moss and the corona's fall-off.
+        // The static background: black, with the chromosphere line inside the limb.
         let v = self.view;
         let limb_r = LIMB_R * v.scale;
         let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
-        self.sky.clear();
-        self.sky.reserve(px.area());
         self.sky_ink.clear();
         self.sky_ink.reserve(px.area());
         for y in 0..ph {
             for x in 0..pw {
                 let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
                 let above = (fx - v.cx).hypot(fy - v.cy) - limb_r;
-                // `sky` keeps its sign convention (< 0 on the disc) for the cavity test.
-                let val = if above < 0.0 { -1.0 } else { 0.0 };
-                self.sky.push(val as f32);
                 // The chromosphere: a line about a pixel wide just inside the limb, fading
                 // smoothly on both sides.
                 let rim = (1.0 - (above + 0.5 * RIM_PX).abs() / RIM_PX).max(0.0);
@@ -1328,6 +1343,7 @@ mod tests {
             .chain(&HALPHA)
             .chain(&WHITE)
             .map(|s| s.1)
+            .chain([FLARE_WHITE, FLARE_YELLOW])
             .collect();
         for c in canvas.cells() {
             for ink in [c.ink, c.bg] {
@@ -1335,10 +1351,10 @@ mod tests {
                     ink.role == Role::Background || ink == CHROMOSPHERE || steps.contains(&ink),
                     "{ink:?}"
                 );
-                pink += usize::from(ink == HALPHA[0].1);
+                pink += usize::from(ink == HALPHA[0].1 || ink == HALPHA[1].1);
             }
         }
-        assert!(pink > 0, "the rope's core shows in bright H-alpha");
+        assert!(pink > 0, "the rope's core shows in H-alpha");
     }
 
     #[test]
@@ -1375,6 +1391,32 @@ mod tests {
             }
         }
         assert!(rim > 20, "{rim} rim pixels");
+    }
+
+    #[test]
+    fn erup_a11_the_flare_lights_white_loop_tops_and_ribbons() {
+        let size = Size::new(120, 40);
+        let mut g = SolarEruption::new();
+        let mut ctx = Ctx::new(5, size);
+        g.resize(size, &mut ctx);
+        g.prepare();
+        let count = |g: &SolarEruption, ink: Ink| {
+            let ps = g.pixels.pixel_size();
+            (0..i32::from(ps.height()))
+                .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| g.pixels.get(x, y) == Some(ink))
+                .count()
+        };
+        // Quiet: no flare.
+        assert_eq!(count(&g, FLARE_WHITE) + count(&g, FLARE_YELLOW), 0);
+        // Mid-flare: white and yellow loop tops and ribbons.
+        let mid = ACTS[..FLARE].iter().map(|a| a.1).sum::<f64>() + 0.6 * ACTS[FLARE].1;
+        while g.t < mid {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let (white, yellow) = (count(&g, FLARE_WHITE), count(&g, FLARE_YELLOW));
+        assert!(white > 10 && yellow > 10, "white {white}, yellow {yellow}");
     }
 
     #[test]

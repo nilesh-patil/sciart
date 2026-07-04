@@ -15,7 +15,7 @@ use sciart_core::draw;
 use sciart_core::geom;
 use sciart_core::ink;
 use sciart_core::prelude::*;
-use sciart_core::raster::{self, Glow, Tone, halo_kernel};
+use sciart_core::raster::{self, Glow, Tone};
 use sciart_core::timeline::ease;
 
 use crate::shared::skyline::{Skyline, Terrain};
@@ -99,12 +99,6 @@ const TRAIN_LEVEL: u8 = 30;
 const LIGHT_POW: f64 = 0.55;
 /// Trains widen with this time constant (s).
 const TRAIN_SPREAD: f64 = 0.8;
-/// The head's glare: kernel, light per unit of meteor light, tone (knee, white) and the
-/// level from which its core is drawn (one flat white step, no halo, ADR-0018).
-const BLAZE: [(i32, i32, f32); 9] = halo_kernel(1);
-const BLAZE_GAIN: f32 = 0.2;
-const BLAZE_TONE: (f32, f32) = (0.08, 1.5);
-const BLAZE_CORE: u8 = 120;
 /// Train: points along the track, life range (s), fade time scale, and the wind: two
 /// layers' amplitude (km/s, time-lapsed) and vertical wavelength (km).
 const TRAIN_POINTS: usize = 24;
@@ -313,8 +307,6 @@ pub struct MeteorShower {
     /// Recent tracks, drawn faintly (the stacked-photograph composite).
     tracks: ParticlePool<Track>,
     /// The heads' soft glare, redrawn each step, under the braille streaks.
-    blaze: Glow,
-    blaze_tone: Tone,
     /// The trains' light, redrawn every step as they drift.
     train_light: Glow,
     train_tone: Tone,
@@ -432,7 +424,6 @@ impl MeteorShower {
     /// Draw the streaks and tracks in braille.
     fn rasterise(&mut self) {
         self.streaks.clear();
-        self.blaze.clear();
         // Nothing is drawn over the land: dots at or below its top are skipped.
         let land = &self.land;
         let above = |x: f64, y: f64| {
@@ -469,8 +460,6 @@ impl MeteorShower {
                 continue;
             };
             let (a, b) = (dot(a), dot(b));
-            self.blaze
-                .splat(b.0, b.1, &BLAZE, BLAZE_GAIN * light as f32);
             // A soft green glow a cell or two wide along the bright end of the tail.
             let mid = (a.0 + (b.0 - a.0) * 0.45, a.1 + (b.1 - a.1) * 0.45);
             if SHOW_WAKE && above(mid.0, mid.1) && above(b.0, b.1) {
@@ -572,8 +561,8 @@ impl MeteorShower {
     fn compose(&mut self) {
         let ps = self.picture.pixel_size();
         let w = usize::from(ps.width());
-        let (tt, bt) = (&self.train_tone, &self.blaze_tone);
-        let (trains, blaze) = (self.train_light.values(), self.blaze.values());
+        let tt = &self.train_tone;
+        let trains = self.train_light.values();
         let (sky, land) = (&self.sky, &self.land);
         self.picture.shade(|x, y| {
             let i = y as usize * w + x as usize;
@@ -589,12 +578,8 @@ impl MeteorShower {
             // M14: no dither; the faint end fades smoothly to black over `DITHER` levels.
             let u = (f64::from(t.saturating_sub(TRAIN_FLOOR)) / f64::from(DITHER)).min(1.0);
             let faded = (f64::from(t) * u * u * (3.0 - 2.0 * u)).round() as u16;
-            let b = bt.level(blaze.get(i).copied().unwrap_or(0.0));
-            if b >= BLAZE_CORE && b >= t {
-                Ink::new(Role::Star, 230)
-            } else if SHOW_TRAINS
-                && faded * TRAIN_DIM.0 / TRAIN_DIM.1 >= ink::MIN_VISIBLE_LEVEL as u16
-            {
+            // The head is braille only (its 2 × 2-dot blaze): no half-block glare.
+            if SHOW_TRAINS && faded * TRAIN_DIM.0 / TRAIN_DIM.1 >= ink::MIN_VISIBLE_LEVEL as u16 {
                 Ink::new(Role::Particle, TRAIN_LEVEL)
             } else {
                 match sky.get(i).copied().unwrap_or(0) {
@@ -689,8 +674,6 @@ impl Generator for MeteorShower {
         self.meteors = ParticlePool::with_capacity(MAX_METEORS);
         self.trains = ParticlePool::with_capacity(MAX_TRAINS);
         self.tracks = ParticlePool::with_capacity(MAX_TRACKS);
-        self.blaze.resize(size);
-        self.blaze_tone = Tone::asinh(BLAZE_TONE.0, BLAZE_TONE.1);
         self.train_light.resize(size);
         self.picture.resize(size);
         self.train_tone = Tone::asinh(TRAIN_TONE.0, TRAIN_TONE.1);

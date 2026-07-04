@@ -84,6 +84,19 @@ pub(crate) fn corona_ink(light: f64) -> Option<Ink> {
     }
 }
 
+/// One corona step darker (`None` below the faintest): the corona held back in the
+/// diamond-ring acts.
+fn dimmer(ink: Ink) -> Option<Ink> {
+    const LEVELS: [f64; 4] = [170.0, 95.0, 45.0, 18.0];
+    let k = LEVELS.iter().position(|&l| corona_ink(l) == Some(ink))?;
+    LEVELS.get(k + 1).and_then(|&l| corona_ink(l))
+}
+
+/// The diamond's bead: 2 × 2 pixels less one corner (3 lit), and its spikes' least
+/// reach in dots.
+const DIAMOND_PX: [(i32, i32); 3] = [(0, 0), (-1, 0), (0, -1)];
+const SPIKE_DOTS: f64 = 8.0;
+
 /// The photosphere by its limb-darkened brightness `i` (0–1), stepped like M11's
 /// exoplanet star: a yellow-white centre, yellow, an orange limb.
 fn photosphere_ink(i: f64) -> Ink {
@@ -325,6 +338,8 @@ pub struct Eclipse {
     beads: Glow,
     bead_tone: Tone,
     picture: Pixels,
+    /// The diamond ring's spikes (braille, over the picture).
+    spikes: Dots,
     t: f64,
     /// Uncovered fraction and Moon offset now.
     f: f64,
@@ -349,6 +364,57 @@ impl Eclipse {
     fn moon(&self) -> (f64, f64) {
         let (s, c) = PATH_TILT.sin_cos_det();
         (self.d * c, self.d * s)
+    }
+
+    /// Whether the Timeline is in one of the two diamond-ring acts.
+    fn diamond_act(&self) -> bool {
+        self.timeline()
+            .is_some_and(|tl| matches!(tl.at(self.t).index, 1 | 3))
+    }
+
+    /// The diamond ring (ECL-A11): through the diamond-ring acts, the last light is a
+    /// white bead of 2–3 pixels on the limb at the contact point (the Sun's limb straight
+    /// away from the Moon's centre, where the crescent closes last), with short braille
+    /// spikes, white along the axes and yellow on the diagonals, kept off the Moon.
+    fn diamond(&mut self) {
+        self.spikes.clear();
+        if !self.diamond_act() {
+            return;
+        }
+        let m = self.moon();
+        let len = m.0.hypot(m.1).max(1e-9);
+        // 0.8 px beyond the limb, as the beads are.
+        let out = 1.0 + BEAD_LIFT / self.radius.max(1e-9);
+        let (bx, by) = self.to_px((-m.0 / len * out, -m.1 / len * out));
+        let (mx, my) = self.to_px(m);
+        let moon_r = MOON_R * self.radius;
+        let clear = |x: f64, y: f64| (x - mx).hypot(y - my) > moon_r + 0.5;
+        for (dx, dy) in DIAMOND_PX {
+            let (x, y) = (bx + f64::from(dx), by + f64::from(dy));
+            if clear(x + 0.5, y + 0.5) {
+                self.picture
+                    .set(x.floor() as i32, y.floor() as i32, BEAD_CORE);
+            }
+        }
+        // Spikes in dot units (two dots per pixel each way), from the bead's centre.
+        let (cx, cy) = (2.0 * bx + 1.0, 2.0 * by + 1.0);
+        let reach = SPIKE_DOTS.max(1.6 * self.radius);
+        for k in 0..8 {
+            let (s, c) = (f64::from(k) * TAU / 8.0).sin_cos_det();
+            let (r, ink) = if k % 2 == 0 {
+                (reach, Ink::new(Role::Star, 230))
+            } else {
+                (0.55 * reach, Ink::new(Role::Sun, 200))
+            };
+            let steps = (2.0 * r) as i32;
+            for j in 2..=steps {
+                let d = 0.5 * f64::from(j);
+                let (x, y) = (cx + d * c, cy + d * s);
+                if clear(0.5 * x, 0.5 * y) {
+                    self.spikes.plot(x, y, ink);
+                }
+            }
+        }
     }
 
     /// Corona visibility: 0 while the photosphere's glare drowns it, 1 in totality.
@@ -404,6 +470,8 @@ impl Eclipse {
             }
         }
         let (corona, prom, land) = (&self.corona, &self.prom, &self.land);
+        // In the diamond-ring acts the corona is held back one step (it blooms in totality).
+        let hold = self.diamond_act();
         let beads = self.beads.values();
         let bt = &self.bead_tone;
         self.picture.shade(|x, y| {
@@ -466,9 +534,12 @@ impl Eclipse {
             }
             // Added in light and tone-mapped (the brightest core rolls off), then drawn in
             // flat steps that thin out into black.
-            corona_ink(soft_clip((c + b + rim) * open)).unwrap_or(Ink::BLANK)
+            corona_ink(soft_clip((c + b + rim) * open))
+                .and_then(|i| if hold { dimmer(i) } else { Some(i) })
+                .unwrap_or(Ink::BLANK)
         });
         self.stars(f);
+        self.diamond();
     }
 
     /// Fill the next `rows` pixel rows of the corona and the prominences
@@ -578,6 +649,7 @@ impl Generator for Eclipse {
         }
         self.beads.resize(size);
         self.picture.resize(size);
+        self.spikes.resize(size);
         let tl = self
             .timeline
             .take()
@@ -615,6 +687,7 @@ impl Generator for Eclipse {
         self.picture.blit(canvas, |_, _, top, bottom| {
             raster::ascii_ramp_cell(top, bottom)
         });
+        self.spikes.blit_over(canvas, &self.picture);
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -954,6 +1027,43 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn ecl_a11_the_diamond_ring_shows_a_bead_and_spikes_then_totality_does_not() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = built(size);
+        let white = |g: &Eclipse| {
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let ps = g.picture.pixel_size();
+            let bead = (0..i32::from(ps.height()))
+                .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| g.picture.get(x, y) == Some(BEAD_CORE))
+                .count();
+            let spikes = canvas
+                .cells()
+                .iter()
+                .filter(|c| ('\u{2801}'..='\u{28ff}').contains(&c.ch))
+                .count();
+            (bead, spikes)
+        };
+        // Mid diamond-ring act (8–12 s): a 2–3 pixel white bead and its braille spikes.
+        run_to(&mut g, &mut ctx, 11.0);
+        let (bead, spikes) = white(&g);
+        assert!((2..=6).contains(&bead), "bead {bead} px");
+        assert!(spikes >= 4, "{spikes} spike cells");
+        // The corona is held back a step: its brightest step does not show yet.
+        let top = corona_ink(200.0).unwrap();
+        let ps = g.picture.pixel_size();
+        let bright = (0..i32::from(ps.height()))
+            .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.picture.get(x, y) == Some(top))
+            .count();
+        assert_eq!(bright, 0, "corona at full bloom in the diamond ring");
+        // Totality: no diamond.
+        run_to(&mut g, &mut ctx, 20.0);
+        assert_eq!(white(&g).1, 0, "spikes in totality");
     }
 
     #[test]

@@ -996,7 +996,7 @@ impl Generator for JwstUnfolding {
         self.roll = ROLL.sin_cos_det();
         let ps = self.pixels.pixel_size();
         self.stars.clear();
-        for k in 0..(size.area() / 45) as i32 {
+        for k in 0..(size.area() / 150) as i32 {
             let x = (hash01(cell_key(k, 41)) * f64::from(ps.width())) as i32;
             let y = (hash01(cell_key(k, 43)) * f64::from(ps.height())) as i32;
             let l = 18 + (hash01(cell_key(k, 47)).powi(4) * 150.0) as u8;
