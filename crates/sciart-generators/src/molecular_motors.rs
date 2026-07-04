@@ -255,8 +255,12 @@ const TUBE_ALPHA: Ink = Ink::new(Role::Structure, 110);
 const MEMBRANE: Ink = Ink::new(Role::Structure, 150);
 const FOOTPRINTS: [Ink; 2] = [Ink::new(Role::Particle, 70), Ink::new(Role::Particle, 130)];
 const TETHER: Ink = Ink::new(Role::Particle, 110);
-const HEAD_BOUND: Ink = Ink::new(Role::Particle, 215);
-const HEAD_FREE: Ink = Ink::new(Role::Particle, 140);
+/// The two heads in two colours (`Particle` and `Wave`), so hand-over-hand stepping
+/// reads: each bright while bound, a step dimmer while it swings free.
+const HEADS: [[Ink; 2]; 2] = [
+    [Ink::new(Role::Particle, 140), Ink::new(Role::Particle, 215)],
+    [Ink::new(Role::Wave, 140), Ink::new(Role::Wave, 215)],
+];
 const BETA: Ink = Ink::new(Role::Hot, 200);
 const ALPHA: Ink = Ink::new(Role::Cold, 170);
 const ROTOR: Ink = Ink::new(Role::Accent, 240);
@@ -505,13 +509,15 @@ impl Motors {
         // are 1-px lines, and the track's surface row carries one pixel per 4 nm tubulin
         // monomer, β paler than α, so the 8 nm dimer rhythm the heads step along still
         // reads and moves with the track.
-        let (y_top, y_bot) = (
-            to_px(0.0, 2.4, cam).1,
-            to_px(0.0, 14.6, cam).1.min(ph - 1.0),
-        );
+        // The far wall only when it falls inside the art rows: clamped to the bottom it
+        // read as a frame rule over the title.
+        let (y_top, y_bot) = (to_px(0.0, 2.4, cam).1, to_px(0.0, 14.6, cam).1);
+        let far_wall = y_bot < ph - 1.0;
         for px in 0..i32::from(ps.width()) {
             self.pixels.set(px, y_top as i32, TUBE_WALL);
-            self.pixels.set(px, y_bot as i32, TUBE_WALL);
+            if far_wall {
+                self.pixels.set(px, y_bot as i32, TUBE_WALL);
+            }
         }
         let first = ((cam - pw / 2.0 / s) / 4.0).floor() as i64 - 3;
         let last = ((cam + pw / 2.0 / s) / 4.0).ceil() as i64 + 3;
@@ -555,7 +561,7 @@ impl Motors {
             let bound = k.free.is_none_or(|(f, _)| f != i);
             let (x, y) = to_px(h[0], h[1], cam);
             flat_segment(&mut self.pixels, hip_px, (x, y), 0.45, TETHER);
-            let ink = if bound { HEAD_BOUND } else { HEAD_FREE };
+            let ink = HEADS[i][usize::from(bound)];
             flat_disc(&mut self.pixels, (x, y), 3.2 * s, ink);
         }
     }
@@ -863,8 +869,10 @@ mod tests {
             FOOTPRINTS[0],
             FOOTPRINTS[1],
             TETHER,
-            HEAD_BOUND,
-            HEAD_FREE,
+            HEADS[0][0],
+            HEADS[0][1],
+            HEADS[1][0],
+            HEADS[1][1],
             BETA,
             ALPHA,
             ROTOR,

@@ -15,18 +15,18 @@
 //! same time to cross. When a branch reaches the edge the whole channel flashes, glows
 //! and fades out, and the next act starts on a fresh block.
 //!
-//! Picture (M14, ADR-0017): one braille dot layer. Each tree link is a 1-dot line whose
-//! brightness follows the log of the current it carries (the size of its subtree), in a
-//! muted ramp that tops out at [`LINE_MAX`]: the trunk a pale violet, branches down to a
-//! dim indigo at the tips; only the few links carrying most of the current are doubled
-//! into a 2-dot stroke, so the trunk reads as the channel. Newly broken-down tips, and
-//! the whole tree when a branch strikes, flash white-hot and cool back. In ASCII the same
-//! dots show by dot count. Rasterised once per drawn frame in `prepare` (GEN-R20);
-//! `render` only blits. (The M12 half-block channels with soft halos are gone.)
+//! Picture (M15, ADR-0018: M11's idiom): one braille dot layer. Each tree link is a 1-dot
+//! line in the act's semantic colour (`Wave` for the discharges, `Cold` for the fingering
+//! air), in three flat steps by the log of the current it carries (the size of its
+//! subtree): twigs dim, limbs brighter, the trunk brightest; only the few links carrying
+//! most of the current are doubled into a 2-dot stroke, so the trunk reads as the
+//! channel. Newly broken-down tips, and the whole tree when a branch strikes, flash `Star`
+//! white. In ASCII the same dots show by dot count. Rasterised once per drawn frame in
+//! `prepare` (GEN-R20); `render` only blits.
 
 use rand::Rng;
+use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::{grid, ink};
 
 use crate::shared::laplacian_growth::{Dbm, Edge, Edges};
 
@@ -69,13 +69,13 @@ const PREROLL_ROUNDS: usize = 80;
 const PREROLL_SWEEPS: usize = 6;
 
 /// One act: caption index, η, where the tap is (fractions of the lattice), which edges
-/// hold the charge, the ramp, and the glow's kernel radius (0 = thin stroke).
+/// hold the charge, the line's role, and whether its channels are wide.
 #[derive(Debug, Clone, Copy)]
 struct Act {
     eta: f64,
     seed: (f64, f64),
     edges: Edges,
-    ramp: Ramp,
+    role: Role,
     wide: bool,
     /// The act completes when the reach from the tap is this fraction of the lattice
     /// height (the tree fills the block), or, when `None`, when a branch reaches a
@@ -93,7 +93,7 @@ const ACTS: [Act; 4] = [
         eta: 0.75,
         seed: (0.5, 1.0),
         edges: [S, M, M, M],
-        ramp: Ramp::Plasma,
+        role: Role::Wave,
         wide: false,
         fill: Some(0.85),
     },
@@ -101,7 +101,7 @@ const ACTS: [Act; 4] = [
         eta: 1.5,
         seed: (0.5, 1.0),
         edges: [S, M, M, M],
-        ramp: Ramp::Plasma,
+        role: Role::Wave,
         wide: false,
         fill: Some(0.85),
     },
@@ -110,7 +110,7 @@ const ACTS: [Act; 4] = [
         eta: 3.0,
         seed: (0.5, 0.0),
         edges: [M, M, S, M],
-        ramp: Ramp::Plasma,
+        role: Role::Wave,
         wide: false,
         fill: None,
     },
@@ -119,7 +119,7 @@ const ACTS: [Act; 4] = [
         eta: 1.0,
         seed: (0.5, 0.5),
         edges: [S, S, S, S],
-        ramp: Ramp::Cobalt,
+        role: Role::Cold,
         wide: true,
         fill: Some(0.45),
     },
@@ -144,31 +144,40 @@ pub(crate) fn reach_schedule(local: f64) -> f64 {
     1.0 - (1.0 - x) * (1.0 - x)
 }
 
-/// Line level (0..=255) of a link at current `c ∈ [0, 1]`: from `LINE_MIN` on the
-/// finest twig to `LINE_MAX` where the trunk begins (M14: the violet branches muted to
-/// ≤ 140); the trunk itself, from [`TRUNK`] up, whitens on to `TRUNK_MAX` (the ramp's
-/// pale lavender, low chroma), so the channel carrying the current is the bright subject
-/// (ADR-0017 rule 6).
-const LINE_MIN: f64 = 30.0;
-const LINE_MAX: f64 = 140.0;
-const TRUNK_MAX: f64 = 235.0;
 /// Links whose current is at least this (of the whole tree's, on the log scale of
 /// [`link_brightness`]) are doubled into a 2-dot stroke: the trunk and main limbs; in the
 /// fingering act the air channels are wider, from `TRUNK_WIDE`.
 const TRUNK: f32 = 0.8;
 const TRUNK_WIDE: f32 = 0.6;
 
-/// A link's level at base brightness `base` ([`link_brightness`] without the tip flash)
-/// and heat `hot ∈ [0, 1]` (a fresh tip, or the breakdown flash): the muted line level,
-/// lifted toward white (255) by the heat (LICH-A6, M14).
-pub(crate) fn line_level(base: f32, hot: f32) -> f64 {
-    let (c, knee) = (f64::from(base.clamp(0.0, 1.0)), f64::from(TRUNK));
-    let base = if c < knee {
-        LINE_MIN + (LINE_MAX - LINE_MIN) * c / knee
+/// The three flat line levels (twig, limb, trunk) and the white of a hot tip or flash.
+const LEVELS: [u8; 3] = [100, 170, 240];
+const HOT_INK: Ink = Ink::new(Role::Star, 255);
+/// Current from which a link is a limb rather than a twig.
+const LIMB: f32 = 0.5;
+
+/// A link's ink at base brightness `base` ([`link_brightness`] without the tip flash),
+/// heat `hot ∈ [0, 1]` (a fresh tip, or the breakdown flash), fading out by `fade` at the
+/// act's end, in `role`: white while hot, else the twig, limb or trunk step (LICH-A6);
+/// in the fade's first half a step down, then gone.
+pub(crate) fn link_ink(role: Role, base: f32, hot: f32, fade: f64, trunk: f32) -> Ink {
+    if fade < 0.2 {
+        return Ink::BLANK;
+    }
+    if hot >= 0.5 && fade >= 0.6 {
+        return HOT_INK;
+    }
+    let step = if base >= trunk {
+        2
     } else {
-        LINE_MAX + (TRUNK_MAX - LINE_MAX) * (c - knee) / (1.0 - knee)
+        usize::from(base >= LIMB)
     };
-    base + (255.0 - base) * f64::from(hot.clamp(0.0, 1.0))
+    let step = if fade < 0.6 {
+        step.saturating_sub(1)
+    } else {
+        step
+    };
+    Ink::new(role, LEVELS[step])
 }
 
 /// Brightness in [0, 1] of a link carrying `sub` of the tree's `total` sites, born at
@@ -362,16 +371,15 @@ impl Lichtenberg {
         for (i, n) in nodes.iter().enumerate() {
             let base = link_current(self.sub[i], total);
             let hot = tip_heat(n.born, now).max(flash);
-            let level = line_level(base, hot) * fade;
-            if level < ink::MIN_VISIBLE_LEVEL {
+            let ink = link_ink(act.role, base, hot, fade, trunk);
+            if ink == Ink::BLANK {
                 continue;
             }
             let p = nodes[n.parent as usize];
             let (a, c) = (at(p.x, p.y), at(n.x, n.y));
-            let ink = ink::ramp(act.ramp, level / 255.0);
             self.dots.line(a.0, a.1, c.0, c.1, ink);
             // The links carrying most of the current: a second line one dot across, so
-            // the trunk is a solid 2-dot channel (ADR-0017 rule 6) and the rest hairlines.
+            // the trunk is a solid 2-dot channel and the rest hairlines.
             if base >= trunk {
                 let (ox, oy) = if (c.0 - a.0).abs() >= (c.1 - a.1).abs() {
                     (0.0, 1.0)
@@ -538,17 +546,30 @@ mod tests {
     }
 
     #[test]
-    fn lich_a6_lines_are_muted_except_hot_tips_and_the_flash() {
-        // M14 (ADR-0017): a cool branch stays under LINE_MAX (140); only the trunk
-        // (current ≥ TRUNK) whitens on to TRUNK_MAX; a fresh tip or the strike flash lifts
-        // any link to white.
-        assert_eq!(line_level(0.0, 0.0), LINE_MIN);
-        assert!(line_level(TRUNK - 0.01, 0.0) < LINE_MAX);
-        assert!((line_level(TRUNK, 0.0) - LINE_MAX).abs() < 1e-9);
-        assert!((line_level(1.0, 0.0) - TRUNK_MAX).abs() < 1e-9);
-        assert_eq!(line_level(0.3, 1.0), 255.0);
-        // Seen in dots after the scene's first frames: every lit cell is in the act's
-        // ramp, and apart from the trunk and hot tips the levels stay under the cap.
+    fn lich_a6_lines_are_flat_steps_except_hot_tips_and_the_flash() {
+        // M15 (ADR-0018): twigs, limbs and trunk in three flat steps of the act's role; a
+        // fresh tip or the strike flash is white; the act's fade steps down, then out.
+        let role = ACTS[0].role;
+        assert_eq!(
+            link_ink(role, 0.0, 0.0, 1.0, TRUNK),
+            Ink::new(role, LEVELS[0])
+        );
+        assert_eq!(
+            link_ink(role, LIMB, 0.0, 1.0, TRUNK),
+            Ink::new(role, LEVELS[1])
+        );
+        assert_eq!(
+            link_ink(role, 1.0, 0.0, 1.0, TRUNK),
+            Ink::new(role, LEVELS[2])
+        );
+        assert_eq!(link_ink(role, 0.3, 1.0, 1.0, TRUNK), HOT_INK);
+        assert_eq!(
+            link_ink(role, 1.0, 0.0, 0.4, TRUNK),
+            Ink::new(role, LEVELS[1])
+        );
+        assert_eq!(link_ink(role, 1.0, 0.0, 0.1, TRUNK), Ink::BLANK);
+        // Seen in dots after the scene's first frames: every lit cell is the act's role or
+        // a hot tip, and apart from the trunk the links are twigs and limbs.
         let (mut g, mut ctx) = scene(120, 40);
         for _ in 0..90 {
             g.update(SIM_DT, &mut ctx);
@@ -556,22 +577,16 @@ mod tests {
         g.prepare();
         let mut c = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
         g.render(&mut c);
-        let lit: Vec<u8> = c
+        let lit: Vec<Ink> = c
             .cells()
             .iter()
-            .filter(|c| c.ink.role == Role::Ramp(ACTS[0].ramp))
-            .map(|c| c.ink.level)
+            .filter(|c| c.ink.role != Role::Background)
+            .map(|c| c.ink)
             .collect();
         assert!(lit.len() > 50, "{} lit cells", lit.len());
-        let muted = lit
-            .iter()
-            .filter(|&&l| f64::from(l) <= LINE_MAX + 1.0)
-            .count();
-        assert!(
-            muted * 10 >= lit.len() * 7,
-            "{muted} of {} muted",
-            lit.len()
-        );
+        assert!(lit.iter().all(|&i| i.role == role || i == HOT_INK));
+        let thin = lit.iter().filter(|i| i.level < LEVELS[2]).count();
+        assert!(thin * 10 >= lit.len() * 7, "{thin} of {} thin", lit.len());
         assert!(c.cells().iter().all(|c| c.bg == Ink::BLANK));
     }
 }

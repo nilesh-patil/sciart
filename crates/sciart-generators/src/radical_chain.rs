@@ -603,7 +603,8 @@ impl RadicalChain {
                         f64::from(f.x0) + r.x * f.scale,
                         f64::from(f.y0) + r.y * f.scale,
                     );
-                    self.dots.plot(2.0 * px, 2.0 * py, RADICAL);
+                    // A small plus of dots, so a lone radical reads at a glance.
+                    self.dots.disc(2.0 * px, 2.0 * py, 1.0, RADICAL);
                 }
             }
         }

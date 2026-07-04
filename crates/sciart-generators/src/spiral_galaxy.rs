@@ -84,7 +84,7 @@ const KNOT_SHOWN: f64 = 0.87;
 const YOUNG_SHARE: f64 = 0.12;
 const YOUNG_BAND: (f64, f64) = (-0.15, 0.7);
 /// Only the brighter young stars show (the arms slightly blue, not dotted).
-const YOUNG_LUM: f32 = 0.2;
+const YOUNG_LUM: f32 = 0.12;
 /// Tone curve for the integrated starlight.
 const KNEE: f32 = 0.35;
 const WHITE: f32 = 9.0;

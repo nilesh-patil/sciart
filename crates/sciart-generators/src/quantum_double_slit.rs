@@ -44,20 +44,17 @@
 //!
 //! ## Picture
 //!
-//! Half-block pixels show the wave as a soft single-hue glow (`Ramp(Aurora)`, a
-//! phosphor green): brightness follows `|ψ|` (the square root of the probability
-//! density, so the fan's weak outer lobes still read), and where the view resolves the
-//! carrier a light shimmer of `Re ψ/|ψ|` rides on it, so wavefronts visibly stream
-//! through the steady fan of lobes and dark nodal rays. Faint density fades smoothly to
-//! black (no hard cut), and the glow stays muted, `Aurora` 32–140 (ADR-0017). The slit
-//! wall (or barrier) is a 1-px Starlight line at its front face and the screen a dashed
-//! 1-px line; the screen strip is black, and clicks are white braille dots that build
-//! the fringes by their density alone.
+//! Half-block pixels show the wave in M11's idiom (ADR-0018): `Wave` in three flat
+//! steps; brightness follows `|ψ|` (the square root of the probability density, so the
+//! fan's weak outer lobes still read), and where the view resolves the carrier a light
+//! shimmer of `Re ψ/|ψ|` rides on it, so wavefronts visibly stream through the steady fan
+//! of lobes and dark nodal rays. The slit wall (or barrier) is a 1-px `Structure` line at
+//! its front face and the screen a dashed 1-px `Dim` line; the screen strip is black,
+//! and clicks are white braille dots that build the fringes by their density alone.
 
 use std::f64::consts::TAU;
 
 use rand::Rng;
-use sciart_core::ink;
 use sciart_core::ode::{C64, tridiag_apply_c, tridiag_factor_c};
 use sciart_core::prelude::*;
 
@@ -120,8 +117,8 @@ const SIGMA_X: f64 = 8.0;
 const CLICK_RATE: [f64; 3] = [640.0, 210.0, 150.0];
 const CLICK_CAP: usize = 4000;
 const CLICKS_PER_FRAME: usize = 24;
-/// A click flashes at full level and settles to `CLICK_REST` over `CLICK_FADE_S`.
-const CLICK_REST: f64 = 185.0;
+/// A click flashes at full level for half of `CLICK_FADE_S`, then rests a step dimmer.
+const CLICK_INKS: [Ink; 2] = [Ink::new(Role::Star, 185), Ink::new(Role::Star, 255)];
 const CLICK_FADE_S: f32 = 1.2;
 /// Wave visibility by act: act 2 holds the fan almost at full brightness (a dimmed fan
 /// read as the scene fading out); the clicks carry the bands.
@@ -136,16 +133,24 @@ const PEAK_HALF_LIFE_S: f64 = 4.0;
 /// The source side (incident + reflected standing wave) is exposed at this share of the
 /// fan's brightness, so the diffraction fan carries the picture.
 const SOURCE_EXPOSURE: f64 = 0.55;
-/// The wave's ramp top and floor levels (ADR-0017: muted; below the floor it tapers
-/// smoothly to black by half the floor).
+/// The wave's brightness scale, and its flat steps `(brightness from, Wave level)`.
 const WAVE_TOP: f64 = 140.0;
-const WAVE_FLOOR: f64 = 32.0;
-/// The wave's glow ramp and the carrier shimmer's depth.
-const WAVE: Ramp = Ramp::Aurora;
-const SHIMMER: f64 = 0.25;
-const WALL_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 111);
-const BARRIER_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 71);
-const SCREEN_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 55);
+const WAVE_STEPS: [(f64, u8); 3] = [(30.0, 80), (62.0, 150), (98.0, 225)];
+/// The carrier shimmer's depth.
+const SHIMMER: f64 = 0.5;
+const WALL_INK: Ink = Ink::new(Role::Structure, 150);
+const BARRIER_INK: Ink = Ink::new(Role::Structure, 100);
+const SCREEN_INK: Ink = Ink::new(Role::Dim, 110);
+
+/// The wave's ink at brightness `raw` (0–`WAVE_TOP`): the highest step it reaches, or
+/// black below the first.
+pub(crate) fn wave_ink(raw: f64) -> Ink {
+    WAVE_STEPS
+        .iter()
+        .rev()
+        .find(|(from, _)| raw >= *from)
+        .map_or(Ink::BLANK, |&(_, l)| Ink::new(Role::Wave, l))
+}
 
 /// Grid layout for one view aspect (square nodes), all in nodes.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -887,9 +892,9 @@ impl QuantumDoubleSlit {
         let tunnel = act == 2;
         let cutoff = if tunnel { 0.5 * CUTOFF } else { CUTOFF };
         // Below this `a` a pixel is blank for sure: `t` is under both the knee's zero
-        // (`cutoff/2`) or under the taper's zero (`raw ≤ WAVE_TOP·vis·t < WAVE_FLOOR/2`);
+        // (`cutoff/2`) or under the first step (`raw ≤ WAVE_TOP·vis·t < WAVE_STEPS[0]`);
         // shrunk by 0.1 % so rounding never flips a lit pixel.
-        let t_blank = (0.5 * cutoff).max(0.5 * WAVE_FLOOR / (WAVE_TOP * vis));
+        let t_blank = (0.5 * cutoff).max(WAVE_STEPS[0].0 / (WAVE_TOP * vis));
         let a_blank = 0.999
             * if tunnel {
                 t_blank.powf(4.0 / 3.0)
@@ -910,7 +915,7 @@ impl QuantumDoubleSlit {
             let row = gw * if fy < 0.5 { gy } else { gy1 };
             let kind = solid[near_x(gx, fx) + row];
             if kind != Solid::Free {
-                // Only the obstacle's front face, a 1-px line (ADR-0017).
+                // Only the obstacle's front face, a 1-px line.
                 let behind = x
                     .checked_sub(1)
                     .and_then(|l| cols.get(l as usize))
@@ -954,18 +959,9 @@ impl QuantumDoubleSlit {
             } else {
                 a.powf(0.8)
             };
-            // A soft knee instead of a hard cut: faint density fades out, no speckle.
+            // A knee instead of a hard cut, so faint density thins out, no speckle.
             let knee = ((t - 0.5 * cutoff) / cutoff).clamp(0.0, 1.0);
-            // Below the floor the level tapers smoothly to black over [floor/2, floor]
-            // (a hard cut stair-stepped the fan's edges, and no dither, M14).
-            let raw = WAVE_TOP * vis * t * knee * knee * shimmer;
-            let u = ((raw - 0.5 * WAVE_FLOOR) / (0.5 * WAVE_FLOOR)).clamp(0.0, 1.0);
-            let level = raw * u * u * (3.0 - 2.0 * u);
-            if level < ink::MIN_VISIBLE_LEVEL {
-                Ink::BLANK
-            } else {
-                Ink::new(Role::Ramp(WAVE), ink::level(level))
-            }
+            wave_ink(WAVE_TOP * vis * t * knee * knee * shimmer)
         });
         self.dots.clear();
         let (strip, dh) = (self.strip_x, 4 * i32::from(self.size.height()));
@@ -973,27 +969,23 @@ impl QuantumDoubleSlit {
         for c in self.clicks.iter() {
             let x = strip + 3 + (c.fx * width as f32) as i32;
             let y = (c.fy * dh as f32) as i32;
-            let fresh = 1.0 - (c.age / CLICK_FADE_S).clamp(0.0, 1.0);
-            let level = CLICK_REST + (255.0 - CLICK_REST) * f64::from(fresh);
-            self.dots
-                .set(x, y, ink::ramp(Ramp::Starlight, level / 255.0));
+            let fresh = c.age < 0.5 * CLICK_FADE_S;
+            self.dots.set(x, y, CLICK_INKS[usize::from(fresh)]);
         }
     }
 }
 
-/// ASCII fallback of a pixel pair: the stronger ink; `Div` by its distance from zero on
-/// the ASCII ramp, walls and the screen as `|`, the click glow as `.` and `:`.
+/// ASCII fallback of a pixel pair: the stronger ink; the wave by level on the ASCII
+/// ramp, walls, the barrier and the screen as `|`.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let ink = sciart_core::raster::stronger(top, bottom);
     match ink.role {
-        Role::Ramp(WAVE) => {
+        Role::Wave => {
             let i = usize::from(ink.level);
             let ramp = sciart_core::raster::ASCII_RAMP;
             Some((ramp[(i * ramp.len() / 256).min(ramp.len() - 1)], ink))
         }
-        // Walls, barrier and screen (odd levels) are rules; the click glow (even) is shade.
-        Role::Ramp(Ramp::Starlight) if ink.level % 2 == 1 => Some(('|', ink)),
-        Role::Ramp(Ramp::Starlight) => Some((if ink.level < 60 { '.' } else { ':' }, ink)),
+        Role::Structure | Role::Dim => Some(('|', ink)),
         _ => None,
     }
 }
@@ -1360,11 +1352,8 @@ mod tests {
             let (view, ph) = (g.view_px, 2 * i32::from(h));
             let lit = (0..ph)
                 .filter(|&y| {
-                    (view * 3 / 4..view).any(|x| {
-                        g.pixels
-                            .get(x, y)
-                            .is_some_and(|p| p.role == Role::Ramp(WAVE))
-                    })
+                    (view * 3 / 4..view)
+                        .any(|x| g.pixels.get(x, y).is_some_and(|p| p.role == Role::Wave))
                 })
                 .count();
             assert!(
@@ -1381,6 +1370,41 @@ mod tests {
         assert!(
             WAVE_VIS.iter().all(|&v| (0.9..=1.0).contains(&v)),
             "{WAVE_VIS:?}"
+        );
+    }
+
+    #[test]
+    fn qds_a8_the_wave_is_three_flat_wave_steps_on_black() {
+        assert_eq!(wave_ink(0.0), Ink::BLANK);
+        assert_eq!(wave_ink(WAVE_TOP), Ink::new(Role::Wave, WAVE_STEPS[2].1));
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = QuantumDoubleSlit::new();
+        g.resize(size, &mut ctx);
+        for _ in 0..(6 * 60) {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let ps = g.pixels.pixel_size();
+        let mut steps = [0usize; 3];
+        for y in 0..i32::from(ps.height()) {
+            for x in 0..i32::from(ps.width()) {
+                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                if ink.role == Role::Wave {
+                    let k = WAVE_STEPS.iter().position(|s| s.1 == ink.level);
+                    assert!(k.is_some(), "{ink:?}");
+                    steps[k.unwrap_or(0)] += 1;
+                } else {
+                    assert!(
+                        [Ink::BLANK, WALL_INK, BARRIER_INK, SCREEN_INK].contains(&ink),
+                        "({x}, {y}): {ink:?}"
+                    );
+                }
+            }
+        }
+        assert!(
+            steps[0] > 0 && steps[1] > 0,
+            "the lower two steps show: {steps:?}"
         );
     }
 }

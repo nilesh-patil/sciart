@@ -25,7 +25,6 @@
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::{ease, ink};
 
 pub static META: Meta = Meta {
     name: "seashell_pigmentation",
@@ -349,8 +348,8 @@ impl Shell {
             let hw = half * body_half(t.clamp(0.0, 1.0));
             let slope =
                 half * (body_half(t + 0.01) - body_half(t - 0.01)) / (0.02 * length).max(1e-6);
-            // Pixel coverage of the silhouette (sides, shoulder and lip), so the outline is
-            // antialiased on the sub-cell pixel lattice instead of stepping.
+            // Pixel coverage of the silhouette (sides, shoulder and lip); a pixel at least
+            // half inside is shell (M11's flat, hard-edged pixels).
             let body_cover = if (-0.05..=1.05).contains(&t) {
                 coverage(hw - dx.abs(), slope)
                     * (fy - top + 0.5).clamp(0.0, 1.0)
@@ -360,20 +359,23 @@ impl Shell {
             };
             let (st, shw, spire_cover) = spire;
             if spire_cover > body_cover {
-                // Whorl sutures as thin sepia lines; a highlight on the lit (left) flank.
+                if spire_cover < 0.5 {
+                    return Ink::BLANK;
+                }
+                // Whorl sutures as thin dim lines; the lit (left) flank a step lighter.
                 let u = dx / shw.max(0.5);
-                let suture = ((st * 3.5).fract() - 0.5).abs();
-                let suture = ease::smoothstep(((0.1 - (0.5 - suture)) / 0.1).clamp(0.0, 1.0));
-                let lit = lambert(u.clamp(-1.0, 1.0));
-                let lvl = (70.0 + 40.0 * lit) * (1.0 - 0.45 * suture) * spire_cover;
-                return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl));
+                let suture = ((st * 3.5).fract() - 0.5).abs() > 0.42;
+                return if suture {
+                    SUTURE_INK
+                } else {
+                    SHELL_INKS[usize::from(lambert(u.clamp(-1.0, 1.0)) > LIT)]
+                };
             }
-            if body_cover <= 0.0 {
+            if body_cover < 0.5 {
                 return Ink::BLANK;
             }
             let t = t.clamp(0.0, 1.0);
             let u = (dx / hw.max(1e-6)).clamp(-1.0, 1.0);
-            let light = lambert(u) * body_cover;
             // Rows from the lip (bottom) upward, newest first.
             let back = ((1.0 - t) * length) as usize;
             let pigment = if back < laid.min(cap) {
@@ -385,36 +387,40 @@ impl Shell {
                 0.0
             };
             let at_lip = t > 1.0 - wet;
-            // Pigment only where the pixel is mostly shell: a brown glow cannot fade to
-            // black, so the antialiased rim stays shell-coloured.
-            if pigment > PIG_MIN && body_cover >= 0.6 {
+            if pigment > PIG_MIN {
                 if at_lip {
                     // Fresh pigment at the growing edge glows, so the lip is seen to paint.
-                    return Ink::new(Role::Ramp(Ramp::Ember), ink::level(210.0 * body_cover));
+                    return WET_PIGMENT;
                 }
-                // M14 (ADR-0017): pigment is darker than the shell, as on a real cone:
-                // `Ramp(Sienna)` 30–70, the densest line darkest, shaded with the shell.
-                let k = ease::smoothstep((pigment - PIG_MIN) / 0.9);
-                let lvl = (70.0 - 40.0 * k) * (0.6 + 0.4 * light);
-                Ink::new(PIGMENT, ink::level(lvl))
+                // Pigment in two flat steps, the densest line brightest.
+                PIGMENT_INKS[usize::from(pigment > PIG_DENSE)]
+            } else if at_lip {
+                // The wet lip is the bright accent.
+                LIP_INK
             } else {
-                let lvl = if at_lip {
-                    255.0 * body_cover
-                } else {
-                    // M14: a dim cream shell (Starlight 70–110 by the light) under the
-                    // darker pigment; the wet lip is the bright accent.
-                    (60.0 + 55.0 * lambert(u)) * body_cover
-                };
-                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl))
+                // The shell in two flat steps: its lit (left) flank a step lighter.
+                SHELL_INKS[usize::from(lambert(u) > LIT)]
             }
         });
     }
 }
 
-/// Pigment below this is shell ground.
+/// Pigment below this is shell ground; above `PIG_DENSE`, a dense line.
 const PIG_MIN: f64 = 0.25;
-/// The pigment's ramp (M14).
-const PIGMENT: Role = Role::Ramp(Ramp::Sienna);
+const PIG_DENSE: f64 = 0.7;
+/// Inks in M11's roles and flat steps (ADR-0018): the shell `Structure` (shaded and lit
+/// flank), the spire's sutures `Dim`, the pigment chestnut `Hot` (fading band and dense
+/// line), the wet lip `Star` and fresh pigment at it `Sun`.
+const SHELL_INKS: [Ink; 2] = [
+    Ink::new(Role::Structure, 70),
+    Ink::new(Role::Structure, 120),
+];
+const SUTURE_INK: Ink = Ink::new(Role::Dim, 60);
+const PIGMENT_INKS: [Ink; 2] = [Ink::new(Role::Hot, 110), Ink::new(Role::Hot, 200)];
+const LIP_INK: Ink = Ink::new(Role::Star, 255);
+const WET_PIGMENT: Ink = Ink::new(Role::Sun, 255);
+/// `lambert` above this is the lit flank.
+const LIT: f64 = 0.7;
 /// The spire's height as a fraction of the body's.
 const SPIRE: f64 = 0.15;
 /// The body's length at the start of a regime, as a fraction of its full length.
@@ -446,7 +452,7 @@ fn lambert(u: f64) -> f64 {
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let lit = |i: Ink| i.role != Role::Background;
-    let pig = |i: Ink| i.role == PIGMENT;
+    let pig = |i: Ink| i.role == Role::Hot || i.role == Role::Sun;
     match (lit(top), lit(bottom)) {
         (false, false) => None,
         _ if pig(top) => Some(('#', top)),
@@ -657,7 +663,7 @@ mod tests {
     }
 
     #[test]
-    fn shl_a7_shell_fills_most_of_the_height_with_a_smooth_outline() {
+    fn shl_a7_shell_fills_most_of_the_height_in_flat_inks() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(7, size);
         let mut g = Shell::default();
@@ -683,16 +689,21 @@ mod tests {
             (0.75..=0.95).contains(&frac),
             "shell spans {frac:.2} of the height"
         );
-        // Antialiased silhouette: partially covered pixels exist along the flank rows.
-        let mid = i32::from(px.height()) / 2;
-        let row: Vec<u8> = (0..i32::from(px.width()))
-            .filter_map(|x| g.pixels.get(x, mid))
-            .filter(|i| i.role != Role::Background)
-            .map(|i| i.level)
-            .collect();
-        assert!(
-            row.first().is_some_and(|&l| l < 90),
-            "soft left edge {row:?}"
-        );
+        // A flat silhouette (M11's idiom): every shell pixel is one of the scene's inks.
+        let inks = [
+            SHELL_INKS[0],
+            SHELL_INKS[1],
+            SUTURE_INK,
+            PIGMENT_INKS[0],
+            PIGMENT_INKS[1],
+            LIP_INK,
+            WET_PIGMENT,
+        ];
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let i = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                assert!(i == Ink::BLANK || inks.contains(&i), "({x}, {y}): {i:?}");
+            }
+        }
     }
 }

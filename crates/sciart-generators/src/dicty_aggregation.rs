@@ -327,16 +327,15 @@ impl Dicty {
         let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
             .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
-        // The cells: one dot each, a step brighter where they crowd; a new lawn appears
-        // (and the old one goes) at the cycle change.
+        // The cells: one dot each, always drawn (the scattered lawn is the subject before
+        // the first wave), a step brighter where they crowd; around a re-scatter the
+        // crowds drop to the lawn step, so the old mounds fade before the new lawn.
         self.dots.clear();
-        if fade > 0.05 {
-            for c in &self.cells {
-                let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
-                let (px, py) = ((x / 2.0) as i32, (y / 2.0) as i32);
-                let crowded = self.glow.get(px, py).unwrap_or(0.0) > CROWD;
-                self.dots.plot(x, y, CELL_INKS[usize::from(crowded)]);
-            }
+        for c in &self.cells {
+            let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
+            let (px, py) = ((x / 2.0) as i32, (y / 2.0) as i32);
+            let crowded = fade > 0.5 && self.glow.get(px, py).unwrap_or(0.0) > CROWD;
+            self.dots.plot(x, y, CELL_INKS[usize::from(crowded)]);
         }
         slope_field(&self.u, &mut self.slope);
         let (map, u, v, slope) = (&self.map, &self.u, &self.v, &self.slope);
@@ -616,5 +615,19 @@ mod tests {
         assert!(cells > 50 && waves > 0, "{cells} cells, {waves} wave cells");
         // Streams and mounds exist: some cells are crowded.
         assert!(canvas.cells().iter().any(|c| c.ink == CELL_INKS[1]));
+    }
+
+    #[test]
+    fn dict_a7_the_scattered_lawn_shows_from_the_first_frame() {
+        let size = Size::new(120, 40);
+        let (g, _) = lawn(size);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let cells = canvas
+            .cells()
+            .iter()
+            .filter(|c| c.ink == CELL_INKS[0])
+            .count();
+        assert!(cells > 100, "{cells} lawn cells at t = 0");
     }
 }

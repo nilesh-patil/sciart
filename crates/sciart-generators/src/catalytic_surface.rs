@@ -26,11 +26,13 @@
 //!
 //! ## Picture
 //!
-//! The lattice is the art (ADR-0017): one half-block pixel per site, on black. Empty
-//! platinum is the terminal's black, O a grey just off it (`Ramp(Starlight)` 20), CO a
-//! muted rust (`Ramp(Sienna)`) that brightens on its islands' edges, where the reaction
-//! runs, so islands, fronts and the moving poisoning rings read as fine texture. A sparse sample of the CO₂ events blinks as single near-white pixels that
-//! fade in ≈ 0.3 s (the accent). Sites are sampled nearest (1:1 up to the cap).
+//! The lattice is the art, in M11's idiom (ADR-0018): one half-block pixel per site, in
+//! flat semantic colours like M11's Ising domains. Empty platinum is the terminal's black,
+//! O a dark `Cold` blue, CO a dim `Hot` orange that is bright on its islands' edges,
+//! where the reaction runs, so islands, fronts and the moving poisoning rings read as a
+//! complementary pair. A sparse sample of the CO₂ events blinks as single white `Star`
+//! pixels, full then a step dimmer, gone in ≈ 0.3 s (the accent). Sites are sampled
+//! nearest (1:1 up to the cap).
 
 use std::fmt::Write as _;
 
@@ -108,16 +110,15 @@ const SWEEP: [(&str, f64, f64, f64); 8] = [
     ("recover", 3.0, Y_OXYGEN, Y_JET),
 ];
 
-/// Inks (ADR-0017): O a grey just off black (the Ice ramp has no near-black foot), CO a
-/// muted rust, brightest on the island's edge, the CO₂ blinks near white.
-const O_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 20);
-const CO_INK: Ink = Ink::new(Role::Ramp(Ramp::Sienna), 80);
+/// Inks in M11's roles (ADR-0018): O a dark `Cold` blue, CO a dim `Hot`, bright on its
+/// island's edge, the CO₂ blinks white.
+const O_INK: Ink = Ink::new(Role::Cold, 20);
+const CO_INK: Ink = Ink::new(Role::Hot, 70);
 /// A CO site on its island's edge (a non-CO neighbour), where the reaction runs: the
 /// edge carries the light.
-const FRONT_INK: Ink = Ink::new(Role::Ramp(Ramp::Sienna), 185);
-const FLASH_RAMP: Ramp = Ramp::Starlight;
-/// A blink's level: `FLASH_LO + (FLASH_HI − FLASH_LO)·v` for its brightness `v`.
-const FLASH_LEVELS: (f32, f32) = (170.0, 250.0);
+const FRONT_INK: Ink = Ink::new(Role::Hot, 200);
+/// A blink: full while its brightness is above half, then a step dimmer.
+const FLASH_INKS: [Ink; 2] = [Ink::new(Role::Star, 170), Ink::new(Role::Star, 255)];
 /// The loop opens part-way through "O returns", where the jet's `y` is ≈ 0.59, on a
 /// surface already split the way that `y` splits it: a CO disc about the jet out to where
 /// the local `y` falls to `y₂` ([`Y_2`]; ≈ 0.46 of the half-diagonal, ≈ 40 % of the
@@ -146,9 +147,8 @@ pub(crate) fn y_at(beat: &Beat) -> f64 {
 /// platinum.
 pub(crate) fn site_ink(site: u8, spark: f32, front: bool) -> Ink {
     if spark >= SPARK_MIN {
-        let (lo, hi) = FLASH_LEVELS;
-        let v = ((spark - SPARK_MIN) / (1.0 - SPARK_MIN)).clamp(0.0, 1.0);
-        return Ink::new(Role::Ramp(FLASH_RAMP), (lo + (hi - lo) * v) as u8);
+        let v = (spark - SPARK_MIN) / (1.0 - SPARK_MIN);
+        return FLASH_INKS[usize::from(v >= 0.5)];
     }
     match site {
         OX => O_INK,
@@ -645,15 +645,17 @@ mod tests {
 
     #[test]
     fn cat_a7_sites_on_black_and_sparks_are_single_bright_blinks() {
-        // ADR-0017: empty platinum is black, O and CO dim, and a CO₂ blink the only bright
-        // thing, fading to its site's own ink.
+        // ADR-0018: empty platinum is black, O and CO flat semantic domains, and a CO₂
+        // blink the only white thing, a step dimmer before it goes.
         assert_eq!(site_ink(EMPTY, 0.0, false), Ink::BLANK);
         assert_eq!(site_ink(OX, 0.0, false), O_INK);
         assert_eq!(site_ink(CO, 0.0, false), CO_INK);
         // The front carries the light, and O stays just off black.
         assert!(site_ink(CO, 0.0, true).level > CO_INK.level);
         let hot = site_ink(EMPTY, 1.0, false);
-        assert!(hot.role == Role::Ramp(FLASH_RAMP) && hot.level >= 230);
+        assert_eq!(hot, FLASH_INKS[1]);
+        assert_eq!(site_ink(OX, 0.3, false), FLASH_INKS[0]);
+        assert_eq!((O_INK.role, CO_INK.role), (Role::Cold, Role::Hot));
         assert!(site_ink(OX, 0.5, false).level < hot.level);
         assert_eq!(site_ink(CO, SPARK_MIN * 0.9, false), CO_INK);
     }
@@ -756,11 +758,7 @@ mod tests {
             let ps = g.pixels.pixel_size();
             (0..i32::from(ps.height()))
                 .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| {
-                    g.pixels
-                        .get(x, y)
-                        .is_some_and(|i| i.role == Role::Ramp(FLASH_RAMP) && i != O_INK)
-                })
+                .filter(|&(x, y)| g.pixels.get(x, y).is_some_and(|i| i.role == Role::Star))
                 .count()
         };
         assert!(bright(&g) > 0, "the front sparks from the first frame");

@@ -13,17 +13,7 @@ const SIZES: [(u16, u16); 2] = [(80, 24), (200, 50)];
 /// Scenes added at M13 whose M11-idiom restyle (GEN-R24) has not landed yet: skipped by
 /// the palette check. An allowlist that may only shrink: a listed scene that already
 /// passes fails `gen_r23_pending_only_shrinks` until its entry is deleted. Alphabetical.
-const PENDING: &[&str] = &[
-    "catalytic_surface",
-    "hp_protein_folding",
-    "kelvin_helmholtz",
-    "lenia",
-    "lichtenberg_discharge",
-    "motility_clustering",
-    "quantum_double_slit",
-    "seashell_pigmentation",
-    "spinodal_decomposition",
-];
+const PENDING: &[&str] = &[];
 const TIMES: [u32; 4] = [0, 1, 5, 20];
 
 fn is_m11_role(role: Role) -> bool {
