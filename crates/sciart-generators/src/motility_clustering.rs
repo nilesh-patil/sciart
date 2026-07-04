@@ -79,9 +79,9 @@ const ARRIVE_S: f64 = 3.0;
 /// crowd) a `Cold` stroke, one pressed by 3–4 neighbours a brighter `Cold`, and a jammed
 /// one (≥ [`CLUSTER_CONTACTS`]) a bright `Hot` stroke, so the clusters are the one warm
 /// subject on black.
-const FREE_INK: Ink = Ink::new(Role::Cold, 140);
-const PRESSED_INK: Ink = Ink::new(Role::Cold, 220);
-const JAM_INK: Ink = Ink::new(Role::Hot, 235);
+const FREE_INK: Ink = Ink::new(Role::Cold, 180);
+const PRESSED_INK: Ink = Ink::new(Role::Cold, 230);
+const JAM_INK: Ink = Ink::new(Role::Hot, 240);
 // Crowding only ever brightens a rod [MIPS-A6].
 const _: () = assert!(JAM_INK.level > PRESSED_INK.level && PRESSED_INK.level > FREE_INK.level);
 /// Rod length in swimmer diameters (a rod-shaped cell; the model is still discs).
