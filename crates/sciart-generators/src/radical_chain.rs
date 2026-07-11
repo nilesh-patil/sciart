@@ -31,11 +31,11 @@
 
 use std::fmt::Write as _;
 
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::raster::{self, STROKE_KERNEL};
+use sciart_core::rng::hash01;
 use sciart_core::title;
-use sciart_core::{Tone, draw, ease};
+use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
     name: "radical_chain",
@@ -76,11 +76,6 @@ const FUEL: f64 = 60_000.0;
 const MAX_CELLS: usize = 3000;
 const BUCKET: f64 = 1.25;
 const K_COOL: f64 = 2.5;
-/// The burnt gas's afterglow: a memory of the temperature excess fading with this time
-/// constant (s), drawn at `EMBER_W` of the live heat, so the trail behind the front dims
-/// fast to violet and the whole vessel fades over ≈ 3–4 s after the flash.
-const EMBER_TAU: f32 = 1.8;
-const EMBER_W: f32 = 0.9;
 const T_DIFF: f32 = 6.0;
 const HEAT_BRANCH: f32 = 0.5;
 const HEAT_RECOMB: f32 = 0.2;
@@ -101,7 +96,9 @@ const MAX_H: f64 = 1.0 / 60.0;
 const MAX_SUBSTEPS: usize = 15;
 
 /// Timeline: (label, seconds); pressure in units of the first explosion limit.
-const PHASES: [(&str, f64); 4] = [("slow", 2.5), ("rise", 1.5), ("burn", 6.5), ("vent", 5.5)];
+/// M16: the burn is 5 s (was 6.5 s): with no drawn afterglow the vessel would sit
+/// empty after the flame.
+const PHASES: [(&str, f64); 4] = [("slow", 2.5), ("rise", 1.5), ("burn", 5.0), ("vent", 5.5)];
 /// Index of the burn beat in [`PHASES`]: the spark strikes as it begins.
 const BURN: usize = 2;
 /// The vent drops the pressure over the first `1/VENT_FAST` of its beat, so fresh gas
@@ -112,32 +109,37 @@ const P_HIGH: f64 = 2.2;
 
 /// Radicals in the vessel at the start, so the first frame already has sparks.
 const SEED_RADICALS: usize = 25;
-/// Inks in M11's idiom (ADR-0018): the flash is the hot gas in flat `Seq` steps, black →
-/// violet → red → orange → yellow at the hottest core, like M11's reaction fields; the
-/// radicals, the subject, are bright pale-blue `Wave` dots over short `Cold` chain trails,
-/// the complementary pair of the warm flash.
-const FLAME_STEPS: [u8; 4] = [70, 130, 185, 235];
-/// Toned flash levels below this are single reactions' heat, not a flame: left black.
-const FLASH_MIN: u8 = 48;
-/// Toned trail levels below this are left black.
-const TRAIL_MIN: u8 = 70;
 /// The ignition spark's temperature excess and radius (grid cells), and where in the
 /// vessel it may strike (fractions of the width and height from the centre).
 const SPARK_HEAT: f32 = 1.6;
 const SPARK_R: f32 = 2.5;
 const SPARK_SPREAD: f64 = 0.3;
-/// Glow kept per frame: short fading trails behind the sparks.
-const TRAIL_KEEP: f32 = 0.72;
-/// Radicals are drawn as dots, and their chains as strokes, while the pool is sparse.
-const SPARSE: usize = 300;
-const OUTSIDE: u8 = 0;
-const ON_WALL: u8 = 1;
-const INSIDE: u8 = 2;
+/// M16 (GEN-R25, strange_attractors' thread idiom): each radical is a bright `Sun` dot
+/// heading a thread through its last `TRAIL_N` positions (sampled every `TRAIL_DT` s),
+/// coloured by age: `Hot` 230 fresh, `Hot` 150, then a faint `Accent` 90 tail. A child is
+/// born on its parent with the parent's trail, so every branching forks a thread.
+pub(crate) const TRAIL_N: usize = 8;
+const TRAIL_DT: f64 = 0.06;
+/// Time constant of the drawn position's smoothing (s).
+const SMOOTH_S: f64 = 0.12;
+const THREAD_INKS: [Ink; 3] = [
+    Ink::new(Role::Hot, 230),
+    Ink::new(Role::Hot, 150),
+    Ink::new(Role::Accent, 90),
+];
+const HEAD: Ink = Ink::new(Role::Sun, 255);
+/// At most this many threads are drawn (a fixed hashed share of the pool beyond it).
+pub(crate) const MAX_THREADS: usize = 240;
+/// A radical lost at the wall: a brief `Cold` dot there for `DEATH_S` seconds (a ring of
+/// `N_DEATHS`).
+const DEATH: Ink = Ink::new(Role::Cold, 200);
+const DEATH_S: f32 = 0.4;
+const N_DEATHS: usize = 160;
+/// Wall deaths one update records at most.
+const MAX_WALL_HITS: usize = 512;
 /// The wall: a faint dotted line, one dot in `WALL_EVERY`.
 const WALL: Ink = Ink::new(Role::Dim, 90);
 const WALL_EVERY: usize = 3;
-const RADICAL: Ink = Ink::new(Role::Wave, 255);
-const TRAIL: Ink = Ink::new(Role::Cold, 110);
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Pressure (units of the first limit) at a beat of the loop.
@@ -186,14 +188,30 @@ impl Vessel {
 pub(crate) struct Radical {
     pub x: f64,
     pub y: f64,
-    /// Position before the last step, for the trail.
+    /// Position before the last step (the last point inside, for a wall death).
     pub px: f64,
     pub py: f64,
+    /// Where it is drawn: its position smoothed over `SMOOTH_S` (a random walk drawn
+    /// raw is a scribble; smoothed, a thread).
+    pub shown: (f32, f32),
+    /// Its past drawn positions, newest first (the thread, M16).
+    pub trail: [(f32, f32); TRAIL_N],
+    /// A stable identity: which share of the pool is drawn when it is crowded.
+    pub id: u32,
 }
 
 impl Radical {
     pub(crate) fn at(x: f64, y: f64) -> Self {
-        Self { x, y, px: x, py: y }
+        let id = (x.to_bits() ^ y.to_bits().rotate_left(29)).wrapping_mul(0x9e37_79b9_7f4a_7c15);
+        Self {
+            x,
+            y,
+            px: x,
+            py: y,
+            shown: (x as f32, y as f32),
+            trail: [(x as f32, y as f32); TRAIL_N],
+            id: (id >> 32) as u32,
+        }
     }
 }
 
@@ -225,6 +243,11 @@ pub(crate) struct Chain {
     /// Branching attempts refused because the pool was full (CHN-A4).
     pub refused: u64,
     init_acc: f64,
+    /// Where radicals left through the wall since the scene last looked (their last
+    /// point inside), at most `MAX_WALL_HITS`.
+    pub wall_hits: Vec<(f64, f64)>,
+    /// Births so far: mixed into each child's id.
+    births_n: u32,
 }
 
 impl Chain {
@@ -241,6 +264,25 @@ impl Chain {
             fuel: 1.0,
             refused: 0,
             init_acc: 0.0,
+            wall_hits: Vec::with_capacity(MAX_WALL_HITS),
+            births_n: 0,
+        }
+    }
+
+    /// Ease every radical's drawn position towards it over `dt` seconds.
+    pub(crate) fn smooth(&mut self, dt: f64) {
+        let k = (1.0 - (-dt / SMOOTH_S).exp()) as f32;
+        for r in self.pool.iter_mut() {
+            r.shown.0 += (r.x as f32 - r.shown.0) * k;
+            r.shown.1 += (r.y as f32 - r.shown.1) * k;
+        }
+    }
+
+    /// Push every radical's drawn position onto its trail (newest first).
+    pub(crate) fn sample_trails(&mut self) {
+        for r in self.pool.iter_mut() {
+            r.trail.copy_within(0..TRAIL_N - 1, 1);
+            r.trail[0] = r.shown;
         }
     }
 
@@ -304,12 +346,16 @@ impl Chain {
         let gas = self.gas.as_mut_slice();
         let births = &mut self.births;
         births.clear();
+        let hits = &mut self.wall_hits;
         let mut branched = 0u64;
         self.pool.retain(|r| {
             (r.px, r.py) = (r.x, r.y);
             r.x += half * (2.0 * rng.next_f64() - 1.0);
             r.y += half * (2.0 * rng.next_f64() - 1.0);
             if !vessel.inside(r.x, r.y) {
+                if hits.len() < MAX_WALL_HITS {
+                    hits.push((r.px, r.py));
+                }
                 return false;
             }
             let c = cell(r.x, r.y);
@@ -338,6 +384,14 @@ impl Chain {
             true
         });
         for &b in &self.births {
+            // The child shares its parent's past (the fork) under a new identity.
+            self.births_n = self.births_n.wrapping_add(1);
+            let id = (u64::from(b.id) << 32 | u64::from(self.births_n))
+                .wrapping_mul(0xd1b5_4a32_d192_ed03);
+            let b = Radical {
+                id: (id >> 32) as u32,
+                ..b
+            };
             if !self.pool.spawn(b) {
                 self.refused += 1;
             }
@@ -377,7 +431,7 @@ impl Chain {
     }
 }
 
-/// Where the vessel sits on the pixel buffer.
+/// Where the vessel sits, in half-block pixel units (a dot is half a pixel).
 #[derive(Debug, Clone, Copy, Default)]
 struct Frame {
     x0: i32,
@@ -388,48 +442,31 @@ struct Frame {
     h: i32,
 }
 
-/// One in-place `[1 2 1]/4` pass along rows and then columns of `g` (edges clamped);
-/// `row` is scratch for one row.
-fn soften(g: &mut Grid<f32>, row: &mut Vec<f32>) {
-    let w = usize::from(g.width());
-    if w == 0 {
-        return;
-    }
-    let buf = g.as_mut_slice();
-    for r in buf.chunks_exact_mut(w) {
-        let mut prev = r[0];
-        for x in 0..w {
-            let cur = r[x];
-            r[x] = 0.25 * (prev + 2.0 * cur + r[(x + 1).min(w - 1)]);
-            prev = cur;
-        }
-    }
-    row.clear();
-    row.extend_from_slice(&buf[..w]);
-    let h = buf.len() / w;
-    for y in 0..h {
-        let below = (y + 1).min(h - 1) * w;
-        for x in 0..w {
-            let cur = buf[y * w + x];
-            let next = if y + 1 < h { buf[below + x] } else { cur };
-            buf[y * w + x] = 0.25 * (row[x] + 2.0 * cur + next);
-            row[x] = cur;
-        }
+impl Frame {
+    /// Dot coordinates of the vessel point `(x, y)`.
+    fn dot(&self, x: f64, y: f64) -> (f64, f64) {
+        (
+            2.0 * (f64::from(self.x0) + x * self.scale),
+            2.0 * (f64::from(self.y0) + y * self.scale),
+        )
     }
 }
 
-/// A pixel's ink from its toned flash and trail levels: the flash in one of
-/// [`FLAME_STEPS`], else the chain trail's one flat `Cold` level, else black.
-pub(crate) fn flame_ink(flash: u8, trail: u8) -> Ink {
-    if flash >= FLASH_MIN {
-        let n = FLAME_STEPS.len();
-        let k = usize::from(flash - FLASH_MIN) * n / (256 - usize::from(FLASH_MIN));
-        Ink::new(Role::Seq, FLAME_STEPS[k.min(n - 1)])
-    } else if trail >= TRAIL_MIN {
-        TRAIL
-    } else {
-        Ink::BLANK
+/// The ink of a trail segment `k` samples old (0 the newest): hot and fresh near the
+/// radical, cooling to a faint `Accent` at its tail (M16: colour along the thread by age).
+pub(crate) fn thread_ink(k: usize) -> Ink {
+    match k {
+        0..=1 => THREAD_INKS[0],
+        2..=4 => THREAD_INKS[1],
+        _ => THREAD_INKS[2],
     }
+}
+
+/// Whether radical `id` is drawn with `n` alive: all of them while there are at most
+/// `MAX_THREADS`, else a fixed hashed share, so a drawn thread stays drawn while the
+/// population holds and the crowd of the flash stays a tree, not a wash.
+pub(crate) fn drawn(id: u32, n: usize) -> bool {
+    n <= MAX_THREADS || hash01(u64::from(id)) * n as f64 <= MAX_THREADS as f64
 }
 
 /// Strike the ignition spark: a Gaussian hot spot at a random point near the centre,
@@ -472,22 +509,16 @@ pub struct RadicalChain {
     /// The loop whose ignition spark has been struck.
     sparked: i64,
     frame: Frame,
-    pixels: Pixels,
     dots: Dots,
-    glow: Glow,
-    tone: Tone,
-    map: SampleMap,
     readout_room: usize,
-    /// Per pixel: outside, on the wall or inside the vessel (built in `resize`).
-    mask: Vec<u8>,
     /// Dots of the vessel outline (built in `resize`).
     wall_dots: Vec<(i32, i32)>,
-    /// Afterglow of the burnt gas on the temperature lattice.
-    ember: Grid<f32>,
-    /// The flash per heat node (softened) and its blur scratch row.
-    heat: Grid<f32>,
-    heat_row: Vec<f32>,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    /// Recent wall deaths: vessel position and seconds left to show, a ring.
+    deaths: [(f32, f32, f32); N_DEATHS],
+    death_next: usize,
+    /// Seconds since the trails were last sampled.
+    trail_clock: f64,
+    /// The dots are stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
 }
 
@@ -503,17 +534,12 @@ impl Default for RadicalChain {
             exploded: false,
             sparked: -1,
             frame: Frame::default(),
-            pixels: Pixels::new(Size::new(1, 1)),
             dots: Dots::new(Size::new(1, 1)),
-            glow: Glow::new(Size::new(1, 1)),
-            tone: Tone::asinh(0.6, 8.0),
-            map: SampleMap::default(),
             readout_room: 0,
-            mask: Vec::new(),
             wall_dots: Vec::new(),
-            ember: Grid::new(Size::new(1, 1), 0.0),
-            heat: Grid::new(Size::new(1, 1), 0.0),
-            heat_row: Vec::new(),
+            deaths: [(0.0, 0.0, 0.0); N_DEATHS],
+            death_next: 0,
+            trail_clock: 0.0,
             dirty: true,
         }
     }
@@ -550,106 +576,59 @@ impl RadicalChain {
         }
     }
 
-    /// Expose the radicals' trails into the glow: one decay and one stroke per radical
-    /// per update, so the trail length is in simulated time whatever the draw cadence
-    /// (GEN-R20).
-    fn expose(&mut self) {
-        let Some(chain) = &self.chain else {
+    /// Age the wall deaths by `dt` and add the chain's new ones.
+    fn record_deaths(&mut self, dt: f64) {
+        for d in &mut self.deaths {
+            d.2 = (d.2 - dt as f32).max(0.0);
+        }
+        let Some(chain) = &mut self.chain else {
             return;
         };
-        let f = self.frame;
-        self.glow.decay(TRAIL_KEEP);
-        let full = chain.pool.len() as f32 / CAPACITY as f32;
-        // Many radicals means many overlapping splats: dim each so the flash stays graded.
-        let scale = 1.0 / (1.0 + 3.0 * full);
-        for r in chain.pool.iter() {
-            let (px, py) = (
-                f64::from(f.x0) + r.x * f.scale,
-                f64::from(f.y0) + r.y * f.scale,
-            );
-            // Sparse: a stroke from the last position draws a fading 1-px chain. Crowded
-            // (the flash), a splat keeps the frame cheap.
-            if chain.pool.len() < SPARSE {
-                let (qx, qy) = (
-                    f64::from(f.x0) + r.px * f.scale,
-                    f64::from(f.y0) + r.py * f.scale,
-                );
-                self.glow.stroke(
-                    (2.0 * qx, 2.0 * qy),
-                    (2.0 * px, 2.0 * py),
-                    &STROKE_KERNEL,
-                    2.0 * scale,
-                );
-            } else {
-                self.glow.splat(2.0 * px, 2.0 * py, &STROKE_KERNEL, scale);
-            }
+        for &(x, y) in &chain.wall_hits {
+            self.deaths[self.death_next] = (x as f32, y as f32, DEATH_S);
+            self.death_next = (self.death_next + 1) % N_DEATHS;
         }
+        chain.wall_hits.clear();
     }
 
-    /// The vessel on black (ADR-0018): radicals as single pale-blue dots, their chains as
-    /// flat 1-px `Cold` trails, the explosion a warm flash in flat `Seq` steps that cools
-    /// back to black; the wall a dim dotted line.
+    /// The vessel on black (M16, GEN-R25): every drawn radical a bright `Sun` dot at the
+    /// head of its thread (its last positions, coloured by age), so each branching forks
+    /// a thread and the explosion grows as a tree; wall deaths brief `Cold` dots; the
+    /// wall a faint dotted line.
     fn rasterise(&mut self) {
         let Some(chain) = &self.chain else {
             return;
         };
         let f = self.frame;
         self.dots.clear();
-        if chain.pool.len() < SPARSE {
-            for r in chain.pool.iter() {
-                // Keep the wall line clean: a radical touching it is about to die there.
-                if chain.vessel.sdf(r.x, r.y) < -1.0 / f.scale {
-                    let (px, py) = (
-                        f64::from(f.x0) + r.x * f.scale,
-                        f64::from(f.y0) + r.y * f.scale,
-                    );
-                    // A small plus of dots, so a lone radical reads at a glance.
-                    self.dots.disc(2.0 * px, 2.0 * py, 1.0, RADICAL);
-                }
-            }
-        }
         for &(x, y) in &self.wall_dots {
             self.dots.set(x, y, WALL);
         }
-        // The flash on the coarse heat lattice: live heat plus afterglow, softened by one
-        // [1 2 1] pass so single reactions' heat does not speckle the flame's edge, then
-        // Catmull-Rom sampled (CORE-R102).
-        if self.heat.size() != chain.temp.size() {
-            self.heat.resize(chain.temp.size(), 0.0);
-        }
-        for ((h, &t), &e) in self
-            .heat
-            .as_mut_slice()
-            .iter_mut()
-            .zip(chain.temp.as_slice())
-            .zip(self.ember.as_slice())
-        {
-            *h = 2.0 * (t - 1.0).max(0.0) + EMBER_W * e;
-        }
-        soften(&mut self.heat, &mut self.heat_row);
-        // In the crowd of the flash the chains are the flame: only sparse chains show.
-        let crowded = chain.pool.len() >= SPARSE;
-        let (map, glow, tone, mask, heat) =
-            (&self.map, &self.glow, &self.tone, &self.mask, &self.heat);
-        let pw = i32::from(self.size.width());
-        let (mut ry, mut hr) = (i32::MIN, map.row_cubic(heat, 0));
-        self.pixels.shade(|x, y| {
-            match mask.get((y * pw + x) as usize) {
-                Some(&INSIDE) => {}
-                _ => return Ink::BLANK,
+        let n = chain.pool.len();
+        for r in chain.pool.iter() {
+            if !drawn(r.id, n) {
+                continue;
             }
-            let (lx, ly) = (x - f.x0, y - f.y0);
-            if y != ry {
-                (ry, hr) = (y, map.row_cubic(heat, ly));
+            let mut a = f.dot(f64::from(r.shown.0), f64::from(r.shown.1));
+            for (k, &(tx, ty)) in r.trail.iter().enumerate() {
+                let b = f.dot(f64::from(tx), f64::from(ty));
+                self.dots.line(a.0, a.1, b.0, b.1, thread_ink(k));
+                a = b;
             }
-            let flash = tone.level(hr.at(lx));
-            let trail = if crowded {
-                0
-            } else {
-                tone.level(glow.get(x, y).unwrap_or(0.0))
-            };
-            flame_ink(flash, trail)
-        });
+        }
+        // Heads last: a cell holding a head shows the head's colour (one ink per cell).
+        for r in chain.pool.iter() {
+            if drawn(r.id, n) {
+                let (x, y) = f.dot(f64::from(r.shown.0), f64::from(r.shown.1));
+                self.dots.plot(x, y, HEAD);
+            }
+        }
+        for &(x, y, life) in &self.deaths {
+            if life > 0.0 {
+                let (x, y) = f.dot(f64::from(x), f64::from(y));
+                self.dots.disc(x, y, 0.8, DEATH);
+            }
+        }
     }
 
     fn readout(&self, canvas: &mut Canvas) {
@@ -710,34 +689,8 @@ impl Generator for RadicalChain {
             }
             Some(chain) => chain.regrid(vessel, grid),
         }
-        self.pixels.resize(size);
         self.dots.resize(size);
-        self.glow.resize(size);
-        self.map.rebuild(grid, Size::new(f.w as u16, f.h as u16));
-        let px = self.pixels.pixel_size();
-        let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
-        let wall = 0.9 / f.scale;
-        self.mask.clear();
-        self.mask.extend(
-            (0..ph)
-                .flat_map(|y| (0..pw).map(move |x| (x, y)))
-                .map(|(x, y)| {
-                    let d = vessel.sdf(
-                        (f64::from(x - f.x0) + 0.5) / f.scale,
-                        (f64::from(y - f.y0) + 0.5) / f.scale,
-                    );
-                    // The whole pixel inside (half-diagonal ≈ 0.71 px), so the gas never
-                    // pokes past the one-dot outline at the rounded corners.
-                    if d < -0.75 / f.scale {
-                        INSIDE
-                    } else if d < wall {
-                        ON_WALL
-                    } else {
-                        OUTSIDE
-                    }
-                }),
-        );
-        // The wall: every dot whose centre lies within ~0.4 dot of the vessel's outline,
+        // The wall: every dot whose centre lies within ~0.3 px of the vessel's outline,
         // a crisp one-dot braille line.
         let dots = self.dots.dot_size();
         let band = 0.3 / f.scale;
@@ -806,18 +759,6 @@ impl Generator for RadicalChain {
             chain.step(h, rates, &mut self.rng);
             chain.cool(h);
         }
-        if self.ember.size() != chain.temp.size() {
-            self.ember.resize(chain.temp.size(), 0.0);
-        }
-        let keep = (-(dt as f32) / EMBER_TAU).exp();
-        for (e, &t) in self
-            .ember
-            .as_mut_slice()
-            .iter_mut()
-            .zip(chain.temp.as_slice())
-        {
-            *e = (*e * keep).max(3.0 * (t - 1.0));
-        }
         if beat.index == 3 {
             let k = (-VENT_RATE * dt as f32).exp();
             chain.water.as_mut_slice().iter_mut().for_each(|w| *w *= k);
@@ -825,7 +766,15 @@ impl Generator for RadicalChain {
         if chain.pool.len() > CAPACITY / 8 || chain.max_temp() > 1.5 + SPARK_HEAT {
             self.exploded = true;
         }
-        self.expose();
+        // The threads: every `TRAIL_DT` each radical's position joins its trail, so a
+        // trail spans `TRAIL_N · TRAIL_DT` simulated seconds whatever the draw cadence.
+        chain.smooth(dt);
+        self.trail_clock += dt;
+        if self.trail_clock >= TRAIL_DT {
+            self.trail_clock %= TRAIL_DT;
+            chain.sample_trails();
+        }
+        self.record_deaths(dt);
         self.dirty = true;
     }
 
@@ -838,10 +787,7 @@ impl Generator for RadicalChain {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels.blit(canvas, |_, _, top, bottom| {
-            raster::ascii_ramp_cell(top, bottom)
-        });
-        self.dots.blit_over(canvas, &self.pixels);
+        self.dots.blit(canvas);
         self.readout(canvas);
     }
 }
@@ -1053,12 +999,9 @@ mod tests {
                 .count() as f32
                 / n
         };
-        let (mut at_latch, mut hot_max, mut peak_n) = (None, 0.0f32, 0usize);
-        let mut dark_since: Option<f64> = None;
-        let mut glow_after = 0.0f64;
-        for k in 0..(14.0 / SIM_DT) as usize {
+        let (mut at_latch, mut hot_max) = (None, 0.0f32);
+        for _ in 0..(14.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
-            let t = (k + 1) as f64 * SIM_DT;
             let c = g.chain.as_ref().expect("chain");
             let hot = share(c, &|_, t| t > 1.3);
             let burnt = share(c, &|g, _| g < 0.5);
@@ -1066,18 +1009,6 @@ mod tests {
                 at_latch = Some((hot, burnt));
             }
             hot_max = hot_max.max(hot);
-            peak_n = peak_n.max(c.pool.len());
-            // Once the flame has gone out (pool back under 2 % of its peak), how long
-            // does the afterglow keep the vessel lit?
-            // (Only until the vent drops below the limit, where fresh slow chains start.)
-            let venting = pressure(&g.beat()) < 1.0 && g.beat().index == 3;
-            if g.exploded && !venting && peak_n > 500 && c.pool.len() * 50 < peak_n {
-                let since = *dark_since.get_or_insert(t);
-                let ember = g.ember.as_slice().iter().copied().fold(0.0f32, f32::max);
-                if ember > 0.5 {
-                    glow_after = glow_after.max(t - since);
-                }
-            }
         }
         let (hot, burnt) = at_latch.expect("the flash comes");
         // A kernel at the spark, not the whole vessel at once, which the front then sweeps.
@@ -1086,28 +1017,56 @@ mod tests {
             "at the latch: hot {hot} burnt {burnt}"
         );
         assert!(hot_max > 0.3, "the front sweeps the vessel ({hot_max})");
-        assert!(
-            (1.5..6.0).contains(&glow_after),
-            "afterglow {glow_after} s after the flame goes out"
-        );
+    }
+
+    /// Every lit cell of a frame at `t` s (120×40), with the canvas.
+    fn frame_at(t: f64) -> (RadicalChain, Canvas) {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = RadicalChain::default();
+        g.resize(size, &mut ctx);
+        while g.t < t {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        (g, canvas)
     }
 
     #[test]
-    fn chn_a7_flash_in_stepped_seq_on_black_and_chains_cold() {
-        // ADR-0018: the ground is black; the flash is a few flat `Seq` steps, yellow only
-        // at its hottest; chain trails are one flat `Cold` level under the `Wave` dots.
-        assert_eq!(flame_ink(0, 0), Ink::BLANK);
-        assert_eq!(flame_ink(10, 10), Ink::BLANK);
-        assert_eq!(flame_ink(255, 40), Ink::new(Role::Seq, FLAME_STEPS[3]));
-        assert!(flame_ink(FLASH_MIN + 10, 0).level < flame_ink(250, 0).level);
-        let mut levels: Vec<u8> = (0..=255).map(|f| flame_ink(f, 0).level).collect();
-        levels.dedup();
-        assert_eq!(levels.len(), 1 + FLAME_STEPS.len(), "stepped: {levels:?}");
-        assert_eq!(flame_ink(0, 255), TRAIL);
-        assert_eq!(RADICAL.role, Role::Wave);
-        // A single reaction's heat is not a flame.
-        assert_eq!(flame_ink(FLASH_MIN - 1, 0), Ink::BLANK);
-        assert_eq!(flame_ink(255, 200).role, Role::Seq);
+    fn chn_a7_threads_on_black_coloured_by_age() {
+        // M16: the ground is black and every lit cell (the readout aside) is braille: a
+        // thread (`Hot` fresh, `Accent` tail), a radical (`Sun`), a wall death (`Cold`)
+        // or the faint wall (`Dim`); no flash fill.
+        let allowed = [
+            THREAD_INKS[0],
+            THREAD_INKS[1],
+            THREAD_INKS[2],
+            HEAD,
+            DEATH,
+            WALL,
+        ];
+        for t in [1.5, 4.5, 6.0, 12.5] {
+            let (_, canvas) = frame_at(t);
+            let mut threads = 0;
+            for c in canvas.cells() {
+                if c.ch == ' ' || c.ink.role == Role::Text {
+                    continue;
+                }
+                assert!(
+                    c.bg == Ink::BLANK && ('\u{2800}'..='\u{28ff}').contains(&c.ch),
+                    "t = {t}: {c:?}"
+                );
+                assert!(allowed.contains(&c.ink), "t = {t}: {c:?}");
+                threads += usize::from(c.ink.role == Role::Hot);
+            }
+            assert!(threads > 0, "t = {t}: no threads");
+        }
+        // Colour by age: fresh segments hot, the tail faint.
+        assert_eq!(thread_ink(0), THREAD_INKS[0]);
+        assert!(thread_ink(3).level < thread_ink(0).level);
+        assert_eq!(thread_ink(TRAIL_N - 1).role, Role::Accent);
         // Burnt gas quenches radicals: branching needs unburnt gas.
         let (mut c, mut r) = chain_with(400, 9);
         c.gas.fill(0.0);
@@ -1116,5 +1075,50 @@ mod tests {
             c.step(SIM_DT, hot, &mut r);
         }
         assert!(c.pool.len() < 400, "{}", c.pool.len());
+    }
+
+    #[test]
+    fn chn_a10_branching_forks_a_thread_and_wall_deaths_flash_cold() {
+        // A branching child is born on its parent with the parent's past: one thread
+        // splits in two, the child under a new identity.
+        let (mut c, mut r) = chain_with(50, 3);
+        for _ in 0..TRAIL_N {
+            c.step(SIM_DT, cold(0.0, 1.0), &mut r);
+            c.sample_trails();
+        }
+        let before: Vec<Radical> = c.pool.iter().copied().collect();
+        let n0 = c.pool.len();
+        c.step(SIM_DT, cold(30.0, 1.0), &mut r);
+        let born: Vec<&Radical> = c.pool.iter().skip(n0).collect();
+        assert!(!born.is_empty(), "something branched");
+        for b in born {
+            let parent = before
+                .iter()
+                .find(|p| p.trail == b.trail)
+                .expect("a child shares a parent's trail");
+            assert_ne!(parent.id, b.id);
+        }
+        // Wall deaths: recorded where the radical last was inside, and drawn briefly.
+        let mut c = Chain::new(Vessel { a: A_REF }, Size::new(30, 16));
+        c.pool.spawn(Radical::at(0.9, 0.999_999));
+        let mut r = rng(4);
+        for _ in 0..30 {
+            c.step(SIM_DT, cold(0.0, 1.0), &mut r);
+        }
+        assert!(c.wall_hits.iter().all(|&(x, y)| c.vessel.inside(x, y)));
+        let (mut g, _) = frame_at(1.0);
+        let deaths = |g: &RadicalChain| g.deaths.iter().filter(|d| d.2 > 0.0).count();
+        assert!(deaths(&g) > 0, "slow chains die on the walls");
+        g.chain.as_mut().expect("chain").pool.clear();
+        let mut ctx = Ctx::new(1, Size::new(120, 40));
+        for _ in 0..(f64::from(DEATH_S) / SIM_DT).ceil() as usize + 1 {
+            g.update(SIM_DT, &mut ctx);
+            g.chain.as_mut().expect("chain").pool.clear();
+        }
+        assert_eq!(deaths(&g), 0, "deaths fade within {DEATH_S} s");
+        // A crowded pool draws a bounded, fixed share of threads.
+        let shown = (0..4000u32).filter(|&id| drawn(id, 4000)).count();
+        assert!(shown < MAX_THREADS + MAX_THREADS / 5, "{shown}");
+        assert!((0..100u32).all(|id| drawn(id, 100)));
     }
 }
