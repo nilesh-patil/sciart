@@ -42,15 +42,17 @@
 //! Clicks accumulate in a fixed pool and are drawn on a strip to the right, so the
 //! fringes build up from single dots.
 //!
-//! ## Picture
+//! ## Picture (M16, GEN-R25)
 //!
-//! Half-block pixels show the wave in M11's idiom (ADR-0018): `Wave` in three flat
-//! steps; brightness follows `|ψ|` (the square root of the probability density, so the
-//! fan's weak outer lobes still read), and where the view resolves the carrier a light
-//! shimmer of `Re ψ/|ψ|` rides on it, so wavefronts visibly stream through the steady fan
-//! of lobes and dark nodal rays. The slit wall (or barrier) is a 1-px `Structure` line at
-//! its front face and the screen a dashed 1-px `Dim` line; the screen strip is black,
-//! and clicks are white braille dots that build the fringes by their density alone.
+//! Braille threads on black, no fills. The wave is drawn as its crest lines: the
+//! wavefronts where the carrier peaks (`Im ψ = 0` with `Re ψ > 0`), traced over the
+//! view's nodes by marching squares (`Dots::contour_by`, CORE-R105). Each crest piece is
+//! gated and stepped by the exposed `|ψ|` of its cell (the M15 tone: per-side peaks, a
+//! soft knee, three flat `Wave` steps), so the fan's lobes are bright arcs streaming out
+//! from the slits and the dark nodal rays are gaps in them. A view too coarse to resolve
+//! the carrier draws `|ψ|` iso-lines at the steps instead. The slit wall (or barrier) is a
+//! one-dot `Structure` line at its front face, the screen a dashed `Dim` dot line; clicks
+//! are white braille dots that build the fringes by their density alone.
 
 use std::f64::consts::TAU;
 
@@ -127,19 +129,20 @@ const WAVE_VIS: [f32; 3] = [1.0, 0.92, 1.0];
 /// the wall has its own peak, so the weak transmitted fan is exposed like the incident
 /// packet; the peaks decay with this half-life so a spreading wave stays visible.
 const CUTOFF: f64 = 0.2;
-/// Below this many pixels per node the carrier aliases: show `|ψ|` instead.
-const MIN_PX_PER_NODE: f64 = 0.7;
+/// Below this many dots per node the carrier's crests (≈ 7 nodes apart) crowd into a
+/// blur: draw `|ψ|` iso-lines instead.
+const MIN_DOTS_PER_NODE: f64 = 0.8;
 const PEAK_HALF_LIFE_S: f64 = 4.0;
 /// The source side (incident + reflected standing wave) is exposed at this share of the
 /// fan's brightness, so the diffraction fan carries the picture.
 const SOURCE_EXPOSURE: f64 = 0.55;
 /// The wave's brightness scale, and its flat steps `(brightness from, Wave level)`.
 const WAVE_TOP: f64 = 140.0;
-const WAVE_STEPS: [(f64, u8); 3] = [(30.0, 90), (62.0, 165), (98.0, 255)];
-/// The carrier shimmer's depth.
-const SHIMMER: f64 = 0.5;
-const WALL_INK: Ink = Ink::new(Role::Structure, 150);
-const BARRIER_INK: Ink = Ink::new(Role::Structure, 100);
+/// M16: brighter and earlier steps than M15's fills (90/165/255 from 30/62/98), since a
+/// one-dot crest carries less light than a filled lobe and has no shimmer peak.
+pub(crate) const WAVE_STEPS: [(f64, u8); 3] = [(25.0, 140), (50.0, 205), (75.0, 255)];
+const WALL_INK: Ink = Ink::new(Role::Structure, 190);
+const BARRIER_INK: Ink = Ink::new(Role::Structure, 140);
 const SCREEN_INK: Ink = Ink::new(Role::Dim, 110);
 
 /// The wave's ink at brightness `raw` (0–`WAVE_TOP`): the highest step it reaches, or
@@ -713,17 +716,15 @@ pub struct QuantumDoubleSlit {
     debt: f64,
     /// Exposure peaks of `|ψ|²` left and right of the wall.
     peak: [f64; 2],
-    /// Per node: coverage and phase level; per dot column / row: the node it shows.
-    col_node: Vec<(u16, f32)>,
-    row_node: Vec<(u16, f32)>,
-    /// Dot columns of the wave view, and where the screen strip starts.
-    /// Pixel columns of the wave view; whether the view resolves the carrier.
-    view_px: i32,
+    /// `Im ψ` (the crest field) or the exposed `|ψ|` (coarse views) over the view's
+    /// nodes, sized in `layout`.
+    field: Vec<f32>,
+    /// Dot columns of the wave view (the screen line's column) and whether the view
+    /// resolves the carrier.
+    view_dots: i32,
     carrier: bool,
-    strip_x: i32,
-    pixels: Pixels,
     dots: Dots,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    /// The raster is stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
 }
 
@@ -749,12 +750,9 @@ impl QuantumDoubleSlit {
             clicks: ParticlePool::with_capacity(CLICK_CAP),
             debt: 0.0,
             peak: [0.0; 2],
-            col_node: Vec::new(),
-            row_node: Vec::new(),
-            view_px: 0,
+            field: Vec::new(),
+            view_dots: 0,
             carrier: true,
-            strip_x: 0,
-            pixels: Pixels::default(),
             dots: Dots::default(),
         }
     }
@@ -844,127 +842,110 @@ impl QuantumDoubleSlit {
         }
     }
 
-    /// Map the display onto the grid and size the rasters (resize only).
+    /// Map the display onto the grid and size the raster (resize only).
     fn layout(&mut self, size: Size) {
-        let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+        let w = i32::from(size.width());
         let strip_cells = (w / 6).clamp(1, 20).min(w);
-        let (pw, ph) = (w - strip_cells, 2 * h);
-        self.view_px = pw;
-        self.strip_x = 2 * pw;
+        self.view_dots = 2 * (w - strip_cells);
         let g = self.geo;
-        self.carrier = f64::from(pw) >= MIN_PX_PER_NODE * g.view_w as f64;
-        // Pixel centres in node coordinates, as (node, fraction toward the next).
-        let at = |p: i32, n: i32, v0: usize, vn: usize| {
-            let u = v0 as f64 + (f64::from(p) + 0.5) * vn as f64 / f64::from(n.max(1)) - 0.5;
-            let u = u.max(0.0);
-            (u.floor() as u16, (u - u.floor()) as f32)
-        };
-        self.col_node.clear();
-        self.col_node
-            .extend((0..pw).map(|x| at(x, pw, g.vx0, g.view_w)));
-        self.row_node.clear();
-        self.row_node
-            .extend((0..ph).map(|y| at(y, ph, g.vy0, g.view_h)));
-        self.pixels.resize(size);
+        self.carrier = f64::from(self.view_dots) >= MIN_DOTS_PER_NODE * g.view_w as f64;
+        self.field.clear();
+        self.field.resize(g.view_w * g.view_h, 0.0);
         self.dots.resize(size);
     }
 
-    fn rasterise(&mut self) {
+    /// Exposure of `|ψ|` at a node: the act's per-side scale, tone and knee, as the
+    /// brightness `wave_ink` steps (0 below the cut).
+    fn exposure(&self) -> impl Fn(usize, f64) -> f64 + use<> {
         let act = self.act.unwrap_or(0);
         let vis = f64::from(WAVE_VIS[act.min(2)]);
-        let (gw, split) = (self.geo.w, self.geo.xw + 2);
         // The tunnelling act shares one exposure, so the transmitted share reads true.
         let peak = if act == 2 {
             [self.peak[0].max(self.peak[1]); 2]
         } else {
             self.peak
         };
-        // The tunnelling act shows both sides at the same exposure: what gets through
-        // is visibly a fraction of what arrives.
         let source = if act == 2 { 1.0 } else { SOURCE_EXPOSURE };
         let scale = [
             source / peak[0].max(1e-30).sqrt(),
             1.0 / peak[1].max(1e-30).sqrt(),
         ];
-        let gh = self.geo.h;
-        let (cols, rows, psi, solid) = (&self.col_node, &self.row_node, &self.adi.psi, &self.solid);
-        let (view, carrier) = (self.view_px, self.carrier);
+        let split = self.geo.xw + 2;
         let tunnel = act == 2;
         let cutoff = if tunnel { 0.5 * CUTOFF } else { CUTOFF };
-        // Below this `a` a pixel is blank for sure: `t` is under both the knee's zero
-        // (`cutoff/2`) or under the first step (`raw ≤ WAVE_TOP·vis·t < WAVE_STEPS[0]`);
-        // shrunk by 0.1 % so rounding never flips a lit pixel.
-        let t_blank = (0.5 * cutoff).max(WAVE_STEPS[0].0 / (WAVE_TOP * vis));
-        let a_blank = 0.999
-            * if tunnel {
-                t_blank.powf(4.0 / 3.0)
-            } else {
-                t_blank.powf(1.0 / 0.8)
-            };
-        self.pixels.shade(|x, y| {
-            if x == view {
-                return if y % 2 == 0 { SCREEN_INK } else { Ink::BLANK };
-            }
-            let (Some(&(gx, fx)), Some(&(gy, fy))) = (cols.get(x as usize), rows.get(y as usize))
-            else {
-                return Ink::BLANK;
-            };
-            let (gx, gy) = (usize::from(gx).min(gw - 1), usize::from(gy).min(gh - 1));
-            let (gx1, gy1) = ((gx + 1).min(gw - 1), (gy + 1).min(gh - 1));
-            let near_x = |gx: usize, fx: f32| if fx < 0.5 { gx } else { (gx + 1).min(gw - 1) };
-            let row = gw * if fy < 0.5 { gy } else { gy1 };
-            let kind = solid[near_x(gx, fx) + row];
-            if kind != Solid::Free {
-                // Only the obstacle's front face, a 1-px line.
-                let behind = x
-                    .checked_sub(1)
-                    .and_then(|l| cols.get(l as usize))
-                    .map(|&(lx, lf)| solid[near_x(usize::from(lx).min(gw - 1), lf) + row]);
-                if behind == Some(kind) {
-                    return Ink::BLANK;
-                }
-                return if kind == Solid::Wall {
-                    WALL_INK
-                } else {
-                    BARRIER_INK
-                };
-            }
-            // Bilinear in ψ, so the carrier's crests stay smooth between nodes.
-            let (fx, fy) = (f64::from(fx), f64::from(fy));
-            let lerp = |a: C64, b: C64, f: f64| a.scale(1.0 - f) + b.scale(f);
-            let top = lerp(psi[gy * gw + gx], psi[gy * gw + gx1], fx);
-            let bottom = lerp(psi[gy1 * gw + gx], psi[gy1 * gw + gx1], fx);
-            let z = lerp(top, bottom, fy);
-            let amp = z.norm_sqr().sqrt();
-            let v = scale[usize::from(gx >= split)] * amp;
-            // Crests a little brighter than troughs where the carrier is resolved.
-            let shimmer = if carrier && amp > 0.0 {
-                1.0 - SHIMMER * (0.5 - 0.5 * z.re / amp)
-            } else {
-                1.0
-            };
-            // A hard cut before the act's dimming keeps the dimmed wave's outline as crisp
-            // as the full one's.
-            // √ tone for the carrier (crests stay bold as |ψ| falls off), linear for |ψ|
-            // (so the nodal rays of a coarse view keep their dark gradient); the barrier
-            // act uses `v^¾` either way, lower cut, so the weak transmitted wave shows at
-            // its true, smaller share.
-            let a = v.min(1.0);
-            // Certainly blank (see `a_blank`): skip the power law.
-            if a < a_blank {
-                return Ink::BLANK;
-            }
+        move |gx: usize, amp: f64| {
+            let a = (scale[usize::from(gx >= split)] * amp).min(1.0);
+            // √ tone for the crests, `v^¾` in the barrier act (lower cut), so the weak
+            // transmitted wave shows at its true, smaller share.
             let t = if tunnel {
                 a.sqrt() * a.sqrt().sqrt()
             } else {
                 a.powf(0.8)
             };
-            // A knee instead of a hard cut, so faint density thins out, no speckle.
+            // A knee instead of a hard cut, so faint crests thin out, no speckle.
             let knee = ((t - 0.5 * cutoff) / cutoff).clamp(0.0, 1.0);
-            wave_ink(WAVE_TOP * vis * t * knee * knee * shimmer)
-        });
+            WAVE_TOP * vis * t * knee * knee
+        }
+    }
+
+    fn rasterise(&mut self) {
         self.dots.clear();
-        let (strip, dh) = (self.strip_x, 4 * i32::from(self.size.height()));
+        let g = self.geo;
+        let (vw, vh) = (g.view_w, g.view_h);
+        if vw < 2 || vh < 2 || self.field.len() != vw * vh || self.adi.psi.len() < g.w * g.h {
+            return;
+        }
+        let dh = 4 * i32::from(self.size.height());
+        let sx = f64::from(self.view_dots) / vw as f64;
+        let sy = f64::from(dh) / vh as f64;
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        let expose = self.exposure();
+        let psi = &self.adi.psi;
+        let node = |i: usize, j: usize| psi[(g.vy0 + j) * g.w + g.vx0 + i];
+        if self.carrier {
+            // Crests: Im ψ = 0 where Re ψ > 0, stepped by the cell's exposed |ψ|.
+            for (k, f) in self.field.iter_mut().enumerate() {
+                *f = node(k % vw, k / vw).im as f32;
+            }
+            self.dots
+                .contour_by(&self.field, vw, vh, 0.0, to_dot, |i, j| {
+                    let c = [
+                        node(i, j),
+                        node(i + 1, j),
+                        node(i, j + 1),
+                        node(i + 1, j + 1),
+                    ];
+                    let re: f64 = c.iter().map(|z| z.re).sum();
+                    let amp = 0.25 * c.iter().map(|z| z.norm_sqr().sqrt()).sum::<f64>();
+                    let ink = wave_ink(expose(g.vx0 + i, amp));
+                    (re > 0.0 && ink != Ink::BLANK).then_some(ink)
+                });
+        } else {
+            for (k, f) in self.field.iter_mut().enumerate() {
+                let (i, j) = (k % vw, k / vw);
+                *f = expose(g.vx0 + i, node(i, j).norm_sqr().sqrt()) as f32;
+            }
+            for &(from, level) in &WAVE_STEPS {
+                let ink = Ink::new(Role::Wave, level);
+                self.dots
+                    .contour(&self.field, vw, vh, from as f32, to_dot, ink);
+            }
+        }
+        // The obstacle's front face, one dot thick, and the dashed screen line.
+        let face = to_dot((g.xw - g.vx0) as f64 - 0.5, 0.0).0.round() as i32;
+        for dy in 0..dh {
+            let row = g.vy0 + ((f64::from(dy) + 0.5) / sy) as usize;
+            let kind = self.solid.get(row.min(g.h - 1) * g.w + g.xw);
+            match kind {
+                Some(Solid::Wall) => self.dots.set(face, dy, WALL_INK),
+                Some(Solid::Barrier) => self.dots.set(face, dy, BARRIER_INK),
+                _ => {}
+            }
+            if dy % 4 < 2 {
+                self.dots.set(self.view_dots, dy, SCREEN_INK);
+            }
+        }
+        let strip = self.view_dots;
         let width = (2 * i32::from(self.size.width()) - strip - 3).max(1);
         for c in self.clicks.iter() {
             let x = strip + 3 + (c.fx * width as f32) as i32;
@@ -972,21 +953,6 @@ impl QuantumDoubleSlit {
             let fresh = c.age < 0.5 * CLICK_FADE_S;
             self.dots.set(x, y, CLICK_INKS[usize::from(fresh)]);
         }
-    }
-}
-
-/// ASCII fallback of a pixel pair: the stronger ink; the wave by level on the ASCII
-/// ramp, walls, the barrier and the screen as `|`.
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let ink = sciart_core::raster::stronger(top, bottom);
-    match ink.role {
-        Role::Wave => {
-            let i = usize::from(ink.level);
-            let ramp = sciart_core::raster::ASCII_RAMP;
-            Some((ramp[(i * ramp.len() / 256).min(ramp.len() - 1)], ink))
-        }
-        Role::Structure | Role::Dim => Some(('|', ink)),
-        _ => None,
     }
 }
 
@@ -1065,9 +1031,8 @@ impl Generator for QuantumDoubleSlit {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-        self.dots.blit_over(canvas, &self.pixels);
+        // ASCII falls back by dot count (`Dots::blit`).
+        self.dots.blit(canvas);
     }
 }
 
@@ -1348,17 +1313,24 @@ mod tests {
                 g.update(SIM_DT, &mut ctx);
                 g.prepare();
             }
-            // Rows of the right quarter of the view (next to the screen) that show wave.
-            let (view, ph) = (g.view_px, 2 * i32::from(h));
-            let lit = (0..ph)
+            // Cell rows of the right quarter of the view (next to the screen) that show
+            // a crest.
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let view = g.view_dots / 2;
+            let ch = i32::from(h) - 1;
+            let lit = (0..ch)
                 .filter(|&y| {
-                    (view * 3 / 4..view)
-                        .any(|x| g.pixels.get(x, y).is_some_and(|p| p.role == Role::Wave))
+                    (view * 3 / 4..view).any(|x| {
+                        canvas
+                            .get(x, y)
+                            .is_some_and(|c| c.ch != ' ' && c.ink.role == Role::Wave)
+                    })
                 })
                 .count();
             assert!(
-                lit as f64 >= 0.6 * f64::from(ph),
-                "{w}x{h}: fan lights {lit} of {ph} rows at t = 1.5 s"
+                lit as f64 >= 0.6 * f64::from(ch),
+                "{w}x{h}: fan lights {lit} of {ch} rows at t = 1.5 s"
             );
         }
     }
@@ -1374,7 +1346,7 @@ mod tests {
     }
 
     #[test]
-    fn qds_a8_the_wave_is_three_flat_wave_steps_on_black() {
+    fn qds_a8_the_wave_is_crest_threads_in_three_wave_steps_on_black() {
         assert_eq!(wave_ink(0.0), Ink::BLANK);
         assert_eq!(wave_ink(WAVE_TOP), Ink::new(Role::Wave, WAVE_STEPS[2].1));
         let size = Size::new(120, 40);
@@ -1385,26 +1357,74 @@ mod tests {
             g.update(SIM_DT, &mut ctx);
         }
         g.prepare();
-        let ps = g.pixels.pixel_size();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
         let mut steps = [0usize; 3];
-        for y in 0..i32::from(ps.height()) {
-            for x in 0..i32::from(ps.width()) {
-                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                if ink.role == Role::Wave {
-                    let k = WAVE_STEPS.iter().position(|s| s.1 == ink.level);
-                    assert!(k.is_some(), "{ink:?}");
+        for y in 0..39 {
+            for x in 0..120 {
+                let c = canvas.get(x, y).unwrap();
+                assert_eq!(c.bg, Ink::BLANK, "({x}, {y})");
+                assert!(!matches!(c.ch, '▀' | '▄' | '█'), "({x}, {y})");
+                if c.ch == ' ' {
+                    continue;
+                }
+                if c.ink.role == Role::Wave {
+                    let k = WAVE_STEPS.iter().position(|s| s.1 == c.ink.level);
+                    assert!(k.is_some(), "{:?}", c.ink);
                     steps[k.unwrap_or(0)] += 1;
                 } else {
                     assert!(
-                        [Ink::BLANK, WALL_INK, BARRIER_INK, SCREEN_INK].contains(&ink),
-                        "({x}, {y}): {ink:?}"
+                        [WALL_INK, BARRIER_INK, SCREEN_INK].contains(&c.ink)
+                            || CLICK_INKS.contains(&c.ink),
+                        "({x}, {y}): {:?}",
+                        c.ink
                     );
                 }
             }
         }
-        assert!(
-            steps[0] > 0 && steps[1] > 0,
-            "the lower two steps show: {steps:?}"
-        );
+        assert!(steps[1] > 0 && steps[2] > 0, "steps: {steps:?}");
+    }
+
+    #[test]
+    fn qds_a9_crest_lines_lie_on_the_carrier_crests() {
+        // A plane wave e^{ikx} over the whole view at full exposure: every wave dot lies
+        // within 0.6 node of a crest (kx ≡ 0 mod 2π), none on the troughs.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = QuantumDoubleSlit::new();
+        g.resize(size, &mut ctx);
+        assert!(g.carrier, "120×40 resolves the carrier");
+        let geo = g.geo;
+        for (i, z) in g.adi.psi.iter_mut().enumerate() {
+            let x = (i % geo.w) as f64;
+            let (sn, cs) = (K_WAVE * x).sin_cos_det();
+            *z = if g.solid[i] == Solid::Free {
+                C64::new(cs, sn)
+            } else {
+                C64::ZERO
+            };
+        }
+        g.peak = [1.0; 2];
+        g.clicks.clear();
+        g.rasterise();
+        let sx = f64::from(g.view_dots) / geo.view_w as f64;
+        let (mut on, mut n) = (0usize, 0usize);
+        for y in 0..160 {
+            for x in 0..g.view_dots {
+                if !g.dots.is_lit(x, y) {
+                    continue;
+                }
+                let node = geo.vx0 as f64 + (f64::from(x) + 0.5) / sx - 0.5;
+                if (node - geo.xw as f64).abs() < 3.0 {
+                    continue; // the wall line and its edge
+                }
+                n += 1;
+                let phase = (K_WAVE * node).rem_euclid(TAU);
+                let off = phase.min(TAU - phase) / K_WAVE;
+                on += usize::from(off <= 0.6);
+            }
+        }
+        assert!(n > 100, "{n} crest dots");
+        assert!(on as f64 >= 0.97 * n as f64, "{on} of {n} on crests");
     }
 }

@@ -29,15 +29,24 @@
 //! The simulation runs on an integer sub-step counter at 120 sub-steps per simulated
 //! second (1.5 tu/s): the quench, the pacemakers and the reseeding are scheduled on that
 //! counter, so how frames chop time never changes what happens.
+//!
+//! ## Picture (M16, GEN-R25)
+//!
+//! Thread style: no bands. Each wave is drawn as one-dot braille lines by marching squares
+//! (`Dots::contour_by`, CORE-R105): its leading edge, the level `u = ½` where the catalyst
+//! is still reduced (`v` low), is a bright `Hot` crest thread; behind it the recovering
+//! medium (`u < ½`) carries two `Cold` tail lines, level sets of `v` that fade a step as
+//! the medium recovers. The back of the excited plateau is not drawn, so the tail lines
+//! trail the crest with black between them.
 
 use std::f64::consts::TAU as TWO_PI;
 use std::fmt::Write as _;
 
 use rand::Rng;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, ease, ink};
+use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
@@ -126,10 +135,19 @@ const MIN_FALLBACK_LEN: f64 = 3.0;
 
 const MAX_NODES: usize = 20_000;
 const BUCKET: f64 = 1.25;
-/// `v` scale for the excitation-cycle phase: `a − b₀`, the unquenched value, so the
-/// quench fades tails instead of brightening them.
-const R_SCALE: f32 = A - B0;
-const S_MIN: f32 = 0.06;
+/// M16 (GEN-R25): the crest thread is the `u = CREST_U` level in cells whose mean `v` is
+/// below `CREST_V_MAX` (the leading edge; the plateau's back edge has `v` near `a − b`).
+pub(crate) const CREST_U: f32 = 0.5;
+pub(crate) const CREST_V_MAX: f32 = 0.25;
+pub(crate) const CREST_INK: Ink = Ink::new(Role::Hot, 230);
+/// The tail lines: `v` levels in the recovering medium (`u < ½` at all four corners), the
+/// fresher one brighter.
+pub(crate) const TAILS: [(f32, Ink); 2] = [
+    (0.42, Ink::new(Role::Cold, 190)),
+    (0.2, Ink::new(Role::Cold, 120)),
+];
+/// Below this level a fading-in line is not drawn.
+const LEVEL_MIN: f32 = 12.0;
 /// Reseeded fronts brighten over this many seconds (display only, SPEC-002 Motion).
 const FADE_IN_S: f64 = 0.5;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
@@ -161,10 +179,8 @@ struct Bz {
     v: Grid<f32>,
     /// Laplacian scratch for `bz_step`.
     lap: Grid<f32>,
-    /// Lattice → pixel sampling tables, rebuilt in `resize`.
-    map: SampleMap,
-    /// Shaded in `update`/`resize`; `render` only blits it.
-    pixels: Pixels,
+    /// The threads, rasterised in `prepare` (GEN-R20); `render` only blits them.
+    dots: Dots,
     timeline: Timeline,
     /// Normalised pacemaker positions in `[0, 1]²`.
     pacers: [[f64; 2]; 2],
@@ -190,8 +206,7 @@ impl Default for Bz {
             u: Grid::default(),
             v: Grid::default(),
             lap: Grid::default(),
-            map: SampleMap::default(),
-            pixels: Pixels::default(),
+            dots: Dots::default(),
             timeline: Timeline::new(&[("waves", WAVES_S as f64), ("quench", QUENCH_S as f64)]),
             pacers: [[0.5; 2]; 2],
             n_pacers: 0,
@@ -464,25 +479,10 @@ pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
     seeds
 }
 
-/// The excitation-cycle phase `s ∈ [0, 1]` of a node (SPEC-002 Inks): palest at the
-/// fresh front, orange at the back of the plateau, then red → violet → black as the
-/// medium recovers.
-fn phase(u: f32, v: f32) -> f32 {
-    let r = (v / R_SCALE).clamp(0.0, 1.0);
-    if u >= 0.5 {
-        1.0 - 0.45 * r
-    } else {
-        0.55 * r * r
-    }
-}
-
-/// The phase as a colour; the resting medium is the terminal background.
-fn phase_ink(s: f32) -> Ink {
-    if s < S_MIN {
-        Ink::BLANK
-    } else {
-        ink::seq(f64::from(s))
-    }
+/// `ink` dimmed by the display fade-in `fade ∈ [0, 1]`, or `None` while too dark.
+fn faded(ink: Ink, fade: f32) -> Option<Ink> {
+    let level = f32::from(ink.level) * fade;
+    (level >= LEVEL_MIN).then(|| Ink::new(ink.role, level.round() as u8))
 }
 
 /// The label's phase word for beat `index` in a readout of at most `room` chars.
@@ -492,26 +492,6 @@ fn phase_word(index: usize, room: usize) -> &'static str {
         (true, true) => "light quench",
         (true, false) => "quench",
     }
-}
-
-/// ASCII for a cell from the brighter of its two pixels (SPEC-002 ASCII).
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let lit = |i: Ink| i.role == Role::Seq;
-    let ink = match (lit(top), lit(bottom)) {
-        (false, false) => return None,
-        (true, false) => top,
-        (false, true) => bottom,
-        (true, true) if top.level >= bottom.level => top,
-        (true, true) => bottom,
-    };
-    let ch = match ink.level {
-        217.. => '@',
-        179.. => '#',
-        102.. => '+',
-        51.. => ':',
-        _ => '.',
-    };
-    Some((ch, ink))
 }
 
 impl Bz {
@@ -544,19 +524,42 @@ impl Bz {
         self.step += 1;
     }
 
-    /// Shade the lattice into the pixel buffer: `u` and `v` sampled bilinearly per
-    /// pixel (the identity when the lattice is the pixel grid), then the phase. Shading
-    /// after sampling keeps the `u = ½` threshold sharp: interpolating the phase instead
-    /// would put refractory-coloured pixels ahead of a front on a stretched lattice.
+    /// Draw the waves as threads (SPEC-002 Look, BZ-A9): the crest where `u` crosses ½
+    /// at low `v`, and the tail lines, `v` levels where every corner has `u < ½`.
     fn rasterise(&mut self) {
         // Reseeded fronts brighten from dark (display only: the model is untouched).
         let fade = self.reseeded_at.map_or(1.0, |at| {
             let age = self.step.saturating_sub(at) as f64 / SUB_PER_S as f64;
             ease::smoothstep(age / FADE_IN_S) as f32
         });
-        let (map, u, v) = (&self.map, &self.u, &self.v);
-        self.pixels
-            .shade(|x, y| phase_ink(fade * phase(map.sample(u, x, y), map.sample(v, x, y))));
+        self.dots.clear();
+        let (w, h) = (usize::from(self.u.width()), usize::from(self.u.height()));
+        if w < 2 || h < 2 {
+            return;
+        }
+        let ds = self.dots.dot_size();
+        let sx = f64::from(ds.width()) / w as f64;
+        let sy = f64::from(ds.height()) / h as f64;
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        let (u, v) = (self.u.as_slice(), self.v.as_slice());
+        let corners = |f: &[f32], i: usize, j: usize| {
+            let k = j * w + i;
+            [f[k], f[k + 1], f[k + w + 1], f[k + w]]
+        };
+        for &(level, ink) in TAILS.iter().rev() {
+            let Some(ink) = faded(ink, fade) else {
+                continue;
+            };
+            self.dots.contour_by(v, w, h, level, to_dot, |i, j| {
+                corners(u, i, j).iter().all(|&x| x < CREST_U).then_some(ink)
+            });
+        }
+        if let Some(ink) = faded(CREST_INK, fade) {
+            self.dots.contour_by(u, w, h, CREST_U, to_dot, |i, j| {
+                let mean_v = corners(v, i, j).iter().sum::<f32>() * 0.25;
+                (mean_v < CREST_V_MAX).then_some(ink)
+            });
+        }
     }
 }
 
@@ -567,8 +570,9 @@ impl Generator for Bz {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.cells = size;
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
+        self.dots.resize(size);
+        // One node per half-block-sized square (2×2 dots), as the M10–M15 pixels were.
+        let px = Size::new(size.width(), size.height().saturating_mul(2));
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
         if self.u.is_empty() {
             self.u = Grid::new(lat, 0.0);
@@ -583,7 +587,6 @@ impl Generator for Bz {
                 grid::regrid_bilinear(field, lat, &mut self.lap);
             }
         }
-        self.map.rebuild(lat, px);
         self.rasterise();
     }
 
@@ -610,8 +613,8 @@ impl Generator for Bz {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        // ASCII falls back by dot count (`Dots::blit`).
+        self.dots.blit(canvas);
         let (w, h) = (self.cells.width(), self.cells.height());
         if h < 4 || w < 14 {
             return;
@@ -972,6 +975,7 @@ mod tests {
         // v decays as e^{-t}: the 2 s (3 tu) quench leaves ≈ 0.047, far below both the
         // 0.1 a pacemaker needs and the ≈ 0.23 that still shades (SPEC-002 BZ-A7).
         assert!(max(&bz.v) < 0.06, "max v = {}", max(&bz.v));
+        assert!(lit_cells(&bz).is_empty(), "the quenched dish is black");
         assert!((WAVES_STEPS..CYCLE_STEPS).all(|s| !pacemaker_fires(s)));
         assert!(pacemaker_fires(PM_FIRST) && pacemaker_fires(PM_FIRST + PM_PERIOD));
 
@@ -1034,7 +1038,7 @@ mod tests {
     }
 
     #[test]
-    fn bz_a8_composition_is_thin_fronts_on_dark_medium() {
+    fn bz_a8_composition_is_thin_threads_on_black() {
         let (mut bz, mut ctx) = scene(Size::new(80, 24), 42);
         let mut t = 0;
         for until in [10, 20, 30] {
@@ -1043,24 +1047,26 @@ mod tests {
                 bz.prepare();
                 t += 1;
             }
-            let px: Vec<Ink> = bz.pixels_iter().collect();
-            let n = px.len() as f64;
-            let lit = px.iter().filter(|i| i.role == Role::Seq).count() as f64 / n;
-            let pale = px
-                .iter()
-                .filter(|i| i.role == Role::Seq && i.level >= 217)
-                .count() as f64
-                / n;
-            assert!((0.20..=0.70).contains(&lit), "t={until}: lit {lit:.3}");
-            assert!((0.01..=0.12).contains(&pale), "t={until}: pale {pale:.3}");
+            let cells = lit_cells(&bz);
+            let n = 80.0 * 23.0;
+            let lit = cells.len() as f64 / n;
+            let hot = cells.iter().filter(|c| c.ink.role == Role::Hot).count() as f64
+                / cells.len().max(1) as f64;
+            assert!((0.08..=0.5).contains(&lit), "t={until}: lit {lit:.3}");
+            assert!(hot >= 0.15, "t={until}: crest share {hot:.3}");
+            for c in &cells {
+                assert!(matches!(c.ink.role, Role::Hot | Role::Cold), "{:?}", c.ink);
+                assert_eq!(c.bg, Ink::BLANK);
+            }
         }
     }
 
-    /// Brightest Seq level on screen.
+    /// Brightest crest level on screen.
     fn peak_level(bz: &Bz) -> u8 {
-        bz.pixels_iter()
-            .filter(|i| i.role == Role::Seq)
-            .map(|i| i.level)
+        lit_cells(bz)
+            .iter()
+            .filter(|c| c.ink.role == Role::Hot)
+            .map(|c| c.ink.level)
             .max()
             .unwrap_or(0)
     }
@@ -1095,29 +1101,60 @@ mod tests {
         assert!(last >= 217, "fronts at full brightness 0.5 s in: {last}");
     }
 
-    #[test]
-    fn bz_inks_leading_edge_has_no_refractory_halo_on_a_stretched_lattice() {
+    /// Lit dots by role on a 200×50 scene with fields set by `set(x) -> (u, v)`, as
+    /// (node x of the dot, role).
+    fn threads(set: impl Fn(f64) -> (f32, f32)) -> (Vec<(f64, Role)>, f64) {
         let (mut bz, _) = scene(Size::new(200, 50), 1);
-        assert_ne!(
-            bz.u.size(),
-            bz.pixels.pixel_size(),
-            "want a stretched lattice"
-        );
-        // A fresh front: excited (u = 1, v = 0) left of node 90, resting medium right.
-        bz.v.fill(0.0);
         for y in 0..i32::from(bz.u.height()) {
             for x in 0..i32::from(bz.u.width()) {
-                bz.u.set(x, y, if x < 90 { 1.0 } else { 0.0 });
+                let (u, v) = set(f64::from(x));
+                bz.u.set(x, y, u);
+                bz.v.set(x, y, v);
             }
         }
         bz.rasterise();
-        for ink in bz.pixels_iter().filter(|i| i.role == Role::Seq) {
+        let ds = bz.dots.dot_size();
+        let sx = f64::from(ds.width()) / f64::from(bz.u.width());
+        let mut canvas = Canvas::new(bz.cells, GlyphMode::Unicode);
+        bz.dots.blit(&mut canvas);
+        let mut out = Vec::new();
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                if bz.dots.is_lit(x, y) {
+                    let role = canvas.get(x / 2, y / 4).unwrap().ink.role;
+                    out.push(((f64::from(x) + 0.5) / sx - 0.5, role));
+                }
+            }
+        }
+        (out, f64::from(bz.u.width()))
+    }
+
+    #[test]
+    fn bz_a9_crest_thread_at_the_leading_edge_and_cold_tail_lines_behind() {
+        // A fresh front, excited left of node 90 into resting medium: one Hot thread at
+        // the edge, nothing else (no tail ahead of the front, even on a stretched lattice).
+        let (dots, _) = threads(|x| (if x < 90.0 { 1.0 } else { 0.0 }, 0.0));
+        assert!(!dots.is_empty());
+        for &(x, role) in &dots {
+            assert_eq!(role, Role::Hot);
+            assert!((x - 89.5).abs() <= 1.0, "crest dot at node {x}");
+        }
+        // The back of a plateau (u falls at high v) is not drawn.
+        let (dots, _) = threads(|x| (if x < 90.0 { 1.0 } else { 0.0 }, 0.6));
+        assert!(dots.is_empty(), "{} back-edge dots", dots.len());
+        // Recovering medium, v falling 0.6 → 0 across the dish: the two Cold tail lines
+        // at their v levels, the fresher one brighter.
+        let (dots, w) = threads(|x| (0.0, (0.6 * (1.0 - x / 196.0)) as f32));
+        assert!(!dots.is_empty());
+        for &(x, role) in &dots {
+            assert_eq!(role, Role::Cold);
+            let v = 0.6 * (1.0 - x / (w - 1.0));
             assert!(
-                ink.level >= 217,
-                "halo level {} ahead of the front",
-                ink.level
+                TAILS.iter().any(|&(l, _)| (f64::from(l) - v).abs() < 0.01),
+                "tail dot at v = {v}"
             );
         }
+        assert!(TAILS[0].0 > TAILS[1].0 && TAILS[0].1.level > TAILS[1].1.level);
     }
 
     /// The bottom row at width `w`, `after` sub-steps into the scene (clock only: the
@@ -1160,11 +1197,15 @@ mod tests {
         assert!(!label(13, 0).contains("waves"), "no label below 14 columns");
     }
 
-    impl Bz {
-        fn pixels_iter(&self) -> impl Iterator<Item = Ink> + '_ {
-            let px = self.pixels.pixel_size();
-            let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-            (0..h).flat_map(move |y| (0..w).map(move |x| self.pixels.get(x, y).unwrap()))
-        }
+    /// The lit cells of the field (the label row left out).
+    fn lit_cells(bz: &Bz) -> Vec<Cell> {
+        let mut canvas = Canvas::new(bz.cells, GlyphMode::Unicode);
+        bz.dots.blit(&mut canvas);
+        let (w, h) = (i32::from(bz.cells.width()), i32::from(bz.cells.height()));
+        (0..h - 1)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .map(|(x, y)| *canvas.get(x, y).unwrap())
+            .filter(|c| c.ch != ' ')
+            .collect()
     }
 }
