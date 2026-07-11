@@ -13,13 +13,7 @@ const SPEC: &str = include_str!("../../../docs/specs/SPEC-002-generators.md");
 /// Listed scenes whose M16 restyle has not landed yet: skipped by the half-block check.
 /// An allowlist that may only shrink: a listed scene that already passes fails
 /// `gen_r25_pending_only_shrinks` until its entry is deleted. Alphabetical.
-const PENDING_GEN_R25: &[&str] = &[
-    "planetary_nebula",
-    "relativistic_jet",
-    "solar_eruption",
-    "supernova_remnant",
-    "total_solar_eclipse",
-];
+const PENDING_GEN_R25: &[&str] = &[];
 
 const SIZE: (u16, u16) = (200, 50);
 const TIMES: [u32; 2] = [5, 20];
