@@ -15,17 +15,14 @@
 //! Units: Jupiter radii for the orbit, pile radii for the comet (drawn magnified), and the
 //! pile's dynamical time `τ` (`G·M_comet/ρ³ = 1`) for both.
 
-use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::f64::consts::{FRAC_PI_2, TAU};
 
 use rand::Rng;
+use sciart_core::ease;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, halo_kernel};
 use sciart_core::rng::{cell_key, hash01};
-use sciart_core::{Tone, ease};
 
-use crate::shared::jovian;
 use crate::shared::plume::Plume;
-use sciart_core::rng::value_noise;
 
 pub static META: Meta = Meta {
     name: "comet_breakup",
@@ -181,17 +178,9 @@ pub struct CometBreakup {
     seed: u64,
     frame: (f64, f64),
     view: View,
-    /// Nuclei and dust tails, and the ion tails (toned, then stepped).
-    glow: Glow,
-    tone: Tone,
-    ion: Glow,
-    ion_tone: Tone,
-    /// Impact fireballs and flashes.
-    fire: Glow,
-    fire_tone: Tone,
     /// When the last fragment struck (s).
     last_strike: f64,
-    pixels: Pixels,
+    dots: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -221,14 +210,8 @@ impl CometBreakup {
             seed: 0x5139,
             frame: (1.0, 1.0),
             view: View::default(),
-            glow: Glow::default(),
-            tone: Tone::asinh(0.5, 6.0),
-            ion: Glow::default(),
-            ion_tone: Tone::asinh(0.3, 3.0),
-            fire: Glow::default(),
-            fire_tone: Tone::asinh(0.4, 3.0),
             last_strike: f64::NEG_INFINITY,
-            pixels: Pixels::default(),
+            dots: Dots::default(),
             dirty: false,
         };
         g.reset();
@@ -503,145 +486,114 @@ impl CometBreakup {
         };
     }
 
+    /// Draw the frame as braille threads (SPEC-002 Look, M16): Jupiter's thin limb and
+    /// two belt lines, scars as small grey rings, the grains as white dots trailing dust
+    /// (`Sun` → `Hot` with distance) and ion (`Cold`) threads, the fireball's grains
+    /// coloured by heat, the flash as a starburst.
     fn compose(&mut self) {
         self.update_view();
         let v = self.view;
         let beat = self.timeline.at(self.t);
-        self.glow.clear();
-        self.ion.clear();
-        const CORE: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
-        const COMA: [(i32, i32, f32); 25] = halo_kernel::<25>(2);
-        let com = orbit(self.tau);
-        // Tails behind every few grains (so each fragment trails its own), sampled once per
-        // pixel of length and fading with distance: a broad, pale dust tail, and a longer,
-        // straighter, fainter ion tail pointing straight away from the Sun.
-        let to_px = |dir: [f64; 2], len: f64| [dir[0] * len * v.scale, -dir[1] * len * v.scale];
-        let (dust_px, ion_px) = (to_px(TAIL_DIR, TAIL_LEN), to_px(ION_DIR, ION_LEN));
-        let steps = |p: [f64; 2]| (p[0].hypot(p[1]).ceil() as usize).clamp(2, 256);
-        let tail =
-            |glow: &mut Glow, kernel: &[(i32, i32, f32)], to: [f64; 2], x: f64, y: f64, w: f64| {
-                let n = steps(to);
-                for j in 1..=n {
-                    let s = j as f64 / n as f64;
-                    let k = w * (1.0 - s).powf(1.5) / n as f64 * 14.0;
-                    let (tx, ty) = (x + s * to[0], y + s * to[1]);
-                    glow.splat(2.0 * tx, 2.0 * ty, kernel, k as f32);
-                }
-            };
-        if beat.index <= PEARLS {
-            for (k, p) in self.pos.iter().enumerate() {
-                let w = [com[0] + MAG * p[0], com[1] + MAG * p[1]];
-                let (x, y) = v.px(w);
-                // Nucleus grains: tight, so only the dense core saturates.
-                self.glow.splat(2.0 * x, 2.0 * y, &CORE, 0.14);
-                if k % TAIL_EVERY == 0 {
-                    tail(&mut self.glow, &CORE, dust_px, x, y, 0.04);
-                    tail(&mut self.ion, &CORE, ion_px, x, y, 0.03);
-                }
-            }
-        } else if beat.index == IMPACTS {
-            for k in self.struck..self.n_frag {
-                if let Some(p) = self.run_in(k, beat.local) {
-                    let (x, y) = v.px(p);
-                    let w = 0.4 + 2.0 * (self.fragments[k].size as f64 / N as f64).sqrt();
-                    self.glow.splat(2.0 * x, 2.0 * y, &CORE, 0.8 * w as f32);
-                    tail(&mut self.glow, &CORE, dust_px, x, y, 0.25 * w);
-                    tail(&mut self.ion, &CORE, ion_px, x, y, 0.12 * w);
+        self.dots.clear();
+        // Pixel units (the view's) → dots: two dots per pixel each way.
+        let dot = |(x, y): (f64, f64)| (2.0 * x, 2.0 * y);
+        // Background stars: a fixed sparse hash per cell.
+        let d = self.dots.dot_size();
+        let (cw, ch) = (
+            i32::from(d.width()) / Dots::CELL_W,
+            i32::from(d.height()) / Dots::CELL_H,
+        );
+        for cy in 0..ch {
+            for cx in 0..cw {
+                if hash01(0x5E ^ cell_key(cx, cy)) < STAR_SHARE {
+                    self.dots
+                        .set(cx * Dots::CELL_W, cy * Dots::CELL_H + 1, STAR);
                 }
             }
         }
-        // Jupiter with scars, then the comet glow, the plumes and the Roche circle.
-        let size = self.pixels.pixel_size();
-        let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
-        let (jx, jy) = v.px([0.0, 0.0]);
-        let jr = v.scale;
-        let (tone, ion_tone) = (&self.tone, &self.ion_tone);
-        let (glow, ion) = (self.glow.values(), self.ion.values());
-        for y in 0..ph {
-            for x in 0..pw {
-                let i = (y * pw + x) as usize;
-                let lv = tone.level(glow[i]);
-                let li = ion_tone.level(ion[i]);
-                let (dx, dy) = (
-                    (f64::from(x) + 0.5 - jx) / jr,
-                    (f64::from(y) + 0.5 - jy) / jr,
+        // Jupiter: the limb, two belt edges, the scars (BRK-A5).
+        let (jx, jy) = dot(v.px([0.0, 0.0]));
+        let jr = 2.0 * v.scale;
+        let n = ((TAU * jr) as usize).clamp(16, 4096);
+        for k in 0..n {
+            let (s, c) = (TAU * k as f64 / n as f64).sin_cos_det();
+            self.dots.plot(jx + jr * c, jy + jr * s, LIMB);
+        }
+        for s in BELTS {
+            let half = jr * (1.0 - s * s).sqrt() * 0.97;
+            let y = jy - s * jr;
+            self.dots.line(jx - half, y, jx + half, y, BELT);
+        }
+        for sc in &self.scars[..self.n_scars] {
+            if let Some(p) = self.scar_screen(sc) {
+                let (sx, sy) = dot(p);
+                let lon = sc.lon - SPIN * (self.t - sc.born);
+                let fore = lon.cos_det().max(0.05);
+                let (rx, ry) = (
+                    (0.7 * sc.size * jr * fore).max(0.8),
+                    (0.7 * sc.size * jr * 0.8).max(0.8),
                 );
-                let d2 = dx * dx + dy * dy;
-                // M11 idiom (ADR-0018): white nuclei, a stepped yellow dust tail, the ion
-                // tail in flat blue steps beneath it; no halo, no wash.
-                let ink = if let Some(dust) = dust_ink(lv) {
-                    dust
-                } else if let Some(ion) = ion_ink(li) {
-                    ion
-                } else if d2 < 1.0 {
-                    jupiter_cloud(dx, dy, d2, jr, self.t)
-                } else if hash01(0x5E ^ cell_key(x, y)) < 0.0015 {
-                    STAR
-                } else {
-                    Ink::BLANK
-                };
-                self.pixels.set(x, y, ink);
+                let m = ((TAU * rx.max(ry)) as usize).clamp(8, 256);
+                for k in 0..m {
+                    let (s, c) = (TAU * k as f64 / m as f64).sin_cos_det();
+                    self.dots.plot(sx + rx * c, sy + ry * s, SCAR);
+                }
             }
         }
         // The Roche distance, dashed, while the pile passes inside it.
         if beat.index == BREAKUP {
-            let steps = (TAU * ROCHE * jr / 3.0) as usize;
-            for k in (0..steps).step_by(2) {
-                let a = TAU * k as f64 / steps as f64;
-                let (s, c) = a.sin_cos_det();
-                let (x, y) = v.px([ROCHE * c, ROCHE * s]);
-                let (x, y) = (x.floor() as i32, y.floor() as i32);
-                if self.pixels.get(x, y) == Some(Ink::BLANK) {
-                    self.pixels.set(x, y, Ink::new(Role::Dim, 140));
+            let rr = ROCHE * jr;
+            let m = ((TAU * rr / 3.0) as usize).clamp(8, 4096);
+            for k in (0..m).step_by(2) {
+                let (s, c) = (TAU * k as f64 / m as f64).sin_cos_det();
+                self.dots.plot(jx + rr * c, jy + rr * s, ROCHE_INK);
+            }
+        }
+        // Tails: straight threads from a grain, dust away from the Sun, ion straight
+        // anti-Sun, each in two steps by distance (the dust ages and reddens outward).
+        let tail =
+            |dots: &mut Dots, (x, y): (f64, f64), dir: [f64; 2], len: f64, inks: [Ink; 2]| {
+                let (tx, ty) = (dir[0] * len * jr, -dir[1] * len * jr);
+                let (mx, my) = (x + 0.5 * tx, y + 0.5 * ty);
+                dots.line(mx, my, x + tx, y + ty, inks[1]);
+                dots.line(x, y, mx, my, inks[0]);
+            };
+        let com = orbit(self.tau);
+        if beat.index <= PEARLS {
+            for (k, p) in self.pos.iter().enumerate() {
+                let at = dot(v.px([com[0] + MAG * p[0], com[1] + MAG * p[1]]));
+                if k % ION_EVERY == 0 {
+                    tail(&mut self.dots, at, ION_DIR, ION_LEN, ION_INKS);
+                }
+                if k % TAIL_EVERY == 0 {
+                    tail(&mut self.dots, at, TAIL_DIR, TAIL_LEN, DUST_INKS);
+                }
+            }
+            for p in self.pos.iter() {
+                let (x, y) = dot(v.px([com[0] + MAG * p[0], com[1] + MAG * p[1]]));
+                self.dots.plot(x, y, HEAD);
+            }
+        } else if beat.index == IMPACTS {
+            for k in self.struck..self.n_frag {
+                if let Some(p) = self.run_in(k, beat.local) {
+                    let at = dot(v.px(p));
+                    let w = (self.fragments[k].size as f64 / N as f64).sqrt();
+                    tail(&mut self.dots, at, ION_DIR, ION_LEN * (0.4 + w), ION_INKS);
+                    tail(
+                        &mut self.dots,
+                        at,
+                        TAIL_DIR,
+                        TAIL_LEN * (0.4 + w),
+                        DUST_INKS,
+                    );
+                    self.dots.disc(at.0, at.1, 0.4 + 1.6 * w, HEAD);
                 }
             }
         }
-        // Scars: a dark core inside a dark crescent (the ejecta ring falls back on the
-        // side away from the incoming fragment), carried round by the rotation (BRK-A5).
-        // They darken the clouds under them rather than replacing them, so edges are soft.
-        for s in &self.scars[..self.n_scars] {
-            if let Some((sx, sy)) = self.scar_screen(s) {
-                let lon = s.lon - SPIN * (self.t - s.born);
-                let fore = lon.cos_det().max(0.05);
-                let (rx, ry) = (1.6 * s.size * jr * fore, 1.6 * s.size * jr * 0.8);
-                let (x0, x1) = ((sx - rx).floor() as i32, (sx + rx).ceil() as i32);
-                let (y0, y1) = ((sy - ry).floor() as i32, (sy + ry).ceil() as i32);
-                for y in y0..=y1 {
-                    for x in x0..=x1 {
-                        let (ex, ey) = (
-                            (f64::from(x) + 0.5 - sx) / rx.max(0.5),
-                            (f64::from(y) + 0.5 - sy) / ry.max(0.5),
-                        );
-                        let e = (ex * ex + ey * ey).sqrt();
-                        let core = (1.0 - e / 0.4).max(0.0);
-                        let side = (0.5 + 0.5 * ey).clamp(0.0, 1.0);
-                        let ring = (1.0 - ((e - 0.72) / 0.22).abs()).max(0.0) * side;
-                        let dark = (0.9 * core.sqrt()).max(0.75 * ring);
-                        let Some(under) = self.pixels.get(x, y) else {
-                            continue;
-                        };
-                        // Scars step the clouds down (the red spot too), never the stars
-                        // or the comet.
-                        if dark > 0.25 && jovian::is_cloud(under) {
-                            let n = if dark > 0.6 { 3 } else { 1 };
-                            self.pixels.set(x, y, jovian::darker(under, n));
-                        }
-                    }
-                }
-            }
-        }
-        // Impact fireballs: a flash at each strike, then the plume's hot grains cooling
-        // (temperature from the glow they make together), hidden behind the disc.
-        // Nothing burning and no flash: skip the fireball pass entirely.
-        let since = self.t - self.last_strike;
-        if self.plume.iter().next().is_none() && !(0.0..FLASH).contains(&since) {
-            return;
-        }
-        self.fire.clear();
+        // Impact fireballs: the plume's grains as dots coloured by heat, hidden behind
+        // the disc; the flash a starburst of rays over the limb; the strike a white point.
         let site = impact_site();
-        let up = [site[0], site[1]];
-        let tangent = [-up[1], up[0]];
-
+        let (up, tangent) = (site, [-site[1], site[0]]);
         for gr in self.plume.iter() {
             let p = [
                 site[0] + up[0] * f64::from(gr.pos[2]) + tangent[0] * f64::from(gr.pos[0]),
@@ -650,64 +602,28 @@ impl CometBreakup {
             if gr.pos[1] < 0.0 && p[0].hypot(p[1]) < 1.0 {
                 continue;
             }
-            let (x, y) = v.px(p);
-            let heat = (-f64::from(gr.age) / 1.4).exp() as f32;
-            // Young grains are all at the vent: ramp them in so they do not sum to a
-            // saturated blob before the plume has spread.
-            let spread = ease::smoothstep((f64::from(gr.age) / 0.4).min(1.0)) as f32;
-            self.fire
-                .splat(2.0 * x, 2.0 * y, &COMA, 0.035 * heat * spread);
+            let heat = (-f64::from(gr.age) / 1.4).exp();
+            let ink = FIRE_INKS
+                .iter()
+                .find(|(from, _)| heat >= *from)
+                .map_or(FIRE_INKS[2].1, |&(_, i)| i);
+            let (x, y) = dot(v.px(p));
+            self.dots.plot(x, y, ink);
         }
-        let fw = usize::from(self.fire.pixel_size().width()).max(1);
+        let since = self.t - self.last_strike;
+        let (cx, cy) = dot(v.px([site[0] * 1.03, site[1] * 1.03]));
         if (0.0..FLASH).contains(&since) {
-            // A soft radial glow over the limb at the strike, bright at first and fading
-            // (a Gaussian drawn directly, so it has no kernel's stepped edge).
-            let (cx, cy) = v.px([site[0] * 1.03, site[1] * 1.03]);
-            let r0 = (GLOW_R * v.scale).max(1.5);
-            let k = 1.0 * (-since / GLOW_FADE).exp() * (1.0 - since / FLASH);
-            let reach = 2.2 * r0;
-            let fh = self.fire.values().len() / fw;
-            let (x0, x1) = ((cx - reach).floor().max(0.0) as usize, (cx + reach).ceil());
-            let (y0, y1) = ((cy - reach).floor().max(0.0) as usize, (cy + reach).ceil());
-            let buf = self.fire.values_mut();
-            for y in y0..(y1.max(0.0) as usize).min(fh) {
-                for x in x0..(x1.max(0.0) as usize).min(fw) {
-                    let (ddx, ddy) = (x as f64 + 0.5 - cx, y as f64 + 0.5 - cy);
-                    let g = (-(ddx * ddx + ddy * ddy) / (r0 * r0)).exp();
-                    buf[y * fw + x] += (k * g) as f32;
+            let len = (GLOW_R * jr) * 2.0 * (-since / GLOW_FADE).exp() * (1.0 - since / FLASH);
+            if len >= 1.0 {
+                for k in 0..8 {
+                    let (s, c) = (TAU * f64::from(k) / 8.0 + 0.2).sin_cos_det();
+                    let l = if k % 2 == 0 { len } else { 0.6 * len };
+                    self.dots.line(cx, cy, cx + l * c, cy + l * s, FLASH_INK);
                 }
             }
         }
-        // The fireball in flat M11 steps (ADR-0018): a white heart, then sun-yellow, then
-        // hot orange; over the clouds a faint glow lifts them one step instead.
-        for (i, &f) in self.fire.values().iter().enumerate() {
-            let lv = self.fire_tone.level(f);
-            if lv < FIRE_EDGE {
-                continue;
-            }
-            let (x, y) = ((i % fw) as i32, (i / fw) as i32);
-            let under = self.pixels.get(x, y).unwrap_or(Ink::BLANK);
-            let ink = if lv >= FIRE_HEART {
-                Ink::new(Role::Star, 255)
-            } else if jovian::is_cloud(under) && lv < GLOW_ON_CLOUD {
-                jovian::lighter(under)
-            } else if lv >= 170 {
-                Ink::new(Role::Sun, 220)
-            } else if lv >= 90 {
-                Ink::new(Role::Hot, 200)
-            } else {
-                Ink::new(Role::Hot, 70)
-            };
-            self.pixels.set(x, y, ink);
-        }
-        // The strike itself, a small white point at the limb for its first
-        // `STRIKE_WHITE` s, the frame's brightest accent.
         if (0.0..STRIKE_WHITE).contains(&since) {
-            let (cx, cy) = v.px([site[0] * 1.03, site[1] * 1.03]);
-            let (x0, y0) = (cx.floor() as i32, cy.floor() as i32);
-            for (dx, dy) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
-                self.pixels.set(x0 + dx, y0 + dy, Ink::new(Role::Star, 255));
-            }
+            self.dots.disc(cx, cy, 1.2, HEAD);
         }
     }
 }
@@ -715,86 +631,43 @@ impl CometBreakup {
 /// How long the strike's white point shows (s).
 const STRIKE_WHITE: f64 = 0.6;
 
-/// The Great Red Spot on the disc: planet longitude (rad), sine latitude, half-widths.
-const GRS_LON: f64 = 0.9;
-const GRS_S: f64 = -0.37;
-const GRS_HALF: (f64, f64) = (0.24, 0.07);
-
-/// Jupiter's clouds at disc point `(dx, dy)` (disc radii, `y` down, `d2 = dx² + dy²` < 1),
-/// `jr` pixels per radius, `t` seconds: the shared belt/zone profile (the same stepped
-/// palette as `jupiter_storms`), its edges made wavy and mottled by value noise fixed in
-/// planet longitude so the texture turns with the planet (and the scars), the Great Red
-/// Spot, limb darkening, and the outermost pixel antialiased into space.
-fn jupiter_cloud(dx: f64, dy: f64, d2: f64, jr: f64, t: f64) -> Ink {
-    let mu = (1.0 - d2).sqrt();
-    let s = (-dy).clamp(-1.0, 1.0);
-    let cl = (1.0 - s * s).max(1e-9).sqrt();
-    let lon = (dx / cl).clamp(-1.0, 1.0).asin() + SPIN * t;
-    let turb = value_noise(0x3B1, 2.5 * lon, 12.0 * s, 1.0) - 0.5;
-    let fine = value_noise(0x3B2, 7.0 * lon, 45.0 * s, 1.0) - 0.5;
-    let a = jovian::band_profile(s + 0.035 * turb) + 0.22 * fine;
-    // Limb darkening all the way down (no floor), so the edge sinks into dark sienna and
-    // then fades into space over its outer 1.5 pixels: no bright or orange rim.
-    let aa = ease::smoothstep(((1.0 - d2.sqrt()) * jr / 1.5).min(1.0));
-    let lit = mu.powf(0.9) * aa;
-    let mut level = jovian::cloud_level(a, 0.0);
-    // The Great Red Spot (a small oval in its collar, shared look with jupiter_storms).
-    let dl = (lon - GRS_LON + PI).rem_euclid(TAU) - PI;
-    let (sx, sy) = (dl / GRS_HALF.0, (s - GRS_S) / GRS_HALF.1);
-    let rho = sx.hypot(sy);
-    if rho < 2.0 {
-        // At this scale the spot is a few pixels: feather in its own units (rim over
-        // 0.7–1.3 radii, a faint collar out to 1.9) rather than in pixels.
-        let inside = 1.0 - ease::smoothstep(((rho - 0.7) / 0.6).clamp(0.0, 1.0));
-        let collar =
-            0.6 * (1.0 - inside) * (1.0 - ease::smoothstep(((rho - 1.2) / 0.7).clamp(0.0, 1.0)));
-        let spot = jovian::spot_level(0.5 + fine, a, 0.0);
-        level = jovian::spot_blend(level, spot, inside, collar);
-    }
-    jovian::cloud_ink(level, lit)
-}
-
 /// How far the view leans from Jupiter towards the comet during the approach.
 const FOLLOW_APPROACH: f64 = 0.55;
 /// Dust tails: direction (unit, world, away from a Sun off to the lower left), length in
-/// R_J, samples per pixel of length, and one tail per `TAIL_EVERY` grains.
+/// R_J, and one dust thread per `TAIL_EVERY` grains (so a few threads per fragment,
+/// not a filled band).
 const TAIL_DIR: [f64; 2] = [0.6, 0.8];
 const TAIL_LEN: f64 = 0.8;
-const TAIL_EVERY: usize = 3;
-/// Ion tail: straight away from the Sun (unit, world) and length (R_J).
+const TAIL_EVERY: usize = 16;
+/// Ion tail: straight away from the Sun (unit, world), length (R_J), one streamer per
+/// `ION_EVERY` grains.
 const ION_DIR: [f64; 2] = [0.2, 0.98];
 const ION_LEN: f64 = 1.4;
-/// A background star (M11: small white points, dim).
-const STAR: Ink = Ink::new(Role::Star, 40);
-
-/// Nuclei and dust in flat steps by tone level: white where grains crowd, pale then
-/// deep sun-yellow down the dust tail, nothing below the faintest step.
-fn dust_ink(lv: u8) -> Option<Ink> {
-    match lv {
-        170.. => Some(Ink::new(Role::Star, 255)),
-        100.. => Some(Ink::new(Role::Star, 90)),
-        50.. => Some(Ink::new(Role::Sun, 110)),
-        22.. => Some(Ink::new(Role::Hot, 40)),
-        _ => None,
-    }
-}
-
-/// The ion tail in two flat blue steps (it stays fainter than the dust).
-fn ion_ink(lv: u8) -> Option<Ink> {
-    match lv {
-        110.. => Some(Ink::new(Role::Cold, 120)),
-        40.. => Some(Ink::new(Role::Cold, 20)),
-        _ => None,
-    }
-}
-/// The impact's radial glow: radius (R_J) and length of the flash (s, e-folding).
+const ION_EVERY: usize = 40;
+/// Inks (SPEC-002 Look, M16). Grains and fragments white; dust threads `Sun` near the
+/// nucleus, `Hot` in the outer half; ion threads `Cold`, fainter outward.
+pub(crate) const HEAD: Ink = Ink::new(Role::Star, 255);
+pub(crate) const DUST_INKS: [Ink; 2] = [Ink::new(Role::Sun, 220), Ink::new(Role::Hot, 160)];
+pub(crate) const ION_INKS: [Ink; 2] = [Ink::new(Role::Cold, 200), Ink::new(Role::Cold, 120)];
+/// Jupiter: a thin `Sun` limb and two `Hot` belt edges (sine latitudes); scars grey rings.
+pub(crate) const LIMB: Ink = Ink::new(Role::Sun, 190);
+pub(crate) const BELT: Ink = Ink::new(Role::Hot, 110);
+const BELTS: [f64; 2] = [0.18, -0.24];
+pub(crate) const SCAR: Ink = Ink::new(Role::Dim, 200);
+const ROCHE_INK: Ink = Ink::new(Role::Dim, 140);
+/// Fireball grains by heat `exp(−age/1.4 s)`: white, then yellow, then orange.
+const FIRE_INKS: [(f64, Ink); 3] = [
+    (0.6, Ink::new(Role::Star, 240)),
+    (0.3, Ink::new(Role::Sun, 220)),
+    (0.0, Ink::new(Role::Hot, 170)),
+];
+const FLASH_INK: Ink = Ink::new(Role::Sun, 230);
+/// A background star (one dot, dim) in this share of cells.
+const STAR: Ink = Ink::new(Role::Star, 60);
+const STAR_SHARE: f64 = 0.004;
+/// The impact's flash: ray length (R_J) and its e-folding (s).
 const GLOW_R: f64 = 0.16;
 const GLOW_FADE: f64 = 0.7;
-/// Below this tone level a glow over the clouds lightens them instead of replacing them.
-const GLOW_ON_CLOUD: u8 = 140;
-/// Tone level from which the glow is drawn white (its heart), and its faintest step.
-const FIRE_HEART: u8 = 238;
-const FIRE_EDGE: u8 = 30;
 
 /// Fireball gravity in R_J/s² for the drawn height and flight time.
 fn plume_g() -> f64 {
@@ -867,12 +740,9 @@ impl Generator for CometBreakup {
             self.seed = ctx.rng.random();
             self.reset();
         }
-        self.glow.resize(size);
-        self.ion.resize(size);
-        self.fire.resize(size);
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
-        self.frame = (f64::from(px.width()), f64::from(px.height()));
+        self.dots.resize(size);
+        // The view works in half-block pixel units (w × 2h, square), two dots each.
+        self.frame = (f64::from(size.width()), 2.0 * f64::from(size.height()));
         self.dirty = true;
     }
 
@@ -890,8 +760,7 @@ impl Generator for CometBreakup {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit(canvas);
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -1000,67 +869,94 @@ mod tests {
         assert!(ratio >= 2.0, "axis ratio {ratio} at t = 5 s");
     }
 
+    /// The inks of the cells within one cell of dot `(x, y)` in a rendered frame.
+    fn inks_near(canvas: &Canvas, (x, y): (f64, f64)) -> Vec<Ink> {
+        let (cx, cy) = ((x / 2.0).floor() as i32, (y / 4.0).floor() as i32);
+        let mut out = Vec::new();
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                if let Some(c) = canvas.get(cx + dx, cy + dy) {
+                    if c.ch != ' ' {
+                        out.push(c.ink);
+                    }
+                }
+            }
+        }
+        out
+    }
+
     #[test]
-    fn brk_a6_the_comet_has_a_coma_and_tail_from_the_start() {
+    fn brk_a6_the_comet_has_threaded_tails_from_the_start() {
         let (mut g, mut rng) = fresh();
         run_to(&mut g, &mut rng, 0.1);
         g.compose();
+        let mut canvas = Canvas::new(Size::new(100, 30), GlyphMode::Unicode);
+        g.render(&mut canvas);
         let v = g.view;
         let (nx, ny) = v.px(orbit(g.tau));
-        let d = 0.45 * TAIL_LEN * v.scale;
-        let at = |sx: f64, sy: f64| {
-            g.pixels
-                .get((nx + sx * d).floor() as i32, (ny - sy * d).floor() as i32)
-                .unwrap_or(Ink::BLANK)
-        };
-        // A stepped sun-yellow/white dust tail away from the Sun (M11 roles, ADR-0018),
-        // none (or only its faintest step) on the sunward side.
-        let tail = at(TAIL_DIR[0], TAIL_DIR[1]);
+        let (nx, ny) = (2.0 * nx, 2.0 * ny);
+        let jr = 2.0 * v.scale;
+        let along = |dir: [f64; 2], s: f64| (nx + dir[0] * s * jr, ny - dir[1] * s * jr);
+        // A white nucleus; the dust thread `Sun` near it and `Hot` in its outer half; no
+        // dust on the sunward side; a blue ion streamer half its length out.
+        assert!(inks_near(&canvas, (nx, ny)).contains(&HEAD), "no nucleus");
+        let near = inks_near(&canvas, along(TAIL_DIR, 0.25 * TAIL_LEN));
+        assert!(near.contains(&DUST_INKS[0]), "near dust {near:?}");
+        let far = inks_near(&canvas, along(TAIL_DIR, 0.8 * TAIL_LEN));
+        assert!(far.contains(&DUST_INKS[1]), "far dust {far:?}");
+        let sunward = inks_near(&canvas, along(TAIL_DIR, -0.45 * TAIL_LEN));
         assert!(
-            matches!(tail.role, Role::Sun | Role::Star | Role::Hot),
-            "no dust tail: {tail:?}"
+            !sunward.iter().any(|i| DUST_INKS.contains(i)),
+            "dust on the sunward side: {sunward:?}"
         );
-        let sunward = at(-TAIL_DIR[0], -TAIL_DIR[1]);
-        assert!(
-            sunward == Ink::BLANK || sunward == Ink::new(Role::Hot, 40),
-            "tail on the sunward side: {sunward:?}"
-        );
-        // A white nucleus and a blue ion tail further out along the anti-Sun line.
-        let core = g
-            .pixels
-            .get(nx as i32, ny as i32)
-            .expect("nucleus on screen");
-        assert_eq!(core, Ink::new(Role::Star, 255), "nucleus {core:?}");
-        let di = 0.5 * ION_LEN * v.scale;
-        let ion = (-1..=1).filter_map(|o| {
-            let x = (nx + ION_DIR[0] * di) as i32 + o;
-            g.pixels.get(x, (ny - ION_DIR[1] * di) as i32)
-        });
-        let ion: Vec<_> = ion.collect();
+        let ion = inks_near(&canvas, along(ION_DIR, 0.5 * ION_LEN));
         assert!(
             ion.iter().any(|i| i.role == Role::Cold),
             "no ion tail: {ion:?}"
         );
+        // Every lit cell is a braille thread cell (no half blocks).
+        for y in 0..30 {
+            for x in 0..100 {
+                let ch = canvas.get(x, y).unwrap().ch;
+                assert!(ch == ' ' || ('⠀'..='⣿').contains(&ch), "{x},{y}: {ch:?}");
+            }
+        }
     }
 
     #[test]
-    fn brk_a7_jupiter_shares_the_stepped_cloud_palette() {
+    fn brk_a7_jupiter_is_a_thin_limb_with_belt_lines() {
         let (g, _) = fresh();
         let (jx, jy) = g.view.px([0.0, 0.0]);
-        let r = g.view.scale;
-        let mut sienna = 0;
-        let mut total = 0;
-        for y in (jy - 0.8 * r) as i32..(jy + 0.8 * r) as i32 {
-            for x in (jx - 0.5 * r) as i32..(jx + 0.5 * r) as i32 {
-                if let Some(i) = g.pixels.get(x, y) {
-                    total += 1;
-                    sienna += usize::from(jovian::is_cloud(i));
-                }
+        let (jx, jy, jr) = (2.0 * jx, 2.0 * jy, 2.0 * g.view.scale);
+        // The limb: nearly every point of the circle is lit.
+        let (mut on, mut n) = (0, 0);
+        for k in 0..360 {
+            let (s, c) = (TAU * f64::from(k) / 360.0).sin_cos_det();
+            let (x, y) = ((jx + jr * c).round() as i32, (jy + jr * s).round() as i32);
+            let d = g.dots.dot_size();
+            if (0..i32::from(d.width())).contains(&x) && (0..i32::from(d.height())).contains(&y) {
+                n += 1;
+                on += usize::from(g.dots.is_lit(x, y));
+            }
+        }
+        assert!(n > 100 && on * 10 >= n * 9, "limb {on} of {n}");
+        // Inside, black but for the belt lines (and the odd star).
+        let (mut lit, mut inside) = (0, 0);
+        for y in (jy - 0.85 * jr) as i32..(jy + 0.85 * jr) as i32 {
+            if BELTS
+                .iter()
+                .any(|s| (f64::from(y) - (jy - s * jr)).abs() < 1.5)
+            {
+                continue;
+            }
+            for x in (jx - 0.5 * jr) as i32..(jx + 0.5 * jr) as i32 {
+                inside += 1;
+                lit += usize::from(g.dots.is_lit(x, y));
             }
         }
         assert!(
-            total > 20 && sienna * 10 >= total * 8,
-            "{sienna} of {total}"
+            inside > 200 && lit * 50 <= inside,
+            "{lit} of {inside} lit inside"
         );
     }
 
