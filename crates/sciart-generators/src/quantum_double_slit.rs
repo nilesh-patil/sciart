@@ -140,10 +140,10 @@ const SOURCE_EXPOSURE: f64 = 0.55;
 const WAVE_TOP: f64 = 140.0;
 /// M16: brighter and earlier steps than M15's fills (90/165/255 from 30/62/98), since a
 /// one-dot crest carries less light than a filled lobe and has no shimmer peak.
-pub(crate) const WAVE_STEPS: [(f64, u8); 3] = [(25.0, 140), (50.0, 205), (75.0, 255)];
-const WALL_INK: Ink = Ink::new(Role::Structure, 190);
-const BARRIER_INK: Ink = Ink::new(Role::Structure, 140);
-const SCREEN_INK: Ink = Ink::new(Role::Dim, 110);
+pub(crate) const WAVE_STEPS: [(f64, u8); 3] = [(25.0, 175), (45.0, 230), (70.0, 255)];
+const WALL_INK: Ink = Ink::new(Role::Structure, 250);
+const BARRIER_INK: Ink = Ink::new(Role::Structure, 210);
+const SCREEN_INK: Ink = Ink::new(Role::Dim, 150);
 
 /// The wave's ink at brightness `raw` (0–`WAVE_TOP`): the highest step it reaches, or
 /// black below the first.
@@ -1426,5 +1426,33 @@ mod tests {
         }
         assert!(n > 100, "{n} crest dots");
         assert!(on as f64 >= 0.97 * n as f64, "{on} of {n} on crests");
+    }
+
+    #[test]
+    fn qds_a10_most_crest_dots_are_bright() {
+        // At 120×40 after 6 s at least half the wave's dots are in cells of level ≥ 230,
+        // so the fan reads bright, not faint.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = QuantumDoubleSlit::new();
+        g.resize(size, &mut ctx);
+        for _ in 0..(6 * 60) {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let (mut bright, mut n) = (0usize, 0usize);
+        for y in 0..156 {
+            for x in 0..g.view_dots {
+                let ink = canvas.get(x / 2, y / 4).unwrap().ink;
+                if g.dots.is_lit(x, y) && ink.role == Role::Wave {
+                    n += 1;
+                    bright += usize::from(ink.level >= 230);
+                }
+            }
+        }
+        assert!(n > 200, "{n} wave dots");
+        assert!(2 * bright >= n, "{bright} of {n} wave dots at ≥ 230");
     }
 }

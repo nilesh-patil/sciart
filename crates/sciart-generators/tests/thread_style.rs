@@ -16,8 +16,6 @@ const SPEC: &str = include_str!("../../../docs/specs/SPEC-002-generators.md");
 const PENDING_GEN_R25: &[&str] = &[
     "comet_breakup",
     "cosmic_web",
-    "hurricane",
-    "jupiter_storms",
     "planetary_nebula",
     "relativistic_jet",
     "saturn_rings",
@@ -25,7 +23,6 @@ const PENDING_GEN_R25: &[&str] = &[
     "spiral_galaxy",
     "supernova_remnant",
     "total_solar_eclipse",
-    "vortex_street",
 ];
 
 const SIZE: (u16, u16) = (200, 50);

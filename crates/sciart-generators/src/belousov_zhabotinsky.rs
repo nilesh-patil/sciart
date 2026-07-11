@@ -144,7 +144,7 @@ pub(crate) const CREST_INK: Ink = Ink::new(Role::Hot, 230);
 /// fresher one brighter.
 pub(crate) const TAILS: [(f32, Ink); 2] = [
     (0.42, Ink::new(Role::Cold, 190)),
-    (0.2, Ink::new(Role::Cold, 120)),
+    (0.2, Ink::new(Role::Cold, 150)),
 ];
 /// Below this level a fading-in line is not drawn.
 const LEVEL_MIN: f32 = 12.0;
