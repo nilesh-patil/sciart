@@ -219,6 +219,28 @@ fn core_r41_dots_set_plot_clear_blit_do_not_allocate() {
 }
 
 #[test]
+fn core_r105_contours_do_not_allocate() {
+    let mut dots = Dots::new(Size::new(200, 50));
+    let (w, h) = (200, 100);
+    let field: Vec<f32> = (0..w * h)
+        .map(|k| ((k % w) as f32 - 100.0).hypot((k / w) as f32 - 50.0))
+        .collect();
+    let ink = Ink::new(Role::Hot, 190);
+    let to_dot = |x: f64, y: f64| (2.0 * x, 2.0 * y);
+    let ((), stats) = measure(|| {
+        for level in [10.0, 20.0, 30.0, 45.0] {
+            dots.contour(&field, w, h, level, to_dot, ink);
+            dots.contour_by(&field, w, h, level + 2.0, to_dot, |i, _| {
+                (i % 2 == 0).then_some(ink)
+            });
+        }
+        dots.contour_cell([1.0, 0.0, 1.0, 0.0], 0.5, (3, 3), to_dot, ink);
+    });
+    assert_free("Dots::contour/contour_by/contour_cell", stats);
+    black_box(dots.is_lit(3, 3));
+}
+
+#[test]
 fn core_r42_pixels_set_fill_blit_do_not_allocate() {
     let size = Size::new(200, 50);
     let mut px = Pixels::new(size);

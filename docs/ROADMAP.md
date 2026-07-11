@@ -217,7 +217,7 @@ Design: [docs/design/M15-m11-look.md](design/M15-m11-look.md) · [ADR-0018](adr/
 ## M16 — Thread style
 Design: [docs/design/M16-thread-style.md](design/M16-thread-style.md) · [ADR-0019](adr/0019-thread-style.md) · GEN-R25.
 - [x] light_echo as braille crest rings coloured by age (ECHO-A6..A11)
-- [ ] Infra: core iso-contour helper lifted from light_echo; delete seashell_pigmentation; GEN-R22 skips GEN-R25 scenes; GEN-R25 half-block share test
+- [x] Infra: core iso-contour helper lifted from light_echo; delete seashell_pigmentation; GEN-R22 skips GEN-R25 scenes; GEN-R25 half-block share test
 - [ ] Restyle 25 scenes in the thread style (per-scene choices in the design doc), spec sections first, TDD
 - [ ] Critic review (art + science) ≤ 2 rounds; budgets: < 2 ms worst at 200×50, < 5 ms at 500×150, RT-R16, TEST-R7
 - [ ] Samples at M16 (`samples/*-m16.png`)

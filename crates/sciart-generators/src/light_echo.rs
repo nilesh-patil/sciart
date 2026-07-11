@@ -10,8 +10,8 @@
 //! M16 (strange_attractors' thread idiom): each echo is drawn only on its crest, as a
 //! braille thread one dot thick. The light curve's crests are three instants `t_p`, so
 //! the crest of (sheet, flash, peak) is the level set `Δ(x, y) = c·(t + age − t_p)` of the
-//! sheet's lag field: `prepare` traces it with marching squares over the lattice and draws
-//! each piece as a dot line. Brightness (weight × `L(t_p)` × the flash's weight × the
+//! sheet's lag field: `prepare` traces it with marching squares over the lattice (`Dots::contour_cell`,
+//! CORE-R105, per cell so it can cull) as dot lines. Brightness (weight × `L(t_p)` × the flash's weight × the
 //! exposure) decides whether a piece is drawn and its step; colour is the flash's age.
 
 use rand::Rng;
@@ -346,6 +346,8 @@ impl LightEcho {
         let samples = &self.dust.samples;
         let dots = &mut self.dots;
         let salt = self.salt;
+        // Node centres in dot units (`Dots::from_cells`' convention, node = cell).
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
         for j in 0..lh - 1 {
             for i in 0..lw - 1 {
                 let i0 = j * lw + i;
@@ -381,7 +383,7 @@ impl LightEcho {
                             continue;
                         }
                         let ink = generation_ink(tg.rank, u);
-                        contour(dots, i, j, sx, sy, l, tg.lag, ink);
+                        dots.contour_cell(l, tg.lag, (i, j), to_dot, ink);
                     }
                 }
             }
@@ -419,42 +421,6 @@ impl LightEcho {
             }
         }
         self.dots.set(cx, cy, STAR);
-    }
-}
-
-/// Draw the level set `lag = level` inside lattice quad `(i, j)` (corner lags `l` in the
-/// order (i, j), (i+1, j), (i+1, j+1), (i, j+1)) as dot lines; `(sx, sy)` dots per node.
-#[allow(clippy::too_many_arguments)]
-fn contour(
-    dots: &mut Dots,
-    i: usize,
-    j: usize,
-    sx: f64,
-    sy: f64,
-    l: [f32; 4],
-    level: f32,
-    ink: Ink,
-) {
-    const CORNERS: [(f64, f64); 4] = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
-    let mut pts = [(0.0f64, 0.0f64); 4];
-    let mut n = 0;
-    for e in 0..4 {
-        let (a, b) = (e, (e + 1) % 4);
-        if (l[a] < level) != (l[b] < level) {
-            let f = f64::from((level - l[a]) / (l[b] - l[a]));
-            let (pa, pb) = (CORNERS[a], CORNERS[b]);
-            let (x, y) = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
-            // Node centres in dot units (`Dots::from_cells`' convention, node = cell).
-            pts[n] = (
-                (i as f64 + x + 0.5) * sx - 0.5,
-                (j as f64 + y + 0.5) * sy - 0.5,
-            );
-            n += 1;
-        }
-    }
-    // Two crossings: one piece; four (a saddle): pair them in edge order.
-    for p in pts[..n].chunks_exact(2) {
-        dots.line(p[0].0, p[0].1, p[1].0, p[1].1, ink);
     }
 }
 
