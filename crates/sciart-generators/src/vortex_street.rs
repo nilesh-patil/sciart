@@ -145,8 +145,10 @@ pub(crate) const LEVEL_INKS: [u8; 3] = [170, 215, 255];
 /// `k = ⌈max(sx, sy)/REFINE⌉` (dots per node), at most `MAX_REFINE`.
 const REFINE: f64 = 2.2;
 const MAX_REFINE: usize = 5;
-/// The cylinder: a filled dot disc, drawn last at the top level so its cells stay grey.
+/// The cylinder: a one-dot ring (M16 round 2), drawn last at the top level so its cells
+/// stay grey, as `CYLINDER_PTS` chords.
 const CYLINDER_INK: Ink = Ink::new(Role::Structure, 255);
+const CYLINDER_PTS: usize = 48;
 /// Upstream of the cylinder (the half facing the inlet), weak vorticity (|s| below
 /// `UPSTREAM_MIN`) is staircase noise, not flow: within `UPSTREAM_ANNULUS` nodes of the
 /// rim, where the steps' corners stick out of the round mask, and, when its sign is
@@ -879,43 +881,6 @@ impl Probe {
     }
 }
 
-/// Draw `v = level` in lattice cell `(i, j)` with corners `c` (clockwise from the
-/// top-left node) refined into `k × k` bilinear sub-cells (M16), so the curve stays smooth
-/// when one node spans many dots; `to_dot` maps node coordinates to dots.
-pub(crate) fn contour_refined(
-    dots: &mut Dots,
-    c: [f32; 4],
-    level: f32,
-    (i, j): (usize, usize),
-    k: usize,
-    to_dot: impl Fn(f64, f64) -> (f64, f64) + Copy,
-    ink: Ink,
-) {
-    if k <= 1 {
-        dots.contour_cell(c, level, (i, j), to_dot, ink);
-        return;
-    }
-    let kf = k as f32;
-    let at = |u: usize, v: usize| {
-        let (a, b) = (u as f32 / kf, v as f32 / kf);
-        let top = c[0] + (c[1] - c[0]) * a;
-        let bottom = c[3] + (c[2] - c[3]) * a;
-        top + (bottom - top) * b
-    };
-    let (x0, y0, kd) = (i as f64, j as f64, k as f64);
-    for v in 0..k {
-        for u in 0..k {
-            let sub = [at(u, v), at(u + 1, v), at(u + 1, v + 1), at(u, v + 1)];
-            let below = sub.map(|x| x < level);
-            if below == [true; 4] || below == [false; 4] {
-                continue;
-            }
-            let map = |x: f64, y: f64| to_dot(x0 + x / kd, y0 + y / kd);
-            dots.contour_cell(sub, level, (u, v), map, ink);
-        }
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct VortexStreet {
     /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
@@ -1030,15 +995,29 @@ impl VortexStreet {
                             continue;
                         }
                         let ink = Ink::new(role, ink_level);
-                        contour_refined(dots, c.map(|v| sign * v), level, (i, j), k, to_dot, ink);
+                        dots.contour_cell_refined(
+                            c.map(|v| sign * v),
+                            level,
+                            (i, j),
+                            k,
+                            to_dot,
+                            ink,
+                        );
                     }
                 }
             }
         }
-        // The cylinder: a dot disc of radius D/2 in square dots.
+        // The cylinder: a one-dot ring of radius D/2 in square dots.
         let (cx, cy) = to_dot(p.xc - VIEW_X0 as f64, p.yc);
         let r = 0.5 * p.d * 0.5 * (sx + sy);
-        self.dots.disc(cx, cy, r, CYLINDER_INK);
+        let point = |k: usize| {
+            let (s, c) = (std::f64::consts::TAU * k as f64 / CYLINDER_PTS as f64).sin_cos_det();
+            (cx + r * c, cy + r * s)
+        };
+        for k in 0..CYLINDER_PTS {
+            let (a, b) = (point(k), point(k + 1));
+            self.dots.line(a.0, a.1, b.0, b.1, CYLINDER_INK);
+        }
     }
 
     /// `Re≈140` and, once measured and at width ≥ 40, `  St≈0.18` (row 0, column 1); both
@@ -1654,7 +1633,7 @@ mod tests {
             .filter(|&(x, y)| at(x, y).ink.role == Role::Structure && at(x, y).ch != ' ')
             .collect();
         assert!(!disc.is_empty());
-        // One 4-connected blob: flood fill from the first cell reaches them all.
+        // One 8-connected blob (a ring of cells): flood fill reaches them all.
         let mut seen = vec![disc[0]];
         let mut i = 0;
         while i < seen.len() {
@@ -1664,6 +1643,10 @@ mod tests {
                 (x.wrapping_sub(1), y),
                 (x, y + 1),
                 (x, y.wrapping_sub(1)),
+                (x + 1, y + 1),
+                (x + 1, y.wrapping_sub(1)),
+                (x.wrapping_sub(1), y + 1),
+                (x.wrapping_sub(1), y.wrapping_sub(1)),
             ] {
                 if disc.contains(&n) && !seen.contains(&n) {
                     seen.push(n);

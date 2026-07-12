@@ -1,14 +1,18 @@
 //! Jupiter's whole disc on black space (SPEC-002 `jupiter_storms`, ADR-0017).
 //!
-//! Two dyes ride a prescribed flow (`vortex_advect`, semi-Lagrangian on a capped
-//! lattice): the zone/belt dye, pale in the anticyclonic zones and blue-grey in the
-//! cyclonic belts, and the red chromophore of the Great Red Spot. The flow is alternating
+//! Dyes ride a prescribed flow (`vortex_advect`, semi-Lagrangian on a capped lattice):
+//! the zone/belt dye, pale in the anticyclonic zones and dark in the cyclonic belts, and
+//! a clearing dye drawn out into festoons. The flow is alternating
 //! zonal jets plus Gaussian vortices given as stream functions: the Great Red Spot and
 //! white ovals, anticyclones sitting in the zero of the jets whose shear matches their
 //! spin (so they roll like ball bearings), and short-lived small eddies that wind the
 //! dye into filaments. A weak relaxation back to the banded pattern keeps the belts from
 //! mixing out. The flow lives on a longitude × latitude strip, mapped onto a limb-darkened
 //! disc whose view follows the Great Red Spot.
+//!
+//! M16 (thread style, GEN-R25): the dyes are contoured as smooth threads (a blurred node
+//! grid over the disc, refined bilinear contours, CORE-R106); the Great Red Spot and the
+//! white ovals are kinematic spiral threads turning with their vortices.
 //!
 //! Units: lengths in lattice heights (`H`), so the flow keeps its shape when the lattice
 //! is regridded (ADR-0012); speeds in `H` per simulated second.
@@ -44,10 +48,8 @@ const K: f64 = 6.0 * PI;
 const PHI: f64 = 0.06 * PI;
 /// Peak jet speed, `H` per second (time-lapsed).
 const U0: f64 = 0.11;
-/// Relaxation rate of the zone dye towards the banded pattern, and decay of the red
-/// chromophore outside the Great Red Spot, per second.
+/// Relaxation rate of the zone dye towards the banded pattern, per second.
 const RELAX: f32 = 0.035;
-const RED_DECAY: f32 = 0.3;
 /// Great Red Spot: half-axes (1.4:1, its shape today; it was ~2:1 in the Voyager era) and
 /// turnover period.
 pub(crate) const GRS_A: f64 = 0.14;
@@ -81,21 +83,41 @@ const SWAY: (f64, f64) = (0.5, 0.05);
 const SHADOW_SPEED: f64 = 1.0 / 20.0;
 /// Latitude (and longitude) one lattice height spans (rad).
 const LAT_SPAN: f64 = 65.0 * PI / 180.0;
-/// M16 thread look (GEN-R25): at most this many contour nodes across the disc (spacing
-/// ≥ 2 dots).
-const MAX_ACROSS: f64 = 150.0;
+/// M16 thread look (GEN-R25): at most this many contour nodes across the disc, at least
+/// `MIN_SPACING` dots apart; the node field is blurred `BLUR_PASSES` times (1-2-1) and
+/// each crossed cell refined into sub-cells of about `REFINE` dots (CORE-R106), so the
+/// threads are smooth waves rather than lattice-stepped jogs (JUP-A12).
+const MAX_ACROSS: f64 = 110.0;
+const MIN_SPACING: f64 = 3.5;
+const BLUR_PASSES: usize = 2;
+const REFINE: f64 = 1.4;
 /// Band threads: dye level, role, ink level on the disc and near the limb.
 pub(crate) const BAND_LEVELS: [(f32, Role, [u8; 2]); 3] = [
     (0.2, Role::Hot, [200, 150]),
     (0.45, Role::Hot, [235, 175]),
     (0.75, Role::Sun, [235, 175]),
 ];
-/// The Great Red Spot's chromophore threads, and band threads inside its ellipse.
-const RED_LEVELS: [(f32, u8); 3] = [(0.2, 190), (0.45, 225), (0.7, 255)];
-const SPOT_INK: Ink = Ink::new(Role::Hot, 210);
-/// Band threads within `OVAL_REACH` of a white oval's half-axes.
-const OVAL_INK: Ink = Ink::new(Role::Star, 230);
-const OVAL_REACH: f64 = 1.5;
+/// The storms as spiral threads (JUP-A8, JUP-A11): arms, turns per arm, the drawn
+/// half-axes as a share of the vortex's, points per arm, the inner/outer inks; band
+/// threads inside `CLEAR_Q` of a storm's ellipse are left out so the spiral reads clean.
+/// The spot's drawn width is about a sixth of the disc's.
+const SPOT_SPIRAL: Spiral = Spiral {
+    arms: 2,
+    turns: 1.5,
+    scale: 1.05,
+    inner: Ink::new(Role::Hot, 255),
+    outer: Ink::new(Role::Hot, 205),
+};
+const OVAL_SPIRAL: Spiral = Spiral {
+    arms: 1,
+    turns: 1.5,
+    scale: 1.3,
+    inner: Ink::new(Role::Star, 255),
+    outer: Ink::new(Role::Star, 215),
+};
+const SPIRAL_PTS: usize = 90;
+const CLEAR_Q: f64 = 1.1;
+const OVAL_PERIOD: f64 = 4.0;
 /// The clearing dye's festoon thread.
 const FESTOON: (f32, Ink) = (0.3, Ink::new(Role::Hot, 130));
 /// The limb ellipse, and the `μ` below which threads are one step dimmer.
@@ -187,16 +209,24 @@ fn strength_for_period(a: f64, b: f64, period: f64) -> f64 {
     speed * b / (2.0 * 0.7 * (-0.49f64).exp())
 }
 
+/// A storm drawn as spiral threads.
+#[derive(Debug, Clone, Copy)]
+struct Spiral {
+    arms: usize,
+    turns: f64,
+    scale: f64,
+    inner: Ink,
+    outer: Ink,
+}
+
 #[derive(Debug)]
 pub struct JupiterStorms {
     lattice: Size,
-    /// Zone/belt dye and red chromophore, with their scratch grids.
+    /// Zone/belt dye, with its scratch grid.
     dye: Grid<f32>,
-    red: Grid<f32>,
     /// Blue-grey clearing dye (hot spots drawn out into festoons).
     hot: Grid<f32>,
     scratch_dye: Grid<f32>,
-    scratch_red: Grid<f32>,
     scratch_hot: Grid<f32>,
     /// The banded pattern the dye relaxes to (static per lattice).
     target: Grid<f32>,
@@ -213,8 +243,10 @@ pub struct JupiterStorms {
     origin: (f64, f64),
     spacing: f64,
     band_v: Vec<f32>,
-    red_v: Vec<f32>,
     hot_v: Vec<f32>,
+    /// Scratch row-pass buffer of the node blur, and the cell refinement.
+    blur: Vec<f32>,
+    refine: usize,
     warmed: bool,
     /// Simulated seconds shown (drives Io's shadow).
     t: f64,
@@ -227,10 +259,8 @@ impl JupiterStorms {
         Self {
             lattice: Size::new(1, 1),
             dye: Grid::default(),
-            red: Grid::default(),
             hot: Grid::default(),
             scratch_dye: Grid::default(),
-            scratch_red: Grid::default(),
             scratch_hot: Grid::default(),
             target: Grid::default(),
             flow: Flow::default(),
@@ -242,8 +272,9 @@ impl JupiterStorms {
             origin: (0.0, 0.0),
             spacing: 2.0,
             band_v: Vec::new(),
-            red_v: Vec::new(),
             hot_v: Vec::new(),
+            blur: Vec::new(),
+            refine: 1,
             warmed: false,
             t: 0.0,
             dirty: false,
@@ -391,40 +422,33 @@ impl JupiterStorms {
         }
         self.fill_flow();
         let dtf = dt as f32;
-        let (dye, red, hot) = (&self.dye, &self.red, &self.hot);
-        let (nd, nr, nh) = (
+        let (dye, hot) = (&self.dye, &self.hot);
+        let (nd, nh) = (
             self.scratch_dye.as_mut_slice(),
-            self.scratch_red.as_mut_slice(),
             self.scratch_hot.as_mut_slice(),
         );
         vortex_advect::departures(&self.flow, dtf, XEdge::Wrap, |k, x, y| {
             nd[k] = vortex_advect::sample(dye, x, y, XEdge::Wrap);
-            nr[k] = vortex_advect::sample(red, x, y, XEdge::Wrap);
             nh[k] = vortex_advect::sample(hot, x, y, XEdge::Wrap);
         });
         std::mem::swap(&mut self.dye, &mut self.scratch_dye);
-        std::mem::swap(&mut self.red, &mut self.scratch_red);
         std::mem::swap(&mut self.hot, &mut self.scratch_hot);
 
-        // Sources: relaxation to the bands; the red chromophore is made in the Great Red
-        // Spot's core and bleaches elsewhere.
+        // Sources: relaxation to the bands, the storms' cores and collars, the hot spots.
         let relax = 1.0 - (-RELAX * dtf).exp();
-        let bleach = (-RED_DECAY * dtf).exp();
         let clear = (-HOT_DECAY * dtf).exp();
         let hot_shift = HOT_DRIFT * self.t;
         let w = usize::from(self.lattice.width());
         let scale = f64::from(self.lattice.height());
         let (target, vortices) = (self.target.as_slice(), &self.vortices);
-        for (k, ((d, r), hs)) in self
+        for (k, (d, hs)) in self
             .dye
             .as_mut_slice()
             .iter_mut()
-            .zip(self.red.as_mut_slice())
             .zip(self.hot.as_mut_slice())
             .enumerate()
         {
             *d += (target[k] - *d) * relax;
-            *r *= bleach;
             *hs *= clear;
             let (x, y) = ((k % w) as f64 / scale, (k / w) as f64 / scale);
             let qy = ((y - HOT_Y) / HOT_AB.1).powi(2);
@@ -446,16 +470,8 @@ impl JupiterStorms {
                 dx -= period * (dx / period).round();
                 let q = (dx / v.a).powi(2) + ((y - v.y) / v.b).powi(2);
                 match v.kind {
-                    // The chromophore is made in the spot's core; its own differential
-                    // rotation winds the dye inside into a spiral.
-                    // It enters on the spot's east side only, so the spot's differential
-                    // rotation winds it into a spiral with paler gaps.
-                    Kind::RedSpot if q < 0.6 => {
-                        if dx > 0.0 && q > 0.12 {
-                            *r += (1.0 - *r) * relax * 60.0;
-                        }
-                        *d += (0.45 - *d) * relax * 2.0;
-                    }
+                    // The spot's core: a darker, belt-like interior.
+                    Kind::RedSpot if q < 0.6 => *d += (0.45 - *d) * relax * 2.0,
                     // The pale "hollow" collar round the spot.
                     Kind::RedSpot if q > 1.1 && q < 1.9 => *d += (1.0 - *d) * relax * 6.0,
                     // White ovals: bright cores in a darker collar.
@@ -476,19 +492,16 @@ impl JupiterStorms {
         self.lattice = lattice;
         if fresh {
             self.dye.resize(lattice, 0.0);
-            self.red.resize(lattice, 0.0);
             self.hot.resize(lattice, 0.0);
         } else {
             grid::regrid_bilinear(&mut self.hot, lattice, &mut self.scratch_hot);
             grid::regrid_bilinear(&mut self.dye, lattice, &mut self.scratch_dye);
-            grid::regrid_bilinear(&mut self.red, lattice, &mut self.scratch_red);
             let k = self.period() / old_period;
             for v in &mut self.vortices {
                 v.x *= k;
             }
         }
         self.scratch_dye.resize(lattice, 0.0);
-        self.scratch_red.resize(lattice, 0.0);
         self.scratch_hot.resize(lattice, 0.0);
         self.target.resize(lattice, 0.0);
         self.flow.resize(lattice);
@@ -522,7 +535,8 @@ impl JupiterStorms {
     /// Lay the node grid over the disc and fix each node's geometry (M16).
     fn layout(&mut self) {
         let (cx, cy, rx, ry) = self.disc();
-        let s = (2.0 * rx / MAX_ACROSS).max(2.0);
+        let s = (2.0 * rx / MAX_ACROSS).max(MIN_SPACING);
+        self.refine = ((s / REFINE).ceil() as usize).clamp(1, 8);
         let nw = (2.0 * (rx + 2.0 * s) / s).ceil() as usize + 1;
         let nh = (2.0 * (ry + 2.0 * s) / s).ceil() as usize + 1;
         self.spacing = s;
@@ -555,7 +569,7 @@ impl JupiterStorms {
             }
         }
         let n = nw * nh;
-        for v in [&mut self.band_v, &mut self.red_v, &mut self.hot_v] {
+        for v in [&mut self.band_v, &mut self.hot_v, &mut self.blur] {
             v.clear();
             v.resize(n, f32::NAN);
         }
@@ -598,7 +612,6 @@ impl JupiterStorms {
         let spin = self.spin();
         let lat_h = f64::from(self.lattice.height());
         let (sx, sy, sr) = self.shadow();
-        let grs = self.vortices.first().copied();
         let (nw, _) = self.nodes;
         for k in 0..self.geo.len() {
             let g = self.geo[k];
@@ -608,7 +621,6 @@ impl JupiterStorms {
             );
             if g.mu < 0.0 || (x - sx).hypot(y - sy) < sr {
                 self.band_v[k] = f32::NAN;
-                self.red_v[k] = f32::NAN;
                 self.hot_v[k] = f32::NAN;
                 continue;
             }
@@ -617,12 +629,6 @@ impl JupiterStorms {
             let a = vortex_advect::sample(&self.dye, gx, gy, XEdge::Wrap);
             // Toward the poles the bands fade into a featureless hood: no threads there.
             self.band_v[k] = a + (0.5 - a) * g.polar;
-            self.red_v[k] = match grs {
-                Some(v) if self.ellipse_q(&v, lx, ly) < 2.5 => {
-                    vortex_advect::sample(&self.red, gx, gy, XEdge::Wrap)
-                }
-                _ => 0.0,
-            };
             self.hot_v[k] = if (ly - HOT_Y).abs() < HOT_LANE {
                 vortex_advect::sample(&self.hot, gx, gy, XEdge::Wrap)
             } else {
@@ -631,27 +637,99 @@ impl JupiterStorms {
         }
     }
 
-    /// The ink of a band thread at band level `level` (index into `BAND_LEVELS`) where
-    /// the lattice point is `(lx, ly)` and the limb factor `mu` (JUP-A9..A11).
-    fn band_ink(&self, level: usize, lx: f64, ly: f64, mu: f32) -> Ink {
-        let mut storms = self.vortices.iter().take_while(|v| v.kind != Kind::Eddy);
-        if let Some(grs) = storms.next() {
-            if self.ellipse_q(grs, lx, ly) < 1.0 {
-                return SPOT_INK;
+    /// Whether the lattice point `(lx, ly)` lies in a storm's cleared area, where the
+    /// storm's spiral is drawn instead of band threads.
+    fn in_storm(&self, lx: f64, ly: f64) -> bool {
+        self.vortices
+            .iter()
+            .take_while(|v| v.kind != Kind::Eddy)
+            .any(|v| {
+                let reach = CLEAR_Q
+                    * if v.kind == Kind::Oval {
+                        OVAL_SPIRAL.scale
+                    } else {
+                        1.0
+                    };
+                self.ellipse_q(v, lx, ly) < reach * reach
+            })
+    }
+
+    /// Blur `values` (row-major over the node grid) in place with the 1-2-1 kernel along
+    /// rows and then columns, `BLUR_PASSES` times; NaN nodes (off the disc, under Io's
+    /// shadow) are left NaN and left out of their neighbours' weights.
+    fn blur_nodes(values: &mut [f32], tmp: &mut [f32], (nw, nh): (usize, usize)) {
+        if nw < 3 || nh < 3 || values.len() != nw * nh || tmp.len() != values.len() {
+            return;
+        }
+        // One 1-2-1 pass with neighbours `step` apart, `span` nodes along that axis.
+        let pass = |src: &[f32], dst: &mut [f32], step: usize, span: usize| {
+            for (k, out) in dst.iter_mut().enumerate() {
+                let c = src[k];
+                if !c.is_finite() {
+                    *out = c;
+                    continue;
+                }
+                let pos = (k / step) % span;
+                let (mut sum, mut w) = (2.0 * c, 2.0);
+                if pos > 0 && src[k - step].is_finite() {
+                    sum += src[k - step];
+                    w += 1.0;
+                }
+                if pos + 1 < span && src[k + step].is_finite() {
+                    sum += src[k + step];
+                    w += 1.0;
+                }
+                *out = sum / w;
+            }
+        };
+        for _ in 0..BLUR_PASSES {
+            pass(values, tmp, 1, nw);
+            pass(tmp, values, nw, nh);
+        }
+    }
+
+    /// Draw a storm as spiral threads on the sphere, turning with its vortex: `arms`
+    /// arms of `turns` turns each from 0.12 to 1 of the drawn half-axes, counter-
+    /// clockwise on screen at the vortex's turnover period (JUP-A4).
+    fn spiral(&mut self, v: Vortex, sp: Spiral, period: f64, spin: f64) {
+        let (cx, cy, rx, ry) = self.disc();
+        let phase = -TAU * self.t / period;
+        let project = |dlx: f64, dly: f64| {
+            let lon = (v.x + dlx) * LAT_SPAN - spin;
+            let lat = (0.5 - (v.y + dly)) * LAT_SPAN;
+            let (sl, cl) = lat.sin_cos_det();
+            let (so, co) = lon.sin_cos_det();
+            (cx + rx * cl * so, cy - ry * sl, cl * co)
+        };
+        for arm in 0..sp.arms {
+            let mut prev: Option<(f64, f64)> = None;
+            for k in 0..=SPIRAL_PTS {
+                let u = k as f64 / SPIRAL_PTS as f64;
+                let rho = 0.12 + 0.88 * u;
+                let th = phase + TAU * (sp.turns * u + arm as f64 / sp.arms as f64);
+                let (s, c) = th.sin_cos_det();
+                let (dlx, dly) = (rho * sp.scale * v.a * c, rho * sp.scale * v.b * s);
+                let (x, y, front) = project(dlx, dly);
+                if front <= 0.05 {
+                    prev = None;
+                    continue;
+                }
+                let ink = if rho < 0.55 { sp.inner } else { sp.outer };
+                if let Some((px, py)) = prev {
+                    self.dots.line(px, py, x, y, ink);
+                }
+                prev = Some((x, y));
             }
         }
-        if storms
-            .any(|v| v.kind == Kind::Oval && self.ellipse_q(v, lx, ly) < OVAL_REACH * OVAL_REACH)
-        {
-            return OVAL_INK;
-        }
-        band_level_ink(level, mu)
     }
 
     /// Draw the frame: band, spot and festoon threads, then the limb.
     fn raster(&mut self) {
         self.dots.clear();
         self.sample_nodes();
+        Self::blur_nodes(&mut self.band_v, &mut self.blur, self.nodes);
+        Self::blur_nodes(&mut self.hot_v, &mut self.blur, self.nodes);
+        let k = self.refine;
         let (nw, nh) = self.nodes;
         let (ox, oy, s) = (self.origin.0, self.origin.1, self.spacing);
         let to_dot = move |x: f64, y: f64| (ox + x * s, oy + y * s);
@@ -671,25 +749,30 @@ impl JupiterStorms {
                     continue;
                 }
                 let band = corners(&self.band_v, i, j);
-                for (n, &(level, _, _)) in BAND_LEVELS.iter().enumerate() {
-                    if crosses(&band, level) {
-                        let (lx, ly) = self.lattice_of(&g, spin);
-                        let ink = self.band_ink(n, lx, ly, g.mu);
-                        self.dots.contour_cell(band, level, (i, j), to_dot, ink);
-                    }
-                }
-                let red = corners(&self.red_v, i, j);
-                for &(level, l) in &RED_LEVELS {
-                    if crosses(&red, level) {
-                        let ink = Ink::new(Role::Hot, l);
-                        self.dots.contour_cell(red, level, (i, j), to_dot, ink);
+                let (lx, ly) = self.lattice_of(&g, spin);
+                if !self.in_storm(lx, ly) {
+                    for (n, &(level, _, _)) in BAND_LEVELS.iter().enumerate() {
+                        if crosses(&band, level) {
+                            let ink = band_level_ink(n, g.mu);
+                            self.dots
+                                .contour_cell_refined(band, level, (i, j), k, to_dot, ink);
+                        }
                     }
                 }
                 let hot = corners(&self.hot_v, i, j);
                 if crosses(&hot, FESTOON.0) {
                     self.dots
-                        .contour_cell(hot, FESTOON.0, (i, j), to_dot, FESTOON.1);
+                        .contour_cell_refined(hot, FESTOON.0, (i, j), k, to_dot, FESTOON.1);
                 }
+            }
+        }
+        // The storms as spirals turning with their vortices.
+        for idx in 0..self.vortices.len() {
+            let v = self.vortices[idx];
+            match v.kind {
+                Kind::RedSpot => self.spiral(v, SPOT_SPIRAL, GRS_PERIOD, spin),
+                Kind::Oval => self.spiral(v, OVAL_SPIRAL, OVAL_PERIOD, spin),
+                Kind::Eddy => {}
             }
         }
         // The limb: a thin dot ellipse.
@@ -1025,6 +1108,77 @@ mod tests {
             assert_eq!(disc.role, limb.role);
             assert!(limb.level < disc.level, "{disc:?} vs {limb:?}");
         }
+    }
+
+    /// Share of lit dots that sit at a corner: exactly two lit neighbours (of 8) at 90°
+    /// or less to each other as seen from the dot (a smooth thread's two neighbours are
+    /// roughly opposite, 135° or more apart).
+    fn corner_share(d: &Dots) -> f64 {
+        let ds = d.dot_size();
+        let (mut lit, mut corners) = (0usize, 0usize);
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                if !d.is_lit(x, y) {
+                    continue;
+                }
+                lit += 1;
+                let nb: Vec<(i32, i32)> = (-1..=1)
+                    .flat_map(|a| (-1..=1).map(move |b| (a, b)))
+                    .filter(|&(a, b)| (a, b) != (0, 0) && d.is_lit(x + a, y + b))
+                    .collect();
+                let sharp = nb.len() == 2 && nb[0].0 * nb[1].0 + nb[0].1 * nb[1].1 >= 0;
+                corners += usize::from(sharp);
+            }
+        }
+        corners as f64 / lit.max(1) as f64
+    }
+
+    #[test]
+    fn jup_a12_threads_are_smooth_not_stepped() {
+        for size in [Size::new(200, 50), Size::new(100, 40)] {
+            let mut g = JupiterStorms::new();
+            let mut ctx = Ctx::new(42, size);
+            g.resize(size, &mut ctx);
+            for _ in 0..(12.0 / SIM_DT) as usize {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            let share = corner_share(&g.dots);
+            // Jogs: dots in an L-step, with both a side and an up/down neighbour (a
+            // lattice-stepped run). M16 round 1 had ≈ 10 %; smooth threads ≈ 4 %.
+            let ds = g.dots.dot_size();
+            let (mut lit, mut jogs) = (0usize, 0usize);
+            for y in 0..i32::from(ds.height()) {
+                for x in 0..i32::from(ds.width()) {
+                    if g.dots.is_lit(x, y) {
+                        lit += 1;
+                        let side = g.dots.is_lit(x - 1, y) || g.dots.is_lit(x + 1, y);
+                        let ud = g.dots.is_lit(x, y - 1) || g.dots.is_lit(x, y + 1);
+                        jogs += usize::from(side && ud);
+                    }
+                }
+            }
+            let jog = jogs as f64 / lit.max(1) as f64;
+            if size.width() >= 200 {
+                assert!(jog <= 0.05, "{size:?}: {:.1} % jog dots", 100.0 * jog);
+            }
+            assert!(
+                share <= 0.05,
+                "{size:?}: {:.1} % corner dots",
+                100.0 * share
+            );
+        }
+    }
+
+    #[test]
+    fn jup_a8_the_spot_spiral_is_about_a_sixth_of_the_disc() {
+        let (g, _) = scene();
+        let grs = g.vortices[0];
+        // Drawn half-width in longitude, projected at the centre meridian.
+        let half = (SPOT_SPIRAL.scale * grs.a * LAT_SPAN).sin_det();
+        let width = 2.0 * half / 2.0; // share of the disc's diameter (2R)
+        assert!((0.13..=0.2).contains(&width), "spot {width:.3} of the disc");
+        assert!(SPOT_SPIRAL.arms * 2 >= 2 && SPOT_SPIRAL.turns * SPOT_SPIRAL.arms as f64 >= 2.0);
     }
 
     #[test]

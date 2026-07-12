@@ -106,6 +106,11 @@ const IR: usize = 1;
 pub(crate) const LEVELS: [f32; 3] = [0.3, 0.5, 0.7];
 const VIS_LEVELS: [u8; 3] = [150, 200, 245];
 const EYEWALL_RM: f64 = 1.8;
+/// Inside `EYEWALL_RM` only these contour levels are drawn (two eyewall rings, M16
+/// round 2); outside it every band is one thread along its ridge (its centre line).
+const EYE_LEVELS: [usize; 2] = [1, 2];
+/// Band ridges in cloud dimmer than this are noise between cells, not bands.
+const RIDGE_MIN: f32 = 0.4;
 const INNER_RM: f64 = 3.2;
 const REFINE: f64 = 2.2;
 const MAX_REFINE: usize = 5;
@@ -176,43 +181,6 @@ fn box_blur(g: &mut Grid<f32>, tmp: &mut Grid<f32>) {
         let (u, d) = (y.saturating_sub(1) * w, (y + 1).min(h - 1) * w);
         for x in 0..w {
             src[y * w + x] = 0.25 * (dst[u + x] + dst[d + x]) + 0.5 * dst[y * w + x];
-        }
-    }
-}
-
-/// Draw `v = level` in lattice cell `(i, j)` with corners `c` (clockwise from the
-/// top-left node) refined into `k × k` bilinear sub-cells, so the spiral stays smooth
-/// when one node spans many dots; `to_dot` maps node coordinates to dots.
-fn contour_refined(
-    dots: &mut Dots,
-    c: [f32; 4],
-    level: f32,
-    (i, j): (usize, usize),
-    k: usize,
-    to_dot: impl Fn(f64, f64) -> (f64, f64) + Copy,
-    ink: Ink,
-) {
-    if k <= 1 {
-        dots.contour_cell(c, level, (i, j), to_dot, ink);
-        return;
-    }
-    let kf = k as f32;
-    let at = |u: usize, v: usize| {
-        let (a, b) = (u as f32 / kf, v as f32 / kf);
-        let top = c[0] + (c[1] - c[0]) * a;
-        let bottom = c[3] + (c[2] - c[3]) * a;
-        top + (bottom - top) * b
-    };
-    let (x0, y0, kd) = (i as f64, j as f64, k as f64);
-    for v in 0..k {
-        for u in 0..k {
-            let sub = [at(u, v), at(u + 1, v), at(u + 1, v + 1), at(u, v + 1)];
-            let below = sub.map(|x| x < level);
-            if below == [true; 4] || below == [false; 4] {
-                continue;
-            }
-            let map = |x: f64, y: f64| to_dot(x0 + x / kd, y0 + y / kd);
-            dots.contour_cell(sub, level, (u, v), map, ink);
         }
     }
 }
@@ -301,6 +269,9 @@ pub struct Hurricane {
     /// M16: the inflow tracers, steps since their trails moved on, and the threads.
     tracers: Vec<Tracer>,
     trail_age: u32,
+    /// Radial derivative of the brightness per node (M16 round 2): a band's centre line
+    /// is where it crosses zero going downhill outward.
+    ridge: Vec<f32>,
     dots: Dots,
     warmed: bool,
 }
@@ -327,6 +298,7 @@ impl Hurricane {
                 .collect(),
             tracers: Vec::with_capacity(TRACERS),
             trail_age: 0,
+            ridge: Vec::new(),
             dots: Dots::default(),
             warmed: false,
         }
@@ -516,6 +488,8 @@ impl Hurricane {
         self.small = lattice.height() <= SMALL;
         self.scratch.resize(lattice, 0.0);
         self.bright.resize(lattice, 0.0);
+        self.ridge.clear();
+        self.ridge.resize(lattice.area(), 0.0);
         self.cirrus.resize(lattice, 0.0);
         // A regridded lattice needs its cirrus before the next picture.
         self.swell_age = SWELL_EVERY;
@@ -595,7 +569,33 @@ impl Hurricane {
         }
     }
 
-    /// Draw the frame: the brightness contours, then the tracers. The faint cirrus
+    /// The radial derivative of the brightness at every node (central differences,
+    /// one-sided at the lattice's edges), for the bands' ridge lines.
+    fn fill_ridge(&mut self) {
+        let (w, h) = (
+            usize::from(self.lattice.width()),
+            usize::from(self.lattice.height()),
+        );
+        if self.ridge.len() != w * h || w < 2 || h < 2 {
+            return;
+        }
+        let scale = h as f64;
+        let (cx, cy) = self.centre(self.t);
+        let b = self.bright.as_slice();
+        for j in 0..h {
+            let (ju, jd) = (j.saturating_sub(1), (j + 1).min(h - 1));
+            for i in 0..w {
+                let (il, ir) = (i.saturating_sub(1), (i + 1).min(w - 1));
+                let gx = (b[j * w + ir] - b[j * w + il]) / (ir - il) as f32;
+                let gy = (b[jd * w + i] - b[ju * w + i]) / (jd - ju) as f32;
+                let (ex, ey) = (i as f64 / scale - cx, j as f64 / scale - cy);
+                let r = ex.hypot(ey).max(1e-9);
+                self.ridge[j * w + i] = (f64::from(gx) * ex / r + f64::from(gy) * ey / r) as f32;
+            }
+        }
+    }
+
+    /// Draw the frame: the eyewall rings and band ridge threads, then the tracers. The faint cirrus
     /// outflow (below the lowest contour) is not drawn: as threads it only hatched the
     /// storm's flanks.
     fn raster(&mut self) {
@@ -631,9 +631,11 @@ impl Hurricane {
             }
         };
         if gain >= FADE_OFF {
+            self.fill_ridge();
             // The cold of each contour level before the height factor (IR act).
             let colds = LEVELS.map(|l| ir_curve(f64::from(l)));
             let bright = self.bright.as_slice();
+            let ridge = self.ridge.as_slice();
             let dots = &mut self.dots;
             for j in 0..vh - 1 {
                 for i in 0..vw - 1 {
@@ -645,19 +647,53 @@ impl Hurricane {
                     let hi = c[0].max(c[1]).max(c[2].max(c[3]));
                     let lo = c[0].min(c[1]).min(c[2].min(c[3]));
                     // Radius of the cell's centre from the storm's, `H`.
-                    let r = ((i as f64 + 0.5) / scale - cx).hypot((j as f64 + 0.5) / scale - cy);
-                    if hi >= LEVELS[0] {
-                        for (n, &level) in LEVELS.iter().enumerate() {
+                    let (ex, ey) = ((i as f64 + 0.5) / scale - cx, (j as f64 + 0.5) / scale - cy);
+                    let r = ex.hypot(ey);
+                    if hi < LEVELS[0] {
+                        continue;
+                    }
+                    if r / R_MAX_WIND < EYEWALL_RM {
+                        // The eyewall: two rings.
+                        for &n in &EYE_LEVELS {
+                            let level = LEVELS[n];
                             if lo < level && level <= hi {
                                 let ink = if use_ir {
                                     ir_thread(colds[n] * height_factor(r))
                                 } else {
                                     vis_thread(r / R_MAX_WIND, n)
                                 };
-                                contour_refined(dots, c, level, (i, j), k, to_dot, dim(ink));
+                                dots.contour_cell_refined(c, level, (i, j), k, to_dot, dim(ink));
                             }
                         }
+                        continue;
                     }
+                    // A band: one thread on its ridge, where the radial derivative falls
+                    // through zero outward, in cloud at least as bright as the lowest level.
+                    let mean = 0.25 * (c[0] + c[1] + c[2] + c[3]);
+                    if mean < RIDGE_MIN {
+                        continue;
+                    }
+                    let d = at(ridge);
+                    let (dlo, dhi) = (
+                        d[0].min(d[1]).min(d[2].min(d[3])),
+                        d[0].max(d[1]).max(d[2].max(d[3])),
+                    );
+                    if !(dlo < 0.0 && 0.0 <= dhi) {
+                        continue;
+                    }
+                    let (ux, uy) = (ex / r.max(1e-9), ey / r.max(1e-9));
+                    let slope = 0.5 * f64::from((d[1] + d[2]) - (d[0] + d[3])) * ux
+                        + 0.5 * f64::from((d[2] + d[3]) - (d[0] + d[1])) * uy;
+                    if slope >= 0.0 {
+                        continue; // a trough between bands, not a ridge
+                    }
+                    let n = LEVELS.iter().rposition(|&l| mean >= l).unwrap_or(0);
+                    let ink = if use_ir {
+                        ir_thread(ir_curve(f64::from(mean)) * height_factor(r))
+                    } else {
+                        vis_thread(r / R_MAX_WIND, n)
+                    };
+                    dots.contour_cell_refined(d, 0.0, (i, j), k, to_dot, dim(ink));
                 }
             }
         }
