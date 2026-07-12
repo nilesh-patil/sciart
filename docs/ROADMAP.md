@@ -214,5 +214,16 @@ Design: [docs/design/M15-m11-look.md](design/M15-m11-look.md) · [ADR-0018](adr/
 - [x] Local `--no-ff` merge of `feat/m15-m11-style` into main
 - [ ] M15 follow-ups: see "Follow-ups" in docs/design/M15-m11-look.md
 
+## M16 — Thread style
+Design: [docs/design/M16-thread-style.md](design/M16-thread-style.md) · [ADR-0019](adr/0019-thread-style.md) · GEN-R25.
+- [x] light_echo as braille crest rings coloured by age (ECHO-A6..A11)
+- [x] Infra: core iso-contour helper lifted from light_echo; delete seashell_pigmentation; GEN-R22 skips GEN-R25 scenes; GEN-R25 half-block share test
+- [x] Restyle 25 scenes in the thread style (per-scene choices in the design doc), spec sections first, TDD; core `Dots::contour_cell_refined` (CORE-R106); `shared::jovian` removed
+- [x] Critic review (art + science): round 1 sent 12 scenes back, round 2 accepted 11, spacetime_grid in a 3rd two-constant round; budgets: every worst frame < 1.2 ms at 200×50 and < 2.8 ms at 500×150
+- [x] Results: gallery 0.535 ms CPU, 9.9 KB and 576 changed cells per frame (M15: 0.56 ms, 12.5 KB, 600); the 26 thread scenes 13.7 → 5.8 KB per frame
+- [x] Samples at M16 (`samples/*-m16.png`, M16 column in `samples/README.md` and `samples/compare/`)
+- [x] Local `--no-ff` merge of `feat/m16-thread-style` into main
+- [ ] M16 follow-ups: see "Follow-ups" in docs/design/M16-thread-style.md
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).

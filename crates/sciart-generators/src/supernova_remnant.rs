@@ -1,21 +1,25 @@
-//! A young supernova remnant like Cassiopeia A in X-ray false colour (SPEC-002
-//! `supernova_remnant`).
+//! A young supernova remnant like Cassiopeia A or the Crab, as a shell of filaments
+//! (SPEC-002 `supernova_remnant`).
 //!
 //! Three analytic surfaces, all scaled by the forward-shock radius `R_f(t)` (a
 //! Truelove–McKee-style blend from ejecta-dominated to Sedov–Taylor expansion): the blast
 //! wave, the contact discontinuity rippled by Rayleigh–Taylor fingers, and the reverse
-//! shock inside it. Each is drawn as a projected, limb-brightened shell per pixel; ejecta
-//! knots coast outward homologously and light up as the reverse shock reaches them.
-//! Lengths on screen are in pixels, the model in units of `R_f`.
+//! shock inside it. Ejecta knots coast outward homologously and light up as the reverse
+//! shock reaches them.
+//!
+//! M16 (GEN-R25, thread style): the shocked ejecta are radial braille filaments from the
+//! reverse shock out to the R–T fingertips, coloured by temperature along the thread
+//! (freshly shocked `Sun` inside, cooler `Hot` outward); freshly lit knots are sparks with
+//! short radial trails; the blast wave a faint dotted `Cold` circle. Lengths on screen are
+//! in dots (square), the model in units of `R_f`.
 
+use std::cell::RefCell;
 use std::f64::consts::TAU;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
-use sciart_core::rng::{cell_key, hash01, value_noise};
+use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "supernova_remnant",
@@ -56,95 +60,48 @@ const RT_RATE: f64 = 0.35;
 const RT_CAP: f64 = 0.12;
 /// Angle table resolution.
 const ANGLES: usize = 512;
-/// Comoving clump texture: `NOISE²` texels over `±NOISE_SPAN` `R_f`.
-const NOISE: usize = 64;
-const NOISE_SPAN: f64 = 1.2;
-/// Emitting ejecta sit in the outer part of the shocked shell, from this fraction of
-/// the contact radius out (or from the reverse shock, if that is farther out).
-const EJECTA_INNER: f64 = 0.82;
 /// Out-of-round shape (share of `R_f`) the whole remnant shares at low angular order
-/// (SNR-A6), and the angular fineness of the ejecta streaks.
+/// (SNR-A6).
 const RIM_WOBBLE: f64 = 0.09;
 /// Wobble modes `m` = 2, 3, 4: relative amplitudes and the slow drift of their phases
 /// (rad/s), so the lopsided shell turns and reshapes as it ploughs into lumpy gas.
 const WOBBLE_AMP: [f64; 3] = [1.0, 0.6, 0.35];
 const WOBBLE_DRIFT: f64 = 0.05;
-const STREAK: f64 = 7.0;
-/// The shell is hollow inside this share of the contact radius.
-const HOLLOW: f64 = 0.45;
-/// A lit knot's weight in the ejecta it sits in.
-const KNOT_WEIGHT: f32 = 0.9;
-/// A knot: one pixel (ADR-0017: 1-px filaments).
-const KNOT_BLOB: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
-/// Level caps: a thin, dim forward shock under the ejecta (ADR-0017: 1 px, ≤ 45).
-const RIM_MAX: u8 = 45;
-/// The ejecta's contrast curve: the toned value `u` at `EJECTA_TOP·u^EJECTA_GAMMA`, so the
-/// filaments' bodies sit at ≤ 130 and only the brightest knots reach the top.
-const EJECTA_TOP: f64 = 250.0;
-const EJECTA_GAMMA: f64 = 2.0;
-/// Ejecta at or below this level are dim `Hot` bodies; only the brighter
-/// knots and fingertips take their element's colour (critic round 2).
-const BODY_TOP: u8 = 110;
-/// The young remnant's exposure lift (×(1 + `EARLY_LIFT`) at the start), fading out over
-/// `EARLY_SPAN` model seconds.
-const EARLY_LIFT: f64 = 2.5;
-const EARLY_SPAN: f64 = 6.0;
-/// Exposure before the tone, so the brightest knots reach the top.
-const EJECTA_GAIN: f32 = 1.8;
-
-/// The ejecta's contrast curve by toned level, built once (no `powf` per pixel).
-fn ejecta_curve() -> &'static [u8; 256] {
-    static CURVE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
-    CURVE.get_or_init(|| {
-        std::array::from_fn(|i| ink::level(EJECTA_TOP * (i as f64 / 255.0).powf(EJECTA_GAMMA)))
-    })
-}
-/// Element colours in M11's semantic roles (ADR-0018; false colour, as Chandra's
-/// composites): the forward shock a faint blue line, silicon/sulfur yellow, iron red,
-/// oxygen cyan, each one flat level on the knots and fingertips.
-const RIM: Ink = Ink::new(Role::Cold, 70);
-const SILICON: Ink = Ink::new(Role::Sun, 210);
-const IRON: Ink = Ink::new(Role::Hot, 220);
-const OXYGEN: Ink = Ink::new(Role::Wave, 200);
-/// The filaments' bodies: two flat dim orange steps (shocked gas).
-const BODY: [Ink; 2] = [Ink::new(Role::Hot, 0), Ink::new(Role::Hot, 45)];
-/// The central compact object, and the explosion's white heart.
-const COMPACT: Ink = Ink::new(Role::Star, 200);
-const FLASH: Ink = Ink::new(Role::Star, 255);
-
-/// Ink of a remnant pixel from the shock's level `l_rim` and the ejecta's curve level
-/// `l_ej` (0–255): black below the faintest step, the shock where it outshines the
-/// ejecta, dim orange filament bodies, and the element's colour on the knots.
-fn ejecta_ink(l_rim: u8, l_ej: u8, element: Element) -> Ink {
-    if f64::from(l_rim.max(l_ej)) < ink::MIN_VISIBLE_LEVEL {
-        Ink::BLANK
-    } else if l_rim >= l_ej {
-        RIM
-    } else if l_ej <= BODY_TOP {
-        BODY[usize::from(l_ej >= 55)]
-    } else {
-        match element {
-            Element::Iron => IRON,
-            Element::Oxygen => OXYGEN,
-            Element::Silicon => SILICON,
-        }
-    }
-}
-
-/// Which element dominates a patch of ejecta.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Element {
-    Silicon,
-    Iron,
-    Oxygen,
-}
-/// Ejecta knots (SNR-A5), the share rich in iron, and their afterglow.
-pub(crate) const KNOTS: usize = 1500;
+/// Filaments (M16, SNR-A8): the emitting shell starts at max(`R_r`, `FIL_INNER`·`R_c0`),
+/// `R_c0 = CONTACT·R_f` the unperturbed contact, so fingers are long and the gaps between
+/// them short stubs; one filament per `FIL_SPACING` dots of that inner edge's
+/// circumference, at most `FIL_MAX`, along the golden-angle sequence.
+const FIL_INNER: f64 = 0.5;
+const FIL_SPACING: f64 = 2.0;
+pub(crate) const FIL_MAX: usize = 400;
+/// Golden-angle fraction: any prefix of `frac(i·φ)` is evenly spread round the circle.
+const GOLDEN: f64 = 0.618_033_988_749_895;
+/// Sideways wiggle of a filament (dots), at most, growing from 0 at its root.
+const WIGGLE: f64 = 2.5;
+/// The inner share of a filament that is freshly shocked, hot ejecta (SNR-A9).
+const HOT_SHARE: f64 = 0.35;
+/// Segment length along a filament (dots).
+const SEG: f64 = 2.0;
+/// Ejecta knots (SNR-A5) and their afterglow.
+pub(crate) const KNOTS: usize = 600;
 const KNOT_TAU: f64 = 1.5;
 const KNOT_FLOOR: f64 = 0.25;
-/// Iron-rich sector of the shell (radians) and its half-width.
-const IRON_AT: f64 = 2.4;
-const IRON_HALF: f64 = 0.7;
+/// Sparks (SNR-A10): drawn while a knot's brightness is at least `SPARK_MIN`, white while
+/// at least `SPARK_WHITE`, with a radial trail of the last `SPARK_TRAIL` seconds.
+const SPARK_MIN: f64 = 0.45;
+const SPARK_WHITE: f64 = 0.75;
+pub(crate) const SPARK_TRAIL: f64 = 1.2;
+
+/// Inks (M16): temperature along the filaments, a faint blue blast wave, white sparks.
+pub(crate) const SHOCK: Ink = Ink::new(Role::Cold, 110);
+pub(crate) const HOT_EJECTA: Ink = Ink::new(Role::Sun, 220);
+pub(crate) const FINGER: Ink = Ink::new(Role::Hot, 190);
+pub(crate) const STUB: Ink = Ink::new(Role::Hot, 150);
+const SPARK: Ink = Ink::new(Role::Star, 255);
+/// The central compact object, and the explosion's white heart.
+const COMPACT: Ink = Ink::new(Role::Star, 200);
+pub(crate) const FLASH: Ink = Ink::new(Role::Star, 255);
+const FLASH_RING: Ink = Ink::new(Role::Sun, 220);
 
 /// Forward-shock radius in model units at model time `t` (SNR-A1): log slope `4/7`
 /// early, `2/5` late.
@@ -167,97 +124,18 @@ pub(crate) fn contact_frac(p: f64) -> f64 {
     CONTACT * (1.0 + FINGER_OUT * out * out - FINGER_IN * inn)
 }
 
-/// Projected path length through a shell between radii `inner < outer` at impact
-/// parameter `rho`, the limb-brightened emission of a thin shell.
-fn shell_path(rho: f64, inner: f64, outer: f64) -> f64 {
-    if rho >= outer {
-        return 0.0;
-    }
-    let o = (outer * outer - rho * rho).sqrt();
-    let i = if rho < inner {
-        (inner * inner - rho * rho).sqrt()
-    } else {
-        0.0
-    };
-    o - i
-}
-
-/// Blur `buf` (`w × h`, row-major) in place with the separable 3 × 3 binomial kernel
-/// `[1 2 1]/4 ⊗ [1 2 1]/4`, edges clamped; `rows` is scratch for two rows (`2·w`), so the
-/// blur costs no frame-sized buffer (TEST-R7).
-fn blur121(buf: &mut [f32], rows: &mut [f32], w: usize, h: usize) {
-    if w == 0 || h == 0 || buf.len() < w * h || rows.len() < 2 * w {
-        return;
-    }
-    let (prev, cur) = rows.split_at_mut(w);
-    for y in 0..h {
-        let row = &mut buf[y * w..(y + 1) * w];
-        cur[..w].copy_from_slice(row);
-        for x in 0..w {
-            row[x] = 0.25 * (cur[x.saturating_sub(1)] + cur[(x + 1).min(w - 1)]) + 0.5 * cur[x];
-        }
-    }
-    // Vertical: `prev` holds the row above as it was before this pass.
-    prev.copy_from_slice(&buf[..w]);
-    for y in 0..h {
-        cur[..w].copy_from_slice(&buf[y * w..(y + 1) * w]);
-        let down = (y + 1).min(h - 1) * w;
-        for x in 0..w {
-            let below = if y + 1 < h { buf[down + x] } else { cur[x] };
-            buf[y * w + x] = 0.25 * (prev[x] + below) + 0.5 * cur[x];
-        }
-        prev.copy_from_slice(&cur[..w]);
-    }
-}
-
-/// Pack a rim strength in `[0, 1]` (6 bits) and the dominant element (2 bits).
-fn pack(rim: f32, element: Element) -> u8 {
-    let e = match element {
-        Element::Silicon => 0,
-        Element::Iron => 1,
-        Element::Oxygen => 2,
-    };
-    ((rim.clamp(0.0, 1.0) * 63.0).round() as u8) << 2 | e
-}
-
-/// The inverse of [`pack`].
-fn unpack(v: u8) -> (f32, Element) {
-    let element = match v & 3 {
-        1 => Element::Iron,
-        2 => Element::Oxygen,
-        _ => Element::Silicon,
-    };
-    (f32::from(v >> 2) / 63.0, element)
-}
-
-/// Bilinear sample of the `(clump, iron)` texture at comoving position `(u, v)` (`R_f`).
-fn sample_noise(tex: &[(f32, f32)], u: f64, v: f64) -> (f64, f64) {
-    if tex.len() < NOISE * NOISE {
-        return (0.5, 0.0);
-    }
-    let scale = (NOISE - 1) as f64 / (2.0 * NOISE_SPAN);
-    let x = ((u + NOISE_SPAN) * scale).clamp(0.0, (NOISE - 2) as f64);
-    let y = ((v + NOISE_SPAN) * scale).clamp(0.0, (NOISE - 2) as f64);
-    let (i, j) = (x as usize, y as usize);
-    let (fx, fy) = (x - i as f64, y - j as f64);
-    let at = |i: usize, j: usize| tex[j * NOISE + i];
-    let mix = |a: f32, b: f32, t: f64| f64::from(a) + (f64::from(b) - f64::from(a)) * t;
-    let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1));
-    let top = (mix(a.0, b.0, fx), mix(a.1, b.1, fx));
-    let bottom = (mix(c.0, d.0, fx), mix(c.1, d.1, fx));
-    (
-        top.0 + (bottom.0 - top.0) * fy,
-        top.1 + (bottom.1 - top.1) * fy,
-    )
+/// The blast wave's early growth from the flash (a share of `R_f`, 0 → 1 over 1.2 s).
+fn grow(tau: f64) -> f64 {
+    ease::out_quad(tau / 1.2)
 }
 
 /// A knot of ejecta: homologous speed (its radius in `R_f` at the end of the expansion),
-/// direction, whether iron-rich, and when the reverse shock lit it (loop s).
+/// direction, and when the reverse shock lit it (loop s).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Knot {
     u: f64,
+    /// `(sin, cos)` of its direction.
     dir: (f64, f64),
-    iron: bool,
     lit: Option<f64>,
     /// Angle bin of `dir` (the remnant's shape factor there).
     bin: u16,
@@ -272,6 +150,14 @@ impl Knot {
         self.u * (t / t_end) * r_end / forward_shock(t)
     }
 
+    /// Radius in units of the end radius `R_END·half` at loop time `tau` (≤ `EXPAND`),
+    /// before the shape factor: `frac · R_f`, which is `u·t/t_end` (homologous), times
+    /// the early growth the blast wave shares.
+    fn reach(&self, tau: f64) -> f64 {
+        let tau = tau.clamp(0.0, EXPAND);
+        self.u * (T0 + tau) / (T0 + EXPAND) * grow(tau)
+    }
+
     /// Brightness at loop time `tau`: 0 until shocked, then a flare fading to a floor
     /// (non-increasing, SNR-A3).
     fn brightness(&self, tau: f64) -> f64 {
@@ -282,6 +168,19 @@ impl Knot {
     }
 }
 
+/// One filament of the shell: its direction and the shape of its sideways wiggle.
+#[derive(Debug, Clone, Copy, Default)]
+struct Filament {
+    /// `(sin, cos)` of its direction and its angle bin.
+    dir: (f64, f64),
+    bin: u16,
+    /// Wiggle: phases of two sine terms and the share of `WIGGLE` it reaches.
+    phase: (f64, f64),
+    amp: f64,
+    /// Its fingertip short of the contact by this share (0–0.2), so tips are ragged.
+    short: f64,
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 struct Mode {
     k: u32,
@@ -289,10 +188,19 @@ struct Mode {
     weight: f64,
 }
 
+/// The shell's radii (dots) at an angle bin.
+#[derive(Debug, Clone, Copy)]
+struct Radii {
+    /// Blast wave, contact, emitting shell's inner edge.
+    rf: f64,
+    rc: f64,
+    inner: f64,
+}
+
 #[derive(Debug, Default)]
 pub struct SupernovaRemnant {
     seeded: bool,
-    /// Loop time and completed loops.
+    /// Loop time.
     tau: f64,
     modes: Vec<Mode>,
     /// `cos(kθ)` and `sin(kθ)` per mode per angle bin.
@@ -304,23 +212,15 @@ pub struct SupernovaRemnant {
     /// modes (phase, amplitude, drift).
     wobble: Vec<f32>,
     wob_modes: [(f64, f64, f64); 3],
-    /// Salt of the ejecta's streak texture.
-    salt: u64,
-    clumps: Vec<(f32, f32)>,
+    filaments: Vec<Filament>,
     knots: ParticlePool<Knot>,
-    /// Screen centre, half-height (pixels), and per pixel: radius and angle bin.
+    /// Screen centre and half-height, in dots.
     centre: (f64, f64),
     half: f64,
-    angle: Vec<u16>,
-    knot_glow: Glow,
-    iron_glow: Glow,
-    tone_ejecta: Tone,
-    /// Per pixel: the rim's strength and the dominant element, packed (the ejecta field
-    /// itself is built in `knot_glow`'s buffer); two rows of blur scratch.
-    aux: Vec<u8>,
-    rows: Vec<f32>,
-    pixels: Pixels,
-    stars: Vec<(i32, i32, u8)>,
+    stars: Vec<(i32, i32, Ink)>,
+    /// The braille lattice; a cell so `prepare` can draw into it while reading the
+    /// rest of `self` (no placeholder lattice allocated per frame, GEN-R11).
+    dots: RefCell<Dots>,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -346,8 +246,6 @@ impl SupernovaRemnant {
             }
         }
         self.finger = vec![0.0; ANGLES];
-        let salt: u64 = ctx.rng.random();
-        self.salt = salt;
         // Low-order modes of the remnant's shape (m = 2 dominant: a lopsided shell).
         self.wob_modes = std::array::from_fn(|k| {
             (
@@ -358,39 +256,46 @@ impl SupernovaRemnant {
         });
         self.wobble = vec![0.0; ANGLES];
         self.update_wobble();
-        self.clumps = (0..NOISE * NOISE)
-            .map(|i| {
-                let (x, y) = ((i % NOISE) as f64, (i / NOISE) as f64);
-                let oxygen = value_noise(salt, x, y, 8.0);
-                let iron = value_noise(salt ^ 0x51ed, x, y, 11.0);
-                (oxygen as f32, iron as f32)
-            })
-            .collect();
+        self.filaments = vec![Filament::default(); FIL_MAX];
         self.knots = ParticlePool::with_capacity(KNOTS);
-        self.tone_ejecta = Tone::asinh(0.25, 2.6);
-        self.tau = ctx.rng.random_range(1.0..1.3);
+        self.tau = ctx.rng.random_range(5.2..5.6);
         self.explode(ctx);
         self.light_knots();
     }
 
-    /// A new supernova: fresh knots (all dark, inside the reverse shock).
+    /// A new supernova: fresh knots (all dark, inside the reverse shock), new finger
+    /// phases and a new set of filaments.
     fn explode(&mut self, ctx: &mut Ctx) {
         self.knots.clear();
         for _ in 0..KNOTS {
             let u = ctx.rng.random_range(0.5..0.97);
             let a = ctx.rng.random_range(0.0..TAU);
-            let near_iron = sciart_core::geom::wrap_angle(a - IRON_AT).abs() < IRON_HALF;
-            let iron = ctx.rng.random_bool(if near_iron { 0.75 } else { 0.0 });
             self.knots.spawn(Knot {
                 u,
                 dir: a.sin_cos_det(),
-                iron,
                 lit: None,
-                bin: ((a / TAU * ANGLES as f64) as usize % ANGLES) as u16,
+                bin: bin_of(a),
             });
         }
         for m in &mut self.modes {
             m.phase = ctx.rng.random_range(0.0..TAU);
+        }
+        let offset = ctx.rng.random_range(0.0..1.0);
+        for (i, f) in self.filaments.iter_mut().enumerate() {
+            // Golden-angle order, so every prefix is evenly spread (SNR-A8); a little
+            // jitter keeps the spacing from looking machined.
+            let a = TAU
+                * ((i as f64 * GOLDEN + offset).fract() + ctx.rng.random_range(-0.2..0.2) / 400.0);
+            *f = Filament {
+                dir: a.sin_cos_det(),
+                bin: bin_of(a),
+                phase: (
+                    ctx.rng.random_range(0.0..TAU),
+                    ctx.rng.random_range(0.0..TAU),
+                ),
+                amp: ctx.rng.random_range(0.3..1.0),
+                short: ctx.rng.random_range(0.0..0.2),
+            };
         }
     }
 
@@ -398,11 +303,10 @@ impl SupernovaRemnant {
         forward_shock(T0 + EXPAND)
     }
 
-    /// Forward-shock radius in pixels now.
-    fn rf_px(&self) -> f64 {
+    /// Forward-shock radius in dots now (before the shape factor).
+    fn rf_dots(&self) -> f64 {
         let tau = self.tau.min(EXPAND);
-        let grow = ease::out_quad(self.tau / 1.2);
-        R_END * self.half * forward_shock(T0 + tau) / self.r_end() * grow
+        R_END * self.half * forward_shock(T0 + tau) / self.r_end() * grow(self.tau)
     }
 
     /// Mark knots that the reverse shock has reached by `tau`.
@@ -464,158 +368,172 @@ impl SupernovaRemnant {
         1.0 - ease::smoothstep((self.tau - EXPAND) / FADE)
     }
 
-    fn raster(&mut self) {
-        self.update_fingers();
-        self.update_wobble();
-        let tau = self.tau.min(EXPAND);
-        let rf = self.rf_px();
-        let rr = reverse_frac(tau) * rf;
-        let env = self.envelope();
-        let r_end = self.r_end();
-        // Knots into their glows, each with a short tail pointing back to the centre.
-        self.knot_glow.clear();
-        self.iron_glow.clear();
-        for k in self.knots.iter() {
-            let b = k.brightness(self.tau) as f32;
-            if b <= 0.0 {
+    /// The shell's radii (dots) at angle bin `bin`, for the blast wave `rf` (dots).
+    fn radii(&self, bin: usize, rf: f64) -> Radii {
+        let sh = Self::shape(&self.wobble, bin);
+        let rfa = rf * sh;
+        let p = f64::from(self.finger.get(bin).copied().unwrap_or(0.0));
+        let rr = reverse_frac(self.tau.min(EXPAND)) * rfa;
+        Radii {
+            rf: rfa,
+            rc: contact_frac(p) * rfa,
+            inner: rr.max(FIL_INNER * CONTACT * rfa),
+        }
+    }
+
+    /// Filaments drawn now: one per `FIL_SPACING` dots of the shell's inner edge, scaled
+    /// by the fade envelope (SNR-A8).
+    fn filament_count(&self) -> usize {
+        let rf = self.rf_dots();
+        let inner = (reverse_frac(self.tau.min(EXPAND))).max(FIL_INNER * CONTACT) * rf;
+        let n = TAU * inner / FIL_SPACING * self.envelope();
+        (n.max(0.0) as usize).min(FIL_MAX).min(self.filaments.len())
+    }
+
+    /// Every filament segment `(from, to, ink)` in dots, in drawing order: each filament a
+    /// wiggling radial thread from the shell's inner edge to its fingertip, `Sun` on its
+    /// inner, freshly shocked share and `Hot` beyond (brighter in the fingers).
+    fn filament_segments(&self, mut f: impl FnMut((f64, f64), (f64, f64), Ink)) {
+        let rf = self.rf_dots();
+        if rf <= 0.0 {
+            return;
+        }
+        let c = self.centre;
+        for fil in &self.filaments[..self.filament_count()] {
+            let bin = usize::from(fil.bin);
+            let r = self.radii(bin, rf);
+            let tip = r.rc * (1.0 - fil.short);
+            let len = tip - r.inner;
+            if len <= 0.0 {
                 continue;
             }
-            let r = k.frac(tau, r_end) * rf * Self::shape(&self.wobble, usize::from(k.bin));
-            let (s, c) = k.dir;
-            let (x, y) = (self.centre.0 + r * c - 0.5, self.centre.1 - r * s - 0.5);
-            let glow = if k.iron {
-                &mut self.iron_glow
-            } else {
-                &mut self.knot_glow
+            let in_finger = self.finger.get(bin).is_some_and(|&p| p > 0.0);
+            let outer_ink = if in_finger { FINGER } else { STUB };
+            let (s, co) = fil.dir;
+            // Radial unit (screen y down) and its perpendicular.
+            let (ux, uy) = (co, -s);
+            let (vx, vy) = (s, co);
+            let wig = (WIGGLE * fil.amp).min(0.15 * len);
+            let at = |q: f64| {
+                let rad = r.inner + q * len;
+                let side = wig
+                    * q
+                    * (0.65 * (TAU * 1.1 * q + fil.phase.0).sin_det()
+                        + 0.35 * (TAU * 2.3 * q + fil.phase.1).sin_det());
+                (c.0 + rad * ux + side * vx, c.1 + rad * uy + side * vy)
             };
-            glow.splat(2.0 * x + 1.0, 2.0 * y + 1.0, &KNOT_BLOB, 0.45 * b);
-        }
-        // Pass 1, per pixel: the blast wave's rim, the ejecta's emission (knots added in)
-        // and which element dominates.
-        let (angle, centre) = (&self.angle, self.centre);
-        let (finger, clumps, wobble, salt) = (&self.finger, &self.clumps, &self.wobble, self.salt);
-        // The ejecta field is written over the knot glow in place (each pixel reads its
-        // knot light before overwriting it), saving a frame-sized buffer.
-        let (kg, ig) = (self.knot_glow.values_mut(), self.iron_glow.values());
-        let ps = self.pixels.pixel_size();
-        let (width, height) = (usize::from(ps.width()), usize::from(ps.height()));
-        for (i, &a) in angle.iter().enumerate() {
-            let (x, y) = ((i % width) as f64, (i / width) as f64);
-            let (dx, dy) = (x + 0.5 - centre.0, centre.1 - y - 0.5);
-            let r = dx.hypot(dy);
-            let a = usize::from(a);
-            let p = f64::from(finger[a]);
-            // The whole remnant is out of round at low order where the surrounding gas
-            // is lumpy: R_f, R_c and R_r all scale with the local shape factor.
-            let sh = Self::shape(wobble, a);
-            let rfa = rf * sh;
-            let rc = contact_frac(p) * rfa;
-            // Blast wave: a one-pixel line at R_f(θ) (antialiased inward), fading softly
-            // outward over a couple of pixels.
-            let d = r - rfa;
-            // M14: the line only, antialiased inward (no outward fade band).
-            let rim = if !(-1.0..=0.0).contains(&d) || rf <= 0.0 {
-                0.0
-            } else {
-                (1.0 + d) as f32
-            };
-            // Shocked ejecta between the reverse shock and the contact: densest near the
-            // contact (so the shell reads as a ring, not a disc), clumpy in comoving
-            // coordinates, brightest in the fingers.
-            // Inside 0.45 R_c the shell is hollow (v = 0): skip the noise there.
-            let (ej, element) = if r < rc && r > HOLLOW * rc && rf > 0.0 {
-                let inner = (rr * sh).max(EJECTA_INNER * rc);
-                let peak = (rc * rc - inner * inner).sqrt().max(1e-9);
-                let path = shell_path(r, inner, rc) / peak;
-                // Radial filaments: noise fine in angle, slow along the radius, so the
-                // ejecta streak outward like the fingers they are.
-                let (ux, uy) = (dx / r.max(1e-9), dy / r.max(1e-9));
-                let q = r / rfa;
-                let streak = value_noise(salt, STREAK * ux + 1.3 * q, STREAK * uy - 1.3 * q, 1.0);
-                let texture = 0.3 + 1.1 * streak * streak;
-                let finger_boost = (0.55 + 2.0 * p.max(0.0) / 0.25).min(2.4);
-                let hollow = ease::smoothstep((q / (rc / rfa) - HOLLOW) / 0.4);
-                let v = hollow * path * path * texture * finger_boost;
-                // Element map: broad comoving patches (Chandra false colour).
-                let (o_rich, fe_rich) = sample_noise(clumps, dx / rf, dy / rf);
-                let th = a as f64 / ANGLES as f64 * TAU;
-                let sector = 1.0
-                    - ease::smoothstep(
-                        (sciart_core::geom::wrap_angle(th - IRON_AT).abs() - IRON_HALF * 0.5)
-                            / IRON_HALF,
-                    );
-                let element = if fe_rich * (0.4 + 0.9 * sector) > 0.6 {
-                    Element::Iron
-                } else if o_rich > 0.6 {
-                    Element::Oxygen
-                } else {
-                    Element::Silicon
-                };
-                (v, element)
-            } else {
-                (0.0, Element::Silicon)
-            };
-            let iv = ig.get(i).copied().unwrap_or(0.0);
-            let Some(slot) = kg.get_mut(i) else { continue };
-            // Knots brighten the filaments they sit in; the colour stays the smooth
-            // element map's (a per-knot tint would speckle).
-            *slot = ej as f32 + KNOT_WEIGHT * (*slot + iv);
-            if let Some(a) = self.aux.get_mut(i) {
-                *a = pack(rim, element);
-            }
-        }
-        // Pass 2: a 3 × 3 binomial blur of the ejecta, so the R–T fingers read as smooth
-        // filaments, not pixel grain.
-        blur121(self.knot_glow.values_mut(), &mut self.rows, width, height);
-        // Pass 3: tone-map into inks.
-        let t_ej = &self.tone_ejecta;
-        let (aux, ej_buf) = (&self.aux, self.knot_glow.values());
-        let env32 = env as f32;
-        // The young remnant is small and faint: a lift that fades out over its first
-        // seconds keeps it legible, like a camera opening up.
-        let early =
-            (1.0 + EARLY_LIFT * (1.0 - ease::smoothstep((self.tau - T0) / EARLY_SPAN))) as f32;
-        self.pixels.shade(|x, y| {
-            let i = y as usize * width + x as usize;
-            let (Some(&packed), Some(&ej)) = (aux.get(i), ej_buf.get(i)) else {
-                return Ink::BLANK;
-            };
-            let (rim, element) = unpack(packed);
-            let l_rim = ink::level((f64::from(rim * env32 * early)).min(1.0) * f64::from(RIM_MAX));
-            let l_ej = ejecta_curve()[usize::from(t_ej.level(EJECTA_GAIN * early * ej * env32))];
-            ejecta_ink(l_rim, l_ej, element)
-        });
-        // Background stars, then the central compact object and the flash.
-        for &(x, y, l) in &self.stars {
-            if self.pixels.get(x, y) == Some(Ink::BLANK) {
-                let l = if l > 120 { 120 } else { 40 };
-                self.pixels.set(x, y, Ink::new(Role::Star, l));
-            }
-        }
-        let (cx, cy) = (self.centre.0.floor() as i32, self.centre.1.floor() as i32);
-        self.pixels.set(cx, cy, COMPACT);
-        let flash = 1.0 - ease::smoothstep(self.tau / 1.5);
-        if flash > 0.0 {
-            let radius = 1.0 + 0.07 * self.half * flash;
-            let (pixels, self_c) = (&mut self.pixels, self.centre);
-            disc_pixels(self.centre, radius, |x, y, cover| {
-                let d =
-                    (f64::from(x) + 0.5 - self_c.0).hypot(f64::from(y) + 0.5 - self_c.1) / radius;
-                let v = 255.0 * flash * cover * (1.0 - d.min(1.0)).powi(2);
-                // The flash in flat rings: white, yellow, orange.
-                let ink = match v {
-                    v if v >= 150.0 => Ink::new(Role::Star, 230),
-                    v if v >= 60.0 => Ink::new(Role::Sun, 220),
-                    v if v >= ink::MIN_VISIBLE_LEVEL => Ink::new(Role::Hot, 150),
-                    _ => return,
-                };
-                pixels.set(x, y, ink);
-            });
-            if flash > 0.3 {
-                self.pixels.set(cx, cy, FLASH);
+            let n = (len / SEG).ceil().max(1.0) as usize;
+            let mut prev = at(0.0);
+            for k in 1..=n {
+                let q = k as f64 / n as f64;
+                let next = at(q);
+                let mid = (k as f64 - 0.5) / n as f64;
+                f(
+                    prev,
+                    next,
+                    if mid < HOT_SHARE {
+                        HOT_EJECTA
+                    } else {
+                        outer_ink
+                    },
+                );
+                prev = next;
             }
         }
     }
+
+    /// Every spark (a freshly lit knot) as `(tail, head, head ink)` in dots (SNR-A10).
+    fn sparks(&self, mut f: impl FnMut((f64, f64), (f64, f64), Ink)) {
+        let scale = R_END * self.half;
+        let tau = self.tau.min(EXPAND);
+        let env = self.envelope();
+        for k in self.knots.iter() {
+            let b = k.brightness(self.tau) * env;
+            if b < SPARK_MIN {
+                continue;
+            }
+            let sh = Self::shape(&self.wobble, usize::from(k.bin)) * scale;
+            let (head, tail) = (k.reach(tau) * sh, k.reach(tau - SPARK_TRAIL) * sh);
+            let (s, c) = k.dir;
+            let p = |r: f64| (self.centre.0 + r * c, self.centre.1 - r * s);
+            f(
+                p(tail),
+                p(head),
+                if b >= SPARK_WHITE { SPARK } else { HOT_EJECTA },
+            );
+        }
+    }
+
+    fn raster(&mut self) {
+        self.update_fingers();
+        self.update_wobble();
+        let mut dots = self.dots.borrow_mut();
+        dots.clear();
+        // Background stars first: everything else outshines them.
+        for &(x, y, ink) in &self.stars {
+            dots.set(x, y, ink);
+        }
+        self.shock(&mut dots);
+        self.filament_segments(|a, b, ink| dots.line(a.0, a.1, b.0, b.1, ink));
+        self.sparks(|tail, head, ink| {
+            dots.line(tail.0, tail.1, head.0, head.1, HOT_EJECTA);
+            dots.plot(head.0, head.1, ink);
+        });
+        self.centre_star(&mut dots);
+        drop(dots);
+    }
+
+    /// The blast wave: a dotted circle one dot thick at `R_f(θ)` (SNR-A4), thinning out
+    /// with the fade envelope.
+    fn shock(&self, dots: &mut Dots) {
+        let rf = self.rf_dots();
+        if rf < 1.0 {
+            return;
+        }
+        let env = self.envelope();
+        let n = (TAU * rf * (1.0 + RIM_WOBBLE)).ceil() as usize;
+        for k in (0..n).step_by(2) {
+            if hash01(cell_key(k as i32, 17)) >= env {
+                continue;
+            }
+            let a = TAU * k as f64 / n as f64;
+            let r = self.radii(usize::from(bin_of(a)), rf).rf;
+            let (s, c) = a.sin_cos_det();
+            dots.plot(self.centre.0 + r * c, self.centre.1 - r * s, SHOCK);
+        }
+    }
+
+    /// The compact object, and in the first 1.5 s the flash: a `Sun` ring and `Star` arms
+    /// that shrink as it fades round a white heart (SNR-A5).
+    fn centre_star(&self, dots: &mut Dots) {
+        let (cx, cy) = (self.centre.0.round() as i32, self.centre.1.round() as i32);
+        let flash = 1.0 - ease::smoothstep(self.tau / 1.5);
+        if flash > 0.0 {
+            let ring = 1.5 + 0.06 * self.half * flash;
+            let r = ring.ceil() as i32 + 1;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let d = f64::from(dx).hypot(f64::from(dy));
+                    // Off the axes, so the ring's cells are not the arms'.
+                    if dx != 0 && dy != 0 && (d - ring).abs() <= 0.5 {
+                        dots.set(cx + dx, cy + dy, FLASH_RING);
+                    }
+                }
+            }
+            let arm = (ring + 3.0 * flash).round() as i32;
+            for a in 1..=arm {
+                for (dx, dy) in [(a, 0), (-a, 0), (0, a), (0, -a)] {
+                    dots.set(cx + dx, cy + dy, FLASH);
+                }
+            }
+        }
+        dots.set(cx, cy, if flash > 0.3 { FLASH } else { COMPACT });
+    }
+}
+
+/// Angle bin of the angle `a` (radians, counter-clockwise from +x).
+fn bin_of(a: f64) -> u16 {
+    ((a / TAU).rem_euclid(1.0) * ANGLES as f64) as u16 % ANGLES as u16
 }
 
 impl Generator for SupernovaRemnant {
@@ -627,39 +545,22 @@ impl Generator for SupernovaRemnant {
         if !self.seeded {
             self.seed(ctx);
         }
-        self.pixels.resize(size);
-        self.knot_glow.resize(size);
-        self.iron_glow.resize(size);
-        let px = self.pixels.pixel_size();
-        let (w, h) = (f64::from(px.width()), f64::from(px.height()));
+        self.dots.get_mut().resize(size);
+        let ds = self.dots.get_mut().dot_size();
+        let (w, h) = (f64::from(ds.width()), f64::from(ds.height()));
         self.centre = (w / 2.0, h / 2.0);
         self.half = (h / 2.0).min(w / 2.0 / R_END * 0.95);
-        let n = usize::from(px.width()) * usize::from(px.height());
-        self.aux.clear();
-        self.aux.resize(n, 0);
-        self.rows.clear();
-        self.rows.resize(2 * usize::from(px.width()), 0.0);
-        self.angle.clear();
-        let n = usize::from(px.width()) * usize::from(px.height());
-        self.angle.reserve_exact(n);
-        for y in 0..px.height() {
-            for x in 0..px.width() {
-                let (dx, dy) = (
-                    f64::from(x) + 0.5 - self.centre.0,
-                    self.centre.1 - f64::from(y) - 0.5,
-                );
-                let a = (dy.atan2(dx) / TAU).rem_euclid(1.0);
-                self.angle
-                    .push(((a * ANGLES as f64) as usize % ANGLES) as u16);
-            }
-        }
         self.stars.clear();
         let n = size.area() / 200;
         for k in 0..n as i32 {
             let x = (hash01(cell_key(k, 3)) * w) as i32;
             let y = (hash01(cell_key(k, 7)) * h) as i32;
-            let l = 20 + (hash01(cell_key(k, 11)).powi(4) * 150.0) as u8;
-            self.stars.push((x, y, l));
+            let l = if hash01(cell_key(k, 11)) > 0.8 {
+                120
+            } else {
+                60
+            };
+            self.stars.push((x, y, Ink::new(Role::Star, l)));
         }
         self.dirty = true;
     }
@@ -681,8 +582,7 @@ impl Generator for SupernovaRemnant {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.borrow().blit(canvas);
     }
 }
 
@@ -698,9 +598,35 @@ mod tests {
         (g, ctx)
     }
 
+    fn run(g: &mut SupernovaRemnant, ctx: &mut Ctx, secs: f64) {
+        for _ in 0..(secs / SIM_DT).round() as usize {
+            g.update(SIM_DT, ctx);
+        }
+        g.prepare();
+    }
+
     fn log_slope(t: f64) -> f64 {
         let h = 1e-4 * t;
         (forward_shock(t + h).ln() - forward_shock(t - h).ln()) / ((t + h).ln() - (t - h).ln())
+    }
+
+    /// The filament dots alone, on a fresh lattice, with each dot's ink.
+    fn filament_dots(g: &SupernovaRemnant) -> (Dots, Vec<(i32, i32, Ink)>) {
+        let ds = g.dots.borrow().dot_size();
+        let mut dots = Dots::new(Size::new(ds.width() / 2, ds.height() / 4));
+        let mut list = Vec::new();
+        g.filament_segments(|a, b, ink| {
+            dots.line(a.0, a.1, b.0, b.1, ink);
+            for (x, y) in sciart_core::geom::line(
+                a.0.round() as i32,
+                a.1.round() as i32,
+                b.0.round() as i32,
+                b.1.round() as i32,
+            ) {
+                list.push((x, y, ink));
+            }
+        });
+        (dots, list)
     }
 
     #[test]
@@ -771,82 +697,69 @@ mod tests {
     }
 
     #[test]
-    fn snr_a4_rim_pixels_hug_the_blast_wave() {
+    fn snr_a4_shock_dots_hug_the_blast_wave() {
         let (mut g, mut ctx) = built(Size::new(200, 50));
-        for _ in 0..300 {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        let rf = g.rf_px();
-        let px = g.pixels.pixel_size();
-        let mut n = 0;
-        let w = usize::from(px.width());
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let ink = g.pixels.get(x, y).unwrap();
-                // The shock's ink is its own flat blue; count the pixels the rim
-                // field owns.
-                let (rim, _) = unpack(g.aux[y as usize * w + x as usize]);
-                if rim > 0.0 && ink == RIM {
-                    let (dx, dy) = (
-                        f64::from(x) + 0.5 - g.centre.0,
-                        g.centre.1 - f64::from(y) - 0.5,
-                    );
-                    let r = dx.hypot(dy);
-                    let tol = 3.0 + RIM_WOBBLE * rf;
-                    assert!((r - rf).abs() <= tol, "rim pixel at {r} vs R_f {rf}");
+        for secs in [2.0, 6.0, 10.0] {
+            run(&mut g, &mut ctx, secs);
+            let rf = g.rf_dots();
+            let mut dots = Dots::new(Size::new(200, 50));
+            g.shock(&mut dots);
+            let ds = dots.dot_size();
+            let mut n = 0;
+            for y in 0..i32::from(ds.height()) {
+                for x in 0..i32::from(ds.width()) {
+                    if !dots.is_lit(x, y) {
+                        continue;
+                    }
                     n += 1;
+                    let (dx, dy) = (f64::from(x) - g.centre.0, g.centre.1 - f64::from(y));
+                    let a = dy.atan2(dx);
+                    let want = rf * SupernovaRemnant::shape(&g.wobble, usize::from(bin_of(a)));
+                    let r = dx.hypot(dy);
+                    assert!(
+                        (r - want).abs() <= 1.5,
+                        "shock dot at {r:.1} vs R_f {want:.1}"
+                    );
                 }
             }
+            let share = f64::from(n) / (TAU * rf);
+            assert!(
+                share >= 0.4,
+                "shock drawn on {share:.2} of its circumference"
+            );
         }
-        assert!(n > 50, "rim drawn ({n} px)");
     }
 
     #[test]
-    fn snr_a7_dim_bodies_coloured_knots_and_a_legible_start() {
-        // The ejecta's bodies are dim `Hot` steps (≤ `BODY_TOP`); only
-        // brighter knots and fingertips take an element colour. And the young remnant
-        // reads from the first second.
-        let (mut g, mut ctx) = built(Size::new(200, 50));
-        let lit = |g: &SupernovaRemnant| {
-            let px = g.pixels.pixel_size();
-            (0..i32::from(px.height()))
-                .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| {
-                    g.pixels
-                        .get(x, y)
-                        .is_some_and(|i| i.role != Role::Background && i.level >= 60)
-                })
-                .count()
-        };
-        for _ in 0..60 {
+    fn snr_a5_pool_is_capped_and_the_loop_restarts_with_a_flash() {
+        let size = Size::new(80, 24);
+        let (mut g, mut ctx) = built(size);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let mut flashed = false;
+        let mut prev_tau = g.tau;
+        for _ in 0..(2.5 * LOOP / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
-        }
-        g.prepare();
-        assert!(lit(&g) > 40, "{} bright pixels at 1 s", lit(&g));
-        for _ in 0..(20.0 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-        }
-        g.prepare();
-        let px = g.pixels.pixel_size();
-        let mut coloured = 0;
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let ink = g.pixels.get(x, y).unwrap();
-                // ADR-0018: dim bodies, flat element colours on the knots, nothing else.
-                if [SILICON, IRON, OXYGEN].contains(&ink) {
-                    coloured += 1;
-                } else {
-                    assert!(
-                        matches!(ink.role, Role::Background | Role::Star)
-                            || BODY.contains(&ink)
-                            || ink == RIM,
-                        "({x}, {y}): {ink:?}"
-                    );
-                }
+            g.prepare();
+            assert!(g.knots.len() <= KNOTS);
+            if g.tau < prev_tau {
+                // Just restarted: the centre cell is the flash's heart, every knot dark.
+                canvas.clear();
+                g.render(&mut canvas);
+                let (cx, cy) = (
+                    (g.centre.0.round() as i32) / Dots::CELL_W,
+                    (g.centre.1.round() as i32) / Dots::CELL_H,
+                );
+                assert_eq!(canvas.get(cx, cy).map(|c| c.ink), Some(FLASH));
+                assert!(
+                    g.knots
+                        .iter()
+                        .all(|k| k.lit.is_none() || k.lit == Some(g.tau))
+                );
+                flashed = true;
             }
+            prev_tau = g.tau;
         }
-        assert!(coloured > 0, "no coloured knots");
+        assert!(flashed);
     }
 
     #[test]
@@ -888,27 +801,147 @@ mod tests {
     }
 
     #[test]
-    fn snr_a5_pool_is_capped_and_the_loop_restarts_with_a_flash() {
-        let (mut g, mut ctx) = built(Size::new(80, 24));
-        let mut flashed = false;
-        let mut prev_tau = g.tau;
-        for _ in 0..(2.5 * LOOP / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-            assert!(g.knots.len() <= KNOTS);
-            if g.tau < prev_tau {
-                // Just restarted: the centre is a flash, every knot dark again.
-                let (cx, cy) = (g.centre.0.floor() as i32, g.centre.1.floor() as i32);
-                assert_eq!(g.pixels.get(cx, cy), Some(FLASH));
-                assert!(
-                    g.knots
-                        .iter()
-                        .all(|k| k.lit.is_none() || k.lit == Some(g.tau))
-                );
-                flashed = true;
+    fn snr_a7_legible_start_and_only_m16_braille_inks() {
+        let size = Size::new(200, 50);
+        let (mut g, mut ctx) = built(size);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let allowed = |ink: Ink| {
+            [SHOCK, HOT_EJECTA, FINGER, STUB, FLASH_RING].contains(&ink) || ink.role == Role::Star
+        };
+        let mut t = g.tau;
+        for (i, until) in [1.0, 5.0, 20.0, 37.0, 39.5].into_iter().enumerate() {
+            run(&mut g, &mut ctx, until - t);
+            t = until;
+            canvas.clear();
+            g.render(&mut canvas);
+            let mut lit = 0;
+            for y in 0..50 {
+                for x in 0..200 {
+                    let c = canvas.get(x, y).unwrap();
+                    if c.ch == ' ' {
+                        continue;
+                    }
+                    lit += 1;
+                    assert_eq!(c.bg, Ink::BLANK, "half block at {x},{y}");
+                    assert!(
+                        ('\u{2800}'..='\u{28ff}').contains(&c.ch),
+                        "{:?} at {x},{y}",
+                        c.ch
+                    );
+                    assert!(allowed(c.ink), "{:?} at {x},{y} t={until}", c.ink);
+                }
             }
-            prev_tau = g.tau;
+            if i == 0 {
+                assert!(lit > 60, "{lit} cells lit at 1 s");
+            }
         }
-        assert!(flashed);
+    }
+
+    #[test]
+    fn snr_a8_filaments_are_thin_radial_threads_that_follow_the_shell() {
+        let (mut g, mut ctx) = built(Size::new(200, 50));
+        g.tau = 3.0;
+        g.prepare();
+        let early = g.filament_count();
+        let (mut thin, mut total) = (0usize, 0usize);
+        let mut t = 3.0;
+        for until in [8.0, 15.0, 25.0, 30.0] {
+            run(&mut g, &mut ctx, until - t);
+            t = until;
+            g.update_fingers();
+            g.update_wobble();
+            let rf = g.rf_dots();
+            let (dots, list) = filament_dots(&g);
+            for &(x, y, _) in &list {
+                let (dx, dy) = (f64::from(x) - g.centre.0, f64::from(y) - g.centre.1);
+                let r = dx.hypot(dy).max(1e-9);
+                // Between the reverse shock and the blast wave (plus a dot of rounding).
+                let a = (-dy).atan2(dx);
+                let rad = g.radii(usize::from(bin_of(a)), rf);
+                let rr = reverse_frac(g.tau.min(EXPAND)) * rad.rf;
+                assert!(
+                    r >= rr - 2.5 - WIGGLE && r <= rad.rf + 1.0,
+                    "r {r:.1} rr {rr:.1} rf {:.1}",
+                    rad.rf
+                );
+                // Across the radial direction.
+                let (vx, vy) = (-dy / r, dx / r);
+                let across = (-2..=2)
+                    .filter(|&k| {
+                        let k = f64::from(k);
+                        dots.is_lit(
+                            (f64::from(x) + k * vx).round() as i32,
+                            (f64::from(y) + k * vy).round() as i32,
+                        )
+                    })
+                    .count();
+                thin += usize::from(across <= 3);
+                total += 1;
+            }
+        }
+        let share = thin as f64 / total as f64;
+        assert!(share >= 0.85, "thin share {share:.3}");
+        assert!(
+            g.filament_count() > early,
+            "{early} → {}",
+            g.filament_count()
+        );
+    }
+
+    #[test]
+    fn snr_a9_hot_freshly_shocked_ejecta_sit_inside_the_cooler_fingers() {
+        let (mut g, mut ctx) = built(Size::new(200, 50));
+        run(&mut g, &mut ctx, 15.0);
+        let rf = g.rf_dots();
+        let (_, list) = filament_dots(&g);
+        let (mut sun, mut hot) = ((0.0, 0), (0.0, 0));
+        for (x, y, ink) in list {
+            let r = (f64::from(x) - g.centre.0).hypot(f64::from(y) - g.centre.1) / rf;
+            if ink == HOT_EJECTA {
+                sun = (sun.0 + r, sun.1 + 1);
+            } else {
+                hot = (hot.0 + r, hot.1 + 1);
+            }
+        }
+        assert!(sun.1 > 50 && hot.1 > 50, "{sun:?} {hot:?}");
+        let (s, h) = (sun.0 / f64::from(sun.1), hot.0 / f64::from(hot.1));
+        assert!(s < h, "Sun at {s:.3} R_f, Hot at {h:.3}");
+    }
+
+    #[test]
+    fn snr_a10_spark_trails_are_radial_and_behind_the_head() {
+        let (mut g, mut ctx) = built(Size::new(200, 50));
+        let mut seen = 0;
+        let mut t = 0.0;
+        for until in [3.0, 10.0, 20.0, 30.0] {
+            run(&mut g, &mut ctx, until - t);
+            t = until;
+            let c = g.centre;
+            g.sparks(|tail, head, _| {
+                seen += 1;
+                let (rt, rh) = (
+                    (tail.0 - c.0).hypot(tail.1 - c.1),
+                    (head.0 - c.0).hypot(head.1 - c.1),
+                );
+                assert!(rh > rt, "head {rh} inside tail {rt}");
+                // Radial: the tail, the head and the centre are collinear.
+                let cross = (tail.0 - c.0) * (head.1 - c.1) - (tail.1 - c.1) * (head.0 - c.0);
+                assert!(
+                    cross.abs() <= 1e-6 * rh * rh.max(1.0),
+                    "not radial: {cross}"
+                );
+            });
+        }
+        assert!(seen > 20, "{seen} sparks");
+        // The trail is the distance coasted in SPARK_TRAIL.
+        let k = Knot {
+            u: 0.8,
+            dir: (0.0, 1.0),
+            lit: Some(0.0),
+            bin: 0,
+        };
+        let len = k.reach(20.0) - k.reach(20.0 - SPARK_TRAIL);
+        let v = 0.8 / (T0 + EXPAND);
+        assert!((len - v * SPARK_TRAIL).abs() < 1e-9, "{len}");
     }
 }

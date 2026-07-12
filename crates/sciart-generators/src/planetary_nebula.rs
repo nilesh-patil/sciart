@@ -1,28 +1,32 @@
-//! A planetary nebula like the Cat's Eye (SPEC-002 `planetary_nebula`).
+//! A planetary nebula like the Cat's Eye or NGC 6302 (SPEC-002 `planetary_nebula`).
 //!
-//! Act 1: the dying giant puffs off evenly spaced spherical shells (the AGB rings).
-//! Act 2: the exposed hot core's fast wind inflates a prolate bubble with a pinched
-//! waist inside the slow wind. Act 3: the core, now ~100 kK, ionises it: [O III] inside,
-//! [N II] at the rim and in the knots at the tips. Every shell is drawn as analytic
-//! limb-brightened emission (projected path length through a shell); lengths are in
-//! units of the half-height `H` (pixels on screen).
+//! Act 1: the dying giant's slow, dusty wind drifts out, densest round its equator.
+//! Act 2: the exposed hot core's fast wind inflates two lobes, an hourglass, sweeping the
+//! slow wind up. Act 3: the core, now ~100 kK, ionises the lobes: [O III] inside, [N II]
+//! at the tips and in the knots beyond them.
+//!
+//! M16 (GEN-R25, thread style): the lobes are the fast wind's streamlines, deflected toward
+//! the axis by the dense equatorial gas, drawn as braille threads whose dashes flow
+//! outward; colour along a thread is its ionisation. No shells, rings, fills or haze.
+//! Lengths are in units of the half-height `H` (dots on screen).
+
+use std::cell::RefCell;
+use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::ascii_ramp_cell;
-use sciart_core::rng::{cell_key, hash01, value_noise};
+use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "planetary_nebula",
     category: Category::DeepCosmos,
-    description: "A dying star's shells and the bipolar bubble its fast wind blows inside them",
+    description: "A dying star's slow wind and the bipolar lobes its fast wind blows through it",
     title: "Planetary nebula · winds collide",
-    captions: &[SHELLS, FAST_WIND, IONISED],
+    captions: &[SLOW_WIND, FAST_WIND, IONISED],
 };
 
-const SHELLS: &str = "shells";
+const SLOW_WIND: &str = "slow wind";
 const FAST_WIND: &str = "fast wind";
 const IONISED: &str = "ionised";
 
@@ -32,7 +36,7 @@ pub fn build() -> Box<dyn Generator> {
 
 /// Acts (s) and their indices.
 const ACTS: [(&str, f64); 4] = [
-    (SHELLS, 6.0),
+    (SLOW_WIND, 6.0),
     (FAST_WIND, 8.0),
     (IONISED, 26.0),
     ("fade", 5.0),
@@ -44,127 +48,109 @@ const T_WIND: f64 = 6.0;
 const T_IONISED: f64 = 14.0;
 const T_FADE: f64 = 40.0;
 const LOOP: f64 = 45.0;
-/// Rings already puffed off when the loop starts, so the first frame shows shells.
-const PRE_RINGS: f64 = 5.0;
-/// AGB rings: launch interval (s), count, expansion speed (H/s), relative thickness.
-pub(crate) const RING_EVERY: f64 = 2.2;
-pub(crate) const RINGS: usize = 9;
-pub(crate) const V_SHELL: f64 = 0.042;
-const RING_THICK: f64 = 2.2;
-/// Fast-wind bubble: equatorial radius at full size (H), growth time (s), prolateness
-/// `R(θ) = R_b (1 + P cos² θ)`, shell thickness (fraction of the radius).
-const BUBBLE_R: f64 = 0.36;
-const BUBBLE_GROW: f64 = 7.0;
-/// Slow further growth through the ionised act (share of the full radius, over s).
-const BUBBLE_CREEP: (f64, f64) = (0.25, 32.0);
-pub(crate) const PROLATE: f64 = 0.6;
-const BUBBLE_THICK: f64 = 0.1;
-/// The Cat's Eye's second, tilted inner bubble: size and tilt relative to the first.
-const INNER_SCALE: f64 = 0.62;
-const INNER_TILT: f64 = 0.75;
-/// Ionisation front: sweeps out to this multiple of the bubble radius over the act.
+/// Slow wind (PNE-A1): grains, their speed (H/s, ±20 %), the radius they coast to, the
+/// share launched near the equator and that spread (rad), and where they thin out.
+pub(crate) const DUST: usize = 480;
+pub(crate) const V_DUST: f64 = 0.045;
+const R_DUST: f64 = 0.95;
+const TORUS_SHARE: f64 = 0.7;
+const TORUS_SPREAD: f64 = 0.35;
+const DUST_THIN: (f64, f64) = (0.6, 0.35);
+/// Each grain trails 2 dots behind it, outward motion made visible.
+const DUST_TRAIL: f64 = 2.0;
+/// Lobes (PNE-A2): full length (H), the quick inflation and the slow creep after it
+/// (share of the full length, over s).
+const L_FULL: f64 = 0.85;
+const LOBE_GROW: f64 = 7.0;
+const LOBE_CREEP: (f64, f64) = (0.38, 32.0);
+/// Streamlines per lobe and side as `(p, F)`: the curve `r = F·L·|cos θ|^p`; the first
+/// is the lobe wall.
+const PETALS: [(f64, f64); 5] = [
+    (2.7, 1.0),
+    (3.3, 0.93),
+    (4.2, 0.86),
+    (5.5, 0.79),
+    (7.5, 0.72),
+];
+pub(crate) const WALL_POW: f64 = PETALS[0].0;
+/// The Cat's Eye's second, tilted pair of lobes: size, tilt (rad), streamlines.
+const INNER_SCALE: f64 = 0.55;
+const INNER_TILT: f64 = 0.35;
+const INNER_PETALS: [(f64, f64); 3] = [(5.0, 1.0), (7.0, 0.85), (10.0, 0.7)];
+/// Streamlines start this far from the star (lobe lengths): the free-streaming wind next
+/// to the star is too thin to show, and the threads would crowd there.
+const R0: f64 = 0.22;
+/// The flowing dashes (PNE-A7): period (H), duty, speed (H/s).
+const DASH: f64 = 0.08;
+const DUTY: f64 = 0.75;
+pub(crate) const V_FLOW: f64 = 0.06;
+/// Ionisation front: sweeps out to this multiple of the lobe radius over the act.
 const ION_REACH: f64 = 1.25;
-/// Low-ionisation knots (FLIERs) just outside the tips: distance (bubble radii), size.
+/// [N II] on the lobe wall beyond this share of the lobe length, once the rim glow is
+/// this strong.
+const NII_FROM: f64 = 0.82;
+const NII_GLOW: f64 = 0.5;
+/// Low-ionisation knots (FLIERs) just beyond the tips: distance (lobe lengths), drift
+/// (lobe lengths per s), trail (dots).
 const FLIER_AT: f64 = 1.12;
-const FLIER_R: f64 = 0.0;
-/// [N II] rim band in normalised radius.
-const RIM_BAND: (f64, f64) = (0.96, 1.03);
-/// Symmetry axis on the sky (radians) and its precession.
+const FLIER_DRIFT: f64 = 0.004;
+const FLIER_TRAIL: f64 = 3.0;
+/// Symmetry axis on the sky (radians), its precession and slow turn (rad/s).
 const AXIS: f64 = 1.0;
 const PRECESS: f64 = 0.12;
-/// Slow turn of the axis on the sky (rad/s).
 const TURN: f64 = 0.012;
-/// FLIER drift outward (bubble radii per s) and flicker rate (rad/s).
-const FLIER_DRIFT: f64 = 0.004;
-const FLICKER: f64 = 3.1;
-/// Ink caps.
-const RING_MAX: f32 = 80.0;
-/// Outer [O III] halo: reach (bubble radii) and brightness; the interior texture salt.
-const HALO_REACH: f64 = 1.7;
-const HALO_GLOW: f64 = 0.0;
-/// AGB rings fade out from this radius (H) over this span, and wobble in radius by up
-/// to this share with the clumpy wind.
-const RING_FADE: (f64, f64) = (0.18, 0.6);
-const RING_WOBBLE: f64 = 0.04;
-/// Peak of the AGB wind haze (share of the ring ink cap).
-const HAZE: f64 = 0.25;
-const TEXTURE_SALT: u64 = 0x5eed_ca75;
-const NII_MAX: u8 = 205;
-/// [O III] at `OIII_TOP·u^OIII_GAMMA` of its toned value `u`, its interior floor
-/// `OIII_FLOOR`: a contrast curve, so the interior is dark and the shells' limbs read as
-/// thin bright shells; [N II] a thin rim up to `NII_TOP`; no ionised halo; the FLIERs
-/// 1–2 px knots; the central star one pixel. [`emission_ink`] steps the levels.
-const OIII_TOP: f64 = 210.0;
-const OIII_GAMMA: f64 = 3.5;
-/// The AGB rings are dust seen in reflected starlight (neutral grey), their emission `u`
-/// (0–1) at `RING_TOP·u^RING_GAMMA`, thin bright arcs.
-const RING_TOP: f64 = 180.0;
-const RING_GAMMA: f64 = 1.2;
-/// Exposure before the contrast curves, so the crests reach the tops.
-const RING_GAIN: f64 = 1.5;
-const OIII_GAIN: f32 = 4.0;
 
-/// The two contrast curves as 256-entry tables (no `powf` per pixel): [O III] by its
-/// toned level, the rings by their exposed value in 1/255 steps.
-fn curves() -> &'static ([f32; 256], [f32; 256]) {
-    static CURVES: std::sync::OnceLock<([f32; 256], [f32; 256])> = std::sync::OnceLock::new();
-    CURVES.get_or_init(|| {
-        let at = |top: f64, gamma: f64| {
-            std::array::from_fn(|i| (top * (i as f64 / 255.0).powf(gamma)) as f32)
-        };
-        (at(OIII_TOP, OIII_GAMMA), at(RING_TOP, RING_GAMMA))
-    })
-}
-const OIII_FLOOR: f64 = 0.0;
-const NII_TOP: f64 = 70.0;
-/// [O III] is cyan on the shells' crests, from this level up; green below.
-const OIII_TINT: f64 = 120.0;
+/// Inks (M16): ionisation along the threads.
+const OIII: Ink = Ink::new(Role::Wave, 200);
+const OIII_INNER: Ink = Ink::new(Role::Particle, 160);
+const NEUTRAL: Ink = Ink::new(Role::Cold, 150);
+const NII: Ink = Ink::new(Role::Hot, 190);
+const FLIER: Ink = Ink::new(Role::Hot, 220);
+const DUST_INK: Ink = Ink::new(Role::Hot, 120);
+const STAR: Ink = Ink::new(Role::Star, 255);
 
-/// The AGB wind's clumpy texture at sky offset `(x, y)` (H): a warp in `[−½, ½]` and a
-/// brightness factor in `[0.55, 1.35]`. Fixed to the gas, so it is tabulated per pixel
-/// on resize.
-pub(crate) fn wind_texture(x: f64, y: f64) -> (f64, f64) {
-    let warp = value_noise(TEXTURE_SALT ^ 0xa6b, x * 5.0, y * 5.0, 1.0) - 0.5;
-    let clump = value_noise(
-        TEXTURE_SALT ^ 0xc1,
-        x * 8.0 + 2.0 * warp,
-        y * 8.0 - 2.0 * warp,
-        1.0,
-    );
-    (warp, 0.55 + 0.8 * clump * clump)
+/// Radius of the lobe wall of length `l` at the cosine `c` of the angle from the axis:
+/// a teardrop from the star (pinched to it at the waist) to the tip at `l` (PNE-A2).
+pub(crate) fn lobe_radius(l: f64, c: f64) -> f64 {
+    l * c.abs().powf(WALL_POW)
 }
 
-/// Radius of AGB ring `k` at loop time `t` (H), or `None` before it is launched.
-pub(crate) fn ring_radius(k: usize, t: f64) -> Option<f64> {
-    let t0 = (k as f64 - PRE_RINGS) * RING_EVERY;
-    (t >= t0).then_some(V_SHELL * (t - t0))
+/// The streamline `(p, f)` of a lobe of length `l` at `v` ∈ [0, 1]: `(r, θ)` with θ
+/// from 90° (at the star, `v` = 0) to 0 (the tip, at `f·l`), `r = f·l·cos^p θ`. Leaving
+/// the star sideways and turning to the axis, it is the wind deflected poleward by the
+/// dense equatorial gas; with `p ≥ WALL_POW` and `f ≤ 1` it stays inside the wall.
+pub(crate) fn petal(p: f64, f: f64, l: f64, v: f64) -> (f64, f64) {
+    let th = std::f64::consts::FRAC_PI_2 * (1.0 - v);
+    (f * l * th.cos_det().max(0.0).powf(p), th)
 }
 
-/// Bubble radius along direction `cos_axis` (the cosine of the angle from the symmetry
-/// axis), for equatorial radius `r_b` (PNE-A2).
-pub(crate) fn bubble_radius(r_b: f64, cos_axis: f64) -> f64 {
-    r_b * (1.0 + PROLATE * cos_axis * cos_axis)
+/// Whether the flowing dash pattern is on at flow coordinate `s` (H) at time `t`
+/// (PNE-A7): it moves outward at `V_FLOW`.
+pub(crate) fn dash_on(s: f64, t: f64, seed: f64) -> bool {
+    ((s - V_FLOW * t) / DASH + seed).rem_euclid(1.0) < DUTY
 }
 
-/// Projected path through a shell `inner < outer` at impact parameter `rho`.
-fn shell_path(rho: f64, inner: f64, outer: f64) -> f64 {
-    if rho >= outer {
-        return 0.0;
+/// A grain of the slow wind: launch angle from the axis, speed (H/s), phase (s).
+#[derive(Debug, Clone, Copy)]
+struct Grain {
+    ang: f64,
+    v: f64,
+    phase: f64,
+}
+
+impl Grain {
+    /// Distance from the star (H) at time `t`: coasting out to `R_DUST`, then relaunched.
+    fn r(&self, t: f64) -> f64 {
+        let period = R_DUST / self.v;
+        self.v * (t + self.phase).rem_euclid(period)
     }
-    let o = (outer * outer - rho * rho).sqrt();
-    let i = if rho < inner {
-        (inner * inner - rho * rho).sqrt()
-    } else {
-        0.0
-    };
-    o - i
 }
 
-/// Limb-brightened emission of a shell in normalised radius `q` (1 at its outer edge),
-/// scaled to 1 at the inner edge where it peaks.
-fn shell_profile(q: f64, thick: f64) -> f64 {
-    let inner = 1.0 - thick;
-    shell_path(q, inner, 1.0) / (1.0 - inner * inner).sqrt()
+/// A thread's kind: an outer lobe's streamline (wall or not) or an inner lobe's.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Kind {
+    Outer { wall: bool },
+    Inner,
 }
 
 #[derive(Debug, Default)]
@@ -172,13 +158,14 @@ pub struct PlanetaryNebula {
     seeded: bool,
     t: f64,
     timeline: Option<Timeline>,
+    grains: Vec<Grain>,
+    /// Centre and half-height, in dots.
     centre: (f64, f64),
     h: f64,
-    tone: Tone,
-    pixels: Pixels,
-    /// Per pixel: [`wind_texture`] quantised to bytes (warp, clumps).
-    wind: Vec<(u8, u8)>,
-    stars: Vec<(i32, i32, u8)>,
+    stars: Vec<(i32, i32, Ink)>,
+    /// The braille lattice; a cell so `prepare` can draw into it while reading the
+    /// rest of `self` (no placeholder lattice allocated per frame, GEN-R11).
+    dots: RefCell<Dots>,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -189,55 +176,35 @@ impl PlanetaryNebula {
             Some(tl) => tl.at(self.t),
             None => Beat {
                 index: 0,
-                label: SHELLS,
+                label: SLOW_WIND,
                 local: 0.0,
                 progress: 0.0,
             },
         }
     }
 
-    /// Loop time in `[0, total)`.
+    /// Loop time in `[0, LOOP)`.
     fn tau(&self) -> f64 {
         self.t.rem_euclid(LOOP)
     }
 
-    /// Equatorial bubble radius now (H).
-    fn bubble(&self) -> f64 {
+    /// Lobe length now (H): 0 before the fast wind.
+    fn lobe(&self) -> f64 {
         let t = self.tau() - T_WIND;
         if t <= 0.0 {
             0.0
         } else {
-            let creep = (t / BUBBLE_CREEP.1).min(1.0);
-            BUBBLE_R
-                * ((1.0 - BUBBLE_CREEP.0) * ease::out_quad(t / BUBBLE_GROW)
-                    + BUBBLE_CREEP.0 * creep)
+            let creep = (t / LOBE_CREEP.1).min(1.0);
+            L_FULL * ((1.0 - LOBE_CREEP.0) * ease::out_quad(t / LOBE_GROW) + LOBE_CREEP.0 * creep)
         }
     }
 
-    /// Symmetry axis now: unit vector on screen (x right, y up).
-    fn axis(&self) -> (f64, f64) {
-        let a = AXIS + TURN * self.t + PRECESS * (std::f64::consts::TAU * self.t / 50.0).sin_det();
-        let (s, c) = a.sin_cos_det();
-        (c, s)
+    /// Symmetry axis angle now (rad, counter-clockwise from +x).
+    fn axis_angle(&self) -> f64 {
+        AXIS + TURN * self.t + PRECESS * (TAU * self.t / 50.0).sin_det()
     }
 
-    /// Normalised bubble radius `q` of sky offset `(x, y)` (H) for a bubble of
-    /// equatorial radius `r_b` about `axis`, and the cosine to the axis.
-    #[cfg(test)]
-    fn q(x: f64, y: f64, r_b: f64, axis: (f64, f64)) -> (f64, f64) {
-        Self::q_at(x, y, x.hypot(y), r_b, axis)
-    }
-
-    /// [`Self::q`] with `rho = x.hypot(y)` already known (the per-pixel path).
-    fn q_at(x: f64, y: f64, rho: f64, r_b: f64, axis: (f64, f64)) -> (f64, f64) {
-        if rho == 0.0 || r_b <= 0.0 {
-            return (if r_b > 0.0 { 0.0 } else { f64::INFINITY }, 1.0);
-        }
-        let c = (x * axis.0 + y * axis.1) / rho;
-        (rho / bubble_radius(r_b, c), c)
-    }
-
-    /// Ionisation: how far out (in `q`) the front has swept, and the rim's [N II] glow.
+    /// Ionisation: how far out (in `q`) the front has swept, and the [N II] glow.
     fn ionisation(&self) -> (f64, f64) {
         let tau = self.tau();
         let front = ION_REACH * ease::smoothstep((tau - T_IONISED + 0.5) / 4.0);
@@ -250,296 +217,161 @@ impl PlanetaryNebula {
         ease::smoothstep(tau / 1.5) * (1.0 - ease::smoothstep((tau - T_FADE) / 4.5))
     }
 
-    /// Everything the per-pixel emission needs this frame. Whatever does not depend on
-    /// the pixel is worked out here once, not per pixel (GEN-R8 at 500×150: ~150 k pixels
-    /// a frame); each value is computed exactly as the per-pixel code did, so frames are
-    /// bit-identical.
-    /// A radius (H) beyond which this frame's emission is exactly zero, so those pixels
-    /// are blank without shading: past the last ring that can show, the visible haze
-    /// (where [`Frame::emission`] would skip it), the [O III] halo (`q ≥ HALO_REACH` at the
-    /// bubble's longest radius) and the FLIERs. A 1e-6 relative margin covers rounding
-    /// (`hypot` vs `x² + y²`, and `cos² ≤ 1`), so the cut never changes a pixel.
-    fn reach(r_b: f64, tip: f64, haze_on: f64, px: f64, rings: &[Option<RingNow>]) -> f64 {
-        let thick = RING_THICK * px;
-        let mut reach = rings
-            .iter()
-            .map_while(|g| *g)
-            .filter(|g| g.r > thick && g.r < RING_FADE.0 + RING_FADE.1)
-            .map(|g| g.r * (1.0 + RING_WOBBLE))
-            .fold(0.0, f64::max);
-        // Haze shows while HAZE·haze_on·e^(−ρ/0.45)·RING_MAX ≥ EDGE_DITHER / 1.35.
-        let haze_peak = HAZE * haze_on * f64::from(RING_MAX) * 1.35 / ink::MIN_VISIBLE_LEVEL;
-        if haze_peak > 1.0 {
-            reach = reach.max(0.45 * haze_peak.ln());
-        }
-        if r_b > 0.0 {
-            reach = reach
-                .max(HALO_REACH * bubble_radius(r_b, 1.0))
-                .max(tip + FLIER_R + 0.6 * px);
-        }
-        reach * (1.0 + 1e-6) + 1e-9
+    /// Dot position of the point at `(r, θ)` (H, rad from the axis) of lobe `lobe` (±1)
+    /// and side `side` (±1) about the axis at angle `axis`.
+    fn at(&self, axis: (f64, f64), r: f64, th: f64, lobe: f64, side: f64) -> (f64, f64) {
+        let (s, c) = th.sin_cos_det();
+        let (a, b) = (lobe * r * c, side * r * s);
+        // Sky offset (y up): a along the axis, b across it.
+        let x = a * axis.0 - b * axis.1;
+        let y = a * axis.1 + b * axis.0;
+        (self.centre.0 + x * self.h, self.centre.1 - y * self.h)
     }
 
-    fn frame(&self, px: f64) -> Frame {
-        let (front, rim_glow) = self.ionisation();
-        let tau = self.tau();
-        let (t, r_b, axis) = (self.t, self.bubble(), self.axis());
-        let (s, co) = (INNER_TILT.sin_det(), INNER_TILT.cos_det());
-        let mut rings = [None; RINGS];
-        for (k, slot) in rings.iter_mut().enumerate() {
-            *slot = ring_radius(k, tau).map(|r| RingNow {
-                r,
-                dim: (-r / 0.75).exp(),
-                fade: 1.0 - ease::smoothstep((r - RING_FADE.0) / RING_FADE.1),
-                tint: 0.55 + 0.45 * hash01(cell_key(k as i32, 77)),
-            });
+    /// Every streamline segment `(from, to, ink, kind)` in dots: the flowing dashes of
+    /// both lobes' petals (and the tilted inner pair), coloured by ionisation.
+    fn threads(&self, mut f: impl FnMut((f64, f64), (f64, f64), Ink, Kind)) {
+        let l = self.lobe();
+        if l <= 0.0 || self.h <= 0.0 {
+            return;
         }
-        let drift = FLIER_DRIFT * (tau - T_WIND).max(0.0);
-        let tip = bubble_radius(r_b, 1.0) * (FLIER_AT + drift);
-        let flier = |sign: f64| Flier {
-            at: (sign * tip * axis.0, sign * tip * axis.1),
-            flicker: 0.8 + 0.2 * (FLICKER * t + 2.0 * sign).sin_det(),
-        };
-        let haze_on = 1.0 - ease::smoothstep((tau - T_WIND) / 4.0);
-        Frame {
-            cut2: Self::reach(r_b, tip, haze_on, px, &rings).powi(2),
-            r_b,
-            axis,
-            inner_axis: (axis.0 * co - axis.1 * s, axis.0 * s + axis.1 * co),
-            front,
-            rim_glow,
-            haze_on,
-            rings,
-            fliers: [flier(1.0), flier(-1.0)],
-        }
-    }
-}
-
-/// AGB ring `k` this frame: its radius and the per-ring factors of its emission.
-#[derive(Debug, Clone, Copy)]
-struct RingNow {
-    r: f64,
-    dim: f64,
-    fade: f64,
-    tint: f64,
-}
-
-/// A FLIER this frame: its centre (H) and flicker factor.
-#[derive(Debug, Clone, Copy)]
-struct Flier {
-    at: (f64, f64),
-    flicker: f64,
-}
-
-/// A snapshot of the nebula's state for shading one frame.
-#[derive(Debug, Clone, Copy)]
-struct Frame {
-    /// Squared radius (H²) beyond which the frame is blank ([`PlanetaryNebula::reach`]).
-    cut2: f64,
-    r_b: f64,
-    axis: (f64, f64),
-    inner_axis: (f64, f64),
-    front: f64,
-    rim_glow: f64,
-    haze_on: f64,
-    /// Launched rings in launch order; `None` from the first not yet launched.
-    rings: [Option<RingNow>; RINGS],
-    fliers: [Flier; 2],
-}
-
-impl Frame {
-    /// `(O III, N II, ring)` emission at sky offset `(x, y)` (H units, y up); `px` is
-    /// one pixel in H.
-    /// `tex(x, y)` gives the AGB wind's `(warp, clumps)` texture there ([`wind_texture`]).
-    fn emission(&self, x: f64, y: f64, px: f64, tex: impl Fn() -> (f64, f64)) -> (f64, f64, f64) {
-        let rho = x.hypot(y);
-        // The AGB wind is clumpy: a domain-warped texture fixed to the gas, which also
-        // nudges each ring's radius a little so the rings read as puffed-off shells, not
-        // a target (rings stay evenly spaced on average, PNE-A1). The noise is only
-        // sampled where a ring or the haze can show (it is the frame's main cost).
-        let haze_on = self.haze_on;
-        // Once the fast wind has cleared the haze, skip its exp (the product is 0 anyway).
-        let haze = if haze_on == 0.0 {
-            0.0
-        } else {
-            HAZE * haze_on * (-rho / 0.45).exp()
-        };
-        let thick = RING_THICK * px;
-        let reach = |r: f64| {
-            rho < r * (1.0 + RING_WOBBLE) && rho > (r - thick - 2.0 * px) * (1.0 - RING_WOBBLE)
-        };
-        let launched = || self.rings.iter().map_while(|ring| *ring);
-        let near_ring =
-            launched().any(|g| g.r > thick && g.r < RING_FADE.0 + RING_FADE.1 && reach(g.r));
-        if !near_ring && haze * f64::from(RING_MAX) < ink::MIN_VISIBLE_LEVEL / 1.35 {
-            return self.nebula(x, y, rho, px, 0.0);
-        }
-        let (warp, clumps) = tex();
-        let rho_ring = rho * (1.0 + RING_WOBBLE * warp);
-        // AGB rings: thin shells, dimmer as they spread, fading softly into the haze
-        // well before the outermost one (no hard outer edge).
-        let mut ring = 0.0;
-        if near_ring {
-            for g in launched() {
-                let r = g.r;
-                if r <= thick || rho_ring >= r || rho_ring < r - thick - 2.0 * px {
-                    continue;
+        let (front, rim) = self.ionisation();
+        let env = self.envelope();
+        let a = self.axis_angle();
+        let outer_axis = a.sin_cos_det();
+        let inner_axis = (a + INNER_TILT).sin_cos_det();
+        let t = self.t;
+        let r0 = R0 * l;
+        // `wall_pow`: the family's wall, for the normalised radius `q = r / R(θ)`.
+        let mut draw = |axis: (f64, f64),
+                        lk: f64,
+                        (p, reach): (f64, f64),
+                        wall_pow: f64,
+                        kind: Kind,
+                        id: i32| {
+            // The fade drops whole threads by a fixed hash.
+            if hash01(cell_key(id, 41)) >= env {
+                return;
+            }
+            let seed = hash01(cell_key(id, 43));
+            let n = (reach * lk * self.h * 0.8).ceil().max(4.0) as usize;
+            for (lobe, side) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+                let point = |v: f64| {
+                    let (r, th) = petal(p, reach, lk, v);
+                    (r, th, self.at((axis.1, axis.0), r, th, lobe, side))
+                };
+                let mut prev = point(0.0);
+                for k in 1..=n {
+                    let next = point(k as f64 / n as f64);
+                    let (r, th) = (0.5 * (prev.0 + next.0), 0.5 * (prev.1 + next.1));
+                    // The flow coordinate is the distance from the star.
+                    if prev.0 >= r0 && dash_on(r, t, seed) {
+                        let c = th.cos_det().max(1e-9);
+                        let q = reach * c.powf(p - wall_pow);
+                        let ink = match kind {
+                            _ if q >= front => NEUTRAL,
+                            Kind::Outer { wall: true }
+                                if r > NII_FROM * l && rim >= NII_GLOW && front > 0.0 =>
+                            {
+                                NII
+                            }
+                            Kind::Outer { .. } => OIII,
+                            Kind::Inner => OIII_INNER,
+                        };
+                        f(prev.2, next.2, ink, kind);
+                    }
+                    prev = next;
                 }
-                let p =
-                    shell_path(rho_ring, r - thick, r) / (r * r - (r - thick) * (r - thick)).sqrt();
-                ring += p * g.dim * g.fade * g.tint;
             }
+        };
+        let mut id = 0_i32;
+        for (k, &petal) in PETALS.iter().enumerate() {
+            draw(
+                outer_axis,
+                l,
+                petal,
+                WALL_POW,
+                Kind::Outer { wall: k == 0 },
+                id,
+            );
+            id += 1;
         }
-        // The giant's dusty wind: a faint haze thinning outward, gone once the core is
-        // exposed and the fast wind clears it.
-        self.nebula(x, y, rho, px, (ring + haze) * clumps)
+        for &petal in &INNER_PETALS {
+            draw(
+                inner_axis,
+                INNER_SCALE * l,
+                petal,
+                INNER_PETALS[0].0,
+                Kind::Inner,
+                id,
+            );
+            id += 1;
+        }
     }
 
-    /// `(O III, N II, ring)` for the bubble and its knots, given the AGB `ring` emission;
-    /// `rho` is `x.hypot(y)`.
-    fn nebula(&self, x: f64, y: f64, rho: f64, px: f64, ring: f64) -> (f64, f64, f64) {
-        let r_b = self.r_b;
-        if r_b <= 0.0 {
-            return (0.0, 0.0, ring);
+    /// The FLIERs: `(tail, head)` in dots, beyond both tips, once the core is hot.
+    fn fliers(&self, mut f: impl FnMut((f64, f64), (f64, f64))) {
+        let l = self.lobe();
+        let (front, rim) = self.ionisation();
+        if l <= 0.0 || rim < NII_GLOW || front <= 0.0 || self.envelope() < 0.5 {
+            return;
         }
-        let (axis, front, rim_glow) = (self.axis, self.front, self.rim_glow);
-        let (q, c) = PlanetaryNebula::q_at(x, y, rho, r_b, axis);
-        let (q2, _) = PlanetaryNebula::q_at(x, y, rho, r_b * INNER_SCALE, self.inner_axis);
-        // [O III]: the ionised interior, brightest in the shells' limbs.
-        let mut oiii = 0.0;
-        if q < 1.0 && q < front {
-            // Each shell less its face-on baseline (its level at the centre): only the limb
-            // brightening shows, so the shells read thin (stylised, ADR-0017; a projected
-            // shell glows faintly across its whole face).
-            let limb = |q: f64, thick: f64| {
-                (shell_profile(q, thick).min(1.6) - shell_profile(0.0, thick).min(1.6)).max(0.0)
-            };
-            oiii = OIII_FLOOR + 0.9 * limb(q, BUBBLE_THICK);
-            oiii += 0.6 * limb(q2, 0.12);
-            // Soft edge on the sweeping front.
-            oiii *= ease::smoothstep((front - q) / 0.12);
-            // Filamentary texture fixed to the nebula (axis-aligned coordinates).
-            let (u, v) = (x * axis.0 + y * axis.1, -x * axis.1 + y * axis.0);
-            let n = value_noise(TEXTURE_SALT, u * 14.0, v * 14.0, 1.0);
-            oiii *= 0.8 + 0.35 * n;
-        } else if q < HALO_REACH && front > 0.0 {
-            // The faint ionised halo beyond the bubble.
-            let fall = 1.0 - ease::smoothstep((q - 1.0) / (HALO_REACH - 1.0));
-            oiii = HALO_GLOW * fall * (front / ION_REACH);
+        let axis = self.axis_angle().sin_cos_det();
+        let drift = FLIER_DRIFT * (self.tau() - T_WIND).max(0.0);
+        let r = l * (FLIER_AT + drift);
+        let back = FLIER_TRAIL / self.h.max(1e-9);
+        for lobe in [1.0, -1.0] {
+            let head = self.at((axis.1, axis.0), r, 0.0, lobe, 1.0);
+            let tail = self.at((axis.1, axis.0), r - back, 0.0, lobe, 1.0);
+            f(tail, head);
         }
-        // [N II]: the rim band (it glows once the core is hot), and the FLIERs.
-        let mut nii = 0.0;
-        if (RIM_BAND.0..RIM_BAND.1).contains(&q) {
-            let mid = 0.5 * (RIM_BAND.0 + RIM_BAND.1);
-            let half = 0.5 * (RIM_BAND.1 - RIM_BAND.0);
-            // Only toward the ends of the major axis (critic round 2: no outline all
-            // round).
-            nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * c.powi(4);
-        }
-        for f in &self.fliers {
-            let d = (x - f.at.0).hypot(y - f.at.1) / (FLIER_R + 0.6 * px);
-            if d < 1.0 {
-                nii = f64::max(nii, rim_glow * (1.0 - d * d) * 1.3 * f.flicker);
-            }
-        }
-        (oiii, nii, ring)
     }
-}
 
-impl PlanetaryNebula {
-    fn raster(&mut self) {
-        let env = self.envelope() as f32;
-        let (cx, cy, h) = (self.centre.0, self.centre.1, self.h.max(1e-9));
-        let px = 1.0 / h;
-        let frame = self.frame(px);
-        let (tone, wind) = (&self.tone, &self.wind);
-        let width = usize::from(self.pixels.pixel_size().width());
-        self.pixels.shade(|ix, iy| {
-            let x = (f64::from(ix) + 0.5 - cx) / h;
-            let y = (cy - f64::from(iy) - 0.5) / h;
-            if x * x + y * y > frame.cut2 {
-                return Ink::BLANK;
+    /// Every grain drawn now, as a dot position: not inside the lobe wall (swept up by
+    /// the fast wind), thinning out past `DUST_THIN.0`.
+    fn grains(&self, mut f: impl FnMut((f64, f64), (f64, f64))) {
+        // The slow wind keeps blowing through the fade and the loop's restart, so the
+        // frame is never empty at the act change (no envelope here).
+        let (l, axis) = (self.lobe(), self.axis_angle());
+        let back = DUST_TRAIL / self.h.max(1e-9);
+        for (i, g) in self.grains.iter().enumerate() {
+            let r = g.r(self.t);
+            let keep = 1.0 - ease::smoothstep((r - DUST_THIN.0) / DUST_THIN.1);
+            if hash01(cell_key(i as i32, 47)) >= keep {
+                continue;
             }
-            let i = iy as usize * width + ix as usize;
-            let tex = || {
-                wind.get(i).map_or_else(
-                    || wind_texture(x, y),
-                    |&(w, c)| {
-                        (
-                            f64::from(w) / 255.0 - 0.5,
-                            0.55 + 0.8 * f64::from(c) / 255.0,
-                        )
-                    },
+            if l > 0.0 && r <= lobe_radius(l, g.ang.cos_det()) * 1.02 {
+                continue;
+            }
+            let (s, c) = (axis + g.ang).sin_cos_det();
+            let at = |r: f64| {
+                (
+                    self.centre.0 + r * c * self.h,
+                    self.centre.1 - r * s * self.h,
                 )
             };
-            let (o, n, r) = frame.emission(x, y, px, tex);
-            let lo = f64::from(curves().0[usize::from(tone.level(OIII_GAIN * o as f32 * env))]);
-            let ln =
-                NII_TOP * f64::from(tone.level(n as f32 * env).min(NII_MAX)) / f64::from(NII_MAX);
-            let u = (RING_GAIN * r * f64::from(env)).clamp(0.0, 1.0);
-            let lr = f64::from(curves().1[(u * 255.0).round() as usize]);
-            let min = ink::MIN_VISIBLE_LEVEL;
-            // The fast wind's hot bubble before the ionisation front has swept it: its
-            // thin swept-up rim in blue, cyan toward the ends of the axis (the cold
-            // partner to the red shells, ADR-0018).
-            if lo < min && ln < min && frame.r_b > 0.0 && frame.front < 1.0 && env > 0.5 {
-                let (q, c) = PlanetaryNebula::q_at(x, y, x.hypot(y), frame.r_b, frame.axis);
-                if (WIND_RIM.0..WIND_RIM.1).contains(&q) {
-                    return if c * c > 0.6 { WIND_TIP } else { WIND_SIDE };
-                }
-            }
-            emission_ink(lo, ln, lr)
+            f(at(r), at((r - back).max(0.0)));
+        }
+    }
+
+    fn raster(&mut self) {
+        let mut dots = self.dots.borrow_mut();
+        dots.clear();
+        for &(x, y, ink) in &self.stars {
+            dots.set(x, y, ink);
+        }
+        self.grains(|head, tail| dots.line(tail.0, tail.1, head.0, head.1, DUST_INK));
+        self.threads(|a, b, ink, _| dots.line(a.0, a.1, b.0, b.1, ink));
+        self.fliers(|tail, head| {
+            dots.line(tail.0, tail.1, head.0, head.1, NII);
+            dots.disc(head.0, head.1, 1.0, FLIER);
         });
-        for &(x, y, l) in &self.stars {
-            if self.pixels.get(x, y) == Some(Ink::BLANK) {
-                let l = if l > 120 { 120 } else { 40 };
-                self.pixels.set(x, y, Ink::new(Role::Star, l));
-            }
-        }
-        self.star();
-    }
-
-    /// The central star: one white pixel, the frame's brightest point.
-    fn star(&mut self) {
-        let c = self.centre;
-        self.pixels
-            .set(c.0.floor() as i32, c.1.floor() as i32, STAR);
-    }
-}
-
-/// The central star.
-const STAR: Ink = Ink::new(Role::Star, 255);
-/// The fast wind's swept-up rim before ionisation: its span in `q` (bubble radii), and
-/// its inks along the sides and toward the ends of the axis.
-const WIND_RIM: (f64, f64) = (0.9, 1.03);
-const WIND_SIDE: Ink = Ink::new(Role::Cold, 150);
-const WIND_TIP: Ink = Ink::new(Role::Wave, 200);
-
-/// The nebula in M11's flat, complementary steps (ADR-0018), from the curve levels of
-/// [O III] `lo`, [N II] `ln` and the dust rings `lr` (0–255): a red [N II] rim (`Hot`),
-/// green [O III] shells with cyan crests (`Particle`, `Wave`), the AGB shells (dust in
-/// the giant's reddened light) in two dim `Hot` steps, black below the faintest step.
-pub(crate) fn emission_ink(lo: f64, ln: f64, lr: f64) -> Ink {
-    let min = ink::MIN_VISIBLE_LEVEL;
-    if ln >= lo && ln >= min {
-        Ink::new(Role::Hot, if ln >= 40.0 { 220 } else { 70 })
-    } else if lo >= min {
-        match lo {
-            l if l >= OIII_TINT => Ink::new(Role::Wave, 200),
-            l if l >= 50.0 => Ink::new(Role::Particle, 100),
-            _ => Ink::new(Role::Particle, 0),
-        }
-    } else if lr >= 40.0 {
-        Ink::new(
-            Role::Hot,
-            match lr {
-                l if l >= 120.0 => 170,
-                l if l >= 70.0 => 80,
-                _ => 10,
-            },
-        )
-    } else {
-        Ink::BLANK
+        dots.set(
+            self.centre.0.round() as i32,
+            self.centre.1.round() as i32,
+            STAR,
+        );
+        drop(dots);
     }
 }
 
@@ -552,33 +384,45 @@ impl Generator for PlanetaryNebula {
         if !self.seeded {
             self.seeded = true;
             self.timeline = Some(Timeline::new(&ACTS));
-            self.tone = Tone::asinh(0.35, 2.2);
             self.t = ctx.rng.random_range(0.0..3.0);
+            self.grains = (0..DUST)
+                .map(|_| {
+                    let ang = if ctx.rng.random_bool(TORUS_SHARE) {
+                        // Near the equator, either side: a Gaussian by Box–Muller.
+                        let (u1, u2): (f64, f64) = (
+                            ctx.rng.random_range(1e-9..1.0),
+                            ctx.rng.random_range(0.0..1.0),
+                        );
+                        let z = (-2.0 * u1.ln()).sqrt() * (TAU * u2).cos_det();
+                        let side = if ctx.rng.random_bool(0.5) { 0.5 } else { -0.5 };
+                        side * PI + TORUS_SPREAD * z
+                    } else {
+                        ctx.rng.random_range(0.0..TAU)
+                    };
+                    let v = V_DUST * ctx.rng.random_range(0.8..1.2);
+                    Grain {
+                        ang,
+                        v,
+                        phase: ctx.rng.random_range(0.0..R_DUST / v),
+                    }
+                })
+                .collect();
         }
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
-        let (w, hh) = (f64::from(px.width()), f64::from(px.height()));
+        self.dots.get_mut().resize(size);
+        let ds = self.dots.get_mut().dot_size();
+        let (w, hh) = (f64::from(ds.width()), f64::from(ds.height()));
         self.centre = (w / 2.0, hh / 2.0);
         self.h = (hh / 2.0).min(w / 2.6);
-        self.wind.clear();
-        let hu = self.h.max(1e-9);
-        for iy in 0..px.height() {
-            for ix in 0..px.width() {
-                let x = (f64::from(ix) + 0.5 - self.centre.0) / hu;
-                let y = (self.centre.1 - f64::from(iy) - 0.5) / hu;
-                let (warp, clumps) = wind_texture(x, y);
-                self.wind.push((
-                    ink::level(255.0 * (warp + 0.5)),
-                    ink::level(255.0 * (clumps - 0.55) / 0.8),
-                ));
-            }
-        }
         self.stars.clear();
         for k in 0..(size.area() / 200) as i32 {
             let x = (hash01(cell_key(k, 13)) * w) as i32;
             let y = (hash01(cell_key(k, 29)) * hh) as i32;
-            let l = 20 + (hash01(cell_key(k, 31)).powi(4) * 140.0) as u8;
-            self.stars.push((x, y, l));
+            let l = if hash01(cell_key(k, 31)) > 0.8 {
+                120
+            } else {
+                40
+            };
+            self.stars.push((x, y, Ink::new(Role::Star, l)));
         }
         self.dirty = true;
     }
@@ -595,13 +439,12 @@ impl Generator for PlanetaryNebula {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.borrow().blit(canvas);
     }
 
     fn caption(&self) -> Option<&'static str> {
         Some(match self.beat().index {
-            0 => SHELLS,
+            0 => SLOW_WIND,
             ACT_WIND => FAST_WIND,
             ACT_IONISED | ACT_FADE => IONISED,
             _ => IONISED,
@@ -621,167 +464,144 @@ mod tests {
         (g, ctx)
     }
 
+    fn at_time(g: &mut PlanetaryNebula, ctx: &mut Ctx, t: f64) {
+        g.t = t;
+        g.update(0.0, ctx);
+        g.prepare();
+    }
+
+    /// The thread dots, each with its ink and the direction of its segment.
+    fn thread_dots(g: &PlanetaryNebula) -> Vec<(i32, i32, Ink, (f64, f64))> {
+        let mut out = Vec::new();
+        g.threads(|a, b, ink, _| {
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let n = dx.hypot(dy).max(1e-9);
+            for (x, y) in sciart_core::geom::line(
+                a.0.round() as i32,
+                a.1.round() as i32,
+                b.0.round() as i32,
+                b.1.round() as i32,
+            ) {
+                out.push((x, y, ink, (dx / n, dy / n)));
+            }
+        });
+        out
+    }
+
+    /// Normalised outer-lobe radius `q` and the dot distance to the wall of a point (dots).
+    fn q_of(g: &PlanetaryNebula, (x, y): (f64, f64)) -> (f64, f64) {
+        let (dx, dy) = ((x - g.centre.0) / g.h, (g.centre.1 - y) / g.h);
+        let r = dx.hypot(dy);
+        let (s, c) = g.axis_angle().sin_cos_det();
+        let cos = if r > 0.0 { (dx * c + dy * s) / r } else { 1.0 };
+        let wall = lobe_radius(g.lobe(), cos);
+        (r / wall, (r - wall).abs() * g.h)
+    }
+
     #[test]
-    fn reach_cut_only_skips_pixels_that_are_blank() {
-        // The per-frame cut radius must be conservative: every sky point beyond it emits
-        // exactly nothing, and nothing tones to level 0, at every stage of the loop.
-        let (mut g, _) = built(Size::new(500, 150));
-        assert_eq!(g.tone.level(0.0), 0);
-        let px = 1.0 / g.h;
-        let mut t = 0.0;
-        while t < LOOP {
-            g.t = t;
-            let f = g.frame(px);
-            for i in 0..720 {
-                let a = f64::from(i) * std::f64::consts::TAU / 720.0;
-                for step in 0..40 {
-                    let rho = f.cut2.sqrt() * (1.0 + 1e-7) + f64::from(step) * 0.02;
-                    let (s, c) = a.sin_cos_det();
-                    let (x, y) = (rho * c, rho * s);
-                    let e = f.emission(x, y, px, || wind_texture(x, y));
-                    assert_eq!(e, (0.0, 0.0, 0.0), "t {t} at ({x}, {y})");
+    fn pne_a1_dust_coasts_out_radially_densest_round_the_equator() {
+        let (g, _) = built(Size::new(120, 40));
+        let near = g
+            .grains
+            .iter()
+            .filter(|gr| gr.ang.cos_det().abs() < 0.5)
+            .count();
+        assert!(
+            near as f64 >= 0.55 * DUST as f64,
+            "{near} of {DUST} near the equator"
+        );
+        for gr in &g.grains {
+            assert!((0.8 * V_DUST..=1.2 * V_DUST).contains(&gr.v));
+            let (a, b) = (gr.r(10.0), gr.r(10.5));
+            // Out at its speed, unless it was just relaunched.
+            if b > a {
+                assert!((b - a - 0.5 * gr.v).abs() < 1e-9);
+            } else {
+                assert!(b < 0.5 * gr.v + 1e-9);
+            }
+        }
+    }
+
+    #[test]
+    fn pne_a2_the_lobes_are_an_hourglass_and_hold_their_streamlines() {
+        // Length along the axis over the full width across it (both sides).
+        let width = (0..=900)
+            .map(|i| {
+                let th = f64::from(i) / 10.0 * PI / 180.0;
+                lobe_radius(1.0, th.cos_det()) * th.sin_det()
+            })
+            .fold(0.0, f64::max);
+        let ratio = lobe_radius(1.0, 1.0) / (2.0 * width);
+        assert!(ratio >= 1.4, "{ratio}");
+        for (family, wall) in [
+            (&PETALS[..], WALL_POW),
+            (&INNER_PETALS[..], INNER_PETALS[0].0),
+        ] {
+            for &(p, f) in family {
+                for i in 0..=100 {
+                    let (r, th) = petal(p, f, 0.8, f64::from(i) / 100.0);
+                    let c = th.cos_det().max(0.0);
+                    assert!(r <= 0.8 * c.powf(wall) + 1e-12, "p {p} at {th}");
                 }
             }
-            t += 0.5;
         }
     }
 
     #[test]
-    fn pne_a1_rings_are_evenly_spaced_and_expand_at_v_shell() {
-        let t = 30.0;
-        let radii: Vec<f64> = (0..RINGS).filter_map(|k| ring_radius(k, t)).collect();
-        assert_eq!(radii.len(), RINGS);
-        let gaps: Vec<f64> = radii.windows(2).map(|w| w[0] - w[1]).collect();
-        let mean = gaps.iter().sum::<f64>() / gaps.len() as f64;
-        let var = gaps.iter().map(|g| (g - mean).powi(2)).sum::<f64>() / gaps.len() as f64;
-        assert!(var.sqrt() < 0.01 * mean);
-        for k in 0..RINGS {
-            let a = ring_radius(k, 40.0).unwrap();
-            let b = ring_radius(k, 41.0).unwrap();
-            assert!((b - a - V_SHELL).abs() < 1e-12);
-        }
-    }
-
-    #[test]
-    fn pne_a2_the_bubble_is_prolate() {
-        let r = 0.3;
-        let ratio = bubble_radius(r, 1.0) / bubble_radius(r, 0.0);
-        assert!(ratio >= 1.4, "{ratio}");
-    }
-
-    /// Distance (pixels) from pixel `(ix, iy)` to the bubble's rim along its ray.
-    fn rim_distance(g: &PlanetaryNebula, ix: i32, iy: i32) -> (f64, f64) {
-        let x = (f64::from(ix) + 0.5 - g.centre.0) / g.h;
-        let y = (g.centre.1 - f64::from(iy) - 0.5) / g.h;
-        let (q, c) = PlanetaryNebula::q(x, y, g.bubble(), g.axis());
-        let rim = bubble_radius(g.bubble(), c) * g.h;
-        (q, (q - 1.0).abs() * rim)
-    }
-
-    #[test]
-    fn pne_a3_oiii_inside_and_nii_on_the_rim_or_tips() {
+    fn pne_a3_oiii_inside_and_nii_at_the_tips() {
         let (mut g, mut ctx) = built(Size::new(200, 50));
-        g.t = 30.0;
-        g.update(0.0, &mut ctx);
-        g.prepare();
-        let px = g.pixels.pixel_size();
-        let (mut nii, mut near, mut oiii) = (0, 0, 0);
-        let drift = FLIER_DRIFT * (g.tau() - T_WIND).max(0.0);
-        let tip = bubble_radius(g.bubble(), 1.0) * (FLIER_AT + drift) * g.h;
-        let axis = g.axis();
-        for iy in 0..i32::from(px.height()) {
-            for ix in 0..i32::from(px.width()) {
-                let ink = g.pixels.get(ix, iy).unwrap();
-                let (q, d) = rim_distance(&g, ix, iy);
+        at_time(&mut g, &mut ctx, 30.0);
+        let (mut oiii, mut nii, mut near) = (0, 0, 0);
+        let mut fl = Vec::new();
+        g.fliers(|_, head| fl.push(head));
+        assert_eq!(fl.len(), 2, "FLIERs drawn");
+        g.threads(|a, b, ink, _| {
+            for m in [a, b] {
+                let (q, d) = q_of(&g, m);
                 if matches!(ink.role, Role::Wave | Role::Particle) {
-                    // [O III] is green/cyan, inside the bubble only (no halo).
                     oiii += 1;
-                    assert!(q < 1.0 + 0.1, "[O III] outside the bubble at q = {q}");
+                    assert!(q < 1.1, "[O III] outside the lobes at q = {q}");
                 }
-                if ink.role == Role::Hot && [220, 70].contains(&ink.level) {
+                if ink == NII {
                     nii += 1;
-                    let (x, y) = (
-                        f64::from(ix) + 0.5 - g.centre.0,
-                        g.centre.1 - f64::from(iy) - 0.5,
-                    );
-                    let to_tip = (x - tip * axis.0)
-                        .hypot(y - tip * axis.1)
-                        .min((x + tip * axis.0).hypot(y + tip * axis.1));
-                    if d <= 3.0 || to_tip <= 3.0 + FLIER_R * g.h {
+                    let to_flier = fl
+                        .iter()
+                        .map(|p| (m.0 - p.0).hypot(m.1 - p.1))
+                        .fold(f64::MAX, f64::min);
+                    if d <= 3.0 || to_flier <= 3.0 {
                         near += 1;
                     }
                 }
             }
-        }
-        assert!(nii > 20, "[N II] drawn: {nii}");
-        assert!(oiii > 20, "[O III] drawn: {oiii}");
-        assert!(f64::from(near) >= 0.8 * f64::from(nii), "{near} of {nii}");
+        });
+        assert!(oiii > 20 && nii > 5, "[O III] {oiii}, [N II] {nii}");
+        assert!(near * 10 >= nii * 8, "{near} of {nii}");
     }
 
     #[test]
-    fn pne_a6_thin_shells_on_black_and_a_one_pixel_star() {
-        // ADR-0018: at 200×50 in the ionised act the bubble's middle is free of the cyan
-        // crests (thin shells), the nebula is drawn in M11's roles, and the star is a
-        // single full-level pixel.
+    fn pne_a4_the_lobes_are_hollow_threads() {
         let (mut g, mut ctx) = built(Size::new(200, 50));
-        for t in [3.0, 8.0, 20.0, 30.0] {
-            g.t = t;
-            g.update(0.0, &mut ctx);
-            g.prepare();
-            let px = g.pixels.pixel_size();
-            let (mut inside, mut dark, mut star) = (0, 0, 0);
-            for iy in 0..i32::from(px.height()) {
-                for ix in 0..i32::from(px.width()) {
-                    let ink = g.pixels.get(ix, iy).unwrap();
-                    assert!(
-                        matches!(
-                            ink.role,
-                            Role::Background
-                                | Role::Hot
-                                | Role::Sun
-                                | Role::Star
-                                | Role::Wave
-                                | Role::Particle
-                                | Role::Cold
-                        ),
-                        "t {t}: {ink:?} at ({ix}, {iy})"
-                    );
-                    star += usize::from(ink.level == 255);
-                    let (q, _) = rim_distance(&g, ix, iy);
-                    if t >= 20.0 && q < 0.35 {
-                        inside += 1;
-                        dark += usize::from(ink == Ink::BLANK || ink.role != Role::Wave);
-                    }
-                }
-            }
-            assert_eq!(star, 1, "t {t}: star pixels");
-            if t >= 20.0 {
-                assert!(
-                    inside > 10 && 10 * dark >= 9 * inside,
-                    "t {t}: {dark} of {inside}"
-                );
+        let (mut thin, mut total) = (0usize, 0usize);
+        for t in [10.0, 20.0, 30.0] {
+            at_time(&mut g, &mut ctx, t);
+            let mut dots = Dots::new(Size::new(200, 50));
+            g.threads(|a, b, ink, _| dots.line(a.0, a.1, b.0, b.1, ink));
+            for (x, y, _, (dx, dy)) in thread_dots(&g) {
+                let across = (-2..=2)
+                    .filter(|&k| {
+                        let k = f64::from(k);
+                        dots.is_lit(
+                            (f64::from(x) - k * dy).round() as i32,
+                            (f64::from(y) + k * dx).round() as i32,
+                        )
+                    })
+                    .count();
+                thin += usize::from(across <= 3);
+                total += 1;
             }
         }
-    }
-
-    #[test]
-    fn pne_a4_a_shell_peaks_at_its_projected_edge() {
-        let px = 1.0 / 40.0;
-        let r = 0.6;
-        let thick = RING_THICK * px;
-        let mut best = (0.0, 0.0);
-        for i in 0..4000 {
-            let rho = r * f64::from(i) / 4000.0;
-            let p = shell_path(rho, r - thick, r);
-            if p > best.1 {
-                best = (rho, p);
-            }
-        }
-        assert!(
-            (r - best.0) <= thick + px,
-            "peak {} px inside the edge",
-            (r - best.0) / px
-        );
+        let share = thin as f64 / total as f64;
+        assert!(total > 500 && share >= 0.85, "thin {share:.3} of {total}");
     }
 
     #[test]
@@ -790,7 +610,7 @@ mod tests {
         g.t = 0.0;
         let want = |tau: f64| {
             if tau < T_WIND {
-                SHELLS
+                SLOW_WIND
             } else if tau < T_IONISED {
                 FAST_WIND
             } else {
@@ -811,5 +631,72 @@ mod tests {
             }
             assert_eq!(g.caption(), Some(want(tau)), "τ = {tau}");
         }
+    }
+
+    #[test]
+    fn pne_a6_braille_threads_one_star_and_no_dust_in_the_lobes() {
+        let size = Size::new(200, 50);
+        let (mut g, mut ctx) = built(size);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        for t in [3.0, 8.0, 20.0, 30.0] {
+            at_time(&mut g, &mut ctx, t);
+            canvas.clear();
+            g.render(&mut canvas);
+            let mut star = 0;
+            for y in 0..50 {
+                for x in 0..200 {
+                    let c = canvas.get(x, y).unwrap();
+                    if c.ch == ' ' {
+                        continue;
+                    }
+                    assert_eq!(c.bg, Ink::BLANK, "t {t}: half block at {x},{y}");
+                    assert!(
+                        ('\u{2800}'..='\u{28ff}').contains(&c.ch),
+                        "t {t}: {:?}",
+                        c.ch
+                    );
+                    assert!(
+                        matches!(
+                            c.ink.role,
+                            Role::Hot | Role::Star | Role::Wave | Role::Particle | Role::Cold
+                        ),
+                        "t {t}: {:?} at ({x}, {y})",
+                        c.ink
+                    );
+                    star += usize::from(c.ink == STAR);
+                }
+            }
+            assert_eq!(star, 1, "t {t}: star cells");
+            if g.lobe() > 0.0 {
+                g.grains(|p, _| {
+                    let (q, _) = q_of(&g, p);
+                    assert!(q > 0.95, "t {t}: dust inside the lobes at q = {q}");
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn pne_a7_the_flow_moves_outward() {
+        for i in 0..400 {
+            let s = f64::from(i) * 0.0037;
+            for t in [0.0, 3.3, 17.0] {
+                for dt in [0.1, 0.7, 2.0] {
+                    assert_eq!(
+                        dash_on(s, t, 0.3),
+                        dash_on(s + V_FLOW * dt, t + dt, 0.3),
+                        "s {s} t {t} dt {dt}"
+                    );
+                }
+            }
+        }
+        // And the pattern does move: some dashes change within a second.
+        let changed = (0..400)
+            .filter(|&i| {
+                let s = f64::from(i) * 0.0037;
+                dash_on(s, 0.0, 0.3) != dash_on(s, 1.0, 0.3)
+            })
+            .count();
+        assert!(changed > 20, "{changed}");
     }
 }

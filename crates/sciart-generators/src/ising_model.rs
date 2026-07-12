@@ -9,18 +9,25 @@
 //! quench-and-coarsen (Allen–Cahn `ℓ ∝ t^{1/2}`), reheat, a hot boil, a slow cool into
 //! T_c, a critical hold and a quench back.
 //!
-//! The lattice is capped at 16 384 spins (`grid::lattice_for`, ADR-0012) and shown as one
-//! half-block pixel per spin at or below the cap, nearest-sampled above it. Every pixel
-//! is a `Div` ink whose magnitude grows convexly with the number of aligned neighbours,
-//! so domain interiors glow, walls read as dark seams and thermal noise sinks toward
-//! the background. The raster is rebuilt in `update`/`resize`; `render` only blits it and
-//! writes the label (the M10 raster convention).
+//! The lattice is capped at 16 384 spins (`grid::lattice_for`, ADR-0012).
+//!
+//! ## Picture (M16, GEN-R25: domain walls only)
+//!
+//! Black ground; only the domain walls are drawn, as braille threads one dot thick. The
+//! block magnetisation `b` (the mean of each spin's periodic 3×3 block, in steps of 2/9)
+//! is traced by marching squares (`Dots::contour`, CORE-R105) at `+0.56` (`Hot`, the up
+//! side of each wall) and `−0.56` (`Cold`, the down side), so every wall is a warm and a
+//! cool thread side by side and a lone thermal spin, whose block stays at ±7/9, draws
+//! nothing. Walls coarsen and straighten after the quench and roughen into a fractal
+//! froth near T_c. Spins flipped since the last frame inside ordered regions
+//! (`|b| ≥ 5/9` after the flip) blink as single dots for that frame, coloured by the new
+//! spin. Rasterised once per drawn frame (GEN-R20); `render` blits and writes the label.
 
 use std::fmt::Write as _;
 
+use sciart_core::ease;
 use sciart_core::grid::{lattice_for, regrid_nearest};
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "ising_model",
@@ -58,14 +65,6 @@ const PHASES: [(&str, f64); 6] = [
 const COLD: f64 = 0.60;
 const HOT: f64 = 1.25;
 
-/// ASCII ramp over the cell-mean signed value, `−1 → '.'` to `+1 → '#'`.
-const ASCII_RAMP: [Glyph; 5] = [
-    Glyph::ascii('.'),
-    Glyph::ascii(','),
-    Glyph::ascii(':'),
-    Glyph::ascii('+'),
-    Glyph::ascii('#'),
-];
 const LABEL_INK: Ink = Ink::new(Role::Text, 200);
 
 /// Heat-bath probability that a spin with local field `h = Σ_nn sⱼ` becomes +1 at
@@ -129,18 +128,17 @@ pub(crate) fn label(t_rel: f64, m_abs: f64, size: Size) -> Option<StackText<24>>
     Some(s)
 }
 
-/// `|v|` of a spin with `n_al ∈ 0..=4` aligned neighbours (SPEC-002 Inks). Convex, not
-/// linear: even at 1.25 T_c most spins have 3–4 aligned neighbours, so only a table
-/// that saves its brightness for `n_al = 4` lets the hot phase sink toward the dark
-/// centre stop while interiors stay a rich mid-tone rather than the palette's pale ends.
-const ALIGNED: [f64; 5] = [0.06, 0.12, 0.22, 0.38, 0.72];
-
-/// The `Div` ink of a spin `s` with `n_al` aligned neighbours, indexed by
-/// `(s > 0)·5 + n_al`: `ink::div(±ALIGNED[n_al])`. Built once per scene (the one source
-/// of truth is [`ALIGNED`]).
-fn inks() -> [Ink; 10] {
-    std::array::from_fn(|i| ink::div(if i >= 5 { 1.0 } else { -1.0 } * ALIGNED[i % 5]))
-}
+/// M16 (GEN-R25): the wall threads, at the block-magnetisation levels `±WALL` (just above
+/// the block value 5/9, so the two threads of a wall sit apart and never pass through a
+/// node), and the flip blinks.
+pub(crate) const WALL: f32 = 0.56;
+pub(crate) const UP_INK: Ink = Ink::new(Role::Hot, 220);
+pub(crate) const DOWN_INK: Ink = Ink::new(Role::Cold, 210);
+pub(crate) const FLIP_UP: Ink = Ink::new(Role::Hot, 110);
+pub(crate) const FLIP_DOWN: Ink = Ink::new(Role::Cold, 110);
+/// A flip blinks only where the block after it is this ordered (thermal flips inside
+/// domains, not the boil).
+const FLIP_ORDER: f32 = 5.0 / 9.0;
 
 /// A periodic spin lattice with its wrapped-neighbour tables and tracked magnetisation.
 #[derive(Debug, Default)]
@@ -245,22 +243,21 @@ impl Lattice {
         *m += dm;
     }
 
-    /// Ink-table index of site `(x, y)`: `(s > 0)·5 + aligned neighbours`.
+    /// Mean spin of the periodic 3×3 block about `(x, y)`, in steps of 2/9.
     #[inline]
-    fn ink_index(&self, x: usize, y: usize) -> usize {
+    fn block(&self, x: usize, y: usize) -> f32 {
         let s = self.spins.as_slice();
-        let row = y * usize::from(self.spins.width());
-        let me = s[row + x];
-        let aligned = [
-            s[row + usize::from(self.xl[x])],
-            s[row + usize::from(self.xr[x])],
-            s[self.yu[y] as usize + x],
-            s[self.yd[y] as usize + x],
-        ]
-        .iter()
-        .filter(|&&n| n == me)
-        .count();
-        usize::from(me > 0) * 5 + aligned
+        let (l, r) = (usize::from(self.xl[x]), usize::from(self.xr[x]));
+        let rows = [
+            self.yu[y] as usize,
+            y * usize::from(self.spins.width()),
+            self.yd[y] as usize,
+        ];
+        let sum: i32 = rows
+            .iter()
+            .map(|&row| i32::from(s[row + l]) + i32::from(s[row + x]) + i32::from(s[row + r]))
+            .sum();
+        sum as f32 / 9.0
     }
 }
 
@@ -278,19 +275,11 @@ struct IsingModel {
     lattice: Lattice,
     /// Resample target on a lattice change, then swapped in (ADR-0012).
     scratch: Grid<i8>,
-    /// Lattice → pixel sampling tables, rebuilt in place on resize.
-    map: SampleMap,
-    /// `map.nearest` flattened per axis (lattice column of each pixel column, row of
-    /// each pixel row), deliberately: the per-pixel loop then does two plain loads
-    /// instead of two clamped tap lookups.
-    cols: Vec<u16>,
-    rows: Vec<u16>,
-    /// Ink of every lattice site, so large displays (several pixels per spin) cost one
-    /// lookup per pixel.
-    site_inks: Vec<Ink>,
-    /// [`inks`], indexed by `Lattice::ink_index`.
-    inks: [Ink; 10],
-    pixels: Pixels,
+    /// Block magnetisation per site, and the spins before the last update (its flips blink);
+    /// sized in `resize`.
+    blocks: Vec<f32>,
+    shown: Vec<i8>,
+    dots: Dots,
     size: Size,
 }
 
@@ -304,12 +293,9 @@ impl IsingModel {
             rng: SplitMix64::new(0),
             lattice: Lattice::default(),
             scratch: Grid::default(),
-            map: SampleMap::default(),
-            cols: Vec::new(),
-            rows: Vec::new(),
-            site_inks: Vec::new(),
-            inks: inks(),
-            pixels: Pixels::default(),
+            blocks: Vec::new(),
+            shown: Vec::new(),
+            dots: Dots::default(),
             size: Size::new(0, 0),
         }
     }
@@ -318,27 +304,39 @@ impl IsingModel {
         t_over_tc(self.schedule.at(self.t))
     }
 
-    /// Ink every site, then paint each display pixel from its nearest site.
+    /// The walls as threads and this frame's flips as dots (SPEC-002 Look, ISING-A7).
     fn rasterise(&mut self) {
         let size = self.lattice.size();
-        let w = usize::from(size.width());
-        for (y, row) in self.site_inks.chunks_exact_mut(w.max(1)).enumerate() {
-            for (x, ink) in row.iter_mut().enumerate() {
-                *ink = self.inks[self.lattice.ink_index(x, y)];
+        let (w, h) = (usize::from(size.width()), usize::from(size.height()));
+        self.dots.clear();
+        if w * h == 0 || self.blocks.len() != w * h || self.shown.len() != w * h {
+            return;
+        }
+        for y in 0..h {
+            for x in 0..w {
+                self.blocks[y * w + x] = self.lattice.block(x, y);
             }
         }
-        let (rows, cols, site_inks) = (&self.rows, &self.cols, &self.site_inks);
-        self.pixels.shade(|x, y| {
-            // The tables cover the pixels after every resize; `get` only guards the
-            // protocol (an empty table before the first resize paints nothing).
-            let (Some(&ly), Some(&lx)) = (rows.get(y as usize), cols.get(x as usize)) else {
-                return Ink::BLANK;
-            };
-            site_inks
-                .get(usize::from(ly) * w + usize::from(lx))
-                .copied()
-                .unwrap_or(Ink::BLANK)
-        });
+        let ds = self.dots.dot_size();
+        let sx = f64::from(ds.width()) / w as f64;
+        let sy = f64::from(ds.height()) / h as f64;
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        self.dots
+            .contour(&self.blocks, w, h, -WALL, to_dot, DOWN_INK);
+        self.dots.contour(&self.blocks, w, h, WALL, to_dot, UP_INK);
+        let spins = self.lattice.spins.as_slice();
+        for (i, (&s, &was)) in spins.iter().zip(&self.shown).enumerate() {
+            if s != was {
+                let b = self.blocks[i];
+                // Ordered surroundings: a thermal flip in a domain (its block keeps the
+                // domain's sign), not the boil, where |b| is small.
+                if b.abs() >= FLIP_ORDER {
+                    let (x, y) = to_dot((i % w) as f64, (i / w) as f64);
+                    self.dots
+                        .plot(x, y, if s > 0 { FLIP_UP } else { FLIP_DOWN });
+                }
+            }
+        }
     }
 }
 
@@ -361,18 +359,13 @@ impl Generator for IsingModel {
             regrid_nearest(&mut self.lattice.spins, lattice, &mut self.scratch);
             self.lattice.rebuild();
         }
-        self.site_inks.resize(self.lattice.len(), Ink::BLANK);
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
-        let map = &mut self.map;
-        map.rebuild(lattice, px);
-        // Grid axes are u16, so lattice indices fit a u16: the casts are lossless.
-        self.cols.clear();
-        self.cols
-            .extend((0..i32::from(px.width())).map(|x| map.nearest(x, 0).0 as u16));
-        self.rows.clear();
-        self.rows
-            .extend((0..i32::from(px.height())).map(|y| map.nearest(0, y).1 as u16));
+        // Size the raster buffers here, so `prepare` never allocates (GEN-R11); a resize
+        // shows no blinks (nothing flipped on screen).
+        self.blocks.clear();
+        self.blocks.resize(self.lattice.len(), 0.0);
+        self.shown.clear();
+        self.shown.extend_from_slice(self.lattice.spins.as_slice());
+        self.dots.resize(size);
         self.rasterise();
     }
 
@@ -386,6 +379,10 @@ impl Generator for IsingModel {
         self.acc += sweep_rate(n) * n as f64 * dt;
         let whole = self.acc.floor();
         self.acc -= whole;
+        // The blinks are this update's flips (GEN-R20: bound to updates, not frames).
+        if self.shown.len() == n {
+            self.shown.copy_from_slice(self.lattice.spins.as_slice());
+        }
         self.lattice.attempts(whole as u64, &thr, &mut self.rng);
         self.dirty = true;
     }
@@ -399,13 +396,8 @@ impl Generator for IsingModel {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels.blit(canvas, |_, _, top, bottom| {
-            // Cell mean of the two signed pixel values (exact inverse of `ink::div`),
-            // normalised by the interior level so domain interiors reach the ramp ends.
-            let m = 0.5 * (ink::div_value(top) + ink::div_value(bottom));
-            let glyph = draw::ramp(0.5 * (m / ALIGNED[4] + 1.0), &ASCII_RAMP);
-            Some((glyph.ascii, ink::div(m)))
-        });
+        // ASCII falls back by dot count (`Dots::blit`).
+        self.dots.blit(canvas);
         let m_abs = f64::from(self.lattice.magnetisation().unsigned_abs())
             / self.lattice.len().max(1) as f64;
         if let Some(text) = label(self.t_rel(), m_abs, self.size) {
@@ -720,35 +712,62 @@ mod tests {
         assert_eq!(text(80, 3), None);
     }
 
-    #[test]
-    fn ising_inks_follow_alignment() {
-        // Pinned ends: a lone down spin sits just below zero, a fully aligned up spin high.
-        let inks = inks();
-        assert_eq!(inks[0], Ink::new(Role::Div, 120));
-        assert_eq!(inks[4], Ink::new(Role::Div, 36));
-        assert_eq!(inks[9], Ink::new(Role::Div, 219));
-        // Convex in n_al: every extra aligned neighbour brightens more than the last.
-        let step: Vec<f64> = ALIGNED.windows(2).map(|w| w[1] - w[0]).collect();
-        assert!(step.windows(2).all(|s| s[1] > s[0]), "{step:?}");
-    }
-
-    /// Mean |v| over every pixel of the raster.
-    fn mean_abs(s: &IsingModel) -> f64 {
-        let px = s.pixels.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        let mut sum = 0.0;
-        for y in 0..h {
-            for x in 0..w {
-                sum += ink::div_value(s.pixels.get(x, y).unwrap()).abs();
+    /// Lit dots as (dot x, dot y, cell role).
+    fn lit(s: &IsingModel) -> Vec<(i32, i32, Role)> {
+        let mut canvas = Canvas::new(s.size, GlyphMode::Unicode);
+        s.dots.blit(&mut canvas);
+        let ds = s.dots.dot_size();
+        let mut out = Vec::new();
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                if s.dots.is_lit(x, y) {
+                    out.push((x, y, canvas.get(x / 2, y / 4).unwrap().ink.role));
+                }
             }
         }
-        sum / f64::from(w * h)
+        out
+    }
+
+    /// Set every spin from `f(x, y)` and rebuild the tracked state; no blinks.
+    fn paint(s: &mut IsingModel, f: impl Fn(usize, usize) -> i8) {
+        let w = usize::from(s.lattice.size().width());
+        for (i, v) in s.lattice.spins.as_mut_slice().iter_mut().enumerate() {
+            *v = f(i % w, i / w);
+        }
+        s.lattice.rebuild();
+        s.shown.copy_from_slice(s.lattice.spins.as_slice());
     }
 
     #[test]
-    fn ising_hot_phase_sinks_toward_the_background() {
-        // Order lights up (SPEC-002 Intent): the hot boil at s = 30 is at most 0.65 of
-        // the brightness of the coarsened domains at the end of `coarsen` (s = 20).
+    fn ising_a7_walls_only_hot_on_the_up_side_cold_on_the_down_side() {
+        let (mut s, _) = scene(Size::new(80, 24));
+        let (w, _) = (usize::from(s.lattice.size().width()), 0);
+        let sx = f64::from(s.dots.dot_size().width()) / w as f64;
+        // An up stripe over columns 20..60 in a down sea: walls at 19.5 (up on its right)
+        // and 59.5 (up on its left).
+        paint(&mut s, |x, _| if (20..60).contains(&x) { 1 } else { -1 });
+        s.rasterise();
+        let dots = lit(&s);
+        assert!(dots.iter().any(|d| d.2 == Role::Hot) && dots.iter().any(|d| d.2 == Role::Cold));
+        for &(x, _, role) in &dots {
+            // Site coordinate of the dot, and its signed distance into the up side.
+            let at = (f64::from(x) + 0.5) / sx - 0.5;
+            let d = if at < 40.0 { at - 19.5 } else { 59.5 - at };
+            match role {
+                Role::Hot => assert!((-0.5..1.5).contains(&d), "Hot at {at}"),
+                Role::Cold => assert!((-1.5..0.5).contains(&d), "Cold at {at}"),
+                r => panic!("{r:?}"),
+            }
+        }
+        // An ordered domain with lone thermal spins: no wall, nothing drawn.
+        paint(
+            &mut s,
+            |x, y| if (x * 7 + y * 13) % 29 == 0 { -1 } else { 1 },
+        );
+        s.rasterise();
+        assert!(lit(&s).is_empty());
+        // Walls roughen: the hot boil (t = 30 s) draws more wall than the coarsened
+        // domains at the end of `coarsen` (t = 20 s).
         let (mut s, mut ctx) = scene(Size::new(200, 50));
         let mut run_to = |s: &mut IsingModel, t: f64| {
             while s.t + 1e-9 < t {
@@ -757,9 +776,48 @@ mod tests {
             }
         };
         run_to(&mut s, 20.0);
-        let ordered = mean_abs(&s);
+        let ordered = lit(&s).len();
         run_to(&mut s, 30.0);
-        let hot = mean_abs(&s);
-        assert!(hot <= 0.65 * ordered, "hot {hot} vs ordered {ordered}");
+        let hot = lit(&s).len();
+        assert!(hot >= 2 * ordered, "hot {hot} vs ordered {ordered}");
+        // No half-blocks or backgrounds anywhere.
+        let mut canvas = Canvas::new(s.size, GlyphMode::Unicode);
+        s.render(&mut canvas);
+        for y in 1..50 {
+            for x in 0..200 {
+                let c = canvas.get(x, y).unwrap();
+                assert_eq!(c.bg, Ink::BLANK);
+                assert!(!matches!(c.ch, '▀' | '▄' | '█'));
+            }
+        }
+    }
+
+    #[test]
+    fn ising_a8_flips_blink_for_one_update_inside_ordered_regions() {
+        let (mut s, mut ctx) = scene(Size::new(80, 24));
+        paint(&mut s, |_, _| 1);
+        s.rasterise();
+        assert!(lit(&s).is_empty(), "a resize or repaint shows no blinks");
+        // One spin flipped inside the up domain: a single down (Cold) dot at its site.
+        let w = usize::from(s.lattice.size().width());
+        s.lattice.spins.as_mut_slice()[20 * w + 30] = -1;
+        s.lattice.rebuild();
+        s.rasterise();
+        let dots = lit(&s);
+        assert_eq!(dots.len(), 1, "{dots:?}");
+        assert_eq!(dots[0].2, Role::Cold);
+        assert_eq!(FLIP_DOWN.role, Role::Cold);
+        assert_eq!(FLIP_UP.role, Role::Hot);
+        // Blinks depend on the updates, not on how often frames are drawn (GEN-R20).
+        let (mut a, mut ca) = scene(Size::new(80, 24));
+        let (mut b, mut cb) = scene(Size::new(80, 24));
+        for _ in 0..90 {
+            a.update(SIM_DT, &mut ca);
+            a.prepare();
+            b.update(SIM_DT, &mut cb);
+        }
+        b.prepare();
+        assert_eq!(lit(&a), lit(&b));
+        let _ = &mut ctx;
     }
 }

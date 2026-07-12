@@ -36,9 +36,8 @@
 
 use std::fmt::Write as _;
 
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::raster;
 use sciart_core::title;
 use sciart_core::{draw, ease, rng};
 
@@ -68,7 +67,9 @@ const Y_REACTIVE: f64 = 0.46;
 const Y_JET: f64 = 0.545;
 const Y_CO: f64 = 0.65;
 const Y_ADVANCE: f64 = 0.53;
-const Y_OXYGEN: f64 = 0.43;
+/// M16 round 2: 0.46 (was 0.43, held 0.5 s): the O layer covers ≈ 80–88 % of the
+/// surface at the low point, so the caption still fires but the fronts never all close.
+const Y_OXYGEN: f64 = 0.48;
 /// The gas is fed as a jet onto the centre and CO is used up on its way out, so `y`
 /// falls with distance from the centre: `y = y_jet − GRADE·r`, `r` the distance over the
 /// half-diagonal (0 at the centre, 1 in the corners). Each phase transition then sits on
@@ -93,30 +94,33 @@ pub(crate) const MAX_ATTEMPTS: u32 = 12_000;
 /// Sweeps run in the first resize, so the first frame already shows islands.
 const PREROLL_SWEEPS: usize = 12;
 
-/// The 36.5 s sweep of the jet's `y`: (label, seconds, y at the start, y at the end),
+/// The 36 s sweep of the jet's `y`: (label, seconds, y at the start, y at the end),
 /// smoothstep between. CO islands nucleate at the jet and the CO disc grows out to the
 /// corners; `y` then falls, O eats the disc back along a bright ring front, and the O
 /// layer closes in from the corners to a brief poisoned beat before the jet recovers.
 /// The local `y` stays inside the reactive window somewhere except in the two short
 /// holds, so fronts are always moving.
-const SWEEP: [(&str, f64, f64, f64); 8] = [
+const SWEEP: [(&str, f64, f64, f64); 7] = [
     ("CO nucleates", 5.0, Y_JET, Y_JET),
     ("CO grows", 7.0, Y_JET, Y_CO),
     ("CO", 2.5, Y_CO, Y_CO),
     ("O returns", 9.0, Y_CO, Y_ADVANCE),
     ("reactive", 5.0, Y_ADVANCE, Y_ADVANCE),
     ("O advances", 4.5, Y_ADVANCE, Y_OXYGEN),
-    ("O-poisoned", 0.5, Y_OXYGEN, Y_OXYGEN),
     ("recover", 3.0, Y_OXYGEN, Y_JET),
 ];
 
-/// Inks in M11's roles (ADR-0018): O a dark `Cold` blue, CO a dim `Hot`, bright on its
-/// island's edge, the CO₂ blinks white.
-const O_INK: Ink = Ink::new(Role::Cold, 20);
-const CO_INK: Ink = Ink::new(Role::Hot, 70);
-/// A CO site on its island's edge (a non-CO neighbour), where the reaction runs: the
-/// edge carries the light.
-const FRONT_INK: Ink = Ink::new(Role::Hot, 200);
+/// M16 (GEN-R25): only the CO/O island boundaries are drawn, as two braille threads on
+/// either side of each front: `Hot` on the CO side, `Cold` on the O side. The species field
+/// (CO +1, O −1, empty 0) is box-blurred over `BLUR` sites each way, so lone sites and
+/// vacancies draw nothing and the threads follow the islands, and contoured at `CO_EDGE`
+/// and `−O_EDGE`. The CO level is the lower one, so small CO islands in the reactive
+/// window still show warm.
+pub(crate) const CO_THREAD: Ink = Ink::new(Role::Hot, 210);
+pub(crate) const O_THREAD: Ink = Ink::new(Role::Cold, 235);
+pub(crate) const BLUR: usize = 2;
+pub(crate) const CO_EDGE: f32 = 0.3;
+pub(crate) const O_EDGE: f32 = 0.45;
 /// A blink: full while its brightness is above half, then a step dimmer.
 const FLASH_INKS: [Ink; 2] = [Ink::new(Role::Star, 170), Ink::new(Role::Star, 255)];
 /// The loop opens part-way through "O returns", where the jet's `y` is ≈ 0.59, on a
@@ -142,19 +146,77 @@ pub(crate) fn y_at(beat: &Beat) -> f64 {
     ease::lerp(a, b, ease::smoothstep(beat.progress))
 }
 
-/// The ink of a site in state `site` with spark brightness `spark` (`front`: a CO site on
-/// the island edge): a blink while it lasts, else the species' ink, black for empty
-/// platinum.
-pub(crate) fn site_ink(site: u8, spark: f32, front: bool) -> Ink {
-    if spark >= SPARK_MIN {
+/// The ink of a CO₂ blink of brightness `spark`: full, then a step dimmer, then gone.
+pub(crate) fn spark_ink(spark: f32) -> Option<Ink> {
+    (spark >= SPARK_MIN).then(|| {
         let v = (spark - SPARK_MIN) / (1.0 - SPARK_MIN);
-        return FLASH_INKS[usize::from(v >= 0.5)];
-    }
+        FLASH_INKS[usize::from(v >= 0.5)]
+    })
+}
+
+/// The species value of a site: CO +1, O −1, empty platinum 0.
+#[inline]
+fn species(site: u8) -> f32 {
     match site {
-        OX => O_INK,
-        CO if front => FRONT_INK,
-        CO => CO_INK,
-        _ => Ink::BLANK,
+        CO => 1.0,
+        OX => -1.0,
+        _ => 0.0,
+    }
+}
+
+/// Box-blur the species of `sites` (`w × h`, row-major) over `r` sites each way into
+/// `out`, through `tmp`; the window is clipped at the lattice edges (the mean over the
+/// sites inside it), so a domain touching an edge draws no thread along it.
+pub(crate) fn blur_species(
+    sites: &[u8],
+    (w, h): (usize, usize),
+    r: usize,
+    tmp: &mut Vec<f32>,
+    out: &mut Vec<f32>,
+) {
+    let n = w * h;
+    tmp.clear();
+    tmp.resize(n, 0.0);
+    out.clear();
+    out.resize(n, 0.0);
+    if sites.len() < n || n == 0 {
+        return;
+    }
+    // Rows: a running sum over the window [x − r, x + r] ∩ [0, w).
+    for y in 0..h {
+        let row = &sites[y * w..(y + 1) * w];
+        let dst = &mut tmp[y * w..(y + 1) * w];
+        let mut sum = 0.0f32;
+        for &s in &row[..r.min(w)] {
+            sum += species(s);
+        }
+        for x in 0..w {
+            if x + r < w {
+                sum += species(row[x + r]);
+            }
+            if x > r {
+                sum -= species(row[x - r - 1]);
+            }
+            let count = (x + r).min(w - 1) + 1 - x.saturating_sub(r);
+            dst[x] = sum / count as f32;
+        }
+    }
+    // Columns.
+    for x in 0..w {
+        let mut sum = 0.0f32;
+        for y in 0..r.min(h) {
+            sum += tmp[y * w + x];
+        }
+        for y in 0..h {
+            if y + r < h {
+                sum += tmp[(y + r) * w + x];
+            }
+            if y > r {
+                sum -= tmp[(y - r - 1) * w + x];
+            }
+            let count = (y + r).min(h - 1) + 1 - y.saturating_sub(r);
+            out[y * w + x] = sum / count as f32;
+        }
     }
 }
 
@@ -317,14 +379,14 @@ pub struct CatalyticSurface {
     last_attempts: u32,
     /// `(O, CO)` coverage after the last update, for the caption.
     cover: (f64, f64),
-    pixels: Pixels,
+    dots: Dots,
+    /// The blurred species field and its scratch row pass (sized in `resize`).
+    field: Vec<f32>,
+    tmp: Vec<f32>,
     /// Per-site spark brightness (a sparse sample of the events), and the update count
     /// that keys the sampling.
     sparks: Grid<f32>,
     frame: u32,
-    /// Site column of every pixel column and site row of every pixel row.
-    cols: Vec<u16>,
-    rows: Vec<u16>,
     readout_room: usize,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
@@ -343,11 +405,11 @@ impl Default for CatalyticSurface {
             acc: 0.0,
             last_attempts: 0,
             cover: (0.0, 0.0),
-            pixels: Pixels::new(Size::new(1, 1)),
+            dots: Dots::default(),
+            field: Vec::new(),
+            tmp: Vec::new(),
             sparks: Grid::new(Size::new(1, 1), 0.0),
             frame: 0,
-            cols: Vec::new(),
-            rows: Vec::new(),
             readout_room: 0,
         }
     }
@@ -381,27 +443,34 @@ impl CatalyticSurface {
         }
     }
 
-    /// One pixel per site (nearest; the lattice is the art).
+    /// The island boundaries as two threads (CAT-A9) and the blinks as single dots.
     fn rasterise(&mut self) {
-        let (sites, sparks) = (self.zgb.sites.as_slice(), self.sparks.as_slice());
-        let (cols, rows) = (&self.cols, &self.rows);
         let (w, h) = (
             usize::from(self.zgb.sites.width()),
             usize::from(self.zgb.sites.height()),
         );
-        self.pixels.shade(|x, y| {
-            let (sx, sy) = (cols[x as usize] as usize, rows[y as usize] as usize);
-            let i = sy * w + sx;
-            // The island edge: a CO site with a non-CO neighbour (periodic, as the model).
-            let front = sites[i] == CO && {
-                let (l, r) = ((sx + w - 1) % w, (sx + 1) % w);
-                let (u, d) = ((sy + h - 1) % h, (sy + 1) % h);
-                [sy * w + l, sy * w + r, u * w + sx, d * w + sx]
-                    .iter()
-                    .any(|&j| sites[j] != CO)
-            };
-            site_ink(sites[i], sparks[i], front)
-        });
+        blur_species(
+            self.zgb.sites.as_slice(),
+            (w, h),
+            BLUR,
+            &mut self.tmp,
+            &mut self.field,
+        );
+        self.dots.clear();
+        let ds = self.dots.dot_size();
+        let sx = f64::from(ds.width()) / w.max(1) as f64;
+        let sy = f64::from(ds.height()) / h.max(1) as f64;
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        self.dots
+            .contour(&self.field, w, h, -O_EDGE, to_dot, O_THREAD);
+        self.dots
+            .contour(&self.field, w, h, CO_EDGE, to_dot, CO_THREAD);
+        for (i, &s) in self.sparks.as_slice().iter().enumerate() {
+            if let Some(ink) = spark_ink(s) {
+                let (x, y) = to_dot((i % w) as f64, (i / w) as f64);
+                self.dots.plot(x, y, ink);
+            }
+        }
     }
 
     fn run(&mut self, attempts: u32, y: f64) {
@@ -488,17 +557,13 @@ impl Generator for CatalyticSurface {
         }
         self.zgb.clear_events();
         self.cover = self.zgb.coverage();
-        self.pixels.resize(size);
+        self.dots.resize(size);
         self.sparks.resize(lattice, 0.0);
-        let px = self.pixels.pixel_size();
-        let mut map = SampleMap::default();
-        map.rebuild(lattice, px);
-        self.cols.clear();
-        self.cols
-            .extend((0..i32::from(px.width())).map(|x| map.nearest(x, 0).0 as u16));
-        self.rows.clear();
-        self.rows
-            .extend((0..i32::from(px.height())).map(|y| map.nearest(0, y).1 as u16));
+        // Size the blur buffers here, so `prepare` never allocates (GEN-R11).
+        self.field.clear();
+        self.field.resize(lattice.area(), 0.0);
+        self.tmp.clear();
+        self.tmp.resize(lattice.area(), 0.0);
         self.readout_room = title::stable_readout_room(size, &META);
         self.dirty = true;
     }
@@ -530,10 +595,8 @@ impl Generator for CatalyticSurface {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // ASCII: a density ramp by brightness (sparks brightest), not per-site letters.
-        self.pixels.blit(canvas, |_, _, top, bottom| {
-            raster::ascii_ramp_cell(top, bottom)
-        });
+        // ASCII falls back by dot count (`Dots::blit`).
+        self.dots.blit(canvas);
         self.readout(canvas);
     }
 }
@@ -644,20 +707,33 @@ mod tests {
     }
 
     #[test]
-    fn cat_a7_sites_on_black_and_sparks_are_single_bright_blinks() {
-        // ADR-0018: empty platinum is black, O and CO flat semantic domains, and a CO₂
-        // blink the only white thing, a step dimmer before it goes.
-        assert_eq!(site_ink(EMPTY, 0.0, false), Ink::BLANK);
-        assert_eq!(site_ink(OX, 0.0, false), O_INK);
-        assert_eq!(site_ink(CO, 0.0, false), CO_INK);
-        // The front carries the light, and O stays just off black.
-        assert!(site_ink(CO, 0.0, true).level > CO_INK.level);
-        let hot = site_ink(EMPTY, 1.0, false);
-        assert_eq!(hot, FLASH_INKS[1]);
-        assert_eq!(site_ink(OX, 0.3, false), FLASH_INKS[0]);
-        assert_eq!((O_INK.role, CO_INK.role), (Role::Cold, Role::Hot));
-        assert!(site_ink(OX, 0.5, false).level < hot.level);
-        assert_eq!(site_ink(CO, SPARK_MIN * 0.9, false), CO_INK);
+    fn cat_a7_blinks_are_single_star_dots_on_black() {
+        assert_eq!(spark_ink(1.0), Some(FLASH_INKS[1]));
+        assert_eq!(FLASH_INKS[1], Ink::new(Role::Star, 255));
+        assert_eq!(spark_ink(0.3), Some(Ink::new(Role::Star, 170)));
+        assert_eq!(spark_ink(SPARK_MIN * 0.9), None);
+        assert_eq!((CO_THREAD.role, O_THREAD.role), (Role::Hot, Role::Cold));
+        // No ground: every drawn cell is a braille glyph on a blank background.
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(3, size);
+        let mut g = CatalyticSurface::default();
+        g.resize(size, &mut ctx);
+        for _ in 0..30 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut lit = 0;
+        for y in 0..23 {
+            for x in 0..80 {
+                let c = canvas.get(x, y).unwrap();
+                assert_eq!(c.bg, Ink::BLANK, "{x},{y}");
+                assert!(!matches!(c.ch, '▀' | '▄' | '█'), "{x},{y}");
+                lit += usize::from(c.ch != ' ');
+            }
+        }
+        assert!(lit > 50, "{lit} lit cells");
     }
 
     #[test]
@@ -746,29 +822,114 @@ mod tests {
     }
 
     #[test]
-    fn cat_a7_a_blink_is_one_pixel_and_fades_in_a_third_of_a_second() {
+    fn cat_a7_a_blink_fades_in_a_third_of_a_second() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(3, size);
         let mut g = CatalyticSurface::default();
         g.resize(size, &mut ctx);
         g.prepare();
-        // 1:1 sites and pixels at 80×24: a blink covers exactly its own pixel.
-        assert_eq!(g.zgb.sites.size(), g.pixels.pixel_size());
-        let bright = |g: &CatalyticSurface| {
-            let ps = g.pixels.pixel_size();
-            (0..i32::from(ps.height()))
-                .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| g.pixels.get(x, y).is_some_and(|i| i.role == Role::Star))
+        let stars = |g: &CatalyticSurface| {
+            g.sparks
+                .as_slice()
+                .iter()
+                .filter(|&&s| spark_ink(s).is_some())
                 .count()
         };
-        assert!(bright(&g) > 0, "the front sparks from the first frame");
-        // With the events cleared, every blink is gone within ≈ 0.3 s.
+        assert!(stars(&g) > 0, "the front sparks from the first frame");
         let keep = (-SIM_DT / SPARK_TAU).exp() as f32;
         for _ in 0..18 {
             g.zgb.clear_events();
             g.expose_events(keep);
         }
+        assert_eq!(stars(&g), 0);
+    }
+
+    /// Lit cells after rasterising the current lattice (no sparks): (dot x of the cell's
+    /// centre, its role).
+    fn lit_by_role(g: &mut CatalyticSurface) -> Vec<(f64, Role)> {
+        g.sparks.fill(0.0);
         g.rasterise();
-        assert_eq!(bright(&g), 0);
+        let mut c = Canvas::new(g.size, GlyphMode::Unicode);
+        g.dots.blit(&mut c);
+        let mut out = Vec::new();
+        for cy in 0..i32::from(g.size.height()) {
+            for cx in 0..i32::from(g.size.width()) {
+                let cell = c.get(cx, cy).unwrap();
+                if cell.ch != ' ' {
+                    out.push((f64::from(2 * cx) + 0.5, cell.ink.role));
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn cat_a9_threads_only_at_fronts_hot_on_co_side_cold_on_o_side() {
+        let size = Size::new(40, 12);
+        let mut ctx = Ctx::new(1, size);
+        let mut g = CatalyticSurface::default();
+        g.resize(size, &mut ctx);
+        let w = usize::from(g.zgb.sites.width());
+        let vacancy = |i: usize| rng::hash01(77 ^ i as u64) < 0.1;
+        // CO on the left half, O on the right.
+        for (i, s) in g.zgb.sites.as_mut_slice().iter_mut().enumerate() {
+            *s = if vacancy(i) {
+                EMPTY
+            } else if i % w < w / 2 {
+                CO
+            } else {
+                OX
+            };
+        }
+        let sx = f64::from(g.dots.dot_size().width()) / w as f64;
+        let front = (w / 2) as f64 * sx - 0.5;
+        let lit = lit_by_role(&mut g);
+        assert!(lit.iter().any(|&(_, r)| r == Role::Hot));
+        assert!(lit.iter().any(|&(_, r)| r == Role::Cold));
+        for &(x, r) in &lit {
+            let d = (x - front) / sx;
+            match r {
+                Role::Hot => assert!((-3.0..1.0).contains(&d), "Hot at {d} sites"),
+                Role::Cold => assert!((-1.0..3.0).contains(&d), "Cold at {d} sites"),
+                _ => panic!("{r:?}"),
+            }
+        }
+        // Uniform covers with vacancies: no front, nothing drawn.
+        for cover in [OX, CO] {
+            for (i, s) in g.zgb.sites.as_mut_slice().iter_mut().enumerate() {
+                *s = if vacancy(i) { EMPTY } else { cover };
+            }
+            assert!(lit_by_role(&mut g).is_empty(), "cover {cover}");
+        }
+    }
+
+    #[test]
+    fn cat_a10_no_dead_frame_over_the_loop() {
+        // At 160×45, sampled every 0.25 s over a whole loop, ≥ 2 % of the field's cells
+        // are lit, the O-poisoned beat included.
+        let size = Size::new(160, 45);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = CatalyticSurface::default();
+        g.resize(size, &mut ctx);
+        let loop_s: f64 = SWEEP.iter().map(|p| p.1).sum();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let mut worst = (1.0f64, 0.0f64);
+        for k in 0..(loop_s / 0.25) as usize {
+            for _ in 0..15 {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            canvas.clear();
+            g.dots.blit(&mut canvas);
+            let lit = (0..44)
+                .flat_map(|y| (0..160).map(move |x| (x, y)))
+                .filter(|&(x, y)| canvas.get(x, y).unwrap().ch != ' ')
+                .count() as f64
+                / (160.0 * 44.0);
+            if lit < worst.0 {
+                worst = (lit, 0.25 * (k + 1) as f64);
+            }
+        }
+        assert!(worst.0 >= 0.02, "lit {:.3} at t = {} s", worst.0, worst.1);
     }
 }

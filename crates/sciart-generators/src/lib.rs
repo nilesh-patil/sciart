@@ -26,7 +26,6 @@ macro_rules! registry {
 mod shared {
     pub(crate) mod cahn_hilliard;
     pub(crate) mod excitable;
-    pub(crate) mod jovian;
     pub(crate) mod laplacian_growth;
     pub(crate) mod plume;
     pub(crate) mod skyline;
@@ -93,7 +92,6 @@ registry![
     rocket_launch,
     satellite_orbit,
     saturn_rings,
-    seashell_pigmentation,
     solar_eruption,
     solar_surface,
     solar_system,

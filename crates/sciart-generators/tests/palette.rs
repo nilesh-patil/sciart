@@ -20,7 +20,7 @@ fn is_m11_role(role: Role) -> bool {
     !matches!(role, Role::Ramp(_) | Role::Blackbody | Role::Phase)
 }
 
-/// Check every entry on all cores (scenes are independent: 76 scenes × 20 s at
+/// Check every entry on all cores (scenes are independent: 75 scenes × 20 s at
 /// 200×50 would otherwise dominate a debug `rs-test`), keeping the non-empty results.
 fn par_offenders(entries: &[&'static Entry]) -> Vec<(String, BTreeMap<String, String>)> {
     let threads = std::thread::available_parallelism().map_or(4, usize::from);

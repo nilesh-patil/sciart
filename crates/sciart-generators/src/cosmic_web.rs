@@ -9,10 +9,9 @@
 use std::f64::consts::TAU;
 
 use rand::Rng;
-use sciart_core::Tone;
 use sciart_core::grid::lattice_for;
 use sciart_core::prelude::*;
-use sciart_core::raster::ascii_ramp_cell;
+use sciart_core::rng;
 use sciart_core::timeline::ease;
 
 pub static META: Meta = Meta {
@@ -44,49 +43,55 @@ pub(crate) const LOOP: f64 = RISE + HOLD + RELAX;
 const CROSSING_AT: f64 = 0.4;
 /// A particle freezes this far past its own shell-crossing growth.
 const FREEZE: f32 = 1.0;
+/// Salt of the fixed per-particle hash that thins the fog.
+const FOG_SALT: u64 = 0x05EE_DF06;
 /// Pan across the box, lattice cells per second.
 const PAN: f64 = 0.35;
 /// Growth still creeping on during the hold, from this fraction of `D_max`.
 const HOLD_FROM: f64 = 0.94;
 /// Scene start in loop time: growth ≈ 0.3.
 const START: f64 = 2.3;
-/// Tone curve over density above the floor, scaled so the frame's top quantile maps to
-/// `WHITE`.
-const KNEE: f32 = 1.4;
-const WHITE: f32 = 7.0;
-/// The black floor: density below the frame's `LIT_SHARE` quantile (and below
-/// the mean density, `FLOOR`) is black, so only the densest structure shows, thin; the level then rises to
-/// the `TOP_SHARE` quantile through the tone and `GAMMA`, ending smoothly at the visible
-/// floor (no dither). In the early fog the quantiles close in, so its faint mottling
-/// shows rather than a black frame.
-const FLOOR: f32 = 1.0;
-const GAMMA: f32 = 2.5;
-const LIT_SHARE: f32 = 0.22;
-const TOP_SHARE: f32 = 0.003;
-/// Fine histogram over low densities for the floor and top quantiles.
+/// Fine histogram over low densities for the quantiles.
 const LOW_BINS: usize = 2048;
 const LOW_MAX: f32 = 32.0;
-/// Share of the frame drawn as nodes.
-const NODE_SHARE: f32 = 0.004;
-/// The web's brightness scale: faint links at `LINK_LEVEL` easing in from black, filament
-/// cores up to `WEB_LEVEL`; the knots from there to `KNOT_TOP`, reached only at the
-/// densest `PEAK_SHARE` of the frame.
-const LINK_LEVEL: f32 = 20.0;
-const WEB_LEVEL: f32 = 110.0;
-const KNOT_TOP: f64 = 250.0;
-const PEAK_SHARE: f32 = 0.0015;
-/// Drawn in M11's idiom (ADR-0018): the density as a `Seq` field in four flat steps
-/// `(brightness from, Seq level)`, links violet, filaments red, halos orange, the densest
-/// knots yellow.
-const WEB_STEPS: [(f32, u8); 4] = [(15.0, 60), (50.0, 115), (112.0, 180), (200.0, 235)];
+/// Drawn as particles (SPEC-002 Look, M16): each particle is one braille dot, inked by
+/// the smoothed density where it sits. Knot halos are the densest `KNOT_SHARE` of the
+/// lattice (and at least `KNOT_MIN` times the mean), filaments the densest
+/// `FILAMENT_SHARE` (at least `FILAMENT_MIN`), sheets above `SHEET_MIN`; the rest is the
+/// fog (or a void's last stragglers), of which a fixed `FOG_KEEP` share is drawn.
+const KNOT_SHARE: f32 = 0.006;
+const KNOT_MIN: f32 = 3.0;
+const FILAMENT_SHARE: f32 = 0.05;
+const FILAMENT_MIN: f32 = 2.2;
+const SHEET_MIN: f32 = 1.4;
+const FOG_KEEP: f64 = 0.4;
+/// Drawing-only jitter of a particle, in lattice cells (a glass-like start).
+const JITTER: f64 = 0.9;
+/// The inks, faint to bright: fog and sheets dim `Accent`, filaments `Accent`, knot
+/// halos `Sun`. A brighter class wins a shared braille cell (highest level).
+pub(crate) const FOG: Ink = Ink::new(Role::Accent, 40);
+pub(crate) const SHEET: Ink = Ink::new(Role::Accent, 110);
+pub(crate) const FILAMENT: Ink = Ink::new(Role::Accent, 200);
+pub(crate) const KNOT: Ink = Ink::new(Role::Sun, 245);
 
-/// The `Seq` ink for a web brightness (0–255), or black below the first step.
-pub(crate) fn web_ink(level: f32) -> Ink {
-    WEB_STEPS
-        .iter()
-        .rev()
-        .find(|(from, _)| level >= *from)
-        .map_or(Ink::BLANK, |&(_, l)| Ink::new(Role::Seq, l))
+/// Share of the sheet particles drawn at growth `d` (in `D_max`): half while the web is
+/// diffuse (`d ≤ 0.35`), all of them once it has collapsed (`d ≥ 0.7`).
+pub(crate) fn sheet_share(d: f64) -> f64 {
+    0.5 + 0.5 * ease::smoothstep((d - 0.35) / 0.35)
+}
+
+/// The ink of a particle where the smoothed density is `v`, given the frame's knot and
+/// filament thresholds (`None`: an undrawn fog particle).
+pub(crate) fn particle_ink(v: f32, knot: f32, filament: f32, keep: bool) -> Option<Ink> {
+    if v >= knot {
+        Some(KNOT)
+    } else if v >= filament {
+        Some(FILAMENT)
+    } else if v >= SHEET_MIN {
+        Some(SHEET)
+    } else {
+        keep.then_some(FOG)
+    }
 }
 
 /// One potential mode: wavevector in box periods (integers, so it tiles the box), its
@@ -264,9 +269,7 @@ pub struct CosmicWeb {
     scratch: Grid<f32>,
     /// The density after one blur pass: the caustics' sharp version.
     sharp: Grid<f32>,
-    map: SampleMap,
-    tone: Tone,
-    pixels: Pixels,
+    dots: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -294,7 +297,6 @@ impl CosmicWeb {
             m.phase = ctx.rng.random_range(0.0..TAU);
             m.step = ctx.rng.random_range(0.8..TAU - 0.8);
         }
-        self.tone = Tone::asinh(KNEE, WHITE);
         // Start where D ≈ 0.3 D_max: a faint web already on screen.
         self.t = START;
     }
@@ -405,38 +407,54 @@ impl CosmicWeb {
         }
     }
 
+    /// Deposit and smooth the density, then plot every particle as one dot inked by the
+    /// density where it sits (SPEC-002 Look, M16).
     fn raster(&mut self) {
-        self.deposit(growth(self.t));
+        let d = growth(self.t);
+        let sheet_keep = sheet_share(d);
+        self.deposit(d);
         self.smooth();
-        // The knots: the densest 0.4 % of the frame (halos; proto-halos in the fog).
-        let [halo, floor, top, peak] = quantiles(
-            self.density.as_slice(),
-            [NODE_SHARE, LIT_SHARE, TOP_SHARE, PEAK_SHARE],
+        let [knot, filament] = quantiles(self.density.as_slice(), [KNOT_SHARE, FILAMENT_SHARE]);
+        let knot = knot.max(KNOT_MIN);
+        let filament = filament.max(FILAMENT_MIN).min(knot);
+        let (w, h) = self.dims();
+        let k = (d * self.norm / CROSSING_AT) as f32;
+        let pan = (PAN * self.t).rem_euclid(w as f64) as f32;
+        let (wf, hf) = (w as f32, h as f32);
+        let dot = self.dots.dot_size();
+        // Lattice cell → dots: the lattice spans the whole canvas.
+        let (kx, ky) = (
+            f32::from(dot.width()) / wf.max(1.0),
+            f32::from(dot.height()) / hf.max(1.0),
         );
-        let halo = halo.max(1.0);
-        let peak = peak.max(halo + 0.1);
-        let floor = floor.max(FLOOR);
-        let top = top.max(floor + 0.2);
-        let span = WHITE / (top - floor);
-        let (map, density, tone) = (&self.map, &self.density, &self.tone);
-        let direct = density.size() == self.pixels.pixel_size();
-        let w = usize::from(density.width());
-        self.pixels.shade(|x, y| {
-            let v = if direct {
-                density.as_slice()[y as usize * w + x as usize]
-            } else {
-                map.sample(density, x, y)
+        let density = self.density.as_slice();
+        self.dots.clear();
+        for (idx, &(sx, sy, at)) in self.disp.iter().enumerate() {
+            let (x, y) = displaced((idx % w) as f32, (idx / w) as f32, (sx, sy), k, at * FREEZE);
+            let (x, y) = ((x + pan).rem_euclid(wf), y.rem_euclid(hf));
+            let node = (y as usize).min(h - 1) * w + (x as usize).min(w - 1);
+            let key = idx as u64 ^ FOG_SALT;
+            let u = rng::hash01(key);
+            let Some(ink) = particle_ink(density[node], knot, filament, u < FOG_KEEP) else {
+                continue;
             };
-            if v >= halo {
-                let k = ease::smoothstep(f64::from((v - halo) / (peak - halo)));
-                let level = ease::lerp(f64::from(WEB_LEVEL), KNOT_TOP, k);
-                return web_ink(level as f32);
+            // While the web is still diffuse, the sheets are thinned too (a fixed share
+            // of their particles), so the early fog reads as stipple, not a blanket.
+            if ink == SHEET && u >= sheet_keep {
+                continue;
             }
-            // Faint links ease in from black; a gamma keeps the filaments' cores thin.
-            let t = f32::from(tone.level((v - floor) * span)) / 255.0;
-            let link = LINK_LEVEL * ease::smoothstep(f64::from(t / 0.12)) as f32;
-            web_ink(link + (WEB_LEVEL - LINK_LEVEL) * t.powf(GAMMA))
-        });
+            {
+                // A fixed sub-cell jitter (drawing only) breaks the start lattice's rows,
+                // like a glass start: no moiré in the fog and sheets.
+                let jx = (rng::hash01(key.rotate_left(21)) - 0.5) * JITTER;
+                let jy = (rng::hash01(key.rotate_left(42)) - 0.5) * JITTER;
+                self.dots.plot(
+                    f64::from(x) * f64::from(kx) + jx * f64::from(kx),
+                    f64::from(y) * f64::from(ky) + jy * f64::from(ky),
+                    ink,
+                );
+            }
+        }
     }
 }
 
@@ -449,11 +467,11 @@ impl Generator for CosmicWeb {
         if !self.seeded {
             self.seed(ctx);
         }
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
+        self.dots.resize(size);
+        // The lattice is the half-block pixel grid (square cells), capped (ADR-0012).
+        let px = Size::new(size.width(), size.height().saturating_mul(2));
         let lattice = lattice_for(px, MAX_NODES, 1.0);
         self.density.resize(lattice, 0.0);
-        self.map.rebuild(lattice, px);
         self.cycle = (self.t / LOOP).floor() as i64;
         let lam0 = self.fill_all(0);
         self.norm = if lam0 < 0.0 { -1.0 / lam0 } else { 1.0 };
@@ -503,8 +521,7 @@ impl Generator for CosmicWeb {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit(canvas);
     }
 }
 
@@ -658,30 +675,72 @@ mod tests {
         }
     }
 
-    #[test]
-    fn web_a7_the_web_is_a_stepped_seq_field_on_black() {
-        assert_eq!(web_ink(0.0), Ink::BLANK);
-        assert_eq!(web_ink(255.0), Ink::new(Role::Seq, 235));
-        let (mut g, mut ctx) = built(Size::new(120, 40));
-        for _ in 0..(12 * 60) {
+    /// Lit dots and the per-ink cell counts `[fog, sheet, filament, knot]` of the
+    /// scene after `secs` seconds at `size`.
+    fn census(size: Size, secs: f64) -> (usize, usize, [usize; 4]) {
+        let (mut g, mut ctx) = built(size);
+        for _ in 0..(secs * 60.0).round() as usize {
             g.update(SIM_DT, &mut ctx);
         }
         g.prepare();
-        let ps = g.pixels.pixel_size();
-        let (mut lit, mut n) = (0, 0);
-        for y in 0..i32::from(ps.height()) {
-            for x in 0..i32::from(ps.width()) {
-                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                n += 1;
-                if ink.role == Role::Background {
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut cells = [0; 4];
+        for y in 0..i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let cell = canvas.get(x, y).unwrap();
+                if cell.ch == ' ' {
                     continue;
                 }
-                lit += 1;
-                assert_eq!(ink.role, Role::Seq);
-                assert!(WEB_STEPS.iter().any(|s| s.1 == ink.level), "{ink:?}");
+                assert!(('⠀'..='⣿').contains(&cell.ch), "{x},{y}: {:?}", cell.ch);
+                let k = [FOG, SHEET, FILAMENT, KNOT]
+                    .iter()
+                    .position(|&i| i == cell.ink);
+                let k = k.unwrap_or_else(|| panic!("{x},{y}: {:?}", cell.ink));
+                cells[k] += 1;
             }
         }
-        // Mostly black: the voids stay empty.
-        assert!(f64::from(lit) / f64::from(n) < 0.35, "lit {lit} of {n}");
+        let d = g.dots.dot_size();
+        let lit = (0..i32::from(d.height()))
+            .flat_map(|y| (0..i32::from(d.width())).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.dots.is_lit(x, y))
+            .count();
+        (lit, d.area(), cells)
+    }
+
+    #[test]
+    fn web_a7_the_web_is_particles_as_dots_on_black() {
+        // Every lit cell is a braille particle cell in one of the four inks, ranked so a
+        // brighter class wins its cell; most dots are dark.
+        const { assert!(FOG.level < SHEET.level && SHEET.level < FILAMENT.level) };
+        const { assert!(FILAMENT.level < KNOT.level) };
+        assert_eq!(particle_ink(9.0, 3.0, 2.2, false), Some(KNOT));
+        assert_eq!(particle_ink(2.5, 3.0, 2.2, false), Some(FILAMENT));
+        assert_eq!(particle_ink(1.5, 3.0, 2.2, false), Some(SHEET));
+        assert_eq!(particle_ink(1.0, 3.0, 2.2, true), Some(FOG));
+        assert_eq!(particle_ink(1.0, 3.0, 2.2, false), None);
+        let (lit, n, cells) = census(Size::new(120, 40), 12.0);
+        assert!((lit as f64) < 0.3 * n as f64, "lit {lit} of {n}");
+        assert!(cells[3] > 0 && cells[2] > cells[3], "{cells:?}");
+    }
+
+    #[test]
+    fn web_a8_fog_gathers_into_filaments_and_knots() {
+        // Early (D ≈ 0.3 D_max) the dots are mostly fog and sheets; at the hold the
+        // filament and knot cells at least double.
+        let (_, _, early) = census(Size::new(120, 40), 0.5);
+        let (_, _, late) = census(Size::new(120, 40), 20.5);
+        let bright = |c: [usize; 4]| c[2] + c[3];
+        assert!(bright(late) >= 2 * bright(early), "{early:?} → {late:?}");
+        assert!(early[0] + early[1] > bright(early), "{early:?}");
+        // The fog is thinned by a fixed per-particle hash: ≈ FOG_KEEP of it is drawn.
+        let kept = (0..10_000u64)
+            .filter(|&i| rng::hash01(i ^ FOG_SALT) < FOG_KEEP)
+            .count();
+        assert!((kept as f64 / 1e4 - FOG_KEEP).abs() < 0.02, "{kept}");
+        // While diffuse only half the sheet particles are drawn, all once collapsed.
+        assert_eq!(sheet_share(0.0), 0.5);
+        assert_eq!(sheet_share(0.3), 0.5);
+        assert_eq!(sheet_share(0.8), 1.0);
     }
 }
