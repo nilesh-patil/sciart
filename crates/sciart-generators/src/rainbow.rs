@@ -101,7 +101,7 @@ const SUN_ELEV: (f64, f64) = (18.0, 8.0);
 const LOOP: f64 = 50.0;
 /// Framing: the horizon's row (share of the height) and the sky shown above it (deg).
 const HORIZON_ROW: f64 = 0.9;
-const SKY_SPAN: f64 = 40.0;
+const SKY_SPAN: f64 = 46.0;
 /// Points per traced arc (a full circle about the antisolar point).
 const ARC_STEPS: usize = 360;
 /// Hills the bow's feet stand on.
@@ -116,7 +116,7 @@ const HILLS: Terrain = Terrain {
 const DROP_INK: Ink = Ink::new(Role::Structure, 150);
 const SUNRAY: Ink = Ink::new(Role::Star, 255);
 const CONTEXT_RAY: Ink = Ink::new(Role::Dim, 90);
-const GUIDE: Ink = Ink::new(Role::Dim, 120);
+const GUIDE: Ink = Ink::new(Role::Dim, 150);
 const RIDGE: Ink = Ink::new(Role::Structure, 110);
 /// Below the faintest bow step, so a streak never recolours a bow cell.
 const STREAK: Ink = Ink::new(Role::Dim, 60);
@@ -250,6 +250,27 @@ pub(crate) fn bow_level(a: f64) -> u8 {
 }
 
 // ---- The ray diagram (act 1) ----
+
+/// Sideways spacing (dots) of the six colours' paths inside the drop (display only).
+const RIBBON: f64 = 0.7;
+
+/// The point `s` dots along polyline `pts` and its unit direction there; `None` past
+/// its end or on a degenerate one.
+fn point_at(pts: &[(f64, f64)], mut s: f64) -> Option<((f64, f64), (f64, f64))> {
+    for w in pts.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let l = (b.0 - a.0).hypot(b.1 - a.1);
+        if l < 1e-9 {
+            continue;
+        }
+        let d = ((b.0 - a.0) / l, (b.1 - a.1) / l);
+        if s <= l {
+            return Some(((a.0 + d.0 * s, a.1 + d.1 * s), d));
+        }
+        s -= l;
+    }
+    None
+}
 
 type V2 = (f64, f64);
 
@@ -451,32 +472,67 @@ impl Rainbow {
         }
         let reach = 1.6 * self.art.0;
         let along = (progress - 0.25) / 0.75;
-        // Red last on each cell it shares: ties go to the dot set last, and the bow's
-        // outer colour is red.
-        for &(nm, role) in COLOURS.iter().rev() {
-            let (pts, out) = trace_drop(b, diagram_n(nm), k);
-            let mut path = [(0.0, 0.0); 4];
-            let n = k + 2;
-            for (q, p) in path.iter_mut().zip(&pts[..n]) {
+        // Per colour: the path (entry, reflections, exit, far end), the length inside the
+        // drop and the length drawn so far.
+        let n = k + 2;
+        let mut paths = [[(0.0, 0.0); 5]; 6];
+        let mut inside = [0.0; 6];
+        let mut drawn = [0.0; 6];
+        let mut out = [(0.0, 0.0); 6];
+        for (ci, &(nm, _)) in COLOURS.iter().enumerate() {
+            let (pts, dir) = trace_drop(b, diagram_n(nm), k);
+            for (q, p) in paths[ci].iter_mut().zip(&pts[..n]) {
                 *q = to_screen(*p);
             }
-            let exit = path[n - 1];
-            let mut full = [(0.0, 0.0); 5];
-            full[..n].copy_from_slice(&path[..n]);
-            full[n] = (exit.0 + reach * out.0, exit.1 + reach * out.1);
-            let total: f64 = full[..=n]
+            let exit = paths[ci][n - 1];
+            paths[ci][n] = (exit.0 + reach * dir.0, exit.1 + reach * dir.1);
+            out[ci] = dir;
+            inside[ci] = paths[ci][..n]
                 .windows(2)
                 .map(|p| (p[1].0 - p[0].0).hypot(p[1].1 - p[0].1))
                 .sum();
             // Inside the drop the ray travels on at the same pace; outside it races to
             // the frame's edge over the last third.
-            let inside: f64 = total - reach;
-            let len = if along < 0.66 {
-                inside * along / 0.66
+            drawn[ci] = if along < 0.66 {
+                inside[ci] * along / 0.66
             } else {
-                inside + reach * (along - 0.66) / 0.34
+                inside[ci] + reach * (along - 0.66) / 0.34
             };
-            self.polyline(&full[..=n], len, Ink::new(role, RAY_LEVEL));
+        }
+        // Inside the drop the six paths nearly coincide and a braille cell shows one ink:
+        // drawn a dot at a time, each path offset 0.7 dot sideways by its colour, with
+        // the colour drawn last (the one a shared cell shows) rotating along the ray, so
+        // the interior reads as a multicoloured ribbon (BOW-A12).
+        let steps = drawn
+            .iter()
+            .zip(&inside)
+            .map(|(d, i)| d.min(*i))
+            .fold(0.0, f64::max)
+            .ceil() as usize;
+        for j in 0..=steps {
+            for o in 0..6 {
+                let ci = (j + 1 + o) % 6;
+                let s = j as f64;
+                if s > drawn[ci].min(inside[ci]) {
+                    continue;
+                }
+                let Some((p, d)) = point_at(&paths[ci][..n], s) else {
+                    continue;
+                };
+                let off = (ci as f64 - 2.5) * RIBBON;
+                let ink = Ink::new(COLOURS[ci].1, RAY_LEVEL);
+                self.dots.plot(p.0 - d.1 * off, p.1 + d.0 * off, ink);
+            }
+        }
+        // Out of the drop the colours fan apart: plain lines, red last on shared cells.
+        for ci in (0..6).rev() {
+            let past = drawn[ci] - inside[ci];
+            if past > 0.0 {
+                let e = paths[ci][n - 1];
+                let f = (e.0 + past * out[ci].0, e.1 + past * out[ci].1);
+                self.dots
+                    .line(e.0, e.1, f.0, f.1, Ink::new(COLOURS[ci].1, RAY_LEVEL));
+            }
         }
     }
 
@@ -932,7 +988,8 @@ mod tests {
         let e = elev.sin_cos_det();
         let (bows, _) = arc_angles(g.per_deg * 180.0 / PI);
         let (lo, hi) = (bows[0][0], bows[1][0]);
-        let margin = 2.5 / (g.per_deg * 180.0 / PI);
+        // A cell is 2 × 4 dots: keep the sampled points a cell clear of the red arcs.
+        let margin = 4.5 / (g.per_deg * 180.0 / PI);
         let canvas = frame(&mut g, SKY_T);
         let mut checked = 0;
         for k in 1..8 {
@@ -1048,6 +1105,33 @@ mod tests {
             let canvas = frame(&mut g, t);
             let drop = canvas.cells().iter().any(|c| c.ink == DROP_INK);
             assert_eq!(drop, act == 0, "t = {t}: the drop shows only in act 1");
+        }
+    }
+
+    #[test]
+    fn bow_a12_the_rays_inside_the_drop_are_a_multicoloured_ribbon() {
+        for size in [Size::new(120, 40), Size::new(160, 45)] {
+            let (mut g, _) = scene(size, 2);
+            let canvas = frame(&mut g, 10.0);
+            let (c, r) = g.drop_frame();
+            let w = usize::from(size.width());
+            let mut count = [0usize; 6];
+            for (i, cell) in canvas.cells().iter().enumerate() {
+                let (x, y) = (((i % w) as f64 + 0.5) * 2.0, ((i / w) as f64 + 0.5) * 4.0);
+                if (x - c.0).hypot(y - c.1) > r - 3.0 {
+                    continue;
+                }
+                if let Some(k) = COLOURS.iter().position(|&(_, role)| role == cell.ink.role) {
+                    count[k] += 1;
+                }
+            }
+            let total: usize = count.iter().sum();
+            assert!(total > 30, "{count:?}");
+            let top = *count.iter().max().unwrap_or(&0);
+            assert!(
+                top * 10 <= total * 4,
+                "{size:?}: interior colours {count:?}"
+            );
         }
     }
 }

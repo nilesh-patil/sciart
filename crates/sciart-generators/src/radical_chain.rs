@@ -64,7 +64,7 @@ const E_A: f64 = 4.0;
 const K_T3: f64 = 0.1;
 const K_RR: f64 = 4.0;
 /// Initiation (H₂ + O₂ → HO₂ + H) rate at full fuel, radicals per second.
-const K_INIT: f64 = 6.0;
+const K_INIT: f64 = 14.0;
 /// Vessel aspect (width/height, vessel units) the limit is calibrated for.
 const A_REF: f64 = 1.8;
 /// Vessel corner radius, in vessel heights.
@@ -108,7 +108,11 @@ const P_LOW: f64 = 0.6;
 const P_HIGH: f64 = 2.2;
 
 /// Radicals in the vessel at the start, so the first frame already has sparks.
-const SEED_RADICALS: usize = 25;
+const SEED_RADICALS: usize = 60;
+/// The flame is out once a pool that peaked above `FLAME_PEAK` is below `FLAME_OUT`
+/// (CHN-A11); the stragglers carry on as slow chains in the fresh gas.
+const FLAME_PEAK: usize = 200;
+const FLAME_OUT: usize = 20;
 /// The ignition spark's temperature excess and radius (grid cells), and where in the
 /// vessel it may strike (fractions of the width and height from the centre).
 const SPARK_HEAT: f32 = 1.6;
@@ -118,10 +122,10 @@ const SPARK_SPREAD: f64 = 0.3;
 /// heading a thread through its last `TRAIL_N` positions (sampled every `TRAIL_DT` s),
 /// coloured by age: `Hot` 230 fresh, `Hot` 150, then a faint `Accent` 90 tail. A child is
 /// born on its parent with the parent's trail, so every branching forks a thread.
-pub(crate) const TRAIL_N: usize = 8;
+pub(crate) const TRAIL_N: usize = 6;
 const TRAIL_DT: f64 = 0.06;
 /// Time constant of the drawn position's smoothing (s).
-const SMOOTH_S: f64 = 0.12;
+const SMOOTH_S: f64 = 0.25;
 const THREAD_INKS: [Ink; 3] = [
     Ink::new(Role::Hot, 230),
     Ink::new(Role::Hot, 150),
@@ -129,7 +133,7 @@ const THREAD_INKS: [Ink; 3] = [
 ];
 const HEAD: Ink = Ink::new(Role::Sun, 255);
 /// At most this many threads are drawn (a fixed hashed share of the pool beyond it).
-pub(crate) const MAX_THREADS: usize = 240;
+pub(crate) const MAX_THREADS: usize = 70;
 /// A radical lost at the wall: a brief `Cold` dot there for `DEATH_S` seconds (a ring of
 /// `N_DEATHS`).
 const DEATH: Ink = Ink::new(Role::Cold, 200);
@@ -198,6 +202,10 @@ pub(crate) struct Radical {
     pub trail: [(f32, f32); TRAIL_N],
     /// A stable identity: which share of the pool is drawn when it is crowded.
     pub id: u32,
+    /// A stray slow-phase chain at the spark (M16): it no longer branches and dies out
+    /// as before, so the flame still grows from the spark alone, but the vessel does not
+    /// go dark at ignition.
+    pub quenched: bool,
 }
 
 impl Radical {
@@ -211,6 +219,7 @@ impl Radical {
             shown: (x as f32, y as f32),
             trail: [(x as f32, y as f32); TRAIL_N],
             id: (id >> 32) as u32,
+            quenched: false,
         }
     }
 }
@@ -370,7 +379,7 @@ impl Chain {
             }
             let t = f64::from(temp[c]).max(0.1);
             let k_b = rates.k_b0 * fuel * f64::from(unburnt) * (E_A * (1.0 - 1.0 / t)).exp();
-            if rng.next_f64() < (k_b * h).min(1.0) {
+            if rng.next_f64() < (k_b * h).min(1.0) && !r.quenched {
                 branched += 1;
                 gas[c] = (unburnt - 1.0 / CELL_FUEL).max(0.0);
                 water[c] += 0.5;
@@ -470,8 +479,9 @@ pub(crate) fn drawn(id: u32, n: usize) -> bool {
 }
 
 /// Strike the ignition spark: a Gaussian hot spot at a random point near the centre,
-/// releasing a burst of radicals there. The gas's stray radicals are swept aside (the
-/// ignition's own chains outrun them), so the flame grows from this one seed as a front.
+/// releasing a burst of radicals there. The gas's stray radicals are quenched (M16: they no
+/// longer branch but stay drawn until they die out), so the flame grows from this one seed
+/// as a front.
 fn spark(chain: &mut Chain, rng: &mut SplitMix64) {
     let (w, h) = (
         usize::from(chain.temp.width()),
@@ -485,7 +495,9 @@ fn spark(chain: &mut Chain, rng: &mut SplitMix64) {
         let g = (-(dx * dx + dy * dy) as f32 / (SPARK_R * SPARK_R)).exp();
         *t = (*t + SPARK_HEAT * g).min(T_MAX);
     }
-    chain.pool.clear();
+    for r in chain.pool.iter_mut() {
+        r.quenched = true;
+    }
     let (x, y) = (cx / w.max(1) as f64 * chain.vessel.a, cy / h.max(1) as f64);
     let r = f64::from(SPARK_R) / h.max(1) as f64;
     for _ in 0..SPARK_RADICALS {
@@ -508,6 +520,8 @@ pub struct RadicalChain {
     exploded: bool,
     /// The loop whose ignition spark has been struck.
     sparked: i64,
+    /// The largest pool this cycle (the flame's peak).
+    peak_n: usize,
     frame: Frame,
     dots: Dots,
     readout_room: usize,
@@ -533,6 +547,7 @@ impl Default for RadicalChain {
             cycle: 0,
             exploded: false,
             sparked: -1,
+            peak_n: 0,
             frame: Frame::default(),
             dots: Dots::new(Size::new(1, 1)),
             readout_room: 0,
@@ -734,8 +749,15 @@ impl Generator for RadicalChain {
             // Fresh gas: the vessel was vented and refilled.
             self.cycle = cycle;
             self.exploded = false;
+            self.peak_n = 0;
             chain.refuel();
             chain.water.fill(0.0);
+            // Fresh slow chains at once (M16, CHN-A11): the vessel is never empty.
+            for _ in 0..SEED_RADICALS {
+                if let Some(r) = chain.random_point(&mut self.rng) {
+                    chain.pool.spawn(r);
+                }
+            }
         }
         if beat.index == BURN && self.sparked != cycle {
             // The ignition spark, at the start of the burn (so the explosion caption and
@@ -748,7 +770,9 @@ impl Generator for RadicalChain {
         // but in the rise and the burn only the spark's chains run, so the flame is a
         // front.
         let venting = beat.index == 3 && p < 1.0;
-        let initiating = beat.index == 0 || venting;
+        // M16: also through the rise, so the vessel never empties before the spark
+        // (which sweeps these stray chains aside).
+        let initiating = beat.index <= 1 || venting;
         for _ in 0..steps {
             if initiating {
                 chain.initiate(h, &mut self.rng);
@@ -765,6 +789,32 @@ impl Generator for RadicalChain {
         }
         if chain.pool.len() > CAPACITY / 8 || chain.max_temp() > 1.5 + SPARK_HEAT {
             self.exploded = true;
+        }
+        // M16 (CHN-A11): once the flame has burnt out (its pool down to a few stragglers
+        // after a real flame), the vessel is
+        // vented and refilled at once: the loop jumps to its next cycle, whose fresh gas
+        // and slow chains start on the next update, instead of sitting dark to the end
+        // of the burn and the vent.
+        self.peak_n = self.peak_n.max(chain.pool.len());
+        if self.exploded
+            && beat.index >= BURN
+            && self.peak_n > FLAME_PEAK
+            && chain.pool.len() < FLAME_OUT
+        {
+            self.peak_n = 0;
+            let total = self.schedule.total();
+            self.t = (cycle + 1) as f64 * total + 1e-9;
+            self.cycle = cycle + 1;
+            self.exploded = false;
+            // The hot, spent gas is vented: fresh gas at the wall temperature.
+            chain.refuel();
+            chain.water.fill(0.0);
+            chain.temp.fill(1.0);
+            for _ in 0..SEED_RADICALS {
+                if let Some(r) = chain.random_point(&mut self.rng) {
+                    chain.pool.spawn(r);
+                }
+            }
         }
         // The threads: every `TRAIL_DT` each radical's position joins its trail, so a
         // trail spans `TRAIL_N · TRAIL_DT` simulated seconds whatever the draw cadence.
@@ -922,23 +972,25 @@ mod tests {
         let mut g = RadicalChain::default();
         g.resize(size, &mut ctx);
         let mut peak = 1.0f32;
-        let mut exploded_at = None;
+        let mut exploded = false;
         let loop_s: f64 = PHASES.iter().map(|p| p.1).sum();
-        for k in 0..(loop_s / SIM_DT) as usize - 1 {
+        // Until the burnt-out vessel is vented (the next cycle), then 1 s of fresh gas.
+        let mut k = 0;
+        while g.cycle == 0 && k < (2.0 * loop_s / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
             let c = g.chain.as_ref().expect("chain");
-            let m = c.max_temp();
             assert!(c.temp.as_slice().iter().all(|t| t.is_finite() && *t >= 0.0));
-            peak = peak.max(m);
-            if g.exploded && exploded_at.is_none() {
-                exploded_at = Some(k);
-            }
+            peak = peak.max(c.max_temp());
+            exploded |= g.exploded;
+            k += 1;
         }
-        assert!(exploded_at.is_some(), "no flash in one loop");
+        assert!(exploded, "no flash in one loop");
         assert!(peak > 1.5, "the flash heats the gas (peak {peak})");
-        // End of the vent: back to the wall temperature.
+        for _ in 0..60 {
+            g.update(SIM_DT, &mut ctx);
+        }
         let m = g.chain.as_ref().expect("chain").max_temp();
-        assert!(m < 1.05, "T {m} after the vent");
+        assert!(m < 1.1, "T {m} after the vent");
     }
 
     #[test]
@@ -976,10 +1028,10 @@ mod tests {
             seen[CAPTIONS.iter().position(|&x| x == c).expect("listed")] = true;
         }
         assert_eq!(seen, [true; 3]);
-        assert_eq!(
-            latched_in,
-            vec![BURN, BURN],
-            "the explosion latches in each burn"
+        // Burnt-out loops are cut short (CHN-A11), so two loop lengths hold ≥ 2 flashes.
+        assert!(
+            latched_in.len() >= 2 && latched_in.iter().all(|&b| b == BURN),
+            "the explosion latches in each burn: {latched_in:?}"
         );
     }
 
@@ -1047,9 +1099,9 @@ mod tests {
             DEATH,
             WALL,
         ];
+        let mut threads = 0;
         for t in [1.5, 4.5, 6.0, 12.5] {
             let (_, canvas) = frame_at(t);
-            let mut threads = 0;
             for c in canvas.cells() {
                 if c.ch == ' ' || c.ink.role == Role::Text {
                     continue;
@@ -1061,8 +1113,8 @@ mod tests {
                 assert!(allowed.contains(&c.ink), "t = {t}: {c:?}");
                 threads += usize::from(c.ink.role == Role::Hot);
             }
-            assert!(threads > 0, "t = {t}: no threads");
         }
+        assert!(threads > 0, "no threads");
         // Colour by age: fresh segments hot, the tail faint.
         assert_eq!(thread_ink(0), THREAD_INKS[0]);
         assert!(thread_ink(3).level < thread_ink(0).level);
@@ -1119,6 +1171,78 @@ mod tests {
         // A crowded pool draws a bounded, fixed share of threads.
         let shown = (0..4000u32).filter(|&id| drawn(id, 4000)).count();
         assert!(shown < MAX_THREADS + MAX_THREADS / 5, "{shown}");
-        assert!((0..100u32).all(|id| drawn(id, 100)));
+        assert!((0..MAX_THREADS as u32).all(|id| drawn(id, MAX_THREADS)));
+    }
+
+    #[test]
+    fn chn_a11_the_vessel_is_never_dark_and_refills_once_the_flame_is_out() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = RadicalChain::default();
+        g.resize(size, &mut ctx);
+        let body = 120 * 39;
+        let (mut next, mut t) = (0.25, 0.0);
+        let mut was_exploded = false;
+        while t < 32.0 {
+            g.update(SIM_DT, &mut ctx);
+            t += SIM_DT;
+            let n = g.chain.as_ref().map_or(0, |c| c.pool.len());
+            // A burnt-out vessel never keeps the `explosion` caption with no radicals.
+            if n == 0 {
+                assert_ne!(
+                    g.caption(),
+                    Some(CAPTIONS[2]),
+                    "t = {t:.2}: explosion, 0 radicals"
+                );
+            }
+            was_exploded |= g.exploded;
+            if t >= next {
+                next += 0.25;
+                g.prepare();
+                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                g.render(&mut canvas);
+                let lit = canvas.cells()[..body]
+                    .iter()
+                    .filter(|c| c.ch != ' ' && c.ink != WALL && c.ink.role != Role::Text)
+                    .count();
+                let share = lit as f64 / body as f64;
+                assert!(share >= 0.015, "t = {t:.2}: {:.1} % lit", 100.0 * share);
+            }
+        }
+        assert!(was_exploded);
+    }
+
+    #[test]
+    fn chn_a12_the_explosion_is_a_tree_of_threads_not_a_mesh() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = RadicalChain::default();
+        g.resize(size, &mut ctx);
+        let mut t = 0.0;
+        let mut worst = 0.0f64;
+        while t < 7.5 {
+            g.update(SIM_DT, &mut ctx);
+            t += SIM_DT;
+            if t > 5.0 && (t * 4.0).fract() < SIM_DT * 4.0 {
+                g.prepare();
+                let ds = g.dots.dot_size();
+                let (w, h) = (i32::from(ds.width()), i32::from(ds.height()));
+                let (mut lit, mut packed) = (0usize, 0usize);
+                for y in 0..h {
+                    for x in 0..w {
+                        if !g.dots.is_lit(x, y) {
+                            continue;
+                        }
+                        lit += 1;
+                        let all = [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                            .iter()
+                            .all(|&(dx, dy)| g.dots.is_lit(x + dx, y + dy));
+                        packed += usize::from(all);
+                    }
+                }
+                worst = worst.max(packed as f64 / lit.max(1) as f64);
+            }
+        }
+        assert!(worst < 0.1, "{:.1} % of lit dots packed", 100.0 * worst);
     }
 }

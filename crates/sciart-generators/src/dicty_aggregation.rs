@@ -53,9 +53,18 @@ pub(crate) const CAP: usize = 3000;
 const CELLS_PER_NODE: f64 = 0.24;
 /// Chemotactic speed while a front passes, in nodes per second.
 const CHEMO_SPEED: f32 = 10.0;
+/// Chemotaxis speed-up once the lawn aggregates (from `PACE_LATE_FROM`).
+const CHEMO_LATE: f32 = 1.6;
 /// Pacemaker period and radius; pacemakers only fire recovered nodes.
 const PACE_S: f64 = 7.0;
+/// The quicker relay of the aggregating lawn (s), from this time in the cycle (s).
+const PACE_LATE_S: f64 = 3.5;
+const PACE_LATE_FROM: f64 = 20.0;
 const PACE_R: f64 = 5.0;
+/// Pacemaker homing: search radius (nodes) and the least 5×5-node crowd it moves to
+/// (≈ 2× a fresh lawn's 6).
+const HOME_R: usize = 10;
+const HOME_MIN: f32 = 12.0;
 const PACE_V_MAX: f32 = 0.1;
 /// Nodes more crowded than this take no more cells (a mound's packing).
 const MAX_PER_NODE: f32 = 14.0;
@@ -68,7 +77,7 @@ const STROKE: FrontStroke = FrontStroke {
     tail_v: (0.69, 0.36),
 };
 /// One aggregation lasts this long, then the lawn is scattered afresh.
-const CYCLE_S: f64 = 55.0;
+const CYCLE_S: f64 = 45.0;
 const FADE_S: f64 = 2.0;
 
 // ---- Display (M16, GEN-R25: strange_attractors' thread idiom) ----
@@ -76,7 +85,7 @@ const FADE_S: f64 = 2.0;
 /// Cells: one braille dot per amoeba in `Hot`, at two flat levels: the thin lawn, and
 /// the streams and mounds, where the 3×3-node neighbourhood holds at least
 /// [`CROWD_N`] cells (≈ 4× a fresh lawn's); the ground is black.
-const CELL_INKS: [Ink; 2] = [Ink::new(Role::Hot, 150), Ink::new(Role::Hot, 255)];
+const CELL_INKS: [Ink; 2] = [Ink::new(Role::Hot, 110), Ink::new(Role::Hot, 255)];
 const CROWD_N: f32 = 9.0;
 /// A moving amoeba's trail: a dim `Hot` dot line through its last [`TRAIL_N`]
 /// positions, sampled every [`TRAIL_DT`] simulated seconds (so it is ≈ 0.5 s long and
@@ -161,6 +170,8 @@ struct Dicty {
     scratch: Grid<f32>,
     /// Seconds since the trails were last sampled.
     trail_clock: f64,
+    /// Seconds since the pacemakers last fired.
+    pace_clock: f64,
     /// Cells, trails and wave fronts (M16: all braille).
     dots: Dots,
     seeded: bool,
@@ -186,6 +197,7 @@ impl Default for Dicty {
             time: 0.0,
             scratch: Grid::default(),
             trail_clock: 0.0,
+            pace_clock: PACE_S - 1.0,
             dots: Dots::default(),
             seeded: false,
         }
@@ -207,6 +219,8 @@ impl Dicty {
                 .push(Cell::at(rng.random_range(0.0..w), rng.random_range(0.0..h)));
         }
         self.n_pacers = if w * h > 4000.0 { 3 } else { 1 };
+        // The first pulse 1 s into the cycle, as before.
+        self.pace_clock = PACE_S - 1.0;
         for p in &mut self.pacers {
             *p = (rng.random_range(0.2..0.8), rng.random_range(0.2..0.8));
         }
@@ -258,10 +272,65 @@ impl Dicty {
         }
     }
 
+    /// Cells in the 5×5 nodes about node `(x, y)`.
+    fn crowd5(&self, x: usize, y: usize) -> f32 {
+        let (w, h) = (usize::from(self.u.width()), usize::from(self.u.height()));
+        let mut n = 0.0;
+        for yy in y.saturating_sub(2)..=(y + 2).min(h - 1) {
+            for xx in x.saturating_sub(2)..=(x + 2).min(w - 1) {
+                n += self.rho[yy * w + xx];
+            }
+        }
+        n
+    }
+
+    /// M16 (DICT-A9): a pacemaker moves to the densest crowd within `HOME_R` nodes once
+    /// one has formed (a real aggregate's centre is its pacemaker), so waves keep
+    /// starting where the cells are, run out along the streams (an empty lawn does not
+    /// relay them) and pull the streams in to the mounds until the reset.
+    fn home_pacers(&mut self) {
+        let (w, h) = (usize::from(self.u.width()), usize::from(self.u.height()));
+        if w < 2 || h < 2 {
+            return;
+        }
+        for k in 0..self.n_pacers {
+            let (fx, fy) = self.pacers[k];
+            let (px, py) = (
+                ((fx * (w - 1) as f64).round() as usize).min(w - 1),
+                ((fy * (h - 1) as f64).round() as usize).min(h - 1),
+            );
+            let here = self.crowd5(px, py);
+            let mut best = (here, px, py);
+            for y in py.saturating_sub(HOME_R)..=(py + HOME_R).min(h - 1) {
+                for x in px.saturating_sub(HOME_R)..=(px + HOME_R).min(w - 1) {
+                    let c = self.crowd5(x, y);
+                    if c > best.0 {
+                        best = (c, x, y);
+                    }
+                }
+            }
+            if best.0 >= HOME_MIN && best.0 > 1.3 * here {
+                self.pacers[k] = (
+                    best.1 as f64 / (w - 1) as f64,
+                    best.2 as f64 / (h - 1) as f64,
+                );
+            }
+        }
+    }
+
     fn substep(&mut self, rng: &mut impl Rng) {
         let h = (1.0 / SUB_PER_S) as f32;
-        let pace = (PACE_S * SUB_PER_S) as u64;
-        if self.step % pace == pace / 7 {
+        // The relay quickens as the cells aggregate (in real lawns from ~10 to ~3 min):
+        // `PACE_S` at first, `PACE_LATE_S` once the streams have formed.
+        let local = self.time % CYCLE_S;
+        let late = local >= PACE_LATE_FROM;
+        let period = if late { PACE_LATE_S } else { PACE_S };
+        // Aggregating cells crawl faster (polarised, in streams): the streams shorten.
+        let chemo = if late { CHEMO_LATE } else { 1.0 };
+        self.pace_clock += f64::from(h);
+        if self.pace_clock >= period {
+            self.pace_clock = 0.0;
+            self.home_pacers();
             let (w, hh) = (f64::from(self.u.width()), f64::from(self.u.height()));
             for &(px, py) in &self.pacers[..self.n_pacers] {
                 excitable::excite_disc(
@@ -286,7 +355,7 @@ impl Dicty {
             let du = now - c.last_u;
             c.last_u = now;
             c.moving *= 0.97;
-            if let Some((dx, dy)) = chemotaxis(&self.u, &self.v, (c.x, c.y), du, h) {
+            if let Some((dx, dy)) = chemotaxis(&self.u, &self.v, (c.x, c.y), du, h * chemo) {
                 let (nx, ny) = (
                     (c.x + dx).clamp(0.0, w - 0.01),
                     (c.y + dy).clamp(0.0, hh - 0.01),
@@ -584,7 +653,7 @@ mod tests {
         let n = g.cells.len();
         assert!(n <= CAP);
         let v0 = variance(&g);
-        for _ in 0..(50 * 60) {
+        for _ in 0..(40 * 60) {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
             assert_eq!(g.cells.len(), n);
@@ -634,6 +703,45 @@ mod tests {
             .filter(|c| c.ink == CELL_INKS[0])
             .count();
         assert!(cells > 100, "{cells} lawn cells at t = 0");
+    }
+
+    #[test]
+    fn dict_a9_the_aggregate_keeps_moving_and_signalling_to_the_reset() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = lawn(size);
+        while g.time < 10.0 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let mut start = 10.0;
+        while start + 5.0 <= CYCLE_S - 1.0 {
+            let before: Vec<(f32, f32)> = g.cells.iter().map(|c| (c.x, c.y)).collect();
+            let mut crest = false;
+            let mut next = start + 0.5;
+            while g.time < start + 5.0 {
+                g.update(SIM_DT, &mut ctx);
+                if g.time >= next {
+                    next += 0.5;
+                    g.prepare();
+                    let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                    g.render(&mut canvas);
+                    crest |= canvas.cells().iter().any(|c| c.ink.role == Role::Cold);
+                }
+            }
+            let moved = g
+                .cells
+                .iter()
+                .zip(&before)
+                .filter(|(c, b)| (c.x - b.0).hypot(c.y - b.1) >= 1.0)
+                .count();
+            let share = moved as f64 / g.cells.len() as f64;
+            assert!(
+                share >= 0.2,
+                "{start}–{} s: {share:.2} of cells moved",
+                start + 5.0
+            );
+            assert!(crest, "{start}–{} s: no cAMP crest", start + 5.0);
+            start += 5.0;
+        }
     }
 
     #[test]
