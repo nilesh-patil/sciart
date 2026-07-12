@@ -62,7 +62,7 @@ const CORONA_F: f64 = 0.01;
 /// The corona's field (ECL-A12): closed loops' `L` under each helmet (plus its cusp
 /// `L_max`, seeded per side), open lines per pole and side (the last `STALK` crowd the
 /// separatrix), how far out they run (R☉) and the brightness falloff along them.
-const LOOPS: [f64; 5] = [1.15, 1.3, 1.5, 1.75, 2.05];
+const LOOPS: [f64; 4] = [1.2, 1.45, 1.75, 2.05];
 const CUSP: (f64, f64) = (2.2, 2.6);
 const OPEN: usize = 9;
 const STALK: [f64; 3] = [0.93, 0.96, 0.985];
@@ -77,9 +77,9 @@ const SEG: f64 = 2.0;
 /// The corona's steps, brightest first: `(from, ink)`, `e ≥ from`.
 pub(crate) const CORONA_STEPS: [(f64, Ink); 4] = [
     (0.55, Ink::new(Role::Star, 230)),
-    (0.25, Ink::new(Role::Star, 110)),
-    (0.1, Ink::new(Role::Structure, 100)),
-    (0.035, Ink::new(Role::Structure, 0)),
+    (0.25, Ink::new(Role::Star, 190)),
+    (0.1, Ink::new(Role::Star, 150)),
+    (0.035, Ink::new(Role::Star, 120)),
 ];
 /// The hills' top edge, the only lit land.
 const SKYLINE: Ink = Ink::new(Role::Dim, 60);
@@ -90,7 +90,10 @@ const MOON_RING: Ink = Ink::new(Role::Star, 200);
 /// The diamond's spike inks and least reach in dots.
 const SPIKE_AXIS: Ink = Ink::new(Role::Star, 230);
 const SPIKE_DIAGONAL: Ink = Ink::new(Role::Sun, 200);
-const SPIKE_DOTS: f64 = 8.0;
+const SPIKE_DOTS: f64 = 16.0;
+/// The diamond's white-hot core: the inner share of the axis spikes.
+const SPIKE_CORE: Ink = Ink::new(Role::Star, 255);
+const CORE_SHARE: f64 = 0.4;
 /// Prominences: count range, heights (solar radii).
 const PROMS: (usize, usize) = (3, 6);
 const PROM_H: (f64, f64) = (0.07, 0.16);
@@ -580,7 +583,7 @@ impl Eclipse {
                 }
             }
         }
-        let reach = SPIKE_DOTS.max(1.6 * 0.5 * self.radius);
+        let reach = SPIKE_DOTS.max(1.6 * self.radius);
         for k in 0..8 {
             let (s, c) = (f64::from(k) * TAU / 8.0).sin_cos_det();
             let (r, ink) = if k % 2 == 0 {
@@ -593,7 +596,8 @@ impl Eclipse {
                 let d = 0.5 * f64::from(j);
                 let (x, y) = (bx + d * c, by + d * s);
                 if clear(x, y) {
-                    dots.plot(x, y, ink);
+                    let core = k % 2 == 0 && d <= CORE_SHARE * r;
+                    dots.plot(x, y, if core { SPIKE_CORE } else { ink });
                 }
             }
         }

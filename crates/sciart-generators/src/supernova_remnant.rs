@@ -71,8 +71,8 @@ const WOBBLE_DRIFT: f64 = 0.05;
 /// `R_c0 = CONTACT·R_f` the unperturbed contact, so fingers are long and the gaps between
 /// them short stubs; one filament per `FIL_SPACING` dots of that inner edge's
 /// circumference, at most `FIL_MAX`, along the golden-angle sequence.
-const FIL_INNER: f64 = 0.72;
-const FIL_SPACING: f64 = 3.5;
+const FIL_INNER: f64 = 0.5;
+const FIL_SPACING: f64 = 2.0;
 pub(crate) const FIL_MAX: usize = 400;
 /// Golden-angle fraction: any prefix of `frac(i·φ)` is evenly spread round the circle.
 const GOLDEN: f64 = 0.618_033_988_749_895;
@@ -258,7 +258,7 @@ impl SupernovaRemnant {
         self.update_wobble();
         self.filaments = vec![Filament::default(); FIL_MAX];
         self.knots = ParticlePool::with_capacity(KNOTS);
-        self.tau = ctx.rng.random_range(1.0..1.3);
+        self.tau = ctx.rng.random_range(5.2..5.6);
         self.explode(ctx);
         self.light_knots();
     }
@@ -699,7 +699,7 @@ mod tests {
     #[test]
     fn snr_a4_shock_dots_hug_the_blast_wave() {
         let (mut g, mut ctx) = built(Size::new(200, 50));
-        for secs in [4.0, 10.0, 20.0] {
+        for secs in [2.0, 6.0, 10.0] {
             run(&mut g, &mut ctx, secs);
             let rf = g.rf_dots();
             let mut dots = Dots::new(Size::new(200, 50));

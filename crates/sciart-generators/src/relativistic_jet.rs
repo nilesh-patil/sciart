@@ -55,14 +55,14 @@ const JET_PA: f64 = 0.12;
 /// The helix (JET-A7): cone half-width `(BASE + OPENING·s)·len`, wavenumber (per jet
 /// length), the pattern's outward drift (jet lengths per s), strands, and where the
 /// strands end (jet lengths).
-const BASE: f64 = 0.008;
-const OPENING: f64 = 0.03;
+const BASE: f64 = 0.012;
+const OPENING: f64 = 0.045;
 pub(crate) const HELIX_K: f64 = 30.0;
 pub(crate) const HELIX_DRIFT: f64 = 0.06;
 const STRANDS: usize = 3;
 const JET_END: f64 = 0.93;
 /// Helix sample spacing (dots).
-const STEP: f64 = 1.5;
+const STEP: f64 = 0.8;
 /// The counter-jet is drawn one segment in this many.
 const COUNTER_SPARSE: usize = 3;
 /// Knots (JET-A8): drawn above this brightness, white-hot above `KNOT_BRIGHT`, with a

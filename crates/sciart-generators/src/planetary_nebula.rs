@@ -50,12 +50,14 @@ const T_FADE: f64 = 40.0;
 const LOOP: f64 = 45.0;
 /// Slow wind (PNE-A1): grains, their speed (H/s, ±20 %), the radius they coast to, the
 /// share launched near the equator and that spread (rad), and where they thin out.
-pub(crate) const DUST: usize = 360;
+pub(crate) const DUST: usize = 480;
 pub(crate) const V_DUST: f64 = 0.045;
 const R_DUST: f64 = 0.95;
 const TORUS_SHARE: f64 = 0.7;
 const TORUS_SPREAD: f64 = 0.35;
 const DUST_THIN: (f64, f64) = (0.6, 0.35);
+/// Each grain trails 2 dots behind it, outward motion made visible.
+const DUST_TRAIL: f64 = 2.0;
 /// Lobes (PNE-A2): full length (H), the quick inflation and the slow creep after it
 /// (share of the full length, over s).
 const L_FULL: f64 = 0.85;
@@ -77,7 +79,7 @@ const INNER_TILT: f64 = 0.35;
 const INNER_PETALS: [(f64, f64); 3] = [(5.0, 1.0), (7.0, 0.85), (10.0, 0.7)];
 /// Streamlines start this far from the star (lobe lengths): the free-streaming wind next
 /// to the star is too thin to show, and the threads would crowd there.
-const R0: f64 = 0.12;
+const R0: f64 = 0.22;
 /// The flowing dashes (PNE-A7): period (H), duty, speed (H/s).
 const DASH: f64 = 0.08;
 const DUTY: f64 = 0.75;
@@ -327,22 +329,28 @@ impl PlanetaryNebula {
 
     /// Every grain drawn now, as a dot position: not inside the lobe wall (swept up by
     /// the fast wind), thinning out past `DUST_THIN.0`.
-    fn grains(&self, mut f: impl FnMut((f64, f64))) {
-        let (l, env, axis) = (self.lobe(), self.envelope(), self.axis_angle());
+    fn grains(&self, mut f: impl FnMut((f64, f64), (f64, f64))) {
+        // The slow wind keeps blowing through the fade and the loop's restart, so the
+        // frame is never empty at the act change (no envelope here).
+        let (l, axis) = (self.lobe(), self.axis_angle());
+        let back = DUST_TRAIL / self.h.max(1e-9);
         for (i, g) in self.grains.iter().enumerate() {
             let r = g.r(self.t);
             let keep = 1.0 - ease::smoothstep((r - DUST_THIN.0) / DUST_THIN.1);
-            if hash01(cell_key(i as i32, 47)) >= keep * env {
+            if hash01(cell_key(i as i32, 47)) >= keep {
                 continue;
             }
             if l > 0.0 && r <= lobe_radius(l, g.ang.cos_det()) * 1.02 {
                 continue;
             }
             let (s, c) = (axis + g.ang).sin_cos_det();
-            f((
-                self.centre.0 + r * c * self.h,
-                self.centre.1 - r * s * self.h,
-            ));
+            let at = |r: f64| {
+                (
+                    self.centre.0 + r * c * self.h,
+                    self.centre.1 - r * s * self.h,
+                )
+            };
+            f(at(r), at((r - back).max(0.0)));
         }
     }
 
@@ -352,7 +360,7 @@ impl PlanetaryNebula {
         for &(x, y, ink) in &self.stars {
             dots.set(x, y, ink);
         }
-        self.grains(|p| dots.plot(p.0, p.1, DUST_INK));
+        self.grains(|head, tail| dots.line(tail.0, tail.1, head.0, head.1, DUST_INK));
         self.threads(|a, b, ink, _| dots.line(a.0, a.1, b.0, b.1, ink));
         self.fliers(|tail, head| {
             dots.line(tail.0, tail.1, head.0, head.1, NII);
@@ -660,7 +668,7 @@ mod tests {
             }
             assert_eq!(star, 1, "t {t}: star cells");
             if g.lobe() > 0.0 {
-                g.grains(|p| {
+                g.grains(|p, _| {
                     let (q, _) = q_of(&g, p);
                     assert!(q > 0.95, "t {t}: dust inside the lobes at q = {q}");
                 });
