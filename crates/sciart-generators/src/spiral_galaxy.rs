@@ -55,6 +55,7 @@ const BULGE_SIGMA: f64 = 0.07;
 /// Star cap and stars per cell (ADR-0012).
 const MAX_STARS: usize = 12_000;
 const STARS_PER_CELL: f64 = 0.4;
+const MIN_STARS: usize = 1400;
 /// View: inclination (25°) and the position angle of the major axis on screen.
 const COS_INC: f64 = 0.906_307_787_036_649_9;
 const PA: f64 = 0.35;
@@ -89,7 +90,20 @@ pub(crate) const BULGE_INKS: [(Ink, Ink); 2] = [
     (Ink::new(Role::Hot, 215), Ink::new(Role::Hot, 130)),
     (Ink::new(Role::Sun, 235), Ink::new(Role::Sun, 140)),
 ];
-pub(crate) const YOUNG_INKS: (Ink, Ink) = (Ink::new(Role::Cold, 255), Ink::new(Role::Cold, 160));
+pub(crate) const YOUNG_INKS: (Ink, Ink) = (Ink::new(Role::Cold, 230), Ink::new(Role::Cold, 150));
+/// Old disc stars between the arms: one step dimmer, and only `INTERARM_KEEP` of them
+/// (a fixed per-star hash).
+pub(crate) const INTERARM_INKS: (Ink, Ink) = (Ink::new(Role::Sun, 110), Ink::new(Role::Sun, 50));
+const INTERARM_KEEP: f64 = 0.35;
+const INTERARM_SALT: u64 = 0xA4A5;
+/// The arm band in arm phase: from just inside the dust lane's outer edge to the end of
+/// the young-star band.
+pub(crate) const ARM_BAND: (f64, f64) = (-0.2, 1.0);
+
+/// Whether arm phase `φ` lies on an arm (the band where the old disc is drawn in full).
+pub(crate) fn on_arm(phi: f64) -> bool {
+    (ARM_BAND.0..=ARM_BAND.1).contains(&phi)
+}
 /// Foreground stars: dim and bright, one dot each.
 const FIELD_INKS: [Ink; 2] = [Ink::new(Role::Dim, 120), Ink::new(Role::Star, 170)];
 /// Field stars of our own Galaxy in front, per cell.
@@ -319,7 +333,11 @@ impl SpiralGalaxy {
             // Massive young stars live only just downstream of the arm that made them.
             Pop::Young if young_shows(n, phi) => Some(YOUNG_INKS),
             Pop::Young => None,
-            Pop::Disc => Some(DISC_INKS),
+            Pop::Disc if on_arm(phi) => Some(DISC_INKS),
+            // Between the arms the old disc is drawn sparser and dimmer, so the four arms
+            // stand out (surface brightness, not star counts).
+            Pop::Disc if hash01(n as u64 ^ INTERARM_SALT) < INTERARM_KEEP => Some(INTERARM_INKS),
+            Pop::Disc => None,
         }
     }
 
@@ -377,7 +395,8 @@ impl Generator for SpiralGalaxy {
         if !self.seeded {
             self.seed(ctx);
         }
-        self.n_stars = ((size.area() as f64 * STARS_PER_CELL) as usize).clamp(1, MAX_STARS);
+        // A floor, so a small frame still has enough stars to trace four arms.
+        self.n_stars = ((size.area() as f64 * STARS_PER_CELL) as usize).clamp(MIN_STARS, MAX_STARS);
         self.dots.resize(size);
         let d = self.dots.dot_size();
         let (w, h) = (f64::from(d.width()), f64::from(d.height()));
@@ -572,6 +591,7 @@ mod tests {
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
         let mut inks = vec![DISC_INKS.0, DISC_INKS.1, YOUNG_INKS.0, YOUNG_INKS.1];
+        inks.extend([INTERARM_INKS.0, INTERARM_INKS.1]);
         inks.extend(BULGE_INKS.iter().flat_map(|p| [p.0, p.1]));
         inks.extend(KNOT_INKS);
         inks.extend(FIELD_INKS);
@@ -619,12 +639,41 @@ mod tests {
                 (_, Some(inks)) if inks == YOUNG_INKS => {
                     assert!((YOUNG_BAND.0..=YOUNG_BAND.1).contains(&phi), "φ = {phi}");
                 }
-                (_, Some(inks)) => assert_eq!(inks, DISC_INKS),
+                (_, Some(inks)) if on_arm(phi) => assert_eq!(inks, DISC_INKS),
+                (_, Some(inks)) => assert_eq!(inks, INTERARM_INKS),
                 (Pop::Young, None) => assert!(in_lane(r, phi) || !young_shows(n, phi)),
-                (_, None) => assert!(in_lane(r, phi)),
+                (_, None) => assert!(in_lane(r, phi) || !on_arm(phi)),
             }
         }
         assert!(bulge_max <= 0.3 + 1e-9, "bulge star at {bulge_max}");
+    }
+
+    #[test]
+    fn spg_a8_four_arms_stand_out_from_the_interarm_disc() {
+        // At 160×45 the lit-dot density on the arms (0.25–0.9 R) is ≥ 2.5× that between
+        // them, and the old disc between the arms is the dimmer step.
+        let (g, _) = built(Size::new(160, 45), 42);
+        let d = g.dots.dot_size();
+        let (mut arm, mut arm_n, mut inter, mut inter_n) = (0usize, 0usize, 0usize, 0usize);
+        for py in 0..i32::from(d.height()) {
+            for px in 0..i32::from(d.width()) {
+                let (x, y) = g.to_plane(px, py);
+                if !(0.25..0.9).contains(&x.hypot(y)) {
+                    continue;
+                }
+                let phi = arm_phase(x, y, g.t);
+                let lit = usize::from(g.dots.is_lit(px, py));
+                if on_arm(phi) {
+                    (arm, arm_n) = (arm + lit, arm_n + 1);
+                } else if phi.abs() > 1.6 {
+                    (inter, inter_n) = (inter + lit, inter_n + 1);
+                }
+            }
+        }
+        let (arm, inter) = (arm as f64 / arm_n as f64, inter as f64 / inter_n as f64);
+        assert!(arm >= 2.5 * inter, "arm {arm:.3} vs interarm {inter:.3}");
+        assert!(INTERARM_INKS.0.level < DISC_INKS.0.level);
+        assert!(on_arm(0.0) && on_arm(0.8) && !on_arm(-0.4) && !on_arm(PI));
     }
 
     #[test]

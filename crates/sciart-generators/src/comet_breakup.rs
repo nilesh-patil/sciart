@@ -551,8 +551,15 @@ impl CometBreakup {
         }
         // Tails: straight threads from a grain, dust away from the Sun, ion straight
         // anti-Sun, each in two steps by distance (the dust ages and reddens outward).
+        // While the pile breaks up its many tails are capped, so they stay threads.
+        let cap = if matches!(beat.index, BREAKUP | PEARLS) {
+            BREAK_TAIL_CAP
+        } else {
+            f64::INFINITY
+        };
         let tail =
             |dots: &mut Dots, (x, y): (f64, f64), dir: [f64; 2], len: f64, inks: [Ink; 2]| {
+                let len = len.min(cap / jr);
                 let (tx, ty) = (dir[0] * len * jr, -dir[1] * len * jr);
                 let (mx, my) = (x + 0.5 * tx, y + 0.5 * ty);
                 dots.line(mx, my, x + tx, y + ty, inks[1]);
@@ -644,6 +651,8 @@ const TAIL_EVERY: usize = 16;
 const ION_DIR: [f64; 2] = [0.2, 0.98];
 const ION_LEN: f64 = 1.4;
 const ION_EVERY: usize = 40;
+/// Longest tail thread (dots) during the breakup and the string of pearls.
+pub(crate) const BREAK_TAIL_CAP: f64 = 12.0;
 /// Inks (SPEC-002 Look, M16). Grains and fragments white; dust threads `Sun` near the
 /// nucleus, `Hot` in the outer half; ion threads `Cold`, fainter outward.
 pub(crate) const HEAD: Ink = Ink::new(Role::Star, 255);
@@ -958,6 +967,50 @@ mod tests {
             inside > 200 && lit * 50 <= inside,
             "{lit} of {inside} lit inside"
         );
+    }
+
+    #[test]
+    fn brk_a8_tails_are_capped_during_the_breakup() {
+        // In the breakup and the string of pearls no tail thread runs more than
+        // BREAK_TAIL_CAP dots from the grain it leaves (checked on the lit dots beyond
+        // the pile: every one lies within the cap of some grain).
+        let (mut g, mut rng) = fresh();
+        for t in [6.0, 20.0] {
+            run_to(&mut g, &mut rng, t);
+            g.compose();
+            let v = g.view;
+            let com = orbit(g.tau);
+            let grains: Vec<(f64, f64)> = g
+                .pos
+                .iter()
+                .map(|p| {
+                    let (x, y) = v.px([com[0] + MAG * p[0], com[1] + MAG * p[1]]);
+                    (2.0 * x, 2.0 * y)
+                })
+                .collect();
+            let d = g.dots.dot_size();
+            let (jx, jy) = v.px([0.0, 0.0]);
+            let (jx, jy, jr) = (2.0 * jx, 2.0 * jy, 2.0 * v.scale);
+            for y in 0..i32::from(d.height()) {
+                for x in 0..i32::from(d.width()) {
+                    let (fx, fy) = (f64::from(x), f64::from(y));
+                    // Leave out Jupiter, the Roche circle and the stars.
+                    let rj = (fx - jx).hypot(fy - jy) / jr;
+                    if !g.dots.is_lit(x, y) || rj < 1.05 || (rj - ROCHE).abs() < 0.1 {
+                        continue;
+                    }
+                    let near = grains
+                        .iter()
+                        .map(|&(gx, gy)| (gx - fx).hypot(gy - fy))
+                        .fold(f64::INFINITY, f64::min);
+                    let star = hash01(0x5E ^ cell_key(x / 2, y / 4)) < STAR_SHARE;
+                    assert!(
+                        star || near <= BREAK_TAIL_CAP + 1.5,
+                        "t {t}: dot ({x}, {y}) {near:.1} dots from the pile"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

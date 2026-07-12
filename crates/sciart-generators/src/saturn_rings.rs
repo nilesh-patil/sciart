@@ -92,9 +92,32 @@ const FILL: f64 = 0.74;
 
 /// Ringlets (SPEC-002 Look, M16): one braille thread every `RINGLET_GAP` dots of ring
 /// radius at the ansae; where the tilt crowds them on screen (near the minor axis) only
-/// every m-th is kept, so neighbouring threads stay at least `MIN_GAP` dots apart.
-const RINGLET_GAP: f64 = 3.0;
-const MIN_GAP: f64 = 2.0;
+/// every m-th is kept, so neighbouring threads stay at least `MIN_GAP` dots apart. A
+/// ringlet within `GAP_CLEAR` dots of a gap (Cassini, Encke, Keeler) is left out, so
+/// every gap is a black lane at least a dot wider than itself.
+const RINGLET_GAP: f64 = 4.0;
+/// On a small frame (fewer than `SMALL_SCALE` dots per Saturn radius) the ringlets are
+/// `RINGLET_GAP_SMALL` dots apart, so the rings keep a few threads each.
+const RINGLET_GAP_SMALL: f64 = 3.0;
+const SMALL_SCALE: f64 = 45.0;
+
+/// Ringlet spacing (dots of ring radius at the ansae) for `scale` dots per Saturn radius.
+fn ringlet_gap(scale: f64) -> f64 {
+    if scale < SMALL_SCALE {
+        RINGLET_GAP_SMALL
+    } else {
+        RINGLET_GAP
+    }
+}
+const MIN_GAP: f64 = 2.5;
+const GAP_CLEAR: f64 = 0.75;
+
+/// Whether a ringlet at radius `r` lies within `clear` (R_S) of a gap.
+pub(crate) fn near_gap(r: f64, clear: f64) -> bool {
+    [CASSINI, ENCKE, KEELER]
+        .iter()
+        .any(|&(a, b)| (r - r.clamp(a, b)).abs() < clear)
+}
 
 /// The rings' flat steps by brightness, brightest first: the B ring's bright white, the
 /// grey A and C rings; below the last a ringlet dot is dark (the Cassini Division and
@@ -597,7 +620,8 @@ impl SaturnRings {
         let st = TILT.sin_det();
         let light = 0.85 + 0.15 * l[2] / SUN_ELEV.sin_det();
         let v = self.view;
-        let dr = RINGLET_GAP / v.scale;
+        let spacing = ringlet_gap(v.scale);
+        let dr = spacing / v.scale;
         let d = self.dots.dot_size();
         let (dw, dh) = (i32::from(d.width()), i32::from(d.height()));
         self.ringlets.clear();
@@ -607,15 +631,16 @@ impl SaturnRings {
             let k = self.ringlets.len();
             self.ringlets.push(Ringlet { r: r as f32 });
             let keeler = (r - PAN_R).abs() < WAKE_REACH + 0.02;
-            let b_static = self.brightness_over(r, dr);
-            if b_static > 0.02 || keeler {
+            let b_static = self.brightness_over(r, 0.5 * dr);
+            if !near_gap(r, GAP_CLEAR / v.scale) && (b_static > 0.02 || keeler) {
                 let n = ((TAU * r * v.scale * 1.2) as usize).clamp(16, 1 << 15);
                 let mut last = (i32::MIN, i32::MIN);
                 for j in 0..n {
                     let lambda = TAU * j as f64 / n as f64;
                     let (s, c) = lambda.sin_cos_det();
-                    // Screen spacing to the next ringlet here: thin where it crowds.
-                    let gap = RINGLET_GAP * c.hypot(s * st);
+                    // Screen distance to the next ringlet, across the ellipse (normal
+                    // to it): `gap·sin i / |(sin λ, cos λ·sin i)|`; thin where it crowds.
+                    let gap = spacing * st / s.hypot(c * st);
                     let every = (MIN_GAP / gap.max(1e-3)).ceil().max(1.0) as usize;
                     if k % every != 0 {
                         continue;
@@ -702,7 +727,7 @@ impl SaturnRings {
         }
         let t = self.t;
         let pan = pan_angle(t);
-        let dr = RINGLET_GAP / self.view.scale;
+        let dr = ringlet_gap(self.view.scale) / self.view.scale;
         let edge_reach = 0.5 * (ENCKE.1 - ENCKE.0) + WAVE_AMP + dr;
         for i in 0..self.ring_dots.len() {
             let p = self.ring_dots[i];
@@ -1099,6 +1124,60 @@ mod tests {
     }
 
     #[test]
+    fn ring_a11_ringlets_never_hatch_into_a_fill() {
+        // At 80×24, 160×45 and 200×50, under 10 % of the lit ringlet dots have all four
+        // neighbours (left, right, above, below) lit; every gap clears its ringlets.
+        for (w, h) in [(80, 24), (160, 45), (200, 50)] {
+            let g = scene(w, h, 3.0);
+            let (mut lit, mut packed) = (0, 0);
+            for p in &g.ring_dots {
+                let (x, y) = (i32::from(p.x), i32::from(p.y));
+                if !g.dots.is_lit(x, y) {
+                    continue;
+                }
+                lit += 1;
+                packed += usize::from(
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .all(|&(dx, dy)| g.dots.is_lit(x + dx, y + dy)),
+                );
+            }
+            assert!(lit > 200, "{w}×{h}: {lit} ring dots");
+            assert!(packed * 10 < lit, "{w}×{h}: {packed} of {lit} packed");
+            let clear = GAP_CLEAR / g.view.scale;
+            for rl in &g.ringlets {
+                let r = f64::from(rl.r);
+                let drawn = g
+                    .ring_dots
+                    .iter()
+                    .any(|p| g.ringlets[usize::from(p.ringlet)].r == rl.r);
+                assert!(
+                    !(drawn && near_gap(r, clear)),
+                    "{w}×{h}: ringlet at {r} in a gap"
+                );
+            }
+        }
+        // The Cassini Division is at least 3 dots of black at 160×45 on the ansae.
+        let g = scene(160, 45, 0.0);
+        let drawn: Vec<f64> = g
+            .ring_dots
+            .iter()
+            .map(|p| f64::from(g.ringlets[usize::from(p.ringlet)].r))
+            .collect();
+        let below = drawn
+            .iter()
+            .copied()
+            .filter(|&r| r < CASSINI.0)
+            .fold(0.0, f64::max);
+        let above = drawn
+            .iter()
+            .copied()
+            .filter(|&r| r > CASSINI.1)
+            .fold(9.0, f64::min);
+        assert!((above - below) * g.view.scale >= 4.0, "{below}..{above}");
+    }
+
+    #[test]
     fn ring_a10_ringlets_are_threads_with_black_gaps() {
         let g = scene(200, 50, 2.0);
         // The Cassini Division stays black: no ringlet dot in its core (the Encke and
@@ -1118,7 +1197,7 @@ mod tests {
             );
         }
         // Threads, not a fill: on the ansae (|cos λ| > 0.8) neighbouring ringlets are
-        // RINGLET_GAP dots apart, so under half of the dots in the ring band are lit.
+        // `ringlet_gap` dots apart, so under half of the dots in the ring band are lit.
         let st = TILT.sin_det();
         let d = g.dots.dot_size();
         let (mut lit, mut n) = (0, 0);
