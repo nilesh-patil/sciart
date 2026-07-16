@@ -9,8 +9,23 @@
 //! ```
 //!
 //! on a torus of square nodes decoupled from the display (ADR-0012): below the node cap
-//! one node is exactly one half-block pixel, above it the lattice stops growing and the
-//! pattern zooms.
+//! one node covers 2×2 braille dots, above it the lattice stops growing and the pattern
+//! zooms.
+//!
+//! ## Look (M17, GEN-R26: stipple cells + rim)
+//!
+//! Every braille dot samples `u` and `v` bilinearly from the torus (wrapping across the
+//! screen edges, so the lattice never shows), which keeps the cells round at any zoom.
+//! Inside a cell (`v ≥ v_m`, [`V_M`]) a dot is kept with probability rising smoothly with
+//! `v` ([`cell_p`]), as electron_orbitals keeps a dot with probability |ψ|²; the core band
+//! is `Sun`, the body `Hot`. The membrane is the `v = v_m` iso-line of the same sampled
+//! surface at dot resolution, one `Accent` thread ([`draw_culture`]), so it closes around
+//! every cell and pinches into a figure-8 when a cell divides. Outside, the substrate the
+//! cells have eaten (`1 − u`) is a sparse `Cold` stipple, the moat. Thresholds are fixed
+//! per dot (CORE-R107's hash, cached), and both densities are monotone in the field, so a
+//! slowly changing culture gains and loses dots only where its density crosses them. Node
+//! cells that hold neither a cell nor a moat are skipped whole, so the black majority
+//! costs nothing, and the keep decisions are accumulated without a branch per dot.
 //!
 //! ## Discretisation
 //!
@@ -56,9 +71,9 @@
 use std::fmt::Write as _;
 
 use rand::Rng;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink};
+use sciart_core::{draw, ease, raster};
 
 pub static META: Meta = Meta {
     name: "gray_scott",
@@ -108,26 +123,43 @@ const SEED_R0: (f32, f32) = (1.5, 3.0);
 const PASSAGE_KAPPA: f32 = 0.02;
 const PASSAGE_BLOCK: usize = 6;
 const PASSAGE_SHARE: f64 = 0.8;
-/// v that maps to full brightness. Patterned v peaks at ≈ 0.3–0.45, and broad plateaus
-/// (coral, the tops of large spots) sit at ≈ 0.3–0.37: with headroom above them they read
-/// yellow-orange (level ≈ 200–225) and only spot cores reach the pale-yellow top (0.34
-/// put 36 % of the coral beat's pixels there, with no internal grading).
-const V_FULL: f32 = 0.40;
-/// Below this share of `V_FULL` (v = 0.12) a pixel is substrate, not pattern: the thin
-/// tails between neighbouring spots and loops fall to the halo or to black, so dense
-/// regimes keep a near-black majority (CHEM-A8; tuning history in SPEC-002). Spots lose
-/// only their outermost ring, which the halo still grades.
-const Q_MIN: f32 = 0.3;
-/// Substrate depletion `1 − u` where the dim halo starts to fade in, where it saturates,
-/// and its peak Seq value.
-const HALO_MIN: f32 = 0.2;
-const HALO_FULL: f32 = 0.6;
-const HALO_PEAK: f32 = 0.1;
+/// The membrane level `v_m`: a cell is where `v ≥ v_m`. Patterned v peaks at ≈ 0.3–0.45;
+/// below 0.12 lie the thin tails between neighbouring spots and loops, which stay
+/// substrate, so dense regimes keep a black majority (the M15 pattern edge, CHEM-A8).
+const V_M: f32 = 0.12;
+/// v where a cell's stipple reaches its core density, and where the `Sun` core band
+/// starts. Spot cores reach ≈ 0.35–0.45; coral plateaus sit at ≈ 0.3–0.37.
+const V_CORE: f32 = 0.30;
+const V_SUN: f32 = 0.28;
+/// Kept share of cell dots at the membrane and at the core (SPEC-002 Look (M17)).
+const P_EDGE: f64 = 0.08;
+const P_CORE: f64 = 0.45;
+/// Substrate depletion `1 − u` where the moat stipple starts and where it reaches its
+/// cap, and the cap: sparse, so the moat only hints at the eaten medium.
+const MOAT_D0: f32 = 0.15;
+const MOAT_D1: f32 = 0.45;
+const P_MOAT: f64 = 0.06;
+/// Stipple salt (CORE-R107). The cell and moat clouds never share a dot (a dot is inside
+/// or outside), so one threshold per dot serves both.
+const SALT: u64 = 0x6A09_E667_F3BC_C908;
+
+/// Each dot's fixed stipple threshold: CORE-R107's `hash01(salt ^ cell_key(x, y))`,
+/// quantised to 1/256 and cached in `resize`, since the raster tests up to every dot of
+/// the screen each frame. A dot is kept when its threshold is below `256·p`.
+pub(crate) fn threshold(x: i32, y: i32) -> u8 {
+    (sciart_core::rng::hash01(SALT ^ sciart_core::rng::cell_key(x, y)) * 256.0) as u8
+}
+/// Cell body, core band, membrane and moat inks. A braille cell takes its most intense
+/// dot's ink, so the levels rank them: the rim wins over the stipple it crosses, the core
+/// over the body, and the moat never tints a cell dot.
+const CELL_INK: Ink = Ink::new(Role::Hot, 215);
+const SUN_INK: Ink = Ink::new(Role::Sun, 255);
+const RIM_INK: Ink = Ink::new(Role::Accent, 255);
+const MOAT_INK: Ink = Ink::new(Role::Cold, 185);
 /// The label shows the preset name only from this width on: narrower, it would take most
 /// of row 0 and cut a notch into the pattern.
 const LABEL_NAME_MIN: u16 = 56;
-/// The corner label: level 195 because it sits on the brightest backgrounds of any scene,
-/// inside a blank gutter.
+/// The corner label, inside a blank gutter (level kept from M15).
 const LABEL_INK: Ink = Ink::new(Role::Text, 195);
 
 /// Feed rate F and kill rate k.
@@ -393,50 +425,411 @@ pub(crate) fn lattice_size(display: Size) -> Size {
     Size::new(l.width().max(MIN_LATTICE.0).min(cap(h)), h)
 }
 
-/// Seq level of a pattern pixel for `q = v / V_FULL` at index `round(255 q)`: the ramp
-/// starts at 0.12 at the pattern edge `q = Q_MIN`, just above the halo's 0.1, so edges
-/// stay graded, and `p^0.8` (p the position between the edge and full scale) opens up
-/// the mid tones of the spot bodies.
-fn level_table() -> [u8; 256] {
-    let edge = f64::from(Q_MIN);
+/// Kept share of the cell stipple at `v` (Look (M17), CHEM-A10): 0 outside a cell
+/// (`v < v_m`, or NaN), [`P_EDGE`] at the membrane rising by a smoothstep to [`P_CORE`] at
+/// [`V_CORE`]. Monotone in `v`, so a slowly changing cell only gains or loses dots where
+/// it crosses their fixed thresholds.
+pub(crate) fn cell_p(v: f32) -> f64 {
+    if v.is_nan() || v < V_M {
+        return 0.0;
+    }
+    let t = f64::from(((v - V_M) * (1.0 / (V_CORE - V_M))).min(1.0));
+    P_EDGE + (P_CORE - P_EDGE) * t * t
+}
+
+/// Steps of the cell-density table over `v_m ..= V_CORE` (the raster's hot path reads
+/// `256·cell_p` from it instead of evaluating [`cell_p`] per dot).
+const P_STEPS: usize = 128;
+
+/// `256·cell_p(v)` at `v = v_m + i·(V_CORE − v_m)/(P_STEPS − 1)`, rounded: the dot with
+/// threshold `t` is kept where `t < table[i]`.
+fn cell_table() -> [u8; P_STEPS] {
     std::array::from_fn(|i| {
-        let p = ((i as f64 / 255.0 - edge) / (1.0 - edge)).max(0.0);
-        ink::seq(0.12 + 0.88 * p.powf(0.8)).level
+        let v = V_M + (V_CORE - V_M) * i as f32 / (P_STEPS - 1) as f32;
+        (256.0 * cell_p(v)).round().min(255.0) as u8
     })
 }
 
-/// The ink of one pixel (CHEM-A7): pattern where `v` is at least [`Q_MIN`] of full scale
-/// (v = 0.12); else a dim violet halo that fades in with substrate depletion; else
-/// `None`, the terminal's own background. `u` is only read (and so only sampled) off the
-/// pattern.
-pub(crate) fn v_ink(levels: &[u8; 256], u: impl FnOnce() -> f32, v: f32) -> Option<Ink> {
-    let q = (v / V_FULL).clamp(0.0, 1.0);
-    if q >= Q_MIN {
-        return Some(Ink::new(Role::Seq, levels[(q * 255.0).round() as usize]));
-    }
-    let fade = ((1.0 - u() - HALO_MIN) / (HALO_FULL - HALO_MIN)).clamp(0.0, 1.0);
-    let halo = ink::seq(f64::from(HALO_PEAK * fade));
-    (halo.level > 0).then_some(halo)
+/// The table index of `v ≥ v_m`.
+#[inline]
+fn cell_step(v: f32) -> usize {
+    (((v - V_M) * ((P_STEPS - 1) as f32 / (V_CORE - V_M))) as usize).min(P_STEPS - 1)
 }
 
-/// ASCII fallback for one cell (GEN-R10, CHEM-A7): the brighter half decides, so thin
-/// features survive; `.` for the stronger half of the halo (level ≥ 13), then `:` `+`
-/// `#` `@` by quartile, in that pixel's ink. The faint halo fringe, which Unicode shows
-/// as a fade to black, and a cell with both halves empty are left untouched.
-pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    const HALO_DOT: u8 = 13;
-    let lit = |p: Ink| (p.role == Role::Seq && p.level >= HALO_DOT).then_some(p);
-    // On a tie both halves are the same Seq ink, so which one wins does not matter.
-    let ink = [top, bottom]
-        .into_iter()
-        .filter_map(lit)
-        .max_by_key(|p| p.level)?;
-    const RAMP: [char; 4] = [':', '+', '#', '@'];
-    let ch = match ink.level.checked_sub(32) {
-        None => '.',
-        Some(above) => RAMP[(usize::from(above) * 4 / 224).min(3)],
-    };
-    Some((ch, ink))
+/// Kept share of the moat stipple at substrate `u` (outside cells only): 0 up to a
+/// depletion `1 − u` of [`MOAT_D0`], rising linearly to the cap [`P_MOAT`] at [`MOAT_D1`].
+pub(crate) fn moat_p(u: f32) -> f64 {
+    let d = (1.0 - u - MOAT_D0) * (1.0 / (MOAT_D1 - MOAT_D0));
+    P_MOAT * f64::from(d.clamp(0.0, 1.0))
+}
+
+/// The dots of one screen axis that fall between two neighbouring nodes: lattice cell
+/// `cell` (−1 for the strip before node 0's centre, which wraps to the last node), its two
+/// nodes on the torus with the nodes either side of them (`nm`, `n0`, `n1`, `np`, the
+/// cubic's four), and the dot range `d0..d1`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Span {
+    cell: i32,
+    nm: usize,
+    n0: usize,
+    n1: usize,
+    np: usize,
+    d0: i32,
+    d1: i32,
+}
+
+/// One dot's position between its two nodes: the fraction `t` (for bilinear `u`) and the
+/// uniform cubic B-spline weights of the four nodes `nm, n0, n1, np` at `t` (for `v`).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Tap {
+    t: f32,
+    w: [f32; 4],
+}
+
+impl Tap {
+    fn new(t: f32) -> Self {
+        let s = 1.0 - t;
+        let (t2, t3) = (t * t, t * t * t);
+        Self {
+            t,
+            w: [
+                s * s * s / 6.0,
+                (3.0 * t3 - 6.0 * t2 + 4.0) / 6.0,
+                (-3.0 * t3 + 3.0 * t2 + 3.0 * t + 1.0) / 6.0,
+                t3 / 6.0,
+            ],
+        }
+    }
+}
+
+/// One screen axis of `dots` dots over `nodes` torus nodes, node `n` centred at dot
+/// `(n + ½)·s − ½` (`s = dots / nodes`): each dot's [`Tap`] into `taps`, and the runs of
+/// dots between the same two nodes into `spans`. Built in `resize` (the vectors are
+/// reused).
+fn build_axis(nodes: usize, dots: usize, taps: &mut Vec<Tap>, spans: &mut Vec<Span>) {
+    taps.clear();
+    spans.clear();
+    if nodes == 0 || dots == 0 {
+        return;
+    }
+    let s = dots as f64 / nodes as f64;
+    let n = nodes as i32;
+    for d in 0..dots as i32 {
+        let x = (f64::from(d) + 0.5) / s - 0.5;
+        let cell = x.floor();
+        taps.push(Tap::new((x - cell) as f32));
+        let cell = cell as i32;
+        match spans.last_mut() {
+            Some(span) if span.cell == cell => span.d1 = d + 1,
+            _ => spans.push(Span {
+                cell,
+                nm: (cell - 1).rem_euclid(n) as usize,
+                n0: cell.rem_euclid(n) as usize,
+                n1: (cell + 1).rem_euclid(n) as usize,
+                np: (cell + 2).rem_euclid(n) as usize,
+                d0: d,
+                d1: d + 1,
+            }),
+        }
+    }
+}
+
+/// Which layers [`draw_culture`] draws (tests draw them one at a time).
+pub(crate) const CELLS: u8 = 1;
+pub(crate) const RIM: u8 = 2;
+pub(crate) const MOAT: u8 = 4;
+pub(crate) const ALL_LAYERS: u8 = CELLS | RIM | MOAT;
+
+/// The fields and the lattice → dot mapping, borrowed for one raster.
+pub(crate) struct Culture<'a> {
+    w: usize,
+    u: &'a [f32],
+    v: &'a [f32],
+    fx: &'a [Tap],
+    fy: &'a [Tap],
+    xs: &'a [Span],
+    ys: &'a [Span],
+    /// Each dot's stipple threshold ([`threshold`]), row-major over the dot lattice.
+    thr: &'a [u8],
+    /// `256·cell_p` by [`cell_step`].
+    table: [u8; P_STEPS],
+}
+
+/// The culture of fields `u`, `v` through the axes built by [`build_axis`] and the cached
+/// thresholds. A free function so it borrows only these fields, leaving the scene's dots
+/// free to draw on.
+fn culture<'a>(
+    u: &'a Grid<f32>,
+    v: &'a Grid<f32>,
+    [fx, fy]: [&'a [Tap]; 2],
+    [xs, ys]: [&'a [Span]; 2],
+    thr: &'a [u8],
+) -> Culture<'a> {
+    Culture {
+        w: usize::from(v.width()),
+        u: u.as_slice(),
+        v: v.as_slice(),
+        fx,
+        fy,
+        xs,
+        ys,
+        thr,
+        table: cell_table(),
+    }
+}
+
+/// What a stipple cell holds, as bits: a moat dot, a body dot, a core dot.
+const HAS_MOAT: u8 = 1;
+const HAS_BODY: u8 = 2;
+const HAS_CORE: u8 = 4;
+
+/// The cell and moat stipple as braille: per terminal cell a dot mask and the kinds of dot
+/// it holds, accumulated without a branch per dot (the keep decisions are random by
+/// design, so branching on them mispredicts half the time). Blitted as `Dots::blit` does,
+/// each cell in the ink of its brightest kind (core, then body, then moat).
+#[derive(Debug)]
+pub(crate) struct Stipple {
+    cells: Size,
+    masks: Vec<u8>,
+    kinds: Vec<u8>,
+}
+
+impl Default for Stipple {
+    /// Empty until the first `resize`.
+    fn default() -> Self {
+        Self {
+            cells: Size::new(0, 0),
+            masks: Vec::new(),
+            kinds: Vec::new(),
+        }
+    }
+}
+
+impl Stipple {
+    fn resize(&mut self, cells: Size) {
+        self.cells = cells;
+        for v in [&mut self.masks, &mut self.kinds] {
+            v.clear();
+            v.resize(cells.area(), 0);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.masks.fill(0);
+        self.kinds.fill(0);
+    }
+
+    /// Light dot `(x, y)` (on the lattice) if `keep`, as `kind`.
+    #[inline]
+    fn put(&mut self, x: i32, y: i32, keep: bool, kind: u8) {
+        let i = (y / 4) as usize * usize::from(self.cells.width()) + (x / 2) as usize;
+        let k = u8::from(keep);
+        self.masks[i] |= k * raster::dot_bit(x, y);
+        self.kinds[i] |= k * kind;
+    }
+
+    /// Whether dot `(x, y)` is lit.
+    #[cfg(test)]
+    pub(crate) fn is_lit(&self, x: i32, y: i32) -> bool {
+        let (w, h) = (
+            i32::from(self.cells.width()),
+            i32::from(self.cells.height()),
+        );
+        (0..2 * w).contains(&x)
+            && (0..4 * h).contains(&y)
+            && self.masks[(y / 4) as usize * w as usize + (x / 2) as usize] & raster::dot_bit(x, y)
+                != 0
+    }
+
+    fn blit(&self, canvas: &mut Canvas) {
+        let w = usize::from(self.cells.width());
+        for (i, (&mask, &kind)) in self.masks.iter().zip(&self.kinds).enumerate() {
+            if mask != 0 {
+                let ink = if kind & HAS_CORE != 0 {
+                    SUN_INK
+                } else if kind & HAS_BODY != 0 {
+                    CELL_INK
+                } else {
+                    MOAT_INK
+                };
+                canvas.put((i % w) as i32, (i / w) as i32, raster::braille(mask), ink);
+            }
+        }
+    }
+}
+
+/// The display filter: `v` smoothed by the separable binomial `[1, 2, 1]/4` on the torus
+/// into `out` (through `tmp`), a point-spread of about half a node. With the B-spline
+/// sampling ([`for_each_dot`]) it rounds the corners a coarse lattice leaves on young,
+/// growing spots, as a microscope's optics would; the simulation itself is untouched.
+/// Mismatched sizes leave `out` as it is.
+pub(crate) fn soften(v: &Grid<f32>, tmp: &mut Grid<f32>, out: &mut Grid<f32>) {
+    let (w, h) = (usize::from(v.width()), usize::from(v.height()));
+    if w == 0 || h == 0 || tmp.size() != v.size() || out.size() != v.size() {
+        return;
+    }
+    let (src, t) = (v.as_slice(), tmp.as_mut_slice());
+    for (row, out) in src.chunks_exact(w).zip(t.chunks_exact_mut(w)) {
+        for x in 0..w {
+            let (l, r) = (row[(x + w - 1) % w], row[(x + 1) % w]);
+            out[x] = 0.25 * (l + r) + 0.5 * row[x];
+        }
+    }
+    let o = out.as_mut_slice();
+    for y in 0..h {
+        let (up, dn) = (((y + h - 1) % h) * w, ((y + 1) % h) * w);
+        for x in 0..w {
+            o[y * w + x] = 0.25 * (t[up + x] + t[dn + x]) + 0.5 * t[y * w + x];
+        }
+    }
+}
+
+/// Words of an `inside` bitset row over `dots` dots (one bit per dot, see [`draw_culture`]).
+pub(crate) fn row_words(dots: usize) -> usize {
+    dots.div_ceil(64)
+}
+
+/// Visit the dots of every node cell that `keep(vmax, umin)` accepts — `vmax` the largest
+/// `v` of the cell's 4×4 cubic support (which bounds every sampled `v` in it, the B-spline
+/// weights being a partition of unity), `umin` the smallest `u` of its four corners (which
+/// bounds the bilinear `u`) — calling `f(x, y, v, u)` with `v` sampled by the uniform
+/// cubic B-spline and `u` bilinearly. The B-spline is C², so iso-lines of `v` are round
+/// even where a lattice node spans several dots; bilinear sampling bent them along the
+/// lattice and cells read as rounded squares.
+pub(crate) fn for_each_dot(
+    c: &Culture<'_>,
+    keep: impl Fn(f32, f32) -> bool,
+    mut f: impl FnMut(i32, i32, f32, f32),
+) {
+    let (u, v, w) = (c.u, c.v, c.w);
+    if w == 0 || v.len() < w || u.len() < v.len() {
+        return;
+    }
+    for sy in c.ys {
+        let rows = [sy.nm, sy.n0, sy.n1, sy.np].map(|n| n * w);
+        for sx in c.xs {
+            let cols = [sx.nm, sx.n0, sx.n1, sx.np];
+            let node = rows.map(|r| cols.map(|i| v[r + i]));
+            let vmax = node
+                .iter()
+                .flatten()
+                .fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+            let uc = [
+                u[rows[1] + cols[1]],
+                u[rows[1] + cols[2]],
+                u[rows[2] + cols[2]],
+                u[rows[2] + cols[1]],
+            ];
+            let umin = uc.iter().fold(f32::INFINITY, |a, &b| a.min(b));
+            if !keep(vmax, umin) {
+                continue;
+            }
+            for y in sy.d0..sy.d1 {
+                let ty = c.fy[y as usize];
+                // The four columns combined down the rows once per dot row.
+                let col: [f32; 4] =
+                    std::array::from_fn(|i| (0..4).map(|j| ty.w[j] * node[j][i]).sum::<f32>());
+                let ul = uc[0] + (uc[3] - uc[0]) * ty.t;
+                let ur = uc[1] + (uc[2] - uc[1]) * ty.t;
+                for x in sx.d0..sx.d1 {
+                    let tx = c.fx[x as usize];
+                    let s =
+                        tx.w[0] * col[0] + tx.w[1] * col[1] + tx.w[2] * col[2] + tx.w[3] * col[3];
+                    f(x, y, s, ul + (ur - ul) * tx.t);
+                }
+            }
+        }
+    }
+}
+
+/// Draw the culture's `layers` (Look (M17)): the cell and moat stipple onto `stipple`, the
+/// membrane onto `rim`. Node cells holding neither a cell nor a moat are skipped whole;
+/// every other dot is sampled by [`for_each_dot`] and stippled.
+///
+/// The membrane is the `v = v_m` iso-line at dot resolution: the inside dots (`v ≥ v_m`,
+/// one bit each in `inside`, a row-major bitset of [`row_words`] words per dot row) with a
+/// 4-neighbour outside. That boundary is one dot thick, 8-connected and closed around
+/// every cell by construction (screen edges count as inside, so a cell cut by the edge
+/// gets no false rim there), and a dot joins or leaves it only when the iso-line crosses
+/// the dot itself: the least churn a thread can have.
+pub(crate) fn draw_culture(
+    stipple: &mut Stipple,
+    rim: &mut Dots,
+    inside: &mut [u64],
+    c: &Culture<'_>,
+    layers: u8,
+) {
+    let (dw, dh) = (c.fx.len(), c.fy.len());
+    let words = row_words(dw);
+    if inside.len() < words * dh || c.thr.len() < dw * dh || stipple.masks.len() * 8 < dw * dh {
+        return;
+    }
+    let inside = &mut inside[..words * dh];
+    let trace = layers & RIM != 0;
+    if trace {
+        // Bits past the last dot of a row count as inside, like the screen edge.
+        let pad = if dw % 64 == 0 { 0 } else { !0u64 << (dw % 64) };
+        for row in inside.chunks_exact_mut(words) {
+            row.fill(0);
+            row[words - 1] |= pad;
+        }
+    }
+    let (cells, moat) = (layers & CELLS != 0, layers & MOAT != 0);
+    let keep = |vmax: f32, umin: f32| vmax >= V_M || (moat && 1.0 - umin > MOAT_D0);
+    let table = &c.table;
+    for_each_dot(c, keep, |x, y, s, u| {
+        let t = c.thr[y as usize * dw + x as usize];
+        if s >= V_M {
+            if trace {
+                inside[y as usize * words + x as usize / 64] |= 1 << (x % 64);
+            }
+            if cells {
+                let kind = if s >= V_SUN { HAS_CORE } else { HAS_BODY };
+                stipple.put(x, y, t < table[cell_step(s)], kind);
+            }
+        } else if moat {
+            let p = 256.0 * moat_p(u) as f32;
+            stipple.put(x, y, f32::from(t) < p, HAS_MOAT);
+        }
+    });
+    if trace {
+        trace_rim(rim, inside, words, dw);
+    }
+}
+
+/// Light every inside dot with a 4-neighbour outside as the membrane, a word (64 dots) at
+/// a time; rows above the first and below the last count as inside.
+fn trace_rim(rim: &mut Dots, inside: &[u64], words: usize, dw: usize) {
+    let rows = inside.len() / words.max(1);
+    for y in 0..rows {
+        let row = &inside[y * words..][..words];
+        let up = (y > 0).then(|| &inside[(y - 1) * words..][..words]);
+        let down = (y + 1 < rows).then(|| &inside[(y + 1) * words..][..words]);
+        for (k, &c) in row.iter().enumerate() {
+            if c == 0 {
+                continue;
+            }
+            // Bit i is dot 64k + i: its west neighbour is bit i − 1 (the previous word's
+            // top bit for i = 0), its east neighbour bit i + 1.
+            let west = (c << 1) | if k > 0 { row[k - 1] >> 63 } else { 1 };
+            let east = (c >> 1)
+                | if k + 1 < words {
+                    row[k + 1] << 63
+                } else {
+                    1 << 63
+                };
+            let north = up.map_or(!0, |r| r[k]);
+            let south = down.map_or(!0, |r| r[k]);
+            let mut edge = c & !(west & east & north & south);
+            while edge != 0 {
+                let x = 64 * k + edge.trailing_zeros() as usize;
+                edge &= edge - 1;
+                if x < dw {
+                    rim.set(x as i32, y as i32, RIM_INK);
+                }
+            }
+        }
+    }
 }
 
 /// The two homogeneous non-trivial steady states of the Gray–Scott ODE, when they exist
@@ -468,7 +861,6 @@ pub struct GrayScott {
     /// RNG on the first resize.
     slot: Option<usize>,
     walk: Timeline,
-    levels: [u8; 256],
     /// Reaction time not yet integrated (less than one sub-step).
     pending: f64,
     since_check: f64,
@@ -480,10 +872,24 @@ pub struct GrayScott {
     v_next: Grid<f32>,
     /// The passaging mask on the lattice and the seed it is keyed by (drawn once).
     mask: Grid<f32>,
+    /// `v` through the display filter ([`soften`]), and its scratch pass, on the lattice.
+    shown: Grid<f32>,
+    scratch: Grid<f32>,
     mask_seed: u64,
-    /// Lattice → pixel sampling, the pixels, and the terminal size for the label.
-    map: SampleMap,
-    pixels: Pixels,
+    /// Lattice → dot mapping per screen axis ([`build_axis`]), the braille dots, and the
+    /// terminal size for the label.
+    fx: Vec<Tap>,
+    fy: Vec<Tap>,
+    xs: Vec<Span>,
+    ys: Vec<Span>,
+    /// One bit per dot: inside a cell, for tracing the membrane ([`draw_culture`]).
+    inside: Vec<u64>,
+    /// Each dot's fixed stipple threshold ([`threshold`]), built in `resize`.
+    thr: Vec<u8>,
+    /// The membrane thread, blitted over the stipple so a terminal cell it crosses shows
+    /// the thread alone (a cell has one ink).
+    rim: Dots,
+    dots: Stipple,
     size: Size,
 }
 
@@ -495,7 +901,6 @@ impl GrayScott {
             t0: 0.0,
             slot,
             walk: walk(),
-            levels: level_table(),
             pending: 0.0,
             since_check: 0.0,
             reseeds: 0,
@@ -504,9 +909,17 @@ impl GrayScott {
             u_next: Grid::default(),
             v_next: Grid::default(),
             mask: Grid::default(),
+            shown: Grid::default(),
+            scratch: Grid::default(),
             mask_seed: 0,
-            map: SampleMap::default(),
-            pixels: Pixels::default(),
+            fx: Vec::new(),
+            fy: Vec::new(),
+            xs: Vec::new(),
+            ys: Vec::new(),
+            inside: Vec::new(),
+            thr: Vec::new(),
+            rim: Dots::default(),
+            dots: Stipple::default(),
             size: Size::new(1, 1),
         }
     }
@@ -599,14 +1012,38 @@ impl GrayScott {
         self.v_next = Grid::new(lattice, 0.0);
     }
 
-    /// Rasterise u, v into the pixels (bilinear, CORE-R52); u is sampled only off the
-    /// pattern, where the halo needs it.
+    /// The fields and the lattice → dot mapping, for one raster.
+    #[cfg(test)]
+    pub(crate) fn culture(&self) -> Culture<'_> {
+        culture(
+            &self.u,
+            &self.shown,
+            [&self.fx, &self.fy],
+            [&self.xs, &self.ys],
+            &self.thr,
+        )
+    }
+
+    /// Stipple the culture onto the dots (Look (M17)): `v` through the display filter
+    /// ([`soften`]), then every layer.
     fn rasterise(&mut self) {
-        let (map, u, v, levels) = (&self.map, &self.u, &self.v, &self.levels);
-        self.pixels.shade(|x, y| {
-            let s = map.sample(v, x, y);
-            v_ink(levels, || map.sample(u, x, y), s).unwrap_or(Ink::BLANK)
-        });
+        soften(&self.v, &mut self.scratch, &mut self.shown);
+        let c = culture(
+            &self.u,
+            &self.shown,
+            [&self.fx, &self.fy],
+            [&self.xs, &self.ys],
+            &self.thr,
+        );
+        self.dots.clear();
+        self.rim.clear();
+        draw_culture(
+            &mut self.dots,
+            &mut self.rim,
+            &mut self.inside,
+            &c,
+            ALL_LAYERS,
+        );
     }
 
     /// ` mitosis  F=.037 k=.065 ` on row 0 (CHEM-A7), the name only at width ≥ 56: the
@@ -668,9 +1105,24 @@ impl Generator for GrayScott {
         if self.mask.size() != lattice {
             self.mask = passage_mask(lattice, self.mask_seed);
         }
+        if self.shown.size() != lattice {
+            self.shown = Grid::new(lattice, 0.0);
+            self.scratch = Grid::new(lattice, 0.0);
+        }
         self.size = size;
-        self.pixels.resize(size);
-        self.map.rebuild(lattice, self.pixels.pixel_size());
+        self.dots.resize(size);
+        self.rim.resize(size);
+        let dots = self.rim.dot_size();
+        let (w, h) = self.dims();
+        build_axis(w, usize::from(dots.width()), &mut self.fx, &mut self.xs);
+        build_axis(h, usize::from(dots.height()), &mut self.fy, &mut self.ys);
+        let (dw, dh) = (i32::from(dots.width()), i32::from(dots.height()));
+        self.thr.clear();
+        self.thr
+            .extend((0..dh).flat_map(|y| (0..dw).map(move |x| threshold(x, y))));
+        let bits = row_words(usize::from(dots.width())) * usize::from(dots.height());
+        self.inside.clear();
+        self.inside.resize(bits, 0);
         self.rasterise();
     }
 
@@ -718,8 +1170,8 @@ impl Generator for GrayScott {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        self.dots.blit(canvas);
+        self.rim.blit(canvas);
         self.label(canvas);
     }
 }
@@ -1182,44 +1634,9 @@ mod tests {
     }
 
     #[test]
-    fn chem_a7_inks_ascii_and_label() {
-        let levels = level_table();
-        for u in [0.0f32, 0.5, 0.79, 0.81, 1.0] {
-            let mut last = 0;
-            for i in 0..=100 {
-                let v = i as f32 * 0.005;
-                let ink = v_ink(&levels, || u, v);
-                // The halo level 0.1·clamp((1 − u − 0.2)/0.4) rounds to 0 below 1/255.
-                let halo = 0.1 * ((1.0 - u - 0.2) / 0.4).clamp(0.0, 1.0);
-                let quiet = v / V_FULL < Q_MIN && halo * 255.0 < 0.5;
-                assert_eq!(ink.is_none(), quiet, "u {u} v {v}");
-                if let Some(ink) = ink {
-                    assert_eq!(ink.role, Role::Seq);
-                    assert!(ink.level >= last, "level falls at u {u} v {v}");
-                    last = ink.level;
-                }
-            }
-        }
-        // The halo fades in from 0 at the threshold (no hard black notch) to 0.1 at full
-        // depletion, monotonically; the pattern never reads u.
-        let mut last = 0;
-        for i in 0..=100 {
-            let u = 1.0 - i as f32 * 0.01;
-            let level = v_ink(&levels, || u, 0.0).map_or(0, |ink| ink.level);
-            assert!(level >= last && level <= last + 1, "halo jumps at u {u}");
-            last = level;
-        }
-        assert_eq!(last, ink::seq(0.1).level);
-        assert!(v_ink(&levels, || unreachable!(), 0.2).is_some());
-        // ASCII: the faint halo fringe stays blank, the rest of the halo is '.', and the
-        // brighter half decides.
-        let seq = |level| Ink::new(Role::Seq, level);
-        assert_eq!(ascii_cell(seq(12), Ink::BLANK), None);
-        assert_eq!(ascii_cell(Ink::BLANK, seq(13)), Some(('.', seq(13))));
-        assert_eq!(ascii_cell(seq(31), seq(20)), Some(('.', seq(31))));
-        assert_eq!(ascii_cell(seq(32), seq(255)), Some(('@', seq(255))));
-        assert_eq!(ascii_cell(Ink::BLANK, Ink::BLANK), None);
-
+    fn chem_a7_a9_inks_ascii_and_label() {
+        // M17: the M15 Seq heat map is superseded by the stipple's four inks (CHEM-A9); the
+        // label is unchanged.
         let mut s = Stage::new(
             Box::new(GrayScott::new(Some(0))),
             42,
@@ -1233,12 +1650,13 @@ mod tests {
         }
         let frame = s.render();
         for c in frame.cells() {
-            for ink in [c.ink, c.bg] {
-                assert!(matches!(
-                    ink.role,
-                    Role::Seq | Role::Text | Role::Background
-                ));
-            }
+            assert_eq!(c.bg, Ink::BLANK, "no half-block cells");
+            assert!(!matches!(c.ch, '▀' | '▄' | '█'));
+            assert!(
+                [CELL_INK, SUN_INK, RIM_INK, MOAT_INK, LABEL_INK, Ink::BLANK].contains(&c.ink),
+                "{:?}",
+                c.ink
+            );
         }
         let row: String = frame.to_lines()[0].chars().take(24).collect();
         assert_eq!(
@@ -1252,12 +1670,9 @@ mod tests {
         );
         s.set_glyph_mode(GlyphMode::Ascii);
         let lines = s.render().to_lines();
-        assert!(
-            lines[1..]
-                .iter()
-                .all(|l| l.chars().all(|c| " .:+#@".contains(c)))
-        );
-        let ramp = |c: char| " .:+#@".contains(c);
+        // The braille dot-count fallback (CORE-R41, GEN-R10).
+        let ramp = |c: char| " .:+#".contains(c);
+        assert!(lines[1..].iter().all(|l| l.chars().all(ramp)));
         assert!(lines[0].starts_with(" mitosis  F=.037 k=.065 "));
         assert!(lines[0].chars().skip(24).all(ramp));
 
@@ -1318,9 +1733,47 @@ mod tests {
     /// An ASCII frame below the label row.
     type Frame = Vec<Vec<char>>;
 
+    // The culture tests (CHEM-A4, A5, A8) measure the *field*: a dark majority, motion,
+    // never jamming. Their thresholds were tuned on the M15 heat map, so they keep reading
+    // the field through that quantiser (v / 0.40 on a Seq ramp from the 0.12 pattern edge,
+    // a faint depletion halo, `.:+#@` by quartile), now a test instrument only; the M17
+    // stipple look has its own acceptance (CHEM-A9..A12).
+
+    /// The M15 half-block picture of the culture: one pixel per half cell, `v` and `u`
+    /// sampled bilinearly (CORE-R52); Seq levels as at M15.
+    fn m15_pixels(g: &GrayScott) -> Pixels {
+        const V_FULL: f32 = 0.40;
+        const Q_MIN: f32 = 0.3;
+        let mut pixels = Pixels::new(g.size);
+        let mut map = sciart_core::grid::SampleMap::default();
+        map.rebuild(g.u.size(), pixels.pixel_size());
+        pixels.shade(|x, y| {
+            let q = (map.sample(&g.v, x, y) / V_FULL).clamp(0.0, 1.0);
+            if q >= Q_MIN {
+                let p = (f64::from(q) - f64::from(Q_MIN)) / (1.0 - f64::from(Q_MIN));
+                return sciart_core::ink::seq(0.12 + 0.88 * p.powf(0.8));
+            }
+            let u = map.sample(&g.u, x, y);
+            let fade = ((1.0 - u - 0.2) / 0.4).clamp(0.0, 1.0);
+            sciart_core::ink::seq(f64::from(0.1 * fade))
+        });
+        pixels
+    }
+
+    /// The M15 ASCII frame below the label row: per cell the brighter half, `.` for the
+    /// stronger half of the halo (level ≥ 13), then `:+#@` by quartile.
     fn ascii_frame(g: &GrayScott, size: Size) -> Frame {
+        let pixels = m15_pixels(g);
         let mut canvas = Canvas::new(size, GlyphMode::Ascii);
-        g.render(&mut canvas);
+        pixels.blit(&mut canvas, |_, _, top, bottom| {
+            let level = top.level.max(bottom.level);
+            let ch = match level {
+                0..=12 => return None,
+                13..=31 => '.',
+                _ => [':', '+', '#', '@'][(usize::from(level - 32) * 4 / 224).min(3)],
+            };
+            Some((ch, Ink::new(Role::Seq, level)))
+        });
         canvas
             .to_lines()
             .iter()
@@ -1329,14 +1782,15 @@ mod tests {
             .collect()
     }
 
-    /// Share of the half-block pixels below the label row that are near-black: the
-    /// terminal background or `Seq` below level 32 (the dim violet halo).
+    /// Share of the M15 half-block pixels below the label row that are near-black: the
+    /// terminal background or `Seq` below level 32 (the dim halo).
     fn near_black_share(g: &GrayScott) -> f64 {
-        let px = g.pixels.pixel_size();
+        let pixels = m15_pixels(g);
+        let px = pixels.pixel_size();
         let (mut n, mut dark) = (0usize, 0usize);
         for y in 2..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
-                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                let ink = pixels.get(x, y).unwrap_or(Ink::BLANK);
                 n += 1;
                 dark += usize::from(ink.role == Role::Background || ink.level < 32);
             }
@@ -1390,6 +1844,247 @@ mod tests {
                 / n
         });
         (dense, dark, change)
+    }
+
+    /// `v` at every dot, row-major over the dot lattice, sampled as the raster samples it.
+    fn v_dots(g: &GrayScott) -> (usize, Vec<f32>) {
+        let c = g.culture();
+        let dw = c.fx.len();
+        let mut out = vec![f32::NAN; dw * c.fy.len()];
+        for_each_dot(
+            &c,
+            |_, _| true,
+            |x, y, s, _| out[y as usize * dw + x as usize] = s,
+        );
+        assert!(
+            out.iter().all(|v| v.is_finite()),
+            "the spans tile the lattice"
+        );
+        (dw, out)
+    }
+
+    /// The dots of `layers` alone at the scene's current state.
+    fn layer(g: &GrayScott, layers: u8) -> Dots {
+        let (mut s, mut d) = (Stipple::default(), Dots::new(g.size));
+        s.resize(g.size);
+        let mut inside = vec![0; g.inside.len()];
+        draw_culture(&mut s, &mut d, &mut inside, &g.culture(), layers);
+        for (x, y) in stipple_lit(&s, d.dot_size()) {
+            d.set(x, y, CELL_INK);
+        }
+        d
+    }
+
+    fn stipple_lit(s: &Stipple, size: Size) -> Vec<(i32, i32)> {
+        let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| s.is_lit(x, y))
+            .collect()
+    }
+
+    /// The scene's raster: stipple and rim.
+    fn raster(g: &GrayScott) -> std::collections::HashSet<(i32, i32)> {
+        stipple_lit(&g.dots, g.rim.dot_size())
+            .into_iter()
+            .chain(lit(&g.rim))
+            .collect()
+    }
+
+    fn lit(d: &Dots) -> Vec<(i32, i32)> {
+        let s = d.dot_size();
+        let (w, h) = (i32::from(s.width()), i32::from(s.height()));
+        (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| d.is_lit(x, y))
+            .collect()
+    }
+
+    #[test]
+    fn chem_a9_every_lit_dot_is_a_cell_rim_or_moat_dot() {
+        let runs: Vec<(usize, (u16, u16))> = [0, 2, 3, 4]
+            .into_iter()
+            .flat_map(|slot| [(120, 40), (80, 24)].map(|s| (slot, s)))
+            .collect();
+        par(runs, |(slot, (w, h))| {
+            let (mut g, mut ctx) = scene(Some(slot), 5, w, h);
+            run_to(&mut g, &mut ctx, 6.0);
+            let id = format!("slot {slot} {w}x{h}");
+            let (dw, v) = v_dots(&g);
+            let vat = |x: i32, y: i32| v[y as usize * dw + x as usize];
+            let cells = lit(&layer(&g, CELLS));
+            let moat = lit(&layer(&g, MOAT));
+            let rim = lit(&layer(&g, RIM));
+            assert!(!cells.is_empty() && !rim.is_empty(), "{id}: a culture");
+            assert!(cells.iter().all(|&(x, y)| vat(x, y) >= V_M), "{id}");
+            assert!(moat.iter().all(|&(x, y)| vat(x, y) < V_M), "{id}");
+            let dh = (v.len() / dw) as i32;
+            for &(x, y) in &rim {
+                // Within one dot of the iso-line: the 3×3 block straddles v_m. On the
+                // outermost dots the neighbour across the iso-line may be off screen.
+                if x == 0 || y == 0 || x + 1 == dw as i32 || y + 1 == dh {
+                    continue;
+                }
+                let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
+                for (nx, ny) in (-1..=1).flat_map(|a| (-1..=1).map(move |b| (x + a, y + b))) {
+                    if (0..dw as i32).contains(&nx) && (0..dh).contains(&ny) {
+                        lo = lo.min(vat(nx, ny));
+                        hi = hi.max(vat(nx, ny));
+                    }
+                }
+                assert!(
+                    lo <= V_M && V_M <= hi,
+                    "{id}: rim dot ({x}, {y}) off the membrane"
+                );
+            }
+            // The full raster is exactly the three layers, on braille only.
+            let all = raster(&g);
+            let parts: std::collections::HashSet<_> =
+                cells.iter().chain(&moat).chain(&rim).copied().collect();
+            assert_eq!(all, parts, "{id}");
+            let mut canvas = Canvas::new(g.size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            assert!(canvas.cells().iter().all(|c| c.bg == Ink::BLANK), "{id}");
+        });
+    }
+
+    #[test]
+    fn chem_a10_stipple_density_follows_v() {
+        for slot in [0, 2, 4] {
+            let (mut g, mut ctx) = scene(Some(slot), 9, 200, 50);
+            run_to(&mut g, &mut ctx, 6.0);
+            let (dw, v) = v_dots(&g);
+            let cells = layer(&g, CELLS);
+            let mut inside: Vec<(f32, bool)> = v
+                .iter()
+                .enumerate()
+                .filter(|&(_, &s)| s >= V_M)
+                .map(|(i, &s)| (s, cells.is_lit((i % dw) as i32, (i / dw) as i32)))
+                .collect();
+            inside.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let q = inside.len() / 4;
+            assert!(q > 200, "slot {slot}: {} cell dots", inside.len());
+            let share =
+                |s: &[(f32, bool)]| s.iter().filter(|p| p.1).count() as f64 / s.len() as f64;
+            let (bottom, top) = (share(&inside[..q]), share(&inside[inside.len() - q..]));
+            assert!(
+                top >= 2.0 * bottom,
+                "slot {slot}: top {top} vs bottom {bottom}"
+            );
+            // And the kept share tracks the density it was drawn from.
+            let want = inside[inside.len() - q..]
+                .iter()
+                .map(|p| cell_p(p.0))
+                .sum::<f64>()
+                / q as f64;
+            assert!(
+                (top - want).abs() < 0.05,
+                "slot {slot}: {top} kept, {want} wanted"
+            );
+        }
+        // The density itself: 0 outside, P_EDGE at the membrane, P_CORE at the core,
+        // monotone between; the moat is capped and only where u is depleted.
+        assert_eq!(cell_p(V_M - 1e-4), 0.0);
+        assert_eq!(cell_p(f32::NAN), 0.0);
+        assert!((cell_p(V_M) - P_EDGE).abs() < 1e-9);
+        assert!((cell_p(V_CORE) - P_CORE).abs() < 1e-9 && cell_p(0.9) == cell_p(V_CORE));
+        let mut last = 0.0;
+        for i in 0..=100 {
+            let p = cell_p(V_M + i as f32 * 0.003);
+            assert!(p >= last);
+            last = p;
+        }
+        assert_eq!(moat_p(1.0), 0.0);
+        assert!(moat_p(1.0 - MOAT_D0) < 1e-6 && moat_p(0.95) == 0.0);
+        assert!((moat_p(0.0) - P_MOAT).abs() < 1e-12 && P_MOAT <= 0.06);
+    }
+
+    #[test]
+    fn chem_a11_stipple_holds_still() {
+        let runs: Vec<usize> = START_SLOTS.to_vec();
+        par(runs, |slot| {
+            let (mut g, mut ctx) = scene(Some(slot), 42, 200, 50);
+            run_to(&mut g, &mut ctx, 20.0);
+            let render = |g: &GrayScott| {
+                let mut c = Canvas::new(g.size, GlyphMode::Unicode);
+                g.render(&mut c);
+                c
+            };
+            // An unchanged state re-rasterises to the identical frame.
+            let before = render(&g);
+            g.dirty = true;
+            g.prepare();
+            g.rasterise();
+            assert!(render(&g).cells() == before.cells(), "slot {slot}");
+            // One 1/60 s step changes under 5 % of the stipple's lit dots (the rim is a
+            // thread and moves with the moving spots), and under 10 % of all lit dots.
+            let set = |d: &Dots| lit(d).into_iter().collect::<std::collections::HashSet<_>>();
+            let (a, a_all) = (set(&layer(&g, CELLS | MOAT)), raster(&g));
+            g.update(SIM_DT, &mut ctx);
+            g.prepare();
+            let (b, b_all) = (set(&layer(&g, CELLS | MOAT)), raster(&g));
+            let share = |a: &std::collections::HashSet<(i32, i32)>, b| {
+                a.symmetric_difference(b).count() as f64 / a.len().max(1) as f64
+            };
+            let (stipple, all) = (share(&a, &b), share(&a_all, &b_all));
+            assert!(
+                stipple < 0.05,
+                "slot {slot}: {stipple} of stipple dots changed"
+            );
+            assert!(all < 0.10, "slot {slot}: {all} of lit dots changed");
+        });
+    }
+
+    #[test]
+    fn chem_a12_every_mitosis_spot_has_a_closed_rim() {
+        for (seed, (w, h)) in [(1, (120, 40)), (7, (200, 50)), (3, (80, 24))] {
+            let (mut g, mut ctx) = scene(Some(0), seed, w, h);
+            run_to(&mut g, &mut ctx, 5.0);
+            assert_eq!(
+                preset_at(&g.walk, g.t + g.t0).from,
+                0,
+                "in the mitosis hold"
+            );
+            let (dw, v) = v_dots(&g);
+            let dh = v.len() / dw;
+            let rim = layer(&g, RIM);
+            // A 4-connected flood from the medium over non-rim dots: an 8-connected rim
+            // blocks it, so if every rim is closed it never reaches a cell's interior.
+            let mut seen = vec![false; v.len()];
+            let mut stack: Vec<usize> = (0..v.len())
+                .filter(|&i| v[i] < V_M - 0.02 && !rim.is_lit((i % dw) as i32, (i / dw) as i32))
+                .collect();
+            for &i in &stack {
+                seen[i] = true;
+            }
+            while let Some(i) = stack.pop() {
+                let (x, y) = (i % dw, i / dw);
+                let mut push = |j: usize| {
+                    if !seen[j] && !rim.is_lit((j % dw) as i32, (j / dw) as i32) {
+                        seen[j] = true;
+                        stack.push(j);
+                    }
+                };
+                if x > 0 {
+                    push(i - 1);
+                }
+                if x + 1 < dw {
+                    push(i + 1);
+                }
+                if y > 0 {
+                    push(i - dw);
+                }
+                if y + 1 < dh {
+                    push(i + dw);
+                }
+            }
+            let interior = (0..v.len()).filter(|&i| v[i] > V_M + 0.03).count();
+            let leaked = (0..v.len())
+                .filter(|&i| seen[i] && v[i] > V_M + 0.03)
+                .count();
+            assert!(interior > 100, "seed {seed}: spots exist");
+            assert_eq!(leaked, 0, "seed {seed} {w}x{h}: a rim is open");
+        }
     }
 
     #[test]

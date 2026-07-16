@@ -213,7 +213,12 @@ fn galaxy_samples(rng: &mut impl Rng) -> Vec<Sample> {
             } else {
                 let phi = span * rng.random_range(0.0_f64..1.0);
                 let r = ARM_R0 * (ARM_K * phi).exp();
-                let a = phi + if i % 2 == 0 { 0.0 } else { std::f64::consts::PI };
+                let a = phi
+                    + if i % 2 == 0 {
+                        0.0
+                    } else {
+                        std::f64::consts::PI
+                    };
                 let (s, c) = a.sin_cos_det();
                 let (dr, dt) = gaussian2(rng, ARM_SD0 + ARM_SD1 * r);
                 // Scatter across and along the arm; clamp to the galaxy radius.
@@ -343,7 +348,12 @@ fn galaxy_dots(
             }
             let (x, y) = view.to_dot(theta);
             if x.is_finite() && y.is_finite() {
-                f((x.round() as i32, y.round() as i32), Ink::new(role, galaxy_level(mu)), i, theta);
+                f(
+                    (x.round() as i32, y.round() as i32),
+                    Ink::new(role, galaxy_level(mu)),
+                    i,
+                    theta,
+                );
             }
         }
     }
@@ -394,7 +404,10 @@ impl GravitationalLensing {
         let (sn, c) = self.pass_dir.sin_cos_det();
         let b = self.impact * te;
         let beta = (along * c - b * sn, along * sn + b * c);
-        (beta, (std::f64::consts::PI * s).sin_det().max(0.0).powf(0.6))
+        (
+            beta,
+            (std::f64::consts::PI * s).sin_det().max(0.0).powf(0.6),
+        )
     }
 
     fn new_pass(&mut self, ctx: &mut Ctx) {
@@ -886,7 +899,10 @@ mod tests {
                 let r = (f64::from(x) - cx).hypot(f64::from(y) - cy);
                 let on = g.dots.is_lit(x, y);
                 if on {
-                    assert!(r / View::DOTS_PER_ROW <= 0.35 * te, "lens dot at {r:.1} dots");
+                    assert!(
+                        r / View::DOTS_PER_ROW <= 0.35 * te,
+                        "lens dot at {r:.1} dots"
+                    );
                 }
                 let k = (3.0 * r / r_max) as usize;
                 if k < 3 {
@@ -895,7 +911,9 @@ mod tests {
                 }
             }
         }
-        let d: Vec<f64> = (0..3).map(|k| f64::from(lit_n[k]) / f64::from(all_n[k])).collect();
+        let d: Vec<f64> = (0..3)
+            .map(|k| f64::from(lit_n[k]) / f64::from(all_n[k]))
+            .collect();
         assert!(d[0] > d[1] && d[1] > d[2] && d[2] > 0.0, "{d:?}");
         // Fixed thresholds: the cloud holds still between frames.
         let before = lit(&g);

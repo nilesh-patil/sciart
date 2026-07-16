@@ -986,7 +986,11 @@ impl SolarEruption {
                 pose.apply(1.0 - 0.55 * hot, self.blob_at(b, 3.0)),
             );
             let (pd, qd) = (v.px(p[0], p[1]), v.px(q[0], q[1]));
-            if p[1] >= 0.0 && q[1] >= 0.0 && !self.in_cavity(shell, pd) && !self.in_cavity(shell, qd) {
+            if p[1] >= 0.0
+                && q[1] >= 0.0
+                && !self.in_cavity(shell, pd)
+                && !self.in_cavity(shell, qd)
+            {
                 f(qd, pd, RAIN_INK, Part::Rain);
             }
         }
@@ -1049,7 +1053,7 @@ impl SolarEruption {
             let limb_r = LIMB_R * v.scale;
             let band = (r * (1.0 - FRONT_INNER)).max(2.0);
             let front_boost = (2.0 - self.px_scale / 40.0).clamp(1.0, 1.7);
-            let n =((TAU * r * band * FRONT_FILL) as usize).min(FRONT_SAMPLES);
+            let n = ((TAU * r * band * FRONT_FILL) as usize).min(FRONT_SAMPLES);
             for i in 0..n {
                 let key = 0xF207_0000 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 let (s, co) = (TAU * (i as f64 * GOLDEN).fract()).sin_cos_det();
@@ -1537,7 +1541,10 @@ mod tests {
             assert!(front > 10, "front {front} at {dt}");
             tops.push(top);
         }
-        assert!(tops.windows(2).all(|w| w[1] < w[0]), "the front rises: {tops:?}");
+        assert!(
+            tops.windows(2).all(|w| w[1] < w[0]),
+            "the front rises: {tops:?}"
+        );
     }
 
     #[test]
@@ -1604,7 +1611,10 @@ mod tests {
                     assert_eq!(a, b, "front dots, not strokes");
                     assert!(matches!(ink.role, Role::Star | Role::Cold), "{ink:?}");
                     let d = (a.0 - c.0).hypot(a.1 - c.1);
-                    assert!(d <= r + 1.0 && d >= FRONT_INNER * r - 2.5, "front at {d:.1} of {r:.1}");
+                    assert!(
+                        d <= r + 1.0 && d >= FRONT_INNER * r - 2.5,
+                        "front at {d:.1} of {r:.1}"
+                    );
                     dots.plot(a.0, a.1, ink);
                     n += 1;
                 }
@@ -1648,7 +1658,10 @@ mod tests {
                     assert_eq!(ink.role, Role::Sun, "{ink:?}");
                     let x = corona_x(&g, b).abs();
                     let near = feet.iter().map(|f| (f - x).abs()).fold(f64::MAX, f64::min);
-                    assert!(near < 0.3, "ribbon dot {x:.2} far from the feet ({near:.2})");
+                    assert!(
+                        near < 0.3,
+                        "ribbon dot {x:.2} far from the feet ({near:.2})"
+                    );
                     sum += x;
                     n += 1;
                 }
