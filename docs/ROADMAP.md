@@ -225,5 +225,15 @@ Design: [docs/design/M16-thread-style.md](design/M16-thread-style.md) · [ADR-00
 - [x] Local `--no-ff` merge of `feat/m16-thread-style` into main
 - [ ] M16 follow-ups: see "Follow-ups" in docs/design/M16-thread-style.md
 
+## M17 — Orbital-thread style
+Design: [docs/design/M17-orbital-thread.md](design/M17-orbital-thread.md) · [ADR-0020](adr/0020-orbital-thread-style.md) · GEN-R26, CORE-R107.
+- [x] Visual options per scene (user picked all recommended designs); spec first: GEN-R26, CORE-R107, `Look (M17)` + acceptance IDs in 10 sections
+- [x] Infra: `raster::stipple_keep` / `Dots::stipple` (CORE-R107); GEN-R26 list, half-block and stillness test; GEN-R22 skips GEN-R26 scenes
+- [ ] Redesign gray_scott, ising_model, molecular_motors (team A)
+- [ ] Redesign gravitational_lensing, spacetime_grid, three_body, spiral_galaxy (team B)
+- [ ] Redesign io_volcanoes, solar_eruption, supernova_remnant (team C)
+- [ ] Critic review (art + science, ≤ 2 rounds); budgets (worst frame < 2 ms at 200×50, < 5 ms at 500×150; bytes and changed cells per frame)
+- [ ] Results, samples at M17, the contributor guide figures
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
