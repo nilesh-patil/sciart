@@ -23,15 +23,25 @@
 //! - **defibrillation**: a shock excites every cell at once from a common state, the
 //!   heart recovers as one, and the pacemaker takes over again.
 //!
-//! The display is the standard phase map `θ = atan2(v − v*, u − u*)` (cyclic hues), with
-//! resting tissue dim and phase singularities (spiral tips) as white dots. A pseudo-ECG,
-//! `Φ = Σ ∇u·∇(1/r)` at an electrode below the apex, sweeps along the bottom rows.
+//! ## Look (M18, GEN-R26: excitation cloud + tip-meander threads)
+//!
+//! Braille only, on a black organ. Each wave is a two-lobed probability cloud sampled
+//! bilinearly from the lattice at every dot: the excited tissue a `Hot` stipple with
+//! density `0.7·u²`, the recovering refractory tail a sparse `Cold` stipple rising with
+//! `v` (the opposite lobe), each dot's threshold fixed (CORE-R107) so the clouds hold
+//! still and change only where a wave passes. The fresh front (`u = ½`, `v < ⅓`) is a
+//! 1-px `Sun` thread. Phase singularities, the points where `θ = atan2(v − v*, u − u*)`
+//! winds by 2π, are spiral tips: small `Star` atoms (CORE-R108) trailing the last 1.2 s
+//! of their own meander as a thread, so fibrillation paints curling rosettes. The heart
+//! outline is a 1-px `Dim` thread. A pseudo-ECG, `Φ = Σ ∇u·∇(1/r)` at an electrode below
+//! the apex, sweeps along the bottom rows.
 
 use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
+use sciart_core::rng;
 use sciart_core::{draw, title};
 
 use crate::shared::excitable::{self, AlievPanfilov, Medium};
@@ -110,19 +120,65 @@ const MAX_NODES: usize = 12_800;
 const BUCKET: f64 = 1.25;
 /// Tips tracked for display.
 const MAX_TIPS: usize = 48;
-/// Sub-steps between singularity counts.
-const COUNT_EVERY: u64 = 60;
-/// Inks in M11's roles and flat steps (ADR-0018). The organ is black but for its 1-px
-/// `Dim` rim; the heart's outline pixels are those at least half covered by the rim band.
+/// Sub-steps between singularity counts: about one per drawn frame (30 FPS), so a
+/// meandering tip moves well under a node between counts and its trail stays smooth.
+const COUNT_EVERY: u64 = 27;
+/// Inks in M11's roles and flat steps (ADR-0018), as braille (Look (M18)).
+/// The heart's outline thread.
 const RIM_INK: Ink = Ink::new(Role::Dim, 110);
-/// The excitation front: a `Hot` line, a step dimmer as it goes stale.
-const FRONT_INKS: [Ink; 2] = [Ink::new(Role::Hot, 150), Ink::new(Role::Hot, 255)];
-/// The defibrillation shock: the whole organ flashes white for a moment.
+/// The excited lobe: `Hot` stipple, kept with probability `EXCITED_P·u²` above `U_EXCITED`.
+const EXCITED_INK: Ink = Ink::new(Role::Hot, 200);
+const EXCITED_P: f32 = 0.4;
+const U_EXCITED: f32 = 0.15;
+/// The refractory lobe: sparse `Cold` stipple where `u ≤ U_EXCITED` and `v` exceeds
+/// `REFRACTORY_V·V_MAX`, kept with probability `REFRACTORY_P·min(1, v/V_MAX)`.
+const REFRACTORY_INK: Ink = Ink::new(Role::Cold, 150);
+const REFRACTORY_P: f32 = 0.12;
+const REFRACTORY_V: f32 = 0.4;
+/// The model's typical plateau `v` (Aliev–Panfilov, `k = 8`, `a = 0.1`): the refractory
+/// tail peaks at about 2.0 behind every wave, measured at 200×50.
+const V_MAX: f32 = 2.0;
+/// The excited lobe has thinned to nothing this long (seconds) after a node's upstroke.
+const AGE_FRESH: f32 = 0.15;
+/// A node's upstroke: `u` rising through `U_UP`; it can fire again once below `U_DOWN`.
+const U_UP: f32 = 0.5;
+const U_DOWN: f32 = 0.3;
+/// The age of a node that has not fired since the lattice was built.
+const AGE_NEVER: f32 = 1.0e3;
+/// The fresh front: a 1-px `Sun` thread on `u = ½` while `v < FRONT_V`, the dots within
+/// `FRONT_W` dots of the contour (distance `|u − ½| / |∇u|` × dots per node).
+const FRONT_INK: Ink = Ink::new(Role::Sun, 255);
+const FRONT_V: f32 = 1.0 / 3.0;
+const FRONT_W: f32 = 0.75;
+/// Fixed stipple salt (CORE-R107) of the per-dot threshold bytes.
+const EXCITED_SALT: u64 = 0x4845_4152_545F_4854;
+/// The defibrillation shock: the organ flashes as a dense `Star` stipple for its first
+/// `FLASH_S`.
 const FLASH_INK: Ink = Ink::new(Role::Star, 200);
+const FLASH_P: f32 = 0.5;
+const FLASH_S: f64 = 0.125;
 /// The ECG trace in a monitor's green, newer half brighter, led by a white write head.
 const ECG_INKS: [Ink; 2] = [Ink::new(Role::Particle, 90), Ink::new(Role::Particle, 160)];
 const ECG_HEAD_INK: Ink = Ink::new(Role::Star, 255);
+/// Spiral tips: bright `Star` atoms (σ in dots), trailing their meander for `TRAIL_S` as a
+/// thin `Dim` thread, the newer half `TRAIL_INKS[1]`, the older `TRAIL_INKS[0]`; the
+/// trail follows the tip smoothed with time constant `TRAIL_TAU` (seconds), since a
+/// detected singularity jitters by a node from count to count.
 const TIP_INK: Ink = Ink::new(Role::Star, 255);
+const TIP_SIGMA: f64 = 0.8;
+const TIP_PEAK: f64 = 0.95;
+const TRAIL_INKS: [Ink; 2] = [Ink::new(Role::Dim, 60), Ink::new(Role::Dim, 110)];
+const TRAIL_S: f64 = 0.9;
+const TRAIL_TAU: f32 = 0.15;
+/// Positions per trail: one per singularity count (every `COUNT_EVERY` sub-steps), with
+/// room to spare over `TRAIL_S`.
+const TRAIL_N: usize = 48;
+/// Counts a trail may miss its tip for and still continue.
+const TRAIL_GAP: u64 = 2;
+/// A tip that moved further than this between counts (dots, or lattice nodes when the
+/// node spacing is coarser) is a new tip: its trail restarts.
+const TRAIL_JUMP_DOTS: f32 = 3.0;
+const TRAIL_JUMP_NODES: f32 = 1.5;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 /// ECG sweep speed in dot columns per second.
 const SWEEP_DOTS_PER_S: f64 = 40.0;
@@ -137,6 +193,9 @@ struct Heart {
     v: Grid<f32>,
     /// `|∇u|` per node, refreshed by `rasterise` for the front's line (M14).
     slope: Grid<f32>,
+    /// Seconds since each node's last upstroke, and whether it is still up (Look (M18)).
+    age: Grid<f32>,
+    up: Vec<bool>,
     lap: Vec<f32>,
     /// Per-node `ε` factor for the fibrillation act.
     patchy: Vec<f32>,
@@ -146,6 +205,10 @@ struct Heart {
     taken: Vec<bool>,
     tips: [(i32, i32); MAX_TIPS],
     tip_count: usize,
+    /// Each detected tip refined inside its plaquette (lattice index units).
+    tip_pos: [(f32, f32); MAX_TIPS],
+    /// Meander trails, one fixed ring per tip slot (HRT-A10).
+    trails: [Trail; MAX_TIPS],
     /// Pseudo-ECG lead field `∇(1/r)` per node.
     lead: Vec<[f32; 2]>,
     /// ECG samples per dot column, the sweep's write head and its running scale.
@@ -164,14 +227,25 @@ struct Heart {
     step: u64,
     owed: f64,
     timeline: Timeline,
-    pixels: Pixels,
     dots: Dots,
+    /// Lattice → dot view sampling (bilinear), and the dot view: origin and size in dots.
     map: SampleMap,
-    /// Pixel rectangle the lattice maps onto: origin and size.
+    dview: (i32, i32, Size),
+    /// Dots per lattice node.
+    dpn: f32,
+    /// Pixel rectangle the lattice is sized for (half-block pixels): origin and size.
     view: (i32, i32, Size),
-    /// Per view pixel: the heart's coverage and its rim band's coverage (0..=255), 4×4
-    /// supersampled once per resize, so the outline is antialiased (HRT-A6).
-    edge: Vec<[u8; 2]>,
+    /// Per view dot: [`OUTSIDE`], [`ORGAN`] or [`OUTLINE`], built once per resize.
+    organ: Vec<u8>,
+    /// Fresh-front dots in the last frame (HRT-A11).
+    front_dots: usize,
+    /// Per view dot its fixed stipple threshold byte (CORE-R107), and per dot column and
+    /// row the lattice cell it samples (the sample map's bilinear taps), built per resize.
+    thr: Vec<u8>,
+    cols: Vec<u16>,
+    rows: Vec<u16>,
+    /// Per lattice cell what it can show this frame.
+    bounds: Vec<Bound>,
     ecg_rows: u16,
     cells: Size,
     readout_room: usize,
@@ -188,6 +262,8 @@ impl Default for Heart {
             u: Grid::default(),
             v: Grid::default(),
             slope: Grid::default(),
+            age: Grid::default(),
+            up: Vec::new(),
             lap: Vec::new(),
             patchy: Vec::new(),
             heterogeneous: false,
@@ -195,6 +271,8 @@ impl Default for Heart {
             taken: Vec::new(),
             tips: [(0, 0); MAX_TIPS],
             tip_count: 0,
+            tip_pos: [(0.0, 0.0); MAX_TIPS],
+            trails: [Trail::EMPTY; MAX_TIPS],
             lead: Vec::new(),
             ecg: Vec::new(),
             head: 0.0,
@@ -213,11 +291,17 @@ impl Default for Heart {
                 (CAPTIONS[2], VF_S),
                 (CAPTIONS[3], SHOCK_S),
             ]),
-            pixels: Pixels::default(),
             dots: Dots::default(),
             map: SampleMap::default(),
+            dview: (0, 0, Size::new(1, 1)),
+            dpn: 1.0,
             view: (0, 0, Size::new(1, 1)),
-            edge: Vec::new(),
+            organ: Vec::new(),
+            front_dots: 0,
+            thr: Vec::new(),
+            cols: Vec::new(),
+            rows: Vec::new(),
+            bounds: Vec::new(),
             ecg_rows: 0,
             cells: Size::new(1, 1),
             readout_room: 0,
@@ -377,6 +461,85 @@ impl Heart {
             &mut self.taken,
             &mut self.tips,
         );
+        self.track_tips();
+    }
+
+    /// Refine each detected tip inside its plaquette and extend the trail of the tip it
+    /// continues (the nearest tip of the last count within the jump limit), or start a
+    /// trail in a free slot (HRT-A10).
+    fn track_tips(&mut self) {
+        let n = self.tip_count.min(MAX_TIPS);
+        let w = i32::from(self.u.width());
+        let (u, v) = (self.u.as_slice(), self.v.as_slice());
+        for k in 0..n {
+            let (x, y) = self.tips[k];
+            let (mut sx, mut sy, mut sw) = (0.0_f32, 0.0_f32, 0.0_f32);
+            for (cx, cy) in [(x, y), (x + 1, y), (x, y + 1), (x + 1, y + 1)] {
+                let i = (cy * w + cx) as usize;
+                // Closest to the phase centre weighs most: the singularity is where the
+                // u and v isolines through (u*, v*) cross.
+                let d = (u[i] - CENTRE.0).abs() + (v[i] - CENTRE.1).abs() + 1e-3;
+                let wt = 1.0 / (d * d);
+                sx += wt * cx as f32;
+                sy += wt * cy as f32;
+                sw += wt;
+            }
+            self.tip_pos[k] = (sx / sw, sy / sw);
+        }
+        let now = self.step;
+        let jump = (TRAIL_JUMP_DOTS / self.dpn).max(TRAIL_JUMP_NODES);
+        let horizon = (TRAIL_S * SUB_PER_S as f64) as u64;
+        let mut claimed = [false; MAX_TIPS];
+        for k in 0..n {
+            let p = self.tip_pos[k];
+            // The nearest trail extended at one of the last `TRAIL_GAP` counts (a tip the
+            // detector missed once keeps its trail), within the jump limit per count.
+            let best = (0..MAX_TIPS)
+                .filter(|&j| !claimed[j])
+                .filter_map(|j| {
+                    let (q, at) = self.trails[j].last_tip()?;
+                    let counts = now.saturating_sub(at) / COUNT_EVERY;
+                    let d = (q.0 - p.0).hypot(q.1 - p.1);
+                    ((1..=TRAIL_GAP).contains(&counts) && d <= jump * counts as f32)
+                        .then_some((j, d))
+                })
+                .min_by(|a, b| a.1.total_cmp(&b.1));
+            let slot = match best {
+                Some((j, _)) => j,
+                None => {
+                    // A free slot: empty, or its trail older than the horizon.
+                    let Some(j) = (0..MAX_TIPS).find(|&j| {
+                        !claimed[j]
+                            && self.trails[j]
+                                .newest()
+                                .is_none_or(|(_, at)| now.saturating_sub(at) > horizon)
+                    }) else {
+                        continue;
+                    };
+                    self.trails[j].clear();
+                    j
+                }
+            };
+            claimed[slot] = true;
+            self.trails[slot].push(p, now);
+        }
+    }
+
+    /// Age every node by `dt` and restart the clock of each node whose `u` has risen
+    /// through `U_UP` since the last update (its upstroke).
+    fn age_nodes(&mut self, dt: f32) {
+        let u = self.u.as_slice();
+        for ((a, up), &uu) in self.age.as_mut_slice().iter_mut().zip(&mut self.up).zip(u) {
+            if uu > U_UP && !*up {
+                *up = true;
+                *a = 0.0;
+            } else {
+                *a = (*a + dt).min(AGE_NEVER);
+            }
+            if uu < U_DOWN {
+                *up = false;
+            }
+        }
     }
 
     /// The pseudo-ECG `Φ = Σ ∇u·∇(1/r)` (central differences; walls give zero).
@@ -407,6 +570,9 @@ impl Heart {
         let n = lat.area();
         self.u = Grid::new(lat, 0.0);
         self.v = Grid::new(lat, 0.0);
+        self.age = Grid::new(lat, AGE_NEVER);
+        self.up.clear();
+        self.up.resize(n, false);
         for buf in [&mut self.lap, &mut self.theta] {
             buf.clear();
             buf.resize(n, 0.0);
@@ -465,102 +631,193 @@ impl Heart {
         reset(&mut self.u, &mut self.v);
         self.tip_count = 0;
         self.heterogeneous = false;
-        self.map.rebuild(lat, view);
     }
 
-    /// Shade the heart into the pixels and draw the ECG sweep (update/resize only).
+    /// Draw the heart and the ECG sweep as braille (Look (M18)), once per drawn frame.
     fn rasterise(&mut self) {
-        let (vx, vy, vs) = self.view;
-        let flash = self.shocked_at.map_or(0.0, |at| {
-            let age = self.step.saturating_sub(at) as f64 / SUB_PER_S as f64;
-            (1.0 - age / 0.25).max(0.0)
-        });
-        slope_field(&self.u, &mut self.slope);
-        let (map, u, v, edge, slope) = (&self.map, &self.u, &self.v, &self.edge, &self.slope);
-        let (vw, vh) = (i32::from(vs.width()), i32::from(vs.height()));
-        let px = f64::from(vs.width()) / f64::from(u.width().max(1));
-        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
-        let (mut ry, mut ur, mut vr, mut gr) =
-            (i32::MIN, map.row(u, 0), map.row(v, 0), map.row(slope, 0));
-        self.pixels.shade(|x, y| {
-            let (lx, ly) = (x - vx, y - vy);
-            if y != ry {
-                (ry, ur, vr, gr) = (y, map.row(u, ly), map.row(v, ly), map.row(slope, ly));
+        self.dots.clear();
+        let flash = self
+            .shocked_at
+            .is_some_and(|at| (self.step.saturating_sub(at) as f64 / SUB_PER_S as f64) < FLASH_S);
+        let g_max = slope_field(&self.u, &mut self.slope);
+        let band = FRONT_W * g_max / self.dpn;
+        cell_bounds(&self.u, &self.v, &self.age, band, &mut self.bounds);
+        let (ox, oy, ds) = self.dview;
+        let (dw, dh) = (i32::from(ds.width()), i32::from(ds.height()));
+        let (map, u, v, slope, organ) = (&self.map, &self.u, &self.v, &self.slope, &self.organ);
+        let age = &self.age;
+        let (thr, cols, rows, bounds) = (&self.thr, &self.cols, &self.rows, &self.bounds);
+        let lw = usize::from(u.width());
+        let dpn = self.dpn;
+        let mut front = 0;
+        for y in 0..dh {
+            let start = (y * dw) as usize;
+            let row = &organ[start..][..dw as usize];
+            if row.iter().all(|&o| o == OUTSIDE) {
+                continue;
             }
-            if !(0..vw).contains(&lx) || !(0..vh).contains(&ly) {
-                return Ink::BLANK;
+            let thr_row = &thr[start..][..dw as usize];
+            let cell_row = &bounds[usize::from(rows[y as usize]) * lw..][..lw];
+            let (ur, vr, gr) = (map.row(u, y), map.row(v, y), map.row(slope, y));
+            let ar = map.row(age, y);
+            for (x, (&o, &t)) in (0..dw).zip(row.iter().zip(thr_row)) {
+                let (px, py) = (ox + x, oy + y);
+                match o {
+                    OUTSIDE => continue,
+                    OUTLINE => {
+                        self.dots.set(px, py, RIM_INK);
+                        continue;
+                    }
+                    _ => {}
+                }
+                if flash {
+                    // The refractory byte, so the flash picks its own dots.
+                    if thresholds(t).1 < FLASH_P {
+                        self.dots.set(px, py, FLASH_INK);
+                    }
+                    continue;
+                }
+                // Most dots are settled by their cell's bounds alone: no front nearby and
+                // a threshold above any probability the cell can reach.
+                let b = cell_row[usize::from(cols[x as usize])];
+                let (th, tc) = thresholds(t);
+                if !b.front && th >= b.hot && tc >= b.cold {
+                    continue;
+                }
+                let uu = ur.at(x);
+                let vv = vr.at(x);
+                // Only fresh dots within `band` of u = ½ can be on the front (a sampled
+                // slope never exceeds the lattice's largest).
+                let du = (uu - 0.5).abs();
+                if b.front && vv < FRONT_V && du <= band && du / gr.at(x).max(1e-4) * dpn <= FRONT_W
+                {
+                    self.dots.set(px, py, FRONT_INK);
+                    front += 1;
+                    continue;
+                }
+                if let Some(ink) = lobe_ink(uu, vv, ar.at(x), t) {
+                    self.dots.set(px, py, ink);
+                }
             }
-            // The outline is the analytic heart curve: a pixel at least half inside the
-            // heart is organ, and one at least half on the rim band is outline.
-            let [cover, rim] = edge.get((ly * vw + lx) as usize).copied().unwrap_or([0, 0]);
-            if cover < 128 {
-                return Ink::BLANK;
-            }
-            if flash > 0.5 {
-                return FLASH_INK;
-            }
-            let (uu, vv) = (ur.at(lx), vr.at(lx));
-            let ink = front_ink(uu, vv, gr.at(lx), px);
-            if ink != Ink::BLANK {
-                ink
-            } else if rim >= 128 {
-                RIM_INK
-            } else {
-                Ink::BLANK
-            }
-        });
-        // Tips as single white pixels.
-        let (sx, sy) = (
-            f64::from(vs.width()) / f64::from(self.u.width()),
-            f64::from(vs.height()) / f64::from(self.u.height()),
-        );
-        for &(tx, ty) in &self.tips[..self.tip_count.min(MAX_TIPS)] {
-            let (px, py) = (
-                vx + ((f64::from(tx) + 1.0) * sx) as i32,
-                vy + ((f64::from(ty) + 1.0) * sy) as i32,
-            );
-            self.pixels.set(px, py, TIP_INK);
         }
+        self.front_dots = front;
+        self.draw_tips();
         self.draw_ecg();
     }
 
-    /// Supersample the heart curve over the view (4×4 per pixel): its coverage, and the
-    /// coverage of a rim band ~1.3 px wide inside the curve (the heart minus a copy
-    /// shrunk about its centre by that much).
-    fn build_edge(&mut self) {
-        const SS: i32 = 4;
-        let (_, _, vs) = self.view;
-        let (vw, vh) = (i32::from(vs.width()), i32::from(vs.height()));
-        let (hp, hx, hy) = heart_frame(vs);
-        // The heart is ~1.1 units in radius, so this shrink moves its edge ~1.3 px in.
-        let shrink = (1.0 - 1.3 * hp / 1.1).max(0.0);
-        self.edge.clear();
-        self.edge.reserve(vs.area());
-        for py in 0..vh {
-            for px in 0..vw {
-                let (mut outer, mut inner) = (0u32, 0u32);
-                for sy in 0..SS {
-                    for sx in 0..SS {
-                        let fx = px as f32 + (sx as f32 + 0.5) / SS as f32;
-                        let fy = py as f32 + (sy as f32 + 0.5) / SS as f32;
-                        let (x, y) = ((fx - hx) * hp, (hy - fy) * hp);
-                        if in_heart(x, y) {
-                            outer += 1;
-                            if shrink > 0.0 && in_heart(x / shrink, y / shrink) {
-                                inner += 1;
-                            }
-                        }
+    /// Lattice index coordinates to dot coordinates (the inverse of the sample map's
+    /// cell-centre alignment).
+    fn lat_to_dot(&self, p: (f32, f32)) -> (f64, f64) {
+        let (ox, oy, _) = self.dview;
+        let d = f64::from(self.dpn);
+        (
+            f64::from(ox) + (f64::from(p.0) + 0.5) * d - 0.5,
+            f64::from(oy) + (f64::from(p.1) + 0.5) * d - 0.5,
+        )
+    }
+
+    /// Meander trails (a thin `Dim` thread, brighter in its newer half), then the tips as `Star`
+    /// atoms over them (HRT-A10).
+    fn draw_tips(&mut self) {
+        let horizon = (TRAIL_S * SUB_PER_S as f64) as u64;
+        let now = self.step;
+        let (ox, oy, _) = self.dview;
+        let d = f64::from(self.dpn);
+        let to_dot = |p: (f32, f32)| {
+            (
+                f64::from(ox) + (f64::from(p.0) + 0.5) * d - 0.5,
+                f64::from(oy) + (f64::from(p.1) + 0.5) * d - 0.5,
+            )
+        };
+        // The older half first, so the newer half lies over it.
+        for (pass, &ink) in TRAIL_INKS.iter().enumerate() {
+            for trail in &self.trails {
+                let mut prev: Option<(f64, f64)> = None;
+                for (p, at) in trail.iter() {
+                    let age = now.saturating_sub(at);
+                    if age > horizon {
+                        prev = None;
+                        continue;
                     }
+                    let q = to_dot(p);
+                    let newer = usize::from(2 * age < horizon);
+                    if let Some(a) = prev
+                        && newer == pass
+                    {
+                        self.dots.line(a.0, a.1, q.0, q.1, ink);
+                    }
+                    prev = Some(q);
                 }
-                let n = (SS * SS) as u32;
-                let to_u8 = |k: u32| (k * 255 / n) as u8;
-                self.edge.push([to_u8(outer), to_u8(outer - inner)]);
             }
+        }
+        for k in 0..self.tip_count.min(MAX_TIPS) {
+            let (x, y) = self.lat_to_dot(self.tip_pos[k]);
+            let salt = (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            self.dots
+                .stipple_puff(x, y, TIP_SIGMA, TIP_PEAK, salt, TIP_INK);
         }
     }
 
+    /// Classify every dot of the dot view once per resize: inside the heart (the same
+    /// mask the lattice uses, at the dot's lattice position) or not, and the outline: an
+    /// inside dot with a 4-neighbour outside, one dot thick and closed.
+    fn build_organ(&mut self) {
+        let (_, _, ds) = self.dview;
+        let (dw, dh) = (i32::from(ds.width()), i32::from(ds.height()));
+        let lat = self.u.size();
+        let (per_node, ox, oy) = heart_frame(lat);
+        let (sx, sy) = (
+            f32::from(lat.width()) / dw.max(1) as f32,
+            f32::from(lat.height()) / dh.max(1) as f32,
+        );
+        self.organ.clear();
+        self.organ.extend((0..dh).flat_map(|y| {
+            (0..dw).map(move |x| {
+                // The dot centre in lattice units, node x spanning [x, x + 1).
+                let (lx, ly) = ((x as f32 + 0.5) * sx, (y as f32 + 0.5) * sy);
+                if in_heart((lx - ox) * per_node, (oy - ly) * per_node) {
+                    ORGAN
+                } else {
+                    OUTSIDE
+                }
+            })
+        }));
+        let at = |o: &[u8], x: i32, y: i32| {
+            (0..dw).contains(&x) && (0..dh).contains(&y) && o[(y * dw + x) as usize] != OUTSIDE
+        };
+        for y in 0..dh {
+            for x in 0..dw {
+                let i = (y * dw + x) as usize;
+                if self.organ[i] == ORGAN
+                    && [(-1, 0), (1, 0), (0, -1), (0, 1)]
+                        .iter()
+                        .any(|&(ddx, ddy)| !at(&self.organ, x + ddx, y + ddy))
+                {
+                    self.organ[i] = OUTLINE;
+                }
+            }
+        }
+        // The lattice cell of each dot column and row: the bilinear tap's lower index.
+        let tap = |d: i32, dn: i32, sn: u16| {
+            let s = grid::centre_of(f64::from(d), dn as usize, usize::from(sn))
+                .clamp(0.0, f64::from(sn.saturating_sub(1)));
+            s as u16
+        };
+        self.cols.clear();
+        self.cols.extend((0..dw).map(|x| tap(x, dw, lat.width())));
+        self.rows.clear();
+        self.rows.extend((0..dh).map(|y| tap(y, dh, lat.height())));
+        let (ox, oy, _) = self.dview;
+        self.thr.clear();
+        self.thr.extend((0..dh).flat_map(|y| {
+            (0..dw).map(move |x| {
+                let key = rng::cell_key(ox + x, oy + y);
+                (rng::hash01(EXCITED_SALT ^ key) * 256.0) as u8
+            })
+        }));
+    }
+
     fn draw_ecg(&mut self) {
-        self.dots.clear();
         if self.ecg_rows == 0 || self.ecg.is_empty() {
             return;
         }
@@ -570,7 +827,8 @@ impl Heart {
         let mid = top + span * 0.55;
         let amp = span * 0.45;
         let head = self.head as usize % n;
-        let y_of = |s: f32| mid - amp * f64::from((s / self.ecg_scale).clamp(-1.0, 1.0));
+        // Samples are stored already scaled (see `sweep`), so the drawn history never moves.
+        let y_of = |s: f32| mid - amp * f64::from(s);
         for c in 1..n {
             // Columns just ahead of the head are the sweep's blank gap.
             let ahead = (c + n - head) % n;
@@ -600,43 +858,186 @@ impl Heart {
         self.ecg_base += (sample - self.ecg_base) * (dt / 0.15).min(1.0) as f32;
         let sample = sample - self.ecg_base;
         self.ecg_scale = (self.ecg_scale * 0.995).max(sample.abs() * 1.15).max(1e-3);
+        // Stored in units of the scale at write time, as a monitor writes its trace.
+        let scaled = (sample / self.ecg_scale).clamp(-1.0, 1.0);
         let from = self.head as usize;
         self.head += dt * SWEEP_DOTS_PER_S;
         let to = self.head as usize;
         for c in from + 1..=to {
-            self.ecg[c % n] = sample;
+            self.ecg[c % n] = scaled;
         }
         self.head %= n as f64;
     }
 }
 
-/// The excitation: only the fresh front shows, a 1-px `Hot` line on the `u = ½`
-/// contour, the pixels within `LINE_W` px of it (distance `|u − ½| / |∇u|` × `px` pixels
-/// per node): full while fresh (`v` below `FRONT_V / 3`), a step dimmer after, and gone
-/// once `v` reaches `FRONT_V`, so a wave's back, the plateau, the refractory tail and
-/// resting tissue are black.
-fn front_ink(u: f32, v: f32, g: f32, px: f64) -> Ink {
-    let d = f64::from((u - 0.5).abs()) / f64::from(g.max(1e-4)) * px;
-    if d > LINE_W || v >= FRONT_V {
-        Ink::BLANK
+/// A view dot's class in [`Heart::organ`].
+const OUTSIDE: u8 = 0;
+const ORGAN: u8 = 1;
+const OUTLINE: u8 = 2;
+
+/// The excited lobe's keep probability (Look (M18)): `0.45·u²` damped by the time since
+/// the node's upstroke, `(1 − age/AGE_FRESH)²`, so freshly depolarised tissue is densest
+/// and a wave is a crescent hugging its front instead of a filled band (`v` cannot tell
+/// fresh tissue from old: it barely rises on the plateau). Rises with `u`, falls with
+/// `age`.
+fn excited_p(u: f32, age: f32) -> f32 {
+    let fresh = (1.0 - age / AGE_FRESH).max(0.0);
+    EXCITED_P * u * u * fresh * fresh
+}
+
+/// The refractory lobe's keep probability: `0.12·min(1, v/V_MAX)`. Rises with `v`.
+fn refractory_p(v: f32) -> f32 {
+    REFRACTORY_P * (v / V_MAX).min(1.0)
+}
+
+/// A dot's two fixed uniforms in `(0, 1)` from its stored threshold byte (CORE-R107):
+/// the excited lobe's, and the refractory lobe's (the byte XOR a constant, another
+/// uniform byte, so the two lobes pick different dots).
+#[inline]
+fn thresholds(t: u8) -> (f32, f32) {
+    let uniform = |b: u8| (f32::from(b) + 0.5) / 256.0;
+    (uniform(t), uniform(t ^ 0xA5))
+}
+
+/// The two lobes of the excitation cloud at a dot with threshold byte `t` (Look (M18),
+/// HRT-A9): excited tissue (`u > U_EXCITED`) in `Hot`, recovering tissue
+/// (`u ≤ U_EXCITED`, `v > ¼·V_MAX`) in `Cold`. `None` for an unlit dot.
+fn lobe_ink(u: f32, v: f32, age: f32, t: u8) -> Option<Ink> {
+    let (th, tc) = thresholds(t);
+    if u > U_EXCITED {
+        (th < excited_p(u, age)).then_some(EXCITED_INK)
+    } else if v > REFRACTORY_V * V_MAX {
+        (tc < refractory_p(v)).then_some(REFRACTORY_INK)
     } else {
-        FRONT_INKS[usize::from(v < FRONT_V / 3.0)]
+        None
     }
 }
 
-/// The front line's half-width in pixels, and the `v` at which a front has gone stale.
-const LINE_W: f64 = 1.05;
-const FRONT_V: f32 = 1.0;
+/// What a lattice cell (the square between nodes `(x, y)` and `(x + 1, y + 1)`) can show
+/// anywhere inside it: bilinear `u` and `v` stay within the corners' range, and the lobe
+/// probabilities are monotone in them, so these bound every dot sampled in the cell.
+#[derive(Debug, Clone, Copy, Default)]
+struct Bound {
+    hot: f32,
+    cold: f32,
+    /// The cell may hold a fresh front dot.
+    front: bool,
+}
 
-/// `|∇u|` per node by central differences (one-sided at the edges) into `out`.
-fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
+/// Fill `out` (lattice-sized, indexed by the cell's top-left node) with each cell's
+/// [`Bound`]; `band` is the widest `|u − ½|` a front dot can have.
+fn cell_bounds(u: &Grid<f32>, v: &Grid<f32>, age: &Grid<f32>, band: f32, out: &mut Vec<Bound>) {
+    let (w, h) = (usize::from(u.width()), usize::from(u.height()));
+    out.clear();
+    out.resize(w * h, Bound::default());
+    let (u, v, age) = (u.as_slice(), v.as_slice(), age.as_slice());
+    for y in 0..h {
+        let y1 = (y + 1).min(h - 1);
+        for x in 0..w {
+            let x1 = (x + 1).min(w - 1);
+            let idx = [y * w + x, y * w + x1, y1 * w + x, y1 * w + x1];
+            let (mut u0, mut u1, mut v0, mut v1) = (f32::MAX, f32::MIN, f32::MAX, f32::MIN);
+            let mut a0 = f32::MAX;
+            for i in idx {
+                a0 = a0.min(age[i]);
+                (u0, u1) = (u0.min(u[i]), u1.max(u[i]));
+                (v0, v1) = (v0.min(v[i]), v1.max(v[i]));
+            }
+            out[y * w + x] = Bound {
+                hot: if u1 > U_EXCITED {
+                    excited_p(u1, a0)
+                } else {
+                    0.0
+                },
+                cold: if u0 <= U_EXCITED && v1 > REFRACTORY_V * V_MAX {
+                    refractory_p(v1)
+                } else {
+                    0.0
+                },
+                front: v0 < FRONT_V && u0 <= 0.5 + band && u1 >= 0.5 - band,
+            };
+        }
+    }
+}
+
+/// A tip's meander: a fixed ring of its last [`TRAIL_N`] smoothed positions (lattice
+/// index units) and the sub-step each was taken at, plus the last raw detection (for
+/// matching the next count's tips).
+#[derive(Debug, Clone, Copy)]
+struct Trail {
+    pts: [(f32, f32); TRAIL_N],
+    at: [u64; TRAIL_N],
+    raw: (f32, f32),
+    /// Next slot to write, and how many are filled.
+    head: usize,
+    len: usize,
+}
+
+impl Trail {
+    const EMPTY: Self = Self {
+        pts: [(0.0, 0.0); TRAIL_N],
+        at: [0; TRAIL_N],
+        raw: (0.0, 0.0),
+        head: 0,
+        len: 0,
+    };
+
+    fn clear(&mut self) {
+        self.len = 0;
+    }
+
+    /// Record the tip detected at `p` at sub-step `at`: the trail moves toward it by an
+    /// exponential moving average with time constant [`TRAIL_TAU`].
+    fn push(&mut self, p: (f32, f32), at: u64) {
+        let q = match self.newest() {
+            Some((last, then)) => {
+                let dt = at.saturating_sub(then) as f32 / SUB_PER_S as f32;
+                let k = 1.0 - (-dt / TRAIL_TAU).exp();
+                (last.0 + k * (p.0 - last.0), last.1 + k * (p.1 - last.1))
+            }
+            None => p,
+        };
+        self.raw = p;
+        self.pts[self.head] = q;
+        self.at[self.head] = at;
+        self.head = (self.head + 1) % TRAIL_N;
+        self.len = (self.len + 1).min(TRAIL_N);
+    }
+
+    /// The newest smoothed position and its sub-step.
+    fn newest(&self) -> Option<((f32, f32), u64)> {
+        (self.len > 0).then(|| {
+            let i = (self.head + TRAIL_N - 1) % TRAIL_N;
+            (self.pts[i], self.at[i])
+        })
+    }
+
+    /// The last raw detection and its sub-step.
+    fn last_tip(&self) -> Option<((f32, f32), u64)> {
+        self.newest().map(|(_, at)| (self.raw, at))
+    }
+
+    /// Oldest first.
+    fn iter(&self) -> impl Iterator<Item = ((f32, f32), u64)> + '_ {
+        let start = (self.head + TRAIL_N - self.len) % TRAIL_N;
+        (0..self.len).map(move |k| {
+            let i = (start + k) % TRAIL_N;
+            (self.pts[i], self.at[i])
+        })
+    }
+}
+
+/// `|∇u|` per node by central differences (one-sided at the edges) into `out`; returns
+/// the largest.
+fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) -> f32 {
     let (w, h) = (usize::from(u.width()), usize::from(u.height()));
     if out.size() != u.size() {
         out.resize(u.size(), 0.0);
     }
     if w == 0 || h == 0 {
-        return;
+        return 0.0;
     }
+    let mut max = 0.0_f32;
     let (p, o) = (u.as_slice(), out.as_mut_slice());
     for y in 0..h {
         let (yn, ys) = (y.saturating_sub(1), (y + 1).min(h - 1));
@@ -644,22 +1045,12 @@ fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
             let (xw, xe) = (x.saturating_sub(1), (x + 1).min(w - 1));
             let gx = (p[y * w + xe] - p[y * w + xw]) / (xe - xw).max(1) as f32;
             let gy = (p[ys * w + x] - p[yn * w + x]) / (ys - yn).max(1) as f32;
-            o[y * w + x] = (gx * gx + gy * gy).sqrt();
+            let g = (gx * gx + gy * gy).sqrt();
+            o[y * w + x] = g;
+            max = max.max(g);
         }
     }
-}
-
-/// ASCII by what a pixel shows: tips `@`, the front `#`, the shock flash `*`, the rim `.`.
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let ink = sciart_core::raster::stronger(top, bottom);
-    let ch = match ink.role {
-        Role::Background => return None,
-        Role::Hot => '#',
-        _ if ink == TIP_INK => '@',
-        Role::Star => '*',
-        _ => '.',
-    };
-    Some((ch, ink))
+    max
 }
 
 impl Generator for Heart {
@@ -674,7 +1065,6 @@ impl Generator for Heart {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.cells = size;
         self.readout_room = title::stable_readout_room(size, &META);
-        self.pixels.resize(size);
         self.dots.resize(size);
         let h = size.height();
         self.ecg_rows = match h {
@@ -694,10 +1084,14 @@ impl Generator for Heart {
             // The story restarts at sinus rhythm on a fresh heart (SPEC-002 Resize).
             self.step = 0;
             self.shocked_at = None;
-        } else {
-            self.map.rebuild(lat, Size::new(side, px_h));
         }
-        self.build_edge();
+        // The dot view over the same square: 2 dots per pixel each way.
+        let dsize = Size::new(side.saturating_mul(2), px_h.saturating_mul(2));
+        self.dview = (2 * vx, 0, dsize);
+        self.map.rebuild(lat, dsize);
+        self.dpn = f32::from(dsize.width()) / f32::from(lat.width().max(1));
+        self.trails = [Trail::EMPTY; MAX_TIPS];
+        self.build_organ();
         let cols = usize::from(size.width()) * Dots::CELL_W as usize;
         self.ecg.clear();
         self.ecg.resize(cols, 0.0);
@@ -716,6 +1110,7 @@ impl Generator for Heart {
         for _ in 0..n as u32 {
             self.substep();
         }
+        self.age_nodes(dt as f32);
         let sample = self.ecg_sample();
         self.sweep(dt, sample);
         self.dirty = true;
@@ -730,9 +1125,7 @@ impl Generator for Heart {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-        self.dots.blit_over(canvas, &self.pixels);
+        self.dots.blit(canvas);
         let h = self.cells.height();
         if h < 4 {
             return;
@@ -868,32 +1261,147 @@ mod tests {
         }
     }
 
+    /// Run to `t` seconds and render; the canvas and the heart.
+    fn frame_at(size: Size, t: f64) -> (Heart, Canvas) {
+        let (mut g, mut ctx) = heart_at(size);
+        run_s(&mut g, &mut ctx, t);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        (g, canvas)
+    }
+
     #[test]
-    fn hrt_a6_the_outline_is_a_flat_1px_rim_and_the_front_hot_steps() {
-        let (mut g, mut ctx) = heart_at(Size::new(120, 40));
-        let rim = g.edge.iter().filter(|e| e[1] >= 128).count();
-        let full = g.edge.iter().filter(|e| e[0] >= 128).count();
+    fn hrt_a8_frames_are_braille_only() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            let (mut g, mut ctx) = heart_at(size);
+            for t in [5.0, 30.0] {
+                let wait = t - g.local_s();
+                run_s(&mut g, &mut ctx, wait);
+                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                g.render(&mut canvas);
+                let (mut lit, mut blocks) = (0_u32, 0_u32);
+                for c in canvas.cells() {
+                    if c.ch == ' ' && c.bg == Ink::BLANK {
+                        continue;
+                    }
+                    lit += 1;
+                    blocks += u32::from(c.bg != Ink::BLANK || matches!(c.ch, '▀' | '▄' | '█'));
+                }
+                assert!(lit > 50, "{size:?} t {t}: {lit} lit cells");
+                assert!(
+                    f64::from(blocks) <= 0.03 * f64::from(lit),
+                    "{size:?} t {t}: {blocks} half-block cells of {lit}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hrt_a9_two_lobes_with_density_rising_in_u() {
+        // Lit share over every threshold byte: the exact keep probability.
+        let share = |u: f32, v: f32| {
+            (0..=255u8)
+                .filter(|&t| lobe_ink(u, v, 0.0, t).is_some())
+                .count() as f64
+                / 256.0
+        };
+        // The excited lobe's lit share rises with u: ≥ 3× from u ≈ 0.3 to u ≈ 0.9.
+        let (lo, hi) = (share(0.3, 0.0), share(0.9, 0.0));
         assert!(
-            rim > 40 && full > 5 * rim,
-            "a thin rim band: {rim} of {full}"
+            hi >= 3.0 * lo && lo > 0.0,
+            "lit share {lo:.3} at u 0.3, {hi:.3} at 0.9"
         );
-        run_s(&mut g, &mut ctx, act_start(REENTRY) + 3.0);
-        let (mut front, mut stale) = (0, 0);
-        let ps = g.pixels.pixel_size();
-        for y in 0..i32::from(ps.height()) {
-            for x in 0..i32::from(ps.width()) {
-                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                match ink {
-                    i if i == FRONT_INKS[1] => front += 1,
-                    i if i == FRONT_INKS[0] => stale += 1,
-                    i => assert!(
-                        [Ink::BLANK, RIM_INK, TIP_INK, FLASH_INK].contains(&i),
-                        "({x}, {y}): {i:?}"
-                    ),
+        // Every lit field dot belongs to its lobe.
+        for ui in 0..=20 {
+            for vi in 0..=20 {
+                let (u, v) = (ui as f32 / 20.0, vi as f32 / 20.0 * 2.5);
+                for t in 0..=255u8 {
+                    match lobe_ink(u, v, 0.05, t) {
+                        Some(i) if i == EXCITED_INK => assert!(u > 0.15),
+                        Some(i) if i == REFRACTORY_INK => {
+                            assert!(u <= 0.15 && v > 0.25 * V_MAX, "cold at u {u} v {v}");
+                        }
+                        Some(i) => panic!("{i:?}"),
+                        None => {}
+                    }
                 }
             }
         }
-        assert!(front > 20, "{front} fresh-front pixels ({stale} stale)");
+        // The refractory lobe is sparse: at most 0.22.
+        assert!(share(0.0, 3.0) <= 0.23);
+    }
+
+    #[test]
+    fn hrt_a10_tips_are_atoms_trailing_their_own_meander() {
+        let (mut g, mut ctx) = heart_at(Size::new(200, 50));
+        run_s(&mut g, &mut ctx, act_start(VF) + 4.0);
+        let horizon = (TRAIL_S * SUB_PER_S as f64) as u64;
+        let jump = (TRAIL_JUMP_DOTS / g.dpn).max(TRAIL_JUMP_NODES);
+        let mut checked = 0;
+        for _ in 0..12 {
+            run_s(&mut g, &mut ctx, 0.25);
+            assert!(g.tip_count > 0, "fibrillation has tips");
+            for k in 0..g.tip_count.min(MAX_TIPS) {
+                let (x, y) = g.lat_to_dot(g.tip_pos[k]);
+                // The atom's centre dot is lit, and lies within 1 dot of the tip.
+                assert!(g.dots.is_lit(x.round() as i32, y.round() as i32), "tip {k}");
+                let (tx, ty) = g.tips[k];
+                let p = g.tip_pos[k];
+                assert!(
+                    (tx as f32..=tx as f32 + 1.0).contains(&p.0)
+                        && (ty as f32..=ty as f32 + 1.0).contains(&p.1),
+                    "the tip stays in its plaquette"
+                );
+                checked += 1;
+            }
+            // Each trail: consecutive positions within the jump limit, drawn only while
+            // no older than 1.2 s, and every live trail ends at a tip of this count.
+            for trail in &g.trails {
+                let pts: Vec<_> = trail
+                    .iter()
+                    .filter(|&(_, at)| g.step.saturating_sub(at) <= horizon)
+                    .collect();
+                for w in pts.windows(2) {
+                    let (a, b) = (w[0].0, w[1].0);
+                    let counts = ((w[1].1 - w[0].1) / COUNT_EVERY) as f32;
+                    assert!(counts <= TRAIL_GAP as f32);
+                    assert!((a.0 - b.0).hypot(a.1 - b.1) <= jump * counts + 1e-4);
+                    assert!(w[1].1 > w[0].1, "oldest first");
+                }
+            }
+        }
+        assert!(checked > 20);
+    }
+
+    #[test]
+    // HRT-A6 (M15 half-block rim and Hot front) is superseded by HRT-A8..A11; its thin-rim
+    // check carries over on the dot lattice.
+    fn hrt_a6_a11_reentry_frame_is_lobes_front_tips_outline_and_ecg() {
+        let (g, canvas) = frame_at(Size::new(120, 40), act_start(REENTRY) + 3.0);
+        assert!(g.front_dots > 20, "{} fresh-front dots", g.front_dots);
+        let allowed = [
+            EXCITED_INK,
+            REFRACTORY_INK,
+            FRONT_INK,
+            TIP_INK,
+            TRAIL_INKS[0],
+            TRAIL_INKS[1],
+            RIM_INK,
+            FLASH_INK,
+            ECG_INKS[0],
+            ECG_INKS[1],
+            ECG_HEAD_INK,
+            LABEL_INK,
+        ];
+        for c in canvas.cells() {
+            if c.ch != ' ' {
+                assert!(allowed.contains(&c.ink), "{:?}", c.ink);
+            }
+        }
+        // The outline is a thin thread: under a fifth of the organ's dots.
+        let rim = g.organ.iter().filter(|&&o| o == OUTLINE).count();
+        let organ = g.organ.iter().filter(|&&o| o != OUTSIDE).count();
+        assert!(rim > 40 && organ > 5 * rim, "{rim} of {organ}");
     }
 
     #[test]
@@ -906,7 +1414,7 @@ mod tests {
         let head = g.head as i32 % g.ecg.len() as i32;
         let top = f64::from(size.height() - 1 - g.ecg_rows) * f64::from(Dots::CELL_H);
         let span = f64::from(g.ecg_rows) * f64::from(Dots::CELL_H) - 1.0;
-        let s = (g.ecg[head as usize] / g.ecg_scale).clamp(-1.0, 1.0);
+        let s = g.ecg[head as usize];
         let hy = top + span * 0.55 - span * 0.45 * f64::from(s);
         let cell = canvas.get(head / 2, (hy / 4.0) as i32).copied();
         assert_eq!(cell.map(|c| c.ink), Some(ECG_HEAD_INK), "the write head");
