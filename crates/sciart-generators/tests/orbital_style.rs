@@ -17,6 +17,19 @@ const TIMES: [u32; 2] = [5, 20];
 const MAX_BLOCK_SHARE: f64 = 0.03;
 /// Mean share of cells that change per drawn frame (two 60 Hz steps), t = 10–12 s.
 const MAX_CHANGED: f64 = 0.10;
+/// Per-scene stillness limits that GEN-R26 states with a reason.
+const CHANGED_EXCEPTIONS: &[(&str, f64)] = &[
+    // The user asked to keep the M16 rubber sheet exactly; its travelling crests alone
+    // change 10.1 % of cells per frame.
+    ("spacetime_grid", 0.11),
+];
+
+fn max_changed(scene: &str) -> f64 {
+    CHANGED_EXCEPTIONS
+        .iter()
+        .find(|(s, _)| *s == scene)
+        .map_or(MAX_CHANGED, |&(_, m)| m)
+}
 
 /// The scenes named in SPEC-002's GEN-R26 text: the backticked names between ", for " and
 /// the first ": everything".
@@ -148,7 +161,7 @@ fn gen_r26_orbital_scenes_are_at_most_3_percent_half_blocks() {
 fn gen_r26_stipple_holds_still() {
     let failing: Vec<String> = par_map(GEN_R26, changed_share)
         .into_iter()
-        .filter(|&(_, share)| share > MAX_CHANGED)
+        .filter(|&(scene, share)| share > max_changed(scene))
         .map(|(scene, share)| format!("  {scene}: {:.1} % of cells per frame", 100.0 * share))
         .collect();
     assert!(

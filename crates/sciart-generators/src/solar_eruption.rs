@@ -25,6 +25,7 @@ use std::f64::consts::TAU;
 use rand::Rng;
 use sciart_core::ease;
 use sciart_core::prelude::*;
+use sciart_core::raster::stipple_keep;
 use sciart_core::rng::hash01;
 
 use sciart_core::rng::value_noise;
@@ -93,13 +94,13 @@ const COOL: f64 = 9.0;
 /// `Cold` (ERUP-A12), each segment's brightness `e` picking a step (`e ≥ from`), below the
 /// last not drawn.
 pub(crate) const CLOSED: [(f64, Ink); 3] = [
-    (1.0, Ink::new(Role::Hot, 220)),
-    (0.35, Ink::new(Role::Hot, 150)),
+    (0.75, Ink::new(Role::Hot, 245)),
+    (0.3, Ink::new(Role::Hot, 170)),
     (0.12, Ink::new(Role::Hot, 90)),
 ];
 pub(crate) const OPEN: [(f64, Ink); 3] = [
-    (1.0, Ink::new(Role::Cold, 220)),
-    (0.35, Ink::new(Role::Cold, 150)),
+    (0.75, Ink::new(Role::Cold, 245)),
+    (0.3, Ink::new(Role::Cold, 170)),
     (0.12, Ink::new(Role::Cold, 90)),
 ];
 /// The flare (ERUP-A11): loops hotter than `FLARE_HOT` are `FLARE_YELLOW`, their tops
@@ -108,25 +109,48 @@ pub(crate) const OPEN: [(f64, Ink); 3] = [
 const FLARE_HOT: f64 = 0.3;
 const TOP_HOT: f64 = 0.8;
 const TOP_SHARE: f64 = 0.12;
-/// The share of the cool field lines (closed and open, each mirror twin on its own) drawn.
+/// The share of the cool field lines (closed and open, each mirror twin on its own) drawn;
+/// fewer while the loops rise (ERUP-A17: a calmer `loops rise`), eased in and out so lines
+/// leave and return one by one, each at its own fixed threshold.
 pub(crate) const LINE_KEEP: f64 = 0.7;
+const RISE_KEEP: (f64, f64) = (0.2, 0.1);
 
-/// Whether cool field line `k` (an index into the lines and their mirror twins) is drawn.
-pub(crate) fn drawn(k: usize) -> bool {
-    hash01(0x7A1E ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) < LINE_KEEP
+/// Whether cool field line `k` (an index into the lines and their mirror twins) is drawn
+/// at keep share `keep`.
+pub(crate) fn drawn(k: usize, keep: f64) -> bool {
+    hash01(0x7A1E ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) < keep
 }
 pub(crate) const FLARE_WHITE: Ink = Ink::new(Role::Star, 255);
 pub(crate) const FLARE_YELLOW: Ink = Ink::new(Role::Sun, 240);
-/// The flux rope: strands facing the viewer, behind, and while it is faint; its core.
-pub(crate) const ROPE_FRONT: Ink = Ink::new(Role::Hot, 240);
-pub(crate) const ROPE_BACK: Ink = Ink::new(Role::Hot, 140);
+/// The flux rope (M17): helical strands `Accent` where they face the viewer, `Hot` behind,
+/// faint `Hot` while it forms; its prominence core one bright `Hot` thread.
+pub(crate) const ROPE_FRONT: Ink = Ink::new(Role::Accent, 230);
+pub(crate) const ROPE_BACK: Ink = Ink::new(Role::Hot, 150);
 pub(crate) const ROPE_FAINT: Ink = Ink::new(Role::Hot, 90);
-/// The CME front (white light in false-colour magenta) and its plasma (ERUP-A13).
-pub(crate) const FRONT_BRIGHT: Ink = Ink::new(Role::Accent, 230);
-pub(crate) const FRONT_DIM: Ink = Ink::new(Role::Accent, 150);
-pub(crate) const PLASMA_TRAIL_INK: Ink = Ink::new(Role::Accent, 110);
-const PLASMA: usize = 48;
-pub(crate) const PLASMA_TRAIL: f64 = 0.025;
+pub(crate) const ROPE_CORE: Ink = Ink::new(Role::Hot, 240);
+/// The CME front (M17, ERUP-A15): sparse white-light stipple, `Star` on top where it is
+/// brightest, `Cold` down the flanks; golden-angle samples, `FRONT_FILL` per dot of the band
+/// circumference, each at a fixed depth in the front's band and with a fixed threshold.
+pub(crate) const FRONT_STAR: Ink = Ink::new(Role::Star, 230);
+pub(crate) const FRONT_COLD: Ink = Ink::new(Role::Cold, 170);
+const FRONT_SAMPLES: usize = 3000;
+const FRONT_FILL: f64 = 0.5;
+const FRONT_KEEP: f64 = 0.9;
+/// Golden-angle fraction: any prefix of `frac(i·φ)` is evenly spread round the circle.
+const GOLDEN: f64 = 0.618_033_988_749_895;
+/// Loop plasma (M17): stipple beside the closed loops, kept with probability ∝ emission
+/// measure (the loop brightness `e`, itself ∝ n²), in a band `PLASMA_REACH` dots either side of the thread; densest at the
+/// hot loop tops in the flare.
+const PLASMA_REACH: i32 = 2;
+const PLASMA_EM: f64 = 0.22;
+const PLASMA_CAP: f64 = 0.35;
+const PLASMA_LOOP: Ink = Ink::new(Role::Hot, 140);
+/// Loop brightness from which its plasma knots are drawn `Sun` (the densest knots).
+const PLASMA_KNOT: f64 = 0.55;
+const PLASMA_FLARE: Ink = Ink::new(Role::Sun, 220);
+const PLASMA_TOP: Ink = Ink::new(Role::Star, 220);
+/// The CME front's inner edge (share of the bubble radius); inside it is the cavity.
+pub(crate) const FRONT_INNER: f64 = 0.9;
 /// Coronal rain.
 const RAIN_INK: Ink = Ink::new(Role::Hot, 240);
 /// The limb: a thin arc just inside it.
@@ -149,6 +173,7 @@ pub(crate) enum Part {
     Ribbon,
     Rope,
     Front,
+    /// Loop plasma stipple (a single dot).
     Plasma,
     Rain,
 }
@@ -340,7 +365,7 @@ pub(crate) fn along(k: usize, s: f64, t: f64) -> f64 {
 }
 
 /// Twisted strands in the flux rope, turns of twist along it, and its footpoints `|x|`.
-pub(crate) const STRANDS: usize = 4;
+pub(crate) const STRANDS: usize = 3;
 const TWIST: f64 = 2.5;
 const ROPE_FOOT: f64 = 0.8;
 /// `sin θ + SHEAR·sin 2θ` peaks at this value (θ ≈ 61°), used to put the apex at `hr`.
@@ -416,6 +441,37 @@ pub(crate) fn cavity(d: f64) -> f64 {
         1.0
     } else {
         0.12 + 0.88 * ease::smoothstep(((d - 0.72) / 0.26).clamp(0.0, 1.0))
+    }
+}
+
+/// Plasma stipple beside the thread from `a` to `b` (dots): candidate dots up to
+/// `PLASMA_REACH` dots either side (one per dot of length), each kept with probability
+/// `em`, falling off with distance from the thread, against its fixed threshold in layer
+/// `salt` (CORE-R107), so a still loop's plasma holds still (GEN-R26).
+fn plasma_dots(a: (f64, f64), b: (f64, f64), em: f64, salt: u64, mut emit: impl FnMut((f64, f64))) {
+    if em <= 0.0 {
+        return;
+    }
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len = dx.hypot(dy);
+    if !(len > 1e-9 && len.is_finite()) {
+        return;
+    }
+    let (nx, ny) = (-dy / len, dx / len);
+    let n = len.ceil() as usize;
+    for i in 0..n {
+        let f = (i as f64 + 0.5) / n as f64;
+        let (cx, cy) = (a.0 + f * dx, a.1 + f * dy);
+        for o in (-PLASMA_REACH..=PLASMA_REACH).filter(|&o| o != 0) {
+            let fall = 1.0 - f64::from(o.abs()) / f64::from(PLASMA_REACH + 1);
+            let (x, y) = (
+                (cx + f64::from(o) * nx).round(),
+                (cy + f64::from(o) * ny).round(),
+            );
+            if stipple_keep(salt, x as i32, y as i32, em * fall) {
+                emit((x, y));
+            }
+        }
     }
 }
 
@@ -746,12 +802,47 @@ impl SolarEruption {
         }
     }
 
-    /// Every segment `(from, to, ink, part)` in dots, in drawing order.
+    /// Whether dot `p` lies in the CME's cavity while the front is up: inside the front's
+    /// inner edge and off the disc, where only the core (the flux rope) and the front
+    /// itself are drawn (ERUP-A14).
+    fn in_cavity(&self, shell: Option<((f64, f64), f64, f64)>, p: (f64, f64)) -> bool {
+        let Some((c, r, amp)) = shell else {
+            return false;
+        };
+        let v = self.view;
+        amp > 0.0
+            && (p.0 - c.0).hypot(p.1 - c.1) < FRONT_INNER * r
+            && (p.0 - v.cx).hypot(p.1 - v.cy) > LIMB_R * v.scale + 1.0
+    }
+
+    /// The shares of cool closed and open field lines drawn now: fewer while the loops
+    /// rise (ERUP-A17), eased in over 0.8 s; the closed loops return over the flare's
+    /// first 1.5 s, the open field (which the rising rope stretches out) only over the
+    /// CME's, so the flare stays uncluttered.
+    fn line_keep(&self) -> (f64, f64) {
+        let beat = self.timeline.at(self.t);
+        let ease_in = ease::smoothstep((beat.local / 0.8).min(1.0));
+        let ease_out = 1.0 - ease::smoothstep((beat.local / 1.5).min(1.0));
+        let (closed, open) = match beat.index {
+            RISE => (ease_in, ease_in),
+            FLARE => (ease_out, 1.0),
+            CME => (0.0, ease_out),
+            _ => (0.0, 0.0),
+        };
+        (
+            ease::lerp(LINE_KEEP, RISE_KEEP.0, closed),
+            ease::lerp(LINE_KEEP, RISE_KEEP.1, open),
+        )
+    }
+
+    /// Every segment `(from, to, ink, part)` in dots, in drawing order; single dots
+    /// (stipple, ribbons) come as `from == to`.
     fn segments(&self, mut f: impl FnMut((f64, f64), (f64, f64), Ink, Part)) {
         let v = self.view;
         let beat = self.timeline.at(self.t);
         let t = self.t;
         let shell = self.shell();
+        let keep = self.line_keep();
         // At small sizes the loops crowd into fewer dots: thin them.
         let dense = (self.px_scale / 28.0).clamp(0.6, 1.0);
         // Loops: each quiet strand heats and cools on its own cycle; reconnected loops
@@ -778,19 +869,26 @@ impl SolarEruption {
             let m = 1.0 - 0.55 * hot;
             let closed = line.foot.1.is_finite();
             let mut draw = |pose: Pose, flip: f64, kk: usize| {
-                // Thinned (M16 polish): a fixed share of the cool lines is not drawn, so
-                // the rising arcade is not a tangle; hot post-flare loops always are.
-                if hot <= FLARE_HOT && !drawn(kk) {
+                // Thinned: a fixed share of the cool lines is not drawn, so the arcade is
+                // not a tangle; hot post-flare loops always are.
+                let share = if closed { keep.0 } else { keep.1 };
+                if hot <= FLARE_HOT && !drawn(kk, share) {
                     return;
                 }
+                let salt = 0x9A5_0000 ^ (kk as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
                 let at = |p: &[f32; 2]| pose.apply(m, [flip * f64::from(p[0]), f64::from(p[1])]);
                 let mut prev = at(&pts[0]);
                 let mut a = v.px(prev[0], prev[1]);
                 for (j, p) in pts.iter().enumerate().skip(1) {
                     let q = at(p);
                     let b = v.px(q[0], q[1]);
-                    // Behind the limb (a posed loop rooted on the far side): occulted.
-                    if prev[1] >= 0.0 && q[1] >= 0.0 {
+                    // Behind the limb (a posed loop rooted on the far side): occulted; in
+                    // the CME's cavity: emptied.
+                    let shown = prev[1] >= 0.0
+                        && q[1] >= 0.0
+                        && !self.in_cavity(shell, a)
+                        && !self.in_cavity(shell, b);
+                    if shown {
                         if hot > FLARE_HOT {
                             let mid = j as f64 / pts.len() as f64 - 0.5;
                             let top = hot > TOP_HOT && mid.abs() < 0.5 * TOP_SHARE;
@@ -800,12 +898,40 @@ impl SolarEruption {
                                 if top { FLARE_WHITE } else { FLARE_YELLOW },
                                 Part::Flare,
                             );
+                            // Evaporated plasma fills the new loop; its emission measure
+                            // peaks at the loop top.
+                            let crown = (-(mid / 0.14) * (mid / 0.14)).exp();
+                            let em = hot * (0.1 + 0.3 * crown);
+                            let ink = if crown > 0.5 && hot > TOP_HOT {
+                                PLASMA_TOP
+                            } else {
+                                PLASMA_FLARE
+                            };
+                            plasma_dots(a, b, em, salt, |p| {
+                                if !self.in_cavity(shell, p) {
+                                    f(p, p, ink, Part::Plasma);
+                                }
+                            });
                         } else {
                             let mid = (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1));
                             let e = w * along(kk, j as f64 * DS, t) * self.dim_at(shell, mid);
                             let steps = if closed { &CLOSED } else { &OPEN };
                             if let Some(ink) = step_ink(e, steps) {
                                 f(a, b, ink, Part::Loop { closed });
+                                if closed {
+                                    let em = (PLASMA_EM * e).min(PLASMA_CAP);
+                                    // The densest knots glow brightest (EM ∝ n²).
+                                    let ink = if e >= PLASMA_KNOT {
+                                        PLASMA_FLARE
+                                    } else {
+                                        PLASMA_LOOP
+                                    };
+                                    plasma_dots(a, b, em, salt, |p| {
+                                        if !self.in_cavity(shell, p) {
+                                            f(p, p, ink, Part::Plasma);
+                                        }
+                                    });
+                                }
                             }
                         }
                     }
@@ -821,8 +947,8 @@ impl SolarEruption {
                 draw(loop_pose(k + LINES), -1.0, k + LINES);
             }
         }
-        // Flare ribbons: dotted lines along the limb at the post-flare loops' feet, the
-        // newest (inner) reconnection white.
+        // Flare ribbons (ERUP-A16): dotted `Sun` lines along the limb at the post-flare
+        // loops' feet, moving apart as the X-point climbs.
         let flash = match beat.index {
             FLARE => 1.0,
             CME => (1.0 - beat.progress).max(0.25),
@@ -841,12 +967,7 @@ impl SolarEruption {
                     }
                     let x = side * (self.ribbon_seen - 0.2 + 0.3 * u);
                     let p = v.px(x, 0.6 / v.scale.max(1e-9));
-                    let ink = if u < 1.0 / 3.0 {
-                        FLARE_WHITE
-                    } else {
-                        FLARE_YELLOW
-                    };
-                    f(p, p, ink, Part::Ribbon);
+                    f(p, p, FLARE_YELLOW, Part::Ribbon);
                 }
             }
         }
@@ -864,11 +985,12 @@ impl SolarEruption {
                 pose.apply(1.0 - 0.55 * hot, self.blob_pos(b)),
                 pose.apply(1.0 - 0.55 * hot, self.blob_at(b, 3.0)),
             );
-            if p[1] >= 0.0 && q[1] >= 0.0 {
-                f(v.px(q[0], q[1]), v.px(p[0], p[1]), RAIN_INK, Part::Rain);
+            let (pd, qd) = (v.px(p[0], p[1]), v.px(q[0], q[1]));
+            if p[1] >= 0.0 && q[1] >= 0.0 && !self.in_cavity(shell, pd) && !self.in_cavity(shell, qd) {
+                f(qd, pd, RAIN_INK, Part::Rain);
             }
         }
-        // The flux rope: twisted strands round a sheared arch, rising and brightening; in
+        // The flux rope: helical strands round a sheared arch, rising and brightening; in
         // the CME it is the bright core low in the cavity, its legs still rooted.
         let gain = rope_gain(beat.index, beat.progress);
         let hr = self.rope_apex();
@@ -909,13 +1031,14 @@ impl SolarEruption {
                     let a = rope_axis(0.28 + 0.0275 * f64::from(i), hr);
                     let q = v.px(a[0], a[1]);
                     if let Some(p) = prev {
-                        f(p, q, ROPE_FRONT, Part::Rope);
+                        f(p, q, ROPE_CORE, Part::Rope);
                     }
                     prev = Some(q);
                 }
             }
         }
-        // The CME: a filamentary front on the bubble's rim, and plasma riding outward.
+        // The CME front (ERUP-A15): sparse stipple in a thin band at the bubble's rim,
+        // brightest on top and streaky along it, riding the self-similar expansion.
         if let Some((c, r, amp)) = shell {
             let spread = 1.6
                 + if beat.index == CME {
@@ -924,57 +1047,30 @@ impl SolarEruption {
                     0.0
                 };
             let limb_r = LIMB_R * v.scale;
-            let n = (TAU * r / 1.5).ceil().max(12.0) as usize;
-            let point = |k: usize| {
-                let (s, co) = (TAU * k as f64 / n as f64).sin_cos_det();
-                (c.0 + r * co, c.1 + r * s)
-            };
-            let mut prev = point(0);
-            for k in 1..=n {
-                let next = point(k);
-                let mid = (0.5 * (prev.0 + next.0), 0.5 * (prev.1 + next.1));
-                let (ex, ey) = (mid.0 - c.0, mid.1 - c.1);
-                let dn = ex.hypot(ey).max(1e-9);
+            let band = (r * (1.0 - FRONT_INNER)).max(2.0);
+            let front_boost = (2.0 - self.px_scale / 40.0).clamp(1.0, 1.7);
+            let n =((TAU * r * band * FRONT_FILL) as usize).min(FRONT_SAMPLES);
+            for i in 0..n {
+                let key = 0xF207_0000 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+                let (s, co) = (TAU * (i as f64 * GOLDEN).fract()).sin_cos_det();
                 // Brightest on top, fading down the flanks; streaky along the front.
-                let up = (-ey / dn).max(0.0);
-                let below = (ey / dn).max(0.0);
-                let ux = ((ex / dn + 1.0) * 31.5).clamp(0.0, 63.0);
+                let (up, below) = ((-s).max(0.0), s.max(0.0));
+                let ux = ((co + 1.0) * 31.5).clamp(0.0, 63.0);
                 let kk = (ux as usize).min(62);
                 let fr = ux - kk as f64;
                 let streak = f64::from(self.front_tex[kk]) * (1.0 - fr)
                     + f64::from(self.front_tex[kk + 1]) * fr;
                 let flank = (0.04 + 0.96 * up.powf(spread)) * (1.0 - 2.0 * below).max(0.0);
-                let lit = amp * flank * (0.25 + 1.8 * streak * streak);
-                let off_disc = (mid.0 - v.cx).hypot(mid.1 - v.cy) >= limb_r;
-                if lit >= 0.25 && off_disc {
-                    f(
-                        prev,
-                        next,
-                        if lit >= 0.8 { FRONT_BRIGHT } else { FRONT_DIM },
-                        Part::Front,
-                    );
+                // Small screens have few dots on the rim: boost the share kept there.
+                let lit = amp * flank * (0.25 + 1.8 * streak * streak) * front_boost;
+                if hash01(key ^ 0x5) >= FRONT_KEEP * lit.min(1.0) {
+                    continue;
                 }
-                prev = next;
-            }
-            // Plasma: fixed places in the bubble's upper half riding the self-similar
-            // expansion, each trailing back to where it was a moment ago.
-            if amp >= 0.2 {
-                let earlier = bubble(beat.index, (beat.progress - PLASMA_TRAIL).max(0.0));
-                for i in 0..PLASMA {
-                    let key = 0x91A5 ^ (i as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
-                    let d = 0.5 + 0.45 * hash01(key);
-                    let ang = std::f64::consts::PI * (0.08 + 0.84 * hash01(key ^ 7));
-                    let (s, co) = ang.sin_cos_det();
-                    let at = |(hc, rr): (f64, f64)| {
-                        let (cx, cy) = v.px(0.0, hc);
-                        let rd = rr * v.scale * d;
-                        (cx + rd * co, cy - rd * s)
-                    };
-                    let head = (c.0 + r * d * co, c.1 - r * d * s);
-                    let tail = earlier.map_or(head, at);
-                    if (head.0 - v.cx).hypot(head.1 - v.cy) >= limb_r {
-                        f(tail, head, FRONT_BRIGHT, Part::Plasma);
-                    }
+                let d = r - band * hash01(key);
+                let p = (c.0 + d * co, c.1 + d * s);
+                if (p.0 - v.cx).hypot(p.1 - v.cy) >= limb_r {
+                    let ink = if lit >= 0.8 { FRONT_STAR } else { FRONT_COLD };
+                    f(p, p, ink, Part::Front);
                 }
             }
         }
@@ -992,14 +1088,7 @@ impl SolarEruption {
             dots.plot(v.cx + r * s, v.cy - r * c, LIMB);
         }
         self.segments(|a, b, ink, part| match part {
-            Part::Ribbon => dots.plot(b.0, b.1, ink),
-            Part::Plasma => {
-                dots.line(a.0, a.1, b.0, b.1, PLASMA_TRAIL_INK);
-                dots.plot(b.0, b.1, ink);
-            }
-            Part::Rain => {
-                dots.line(a.0, a.1, b.0, b.1, ink);
-            }
+            Part::Ribbon | Part::Plasma | Part::Front => dots.plot(b.0, b.1, ink),
             _ => dots.line(a.0, a.1, b.0, b.1, ink),
         });
         drop(dots);
@@ -1303,7 +1392,9 @@ mod tests {
     }
 
     #[test]
-    fn erup_a8_m16_inks_mid_cme() {
+    fn erup_a8_m17_inks_mid_cme() {
+        // M17: the M16 inks less the `Accent` front and plasma, plus the stipple front
+        // (`Star`/`Cold`), the loop plasma, and the rope's `Accent` front strands.
         let size = Size::new(80, 24);
         let mid = ACTS[..CME].iter().map(|a| a.1).sum::<f64>() + 3.0;
         let (g, _) = run_to(size, mid);
@@ -1318,9 +1409,12 @@ mod tests {
                 ROPE_FRONT,
                 ROPE_BACK,
                 ROPE_FAINT,
-                FRONT_BRIGHT,
-                FRONT_DIM,
-                PLASMA_TRAIL_INK,
+                ROPE_CORE,
+                FRONT_STAR,
+                FRONT_COLD,
+                PLASMA_LOOP,
+                PLASMA_FLARE,
+                PLASMA_TOP,
                 RAIN_INK,
                 LIMB,
             ])
@@ -1333,7 +1427,10 @@ mod tests {
             assert!(('\u{2800}'..='\u{28ff}').contains(&c.ch), "{:?}", c.ch);
             assert!(inks.contains(&c.ink), "{:?}", c.ink);
         }
-        assert!(count(&canvas, ROPE_FRONT) > 0, "the rope shows");
+        assert!(
+            count(&canvas, ROPE_FRONT) + count(&canvas, ROPE_CORE) > 0,
+            "the rope shows"
+        );
     }
 
     #[test]
@@ -1416,31 +1513,31 @@ mod tests {
     }
 
     #[test]
-    fn erup_a13_the_cme_front_rides_the_rim_and_its_plasma_trails_back() {
+    fn erup_a13_the_cme_front_rides_the_rim_and_expands() {
+        // M17: the front is stipple in a thin band at the rim (the M16 plasma dots, which
+        // sat in what is now the dark cavity, are gone); a fixed front sample rides the
+        // self-similar expansion outward.
         let size = Size::new(120, 40);
         let start = ACTS[..CME].iter().map(|a| a.1).sum::<f64>();
-        let (mut front, mut plasma) = (0, 0);
+        let mut tops = Vec::new();
         for dt in [0.5, 1.5, 3.0] {
             let (g, _) = run_to(size, start + dt);
             let (c, r, _) = g.shell().expect("a bubble in the CME act");
-            g.segments(|a, b, _, part| match part {
-                Part::Front => {
-                    for p in [a, b] {
-                        let d = (p.0 - c.0).hypot(p.1 - c.1);
-                        assert!((d - r).abs() <= 1.5, "front at {d} vs {r}");
-                    }
+            let band = (r * (1.0 - FRONT_INNER)).max(2.0);
+            let mut front = 0;
+            let mut top = f64::MAX;
+            g.segments(|a, _, _, part| {
+                if part == Part::Front {
+                    let d = (a.0 - c.0).hypot(a.1 - c.1);
+                    assert!(d <= r + 1e-9 && d >= r - band - 1e-9, "front at {d} vs {r}");
+                    top = top.min(a.1);
                     front += 1;
                 }
-                Part::Plasma => {
-                    assert!(a.1 >= b.1, "tail above the head");
-                    let d = (b.0 - c.0).hypot(b.1 - c.1) / r;
-                    assert!((0.49..=0.96).contains(&d), "plasma at {d}");
-                    plasma += 1;
-                }
-                _ => {}
             });
+            assert!(front > 10, "front {front} at {dt}");
+            tops.push(top);
         }
-        assert!(front > 10 && plasma > 10, "front {front}, plasma {plasma}");
+        assert!(tops.windows(2).all(|w| w[1] < w[0]), "the front rises: {tops:?}");
     }
 
     #[test]
@@ -1454,6 +1551,133 @@ mod tests {
             assert!(META.captions.contains(&c), "{c}");
         }
         assert_eq!(ACTS[QUIET].0, META.captions[0]);
+    }
+
+    /// Corona `x` (`L` along the limb) of dot `p`: the inverse of `View::px`.
+    fn corona_x(g: &SolarEruption, p: (f64, f64)) -> f64 {
+        let v = g.view;
+        (p.0 - v.cx).atan2(v.cy - p.1) * LIMB_R
+    }
+
+    /// Whether dot `p` is off the disc (outside the limb by more than a dot).
+    fn off_disc(g: &SolarEruption, p: (f64, f64)) -> bool {
+        let v = g.view;
+        (p.0 - v.cx).hypot(p.1 - v.cy) > LIMB_R * v.scale + 1.0
+    }
+
+    #[test]
+    fn erup_a14_the_cme_cavity_is_dark() {
+        let size = Size::new(120, 40);
+        let start = ACTS[..CME].iter().map(|a| a.1).sum::<f64>();
+        for dt in [0.3, 1.0, 2.0, 3.5] {
+            let (g, _) = run_to(size, start + dt);
+            let (c, r, _) = g.shell().expect("a bubble in the CME act");
+            let mut inside = 0;
+            g.segments(|a, b, ink, part| {
+                for p in [a, b] {
+                    let d = (p.0 - c.0).hypot(p.1 - c.1) / r;
+                    if d < FRONT_INNER && off_disc(&g, p) {
+                        // Only the core (the flux rope) lives in the cavity.
+                        assert!(
+                            matches!(part, Part::Rope | Part::Front),
+                            "{part:?} {ink:?} in the cavity at d {d:.2}"
+                        );
+                        inside += 1;
+                    }
+                }
+            });
+            assert!(inside > 0 || dt > 2.5, "the core shows in the cavity");
+        }
+    }
+
+    #[test]
+    fn erup_a15_the_cme_front_is_sparse_stipple() {
+        let size = Size::new(120, 40);
+        let start = ACTS[..CME].iter().map(|a| a.1).sum::<f64>();
+        for dt in [0.3, 1.0, 2.0] {
+            let (g, _) = run_to(size, start + dt);
+            let (c, r, _) = g.shell().expect("a bubble");
+            let mut dots = Dots::new(size);
+            let mut n = 0;
+            g.segments(|a, b, ink, part| {
+                if part == Part::Front {
+                    assert_eq!(a, b, "front dots, not strokes");
+                    assert!(matches!(ink.role, Role::Star | Role::Cold), "{ink:?}");
+                    let d = (a.0 - c.0).hypot(a.1 - c.1);
+                    assert!(d <= r + 1.0 && d >= FRONT_INNER * r - 2.5, "front at {d:.1} of {r:.1}");
+                    dots.plot(a.0, a.1, ink);
+                    n += 1;
+                }
+            });
+            assert!(n > 20, "{n} front dots");
+            // Along the front's band (the annulus over the arc where it is drawn), at most
+            // half the dots are lit.
+            let ds = dots.dot_size();
+            let (mut band, mut lit) = (0usize, 0usize);
+            for y in 0..i32::from(ds.height()) {
+                for x in 0..i32::from(ds.width()) {
+                    let p = (f64::from(x), f64::from(y));
+                    let d = (p.0 - c.0).hypot(p.1 - c.1);
+                    if p.1 < c.1 && d >= FRONT_INNER * r - 2.5 && d <= r + 1.0 && off_disc(&g, p) {
+                        band += 1;
+                        lit += usize::from(dots.is_lit(x, y));
+                    }
+                }
+            }
+            assert!(lit * 2 <= band, "{lit} of {band} band dots lit");
+        }
+    }
+
+    #[test]
+    fn erup_a16_sun_ribbons_at_the_loop_feet_separate() {
+        let size = Size::new(120, 40);
+        let start = ACTS[..FLARE].iter().map(|a| a.1).sum::<f64>();
+        let mut seps = Vec::new();
+        for dt in [1.5, 3.0, 5.5] {
+            let (g, _) = run_to(size, start + dt);
+            let feet: Vec<f64> = g
+                .lines
+                .iter()
+                .filter(|l| l.age.is_finite() && l.foot.1.is_finite())
+                .map(|l| l.foot.0.abs())
+                .collect();
+            assert!(!feet.is_empty(), "post-flare loops at {dt}");
+            let (mut sum, mut n) = (0.0, 0);
+            g.segments(|_, b, ink, part| {
+                if part == Part::Ribbon {
+                    assert_eq!(ink.role, Role::Sun, "{ink:?}");
+                    let x = corona_x(&g, b).abs();
+                    let near = feet.iter().map(|f| (f - x).abs()).fold(f64::MAX, f64::min);
+                    assert!(near < 0.3, "ribbon dot {x:.2} far from the feet ({near:.2})");
+                    sum += x;
+                    n += 1;
+                }
+            });
+            assert!(n > 4, "{n} ribbon dots at {dt}");
+            seps.push(sum / f64::from(n));
+        }
+        assert!(seps.windows(2).all(|w| w[1] > w[0]), "separation {seps:?}");
+    }
+
+    #[test]
+    fn erup_a17_loops_rise_is_calmer_than_m16() {
+        // M16's lit cells in `loops rise` (seed 42, 200×50, the scene alone), measured at
+        // the base commit 75f5552 before the M17 redesign.
+        const M16: [(f64, usize); 4] = [(7.0, 1094), (9.0, 973), (11.0, 1391), (13.0, 1830)];
+        let size = Size::new(200, 50);
+        let mut g = SolarEruption::new();
+        let mut ctx = Ctx::new(42, size);
+        g.resize(size, &mut ctx);
+        for (t, m16) in M16 {
+            while g.t < t {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            assert_eq!(g.caption(), Some("loops rise"));
+            let canvas = canvas_of(&g, size);
+            let lit = canvas.cells().iter().filter(|c| c.ch != ' ').count();
+            assert!(lit * 10 <= m16 * 7, "t {t}: {lit} lit cells vs M16 {m16}");
+        }
     }
 
     #[test]
