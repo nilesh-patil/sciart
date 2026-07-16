@@ -46,6 +46,11 @@ pub const GEN_R26: &[&str] = &[
     "spiral_galaxy",
     "supernova_remnant",
     "ising_model",
+    "wave_interference",
+    "chemical_garden",
+    "physarum",
+    "firefly_sync",
+    "heart_fibrillation",
 ];
 
 /// Whether GEN-R25 or GEN-R26 restyled `scene` (so GEN-R22 no longer pins it).
