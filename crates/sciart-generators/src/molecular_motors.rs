@@ -15,6 +15,16 @@
 //! α₃β₃ ring round the γ rotor, with an actin filament stuck on γ to make its turns
 //! visible. Each 120° turn is an 80° substep after an ATP-binding dwell and a 40°
 //! substep after a catalytic dwell, both exponential; each turn releases one ATP.
+//!
+//! Look (M17, GEN-R26: cloud heads + step arches): all braille on black. Heads, tubulin
+//! monomers, c-subunits and the α₃β₃ lobes are Gaussian stipple clouds whose thresholds
+//! are keyed to the offset from their centre (CORE-R107), so a cloud moves rigidly with
+//! its molecule and never shimmers; the bound head is `Cold`, the swinging head `Hot`.
+//! Linkers, stalk, γ and the proton half-channels are 1-dot threads; the vesicle is a
+//! hollow stipple shell. The swinging head's path is sampled at 80 Hz and drawn as an arch
+//! thread (`Sun` while the neck linker pulls hard, `Hot` as it settles) that dissolves
+//! over 2 s, so the walk writes a chain of arches. Subjects (heads; γ, c-ring, protons)
+//! sit on a front layer blitted over the rest, so the cells they cross show them alone.
 
 use std::f64::consts::PI;
 use std::fmt::Write as _;
@@ -237,35 +247,65 @@ const KINESIN: usize = 0;
 /// `[ATP]` (µM) over the kinesin act: saturating, near `K_M`, scarce.
 const ATP_STEPS: [(f64, f64); 3] = [(0.0, 1000.0), (8.0, 60.0), (16.0, 15.0)];
 const ATP_DOTS: usize = 90;
-/// Footprints kept, and the seconds one takes to fade.
+/// Binding marks kept, and the seconds the site a head bound to glows (KIN-A7).
 const TRAIL: usize = 8;
 const TRAIL_S: f64 = 5.0;
 /// Cargo vesicle radius and its tether rest height (nm).
 const CARGO_R: f64 = 9.0;
 const CARGO_Y: f64 = -18.0;
+/// Low-pass time of the drawn vesicle position (s).
+const CARGO_VIEW_S: f64 = 0.4;
+/// ATP diffusion step per model sub-step (fraction of the half-screen): slowed for the eye,
+/// so molecules drift rather than twinkle from place to place.
+const ATP_STEP: f64 = 0.005;
+/// The swinging head's path: sampled every [`ARCH_EVERY`] model sub-steps (80 Hz), the last
+/// [`ARCH_N`] samples kept, each dissolving over [`ARCH_S`] (KIN-A11).
+const ARCH_EVERY: u32 = 3;
+const ARCH_N: usize = 256;
+const ARCH_S: f64 = 2.0;
+/// Pull speed (nm/s, display time) above which the arch is `Sun` rather than `Hot`: the
+/// docking neck linker pulls hardest at the start of the swing.
+const ARCH_FAST: f64 = SWING_K * SITE_NM;
+/// Low-pass time of the drawn path (s): smooths thermal kicks, keeps the arch.
+const ARCH_TAU: f64 = 0.03;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-/// Inks in M11's roles and flat steps (ADR-0018): kinesin `Particle` (the bound head
-/// brightest), its footprints fading in two steps; the microtubule and the cargo's
-/// membrane `Structure` lines; ATP `Sun` points; the synthase's β subunits `Hot` and α
-/// `Cold`, γ and its filament `Accent`, the substep ticks `Dim`.
-const ATP_INK: Ink = Ink::new(Role::Sun, 200);
-const TUBE_WALL: Ink = Ink::new(Role::Structure, 90);
-const TUBE_BETA: Ink = Ink::new(Role::Structure, 170);
-const TUBE_ALPHA: Ink = Ink::new(Role::Structure, 110);
-const MEMBRANE: Ink = Ink::new(Role::Structure, 150);
-const FOOTPRINTS: [Ink; 2] = [Ink::new(Role::Particle, 70), Ink::new(Role::Particle, 130)];
-const TETHER: Ink = Ink::new(Role::Particle, 110);
-/// The two heads in two colours (`Particle` and `Wave`), so hand-over-hand stepping
-/// reads: each bright while bound, a step dimmer while it swings free.
-const HEADS: [[Ink; 2]; 2] = [
-    [Ink::new(Role::Particle, 140), Ink::new(Role::Particle, 215)],
-    [Ink::new(Role::Wave, 140), Ink::new(Role::Wave, 215)],
-];
-const BETA: Ink = Ink::new(Role::Hot, 200);
-const ALPHA: Ink = Ink::new(Role::Cold, 170);
-const ROTOR: Ink = Ink::new(Role::Accent, 240);
-const GHOST: Ink = Ink::new(Role::Accent, 100);
-const TICKS: [Ink; 2] = [Ink::new(Role::Dim, 100), Ink::new(Role::Dim, 160)];
+
+// Inks (M11 roles, GEN-R23). Kinesin act: the heads are the two signs of an orbital lobe
+// (bound `Cold`, swinging `Hot`); tubulin dimers alternate `Cold` (β, the binding sites)
+// and `Structure` (α); a site a head just bound glows brighter; the linkers, stalk and the
+// vesicle's shell are `Structure`; the arches run `Sun` → `Hot` as the swing slows; ATP is
+// `Sun`. Synthase act: α `Hot`, β `Cold`, the c-ring `Structure`, γ `Accent`, protons
+// `Cold`, the half-channels `Dim`.
+const ATP_INK: Ink = Ink::new(Role::Sun, 255);
+const TUB_ALPHA: Ink = Ink::new(Role::Structure, 120);
+const TUB_BETA: Ink = Ink::new(Role::Cold, 150);
+const TUB_MARK: Ink = Ink::new(Role::Cold, 235);
+const SHELL: Ink = Ink::new(Role::Structure, 150);
+const LINK: Ink = Ink::new(Role::Star, 200);
+const BOUND: Ink = Ink::new(Role::Cold, 240);
+const SWING: Ink = Ink::new(Role::Hot, 245);
+const ALPHA: Ink = Ink::new(Role::Hot, 200);
+const BETA: Ink = Ink::new(Role::Cold, 200);
+const C_RING: Ink = Ink::new(Role::Structure, 210);
+const GAMMA: Ink = Ink::new(Role::Accent, 255);
+const GHOST: Ink = Ink::new(Role::Accent, 120);
+const PROTON: Ink = Ink::new(Role::Cold, 255);
+const CHANNEL: Ink = Ink::new(Role::Dim, 150);
+
+/// Stipple salts (CORE-R107).
+const SALT_SHELL: u64 = 0x1F83_D9AB_FB41_BD6B;
+const SALT_HEAD: u64 = 0x5BE0_CD19_137E_2179;
+const SALT_LOBE: u64 = 0x629A_292A_367C_D507;
+const SALT_CRING: u64 = 0x9159_015A_3070_DD17;
+
+/// Layers (tests draw them one at a time).
+pub(crate) const TUBE: u8 = 1;
+pub(crate) const HEADS: u8 = 2;
+pub(crate) const ARCH: u8 = 4;
+pub(crate) const CARGO: u8 = 8;
+pub(crate) const LINKS: u8 = 16;
+pub(crate) const ATP: u8 = 32;
+pub(crate) const ALL_LAYERS: u8 = 63;
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Dot {
@@ -277,28 +317,56 @@ struct Dot {
     vy: f64,
 }
 
+/// One sample of the swinging head's path (nm, world), when it was taken, whether the pull
+/// was fast, and the step it belongs to.
+#[derive(Debug, Clone, Copy, Default)]
+struct ArchPt {
+    x: f64,
+    y: f64,
+    t: f64,
+    fast: bool,
+    step: u64,
+}
+
 #[derive(Debug)]
 struct Motors {
     kinesin: Kinesin,
     rotor: Rotor,
     /// Cargo bead position (nm), lagging on its spring.
     cargo: [f64; 2],
+    /// Where the vesicle is drawn: its position low-passed over [`CARGO_VIEW_S`], so its
+    /// Brownian jitter shows as a slow wander, not a shell redrawn every frame.
+    cargo_view: [f64; 2],
     /// Camera centre (nm), easing after the motor.
     cam: f64,
+    cam_target: f64,
     dots: Vec<Dot>,
     /// Sites heads bound to (nm) and when, a ring buffer.
     trail: [(f64, f64); TRAIL],
     trail_len: usize,
     trail_next: usize,
+    /// The swinging head's sampled path, a ring buffer; the low-passed head position and
+    /// the step it follows; the sub-step counter that paces the samples.
+    arch: [ArchPt; ARCH_N],
+    arch_len: usize,
+    arch_next: usize,
+    smooth: Option<(u64, [f64; 2])>,
+    substeps: u32,
     time: f64,
     owed: f64,
     act: usize,
     timeline: Timeline,
-    pixels: Pixels,
+    /// The back layer (track, cargo, arches, lobes) and the front layer (heads, γ, c-ring,
+    /// protons) blitted over it, so a cell the subject crosses shows the subject alone.
+    layers: Option<[Dots; 2]>,
+    /// The synthase's static α₃β₃ lobes, drawn in `resize` and blitted under the layers.
+    lobes: Dots,
+    /// Their size in dots (kept apart, as the layers are moved out while drawing).
+    dot_size: Size,
     cells: Size,
     readout_room: usize,
     rng: SplitMix64,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    /// The dots are stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
 }
 
@@ -309,16 +377,25 @@ impl Default for Motors {
             kinesin: Kinesin::new(),
             rotor: Rotor::new(),
             cargo: [-14.0, CARGO_Y],
+            cargo_view: [-14.0, CARGO_Y],
             cam: 0.0,
+            cam_target: 0.0,
             dots: Vec::with_capacity(ATP_DOTS),
             trail: [(0.0, 0.0); TRAIL],
             trail_len: 0,
             trail_next: 0,
+            arch: [ArchPt::default(); ARCH_N],
+            arch_len: 0,
+            arch_next: 0,
+            smooth: None,
+            substeps: 0,
             time: 0.0,
             owed: 0.0,
             act: KINESIN,
             timeline: Timeline::new(&[(CAPTIONS[0], KINESIN_S), (CAPTIONS[1], SYNTHASE_S)]),
-            pixels: Pixels::default(),
+            layers: Some([Dots::default(), Dots::default()]),
+            lobes: Dots::default(),
+            dot_size: Size::new(2, 4),
             cells: Size::new(1, 1),
             readout_room: 0,
             rng: SplitMix64::new(1),
@@ -335,42 +412,118 @@ fn atp_at(t: f64) -> f64 {
         .map_or(ATP_STEPS[0].1, |s| s.1)
 }
 
-/// A flat disc: every pixel at least half inside takes `ink`.
-fn flat_disc(px: &mut Pixels, c: (f64, f64), r: f64, ink: Ink) {
-    raster::disc_pixels(c, r, |x, y, cover| {
-        if cover >= 0.5 {
-            px.set(x, y, ink);
-        }
-    });
+/// The arch ink of a sample `age` seconds old: `Sun` where the pull was fast, `Hot` where
+/// the swing settled, stepping down through three levels as it ages (flat steps, so a
+/// fading arch changes its cells only twice).
+fn arch_ink(fast: bool, age: f64) -> Ink {
+    let step = ((1.0 - age / ARCH_S) * 3.0).ceil().clamp(1.0, 3.0) as u8;
+    let level = 105 + 50 * step;
+    Ink::new(if fast { Role::Sun } else { Role::Hot }, level)
 }
 
-/// A flat 1-px ring: the disc's pixels within about a pixel of its rim.
-fn flat_ring(px: &mut Pixels, c: (f64, f64), r: f64, ink: Ink) {
-    raster::disc_pixels(c, r, |x, y, cover| {
-        let (ox, oy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
-        if cover >= 0.5 && ox.hypot(oy) > r - 1.2 {
-            px.set(x, y, ink);
-        }
-    });
+/// A per-object salt: `salt` mixed with an index, so identical clouds differ.
+fn salted(salt: u64, k: i64) -> u64 {
+    salt ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
-/// A flat stroke of half-width `hw` pixels from `a` to `b`: every pixel whose centre lies
-/// within `hw + ¼` of the segment, so even a thin rod is an unbroken 1-px line.
-fn flat_segment(px: &mut Pixels, a: (f64, f64), b: (f64, f64), hw: f64, ink: Ink) {
-    let reach = hw + 1.0;
-    let (x0, x1) = (a.0.min(b.0) - reach, a.0.max(b.0) + reach);
-    let (y0, y1) = (a.1.min(b.1) - reach, a.1.max(b.1) + reach);
-    if !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) {
+/// A Gaussian stipple cloud about `c` (dots): a dot is kept with probability
+/// `peak·e^{−r²/2σ²}` out to 2.5σ. The thresholds are keyed to the dot's offset from the
+/// rounded centre (CORE-R107), so a moving cloud moves rigidly and never shimmers.
+fn cloud(dots: &mut Dots, c: (f64, f64), sigma: f64, peak: f64, salt: u64, ink: Ink) {
+    if !(c.0.is_finite() && c.1.is_finite() && sigma > 0.0 && sigma < 1e3) {
         return;
     }
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = (dx * dx + dy * dy).max(1e-9);
-    for y in y0.floor() as i32..=y1.ceil() as i32 {
-        for x in x0.floor() as i32..=x1.ceil() as i32 {
-            let (qx, qy) = (f64::from(x) + 0.5 - a.0, f64::from(y) + 0.5 - a.1);
-            let t = ((qx * dx + qy * dy) / len2).clamp(0.0, 1.0);
-            if (qx - t * dx).hypot(qy - t * dy) <= hw + 0.25 {
-                px.set(x, y, ink);
+    let (cx, cy) = (c.0.round() as i32, c.1.round() as i32);
+    let reach = (2.5 * sigma).ceil() as i32;
+    let (k, cut) = (-0.5 / (sigma * sigma), (2.5 * sigma).powi(2));
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let r2 = f64::from(dx * dx + dy * dy);
+            if r2 <= cut && raster::stipple_keep(salt, dx, dy, peak * (k * r2).exp()) {
+                dots.set(cx.saturating_add(dx), cy.saturating_add(dy), ink);
+            }
+        }
+    }
+}
+
+/// A teardrop stipple cloud of length ≈ `size` (dots) from its pointed `tip` outward along
+/// the unit `dir`: across the axis a Gaussian whose width grows from the tip, along it a
+/// Gaussian peaked 60 % of the way out, so the round end faces away from the tip. Keyed to
+/// the offset from the rounded tip, like [`cloud`].
+fn teardrop(dots: &mut Dots, tip: (f64, f64), dir: (f64, f64), size: f64, salt: u64, ink: Ink) {
+    if !(tip.0.is_finite() && tip.1.is_finite() && size > 0.0 && size < 1e4) {
+        return;
+    }
+    let len = 0.95 * size;
+    let (tx, ty) = (tip.0.round() as i32, tip.1.round() as i32);
+    // The bounding box of the rotated rectangle along × ±3 widths, so only candidate dots
+    // are visited.
+    let side = 3.0 * (0.17 * size + 0.5);
+    let corners = [(0.0, -side), (0.0, side), (len, -side), (len, side)]
+        .map(|(a, b)| (a * dir.0 + b * dir.1, a * dir.1 - b * dir.0));
+    let span = |k: fn(&(f64, f64)) -> f64| {
+        let lo = corners.iter().map(k).fold(f64::INFINITY, f64::min).floor() as i32;
+        let hi = corners
+            .iter()
+            .map(k)
+            .fold(f64::NEG_INFINITY, f64::max)
+            .ceil() as i32;
+        lo..=hi
+    };
+    let (xs, ys) = (span(|p| p.0), span(|p| p.1));
+    for dy in ys {
+        for dx in xs.clone() {
+            let (px, py) = (f64::from(dx), f64::from(dy));
+            let along = px * dir.0 + py * dir.1;
+            if !(0.0..len).contains(&along) {
+                continue;
+            }
+            let across = px * dir.1 - py * dir.0;
+            let f = along / len;
+            // f^0.75: the width grows from the pointed tip.
+            let width = 0.17 * size * (f * f.sqrt()).sqrt() + 0.5;
+            let a = (f - 0.6) / 0.28;
+            let p = 0.5 * (-0.5 * (a * a + (across / width).powi(2))).exp();
+            if raster::stipple_keep(salt, dx, dy, p) {
+                dots.set(tx.saturating_add(dx), ty.saturating_add(dy), ink);
+            }
+        }
+    }
+}
+
+/// The synthase's centre and α₃β₃ radius (dots) in an art area of `(dw, dh)` dots.
+fn synthase_frame((dw, dh): (f64, f64)) -> ((f64, f64), f64) {
+    ((dw / 2.0, dh / 2.0), (dh * 0.24).min(dw * 0.22))
+}
+
+/// The α₃β₃ hexamer: six teardrops pointed at the centre, α `Hot` and β `Cold`
+/// alternating. Static, so drawn once per resize into its own layer.
+fn draw_lobes(dots: &mut Dots, art: (f64, f64)) {
+    let (c, r) = synthase_frame(art);
+    dots.clear();
+    for j in 0..6i32 {
+        let ink = if j % 2 == 0 { ALPHA } else { BETA };
+        let deg = f64::from(j) * 60.0 + 30.0;
+        let (x, y) = gamma_dir(deg);
+        let tip = (c.0 + 0.42 * r * x, c.1 + 0.42 * r * y);
+        teardrop(dots, tip, (x, y), r, salted(SALT_LOBE, i64::from(j)), ink);
+    }
+}
+
+/// A hollow stipple shell about `c` (dots): dots with `r_in ≤ r ≤ r_out` kept with
+/// probability `p`, keyed to the offset from the rounded centre like [`cloud`].
+fn shell(dots: &mut Dots, c: (f64, f64), (r_in, r_out): (f64, f64), p: f64, ink: Ink) {
+    if !(c.0.is_finite() && c.1.is_finite() && r_out > 0.0 && r_out < 1e4) {
+        return;
+    }
+    let (cx, cy) = (c.0.round() as i32, c.1.round() as i32);
+    let reach = r_out.ceil() as i32;
+    let (lo, hi) = (r_in * r_in, r_out * r_out);
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let r2 = f64::from(dx * dx + dy * dy);
+            if (lo..=hi).contains(&r2) && raster::stipple_keep(SALT_SHELL, dx, dy, p) {
+                dots.set(cx.saturating_add(dx), cy.saturating_add(dy), ink);
             }
         }
     }
@@ -383,16 +536,38 @@ pub(crate) fn gamma_dir(deg: f64) -> (f64, f64) {
     (c, s)
 }
 
+/// `a + (b − a)·t` on points.
+fn mix(a: (f64, f64), b: (f64, f64), t: f64) -> (f64, f64) {
+    (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+}
+
 impl Motors {
     fn local(&self) -> f64 {
         self.time % self.timeline.total()
     }
 
+    /// Dot extent of the art (the bottom row holds the title and readout).
+    fn art(&self) -> (f64, f64) {
+        let ds = self.dot_size;
+        (
+            f64::from(ds.width()),
+            (f64::from(ds.height()) - 4.0).max(1.0),
+        )
+    }
+
+    /// Dots per nm in the kinesin act: 64 nm across and 38 nm down fit, so the vesicle
+    /// (up to 27 nm above the track) and the microtubule (10 nm below) stay on screen.
     fn scale(&self) -> f64 {
-        let ps = self.pixels.pixel_size();
-        (f64::from(ps.width()) / 60.0)
-            .min(f64::from(ps.height()) / 32.0)
-            .max(0.4)
+        let (dw, dh) = self.art();
+        (dw / 64.0).min(dh / 38.0).max(0.8)
+    }
+
+    /// The kinesin act's world → dot map: x about the camera, y from the track surface,
+    /// which sits 10.5 nm above the bottom of the art.
+    fn kinesin_dot(&self, x: f64, y: f64) -> (f64, f64) {
+        let (dw, dh) = self.art();
+        let s = self.scale();
+        (dw / 2.0 + (x - self.cam) * s, dh - 10.5 * s + y * s)
     }
 
     fn scatter_dots(&mut self, n: usize) {
@@ -414,6 +589,41 @@ impl Motors {
         ((atp.log10() - 0.8) * 30.0).clamp(8.0, ATP_DOTS as f64) as usize
     }
 
+    /// Follow the swinging head's path (KIN-A11): low-passed over [`ARCH_TAU`] so the arch
+    /// shows the docking pull rather than every thermal kick, clamped to the stretch between
+    /// its old and new sites and above the track surface (a head cannot enter the
+    /// microtubule), and sampled every [`ARCH_EVERY`] sub-steps.
+    fn track_arch(&mut self, h: f64) {
+        let Some((i, p)) = self.kinesin.free else {
+            self.smooth = None;
+            return;
+        };
+        let step = self.kinesin.steps;
+        let s = match self.smooth {
+            Some((at, s)) if at == step => {
+                let a = (h / ARCH_TAU).min(1.0);
+                [s[0] + (p[0] - s[0]) * a, s[1] + (p[1] - s[1]) * a]
+            }
+            _ => p,
+        };
+        self.smooth = Some((step, s));
+        self.substeps = self.substeps.wrapping_add(1);
+        if self.substeps % ARCH_EVERY != 0 {
+            return;
+        }
+        let lead = self.kinesin.site[1 - i];
+        let (from, to) = ((lead - 1) as f64 * SITE_NM, (lead + 1) as f64 * SITE_NM);
+        self.arch[self.arch_next] = ArchPt {
+            x: s[0].clamp(from, to),
+            y: s[1].min(0.0),
+            t: self.time,
+            fast: SWING_K * (to - s[0]).abs() >= ARCH_FAST,
+            step,
+        };
+        self.arch_next = (self.arch_next + 1) % ARCH_N;
+        self.arch_len = (self.arch_len + 1).min(ARCH_N);
+    }
+
     fn step_model(&mut self, h: f64) {
         let local = self.local();
         let act = self.timeline.at(local).index;
@@ -422,8 +632,11 @@ impl Motors {
             if act == KINESIN {
                 self.kinesin = Kinesin::new();
                 self.cargo = [-14.0, CARGO_Y];
+                self.cargo_view = self.cargo;
                 self.cam = 0.0;
+                self.cam_target = 0.0;
                 self.trail_len = 0;
+                self.arch_len = 0;
                 self.scatter_dots(Self::dots_for(atp_at(0.0)));
             } else {
                 self.rotor = Rotor::new();
@@ -447,18 +660,30 @@ impl Motors {
                 self.trail_next = (self.trail_next + 1) % TRAIL;
                 self.trail_len = (self.trail_len + 1).min(TRAIL);
             }
+            self.track_arch(h);
             // The cargo lags behind on its tether.
             let c = self.kinesin.centre();
             self.cargo[0] += (c - 16.0 - self.cargo[0]) * (2.0 * h).min(1.0);
             self.cargo[1] += (CARGO_Y - self.cargo[1]) * (2.0 * h).min(1.0);
             self.cargo[0] += gaussian(&mut self.rng, 0.0, 0.15);
-            // A lazy camera: the motor walks across the frame, and the view pans only
-            // once it strays 14 nm from the centre, so every step shows.
-            let off = c - self.cam;
-            let zone = (0.1 * f64::from(self.pixels.pixel_size().width()) / self.scale()).min(14.0);
-            if off.abs() > zone {
-                self.cam += (off - zone * off.signum()) * (2.0 * h).min(1.0);
+            let a = (h / CARGO_VIEW_S).min(1.0);
+            for (v, c) in self.cargo_view.iter_mut().zip(self.cargo) {
+                *v += (c - *v) * a;
             }
+            // A lazy camera: the view holds still while the motor walks across it (so the
+            // lattice does not slide under every step), and once the motor strays a third
+            // of the view from the centre it re-centres in a short eased pan, leading the
+            // walk so the motor enters from the left again.
+            let zone = (self.art().0 / self.scale() / 3.0).min(24.0);
+            if (c - self.cam_target).abs() > zone {
+                self.cam_target = c + 0.25 * zone;
+            }
+            let gap = self.cam_target - self.cam;
+            self.cam = if gap.abs() < 0.02 {
+                self.cam_target
+            } else {
+                self.cam + gap * (6.0 * h).min(1.0)
+            };
         } else {
             let mut rng = self.rng.clone();
             let made = self.rotor.step(h, &mut rng);
@@ -481,168 +706,187 @@ impl Motors {
                 d.x += d.vx * h;
                 d.y += d.vy * h;
             } else {
-                d.x += gaussian(&mut self.rng, 0.0, 0.02);
-                d.y += gaussian(&mut self.rng, 0.0, 0.02);
+                d.x += gaussian(&mut self.rng, 0.0, ATP_STEP);
+                d.y += gaussian(&mut self.rng, 0.0, ATP_STEP);
             }
             d.x = (d.x + 1.0).rem_euclid(2.0) - 1.0;
             d.y = (d.y + 1.0).rem_euclid(2.0) - 1.0;
         }
     }
 
-    fn draw_kinesin(&mut self) {
-        let ps = self.pixels.pixel_size();
-        let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()) - 2.0);
+    /// Seconds since a head bound to the site at `x` nm, if it is among the marks.
+    fn mark_age(&self, x: f64) -> Option<f64> {
+        self.trail[..self.trail_len]
+            .iter()
+            .filter(|m| m.0 == x)
+            .map(|m| self.time - m.1)
+            .reduce(f64::min)
+    }
+
+    /// The kinesin act (SPEC-002 Look (M17)).
+    fn draw_kinesin(&self, back: &mut Dots, front: &mut Dots, layers: u8) {
+        let (dw, dh) = self.art();
         let s = self.scale();
-        let track_y = ph * 0.66;
-        let to_px = |x: f64, y: f64, cam: f64| (pw / 2.0 + (x - cam) * s, track_y + y * s);
-        let cam = self.cam;
-        // ATP molecules drifting in solution.
-        for d in &self.dots {
-            let (x, y) = (pw * (d.x + 1.0) / 2.0, ph * (d.y + 1.0) / 2.0);
-            // Not on or inside the tube (M14: the tube is only its walls, so its inside
-            // would otherwise show molecules through it).
-            if y < track_y - 7.0 * s {
-                self.pixels.set(x as i32, y as i32, ATP_INK);
+        let at = |x: f64, y: f64| self.kinesin_dot(x, y);
+        let track_y = at(0.0, 0.0).1;
+        // Clouds keep a few dots across even on small terminals.
+        let sigma = |nm: f64| (nm * s).max(1.4);
+        if layers & ATP != 0 {
+            // ATP diffusing in solution, never inside the microtubule.
+            for d in &self.dots {
+                let (x, y) = (dw * (d.x + 1.0) / 2.0, dh * (d.y + 1.0) / 2.0);
+                if !(track_y + 0.5 * s..track_y + 13.0 * s).contains(&y) {
+                    back.plot(x, y, ATP_INK);
+                }
             }
         }
-        // Microtubule: a thin lattice, not a row of shaded balls. The tube's two walls
-        // are 1-px lines, and the track's surface row carries one pixel per 4 nm tubulin
-        // monomer, β paler than α, so the 8 nm dimer rhythm the heads step along still
-        // reads and moves with the track.
-        // The far wall only when it falls inside the art rows: clamped to the bottom it
-        // read as a frame rule over the title.
-        let (y_top, y_bot) = (to_px(0.0, 2.4, cam).1, to_px(0.0, 14.6, cam).1);
-        let far_wall = y_bot < ph - 1.0;
-        for px in 0..i32::from(ps.width()) {
-            self.pixels.set(px, y_top as i32, TUBE_WALL);
-            if far_wall {
-                self.pixels.set(px, y_bot as i32, TUBE_WALL);
+        if layers & TUBE != 0 {
+            // The microtubule side-on as a fine braille lattice: three thin protofilament
+            // rows of tubulin monomers 4 nm apart, each a short 1-dot dash with a gap to the
+            // next, each row shifted along the helix; β (`Cold`, under each 8 nm binding site
+            // in the top row) and α (`Structure`) alternate, and a site a head has just bound
+            // glows brighter and a dot longer.
+            let first = ((self.cam - dw / 2.0 / s) / 4.0).floor() as i64 - 2;
+            let last = ((self.cam + dw / 2.0 / s) / 4.0).ceil() as i64 + 2;
+            let half = (0.5 * s).clamp(0.5, 2.5);
+            for row in 0..3i64 {
+                let y = 2.6 + 3.2 * row as f64;
+                if at(0.0, y).1 > dh {
+                    break;
+                }
+                for k in first..=last {
+                    let x = 4.0 * k as f64 + 1.3 * row as f64;
+                    let beta = k.rem_euclid(2) == 0;
+                    let (ink, reach) = match (beta, row) {
+                        (false, _) => (TUB_ALPHA, half),
+                        (true, 0) => match self.mark_age(x) {
+                            Some(age) if age < TRAIL_S => (TUB_MARK, half + 1.0),
+                            _ => (TUB_BETA, half),
+                        },
+                        (true, _) => (TUB_BETA, half),
+                    };
+                    let p = at(x, y);
+                    back.line(p.0 - reach, p.1, p.0 + reach, p.1, ink);
+                }
             }
         }
-        let first = ((cam - pw / 2.0 / s) / 4.0).floor() as i64 - 3;
-        let last = ((cam + pw / 2.0 / s) / 4.0).ceil() as i64 + 3;
-        for k in first..=last {
-            let x = k as f64 * 4.0 + 2.0;
-            let beta = k.rem_euclid(2) == 0;
-            let (px, _) = to_px(x, 0.0, cam);
-            let ink = if beta { TUBE_BETA } else { TUBE_ALPHA };
-            self.pixels.set(px as i32, y_top as i32 + 1, ink);
-        }
-        // Footprints: each site a head bound to shows and fades in two steps, so the walk
-        // leaves a trail of 8 nm steps along the track.
-        for &(x, at) in &self.trail[..self.trail_len] {
-            let age = (self.time - at) / TRAIL_S;
-            if (0.0..1.0).contains(&age) {
-                let ink = FOOTPRINTS[usize::from(age < 0.4)];
-                flat_disc(&mut self.pixels, to_px(x, 3.4, cam), 1.0 * s, ink);
+        if layers & ARCH != 0 {
+            // Each sample joins the previous one of the same step; the thread steps down in
+            // brightness as it ages and is gone after ARCH_S.
+            for j in 1..self.arch_len {
+                let idx = |j: usize| (self.arch_next + ARCH_N - self.arch_len + j) % ARCH_N;
+                let (a, b) = (self.arch[idx(j - 1)], self.arch[idx(j)]);
+                let age = self.time - b.t;
+                if a.step != b.step || !(0.0..ARCH_S).contains(&age) {
+                    continue;
+                }
+                let ink = arch_ink(b.fast, age);
+                let (p, q) = (at(a.x, a.y), at(b.x, b.y));
+                back.line(p.0, p.1, q.0, q.1, ink);
             }
         }
-        // Cargo, tether (coiled coil) and heads.
+        let cargo = at(self.cargo_view[0], self.cargo_view[1]);
+        let r = CARGO_R * s;
+        if layers & CARGO != 0 {
+            // A vesicle: its membrane a sparse stipple shell, the lumen black.
+            shell(back, cargo, (0.84 * r, r), 0.3, SHELL);
+        }
         let k = self.kinesin;
         let heads = [k.head(0), k.head(1)];
-        let hip = (
-            0.5 * (heads[0][0] + heads[1][0]),
-            0.5 * (heads[0][1] + heads[1][1]) - 6.5,
-        );
-        let (cx, cy) = to_px(self.cargo[0], self.cargo[1], cam);
-        // The cargo: a vesicle, drawn as its membrane only, a thin ring; the lumen is
-        // left black.
-        let r = CARGO_R * s;
-        flat_ring(&mut self.pixels, (cx, cy), r, MEMBRANE);
-        let hip_px = to_px(hip.0, hip.1, cam);
-        flat_segment(
-            &mut self.pixels,
-            hip_px,
-            (cx + 0.55 * r, cy + 0.72 * r),
-            0.45,
-            TETHER,
-        );
-        for (i, h) in heads.iter().enumerate() {
-            let bound = k.free.is_none_or(|(f, _)| f != i);
-            let (x, y) = to_px(h[0], h[1], cam);
-            flat_segment(&mut self.pixels, hip_px, (x, y), 0.45, TETHER);
-            let ink = HEADS[i][usize::from(bound)];
-            flat_disc(&mut self.pixels, (x, y), 3.2 * s, ink);
+        if layers & LINKS != 0 {
+            // Neck linkers to the hip, and the coiled-coil stalk to the vesicle.
+            let hip = at(
+                0.5 * (heads[0][0] + heads[1][0]),
+                0.5 * (heads[0][1] + heads[1][1]) - 6.5,
+            );
+            for h in heads {
+                let p = at(h[0], h[1]);
+                back.line(hip.0, hip.1, p.0, p.1, LINK);
+            }
+            let (ax, ay) = (cargo.0 + 0.55 * r, cargo.1 + 0.72 * r);
+            back.line(hip.0, hip.1, ax, ay, LINK);
+        }
+        if layers & HEADS != 0 {
+            for (i, h) in heads.iter().enumerate() {
+                let bound = k.free.is_none_or(|(f, _)| f != i);
+                let ink = if bound { BOUND } else { SWING };
+                let salt = salted(SALT_HEAD, i as i64);
+                cloud(front, at(h[0], h[1]), sigma(0.95), 0.75, salt, ink);
+            }
         }
     }
 
-    fn draw_synthase(&mut self) {
-        let ps = self.pixels.pixel_size();
-        let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()) - 2.0);
-        let c = (pw / 2.0, ph / 2.0);
-        let r = (ph * 0.22).min(pw * 0.2);
-        // The α₃β₃ ring.
-        for j in 0..6 {
-            let a = f64::from(j) * PI / 3.0 + PI / 6.0;
-            let (s, co) = a.sin_cos_det();
-            let ink = if j % 2 == 0 { BETA } else { ALPHA };
-            flat_ring(&mut self.pixels, (c.0 + r * co, c.1 + r * s), r * 0.52, ink);
+    /// The synthase act, seen from the membrane (Fo) side as in Noji's films: six teardrop
+    /// α₃β₃ lobes around a clear centre, the c-ring a stippled annulus whose ten subunits
+    /// turn with γ, γ a short `Accent` thread at the centre, and protons crossing the
+    /// a-subunit's half-channels in the gap below.
+    fn draw_synthase(&self, back: &mut Dots, front: &mut Dots) {
+        let (dw, dh) = self.art();
+        let (c, r) = synthase_frame((dw, dh));
+        let around = |deg: f64, radius: f64| {
+            let (x, y) = gamma_dir(deg);
+            (c.0 + radius * x, c.1 + radius * y)
+        };
+        // The α₃β₃ lobes never move: they are drawn once per resize ([`draw_lobes`]).
+        let phi = self.rotor.shown();
+        // The c-ring: an annulus whose density peaks on its ten c-subunits, turning with γ.
+        let (r0, r1) = (0.2 * r, 0.32 * r);
+        let reach = r1.ceil() as i32;
+        let (cx, cy) = (c.0.round() as i32, c.1.round() as i32);
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                let d = f64::from(dx).hypot(f64::from(dy));
+                if !(r0..=r1).contains(&d) {
+                    continue;
+                }
+                // Angle on screen in the γ convention (0° up, clockwise), in degrees.
+                let deg = f64::from(dx).atan2(-f64::from(dy)).to_degrees();
+                let k = (5.0 * (deg - phi)).to_radians().cos_det();
+                let p = 0.1 + 0.75 * k * k;
+                if raster::stipple_keep(SALT_CRING, dx, dy, p) {
+                    front.set(cx + dx, cy + dy, C_RING);
+                }
+            }
         }
-        // γ and the actin filament stuck to it (Noji et al. 1997), turning clockwise as
-        // seen from the membrane side: the synthesis sense.
-        let (gx, gy) = gamma_dir(self.rotor.shown());
-        flat_disc(&mut self.pixels, c, r * 0.3, ROTOR);
-        let tip = (c.0 + 2.6 * r * gx, c.1 + 2.6 * r * gy);
-        // While γ turns, a fading ghost of the filament sweeps behind it (motion blur).
+        // γ inside the ring; while it turns, fading ghosts sweep behind it.
         if let Some(t) = self.rotor.turning {
-            let (bx, by) = gamma_dir(self.rotor.shown() - 25.0 * (1.0 - t / TURN_S));
-            flat_segment(
-                &mut self.pixels,
-                c,
-                (c.0 + 2.6 * r * bx, c.1 + 2.6 * r * by),
-                0.5,
-                GHOST,
-            );
+            for lag in [10.0, 20.0, 30.0] {
+                let g = around(phi - lag * (1.0 - t / TURN_S), 0.24 * r);
+                front.line(c.0, c.1, g.0, g.1, GHOST);
+            }
         }
-        flat_segment(&mut self.pixels, c, tip, 0.8, ROTOR);
-        // Tick marks every 40°, the substep positions.
-        for k in 0..9 {
-            let (dx, dy) = gamma_dir(f64::from(k) * 40.0);
-            self.pixels.set(
-                (c.0 + 2.9 * r * dx) as i32,
-                (c.1 + 2.9 * r * dy) as i32,
-                TICKS[usize::from(k % 3 == 0)],
-            );
+        let tip = around(phi, 0.24 * r);
+        front.line(c.0, c.1, tip.0, tip.1, GAMMA);
+        // The a-subunit in the gap between the lowest lobes: protons ride in along one
+        // half-channel to the ring and out along the other, one per 36° of rotation.
+        let a = around(180.0, 0.34 * r);
+        let (inlet, outlet) = (around(173.0, 1.25 * r), around(187.0, 1.25 * r));
+        back.line(inlet.0, inlet.1, a.0, a.1, CHANNEL);
+        back.line(a.0, a.1, outlet.0, outlet.1, CHANNEL);
+        let frac = phi.rem_euclid(36.0) / 36.0;
+        for p in [mix(inlet, a, frac), mix(a, outlet, frac)] {
+            front.disc(p.0, p.1, 1.4, PROTON);
         }
         for d in &self.dots {
-            let (x, y) = (c.0 + d.x * pw * 0.5, c.1 + d.y * ph * 0.5);
-            self.pixels.set(x as i32, y as i32, ATP_INK);
+            front.plot(c.0 + d.x * dw * 0.5, c.1 + d.y * dh * 0.5, ATP_INK);
         }
     }
 
     fn rasterise(&mut self) {
-        self.pixels.clear();
+        // Taking the layers out of their `Option` moves them without allocating, so the
+        // drawing code can read the rest of the scene.
+        let Some([mut back, mut front]) = self.layers.take() else {
+            return;
+        };
+        back.clear();
+        front.clear();
         if self.act == KINESIN {
-            self.draw_kinesin();
+            self.draw_kinesin(&mut back, &mut front, ALL_LAYERS);
         } else {
-            self.draw_synthase();
+            self.draw_synthase(&mut back, &mut front);
         }
+        self.layers = Some([back, front]);
     }
-}
-
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let lit = |i: Ink| i.role != Role::Background;
-    let ink = match (lit(top), lit(bottom)) {
-        (false, false) => return None,
-        (true, false) => top,
-        (false, true) => bottom,
-        (true, true) => {
-            if top.level >= bottom.level {
-                top
-            } else {
-                bottom
-            }
-        }
-    };
-    let ch = match ink.role {
-        Role::Particle if ink.level > 150 => '@',
-        Role::Particle => '|',
-        Role::Sun => '*',
-        Role::Accent => '#',
-        _ if ink.level > 110 => 'o',
-        _ => '.',
-    };
-    Some((ch, ink))
 }
 
 impl Generator for Motors {
@@ -657,7 +901,14 @@ impl Generator for Motors {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.cells = size;
         self.readout_room = title::stable_readout_room(size, &META);
-        self.pixels.resize(size);
+        let layers = self.layers.get_or_insert_with(Default::default);
+        for layer in layers.iter_mut() {
+            layer.resize(size);
+        }
+        self.dot_size = layers[0].dot_size();
+        self.lobes.resize(size);
+        let art = self.art();
+        draw_lobes(&mut self.lobes, art);
         if self.dots.is_empty() && self.time == 0.0 {
             self.rng = SplitMix64::from_rng(&mut ctx.rng);
             self.scatter_dots(Self::dots_for(atp_at(0.0)));
@@ -689,8 +940,13 @@ impl Generator for Motors {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        // ASCII falls back by dot count (`Dots::blit`).
+        if self.act != KINESIN {
+            self.lobes.blit(canvas);
+        }
+        for layer in self.layers.iter().flatten() {
+            layer.blit(canvas);
+        }
         let h = i32::from(self.cells.height());
         if h < 4 {
             return;
@@ -854,42 +1110,157 @@ mod tests {
         assert_eq!(g.caption(), Some("kinesin walks"));
     }
 
-    #[test]
-    fn kin_a8_flat_semantic_inks_on_black() {
-        let size = Size::new(120, 40);
-        let mut ctx = Ctx::new(8, size);
+    fn scene(size: Size, seed: u64) -> (Motors, Ctx) {
+        let mut ctx = Ctx::new(seed, size);
         let mut g = Motors::default();
         g.resize(size, &mut ctx);
-        let inks = [
-            ATP_INK,
-            TUBE_WALL,
-            TUBE_BETA,
-            TUBE_ALPHA,
-            MEMBRANE,
-            FOOTPRINTS[0],
-            FOOTPRINTS[1],
-            TETHER,
-            HEADS[0][0],
-            HEADS[0][1],
-            HEADS[1][0],
-            HEADS[1][1],
-            BETA,
-            ALPHA,
-            ROTOR,
-            GHOST,
-            TICKS[0],
-            TICKS[1],
-        ];
-        for t in [5.0, 20.0, KINESIN_S + 6.0] {
-            while g.time < t {
-                g.update(SIM_DT, &mut ctx);
+        g.prepare();
+        (g, ctx)
+    }
+
+    /// The kinesin act's `layers` alone, back and front merged, as lit dot coordinates.
+    fn kinesin_layer(g: &Motors, layers: u8) -> Vec<(i32, i32)> {
+        let (mut a, mut b) = (Dots::new(g.cells), Dots::new(g.cells));
+        g.draw_kinesin(&mut a, &mut b, layers);
+        let ds = a.dot_size();
+        let mut out = Vec::new();
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                if a.is_lit(x, y) || b.is_lit(x, y) {
+                    out.push((x, y));
+                }
             }
-            g.prepare();
-            let ps = g.pixels.pixel_size();
-            for y in 0..i32::from(ps.height()) {
-                for x in 0..i32::from(ps.width()) {
-                    let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                    assert!(ink == Ink::BLANK || inks.contains(&ink), "t {t}: {ink:?}");
+        }
+        out
+    }
+
+    #[test]
+    fn kin_a9_no_half_block_cells_in_either_act() {
+        for size in [Size::new(120, 40), Size::new(80, 24), Size::new(200, 50)] {
+            let mut s = Stage::new(Box::new(Motors::default()), 9, size, GlyphMode::Unicode);
+            let mut steps = 0;
+            for t in [3.0, 12.0, 20.0, KINESIN_S + 3.0, KINESIN_S + 10.0] {
+                while f64::from(steps) * SIM_DT < t {
+                    s.step(SIM_DT);
+                    steps += 1;
+                }
+                let frame = s.render();
+                let lit = frame.cells().iter().filter(|c| c.ch != ' ').count();
+                assert!(lit > 50, "{size:?} t {t}: {lit} lit cells");
+                for c in frame.cells() {
+                    assert_eq!(c.bg, Ink::BLANK, "{size:?} t {t}");
+                    assert!(!matches!(c.ch, '▀' | '▄' | '█'), "{size:?} t {t}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kin_a10_bound_head_cold_swinging_head_hot_throughout_a_step() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = scene(size, 10);
+        let mut checked = 0;
+        while g.time < 10.0 {
+            g.update(SIM_DT, &mut ctx);
+            let Some((free, _)) = g.kinesin.free else {
+                continue;
+            };
+            // The swinging head passes over the bound one and is drawn on top: a cell
+            // holding any of its dots is `Hot`, a cell holding only the bound head's `Cold`.
+            let heads = |g: &Motors| {
+                let mut front = Dots::new(size);
+                g.draw_kinesin(&mut Dots::new(size), &mut front, HEADS);
+                front
+            };
+            let both = heads(&g);
+            let bound = 1 - free;
+            let saved = g.kinesin.jig[bound][0];
+            g.kinesin.jig[bound][0] = 1e6;
+            let swing_only = heads(&g);
+            g.kinesin.jig[bound][0] = saved;
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            both.blit(&mut canvas);
+            for cy in 0..40 {
+                for cx in 0..120 {
+                    let Some(mask) = both.cell_mask(cx, cy).filter(|&m| m != 0) else {
+                        continue;
+                    };
+                    let ink = canvas.get(cx, cy).unwrap().ink;
+                    let swinging = swing_only.cell_mask(cx, cy).unwrap_or(0) != 0;
+                    let want = if swinging { SWING } else { BOUND };
+                    assert_eq!(ink, want, "t {} cell ({cx}, {cy}) mask {mask:#x}", g.time);
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 200, "{checked} head cells checked");
+        assert_eq!((BOUND.role, SWING.role), (Role::Cold, Role::Hot));
+    }
+
+    #[test]
+    fn kin_a11_steps_write_arches_above_the_track_that_fade() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = scene(size, 11);
+        let mut checked = 0;
+        while g.time < 8.0 {
+            g.update(SIM_DT, &mut ctx);
+            let Some((free, _)) = g.kinesin.free else {
+                continue;
+            };
+            // During a step every arch dot of this step lies above the track and between
+            // the head's old and new sites (within a dot of rounding).
+            let lead = g.kinesin.site[1 - free];
+            let (x0, track) = g.kinesin_dot((lead - 1) as f64 * SITE_NM, 0.0);
+            let (x1, _) = g.kinesin_dot((lead + 1) as f64 * SITE_NM, 0.0);
+            let step = g.kinesin.steps;
+            let mut only = g.arch;
+            for p in &mut only {
+                if p.step != step {
+                    p.t = f64::NEG_INFINITY;
+                }
+            }
+            let saved = std::mem::replace(&mut g.arch, only);
+            for (x, y) in kinesin_layer(&g, ARCH) {
+                let (x, y) = (f64::from(x), f64::from(y));
+                assert!(y <= track + 1.0, "arch below the track at t {}", g.time);
+                assert!((x0 - 1.0..=x1 + 1.0).contains(&x), "arch off the step");
+                checked += 1;
+            }
+            g.arch = saved;
+        }
+        assert!(checked > 50, "{checked} arch dots");
+        // Stepping stops: 3 s later the trace is gone.
+        while g.kinesin.free.is_some() {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.kinesin.wait = 1e9;
+        assert!(!kinesin_layer(&g, ARCH).is_empty(), "an arch to fade");
+        let stop = g.time;
+        while g.time < stop + 3.0 {
+            g.kinesin.wait = 1e9;
+            g.update(SIM_DT, &mut ctx);
+        }
+        assert!(
+            kinesin_layer(&g, ARCH).is_empty(),
+            "arches still lit after 3 s"
+        );
+    }
+
+    #[test]
+    fn kin_a12_the_cargo_is_hollow() {
+        for size in [Size::new(120, 40), Size::new(200, 50), Size::new(80, 24)] {
+            let (mut g, mut ctx) = scene(size, 12);
+            for t in [2.0, 9.0] {
+                while g.time < t {
+                    g.update(SIM_DT, &mut ctx);
+                }
+                let c = g.kinesin_dot(g.cargo_view[0], g.cargo_view[1]);
+                let r = CARGO_R * g.scale();
+                let shell = kinesin_layer(&g, CARGO);
+                assert!(shell.len() > 20, "{size:?}: {} shell dots", shell.len());
+                for (x, y) in shell {
+                    let d = (f64::from(x) - c.0).hypot(f64::from(y) - c.1);
+                    assert!(d >= 0.6 * r, "{size:?}: dot {d} from the centre, r {r}");
                 }
             }
         }

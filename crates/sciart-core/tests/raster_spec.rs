@@ -834,3 +834,83 @@ fn core_r105_degenerate_fields_draw_nothing() {
     d.contour_cell([0.0, f32::INFINITY, 1.0, 0.0], 0.5, (0, 0), id, A);
     assert!(lit_dots(&d).is_empty());
 }
+
+// ---- CORE-R107 (M17, ADR-0020): fixed-threshold stipple ----
+
+#[test]
+fn core_r107_stipple_keep_is_deterministic_and_bounded() {
+    for (x, y) in [(0, 0), (3, -7), (1000, 20)] {
+        assert_eq!(
+            raster::stipple_keep(9, x, y, 0.4),
+            raster::stipple_keep(9, x, y, 0.4)
+        );
+        assert!(!raster::stipple_keep(9, x, y, 0.0), "p = 0 keeps nothing");
+        assert!(!raster::stipple_keep(9, x, y, -1.0), "p < 0 keeps nothing");
+        assert!(
+            !raster::stipple_keep(9, x, y, f64::NAN),
+            "NaN keeps nothing"
+        );
+        assert!(raster::stipple_keep(9, x, y, 1.0), "p = 1 keeps every dot");
+    }
+}
+
+fn kept_share(f: impl Fn(i32, i32) -> bool) -> f64 {
+    let kept = (0..200)
+        .flat_map(|x| (0..200).map(move |y| (x, y)))
+        .filter(|&(x, y)| f(x, y))
+        .count();
+    kept as f64 / 40_000.0
+}
+
+#[test]
+fn core_r107_stipple_keep_rate_matches_the_density() {
+    for p in [0.05, 0.25, 0.5, 0.9] {
+        let rate = kept_share(|x, y| raster::stipple_keep(42, x, y, p));
+        assert!((rate - p).abs() < 0.01, "p {p}: kept {rate}");
+    }
+}
+
+#[test]
+fn core_r107_salts_decorrelate_layers() {
+    let rate =
+        kept_share(|x, y| raster::stipple_keep(1, x, y, 0.5) && raster::stipple_keep(2, x, y, 0.5));
+    assert!(
+        (rate - 0.25).abs() < 0.01,
+        "independent salts overlap at p² = 0.25, got {rate}"
+    );
+}
+
+proptest! {
+    /// No shimmer: raising the density only adds dots, so a cloud whose density changes
+    /// smoothly changes only where it crosses a dot's fixed threshold.
+    #[test]
+    fn core_r107_stipple_is_monotone_in_density(
+        salt in any::<u64>(), x in -500i32..500, y in -500i32..500,
+        p in 0.0f64..1.0, dp in 0.0f64..1.0,
+    ) {
+        if raster::stipple_keep(salt, x, y, p) {
+            prop_assert!(raster::stipple_keep(salt, x, y, p + dp));
+        }
+    }
+}
+
+#[test]
+fn core_r107_dots_stipple_lights_exactly_the_kept_dots() {
+    let mut dots = Dots::new(Size::new(10, 5));
+    let ink = Ink::new(Role::Hot, 200);
+    for x in 0..20 {
+        for y in 0..20 {
+            dots.stipple(x, y, 0.3, 7, ink);
+        }
+    }
+    for x in 0..20 {
+        for y in 0..20 {
+            assert_eq!(
+                dots.is_lit(x, y),
+                raster::stipple_keep(7, x, y, 0.3),
+                "dot {x},{y}"
+            );
+        }
+    }
+    dots.stipple(-1, 3, 1.0, 7, ink); // off-lattice: ignored, no panic
+}
