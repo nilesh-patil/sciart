@@ -10,8 +10,11 @@
 //! high concentration anchor trunk lines between the sources, as in Nakagaki et al. (2000)
 //! and Tero et al. (2010).
 //!
-//! `update` runs the Jones steps and then tone-maps a lightly time-smoothed copy of the
-//! trail into `Pixels`; `render` only blits (the M10 raster convention).
+//! `update` runs the Jones steps; `prepare` draws a lightly time-smoothed copy of the
+//! trail (Look (M18), GEN-R26: stipple veins + food atoms) as a braille probability
+//! stipple, `Hot` filling in to `Sun` toward a tube's core, with a 1-px `Sun` ridge
+//! thread on the strongest tubes and each oat flake a small `Cold` stipple atom
+//! (CORE-R108); `render` only blits.
 
 use std::fmt::Write as _;
 
@@ -19,8 +22,9 @@ use rand::Rng;
 use rand::seq::SliceRandom;
 use sciart_core::draw;
 use sciart_core::grid::{self, SampleMap};
-use sciart_core::ink::{self, seq_value};
+use sciart_core::ink;
 use sciart_core::prelude::*;
+use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
 
@@ -88,6 +92,30 @@ const FLAKE_OUT: f64 = 1.0;
 /// dark. A lower floor lights the diffuse attractant around every tube, which fattens
 /// the veins into blobs.
 const U_FLOOR: f64 = 0.45;
+/// Look (M18): the vein stipple's density at full tone, the tone where its dots turn
+/// from `Hot` to `Sun`, and the tone a ridge dot needs. The spec's draft `u ≥ 0.8` put
+/// ridges only in the junction blobs; `0.62` threads every established tube.
+const VEIN_PEAK: f64 = 0.85;
+const SUN_U: f64 = 0.8;
+const SUN_V: f32 = (SUN_U * SUN_U) as f32;
+const RIDGE_U: f64 = 0.62;
+const RIDGE_V: f32 = (RIDGE_U * RIDGE_U) as f32;
+/// A ridge dot's fall across the tube over ±2 dots (`2v − v₋₂ − v₊₂`) is at least this
+/// share of its value, so flat junction blobs grow no maze of stubs (`is_ridge`).
+const RIDGE_FALL: f32 = 0.12;
+/// The ridge test reads two dot rows either side: the sampled rows are a ring of five.
+const REACH: usize = 2;
+const RING: usize = 2 * REACH + 1;
+const VEIN_INK: Ink = Ink::new(Role::Hot, 200);
+const CORE_INK: Ink = Ink::new(Role::Sun, 230);
+const RIDGE_INK: Ink = Ink::new(Role::Sun, 255);
+/// Fixed stipple thresholds (CORE-R107): the veins' layer and the flakes' atoms.
+const VEIN_SALT: u64 = 0x5851_F42D_4C95_7F2D;
+const FLAKE_SALT: u64 = 0x1405_7B7E_F767_814F;
+/// An oat flake: a `Cold` 230 atom of σ 1.6 dots, peak density 0.95 (CORE-R108).
+const FLAKE_LEVEL: u8 = 230;
+const FLAKE_SIGMA: f64 = 1.6;
+const FLAKE_PEAK: f64 = 0.95;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// `(cos, sin)` of the 16 headings, `k · 22.5°` with y down.
@@ -317,12 +345,6 @@ fn remap((x, y): (f32, f32), from: Size, to: Size) -> (f32, f32) {
         axis(x, from.width(), to.width()),
         axis(y, from.height(), to.height()),
     )
-}
-
-/// The display pixel at the centre of a flake's lattice site.
-fn flake_pixel((fx, fy): (i32, i32), lattice: Size, display: Size) -> (i32, i32) {
-    let (x, y) = remap((fx as f32, fy as f32), lattice, display);
-    site(x, y)
 }
 
 /// One agent: a continuous position, a heading in Z₁₆, and when it dies in the fade.
@@ -604,12 +626,31 @@ pub(crate) struct Physarum {
     k_ref: f32,
     k_bloom: f32,
     k_shown: f32,
-    /// What is tone-mapped: `V` through a short EMA (display only; agents sense `T`).
+    /// What is drawn: `V` through a short EMA (display only; agents sense `T`).
     shown: Grid<f32>,
+    /// Bilinear taps from the lattice onto the plate's braille dots.
     map: SampleMap,
-    pixels: Pixels,
-    /// The drawn flakes' display pixels and ink, for the ASCII `@` marks.
-    flakes: [(i32, i32); MAX_FOOD],
+    /// Per dot row, the two lattice rows its bilinear sample reads (built in `resize`),
+    /// and per lattice row its peak (each raster), so dark dot rows skip sampling.
+    row_src: Vec<(u16, u16)>,
+    row_peak: Vec<f32>,
+    /// Per lattice column `i`, the first dot column whose left bilinear tap is `≥ i`
+    /// (`lw + 1` entries), so whole dark spans of a dot row are skipped.
+    col_start: Vec<u32>,
+    /// The vein stipple's density per exposed field value.
+    density: DensityTable,
+    /// Three dot rows of the sampled, exposed field (`S / (2.5·T_ref)`), as a ring, for
+    /// the ridge test across rows.
+    rows: Vec<f32>,
+    /// The vein stipple and its ridge threads (Look (M18)).
+    veins: Dots,
+    /// The ridge threads, blitted over the veins so a cell a thread crosses shows the
+    /// thread alone: a crisp 1-px line through the stipple.
+    ridge: Dots,
+    /// The oat flakes as `Cold` atoms, blitted over the veins so each stays crisp.
+    atoms: Dots,
+    /// The drawn flakes' centres in dots and their ink (the ASCII `@` marks too).
+    flakes: [(f64, f64); MAX_FOOD],
     n_flakes: usize,
     flake_ink: Ink,
     cells: Size,
@@ -632,8 +673,15 @@ impl Physarum {
             k_shown: ema_weight(SHOWN_TAU),
             shown: Grid::default(),
             map: SampleMap::default(),
-            pixels: Pixels::default(),
-            flakes: [(0, 0); MAX_FOOD],
+            row_src: Vec::new(),
+            row_peak: Vec::new(),
+            col_start: Vec::new(),
+            density: DensityTable::new(),
+            rows: Vec::new(),
+            veins: Dots::default(),
+            ridge: Dots::default(),
+            atoms: Dots::default(),
+            flakes: [(0.0, 0.0); MAX_FOOD],
             n_flakes: 0,
             flake_ink: Ink::BLANK,
             cells: Size::new(1, 1),
@@ -678,7 +726,7 @@ impl Physarum {
             let (bright, peak) = self.colony.vis_bright_mean();
             // A young inoculum is a flat stack of deposits about 2.5× its bright-half
             // mean, which that reference alone paints as one saturated disc; exposing for
-            // its peak keeps `#` for the hottest spots of the drop.
+            // its peak keeps the dense core for the hottest spots of the drop.
             let (target, k) = if start.index == EXPLORE && start.local < BLOOM_SECS {
                 (bright.max(BLOOM_PEAK * peak), self.k_bloom)
             } else {
@@ -726,22 +774,154 @@ impl Physarum {
         }
     }
 
-    /// Tone-map the drawn field onto the display pixels and lay the oat flakes over it.
-    fn rasterise(&mut self) {
-        let size = self.pixels.pixel_size();
-        let scale = 1.0 / (2.5 * self.t_ref.max(1e-6));
-        // `u = √(v)` is below the floor exactly when `v` is below its square, so the
-        // dark plate skips the square root.
-        let floor = (U_FLOOR * U_FLOOR) as f32;
-        let (map, shown) = (&self.map, &self.shown);
-        self.pixels.shade(|x, y| {
-            let v = map.sample(shown, x, y) * scale;
-            if v < floor {
-                Ink::BLANK
-            } else {
-                ink::seq(0.2 + 0.8 * f64::from(v.sqrt().min(1.0)))
+    /// Size the dot layers and the sampling tables for a plate of `plate` cells (in
+    /// `resize`, so `rasterise` never allocates).
+    fn layout(&mut self, plate: Size) {
+        let lattice = self.colony.lattice();
+        self.veins.resize(plate);
+        self.ridge.resize(plate);
+        self.atoms.resize(plate);
+        let dots = self.veins.dot_size();
+        let (dw, dh) = (usize::from(dots.width()), usize::from(dots.height()));
+        let lh = usize::from(lattice.height()).max(1);
+        self.map.rebuild(lattice, dots);
+        // The same cell-centre, edge-clamped taps `SampleMap` uses (CORE-R52).
+        self.row_src.clear();
+        self.row_src.extend((0..dh).map(|y| {
+            let s = grid::centre_of(y as f64, dh, lh).clamp(0.0, (lh - 1) as f64);
+            let i0 = s as usize;
+            (i0 as u16, (i0 + 1).min(lh - 1) as u16)
+        }));
+        // Dot columns are monotone in their left tap: `col_start[i]..col_start[i + 1]` are
+        // the dots whose bilinear sample reads lattice columns `i` and `i + 1`.
+        let lw = usize::from(lattice.width()).max(1);
+        self.col_start.clear();
+        self.col_start.resize(lw + 1, dw as u32);
+        for x in (0..dw).rev() {
+            let s = grid::centre_of(x as f64, dw, lw).clamp(0.0, (lw - 1) as f64);
+            self.col_start[s as usize] = x as u32;
+        }
+        for i in (0..lw).rev() {
+            self.col_start[i] = self.col_start[i].min(self.col_start[i + 1]);
+        }
+        self.row_peak.clear();
+        self.row_peak.reserve(lh);
+        self.rows.clear();
+        self.rows.resize(RING * dw, 0.0);
+    }
+
+    /// Sample dot row `y` of the exposed field into ring slot `y mod 3`. Only the spans
+    /// between lattice columns whose four corners reach the floor are sampled (a bilinear
+    /// value never exceeds its corners); the dark plate stays 0, so a frame costs about
+    /// the network's area, not the screen's.
+    fn sample_row(&mut self, y: usize, scale: f32, floor: f32) {
+        let dw = self.rows.len() / RING;
+        let slot = &mut self.rows[(y % RING) * dw..][..dw];
+        slot.fill(0.0);
+        let (a, b) = self.row_src[y];
+        let peak = self.row_peak[usize::from(a)].max(self.row_peak[usize::from(b)]);
+        if peak < floor {
+            return;
+        }
+        let lw = usize::from(self.shown.width());
+        let src = self.shown.as_slice();
+        let (r0, r1) = (
+            &src[usize::from(a) * lw..][..lw],
+            &src[usize::from(b) * lw..][..lw],
+        );
+        let raw_floor = floor / scale;
+        let row = self.map.row(&self.shown, y as i32);
+        for i in 0..lw {
+            let (x0, x1) = (self.col_start[i] as usize, self.col_start[i + 1] as usize);
+            if x0 == x1 {
+                continue;
             }
-        });
+            let j = (i + 1).min(lw - 1);
+            if r0[i].max(r0[j]).max(r1[i]).max(r1[j]) < raw_floor {
+                continue;
+            }
+            for (x, v) in slot[x0..x1].iter_mut().enumerate() {
+                *v = row.at((x0 + x) as i32) * scale;
+            }
+        }
+    }
+
+    /// The drawn field as a vein stipple with ridge threads, and the oat flakes as atoms
+    /// (Look (M18)).
+    fn rasterise(&mut self) {
+        self.veins.clear();
+        self.ridge.clear();
+        self.atoms.clear();
+        let scale = 1.0 / (2.5 * self.t_ref.max(1e-6));
+        // `u = √v` is below the floor exactly when `v` is below its square, so the dark
+        // plate skips the square root.
+        let floor = (U_FLOOR * U_FLOOR) as f32;
+        let lw = usize::from(self.shown.width()).max(1);
+        self.row_peak.clear();
+        self.row_peak.extend(
+            self.shown
+                .as_slice()
+                .chunks_exact(lw)
+                .map(|r| r.iter().fold(0.0f32, |m, &v| m.max(v)) * scale),
+        );
+        let dw = self.rows.len() / RING;
+        let dh = self.row_src.len();
+        if dw > 0 && dh > 0 && self.row_peak.len() == usize::from(self.shown.height()) {
+            for y in 0..dh.min(REACH) {
+                self.sample_row(y, scale, floor);
+            }
+            for y in 0..dh {
+                if y + REACH < dh {
+                    self.sample_row(y + REACH, scale, floor);
+                }
+                // Off the plate counts as dark, which no ridge dot can be.
+                let rows = &self.rows;
+                let at = |k: isize| {
+                    let r = y as isize + k;
+                    (0..dh as isize)
+                        .contains(&r)
+                        .then(|| &rows[(r as usize % RING) * dw..][..dw])
+                };
+                let cur = &rows[(y % RING) * dw..][..dw];
+                let column = [at(-2), at(-1), at(1), at(2)];
+                for (x, &v) in cur.iter().enumerate() {
+                    if v < floor {
+                        continue;
+                    }
+                    let (xi, yi) = (x as i32, y as i32);
+                    if v >= RIDGE_V {
+                        let row = |k: isize| {
+                            let i = x as isize + k;
+                            if (0..dw as isize).contains(&i) {
+                                cur[i as usize]
+                            } else {
+                                0.0
+                            }
+                        };
+                        let col = |r: Option<&[f32]>| r.map_or(0.0, |s| s[x]);
+                        let across_x = [row(-2), row(-1), v, row(1), row(2)];
+                        let across_y = [
+                            col(column[0]),
+                            col(column[1]),
+                            v,
+                            col(column[2]),
+                            col(column[3]),
+                        ];
+                        if is_ridge(across_x, across_y) {
+                            self.ridge.set(xi, yi, RIDGE_INK);
+                            continue;
+                        }
+                    }
+                    // The dot's fixed threshold first (CORE-R107), then the density from
+                    // the table: no square root per dot.
+                    let t = hash01(VEIN_SALT ^ cell_key(xi, yi)) as f32;
+                    if t < self.density.at(v) {
+                        let ink = if v < SUN_V { VEIN_INK } else { CORE_INK };
+                        self.veins.set(xi, yi, ink);
+                    }
+                }
+            }
+        }
         // The colony's flakes show while it lives and fade out over the last second of
         // the fade; the next colony's fade in over rest, on an empty plate.
         let beat = self.timeline.at(self.time());
@@ -753,21 +933,23 @@ impl Physarum {
             ),
             _ => (self.colony.plan, 1.0),
         };
-        let level = ink::level(255.0 * level);
+        let level = ink::level(f64::from(FLAKE_LEVEL) * level);
         if level == 0 {
             self.n_flakes = 0;
             return;
         }
-        let ink = Ink::new(Role::Structure, level);
-        let lattice = self.colony.lattice();
+        let ink = Ink::new(Role::Cold, level);
+        let (lattice, dots) = (self.colony.lattice(), self.atoms.dot_size());
         self.flake_ink = ink;
         self.n_flakes = plan.food().len();
-        for (slot, &f) in self.flakes.iter_mut().zip(plan.food()) {
-            let (px, py) = flake_pixel(f, lattice, size);
-            for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
-                self.pixels.set(px + dx, py + dy, ink);
-            }
-            *slot = (px, py);
+        for (k, (slot, &f)) in self.flakes.iter_mut().zip(plan.food()).enumerate() {
+            // Snapped to a dot, so the atom is symmetric about its centre dot.
+            let (cx, cy) = flake_dot(f, lattice, dots);
+            let (cx, cy) = (cx.round(), cy.round());
+            let salt = FLAKE_SALT ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15);
+            self.atoms
+                .stipple_puff(cx, cy, FLAKE_SIGMA, FLAKE_PEAK, salt, ink);
+            *slot = (cx, cy);
         }
     }
 
@@ -777,39 +959,82 @@ impl Physarum {
     }
 }
 
+/// Kept share of the vein stipple at tone `u` (Look (M18), PHY-A9): 0 up to the floor,
+/// then `0.85·((u − 0.45)/0.55)²`, so a vein fills in toward its core.
+pub(crate) fn vein_density(u: f64) -> f64 {
+    if u <= U_FLOOR {
+        0.0
+    } else {
+        VEIN_PEAK * ((u - U_FLOOR) / (1.0 - U_FLOOR)).powi(2)
+    }
+}
+
+/// [`vein_density`] tabulated over the exposed field `v = u²` (the square root and the
+/// square leave the per-dot loop): `N` steps from the floor `v = 0.45²` to `v = 1`, read
+/// at the step below `v` (so never above the exact density), `VEIN_PEAK` from `v ≥ 1`.
+#[derive(Debug, Clone)]
+struct DensityTable {
+    p: [f32; DensityTable::N + 1],
+}
+
+impl DensityTable {
+    const N: usize = 512;
+    const V0: f64 = U_FLOOR * U_FLOOR;
+
+    fn new() -> Self {
+        let mut p = [0.0f32; Self::N + 1];
+        for (k, d) in p.iter_mut().enumerate() {
+            let v = Self::V0 + (1.0 - Self::V0) * k as f64 / Self::N as f64;
+            *d = vein_density(v.sqrt()) as f32;
+        }
+        Self { p }
+    }
+
+    /// Density at `v` (0 below the floor).
+    #[inline]
+    fn at(&self, v: f32) -> f32 {
+        let k = (f64::from(v) - Self::V0) * Self::N as f64 / (1.0 - Self::V0);
+        if k < 0.0 {
+            0.0
+        } else {
+            self.p[(k as usize).min(Self::N)]
+        }
+    }
+}
+
+/// A ridge dot (PHY-A10), from the sampled field at offsets −2..=2 dots along x and along
+/// y (index 2 is the dot itself): a local maximum across the tube, along x
+/// (`x[1] < v ≥ x[3]`) or along y. The axis must be the one across the tube: its fall
+/// over ±2 dots (`2v − x[0] − x[4]`) is the larger of the two and at least
+/// [`RIDGE_FALL`] of `v`. A tube's core falls by ≈ 15–40 % over two dots; a junction
+/// blob's flat top by a few per cent, and there a "maximum" is deposit noise, not a tube,
+/// so blobs stay stipple and threads run only along tubes.
+pub(crate) fn is_ridge(x: [f32; 5], y: [f32; 5]) -> bool {
+    let v = x[2];
+    let max_x = x[1] < v && v >= x[3];
+    let max_y = y[1] < v && v >= y[3];
+    let (fx, fy) = (2.0 * v - x[0] - x[4], 2.0 * v - y[0] - y[4]);
+    let sharp = RIDGE_FALL * v;
+    (max_x && fx >= fy && fx >= sharp) || (max_y && fy >= fx && fy >= sharp)
+}
+
+/// A flake's centre in dot coordinates (the centre of its lattice site).
+fn flake_dot((fx, fy): (i32, i32), lattice: Size, dots: Size) -> (f64, f64) {
+    let (x, y) = remap((fx as f32, fy as f32), lattice, dots);
+    (f64::from(x), f64::from(y))
+}
+
+/// The terminal cell holding a dot-space point.
+fn cell_of((x, y): (f64, f64)) -> (i32, i32) {
+    (
+        (x.round() as i32).div_euclid(Dots::CELL_W),
+        (y.round() as i32).div_euclid(Dots::CELL_H),
+    )
+}
+
 /// The label is drawn only on terminals of at least 40×12 cells, in a row of its own.
 fn shows_label(size: Size) -> bool {
     size.width() >= 40 && size.height() >= 12
-}
-
-/// The tone `u ∈ [0, 1]` a trail pixel stands for (0 for an empty pixel).
-fn tone(ink: Ink) -> f64 {
-    if ink.role == Role::Seq {
-        (seq_value(ink) - 0.2) / 0.8
-    } else {
-        0.0
-    }
-}
-
-/// ASCII fallback per cell (GEN-R10): the brighter pixel's tone graded `. : + #` in
-/// steps of 0.15 above the visible floor. Food pixels count as blank here; `render`
-/// marks each flake with a single `@` instead of the plus it covers in half blocks.
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let (u, ink) = if tone(top) >= tone(bottom) {
-        (tone(top), top)
-    } else {
-        (tone(bottom), bottom)
-    };
-    if ink.role != Role::Seq {
-        return None;
-    }
-    let ch = match ((u - U_FLOOR) / 0.15) as u32 {
-        0 => '.',
-        1 => ':',
-        2 => '+',
-        _ => '#',
-    };
-    Some((ch, ink))
 }
 
 impl Generator for Physarum {
@@ -840,8 +1065,7 @@ impl Generator for Physarum {
             self.show_now();
         }
         self.cells = size;
-        self.map.rebuild(lattice, display);
-        self.pixels.resize(plate);
+        self.layout(plate);
         self.relabel();
         self.rasterise();
     }
@@ -869,11 +1093,14 @@ impl Generator for Physarum {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        self.veins.blit(canvas);
+        self.ridge.blit(canvas);
+        self.atoms.blit(canvas);
+        // In ASCII a braille atom is a small `.`/`:` smudge; one `@` marks the flake.
         if canvas.mode() == GlyphMode::Ascii {
-            for &(px, py) in &self.flakes[..self.n_flakes] {
-                canvas.put(px, py.div_euclid(2), Glyph::ascii('@'), self.flake_ink);
+            for &c in &self.flakes[..self.n_flakes] {
+                let (x, y) = cell_of(c);
+                canvas.put(x, y, Glyph::ascii('@'), self.flake_ink);
             }
         }
         // Bottom-right, clear of the title (GEN-R13), with one dark cell either side so the
@@ -1252,7 +1479,11 @@ mod tests {
             } else {
                 p.flake_ink.level
             };
-            (p.flakes[..p.n_flakes].to_vec(), level)
+            let at: Vec<(i32, i32)> = p.flakes[..p.n_flakes]
+                .iter()
+                .map(|&(x, y)| (x.round() as i32, y.round() as i32))
+                .collect();
+            (at, level)
         };
         let (mut last, mut changes) = (drawn(&p), 0);
         while p.time() < 2.0 * 48.0 + 1.0 {
@@ -1262,17 +1493,21 @@ mod tests {
             let t = p.time();
             let beat = p.timeline.at(t);
             if beat.index < FADE {
-                let size = p.pixels.pixel_size();
+                let dots = p.atoms.dot_size();
                 let want: Vec<(i32, i32)> = p
                     .colony
                     .plan
                     .food()
                     .iter()
-                    .map(|&f| flake_pixel(f, p.colony.lattice(), size))
+                    .map(|&f| {
+                        let (x, y) = flake_dot(f, p.colony.lattice(), dots);
+                        let (x, y) = (x.round(), y.round());
+                        (x.round() as i32, y.round() as i32)
+                    })
                     .collect();
                 assert_eq!(
                     (&flakes, level),
-                    (&want, 255),
+                    (&want, FLAKE_LEVEL),
                     "t = {t}: the colony's own flakes"
                 );
             }
@@ -1354,15 +1589,21 @@ mod tests {
     fn phy_a7_gen_r13_flakes_stay_cool_and_the_label_sits_right_with_a_margin() {
         let size = Size::new(80, 24);
         let (p, _) = scene(size, 42);
-        let flakes: Vec<(i32, i32)> = p.flakes[..p.n_flakes].to_vec();
+        let flakes: Vec<(f64, f64)> = p.flakes[..p.n_flakes].to_vec();
         assert_eq!(flakes.len(), 5);
-        // At t = 0 no trail tone surrounds a flake: its pinned attractant drives the
-        // physics but is not drawn, so the flake is a pale mark on the dark plate.
-        for &(px, py) in &flakes {
-            for dy in -3..=3 {
-                for dx in -3..=3 {
-                    let ink = p.pixels.get(px + dx, py + dy).unwrap_or(Ink::BLANK);
-                    assert_ne!(ink.role, Role::Seq, "halo at ({}, {})", px + dx, py + dy);
+        // At t = 0 no vein dot surrounds a flake (M18: 6 dots, the old 3 pixels): its
+        // pinned attractant drives the physics but is not drawn, so the flake is a pale
+        // atom on the dark plate.
+        for &(fx, fy) in &flakes {
+            let (cx, cy) = (fx.round() as i32, fy.round() as i32);
+            for dy in -6..=6 {
+                for dx in -6..=6 {
+                    assert!(
+                        !p.veins.is_lit(cx + dx, cy + dy),
+                        "vein at ({}, {})",
+                        cx + dx,
+                        cy + dy
+                    );
                 }
             }
         }
@@ -1374,8 +1615,9 @@ mod tests {
                 // One `@` per flake, at the flake's own cell.
                 let ats: usize = lines.iter().map(|l| l.matches('@').count()).sum();
                 assert_eq!(ats, flakes.len(), "{lines:#?}");
-                for &(px, py) in &flakes {
-                    assert_eq!(canvas.get(px, py / 2).map(|c| c.ch), Some('@'));
+                for &c in &flakes {
+                    let (x, y) = cell_of(c);
+                    assert_eq!(canvas.get(x, y).map(|c| c.ch), Some('@'));
                 }
             }
             // The label is right-aligned (GEN-R13) and keeps one dark cell on either side.
@@ -1435,7 +1677,10 @@ mod tests {
         let first = frame(&p);
         // Each bloom (the first and the second cycle's) is a drop with a `+` core and a
         // `:` rim, not one saturated `#` disc (exposed for the bright half alone, `#`
-        // peaks at ≈ 44 % of the lit cells; here ≈ 12 %).
+        // peaks at ≈ 44 % of the lit cells). M18: the ASCII grades are now a braille cell's
+        // dot count (`#` = 5+ of 8 dots), so the stipple's dense `Sun` core reads as `#`
+        // in ≈ 21 % of the lit cells at its peak; the bound is 30 % (was 20 % for the
+        // M10 tone grades, ≈ 12 % then).
         for start in [0.0, 48.0] {
             run_to(&mut p, &mut ctx, start);
             // Every bloom opens on the same soft drop as the first: not an underexposed
@@ -1454,7 +1699,7 @@ mod tests {
                 p.update(2.0 * STEP, &mut ctx);
                 p.prepare();
                 let hot = share(&frame(&p), &['#']);
-                assert!(hot <= 0.2, "t = {}: `#` share {hot}", p.time());
+                assert!(hot <= 0.3, "t = {}: `#` share {hot}", p.time());
             }
         }
         // During consolidation the network pulses, but its edges do not fizz: few lit
@@ -1475,5 +1720,155 @@ mod tests {
         }
         let churn = changed as f64 / lit as f64;
         assert!(churn <= 0.15, "{churn} of lit cells change per frame");
+    }
+
+    /// Half-block cells among the lit cells of a frame.
+    fn half_block_share(canvas: &Canvas) -> f64 {
+        let lit = canvas.cells().iter().filter(|c| c.ch != ' ').count();
+        let half = canvas
+            .cells()
+            .iter()
+            .filter(|c| matches!(c.ch, '▀' | '▄' | '█'))
+            .count();
+        half as f64 / lit.max(1) as f64
+    }
+
+    #[test]
+    fn phy_a8_frames_are_braille_only() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            let (mut p, mut ctx) = scene(size, 42);
+            for t in [5.0, 20.0] {
+                run_to(&mut p, &mut ctx, t);
+                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+                p.render(&mut canvas);
+                let lit = canvas.cells().iter().filter(|c| c.ch != ' ').count();
+                assert!(lit > 50, "{size:?} t = {t}: {lit} lit cells");
+                let share = half_block_share(&canvas);
+                assert!(share <= 0.03, "{size:?} t = {t}: half blocks {share}");
+            }
+        }
+    }
+
+    /// Lit vein dots in the dot window `[x0, x1) × [y0, y1)`.
+    fn lit_in(p: &Physarum, (x0, x1): (i32, i32), (y0, y1): (i32, i32)) -> usize {
+        (y0..y1)
+            .flat_map(|y| (x0..x1).map(move |x| (x, y)))
+            .filter(|&(x, y)| p.veins.is_lit(x, y))
+            .count()
+    }
+
+    #[test]
+    fn phy_a9_the_stipple_fills_in_toward_the_core() {
+        assert_eq!(vein_density(0.45), 0.0);
+        assert_eq!(vein_density(0.2), 0.0);
+        assert!((vein_density(1.0) - VEIN_PEAK).abs() < 1e-12);
+        assert!(vein_density(0.6) < vein_density(0.8) && vein_density(0.8) < vein_density(0.95));
+        // A plate in three flat bands of tone u = 0.95, 0.6 and 0.44: flat, so no ridges.
+        let size = Size::new(120, 41);
+        let (mut p, _) = scene(size, 42);
+        let lw = usize::from(p.shown.width());
+        let at = |u: f32| u * u * 2.5 * p.t_ref;
+        let (hi, mid, lo) = (at(0.95), at(0.6), at(0.44));
+        for (i, v) in p.shown.as_mut_slice().iter_mut().enumerate() {
+            *v = match 3 * (i % lw) / lw {
+                0 => hi,
+                1 => mid,
+                _ => lo,
+            };
+        }
+        p.rasterise();
+        let dw = i32::from(p.veins.dot_size().width());
+        let dh = i32::from(p.veins.dot_size().height());
+        // Windows well inside each band (away from the bilinear blend at the seams).
+        let band = |k: i32| lit_in(&p, (k * dw / 3 + 8, (k + 1) * dw / 3 - 8), (0, dh));
+        let (dense, sparse, none) = (band(0), band(1), band(2));
+        assert!(sparse > 0, "the u = 0.6 band is a faint stipple");
+        assert!(dense >= 3 * sparse, "u 0.95: {dense} dots, u 0.6: {sparse}");
+        assert_eq!(none, 0, "no field dot below the floor");
+    }
+
+    #[test]
+    fn phy_a10_ridge_dots_are_local_maxima_of_strong_tubes() {
+        // The rule itself.
+        // A sharp tube profile across x, flat along y: a ridge.
+        let tube = [0.5, 0.75, 0.9, 0.8, 0.55];
+        let along = [0.89, 0.9, 0.9, 0.89, 0.9];
+        assert!(is_ridge(tube, along), "a max across x");
+        assert!(is_ridge(along, tube), "a max across y");
+        assert!(!is_ridge([0.5, 0.95, 0.9, 0.8, 0.5], along), "no local max");
+        // A max along a gentle bump of a horizontal tube is not across it.
+        assert!(!is_ridge(
+            [0.85, 0.89, 0.9, 0.89, 0.85],
+            [0.4, 0.9, 0.9, 0.95, 0.5]
+        ));
+        // A junction blob's flat top: a max, but no tube.
+        assert!(!is_ridge(
+            [0.88, 0.89, 0.9, 0.89, 0.88],
+            [0.89, 0.9, 0.9, 0.9, 0.89]
+        ));
+        // In frames: every ridge dot is a local maximum of the independently sampled
+        // field along x or y, with u ≥ RIDGE_U.
+        let size = Size::new(200, 50);
+        let (mut p, mut ctx) = scene(size, 42);
+        let mut ridges = 0;
+        for t in [8.0, 20.0, 35.0] {
+            run_to(&mut p, &mut ctx, t);
+            let scale = 1.0 / (2.5 * p.t_ref.max(1e-6));
+            let d = p.ridge.dot_size();
+            let (w, h) = (i32::from(d.width()), i32::from(d.height()));
+            let v = |x: i32, y: i32| {
+                if x < 0 || y < 0 || x >= w || y >= h {
+                    0.0
+                } else {
+                    p.map.sample(&p.shown, x, y) * scale
+                }
+            };
+            for y in 0..h {
+                for x in 0..w {
+                    if !p.ridge.is_lit(x, y) {
+                        continue;
+                    }
+                    ridges += 1;
+                    let c = v(x, y);
+                    assert!(c >= RIDGE_V, "t = {t}: ridge dot ({x}, {y}) at v {c}");
+                    assert!(
+                        (v(x - 1, y) < c && c >= v(x + 1, y))
+                            || (v(x, y - 1) < c && c >= v(x, y + 1)),
+                        "t = {t}: ridge dot ({x}, {y}) is no local max"
+                    );
+                }
+            }
+        }
+        assert!(ridges > 200, "{ridges} ridge dots");
+    }
+
+    #[test]
+    fn phy_a11_each_flake_is_a_cold_atom_centred_on_it() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            let (mut p, mut ctx) = scene(size, 42);
+            run_to(&mut p, &mut ctx, 20.0);
+            assert!(p.n_flakes >= 4);
+            assert_eq!(p.flake_ink, Ink::new(Role::Cold, FLAKE_LEVEL));
+            let reach = (3.0 * FLAKE_SIGMA).ceil() as i32;
+            for &(fx, fy) in &p.flakes[..p.n_flakes] {
+                let (cx, cy) = (fx.round() as i32, fy.round() as i32);
+                let (mut n, mut sx, mut sy) = (0, 0.0, 0.0);
+                for y in cy - reach..=cy + reach {
+                    for x in cx - reach..=cx + reach {
+                        if p.atoms.is_lit(x, y) {
+                            n += 1;
+                            sx += f64::from(x);
+                            sy += f64::from(y);
+                        }
+                    }
+                }
+                assert!(n >= 5, "{size:?}: flake at ({fx}, {fy}) has {n} dots");
+                let (mx, my) = (sx / f64::from(n), sy / f64::from(n));
+                assert!(
+                    (mx - fx).hypot(my - fy) <= 1.0,
+                    "{size:?}: centroid ({mx:.2}, {my:.2}) vs flake ({fx:.2}, {fy:.2})"
+                );
+            }
+        }
     }
 }

@@ -237,5 +237,17 @@ Design: [docs/design/M17-orbital-thread.md](design/M17-orbital-thread.md) · [AD
 - [x] Local `--no-ff` merge into main
 - [ ] M17 follow-ups: see "Follow-ups" in docs/design/M17-orbital-thread.md
 
+## M18 — Orbital molecules ✅
+Design: [docs/design/M18-orbital-molecules.md](design/M18-orbital-molecules.md) · [ADR-0021](adr/0021-orbital-molecules.md) · GEN-R26 (molecules rule), CORE-R108.
+- [x] Visual options per scene (user picked the recommended design for all but chemical_garden: bead chains); spec first: GEN-R26 list + molecules rule, CORE-R108, `Look (M18)` + acceptance IDs in 6 sections
+- [x] Infra: `Dots::stipple_puff` (CORE-R108); GEN-R26 test list
+- [x] Redesign wave_interference, spiral_galaxy (6 arms) (team A)
+- [x] Redesign physarum, firefly_sync (team B)
+- [x] Redesign chemical_garden, heart_fibrillation (team C)
+- [x] Lead review (art + science, ≤ 2 rounds per team); budgets: worst frame ≤ 0.72 ms at 200×50 and ≤ 3.38 ms at 500×150; the 6 scenes 25.9 → 3.7 KB and 1121 → 257 changed cells per frame
+- [x] Results (gallery 0.539 ms, 7.4 KB, 480 changed cells per frame), samples at M18, the contributor guide
+- [x] Local `--no-ff` merge into main
+- [ ] M18 follow-ups: see "Follow-ups" in docs/design/M18-orbital-molecules.md
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
