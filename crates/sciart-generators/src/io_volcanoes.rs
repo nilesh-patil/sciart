@@ -27,7 +27,7 @@ use sciart_core::prelude::*;
 use sciart_core::raster::stipple_keep;
 use sciart_core::rng::{cell_key, hash01, value_noise};
 
-use crate::shared::plume::{self, Grain, Plume};
+use crate::shared::plume::{self, Plume};
 
 pub static META: Meta = Meta {
     name: "io_volcanoes",
@@ -67,13 +67,32 @@ const FAN: [f64; 6] = [0.07, 0.3, 0.48, 0.62, 0.73, 0.8];
 const FAN_JITTER: f64 = 0.025;
 /// Landings drawn: only beyond this share of the 45° range (the ring's caustic).
 const RING_INNER: f64 = 0.9;
-/// A grain's trail: `TRAIL_SEGS` pieces of its own parabola, each `TRAIL_SEG` simulated
-/// seconds of flight, brightest at the head (GEN-R26 afterglow).
-const TRAIL_SEGS: usize = 16;
-const TRAIL_SEG: f64 = 0.25;
-const TRAIL_LEVELS: [u8; TRAIL_SEGS] = [
-    235, 235, 235, 235, 185, 185, 185, 185, 135, 135, 135, 135, 90, 90, 90, 90,
+/// The drawn plume threads, `(zenith rad, azimuth °)`: Pele's nested dome (a thin
+/// near-vertical column, then two shells of arcs, evenly spaced round the vent).
+const PELE_ARCS: [(f64, f64); 14] = [
+    (0.1, 0.0),
+    (0.1, 180.0),
+    (0.48, 0.0),
+    (0.48, 180.0),
+    (0.48, 35.0),
+    (0.48, 145.0),
+    (0.48, 215.0),
+    (0.48, 325.0),
+    (0.76, 0.0),
+    (0.76, 180.0),
+    (0.76, 35.0),
+    (0.76, 145.0),
+    (0.76, 215.0),
+    (0.76, 325.0),
 ];
+/// Share of the Prometheus types' frost-ring dots drawn.
+const FROST_KEEP: f64 = 0.55;
+/// Thread sampling (dots between samples, at most), its level, the grains riding each
+/// thread and their trail (share of the flight).
+const ARC_STEP: f64 = 1.0;
+const ARC_LEVEL: u8 = 170;
+const ARC_HEADS: usize = 2;
+const HEAD_TRAIL: f64 = 0.07;
 /// Flight states (IO-A11 colours): `Hot` below this share of the grain's apex while
 /// rising, `Cold` above `CONDENSE` of it or falling, `Sun` between.
 const VENT_SHARE: f64 = 0.22;
@@ -170,7 +189,6 @@ pub(crate) fn range_45(v0: f64) -> f64 {
 
 /// Height (km) of a grain launched with vertical speed `vz` (km/s) after flight time `t`
 /// (s): the exact parabola (IO-A11).
-#[cfg(test)]
 pub(crate) fn height(vz: f64, t: f64) -> f64 {
     vz * t - 0.5 * G_IO * t * t
 }
@@ -215,16 +233,6 @@ fn kept(key: u32, keep: f64) -> bool {
     keep >= 1.0 || hash01(u64::from(key) ^ 0x6A11) < keep
 }
 
-/// A grain thread's level: `level`, dimmed on the falling curtains below 60 % of the
-/// grain's apex, so the bright canopy reads above the fainter fallout.
-fn grain_level(at: ((f64, f64), f64, f64, f64), level: u8) -> u8 {
-    let (_, z, vz, apex) = at;
-    if vz < 0.0 && z < 0.6 * apex {
-        (f64::from(level) * 0.62) as u8
-    } else {
-        level
-    }
-}
 
 fn normalize(v: [f64; 3]) -> [f64; 3] {
     let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
@@ -323,7 +331,6 @@ impl View {
     }
 
     /// Dots per km of plume (the ×EXAG scale).
-    #[cfg(test)]
     fn dots_per_km(self) -> f64 {
         self.r * EXAG / IO_KM
     }
@@ -546,7 +553,8 @@ impl IoVolcanoes {
     /// Every grain's position as `(dot, z km, vz km/s, apex km)` at `tau` real seconds
     /// before now (clamped to its launch), for vent-local grain `g` (IO-A11: the exact
     /// parabola run backwards).
-    fn grain_at(&self, g: &Grain, tau: f64) -> Option<((f64, f64), f64, f64, f64)> {
+    #[cfg(test)]
+    fn grain_at(&self, g: &plume::Grain, tau: f64) -> Option<((f64, f64), f64, f64, f64)> {
         let k = usize::from(g.src).min(VENTS.len() - 1);
         let tau = tau.min(f64::from(g.age));
         let (vz, z) = (f64::from(g.vel[2]), f64::from(g.pos[2]));
@@ -562,15 +570,81 @@ impl IoVolcanoes {
         Some((self.view.to_dot(p), zt, vzt, apex))
     }
 
+    /// Dot, height (km) and vertical speed of a grain of vent `k` launched with speeds
+    /// `(vh, vz)` (km/s) along azimuth `(cos, sin)`, `u` real seconds into its flight: the
+    /// exact parabola (IO-A11). `None` behind Io.
+    fn arc_at(&self, k: usize, (vh, vz): (f64, f64), (ca, sa): (f64, f64), u: f64) -> Option<((f64, f64), f64, f64)> {
+        let z = height(vz, u);
+        let d = vh * u;
+        let p = self.frames[k].place(d * ca, d * sa, z.max(0.0));
+        (!View::hidden(p)).then(|| (self.view.to_dot(p), z, vz - G_IO * u))
+    }
+
+    /// One plume thread (IO-A11, IO-A12): the whole parabola of a grain launched at `v0`,
+    /// zenith `zen`, azimuth `az_deg`, sampled at most `ARC_STEP` dots apart and joined by
+    /// lines (a smooth curve), coloured `Hot` → `Sun` → `Cold` by the state in flight;
+    /// `ARC_HEADS` bright grains ride it, each with a short trail.
+    fn draw_arc(&mut self, k: usize, v0: f64, zen: f64, az_deg: f64, i: usize) {
+        let (sz, cz) = zen.sin_cos_det();
+        let speeds = (v0 * sz, v0 * cz);
+        let (sa, ca) = az_deg.to_radians().sin_cos_det();
+        let dir = (ca, sa);
+        let flight = 2.0 * speeds.1 / G_IO;
+        let apex = speeds.1 * speeds.1 / (2.0 * G_IO);
+        let reach = self.view.dots_per_km() * (speeds.0 * flight + 2.0 * apex);
+        let n = ((reach / ARC_STEP).ceil() as usize).clamp(8, 4000);
+        let ink_at = |z: f64, vz: f64, level: u8| {
+            let role = flight_role(z, vz, apex);
+            // The falling limbs fade, so the dome's top reads above the curtains.
+            let level = if vz < 0.0 && z < 0.6 * apex {
+                (f64::from(level) * 0.6) as u8
+            } else {
+                level
+            };
+            Ink::new(role, level)
+        };
+        let mut prev: Option<(f64, f64)> = None;
+        for j in 0..=n {
+            let u = flight * j as f64 / n as f64;
+            match self.arc_at(k, speeds, dir, u) {
+                Some((pt, z, vz)) => {
+                    if let Some(q) = prev {
+                        let ink = ink_at(z, vz, ARC_LEVEL);
+                        self.dots.line(q.0, q.1, pt.0, pt.1, ink);
+                    }
+                    prev = Some(pt);
+                }
+                None => prev = None,
+            }
+        }
+        // Grains riding the thread, evenly spaced in flight time.
+        let offset = hash01(0xA2C ^ ((k as u64) << 8) ^ i as u64);
+        for h in 0..ARC_HEADS {
+            let phase = (self.t * LAPSE / flight + h as f64 / ARC_HEADS as f64 + offset).fract();
+            let u1 = phase * flight;
+            let u0 = (u1 - HEAD_TRAIL * flight).max(0.0);
+            let mut prev: Option<(f64, f64)> = None;
+            for s in 0..=4 {
+                let u = u0 + (u1 - u0) * f64::from(s) / 4.0;
+                if let Some((pt, z, vz)) = self.arc_at(k, speeds, dir, u) {
+                    if let Some(q) = prev {
+                        self.dots.line(q.0, q.1, pt.0, pt.1, ink_at(z, vz, 255));
+                    }
+                    prev = Some(pt);
+                }
+            }
+        }
+    }
+
     fn compose(&mut self) {
         self.dots.clear();
         for s in &self.specks {
             self.dots.set(i32::from(s.x), i32::from(s.y), s.ink);
         }
         let v = self.view;
-        // Fallout rings: each live landing one stipple dot.
+        // Pele's fallout ring: each live landing one stipple dot.
         let now = self.t as f32;
-        for (k, falls) in self.falls.iter().enumerate() {
+        for (k, falls) in self.falls.iter().enumerate().take(1) {
             let f = self.frames[k];
             let (fall, inv_range) = (VENTS[k].fall, 1.0 / range_45(VENTS[k].v0));
             for l in falls.iter() {
@@ -620,46 +694,50 @@ impl IoVolcanoes {
                 self.dots.set(x + dx, y + dy, ink);
             }
         }
-        // The plumes: every grain a short decaying thread along its own parabola,
-        // coloured by its state in flight, oldest piece first so heads win.
-        let seg = TRAIL_SEG * LAPSE;
-        for g in self.plume.iter() {
-            if !kept(g.vel[0].to_bits() ^ g.vel[2].to_bits().rotate_left(16), self.keep) {
-                continue;
-            }
-            let age = f64::from(g.age);
-            // The thread's knots, head first (each the exact parabola run back).
-            let pts: [_; TRAIL_SEGS + 1] = std::array::from_fn(|i| {
-                let back = i as f64 * seg;
-                if i > 0 && back - seg >= age {
-                    None
-                } else {
-                    self.grain_at(g, back)
-                }
-            });
-            for s in (0..TRAIL_SEGS).rev() {
-                let (Some(head), Some(tail)) = (pts[s], pts[s + 1]) else {
+        // The plumes: a fixed fan of exact parabolas per vent (the umbrella's nested
+        // dome), each sampled at dot resolution and coloured by the state in flight, with
+        // bright grains riding them.
+        let pele = VENTS[0].v0 * plume_scale(self.t, VENTS[0].phase).sqrt();
+        for (i, &(zen, az)) in PELE_ARCS.iter().enumerate() {
+            self.draw_arc(0, pele, zen, az, i);
+        }
+        // The Prometheus types, seen from above: their thin SO₂ frost ring (a sparse
+        // stipple ellipse at the 45° range, foreshortened by the globe) round a bright
+        // `Hot` vent knot.
+        let per_km = v.dots_per_km();
+        for (k, vent) in VENTS.iter().enumerate().skip(1) {
+            let f = self.frames[k];
+            let r = range_45(vent.v0 * plume_scale(self.t, vent.phase).sqrt());
+            let n = ((TAU * r * per_km).ceil() as usize).clamp(12, 2000);
+            for i in 0..n {
+                if hash01(0xF207 ^ ((k as u64) << 16) ^ i as u64) >= FROST_KEEP {
                     continue;
-                };
-                let ink = Ink::new(flight_role(head.1, head.2, head.3), grain_level(head, TRAIL_LEVELS[s]));
-                self.dots.line(tail.0.0, tail.0.1, head.0.0, head.0.1, ink);
-            }
-            if let Some(head) = pts[0] {
-                let ink = Ink::new(flight_role(head.1, head.2, head.3), grain_level(head, 255));
-                self.dots.plot(head.0.0, head.0.1, ink);
+                }
+                let (s, c) = (TAU * i as f64 / n as f64).sin_cos_det();
+                let p = f.place(r * c, r * s, 0.0);
+                if p[2] >= 0.0 {
+                    let (x, y) = v.to_dot(p);
+                    self.dots.plot(x, y, vent.fall);
+                }
             }
         }
-        // The vents: one dot pulsing with the tide (IO-A5).
-        let ink = if vent_glow(self.t) > 0.55 {
-            VENT_HOT
-        } else {
-            VENT_WARM
-        };
-        for f in &self.frames {
+        // The vents, pulsing with the tide (IO-A5): Pele one dot, the others small knots.
+        let glow = vent_glow(self.t) > 0.55;
+        for (k, f) in self.frames.iter().enumerate() {
             let p = f.place(0.0, 0.0, 0.0);
-            if p[2] >= 0.0 {
-                let (x, y) = v.to_dot(p);
-                self.dots.plot(x, y, ink);
+            if p[2] < 0.0 {
+                continue;
+            }
+            let (x, y) = v.to_dot(p);
+            if k == 0 {
+                self.dots.plot(x, y, if glow { VENT_HOT } else { VENT_WARM });
+            } else {
+                let (x, y) = (x.round() as i32, y.round() as i32);
+                let core = if glow { VENT_WARM } else { LAVA };
+                self.dots.set(x, y, core);
+                for (dx, dy) in [(1, 0), (-1, 0), (0, -1)] {
+                    self.dots.set(x + dx, y + dy, LAVA);
+                }
             }
         }
     }
