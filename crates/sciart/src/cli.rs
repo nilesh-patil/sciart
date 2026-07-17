@@ -72,6 +72,7 @@ pub enum ThemeArg {
     Astro,
     Rainbow,
     Mono,
+    Aurora,
 }
 
 impl From<ThemeArg> for Theme {
@@ -80,6 +81,7 @@ impl From<ThemeArg> for Theme {
             ThemeArg::Astro => Theme::Astro,
             ThemeArg::Rainbow => Theme::Rainbow,
             ThemeArg::Mono => Theme::Mono,
+            ThemeArg::Aurora => Theme::Aurora,
         }
     }
 }

@@ -12,16 +12,19 @@ pub enum Theme {
     Astro,
     Rainbow,
     Mono,
+    /// Auroral emission lines on a polar night (RND-R16, ADR-0022).
+    Aurora,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 3] = [Theme::Astro, Theme::Rainbow, Theme::Mono];
+    pub const ALL: [Theme; 4] = [Theme::Astro, Theme::Rainbow, Theme::Mono, Theme::Aurora];
 
     pub const fn name(self) -> &'static str {
         match self {
             Theme::Astro => "astro",
             Theme::Rainbow => "rainbow",
             Theme::Mono => "mono",
+            Theme::Aurora => "aurora",
         }
     }
 
@@ -41,6 +44,13 @@ impl Theme {
     pub fn color(self, ink: Ink, x: u16, y: u16) -> Rgb {
         let level = f64::from(ink.level) / 255.0;
         match (self, ink.role) {
+            (Theme::Aurora, Role::Seq) => gradient(&CURTAIN, ink::seq_value(ink)),
+            (Theme::Aurora, Role::Div) => gradient(&AURORA_DIV, div_pos(ink)),
+            // Roles scenes may not use (GEN-R23) borrow astro's tables (RND-R16).
+            (Theme::Aurora, Role::Phase | Role::Blackbody | Role::Ramp(_)) => {
+                Theme::Astro.color(ink, x, y)
+            }
+            (Theme::Aurora, role) => scale(aurora_base(role), 0.3 + 0.7 * level),
             // Colormap roles ignore the per-cell hash and the role-hue scaling: a field
             // needs one smooth, perceptually ordered ramp (RND-R6, ADR-0011).
             (Theme::Astro, Role::Seq) => gradient(&INFERNO, ink::seq_value(ink)),
@@ -205,6 +215,25 @@ const BLUE_RED: [Rgb; 5] = [
     Rgb(255, 100, 85),
 ];
 
+/// Aurora curtain (RND-R16): night → violet (N₂⁺ top) → teal → oxygen green → mint, the way
+/// a curtain brightens toward its base.
+const CURTAIN: [Rgb; 5] = [
+    Rgb(6, 8, 24),
+    Rgb(70, 30, 120),
+    Rgb(20, 130, 140),
+    Rgb(60, 220, 120),
+    Rgb(210, 255, 220),
+];
+
+/// Violet for negative, a centre just above the background, oxygen green for positive.
+const AURORA_DIV: [Rgb; 5] = [
+    Rgb(190, 130, 255),
+    Rgb(80, 50, 170),
+    Rgb(18, 22, 34),
+    Rgb(30, 140, 90),
+    Rgb(120, 255, 170),
+];
+
 /// Position of a `Div` ink along its colormap, `[−1, 1] → [0, 1]`: level 128 (zero) lands
 /// exactly on the centre stop, through core's inverse of `ink::div` (CORE-R46, CORE-R56).
 fn div_pos(ink: Ink) -> f64 {
@@ -255,6 +284,26 @@ fn astro_base(role: Role) -> Rgb {
         Role::Accent => Rgb(255, 90, 200),
         Role::Text => Rgb(230, 230, 230),
         Role::Dim | Role::Background => Rgb(90, 90, 115),
+        _ => Rgb(200, 200, 200),
+    }
+}
+
+/// Aurora's object roles (RND-R16): the two oxygen lines carry the `Hot`/`Cold` pair
+/// (630 nm red, 557.7 nm green) and N₂⁺ (427.8 nm) the violet `Accent`; the rest stay cool
+/// on night blue, except a pale-gold `Sun` so stars do not all turn green.
+fn aurora_base(role: Role) -> Rgb {
+    match role {
+        Role::Star => Rgb(225, 245, 255),
+        Role::Sun => Rgb(255, 215, 120),
+        Role::Planet => Rgb(90, 170, 255),
+        Role::Particle => Rgb(150, 255, 200),
+        Role::Wave => Rgb(40, 220, 210),
+        Role::Hot => Rgb(255, 70, 110),
+        Role::Cold => Rgb(60, 255, 150),
+        Role::Structure => Rgb(130, 140, 175),
+        Role::Accent => Rgb(170, 90, 255),
+        Role::Text => Rgb(220, 235, 235),
+        Role::Dim | Role::Background => Rgb(60, 80, 110),
         _ => Rgb(200, 200, 200),
     }
 }
@@ -382,10 +431,12 @@ pub(crate) fn lut(theme: Theme) -> &'static Lut {
     static ASTRO: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Astro));
     static RAINBOW: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Rainbow));
     static MONO: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Mono));
+    static AURORA: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Aurora));
     match theme {
         Theme::Astro => &ASTRO,
         Theme::Rainbow => &RAINBOW,
         Theme::Mono => &MONO,
+        Theme::Aurora => &AURORA,
     }
 }
 
@@ -1024,6 +1075,118 @@ mod tests {
         for (i, (ra, a)) in tops.iter().enumerate() {
             for (rb, b) in &tops[i + 1..] {
                 assert!(hue_gap(*a, *b) >= 15.0, "{ra:?} {a:.0} vs {rb:?} {b:.0}");
+            }
+        }
+    }
+
+    // ----- aurora (RND-R16) -----
+
+    fn aurora(role: Role, level: u8) -> Rgb {
+        Theme::Aurora.color(Ink::new(role, level), 0, 0)
+    }
+
+    /// Index of the strictly largest channel (0 red, 1 green, 2 blue).
+    fn dominant(Rgb(r, g, b): Rgb) -> Option<usize> {
+        let c = [r, g, b];
+        let max = c.into_iter().max()?;
+        let mut at = (0..3).filter(|&i| c[i] == max);
+        let i = at.next()?;
+        at.next().is_none().then_some(i)
+    }
+
+    #[test]
+    fn rnd_r16_aurora_is_named_and_cycles_after_mono() {
+        assert_eq!(Theme::from_name("Aurora"), Some(Theme::Aurora));
+        assert_eq!(Theme::Aurora.name(), "aurora");
+        assert_eq!(Theme::Mono.next(), Theme::Aurora);
+        assert_eq!(Theme::Aurora.next(), Theme::Astro);
+        assert_eq!(Theme::default(), Theme::Astro, "astro stays the default");
+    }
+
+    #[test]
+    fn rnd_r16_object_roles_follow_the_emission_lines() {
+        let bases = [
+            (Role::Hot, Rgb(255, 70, 110)),
+            (Role::Cold, Rgb(60, 255, 150)),
+            (Role::Accent, Rgb(170, 90, 255)),
+            (Role::Wave, Rgb(40, 220, 210)),
+            (Role::Particle, Rgb(150, 255, 200)),
+            (Role::Planet, Rgb(90, 170, 255)),
+            (Role::Sun, Rgb(255, 215, 120)),
+            (Role::Star, Rgb(225, 245, 255)),
+            (Role::Structure, Rgb(130, 140, 175)),
+            (Role::Dim, Rgb(60, 80, 110)),
+            (Role::Background, Rgb(60, 80, 110)),
+            (Role::Text, Rgb(220, 235, 235)),
+        ];
+        for (role, base) in bases {
+            assert_eq!(aurora(role, 255), base, "{role:?} at full level");
+            assert_eq!(aurora(role, 0), scale(base, 0.3), "{role:?} at level 0");
+            for (x, y) in [(1, 0), (17, 3), (199, 49)] {
+                let ink = Ink::new(role, 200);
+                assert_eq!(
+                    Theme::Aurora.color(ink, x, y),
+                    aurora(role, 200),
+                    "{role:?}"
+                );
+            }
+        }
+        // Hot/Cold are the two oxygen lines, a complementary red/green pair; N2+ is violet.
+        assert_eq!(dominant(aurora(Role::Hot, 200)), Some(0), "Hot is red");
+        assert_eq!(dominant(aurora(Role::Cold, 200)), Some(1), "Cold is green");
+        assert_eq!(
+            dominant(aurora(Role::Accent, 200)),
+            Some(2),
+            "Accent is violet"
+        );
+    }
+
+    #[test]
+    fn rnd_r16_seq_is_the_curtain_ramp() {
+        let c = |l| aurora(Role::Seq, l);
+        assert!(luma(c(0)) < 60, "level 0 is near black: {:?}", c(0));
+        for l in [16, 48] {
+            assert_eq!(dominant(c(l)), Some(2), "blue leads low: {l} {:?}", c(l));
+        }
+        for l in [192, 230, 255] {
+            assert_eq!(dominant(c(l)), Some(1), "green leads high: {l} {:?}", c(l));
+        }
+        assert_eq!(c(255), Rgb(210, 255, 220), "ends on mint");
+    }
+
+    #[test]
+    fn rnd_r16_div_is_violet_dark_green() {
+        let c = |l| aurora(Role::Div, l);
+        assert!(luma(c(128)) < 120, "zero near background: {:?}", c(128));
+        for l in [0, 32] {
+            assert_eq!(
+                dominant(c(l)),
+                Some(2),
+                "negative is violet: {l} {:?}",
+                c(l)
+            );
+        }
+        for l in [224, 255] {
+            assert_eq!(dominant(c(l)), Some(1), "positive is green: {l} {:?}", c(l));
+        }
+    }
+
+    #[test]
+    fn rnd_r16_unused_field_roles_reuse_astro() {
+        let roles = [
+            Role::Phase,
+            Role::Blackbody,
+            Role::Ramp(Ramp::Ember),
+            Role::Ramp(Ramp::Ice),
+        ];
+        for role in roles {
+            for level in [0, 64, 140, 255] {
+                let ink = Ink::new(role, level);
+                assert_eq!(
+                    Theme::Aurora.color(ink, 3, 5),
+                    Theme::Astro.color(ink, 3, 5),
+                    "{role:?} {level}"
+                );
             }
         }
     }

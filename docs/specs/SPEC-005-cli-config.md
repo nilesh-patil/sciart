@@ -11,7 +11,7 @@ sciart [OPTIONS] [COMMAND]
 Options:
   --fps <1..=120>          default 30
   --interval <SECS>        default 15 (sim only)
-  --theme <astro|rainbow|mono>
+  --theme <astro|rainbow|mono|aurora>
   --keep-awake <caffeinate|mouse|off>
   --seed <u64>             default: random
   --ascii                  pure-ASCII glyphs
