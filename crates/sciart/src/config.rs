@@ -187,6 +187,14 @@ mod tests {
     }
 
     #[test]
+    fn rnd_r16_cfg_r1_aurora_from_flag_or_file() {
+        let (s, _) = resolve(&cli(&["--theme", "aurora"]).unwrap(), FileConfig::default());
+        assert_eq!(s.theme, Theme::Aurora, "flag");
+        let (s, _) = resolve(&cli(&[]).unwrap(), file("theme = \"aurora\""));
+        assert_eq!(s.theme, Theme::Aurora, "file");
+    }
+
+    #[test]
     fn cfg_r1_boolean_flags_can_only_turn_on() {
         let (s, _) = resolve(&cli(&["--ascii"]).unwrap(), file("ascii = false"));
         assert!(s.ascii);
