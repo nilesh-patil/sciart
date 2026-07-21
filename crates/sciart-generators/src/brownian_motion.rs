@@ -16,8 +16,9 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::draw;
 use sciart_core::geom::ASPECT;
-use sciart_core::particles::{gaussian2, plot};
+use sciart_core::particles::gaussian2;
 use sciart_core::prelude::*;
+use sciart_core::raster::Dots;
 use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
@@ -49,19 +50,28 @@ const MOL_PER_CELL: f64 = 0.02;
 const MOL_MAX: usize = 400;
 /// Maxwell–Boltzmann velocity standard deviation per axis for the molecules, rows/s.
 const MOL_SD: f64 = 7.0;
-/// Collision flashes: pool cap, lifetime (s), and the chance a hit flashes.
-const FLASH_MAX: usize = 32;
+/// A molecule that struck the grain this recently (s) draws as the kick flash.
 const FLASH_LIFE: f64 = 0.3;
-const FLASH_P: f64 = 0.35;
 /// Molecules bounce off the grain at this extra distance, rows.
 const CONTACT_PAD: f64 = 0.35;
-
-const GRAIN_CORE: Glyph = Glyph::new('●', '@');
-const GRAIN_EDGE: Glyph = Glyph::new('◍', 'O');
-const MOL_SLOW: Glyph = Glyph::new('·', '.');
-const MOL_FAST: Glyph = Glyph::new('•', 'o');
-const TRAIL: Glyph = Glyph::new('∙', '.');
-const FLASH: Glyph = Glyph::new('✦', '*');
+/// Squared-speed terciles of the 2-D Maxwell–Boltzmann (Rayleigh) speed distribution,
+/// `F(v) = 1 − e^{−v²/2s²}`, so quantile `p` sits at `v² = 2 s² ln(1/(1 − p))`: `ln 1.5`
+/// and `ln 3` for the 1/3 and 2/3 quantiles (BRO-A4).
+const SLOW2: f64 = 2.0 * MOL_SD * MOL_SD * 0.405_465_108_108_164_4;
+const FAST2: f64 = 2.0 * MOL_SD * MOL_SD * 1.098_612_288_668_109_6;
+/// The walk thread's colours along its length, newest to oldest (BRO-A5).
+const WALK_ROLES: [Role; 5] = [Role::Hot, Role::Sun, Role::Particle, Role::Wave, Role::Cold];
+/// Walk-thread levels at the newest and oldest end.
+const WALK_NEW: f64 = 230.0;
+const WALK_OLD: f64 = 70.0;
+/// Molecule dot level; the kick flash runs from `FLASH_HI` down to `FLASH_LO`.
+const MOL_LEVEL: u8 = 230;
+const FLASH_HI: f64 = 255.0;
+const FLASH_LO: f64 = 150.0;
+/// The grain atom: σ = grain radius in dots ÷ this, peak density, stipple salt.
+const GRAIN_SIGMA_DIV: f64 = 2.6;
+const GRAIN_PEAK: f64 = 1.0;
+const GRAIN_SALT: u64 = 0xB20_7A11;
 
 /// Exact one-axis transition of the OU process over a step `h` (BRO-A1, BRO-A2).
 ///
@@ -164,19 +174,48 @@ fn ou_step_2d(step: &OuStep, s: &mut [f64; 4], rng: &mut impl Rng) {
     (s[1], s[3]) = step.apply(s[1], s[3], z3, z4);
 }
 
+/// Molecule role by speed against the 2-D Maxwell–Boltzmann terciles (BRO-A4).
+/// Below the 1/3 quantile `Cold`, above the 2/3 quantile `Hot`, else `Wave`.
+pub(crate) fn speed_role(speed: f64) -> Role {
+    let s2 = speed * speed;
+    if s2 < SLOW2 {
+        Role::Cold
+    } else if s2 > FAST2 {
+        Role::Hot
+    } else {
+        Role::Wave
+    }
+}
+
+/// Walk-thread ink at `age` ∈ [0, 1] (0 newest, 1 oldest; clamped, NaN is newest)
+/// (BRO-A5): five equal spans `Hot` → `Sun` → `Particle` → `Wave` → `Cold`, the level
+/// falling linearly from 230 to 70.
+pub(crate) fn walk_ink(age: f64) -> Ink {
+    let a = if age.is_nan() {
+        0.0
+    } else {
+        age.clamp(0.0, 1.0)
+    };
+    let span = ((a * WALK_ROLES.len() as f64) as usize).min(WALK_ROLES.len() - 1);
+    let level = WALK_NEW + (WALK_OLD - WALK_NEW) * a;
+    Ink::new(WALK_ROLES[span], level.round() as u8)
+}
+
+/// Dot coordinates of a point in rows (x already divided by `ASPECT`), whose cell is the
+/// one `particles::plot` rounds it to.
+#[inline]
+fn to_dot(x: f64, y: f64) -> (f64, f64) {
+    Dots::from_cells(x * ASPECT + 0.5, y + 0.5)
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Molecule {
     x: f64,
     y: f64,
     vx: f64,
     vy: f64,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Flash {
-    x: f64,
-    y: f64,
-    age: f64,
+    /// Seconds since this molecule last struck the grain.
+    kick: f64,
 }
 
 /// A rectangle in rows (x already divided by ASPECT).
@@ -226,7 +265,10 @@ pub struct BrownianMotion {
     msd_sum: f64,
     msd_count: u64,
     molecules: ParticlePool<Molecule>,
-    flashes: ParticlePool<Flash>,
+    /// Grain, walk thread and molecules, rasterised in `prepare` when `dirty` (GEN-R20).
+    dots: Dots,
+    dirty: bool,
+    size: Size,
     label: String,
     label_row: Option<i32>,
     /// Chars the readout may take on its row, right of the title (GEN-R13).
@@ -247,7 +289,9 @@ impl Default for BrownianMotion {
             msd_sum: 0.0,
             msd_count: 0,
             molecules: ParticlePool::with_capacity(0),
-            flashes: ParticlePool::with_capacity(FLASH_MAX),
+            dots: Dots::default(),
+            dirty: true,
+            size: Size::new(1, 1),
             label: String::with_capacity(64),
             label_row: None,
             room: 0,
@@ -316,12 +360,12 @@ impl BrownianMotion {
         self.label.clear();
     }
 
-    fn move_molecules(&mut self, dt: f64, ctx: &mut Ctx) {
+    fn move_molecules(&mut self, dt: f64) {
         let b = self.mol_box;
         let (gx, gy) = self.grain_pos();
         let reach = self.grain_r + CONTACT_PAD;
-        let flashes = &mut self.flashes;
         for m in self.molecules.iter_mut() {
+            m.kick += dt;
             let (x, fx) = fold(m.x + m.vx * dt, b.x0, b.x1);
             let (y, fy) = fold(m.y + m.vy * dt, b.y0, b.y1);
             (m.x, m.y) = (x, y);
@@ -331,7 +375,8 @@ impl BrownianMotion {
             if fy {
                 m.vy = -m.vy;
             }
-            // Specular bounce off the grain; a fraction of hits flash at the contact point.
+            // Specular bounce off the grain (speed-preserving, so the MB terciles hold);
+            // the molecule then shows the kick flash for FLASH_LIFE.
             let (dx, dy) = (m.x - gx, m.y - gy);
             let d2 = dx * dx + dy * dy;
             if d2 < reach * reach && d2 > 1e-12 {
@@ -341,22 +386,64 @@ impl BrownianMotion {
                 if vn < 0.0 {
                     m.vx -= 2.0 * vn * nx;
                     m.vy -= 2.0 * vn * ny;
-                    if ctx.rng.random::<f64>() < FLASH_P {
-                        flashes.spawn(Flash {
-                            x: gx + nx * reach,
-                            y: gy + ny * reach,
-                            age: 0.0,
-                        });
-                    }
+                    m.kick = 0.0;
                 }
                 m.x = fold(gx + nx * reach, b.x0, b.x1).0;
                 m.y = fold(gy + ny * reach, b.y0, b.y1).0;
             }
         }
-        self.flashes.retain(|f| {
-            f.age += dt;
-            f.age < FLASH_LIFE
-        });
+    }
+
+    /// Draw the Look (M20) onto the dot lattice: walk thread, molecules, then the grain,
+    /// so `Dots`' strongest-ink-per-cell rule lets the grain and the flashes win.
+    fn rasterise(&mut self) {
+        self.dots.clear();
+        // Walk thread, oldest sample → newest → the grain's live position; the segment
+        // ending at sample i is (n − i) ticks old, scaled by the full trail's length, so a
+        // colour always means the same age in seconds (a young trail shows only the warm
+        // spans) and a full trail runs from 0 at the grain to 1 at its oldest end.
+        let (gx, gy) = self.grain_pos();
+        let n = self.trail.len();
+        let span = (TRAIL_LEN - 1) as f64;
+        let mut prev: Option<(f64, f64)> = None;
+        for (i, &(x, y)) in self
+            .trail
+            .iter()
+            .chain(std::iter::once(&(gx, gy)))
+            .enumerate()
+        {
+            let b = to_dot(x, y);
+            if let Some(a) = prev {
+                let age = n.saturating_sub(i) as f64 / span;
+                self.dots.line(a.0, a.1, b.0, b.1, walk_ink(age));
+            }
+            prev = Some(b);
+        }
+        // Molecules: one dot coloured by speed tercile, or a fading Sun plus sign.
+        for m in self.molecules.iter() {
+            let (x, y) = to_dot(m.x, m.y);
+            if m.kick < FLASH_LIFE {
+                let f = (m.kick / FLASH_LIFE).clamp(0.0, 1.0);
+                let ink = Ink::new(Role::Sun, (FLASH_HI + (FLASH_LO - FLASH_HI) * f) as u8);
+                for (dx, dy) in [(0.0, 0.0), (1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+                    self.dots.plot(x + dx, y + dy, ink);
+                }
+            } else {
+                let role = speed_role(m.vx.hypot(m.vy));
+                self.dots.plot(x, y, Ink::new(role, MOL_LEVEL));
+            }
+        }
+        // The grain: an Accent stipple atom (a dot is one quarter row).
+        let (cx, cy) = to_dot(gx, gy);
+        let sigma = self.grain_r * f64::from(Dots::CELL_H) / GRAIN_SIGMA_DIV;
+        self.dots.stipple_puff(
+            cx,
+            cy,
+            sigma,
+            GRAIN_PEAK,
+            GRAIN_SALT,
+            Ink::new(Role::Accent, 255),
+        );
     }
 }
 
@@ -403,9 +490,18 @@ impl Generator for BrownianMotion {
                 y: m.y0 + ctx.rng.random::<f64>() * (m.y1 - m.y0),
                 vx,
                 vy,
+                kick: FLASH_LIFE,
             });
         }
-        self.flashes.clear();
+        // The lattice stops above the readout row, so no dot lands under the label.
+        self.size = size;
+        let dot_rows = if self.label_row.is_some() {
+            size.height() - 1
+        } else {
+            size.height()
+        };
+        self.dots.resize(Size::new(size.width(), dot_rows));
+        self.dirty = true;
         self.refresh_label();
     }
 
@@ -428,64 +524,22 @@ impl Generator for BrownianMotion {
             }
         }
         self.t += dt;
-        self.move_molecules(dt, ctx);
+        self.move_molecules(dt);
         self.refresh_label();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        for m in self.molecules.iter() {
-            let s2 = m.vx * m.vx + m.vy * m.vy;
-            let fast = s2 > 2.0 * MOL_SD * MOL_SD;
-            let u = (s2.sqrt() / (3.0 * MOL_SD)).min(1.0);
-            let ink = Ink::new(Role::Particle, (70.0 + 150.0 * u) as u8);
-            let glyph = if fast { MOL_FAST } else { MOL_SLOW };
-            plot(canvas, m.x * ASPECT, m.y, glyph, ink);
+        if canvas.size() != self.size {
+            return;
         }
-
-        // Trail: join consecutive samples with dots, fading with age.
-        let n = self.trail.len();
-        let (gx, gy) = self.grain_pos();
-        let mut prev: Option<(f64, f64)> = None;
-        for (i, &p) in self
-            .trail
-            .iter()
-            .chain(std::iter::once(&(gx, gy)))
-            .enumerate()
-        {
-            let age = 1.0 - (i as f64 / n.max(1) as f64).min(1.0);
-            let ink = Ink::new(
-                Role::Structure,
-                (35.0 + 185.0 * (1.0 - age).powf(1.3)) as u8,
-            );
-            if let Some(q) = prev {
-                let (dc, dr) = ((p.0 - q.0) * ASPECT, p.1 - q.1);
-                let steps = dc.abs().max(dr.abs()).ceil().clamp(1.0, 256.0) as usize;
-                for k in 1..=steps {
-                    let f = k as f64 / steps as f64;
-                    plot(canvas, (q.0 * ASPECT) + dc * f, q.1 + dr * f, TRAIL, ink);
-                }
-            }
-            prev = Some(p);
-        }
-
-        for f in self.flashes.iter() {
-            let level = 255.0 * (1.0 - f.age / FLASH_LIFE).clamp(0.0, 1.0);
-            plot(
-                canvas,
-                f.x * ASPECT,
-                f.y,
-                FLASH,
-                Ink::new(Role::Particle, level.max(90.0) as u8),
-            );
-        }
-
-        draw::disc(canvas, gx * ASPECT, gy, self.grain_r, |d, nx, ny| {
-            // Lit from the upper left.
-            let light = (0.75 - 0.35 * (nx + ny)).clamp(0.3, 1.0);
-            let glyph = if d < 0.7 { GRAIN_CORE } else { GRAIN_EDGE };
-            Some((glyph, Ink::new(Role::Accent, (255.0 * light) as u8)))
-        });
-
+        self.dots.blit(canvas);
         if let Some(row) = self.label_row
             && !self.label.is_empty()
         {
@@ -751,16 +805,129 @@ mod tests {
     #[test]
     fn bro_renders_grain_trail_molecules_and_readout_in_ascii() {
         let mut stage = Stage::new(build(), 42, Size::new(100, 30), GlyphMode::Ascii);
-        for _ in 0..120 {
+        // 10 s: the walk thread reaches well beyond the grain atom.
+        for _ in 0..600 {
             stage.step(SIM_DT);
         }
         let frame = stage.render();
         let lines = frame.to_lines();
         assert!(lines.iter().all(|l| l.is_ascii()));
         let roles: Vec<_> = frame.cells().iter().map(|c| c.ink.role).collect();
-        for r in [Role::Accent, Role::Structure, Role::Particle, Role::Text] {
+        // Grain, the walk thread's colours, the molecules' terciles and the readout.
+        for r in [
+            Role::Accent,
+            Role::Hot,
+            Role::Sun,
+            Role::Particle,
+            Role::Wave,
+            Role::Cold,
+            Role::Text,
+        ] {
             assert!(roles.contains(&r), "{r:?} missing");
         }
         assert!(lines[29].contains("D^"), "{}", lines[29]);
+    }
+
+    #[test]
+    fn bro_a4_speed_role_follows_the_mb_terciles() {
+        // 2-D MB speed is Rayleigh: F(v) = 1 − e^{−v²/2s²}, quantile p at s·√(−2 ln(1 − p)).
+        let q = |p: f64| MOL_SD * (-2.0 * (1.0 - p).ln()).sqrt();
+        let (lo, hi) = (q(1.0 / 3.0), q(2.0 / 3.0));
+        assert_eq!(speed_role(0.0), Role::Cold);
+        assert_eq!(speed_role(lo * 0.99), Role::Cold);
+        assert_eq!(speed_role(lo * 1.01), Role::Wave);
+        assert_eq!(speed_role(hi * 0.99), Role::Wave);
+        assert_eq!(speed_role(hi * 1.01), Role::Hot);
+        assert_eq!(speed_role(1e9), Role::Hot);
+        let tally = |speeds: &mut dyn Iterator<Item = f64>| {
+            let mut counts = [0u32; 3];
+            for s in speeds {
+                match speed_role(s) {
+                    Role::Cold => counts[0] += 1,
+                    Role::Wave => counts[1] += 1,
+                    Role::Hot => counts[2] += 1,
+                    r => panic!("unexpected role {r:?}"),
+                }
+            }
+            counts
+        };
+        // A seeded population drawn as the scene draws its molecules: 33 ± 5 %.
+        let mut ctx = seeded(4);
+        let n = 3000;
+        let counts = tally(&mut (0..n).map(|_| {
+            let (vx, vy) = gaussian2(&mut ctx.rng, MOL_SD);
+            vx.hypot(vy)
+        }));
+        for c in counts {
+            assert!(
+                (f64::from(c) / f64::from(n) - 1.0 / 3.0).abs() < 0.05,
+                "{counts:?}"
+            );
+        }
+        // The scene's own 400 molecules at 200×50 after 5 s (bounces conserve speed);
+        // s.e. ≈ 2.4 %, so the 5 % band is about 2 s.e. for this one seeded draw.
+        let mut g = BrownianMotion::default();
+        g.resize(Size::new(200, 50), &mut ctx);
+        for _ in 0..300 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let counts = tally(&mut g.molecules.iter().map(|m| m.vx.hypot(m.vy)));
+        let total = f64::from(counts.iter().sum::<u32>());
+        for c in counts {
+            assert!(
+                (f64::from(c) / total - 1.0 / 3.0).abs() < 0.05,
+                "{counts:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn bro_a5_walk_thread_role_spans_and_level_fall_with_age() {
+        let order = [Role::Hot, Role::Sun, Role::Particle, Role::Wave, Role::Cold];
+        for (k, role) in order.iter().enumerate() {
+            // Each fifth of the age range is one role: its start, middle and end.
+            for f in [0.0, 0.5, 0.999] {
+                let age = (k as f64 + f) / 5.0;
+                assert_eq!(walk_ink(age).role, *role, "age {age}");
+            }
+        }
+        assert_eq!(walk_ink(1.0).role, Role::Cold);
+        assert_eq!(walk_ink(0.0).level, 230);
+        assert_eq!(walk_ink(1.0).level, 70);
+        let mut prev = u8::MAX;
+        for i in 0..=1000 {
+            let level = walk_ink(f64::from(i) / 1000.0).level;
+            assert!(level <= prev, "level rises at {i}");
+            prev = level;
+        }
+        // Out-of-range ages clamp.
+        assert_eq!(walk_ink(-1.0), walk_ink(0.0));
+        assert_eq!(walk_ink(2.0), walk_ink(1.0));
+        assert_eq!(walk_ink(f64::NAN), walk_ink(0.0));
+    }
+
+    #[test]
+    fn bro_a6_draws_as_braille_with_no_half_blocks() {
+        let size = Size::new(200, 50);
+        let mut stage = Stage::new(build(), 42, size, GlyphMode::Unicode);
+        for _ in 0..(5.0 / SIM_DT).round() as usize {
+            stage.step(SIM_DT);
+        }
+        let frame = stage.render();
+        let (mut lit, mut braille) = (0u32, 0u32);
+        for y in 0..i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let ch = frame.get(x, y).unwrap().ch;
+                assert!(!matches!(ch, '▀' | '▄' | '█'), "half block at ({x}, {y})");
+                // The bottom row holds the title and the readout.
+                if y == i32::from(size.height()) - 1 || ch == ' ' || ch == '\u{2800}' {
+                    continue;
+                }
+                lit += 1;
+                braille += u32::from(('\u{2801}'..='\u{28FF}').contains(&ch));
+            }
+        }
+        let share = f64::from(braille) / f64::from(lit.max(1));
+        assert!(share >= 0.85, "braille share {share:.3} of {lit}");
     }
 }

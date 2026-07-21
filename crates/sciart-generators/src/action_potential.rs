@@ -32,7 +32,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, ease, geom, ink, ode};
+use sciart_core::{draw, ease, geom, ink, ode, raster, rng};
 
 pub static META: Meta = Meta {
     name: "action_potential",
@@ -146,18 +146,21 @@ const TRACE_LEN: usize = 400;
 const TRACE_TOP_MV: f64 = 45.0;
 const TRACE_BOTTOM_MV: f64 = -85.0;
 
-// ---- Drawing ----
+// ---- Drawing (SPEC-002 Look (M20): membrane threads + ion dust) ----
 
 /// Compartment position (0..N−1) where the trunk hands over to the arbor: 9.2 cm.
 const TRUNK_END: f64 = 184.0;
 const VESICLES_PER_BOUTON: usize = 4;
 const VESICLE_LIFE: f64 = 0.4;
 const DENDRITES: usize = 40;
-const MEMBRANE: Ink = Ink::new(Role::Structure, 100);
-const RIM: Ink = Ink::new(Role::Structure, 110);
+/// The soma outline, the hillock and the two axon membranes: one 1-px thread.
+const MEMBRANE: Ink = Ink::new(Role::Structure, 105);
 const ARBOR: Ink = Ink::new(Role::Structure, 85);
-/// Dendrite outline level by branching depth: thinner branches read dimmer.
+/// Dendrite thread level by branching depth: thinner branches read dimmer.
 const DENDRITE_LEVEL: [u8; 4] = [110, 90, 75, 60];
+/// Spines: 1–2-dot stubs, one per `SPINE_EVERY` dots of a dendrite beyond depth 1.
+const SPINE: Ink = Ink::new(Role::Structure, 55);
+const SPINE_EVERY: usize = 6;
 /// Dendrites fan out within this angle (rad) of pointing straight left, away from the
 /// axon.
 const DENDRITE_CONE: f64 = 1.45;
@@ -174,17 +177,43 @@ const LEAD_INK: Ink = Ink::new(Role::Dim, 60);
 /// The smallest oscilloscope panel: 4 rows (16 dots for 130 mV) by 12 columns.
 const SCOPE_MIN_ROWS: i32 = 4;
 const SCOPE_MIN_COLS: i32 = 12;
-/// Terminal arbor: trunk end → three primaries, the outer two forking into two each.
-const ARBOR_SEGS: usize = 7;
 const TRACE_INK: Ink = Ink::new(Role::Accent, 210);
 const TICK_INK: Ink = Ink::new(Role::Dim, 120);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const ELECTRODE_INK: Ink = Ink::new(Role::Accent, 200);
-/// `Div` levels this close to 128 are drawn as background: 6 above rest (+0.2 mV, so
-/// sub-threshold responses show) and 12 below (−3.7 mV, so only the recent
-/// after-hyperpolarisation tints the axoplasm).
-const FILL_REST_ABOVE: u8 = 6;
-const FILL_REST_BELOW: u8 = 12;
+/// Ion dust (CORE-R107 fixed-threshold stipple): density and ink at rest.
+const DUST_REST_P: f64 = 0.03;
+const DUST_REST: Ink = Ink::new(Role::Cold, 70);
+/// Dust turns `Hot` this far above rest (mV), so the cable's sub-0.05 mV drift at rest
+/// never tints the resting dust.
+const HOT_FROM_MV: f64 = 0.5;
+const SALT_DUST: u64 = 0xA1_D057;
+const SALT_NUCLEUS: u64 = 0x5EED_0C1E;
+const SALT_BOUTON: u64 = 0xB0_7700;
+/// The nucleus: a `Dim` stipple atom of σ = `NUCLEUS_SIGMA` soma radii, with a
+/// one-dot nucleolus.
+const NUCLEUS: Ink = Ink::new(Role::Dim, 95);
+const NUCLEUS_SIGMA: f64 = 0.28;
+const NUCLEOLUS: Ink = Ink::new(Role::Structure, 170);
+/// Boutons: `Structure` stipple atoms that flash `Hot` for `BOUTON_FLASH` s when a spike
+/// arrives.
+const BOUTON: Ink = Ink::new(Role::Structure, 120);
+const BOUTON_HOT: Ink = Ink::new(Role::Hot, 240);
+const BOUTON_SIGMA: f64 = 1.3;
+const BOUTON_FLASH: f64 = 0.4;
+/// Ion flux: Na⁺ where dV/dt > `NA_DVDT`, K⁺ where dV/dt < `K_DVDT` (mV/ms), each
+/// living `ION_LIFE` s, at most `ION_CAP` at once.
+const ION_CAP: usize = 160;
+const ION_LIFE: f64 = 0.25;
+const NA_DVDT: f64 = 20.0;
+const K_DVDT: f64 = -10.0;
+/// Chance per frame that a compartment past a flux threshold emits one ion.
+const NA_RATE: f64 = 0.4;
+const K_RATE: f64 = 0.15;
+/// Where the soma outline leaves its circle for the hillock (rad above the axis), and
+/// how far past the soma centre (in radii) the hillock meets the axon membranes.
+const HILLOCK_ANGLE: f64 = 0.85;
+const HILLOCK_REACH: f64 = 1.75;
 
 /// Stimulus current per end, μA/cm².
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -350,56 +379,47 @@ fn up_crossing(before: f64, after: f64) -> Option<f64> {
     (before < 0.0 && after >= 0.0).then(|| -before / (after - before))
 }
 
-/// Membrane potential as a `Div` ink (SPEC-002 Inks): square-root transfer above rest,
-/// so millivolt-scale responses show; below rest a 3/2-power one, so the shallow tail of
-/// the after-hyperpolarisation stays near the background and only the deep, recent
-/// wake (≈ −0.48 at the −75.9 mV minimum) reads as cool.
-fn potential_ink(v: f64) -> Ink {
+/// The membrane potential on SPEC-002's signed scale: `√((V − V_rest)/105 mV)` above
+/// rest (≈ +0.99 at the peak; the square root keeps millivolt-scale responses visible),
+/// `−0.55·((V_rest − V)/12 mV)^1.5` below it (≈ −0.48 at the −75.9 mV minimum, so only
+/// the deep, recent after-hyperpolarisation reads).
+fn potential_x(v: f64) -> f64 {
     let d = v - V_REST;
-    let x = if d >= 0.0 {
+    if d >= 0.0 {
         (d / 105.0).sqrt()
     } else {
         -0.55 * (-d / 12.0).powf(1.5)
-    };
-    ink::div(x)
-}
-
-/// `potential_ink` for a filled region (axoplasm, soma), left empty within a hair of
-/// rest, where the `Div` centre is indistinguishable from the background anyway. A
-/// resting axon then reads as its two membrane lines, and the half-block glyphs change
-/// as a spike passes, not only their colours.
-fn fill_ink(v: f64) -> Ink {
-    let i = potential_ink(v);
-    let quiet = if i.level < 128 {
-        128 - i.level <= FILL_REST_BELOW
-    } else {
-        i.level - 128 <= FILL_REST_ABOVE
-    };
-    if quiet { Ink::BLANK } else { i }
-}
-
-/// `potential_ink`, except that near rest a drawn outline shows instead (`Div` rest sits
-/// on the background colour).
-fn outline_or_potential(v: f64, outline: Ink) -> Ink {
-    let i = potential_ink(v);
-    if spike_char(i.level).is_some() {
-        i
-    } else {
-        outline
     }
 }
 
-/// ASCII for a `Div` level away from rest (SPEC-002 ASCII thresholds), `None` near rest.
-fn spike_char(level: u8) -> Option<char> {
-    match level {
-        242.. => Some('@'),
-        211.. => Some('#'),
-        145.. => Some('+'),
-        // V ≲ −74 mV: the deep, recent after-hyperpolarisation only. The AHP stays
-        // below −71.5 mV for 6 ms (1.5 s on screen, two thirds of the axon); below
-        // −74 mV it covers about a third, so the resting `=` frames each pulse.
-        ..84 => Some('~'),
-        _ => None,
+/// The ion dust at `v` (SPEC-002 Look (M20)): stipple density and ink. 0.03 at rest;
+/// `0.03 + 0.50·x` in `Hot` above it and `0.03 + 0.30·|x|` in `Cold` below. A resting
+/// axon is sparse cool dust, a spike a dense bright puff, its wake a cool trail.
+pub(crate) fn dust(v: f64) -> (f64, Ink) {
+    let x = potential_x(v);
+    if x >= 0.0 {
+        let ink = if v - V_REST > HOT_FROM_MV {
+            Ink::new(Role::Hot, ink::level(140.0 + 115.0 * x))
+        } else {
+            DUST_REST
+        };
+        (DUST_REST_P + 0.50 * x, ink)
+    } else {
+        let ink = Ink::new(Role::Cold, ink::level(70.0 - 260.0 * x));
+        (DUST_REST_P - 0.30 * x, ink)
+    }
+}
+
+/// A terminal-arbor dot at `v`: `Hot` while well depolarised, `Cold` in the deep wake,
+/// otherwise the thread's outline.
+fn arbor_ink(v: f64) -> Ink {
+    let x = potential_x(v);
+    if x > 0.25 {
+        Ink::new(Role::Hot, ink::level(140.0 + 115.0 * x))
+    } else if x < -0.25 {
+        Ink::new(Role::Cold, ink::level(70.0 - 260.0 * x))
+    } else {
+        ARBOR
     }
 }
 
@@ -413,34 +433,6 @@ fn trace_y([_, y0, _, y1]: [i32; 4], mv: f64) -> f64 {
     bottom - f.clamp(0.0, 1.0) * (bottom - top)
 }
 
-/// The ASCII stroke for a segment between two dot positions (dots are square): `-`
-/// below 0.55 rise per run (≳ 3.6 cells per row), `|` above 2.5, else `/` or a
-/// backslash by the screen direction.
-fn slope_glyph(a: [f64; 2], b: [f64; 2]) -> char {
-    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-    if dy.abs() < 0.55 * dx.abs() {
-        '-'
-    } else if dy.abs() > 2.5 * dx.abs() {
-        '|'
-    } else if (dx > 0.0) == (dy > 0.0) {
-        '\\'
-    } else {
-        '/'
-    }
-}
-
-/// Cells on the segment between two dot positions (2×4 dots per cell).
-fn cell_line(a: [f64; 2], b: [f64; 2]) -> impl Iterator<Item = (i32, i32)> {
-    let cell = |p: [f64; 2]| {
-        (
-            (p[0] / f64::from(Dots::CELL_W)).floor() as i32,
-            (p[1] / f64::from(Dots::CELL_H)).floor() as i32,
-        )
-    };
-    let ((x0, y0), (x1, y1)) = (cell(a), cell(b));
-    geom::line(x0, y0, x1, y1)
-}
-
 /// V at fractional compartment position `c`, linearly interpolated.
 fn v_at(v: &[f64; N], c: f64) -> f64 {
     let c = c.clamp(0.0, (N - 1) as f64);
@@ -448,22 +440,104 @@ fn v_at(v: &[f64; N], c: f64) -> f64 {
     ease::lerp(v[i], v[i + 1], c - i as f64)
 }
 
-/// A dendrite segment in dots.
+/// The quadratic Bézier from `a` to `b` pulled towards `c`, at `t`.
+fn quad(a: [f64; 2], c: [f64; 2], b: [f64; 2], t: f64) -> [f64; 2] {
+    let u = 1.0 - t;
+    let (wa, wc, wb) = (u * u, 2.0 * u * t, t * t);
+    [
+        wa * a[0] + wc * c[0] + wb * b[0],
+        wa * a[1] + wc * c[1] + wb * b[1],
+    ]
+}
+
+/// The cubic Bézier with control points `p`, at `t`.
+fn cubic(p: [[f64; 2]; 4], t: f64) -> [f64; 2] {
+    let u = 1.0 - t;
+    let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+    [
+        w[0] * p[0][0] + w[1] * p[1][0] + w[2] * p[2][0] + w[3] * p[3][0],
+        w[0] * p[0][1] + w[1] * p[1][1] + w[2] * p[2][1] + w[3] * p[3][1],
+    ]
+}
+
+/// Length of the polyline through `pts`, an upper bound on a Bézier's length.
+fn polyline_len(pts: &[[f64; 2]]) -> f64 {
+    pts.windows(2)
+        .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+        .sum()
+}
+
+/// Walk the curve `at(t)`, `t ∈ [0, 1]`, sampled at `n + 1` points, as a connected
+/// 1-px thread: `f(x, y, t)` once per dot, consecutive dots 8-adjacent.
+fn walk(n: usize, at: impl Fn(f64) -> [f64; 2], mut f: impl FnMut(i32, i32, f64)) {
+    let round = |p: [f64; 2]| (p[0].round() as i32, p[1].round() as i32);
+    let mut prev = round(at(0.0));
+    f(prev.0, prev.1, 0.0);
+    let n = n.max(1);
+    for k in 1..=n {
+        let t = k as f64 / n as f64;
+        let p = round(at(t));
+        if p != prev {
+            for (x, y) in geom::line(prev.0, prev.1, p.0, p.1).skip(1) {
+                f(x, y, t);
+            }
+            prev = p;
+        }
+    }
+}
+
+/// Samples for a curve whose control polygon is `pts`: about two per dot of length.
+fn samples(pts: &[[f64; 2]]) -> usize {
+    (2.0 * polyline_len(pts)).ceil() as usize + 1
+}
+
+/// Every dot of the soma's teardrop outline and the two axon membranes, in dots: a
+/// circle of radius `R` whose right side leaves at `HILLOCK_ANGLE` and tapers along a
+/// cubic Bézier into the axon hillock, meeting each membrane row at `xj` without a gap,
+/// then the membranes on to the trunk's end. Dots may repeat.
+fn soma_outline(g: &Geo, mut f: impl FnMut(i32, i32)) {
+    let [sx, sy, r] = g.soma;
+    let (s, c) = HILLOCK_ANGLE.sin_cos_det();
+    let a = 0.5 * f64::from(g.lb - g.ut);
+    let arc = |th: f64| {
+        let (s, c) = th.sin_cos_det();
+        [sx + r * c, sy - r * s]
+    };
+    let n = (4.0 * PI * r).ceil() as usize + 4;
+    walk(
+        n,
+        |t| arc(ease::lerp(HILLOCK_ANGLE, 2.0 * PI - HILLOCK_ANGLE, t)),
+        |x, y, _| f(x, y),
+    );
+    for (side, row) in [(-1.0, g.ut), (1.0, g.lb)] {
+        let p0 = [sx + r * c, sy + side * r * s];
+        // The circle's tangent there, heading right and towards the axis.
+        let t0 = [s, -side * c];
+        let p3 = [g.xj, sy + side * a];
+        let (k0, k1) = (0.4 * r, 0.5 * (g.xj - p0[0]).max(0.0));
+        let p = [
+            p0,
+            [p0[0] + k0 * t0[0], p0[1] + k0 * t0[1]],
+            [p3[0] - k1, p3[1]],
+            p3,
+        ];
+        walk(samples(&p), |t| cubic(p, t), |x, y, _| f(x, y));
+        for (x, y) in geom::line(g.xj.round() as i32, row, g.x1 as i32, row) {
+            f(x, y);
+        }
+    }
+}
+
+/// A dendrite thread in dots: a quadratic Bézier from `a` to `b` bowed by `ctrl`.
+// The drawing is baked into `art`; the segments stay for the AP-A9 and AP-A13 checks.
+#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy)]
 struct Seg {
     a: [f64; 2],
+    ctrl: [f64; 2],
     b: [f64; 2],
     depth: usize,
     ink: Ink,
-}
-
-/// A terminal-arbor segment in dots, with the compartment positions at its two ends.
-#[derive(Debug, Clone, Copy, Default)]
-struct ArborSeg {
-    a: [f64; 2],
-    b: [f64; 2],
-    c0: f64,
-    c1: f64,
 }
 
 /// One arbor dot and the compartment position whose V it shows.
@@ -472,6 +546,22 @@ struct ArborDot {
     x: i32,
     y: i32,
     c: f64,
+}
+
+/// One dot of the axoplasm or soma interior, stippled by the V at compartment `c`.
+#[derive(Debug, Clone, Copy)]
+struct BodyDot {
+    x: i32,
+    y: i32,
+    c: f32,
+}
+
+/// One dot of the static drawing: outline, membranes, nucleus, dendrites, lead.
+#[derive(Debug, Clone, Copy)]
+struct ArtDot {
+    x: i32,
+    y: i32,
+    ink: Ink,
 }
 
 /// One decimated oscilloscope column, in dots (y grows downwards): the span it covers,
@@ -494,16 +584,41 @@ struct Vesicle {
     age: f64,
 }
 
+/// A Na⁺ (`na`) or K⁺ ion crossing the membrane at compartment `c`, in dots.
+#[derive(Debug, Clone, Copy)]
+struct Ion {
+    x: f64,
+    y: f64,
+    vx: f64,
+    vy: f64,
+    age: f64,
+    /// The emitting compartment (AP-A12 checks its dV/dt).
+    #[cfg_attr(not(test), allow(dead_code))]
+    c: usize,
+    na: bool,
+}
+
+/// Na⁺ ions are `Hot`, K⁺ ions `Cold`, both fading over their 0.25 s.
+fn ion_ink(ion: &Ion) -> Ink {
+    let fade = (1.0 - ion.age / ION_LIFE).clamp(0.0, 1.0);
+    let level = ink::level(130.0 + 110.0 * fade);
+    Ink::new(if ion.na { Role::Hot } else { Role::Cold }, level)
+}
+
 /// One dendrite segment in normalised tree space, drawn from `ctx.rng` once and fitted
 /// to the space left of the soma on every resize. It ends at the node `(angle, rho)`:
 /// polar about the soma centre, `rho` soma radii beyond the rim. A primary starts on
-/// the rim at its own angle; every other segment starts at its parent's end.
+/// the rim at its own angle; every other segment starts at its parent's end. `wedge`
+/// is the angular wedge its subtree keeps to, and `bow` how far (as a share of its
+/// length) its thread bows towards the wedge's free side.
 #[derive(Debug, Clone, Copy, Default)]
 struct Branch {
     parent: Option<usize>,
     angle: f64,
     rho: f64,
     depth: usize,
+    wedge: (f64, f64),
+    bow: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -518,7 +633,8 @@ impl Tree {
     /// wedge of the cone, and every fork splits its wedge at the parent's angle between
     /// its two children, so subtrees never cross: each lies in its own convex wedge
     /// about the soma centre. Every branch forks twice and about half the twigs once
-    /// more (21 + ~6 segments).
+    /// more (21 + ~6 segments). The bows are drawn after the topology, so they leave it
+    /// as it was before the threads were curved.
     fn grow(rng: &mut impl Rng) -> Self {
         let mut t = Tree {
             branches: [Branch::default(); DENDRITES],
@@ -539,7 +655,7 @@ impl Tree {
                 parent: None,
                 angle: PI + s,
                 rho: DENDRITE_REACH[0] * rng.random_range(0.8..1.2),
-                depth: 0,
+                ..Branch::default()
             });
         }
         let mut i = 0;
@@ -564,10 +680,15 @@ impl Tree {
                         angle: (b.angle + side * turn).clamp(a + pad, z - pad),
                         rho: b.rho + reach,
                         depth: b.depth + 1,
+                        ..Branch::default()
                     });
                 }
             }
             i += 1;
+        }
+        for (b, &w) in t.branches[..t.len].iter_mut().zip(&wedges) {
+            b.wedge = w;
+            b.bow = rng.random_range(0.08..0.15);
         }
         t
     }
@@ -603,7 +724,7 @@ struct Layout {
     trunk: (i32, i32),
     /// Soma centre and radius.
     soma: [f64; 3],
-    /// Bouton pixel blocks: left column, top row and height.
+    /// Bouton boxes: left column, top row and height.
     boutons: [[i32; 3]; 5],
     bouton_w: i32,
     /// Cells of the electrode and the two stimulus markers.
@@ -623,7 +744,7 @@ impl Layout {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
         let full = w >= 24.0 && h >= 8.0;
         if !full {
-            // One pixel row through the middle, spanning the width.
+            // One cell row through the middle, spanning the width.
             return Self {
                 tube: 2 * (i32::from(size.height()) / 2),
                 trunk: (0, i32::from(size.width()) - 1),
@@ -643,12 +764,12 @@ impl Layout {
         let cy = f64::from(tube) + half;
         let r = (0.22 * h).min(0.075 * w).max(3.5);
         let cx = (0.2 * w).max(r + 3.0);
-        // The trunk leaves the soma where the tube's outer membrane meets the rim.
+        // The trunk's compartments start where the tube's outer membrane meets the rim.
         let x0 = (cx + (r * r - half * half).max(0.0).sqrt()).floor() as i32;
         let x1 = (0.84 * w) as i32;
         let xb = (0.95 * w) as i32;
-        // Boutons on whole cells, symmetric about the axon: the middle one is as tall
-        // as the tube, the others `gap` cells above and below it.
+        // Boutons on whole cells, symmetric about the axon: the middle one centred on
+        // it, the others `gap` cells above and below it.
         let gap = ((0.07 * h).round() as i32).max(1);
         let bouton_w = if w >= 120.0 { 2 } else { 1 };
         let last = row + rows - 1;
@@ -710,41 +831,69 @@ impl Layout {
             lead,
         }
     }
+}
 
-    /// Whether cell `(x, y)` is part of the axon (drawn `=` at rest in ASCII).
-    fn on_axon(&self, x: i32, y: i32) -> bool {
-        let rows = if self.full {
-            self.tube / 2..=(self.tube + self.fill_px + 1) / 2
-        } else {
-            self.tube / 2..=self.tube / 2
-        };
-        rows.contains(&y) && (self.trunk.0..=self.trunk.1).contains(&x)
+/// The neuron's geometry in dots (dot `j` centred at `j`; pixel `p` spans dots `2p` and
+/// `2p + 1`), derived from the `Layout`.
+#[derive(Debug, Clone, Copy, Default)]
+struct Geo {
+    /// Dot rows of the upper and lower axon membranes, and the axis midway between.
+    ut: i32,
+    lb: i32,
+    axis: f64,
+    /// First and last dot column of the trunk, and the compartment position at its end.
+    x0: f64,
+    x1: f64,
+    end_c: f64,
+    /// Soma centre and radius; the hillock's join with the membranes; the nucleus'
+    /// centre and σ.
+    soma: [f64; 3],
+    xj: f64,
+    nucleus: [f64; 3],
+}
+
+impl Geo {
+    fn new(l: &Layout) -> Self {
+        if !l.full {
+            // One cell row: membranes on its top and bottom dot rows, two of axoplasm.
+            let row = l.tube / 2;
+            return Self {
+                ut: 4 * row,
+                lb: 4 * row + 3,
+                axis: f64::from(4 * row) + 1.5,
+                x0: 0.0,
+                x1: f64::from(2 * l.trunk.1 + 1),
+                end_c: (N - 1) as f64,
+                ..Self::default()
+            };
+        }
+        let ut = 2 * l.tube + 1;
+        let lb = 2 * (l.tube + l.fill_px + 1);
+        let [cx, cy, r] = l.soma;
+        // `2·cy − ½` is the axis, midway between the membrane rows.
+        let (sx, sy, rr) = (2.0 * cx - 0.5, 2.0 * cy - 0.5, 2.0 * r);
+        let x1 = f64::from(2 * l.trunk.1 + 1);
+        Self {
+            ut,
+            lb,
+            axis: sy,
+            x0: f64::from(2 * l.trunk.0),
+            x1,
+            end_c: TRUNK_END,
+            soma: [sx, sy, rr],
+            xj: (sx + HILLOCK_REACH * rr).min(x1 - 4.0),
+            nucleus: [sx - 0.1 * rr, sy, NUCLEUS_SIGMA * rr],
+        }
     }
 
-    /// Whether cell `(x, y)` lies in the soma's bounding box (full neuron only).
-    fn near_soma(&self, x: i32, y: i32) -> bool {
-        let [cx, cy, r] = self.soma;
-        let cells_x = (cx - r).floor() as i32..=(cx + r).ceil() as i32;
-        let cells_y = ((cy - r) / 2.0).floor() as i32..=((cy + r) / 2.0).ceil() as i32;
-        self.full && cells_x.contains(&x) && cells_y.contains(&y)
+    /// Compartment position shown at dot column `x` (clamped to the trunk).
+    fn col_c(&self, x: f64) -> f64 {
+        ((x - self.x0) / (self.x1 - self.x0).max(1.0)).clamp(0.0, 1.0) * self.end_c
     }
 
-    /// The soma at cell resolution for ASCII: `Some(true)` on its rim, `Some(false)`
-    /// inside, `None` outside. The outline is the ellipse of radii `r` × `r/2` cells
-    /// (cells are two pixels tall); rim cells are those inside with a 4-neighbour
-    /// outside, which gives a closed outline without gaps or bumps.
-    fn soma_cell(&self, x: i32, y: i32) -> Option<bool> {
-        let [cx, cy, r] = self.soma;
-        let inside = |x: i32, y: i32| {
-            let dx = (f64::from(x) + 0.5 - cx) / r;
-            let dy = (f64::from(y) + 0.5 - 0.5 * cy) / (0.5 * r);
-            dx * dx + dy * dy <= 1.0
-        };
-        inside(x, y).then(|| {
-            [(-1, 0), (1, 0), (0, -1), (0, 1)]
-                .iter()
-                .any(|&(dx, dy)| !inside(x + dx, y + dy))
-        })
+    /// Dot column of compartment position `c`.
+    fn col_x(&self, c: f64) -> f64 {
+        self.x0 + c / self.end_c * (self.x1 - self.x0)
     }
 }
 
@@ -757,6 +906,11 @@ struct ActionPotential {
     /// V at the electrode, one sample per `TRACE_EVERY` sub-steps.
     trace: Trail<f32>,
     vesicles: ParticlePool<Vesicle>,
+    ions: ParticlePool<Ion>,
+    /// dV/dt (mV/ms) of every compartment over the latest update.
+    dvdt: [f64; N],
+    /// Seconds left of the boutons' `Hot` flash.
+    flash: f64,
     timeline: Timeline,
     /// Sub-steps run so far: the scene clock.
     step: u64,
@@ -764,21 +918,20 @@ struct ActionPotential {
     owed: f64,
     tree: Option<Tree>,
     layout: Layout,
-    /// Compartment position of every trunk pixel column.
-    trunk_c: Vec<f64>,
+    geo: Geo,
+    /// The static drawing, the stippled interior, the arbor and the bouton centres.
+    art: Vec<ArtDot>,
+    body: Vec<BodyDot>,
     arbor: Vec<ArborDot>,
-    arbor_segs: [ArborSeg; ARBOR_SEGS],
+    boutons: [[f64; 2]; 5],
     dendrites: Vec<Seg>,
     /// The decimated trace of the latest rasterisation (the first `n_trace_cols`).
     trace_cols: [TraceCol; TRACE_LEN],
     n_trace_cols: usize,
     /// Whether the trace window holds a spike (a sample above −20 mV).
     spike_in_window: bool,
-    /// Rasterised in `update`/`resize`; `render` only blits. `art` holds the dendrites,
-    /// the arbor and the trace, which ASCII draws as line art instead.
-    pixels: Pixels,
+    /// Everything but the markers and text, rasterised in `prepare`; `render` blits it.
     dots: Dots,
-    art: Dots,
     cells: Size,
 }
 
@@ -794,21 +947,24 @@ impl Default for ActionPotential {
             meter: VelocityMeter::default(),
             trace,
             vesicles: ParticlePool::with_capacity(5 * VESICLES_PER_BOUTON),
+            ions: ParticlePool::with_capacity(ION_CAP),
+            dvdt: [0.0; N],
+            flash: 0.0,
             timeline: Timeline::new(&BEATS),
             step: 0,
             owed: 0.0,
             tree: None,
             layout: Layout::default(),
-            trunk_c: Vec::new(),
+            geo: Geo::default(),
+            art: Vec::new(),
+            body: Vec::new(),
             arbor: Vec::new(),
-            arbor_segs: [ArborSeg::default(); ARBOR_SEGS],
+            boutons: [[0.0; 2]; 5],
             dendrites: Vec::new(),
             trace_cols: [TraceCol::default(); TRACE_LEN],
             n_trace_cols: 0,
             spike_in_window: false,
-            pixels: Pixels::default(),
             dots: Dots::default(),
-            art: Dots::default(),
             cells: Size::new(1, 1),
         }
     }
@@ -842,20 +998,20 @@ impl ActionPotential {
         }
     }
 
-    /// A puff of transmitter from every bouton, drifting across the cleft (dots).
+    /// The spike reaches the terminals: the boutons flash and release a puff of
+    /// transmitter that drifts across the cleft (dots).
     fn release(&mut self, rng: &mut impl Rng) {
+        self.flash = BOUTON_FLASH;
         if !self.layout.full {
             return;
         }
-        for b in self.layout.boutons {
-            let x = f64::from(2 * (b[0] + self.layout.bouton_w));
-            let y = f64::from(2 * b[1] + b[2]);
+        for [bx, by] in self.boutons {
             for _ in 0..VESICLES_PER_BOUTON {
                 let (sin, cos) = rng.random_range(-1.0..1.0f64).sin_cos_det();
                 let speed = rng.random_range(5.0..10.0);
                 self.vesicles.spawn(Vesicle {
-                    x,
-                    y,
+                    x: bx + 2.0,
+                    y: by,
                     vx: speed * cos,
                     vy: speed * sin,
                     age: 0.0,
@@ -864,57 +1020,228 @@ impl ActionPotential {
         }
     }
 
+    /// Ion flux (SPEC-002 Look (M20)): where a trunk compartment depolarises fast a Na⁺
+    /// ion enters from outside the membrane, drifting to the axis; where it repolarises
+    /// fast a K⁺ ion leaves from inside, drifting out across the membrane.
+    fn emit_ions(&mut self, rng: &mut impl Rng) {
+        if !self.layout.full {
+            return;
+        }
+        let g = self.geo;
+        let a = 0.5 * f64::from(g.lb - g.ut);
+        for i in 0..=TRUNK_END as usize {
+            let d = self.dvdt[i];
+            let na = d > NA_DVDT;
+            if !na && d >= K_DVDT {
+                continue;
+            }
+            if !rng.random_bool(if na { NA_RATE } else { K_RATE }) {
+                continue;
+            }
+            let x = g.col_x(i as f64) + rng.random_range(-1.0..1.0);
+            // Which membrane, as the direction away from the axis.
+            let out = if rng.random_bool(0.5) { -1.0 } else { 1.0 };
+            let membrane = g.axis + out * a;
+            let (y, vy) = if na {
+                (membrane + 2.0 * out, -out * (a + 1.0) / ION_LIFE)
+            } else {
+                (membrane - out, out * 4.0 / ION_LIFE)
+            };
+            self.ions.spawn(Ion {
+                x,
+                y,
+                vx: rng.random_range(-2.0..2.0),
+                vy,
+                age: 0.0,
+                c: i,
+                na,
+            });
+        }
+    }
+
     fn rebuild_geometry(&mut self) {
         let l = self.layout;
-        self.trunk_c.clear();
-        let span = f64::from((l.trunk.1 - l.trunk.0).max(1));
-        let end = if l.full { TRUNK_END } else { (N - 1) as f64 };
-        self.trunk_c
-            .extend((l.trunk.0..=l.trunk.1).map(|x| f64::from(x - l.trunk.0) / span * end));
-
+        let g = Geo::new(&l);
+        self.geo = g;
+        self.art.clear();
+        self.body.clear();
         self.arbor.clear();
         self.dendrites.clear();
         if !l.full {
+            for x in 0..=g.x1 as i32 {
+                for y in [g.ut, g.lb] {
+                    self.art.push(ArtDot {
+                        x,
+                        y,
+                        ink: MEMBRANE,
+                    });
+                }
+                let c = g.col_c(f64::from(x)) as f32;
+                for y in g.ut + 1..g.lb {
+                    self.body.push(BodyDot { x, y, c });
+                }
+            }
             return;
         }
-        // Arbor: trunk end → three branches; the outer two fork into two boutons each.
-        // Primaries cover 9.2–9.6 cm, the forks 9.6–10 cm; the middle branch all of it.
-        let cy = l.soma[1];
-        let dot = |x: f64, y: f64| [2.0 * x, 2.0 * y];
-        let start = dot(f64::from(l.trunk.1) + 0.5, cy);
-        let tip = |b: [i32; 3]| dot(f64::from(b[0]), f64::from(b[1]) + 0.5 * f64::from(b[2]));
-        let fork =
-            |a: [f64; 2], b: [f64; 2]| [a[0] + 0.45 * (b[0] - a[0]), a[1] + 0.6 * (b[1] - a[1])];
-        let tips = l.boutons.map(tip);
-        let (up, down) = (fork(start, tips[0]), fork(start, tips[4]));
-        let mid_c = 0.5 * (TRUNK_END + (N - 1) as f64);
-        let end_c = (N - 1) as f64;
-        let seg = |a, b, c0, c1| ArborSeg { a, b, c0, c1 };
-        self.arbor_segs = [
-            seg(start, up, TRUNK_END, mid_c),
-            seg(start, down, TRUNK_END, mid_c),
-            seg(start, tips[2], TRUNK_END, end_c),
-            seg(up, tips[0], mid_c, end_c),
-            seg(up, tips[1], mid_c, end_c),
-            seg(down, tips[3], mid_c, end_c),
-            seg(down, tips[4], mid_c, end_c),
-        ];
-        for ArborSeg { a, b, c0, c1 } in self.arbor_segs {
-            let pts = geom::line(a[0] as i32, a[1] as i32, b[0] as i32, b[1] as i32);
-            let len = (b[0] - a[0]).abs().max((b[1] - a[1]).abs()).max(1.0);
-            for (k, (x, y)) in pts.enumerate() {
-                let c = c0 + (c1 - c0) * (k as f64 / len).min(1.0);
-                self.arbor.push(ArborDot { x, y, c });
+        if let Some([x, top, bottom, end]) = l.lead {
+            // Every other dot: a faint dotted wire. The run along the baseline shares
+            // its dot row, so the wire reads as the scope's input line.
+            for y in (4 * top..4 * bottom + 4).filter(|y| y % 2 == 1) {
+                self.art.push(ArtDot {
+                    x: 2 * x,
+                    y,
+                    ink: LEAD_INK,
+                });
+            }
+            if let Some(panel) = l.panel {
+                let y = trace_y(panel, V_REST).round() as i32;
+                for dx in (2 * x + 1..2 * end + 2).step_by(2) {
+                    self.art.push(ArtDot {
+                        x: dx,
+                        y,
+                        ink: LEAD_INK,
+                    });
+                }
             }
         }
+        self.build_soma();
+        self.build_arbor();
+        self.build_dendrites();
+    }
 
-        // Dendrites: scale each primary's subtree as large as fits left of, above or
-        // below the soma: a node `(angle, rho)` sits `r + k·rho` from the soma centre.
-        // Subtrees keep to their own wedges, so scaling them apart keeps the tree
-        // planar; the up and down ones may grow up to 1.6× the tightest, since terminal
-        // rows are coarse and the room is mostly above and below.
+    /// The teardrop outline and membranes, the nucleus, and the interior they enclose:
+    /// a 4-connected flood from the soma centre, bounded by the outline and the
+    /// membranes, up to the trunk's end.
+    fn build_soma(&mut self) {
+        let g = self.geo;
+        let [sx, sy, r] = g.soma;
+        let dots = Dots::new(self.cells).dot_size();
+        let (bx0, bx1) = (((sx - r).floor() as i32 - 2).max(0), g.x1 as i32);
+        let by0 = ((sy - r).floor() as i32 - 2).max(0);
+        let by1 = ((sy + r).ceil() as i32 + 2).min(i32::from(dots.height()) - 1);
+        let bw = (bx1 - bx0 + 1).max(0) as usize;
+        let bh = (by1 - by0 + 1).max(0) as usize;
+        let mut seen = vec![false; bw * bh];
+        let idx = |x: i32, y: i32| {
+            ((bx0..=bx1).contains(&x) && (by0..=by1).contains(&y))
+                .then(|| (y - by0) as usize * bw + (x - bx0) as usize)
+        };
+        let art = &mut self.art;
+        soma_outline(&g, |x, y| {
+            art.push(ArtDot {
+                x,
+                y,
+                ink: MEMBRANE,
+            });
+            if let Some(i) = idx(x, y) {
+                seen[i] = true;
+            }
+        });
+        let [nx, ny, sigma] = g.nucleus;
+        let clear = (1.5 * sigma).powi(2);
+        let start = (sx.round() as i32, sy.round() as i32);
+        let mut todo = Vec::new();
+        if let Some(i) = idx(start.0, start.1)
+            && !seen[i]
+        {
+            seen[i] = true;
+            todo.push(start);
+        }
+        while let Some((x, y)) = todo.pop() {
+            let (dx, dy) = (f64::from(x) - nx, f64::from(y) - ny);
+            if dx * dx + dy * dy > clear {
+                let c = g.col_c(f64::from(x)) as f32;
+                self.body.push(BodyDot { x, y, c });
+            }
+            for (ox, oy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let (x, y) = (x + ox, y + oy);
+                if let Some(i) = idx(x, y)
+                    && !seen[i]
+                {
+                    seen[i] = true;
+                    todo.push((x, y));
+                }
+            }
+        }
+        // The nucleus: a Gaussian stipple atom (as `Dots::stipple_puff`), centre always
+        // lit, with a one-dot nucleolus.
+        let reach = (3.0 * sigma).ceil() as i32;
+        let (cx, cy) = (nx.round() as i32, ny.round() as i32);
+        for y in cy - reach..=cy + reach {
+            for x in cx - reach..=cx + reach {
+                let (dx, dy) = (f64::from(x) - nx, f64::from(y) - ny);
+                let p = 0.6 * (-(dx * dx + dy * dy) / (2.0 * sigma * sigma)).exp();
+                if (x, y) == (cx, cy) || raster::stipple_keep(SALT_NUCLEUS, x, y, p) {
+                    self.art.push(ArtDot { x, y, ink: NUCLEUS });
+                }
+            }
+        }
+        self.art.push(ArtDot {
+            x: cx + 1,
+            y: cy - 1,
+            ink: NUCLEOLUS,
+        });
+    }
+
+    /// The terminal arbor: the trunk end forks into three curved threads, the outer two
+    /// forking again, each ending at a bouton. Primaries cover 9.2–9.6 cm, the forks
+    /// 9.6–10 cm; the middle branch all of it.
+    fn build_arbor(&mut self) {
+        let (l, g) = (self.layout, self.geo);
+        self.boutons = l.boutons.map(|b| {
+            [
+                2.0 * f64::from(b[0]) + f64::from(l.bouton_w) - 0.5,
+                2.0 * f64::from(b[1]) + f64::from(b[2]) - 0.5,
+            ]
+        });
+        let start = [g.x1 + 1.0, g.axis];
+        let tips = self.boutons.map(|b| [b[0] - 1.0, b[1]]);
+        let fork =
+            |a: [f64; 2], b: [f64; 2]| [a[0] + 0.45 * (b[0] - a[0]), a[1] + 0.6 * (b[1] - a[1])];
+        let (up, down) = (fork(start, tips[0]), fork(start, tips[4]));
+        // A primary leaves the trunk level and bends towards its fork; a twig leaves the
+        // fork steeply and arrives level at its bouton.
+        let primary = |a: [f64; 2], b: [f64; 2]| [a[0] + 0.6 * (b[0] - a[0]), a[1]];
+        let twig = |a: [f64; 2], b: [f64; 2]| [a[0] + 0.4 * (b[0] - a[0]), b[1]];
+        let middle = [0.5 * (start[0] + tips[2][0]), start[1]];
+        let mid_c = 0.5 * (TRUNK_END + (N - 1) as f64);
+        let end_c = (N - 1) as f64;
+        let segs = [
+            (start, primary(start, up), up, TRUNK_END, mid_c),
+            (start, primary(start, down), down, TRUNK_END, mid_c),
+            (start, middle, tips[2], TRUNK_END, end_c),
+            (up, twig(up, tips[0]), tips[0], mid_c, end_c),
+            (up, twig(up, tips[1]), tips[1], mid_c, end_c),
+            (down, twig(down, tips[3]), tips[3], mid_c, end_c),
+            (down, twig(down, tips[4]), tips[4], mid_c, end_c),
+        ];
+        for (a, ctrl, b, c0, c1) in segs {
+            let arbor = &mut self.arbor;
+            walk(
+                samples(&[a, ctrl, b]),
+                |t| quad(a, ctrl, b, t),
+                |x, y, t| {
+                    arbor.push(ArborDot {
+                        x,
+                        y,
+                        c: ease::lerp(c0, c1, t),
+                    });
+                },
+            );
+        }
+    }
+
+    /// Dendrites: scale each primary's subtree as large as fits left of, above or
+    /// below the soma: a node `(angle, rho)` sits `r + k·rho` from the soma centre.
+    /// Subtrees keep to their own wedges, so scaling them apart keeps the tree planar;
+    /// the up and down ones may grow up to 1.6× the tightest, since terminal rows are
+    /// coarse and the room is mostly above and below. Each segment is a thread bowed
+    /// towards its wedge's free side, with spines beyond depth 1.
+    fn build_dendrites(&mut self) {
         let Some(tree) = self.tree else { return };
+        let l = self.layout;
         let [cx, cy, r] = l.soma;
+        let dot = |x: f64, y: f64| [2.0 * x - 0.5, 2.0 * y - 0.5];
         let max_depth = 1 + FORK_RADIUS.iter().filter(|&&f| r >= f).count();
         let (lo, top, bottom) = (1.0, 1.0, 2.0 * f64::from(self.cells.height()) - 4.0);
         let mut root = [0; DENDRITES];
@@ -955,63 +1282,116 @@ impl ActionPotential {
                     .max(((e[1] - a[1]) / f64::from(Dots::CELL_H)).abs())
             };
             let short = cells(start, end) < MIN_TWIG_CELLS;
+            // A stretched primary stays straight: its children start on its radial line.
+            let mut bow = b.bow;
             match b.parent {
                 Some(p) if !drawn[p] || short || b.depth > max_depth => continue,
                 None if short => {
                     let (dx, dy) = (b.angle.cos_det(), b.angle.sin_det());
                     let reach = MIN_TWIG_CELLS / cells([0.0, 0.0], [dx, dy]);
                     end = [start[0] + reach * dx, start[1] + reach * dy];
+                    bow = 0.0;
                 }
                 _ => {}
             }
             drawn[i] = true;
+            // Bow towards the wedge's middle, the side the subtree leaves free.
+            let (dx, dy) = (end[0] - start[0], end[1] - start[1]);
+            let len = dx.hypot(dy).max(1e-9);
+            let normal = [-dy / len, dx / len];
+            let mid = [0.5 * (start[0] + end[0]), 0.5 * (start[1] + end[1])];
+            // A primary bows towards its wedge's middle; a fork's child away from its
+            // sibling, which lies across the parent's angle.
+            let away = match b.parent {
+                None => 0.5 * (b.wedge.0 + b.wedge.1),
+                Some(p) => 2.0 * b.angle - tree.branches[p].angle,
+            };
+            let free = node((away, b.rho), k);
+            let towards = (free[0] - mid[0]) * normal[0] + (free[1] - mid[1]) * normal[1];
+            let mut push = 2.0 * bow * len * if towards < 0.0 { -1.0 } else { 1.0 };
+            // The curve lies in the hull of its ends and control point: keeping the
+            // control point inside the segment's own wedge keeps subtrees in disjoint
+            // convex wedges, so threads still never cross.
+            let centre = dot(cx, cy);
+            let ctrl_at = |push: f64| [mid[0] + push * normal[0], mid[1] + push * normal[1]];
+            let in_wedge = |p: [f64; 2]| {
+                let a = (p[1] - centre[1])
+                    .atan2(p[0] - centre[0])
+                    .rem_euclid(2.0 * PI);
+                (b.wedge.0 + 0.02..=b.wedge.1 - 0.02).contains(&a)
+            };
+            for _ in 0..6 {
+                if in_wedge(ctrl_at(push)) {
+                    break;
+                }
+                push *= 0.5;
+            }
+            if !in_wedge(ctrl_at(push)) {
+                push = 0.0;
+            }
+            let ctrl = ctrl_at(push);
+            let ink = Ink::new(Role::Structure, DENDRITE_LEVEL[b.depth.min(3)]);
             self.dendrites.push(Seg {
                 a: start,
+                ctrl,
                 b: end,
                 depth: b.depth,
-                ink: Ink::new(Role::Structure, DENDRITE_LEVEL[b.depth.min(3)]),
+                ink,
             });
+            let art = &mut self.art;
+            let mut k = 0usize;
+            walk(
+                samples(&[start, ctrl, end]),
+                |t| quad(start, ctrl, end, t),
+                |x, y, _| {
+                    art.push(ArtDot { x, y, ink });
+                    if b.depth > 1 && k % SPINE_EVERY == SPINE_EVERY / 2 {
+                        let h = rng::hash01(((i as u64) << 32) ^ k as u64);
+                        let side = if h < 0.5 { -1.0 } else { 1.0 };
+                        let n = if (4.0 * h).fract() < 0.5 { 1 } else { 2 };
+                        for j in 1..=n {
+                            let s = side * f64::from(j);
+                            art.push(ArtDot {
+                                x: x + (s * normal[0]).round() as i32,
+                                y: y + (s * normal[1]).round() as i32,
+                                ink: SPINE,
+                            });
+                        }
+                    }
+                    k += 1;
+                },
+            );
         }
     }
 
-    /// Draw the current state into the pixel and dot rasters.
+    /// Draw the current state into the dot lattice.
     fn rasterise(&mut self) {
-        self.pixels.clear();
         self.dots.clear();
-        self.art.clear();
-        let l = self.layout;
-        if let Some([x, top, bottom, end]) = l.lead {
-            // Every other dot: a faint dotted wire. The run along the baseline shares
-            // its dot row, so the wire reads as the scope's input line.
-            for y in (4 * top..4 * bottom + 4).filter(|y| y % 2 == 1) {
-                self.art.set(2 * x, y, LEAD_INK);
-            }
-            if let Some(panel) = l.panel {
-                let base = trace_y(panel, V_REST).round() as i32;
-                for dx in (2 * x + 1..2 * end + 2).step_by(2) {
-                    self.art.set(dx, base, LEAD_INK);
-                }
-            }
+        for &ArtDot { x, y, ink } in &self.art {
+            self.dots.set(x, y, ink);
         }
-        if let Some(panel) = l.panel {
+        if let Some(panel) = self.layout.panel {
             self.draw_trace(panel);
         }
-        if l.full {
-            self.draw_soma();
-        }
         let v = &self.cable.v;
-        if !l.full {
-            for (x, &c) in (l.trunk.0..).zip(&self.trunk_c) {
-                self.pixels
-                    .set(x, l.tube, outline_or_potential(v_at(v, c), MEMBRANE));
-            }
+        for &BodyDot { x, y, c } in &self.body {
+            let (p, ink) = dust(v_at(v, f64::from(c)));
+            self.dots.stipple(x, y, p, SALT_DUST, ink);
+        }
+        if !self.layout.full {
             return;
         }
-        for &Seg { a, b, ink, .. } in &self.dendrites {
-            self.art.line(a[0], a[1], b[0], b[1], ink);
-        }
         for &ArborDot { x, y, c } in &self.arbor {
-            self.art.set(x, y, outline_or_potential(v_at(v, c), ARBOR));
+            self.dots.set(x, y, arbor_ink(v_at(v, c)));
+        }
+        let (ink, peak) = if self.flash > 0.0 {
+            (BOUTON_HOT, 1.6)
+        } else {
+            (BOUTON, 1.0)
+        };
+        for (i, [x, y]) in self.boutons.into_iter().enumerate() {
+            let salt = SALT_BOUTON + i as u64;
+            self.dots.stipple_puff(x, y, BOUTON_SIGMA, peak, salt, ink);
         }
         for p in self.vesicles.iter() {
             let fade = 1.0 - p.age / VESICLE_LIFE;
@@ -1021,34 +1401,8 @@ impl ActionPotential {
                 Ink::new(Role::Particle, (60.0 + 180.0 * fade) as u8),
             );
         }
-        for (x, &c) in (l.trunk.0..).zip(&self.trunk_c) {
-            let ink = fill_ink(v_at(v, c));
-            self.pixels.set(x, l.tube, MEMBRANE);
-            for y in l.tube + 1..=l.tube + l.fill_px {
-                self.pixels.set(x, y, ink);
-            }
-            self.pixels.set(x, l.tube + l.fill_px + 1, MEMBRANE);
-        }
-        let bouton = outline_or_potential(v[END], RIM);
-        for [x0, y0, height] in l.boutons {
-            for y in y0..y0 + height {
-                for x in x0..x0 + l.bouton_w {
-                    self.pixels.set(x, y, bouton);
-                }
-            }
-        }
-    }
-
-    fn draw_soma(&mut self) {
-        let [cx, cy, r] = self.layout.soma;
-        let fill = fill_ink(self.cable.v[0]);
-        for y in (cy - r).floor() as i32..=(cy + r).ceil() as i32 {
-            for x in (cx - r).floor() as i32..=(cx + r).ceil() as i32 {
-                let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
-                if d <= r {
-                    self.pixels.set(x, y, if d > r - 1.0 { RIM } else { fill });
-                }
-            }
+        for ion in self.ions.iter() {
+            self.dots.plot(ion.x, ion.y, ion_ink(ion));
         }
     }
 
@@ -1058,7 +1412,7 @@ impl ActionPotential {
         let [x0, _, x1, _] = panel;
         let base = trace_y(panel, V_REST).round() as i32;
         for x in (2 * x0..=2 * x1 + 1).step_by(3) {
-            self.art.set(x, base, TICK_INK);
+            self.dots.set(x, base, TICK_INK);
         }
         // One dot column per slice of samples, covering the span the slice reaches,
         // joined to the previous slice's last sample: one short line per column, and
@@ -1094,7 +1448,7 @@ impl ActionPotential {
         self.spike_in_window = peak > -20.0;
         for c in &self.trace_cols[..n] {
             let (x, top, bottom) = (f64::from(c.x), f64::from(c.top), f64::from(c.bottom));
-            self.art.line(x, top, x, bottom, TRACE_INK);
+            self.dots.line(x, top, x, bottom, TRACE_INK);
         }
     }
 
@@ -1103,7 +1457,13 @@ impl ActionPotential {
     /// one, `_` or `-` for a flat run in a cell's lower or upper half. The resting
     /// baseline shows as `.` ticks only where the trace has left it.
     fn draw_trace_ascii(&self, canvas: &mut Canvas, panel: [i32; 4]) {
-        let [x0, _, x1, _] = panel;
+        let [x0, y0, x1, y1] = panel;
+        // The braille trace's dot-count fallback would read as noise: clear it first.
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                canvas.put(x, y, Glyph::ascii(' '), Ink::BLANK);
+            }
+        }
         let base = trace_y(panel, V_REST).round() as i32 / 4;
         for x in (x0..=x1).step_by(2) {
             canvas.put(x, base, Glyph::ascii('.'), TICK_INK);
@@ -1132,76 +1492,6 @@ impl ActionPotential {
                 };
                 canvas.put(x, row, Glyph::ascii(glyph), TRACE_INK);
             }
-        }
-    }
-
-    /// The dendrites and the terminal arbor as ASCII line art (SPEC-002 ASCII): one
-    /// slope glyph per cell in the outline ink. Dendrites go shallowest first and never
-    /// overwrite a drawn cell, so a parent's stroke wins every junction and a fork
-    /// reads `\|/`, not a clump. An arbor cell above rest shows its voltage glyph
-    /// instead, except at the junction with the trunk; below rest the stroke stays and
-    /// only its `Div` colour carries the after-hyperpolarisation.
-    fn draw_line_art(&self, canvas: &mut Canvas) {
-        for &Seg { a, b, depth, ink } in &self.dendrites {
-            let glyph = slope_glyph(a, b);
-            // A child's first cell is its parent's last.
-            for (x, y) in cell_line(a, b).skip(usize::from(depth > 0)) {
-                if canvas.get(x, y).is_some_and(|c| c.ch == ' ') {
-                    canvas.put(x, y, Glyph::ascii(glyph), ink);
-                }
-            }
-        }
-        let v = &self.cable.v;
-        for (i, &ArborSeg { a, b, c0, c1 }) in self.arbor_segs.iter().enumerate() {
-            let glyph = slope_glyph(a, b);
-            let n = cell_line(a, b).count().max(2) - 1;
-            for (k, (x, y)) in cell_line(a, b).enumerate() {
-                // The first two cells of a primary sit on the trunk and at the fork.
-                let junction = i < 3 && k < 2;
-                let ink = potential_ink(v_at(v, ease::lerp(c0, c1, k as f64 / n as f64)));
-                match spike_char(ink.level) {
-                    Some(ch) if !junction && ink.level > 128 => {
-                        canvas.put(x, y, Glyph::ascii(ch), ink);
-                    }
-                    Some(_) => canvas.put(x, y, Glyph::ascii(glyph), ink),
-                    None => canvas.put(x, y, Glyph::ascii(glyph), ARBOR),
-                }
-            }
-        }
-    }
-
-    fn ascii_cell(&self, x: i32, y: i32, top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-        let l = &self.layout;
-        let div = [top, bottom]
-            .into_iter()
-            .filter(|i| i.role == Role::Div)
-            .max_by_key(|i| i.level.abs_diff(128));
-        let spike = div.and_then(|d| spike_char(d.level).map(|ch| (ch, d)));
-        let on_axon = l.on_axon(x, y);
-        if l.near_soma(x, y) && !on_axon {
-            // The soma at cell resolution: a rim derived from pixel pairs comes out
-            // with gaps and bumps, so the rim is its own ellipse of cells, drawn
-            // whatever the voltage, and only the cells inside it show the fill.
-            return match l.soma_cell(x, y) {
-                Some(true) => Some(('o', RIM)),
-                Some(false) => spike,
-                None => None,
-            };
-        }
-        match spike {
-            // A hyperpolarised bouton keeps its `o`; the cool `Div` colour carries the
-            // after-hyperpolarisation, as on the arbor strokes.
-            Some(('~', ink)) if !on_axon => return Some(('o', ink)),
-            Some(_) => return spike,
-            None => {}
-        }
-        let outline = [top, bottom]
-            .into_iter()
-            .find(|i| i.role == Role::Structure);
-        if on_axon {
-            Some(('=', outline.unwrap_or(MEMBRANE)))
-        } else {
-            outline.map(|o| ('o', o))
         }
     }
 
@@ -1249,10 +1539,9 @@ impl Generator for ActionPotential {
             self.tree = Some(Tree::grow(&mut ctx.rng));
         }
         self.layout = Layout::new(size);
-        self.pixels.resize(size);
         self.dots.resize(size);
-        self.art.resize(size);
         self.vesicles.clear();
+        self.ions.clear();
         self.rebuild_geometry();
         self.rasterise();
     }
@@ -1262,10 +1551,12 @@ impl Generator for ActionPotential {
             return;
         }
         let dt = dt.min(0.25);
+        self.flash = (self.flash - dt).max(0.0);
         // 1e-9 of slack so that exact totals (400 sub-steps per second) never lose one.
         self.owed += dt * SUB_PER_S as f64;
         let n = (self.owed + 1e-9).floor();
         self.owed -= n;
+        let before = self.cable.v;
         for _ in 0..n as u32 {
             self.substep(&mut ctx.rng);
         }
@@ -1275,6 +1566,17 @@ impl Generator for ActionPotential {
             p.y += p.vy * dt;
             p.age < VESICLE_LIFE
         });
+        self.ions.retain(|p| {
+            p.age += dt;
+            p.x += p.vx * dt;
+            p.y += p.vy * dt;
+            p.age < ION_LIFE
+        });
+        let ms = n * H_MS;
+        for ((d, &v), &v0) in self.dvdt.iter_mut().zip(&self.cable.v).zip(&before) {
+            *d = if ms > 0.0 { (v - v0) / ms } else { 0.0 };
+        }
+        self.emit_ions(&mut ctx.rng);
         self.dirty = true;
     }
 
@@ -1288,32 +1590,23 @@ impl Generator for ActionPotential {
 
     fn render(&self, canvas: &mut Canvas) {
         let l = self.layout;
-        // ASCII has no braille: the dot-count fallback would reuse the voltage glyphs
-        // for line art, so dendrites and arbor are drawn with slope glyphs instead. The
-        // pixels go last so the axon, soma and boutons sit on top of both.
+        self.dots.blit(canvas);
+        // ASCII has no braille: the trace and the lead are drawn as line art instead of
+        // their dot-count fallbacks.
         if canvas.mode() == GlyphMode::Ascii {
+            if let Some(panel) = l.panel {
+                self.draw_trace_ascii(canvas, panel);
+            }
             if let Some([x, top, bottom, end]) = l.lead {
                 for y in top..=bottom {
                     canvas.put(x, y, Glyph::ascii(':'), LEAD_INK);
                 }
-                for x in (x + 2..=end).step_by(2) {
-                    canvas.put(x, top, Glyph::ascii('.'), LEAD_INK);
+                for cx in x + 1..=end {
+                    let ch = if (cx - x) % 2 == 0 { '.' } else { ' ' };
+                    canvas.put(cx, top, Glyph::ascii(ch), LEAD_INK);
                 }
             }
-            self.dots.blit(canvas);
-            if l.full {
-                self.draw_line_art(canvas);
-            }
-            if let Some(panel) = l.panel {
-                self.draw_trace_ascii(canvas, panel);
-            }
-        } else {
-            self.art.blit(canvas);
-            self.dots.blit(canvas);
         }
-        self.pixels.blit(canvas, |x, y, top, bottom| {
-            self.ascii_cell(x, y, top, bottom)
-        });
         if l.full {
             let (soma, far) = marker_levels(self.step);
             let accent = |level| Ink::new(Role::Accent, level);
@@ -1752,45 +2045,6 @@ mod tests {
     }
 
     #[test]
-    fn ap_ascii_voltage_glyphs_only_mark_membrane_off_rest() {
-        for (w, h) in [(80u16, 24u16), (40, 12), (56, 16), (120, 30), (200, 50)] {
-            let (_, lines) = ascii_frame(Size::new(w, h), 0.0);
-            let text = lines.join("\n").replace("+40", "");
-            for ch in ['@', '#', '+', '~'] {
-                assert!(
-                    !text.contains(ch),
-                    "{w}x{h} at rest shows {ch:?}:\n{}",
-                    lines.join("\n")
-                );
-            }
-            let art = text.chars().filter(|c| "/\\|-".contains(*c)).count();
-            assert!(art >= 6, "{w}x{h}: dendrites and arbor as line art");
-        }
-    }
-
-    #[test]
-    fn ap_ascii_arbor_keeps_its_strokes_below_rest() {
-        // 6 s: the first train spike has passed the terminals and left them
-        // hyperpolarised; 14.2 s: the collision's wake.
-        for t in [6.0, 14.2] {
-            let (ap, lines) = ascii_frame(Size::new(80, 24), t);
-            let x0 = ap.layout.trunk.1 + 1;
-            let arbor: String = lines
-                .iter()
-                .map(|row| row.chars().skip(x0 as usize).collect::<String>())
-                .collect();
-            assert!(!arbor.contains('~'), "t={t}:\n{}", lines.join("\n"));
-            let strokes = arbor.chars().filter(|c| "/\\-|".contains(*c)).count();
-            assert!(
-                strokes >= 12,
-                "t={t}: {strokes} strokes:\n{}",
-                lines.join("\n")
-            );
-            assert!(arbor.matches('o').count() >= 5, "t={t}: boutons");
-        }
-    }
-
-    #[test]
     fn ap_electrode_lead_runs_to_the_scope() {
         for (w, h) in [(56u16, 16u16), (80, 24), (120, 40), (200, 50)] {
             let (ap, lines) = ascii_frame(Size::new(w, h), 0.0);
@@ -1988,77 +2242,216 @@ mod tests {
         }
     }
 
-    /// The soma's cell box at `size`, one cell of margin each side.
-    fn soma_box(ap: &ActionPotential) -> [i32; 4] {
-        let [cx, cy, r] = ap.layout.soma;
-        [
-            (cx - r).floor() as i32 - 1,
-            ((cy - r) / 2.0).floor() as i32 - 1,
-            (cx + r).ceil() as i32 + 1,
-            ((cy + r) / 2.0).ceil() as i32 + 1,
-        ]
+    // ---- Look (M20): membrane threads + ion dust ----
+
+    /// The scene at `size` (seed 42) after `t` s of `SIM_DT` frames, rendered in Unicode.
+    fn unicode_frame(size: Size, t: f64) -> (ActionPotential, Canvas) {
+        let mut ctx = Ctx::new(42, size);
+        let mut ap = ActionPotential::default();
+        ap.resize(size, &mut ctx);
+        let mut done = 0.0;
+        while done < t - 1e-9 {
+            ap.update(SIM_DT, &mut ctx);
+            ap.prepare();
+            done += SIM_DT;
+        }
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        ap.render(&mut canvas);
+        (ap, canvas)
     }
 
     #[test]
-    fn ap_ascii_soma_rim_is_a_clean_closed_outline() {
-        for (w, h) in [(40u16, 12u16), (56, 16), (80, 24), (120, 30), (200, 50)] {
-            let (ap, rest) = ascii_frame(Size::new(w, h), 0.0);
-            let bx = soma_box(&ap);
-            let cells = region(&rest, bx);
-            let frame = rest.join("\n");
-            let outline = |c: char| c == 'o' || c == '=';
-            // Convex: going down the rows, the outline's left edge moves out and then
-            // back in, and so does its right edge (no bites, no bumps).
-            let edges: Vec<(usize, usize)> = cells
-                .iter()
-                .filter_map(|row| {
-                    let first = row.iter().position(|&c| outline(c))?;
-                    let last = row.iter().rposition(|&c| outline(c))?;
-                    Some((first, last))
-                })
-                .collect();
-            assert!(edges.len() >= 3, "{w}x{h}: soma rows {edges:?}\n{frame}");
-            let unimodal = |xs: Vec<i64>| {
-                let turn = xs.iter().enumerate().max_by_key(|(_, x)| **x).unwrap().0;
-                xs[..=turn].windows(2).all(|p| p[0] <= p[1])
-                    && xs[turn..].windows(2).all(|p| p[0] >= p[1])
-            };
-            assert!(
-                unimodal(edges.iter().map(|e| -(e.0 as i64)).collect())
-                    && unimodal(edges.iter().map(|e| e.1 as i64).collect()),
-                "{w}x{h}: rim edges {edges:?}\n{frame}"
-            );
-            // Closed: a row's outline cells come in at most two runs (the two sides), and
-            // the top and bottom rows are one run each.
-            let runs = |row: &Vec<char>| {
-                let mut n = 0;
-                let mut prev = false;
-                for &c in row {
-                    let on = outline(c);
-                    n += usize::from(on && !prev);
-                    prev = on;
+    fn ap_a10_no_half_blocks_and_mostly_braille() {
+        let size = Size::new(200, 50);
+        for t in [0.5, 1.5, 9.0] {
+            let (_, canvas) = unicode_frame(size, t);
+            let (mut lit, mut braille) = (0u32, 0u32);
+            for y in 0..49 {
+                for x in 0..200 {
+                    let c = canvas.get(x, y).unwrap();
+                    assert!(
+                        c.bg == Ink::BLANK && !matches!(c.ch, '▀' | '▄' | '█'),
+                        "t={t}: half-block cell at ({x}, {y})"
+                    );
+                    if c.ch == ' ' || c.ch == '\u{2800}' {
+                        continue;
+                    }
+                    lit += 1;
+                    braille += u32::from(('\u{2801}'..='\u{28FF}').contains(&c.ch));
                 }
-                n
-            };
-            let rows: Vec<&Vec<char>> = cells.iter().filter(|r| runs(r) > 0).collect();
-            assert!(rows.iter().all(|r| runs(r) <= 2), "{w}x{h}:\n{frame}");
-            assert_eq!(runs(rows[0]), 1, "{w}x{h} top:\n{frame}");
-            assert_eq!(runs(rows[rows.len() - 1]), 1, "{w}x{h} bottom:\n{frame}");
-            // A firing or hyperpolarised soma fills its interior; the rim stays drawn.
-            let (_, busy) = ascii_frame(Size::new(w, h), 2.0);
-            let rims = |lines: &[String]| -> Vec<(usize, usize)> {
-                region(lines, bx)
+            }
+            let share = f64::from(braille) / f64::from(lit.max(1));
+            assert!(share >= 0.85, "t={t}: braille share {share:.3} of {lit}");
+        }
+    }
+
+    #[test]
+    fn ap_a11_dust_density_is_a_pure_function_of_v() {
+        let (p, ink) = dust(V_REST);
+        assert!((p - 0.03).abs() < 1e-12, "rest density {p}");
+        assert_eq!(ink.role, Role::Cold, "resting dust is cool");
+        let mut last = p;
+        for k in 1..=1150 {
+            let v = V_REST + f64::from(k) * 0.1;
+            let (p, ink) = dust(v);
+            assert!(p >= last, "density falls at {v:.1} mV");
+            last = p;
+            if k >= 10 {
+                assert_eq!(ink.role, Role::Hot, "{v:.1} mV");
+            }
+        }
+        last = 0.03;
+        for k in 1..=150 {
+            let v = V_REST - f64::from(k) * 0.1;
+            let (p, ink) = dust(v);
+            assert!(p >= last, "density falls at {v:.1} mV");
+            last = p;
+            assert_eq!(ink.role, Role::Cold, "{v:.1} mV");
+        }
+        // At 1.0 s the spike is a dense puff a third of the way along the axon.
+        let (ap, _) = unicode_frame(Size::new(200, 50), 1.0);
+        let v = &ap.cable.v;
+        let peak = (0..=TRUNK_END as usize)
+            .max_by(|&a, &b| v[a].total_cmp(&v[b]))
+            .unwrap() as f64;
+        let density = |sel: &dyn Fn(f64) -> bool| {
+            let (mut n, mut lit) = (0u32, 0u32);
+            for d in ap.body.iter().filter(|d| sel(f64::from(d.c))) {
+                n += 1;
+                lit += u32::from(ap.dots.is_lit(d.x, d.y));
+            }
+            assert!(n > 0);
+            f64::from(lit) / f64::from(n)
+        };
+        let near = density(&|c| c > 0.0 && (c - peak).abs() <= 10.0);
+        let far = density(&|c| c >= 100.0);
+        assert!(
+            far > 0.0 && near >= 8.0 * far,
+            "peak at {peak}: near {near:.3} vs far {far:.3}"
+        );
+    }
+
+    #[test]
+    fn ap_a12_ions_flow_with_the_currents() {
+        let size = Size::new(200, 50);
+        let mut ctx = Ctx::new(42, size);
+        let mut ap = ActionPotential::default();
+        ap.resize(size, &mut ctx);
+        let axis = ap.geo.axis;
+        let (mut na, mut k) = (0u32, 0u32);
+        for f in 1..=(10 * 60) {
+            ap.update(SIM_DT, &mut ctx);
+            ap.prepare();
+            assert!(ap.ions.len() <= ION_CAP, "pool over capacity");
+            if f64::from(f) * SIM_DT < 0.2 - 1e-9 {
+                assert!(ap.ions.is_empty(), "ions at rest, frame {f}");
+            }
+            for ion in ap.ions.iter().filter(|i| i.age == 0.0) {
+                let d = ap.dvdt[ion.c];
+                let out = ion.vy * (ion.y - axis);
+                if ion.na {
+                    assert!(d > 20.0 && out < 0.0, "Na at dV/dt {d:.1}, {out}");
+                    assert_eq!(ion_ink(ion).role, Role::Hot);
+                    na += 1;
+                } else {
+                    assert!(d < -10.0 && out > 0.0, "K at dV/dt {d:.1}, {out}");
+                    assert_eq!(ion_ink(ion).role, Role::Cold);
+                    k += 1;
+                }
+            }
+        }
+        assert!(na >= 20 && k >= 20, "{na} Na, {k} K ions");
+    }
+
+    #[test]
+    fn ap_a13_soma_outline_closed_nucleus_inside_dendrites_never_cross() {
+        use std::collections::HashSet;
+        for (w, h) in [
+            (24u16, 8u16),
+            (40, 12),
+            (56, 16),
+            (80, 24),
+            (120, 40),
+            (200, 50),
+        ] {
+            for seed in 1..=24u64 {
+                let size = Size::new(w, h);
+                let mut ap = ActionPotential::default();
+                ap.resize(size, &mut Ctx::new(seed, size));
+                if seed == 1 {
+                    let g = ap.geo;
+                    let mut wall = HashSet::new();
+                    soma_outline(&g, |x, y| {
+                        wall.insert((x, y));
+                    });
+                    let [sx, sy, r] = g.soma;
+                    let start = (sx.round() as i32, sy.round() as i32);
+                    let mut seen = HashSet::from([start]);
+                    let mut todo = vec![start];
+                    let stop = g.xj.ceil() as i32 + 3;
+                    while let Some((x, y)) = todo.pop() {
+                        assert!(
+                            f64::from(x) >= sx - r - 2.0 && (f64::from(y) - sy).abs() <= r + 2.0,
+                            "{w}x{h}: the soma leaks at ({x}, {y})"
+                        );
+                        if f64::from(x) > g.xj + 0.5 {
+                            assert!(
+                                g.ut < y && y < g.lb,
+                                "{w}x{h}: gap at the hillock, ({x}, {y})"
+                            );
+                        }
+                        if x >= stop {
+                            continue;
+                        }
+                        for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                            let n = (x + dx, y + dy);
+                            if !wall.contains(&n) && seen.insert(n) {
+                                todo.push(n);
+                            }
+                        }
+                    }
+                    let [nx, ny, sigma] = g.nucleus;
+                    let reach = (2.0 * sigma).ceil() as i32;
+                    for dy in -reach..=reach {
+                        for dx in -reach..=reach {
+                            if f64::from(dx * dx + dy * dy) <= 4.0 * sigma * sigma {
+                                let p = (nx.round() as i32 + dx, ny.round() as i32 + dy);
+                                assert!(seen.contains(&p), "{w}x{h}: nucleus dot {p:?} outside");
+                            }
+                        }
+                    }
+                }
+                // Each dendrite thread as 12 chords: no two threads cross.
+                let chords: Vec<(usize, Seg)> = ap
+                    .dendrites
                     .iter()
                     .enumerate()
-                    .flat_map(|(y, row)| {
-                        row.iter()
-                            .enumerate()
-                            .filter(|(_, c)| **c == 'o')
-                            .map(move |(x, _)| (x, y))
+                    .flat_map(|(i, s)| {
+                        (0..12).map(move |k| {
+                            let at = |t: f64| quad(s.a, s.ctrl, s.b, t);
+                            let (t0, t1) = (f64::from(k) / 12.0, f64::from(k + 1) / 12.0);
+                            (
+                                i,
+                                Seg {
+                                    a: at(t0),
+                                    b: at(t1),
+                                    ..*s
+                                },
+                            )
+                        })
                     })
-                    .collect()
-            };
-            assert_eq!(rims(&rest), rims(&busy), "{w}x{h}:\n{}", busy.join("\n"));
+                    .collect();
+                for (n, (i, p)) in chords.iter().enumerate() {
+                    for (j, q) in &chords[..n] {
+                        assert!(
+                            i == j || !cross(p, q),
+                            "seed {seed} {w}x{h}: threads {j} and {i} cross: {:?} {:?}",
+                            ap.dendrites[*j],
+                            ap.dendrites[*i]
+                        );
+                    }
+                }
+            }
         }
     }
 }
