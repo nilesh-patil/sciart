@@ -255,5 +255,11 @@ GEN-R25 (list + `Look (M19)` in galaxy_collision), GAL-A5..A8. User picked: star
 - [x] Failing tests GAL-A5..A8, then the redesign (4× stars as braille dust; afterglow threads only for tidal material beyond 1.15 Rd, after a first all-star version filled the disks); snapshots re-recorded and reviewed; art_metrics row re-seeded after review
 - [x] Budgets: worst frame 0.26 ms at 200×50 and 0.88 ms at 500×150 (`rs-worst`); 8.1 KB and 829 changed cells per frame at 200×50 (`rs-cost`)
 
+## M20 — Planets, Brownian motion and Nerve spike in the new style
+GEN-R25 list + `Look (M20)` in solar_system, brownian_motion, action_potential; SOL-A4..A6, BRO-A4..A6, AP-A10..A13. User picked: speed trails (planets), grain + rainbow walk thread with speed-coloured molecules ("colourful"), membrane threads + ion dust with a better-looking neuron.
+- [x] Visual options per scene; spec first
+- [ ] solar_system, brownian_motion, action_potential redesigns (TDD, one implementer each)
+- [ ] Lead review, snapshots re-recorded and reviewed, art_metrics rows re-seeded; budgets (`rs-worst`)
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
