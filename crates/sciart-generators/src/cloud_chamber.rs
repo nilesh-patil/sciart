@@ -65,9 +65,15 @@ pub(crate) enum Kind {
 
 const KINDS: [Kind; 4] = [Kind::Alpha, Kind::Beta, Kind::Muon, Kind::Pair];
 /// Mean events per simulated second at the reference chamber (200×50 cells), in [`KINDS`]
-/// order: ≈ 8 live tracks there. Rates scale with the chamber scale `S` (see
-/// [`rate_scale`]), so the share of the chamber that tracks cover is the same at every size.
-pub(crate) const RATES: [f64; 4] = [1.0, 1.5, 0.8, 0.12];
+/// order: ≈ 9 live tracks there. Rates scale gently with the chamber (see
+/// [`rate_scale`]), so a small chamber still looks alive and a big one is not a crowd.
+pub(crate) const RATES: [f64; 4] = [1.2, 1.8, 0.95, 0.15];
+/// Exponent of the rate's dependence on the chamber scale `S`: `S^0.4` gives ≈ 6 live
+/// tracks at 80×24, ≈ 8 at 120×40, ≈ 9 at 200×50 and ≈ 14 at 500×150.
+const RATE_EXPONENT: f64 = 0.4;
+/// The fewest live tracks: below this an extra event arrives at once (a floor on Poisson
+/// lulls; rare above 120×40).
+const MIN_LIVE: usize = 4;
 /// The reference chamber scale `S` in dots (200×50 cells = 400×200 dots).
 const S_REF: f64 = 282.842_712_474_619;
 /// Chance that a muon knocks out a visible delta ray.
@@ -247,9 +253,12 @@ pub(crate) fn delta_angle(p: f64) -> f64 {
     (t / p).clamp(-1.0, 1.0).acos()
 }
 
-/// Event-rate factor for a chamber of scale `scale` dots relative to the reference.
+/// Event-rate factor for a chamber of scale `scale` dots relative to the reference:
+/// `(S / S_ref)^0.4`. Track lengths scale with `S`, so a smaller chamber's tracks cover a
+/// little more of it and a bigger one's a little less, which reads better than equal
+/// coverage: equal coverage leaves a small chamber with two or three tracks.
 pub(crate) fn rate_scale(scale: f64) -> f64 {
-    scale / S_REF
+    (scale / S_REF).powf(RATE_EXPONENT)
 }
 
 /// Alpha-track range in dots for line `line` and straggling deviate `z` (clipped to ±3).
@@ -508,6 +517,8 @@ pub struct CloudChamber {
     drops: Vec<Drop>,
     /// Events so far per species, in [`KINDS`] order (CLD-A4).
     events: [u64; 4],
+    /// Extra events the live-track floor added ([`MIN_LIVE`]).
+    floor_events: u64,
     /// Event rates for this chamber (per second, [`KINDS`] order).
     rates: [f64; 4],
     /// Vapour specks in this chamber.
@@ -530,6 +541,7 @@ impl Default for CloudChamber {
             slots: [Slot::default(); SLOTS],
             drops: Vec::new(),
             events: [0; 4],
+            floor_events: 0,
             rates: RATES,
             specks: 0,
             dots: Dots::default(),
@@ -539,6 +551,24 @@ impl Default for CloudChamber {
 }
 
 impl CloudChamber {
+    /// Tracks still on show.
+    fn live(&self) -> usize {
+        self.slots.iter().filter(|s| s.live).count()
+    }
+
+    /// A species drawn in proportion to its rate.
+    fn pick_kind(&self, rng: &mut impl Rng) -> Kind {
+        let total: f64 = self.rates.iter().sum();
+        let mut u = rng.random_range(0.0..total);
+        for (k, &r) in self.rates.iter().enumerate() {
+            if u < r {
+                return KINDS[k];
+            }
+            u -= r;
+        }
+        Kind::Beta
+    }
+
     /// A free slot, or the oldest live one.
     fn free_slot(&self) -> usize {
         let mut best = 0;
@@ -666,15 +696,7 @@ impl Generator for CloudChamber {
         let total: f64 = self.rates.iter().sum();
         let warm = ((total * LIFE_S).round() as usize).min(SLOTS);
         for _ in 0..warm {
-            let mut u = ctx.rng.random_range(0.0..total);
-            let mut kind = Kind::Beta;
-            for (k, &r) in self.rates.iter().enumerate() {
-                if u < r {
-                    kind = KINDS[k];
-                    break;
-                }
-                u -= r;
-            }
+            let kind = self.pick_kind(&mut ctx.rng);
             let age = ctx.rng.random_range(0.0..LIFE_S);
             self.spawn(kind, self.time - age, &mut ctx.rng);
         }
@@ -699,6 +721,14 @@ impl Generator for CloudChamber {
                 let birth = self.time - ctx.rng.random_range(0.0..dt);
                 self.spawn(kind, birth, &mut ctx.rng);
             }
+        }
+        // The floor: a Poisson lull that would leave the chamber nearly empty is cut
+        // short by an extra event at once (disclosed in SPEC-002's As built; counted
+        // apart from the Poisson events, CLD-A4).
+        while self.live() < MIN_LIVE {
+            let kind = self.pick_kind(&mut ctx.rng);
+            self.floor_events += 1;
+            self.spawn(kind, self.time, &mut ctx.rng);
         }
         self.dirty = true;
     }
@@ -984,7 +1014,7 @@ mod tests {
     }
 
     #[test]
-    fn busy_chamber_6_to_10_live_tracks_at_200x50_from_the_first_frame() {
+    fn busy_chamber_from_the_first_frame_at_200x50() {
         let (mut g, mut ctx) = chamber_at(2);
         assert!(live(&g) >= 5, "warm start: {}", live(&g));
         let (mut sum, mut n) = (0usize, 0usize);
@@ -999,8 +1029,71 @@ mod tests {
         assert!((6.0..=10.0).contains(&mean), "mean live tracks {mean}");
     }
 
+    /// Mean live tracks over 30 s, and the lowest 1-s mean, for one chamber.
+    fn liveliness(w: u16, h: u16, seed: u64) -> (f64, f64) {
+        let size = Size::new(w, h);
+        let mut ctx = Ctx::new(seed, size);
+        let mut g = CloudChamber::default();
+        g.resize(size, &mut ctx);
+        let per_s = (1.0 / SIM_DT).round() as usize;
+        let (mut total, mut n, mut low) = (0usize, 0usize, f64::INFINITY);
+        for _ in 0..30 {
+            let mut window = 0usize;
+            for _ in 0..per_s {
+                g.update(SIM_DT, &mut ctx);
+                window += live(&g);
+            }
+            total += window;
+            n += per_s;
+            low = low.min(window as f64 / per_s as f64);
+        }
+        (total as f64 / n as f64, low)
+    }
+
     #[test]
-    fn rates_follow_the_chamber_scale_so_coverage_is_size_independent() {
+    fn chamber_is_alive_at_every_size() {
+        // Mean live tracks over 30 s: lively on small terminals, not a crowd on big ones.
+        let bands = [
+            ((80, 24), 5.0, 8.5),
+            ((120, 40), 5.5, 9.0),
+            ((200, 50), 8.0, 10.5),
+            ((500, 150), 10.0, 16.0),
+        ];
+        for ((w, h), lo, hi) in bands {
+            for seed in [1, 2, 3] {
+                let (mean, _) = liveliness(w, h, seed);
+                assert!((lo..=hi).contains(&mean), "{w}x{h} seed {seed}: {mean}");
+            }
+        }
+        // No 1-s stretch of a near-empty chamber at 120×40.
+        for seed in [1, 2, 3] {
+            let (_, low) = liveliness(120, 40, seed);
+            assert!(
+                low >= 3.0,
+                "seed {seed}: a 1-s window averaged {low} live tracks"
+            );
+        }
+    }
+
+    #[test]
+    fn the_live_track_floor_only_trims_rare_lulls() {
+        for (w, h, most) in [(80, 24, 0.15), (120, 40, 0.06), (200, 50, 0.02)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(4, size);
+            let mut g = CloudChamber::default();
+            g.resize(size, &mut ctx);
+            for _ in 0..(60.0 / SIM_DT) as usize {
+                g.update(SIM_DT, &mut ctx);
+                assert!(g.live() >= MIN_LIVE);
+            }
+            let poisson: u64 = g.events.iter().sum();
+            let share = g.floor_events as f64 / (poisson + g.floor_events) as f64;
+            assert!(share <= most, "{w}x{h}: floor share {share}");
+        }
+    }
+
+    #[test]
+    fn rates_follow_a_gentle_power_of_the_chamber_scale() {
         let rates = |w: u16, h: u16| {
             let size = Size::new(w, h);
             let mut ctx = Ctx::new(1, size);
@@ -1012,7 +1105,7 @@ mod tests {
         let (r2, s2) = rates(500, 150);
         for k in 0..4 {
             assert!((r1[k] - RATES[k]).abs() < 1e-9);
-            assert!((r2[k] / r1[k] - s2 / s1).abs() < 1e-9);
+            assert!((r2[k] / r1[k] - (s2 / s1).powf(RATE_EXPONENT)).abs() < 1e-9);
         }
         assert!(rates(80, 24).0[0] < r1[0]);
     }
