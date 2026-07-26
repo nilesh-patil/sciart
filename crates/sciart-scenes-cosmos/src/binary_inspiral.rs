@@ -596,6 +596,8 @@ impl Generator for BinaryInspiral {
                 });
             }
         }
+        // TEST-R7 (M22): built by `push` once per resize, so drop the doubling slack (up to half the buffer at 500x150); frames are unchanged.
+        self.field.shrink_to_fit();
         let bins = (self.r_out * BINS_PER_DOT).ceil() as usize + 2;
         self.table.clear();
         self.table.resize(bins, (0.0, 0.0, 0.0, 0));

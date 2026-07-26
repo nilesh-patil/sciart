@@ -546,6 +546,9 @@ impl JupiterStorms {
             cy - 0.5 * (nh - 1) as f64 * s,
         );
         self.geo.clear();
+        // TEST-R7 (M22): exactly one entry per lattice node; reserve it instead of
+        // letting `push` double past it.
+        self.geo.reserve_exact(nw * nh);
         for j in 0..nh {
             for i in 0..nw {
                 let (x, y) = (self.origin.0 + i as f64 * s, self.origin.1 + j as f64 * s);

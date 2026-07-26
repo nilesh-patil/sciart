@@ -678,6 +678,8 @@ impl SaturnRings {
             }
             r += dr;
         }
+        // TEST-R7 (M22): built by `push` once per resize, so drop the doubling slack (up to half the buffer at 500x150); frames are unchanged.
+        self.ring_dots.shrink_to_fit();
     }
 
     fn spawn_spoke(&mut self, rng: &mut impl Rng) {

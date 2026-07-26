@@ -471,6 +471,9 @@ impl Generator for Noctilucent {
             }
         }
 
+        // TEST-R7 (M22): built by `push` once per resize, so drop the doubling slack (up to half the buffer at 500x150); frames are unchanged.
+        self.nodes.shrink_to_fit();
+
         // Land and a few dark banks of low cloud over the northern glow.
         let land = Skyline::new(&mut ctx.rng, w, per_deg, LAND);
         let bank_seed: u64 = ctx.rng.random();
@@ -503,6 +506,7 @@ impl Generator for Noctilucent {
                 self.cover.push((c.clamp(0.0, 1.0) * 255.0).round() as u8);
             }
         }
+        self.cover.shrink_to_fit(); // as `nodes` (TEST-R7)
         self.faint.clear();
         self.faint.resize(2 * h * w, 0);
         // The land's top per column (the glow sits on it): the first row it covers.
