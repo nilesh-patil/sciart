@@ -15,3 +15,10 @@ slow-timeout = { period = "60s", terminate-after = 3 }
 [[profile.default.overrides]]
 filter = "binary(contract) | binary(art_metrics) | binary(resource_budget) | binary(palette) | test(/whole_walk/)"
 priority = 50
+
+# These tests spread every scene over all cores themselves; running them beside other
+# tests oversubscribed the machine and starved the pty tests' real-time waits (RT-R17's
+# step-down, RT-R8's idle), so each runs alone (scheduling only).
+[[profile.default.overrides]]
+filter = "binary(contract) | binary(art_metrics) | binary(resource_budget) | binary(encoder_fidelity)"
+threads-required = "num-cpus"
