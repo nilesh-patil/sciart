@@ -13,6 +13,13 @@ repository = "https://github.com/nilesh-patil/tasks-adhoc"
 [workspace.dependencies]
 sciart-core = { path = "crates/sciart-core" }
 sciart-generators = { path = "crates/sciart-generators" }
+# ADR-0023: the scenes, split by category behind the sciart-generators registry facade.
+sciart-shared = { path = "crates/sciart-shared" }
+sciart-scenes-cosmos = { path = "crates/sciart-scenes-cosmos" }
+sciart-scenes-earth = { path = "crates/sciart-scenes-earth" }
+sciart-scenes-physics = { path = "crates/sciart-scenes-physics" }
+sciart-scenes-matter = { path = "crates/sciart-scenes-matter" }
+sciart-scenes-life = { path = "crates/sciart-scenes-life" }
 sciart-render = { path = "crates/sciart-render" }
 sciart-keepawake = { path = "crates/sciart-keepawake" }
 sciart-testalloc = { path = "crates/sciart-testalloc" } # dev-only (ADR-0009)
@@ -62,7 +69,22 @@ debug = "line-tables-only"
 [profile.dev.package.sciart-core]
 opt-level = 1
 
-[profile.dev.package.sciart-generators]
+[profile.dev.package.sciart-shared]
+opt-level = 1
+
+[profile.dev.package.sciart-scenes-cosmos]
+opt-level = 1
+
+[profile.dev.package.sciart-scenes-earth]
+opt-level = 1
+
+[profile.dev.package.sciart-scenes-physics]
+opt-level = 1
+
+[profile.dev.package.sciart-scenes-matter]
+opt-level = 1
+
+[profile.dev.package.sciart-scenes-life]
 opt-level = 1
 
 # TEST-R10 / ADR-0023: tests (`rs-test` under nextest, and focused `cargo test` loops, which
@@ -77,12 +99,28 @@ debug = "line-tables-only"
 debug-assertions = true
 overflow-checks = true
 
-# `test` inherits `dev`, including its per-package overrides, which would pin these two
-# crates (the bulk of the test time) back to opt-level 1.
+# `test` inherits `dev`, including its per-package overrides, which would pin the scene
+# crates (the bulk of the test time) back to opt-level 1; a source rule keeps these lists
+# in step (TEST-R10).
 [profile.test.package.sciart-core]
 opt-level = 2
 
-[profile.test.package.sciart-generators]
+[profile.test.package.sciart-shared]
+opt-level = 2
+
+[profile.test.package.sciart-scenes-cosmos]
+opt-level = 2
+
+[profile.test.package.sciart-scenes-earth]
+opt-level = 2
+
+[profile.test.package.sciart-scenes-physics]
+opt-level = 2
+
+[profile.test.package.sciart-scenes-matter]
+opt-level = 2
+
+[profile.test.package.sciart-scenes-life]
 opt-level = 2
 
 [profile.release]

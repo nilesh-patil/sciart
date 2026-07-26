@@ -18,7 +18,7 @@ use sciart_core::ease;
 use sciart_core::grid;
 use sciart_core::prelude::*;
 
-use crate::shared::excitable::{self, Barkley, Front, FrontStroke};
+use sciart_shared::excitable::{self, Barkley, Front, FrontStroke};
 
 pub static META: Meta = Meta {
     name: "dicty_aggregation",

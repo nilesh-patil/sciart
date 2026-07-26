@@ -26,7 +26,7 @@ const K: f32 = 0.3;
 
 /// Map parameters.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Params {
+pub struct Params {
     /// Bistability `A` (> 1 for two phases).
     pub a: f32,
     /// Stiffness `D`.
@@ -36,7 +36,7 @@ pub(crate) struct Params {
 }
 
 /// Oono & Puri's standard parameters: stable, smooth interfaces a few cells wide.
-pub(crate) const OONO_PURI: Params = Params {
+pub const OONO_PURI: Params = Params {
     a: 1.3,
     d: 0.5,
     m: 1.0,
@@ -44,14 +44,14 @@ pub(crate) const OONO_PURI: Params = Params {
 
 /// Caller-owned working grids for [`step`], sized on first use and then reused.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Scratch {
+pub struct Scratch {
     gamma: Grid<f32>,
     lap: Grid<f32>,
 }
 
 /// One Oono–Puri step of `psi` in place (periodic edges). Allocation-free once `scratch`
 /// has seen a lattice of this size.
-pub(crate) fn step(psi: &mut Grid<f32>, s: &mut Scratch, p: &Params) {
+pub fn step(psi: &mut Grid<f32>, s: &mut Scratch, p: &Params) {
     if psi.is_empty() {
         return;
     }
@@ -85,7 +85,7 @@ fn tanh(x: f32) -> f32 {
 }
 
 /// Mean of `psi` in f64 (0 for an empty grid).
-pub(crate) fn mean(psi: &Grid<f32>) -> f64 {
+pub fn mean(psi: &Grid<f32>) -> f64 {
     if psi.is_empty() {
         return 0.0;
     }
@@ -94,7 +94,7 @@ pub(crate) fn mean(psi: &Grid<f32>) -> f64 {
 
 /// A fresh quench: `mean` plus uniform noise of half-width `amp`, then recentred so the
 /// lattice mean is `mean` to rounding.
-pub(crate) fn quench(psi: &mut Grid<f32>, mean_psi: f32, amp: f32, rng: &mut impl Rng) {
+pub fn quench(psi: &mut Grid<f32>, mean_psi: f32, amp: f32, rng: &mut impl Rng) {
     for x in psi.as_mut_slice() {
         *x = mean_psi + amp * (2.0 * rng.random::<f32>() - 1.0);
     }
@@ -102,7 +102,7 @@ pub(crate) fn quench(psi: &mut Grid<f32>, mean_psi: f32, amp: f32, rng: &mut imp
 }
 
 /// Add a constant so the mean becomes `target` (to f32 rounding).
-pub(crate) fn shift_mean(psi: &mut Grid<f32>, target: f64) {
+pub fn shift_mean(psi: &mut Grid<f32>, target: f64) {
     let delta = (target - mean(psi)) as f32;
     for x in psi.as_mut_slice() {
         *x += delta;
@@ -110,7 +110,7 @@ pub(crate) fn shift_mean(psi: &mut Grid<f32>, target: f64) {
 }
 
 /// Carry `psi` onto a `size` lattice (bilinear, ADR-0012) keeping its mean.
-pub(crate) fn regrid(psi: &mut Grid<f32>, size: Size, scratch: &mut Grid<f32>) {
+pub fn regrid(psi: &mut Grid<f32>, size: Size, scratch: &mut Grid<f32>) {
     if psi.size() == size {
         return;
     }
@@ -122,8 +122,8 @@ pub(crate) fn regrid(psi: &mut Grid<f32>, size: Size, scratch: &mut Grid<f32>) {
 /// Characteristic domain length: the first zero crossing of the two-point correlation
 /// of `ψ − ψ̄` along x and along y (periodic), averaged, with linear interpolation
 /// between lattice lags. Test and measurement helper (SPIN-A2).
-#[cfg(test)]
-pub(crate) fn correlation_length(psi: &Grid<f32>) -> f64 {
+#[cfg(any(test, feature = "test-support"))]
+pub fn correlation_length(psi: &Grid<f32>) -> f64 {
     let (w, h) = (usize::from(psi.width()), usize::from(psi.height()));
     let m = mean(psi);
     let v = |x: usize, y: usize| f64::from(psi.as_slice()[y * w + x]) - m;
@@ -156,8 +156,8 @@ pub(crate) fn correlation_length(psi: &Grid<f32>) -> f64 {
 }
 
 /// Number of 4-connected periodic clusters of cells with `ψ < threshold` (SPIN-A3).
-#[cfg(test)]
-pub(crate) fn count_below(psi: &Grid<f32>, threshold: f32, min_cells: usize) -> usize {
+#[cfg(any(test, feature = "test-support"))]
+pub fn count_below(psi: &Grid<f32>, threshold: f32, min_cells: usize) -> usize {
     let (w, h) = (usize::from(psi.width()), usize::from(psi.height()));
     let cells = psi.as_slice();
     let mut seen = vec![false; w * h];

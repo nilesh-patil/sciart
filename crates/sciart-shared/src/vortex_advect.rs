@@ -19,14 +19,14 @@ use sciart_core::{Grid, Size};
 /// What lies beyond the left and right edges: a planet's longitude wraps round, a storm's
 /// box is clamped (its edge value is repeated). Rows are always clamped.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum XEdge {
+pub enum XEdge {
     Wrap,
     Clamp,
 }
 
 /// Node velocities in lattice cells per second.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Flow {
+pub struct Flow {
     pub u: Grid<f32>,
     pub v: Grid<f32>,
 }
@@ -38,7 +38,7 @@ impl Flow {
         self.v.resize(lattice, 0.0);
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     /// Set every node's velocity to `f(x, y)`.
     pub fn fill_with(&mut self, mut f: impl FnMut(f64, f64) -> (f64, f64)) {
         let w = usize::from(self.u.width()).max(1);
@@ -51,14 +51,14 @@ impl Flow {
     }
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// The velocity of stream function `psi` at `(x, y)`: `u = ∂ψ/∂y`, `v = −∂ψ/∂x`, each as
 /// the difference of ψ across a cell of side `h` centred on the point. The discrete
 /// divergence built from the same differences cancels term by term (JUP-A1), so the
 /// sampled flow neither creates nor destroys dye. With `y` down the screen a positive
 /// bump of ψ turns clockwise on screen and a negative one counter-clockwise.
 #[inline]
-pub(crate) fn stream_velocity(psi: impl Fn(f64, f64) -> f64, x: f64, y: f64, h: f64) -> (f64, f64) {
+pub fn stream_velocity(psi: impl Fn(f64, f64) -> f64, x: f64, y: f64, h: f64) -> (f64, f64) {
     let e = 0.5 * h;
     let u = (psi(x, y + e) - psi(x, y - e)) / h;
     let v = -(psi(x + e, y) - psi(x - e, y)) / h;
@@ -68,7 +68,7 @@ pub(crate) fn stream_velocity(psi: impl Fn(f64, f64) -> f64, x: f64, y: f64, h: 
 /// Bilinear value of `g` at lattice point `(x, y)`, clamped in `y` and wrapped or clamped
 /// in `x` by `edge`; 0 for an empty grid or a non-finite point.
 #[inline]
-pub(crate) fn sample(g: &Grid<f32>, x: f32, y: f32, edge: XEdge) -> f32 {
+pub fn sample(g: &Grid<f32>, x: f32, y: f32, edge: XEdge) -> f32 {
     let (w, h) = (usize::from(g.width()), usize::from(g.height()));
     if w == 0 || h == 0 || !(x.is_finite() && y.is_finite()) {
         return 0.0;
@@ -103,7 +103,7 @@ pub(crate) fn sample(g: &Grid<f32>, x: f32, y: f32, edge: XEdge) -> f32 {
 /// Call `f(k, x, y)` with the departure point `(x, y)` of every node `k` (row-major):
 /// where the fluid now at the node was `dt` seconds ago, traced back along a midpoint
 /// (RK2) characteristic. A scene carrying several fields samples each of them there.
-pub(crate) fn departures(flow: &Flow, dt: f32, edge: XEdge, mut f: impl FnMut(usize, f32, f32)) {
+pub fn departures(flow: &Flow, dt: f32, edge: XEdge, mut f: impl FnMut(usize, f32, f32)) {
     let w = usize::from(flow.u.width());
     if w == 0 || flow.u.size() != flow.v.size() {
         return;
@@ -120,7 +120,7 @@ pub(crate) fn departures(flow: &Flow, dt: f32, edge: XEdge, mut f: impl FnMut(us
 /// Carry `src` along `flow` for `dt` seconds into `dst` (resized to `src`): each node
 /// takes the bilinear value of `src` at its [`departures`] point. `flow` must have
 /// `src`'s size, else `dst` is left zeroed.
-pub(crate) fn advect(src: &Grid<f32>, dst: &mut Grid<f32>, flow: &Flow, dt: f32, edge: XEdge) {
+pub fn advect(src: &Grid<f32>, dst: &mut Grid<f32>, flow: &Flow, dt: f32, edge: XEdge) {
     dst.resize(src.size(), 0.0);
     if flow.u.size() != src.size() {
         dst.fill(0.0);
@@ -134,7 +134,7 @@ pub(crate) fn advect(src: &Grid<f32>, dst: &mut Grid<f32>, flow: &Flow, dt: f32,
 /// seam never shows: `sciart_core::rng::value_noise` (CORE-R97) with unit cells, except
 /// that the lattice column index is taken modulo `period`, which the core form cannot do.
 #[inline]
-pub(crate) fn value_noise_wrap_x(salt: u64, x: f64, y: f64, period: i32) -> f64 {
+pub fn value_noise_wrap_x(salt: u64, x: f64, y: f64, period: i32) -> f64 {
     if !(x.is_finite() && y.is_finite()) || period < 1 {
         return 0.0;
     }

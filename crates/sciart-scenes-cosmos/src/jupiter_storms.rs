@@ -24,7 +24,7 @@ use sciart_core::grid;
 use sciart_core::prelude::*;
 use sciart_core::{Grid, ease};
 
-use crate::shared::vortex_advect::{self, Flow, XEdge, value_noise_wrap_x};
+use sciart_shared::vortex_advect::{self, Flow, XEdge, value_noise_wrap_x};
 
 pub static META: Meta = Meta {
     name: "jupiter_storms",

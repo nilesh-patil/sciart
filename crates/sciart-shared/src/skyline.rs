@@ -8,12 +8,12 @@ use sciart_core::timeline::ease;
 
 /// Height samples per pixel column: the silhouette is anti-aliased across as well as
 /// down, so a spruce flank is a soft slope of partly covered pixels, not a staircase.
-pub(crate) const SKY_SUB: usize = 4;
+pub const SKY_SUB: usize = 4;
 
 /// What stands on the horizon: a far ridge and, optionally, a conifer forest. Heights
 /// are in degrees above the horizon, so the land keeps its shape at every size.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Terrain {
+pub struct Terrain {
     /// Ridge base and relief (deg): `base + relief · noise`.
     pub ridge: (f64, f64),
     /// Tree heights (deg), or `None` for bare hills.
@@ -25,8 +25,8 @@ pub(crate) struct Terrain {
 }
 
 /// A spruce forest on a low ridge (the tests' reference terrain; scenes set their own).
-#[cfg(test)]
-pub(crate) const FOREST: Terrain = Terrain {
+#[cfg(any(test, feature = "test-support"))]
+pub const FOREST: Terrain = Terrain {
     ridge: (0.6, 2.2),
     trees: Some((1.4, 4.2)),
     gap: (0.35, 1.6),
@@ -42,7 +42,7 @@ const CROWN: f64 = 0.27;
 /// An anti-aliased silhouette: silhouette height above the horizon in pixels, at
 /// [`SKY_SUB`] samples per pixel column. Seeded and laid out in `resize`.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Skyline {
+pub struct Skyline {
     sub: Vec<f32>,
 }
 
@@ -78,7 +78,7 @@ impl Spire {
 
 impl Skyline {
     /// A silhouette `width` pixels wide at `px_per_deg`, seeded from `rng`.
-    pub(crate) fn new(rng: &mut impl Rng, width: usize, px_per_deg: f64, terrain: Terrain) -> Self {
+    pub fn new(rng: &mut impl Rng, width: usize, px_per_deg: f64, terrain: Terrain) -> Self {
         let px_per_deg = if px_per_deg.is_finite() && px_per_deg > 0.0 {
             px_per_deg
         } else {
@@ -137,7 +137,7 @@ impl Skyline {
     }
 
     /// Silhouette height (px) above the horizon at continuous pixel column `x`.
-    pub(crate) fn height_at(&self, x: f64) -> f64 {
+    pub fn height_at(&self, x: f64) -> f64 {
         if self.sub.is_empty() || !x.is_finite() {
             return 0.0;
         }
@@ -148,7 +148,7 @@ impl Skyline {
     /// Share of pixel `(x, y)` (spanning rows `[y, y + 1)`) hidden by the land when the
     /// horizon lies at pixel row `base`: averaged over the column's sub-samples, each
     /// covering `clamp(y + 1 − top, 0, 1)` of the pixel.
-    pub(crate) fn cover(&self, x: i32, y: i32, base: f64) -> f32 {
+    pub fn cover(&self, x: i32, y: i32, base: f64) -> f32 {
         let Ok(x) = usize::try_from(x) else {
             return 0.0;
         };

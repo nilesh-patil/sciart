@@ -18,10 +18,10 @@ rs-build = "cargo build --workspace"
 rs-test = "cargo test --workspace --doc && cargo nextest run --workspace"
 # TEST-R10 evidence: rs-test runs exactly the tests `cargo test --workspace` lists.
 rs-test-parity = "python3 scripts/test_set_parity.py"
-# Scene modules are declared inside the `registry!` macro, which `cargo fmt` cannot follow,
-# so they are also formatted/checked file by file.
-rs-fmt = "cargo fmt --all && rustfmt --config-path rustfmt.toml crates/sciart-generators/src/*.rs"
-rs-lint = "cargo fmt --all --check && rustfmt --check --config-path rustfmt.toml crates/sciart-generators/src/*.rs && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
+# Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
+# `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
+rs-fmt = "cargo fmt --all"
+rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"

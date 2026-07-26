@@ -22,7 +22,7 @@ use sciart_core::prelude::*;
 use sciart_core::stellar;
 use sciart_core::timeline::ease;
 
-use crate::shared::skyline::{Skyline, Terrain};
+use sciart_shared::skyline::{Skyline, Terrain};
 
 pub static META: Meta = Meta {
     name: "total_solar_eclipse",
