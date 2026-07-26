@@ -9,5 +9,32 @@ environments:
   default:
     channels:
     - url: https://conda.anaconda.org/conda-forge/
-    packages: {}
-packages: []
+    packages:
+      osx-arm64:
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/cargo-nextest-0.9.148-hc2d82ec_0.conda
+      - conda: https://conda.anaconda.org/conda-forge/osx-arm64/sccache-0.18.0-hc2d82ec_0.conda
+packages:
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/cargo-nextest-0.9.148-hc2d82ec_0.conda
+  sha256: 257ba3d95e3630f5a90d43fc2c1be1721098bf6ca0d2ea1f1c2747e75b81485f
+  md5: 97dc3c7ba958b7260d235093bec0f2ee
+  depends:
+  - __osx >=11.0
+  constrains:
+  - __osx >=11.0
+  license: MIT
+  license_family: MIT
+  run_exports: {}
+  size: 6578148
+  timestamp: 1791436685222
+- conda: https://conda.anaconda.org/conda-forge/osx-arm64/sccache-0.18.0-hc2d82ec_0.conda
+  sha256: 002785be1e019134d2fd281969215d769532dce890b6b36806e15292ab8a4414
+  md5: 6fc9abb418667deeeea744e05284547d
+  depends:
+  - __osx >=11.0
+  constrains:
+  - __osx >=11.0
+  license: Apache-2.0
+  license_family: APACHE
+  run_exports: {}
+  size: 6653687
+  timestamp: 1789877406503
