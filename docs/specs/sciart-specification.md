@@ -132,7 +132,7 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
   paused flag, quarantine count. Off by default; `--hud` or `h` enables.
 
 ### F5: Low-power mode
-- After `low_power.idle_after` (default 10 min) without a key press, drop to
+- After `low_power.idle_after` (default 2 min since M22) without a key press, drop to
   `low_power.fps` (default 5). Any key restores full FPS. Simulation time still advances
   at the fixed dt, so motion stays physically consistent (fewer rendered frames, same speed).
 
