@@ -1,6 +1,6 @@
 # SPEC-005: CLI & configuration
 
-**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file) · **Status**: Implemented through M3; CLI-R7, CFG-R6 and CFG-R7 specified for M11.
+**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file) · **Status**: Implemented through M22 (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22).
 
 ## CLI (clap derive)
 ```
@@ -36,7 +36,7 @@ title = true                          # science title at the bottom-left (M11)
 disabled = ["gray_scott"]            # excluded from sim cycling
 
 [low_power]
-idle_after = 600   # seconds
+idle_after = 120   # seconds (2 min; CFG-R8, M22)
 fps = 5
 ```
 - **CFG-R1** Precedence: CLI flag > config file > built-in default (`fps 30`, `interval 15`, `theme astro`, `ascii false`, `hud false`, `title true`, `disabled []`). Boolean flags (`--ascii`, `--hud`) can only turn a setting on; `--no-title` (M11, CLI-R7) is the one that can only turn its setting off.

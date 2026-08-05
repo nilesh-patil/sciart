@@ -23,8 +23,9 @@ Two things changed the calculus:
 
 - Add GitHub Actions workflows under `.github/workflows/`:
   - `ci.yml`: `lint` on macOS 14 (fmt + clippy with and without all features), `test` on
-    macOS 14 and Ubuntu (doctests + nextest, plus a `NO_COLOR=1` run), `snapshots` on
-    macOS 14 in the optimised `ci` profile (TEST-R9), and `cargo-deny` on Ubuntu.
+    macOS 14 and Ubuntu (doctests + nextest, then the same suite again with `NO_COLOR=1`,
+    plus the gallery-coverage check), `snapshots` on macOS 14 in the optimised `ci` profile
+    (TEST-R9), and `cargo-deny` on Ubuntu.
   - `release.yml`: on a `v*` tag (or manual dispatch), build the `sciart` binary for
     `aarch64-apple-darwin`, `x86_64-apple-darwin` and `x86_64-unknown-linux-gnu`, package
     `sciart` + `README.md` + `LICENSE`, write a SHA-256 file, and attach the tarballs to the
@@ -33,8 +34,12 @@ Two things changed the calculus:
   platform/lock work and makes the workflow readable. The commands are a copy of the
   `rs-ci` definition and must be kept in step with `pixi.toml`; `pixi run rs-ci` remains the
   pre-commit gate and the local source of truth.
+- Every job pins Rust to the declared MSRV, **1.88.0** (`dtolnay/rust-toolchain@1.88.0` and
+  `RUSTUP_TOOLCHAIN=1.88.0`, because `rust-toolchain.toml` floats on `stable` and would
+  otherwise win). CI therefore verifies MSRV, not whatever the newest stable happens to be.
 - `cargo-deny` is part of the gate (licenses, advisories, bans, sources); the allowlist is
-  deliberately narrow and grows only with a reviewed dependency.
+  deliberately narrow and grows only with a reviewed dependency. Its wildcard-path exception
+  requires every workspace crate to be `publish = false` (see the manifests).
 - Release tags are created locally by the maintainer and pushed deliberately; CI never
   creates a tag. The first tag is `v0.1.0`.
 - crates.io publishing stays deferred: the workspace has 12 interdependent crates, and
