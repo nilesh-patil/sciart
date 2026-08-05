@@ -8,15 +8,15 @@ Real-time generative science & astronomy art for the terminal: **85 animated sce
 braille and half-block cells at 30 FPS — and it keeps your machine awake while you watch.
 
 <p align="center">
-  <img src="samples/aurora-m15.png" alt="Aurora: electrons light the air — green curtains over a starry sky" width="880">
+  <img src="samples/current/aurora.png" alt="Aurora: electrons light the air — green curtains over a starry sky" width="880">
 </p>
 
 ## Gallery
 
 <p align="center">
-  <a href="samples/black_hole-m15.png"><img src="samples/black_hole-m15.png" alt="Black hole: infalling gas glows" width="270"></a>
-  <a href="samples/solar_system-m15.png"><img src="samples/solar_system-m15.png" alt="Solar system: farther planets go slower" width="270"></a>
-  <a href="samples/saturn_rings-m16.png"><img src="samples/saturn_rings-m16.png" alt="Saturn rings: moons carve gaps" width="270"></a>
+  <a href="samples/current/black_hole.png"><img src="samples/current/black_hole.png" alt="Black hole: infalling gas glows" width="270"></a>
+  <a href="samples/current/solar_system.png"><img src="samples/current/solar_system.png" alt="Solar system: farther planets go slower" width="270"></a>
+  <a href="samples/current/saturn_rings.png"><img src="samples/current/saturn_rings.png" alt="Saturn rings: moons carve gaps" width="270"></a>
 </p>
 
 <p align="center"><sub>Black hole · Solar system · Saturn rings — <a href="docs/GALLERY.md">full gallery</a></sub></p>
