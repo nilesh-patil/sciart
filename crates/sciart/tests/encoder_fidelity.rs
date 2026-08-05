@@ -253,6 +253,10 @@ fn check(entry: &Entry, run: &Run) {
 
 #[test]
 fn rnd_r17_rt_r15_every_scene_decodes_to_the_painted_frame_and_the_reference_screen() {
+    // TEST-R12: crossterm's `CrosstermBackend` disables colour when `NO_COLOR` is set to a
+    // non-empty value (memoised in `Colored`); our encoder always writes colour, so the
+    // reference must be forced. `check` builds it, and this runs before any of them.
+    crossterm::style::force_color_output(true);
     let entries = registry();
     let jobs: Vec<(&Entry, &Run)> = entries
         .iter()
