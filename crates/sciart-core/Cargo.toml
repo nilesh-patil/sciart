@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["terminal", "generative-art", "canvas", "ascii-art", "ratatui"]
+categories = ["command-line-utilities", "graphics", "science", "visualization"]
+publish = false
 
 [dependencies]
 rand.workspace = true

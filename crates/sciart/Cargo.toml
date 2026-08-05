@@ -6,6 +6,14 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["terminal", "generative-art", "astronomy", "ascii-art", "screensaver"]
+categories = ["command-line-utilities", "graphics", "science", "science::astronomy", "visualization"]
+# Not published to crates.io: installs are `cargo install --git` / a release tarball
+# (IMP-05). Also lets cargo-deny allow the workspace's version-less path dependencies.
+publish = false
 
 [features]
 # Real mouse-jiggle keep-awake backend (KA-R4); needs Accessibility permission on macOS.
