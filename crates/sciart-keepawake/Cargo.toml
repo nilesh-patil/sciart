@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["macos", "keep-awake", "caffeinate", "power-management", "cli"]
+categories = ["command-line-utilities", "hardware-support", "os"]
+publish = false
 
 [features]
 # KA-R4: the real mouse backend (enigo) is opt-in; it needs macOS Accessibility permission.
