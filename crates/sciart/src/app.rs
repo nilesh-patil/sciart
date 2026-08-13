@@ -29,6 +29,8 @@ pub struct Options {
     pub title: bool,
     /// Auto-cycle period; `None` for `run` (RT-R5).
     pub interval: Option<f64>,
+    /// Simulated seconds per wall second (CFG-R9).
+    pub speed: f64,
     pub keep_awake: Mode,
     pub low_power_fps: u16,
     pub idle_after: f64,
@@ -134,6 +136,7 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
     let mut runtime = Runtime::new(opts.entries, opts.seed, size, opts.glyphs, None)
         .with_hud(opts.hud)
         .with_title(opts.title)
+        .with_speed(opts.speed)
         .with_theme(opts.theme);
     if let Some(interval) = opts.interval {
         runtime = runtime.with_interval(interval);
