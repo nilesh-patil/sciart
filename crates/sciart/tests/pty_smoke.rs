@@ -109,22 +109,36 @@ impl Session {
         self.child.process_id().expect("child pid")
     }
 
-    fn quit(mut self) -> (portable_pty::ExitStatus, Vec<u8>) {
-        self.press("q");
+    /// Poll the raw byte stream until `pred` holds or the timeout elapses.
+    fn wait_raw(&self, what: &str, pred: impl Fn(&[u8]) -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if pred(&self.raw.lock().unwrap()) {
+                return;
+            }
+            assert!(Instant::now() < deadline, "timed out waiting for {what}");
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Wait for a command that exits on its own (`list`), without sending input.
+    fn wait_exit(mut self) -> (portable_pty::ExitStatus, Vec<u8>) {
         let deadline = Instant::now() + Duration::from_secs(10);
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
             }
-            if Instant::now() > deadline {
-                self.child.kill().ok();
-                panic!("sciart did not exit after 'q'");
-            }
+            assert!(Instant::now() < deadline, "sciart did not exit");
             thread::sleep(Duration::from_millis(20));
         };
         thread::sleep(Duration::from_millis(100)); // let the reader drain
         let raw = self.raw.lock().unwrap().clone();
         (status, raw)
+    }
+
+    fn quit(mut self) -> (portable_pty::ExitStatus, Vec<u8>) {
+        self.press("q");
+        self.wait_exit()
     }
 }
 
@@ -391,4 +405,89 @@ fn rt_r17_a_paused_picture_writes_nothing() {
     assert_eq!(after, before, "paused: {} bytes written", after - before);
     let (status, _) = s.quit();
     assert!(status.success());
+}
+
+/// CLI-R10: on a terminal `list` prints the aligned header; `--plain` keeps the TSV.
+#[test]
+fn cli_r10_list_on_a_terminal_is_aligned_and_plain_is_tsv() {
+    let s = Session::start(&["list"]);
+    s.wait_raw("aligned list", |b| {
+        String::from_utf8_lossy(b).contains("starfield")
+    });
+    let (status, raw) = s.wait_exit();
+    assert!(status.success());
+    let out = String::from_utf8_lossy(&raw);
+    let header = out
+        .lines()
+        .find(|l| l.contains("NAME") && l.contains("CATEGORY") && l.contains("DESCRIPTION"))
+        .unwrap_or_else(|| panic!("no aligned header:\n{out}"));
+    assert!(header.starts_with("NAME"), "{header:?}");
+    assert!(
+        out.lines()
+            .any(|l| l.starts_with("starfield") && l.contains("deep-cosmos")),
+        "{out}"
+    );
+    assert!(
+        !out.contains("starfield\tdeep-cosmos\t"),
+        "a terminal gets columns, not TSV:\n{out}"
+    );
+
+    let s = Session::start(&["list", "--plain"]);
+    s.wait_raw("plain list", |b| {
+        String::from_utf8_lossy(b).contains("starfield\tdeep-cosmos\t")
+    });
+    let (status, raw) = s.wait_exit();
+    assert!(status.success());
+    let out = String::from_utf8_lossy(&raw);
+    assert!(
+        out.lines().all(|l| l.split('\t').count() == 3),
+        "--plain keeps the TSV:\n{out}"
+    );
+    assert!(!out.contains("NAME\tCATEGORY"), "{out}");
+}
+
+/// CLI-R4/CLI-R10: piped output is the TSV of CLI-R4, with no header.
+#[test]
+fn cli_r4_r10_list_when_piped_is_tsv() {
+    let out = Command::new(BIN).arg("list").output().unwrap();
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines.len(), sciart_generators::registry().len());
+    assert!(lines.iter().all(|l| l.split('\t').count() == 3));
+    assert!(!text.contains("NAME\tCATEGORY"), "{text}");
+}
+
+/// CLI-R9: `list` honours `--category`; unknown/empty selections and a bad `--speed` exit 2.
+#[test]
+fn cli_r9_list_category_and_usage_errors_exit_2() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str]| {
+        Command::new(BIN)
+            .args(args)
+            .env("XDG_CONFIG_HOME", home.path())
+            .output()
+            .unwrap()
+    };
+
+    let out = run(&["list", "--category", "deep-cosmos"]);
+    assert!(out.status.success());
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.is_empty());
+    assert!(
+        text.lines()
+            .all(|l| l.split('\t').nth(1) == Some("deep-cosmos")),
+        "{text}"
+    );
+
+    for args in [
+        &["sim", "--category", "nope"][..],
+        &["--only", "nope", "sim"][..],
+        &["--only", "starfield", "--exclude", "starfield", "sim"][..],
+        &["sim", "--speed", "9"][..],
+    ] {
+        let out = run(args);
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+        assert!(!out.stderr.is_empty(), "{args:?}");
+    }
 }

@@ -14,21 +14,41 @@ mod runtime;
 #[global_allocator]
 static GLOBAL: sciart_testalloc::CountingAlloc = sciart_testalloc::CountingAlloc;
 
+use std::io::IsTerminal;
 use std::process::ExitCode;
 
 use clap::Parser;
 use sciart_core::GlyphMode;
 
-use crate::cli::{Cli, Command, UsageError};
+use crate::cli::{Cli, Command, Filters, UsageError};
 
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let command = cli.command();
 
-    if command == Command::List {
-        for line in cli::list_lines() {
-            println!("{line}");
-        }
+    if let Command::List {
+        json,
+        categories,
+        plain,
+    } = command
+    {
+        // CFG-R2: `list` never loads the config; only CLI filters apply (CLI-R9).
+        let filters = match Filters::from_cli(&command, &cli) {
+            Ok(filters) => filters,
+            Err(e) => {
+                eprintln!("sciart: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let entries = match cli::select(&command, &[], &filters) {
+            Ok(entries) => entries,
+            Err(e) => {
+                eprintln!("sciart: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let format = cli::list_format(json, categories, plain, std::io::stdout().is_terminal());
+        print!("{}", cli::list_output(&entries, format));
         return ExitCode::SUCCESS;
     }
 
@@ -66,7 +86,8 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
     for warning in warnings {
         eprintln!("sciart: warning: {warning}");
     }
-    let entries = cli::select(command, &settings.disabled)?;
+    let filters = Filters::from_cli(command, cli)?;
+    let entries = cli::select(command, &settings.disabled, &filters)?;
 
     #[allow(clippy::disallowed_methods)] // seeding from OS entropy is the binary's job
     let seed = settings.seed.unwrap_or_else(rand::random);
@@ -83,6 +104,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         hud: settings.hud,
         title: settings.title,
         interval: (*command == Command::Sim).then_some(settings.interval),
+        speed: settings.speed,
         keep_awake: settings.keep_awake,
         low_power_fps: settings.low_power_fps,
         idle_after: settings.idle_after,
