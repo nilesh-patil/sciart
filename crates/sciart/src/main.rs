@@ -67,6 +67,8 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         eprintln!("sciart: warning: {warning}");
     }
     let entries = cli::select(command, &settings.disabled)?;
+    // The help page shows the file in use, or where it would be (RT-R18).
+    let config_path = cli.config.clone().or(default);
 
     #[allow(clippy::disallowed_methods)] // seeding from OS entropy is the binary's job
     let seed = settings.seed.unwrap_or_else(rand::random);
@@ -86,5 +88,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         keep_awake: settings.keep_awake,
         low_power_fps: settings.low_power_fps,
         idle_after: settings.idle_after,
+        config_path,
+        favorites: settings.favorites,
     })
 }
