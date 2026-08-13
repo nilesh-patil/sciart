@@ -31,6 +31,9 @@ pub struct FileConfig {
     pub disabled: Vec<String>,
     /// Simulated seconds per wall second (CFG-R9).
     pub speed: Option<f64>,
+    /// Session favourites, seeded at start (CFG-R9); never rewritten by the app.
+    #[serde(default)]
+    pub favorites: Vec<String>,
     pub keep_awake: Option<KeepAwakeArg>,
     #[serde(default)]
     pub low_power: LowPowerConfig,
@@ -58,6 +61,8 @@ pub struct Settings {
     pub disabled: Vec<String>,
     /// Simulated seconds per wall second (CFG-R9).
     pub speed: f64,
+    /// Config `favorites` names/aliases, seeded into the runtime (CFG-R9, RT-R19).
+    pub favorites: Vec<String>,
     pub keep_awake: Mode,
     pub low_power_fps: u16,
     pub idle_after: f64,
@@ -128,14 +133,21 @@ pub fn load(explicit: Option<&Path>, default: Option<&Path>) -> Result<FileConfi
     }
 }
 
-/// Merge CLI > file > defaults (CFG-R1); returns warnings for unknown `disabled` names (CFG-R4).
+/// Merge CLI > file > defaults (CFG-R1); returns warnings for unknown `disabled` and
+/// `favorites` names (CFG-R4, CFG-R9).
 pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
-    let warnings = file
+    let mut warnings: Vec<String> = file
         .disabled
         .iter()
         .filter(|name| sciart_generators::find(name).is_none())
         .map(|name| format!("config disables unknown generator '{name}'"))
         .collect();
+    warnings.extend(
+        file.favorites
+            .iter()
+            .filter(|name| sciart_generators::find(name).is_none())
+            .map(|name| format!("config lists unknown generator '{name}' as a favourite")),
+    );
     let settings = Settings {
         fps: cli.fps.or(file.fps).unwrap_or(DEFAULT_FPS),
         interval: cli.interval.or(file.interval).unwrap_or(DEFAULT_INTERVAL),
@@ -149,6 +161,7 @@ pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
         seed: cli.seed,
         disabled: file.disabled,
         speed: cli.speed.or(file.speed).unwrap_or(DEFAULT_SPEED),
+        favorites: file.favorites,
         keep_awake: cli
             .keep_awake
             .or(file.keep_awake)
@@ -185,6 +198,7 @@ mod tests {
                 seed: None,
                 disabled: vec![],
                 speed: DEFAULT_SPEED,
+                favorites: vec![],
                 keep_awake: Mode::platform_default(),
                 low_power_fps: DEFAULT_LOW_POWER_FPS,
                 idle_after: DEFAULT_IDLE_AFTER,
@@ -405,5 +419,39 @@ mod tests {
         assert_eq!(s.disabled, vec!["starfield", "warp_drive"]);
         assert_eq!(warnings.len(), 1);
         assert!(warnings[0].contains("warp_drive"));
+    }
+
+    #[test]
+    fn cfg_r9_favorites_default_empty_and_seed_the_session_set() {
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), FileConfig::default());
+        assert!(s.favorites.is_empty());
+        assert!(warnings.is_empty());
+
+        let f = file("favorites = [\"starfield\", \"chemical_reaction\"]");
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), f);
+        assert_eq!(s.favorites, vec!["starfield", "chemical_reaction"]);
+        assert!(
+            warnings.is_empty(),
+            "the retired alias resolves without a warning: {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn cfg_r9_unknown_favourite_names_warn_like_disabled() {
+        let f = file("favorites = [\"starfield\", \"warp_drive\"]");
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), f);
+        assert_eq!(s.favorites, vec!["starfield", "warp_drive"]);
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("warp_drive"), "{warnings:?}");
+        assert!(warnings[0].contains("favourite"), "{warnings:?}");
+    }
+
+    #[test]
+    fn cfg_r9_favorites_are_file_only_and_do_not_affect_disabled() {
+        let f = file("favorites = [\"starfield\"]\ndisabled = [\"aurora\"]");
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), f);
+        assert_eq!(s.favorites, vec!["starfield"]);
+        assert_eq!(s.disabled, vec!["aurora"]);
+        assert!(warnings.is_empty());
     }
 }
