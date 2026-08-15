@@ -6,6 +6,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-10-18
+
+### Added
+
+- `sciart record` (behind the `record` feature): render a scene headlessly to a looping GIF,
+  a PNG frame sequence, or an asciicast v2 stream, with deterministic frame timing. The
+  renderer is shared with the preview tool through the new `sciart-capture` crate (ADR-0025).
+- In-app help overlay on `?`: every binding, the current scene, title and category, the
+  config path and the project URL; `Esc` closes it instead of quitting (`RT-R18`).
+- Favourites: `f` toggles the current scene, `v` shows only favourites, seeded from the new
+  config `favorites` list (`RT-R19`).
+- Category navigation (`[`/`]`), shuffle (`s`), scene filters (`--category`, `--only`,
+  `--exclude`) and a simulation speed multiplier (`--speed`, config `speed`) (`RT-R19`,
+  `CLI-R9`, `CFG-R9`).
+- `sciart list --json`, `--categories` and `--plain`; a terminal gets an aligned table
+  (`CLI-R10`).
+
 ## [0.1.0] - 2026-10-18
 
 First public release.
