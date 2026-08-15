@@ -23,10 +23,9 @@ sciart-scenes-life.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
-font8x8.workspace = true
 insta.workspace = true
-png.workspace = true
 proptest.workspace = true
+sciart-capture.workspace = true
 sciart-render.workspace = true
 sciart-testalloc.workspace = true
 # source_rules reads pixi.toml, Cargo.toml and .config/nextest.toml (TEST-R9..R11).

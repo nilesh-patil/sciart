@@ -73,6 +73,9 @@ jobs:
       # IMP-06: exactly one current frame per registered scene, no orphans.
       - name: Gallery coverage
         run: python3 scripts/gallery.py --check
+      # CLI-R8: the feature-gated record tests and the capture crate.
+      - name: Record feature tests
+        run: cargo nextest run -p sciart --features record
 
   snapshots:
     name: snapshots (macOS, ci profile)

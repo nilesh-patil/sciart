@@ -1,9 +1,10 @@
-//! Command-line interface (SPEC-005 CLI-R1..R5).
+//! Command-line interface (SPEC-005 CLI-R1..R10).
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use sciart_core::{Category, Size};
 use sciart_generators::{Entry, find, registry};
 use sciart_keepawake::Mode;
 use sciart_render::Theme;
@@ -51,19 +52,156 @@ pub struct Cli {
     #[arg(long, global = true, value_enum)]
     pub keep_awake: Option<KeepAwakeArg>,
 
+    /// Simulated seconds per wall second (sim and run) [default: 1.0]
+    #[arg(long, global = true, value_parser = speed)]
+    pub speed: Option<f64>,
+
+    /// Only scenes in this category id; repeatable (sim, list)
+    #[arg(long, global = true, value_name = "ID")]
+    pub category: Vec<String>,
+
+    /// Only this scene; repeatable (sim)
+    #[arg(long, global = true, value_name = "NAME")]
+    pub only: Vec<String>,
+
+    /// Skip this scene; repeatable (sim)
+    #[arg(long, global = true, value_name = "NAME")]
+    pub exclude: Vec<String>,
+
     /// Config file [default: $XDG_CONFIG_HOME/sciart/config.toml or ~/.config/sciart/config.toml]
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum Command {
     /// Cycle through generators (default)
     Sim,
     /// Run a single generator
     Run { name: String },
     /// List generators
-    List,
+    List {
+        /// Print a JSON array of {name, category, description}, sorted by name
+        #[arg(long)]
+        json: bool,
+        /// Print `id<TAB>label<TAB>count` per non-empty category, sorted by label
+        #[arg(long)]
+        categories: bool,
+        /// Tab-separated output even on a terminal
+        #[arg(long)]
+        plain: bool,
+    },
+    /// Render a scene to GIF, PNG frames or an asciicast (CLI-R8; needs the `record` feature)
+    Record(RecordArgs),
+}
+
+/// CLI-R8: the `record` subcommand's own flags. `--fps`, `--theme`, `--ascii` and `--seed`
+/// are the global flags, so a recording uses the same spelling as the rest of the CLI.
+#[derive(Debug, Clone, PartialEq, Args)]
+pub struct RecordArgs {
+    /// Scene to record (registered name or retired alias)
+    pub scene: String,
+    /// Output: a .gif file, a PNG-frame directory (.png), or an asciicast (.cast/.json)
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Simulated seconds to record [default: 5]
+    #[arg(long, value_parser = positive_secs)]
+    pub seconds: Option<f64>,
+    /// Number of frames; overrides --seconds (CLI-R8 caps a recording at 36 000 frames)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36_000))]
+    pub frames: Option<u32>,
+    /// Cell size WxH [default: 80x24]
+    #[arg(long, value_parser = size_arg)]
+    pub size: Option<Size>,
+    /// Output format; inferred from --out when omitted
+    #[arg(long, value_enum)]
+    pub format: Option<FormatArg>,
+}
+
+/// CLI-R8 output formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FormatArg {
+    Gif,
+    Png,
+    Asciicast,
+}
+
+impl FormatArg {
+    /// CLI-R8: `.gif`, `.png`, `.cast`/`.json`; anything else (including no extension) is gif.
+    pub fn infer(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => Self::Png,
+            Some("cast" | "json") => Self::Asciicast,
+            _ => Self::Gif,
+        }
+    }
+}
+
+/// CLI-R8 defaults; recording is headless and does not read the config file.
+pub const RECORD_DEFAULT_SECONDS: f64 = 5.0;
+pub const RECORD_DEFAULT_FPS: u16 = 30;
+pub const RECORD_DEFAULT_SIZE: Size = Size::new(80, 24);
+pub const RECORD_DEFAULT_SEED: u64 = 42;
+/// CLI-R8: a recording is capped at 36 000 frames (20 min at 30 fps), so a huge `--seconds`
+/// is a usage error instead of an allocation/write that never ends.
+pub const RECORD_MAX_FRAMES: usize = 36_000;
+
+/// A validated `record` invocation: CLI-R8 defaults applied, scene resolved, timing checked.
+#[cfg_attr(not(feature = "record"), allow(dead_code))] // read by the record implementation
+#[derive(Debug)]
+pub struct RecordSpec {
+    pub entry: &'static Entry,
+    pub out: PathBuf,
+    pub format: FormatArg,
+    pub frames: usize,
+    pub fps: u16,
+    pub size: Size,
+    pub theme: Theme,
+    pub ascii: bool,
+    pub seed: u64,
+}
+
+impl RecordSpec {
+    /// Resolve CLI-R8: every value is either explicit or its documented default; anything
+    /// unknown (scene, fps that does not divide 60) is a `UsageError` (exit 2).
+    pub fn resolve(cli: &Cli, command: &Command) -> Result<Self, UsageError> {
+        let Command::Record(args) = command else {
+            return Err(UsageError::Record("not a record command".to_owned()));
+        };
+        let fps = cli.fps.unwrap_or(RECORD_DEFAULT_FPS);
+        if 60 % fps != 0 {
+            return Err(UsageError::RecordFps(fps));
+        }
+        let entry =
+            find(&args.scene).ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone()))?;
+        // CLI-R8: `--frames` overrides `--seconds`; without either, 5 s at the chosen fps.
+        let frames = match args.frames {
+            Some(frames) => frames as usize,
+            None => {
+                let seconds = args.seconds.unwrap_or(RECORD_DEFAULT_SECONDS);
+                (seconds * f64::from(fps)).round().max(1.0) as usize
+            }
+        };
+        if frames > RECORD_MAX_FRAMES {
+            return Err(UsageError::RecordFrames(frames));
+        }
+        Ok(Self {
+            entry,
+            out: args.out.clone(),
+            format: args.format.unwrap_or_else(|| FormatArg::infer(&args.out)),
+            frames,
+            fps,
+            size: args.size.unwrap_or(RECORD_DEFAULT_SIZE),
+            theme: cli.theme.map(Theme::from).unwrap_or(Theme::Astro),
+            ascii: cli.ascii,
+            seed: cli.seed.unwrap_or(RECORD_DEFAULT_SEED),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
@@ -113,6 +251,23 @@ fn positive_secs(s: &str) -> Result<f64, String> {
     }
 }
 
+/// CFG-R9 / CLI-R9: a finite speed in `0.1..=4`.
+fn speed(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && (0.1..=4.0).contains(&v) => Ok(v),
+        _ => Err(format!("'{s}' is not a speed in 0.1..=4")),
+    }
+}
+
+/// CLI-R8: `WxH` in cells, both at least 1.
+fn size_arg(s: &str) -> Result<Size, String> {
+    let dim = |v: &str| v.parse::<u16>().ok().filter(|&n| n > 0);
+    s.split_once('x')
+        .and_then(|(w, h)| dim(w).zip(dim(h)))
+        .map(|(w, h)| Size::new(w, h))
+        .ok_or_else(|| format!("'{s}' is not WxH with positive sides (e.g. 80x24)"))
+}
+
 impl Cli {
     /// No subcommand means `sim` (CLI-R1).
     pub fn command(&self) -> Command {
@@ -120,12 +275,20 @@ impl Cli {
     }
 }
 
-/// Errors that exit with code 2 (CLI-R2, CFG-R2..R4).
+/// Errors that exit with code 2 (CLI-R2, CFG-R2..R4, CLI-R8).
 #[derive(Debug, PartialEq)]
 pub enum UsageError {
     UnknownGenerator(String),
+    UnknownCategory(String),
     AllDisabled,
+    /// The active filters match no scene (CLI-R9).
+    EmptySelection,
     Config(String),
+    /// CLI-R8: frame k must land on whole 1/60 s steps.
+    RecordFps(u16),
+    /// CLI-R8: the recording cap (36 000 frames) was exceeded.
+    RecordFrames(usize),
+    Record(String),
 }
 
 impl fmt::Display for UsageError {
@@ -139,33 +302,127 @@ impl fmt::Display for UsageError {
                     names.join(", ")
                 )
             }
+            UsageError::UnknownCategory(id) => {
+                let ids: Vec<_> = Category::ALL.iter().map(|c| c.id()).collect();
+                write!(f, "unknown category '{id}'. Available: {}", ids.join(", "))
+            }
             UsageError::AllDisabled => {
                 f.write_str("every generator is disabled in the config file; nothing to show")
             }
+            UsageError::EmptySelection => f.write_str(
+                "the filters select no scenes; check --category, --only, --exclude and the \
+                 config's disabled list",
+            ),
             UsageError::Config(msg) => write!(f, "config: {msg}"),
+            UsageError::RecordFps(fps) => write!(
+                f,
+                "--fps {fps} does not divide 60: recording needs a whole number of 1/60 s \
+                 steps per frame (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60)"
+            ),
+            UsageError::RecordFrames(frames) => write!(
+                f,
+                "a recording is limited to {RECORD_MAX_FRAMES} frames (20 min at 30 fps); \
+                 this request is {frames} frames"
+            ),
+            UsageError::Record(msg) => write!(f, "record: {msg}"),
         }
     }
 }
 
+/// Scene filters from the CLI (CLI-R9). `sim` uses all of them, `list` only `--category`,
+/// `run` ignores them, and `disabled` (CFG-R4) composes on top.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct Filters {
+    /// Category ids from `--category`, as a union; empty = all categories.
+    pub categories: Vec<Category>,
+    /// Canonical names from `--only` (retired aliases resolved, GEN-R14); empty = all.
+    pub only: Vec<&'static str>,
+    /// Canonical names from `--exclude`.
+    pub exclude: Vec<&'static str>,
+}
+
+impl Filters {
+    /// Parse the filter flags according to what `command` honours (CLI-R9).
+    pub fn from_cli(command: &Command, cli: &Cli) -> Result<Self, UsageError> {
+        if matches!(command, Command::Run { .. }) {
+            return Ok(Self::default());
+        }
+        let mut filters = Self::default();
+        for id in &cli.category {
+            let category = Category::ALL
+                .into_iter()
+                .find(|c| c.id() == id)
+                .ok_or_else(|| UsageError::UnknownCategory(id.clone()))?;
+            if !filters.categories.contains(&category) {
+                filters.categories.push(category);
+            }
+        }
+        if matches!(command, Command::Sim) {
+            filters.only = canonical_names(&cli.only)?;
+            filters.exclude = canonical_names(&cli.exclude)?;
+        }
+        Ok(filters)
+    }
+
+    fn matches(&self, entry: &Entry) -> bool {
+        (self.categories.is_empty() || self.categories.contains(&entry.meta.category))
+            && (self.only.is_empty() || self.only.contains(&entry.meta.name))
+            && !self.exclude.contains(&entry.meta.name)
+    }
+}
+
+/// Resolve `--only`/`--exclude` names, accepting retired aliases like `run` and `disabled`
+/// do (GEN-R14, CFG-R7), and rejecting unknown ones (CLI-R9).
+fn canonical_names(names: &[String]) -> Result<Vec<&'static str>, UsageError> {
+    names
+        .iter()
+        .map(|name| {
+            find(name)
+                .map(|e| e.meta.name)
+                .ok_or_else(|| UsageError::UnknownGenerator(name.clone()))
+        })
+        .collect()
+}
+
 /// Generators a command will use. `disabled` filters `sim` only, retired names included
-/// (CLI-R2, CFG-R4, CFG-R7).
-pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Entry>, UsageError> {
+/// (CLI-R2, CFG-R4, CFG-R7); `filters` applies per CLI-R9.
+pub fn select(
+    command: &Command,
+    disabled: &[String],
+    filters: &Filters,
+) -> Result<Vec<&'static Entry>, UsageError> {
     match command {
         Command::Run { name } => find(name)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
-        Command::Sim | Command::List => {
+        Command::Record(args) => find(&args.scene)
+            .map(|e| vec![e])
+            .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),
+        Command::Sim => {
             let disabled: Vec<&str> = disabled
                 .iter()
                 .filter_map(|d| find(d))
                 .map(|e| e.meta.name)
                 .collect();
-            let entries: Vec<_> = registry()
+            let healthy: Vec<_> = registry()
                 .iter()
                 .filter(|e| !disabled.contains(&e.meta.name))
                 .collect();
+            if healthy.is_empty() {
+                return Err(UsageError::AllDisabled);
+            }
+            let entries: Vec<_> = healthy.into_iter().filter(|e| filters.matches(e)).collect();
             if entries.is_empty() {
-                Err(UsageError::AllDisabled)
+                Err(UsageError::EmptySelection)
+            } else {
+                Ok(entries)
+            }
+        }
+        Command::List { .. } => {
+            // `disabled` only filters `sim` (CFG-R4); list honours `--category` only.
+            let entries: Vec<_> = registry().iter().filter(|e| filters.matches(e)).collect();
+            if entries.is_empty() {
+                Err(UsageError::EmptySelection)
             } else {
                 Ok(entries)
             }
@@ -173,19 +430,146 @@ pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Ent
     }
 }
 
+/// How `list` writes its output (CLI-R10).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ListFormat {
+    /// Header row and aligned columns, on a terminal.
+    Aligned,
+    /// The TSV of CLI-R4, when piped or with `--plain`.
+    Tsv,
+    /// A JSON array, with `--json`.
+    Json,
+    /// One line per category, with `--categories`.
+    Categories,
+}
+
+/// Pick the format: `--json` wins, then `--categories`, then TSV when piped or `--plain`
+/// (CLI-R4, CLI-R10).
+pub fn list_format(json: bool, categories: bool, plain: bool, tty: bool) -> ListFormat {
+    if json {
+        ListFormat::Json
+    } else if categories {
+        ListFormat::Categories
+    } else if plain || !tty {
+        ListFormat::Tsv
+    } else {
+        ListFormat::Aligned
+    }
+}
+
+/// Render `entries` in `format`; every format lists the same, name-sorted scene set.
+pub fn list_output(entries: &[&'static Entry], format: ListFormat) -> String {
+    let mut entries = entries.to_vec();
+    entries.sort_by_key(|e| e.meta.name);
+    match format {
+        ListFormat::Aligned => list_aligned(&entries),
+        ListFormat::Tsv => list_tsv(&entries),
+        ListFormat::Json => list_json(&entries),
+        ListFormat::Categories => list_categories(&entries),
+    }
+}
+
 /// `name<TAB>category id<TAB>description`, sorted by name (CLI-R4).
-pub fn list_lines() -> Vec<String> {
-    registry()
+fn list_tsv(entries: &[&Entry]) -> String {
+    let mut out = String::new();
+    for e in entries {
+        out.push_str(e.meta.name);
+        out.push('\t');
+        out.push_str(e.meta.category.id());
+        out.push('\t');
+        out.push_str(e.meta.description);
+        out.push('\n');
+    }
+    out
+}
+
+/// Header row and aligned `NAME CATEGORY DESCRIPTION` columns (CLI-R10).
+fn list_aligned(entries: &[&Entry]) -> String {
+    let width = |s: &str| s.chars().count();
+    let name_w = entries
         .iter()
-        .map(|e| {
-            format!(
-                "{}\t{}\t{}",
-                e.meta.name,
-                e.meta.category.id(),
-                e.meta.description
-            )
+        .map(|e| width(e.meta.name))
+        .chain([width("NAME")])
+        .max()
+        .unwrap_or(4);
+    let cat_w = entries
+        .iter()
+        .map(|e| width(e.meta.category.id()))
+        .chain([width("CATEGORY")])
+        .max()
+        .unwrap_or(8);
+    let mut out = format!(
+        "{:<name_w$}  {:<cat_w$}  {}\n",
+        "NAME", "CATEGORY", "DESCRIPTION"
+    );
+    for e in entries {
+        out.push_str(&format!(
+            "{:<name_w$}  {:<cat_w$}  {}\n",
+            e.meta.name,
+            e.meta.category.id(),
+            e.meta.description
+        ));
+    }
+    out
+}
+
+/// A compact JSON array of `{name, category, description}` (CLI-R10), hand-rolled so the
+/// binary needs no JSON dependency.
+fn list_json(entries: &[&Entry]) -> String {
+    let mut out = String::from("[");
+    for (i, e) in entries.iter().enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str("{\"name\":");
+        out.push_str(&json_string(e.meta.name));
+        out.push_str(",\"category\":");
+        out.push_str(&json_string(e.meta.category.id()));
+        out.push_str(",\"description\":");
+        out.push_str(&json_string(e.meta.description));
+        out.push('}');
+    }
+    out.push_str("]\n");
+    out
+}
+
+/// A JSON string literal with the minimal escaping a JSON parser requires.
+fn json_string(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for c in s.chars() {
+        match c {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                out.push_str(&format!("\\u{:04x}", c as u32));
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+/// `id<TAB>label<TAB>count` per non-empty category, sorted by label (CLI-R10).
+fn list_categories(entries: &[&Entry]) -> String {
+    let mut rows: Vec<(Category, usize)> = Category::ALL
+        .iter()
+        .map(|c| {
+            let n = entries.iter().filter(|e| e.meta.category == *c).count();
+            (*c, n)
         })
-        .collect()
+        .filter(|(_, n)| *n > 0)
+        .collect();
+    rows.sort_by_key(|(c, _)| c.label());
+    let mut out = String::new();
+    for (category, n) in rows {
+        out.push_str(&format!("{}\t{}\t{}\n", category.id(), category.label(), n));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -197,10 +581,30 @@ pub(crate) fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
 mod tests {
     use super::*;
 
+    fn list_command() -> Command {
+        Command::List {
+            json: false,
+            categories: false,
+            plain: false,
+        }
+    }
+
+    /// Select the scenes for `args`, returning their canonical names in registry order.
+    fn selected(args: &[&str], disabled: &[String]) -> Result<Vec<&'static str>, UsageError> {
+        let cli = parse(args).expect("valid CLI");
+        let command = cli.command();
+        let filters = Filters::from_cli(&command, &cli)?;
+        select(&command, disabled, &filters)
+            .map(|entries| entries.iter().map(|e| e.meta.name).collect())
+    }
+
     #[test]
     fn cli_r1_no_subcommand_is_sim() {
         assert_eq!(parse(&[]).unwrap().command(), Command::Sim);
-        assert_eq!(parse(&["list"]).unwrap().command(), Command::List);
+        assert!(matches!(
+            parse(&["list"]).unwrap().command(),
+            Command::List { .. }
+        ));
     }
 
     #[test]
@@ -253,6 +657,7 @@ mod tests {
                 name: "nope".into(),
             },
             &[],
+            &Filters::default(),
         )
         .unwrap_err();
         assert_eq!(err, UsageError::UnknownGenerator("nope".into()));
@@ -260,8 +665,13 @@ mod tests {
         let run = Command::Run {
             name: "starfield".into(),
         };
-        assert_eq!(select(&run, &[]).unwrap().len(), 1);
-        assert_eq!(select(&Command::Sim, &[]).unwrap().len(), registry().len());
+        assert_eq!(select(&run, &[], &Filters::default()).unwrap().len(), 1);
+        assert_eq!(
+            select(&Command::Sim, &[], &Filters::default())
+                .unwrap()
+                .len(),
+            registry().len()
+        );
     }
 
     #[test]
@@ -276,16 +686,23 @@ mod tests {
 
     #[test]
     fn cli_r4_list_is_tab_separated_and_sorted() {
-        let lines = list_lines();
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let text = list_output(&entries, ListFormat::Tsv);
+        let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines.len(), registry().len());
         let mut sorted = lines.clone();
         sorted.sort();
         assert_eq!(lines, sorted);
         assert!(lines.iter().all(|l| l.split('\t').count() == 3));
-        assert!(lines.contains(&format!(
-            "starfield\tdeep-cosmos\t{}",
-            sciart_generators::starfield::META.description
-        )));
+        assert!(
+            lines.contains(
+                &format!(
+                    "starfield\tdeep-cosmos\t{}",
+                    sciart_generators::starfield::META.description
+                )
+                .as_str()
+            )
+        );
         for (old, _) in sciart_generators::ALIASES {
             assert!(
                 !lines.iter().any(|l| l.starts_with(&format!("{old}\t"))),
@@ -295,11 +712,231 @@ mod tests {
     }
 
     #[test]
+    fn cli_r9_category_only_and_exclude_filter_sim() {
+        let names = selected(&["--category", "deep-cosmos"], &[]).unwrap();
+        assert!(names.contains(&"starfield"));
+        assert!(
+            names
+                .iter()
+                .all(|n| find(n).unwrap().meta.category == Category::DeepCosmos)
+        );
+
+        // Repeatable categories are a union.
+        let names = selected(&["--category", "deep-cosmos", "--category", "voyages"], &[]).unwrap();
+        assert!(names.contains(&"starfield") && names.contains(&"moon_landing"));
+        assert!(
+            names
+                .iter()
+                .any(|n| { find(n).unwrap().meta.category == Category::Voyages })
+        );
+
+        // `--only` restricts, `--exclude` removes; both keep registry order.
+        assert_eq!(
+            selected(&["--only", "starfield", "--only", "moon_landing"], &[]).unwrap(),
+            ["moon_landing", "starfield"]
+        );
+        let names = selected(&["--exclude", "starfield"], &[]).unwrap();
+        assert_eq!(names.len(), registry().len() - 1);
+        assert!(!names.contains(&"starfield"));
+
+        // Retired aliases resolve as they do for `run` and `disabled` (GEN-R14, CFG-R7).
+        assert_eq!(
+            selected(&["--only", "chemical_reaction"], &[]).unwrap(),
+            ["gray_scott"]
+        );
+    }
+
+    #[test]
+    fn cli_r9_filters_compose_with_disabled() {
+        let disabled = vec!["starfield".to_string()];
+        let names = selected(&["--category", "deep-cosmos"], &disabled).unwrap();
+        assert!(!names.is_empty());
+        assert!(!names.contains(&"starfield"));
+        assert!(
+            names
+                .iter()
+                .all(|n| find(n).unwrap().meta.category == Category::DeepCosmos)
+        );
+    }
+
+    #[test]
+    fn cli_r9_unknown_category_name_or_empty_selection_exits_2() {
+        let err = selected(&["--category", "nope"], &[]).unwrap_err();
+        assert_eq!(err, UsageError::UnknownCategory("nope".into()));
+        assert!(err.to_string().contains("deep-cosmos"), "{err}");
+        for flag in ["--only", "--exclude"] {
+            assert_eq!(
+                selected(&[flag, "nope"], &[]).unwrap_err(),
+                UsageError::UnknownGenerator("nope".into()),
+                "{flag}"
+            );
+        }
+        assert_eq!(
+            selected(&["--only", "starfield", "--exclude", "starfield"], &[]).unwrap_err(),
+            UsageError::EmptySelection
+        );
+    }
+
+    #[test]
+    fn cli_r9_run_ignores_filters() {
+        let cli = parse(&[
+            "run",
+            "starfield",
+            "--category",
+            "nope",
+            "--only",
+            "nope",
+            "--exclude",
+            "starfield",
+        ])
+        .unwrap();
+        let filters = Filters::from_cli(&cli.command(), &cli).unwrap();
+        assert_eq!(filters, Filters::default(), "run ignores every filter");
+        assert_eq!(
+            select(&cli.command(), &[], &filters).unwrap()[0].meta.name,
+            "starfield"
+        );
+    }
+
+    #[test]
+    fn cli_r10_format_choice_is_json_then_categories_then_tty() {
+        assert_eq!(list_format(false, false, false, true), ListFormat::Aligned);
+        assert_eq!(list_format(false, false, false, false), ListFormat::Tsv);
+        assert_eq!(
+            list_format(false, false, true, true),
+            ListFormat::Tsv,
+            "--plain overrides a terminal"
+        );
+        assert_eq!(list_format(true, false, false, true), ListFormat::Json);
+        assert_eq!(
+            list_format(true, true, true, true),
+            ListFormat::Json,
+            "--json wins"
+        );
+        assert_eq!(
+            list_format(false, true, false, true),
+            ListFormat::Categories
+        );
+    }
+
+    #[test]
+    fn cli_r9_list_honours_category_filter() {
+        let cli = parse(&["list", "--category", "deep-cosmos"]).unwrap();
+        let filters = Filters::from_cli(&cli.command(), &cli).unwrap();
+        let entries = select(&cli.command(), &[], &filters).unwrap();
+        assert!(!entries.is_empty());
+        assert!(
+            entries
+                .iter()
+                .all(|e| e.meta.category == Category::DeepCosmos)
+        );
+        let text = list_output(&entries, ListFormat::Tsv);
+        assert_eq!(text.lines().count(), entries.len());
+        for line in text.lines() {
+            assert_eq!(line.split('\t').nth(1), Some("deep-cosmos"));
+        }
+    }
+
+    #[test]
+    fn cli_r10_aligned_output_has_a_header_and_columns() {
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let text = list_output(&entries, ListFormat::Aligned);
+        let mut lines = text.lines();
+        let header = lines.next().unwrap();
+        assert!(header.starts_with("NAME"));
+        let cat_col = header.find("CATEGORY").unwrap();
+        let desc_col = header.find("DESCRIPTION").unwrap();
+        assert!(cat_col > 4 && desc_col > cat_col);
+        for line in lines {
+            let rest = &line[cat_col..];
+            assert!(
+                Category::ALL.iter().any(|c| rest.starts_with(c.id())),
+                "{line:?}"
+            );
+            assert!(
+                line.len() > desc_col && !line[desc_col..].trim().is_empty(),
+                "{line:?}"
+            );
+        }
+        assert_eq!(text.lines().count(), entries.len() + 1);
+    }
+
+    #[test]
+    fn cli_r10_json_output_is_sorted_and_escaped() {
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let text = list_output(&entries, ListFormat::Json);
+        assert!(text.starts_with("[{\"name\":\""), "{text:?}");
+        assert!(text.ends_with("}]\n"));
+        assert_eq!(text.matches("\"name\":").count(), entries.len());
+        let mut pos = 0;
+        for e in &entries {
+            let needle = format!(
+                "{{\"name\":\"{}\",\"category\":\"{}\",",
+                e.meta.name,
+                e.meta.category.id()
+            );
+            let at = text[pos..]
+                .find(&needle)
+                .unwrap_or_else(|| panic!("missing {needle} after byte {pos}"));
+            pos += at + needle.len();
+        }
+        assert_eq!(
+            json_string("a\"b\\c\nd\te\u{1}"),
+            "\"a\\\"b\\\\c\\nd\\te\\u0001\""
+        );
+    }
+
+    #[test]
+    fn cli_r10_categories_are_sorted_by_label_and_cover_every_scene() {
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let text = list_output(&entries, ListFormat::Categories);
+        let rows: Vec<Vec<&str>> = text.lines().map(|l| l.split('\t').collect()).collect();
+        assert!(rows.iter().all(|r| r.len() == 3), "{rows:?}");
+        let labels: Vec<&str> = rows.iter().map(|r| r[1]).collect();
+        let mut sorted = labels.clone();
+        sorted.sort_unstable();
+        assert_eq!(labels, sorted);
+        let total: usize = rows
+            .iter()
+            .map(|r| r[2].parse::<usize>().expect("count"))
+            .sum();
+        assert_eq!(total, registry().len());
+        for r in &rows {
+            let c = Category::ALL.iter().find(|c| c.id() == r[0]).unwrap();
+            assert_eq!(c.label(), r[1]);
+        }
+        let non_empty = Category::ALL
+            .iter()
+            .filter(|c| registry().iter().any(|e| e.meta.category == **c))
+            .count();
+        assert_eq!(rows.len(), non_empty);
+    }
+
+    #[test]
+    fn cli_r10_every_format_covers_the_same_scene_set() {
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let mut expected: Vec<&str> = entries.iter().map(|e| e.meta.name).collect();
+        expected.sort_unstable();
+        let tsv = list_output(&entries, ListFormat::Tsv);
+        let tsv_names: Vec<&str> = tsv.lines().map(|l| l.split('\t').next().unwrap()).collect();
+        assert_eq!(tsv_names, expected);
+        let aligned = list_output(&entries, ListFormat::Aligned);
+        let aligned_names: Vec<&str> = aligned
+            .lines()
+            .skip(1)
+            .map(|l| l.split_whitespace().next().unwrap())
+            .collect();
+        assert_eq!(aligned_names, expected);
+        let json = list_output(&entries, ListFormat::Json);
+        assert_eq!(json.matches("\"name\":").count(), expected.len());
+    }
+
+    #[test]
     fn cli_r2_gen_r14_run_accepts_a_retired_name() {
         let run = Command::Run {
             name: "chemical_reaction".into(),
         };
-        let picked = select(&run, &[]).unwrap();
+        let picked = select(&run, &[], &Filters::default()).unwrap();
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].meta.name, "gray_scott");
     }
@@ -338,20 +975,202 @@ mod tests {
     }
 
     #[test]
+    fn cli_r9_speed_must_be_finite_and_in_range() {
+        for good in ["0.1", "1", "2.5", "4"] {
+            assert_eq!(
+                parse(&["--speed", good]).unwrap().speed,
+                Some(good.parse().unwrap()),
+                "--speed {good}"
+            );
+        }
+        for bad in ["0", "0.09", "4.1", "-1", "nan", "inf", "fast"] {
+            let err = parse(&["--speed", bad]).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "--speed {bad}");
+        }
+        assert_eq!(
+            parse(&[]).unwrap().speed,
+            None,
+            "default applied in Settings"
+        );
+    }
+
+    #[test]
     fn cfg_r4_disabled_filters_sim_but_not_run() {
         let all: Vec<String> = registry().iter().map(|e| e.meta.name.to_string()).collect();
         assert!(matches!(
-            select(&Command::Sim, &all),
+            select(&Command::Sim, &all, &Filters::default()),
             Err(UsageError::AllDisabled)
         ));
         let run = Command::Run {
             name: "starfield".into(),
         };
-        assert_eq!(select(&run, &all).unwrap().len(), 1);
+        assert_eq!(select(&run, &all, &Filters::default()).unwrap().len(), 1);
         let unrelated = vec!["not_a_generator".to_string()];
         assert_eq!(
-            select(&Command::Sim, &unrelated).unwrap().len(),
+            select(&Command::Sim, &unrelated, &Filters::default())
+                .unwrap()
+                .len(),
             registry().len()
+        );
+    }
+
+    /// Parse and resolve in one step, as `main` does.
+    fn record(argv: &[&str]) -> (Cli, RecordSpec) {
+        let cli = parse(argv).unwrap();
+        let spec = RecordSpec::resolve(&cli, &cli.command()).unwrap();
+        (cli, spec)
+    }
+
+    #[test]
+    fn cli_r8_record_parses_scene_out_and_headless_defaults() {
+        let (_, spec) = record(&["record", "aurora", "--out", "/tmp/a.gif"]);
+        assert_eq!(spec.entry.meta.name, "aurora");
+        assert_eq!(spec.out, PathBuf::from("/tmp/a.gif"));
+        assert_eq!(
+            (spec.fps, spec.frames, spec.size, spec.theme, spec.seed),
+            (30, 150, Size::new(80, 24), Theme::Astro, 42)
+        );
+        assert_eq!(spec.format, FormatArg::Gif);
+        assert!(!spec.ascii);
+    }
+
+    #[test]
+    fn cli_r8_record_requires_a_scene_and_an_out_path() {
+        assert_eq!(parse(&["record"]).unwrap_err().exit_code(), 2);
+        assert_eq!(parse(&["record", "aurora"]).unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn cli_r8_record_frames_override_seconds_and_round_up_to_whole_frames() {
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--seconds",
+            "2",
+            "--frames",
+            "7",
+        ]);
+        assert_eq!(spec.frames, 7);
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--seconds",
+            "2.5",
+            "--fps",
+            "10",
+        ]);
+        assert_eq!(spec.frames, 25);
+    }
+
+    #[test]
+    fn cli_r8_record_fps_must_divide_60() {
+        let argv = ["record", "starfield", "--out", "x.gif", "--fps", "7"];
+        let cli = parse(&argv).unwrap();
+        assert_eq!(
+            RecordSpec::resolve(&cli, &cli.command()).unwrap_err(),
+            UsageError::RecordFps(7)
+        );
+        for good in [1u16, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60] {
+            let fps = good.to_string();
+            let argv = ["record", "starfield", "--out", "x.gif", "--fps", &fps];
+            let cli = parse(&argv).unwrap();
+            assert_eq!(RecordSpec::resolve(&cli, &cli.command()).unwrap().fps, good);
+        }
+    }
+
+    #[test]
+    fn cli_r8_record_caps_a_recording_at_36000_frames() {
+        // `--frames` itself is range-checked by clap (1..=36 000).
+        assert_eq!(
+            parse(&["record", "starfield", "--out", "x.gif", "--frames", "36001"])
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        let (_, spec) = record(&["record", "starfield", "--out", "x.gif", "--frames", "36000"]);
+        assert_eq!(spec.frames, RECORD_MAX_FRAMES);
+        let (_, spec) = record(&["record", "starfield", "--out", "x.gif", "--seconds", "1200"]);
+        assert_eq!(spec.frames, RECORD_MAX_FRAMES);
+        // A `--seconds` request above the cap is a usage error, never a write.
+        let argv = ["record", "starfield", "--out", "x.gif", "--seconds", "1201"];
+        let cli = parse(&argv).unwrap();
+        let err = RecordSpec::resolve(&cli, &cli.command()).unwrap_err();
+        assert_eq!(err, UsageError::RecordFrames(36_030));
+        assert!(err.to_string().contains("36000"), "{err}");
+        // The absurd case is the same usage error (no allocation, no file).
+        let argv = ["record", "starfield", "--out", "x.gif", "--seconds", "1e9"];
+        let cli = parse(&argv).unwrap();
+        assert!(matches!(
+            RecordSpec::resolve(&cli, &cli.command()),
+            Err(UsageError::RecordFrames(_))
+        ));
+    }
+
+    #[test]
+    fn cli_r8_record_format_is_inferred_from_the_path() {
+        use std::path::Path;
+        for (path, format) in [
+            ("a.gif", FormatArg::Gif),
+            ("a.png", FormatArg::Png),
+            ("a.cast", FormatArg::Asciicast),
+            ("a.json", FormatArg::Asciicast),
+            ("frames", FormatArg::Gif),
+            ("a.mov", FormatArg::Gif),
+        ] {
+            assert_eq!(FormatArg::infer(Path::new(path)), format, "{path}");
+        }
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "a.gif",
+            "--format",
+            "asciicast",
+        ]);
+        assert_eq!(spec.format, FormatArg::Asciicast);
+    }
+
+    #[test]
+    fn cli_r8_record_rejects_unknown_scenes_and_bad_values_with_code_2() {
+        let argv = ["record", "nope", "--out", "x.gif"];
+        let cli = parse(&argv).unwrap();
+        assert!(matches!(
+            RecordSpec::resolve(&cli, &cli.command()),
+            Err(UsageError::UnknownGenerator(name)) if name == "nope"
+        ));
+        for argv in [
+            ["record", "starfield", "--out", "x.gif", "--size", "0x24"],
+            ["record", "starfield", "--out", "x.gif", "--size", "80"],
+            ["record", "starfield", "--out", "x.gif", "--seconds", "0"],
+            ["record", "starfield", "--out", "x.gif", "--frames", "0"],
+            ["record", "starfield", "--out", "x.gif", "--format", "mp4"],
+        ] {
+            assert_eq!(parse(&argv).unwrap_err().exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn cli_r8_record_honours_global_flags() {
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--theme",
+            "mono",
+            "--ascii",
+            "--seed",
+            "7",
+            "--size",
+            "20x8",
+        ]);
+        assert_eq!(
+            (spec.theme, spec.ascii, spec.seed, spec.size),
+            (Theme::Mono, true, 7, Size::new(20, 8))
         );
     }
 }
