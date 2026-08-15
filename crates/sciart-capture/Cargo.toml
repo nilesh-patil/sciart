@@ -1,0 +1,29 @@
+[package]
+name = "sciart-capture"
+description = "Headless frame capture for sciart: the preview renderer, PNG, GIF and asciicast"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["generative-art", "gif", "png", "asciicast", "terminal"]
+categories = ["graphics", "multimedia::images", "command-line-utilities"]
+# ADR-0025: used by `sciart record` behind the `record` feature and by the preview example;
+# never published.
+publish = false
+
+[dependencies]
+sciart-core.workspace = true
+sciart-render.workspace = true
+font8x8.workspace = true
+gif.workspace = true
+png.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -310,6 +310,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1c133bc6a41be0d194c306b5506d15e6feeea7b1d6604bd3f8310dfb2ca96486"
 
 [[package]]
+name = "color_quant"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3d7b894f5411737b7867f4827955924d7c254fc9f4d91a6aad6b097804b1018b"
+
+[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -862,6 +868,16 @@ dependencies = [
  "cfg-if",
  "libc",
  "r-efi 6.0.0",
+]
+
+[[package]]
+name = "gif"
+version = "0.13.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4ae047235e33e2829703574b54fdec96bfbad892062d97fed2f76022287de61b"
+dependencies = [
+ "color_quant",
+ "weezl",
 ]
 
 [[package]]
@@ -1890,11 +1906,14 @@ dependencies = [
  "anyhow",
  "clap",
  "crossterm",
+ "gif",
+ "png",
  "portable-pty",
  "proptest",
  "rand 0.9.5",
  "rand_chacha",
  "ratatui",
+ "sciart-capture",
  "sciart-core",
  "sciart-generators",
  "sciart-keepawake",
@@ -1904,6 +1923,18 @@ dependencies = [
  "tempfile",
  "toml",
  "vt100",
+]
+
+[[package]]
+name = "sciart-capture"
+version = "0.1.0"
+dependencies = [
+ "font8x8",
+ "gif",
+ "png",
+ "sciart-core",
+ "sciart-render",
+ "tempfile",
 ]
 
 [[package]]
@@ -1922,10 +1953,9 @@ name = "sciart-generators"
 version = "0.1.0"
 dependencies = [
  "criterion",
- "font8x8",
  "insta",
- "png",
  "proptest",
+ "sciart-capture",
  "sciart-core",
  "sciart-render",
  "sciart-scenes-cosmos",
@@ -2640,6 +2670,12 @@ dependencies = [
  "js-sys",
  "wasm-bindgen",
 ]
+
+[[package]]
+name = "weezl"
+version = "0.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a28ac98ddc8b9274cb41bb4d9d4d5c425b6020c50c46f25559911905610b4a88"
 
 [[package]]
 name = "wezterm-bidi"
