@@ -1,9 +1,10 @@
-//! Command-line interface (SPEC-005 CLI-R1..R5).
+//! Command-line interface (SPEC-005 CLI-R1..R8).
 
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
+use sciart_core::Size;
 use sciart_generators::{Entry, find, registry};
 use sciart_keepawake::Mode;
 use sciart_render::Theme;
@@ -56,7 +57,7 @@ pub struct Cli {
     pub config: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
+#[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum Command {
     /// Cycle through generators (default)
     Sim,
@@ -64,6 +65,117 @@ pub enum Command {
     Run { name: String },
     /// List generators
     List,
+    /// Render a scene to GIF, PNG frames or an asciicast (CLI-R8; needs the `record` feature)
+    Record(RecordArgs),
+}
+
+/// CLI-R8: the `record` subcommand's own flags. `--fps`, `--theme`, `--ascii` and `--seed`
+/// are the global flags, so a recording uses the same spelling as the rest of the CLI.
+#[derive(Debug, Clone, PartialEq, Args)]
+pub struct RecordArgs {
+    /// Scene to record (registered name or retired alias)
+    pub scene: String,
+    /// Output: a .gif file, a PNG-frame directory (.png), or an asciicast (.cast/.json)
+    #[arg(long)]
+    pub out: PathBuf,
+    /// Simulated seconds to record [default: 5]
+    #[arg(long, value_parser = positive_secs)]
+    pub seconds: Option<f64>,
+    /// Number of frames; overrides --seconds (CLI-R8 caps a recording at 36 000 frames)
+    #[arg(long, value_parser = clap::value_parser!(u32).range(1..=36_000))]
+    pub frames: Option<u32>,
+    /// Cell size WxH [default: 80x24]
+    #[arg(long, value_parser = size_arg)]
+    pub size: Option<Size>,
+    /// Output format; inferred from --out when omitted
+    #[arg(long, value_enum)]
+    pub format: Option<FormatArg>,
+}
+
+/// CLI-R8 output formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum FormatArg {
+    Gif,
+    Png,
+    Asciicast,
+}
+
+impl FormatArg {
+    /// CLI-R8: `.gif`, `.png`, `.cast`/`.json`; anything else (including no extension) is gif.
+    pub fn infer(path: &Path) -> Self {
+        match path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref()
+        {
+            Some("png") => Self::Png,
+            Some("cast" | "json") => Self::Asciicast,
+            _ => Self::Gif,
+        }
+    }
+}
+
+/// CLI-R8 defaults; recording is headless and does not read the config file.
+pub const RECORD_DEFAULT_SECONDS: f64 = 5.0;
+pub const RECORD_DEFAULT_FPS: u16 = 30;
+pub const RECORD_DEFAULT_SIZE: Size = Size::new(80, 24);
+pub const RECORD_DEFAULT_SEED: u64 = 42;
+/// CLI-R8: a recording is capped at 36 000 frames (20 min at 30 fps), so a huge `--seconds`
+/// is a usage error instead of an allocation/write that never ends.
+pub const RECORD_MAX_FRAMES: usize = 36_000;
+
+/// A validated `record` invocation: CLI-R8 defaults applied, scene resolved, timing checked.
+#[cfg_attr(not(feature = "record"), allow(dead_code))] // read by the record implementation
+#[derive(Debug)]
+pub struct RecordSpec {
+    pub entry: &'static Entry,
+    pub out: PathBuf,
+    pub format: FormatArg,
+    pub frames: usize,
+    pub fps: u16,
+    pub size: Size,
+    pub theme: Theme,
+    pub ascii: bool,
+    pub seed: u64,
+}
+
+impl RecordSpec {
+    /// Resolve CLI-R8: every value is either explicit or its documented default; anything
+    /// unknown (scene, fps that does not divide 60) is a `UsageError` (exit 2).
+    pub fn resolve(cli: &Cli, command: &Command) -> Result<Self, UsageError> {
+        let Command::Record(args) = command else {
+            return Err(UsageError::Record("not a record command".to_owned()));
+        };
+        let fps = cli.fps.unwrap_or(RECORD_DEFAULT_FPS);
+        if 60 % fps != 0 {
+            return Err(UsageError::RecordFps(fps));
+        }
+        let entry =
+            find(&args.scene).ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone()))?;
+        // CLI-R8: `--frames` overrides `--seconds`; without either, 5 s at the chosen fps.
+        let frames = match args.frames {
+            Some(frames) => frames as usize,
+            None => {
+                let seconds = args.seconds.unwrap_or(RECORD_DEFAULT_SECONDS);
+                (seconds * f64::from(fps)).round().max(1.0) as usize
+            }
+        };
+        if frames > RECORD_MAX_FRAMES {
+            return Err(UsageError::RecordFrames(frames));
+        }
+        Ok(Self {
+            entry,
+            out: args.out.clone(),
+            format: args.format.unwrap_or_else(|| FormatArg::infer(&args.out)),
+            frames,
+            fps,
+            size: args.size.unwrap_or(RECORD_DEFAULT_SIZE),
+            theme: cli.theme.map(Theme::from).unwrap_or(Theme::Astro),
+            ascii: cli.ascii,
+            seed: cli.seed.unwrap_or(RECORD_DEFAULT_SEED),
+        })
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
@@ -113,6 +225,15 @@ fn positive_secs(s: &str) -> Result<f64, String> {
     }
 }
 
+/// CLI-R8: `WxH` in cells, both at least 1.
+fn size_arg(s: &str) -> Result<Size, String> {
+    let dim = |v: &str| v.parse::<u16>().ok().filter(|&n| n > 0);
+    s.split_once('x')
+        .and_then(|(w, h)| dim(w).zip(dim(h)))
+        .map(|(w, h)| Size::new(w, h))
+        .ok_or_else(|| format!("'{s}' is not WxH with positive sides (e.g. 80x24)"))
+}
+
 impl Cli {
     /// No subcommand means `sim` (CLI-R1).
     pub fn command(&self) -> Command {
@@ -120,12 +241,17 @@ impl Cli {
     }
 }
 
-/// Errors that exit with code 2 (CLI-R2, CFG-R2..R4).
+/// Errors that exit with code 2 (CLI-R2, CFG-R2..R4, CLI-R8).
 #[derive(Debug, PartialEq)]
 pub enum UsageError {
     UnknownGenerator(String),
     AllDisabled,
     Config(String),
+    /// CLI-R8: frame k must land on whole 1/60 s steps.
+    RecordFps(u16),
+    /// CLI-R8: the recording cap (36 000 frames) was exceeded.
+    RecordFrames(usize),
+    Record(String),
 }
 
 impl fmt::Display for UsageError {
@@ -143,6 +269,17 @@ impl fmt::Display for UsageError {
                 f.write_str("every generator is disabled in the config file; nothing to show")
             }
             UsageError::Config(msg) => write!(f, "config: {msg}"),
+            UsageError::RecordFps(fps) => write!(
+                f,
+                "--fps {fps} does not divide 60: recording needs a whole number of 1/60 s \
+                 steps per frame (1, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60)"
+            ),
+            UsageError::RecordFrames(frames) => write!(
+                f,
+                "a recording is limited to {RECORD_MAX_FRAMES} frames (20 min at 30 fps); \
+                 this request is {frames} frames"
+            ),
+            UsageError::Record(msg) => write!(f, "record: {msg}"),
         }
     }
 }
@@ -154,6 +291,9 @@ pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Ent
         Command::Run { name } => find(name)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
+        Command::Record(args) => find(&args.scene)
+            .map(|e| vec![e])
+            .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),
         Command::Sim | Command::List => {
             let disabled: Vec<&str> = disabled
                 .iter()
@@ -352,6 +492,166 @@ mod tests {
         assert_eq!(
             select(&Command::Sim, &unrelated).unwrap().len(),
             registry().len()
+        );
+    }
+
+    /// Parse and resolve in one step, as `main` does.
+    fn record(argv: &[&str]) -> (Cli, RecordSpec) {
+        let cli = parse(argv).unwrap();
+        let spec = RecordSpec::resolve(&cli, &cli.command()).unwrap();
+        (cli, spec)
+    }
+
+    #[test]
+    fn cli_r8_record_parses_scene_out_and_headless_defaults() {
+        let (_, spec) = record(&["record", "aurora", "--out", "/tmp/a.gif"]);
+        assert_eq!(spec.entry.meta.name, "aurora");
+        assert_eq!(spec.out, PathBuf::from("/tmp/a.gif"));
+        assert_eq!(
+            (spec.fps, spec.frames, spec.size, spec.theme, spec.seed),
+            (30, 150, Size::new(80, 24), Theme::Astro, 42)
+        );
+        assert_eq!(spec.format, FormatArg::Gif);
+        assert!(!spec.ascii);
+    }
+
+    #[test]
+    fn cli_r8_record_requires_a_scene_and_an_out_path() {
+        assert_eq!(parse(&["record"]).unwrap_err().exit_code(), 2);
+        assert_eq!(parse(&["record", "aurora"]).unwrap_err().exit_code(), 2);
+    }
+
+    #[test]
+    fn cli_r8_record_frames_override_seconds_and_round_up_to_whole_frames() {
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--seconds",
+            "2",
+            "--frames",
+            "7",
+        ]);
+        assert_eq!(spec.frames, 7);
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--seconds",
+            "2.5",
+            "--fps",
+            "10",
+        ]);
+        assert_eq!(spec.frames, 25);
+    }
+
+    #[test]
+    fn cli_r8_record_fps_must_divide_60() {
+        let argv = ["record", "starfield", "--out", "x.gif", "--fps", "7"];
+        let cli = parse(&argv).unwrap();
+        assert_eq!(
+            RecordSpec::resolve(&cli, &cli.command()).unwrap_err(),
+            UsageError::RecordFps(7)
+        );
+        for good in [1u16, 2, 3, 4, 5, 6, 10, 12, 15, 20, 30, 60] {
+            let fps = good.to_string();
+            let argv = ["record", "starfield", "--out", "x.gif", "--fps", &fps];
+            let cli = parse(&argv).unwrap();
+            assert_eq!(RecordSpec::resolve(&cli, &cli.command()).unwrap().fps, good);
+        }
+    }
+
+    #[test]
+    fn cli_r8_record_caps_a_recording_at_36000_frames() {
+        // `--frames` itself is range-checked by clap (1..=36 000).
+        assert_eq!(
+            parse(&["record", "starfield", "--out", "x.gif", "--frames", "36001"])
+                .unwrap_err()
+                .exit_code(),
+            2
+        );
+        let (_, spec) = record(&["record", "starfield", "--out", "x.gif", "--frames", "36000"]);
+        assert_eq!(spec.frames, RECORD_MAX_FRAMES);
+        let (_, spec) = record(&["record", "starfield", "--out", "x.gif", "--seconds", "1200"]);
+        assert_eq!(spec.frames, RECORD_MAX_FRAMES);
+        // A `--seconds` request above the cap is a usage error, never a write.
+        let argv = ["record", "starfield", "--out", "x.gif", "--seconds", "1201"];
+        let cli = parse(&argv).unwrap();
+        let err = RecordSpec::resolve(&cli, &cli.command()).unwrap_err();
+        assert_eq!(err, UsageError::RecordFrames(36_030));
+        assert!(err.to_string().contains("36000"), "{err}");
+        // The absurd case is the same usage error (no allocation, no file).
+        let argv = ["record", "starfield", "--out", "x.gif", "--seconds", "1e9"];
+        let cli = parse(&argv).unwrap();
+        assert!(matches!(
+            RecordSpec::resolve(&cli, &cli.command()),
+            Err(UsageError::RecordFrames(_))
+        ));
+    }
+
+    #[test]
+    fn cli_r8_record_format_is_inferred_from_the_path() {
+        use std::path::Path;
+        for (path, format) in [
+            ("a.gif", FormatArg::Gif),
+            ("a.png", FormatArg::Png),
+            ("a.cast", FormatArg::Asciicast),
+            ("a.json", FormatArg::Asciicast),
+            ("frames", FormatArg::Gif),
+            ("a.mov", FormatArg::Gif),
+        ] {
+            assert_eq!(FormatArg::infer(Path::new(path)), format, "{path}");
+        }
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "a.gif",
+            "--format",
+            "asciicast",
+        ]);
+        assert_eq!(spec.format, FormatArg::Asciicast);
+    }
+
+    #[test]
+    fn cli_r8_record_rejects_unknown_scenes_and_bad_values_with_code_2() {
+        let argv = ["record", "nope", "--out", "x.gif"];
+        let cli = parse(&argv).unwrap();
+        assert!(matches!(
+            RecordSpec::resolve(&cli, &cli.command()),
+            Err(UsageError::UnknownGenerator(name)) if name == "nope"
+        ));
+        for argv in [
+            ["record", "starfield", "--out", "x.gif", "--size", "0x24"],
+            ["record", "starfield", "--out", "x.gif", "--size", "80"],
+            ["record", "starfield", "--out", "x.gif", "--seconds", "0"],
+            ["record", "starfield", "--out", "x.gif", "--frames", "0"],
+            ["record", "starfield", "--out", "x.gif", "--format", "mp4"],
+        ] {
+            assert_eq!(parse(&argv).unwrap_err().exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn cli_r8_record_honours_global_flags() {
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--theme",
+            "mono",
+            "--ascii",
+            "--seed",
+            "7",
+            "--size",
+            "20x8",
+        ]);
+        assert_eq!(
+            (spec.theme, spec.ascii, spec.seed, spec.size),
+            (Theme::Mono, true, 7, Size::new(20, 8))
         );
     }
 }
