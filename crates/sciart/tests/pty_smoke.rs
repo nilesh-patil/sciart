@@ -1,6 +1,6 @@
 //! End-to-end: the real binary in an 80x24 pseudo-terminal, screen decoded by a vt100
 //! emulator (SPEC-006 end-to-end layer; RND-R4, RND-R5, RND-R9, RT-R6, RT-R9, RT-R12, CLI-R7,
-//! CFG-R2, CFG-R3, RT-R17).
+//! CFG-R2, CFG-R3, RT-R17, RND-R18).
 //! Unix only (portable-pty's native backend).
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // real-time timeouts against a real process (ADR-0008 applies to generators)
@@ -29,11 +29,20 @@ struct Session {
 
 impl Session {
     fn start(args: &[&str]) -> Session {
-        Self::start_with_config(args, None)
+        Self::spawn(args, None, &[])
     }
 
     /// Like `start`, with `config` written to `$XDG_CONFIG_HOME/sciart/config.toml`.
     fn start_with_config(args: &[&str], config: Option<&str>) -> Session {
+        Self::spawn(args, config, &[])
+    }
+
+    /// Like `start`, with extra environment variables (`NO_COLOR` for RND-R18).
+    fn start_with_env(args: &[&str], env: &[(&str, &str)]) -> Session {
+        Self::spawn(args, None, env)
+    }
+
+    fn spawn(args: &[&str], config: Option<&str>, env: &[(&str, &str)]) -> Session {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -52,6 +61,12 @@ impl Session {
         let mut cmd = CommandBuilder::new(BIN);
         cmd.args(args);
         cmd.env("XDG_CONFIG_HOME", config_home.path());
+        // The colour environment is part of what RND-R18 tests assert, so the test's own
+        // `env` list decides it; the developer's shell must not leak in (TEST-R12).
+        cmd.env_remove("NO_COLOR");
+        for (key, value) in env {
+            cmd.env(key, value);
+        }
         let child = pair.slave.spawn_command(cmd).expect("spawn sciart");
         drop(pair.slave);
 
@@ -551,4 +566,126 @@ fn rt_r19_f_and_v_toggle_favourites_and_the_filter() {
     });
     let (status, _) = s.quit();
     assert!(status.success());
+}
+
+// ----- M23: colour capability (RND-R18, CFG-R10) -----
+
+/// RND-R18: `--color 256` quantizes every painted colour to an xterm-256 index, so the raw
+/// stream carries `38;5;n`/`48;5;n` and no truecolor `38;2;`. Asserted on the bytes, not the
+/// decoded screen: vt100 normalises both forms to RGB and would hide the difference.
+#[test]
+fn rnd_r18_colour_256_emits_indexed_sgr() {
+    let args = [
+        "run",
+        "starfield",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+        "--color",
+        "256",
+    ];
+    let s = Session::start(&args);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    s.wait_raw("an indexed SGR sequence", |bytes| {
+        String::from_utf8_lossy(bytes).contains("\x1b[38;5;")
+    });
+    let (status, raw) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains("\x1b[38;5;"),
+        "no indexed foreground in the stream"
+    );
+    assert!(
+        !text.contains("\x1b[38;2;"),
+        "truecolor leaked into --color 256"
+    );
+}
+
+/// RND-R18: an explicit `--color truecolor` wins over `NO_COLOR`, and (because the mode was
+/// explicit) no `NO_COLOR` warning is printed.
+#[test]
+fn rnd_r18_colour_truecolor_overrides_no_color() {
+    let args = [
+        "run",
+        "starfield",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+        "--color",
+        "truecolor",
+    ];
+    let s = Session::start_with_env(&args, &[("NO_COLOR", "1")]);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    s.wait_raw("a truecolor SGR sequence", |bytes| {
+        String::from_utf8_lossy(bytes).contains("\x1b[38;2;")
+    });
+    let (status, raw) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+    let text = String::from_utf8_lossy(&raw);
+    assert!(
+        text.contains("\x1b[38;2;"),
+        "explicit truecolor did not reach the terminal"
+    );
+    assert!(
+        !text.contains("NO_COLOR") && !text.contains("sciart: warning:"),
+        "an explicit --color must not warn:\n{text}"
+    );
+}
+
+/// RND-R18/CFG-R10: with `NO_COLOR` set and no `--color`, the automatic choice is mono and
+/// exactly one `sciart: warning:` line names `NO_COLOR`.
+#[test]
+fn rnd_r18_no_color_selects_mono_with_a_warning() {
+    let args = [
+        "run",
+        "starfield",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let s = Session::start_with_env(&args, &[("NO_COLOR", "1")]);
+    s.wait_raw("the NO_COLOR warning", |bytes| {
+        String::from_utf8_lossy(bytes).contains("NO_COLOR")
+    });
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    let (status, raw) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+    let text = String::from_utf8_lossy(&raw);
+    let warnings: Vec<&str> = text
+        .lines()
+        .filter(|line| line.contains("sciart: warning:") && line.contains("NO_COLOR"))
+        .collect();
+    assert_eq!(
+        warnings.len(),
+        1,
+        "exactly one NO_COLOR warning, got {warnings:?} in:\n{text}"
+    );
+}
+
+/// RND-R18/CFG-R10: an invalid `--color` value is a usage error: exit 2, with a message that
+/// names the flag, before any terminal setup.
+#[test]
+fn rnd_r18_bad_color_exits_2() {
+    let home = tempfile::tempdir().unwrap();
+    let out = Command::new(BIN)
+        .args(["--color", "42", "run", "starfield"])
+        .env("XDG_CONFIG_HOME", home.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
+    assert!(stderr.contains("color"), "{stderr}");
 }
