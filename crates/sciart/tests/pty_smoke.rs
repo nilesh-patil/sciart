@@ -689,3 +689,39 @@ fn rnd_r18_bad_color_exits_2() {
     let stderr = String::from_utf8_lossy(&out.stderr).to_lowercase();
     assert!(stderr.contains("color"), "{stderr}");
 }
+
+// ----- M23: colour-blind theme (RND-R19) -----
+
+/// RND-R19: `colorblind` is a selectable fifth theme, `t` cycles back to astro after it, and
+/// it paints in truecolor (the theme is a palette, not a colour mode).
+#[test]
+fn rnd_r19_colorblind_theme_is_selectable_and_cycles() {
+    let args = [
+        "run",
+        "starfield",
+        "--hud",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+        "--theme",
+        "colorblind",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("the colorblind theme in the HUD", |t| {
+        t.contains("| colorblind |")
+    });
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    // The documented cycle is astro -> rainbow -> mono -> aurora -> colorblind -> astro.
+    s.press("t");
+    s.wait_for("astro after colorblind", |t| t.contains("| astro |"));
+    let (status, raw) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+    assert!(
+        String::from_utf8_lossy(&raw).contains("\x1b[38;2;"),
+        "the colorblind theme still emits truecolor"
+    );
+}
