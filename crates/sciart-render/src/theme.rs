@@ -14,10 +14,18 @@ pub enum Theme {
     Mono,
     /// Auroral emission lines on a polar night (RND-R16, ADR-0022).
     Aurora,
+    /// Okabe–Ito colour-blind-safe palette (RND-R19, ADR-0026).
+    Colorblind,
 }
 
 impl Theme {
-    pub const ALL: [Theme; 4] = [Theme::Astro, Theme::Rainbow, Theme::Mono, Theme::Aurora];
+    pub const ALL: [Theme; 5] = [
+        Theme::Astro,
+        Theme::Rainbow,
+        Theme::Mono,
+        Theme::Aurora,
+        Theme::Colorblind,
+    ];
 
     pub const fn name(self) -> &'static str {
         match self {
@@ -25,6 +33,7 @@ impl Theme {
             Theme::Rainbow => "rainbow",
             Theme::Mono => "mono",
             Theme::Aurora => "aurora",
+            Theme::Colorblind => "colorblind",
         }
     }
 
@@ -51,6 +60,13 @@ impl Theme {
                 Theme::Astro.color(ink, x, y)
             }
             (Theme::Aurora, role) => scale(aurora_base(role), 0.3 + 0.7 * level),
+            (Theme::Colorblind, Role::Seq) => gradient(&VIRIDIS, ink::seq_value(ink)),
+            (Theme::Colorblind, Role::Div) => gradient(&COLORBLIND_DIV, div_pos(ink)),
+            // Roles scenes may not use (GEN-R23) borrow astro's tables (RND-R19).
+            (Theme::Colorblind, Role::Phase | Role::Blackbody | Role::Ramp(_)) => {
+                Theme::Astro.color(ink, x, y)
+            }
+            (Theme::Colorblind, role) => scale(colorblind_base(role), 0.3 + 0.7 * level),
             // Colormap roles ignore the per-cell hash and the role-hue scaling: a field
             // needs one smooth, perceptually ordered ramp (RND-R6, ADR-0011).
             (Theme::Astro, Role::Seq) => gradient(&INFERNO, ink::seq_value(ink)),
@@ -234,6 +250,26 @@ const AURORA_DIV: [Rgb; 5] = [
     Rgb(120, 255, 170),
 ];
 
+/// Viridis-like `Seq` (RND-R19): dark purple → blue → teal → green → yellow, monotone in
+/// lightness so equal level steps are equal brightness steps.
+const VIRIDIS: [Rgb; 5] = [
+    Rgb(68, 1, 84),
+    Rgb(59, 82, 139),
+    Rgb(33, 145, 140),
+    Rgb(93, 200, 99),
+    Rgb(253, 231, 37),
+];
+
+/// `Div` for the colour-blind theme (RND-R19): blue ← near-dark → vermillion, so the two
+/// signs differ in hue without relying on red/green.
+const COLORBLIND_DIV: [Rgb; 5] = [
+    Rgb(0, 114, 178),
+    Rgb(0, 80, 127),
+    Rgb(20, 22, 30),
+    Rgb(138, 61, 0),
+    Rgb(213, 94, 0),
+];
+
 /// Position of a `Div` ink along its colormap, `[−1, 1] → [0, 1]`: level 128 (zero) lands
 /// exactly on the centre stop, through core's inverse of `ink::div` (CORE-R46, CORE-R56).
 fn div_pos(ink: Ink) -> f64 {
@@ -304,6 +340,26 @@ fn aurora_base(role: Role) -> Rgb {
         Role::Accent => Rgb(170, 90, 255),
         Role::Text => Rgb(220, 235, 235),
         Role::Dim | Role::Background => Rgb(60, 80, 110),
+        _ => Rgb(200, 200, 200),
+    }
+}
+
+/// Okabe–Ito object roles (RND-R19): the Hot/Cold pair is vermillion/sky blue, which
+/// stays distinguishable under deuteranopia and protanopia, and `Wave`/`Planet` carry the
+/// bluish green/blue pair; `Particle` is a pale green so it reads apart from `Wave`.
+fn colorblind_base(role: Role) -> Rgb {
+    match role {
+        Role::Star => Rgb(240, 240, 240),
+        Role::Sun => Rgb(240, 228, 66),
+        Role::Planet => Rgb(0, 114, 178),
+        Role::Particle => Rgb(180, 235, 200),
+        Role::Wave => Rgb(0, 158, 115),
+        Role::Hot => Rgb(213, 94, 0),
+        Role::Cold => Rgb(86, 180, 233),
+        Role::Structure => Rgb(150, 150, 150),
+        Role::Accent => Rgb(204, 121, 167),
+        Role::Text => Rgb(235, 235, 235),
+        Role::Dim | Role::Background => Rgb(70, 70, 70),
         _ => Rgb(200, 200, 200),
     }
 }
@@ -432,11 +488,14 @@ pub(crate) fn lut(theme: Theme) -> &'static Lut {
     static RAINBOW: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Rainbow));
     static MONO: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Mono));
     static AURORA: std::sync::LazyLock<Lut> = std::sync::LazyLock::new(|| build(Theme::Aurora));
+    static COLORBLIND: std::sync::LazyLock<Lut> =
+        std::sync::LazyLock::new(|| build(Theme::Colorblind));
     match theme {
         Theme::Astro => &ASTRO,
         Theme::Rainbow => &RAINBOW,
         Theme::Mono => &MONO,
         Theme::Aurora => &AURORA,
+        Theme::Colorblind => &COLORBLIND,
     }
 }
 
@@ -1099,7 +1158,8 @@ mod tests {
         assert_eq!(Theme::from_name("Aurora"), Some(Theme::Aurora));
         assert_eq!(Theme::Aurora.name(), "aurora");
         assert_eq!(Theme::Mono.next(), Theme::Aurora);
-        assert_eq!(Theme::Aurora.next(), Theme::Astro);
+        assert_eq!(Theme::Aurora.next(), Theme::Colorblind); // M23 added the fifth theme
+        assert_eq!(Theme::Colorblind.next(), Theme::Astro);
         assert_eq!(Theme::default(), Theme::Astro, "astro stays the default");
     }
 
@@ -1189,5 +1249,198 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ----- colorblind (RND-R19) -----
+
+    fn colorblind(role: Role, level: u8) -> Rgb {
+        Theme::Colorblind.color(Ink::new(role, level), 0, 0)
+    }
+
+    #[test]
+    fn rnd_r19_colorblind_is_the_fifth_theme_after_aurora() {
+        assert_eq!(Theme::ALL.len(), 5);
+        let names: Vec<_> = Theme::ALL.iter().map(|t| t.name()).collect();
+        assert_eq!(
+            names,
+            vec!["astro", "rainbow", "mono", "aurora", "colorblind"]
+        );
+        assert_eq!(Theme::from_name("COLORBLIND"), Some(Theme::Colorblind));
+        assert_eq!(Theme::Colorblind.name(), "colorblind");
+        assert_eq!(Theme::Aurora.next(), Theme::Colorblind);
+        assert_eq!(Theme::Colorblind.next(), Theme::Astro);
+        assert_eq!(Theme::default(), Theme::Astro, "astro stays the default");
+    }
+
+    #[test]
+    fn rnd_r19_object_roles_are_the_okabe_ito_palette() {
+        let bases = [
+            (Role::Hot, Rgb(0xD5, 0x5E, 0x00)),
+            (Role::Cold, Rgb(0x56, 0xB4, 0xE9)),
+            (Role::Accent, Rgb(0xCC, 0x79, 0xA7)),
+            (Role::Sun, Rgb(0xF0, 0xE4, 0x42)),
+            (Role::Planet, Rgb(0x00, 0x72, 0xB2)),
+            (Role::Wave, Rgb(0x00, 0x9E, 0x73)),
+            (Role::Particle, Rgb(180, 235, 200)),
+            (Role::Star, Rgb(240, 240, 240)),
+            (Role::Structure, Rgb(150, 150, 150)),
+            (Role::Dim, Rgb(70, 70, 70)),
+            (Role::Background, Rgb(70, 70, 70)),
+            (Role::Text, Rgb(235, 235, 235)),
+        ];
+        for (role, base) in bases {
+            assert_eq!(colorblind(role, 255), base, "{role:?} at full level");
+            assert_eq!(colorblind(role, 0), scale(base, 0.3), "{role:?} at level 0");
+            for (x, y) in [(1, 0), (17, 3), (199, 49)] {
+                let ink = Ink::new(role, 200);
+                assert_eq!(
+                    Theme::Colorblind.color(ink, x, y),
+                    colorblind(role, 200),
+                    "{role:?}"
+                );
+            }
+        }
+        // The two signs are the Okabe–Ito pair: vermillion and sky blue.
+        assert_eq!(dominant(colorblind(Role::Hot, 200)), Some(0));
+        assert_eq!(dominant(colorblind(Role::Cold, 200)), Some(2));
+        // Particle is pale green, not Wave's dark bluish green.
+        let Rgb(pr, pg, pb) = colorblind(Role::Particle, 255);
+        assert!(pg > pr && pg > pb && pg > 200, "pale green: {pr} {pg} {pb}");
+    }
+
+    #[test]
+    fn rnd_r19_seq_is_a_viridis_like_ramp_with_monotone_lightness() {
+        let c = |l| colorblind(Role::Seq, l);
+        let Rgb(r0, g0, b0) = c(0);
+        assert!(b0 > r0 && b0 > g0, "dark purple at 0: {:?}", c(0));
+        let Rgb(r1, g1, b1) = c(128);
+        assert!(
+            g1 > r1 && g1 >= b1,
+            "teal/green in the middle: {:?}",
+            c(128)
+        );
+        let Rgb(r2, g2, b2) = c(255);
+        assert!(
+            r2 > 200 && g2 > 200 && b2 < 80,
+            "yellow at 255: {:?}",
+            c(255)
+        );
+        for level in 1..=255u8 {
+            let (a, b) = (rgb_lightness(c(level - 1)), rgb_lightness(c(level)));
+            assert!(b >= a - 0.25, "Seq L* falls at {level}: {a:.2} -> {b:.2}");
+        }
+    }
+
+    #[test]
+    fn rnd_r19_div_is_blue_below_and_vermillion_above() {
+        let c = |l| colorblind(Role::Div, l);
+        assert!(luma(c(128)) < 120, "zero near background: {:?}", c(128));
+        for level in [0, 32] {
+            assert_eq!(dominant(c(level)), Some(2), "negative is blue: {level}");
+        }
+        for level in [224, 255] {
+            assert_eq!(
+                dominant(c(level)),
+                Some(0),
+                "positive is vermillion: {level}"
+            );
+        }
+        // Sign survives the loss of red/green: the two ends keep a wide hue gap.
+        for kind in [Cvd::Deutan, Cvd::Protan] {
+            let gap = cvd_hue_gap(c(0), c(255), kind);
+            assert!(gap >= 30.0, "{kind:?}: Div hue gap {gap:.1}");
+        }
+    }
+
+    #[test]
+    fn rnd_r19_hot_and_cold_stay_apart_under_deuteranopia_and_protanopia() {
+        let (hot, cold) = (colorblind(Role::Hot, 255), colorblind(Role::Cold, 255));
+        assert!(
+            hue_gap(hue(hot), hue(cold)) > 90.0,
+            "normal vision: {hot:?} vs {cold:?}"
+        );
+        for kind in [Cvd::Deutan, Cvd::Protan] {
+            let gap = cvd_hue_gap(hot, cold, kind);
+            assert!(gap >= 30.0, "{kind:?}: Lab hue gap {gap:.1}");
+        }
+    }
+
+    #[test]
+    fn rnd_r19_unused_field_roles_reuse_astro() {
+        for role in [
+            Role::Phase,
+            Role::Blackbody,
+            Role::Ramp(Ramp::Ember),
+            Role::Ramp(Ramp::Ice),
+        ] {
+            for level in [0, 64, 140, 255] {
+                let ink = Ink::new(role, level);
+                assert_eq!(
+                    Theme::Colorblind.color(ink, 3, 5),
+                    Theme::Astro.color(ink, 3, 5),
+                    "{role:?} {level}"
+                );
+            }
+        }
+    }
+
+    /// Dichromacy simulation route for the RND-R19 check: sRGB → linear → LMS →
+    /// deuteranopia/protanopia projection → linear RGB (Viénot, Brettel & Mollon 1999).
+    #[derive(Clone, Copy, Debug)]
+    enum Cvd {
+        Deutan,
+        Protan,
+    }
+
+    fn srgb_linear(Rgb(r, g, b): Rgb) -> [f64; 3] {
+        let f = |c: u8| {
+            let c = f64::from(c) / 255.0;
+            if c <= 0.04045 {
+                c / 12.92
+            } else {
+                ((c + 0.055) / 1.055).powf(2.4)
+            }
+        };
+        [f(r), f(g), f(b)]
+    }
+
+    fn cvd_linear(rgb: Rgb, kind: Cvd) -> [f64; 3] {
+        let [r, g, b] = srgb_linear(rgb);
+        let l = 17.8824 * r + 43.5161 * g + 4.11935 * b;
+        let m = 3.45565 * r + 27.1554 * g + 3.86714 * b;
+        let s = 0.0299566 * r + 0.184309 * g + 1.46709 * b;
+        let (l, m, s) = match kind {
+            Cvd::Deutan => (0.494207 * l + 1.24827 * s, m, s),
+            Cvd::Protan => (2.02344 * m - 2.52581 * s, m, s),
+        };
+        [
+            0.0809444479 * l - 0.130504409 * m + 0.116721066 * s,
+            -0.0102485335 * l + 0.0540193266 * m - 0.113614708 * s,
+            -0.000365296938 * l - 0.00412161469 * m + 0.693511405 * s,
+        ]
+        .map(|c| c.clamp(0.0, 1.0))
+    }
+
+    /// CIE Lab hue angle (degrees) of a linear-RGB colour; D65 white.
+    fn lab_hue([r, g, b]: [f64; 3]) -> f64 {
+        let x = 0.4124564 * r + 0.3575761 * g + 0.1804375 * b;
+        let y = 0.2126729 * r + 0.7151522 * g + 0.0721750 * b;
+        let z = 0.0193339 * r + 0.1191920 * g + 0.9503041 * b;
+        let f = |t: f64| {
+            if t > 216.0 / 24389.0 {
+                t.cbrt()
+            } else {
+                (24389.0 / 27.0 * t + 16.0) / 116.0
+            }
+        };
+        let (fx, fy, fz) = (f(x / 0.95047), f(y), f(z / 1.08883));
+        let a = 500.0 * (fx - fy);
+        let bb = 200.0 * (fy - fz);
+        bb.atan2(a).to_degrees().rem_euclid(360.0)
+    }
+
+    fn cvd_hue_gap(a: Rgb, b: Rgb, kind: Cvd) -> f64 {
+        let d = (lab_hue(cvd_linear(a, kind)) - lab_hue(cvd_linear(b, kind))).abs();
+        d.min(360.0 - d)
     }
 }
