@@ -1,4 +1,4 @@
-//! Config file loading and settings resolution (SPEC-005 CFG-R1..R7).
+//! Config file loading and settings resolution (SPEC-005 CFG-R1..R10).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use sciart_keepawake::Mode;
 use sciart_render::Theme;
 use serde::Deserialize;
 
-use crate::cli::{Cli, KeepAwakeArg, ThemeArg, UsageError};
+use crate::cli::{Cli, ColorArg, KeepAwakeArg, ThemeArg, UsageError};
 
 pub const DEFAULT_FPS: u16 = 30;
 pub const DEFAULT_INTERVAL: f64 = 15.0;
@@ -17,6 +17,42 @@ pub const DEFAULT_IDLE_AFTER: f64 = 120.0;
 /// Simulated seconds per wall second (CFG-R9).
 pub const DEFAULT_SPEED: f64 = 1.0;
 
+/// Resolved colour capability (RND-R18, CFG-R10).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ColorMode {
+    /// 24-bit `Color::Rgb`: the default and `--color truecolor` (the M22 stream).
+    #[default]
+    Truecolor,
+    /// xterm-256 indices (`38;5;n`/`48;5;n`): `--color 256`.
+    Indexed,
+    /// The mono theme: `--color mono`, or `auto` with `NO_COLOR` set.
+    Mono,
+}
+
+impl ColorMode {
+    /// Whether `paint` should emit indexed colours (RND-R18).
+    pub const fn is_indexed(self) -> bool {
+        matches!(self, Self::Indexed)
+    }
+}
+
+/// Environment inputs that affect settings. The binary reads the process env and passes
+/// this in, so tests never mutate `NO_COLOR` (RND-R18).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Env {
+    /// `NO_COLOR` set to a non-empty value (<https://no-color.org>).
+    pub no_color: bool,
+}
+
+impl Env {
+    /// The real process environment.
+    pub fn from_process() -> Self {
+        Self {
+            no_color: std::env::var_os("NO_COLOR").is_some_and(|v| !v.is_empty()),
+        }
+    }
+}
+
 /// On-disk config; every key optional, unknown keys rejected (CFG-R3).
 #[derive(Debug, Default, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -24,6 +60,8 @@ pub struct FileConfig {
     pub fps: Option<u16>,
     pub interval: Option<f64>,
     pub theme: Option<ThemeArg>,
+    /// Colour capability (CFG-R10); `auto` follows `NO_COLOR` (RND-R18).
+    pub color: Option<ColorArg>,
     pub ascii: Option<bool>,
     pub hud: Option<bool>,
     pub title: Option<bool>,
@@ -52,7 +90,10 @@ pub struct LowPowerConfig {
 pub struct Settings {
     pub fps: u16,
     pub interval: f64,
+    /// Effective theme: `mono` when `color` resolves to [`ColorMode::Mono`] (RND-R18).
     pub theme: Theme,
+    /// Resolved colour capability (RND-R18, CFG-R10).
+    pub color: ColorMode,
     pub ascii: bool,
     pub hud: bool,
     /// Show the science title (CFG-R6, CLI-R7).
@@ -134,8 +175,12 @@ pub fn load(explicit: Option<&Path>, default: Option<&Path>) -> Result<FileConfi
 }
 
 /// Merge CLI > file > defaults (CFG-R1); returns warnings for unknown `disabled` and
-/// `favorites` names (CFG-R4, CFG-R9).
-pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
+/// `favorites` names (CFG-R4, CFG-R9) and for an automatic `NO_COLOR` downgrade (RND-R18).
+///
+/// `env` carries the ambient `NO_COLOR` decision instead of reading it here, so tests are
+/// hermetic: `auto` — default, config or flag — follows it; an explicit
+/// `truecolor`/`256`/`mono` wins.
+pub fn resolve(cli: &Cli, file: FileConfig, env: Env) -> (Settings, Vec<String>) {
     let mut warnings: Vec<String> = file
         .disabled
         .iter()
@@ -148,13 +193,28 @@ pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
             .filter(|name| sciart_generators::find(name).is_none())
             .map(|name| format!("config lists unknown generator '{name}' as a favourite")),
     );
+    let (color, warn_no_color) = match cli.color.or(file.color).unwrap_or(ColorArg::Auto) {
+        ColorArg::Auto if env.no_color => (ColorMode::Mono, true),
+        ColorArg::Auto => (ColorMode::Truecolor, false),
+        ColorArg::Truecolor => (ColorMode::Truecolor, false),
+        ColorArg::Indexed256 => (ColorMode::Indexed, false),
+        ColorArg::Mono => (ColorMode::Mono, false),
+    };
+    if warn_no_color {
+        warnings.push("NO_COLOR is set; using the mono theme".to_owned());
+    }
+    let theme = if color == ColorMode::Mono {
+        Theme::Mono
+    } else {
+        cli.theme
+            .or(file.theme)
+            .map_or(Theme::default(), Theme::from)
+    };
     let settings = Settings {
         fps: cli.fps.or(file.fps).unwrap_or(DEFAULT_FPS),
         interval: cli.interval.or(file.interval).unwrap_or(DEFAULT_INTERVAL),
-        theme: cli
-            .theme
-            .or(file.theme)
-            .map_or(Theme::default(), Theme::from),
+        theme,
+        color,
         ascii: cli.ascii || file.ascii.unwrap_or(false),
         hud: cli.hud || file.hud.unwrap_or(false),
         title: !cli.no_title && file.title.unwrap_or(true),
@@ -179,6 +239,12 @@ mod tests {
     use super::*;
     use crate::cli::parse as cli;
 
+    /// Resolve with a clean environment; the `cfg_r10_…` tests call `super::resolve` with
+    /// an explicit `Env`.
+    fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
+        super::resolve(cli, file, Env::default())
+    }
+
     fn file(text: &str) -> FileConfig {
         parse(text, Path::new("test.toml")).unwrap()
     }
@@ -192,6 +258,7 @@ mod tests {
                 fps: 30,
                 interval: 15.0,
                 theme: Theme::Astro,
+                color: ColorMode::Truecolor,
                 ascii: false,
                 hud: false,
                 title: true,
@@ -323,6 +390,89 @@ mod tests {
             assert!(parse(bad, Path::new("c.toml")).is_err(), "{bad}");
         }
         assert_eq!(file("speed = 4").speed, Some(4.0));
+    }
+
+    #[test]
+    fn cfg_r10_color_defaults_to_auto_then_truecolor() {
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), FileConfig::default());
+        assert_eq!(s.color, ColorMode::Truecolor);
+        assert_eq!(s.theme, Theme::Astro);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(FileConfig::default().color, None, "auto is the default");
+    }
+
+    #[test]
+    fn cfg_r10_no_color_selects_mono_unless_a_mode_is_explicit() {
+        let env = Env { no_color: true };
+        let warning = "NO_COLOR is set; using the mono theme";
+
+        // The default (no key, no flag) follows NO_COLOR, as does an explicit `auto` in
+        // either place.
+        for args in [vec![], vec!["--color", "auto"]] {
+            let (s, warnings) = super::resolve(&cli(&args).unwrap(), FileConfig::default(), env);
+            assert_eq!(s.color, ColorMode::Mono, "{args:?}");
+            assert_eq!(s.theme, Theme::Mono, "mono overrides the palette");
+            assert_eq!(warnings, [warning], "{args:?}");
+        }
+        let (s, warnings) = super::resolve(&cli(&[]).unwrap(), file("color = \"auto\""), env);
+        assert_eq!(s.color, ColorMode::Mono, "config auto");
+        assert_eq!(warnings, [warning]);
+
+        // An explicit truecolor/256/mono wins over the environment, with no warning.
+        for (args, text, want) in [
+            (vec!["--color", "truecolor"], "", ColorMode::Truecolor),
+            (vec!["--color", "256"], "", ColorMode::Indexed),
+            (vec!["--color", "mono"], "", ColorMode::Mono),
+            (vec![], "color = \"truecolor\"", ColorMode::Truecolor),
+            (vec![], "color = \"256\"", ColorMode::Indexed),
+            (vec![], "color = \"mono\"", ColorMode::Mono),
+        ] {
+            let f = if text.is_empty() {
+                FileConfig::default()
+            } else {
+                file(text)
+            };
+            let (s, warnings) = super::resolve(&cli(&args).unwrap(), f, env);
+            assert_eq!(s.color, want, "{args:?} {text:?}");
+            assert!(warnings.is_empty(), "explicit mode: {warnings:?}");
+        }
+    }
+
+    #[test]
+    fn cfg_r10_cli_color_beats_file_and_mono_forces_the_theme() {
+        let (s, _) = super::resolve(
+            &cli(&["--color", "256"]).unwrap(),
+            file("color = \"mono\""),
+            Env::default(),
+        );
+        assert_eq!(s.color, ColorMode::Indexed, "flag wins");
+        let (s, _) = super::resolve(
+            &cli(&["--color", "mono", "--theme", "aurora"]).unwrap(),
+            FileConfig::default(),
+            Env::default(),
+        );
+        assert_eq!(
+            (s.color, s.theme),
+            (ColorMode::Mono, Theme::Mono),
+            "--color mono overrides --theme"
+        );
+        let (s, _) = super::resolve(
+            &cli(&[]).unwrap(),
+            file("color = \"256\"\ntheme = \"rainbow\""),
+            Env::default(),
+        );
+        assert_eq!((s.color, s.theme), (ColorMode::Indexed, Theme::Rainbow));
+    }
+
+    #[test]
+    fn cfg_r10_invalid_color_value_is_rejected() {
+        for bad in ["color = \"neon\"", "color = true", "color = 256"] {
+            assert!(parse(bad, Path::new("c.toml")).is_err(), "{bad}");
+        }
+        assert_eq!(
+            file("color = \"256\"").color,
+            Some(crate::cli::ColorArg::Indexed256)
+        );
     }
 
     #[test]

@@ -4,7 +4,8 @@
 
 fps = 30            # 1..=120
 interval = 15       # seconds between scene changes in `sim`
-theme = "astro"     # astro | rainbow | mono | aurora
+theme = "astro"     # astro | rainbow | mono | aurora | colorblind
+color = "auto"      # auto | truecolor | 256 | mono; auto uses mono when NO_COLOR is set
 ascii = false       # pure-ASCII glyphs
 hud = false         # start with the status line visible (toggle with `h`)
 title = true        # science title at the bottom-left, or in the HUD while it is on

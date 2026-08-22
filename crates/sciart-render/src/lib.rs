@@ -1,6 +1,7 @@
 //! Themes and ratatui painting for sciart canvases (SPEC-003 RND-*).
 
 mod backend;
+mod color;
 mod encode;
 mod fields;
 mod hud;
@@ -10,6 +11,7 @@ mod terminal;
 mod theme;
 
 pub use backend::FrameBackend;
+pub use color::{indexed, quantize};
 pub use hud::Hud;
 pub use paint::{HYSTERESIS, Painter, paint};
 pub use terminal::{AppTerminal, TerminalGuard};
