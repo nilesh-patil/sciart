@@ -15,6 +15,7 @@ use sciart_generators::{Entry, registry};
 use sciart_keepawake::{Guard, Mode};
 use sciart_render::{FrameBackend, Hud, Painter, TerminalGuard, Theme};
 
+use crate::config::ColorMode;
 use crate::fps::FpsMeter;
 use crate::keys::action_for;
 use crate::pacer::Pacer;
@@ -45,7 +46,11 @@ pub struct Options {
     pub entries: Vec<&'static Entry>,
     pub fps: u16,
     pub seed: u64,
+    /// Effective theme (`mono` already substituted when the colour mode is mono, RND-R18).
     pub theme: Theme,
+    /// Resolved colour capability (RND-R18): `mono`/`truecolor` are theme/RGB and `indexed`
+    /// makes the painter emit xterm-256 indices.
+    pub color: ColorMode,
     pub glyphs: GlyphMode,
     pub hud: bool,
     /// Science title on (CFG-R6, CLI-R7).
@@ -88,9 +93,19 @@ pub(crate) struct Screen {
 }
 
 impl Screen {
+    /// The default 24-bit painter (`--color auto` without `NO_COLOR`, or `truecolor`).
     pub fn new() -> Self {
+        Self::with_painter(Painter::new())
+    }
+
+    /// A screen whose painter emits xterm-256 indices (RND-R18, `--color 256`).
+    pub fn indexed() -> Self {
+        Self::with_painter(Painter::indexed())
+    }
+
+    fn with_painter(painter: Painter) -> Self {
         Self {
-            painter: Painter::new(),
+            painter,
             ..Self::default()
         }
     }
@@ -293,7 +308,11 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
 
     let mut pacer = Pacer::new(opts.fps, opts.low_power_fps, opts.idle_after);
     let mut fps = FpsMeter::default();
-    let mut screen = Screen::new();
+    let mut screen = if opts.color.is_indexed() {
+        Screen::indexed()
+    } else {
+        Screen::new()
+    };
     let mut last = wall_clock();
     let mut epoch = runtime.epoch();
     let mut first = true;
