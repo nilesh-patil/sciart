@@ -1,0 +1,42 @@
+[package]
+name = "sciart-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+# IMP-14: cargo-fuzz targets, run by .github/workflows/fuzz.yml on a schedule, never by
+# `rs-ci` (TEST-R3). This crate is a detached workspace because cargo-fuzz needs nightly
+# and must not join the product workspace's members or lint set.
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+sciart-core = { path = "../crates/sciart-core" }
+sciart-render = { path = "../crates/sciart-render" }
+
+[[bin]]
+name = "title_fit"
+path = "fuzz_targets/title_fit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "hud_fit"
+path = "fuzz_targets/hud_fit.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "theme_name"
+path = "fuzz_targets/theme_name.rs"
+test = false
+doc = false
+bench = false
+
+[profile.release]
+debug = 1
+
+[workspace]
