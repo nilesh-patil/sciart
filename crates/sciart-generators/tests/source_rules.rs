@@ -21,6 +21,36 @@ fn workspace_root() -> PathBuf {
     crate_dir().join("../..")
 }
 
+/// Every `docs/specs/SPEC-002*.md`, sorted (GEN-R15: the rules monolith plus the five
+/// category files after `scripts/spec_split.py` has moved the scene sections).
+fn spec_002_files() -> Vec<PathBuf> {
+    let dir = workspace_root().join("docs/specs");
+    let mut out: Vec<_> = fs::read_dir(&dir)
+        .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+        .map(|entry| entry.expect("dir entry").path())
+        .filter(|path| {
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with("SPEC-002") && name.ends_with(".md"))
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+/// The concatenation of every SPEC-002 file in path order, so a scene heading may live in
+/// the monolith (before the split) or in a category file (after it).
+fn spec_002_text() -> String {
+    let mut text = String::new();
+    for path in spec_002_files() {
+        text.push_str(
+            &fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display())),
+        );
+        text.push('\n');
+    }
+    text
+}
+
 /// The scene crates (ADR-0023), by the suffix of `crates/sciart-scenes-<suffix>`.
 const SCENE_CRATES: [&str; 5] = ["cosmos", "earth", "physics", "matter", "life"];
 
@@ -260,8 +290,9 @@ fn gen_r6_gen_r7_scene_crates_share_the_workspace_lints_and_clippy_config() {
 fn gen_r15_spec_headings_carry_each_scenes_category_label() {
     // SPEC-002 is where each scene's category (ADR-0013) is written down; this keeps the
     // headings `### <name>  (<category label>, <milestones>)` in step with `Meta.category`.
-    let spec = fs::read_to_string(workspace_root().join("docs/specs/SPEC-002-generators.md"))
-        .expect("SPEC-002");
+    // GEN-R15: the sections may be in the monolith or in the category files, so every
+    // `SPEC-002*.md` is concatenated.
+    let spec = spec_002_text();
     let mut headings: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
     for line in spec.lines() {
         let Some((name, tail)) = line
@@ -287,6 +318,67 @@ fn gen_r15_spec_headings_carry_each_scenes_category_label() {
         })
         .collect();
     assert!(problems.is_empty(), "GEN-R15:\n{}", problems.join("\n"));
+}
+
+/// GEN-R15: once the scene sections live in the category files, the monolith's generated
+/// index must list every registered scene exactly once, and nothing else. Before the split
+/// there are no markers and no category files, so the check is inactive; a half-done split
+/// (category files without an index) fails.
+#[test]
+fn gen_r15_scene_index_lists_every_registered_scene_once() {
+    let dir = workspace_root().join("docs/specs");
+    let monolith =
+        fs::read_to_string(dir.join("SPEC-002-generators.md")).expect("read SPEC-002 monolith");
+    let category_files: Vec<PathBuf> = spec_002_files()
+        .into_iter()
+        .filter(|path| {
+            path.file_name()
+                .is_some_and(|name| name != "SPEC-002-generators.md")
+        })
+        .collect();
+    let (start, end) = match (
+        monolith.find("<!-- scene-index:start -->"),
+        monolith.find("<!-- scene-index:end -->"),
+    ) {
+        (Some(start), Some(end)) => (start, end),
+        (None, None) => {
+            assert!(
+                category_files.is_empty(),
+                "GEN-R15: the scene sections are in {category_files:?} but \
+                 SPEC-002-generators.md has no scene-index markers; run \
+                 `python3 scripts/spec_index.py`"
+            );
+            return;
+        }
+        _ => panic!("GEN-R15: both scene-index markers are required"),
+    };
+    assert!(start < end, "GEN-R15: scene-index markers are out of order");
+    let mut listed: BTreeMap<&str, usize> = BTreeMap::new();
+    for line in monolith[start..end].lines() {
+        // A row is `| \`name\` | Category | [spec](SPEC-002-scenes-…md) |`.
+        if let Some(name) = line.split('`').nth(1) {
+            *listed.entry(name).or_default() += 1;
+        }
+    }
+    let problems: Vec<_> = registry()
+        .iter()
+        .filter_map(|e| {
+            let found = listed.get(e.meta.name).copied().unwrap_or(0);
+            (found != 1)
+                .then(|| format!("{}: listed {found} times in the scene index", e.meta.name))
+        })
+        .collect();
+    assert!(problems.is_empty(), "GEN-R15:\n{}", problems.join("\n"));
+    let known: BTreeSet<&str> = registry().iter().map(|e| e.meta.name).collect();
+    let stale: Vec<&str> = listed
+        .keys()
+        .copied()
+        .filter(|name| !known.contains(name))
+        .collect();
+    assert!(
+        stale.is_empty(),
+        "GEN-R15: the scene index lists unknown scenes: {stale:?}"
+    );
 }
 
 #[test]
