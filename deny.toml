@@ -1,15 +1,20 @@
 # cargo-deny (v2 schema), run by the `deny` job in .github/workflows/ci.yml (IMP-04).
 #
-# Deliberately permissive for the first hosted gate: it should report drift, not block on
-# the tree as it stands. The allowlist is the licence set the current dependency graph
-# actually uses (`cargo metadata --locked`), so a newly added crate with an unreviewed
-# licence fails here instead of slipping in. Harden in Phase 4 (IMP-04 follow-up).
+# Deliberately permissive: it should report drift, not block on the tree as it stands. The
+# allowlist is the licence set the current dependency graph actually uses
+# (`cargo metadata --locked`), so a newly added crate with an unreviewed licence fails here
+# instead of slipping in. Hardened in Phase 4 (IMP-14): the yanked/unmaintained policies
+# are explicit.
 
 [advisories]
 version = 2
 # The lockfile is committed; a yanked crate is worth reporting but not a gate failure on a
 # tree that was green when it was locked.
 yanked = "warn"
+# Unmaintained advisories fail only for a direct dependency of a workspace crate; a deep
+# transitive crate can be pinned and reported without blocking the gate. (The cargo-deny
+# default, `all`, would fail on any transitive advisory.)
+unmaintained = "workspace"
 ignore = []
 
 [licenses]
