@@ -19,6 +19,7 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use rand::Rng;
 use sciart_core::prelude::*;
+use sciart_core::rng::{cell_key, hash01};
 use sciart_core::stellar;
 use sciart_core::timeline::ease;
 
@@ -59,10 +60,11 @@ const PHASES: [(&str, f64); 5] = [
 const LIMB_DARK: (f64, f64) = (0.47, 0.23);
 /// The corona shows once the uncovered fraction falls below this (ECL-A3).
 const CORONA_F: f64 = 0.01;
-/// The corona's field (ECL-A12): closed loops' `L` under each helmet (plus its cusp
-/// `L_max`, seeded per side), open lines per pole and side (the last `STALK` crowd the
-/// separatrix), how far out they run (R☉) and the brightness falloff along them.
-const LOOPS: [f64; 4] = [1.2, 1.45, 1.75, 2.05];
+/// The corona's field (ECL-A12): each helmet's cusp loop (`L_max`, seeded per side; the
+/// smaller loops were dropped in IMP-15 because they stacked into concentric rings), open
+/// lines per pole and side (the last `STALK` crowd the separatrix), how far out they run
+/// (R☉) and the brightness falloff along them.
+const LOOPS: [f64; 0] = [];
 const CUSP: (f64, f64) = (2.2, 2.6);
 const OPEN: usize = 9;
 const STALK: [f64; 3] = [0.93, 0.96, 0.985];
@@ -238,13 +240,21 @@ pub(crate) enum Kind {
     Open { s: f64, south: bool, stalk: bool },
 }
 
-/// One corona thread: its kind, the side of the dipole axis it lies on (±1) and its gain.
+/// One corona thread: its kind, the side of the dipole axis it lies on (±1), its gain and
+/// the share of its outward run that is drawn (varied per thread, so the tips do not end
+/// on one hard circle).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Thread {
     kind: Kind,
     side: f64,
     gain: f64,
+    reach: f64,
 }
+
+/// Share of a corona segment's dots drawn at each rank (1 = faintest … 4 = brightest):
+/// the faint outer steps break into stipple, so the corona falls off softly instead of
+/// ending on a hard edge (IMP-15).
+const CORONA_KEEP: [f64; 5] = [0.0, 0.45, 0.65, 0.85, 1.0];
 
 /// The corona's field (ECL-A12): a dipole tilted to `equator`, its two helmets' cusps.
 #[derive(Debug, Clone, Default)]
@@ -270,6 +280,7 @@ impl Corona {
                     kind: Kind::Closed { l },
                     side,
                     gain: LOOP_GAIN * rng.random_range(GAIN.0..GAIN.1),
+                    reach: 1.0,
                 });
             }
             for south in [false, true] {
@@ -285,10 +296,23 @@ impl Corona {
                         (STALK[k - fan], true)
                     };
                     let boost = if stalk { STALK_GAIN } else { 1.0 };
+                    // Fan lines stop at varied radii; the stalk lines carry the helmet
+                    // out to R_OUT. A hash, not the RNG: the skyline and the planets must
+                    // keep the values they had before IMP-15.
+                    let reach = if stalk {
+                        1.0
+                    } else {
+                        let key = 0x0C0
+                            ^ ((k as u64) << 10)
+                            ^ (u64::from(south) << 2)
+                            ^ u64::from(side < 0.0);
+                        0.55 + 0.40 * hash01(key)
+                    };
                     threads.push(Thread {
                         kind: Kind::Open { s, south, stalk },
                         side,
                         gain: boost * rng.random_range(GAIN.0..GAIN.1),
+                        reach,
                     });
                 }
             }
@@ -447,12 +471,26 @@ impl Eclipse {
                     ),
                 )
             };
+            // Closed loops are drawn over their middle arc only (the legs would stack into
+            // concentric rings at the limb); open lines stop at the thread's reach.
+            let cut = match t.kind {
+                Kind::Closed { .. } => f64::INFINITY,
+                Kind::Open { .. } => {
+                    let lm = model.cusp(t);
+                    lm + (R_OUT - lm) * t.reach
+                }
+            };
             let mut prev = at(0);
             for k in 1..=n {
                 let next = at(k);
                 let r = 0.5 * (prev.0 + next.0);
                 let mid = (0.5 * (prev.1.0 + next.1.0), 0.5 * (prev.1.1 + next.1.1));
-                if !self.under_land(mid) {
+                let u = k as f64 / n as f64;
+                let drawn = match t.kind {
+                    Kind::Closed { .. } => (0.40..=0.60).contains(&u),
+                    Kind::Open { .. } => r <= cut,
+                };
+                if drawn && !self.under_land(mid) {
                     self.segs.push(Seg {
                         a: (prev.1.0 as f32, prev.1.1 as f32),
                         b: (next.1.0 as f32, next.1.1 as f32),
@@ -612,8 +650,18 @@ impl Eclipse {
         }
         self.stars(&mut dots);
         self.corona(|a, b, rank, _| {
-            if let Some(ink) = rank_ink(rank) {
-                dots.line(a.0, a.1, b.0, b.1, ink);
+            let Some(ink) = rank_ink(rank) else { return };
+            let keep = CORONA_KEEP[rank];
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let n = dx.hypot(dy).ceil().max(1.0) as i32;
+            for i in 0..=n {
+                let u = f64::from(i) / f64::from(n);
+                let (x, y) = (a.0 + dx * u, a.1 + dy * u);
+                if keep >= 1.0
+                    || hash01(cell_key(x.round() as i32, y.round() as i32) ^ 0x0C0) < keep
+                {
+                    dots.plot(x, y, ink);
+                }
             }
         });
         let vis = self.corona_vis();

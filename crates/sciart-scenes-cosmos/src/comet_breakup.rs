@@ -378,10 +378,11 @@ impl CometBreakup {
     fn run_in(&self, k: usize, local: f64) -> Option<[f64; 2]> {
         let lead = self.fragments.first()?.along;
         let gap = (lead - self.fragments[k].along).max(0.0);
-        // Spacing on the run-in: the chain's own, shrunk if needed so the last fragment
-        // strikes by 13 s into the act (BRK-A4).
+        // Spacing on the run-in: the chain's own, widened so each pearl reads as its own
+        // body, and shrunk if needed so the last fragment strikes by 13 s into the act
+        // (BRK-A4). 0.16 R_J per chain unit is ~4 dots apart at the home scale.
         let span = lead - self.fragments[self.n_frag.max(1) - 1].along;
-        let spacing = 0.06f64.min(4.3 / span.max(1e-9));
+        let spacing = 0.16f64.min(4.3 / span.max(1e-9));
         // Distance from the site in R_J: the chain arrives at 0.35 R_J/s.
         let d = 0.25 + spacing * gap - 0.35 * local;
         if d <= 0.0 {
@@ -551,8 +552,9 @@ impl CometBreakup {
         }
         // Tails: straight threads from a grain, dust away from the Sun, ion straight
         // anti-Sun, each in two steps by distance (the dust ages and reddens outward).
-        // While the pile breaks up its many tails are capped, so they stay threads.
-        let cap = if matches!(beat.index, BREAKUP | PEARLS) {
+        // While the pile breaks up its many tails are capped, so they stay threads; in the
+        // impacts act they are capped too, so the pearls stay separate bodies.
+        let cap = if matches!(beat.index, BREAKUP | PEARLS | IMPACTS) {
             BREAK_TAIL_CAP
         } else {
             f64::INFINITY
@@ -593,7 +595,7 @@ impl CometBreakup {
                         TAIL_LEN * (0.4 + w),
                         DUST_INKS,
                     );
-                    self.dots.disc(at.0, at.1, 0.4 + 1.6 * w, HEAD);
+                    self.dots.disc(at.0, at.1, 0.8 + 2.2 * w, HEAD);
                 }
             }
         }
@@ -617,20 +619,58 @@ impl CometBreakup {
             let (x, y) = dot(v.px(p));
             self.dots.plot(x, y, ink);
         }
-        let since = self.t - self.last_strike;
-        let (cx, cy) = dot(v.px([site[0] * 1.03, site[1] * 1.03]));
-        if (0.0..FLASH).contains(&since) {
-            let len = (GLOW_R * jr) * 2.0 * (-since / GLOW_FADE).exp() * (1.0 - since / FLASH);
-            if len >= 1.0 {
-                for k in 0..8 {
-                    let (s, c) = (TAU * f64::from(k) / 8.0 + 0.2).sin_cos_det();
-                    let l = if k % 2 == 0 { len } else { 0.6 * len };
-                    self.dots.line(cx, cy, cx + l * c, cy + l * s, FLASH_INK);
+        // Each recent strike: an expanding shock ring on the limb, fading over FLASH
+        // seconds, so the impacts read as events rather than as one more pale thread.
+        let site_dot = dot(v.px([site[0] * 1.02, site[1] * 1.02]));
+        for sc in &self.scars[..self.n_scars] {
+            let age = self.t - sc.born;
+            if !(0.0..FLASH).contains(&age) {
+                continue;
+            }
+            let u = age / FLASH;
+            // A shock ring about half a Jupiter radius across at its brightest, growing
+            // outward as it fades: big enough to read against the limb at 80x24.
+            let rr = (0.05 + 0.50 * u) * jr;
+            let m = ((TAU * rr) as usize).clamp(12, 512);
+            let ink = if u < 0.35 {
+                FLASH_CORE
+            } else if u < 0.7 {
+                FLASH_INK
+            } else {
+                Ink::new(Role::Hot, 170)
+            };
+            for k in 0..m {
+                let (s, c) = (TAU * k as f64 / m as f64).sin_cos_det();
+                let (x, y) = (site_dot.0 + rr * c, site_dot.1 + rr * s);
+                // Outside the limb: the ejecta rises off the planet, and the ring must not
+                // paint over Jupiter's dark disc.
+                if (x - jx).hypot(y - jy) >= jr {
+                    self.dots.plot(x, y, ink);
                 }
             }
         }
+        // The newest strike also throws a cone of rays off the limb (the impact's ejecta),
+        // bright for a moment and then fading; the strike point itself is briefly white.
+        let since = self.t - self.last_strike;
+        if (0.0..CONE_LIFE).contains(&since) {
+            let fade = 1.0 - since / CONE_LIFE;
+            let base = site[1].atan2(site[0]);
+            for k in -2..=2 {
+                let a = base + 0.22 * f64::from(k);
+                let (s, c) = a.sin_cos_det();
+                let len = (0.25 + 0.60 * fade) * jr;
+                let ink = if k == 0 { FLASH_CORE } else { FLASH_INK };
+                self.dots.line(
+                    site_dot.0,
+                    site_dot.1,
+                    site_dot.0 + len * c,
+                    site_dot.1 - len * s,
+                    ink,
+                );
+            }
+        }
         if (0.0..STRIKE_WHITE).contains(&since) {
-            self.dots.disc(cx, cy, 1.2, HEAD);
+            self.dots.disc(site_dot.0, site_dot.1, 2.5, HEAD);
         }
     }
 }
@@ -671,12 +711,13 @@ const FIRE_INKS: [(f64, Ink); 3] = [
     (0.0, Ink::new(Role::Hot, 170)),
 ];
 const FLASH_INK: Ink = Ink::new(Role::Sun, 230);
+/// The hottest part of the impact flash (the ring's first frame, the cone's axis).
+const FLASH_CORE: Ink = Ink::new(Role::Star, 255);
 /// A background star (one dot, dim) in this share of cells.
 const STAR: Ink = Ink::new(Role::Star, 60);
 const STAR_SHARE: f64 = 0.004;
-/// The impact's flash: ray length (R_J) and its e-folding (s).
-const GLOW_R: f64 = 0.16;
-const GLOW_FADE: f64 = 0.7;
+/// The impact cone's life (s).
+const CONE_LIFE: f64 = 1.6;
 
 /// Fireball gravity in R_J/s² for the drawn height and flight time.
 fn plume_g() -> f64 {

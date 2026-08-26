@@ -47,8 +47,9 @@ const LOOP: f64 = 30.0;
 /// Grains drawn (then thinned by activity) for the tail a new comet arrives with.
 const BACKLOG: usize = 7000;
 /// Dust offsets from the nucleus are drawn this many times longer than they are: the
-/// real tail grows over weeks, more than the loop can show. **Exaggerated**.
-const TAIL_EXAG: f64 = 5.0;
+/// real tail grows over weeks, more than the loop can show. **Exaggerated**; 3.4 rather
+/// than 5 keeps the fan inside the frame (IMP-15).
+const TAIL_EXAG: f64 = 3.4;
 /// Radiation-pressure range (log-uniform) — kept below 1 (CMT-A5).
 pub(crate) const BETA: (f64, f64) = (0.04, 0.9);
 /// Pools (CMT-A5).
@@ -97,6 +98,11 @@ const COMA_PX: f64 = 4.5;
 /// A new comet arrives this far into its approach, with its tails seeded (GEN-R19: no
 /// warm-up steps in `resize`).
 const ARRIVE: f64 = 4.0;
+/// The drawn ion tail stops this far (as a share of the way) inside the frame edge, and
+/// the dust fan dissolves over this many pixels before the edge.
+const ION_FRAME_MARGIN: f64 = 0.92;
+const EDGE_GAP: f64 = 4.0;
+const EDGE_FADE: f64 = 18.0;
 
 /// Barker's mean-anomaly measure `D + D³/3` of true anomaly `nu` (parabolic time).
 fn barker(nu: f64) -> f64 {
@@ -497,6 +503,25 @@ impl CometTails {
         v.sy = ny + v.scale * self.nucleus[1];
     }
 
+    /// How far the ion tail may be drawn (AU) before it would leave the frame.
+    fn ion_frame_limit(&self) -> f64 {
+        let v = self.view;
+        let (nx, ny) = v.px(self.nucleus);
+        let anti = self.anti_solar();
+        let (dx, dy) = (anti[0], -anti[1]);
+        let edge = |p: f64, d: f64, size: f64| {
+            if d > 1e-9 {
+                (size - p) / d
+            } else if d < -1e-9 {
+                p / -d
+            } else {
+                f64::INFINITY
+            }
+        };
+        let reach = edge(nx, dx, v.w).min(edge(ny, dy, v.h)).max(0.0);
+        reach * ION_FRAME_MARGIN / v.scale.max(1.0)
+    }
+
     fn compose(&mut self) {
         self.follow();
         let v = self.view;
@@ -518,6 +543,17 @@ impl CometTails {
                     n[1] + TAIL_EXAG * (g.pos[1] - n[1]),
                 ]);
                 if clear_of_head(x, y) {
+                    // Dissolve the fan before the frame edge instead of cutting it there.
+                    let edge = x.min(v.w - x).min(y.min(v.h - y));
+                    if edge < EDGE_GAP {
+                        continue;
+                    }
+                    if edge < EDGE_FADE
+                        && hash01(cell_key(x as i32, y as i32) ^ 0x516)
+                            > (edge / EDGE_FADE).clamp(0.0, 1.0)
+                    {
+                        continue;
+                    }
                     // Fine grains (large β) scatter more light per unit mass: bright too.
                     let young = (self.t - g.born < DUST_YOUNG || g.beta > FINE) && !fading;
                     self.dots
@@ -530,6 +566,9 @@ impl CometTails {
             for ion in self.ions.iter().filter(|i| i.attached) {
                 run = run.max(ion_run(ion.age));
             }
+            // Stop the drawn tail at the frame edge (with a small margin): the streamers
+            // fade within the picture rather than being cut by it (IMP-15).
+            run = run.min(self.ion_frame_limit());
             if run > 0.0 {
                 for k in 0..STREAMERS as u8 {
                     let faint = STREAM_W[usize::from(k)] < 0.5;
@@ -626,8 +665,9 @@ impl Generator for CometTails {
         let px = self.pixels.pixel_size();
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
         // The orbit's visible arc spans ±0.75 AU vertically; the Sun sits just off the
-        // left edge so the tails stream across the frame.
-        let scale = (0.36 * w).min(0.8 * h).max(1.0);
+        // left edge so the tails stream across the frame. A little tighter than M14 so
+        // the whole dust fan stays in frame (IMP-15).
+        let scale = (0.30 * w).min(0.64 * h).max(1.0);
         self.view = View {
             sx: 0.0,
             sy: 0.0,
