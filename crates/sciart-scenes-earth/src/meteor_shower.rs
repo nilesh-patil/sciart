@@ -16,6 +16,7 @@ use sciart_core::geom;
 use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::raster::{self, Glow, Tone};
+use sciart_core::rng::value_noise;
 use sciart_core::timeline::ease;
 
 use sciart_shared::skyline::{Skyline, Terrain};
@@ -68,7 +69,7 @@ const WAKE_GLOW: f32 = 0.22;
 /// M14 (ADR-0017): the half-block wake glow is off; the 1-px braille streak carries it.
 const SHOW_WAKE: bool = false;
 /// M14: a meteor trail's level at the head end (the head itself is white 255).
-const TRAIL_TOP: f64 = 200.0;
+const TRAIL_TOP: f64 = 240.0;
 /// M14: persistent trains are not drawn (they read as blocky smears at cell size); the
 /// model still ages them (MET-A4, MET-A8).
 const SHOW_TRAINS: bool = false;
@@ -83,14 +84,14 @@ const RADIANT_ROW: f64 = 0.14;
 const RADIANT_OFF: (f64, f64) = (0.1, 0.25);
 /// A streak is drawn in braille: the head and a tail behind it covering this share of the
 /// path (more for bright meteors), tapering by thinning toward its end.
-const TAIL: (f64, f64) = (0.4, 0.75);
+const TAIL: (f64, f64) = (0.5, 0.85);
 /// Recent tracks: how many are kept, their fade time (s) and peak level (drawn in two dim
 /// grey steps, `TRACK`): a faint composite as in a stacked photograph of a shower: at any
 /// moment several tracks show, all pointing back to the radiant.
 const MAX_TRACKS: usize = 32;
 const MEMORY_TAU: f64 = 3.5;
-const MEMORY_PEAK: f64 = 70.0;
-const TRACK: [Ink; 2] = [Ink::new(Role::Structure, 0), Ink::new(Role::Structure, 60)];
+const MEMORY_PEAK: f64 = 90.0;
+const TRACK: [Ink; 2] = [Ink::new(Role::Structure, 0), Ink::new(Role::Structure, 80)];
 /// The white-hot head of a streak.
 const HEAD: Ink = Ink::new(Role::Star, 255);
 /// A train's one faint green step.
@@ -316,6 +317,8 @@ pub struct MeteorShower {
     land: Vec<u16>,
     picture: Pixels,
     stars: Dots,
+    /// The Milky Way dust band: dim braille dots with clumps and a dark lane.
+    dust: Dots,
     /// Streaks and recent tracks, in braille: thin and sub-cell.
     streaks: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
@@ -509,6 +512,26 @@ impl MeteorShower {
                     self.streaks.plot(b.0 + dx, b.1 + dy, head);
                 }
             }
+            // Bright meteors wear a small green halo, so the head reads as a glowing point
+            // rather than a lone white square.
+            if bright > 0.4 {
+                let halo = Ink::new(Role::Particle, 110);
+                for (dx, dy) in [
+                    (-1.0, -1.0),
+                    (2.0, -1.0),
+                    (-1.0, 2.0),
+                    (2.0, 2.0),
+                    (-1.0, 0.0),
+                    (2.0, 0.0),
+                    (0.0, -1.0),
+                    (0.0, 2.0),
+                ] {
+                    let (x, y) = (b.0 + dx, b.1 + dy);
+                    if above(x, y) {
+                        self.streaks.plot(x, y, halo);
+                    }
+                }
+            }
         }
     }
 
@@ -601,20 +624,57 @@ impl MeteorShower {
         // The Milky Way rises steeply out of the horizon, a little left of the radiant.
         let band_x = rng.random_range(0.25..0.5) * w as f64;
         let tilt = rng.random_range(0.15..0.45);
-        let clumps: [f64; 3] = std::array::from_fn(|_| rng.random_range(0.0..TAU));
         let dust_seed: u64 = rng.random();
-        let band_w = 0.09 * w as f64;
+        let band_w = 0.075 * w as f64;
         self.sky.clear();
         self.land.clear();
         self.land.extend((0..w).map(|x| {
             let top = horizon - skyline.height_at(x as f64 + 0.5);
             top.clamp(0.0, f64::from(u16::MAX)) as u16
         }));
-        // M14 (ADR-0017): a black sky, no Milky Way or airglow haze; `sky` stays empty,
-        // so there is no per-pixel pass at resize.
-        let _ = (h, band_x, tilt, clumps, dust_seed, band_w, deg);
-        // Stars, more of them in the Milky Way.
+        // The dust band is a dim braille layer with clumps and a dark lane, drawn beneath
+        // the stars and streaks so the shower stays the subject. It is fixed per seed.
         let size = Size::new(self.cells.0, self.cells.1);
+        self.dust.resize(size);
+        self.dust.clear();
+        let ds = self.dust.dot_size();
+        let (dw, dh) = (i32::from(ds.width()), i32::from(ds.height()));
+        for y in 0..dh {
+            let cy = (f64::from(y) + 0.5) / 2.0;
+            if cy >= horizon {
+                break;
+            }
+            let bx = band_x + tilt * (cy - 0.5 * h as f64);
+            for x in 0..dw {
+                // Keep the dust band off the land, like the stars below (skyline top).
+                let px = (((f64::from(x) + 0.5) / 2.0) as usize).min(w.saturating_sub(1));
+                if cy >= f64::from(self.land[px]) {
+                    continue;
+                }
+                let d = (f64::from(x) + 0.5) - 2.0 * bx;
+                let profile = (-(d / (2.0 * band_w)).powi(2)).exp();
+                if profile < 0.03 {
+                    continue;
+                }
+                let clump = value_noise(
+                    dust_seed,
+                    f64::from(x) / (band_w * 1.4),
+                    f64::from(y) / (band_w * 1.4),
+                    1.0,
+                );
+                let lane = (-((d - 0.7 * band_w) / (0.24 * band_w)).powi(2)).exp();
+                let v = profile * (0.3 + 0.7 * clump) * (1.0 - 0.75 * lane);
+                let level = if v > 0.42 { 48 } else { 24 };
+                self.dust.stipple(
+                    x,
+                    y,
+                    v * 0.34,
+                    dust_seed ^ 0x9E37_79B9,
+                    Ink::new(Role::Structure, level),
+                );
+            }
+        }
+        // Stars, more of them in the Milky Way.
         let cells = size.area() as f64;
         let n = (STAR_DENSITY * cells) as usize;
         self.stars.resize(size);
@@ -643,6 +703,27 @@ impl MeteorShower {
                 y,
                 Ink::new(Role::Star, if level >= STAR_MAX { 200 } else { 50 }),
             );
+        }
+        // A sprinkle of stars along the dust band, so the Milky Way reads as a band of
+        // stars and not just a grey strip.
+        for _ in 0..(n / 5).max(6) {
+            let cy = rng.random_range(0.05..0.75) * horizon;
+            let bx = band_x + tilt * (cy - 0.5 * h as f64);
+            let x = 2.0 * bx + rng.random_range(-2.0..2.0) * band_w;
+            let y = 2.0 * cy;
+            if !(0.0..f64::from(dsize.width())).contains(&x)
+                || !(0.0..f64::from(dsize.height())).contains(&y)
+            {
+                continue;
+            }
+            // Same land test as the main star loop: no band stars on the ridge.
+            let px = ((x / 2.0) as usize).min(w.saturating_sub(1));
+            let top = self.land.get(px).copied().unwrap_or(0);
+            if y / 2.0 >= f64::from(top) - 0.5 {
+                continue;
+            }
+            let level = if rng.random_bool(0.2) { 80 } else { 45 };
+            self.stars.plot(x, y, Ink::new(Role::Star, level));
         }
         // The radiant's mark: a faint ring of dots round the point every streak leads to.
         if let Some(r) = lens.project(self.radiant).filter(|_| SHOW_RADIANT) {
@@ -760,6 +841,7 @@ impl Generator for MeteorShower {
                 .then(|| raster::ascii_ramp_cell(top, bottom))
                 .flatten()
         });
+        self.dust.blit(canvas);
         self.stars.blit_over(canvas, &self.picture);
         // The radiant, named beside its ring.
         if let Some(r) = self.lens.project(self.radiant).filter(|_| SHOW_RADIANT) {

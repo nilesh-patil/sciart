@@ -75,6 +75,9 @@ the [backlog](docs/BACKLOG.md). At every milestone close:
 The `samples/compare/` sheets and the historical samples table are part of this review: if a
 milestone changes a scene's look, regenerate them before closing it.
 
+Then run the [15-minute milestone review](docs/REVIEW.md) — the standing (art,
+science, Rust/perf) checklist — and record its score in the milestone's design doc.
+
 ## Adding a scene
 
 A new scene touches five places, in this order:

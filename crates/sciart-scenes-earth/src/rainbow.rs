@@ -21,7 +21,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::draw;
 use sciart_core::prelude::*;
-use sciart_core::rng::{hash01, value_noise};
+use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 
 use sciart_shared::skyline::{Skyline, Terrain};
@@ -91,11 +91,11 @@ const CURTAIN_DRIFT: f64 = 2.2;
 /// Rain streaks: one per `STREAK_AREA` cells (at most `MAX_STREAKS`), `STREAK_LEN` dots
 /// long, falling at `STREAK_SPEED` (dots/s, ±40 %), drawn where the curtain passes
 /// `STREAK_VEIL`.
-const STREAK_AREA: usize = 30;
-const MAX_STREAKS: usize = 400;
-const STREAK_LEN: f64 = 5.0;
+const STREAK_AREA: usize = 90;
+const MAX_STREAKS: usize = 140;
+const STREAK_LEN: f64 = 3.5;
 const STREAK_SPEED: f64 = 70.0;
-const STREAK_VEIL: f64 = 0.35;
+const STREAK_VEIL: f64 = 0.5;
 /// Sun elevation over one loop (deg): it sinks, so the bow rises.
 const SUN_ELEV: (f64, f64) = (18.0, 8.0);
 const LOOP: f64 = 50.0;
@@ -240,12 +240,40 @@ pub(crate) fn spectral_role(nm: f64) -> Role {
     }
 }
 
-/// A bow's light `a` (0–1 of its top) in three flat steps.
+/// A bow's light `a` (0–1 of its top) in three flat steps (the undithered reference the
+/// unit tests compare against; the sky uses [`bow_level_at`]).
+#[cfg(test)]
 pub(crate) fn bow_level(a: f64) -> u8 {
     match a {
         a if a >= 0.8 => 230,
         a if a >= 0.55 => 150,
         _ => 70,
+    }
+}
+
+/// [`bow_level`] with the step boundaries dithered by a fixed per-dot hash: the level is
+/// still one of the three steps (BOW-A5), but the change between them is spread over
+/// ≈ 0.06 of the bow's light, so a curtain's edge fades along the arc instead of jumping
+/// at a contour.
+pub(crate) fn bow_level_at(a: f64, x: f64, y: f64, salt: u64) -> u8 {
+    if a >= 0.8 {
+        return 230;
+    }
+    let u = hash01(salt ^ cell_key(x.floor() as i32, y.floor() as i32));
+    if a >= 0.74 {
+        return if u < (a - 0.74) / 0.06 { 230 } else { 150 };
+    }
+    if a >= 0.55 {
+        return if a < 0.61 && u < (0.61 - a) / 0.06 {
+            70
+        } else {
+            150
+        };
+    }
+    if a >= 0.49 && u < (a - 0.49) / 0.06 {
+        150
+    } else {
+        70
     }
 }
 
@@ -645,6 +673,7 @@ impl Rainbow {
         theta: f64,
         e: (f64, f64),
         dotted: bool,
+        wide: bool,
         ink: impl Fn(&Self, V2) -> Option<Ink>,
     ) {
         let st = theta.sin_cos_det();
@@ -661,6 +690,37 @@ impl Rainbow {
                 let mid = (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1));
                 if let Some(k) = ink(self, mid) {
                     self.dots.line(a.0, a.1, b.0, b.1, k);
+                    // A 3-dot band with a dithered shoulder instead of a one-dot wire: the
+                    // core ±1 is solid at the arc's own level and ±2 is a 50 % dither at
+                    // that same level, so neighbouring colour bands just about meet without
+                    // blending into a mottle. Every dot is still one of the three levels
+                    // (BOW-A5).
+                    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                    let len = dx.hypot(dy);
+                    if len > 1e-9 {
+                        let (nx, ny) = (-dy / len, dx / len);
+                        let key = cell_key(mid.0.floor() as i32, mid.1.floor() as i32);
+                        for side in [-1.0, 1.0] {
+                            self.dots.line(
+                                a.0 + side * nx,
+                                a.1 + side * ny,
+                                b.0 + side * nx,
+                                b.1 + side * ny,
+                                k,
+                            );
+                        }
+                        for side in [-2.0, 2.0] {
+                            if wide && hash01(self.salt ^ key ^ (side as i64 as u64) ^ 0x51) < 0.5 {
+                                self.dots.line(
+                                    a.0 + side * nx,
+                                    a.1 + side * ny,
+                                    b.0 + side * nx,
+                                    b.1 + side * ny,
+                                    k,
+                                );
+                            }
+                        }
+                    }
                 }
             }
             prev = q;
@@ -687,19 +747,29 @@ impl Rainbow {
             let lit = rain * sun * (0.55 + 0.45 * g.veil(p.0, p.1));
             share * (BOW_FLOOR + (1.0 - BOW_FLOOR) * (lit / BOW_FULL).min(1.0))
         };
-        for (&theta, &(_, role)) in bows[1].iter().zip(&COLOURS) {
-            self.arc(theta, e, false, |g, p| {
-                Some(Ink::new(role, bow_level(light(g, p, SECONDARY))))
+        for (i, (&theta, &(_, role))) in bows[1].iter().zip(&COLOURS).enumerate() {
+            // The violet nearest Alexander's band keeps its crisp edge.
+            // The secondary stays a thin fainter bow (it faces Alexander's band).
+            let _ = i;
+            self.arc(theta, e, false, false, |g, p| {
+                Some(Ink::new(
+                    role,
+                    bow_level_at(light(g, p, SECONDARY), p.0, p.1, g.salt),
+                ))
             });
         }
-        for (&theta, &(_, role)) in bows[0].iter().zip(&COLOURS) {
-            self.arc(theta, e, false, |g, p| {
-                Some(Ink::new(role, bow_level(light(g, p, 1.0))))
+        for (i, (&theta, &(_, role))) in bows[0].iter().zip(&COLOURS).enumerate() {
+            // The primary's red faces the dark band: keep it one dot thick outward.
+            self.arc(theta, e, false, i != 0, |g, p| {
+                Some(Ink::new(
+                    role,
+                    bow_level_at(light(g, p, 1.0), p.0, p.1, g.salt),
+                ))
             });
         }
         // Supernumeraries: two faint dotted arcs inside the violet, green then violet.
         for (&theta, role) in supers.iter().zip([Role::Particle, Role::Accent]) {
-            self.arc(theta, e, true, |g, p| {
+            self.arc(theta, e, true, false, |g, p| {
                 (light(g, p, 1.0) > 0.5).then_some(Ink::new(role, SUPER_LEVEL))
             });
         }
@@ -891,6 +961,31 @@ mod tests {
             let (bows, supers) = arc_angles(per_rad);
             let gap = ARC_GAP / per_rad;
             assert!(supers[0] < bows[0][5] - gap + 1e-9 && supers[1] < supers[0]);
+        }
+    }
+
+    #[test]
+    fn bow_a5_dithered_levels_stay_on_the_three_steps() {
+        // The dither only chooses between 70, 150 and 230 (BOW-A5), and away from a
+        // boundary it agrees with the plain step everywhere.
+        let mut seen = std::collections::BTreeSet::new();
+        for i in 0..=100 {
+            let a = f64::from(i) / 100.0;
+            for x in 0..12 {
+                for y in 0..12 {
+                    let level = bow_level_at(a, f64::from(x), f64::from(y), 7);
+                    assert!([70, 150, 230].contains(&level), "a {a}: {level}");
+                    seen.insert(level);
+                }
+            }
+        }
+        assert_eq!(seen.len(), 3, "{seen:?}");
+        for x in 0..12 {
+            for y in 0..12 {
+                assert_eq!(bow_level_at(0.9, f64::from(x), f64::from(y), 7), 230);
+                assert_eq!(bow_level_at(0.66, f64::from(x), f64::from(y), 7), 150);
+                assert_eq!(bow_level_at(0.2, f64::from(x), f64::from(y), 7), 70);
+            }
         }
     }
 
