@@ -305,7 +305,7 @@ Design: [docs/IMPROVEMENTS.md](IMPROVEMENTS.md) · [docs/design/M23-programme.md
 - [x] Phase 2 — share loop: `sciart record`, in-app help/favourites, category filters, speed, `list --json` (1,610 default tests + 152 record-feature tests green; `v0.2.0` tagged)
 - [x] Phase 3 — compatibility: colour capability (`NO_COLOR`/256/mono), colour-blind-safe theme (1,637 default + 165 record-feature tests; 10 review sheets signed off; `v0.3.0` tagged)
 - [x] Phase 4 — longevity: SPEC-002 split + generated index [B-01/B-83](BACKLOG.md); backlog triage done [B-84](BACKLOG.md); fuzz targets [B-85](BACKLOG.md) (1,639 default + 166 record-feature tests; 85 sections in five files; 91-row backlog; `v0.4.0` tagged).
-- [ ] Phase 5 — art/science — [B-86..B-88](BACKLOG.md).
+- [x] Phase 5 — art/science — [B-86..B-88](BACKLOG.md); 10/11 scenes now ≥8/10, `catalytic_surface` at 7.5 with a spec decision ([B-92](BACKLOG.md)); 85-row claims audit, 20 reviewed ([B-93/B-94](BACKLOG.md)); review ritual [docs/REVIEW.md](REVIEW.md); `v0.5.0` tagged.
 
 ## M9 — Future (unscheduled)
 - Windows/Linux keep-awake backends, light-background theme, per-OS packaging — [B-89..B-91](BACKLOG.md).
