@@ -673,6 +673,7 @@ impl Rainbow {
         theta: f64,
         e: (f64, f64),
         dotted: bool,
+        wide: bool,
         ink: impl Fn(&Self, V2) -> Option<Ink>,
     ) {
         let st = theta.sin_cos_det();
@@ -689,25 +690,35 @@ impl Rainbow {
                 let mid = (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1));
                 if let Some(k) = ink(self, mid) {
                     self.dots.line(a.0, a.1, b.0, b.1, k);
-                    // A dithered one-dot fringe on either side softens the band's edge:
-                    // the arc is still one of the three steps (BOW-A5), but its border is
-                    // not a single stair-stepped row of dots.
+                    // A 3-dot band with a dithered shoulder instead of a one-dot wire: the
+                    // core ±1 is solid at the arc's own level and ±2 is a 50 % dither at
+                    // that same level, so neighbouring colour bands just about meet without
+                    // blending into a mottle. Every dot is still one of the three levels
+                    // (BOW-A5).
                     let (dx, dy) = (b.0 - a.0, b.1 - a.1);
                     let len = dx.hypot(dy);
                     if len > 1e-9 {
                         let (nx, ny) = (-dy / len, dx / len);
-                        let edge = match k.level {
-                            230 => 150,
-                            150 => 70,
-                            _ => 70,
-                        };
                         let key = cell_key(mid.0.floor() as i32, mid.1.floor() as i32);
-                        let outer = Ink::new(k.role, edge);
-                        if hash01(self.salt ^ key ^ 0x51) < 0.55 {
-                            self.dots.plot(mid.0 + nx, mid.1 + ny, outer);
+                        for side in [-1.0, 1.0] {
+                            self.dots.line(
+                                a.0 + side * nx,
+                                a.1 + side * ny,
+                                b.0 + side * nx,
+                                b.1 + side * ny,
+                                k,
+                            );
                         }
-                        if hash01(self.salt ^ key ^ 0xA7) < 0.3 {
-                            self.dots.plot(mid.0 - nx, mid.1 - ny, outer);
+                        for side in [-2.0, 2.0] {
+                            if wide && hash01(self.salt ^ key ^ (side as i64 as u64) ^ 0x51) < 0.5 {
+                                self.dots.line(
+                                    a.0 + side * nx,
+                                    a.1 + side * ny,
+                                    b.0 + side * nx,
+                                    b.1 + side * ny,
+                                    k,
+                                );
+                            }
                         }
                     }
                 }
@@ -736,16 +747,20 @@ impl Rainbow {
             let lit = rain * sun * (0.55 + 0.45 * g.veil(p.0, p.1));
             share * (BOW_FLOOR + (1.0 - BOW_FLOOR) * (lit / BOW_FULL).min(1.0))
         };
-        for (&theta, &(_, role)) in bows[1].iter().zip(&COLOURS) {
-            self.arc(theta, e, false, |g, p| {
+        for (i, (&theta, &(_, role))) in bows[1].iter().zip(&COLOURS).enumerate() {
+            // The violet nearest Alexander's band keeps its crisp edge.
+            // The secondary stays a thin fainter bow (it faces Alexander's band).
+            let _ = i;
+            self.arc(theta, e, false, false, |g, p| {
                 Some(Ink::new(
                     role,
                     bow_level_at(light(g, p, SECONDARY), p.0, p.1, g.salt),
                 ))
             });
         }
-        for (&theta, &(_, role)) in bows[0].iter().zip(&COLOURS) {
-            self.arc(theta, e, false, |g, p| {
+        for (i, (&theta, &(_, role))) in bows[0].iter().zip(&COLOURS).enumerate() {
+            // The primary's red faces the dark band: keep it one dot thick outward.
+            self.arc(theta, e, false, i != 0, |g, p| {
                 Some(Ink::new(
                     role,
                     bow_level_at(light(g, p, 1.0), p.0, p.1, g.salt),
@@ -754,7 +769,7 @@ impl Rainbow {
         }
         // Supernumeraries: two faint dotted arcs inside the violet, green then violet.
         for (&theta, role) in supers.iter().zip([Role::Particle, Role::Accent]) {
-            self.arc(theta, e, true, |g, p| {
+            self.arc(theta, e, true, false, |g, p| {
                 (light(g, p, 1.0) > 0.5).then_some(Ink::new(role, SUPER_LEVEL))
             });
         }
