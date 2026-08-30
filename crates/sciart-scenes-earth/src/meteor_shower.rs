@@ -646,6 +646,11 @@ impl MeteorShower {
             }
             let bx = band_x + tilt * (cy - 0.5 * h as f64);
             for x in 0..dw {
+                // Keep the dust band off the land, like the stars below (skyline top).
+                let px = (((f64::from(x) + 0.5) / 2.0) as usize).min(w.saturating_sub(1));
+                if cy >= f64::from(self.land[px]) {
+                    continue;
+                }
                 let d = (f64::from(x) + 0.5) - 2.0 * bx;
                 let profile = (-(d / (2.0 * band_w)).powi(2)).exp();
                 if profile < 0.03 {
@@ -709,6 +714,12 @@ impl MeteorShower {
             if !(0.0..f64::from(dsize.width())).contains(&x)
                 || !(0.0..f64::from(dsize.height())).contains(&y)
             {
+                continue;
+            }
+            // Same land test as the main star loop: no band stars on the ridge.
+            let px = ((x / 2.0) as usize).min(w.saturating_sub(1));
+            let top = self.land.get(px).copied().unwrap_or(0);
+            if y / 2.0 >= f64::from(top) - 0.5 {
                 continue;
             }
             let level = if rng.random_bool(0.2) { 80 } else { 45 };

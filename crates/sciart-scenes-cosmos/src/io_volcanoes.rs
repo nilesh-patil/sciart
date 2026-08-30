@@ -211,7 +211,7 @@ pub(crate) fn plume_scale(t: f64, phase: f64) -> f64 {
     s * s
 }
 
-/// The eruption pulse in `[0, ~2.9]`, mean 1 over a cycle: a sharp burst, a long decay
+/// The eruption pulse in `[0.43, 3.29]`, mean 1 over a cycle: a sharp burst, a long decay
 /// while the canopy drifts out and falls, then a quiet rest. `phase` is the vent's
 /// offset in radians (as before), converted to a share of the cycle.
 pub(crate) fn eruption(t: f64, phase: f64) -> f64 {
@@ -948,7 +948,7 @@ mod tests {
     }
 
     #[test]
-    fn io_a8_the_eruption_pulses_around_a_mean_launch_rate() {
+    fn io_a14_the_eruption_pulses_around_a_mean_launch_rate() {
         // The eruption envelope is normalised to mean 1, so the steady-state population
         // (IO-A4) is unchanged, but it swings from a burst to a quiet rest > 3× lower.
         let n = 400;
