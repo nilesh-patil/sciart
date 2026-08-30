@@ -84,6 +84,8 @@ const STATION_LEFT: i32 = -4;
 /// M14 (ADR-0017): from this width sprites are drawn at 2× (two pixel columns and four
 /// pixel rows per table cell) as pixel art; narrower screens keep 1×.
 const SPRITE_2X_FROM: f64 = 120.0;
+/// From this width the sprites are drawn at 3×, so the chaser reads as the hero craft.
+const SPRITE_3X_FROM: f64 = 160.0;
 /// M14 (ADR-0017): the Earth's surface level share under its limb.
 const EARTH_DIM: f64 = 0.45;
 /// M14: the burns' Δv labels are not drawn (the numbers stay in the model and tests).
@@ -440,14 +442,14 @@ impl OrbitalRendezvous {
                     py,
                     x,
                     y,
-                    Ink::new(Role::Particle, if age < 6.0 { 200 } else { 80 }),
+                    Ink::new(Role::Particle, if age < 6.0 { 230 } else { 100 }),
                 );
             }
             prev = Some((x, y));
         }
         // Still to fly: a dim solid line from the chaser on (drawn after the trail, so it
         // never covers it; `Dots` keeps the brighter ink where they meet).
-        let plan = Ink::new(Role::Dim, 110);
+        let plan = Ink::new(Role::Dim, 150);
         let mut prev = (hx, hy);
         for &(x, y) in self.plan.iter().skip(flown + 1) {
             self.dots.line(prev.0, prev.1, x, y, plan);
@@ -582,7 +584,13 @@ impl Generator for OrbitalRendezvous {
         self.sprites.resize(size);
         self.w = f64::from(size.width());
         self.h = f64::from(size.height());
-        self.sprite = if self.w >= SPRITE_2X_FROM { 2 } else { 1 };
+        self.sprite = if self.w >= SPRITE_3X_FROM {
+            3
+        } else if self.w >= SPRITE_2X_FROM {
+            2
+        } else {
+            1
+        };
         // Scale each axis to the trajectory: along track from the start gap to the
         // station, radially from the station's altitude to the hops' lowest dip.
         self.origin = (STATION_COL * self.w, TOP_ROW * self.h);
