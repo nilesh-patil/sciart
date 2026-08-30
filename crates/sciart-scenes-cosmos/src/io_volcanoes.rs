@@ -54,7 +54,7 @@ pub(crate) const POOL: usize = 900;
 pub(crate) const TIDE_PERIOD: f64 = 20.0;
 /// Plume filaments: grains leave in this many azimuthal rays (Pele's canopy shows
 /// radial streaks in Voyager and Galileo images).
-const RAYS: u32 = 30;
+const RAYS: u32 = 8;
 /// Simulated steps of eruption run in the first resize, so the plumes and rings already
 /// show; in strides (the flight is exact and each grain lands at its exact point, so the
 /// rings do not depend on the stride).
@@ -64,7 +64,7 @@ const _: () = assert!(WARM % WARM_STRIDE == 0, "the stride divides the warm-up")
 /// Launch zenith angles (rad): a fan from near-vertical (the umbrella's top, IO-A12) to
 /// the 45° grains that land at the maximum range, each jittered by up to `FAN_JITTER`.
 const FAN: [f64; 6] = [0.07, 0.3, 0.48, 0.62, 0.73, 0.8];
-const FAN_JITTER: f64 = 0.025;
+const FAN_JITTER: f64 = 0.01;
 /// Landings drawn: only beyond this share of the 45° range (the ring's caustic).
 const RING_INNER: f64 = 0.84;
 /// The eruption cycle (scene seconds): each vent puffs, its canopy drifts outward and
@@ -73,8 +73,29 @@ const RING_INNER: f64 = 0.84;
 const BURST_PERIOD: f64 = 8.0;
 /// Trail behind a live grain, in simulated (time-lapsed) seconds: a short thread, so the
 /// canopy is made of the grains in flight now rather than a fixed set of parabolas.
-const TRAIL: f64 = 150.0;
-const TRAIL_STEPS: usize = 10;
+const TRAIL: f64 = 30.0;
+const TRAIL_STEPS: usize = 3;
+/// The fixed Pele umbrella: `(zenith rad, azimuth deg)`. Drawn faintly under the live
+/// grains so the canopy keeps a coherent silhouette while the bright dashes move along it.
+const PELE_ARCS: [(f64, f64); 14] = [
+    (0.1, 0.0),
+    (0.1, 180.0),
+    (0.48, 0.0),
+    (0.48, 180.0),
+    (0.48, 35.0),
+    (0.48, 145.0),
+    (0.48, 215.0),
+    (0.48, 325.0),
+    (0.76, 0.0),
+    (0.76, 180.0),
+    (0.76, 35.0),
+    (0.76, 145.0),
+    (0.76, 215.0),
+    (0.76, 325.0),
+];
+/// Dots between the guide's samples, and its level (well under the live grains).
+const GUIDE_STEP: f64 = 1.5;
+const GUIDE_LEVEL: u8 = 85;
 /// Share of the Prometheus types' frost-ring dots drawn.
 const FROST_KEEP: f64 = 0.55;
 /// Flight states (IO-A11 colours): `Hot` below this share of the grain's apex while
@@ -172,9 +193,7 @@ pub(crate) fn range_45(v0: f64) -> f64 {
 }
 
 /// Height (km) of a grain launched with vertical speed `vz` (km/s) after flight time `t`
-/// (s): the exact parabola (IO-A11). Only the unit tests need it now that the drawing
-/// walks each live grain's own recent trail.
-#[cfg(test)]
+/// (s): the exact parabola (IO-A11).
 pub(crate) fn height(vz: f64, t: f64) -> f64 {
     vz * t - 0.5 * G_IO * t * t
 }
@@ -238,27 +257,36 @@ fn draw_grain(dots: &mut Dots, view: View, frames: &[Frame; 3], g: &plume::Grain
         f64::from(g.vel[2]),
     );
     let apex = z0 + vz * vz / (2.0 * G_IO);
-    let mut prev: Option<(f64, f64)> = None;
-    for s in 0..=TRAIL_STEPS {
+    // The trail spans about 1–2 terminal cells and is drawn three dots wide, so a grain
+    // is a short solid dash with a bright head rather than a one-dot speckle.
+    let mut pts: [Option<(f64, f64)>; TRAIL_STEPS + 1] = [None; TRAIL_STEPS + 1];
+    for (s, slot) in pts.iter_mut().enumerate() {
         let tau = TRAIL * (TRAIL_STEPS - s) as f64 / TRAIL_STEPS as f64;
-        let (z, vzt) = (z0 - vz * tau - 0.5 * G_IO * tau * tau, vz + G_IO * tau);
+        let z = z0 - vz * tau - 0.5 * G_IO * tau * tau;
         let p = frame.place(x0 - vx * tau, y0 - vy * tau, z.max(0.0));
-        if View::hidden(p) {
-            prev = None;
+        *slot = (!View::hidden(p)).then(|| view.to_dot(p));
+    }
+    let role = flight_role(z0, vz, apex);
+    let body = Ink::new(role, 170);
+    for w in pts.windows(2) {
+        let (Some(a), Some(b)) = (w[0], w[1]) else {
             continue;
-        }
-        let pt = view.to_dot(p);
-        if let Some(q) = prev {
-            let level = if s == TRAIL_STEPS { 240 } else { 150 };
+        };
+        let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+        let len = dx.hypot(dy).max(1e-9);
+        let (nx, ny) = (-dy / len, dx / len);
+        for off in [-0.7, 0.0, 0.7] {
             dots.line(
-                q.0,
-                q.1,
-                pt.0,
-                pt.1,
-                Ink::new(flight_role(z, vzt, apex), level),
+                a.0 + off * nx,
+                a.1 + off * ny,
+                b.0 + off * nx,
+                b.1 + off * ny,
+                body,
             );
         }
-        prev = Some(pt);
+    }
+    if let Some((x, y)) = pts[TRAIL_STEPS] {
+        dots.disc(x, y, 0.6, Ink::new(role, 255));
     }
 }
 
@@ -610,6 +638,39 @@ impl IoVolcanoes {
         Some((self.view.to_dot(p), zt, vzt, apex))
     }
 
+    /// One faint fixed guide parabola: the Pele dome's silhouette, so the canopy reads as
+    /// one plume while the live grains (drawn bright on top) move along it.
+    fn draw_guide(&mut self, v0: f64, zen: f64, az_deg: f64) {
+        let (sz, cz) = zen.sin_cos_det();
+        let (vh, vz) = (v0 * sz, v0 * cz);
+        let (sa, ca) = az_deg.to_radians().sin_cos_det();
+        let flight = 2.0 * vz / G_IO;
+        let apex = vz * vz / (2.0 * G_IO);
+        let reach = self.view.dots_per_km() * (vh * flight + 2.0 * apex);
+        let n = ((reach / GUIDE_STEP).ceil() as usize).clamp(4, 4000);
+        let mut prev: Option<(f64, f64)> = None;
+        for j in 0..=n {
+            let u = flight * j as f64 / n as f64;
+            let z = height(vz, u);
+            let p = self.frames[0].place(vh * u * ca, vh * u * sa, z.max(0.0));
+            if View::hidden(p) {
+                prev = None;
+                continue;
+            }
+            let pt = self.view.to_dot(p);
+            if let Some(q) = prev {
+                self.dots.line(
+                    q.0,
+                    q.1,
+                    pt.0,
+                    pt.1,
+                    Ink::new(flight_role(z, vz - G_IO * u, apex), GUIDE_LEVEL),
+                );
+            }
+            prev = Some(pt);
+        }
+    }
+
     fn compose(&mut self) {
         self.dots.clear();
         for s in &self.specks {
@@ -672,6 +733,11 @@ impl IoVolcanoes {
             for &(dx, dy) in &[(0, 0), (1, 0), (0, 1), (-1, 0)][..n.min(4)] {
                 self.dots.set(x + dx, y + dy, ink);
             }
+        }
+        // The Pele umbrella's faint fixed dome, then the live grains bright on top.
+        let pele = VENTS[0].v0 * plume_scale(self.t, VENTS[0].phase).sqrt();
+        for &(zen, az) in PELE_ARCS.iter() {
+            self.draw_guide(pele, zen, az);
         }
         // The plumes: the live ballistic grains, each with a short decaying thread along
         // its own parabola. The eruption pulse changes how many are in flight, so the
