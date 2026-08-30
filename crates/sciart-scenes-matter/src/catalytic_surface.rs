@@ -118,6 +118,10 @@ const SWEEP: [(&str, f64, f64, f64); 7] = [
 /// window still show warm.
 pub(crate) const CO_THREAD: Ink = Ink::new(Role::Hot, 210);
 pub(crate) const O_THREAD: Ink = Ink::new(Role::Cold, 235);
+/// A second, dimmer contour just inside each bright thread, turning the one-dot front into
+/// a graded reaction band (soft edges; the bright thread still carries the front).
+pub(crate) const CO_GLOW: Ink = Ink::new(Role::Hot, 95);
+pub(crate) const O_GLOW: Ink = Ink::new(Role::Cold, 120);
 pub(crate) const BLUR: usize = 2;
 pub(crate) const CO_EDGE: f32 = 0.3;
 pub(crate) const O_EDGE: f32 = 0.45;
@@ -461,6 +465,8 @@ impl CatalyticSurface {
         let sx = f64::from(ds.width()) / w.max(1) as f64;
         let sy = f64::from(ds.height()) / h.max(1) as f64;
         let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        self.dots.contour(&self.field, w, h, -0.33, to_dot, O_GLOW);
+        self.dots.contour(&self.field, w, h, 0.18, to_dot, CO_GLOW);
         self.dots
             .contour(&self.field, w, h, -O_EDGE, to_dot, O_THREAD);
         self.dots
