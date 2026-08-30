@@ -94,6 +94,7 @@ historical context; the spec is still the contract.
 | Document | What it covers |
 | --- | --- |
 | [Gallery](GALLERY.md) | One current frame per registered scene, grouped by category |
+| [Science claims](science/README.md) | Per-scene title/model/caveat audit (20 audited, 65 pending) |
 | [Roadmap](ROADMAP.md) | Milestones M0–M23, done/not-done, links to designs |
 | [Backlog](BACKLOG.md) | Open follow-ups and stale claims, with status and priority |
 | [Improvements](IMPROVEMENTS.md) | The 17-item improvement proposal (IMP-01..17) and its evidence |
