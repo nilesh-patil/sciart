@@ -40,6 +40,19 @@ pub const HYSTERESIS: u8 = 4;
 /// default (RND-R15): a blank has no foreground, and a half block whose two halves are
 /// one colour is drawn as a blank in that background.
 pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
+    paint_with_background(canvas, theme, area, buf, Background::Opaque);
+}
+
+/// [`paint`] with an explicit background mode (RND-R20): [`Background::Terminal`] keeps
+/// the pre-M24 `Color::Reset` cells, which tests and callers that need the terminal's own
+/// background opt into explicitly.
+pub fn paint_with_background(
+    canvas: &Canvas,
+    theme: Theme,
+    area: Rect,
+    buf: &mut Buffer,
+    background: Background,
+) {
     paint_with(
         canvas,
         theme,
@@ -47,8 +60,10 @@ pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
         buf,
         &[],
         &mut [],
-        false,
-        Background::Opaque,
+        Mode {
+            indexed: false,
+            background,
+        },
     );
 }
 
@@ -144,7 +159,7 @@ impl Painter {
     /// first frame with a new background must repaint every cell.
     pub fn with_background(mut self, background: Background) -> Self {
         self.background = background;
-        self.emitted.clear();
+        self.emitted.fill(Emitted::NONE);
         self
     }
 
@@ -181,8 +196,10 @@ impl Painter {
             buf,
             &self.hues,
             memory,
-            self.indexed,
-            self.background,
+            Mode {
+                indexed: self.indexed,
+                background: self.background,
+            },
         );
     }
 }
@@ -203,6 +220,14 @@ fn near(a: Packed, b: Packed) -> bool {
     (a == b) | (both_set & d(16) & d(8) & d(0))
 }
 
+/// How [`paint_with`] writes colours: the RND-R18 colour capability and the RND-R20
+/// background mode (kept together so the hot loop takes one small `Copy` value).
+#[derive(Debug, Clone, Copy)]
+struct Mode {
+    indexed: bool,
+    background: Background,
+}
+
 /// The painting loop: `hues` (per-position rainbow parts) and `memory` (hysteresis) may
 /// be empty, in which case rainbow hues are computed per cell and colours are exact.
 fn paint_with(
@@ -212,15 +237,26 @@ fn paint_with(
     buf: &mut Buffer,
     hues: &[HuePos],
     memory: &mut [Emitted],
-    indexed: bool,
-    background: Background,
+    mode: Mode,
 ) {
-    let _ = background; // RND-R20 behaviour lands with the paint tests.
+    // RND-R20: opaque mode fills every background-role cell with explicit black (the
+    // xterm black index in indexed mode); terminal mode keeps `Color::Reset`.
+    let blank = match mode.background {
+        Background::Terminal => DEFAULT,
+        Background::Opaque => {
+            let black = crate::Rgb(0, 0, 0);
+            if mode.indexed {
+                pack_indexed(quantize(black))
+            } else {
+                pack(black)
+            }
+        }
+    };
     let width = usize::from(canvas.size().width());
     let table = lut(theme);
     let color = |ink: Ink, i: usize, x: u16, y: u16| -> Packed {
         if ink.role == Role::Background {
-            return DEFAULT;
+            return blank;
         }
         let c = match role_index(ink.role) {
             Some(r) if !per_cell(theme, ink.role) => table.colors[r][usize::from(ink.level)],
@@ -229,7 +265,7 @@ fn paint_with(
                 .filter(|_| per_cell(theme, ink.role))
                 .map_or_else(|| theme.color(ink, x, y), |&p| rainbow_at(p, ink.level)),
         };
-        if indexed {
+        if mode.indexed {
             pack_indexed(quantize(c))
         } else {
             pack(c)
@@ -259,7 +295,9 @@ fn paint_with(
                 ch = ' ';
             }
             if ch == ' ' {
-                fg = DEFAULT;
+                // A blank shows no foreground; keep the pen on the background colour so
+                // an opaque frame never falls back to the terminal default.
+                fg = blank;
             }
             if let Some(m) = memory.get_mut(i) {
                 if m.ch == ch {
@@ -302,7 +340,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         buf[(0, 0)].set_char('X');
 
-        paint(&canvas, Theme::Mono, area, &mut buf);
+        paint_with_background(&canvas, Theme::Mono, area, &mut buf, Background::Terminal);
 
         assert_eq!(
             buf[(0, 0)].symbol(),
@@ -324,7 +362,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         buf[(1, 0)].set_bg(Color::Red); // stale background must be reset
 
-        paint(&canvas, Theme::Astro, area, &mut buf);
+        paint_with_background(&canvas, Theme::Astro, area, &mut buf, Background::Terminal);
 
         assert_eq!(buf[(0, 0)].symbol(), "▀");
         assert_eq!(buf[(0, 0)].fg, rgb(Theme::Astro, top));
@@ -358,7 +396,7 @@ mod tests {
         canvas.put_bg(2, 0, Glyph::new('▄', '#'), ink, ink);
         let area = Rect::new(0, 0, 3, 1);
         let mut buf = Buffer::empty(area);
-        paint(&canvas, Theme::Astro, area, &mut buf);
+        paint_with_background(&canvas, Theme::Astro, area, &mut buf, Background::Terminal);
         for x in 0..3 {
             let cell = &buf[(x, 0)];
             assert_eq!(cell.symbol(), " ", "cell {x}");
@@ -592,6 +630,83 @@ mod tests {
             );
             assert_eq!(painter.emitted[0].bg, pack_indexed(want), "level {level}");
         }
+    }
+
+    #[test]
+    fn rnd_r20_opaque_is_the_default_and_paints_black_backgrounds() {
+        let mut canvas = Canvas::new(Size::new(3, 2), GlyphMode::Unicode);
+        canvas.put(1, 1, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
+        let area = Rect::new(0, 0, 3, 2);
+        let mut buf = Buffer::empty(area);
+        paint(&canvas, Theme::Astro, area, &mut buf);
+        for (x, y) in [(0, 0), (2, 0), (0, 1), (2, 1)] {
+            assert_eq!(buf[(x, y)].bg, Color::Rgb(0, 0, 0), "blank bg ({x},{y})");
+            assert_eq!(buf[(x, y)].fg, Color::Rgb(0, 0, 0), "blank fg ({x},{y})");
+        }
+        assert_eq!(buf[(1, 1)].bg, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn rnd_r20_terminal_background_keeps_reset() {
+        let mut canvas = Canvas::new(Size::new(2, 1), GlyphMode::Unicode);
+        canvas.put(1, 0, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        paint_with_background(&canvas, Theme::Astro, area, &mut buf, Background::Terminal);
+        assert_eq!(buf[(0, 0)].bg, Color::Reset);
+        assert_eq!(buf[(0, 0)].fg, Color::Reset);
+    }
+
+    #[test]
+    fn rnd_r20_explicit_background_inks_survive_both_modes() {
+        let mut canvas = Canvas::new(Size::new(2, 1), GlyphMode::Unicode);
+        let (top, bottom) = (Ink::new(Role::Seq, 10), Ink::new(Role::Div, 200));
+        canvas.put_bg(0, 0, Glyph::new('▀', '#'), top, bottom);
+        let area = Rect::new(0, 0, 2, 1);
+        for background in [Background::Opaque, Background::Terminal] {
+            let mut buf = Buffer::empty(area);
+            paint_with_background(&canvas, Theme::Astro, area, &mut buf, background);
+            assert_eq!(buf[(0, 0)].fg, rgb(Theme::Astro, top), "{background:?}");
+            assert_eq!(buf[(0, 0)].bg, rgb(Theme::Astro, bottom), "{background:?}");
+            let blank = match background {
+                Background::Opaque => Color::Rgb(0, 0, 0),
+                Background::Terminal => Color::Reset,
+            };
+            assert_eq!(buf[(1, 0)].bg, blank, "{background:?}");
+        }
+    }
+
+    #[test]
+    fn rnd_r20_indexed_opaque_background_is_the_black_index() {
+        let mut canvas = Canvas::new(Size::new(2, 1), GlyphMode::Unicode);
+        canvas.put(1, 0, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
+        let area = Rect::new(0, 0, 2, 1);
+        let mut buf = Buffer::empty(area);
+        Painter::indexed().paint(&canvas, Theme::Astro, area, &mut buf);
+        assert_eq!(buf[(0, 0)].bg, Color::Indexed(16));
+        assert_eq!(buf[(0, 0)].fg, Color::Indexed(16));
+    }
+
+    #[test]
+    fn rnd_r20_switching_background_clears_the_emitted_memory() {
+        let mut canvas = Canvas::new(Size::new(2, 1), GlyphMode::Unicode);
+        canvas.put(1, 0, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
+        let area = Rect::new(0, 0, 2, 1);
+        let mut painter = Painter::new();
+        let mut buf = Buffer::empty(area);
+        painter.paint(&canvas, Theme::Astro, area, &mut buf);
+        assert!(
+            painter.emitted.iter().any(|e| *e != Emitted::NONE),
+            "the first frame fills the memory"
+        );
+        let mut painter = painter.with_background(Background::Terminal);
+        assert!(
+            painter.emitted.iter().all(|e| *e == Emitted::NONE),
+            "switching background clears the memory so the next frame repaints every cell"
+        );
+        let mut terminal = Buffer::empty(area);
+        painter.paint(&canvas, Theme::Astro, area, &mut terminal);
+        assert_eq!(terminal[(0, 0)].bg, Color::Reset);
     }
 
     #[test]
