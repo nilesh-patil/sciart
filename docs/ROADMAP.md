@@ -307,5 +307,12 @@ Design: [docs/IMPROVEMENTS.md](IMPROVEMENTS.md) · [docs/design/M23-programme.md
 - [x] Phase 4 — longevity: SPEC-002 split + generated index [B-01/B-83](BACKLOG.md); backlog triage done [B-84](BACKLOG.md); fuzz targets [B-85](BACKLOG.md) (1,639 default + 166 record-feature tests; 85 sections in five files; 91-row backlog; `v0.4.0` tagged).
 - [x] Phase 5 — art/science — [B-86..B-88](BACKLOG.md); 10/11 scenes now ≥8/10, `catalytic_surface` at 7.5 with a spec decision ([B-92](BACKLOG.md)); 85-row claims audit, 20 reviewed ([B-93/B-94](BACKLOG.md)); review ritual [docs/REVIEW.md](REVIEW.md); `v0.5.0` tagged.
 
+## M24 — Opaque background (in progress)
+Design: [ADR-0027](adr/0027-opaque-background.md) · RND-R20, CLI-R11, CFG-R11. A live terminal showed a horizontal band through every scene; previews and recordings were clean, and a pty capture showed no app background, so the band came from terminal transparency/wallpaper. The fix makes the live background opaque black by default.
+- [ ] Specs + ADR + failing tests (RND-R20, CLI-R11, CFG-R11)
+- [ ] Renderer: `Background::{Opaque, Terminal}`, opaque black default, explicit cell backgrounds preserved
+- [ ] CLI/config: `--background opaque|terminal`, `background` key, precedence
+- [ ] pty proof, docs, full gate; `v0.6.0` tagged
+
 ## M9 — Future (unscheduled)
 - Windows/Linux keep-awake backends, light-background theme, per-OS packaging — [B-89..B-91](BACKLOG.md).
