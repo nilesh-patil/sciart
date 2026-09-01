@@ -65,6 +65,7 @@ amend or supersede earlier ones; the index notes the relationship.
 | [0024](adr/0024-hosted-ci-and-release.md) | Hosted CI and the tagged release pipeline |
 | [0025](adr/0025-capture-and-record.md) | Headless capture and `sciart record` |
 | [0026](adr/0026-colour-capability.md) | Colour capability, `NO_COLOR`, and the colour-blind-safe theme |
+| [0027](adr/0027-opaque-background.md) | Opaque black live background by default, with `--background terminal` opt-out |
 
 ## Design notes
 
@@ -89,6 +90,7 @@ historical context; the spec is still the contract.
 | [M22 lean build](design/M22-lean-build-runtime.md) | Build/runtime measurements, decisions and follow-ups |
 | [M23 programme](design/M23-programme.md) | The 17 improvement items and the phase plan |
 | [M23 Phase 5](design/M23-wave5.md) | Art re-scores (10/11 at 8+), science claims, review ritual and the remaining art follow-ups |
+| [M24 background](design/M24-background.md) | The live horizontal-band diagnosis and the opaque-black background fix |
 
 ## Reference and process
 
