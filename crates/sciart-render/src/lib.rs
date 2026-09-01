@@ -13,6 +13,6 @@ mod theme;
 pub use backend::FrameBackend;
 pub use color::{indexed, quantize};
 pub use hud::Hud;
-pub use paint::{HYSTERESIS, Painter, paint};
+pub use paint::{Background, HYSTERESIS, Painter, paint};
 pub use terminal::{AppTerminal, TerminalGuard};
 pub use theme::{Rgb, Theme};

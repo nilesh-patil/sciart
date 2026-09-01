@@ -8,12 +8,12 @@ use std::time::{Duration, Instant};
 use crossterm::event::{self, Event};
 use ratatui::Terminal;
 use ratatui::layout::Rect;
-use ratatui::style::Style;
+use ratatui::style::{Color, Style};
 use sciart_core::title::{Form, ascii_of};
 use sciart_core::{GlyphMode, Size};
 use sciart_generators::{Entry, registry};
 use sciart_keepawake::{Guard, Mode};
-use sciart_render::{FrameBackend, Hud, Painter, TerminalGuard, Theme};
+use sciart_render::{Background, FrameBackend, Hud, Painter, TerminalGuard, Theme};
 
 use crate::config::ColorMode;
 use crate::fps::FpsMeter;
@@ -51,6 +51,8 @@ pub struct Options {
     /// Resolved colour capability (RND-R18): `mono`/`truecolor` are theme/RGB and `indexed`
     /// makes the painter emit xterm-256 indices.
     pub color: ColorMode,
+    /// Opaque black or terminal-default cell backgrounds (RND-R20, CLI-R11/CFG-R11).
+    pub background: Background,
     pub glyphs: GlyphMode,
     pub hud: bool,
     /// Science title on (CFG-R6, CLI-R7).
@@ -103,6 +105,12 @@ impl Screen {
         Self::with_painter(Painter::indexed())
     }
 
+    /// Use the selected background mode (RND-R20); the painter repaints every cell.
+    pub fn with_background(mut self, background: Background) -> Self {
+        self.painter = self.painter.with_background(background);
+        self
+    }
+
     fn with_painter(painter: Painter) -> Self {
         Self {
             painter,
@@ -137,13 +145,15 @@ impl Screen {
         if help {
             Self::build_help(help_text, runtime, extras.config_path);
         }
+        let background = painter.background();
+        let blank = painter.blank_color();
         let overlay = !help && (runtime.status() == Status::AllFailed || runtime.hud());
         let mut overlay_row = None;
         terminal.draw(|f| {
             let area = f.area();
             if help {
                 // RT-R18: a static page instead of the scene and the HUD.
-                draw_help(area, f.buffer_mut(), help_text);
+                draw_help(area, f.buffer_mut(), help_text, background, blank);
                 return;
             }
             if overlay {
@@ -273,11 +283,24 @@ fn push_path(out: &mut String, path: &Path, budget: usize) {
 }
 
 /// Draw the help page over the whole area, ASCII and clipped to the terminal (RT-R18).
-fn draw_help(area: Rect, buf: &mut ratatui::buffer::Buffer, text: &str) {
+fn draw_help(
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    text: &str,
+    background: Background,
+    blank: Color,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     buf.reset();
+    // RND-R20: the help page is a full-screen visual too; keep terminal wallpaper out and
+    // use the same black the painter would emit (indexed black under `--color 256`).
+    let style = match background {
+        Background::Opaque => Style::new().bg(blank),
+        Background::Terminal => Style::new(),
+    };
+    buf.set_style(area, style);
     let width = usize::from(area.width);
     for (i, line) in text.split('\n').enumerate() {
         let Ok(row) = u16::try_from(i) else { break };
@@ -285,7 +308,7 @@ fn draw_help(area: Rect, buf: &mut ratatui::buffer::Buffer, text: &str) {
         if y >= area.bottom() {
             break;
         }
-        buf.set_stringn(area.x, y, line, width, Style::new());
+        buf.set_stringn(area.x, y, line, width, style);
     }
 }
 
@@ -312,7 +335,8 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         Screen::indexed()
     } else {
         Screen::new()
-    };
+    }
+    .with_background(opts.background);
     let mut last = wall_clock();
     let mut epoch = runtime.epoch();
     let mut first = true;

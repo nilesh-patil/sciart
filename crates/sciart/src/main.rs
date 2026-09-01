@@ -140,6 +140,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         seed,
         theme: settings.theme,
         color: settings.color,
+        background: settings.background,
         glyphs: if settings.ascii {
             GlyphMode::Ascii
         } else {
