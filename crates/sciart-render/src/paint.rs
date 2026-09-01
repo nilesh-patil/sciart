@@ -15,12 +15,15 @@ use crate::color::quantize;
 use crate::theme::{HuePos, hue_pos, lut, per_cell, rainbow_at, role_index};
 
 /// How the painter fills a cell whose background ink is `Role::Background` (RND-R20).
+///
+/// The library default is [`Background::Terminal`] so headless callers keep the exact
+/// RND-R3/RND-R7 stream; the app selects [`Background::Opaque`] from its settings.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum Background {
     /// Opaque black, so terminal wallpaper/transparency cannot leak into the art.
-    #[default]
     Opaque,
     /// Terminal default (`Color::Reset`), the pre-M24 behaviour.
+    #[default]
     Terminal,
 }
 
@@ -32,15 +35,16 @@ pub enum Background {
 pub const HYSTERESIS: u8 = 4;
 
 /// Write every canvas cell that fits inside `area` into `buf` (RND-R3), with the exact
-/// theme colours and the default opaque background (RND-R20).
+/// theme colours and the library-default terminal background (RND-R20).
 ///
 /// A `Role::Background` ink means "terminal default", for the foreground (RND-R3) and
 /// for the cell background (RND-R7, CORE-R40), unless [`Background::Opaque`] fills it
 /// with black. Attributes that cannot change what the cell looks like are left at the
 /// default (RND-R15): a blank has no foreground, and a half block whose two halves are
-/// one colour is drawn as a blank in that background.
+/// one colour is drawn as a blank in that background. The app passes `Opaque` through
+/// [`Painter::with_background`].
 pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
-    paint_with_background(canvas, theme, area, buf, Background::Opaque);
+    paint_with_background(canvas, theme, area, buf, Background::Terminal);
 }
 
 /// [`paint`] with an explicit background mode (RND-R20): [`Background::Terminal`] keeps
@@ -166,6 +170,17 @@ impl Painter {
     /// The background mode this painter was built with (RND-R20).
     pub fn background(&self) -> Background {
         self.background
+    }
+
+    /// The colour of a `Role::Background` cell in this painter's mode (RND-R20): the
+    /// terminal default, black, or the xterm-256 black when indexed. Used by the help
+    /// page, which bypasses [`Painter::paint`].
+    pub fn blank_color(&self) -> Color {
+        match self.background {
+            Background::Terminal => Color::Reset,
+            Background::Opaque if self.indexed => Color::Indexed(quantize(crate::Rgb(0, 0, 0))),
+            Background::Opaque => Color::Rgb(0, 0, 0),
+        }
     }
 
     /// Forget every emitted colour: the next frame is painted exactly (scene change or
@@ -300,9 +315,8 @@ fn paint_with(
                 ch = ' ';
             }
             if ch == ' ' {
-                // A blank shows no foreground; keep the pen on the background colour so
-                // an opaque frame never falls back to the terminal default.
-                fg = blank;
+                // A blank shows no foreground; the background carries the opaque ground.
+                fg = DEFAULT;
             }
             if let Some(m) = memory.get_mut(i) {
                 if m.ch == ch {
@@ -638,17 +652,29 @@ mod tests {
     }
 
     #[test]
-    fn rnd_r20_opaque_is_the_default_and_paints_black_backgrounds() {
+    fn rnd_r20_opaque_paints_black_backgrounds_and_leaves_blank_fg_default() {
         let mut canvas = Canvas::new(Size::new(3, 2), GlyphMode::Unicode);
         canvas.put(1, 1, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
         let area = Rect::new(0, 0, 3, 2);
         let mut buf = Buffer::empty(area);
-        paint(&canvas, Theme::Astro, area, &mut buf);
+        paint_with_background(&canvas, Theme::Astro, area, &mut buf, Background::Opaque);
         for (x, y) in [(0, 0), (2, 0), (0, 1), (2, 1)] {
             assert_eq!(buf[(x, y)].bg, Color::Rgb(0, 0, 0), "blank bg ({x},{y})");
-            assert_eq!(buf[(x, y)].fg, Color::Rgb(0, 0, 0), "blank fg ({x},{y})");
+            assert_eq!(buf[(x, y)].fg, Color::Reset, "blank fg ({x},{y})");
         }
         assert_eq!(buf[(1, 1)].bg, Color::Rgb(0, 0, 0));
+    }
+
+    #[test]
+    fn rnd_r20_paint_defaults_to_the_terminal_background() {
+        let canvas = Canvas::new(Size::new(1, 1), GlyphMode::Unicode);
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        paint(&canvas, Theme::Astro, area, &mut buf);
+        assert_eq!(buf[(0, 0)].bg, Color::Reset);
+        let mut buf = Buffer::empty(area);
+        paint_with_background(&canvas, Theme::Astro, area, &mut buf, Background::Opaque);
+        assert_eq!(buf[(0, 0)].bg, Color::Rgb(0, 0, 0));
     }
 
     #[test]
@@ -687,9 +713,11 @@ mod tests {
         canvas.put(1, 0, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
         let area = Rect::new(0, 0, 2, 1);
         let mut buf = Buffer::empty(area);
-        Painter::indexed().paint(&canvas, Theme::Astro, area, &mut buf);
+        Painter::indexed()
+            .with_background(Background::Opaque)
+            .paint(&canvas, Theme::Astro, area, &mut buf);
         assert_eq!(buf[(0, 0)].bg, Color::Indexed(16));
-        assert_eq!(buf[(0, 0)].fg, Color::Indexed(16));
+        assert_eq!(buf[(0, 0)].fg, Color::Reset);
     }
 
     #[test]
@@ -697,7 +725,7 @@ mod tests {
         let mut canvas = Canvas::new(Size::new(2, 1), GlyphMode::Unicode);
         canvas.put(1, 0, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
         let area = Rect::new(0, 0, 2, 1);
-        let mut painter = Painter::new();
+        let mut painter = Painter::new().with_background(Background::Opaque);
         let mut buf = Buffer::empty(area);
         painter.paint(&canvas, Theme::Astro, area, &mut buf);
         assert!(

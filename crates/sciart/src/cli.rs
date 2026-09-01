@@ -40,7 +40,8 @@ pub struct Cli {
     #[arg(long, global = true, value_enum)]
     pub color: Option<ColorArg>,
 
-    /// Background behind every cell: opaque black or the terminal default [default: opaque]
+    /// Background behind every cell: opaque black or the terminal default; terminal output only
+    /// [default: opaque]
     #[arg(long, global = true, value_enum)]
     pub background: Option<BackgroundArg>,
 
