@@ -163,6 +163,11 @@ impl Painter {
         self
     }
 
+    /// The background mode this painter was built with (RND-R20).
+    pub fn background(&self) -> Background {
+        self.background
+    }
+
     /// Forget every emitted colour: the next frame is painted exactly (scene change or
     /// reset, RND-R14).
     pub fn reset(&mut self) {
