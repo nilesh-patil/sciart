@@ -28,7 +28,7 @@ proptest.workspace = true
 sciart-capture.workspace = true
 sciart-render.workspace = true
 sciart-testalloc.workspace = true
-# source_rules reads pixi.toml, Cargo.toml and .config/nextest.toml (TEST-R9..R11).
+# source_rules reads the scene crates' Cargo.toml manifests (GEN-R6/GEN-R16).
 toml.workspace = true
 
 [[bench]]

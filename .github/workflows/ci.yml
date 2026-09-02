@@ -74,8 +74,12 @@ jobs:
       - name: Gallery coverage
         run: python3 scripts/gallery.py --check
       # GEN-R15: the generated SPEC-002 scene index is current.
-      - name: Spec index
-        run: python3 scripts/spec_index.py --check
+      # TEST-R1/R4: spec traceability; TEST-R9/R10/R11: tooling schema (as `rs-spec-check`).
+      - name: Spec index & tooling schema
+        run: |
+          python3 scripts/spec_index.py --check
+          python3 scripts/spec_check.py
+          python3 scripts/tooling_check.py
       # CLI-R8: the feature-gated record tests and the capture crate.
       - name: Record feature tests
         run: cargo nextest run -p sciart --features record
