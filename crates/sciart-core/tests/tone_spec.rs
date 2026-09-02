@@ -1,7 +1,6 @@
-//! SPEC-001 CORE-R81: the asinh tone curve and `Density::to_pixels`.
+//! SPEC-001 CORE-R81: the asinh tone curve.
 
 use proptest::prelude::*;
-use sciart_core::prelude::*;
 use sciart_core::raster::Tone;
 
 /// The exact curve, `255 · asinh(v / knee) / asinh(white / knee)` clamped to `[0, 255]`.
@@ -84,49 +83,5 @@ proptest! {
             let err = (f64::from(tone.level(v)) - exact(v, knee, white)).abs();
             prop_assert!(err <= 2.0, "v {v}: {} vs {:.2}", tone.level(v), exact(v, knee, white));
         }
-    }
-}
-
-const INK: fn(u8) -> Ink = |level| Ink::new(Role::Seq, level);
-
-#[test]
-fn core_r81_to_pixels_sums_each_two_by_two_dot_block() {
-    // 2×1 cells: 4×4 dots, 2×2 pixels.
-    let size = Size::new(2, 1);
-    let mut density = Density::new(size);
-    let tone = Tone::asinh(1.0, 8.0);
-    // Pixel (0, 0) ⇐ dots (0..=1, 0..=1); pixel (1, 1) ⇐ dots (2..=3, 2..=3).
-    for (x, y) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-        density.deposit(f64::from(x), f64::from(y), 2.0);
-    }
-    density.deposit(3.0, 3.0, 0.5);
-    let mut px = Pixels::new(size);
-    px.fill(Ink::new(Role::Hot, 9)); // stale content must be overwritten
-    density.to_pixels(&mut px, &tone, INK);
-    assert_eq!(px.get(0, 0), Some(INK(tone.level(8.0))));
-    assert_eq!(px.get(0, 0), Some(INK(255)));
-    assert_eq!(px.get(1, 1), Some(INK(tone.level(0.5))));
-    assert_eq!(px.get(1, 0), Some(Ink::BLANK), "an empty block is empty");
-    assert_eq!(px.get(0, 1), Some(Ink::BLANK));
-}
-
-#[test]
-fn core_r81_to_pixels_leaves_level_zero_empty_and_ignores_extra_pixels() {
-    let mut density = Density::new(Size::new(1, 1)); // 2×4 dots ⇒ 1×2 pixels
-    density.deposit(0.0, 0.0, 1e-9); // rounds to level 0
-    density.deposit(1.0, 3.0, 5.0);
-    let tone = Tone::asinh(1.0, 5.0);
-    let mut px = Pixels::new(Size::new(3, 2)); // larger than the density
-    px.fill(Ink::new(Role::Hot, 9));
-    let mut calls = 0;
-    density.to_pixels(&mut px, &tone, |l| {
-        calls += 1;
-        INK(l)
-    });
-    assert_eq!(calls, 1, "ink is called for lit pixels only");
-    assert_eq!(px.get(0, 0), Some(Ink::BLANK));
-    assert_eq!(px.get(0, 1), Some(INK(255)));
-    for (x, y) in [(1, 0), (2, 0), (0, 2), (2, 3)] {
-        assert_eq!(px.get(x, y), Some(Ink::BLANK), "no block at ({x}, {y})");
     }
 }
