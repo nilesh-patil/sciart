@@ -14,13 +14,12 @@ categories = ["science", "science::chemistry", "science::physics", "simulation",
 publish = false
 
 [dependencies]
+# No sciart-shared dep: this crate's shared models (cahn_hilliard, laplacian_growth)
+# live here as crate-private helpers (GEN-R3).
 sciart-core.workspace = true
-sciart-shared.workspace = true
 rand.workspace = true
 
 [dev-dependencies]
-# The shared models' test helpers (`test-support`) for this crate's unit tests.
-sciart-shared = { workspace = true, features = ["test-support"] }
 proptest.workspace = true
 
 [lints]

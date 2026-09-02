@@ -4,6 +4,11 @@
 //! (GEN-R3). Scenes import only `sciart_core`, `sciart_shared` and `rand`, never another
 //! scene, so this crate has no `crate::` paths between modules (GEN-R16).
 
+// Crate-private numerics modules (GEN-R3/GEN-R16): single-crate shared models,
+// never registered; only this crate may import them.
+pub(crate) mod cahn_hilliard;
+pub(crate) mod laplacian_growth;
+
 pub mod belousov_zhabotinsky;
 pub mod catalytic_surface;
 pub mod chemical_garden;

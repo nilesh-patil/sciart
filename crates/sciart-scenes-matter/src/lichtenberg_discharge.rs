@@ -28,7 +28,7 @@ use rand::Rng;
 use sciart_core::grid;
 use sciart_core::prelude::*;
 
-use sciart_shared::laplacian_growth::{Dbm, Edge, Edges};
+use crate::laplacian_growth::{Dbm, Edge, Edges};
 
 const CAPTIONS: [&str; 4] = ["dense", "fern", "lightning", "fingering"];
 

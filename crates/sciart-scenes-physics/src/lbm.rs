@@ -1,5 +1,5 @@
-//! D2Q9 lattice Boltzmann in lattice units (CORE-R98, CORE-R99), lifted from
-//! `vortex_street` for M13 so every flow scene runs the same, tested kernel.
+//! D2Q9 lattice Boltzmann in lattice units (SPEC-002 `physics` LBM-A1/A2), lifted from
+//! `vortex_street` for M13 and re-homed to this crate: one crate's scenes, one kernel.
 //!
 //! ## Model
 //!
@@ -23,7 +23,7 @@
 //!
 //! Lattice rows grow downward, like the screen, and all velocities are in that frame.
 
-use crate::{Grid, Size};
+use sciart_core::{Grid, Size};
 
 /// D2Q9 velocities (rows-down frame): rest, E, S, W, N, SE, SW, NW, NE.
 pub const CX: [i32; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1];
@@ -43,18 +43,18 @@ pub const W: [f32; 9] = [
     1.0 / 36.0,
 ];
 /// The four opposite pairs that TRT splits into even and odd parts.
-const PAIRS: [(usize, usize); 4] = [(1, 3), (2, 4), (5, 7), (6, 8)];
+pub(crate) const PAIRS: [(usize, usize); 4] = [(1, 3), (2, 4), (5, 7), (6, 8)];
 /// Nodes collided together in the inner loop: one 128-bit SIMD register of f32 (NEON,
 /// SSE2). Measured 7 ns/node against 29 ns unbatched; 8 and 16 lanes spill.
 const LANES: usize = 4;
 
-/// `τ⁻` from the magic parameter `Λ = (τ − ½)(τ⁻ − ½)` (CORE-R98).
+/// `τ⁻` from the magic parameter `Λ = (τ − ½)(τ⁻ − ½)` (LBM-A1).
 pub fn tau_minus(tau: f64, magic: f64) -> f64 {
     0.5 + magic / (tau - 0.5)
 }
 
 /// Shifted equilibrium `f_i^eq − w_i = w_i (δρ + ρ(3 c·u + 4.5 (c·u)² − 1.5 u²))` with
-/// `ρ = 1 + δρ` (CORE-R98).
+/// `ρ = 1 + δρ` (LBM-A1).
 #[inline(always)]
 pub fn heq(drho: f32, ux: f32, uy: f32) -> [f32; 9] {
     let rho = 1.0 + drho;
@@ -66,7 +66,7 @@ pub fn heq(drho: f32, ux: f32, uy: f32) -> [f32; 9] {
 }
 
 /// TRT collision of one node's shifted populations in place; returns the node's
-/// `(ρ, uₓ, u_y)`, which the collision conserves (CORE-R98).
+/// `(ρ, uₓ, u_y)`, which the collision conserves (LBM-A1).
 #[inline(always)]
 pub fn collide(h: &mut [f32; 9], omega_p: f32, omega_m: f32) -> (f32, f32, f32) {
     let drho = ((h[0] + h[1]) + (h[2] + h[3])) + ((h[4] + h[5]) + (h[6] + h[7])) + h[8];
@@ -85,7 +85,7 @@ pub fn collide(h: &mut [f32; 9], omega_p: f32, omega_m: f32) -> (f32, f32, f32) 
     (rho, ux, uy)
 }
 
-/// Populations, moments and the solid mask of one lattice (CORE-R99).
+/// Populations, moments and the solid mask of one lattice (LBM-A2).
 #[derive(Debug, Clone, Default)]
 pub struct Lattice {
     w: usize,
@@ -147,26 +147,15 @@ impl Lattice {
     }
 
     /// The nine planes of current shifted populations `f_i − w_i`, plane-major.
+    #[cfg(test)]
     pub fn populations(&self) -> &[f32] {
         &self.f
     }
 
-    pub fn populations_mut(&mut self) -> &mut [f32] {
-        &mut self.f
-    }
-
-    /// The spare buffer's planes (zeroed by [`Self::new`]).
-    pub fn spare(&self) -> &[f32] {
-        &self.next
-    }
-
-    /// The spare buffer's planes, mutable.
+    /// The spare buffer's planes, mutable (spec tests drive boundary columns by hand).
+    #[cfg(test)]
     pub fn spare_mut(&mut self) -> &mut [f32] {
         &mut self.next
-    }
-
-    pub fn rho(&self) -> &Grid<f32> {
-        &self.rho
     }
 
     pub fn ux(&self) -> &Grid<f32> {
@@ -177,18 +166,6 @@ impl Lattice {
         &self.uy
     }
 
-    pub fn rho_mut(&mut self) -> &mut Grid<f32> {
-        &mut self.rho
-    }
-
-    pub fn ux_mut(&mut self) -> &mut Grid<f32> {
-        &mut self.ux
-    }
-
-    pub fn uy_mut(&mut self) -> &mut Grid<f32> {
-        &mut self.uy
-    }
-
     /// The moment grids `(ρ, uₓ, u_y)` for writing, e.g. before [`Self::equilibrate`].
     pub fn moments_mut(&mut self) -> (&mut Grid<f32>, &mut Grid<f32>, &mut Grid<f32>) {
         (&mut self.rho, &mut self.ux, &mut self.uy)
@@ -196,12 +173,14 @@ impl Lattice {
 
     /// The spare buffer just written by [`Self::stream_collide`] and the moment grids,
     /// for the caller's boundary conditions before [`Self::swap`].
+    #[cfg(test)]
     pub fn next_and_moments(
         &mut self,
     ) -> (&mut [f32], &mut Grid<f32>, &mut Grid<f32>, &mut Grid<f32>) {
         (&mut self.next, &mut self.rho, &mut self.ux, &mut self.uy)
     }
 
+    #[cfg(test)]
     pub fn solid(&self) -> &[bool] {
         &self.solid
     }
@@ -239,6 +218,7 @@ impl Lattice {
     }
 
     /// Σρ in f64 over every node, from the current populations.
+    #[cfg(test)]
     pub fn mass(&self) -> f64 {
         let n = self.w * self.h;
         (0..n)
@@ -414,4 +394,227 @@ fn node_slow(
         plane[i] = v;
     }
     moments
+}
+
+// ---------------------------------------------------------------- tests
+#[cfg(test)]
+mod spec {
+    //! SPEC-002 `physics` shared numerics: the D2Q9 TRT lattice Boltzmann module (LBM-A1,
+    //! LBM-A2; formerly LBM-A1/R99, re-homed when the module became crate-private).
+
+    use proptest::prelude::*;
+    use sciart_core::Size;
+
+    use super::{CX, CY, Lattice, W, tau_minus};
+
+    const TAU: f64 = 0.53;
+
+    fn omegas(tau: f64) -> (f32, f32) {
+        ((1.0 / tau) as f32, (1.0 / tau_minus(tau, 0.25)) as f32)
+    }
+
+    /// `(Σh, Σh·cx, Σh·cy)` in f64.
+    fn moments(h: &[f32; 9]) -> (f64, f64, f64) {
+        let mut m = (0.0, 0.0, 0.0);
+        for q in 0..9 {
+            let v = f64::from(h[q]);
+            m.0 += v;
+            m.1 += v * f64::from(CX[q]);
+            m.2 += v * f64::from(CY[q]);
+        }
+        m
+    }
+
+    #[test]
+    fn lbm_a1_weights_velocities_and_opposites_are_consistent() {
+        let sum: f64 = W.iter().map(|&w| f64::from(w)).sum();
+        assert!((sum - 1.0).abs() < 1e-7);
+        for q in 0..9 {
+            let o = super::OPP[q];
+            assert_eq!((CX[o], CY[o]), (-CX[q], -CY[q]));
+            assert_eq!(W[o], W[q]);
+        }
+        assert!((tau_minus(0.53, 0.25) - (0.5 + 0.25 / 0.03)).abs() < 1e-9);
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+        #[test]
+        fn lbm_a1_equilibrium_has_the_stated_moments(
+            drho in -0.1f32..0.1, ux in -0.15f32..0.15, uy in -0.15f32..0.15,
+        ) {
+            let eq = super::heq(drho, ux, uy);
+            let (m0, jx, jy) = moments(&eq);
+            let rho = 1.0 + f64::from(drho);
+            prop_assert!((m0 - f64::from(drho)).abs() < 1e-6);
+            prop_assert!((jx - rho * f64::from(ux)).abs() < 1e-6);
+            prop_assert!((jy - rho * f64::from(uy)).abs() < 1e-6);
+        }
+
+        #[test]
+        fn lbm_a1_collision_conserves_mass_and_momentum(
+            h in prop::array::uniform9(-0.02f32..0.02), tau in 0.51f64..1.5,
+        ) {
+            let (wp, wm) = omegas(tau);
+            let mut post = h;
+            let (rho, ux, uy) = super::collide(&mut post, wp, wm);
+            let (a, b) = (moments(&h), moments(&post));
+            prop_assert!((a.0 - b.0).abs() < 1e-6, "mass {a:?} → {b:?}");
+            prop_assert!((a.1 - b.1).abs() < 1e-6 && (a.2 - b.2).abs() < 1e-6);
+            prop_assert!((f64::from(rho) - (1.0 + a.0)).abs() < 1e-6);
+            prop_assert!((f64::from(ux) * f64::from(rho) - a.1).abs() < 1e-6);
+            prop_assert!((f64::from(uy) * f64::from(rho) - a.2).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn lbm_a1_equilibrium_is_a_fixed_point_of_the_collision() {
+        let (wp, wm) = omegas(TAU);
+        let eq = super::heq(0.02, 0.05, -0.03);
+        let mut h = eq;
+        super::collide(&mut h, wp, wm);
+        for q in 0..9 {
+            assert!((h[q] - eq[q]).abs() < 1e-7, "{q}: {} vs {}", h[q], eq[q]);
+        }
+    }
+
+    fn shear_lattice(n: u16, amp: f32) -> Lattice {
+        let mut lat = Lattice::new(Size::new(n, n), |_, _| false);
+        let k = std::f64::consts::TAU / f64::from(n);
+        let (_, ux, _) = lat.moments_mut();
+        for y in 0..n {
+            let v = amp * sciart_core::trig::sin(k * f64::from(y)) as f32;
+            for x in 0..n {
+                ux.set(i32::from(x), i32::from(y), v);
+            }
+        }
+        lat.equilibrate();
+        lat
+    }
+
+    /// Amplitude of the sin(ky) mode of uₓ.
+    fn shear_amplitude(lat: &Lattice) -> f64 {
+        let n = lat.height();
+        let k = std::f64::consts::TAU / n as f64;
+        let ux = lat.ux().as_slice();
+        let mut s = 0.0;
+        for y in 0..n {
+            let row_mean: f64 = (0..lat.width())
+                .map(|x| f64::from(ux[y * lat.width() + x]))
+                .sum::<f64>()
+                / lat.width() as f64;
+            s += row_mean * sciart_core::trig::sin(k * y as f64);
+        }
+        2.0 * s / n as f64
+    }
+
+    #[test]
+    fn lbm_a2_periodic_step_conserves_mass_to_rounding() {
+        let (wp, wm) = omegas(TAU);
+        let mut lat = shear_lattice(64, 0.08);
+        let m0 = lat.mass();
+        for _ in 0..200 {
+            let before = lat.mass();
+            lat.step_periodic(wp, wm);
+            let rel = ((lat.mass() - before) / before).abs();
+            assert!(rel < 1e-8, "{rel}");
+        }
+        assert!(((lat.mass() - m0) / m0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn lbm_a2_uniform_flow_stays_uniform_and_momentum_is_kept() {
+        let (wp, wm) = omegas(TAU);
+        let mut lat = Lattice::new(Size::new(24, 16), |_, _| false);
+        {
+            let (_, ux, uy) = lat.moments_mut();
+            ux.fill(0.1);
+            uy.fill(-0.04);
+        }
+        lat.equilibrate();
+        for _ in 0..50 {
+            lat.step_periodic(wp, wm);
+        }
+        for (&u, &v) in lat.ux().as_slice().iter().zip(lat.uy().as_slice()) {
+            assert!((u - 0.1).abs() < 1e-5 && (v + 0.04).abs() < 1e-5, "{u} {v}");
+        }
+        assert!(lat.healthy((0.99, 1.01)));
+    }
+
+    #[test]
+    fn lbm_a2_shear_wave_decays_at_the_trt_viscosity() {
+        for tau in [0.53, 0.8] {
+            let (wp, wm) = omegas(tau);
+            let mut lat = shear_lattice(64, 0.01);
+            // One step to fill the moments from the populations.
+            lat.step_periodic(wp, wm);
+            let a0 = shear_amplitude(&lat);
+            let steps = 400;
+            for _ in 0..steps {
+                lat.step_periodic(wp, wm);
+            }
+            let a1 = shear_amplitude(&lat);
+            let k = std::f64::consts::TAU / 64.0;
+            let nu = -(a1 / a0).ln() / (k * k * f64::from(steps));
+            let expect = (tau - 0.5) / 3.0;
+            assert!(
+                (nu / expect - 1.0).abs() < 0.02,
+                "τ {tau}: ν {nu} vs {expect}"
+            );
+        }
+    }
+
+    #[test]
+    fn lbm_a2_bounce_back_keeps_mass_and_solids_at_rest() {
+        let (wp, wm) = omegas(TAU);
+        let solid = |x: usize, y: usize| (10..14).contains(&x) && (6..10).contains(&y);
+        let mut lat = Lattice::new(Size::new(32, 16), solid);
+        {
+            let (_, ux, _) = lat.moments_mut();
+            ux.fill(0.08);
+        }
+        lat.equilibrate();
+        let m0 = lat.mass();
+        for _ in 0..300 {
+            lat.step_periodic(wp, wm);
+        }
+        assert!(
+            ((lat.mass() - m0) / m0).abs() < 1e-6,
+            "{m0} → {}",
+            lat.mass()
+        );
+        for (i, &s) in lat.solid().iter().enumerate() {
+            if s {
+                assert_eq!(lat.ux().as_slice()[i], 0.0);
+            }
+        }
+        assert!(lat.healthy((0.9, 1.1)));
+    }
+
+    #[test]
+    fn lbm_a2_without_wrap_the_border_columns_are_left_to_the_caller() {
+        let (wp, wm) = omegas(TAU);
+        let mut lat = Lattice::new(Size::new(8, 5), |_, _| false);
+        lat.spare_mut().fill(7.0);
+        lat.stream_collide(wp, wm, false);
+        let (next, ..) = lat.next_and_moments();
+        for plane in super::planes_mut(next, 40) {
+            for row in plane.chunks_exact(8) {
+                assert_eq!((row[0], row[7]), (7.0, 7.0));
+                assert!(row[1..7].iter().all(|&v| v != 7.0));
+            }
+        }
+    }
+
+    #[test]
+    fn lbm_a2_degenerate_lattices_do_not_panic() {
+        let (wp, wm) = omegas(TAU);
+        for (w, h) in [(1, 1), (1, 5), (5, 1), (2, 2)] {
+            let mut lat = Lattice::new(Size::new(w, h), |_, _| false);
+            lat.step_periodic(wp, wm);
+            lat.stream_collide(wp, wm, false);
+            lat.swap();
+            assert!(lat.healthy((0.99, 1.01)));
+        }
+    }
 }

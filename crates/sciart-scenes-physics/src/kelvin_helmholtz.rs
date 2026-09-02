@@ -3,7 +3,7 @@
 //!
 //! ## Model
 //!
-//! The core D2Q9 lattice Boltzmann kernel (`sciart_core::lbm`, CORE-R98/R99, the one
+//! The crate's shared D2Q9 lattice Boltzmann module (`crate::lbm`, LBM-A1/A2, the one
 //! vortex_street runs) on a capped lattice, periodic in both axes. Periodic in y means
 //! the classic *double* shear layer: a band moving right at `+U` between two bands
 //! moving left at `−U`,
@@ -43,8 +43,8 @@
 
 use std::fmt::Write as _;
 
+use crate::lbm::{self, Lattice};
 use rand::Rng;
-use sciart_core::lbm::{self, Lattice};
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
 use sciart_core::{draw, grid};

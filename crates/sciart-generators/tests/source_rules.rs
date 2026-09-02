@@ -56,6 +56,22 @@ fn spec_002_text() -> String {
 /// The scene crates (ADR-0023), by the suffix of `crates/sciart-scenes-<suffix>`.
 const SCENE_CRATES: [&str; 5] = ["cosmos", "earth", "physics", "matter", "life"];
 
+/// Crate-private helper modules a scene crate may carry besides its scenes (GEN-R3,
+/// GEN-R16): single-crate shared numerics, `pub(crate) mod` in that crate's `lib.rs`,
+/// never registered. Keep in step with SPEC-002's GEN-R3 wording.
+const CRATE_HELPERS: &[(&str, &[&str])] = &[
+    ("physics", &["lbm"]),
+    ("matter", &["cahn_hilliard", "laplacian_growth"]),
+];
+
+fn helpers_of(suffix: &str) -> &'static [&'static str] {
+    CRATE_HELPERS
+        .iter()
+        .find(|(s, _)| *s == suffix)
+        .map(|(_, h)| *h)
+        .unwrap_or(&[])
+}
+
 /// GEN-R3 / ADR-0023: the crate a scene of each category lives in.
 fn crate_for(category: Category) -> &'static str {
     match category {
@@ -111,11 +127,18 @@ fn stems(files: &[PathBuf]) -> BTreeSet<String> {
         .collect()
 }
 
-/// The modules a crate's `src/lib.rs` declares with `pub mod <name>;`.
+/// The scene modules a crate's `src/lib.rs` declares with `pub mod <name>;` plus its
+/// helper modules declared `pub(crate) mod <name>;` (GEN-R3).
 fn declared_modules(krate: &Path) -> BTreeSet<String> {
     let lib = fs::read_to_string(krate.join("src/lib.rs")).expect("lib.rs");
     lib.lines()
-        .filter_map(|l| l.trim().strip_prefix("pub mod ")?.strip_suffix(';'))
+        .filter_map(|l| {
+            let t = l.trim();
+            let after = t
+                .strip_prefix("pub mod ")
+                .or_else(|| t.strip_prefix("pub(crate) mod "))?;
+            after.strip_suffix(';')
+        })
         .map(str::to_owned)
         .collect()
 }
@@ -145,15 +168,26 @@ fn gen_r3_every_scene_module_file_is_registered_in_its_category_crate() {
         let dir = scene_crate_dir(suffix);
         let mut files = stems(&rust_sources(&dir.join("src")));
         files.remove("lib");
+        let helpers: BTreeSet<String> =
+            helpers_of(suffix).iter().map(ToString::to_string).collect();
+        for h in &helpers {
+            files.remove(h);
+        }
+        let mut declared = declared_modules(&dir);
+        for h in &helpers {
+            assert!(
+                declared.remove(h),
+                "GEN-R3: sciart-scenes-{suffix}: helper `{h}` must be declared in lib.rs"
+            );
+        }
         assert_eq!(
-            files,
-            declared_modules(&dir),
+            files, declared,
             "GEN-R3: sciart-scenes-{suffix}: src/<name>.rs files and `pub mod` lines must match"
         );
         assert!(
-            rust_sources(&dir.join("src")).len() == files.len() + 1
-                && rust_sources_deep(&dir.join("src")).len() == files.len() + 1,
-            "GEN-R3: sciart-scenes-{suffix}/src holds only lib.rs and scene files"
+            rust_sources(&dir.join("src")).len() == files.len() + helpers.len() + 1
+                && rust_sources_deep(&dir.join("src")).len() == files.len() + helpers.len() + 1,
+            "GEN-R3: sciart-scenes-{suffix}/src holds only lib.rs, scene files and helpers"
         );
         for file in files {
             if let Some(other) = home.insert(file.clone(), suffix) {
@@ -206,13 +240,17 @@ fn gen_r16_no_scene_imports_another_scene() {
     // manifests enforce the same at the dependency level.
     const FOREIGN: [&str; 2] = ["sciart_scenes_", "sciart_generators"];
     let mut hits = Vec::new();
-    let mut scan = |file: &Path, crate_paths_ok: bool| {
+    // `crate_paths_ok` files may use `crate::` freely (shared models, helper modules);
+    // scene files may reach only their own crate's allowlisted helpers, written
+    // explicitly (`use crate::lbm::…` / `use crate::lbm;`), never another scene.
+    let mut scan = |file: &Path, crate_paths_ok: bool, helpers: &[String]| {
         let text = fs::read_to_string(file).expect("read source");
         for (n, line) in text.lines().enumerate() {
+            let crate_ok = crate_paths_ok || helpers.iter().any(|h| line.contains(h));
             let bad = FOREIGN
                 .iter()
                 .copied()
-                .chain((!crate_paths_ok).then_some("crate::"))
+                .chain((!crate_ok).then_some("crate::"))
                 .filter(|b| line.contains(*b));
             for b in bad {
                 hits.push(format!("{}:{}: `{b}`", file.display(), n + 1));
@@ -220,15 +258,26 @@ fn gen_r16_no_scene_imports_another_scene() {
         }
     };
     for suffix in SCENE_CRATES {
+        let helpers: Vec<String> = helpers_of(suffix)
+            .iter()
+            .map(|h| format!("crate::{h}"))
+            .collect();
         for file in rust_sources_deep(&scene_crate_dir(suffix).join("src")) {
+            let name = file.file_name().and_then(|n| n.to_str()).unwrap_or("");
+            if let Some(stem) = name.strip_suffix(".rs") {
+                if helpers_of(suffix).contains(&stem) {
+                    scan(&file, true, &helpers);
+                    continue;
+                }
+            }
             if !file.ends_with("src/lib.rs") {
-                scan(&file, false);
+                scan(&file, false, &helpers);
             }
         }
     }
     // Shared models may use their own crate's modules, never a scene.
     for file in rust_sources_deep(&shared_crate_dir().join("src")) {
-        scan(&file, true);
+        scan(&file, true, &[]);
     }
     assert!(
         hits.is_empty(),

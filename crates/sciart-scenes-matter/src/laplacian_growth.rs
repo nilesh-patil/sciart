@@ -119,7 +119,7 @@ impl Dbm {
         &self.nodes
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn capacity(&self) -> usize {
         self.cap
     }
@@ -138,7 +138,7 @@ impl Dbm {
         self.touched
     }
 
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn phi(&self, x: usize, y: usize) -> f32 {
         self.phi[y * self.w + x]
     }
@@ -293,7 +293,7 @@ impl Dbm {
     }
 
     /// Largest Laplace residual `|mean(neighbours) − φ|` over the free sites.
-    #[cfg(any(test, feature = "test-support"))]
+    #[cfg(test)]
     pub fn residual(&self) -> f32 {
         let Some(edges) = self.edges else {
             return 0.0;
@@ -419,7 +419,7 @@ impl Dbm {
 
 /// Box-counting dimension of a node set: the log-log slope of occupied boxes against
 /// 1/box size over sizes 1, 2, 4, 8 (least squares) (LICH-A3).
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn box_dimension(nodes: &[Node]) -> f64 {
     use std::collections::HashSet;
     let pts: Vec<(f64, f64)> = [1u16, 2, 4, 8]
