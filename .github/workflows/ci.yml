@@ -8,8 +8,9 @@ name: CI
 #   snapshots = the snapshot suite in the optimised `ci` profile (TEST-R9)
 #   deny      = cargo-deny (advisories, licences, bans, sources; `deny.toml`)
 # Linux is a supported build/test platform; macOS also runs lint and the
-# optimiser-sensitive snapshots. The second `test` step runs the same suite with NO_COLOR=1
-# (TEST-R12), so the ambient environment can never decide whether the gate is green.
+# optimiser-sensitive snapshots. A second `test` step re-runs only the colour-sensitive
+# suites with NO_COLOR=1 (TEST-R12), so the ambient environment can never decide whether
+# the gate is green.
 # pixi is deliberately not used here: Linux needs no conda platform for this workflow.
 
 on:
@@ -65,11 +66,15 @@ jobs:
         run: cargo test --workspace --doc
       - name: Tests (nextest)
         run: cargo nextest run --workspace
-      # TEST-R12: the suite must also pass when the ambient environment disables colour.
-      - name: Tests (nextest, NO_COLOR=1)
+      # TEST-R12: the colour-sensitive suites must also pass when the ambient
+      # environment disables colour. Only pty_smoke and encoder_fidelity build
+      # crossterm references or drive the real binary through colour paths; the
+      # other 1600+ tests never read the ambient colour configuration, so they
+      # are not re-run here.
+      - name: Colour-sensitive suites (nextest, NO_COLOR=1)
         env:
           NO_COLOR: "1"
-        run: cargo nextest run --workspace
+        run: cargo nextest run -p sciart --test pty_smoke --test encoder_fidelity
       # IMP-06: exactly one current frame per registered scene, no orphans.
       - name: Gallery coverage
         run: python3 scripts/gallery.py --check
