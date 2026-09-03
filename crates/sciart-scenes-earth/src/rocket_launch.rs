@@ -15,6 +15,7 @@ use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::particles::{gaussian, gaussian2, plot};
 use sciart_core::prelude::*;
+use sciart_core::text::StackStr;
 
 pub static META: Meta = Meta {
     name: "rocket_launch",
@@ -955,7 +956,7 @@ impl RocketLaunch {
     /// allocating.
     fn draw_telemetry(&self, canvas: &mut Canvas) {
         use std::fmt::Write;
-        let mut buf = LineBuf::default();
+        let mut buf = StackStr::<64>::default();
         let met = self.t - T_LIFT;
         let sign = if met < 0.0 { '-' } else { '+' };
         let _ = write!(
@@ -971,39 +972,6 @@ impl RocketLaunch {
 
 /// Temperature above which exhaust is drawn as flame rather than smoke.
 const HOT_T: f64 = 0.28;
-
-/// A fixed-capacity text buffer, so `render` can format numbers without allocating.
-struct LineBuf {
-    bytes: [u8; 64],
-    len: usize,
-}
-
-impl Default for LineBuf {
-    fn default() -> Self {
-        Self {
-            bytes: [0; 64],
-            len: 0,
-        }
-    }
-}
-
-impl LineBuf {
-    fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
-    }
-}
-
-impl std::fmt::Write for LineBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let end = self.len + s.len();
-        if end > self.bytes.len() {
-            return Err(std::fmt::Error);
-        }
-        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
 
 #[cfg(test)]
 mod tests {

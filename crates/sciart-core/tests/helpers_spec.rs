@@ -983,3 +983,38 @@ fn core_r59_mismatched_lengths_and_zero_pivots_leave_rhs_unchanged() {
     ));
     assert_eq!(rhs, orig);
 }
+
+// ---------------------------------------------------------------- CORE-R109
+
+#[test]
+fn core_r109_stack_str_errors_on_overflow_and_keeps_valid_utf8() {
+    use sciart_core::text::StackStr;
+    use std::fmt::Write;
+    let mut s = StackStr::<8>::default();
+    assert!(write!(s, "abc").is_ok());
+    assert!(
+        write!(s, "defghi").is_err(),
+        "9 bytes would exceed the 8-byte buffer"
+    );
+    assert_eq!(
+        s.as_str(),
+        "abc",
+        "the failed write leaves the buffer intact"
+    );
+    let mut t = StackStr::<8>::default();
+    assert!(write!(t, "12345678").is_ok());
+    assert_eq!(t.as_str(), "12345678");
+}
+
+#[test]
+fn core_r109_stack_str_is_empty_by_default_and_never_panics_on_unicode_pieces() {
+    use sciart_core::text::StackStr;
+    use std::fmt::Write;
+    let mut s = StackStr::<6>::default();
+    assert_eq!(s.as_str(), "");
+    // Whole &str pieces only: a multi-byte char that does not fit errors, mid-sequence
+    // writes still leave valid UTF-8.
+    assert!(write!(s, "éàü").is_ok());
+    assert!(write!(s, "x").is_err());
+    assert_eq!(s.as_str(), "éàü");
+}

@@ -34,6 +34,7 @@ use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::particles::{gaussian, plot};
 use sciart_core::prelude::*;
+use sciart_core::text::StackStr;
 use sciart_core::timeline::ease;
 use sciart_core::{draw, rng};
 
@@ -1296,7 +1297,7 @@ impl MarsRover {
         }
         let width = l.w as usize;
         let cycle = (self.t / CYCLE).floor() as i64;
-        let mut right = LineBuf::default();
+        let mut right = StackStr::<48>::default();
         let _ = match beat.index {
             PH_DRIVE => write!(right, "DRIVE {:.1} m", drive_profile(beat.local).0 * UNIT_M),
             PH_DEPLOY => write!(right, "ARM DEPLOY"),
@@ -1304,7 +1305,7 @@ impl MarsRover {
             PH_STOW => write!(right, "ARM STOW"),
             _ => write!(right, "UHF RELAY > ORBITER"),
         };
-        let mut left = LineBuf::default();
+        let mut left = StackStr::<48>::default();
         let lmst = (12.0 + hour.to_degrees() / 15.0).rem_euclid(24.0);
         // The sol number ticks over at local midnight.
         let midnight = SOL_KNOTS[2].0
@@ -1318,7 +1319,7 @@ impl MarsRover {
             (lmst.fract() * 60.0).floor() as u32
         );
         let ink = Ink::new(Role::Text, 170);
-        let (ll, rl) = (left.len, right.len);
+        let (ll, rl) = (left.len(), right.len());
         if rl + 2 <= width {
             canvas.text((width - rl - 1) as i32, 0, right.as_str(), ink);
         }
@@ -1455,39 +1456,6 @@ fn segment(canvas: &mut Canvas, a: P2, b: P2, glyph: Glyph, ink: Ink) {
     );
     for (x, y) in geom::line(x0, y0, x1, y1) {
         canvas.put(x, y, glyph, ink);
-    }
-}
-
-/// A fixed-capacity text buffer, so `render` can format numbers without allocating.
-struct LineBuf {
-    bytes: [u8; 48],
-    len: usize,
-}
-
-impl Default for LineBuf {
-    fn default() -> Self {
-        Self {
-            bytes: [0; 48],
-            len: 0,
-        }
-    }
-}
-
-impl LineBuf {
-    fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
-    }
-}
-
-impl std::fmt::Write for LineBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let end = self.len + s.len();
-        if end > self.bytes.len() {
-            return Err(std::fmt::Error);
-        }
-        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
     }
 }
 

@@ -27,6 +27,7 @@ use sciart_core::geom::ASPECT;
 use sciart_core::ode;
 use sciart_core::particles::plot;
 use sciart_core::prelude::*;
+use sciart_core::text::StackStr;
 
 pub static META: Meta = Meta {
     name: "moon_landing",
@@ -1111,7 +1112,7 @@ impl MoonLanding {
         let alt = d.altitude(&self.terrain);
         let vs = d.lm.vz;
         let fuel = 100.0 * d.lm.fuel() / PROP_FULL;
-        let mut buf = LineBuf::default();
+        let mut buf = StackStr::<64>::default();
         let ok = if w >= 44 {
             write!(
                 buf,
@@ -1120,7 +1121,7 @@ impl MoonLanding {
         } else {
             write!(buf, "ALT {alt:.0} V/S {vs:+.1} F {fuel:.0}%")
         };
-        if ok.is_ok() && buf.len < w {
+        if ok.is_ok() && buf.len() < w {
             canvas.text(1, 0, buf.as_str(), Ink::new(Role::Text, 160));
         }
         let prog = match d.program() {
@@ -1128,7 +1129,7 @@ impl MoonLanding {
             Program::P66 => "P66",
             Program::Landed => "",
         };
-        if w >= buf.len + 8 && !prog.is_empty() {
+        if w >= buf.len() + 8 && !prog.is_empty() {
             canvas.text(w as i32 - 4, 0, prog, Ink::new(Role::Accent, 200));
         }
     }
@@ -1139,39 +1140,6 @@ impl MoonLanding {
 fn caption(canvas: &mut Canvas, w: usize, y: i32, variants: &[&str], ink: Ink) {
     if let Some(s) = variants.iter().find(|s| s.chars().count() + 2 <= w) {
         draw::text_centered(canvas, y, s, ink);
-    }
-}
-
-/// A fixed-capacity text buffer, so `render` can format numbers without allocating.
-struct LineBuf {
-    bytes: [u8; 64],
-    len: usize,
-}
-
-impl Default for LineBuf {
-    fn default() -> Self {
-        Self {
-            bytes: [0; 64],
-            len: 0,
-        }
-    }
-}
-
-impl LineBuf {
-    fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
-    }
-}
-
-impl std::fmt::Write for LineBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let end = self.len + s.len();
-        if end > self.bytes.len() {
-            return Err(std::fmt::Error);
-        }
-        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
     }
 }
 
