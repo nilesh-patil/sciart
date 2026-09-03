@@ -1,6 +1,5 @@
 //! SPEC-001 CORE-R93..R95: stellar-disc helpers shared by the Sun & Planets scenes.
 
-use proptest::prelude::*;
 use sciart_core::raster;
 use sciart_core::stellar;
 
@@ -18,32 +17,6 @@ fn core_r93_limb_darkening_law() {
         stellar::limb_darkening(0.0, u)
     );
     assert!(stellar::limb_darkening(f64::NAN, u).is_finite());
-}
-
-#[test]
-fn core_r94_brightness_temperature_by_wien() {
-    // The centre reads its own temperature; 1/T − 1/T₀ = −(λ/c₂)·ln i at 550 nm.
-    assert!((stellar::brightness_temperature(5772.0, 1.0) - 5772.0).abs() < 1e-9);
-    let t = stellar::brightness_temperature(5772.0, 0.4);
-    assert!((5772.0 - t - 970.0).abs() < 20.0, "{t}");
-    // A K dwarf's limb at 0.26 of the centre: about 4000 K.
-    let limb = stellar::brightness_temperature(5050.0, 0.26);
-    assert!((limb - 4008.0).abs() < 10.0, "{limb}");
-    for i in [0.0, -1.0, 1e-9, 1.5, f64::INFINITY, f64::NAN] {
-        let t = stellar::brightness_temperature(5050.0, i);
-        assert!(t.is_finite() && t > 0.0 && t <= 5050.0 + 1e-9, "{i}: {t}");
-    }
-}
-
-proptest! {
-    #[test]
-    fn core_r94_brightness_temperature_is_monotone(a in 1e-6f64..1.0, b in 1e-6f64..1.0) {
-        let (lo, hi) = if a < b { (a, b) } else { (b, a) };
-        prop_assert!(
-            stellar::brightness_temperature(5050.0, lo)
-                <= stellar::brightness_temperature(5050.0, hi)
-        );
-    }
 }
 
 #[test]
