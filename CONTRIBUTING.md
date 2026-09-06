@@ -54,9 +54,9 @@ suite again in the optimised `ci` profile (TEST-R9). CI mirrors the same command
 4. **Gate and commit.** `pixi run rs-ci`, then a small conventional commit with the ID:
    `feat(core): clamp fixed-step backlog [CORE-R10]`.
 
-`crates/sciart/tests/spec_traceability.rs` fails if a requirement ID has no citing test and is
-not listed in SPEC-006's manual table; it also fails on citations of undefined IDs. Keep it
-green rather than bending it.
+`pixi run rs-spec-check` (`scripts/spec_check.py`) fails if a requirement ID has no citing
+test or checker script and is not listed in SPEC-006's manual table; it also fails on
+citations of undefined IDs. Keep it green rather than bending it.
 
 ## Backlog review
 
