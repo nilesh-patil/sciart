@@ -314,5 +314,18 @@ Design: [ADR-0027](adr/0027-opaque-background.md) · RND-R20, CLI-R11, CFG-R11. 
 - [x] CLI/config: `--background opaque|terminal`, `background` key, precedence
 - [x] pty proof, docs, full gate; `v0.6.0` tagged
 
+## M25 — v1.0 release programme (in progress)
+Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisions: binaries + pixi/conda + crates.io + Homebrew; macOS and Linux first-class, no Windows; scriptable modes, recorder in the binary, a `sciart` library facade, a WASM gallery and a docs site; per-platform determinism; history scrubbed for privacy.
+- [x] History scrub, survey (distribution, performance, usage and API, portability), decisions, programme
+- [ ] Phase 1 — portability (KA-R7..R9, RT-R20, RND-R21, TEST-R13; ADR-0028/0029)
+- [ ] Phase 1 — performance (RND-R22/R23, RT-R21/R22; ADR-0030)
+- [ ] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2)
+- [ ] Phase 2 — CLI modes (CLI-R12..R17, RT-R23; ADR-0031)
+- [ ] Phase 2 — library facade (LIB-R1..R8, SPEC-007; ADR-0032)
+- [ ] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033)
+- [ ] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034)
+- [ ] Phase 4 — version 1.0.0, CHANGELOG, docs truth pass, final review, local tag `v1.0.0`
+- [ ] Publish (owner): crates.io, conda channel, Homebrew tap, GitHub Pages, public repository
+
 ## M9 — Future (unscheduled)
 - Windows/Linux keep-awake backends, light-background theme, per-OS packaging — [B-89..B-91](BACKLOG.md).
