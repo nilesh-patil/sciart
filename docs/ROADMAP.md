@@ -324,6 +324,7 @@ Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisio
 - [ ] Phase 2 — library facade (LIB-R1..R8, SPEC-007; ADR-0032)
 - [ ] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033)
 - [ ] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034)
+- [ ] Phase 4 — clean tree and history (public documents only; neutral wording; second history rewrite)
 - [ ] Phase 4 — version 1.0.0, CHANGELOG, docs truth pass, final review, local tag `v1.0.0`
 - [ ] Publish (owner): crates.io, conda channel, Homebrew tap, GitHub Pages, public repository
 
