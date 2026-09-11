@@ -308,6 +308,120 @@ fn cfg_r3_unknown_key_exits_2_with_location() {
     );
 }
 
+// ----- M25: termination signals (RT-R20) -----
+
+/// Direct children of `pid` (the keep-awake helper, when one runs).
+fn children(pid: u32) -> Vec<u32> {
+    Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Alive and not a zombie (an orphan waits a moment for init or launchd to reap it).
+fn running(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            let stat = stat.trim();
+            o.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+        })
+}
+
+/// RT-R20: send `signal` to sciart in the state `keys` puts it in, then check it left the
+/// event loop within 250 ms, restored the terminal as `q` does, exited `128 + n`, and left
+/// no keep-awake helper running.
+fn assert_signal_exit(keys: &str, state: impl Fn(&str) -> bool, signal: &str, code: u32) {
+    let mut s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "1"]);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    if !keys.is_empty() {
+        s.press(keys);
+        s.wait_for("the state under test", &state);
+    }
+    let helpers = children(s.pid());
+    // On macOS the default keep-awake is a child `caffeinate`, so the helper check below is
+    // not vacuous there; on Linux the inhibitor may have exited already (no logind/polkit).
+    if cfg!(target_os = "macos") {
+        assert!(!helpers.is_empty(), "caffeinate runs as sciart's child");
+    }
+    let sent = Instant::now();
+    let kill = Command::new("kill")
+        .args(["-s", signal, &s.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success(), "kill -s {signal}");
+    let status = loop {
+        if let Some(status) = s.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            sent.elapsed() < Duration::from_secs(10),
+            "sciart ignored SIG{signal}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    let took = sent.elapsed();
+    assert!(
+        took < Duration::from_millis(250),
+        "SIG{signal} took {took:?} to end the app"
+    );
+    assert_eq!(status.exit_code(), code, "exit status after SIG{signal}");
+    thread::sleep(Duration::from_millis(100)); // let the reader drain
+    let raw = s.raw.lock().unwrap().clone();
+    let leave = raw
+        .windows(ALT_LEAVE.len())
+        .rposition(|w| w == ALT_LEAVE)
+        .expect("left the alternate screen");
+    let tail = &raw[leave.saturating_sub(64)..];
+    for (seq, what) in [
+        (&b"\x1b[?25h"[..], "cursor shown"),
+        (&b"\x1b[?1004l"[..], "focus reporting off"),
+    ] {
+        assert!(count(tail, seq) >= 1, "{what} on SIG{signal}");
+    }
+    assert_eq!(count(&raw, ALT_LEAVE), 1, "left the alternate screen once");
+    for pid in helpers {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "keep-awake helper {pid} outlived SIG{signal}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[test]
+fn rt_r20_sigterm_while_running_restores_and_exits_143() {
+    assert_signal_exit("", |_| true, "TERM", 143);
+}
+
+#[test]
+fn rt_r20_sighup_while_paused_restores_and_exits_129() {
+    assert_signal_exit(" ", |t| t.contains("| PAUSED"), "HUP", 129);
+}
+
+#[test]
+fn rt_r20_sigterm_on_the_help_page_restores_and_exits_143() {
+    assert_signal_exit("?", |t| t.contains("help"), "TERM", 143);
+}
+
+#[test]
+fn rt_r20_sighup_on_the_paused_help_page_restores_and_exits_129() {
+    assert_signal_exit(" ?", |t| t.contains("help"), "HUP", 129);
+}
+
 // ----- M3: keep-awake and low power -----
 
 /// KA-R3 end-to-end: sciart's own `caffeinate` runs while it runs and is gone after `q`.
