@@ -16,6 +16,9 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 const BIN: &str = env!("CARGO_BIN_EXE_sciart");
 const ALT_ENTER: &[u8] = b"\x1b[?1049h";
 const ALT_LEAVE: &[u8] = b"\x1b[?1049l";
+/// Every non-empty frame is one synchronized update (RT-R15, DEC mode 2026).
+const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+const END_SYNC: &[u8] = b"\x1b[?2026l";
 
 struct Session {
     screen: Arc<Mutex<vt100::Parser>>,
@@ -85,8 +88,11 @@ impl Session {
                 if n == 0 {
                     break;
                 }
+                // Both under one critical section (raw first, as `settled_screen` takes
+                // them), so the byte stream and the decoded screen always agree.
+                let mut raw = r.lock().unwrap();
                 s.lock().unwrap().process(&buf[..n]);
-                r.lock().unwrap().extend_from_slice(&buf[..n]);
+                raw.extend_from_slice(&buf[..n]);
             }
         });
         let writer = pair.master.take_writer().unwrap();
@@ -102,6 +108,33 @@ impl Session {
 
     fn contents(&self) -> String {
         self.screen.lock().unwrap().screen().contents()
+    }
+
+    /// The decoded screen once `pred` holds *between* frames: every synchronized update
+    /// begun so far has ended, so no frame is half-applied. A pty read can split a frame,
+    /// and a check that samples mid-frame sees cells the frame has not reached yet (the
+    /// RND-R20 opaque-ground tests did, once in six runs under load).
+    fn settled_screen(&self, what: &str, pred: impl Fn(&str) -> bool) -> vt100::Screen {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let raw = self.raw.lock().unwrap();
+                let parser = self.screen.lock().unwrap();
+                let ended = count(&raw, END_SYNC);
+                if ended > 0
+                    && ended == count(&raw, BEGIN_SYNC)
+                    && pred(&parser.screen().contents())
+                {
+                    return parser.screen().clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what} between frames; screen:\n{}",
+                self.contents()
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Poll the decoded screen until `pred` holds or the timeout elapses.
@@ -969,10 +1002,9 @@ fn rnd_r19_colorblind_theme_is_selectable_and_cycles() {
 
 // ----- M24: opaque live background (RND-R20, CLI-R11) -----
 
-/// Every cell of the 80x24 screen (not just the lit ones) must have background `want`.
-fn assert_background(session: &Session, want: vt100::Color) {
-    let parser = session.screen.lock().unwrap();
-    let screen = parser.screen();
+/// Every cell of the 80x24 screen (not just the lit ones) must have background `want`. Take
+/// `screen` from [`Session::settled_screen`], never mid-frame.
+fn assert_background(screen: &vt100::Screen, want: vt100::Color) {
     for y in 0..24 {
         for x in 0..80 {
             let cell = screen.cell(y, x).expect("80x24 cell");
@@ -987,10 +1019,10 @@ fn assert_background(session: &Session, want: vt100::Color) {
 fn rnd_r20_live_background_is_opaque_black_by_default() {
     let args = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
     let s = Session::start(&args);
-    s.wait_for("a lit frame", |t| {
+    let screen = s.settled_screen("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
-    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    assert_background(&screen, vt100::Color::Rgb(0, 0, 0));
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
 }
@@ -1011,10 +1043,10 @@ fn rnd_r20_background_terminal_keeps_the_terminal_default() {
         "terminal",
     ];
     let s = Session::start(&args);
-    s.wait_for("a lit frame", |t| {
+    let screen = s.settled_screen("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
-    assert_background(&s, vt100::Color::Default);
+    assert_background(&screen, vt100::Color::Default);
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
 }
@@ -1033,13 +1065,13 @@ fn rnd_r20_hud_and_help_use_the_opaque_ground() {
         "--hud",
     ];
     let mut s = Session::start(&args);
-    s.wait_for("the HUD", |t| t.contains(" fps "));
-    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    let screen = s.settled_screen("the HUD", |t| t.contains(" fps "));
+    assert_background(&screen, vt100::Color::Rgb(0, 0, 0));
     s.press("?");
-    s.wait_for("the help page", |t| {
+    let screen = s.settled_screen("the help page", |t| {
         t.contains("sciart") && t.contains("help")
     });
-    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    assert_background(&screen, vt100::Color::Rgb(0, 0, 0));
     s.press("\x1b");
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
@@ -1060,15 +1092,15 @@ fn rnd_r20_indexed_opaque_ground_is_xterm_black() {
         "256",
     ];
     let mut s = Session::start(&args);
-    s.wait_for("a lit frame", |t| {
+    let screen = s.settled_screen("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
-    assert_background(&s, vt100::Color::Idx(16));
+    assert_background(&screen, vt100::Color::Idx(16));
     s.press("?");
-    s.wait_for("the help page", |t| {
+    let screen = s.settled_screen("the help page", |t| {
         t.contains("sciart") && t.contains("help")
     });
-    assert_background(&s, vt100::Color::Idx(16));
+    assert_background(&screen, vt100::Color::Idx(16));
     s.press("\x1b");
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
