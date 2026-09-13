@@ -48,7 +48,7 @@ one line of advice on exit and changes nothing itself.
 - **Identical frames everywhere through the pure-Rust `libm` crate**: one behaviour on every
   target and in the browser, at the cost of a new core dependency, re-recording every
   snapshot and the M11 fixtures, and slower transcendental functions in the hot scenes.
-  Rejected for 1.0; the owner chose the per-platform promise.
+  Rejected for 1.0 in favour of the per-platform promise.
 - **Pin frames on every target**: five sets of expected frames to review and keep.
 - **Detect terminal capability and switch modes**: rejected in ADR-0026; a wrong guess is
   worse than a hint.
