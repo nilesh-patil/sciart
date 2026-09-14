@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -25,6 +26,8 @@ struct Session {
     raw: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// While set, nothing is read from the pty: its buffer fills and sciart's writes stall.
+    stalled: Arc<AtomicBool>,
     /// Closing the master hangs up the pty, so it lives as long as the session.
     _master: Box<dyn portable_pty::MasterPty + Send>,
     _config_home: tempfile::TempDir,
@@ -81,10 +84,15 @@ impl Session {
         let screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
         let raw = Arc::new(Mutex::new(Vec::new()));
         let mut reader = pair.master.try_clone_reader().unwrap();
-        let (s, r) = (screen.clone(), raw.clone());
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (s, r, hold) = (screen.clone(), raw.clone(), stalled.clone());
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
-            while let Ok(n) = reader.read(&mut buf) {
+            loop {
+                while hold.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let Ok(n) = reader.read(&mut buf) else { break };
                 if n == 0 {
                     break;
                 }
@@ -101,6 +109,7 @@ impl Session {
             raw,
             writer,
             child,
+            stalled,
             _master: pair.master,
             _config_home: config_home,
         }
@@ -374,6 +383,57 @@ fn running(pid: u32) -> bool {
         })
 }
 
+/// RT-R20: send `signal` and check that sciart exits `code` within 250 ms of delivery.
+fn assert_signal_ends_in_time(s: &mut Session, signal: &str, code: u32) {
+    let kill = Command::new("kill")
+        .args(["-s", signal, &s.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success(), "kill -s {signal}");
+    // The clock starts once `kill` has returned, i.e. the signal is delivered: starting it
+    // before would time the fork and exec of `kill` itself, which under a loaded parallel
+    // test run took longer than the requirement's whole budget.
+    let sent = Instant::now();
+    let pid = s.pid();
+    while !exiting(pid) {
+        assert!(
+            sent.elapsed() < Duration::from_secs(10),
+            "sciart ignored SIG{signal}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let took = sent.elapsed();
+    assert!(
+        took < Duration::from_millis(250),
+        "SIG{signal} took {took:?} to end the app"
+    );
+    // The kernel may hold an exiting process until its terminal output drains (macOS does,
+    // even after SIGKILL), so the status is read once the terminal reads again.
+    s.stalled.store(false, Ordering::Relaxed);
+    let status = loop {
+        if let Some(status) = s.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            sent.elapsed() < Duration::from_secs(10),
+            "sciart never finished exiting after SIG{signal}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(status.exit_code(), code, "exit status after SIG{signal}");
+}
+
+/// The process has called `exit` (macOS `E`), is a zombie, or is gone.
+fn exiting(pid: u32) -> bool {
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    let stat = stat.trim();
+    stat.is_empty() || stat.contains('E') || stat.contains('Z')
+}
+
 /// RT-R20: send `signal` to sciart in the state `keys` puts it in, then check it left the
 /// event loop within 250 ms, restored the terminal as `q` does, exited `128 + n`, and left
 /// no keep-awake helper running.
@@ -392,31 +452,7 @@ fn assert_signal_exit(keys: &str, state: impl Fn(&str) -> bool, signal: &str, co
     if cfg!(target_os = "macos") {
         assert!(!helpers.is_empty(), "caffeinate runs as sciart's child");
     }
-    let kill = Command::new("kill")
-        .args(["-s", signal, &s.pid().to_string()])
-        .status()
-        .unwrap();
-    assert!(kill.success(), "kill -s {signal}");
-    // The clock starts once `kill` has returned, i.e. the signal is delivered: starting it
-    // before would time the fork and exec of `kill` itself, which under a loaded parallel
-    // test run took longer than the requirement's whole budget.
-    let sent = Instant::now();
-    let status = loop {
-        if let Some(status) = s.child.try_wait().unwrap() {
-            break status;
-        }
-        assert!(
-            sent.elapsed() < Duration::from_secs(10),
-            "sciart ignored SIG{signal}"
-        );
-        thread::sleep(Duration::from_millis(5));
-    };
-    let took = sent.elapsed();
-    assert!(
-        took < Duration::from_millis(250),
-        "SIG{signal} took {took:?} to end the app"
-    );
-    assert_eq!(status.exit_code(), code, "exit status after SIG{signal}");
+    assert_signal_ends_in_time(&mut s, signal, code);
     thread::sleep(Duration::from_millis(100)); // let the reader drain
     let raw = s.raw.lock().unwrap().clone();
     let leave = raw
@@ -461,6 +497,29 @@ fn rt_r20_sigterm_on_the_help_page_restores_and_exits_143() {
 #[test]
 fn rt_r20_sighup_on_the_paused_help_page_restores_and_exits_129() {
     assert_signal_exit(" ?", |t| t.contains("help"), "HUP", 129);
+}
+
+/// RT-R20: with the terminal no longer reading (a stalled link), the frame write blocks
+/// while holding stdout; the restore cannot get through, and the exit must not wait for it.
+#[test]
+fn rt_r20_sigterm_ends_the_app_even_when_its_writes_have_stalled() {
+    let args = [
+        "run",
+        "starfield",
+        "--hud",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| !c.is_whitespace()).count() > 50
+    });
+    s.stalled.store(true, Ordering::Relaxed);
+    // Long enough for the pty buffer to fill at 30 frames a second.
+    thread::sleep(Duration::from_secs(2));
+    assert_signal_ends_in_time(&mut s, "TERM", 143);
 }
 
 // ----- M25: terminal hint (RND-R21) -----
