@@ -165,12 +165,35 @@ def workflow_jobs(text: str) -> dict[str, str]:
     return jobs
 
 
+def matrix_values(body: str, key: str) -> list[str] | None:
+    """Every value `key` takes in the job's `strategy.matrix` (plain lists and `include`
+    entries), or None when the matrix cannot be read that simply (an `exclude`, or no
+    matrix at all), so the caller fails closed."""
+    block = re.search(r"^      matrix:\n((?:(?:        .*)?\n)*)", body, re.M)
+    if block is None or "exclude:" in block.group(1):
+        return None
+    text = block.group(1)
+    values = re.findall(rf"^\s+(?:-\s+)?{re.escape(key)}:\s*([A-Za-z0-9._-]+)\s*$", text, re.M)
+    for listed in re.findall(rf"^\s+{re.escape(key)}:\s*\[([^\]]*)\]", text, re.M):
+        values += [v.strip() for v in listed.split(",") if v.strip()]
+    return values
+
+
 def job_targets(body: str) -> set[str]:
-    """Targets a job runs on: a literal `runs-on`, or every `os` of its matrix."""
-    labels = re.findall(r"^\s+runs-on:\s*([A-Za-z0-9._-]+)\s*$", body, re.M)
-    labels += re.findall(r"^\s+(?:-\s+)?os:\s*([A-Za-z0-9._-]+)\s*$", body, re.M)
-    for listed in re.findall(r"^\s+os:\s*\[([^\]]*)\]", body, re.M):
-        labels += [label.strip() for label in listed.split(",") if label.strip()]
+    """Targets a job actually runs on, read from its `runs-on`: a literal label, or every
+    value of the matrix key it names (`${{ matrix.os }}`). Matrix values that `runs-on`
+    does not use count for nothing."""
+    runs_on = re.search(r"^    runs-on:\s*(.+?)\s*$", body, re.M)
+    if runs_on is None:
+        return set()
+    value = runs_on.group(1).strip("'\"")
+    from_matrix = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", value)
+    if from_matrix:
+        labels = matrix_values(body, from_matrix.group(1)) or []
+    elif re.fullmatch(r"[A-Za-z0-9._-]+", value):
+        labels = [value]
+    else:
+        labels = []  # any other expression: not checkable, so it proves nothing
     return {t for t in map(runner_target, labels) if t}
 
 
