@@ -37,6 +37,10 @@ ratatui.workspace = true
 serde.workspace = true
 toml.workspace = true
 
+[target.'cfg(unix)'.dependencies]
+# RT-R20: termination signals restore the terminal.
+signal-hook.workspace = true
+
 [dev-dependencies]
 gif.workspace = true
 png.workspace = true

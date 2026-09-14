@@ -313,6 +313,12 @@ fn draw_help(
 }
 
 pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
+    // RT-R20: SIGTERM/SIGHUP restore the terminal from a watcher thread, whatever the loop
+    // is doing. Started first, so no signal finds the terminal set up and unwatched; a
+    // signal during the set-up waits for it, as `TerminalGuard::enter` holds the stdout
+    // lock the restore takes (see `signals`).
+    #[cfg(unix)]
+    crate::signals::watch()?;
     let mut guard = TerminalGuard::enter()?;
     install_panic_filter();
     let terminal = guard.terminal();

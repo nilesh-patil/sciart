@@ -14,7 +14,7 @@ Options:
   --interval <SECS>        default 15 (sim only)
   --theme <astro|rainbow|mono|aurora|colorblind>
   --color <auto|truecolor|256|mono>  colour output (M23)
-  --keep-awake <caffeinate|mouse|off>
+  --keep-awake <caffeinate|inhibit|mouse|off>
   --seed <u64>             default: random
   --ascii                  pure-ASCII glyphs
   --hud                    start with HUD visible
@@ -53,8 +53,8 @@ fps = 5
 - **CFG-R3** Unknown keys are rejected (`deny_unknown_fields`) with the file path and TOML error location (code 2). Values are validated like the CLI: `fps ∈ 1..=120`, `interval > 0`.
 - **CFG-R4** `disabled` names that are not registered produce a warning (printed to stderr before the TUI starts), not an error. `disabled` only filters `sim`; `run <name>` always works. If `disabled` removes every generator, `sim` exits with code 2.
 - **CLI-R5** `--interval <SECS>` must be a finite number > 0 (code 2 otherwise).
-- **CLI-R6** (M3) `--keep-awake <caffeinate|mouse|off>`; default `Mode::platform_default()` (KA-R1). A backend that can't start (e.g. `mouse` without the cargo feature) is a warning, not an error (KA-R2).
-- **CFG-R5** (M3) Config keys `keep_awake = "caffeinate"|"mouse"|"off"` and table `[low_power]` with `idle_after` (seconds, finite > 0, default 120 since M22, CFG-R8) and `fps` (1..=120, default 5); unknown keys inside `[low_power]` are rejected too. Precedence as CFG-R1 (`keep_awake` also has the CLI flag; low-power settings are file-only).
+- **CLI-R6** (M3; `inhibit` in M25) `--keep-awake <caffeinate|inhibit|mouse|off>`; default `Mode::platform_default()` (KA-R8). A backend that can't start (e.g. `mouse` without the cargo feature) is a warning, not an error (KA-R2).
+- **CFG-R5** (M3; `inhibit` in M25) Config keys `keep_awake = "caffeinate"|"inhibit"|"mouse"|"off"` and table `[low_power]` with `idle_after` (seconds, finite > 0, default 120 since M22, CFG-R8) and `fps` (1..=120, default 5); unknown keys inside `[low_power]` are rejected too. Precedence as CFG-R1 (`keep_awake` also has the CLI flag; low-power settings are file-only).
 - **CLI-R7** (M11) `--no-title` hides the science title (canvas and HUD name slot fall back as RT-R12/RND-R9 describe: the canvas shows no title and the HUD shows the id). Like `--ascii`/`--hud` it can only turn its setting one way: it overrides `title = true` in the config file, and its absence leaves the file's value.
 - **CFG-R6** (M11) Config key `title = true|false` (default `true`) controls the science title (RT-R12). Precedence as CFG-R1, with the CLI side being `--no-title` (CLI-R7). There is no runtime key for it.
 - **CFG-R7** (M11) A retired scene name in `disabled` (GEN-R14) resolves to the renamed scene and disables it without the CFG-R4 warning.

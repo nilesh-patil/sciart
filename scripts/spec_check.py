@@ -59,7 +59,9 @@ def sources() -> list[tuple[str, str]]:
     """`(label, text)` of every #[test] fn under crates/ and every checker in scripts/."""
     out: list[tuple[str, str]] = []
     for path in sorted((ROOT / "crates").rglob("*.rs")):
-        if any(part == "target" or part.startswith(".") for part in path.parts):
+        # Relative parts: a checkout that itself sits inside a hidden directory must not
+        # hide every file.
+        if any(part == "target" or part.startswith(".") for part in path.relative_to(ROOT).parts):
             continue
         lines = path.read_text().splitlines()
         for i, line in enumerate(lines):
