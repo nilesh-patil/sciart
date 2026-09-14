@@ -44,6 +44,11 @@ pub fn restore() {
 
 impl TerminalGuard {
     pub fn enter() -> io::Result<Self> {
+        // RT-R20: the set-up runs under the stdout lock, the lock the termination-signal
+        // restore takes, so a signal restores either before any change or after all of
+        // them; never between raw mode and the alternate screen, which would leave the
+        // terminal raw at exit. The lock is re-entrant, so the writes below still go out.
+        let _setup = stdout().lock();
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
             restore();
