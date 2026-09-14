@@ -45,22 +45,16 @@ impl Os {
 
 impl Mode {
     /// The default mode for `os`, given an environment lookup (KA-R8): `Caffeinate` on
-    /// macOS; on Linux `Inhibit` for a local session and `Off` for a remote one (an SSH
-    /// session without a forwarded display: keeping the remote host awake is not what its
-    /// viewer wants); `Off` elsewhere. An empty variable counts as unset.
+    /// macOS; on Linux `Inhibit` for a local session and `Off` for a remote one (any SSH
+    /// session, whatever `DISPLAY` says, since X forwarding sets it too: keeping the remote
+    /// host awake is not what its viewer wants); `Off` elsewhere. An empty variable counts
+    /// as unset.
     pub fn default_for(os: Os, env: impl Fn(&str) -> Option<OsString>) -> Mode {
         let set = |key: &str| env(key).is_some_and(|v| !v.is_empty());
         match os {
             Os::MacOs => Mode::Caffeinate,
-            Os::Linux => {
-                let ssh = set("SSH_CONNECTION") || set("SSH_TTY");
-                let display = set("DISPLAY") || set("WAYLAND_DISPLAY");
-                if ssh && !display {
-                    Mode::Off
-                } else {
-                    Mode::Inhibit
-                }
-            }
+            Os::Linux if set("SSH_CONNECTION") || set("SSH_TTY") => Mode::Off,
+            Os::Linux => Mode::Inhibit,
             Os::Other => Mode::Off,
         }
     }
@@ -423,12 +417,13 @@ mod tests {
             Mode::Off,
             "remote: SSH_TTY"
         );
+        // X forwarding sets DISPLAY too: a session is remote whatever the display says.
         assert_eq!(
             Mode::default_for(Os::Linux, &ssh_x),
-            Mode::Inhibit,
-            "forwarded display"
+            Mode::Off,
+            "forwarded display is still remote"
         );
-        assert_eq!(Mode::default_for(Os::Linux, &ssh_wayland), Mode::Inhibit);
+        assert_eq!(Mode::default_for(Os::Linux, &ssh_wayland), Mode::Off);
         assert_eq!(
             Mode::default_for(Os::Linux, &ssh_empty),
             Mode::Inhibit,
