@@ -59,8 +59,8 @@ def sources() -> list[tuple[str, str]]:
     """`(label, text)` of every #[test] fn under crates/ and every checker in scripts/."""
     out: list[tuple[str, str]] = []
     for path in sorted((ROOT / "crates").rglob("*.rs")):
-        # Judge only the parts below the repo root: a checkout under a dot-directory (a git
-        # checkout in a hidden directory) must not hide every source file.
+        # Judge only the parts below the repo root: a checkout that itself lives under a
+        # dot-directory must not hide every source file.
         rel = path.relative_to(ROOT).parts
         if any(part == "target" or part.startswith(".") for part in rel):
             continue
