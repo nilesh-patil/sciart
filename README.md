@@ -20,6 +20,12 @@ braille and half-block cells at 30 FPS — and it keeps your machine awake while
 <p align="center"><sub>Galaxy collision · Hydrogen electron orbitals</sub></p>
 
 <p align="center">
+  <img src="docs/media/double_pendulum.gif" alt="Double pendulum: twin pendulums released a thousandth of a radian apart trace dotted trails that drift apart into chaos" width="400">
+  <img src="docs/media/binary_inspiral.gif" alt="Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple" width="400">
+</p>
+<p align="center"><sub>Double pendulum · Binary inspiral</sub></p>
+
+<p align="center">
   <img src="docs/media/total_solar_eclipse.gif" alt="Total solar eclipse: the last crescent of Sun thins away, the diamond ring flashes and the pearly corona opens" width="400">
   <img src="docs/media/solar_system.gif" alt="Solar system: the planets circle the Sun with short speed trails, the farther ones slower, past the asteroid belt" width="400">
 </p>
