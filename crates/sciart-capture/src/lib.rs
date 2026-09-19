@@ -11,6 +11,7 @@
 
 mod asciicast;
 mod gif;
+mod glyphs;
 mod image;
 
 use sciart_core::prelude::{GlyphMode, Stage};
@@ -18,7 +19,7 @@ use sciart_render::Theme;
 
 pub use self::asciicast::{render_ansi, write_asciicast};
 pub use self::gif::write_gif;
-pub use self::image::{CELL_H, CELL_W, Image, paint, write_png};
+pub use self::image::{CELL_H, CELL_W, Image, draws_natively, paint, write_png};
 
 /// How to render frames: the colour theme and whether to use the ASCII glyph set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

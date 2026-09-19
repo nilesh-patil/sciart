@@ -7,6 +7,8 @@ use font8x8::{BASIC_FONTS, BLOCK_FONTS, BOX_FONTS, GREEK_FONTS, LATIN_FONTS, MIS
 use sciart_core::prelude::*;
 use sciart_render::{Rgb, Theme};
 
+use crate::glyphs::builtin;
+
 /// Pixels per cell: a typical terminal cell is about twice as tall as it is wide.
 pub const CELL_W: usize = 8;
 pub const CELL_H: usize = 16;
@@ -113,6 +115,17 @@ fn glyph(img: &mut Image, x0: usize, y0: usize, ch: char, fallback: char, fg: Rg
             }
         }
         _ => {
+            if let Some(rows) = builtin(ch) {
+                // CLI-R18: a full-resolution 8 × 16 bitmap for a glyph `font8x8` lacks.
+                for (r, bits) in rows.iter().enumerate() {
+                    for c in 0..CELL_W {
+                        if bits & (1 << c) != 0 {
+                            img.rect(x0 + c, y0 + r, 1, 1, fg);
+                        }
+                    }
+                }
+                return;
+            }
             let Some(rows) = bitmap(ch).or_else(|| bitmap(fallback)) else {
                 // Neither glyph is in the font: a small centred block marks the cell.
                 img.rect(x0 + 2, y0 + 5, 4, 6, fg);
@@ -127,6 +140,14 @@ fn glyph(img: &mut Image, x0: usize, y0: usize, ch: char, fallback: char, fg: Rg
             }
         }
     }
+}
+
+/// CLI-R18: whether the capture draws `ch` as itself (braille, half blocks, `font8x8`, or a
+/// built-in bitmap) rather than through the scene's ASCII fallback.
+pub fn draws_natively(ch: char) -> bool {
+    matches!(ch, ' ' | '▀' | '▄' | '█' | '\u{2801}'..='\u{28FF}')
+        || builtin(ch).is_some()
+        || bitmap(ch).is_some()
 }
 
 /// Paint `canvas` as a terminal would with `theme`; `fallback` is the same frame in ASCII.
