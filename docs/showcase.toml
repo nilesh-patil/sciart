@@ -1,0 +1,219 @@
+# Showcase manifest (SPEC-009 WEB-R1): every animated capture in the README and the gallery.
+#
+# Each clip is recorded by `sciart record` with exactly these parameters; nothing is edited by
+# hand or captured by another tool. `python3 scripts/showcase.py` (`pixi run rs-showcase`)
+# records the missing clips, `--force` re-records all of them, and `--check`
+# (`pixi run rs-showcase-check`, CI) enforces WEB-R2.
+#
+# Fields: `id` (unique), `scene` (a registered name), `seed`, `size` (WxH cells, 8x16 px per
+# cell), `start` (simulated seconds before the first frame, `record --start`), `seconds`,
+# `fps` (divides 60), `theme`, `out` (a .gif under docs/media/), `alt` (names the scene and
+# says what the clip shows; the README and the gallery use it), and `readme`: "hero" (exactly
+# one clip), "grid" (at least eight) or absent (gallery only).
+#
+# `start` picks each scene's best window: narrative scenes follow a timeline, and some open
+# slowly. Most clips run at 20 fps (an exact 5/100 s GIF delay); the densest ones run at 15
+# or 12 fps to stay under the 1.5 MB clip limit.
+
+[[clip]]
+id = "lorenz"
+scene = "strange_attractors"
+seed = 42
+size = "100x30"
+start = 48.0
+seconds = 6.0
+fps = 15
+theme = "astro"
+out = "docs/media/strange_attractors.gif"
+readme = "hero"
+alt = "Strange attractors: the Lorenz butterfly traced by swarms of fine braille threads, turning in space"
+
+[[clip]]
+id = "galaxy-collision"
+scene = "galaxy_collision"
+seed = 42
+size = "80x24"
+start = 11.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+out = "docs/media/galaxy_collision.gif"
+readme = "grid"
+alt = "Galaxy collision: two spiral galaxies swing through each other and pull out tidal tails"
+
+[[clip]]
+id = "electron-orbitals"
+scene = "electron_orbitals"
+seed = 42
+size = "80x24"
+start = 6.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+out = "docs/media/electron_orbitals.gif"
+readme = "grid"
+alt = "Electron orbitals: a hydrogen electron cloud, drawn as warm and cool probability stipple, sloshes from the 2p into a 3d state"
+
+[[clip]]
+id = "solar-system"
+scene = "solar_system"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+out = "docs/media/solar_system.gif"
+readme = "grid"
+alt = "Solar system: the planets circle the Sun with short speed trails, the farther ones slower, past the asteroid belt"
+
+[[clip]]
+id = "total-solar-eclipse"
+scene = "total_solar_eclipse"
+seed = 42
+size = "80x24"
+start = 6.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+out = "docs/media/total_solar_eclipse.gif"
+readme = "grid"
+alt = "Total solar eclipse: the last crescent of Sun thins away, the diamond ring flashes and the pearly corona opens"
+
+[[clip]]
+id = "belousov-zhabotinsky"
+scene = "belousov_zhabotinsky"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+out = "docs/media/belousov_zhabotinsky.gif"
+readme = "grid"
+alt = "Belousov-Zhabotinsky reaction: oxidation waves wind into a turning spiral, drawn as thin red and blue threads"
+
+[[clip]]
+id = "snowflake-growth"
+scene = "snowflake_growth"
+seed = 42
+size = "80x24"
+start = 51.5
+seconds = 8.0
+fps = 20
+theme = "astro"
+out = "docs/media/snowflake_growth.gif"
+readme = "grid"
+alt = "Snowflake growth: a stellar dendrite grows six branching arms out of the vapour"
+
+[[clip]]
+id = "mitosis"
+scene = "mitosis"
+seed = 42
+size = "80x24"
+start = 13.0
+seconds = 10.0
+fps = 15
+theme = "astro"
+out = "docs/media/mitosis.gif"
+readme = "grid"
+alt = "Mitosis: chromosomes align on the spindle, split to opposite poles and the cell pinches in two"
+
+[[clip]]
+id = "vortex-street"
+scene = "vortex_street"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 6.0
+fps = 20
+theme = "astro"
+out = "docs/media/vortex_street.gif"
+readme = "grid"
+alt = "Vortex street: eddies peel off a cylinder, alternating sides, as contour threads of spinning fluid"
+
+[[clip]]
+id = "aurora"
+scene = "aurora"
+seed = 42
+size = "80x24"
+start = 5.0
+seconds = 5.0
+fps = 12
+theme = "astro"
+out = "docs/media/aurora.gif"
+readme = "grid"
+alt = "Aurora: a substorm breaks up and green auroral curtains surge over a still northern lake"
+
+[[clip]]
+id = "rocket-launch"
+scene = "rocket_launch"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+out = "docs/media/rocket_launch.gif"
+readme = "grid"
+alt = "Rocket launch: ignition, liftoff and the climb away from the tower on an exhaust plume"
+
+[[clip]]
+id = "binary-inspiral"
+scene = "binary_inspiral"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+out = "docs/media/binary_inspiral.gif"
+alt = "Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple"
+
+[[clip]]
+id = "physarum"
+scene = "physarum"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+out = "docs/media/physarum.gif"
+alt = "Physarum: a slime mould spreads a lace of veins that thickens into a network between food sources"
+
+[[clip]]
+id = "chladni-plate"
+scene = "chladni_plate"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 5.0
+fps = 20
+theme = "astro"
+out = "docs/media/chladni_plate.gif"
+alt = "Chladni plate: scattered sand on a vibrating plate gathers on the nodal lines into a Chladni figure"
+
+[[clip]]
+id = "dna-helix"
+scene = "dna_helix"
+seed = 42
+size = "80x24"
+start = 6.0
+seconds = 8.0
+fps = 12
+theme = "astro"
+out = "docs/media/dna_helix.gif"
+alt = "DNA helix: the double helix turns while a replication fork unzips it and copies each strand"
+
+[[clip]]
+id = "comet-tails"
+scene = "comet_tails"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+out = "docs/media/comet_tails.gif"
+alt = "Comet tails: a comet rounds the Sun with a curved dust tail and a straight blue ion tail pushed away from it"
