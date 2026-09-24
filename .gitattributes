@@ -1,2 +1,7 @@
 # SCM syntax highlighting & preventing 3-way merges
 pixi.lock merge=binary linguist-language=YAML linguist-generated=true
+
+# TEST-R13: golden frames and fixtures are compared byte for byte, so they are checked out
+# with LF on every platform, whatever `core.autocrlf` says.
+*.snap text eol=lf
+**/tests/fixtures/** text eol=lf

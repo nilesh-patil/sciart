@@ -195,7 +195,8 @@ Counted from the tables below on 2026-10-18; re-count after edits.
 
 | ID | Area | Issue | Source | Status | Priority | Note |
 | --- | --- | --- | --- | --- | --- | --- |
-| B-89 | keep-awake | Windows/Linux keep-awake backends. | [ROADMAP](ROADMAP.md) | open | P3 | Deferred by the macOS-first decision. |
+| B-89 | keep-awake | Windows keep-awake backend. | [ROADMAP](ROADMAP.md) | open | P3 | Linux landed in M25 (KA-R7..R9); Windows is out of scope for 1.0. |
+| B-96 | keep-awake | Run `--keep-awake inhibit` on a Linux desktop with logind: the lock appears in `systemd-inhibit --list`, blocks suspend, and is gone after `q`, `kill` and `kill -9`. | [ROADMAP](ROADMAP.md) | open | P1 | No test can fail on the real helper (it needs logind and polkit); the helper choice, the pipe and the defaults are tested with a stand-in. |
 | B-90 | themes | Light-background theme. | [ROADMAP](ROADMAP.md) | open | P3 | Not scheduled. |
 | B-91 | release | Per-OS release packaging beyond tarballs. | [ROADMAP](ROADMAP.md) | open | P3 | Homebrew/apt/etc.; release workflow already ships tarballs. |
 | B-92 | art / spec | `catalytic_surface`'s late uniform-CO beat is a rust ring around a black interior; a dim interior stipple would read better but CAT-A9 forbids it. | [M23 Phase 5](design/M23-wave5.md) | open | P1 | Needs a spec decision (allow a dim interior after the opening, or accept the ring), not a parameter tweak. |
