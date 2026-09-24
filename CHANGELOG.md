@@ -17,6 +17,17 @@ All notable changes to this project are documented here. The format is based on
 - A one-line hint on exit when the terminal is unlikely to render truecolor braille (the
   Linux console, Apple Terminal without `COLORTERM`, `screen`/`tmux`), unless a colour mode
   was chosen explicitly (RND-R21).
+- Animated captures in the README and the gallery: 18 clips recorded by `sciart record`
+  from the manifest `docs/showcase.toml`; `pixi run rs-showcase` regenerates them and
+  `rs-showcase-check` fails on a missing, stale or unlisted clip (WEB-R1, WEB-R2).
+- `sciart record --start <seconds>` simulates that long before the first frame, so a
+  recording can open on a scene's best moment (CLI-R8).
+
+### Fixed
+
+- Recordings and gallery frames draw every glyph the scenes use (`•`, `●`, `☉`, arrows,
+  planet symbols, superscripts and more) instead of an ASCII stand-in; 22 gallery frames
+  were re-rendered (CLI-R18).
 
 ### Changed
 
