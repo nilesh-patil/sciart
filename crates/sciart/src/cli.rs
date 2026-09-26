@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use sciart_generators::{Entry, find, registry};
+use sciart_keepawake::Mode;
 use sciart_render::Theme;
 use serde::Deserialize;
 
@@ -42,6 +43,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub hud: bool,
 
+    /// How to keep the machine awake [default: caffeinate on macOS, off elsewhere]
+    #[arg(long, global = true, value_enum)]
+    pub keep_awake: Option<KeepAwakeArg>,
+
     /// Config file [default: $XDG_CONFIG_HOME/sciart/config.toml or ~/.config/sciart/config.toml]
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
@@ -71,6 +76,25 @@ impl From<ThemeArg> for Theme {
             ThemeArg::Astro => Theme::Astro,
             ThemeArg::Rainbow => Theme::Rainbow,
             ThemeArg::Mono => Theme::Mono,
+        }
+    }
+}
+
+/// CLI-R6 / CFG-R5 spelling of `sciart_keepawake::Mode`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum KeepAwakeArg {
+    Caffeinate,
+    Mouse,
+    Off,
+}
+
+impl From<KeepAwakeArg> for Mode {
+    fn from(k: KeepAwakeArg) -> Mode {
+        match k {
+            KeepAwakeArg::Caffeinate => Mode::Caffeinate,
+            KeepAwakeArg::Mouse => Mode::Mouse,
+            KeepAwakeArg::Off => Mode::Off,
         }
     }
 }
@@ -259,6 +283,23 @@ mod tests {
             assert_eq!(err.exit_code(), 2, "--interval {bad}");
         }
         assert_eq!(parse(&["--interval", "0.5"]).unwrap().interval, Some(0.5));
+    }
+
+    #[test]
+    fn cli_r6_keep_awake_flag() {
+        for (arg, mode) in [
+            ("caffeinate", Mode::Caffeinate),
+            ("mouse", Mode::Mouse),
+            ("off", Mode::Off),
+        ] {
+            let cli = parse(&["--keep-awake", arg]).unwrap();
+            assert_eq!(cli.keep_awake.map(Mode::from), Some(mode));
+        }
+        assert_eq!(parse(&[]).unwrap().keep_awake, None);
+        assert_eq!(
+            parse(&["--keep-awake", "jiggle"]).unwrap_err().exit_code(),
+            2
+        );
     }
 
     #[test]

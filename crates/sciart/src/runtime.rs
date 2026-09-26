@@ -10,7 +10,7 @@ use sciart_generators::Entry;
 use sciart_render::Theme;
 
 /// Simulation steps allowed per frame before the backlog is dropped (ADR-0003).
-const MAX_STEPS: u32 = 5;
+const MAX_STEPS: u32 = 15;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Status {
@@ -442,8 +442,8 @@ mod tests {
         let mut r = rt(&[&OK], 0);
         r.tick(3.0 * SIM_DT);
         assert_eq!(first_line(&r), "3");
-        r.tick(100.0); // clamped to max_steps = 5 (CORE-R10)
-        assert_eq!(first_line(&r), "8");
+        r.tick(100.0); // clamped to MAX_STEPS = 15 (CORE-R10, RT-R11)
+        assert_eq!(first_line(&r), "18");
         assert_eq!(r.status(), Status::Running);
     }
 
@@ -538,6 +538,13 @@ mod tests {
     };
 
     #[test]
+    fn rt_r11_low_fps_frames_keep_full_simulation_speed() {
+        let mut r = rt(&[&OK], 0);
+        r.tick(0.2); // one 5 FPS frame = 12 simulation steps
+        assert_eq!(first_line(&r), "12");
+    }
+
+    #[test]
     fn rt_r7_switch_renders_immediately() {
         let r = rt(&[&OK], 0);
         assert_eq!(first_line(&r), "0", "first frame drawn before any tick");
@@ -570,7 +577,7 @@ mod tests {
         let mut r = rt(&[&OK], 0).with_interval(0.1);
         r.tick(1.0);
         r.tick(1.0);
-        assert_eq!(first_line(&r), "10", "not rebuilt by the cycle timer");
+        assert_eq!(first_line(&r), "30", "not rebuilt by the cycle timer");
     }
 
     #[test]

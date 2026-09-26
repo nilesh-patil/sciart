@@ -42,12 +42,14 @@ cleanup = "find . -name '__pycache__' -type d -exec rm -rf '{}' +"
 rs-build = "cargo build --workspace"
 rs-test = "cargo test --workspace"
 rs-fmt = "cargo fmt --all"
-rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
+rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
 rs-ci = { depends-on = ["rs-lint", "rs-test"] }
 rs-bench = "cargo bench -p sciart-generators"
 rs-list = "cargo run -q -p sciart -- list"
 rs-sim = "cargo run --release -p sciart -- sim"
 rs-run = "cargo run --release -p sciart -- run"
+rs-install = "cargo install --path crates/sciart"
+rs-install-mouse = "cargo install --path crates/sciart --features mouse"
 
 [dependencies]
 python-freethreading = ">=3.13.5,<4"

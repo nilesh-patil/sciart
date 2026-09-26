@@ -1,6 +1,6 @@
 # SPEC-005: CLI & configuration
 
-**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file) · **Status**: M2 implemented; `--keep-awake` and the `keep_awake` / `[low_power]` config keys land in M3 (until then they are rejected as unknown keys).
+**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file) · **Status**: Implemented through M3.
 
 ## CLI (clap derive)
 ```
@@ -42,3 +42,5 @@ fps = 5
 - **CFG-R3** Unknown keys are rejected (`deny_unknown_fields`) with the file path and TOML error location (code 2). Values are validated like the CLI: `fps ∈ 1..=120`, `interval > 0`.
 - **CFG-R4** `disabled` names that are not registered produce a warning (printed to stderr before the TUI starts), not an error. `disabled` only filters `sim`; `run <name>` always works. If `disabled` removes every generator, `sim` exits with code 2.
 - **CLI-R5** `--interval <SECS>` must be a finite number > 0 (code 2 otherwise).
+- **CLI-R6** (M3) `--keep-awake <caffeinate|mouse|off>`; default `Mode::platform_default()` (KA-R1). A backend that can't start (e.g. `mouse` without the cargo feature) is a warning, not an error (KA-R2).
+- **CFG-R5** (M3) Config keys `keep_awake = "caffeinate"|"mouse"|"off"` and table `[low_power]` with `idle_after` (seconds, finite > 0, default 600) and `fps` (1..=120, default 5); unknown keys inside `[low_power]` are rejected too. Precedence as CFG-R1 (`keep_awake` also has the CLI flag; low-power settings are file-only).

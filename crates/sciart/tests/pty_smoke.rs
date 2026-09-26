@@ -28,6 +28,11 @@ struct Session {
 
 impl Session {
     fn start(args: &[&str]) -> Session {
+        Self::start_with_config(args, None)
+    }
+
+    /// Like `start`, with `config` written to `$XDG_CONFIG_HOME/sciart/config.toml`.
+    fn start_with_config(args: &[&str], config: Option<&str>) -> Session {
         let pair = native_pty_system()
             .openpty(PtySize {
                 rows: 24,
@@ -38,6 +43,11 @@ impl Session {
             .expect("openpty");
         // Isolate from the developer's real config file.
         let config_home = tempfile::tempdir().unwrap();
+        if let Some(text) = config {
+            let dir = config_home.path().join("sciart");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("config.toml"), text).unwrap();
+        }
         let mut cmd = CommandBuilder::new(BIN);
         cmd.args(args);
         cmd.env("XDG_CONFIG_HOME", config_home.path());
@@ -92,6 +102,10 @@ impl Session {
     fn press(&mut self, keys: &str) {
         self.writer.write_all(keys.as_bytes()).unwrap();
         self.writer.flush().unwrap();
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.process_id().expect("child pid")
     }
 
     fn quit(mut self) -> (portable_pty::ExitStatus, Vec<u8>) {
@@ -180,4 +194,70 @@ fn cfg_r3_unknown_key_exits_2_with_location() {
         stderr.contains("line 2") && stderr.contains("warp"),
         "{stderr}"
     );
+}
+
+// ----- M3: keep-awake and low power -----
+
+/// KA-R3 end-to-end: sciart's own `caffeinate` runs while it runs and is gone after `q`.
+#[cfg(target_os = "macos")]
+#[test]
+fn ka_r3_caffeinate_lives_and_dies_with_sciart() {
+    let s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "1"]);
+    s.wait_for("keep-awake in HUD", |t| t.contains("| caffeinate:on |"));
+    let pattern = format!("caffeinate -dimsu -w {}", s.pid());
+    let running = || {
+        Command::new("pgrep")
+            .args(["-f", &pattern])
+            .output()
+            .is_ok_and(|o| o.status.success())
+    };
+    assert!(running(), "caffeinate for this sciart should be running");
+    let (status, _) = s.quit();
+    assert!(status.success());
+    assert!(!running(), "caffeinate must not outlive sciart");
+}
+
+#[test]
+fn ka_r2_unavailable_backend_is_a_warning_not_a_failure() {
+    // Default test builds have no `mouse` feature, so this backend cannot start.
+    let s = Session::start(&["run", "starfield", "--hud", "--keep-awake", "mouse"]);
+    s.wait_for("fallback status", |t| t.contains("| mouse:unavailable |"));
+    let (status, raw) = s.quit();
+    assert!(status.success());
+    assert!(String::from_utf8_lossy(&raw).contains("warning: keep-awake 'mouse' unavailable"));
+}
+
+#[test]
+fn rt_r8_focus_loss_enters_low_power_and_focus_gain_leaves_it() {
+    let mut s = Session::start(&["run", "starfield", "--hud", "--keep-awake", "off"]);
+    s.wait_for("HUD", |t| t.contains("| off |"));
+    s.press("\x1b[O"); // focus out
+    s.wait_for("low power", |t| t.contains("| LOW-POWER |"));
+    s.press("\x1b[I"); // focus in
+    s.wait_for("full power", |t| {
+        !t.contains("LOW-POWER") && t.contains("| off |")
+    });
+    let (status, raw) = s.quit();
+    assert!(status.success());
+    assert_eq!(
+        count(&raw, b"\x1b[?1004h"),
+        1,
+        "focus reporting enabled once"
+    );
+    assert_eq!(
+        count(&raw, b"\x1b[?1004l"),
+        1,
+        "focus reporting disabled on exit"
+    );
+}
+
+#[test]
+fn rt_r8_idle_time_enters_low_power_and_a_key_restores() {
+    let config = "keep_awake = \"off\"\n[low_power]\nidle_after = 0.3\nfps = 4\n";
+    let mut s = Session::start_with_config(&["run", "starfield", "--hud"], Some(config));
+    s.wait_for("idle low power", |t| t.contains("| LOW-POWER |"));
+    s.press("x"); // unbound key still counts as activity
+    s.wait_for("activity restores", |t| !t.contains("LOW-POWER"));
+    let (status, _) = s.quit();
+    assert!(status.success());
 }

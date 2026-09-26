@@ -14,6 +14,9 @@ pub struct Hud<'a> {
     pub fps: f64,
     pub theme: Theme,
     pub seed: u64,
+    /// Keep-awake status string (KA-R5).
+    pub keep_awake: &'a str,
+    pub low_power: bool,
     pub paused: bool,
     pub quarantined: usize,
 }
@@ -25,7 +28,11 @@ impl Hud<'_> {
             format!("{:.0} fps", self.fps),
             self.theme.name().to_string(),
             format!("seed {}", self.seed),
+            self.keep_awake.to_string(),
         ];
+        if self.low_power {
+            parts.push("LOW-POWER".into());
+        }
         if self.paused {
             parts.push("PAUSED".into());
         }
@@ -59,6 +66,8 @@ mod tests {
             fps: 29.6,
             theme: Theme::Astro,
             seed: 42,
+            keep_awake: "caffeinate:on",
+            low_power: false,
             paused: false,
             quarantined: 0,
         }
@@ -68,16 +77,18 @@ mod tests {
     fn rnd_r4_line_format() {
         assert_eq!(
             hud().line(),
-            "starfield | 30 fps | astro | seed 42 | n p space r h t q"
+            "starfield | 30 fps | astro | seed 42 | caffeinate:on | n p space r h t q"
         );
         let h = Hud {
+            low_power: true,
             paused: true,
             quarantined: 2,
             ..hud()
         };
         assert_eq!(
             h.line(),
-            "starfield | 30 fps | astro | seed 42 | PAUSED | 2 quarantined | n p space r h t q"
+            "starfield | 30 fps | astro | seed 42 | caffeinate:on | LOW-POWER | PAUSED \
+             | 2 quarantined | n p space r h t q"
         );
         assert!(h.line().is_ascii());
     }
