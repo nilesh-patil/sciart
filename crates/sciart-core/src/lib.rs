@@ -6,6 +6,7 @@
 mod canvas;
 mod clock;
 mod ctx;
+pub mod draw;
 mod generator;
 pub mod geom;
 mod ink;
