@@ -58,11 +58,15 @@ Shared helpers first: `ParticlePool` (fixed-capacity, respawn), Keplerian speed,
 
 ## M6 — Batch C: grid / automata / stochastic (4)
 Shared helpers first: `Grid<T>` with resize-rebuild, neighbourhood iteration.
-- [ ] crystal_growth · [ ] radioactive_decay · [ ] chemical_reaction · [ ] spacetime_grid
+- [x] `sciart_core::grid` — Grid, Hood, Edges, step [CORE-R33..R36]
+- [x] crystal_growth · [x] radioactive_decay · [x] chemical_reaction · [x] spacetime_grid
+- [x] Snapshots recorded and reviewed; benches < 1 ms at 200×50 [GEN-R8]
 
 ## M7 — Batch D: physics sims & narrative scenes (4)
 Shared helpers first: RK4 integrator, scene timeline/state machine.
-- [ ] double_pendulum · [ ] mars_rover · [ ] voyager_journey · [ ] moon_landing
+- [x] `sciart_core::{ode, timeline, ease}` — RK4, Timeline, easing [CORE-R37..R39]
+- [x] double_pendulum · [x] mars_rover · [x] voyager_journey · [x] moon_landing
+- [x] Snapshots recorded and reviewed; benches < 1 ms at 200×50 [GEN-R8]
 
 ## M8 — Parity & cutover
 - [ ] All 26 registered; every requirement ID cited by a test [TEST-R1]
