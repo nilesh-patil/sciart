@@ -6,6 +6,11 @@
 __pycache__/
 .pytest_cache/
 
+# Rust build output and pending snapshot reviews
+/target/
+*.snap.new
+*.pending-snap
+
 
 # macOS metadata
 .DS_Store

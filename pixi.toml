@@ -38,6 +38,17 @@ run_spacetime_grid = "python tools-py/activate.py spacetime_grid"
 run_chemical_reaction = "python tools-py/activate.py chemical_reaction"
 cleanup = "find . -name '__pycache__' -type d -exec rm -rf '{}' +"
 
+# --- Rust (sciart) - see the contributor guide and docs/adr/0007-pixi-task-runner.md ---
+rs-build = "cargo build --workspace"
+rs-test = "cargo test --workspace"
+rs-fmt = "cargo fmt --all"
+rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings"
+rs-ci = { depends-on = ["rs-lint", "rs-test"] }
+rs-bench = "cargo bench -p sciart-generators"
+rs-list = "cargo run -q -p sciart -- list"
+rs-sim = "cargo run --release -p sciart -- sim"
+rs-run = "cargo run --release -p sciart -- run"
+
 [dependencies]
 python-freethreading = ">=3.13.5,<4"
 uv = ">=0.9.3,<0.10"

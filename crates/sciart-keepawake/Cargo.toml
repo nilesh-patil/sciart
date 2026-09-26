@@ -1,0 +1,17 @@
+[package]
+name = "sciart-keepawake"
+description = "Keep-awake backends for sciart (caffeinate, mouse, off)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# KA-R4: mouse backend is opt-in (M3)
+mouse = []
+
+[dependencies]
+
+[lints]
+workspace = true
