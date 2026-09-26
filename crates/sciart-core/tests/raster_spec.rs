@@ -159,6 +159,31 @@ fn core_r41_cell_keeps_the_brightest_dot_ink_and_ties_go_to_the_last() {
 }
 
 #[test]
+fn core_r41_div_intensity_is_distance_from_zero_so_negative_lobes_keep_their_peak() {
+    let ink_of = |dots: &Dots| cell(&blit_one(dots, Size::new(1, 1), GlyphMode::Unicode), 0, 0).ink;
+    // A strong negative value (level 10, |10 − 128| = 118) beats a weak positive one
+    // (level 150, |150 − 128| = 22), whichever order they are set in.
+    let strong_neg = Ink::new(Role::Div, 10);
+    let weak_pos = Ink::new(Role::Div, 150);
+    for (first, second) in [(strong_neg, weak_pos), (weak_pos, strong_neg)] {
+        let mut dots = Dots::new(Size::new(1, 1));
+        dots.set(0, 0, first);
+        dots.set(1, 0, second);
+        assert_eq!(ink_of(&dots), strong_neg, "{first:?} then {second:?}");
+    }
+    // Equal distance from zero is a tie: the last set wins.
+    let mut dots = Dots::new(Size::new(1, 1));
+    dots.set(0, 0, Ink::new(Role::Div, 28)); // |28 − 128| = 100
+    dots.set(1, 0, Ink::new(Role::Div, 228)); // |228 − 128| = 100
+    assert_eq!(ink_of(&dots), Ink::new(Role::Div, 228));
+    // Other roles still compare by level: 10 < 90.
+    let mut dots = Dots::new(Size::new(1, 1));
+    dots.set(0, 0, B);
+    dots.set(1, 0, Ink::new(Role::Seq, 10));
+    assert_eq!(ink_of(&dots), B);
+}
+
+#[test]
 fn core_r41_blit_leaves_unlit_cells_untouched() {
     let mut c = Canvas::new(Size::new(3, 1), GlyphMode::Unicode);
     for x in 0..3 {

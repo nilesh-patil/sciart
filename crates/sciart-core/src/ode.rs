@@ -1,5 +1,5 @@
 //! Fixed-step ODE integration for deterministic physics scenes (SPEC-001 CORE-R37,
-//! CORE-R44).
+//! CORE-R44) and a tridiagonal solver for implicit diffusion (CORE-R59).
 //!
 //! RK4 state is a const-generic `[f64; N]` so every stage lives on the stack: no
 //! allocation, no trait objects, and the closure is monomorphised into a tight loop.
@@ -157,4 +157,53 @@ where
         verlet_step(pos, vel, acc, h, &mut accel);
     }
     steps
+}
+
+/// Solve the tridiagonal system `sub[i]·x[i−1] + diag[i]·x[i] + sup[i]·x[i+1] = rhs[i]`
+/// in place into `rhs` by the Thomas algorithm, in O(n) (CORE-R59). `sub[0]` and
+/// `sup[n − 1]` are ignored; `scratch` holds the eliminated super-diagonal.
+///
+/// For implicit (Crank–Nicolson) diffusion steps, which stay stable at any `dt`. All
+/// five slices must have the same length. Mismatched lengths or a zero (or non-finite)
+/// pivot return `false` with `rhs` untouched: the pivots are checked in a first pass
+/// before `rhs` is written. Without pivoting, it is stable for diagonally dominant
+/// matrices, which is what diffusion produces.
+pub fn tridiag_solve(
+    sub: &[f64],
+    diag: &[f64],
+    sup: &[f64],
+    rhs: &mut [f64],
+    scratch: &mut [f64],
+) -> bool {
+    let n = rhs.len();
+    if [sub.len(), diag.len(), sup.len(), scratch.len()] != [n; 4] {
+        return false;
+    }
+    // Pass 1: pivots m_i = diag[i] − sub[i]·c'[i−1], and c'[i] = sup[i] / m_i.
+    let pivot = |i: usize, c_prev: f64| {
+        if i == 0 {
+            diag[0]
+        } else {
+            diag[i] - sub[i] * c_prev
+        }
+    };
+    let mut c_prev = 0.0;
+    for i in 0..n {
+        let m = pivot(i, c_prev);
+        if m == 0.0 || !m.is_finite() {
+            return false;
+        }
+        c_prev = sup[i] / m;
+        scratch[i] = c_prev;
+    }
+    // Pass 2: forward-eliminate rhs with the same pivots, then back-substitute.
+    for i in 0..n {
+        let c_prev = if i == 0 { 0.0 } else { scratch[i - 1] };
+        let d_prev = if i == 0 { 0.0 } else { rhs[i - 1] };
+        rhs[i] = (rhs[i] - sub[i] * d_prev) / pivot(i, c_prev);
+    }
+    for i in (0..n.saturating_sub(1)).rev() {
+        rhs[i] -= scratch[i] * rhs[i + 1];
+    }
+    true
 }

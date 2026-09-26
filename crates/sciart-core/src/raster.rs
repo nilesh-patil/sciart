@@ -1,4 +1,5 @@
-//! Sub-cell rasters layered onto a [`Canvas`] (SPEC-001 CORE-R41, CORE-R42, ADR-0010).
+//! Sub-cell rasters layered onto a [`Canvas`] (SPEC-001 CORE-R41, CORE-R42, CORE-R51,
+//! CORE-R55, ADR-0010).
 //!
 //! - [`Dots`]: a braille lattice of 2 × 4 dots per cell, one ink per cell. With cells
 //!   ~2:1 tall ([`ASPECT`](crate::geom::ASPECT)) the dots are *square*, so line art,
@@ -6,12 +7,14 @@
 //! - [`Pixels`]: two square pixels per cell drawn as half blocks, with the lower pixel
 //!   in the cell's background colour: 2× the vertical resolution with real colour, for
 //!   fields.
+//! - [`Density`]: an `f32` long-exposure buffer at `Dots` resolution, thresholded onto
+//!   a `Dots` lattice.
 //!
-//! Both are plain row-major buffers sized in `resize` and allocation-free afterwards
+//! All are plain row-major buffers sized in `resize` and allocation-free afterwards
 //! (GEN-R11). A scene draws into one, then `blit`s it onto the canvas; a cell holds a
 //! single glyph, so one region uses one raster.
 
-use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size};
+use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom};
 
 /// Bit of dot `(dx, dy)` within its braille cell, indexed `[dx][dy]`: standard Unicode
 /// dot numbering 1-2-3-7 down the left column and 4-5-6-8 down the right, dot `n` being
@@ -43,6 +46,78 @@ pub fn braille(mask: u8) -> Glyph {
     Glyph::new(ch, ascii)
 }
 
+/// How strongly an ink stands out, for picking a cell's one ink among its dots
+/// (CORE-R41): its `level`, except for a signed [`Role::Div`] field, whose zero sits at
+/// 128, so a deep negative lobe (low level) must beat a faint positive one.
+#[inline]
+fn intensity(ink: Ink) -> u8 {
+    if ink.role == Role::Div {
+        ink.level.abs_diff(128)
+    } else {
+        ink.level
+    }
+}
+
+/// Walk the dots of the segment `(x0, y0)–(x1, y1)` on a `lattice`-sized dot grid
+/// (CORE-R51), calling `f` for each; `f` must ignore off-lattice dots.
+///
+/// Endpoints are rounded and joined by [`geom::line`]. When both lie within a margin of
+/// `w + h` around the lattice the walk is the exact unclipped Bresenham segment (the
+/// off-lattice part costs at most `3·(w + h)` steps). Farther endpoints are first
+/// clipped to that margin box (Liang–Barsky), so the walk length is bounded whatever
+/// the input; that only shifts the Bresenham phase of lines that are already wild.
+fn segment(x0: f64, y0: f64, x1: f64, y1: f64, lattice: Size, mut f: impl FnMut(i32, i32)) {
+    if !(x0.is_finite() && y0.is_finite() && x1.is_finite() && y1.is_finite()) {
+        return;
+    }
+    let (w, h) = (i32::from(lattice.width()), i32::from(lattice.height()));
+    let m = f64::from(w + h);
+    let (lo_x, hi_x) = (-m, f64::from(w) + m);
+    let (lo_y, hi_y) = (-m, f64::from(h) + m);
+    let inside = |x: f64, y: f64| (lo_x..=hi_x).contains(&x) && (lo_y..=hi_y).contains(&y);
+
+    let (mut a, mut b) = ((x0.round(), y0.round()), (x1.round(), y1.round()));
+    if !(inside(a.0, a.1) && inside(b.0, b.1)) {
+        // Parametrise p(t) = p0 + t·(p1 − p0)/2 for t ∈ [0, 2]: the halved difference
+        // cannot overflow even for endpoints at ±f64::MAX.
+        let (dx, dy) = (x1 * 0.5 - x0 * 0.5, y1 * 0.5 - y0 * 0.5);
+        let (mut t0, mut t1) = (0.0f64, 2.0f64);
+        for (p, q) in [
+            (-dx, x0 - lo_x),
+            (dx, hi_x - x0),
+            (-dy, y0 - lo_y),
+            (dy, hi_y - y0),
+        ] {
+            if p == 0.0 {
+                if q < 0.0 {
+                    return; // parallel to this edge and outside it
+                }
+            } else if p < 0.0 {
+                t0 = t0.max(q / p);
+            } else {
+                t1 = t1.min(q / p);
+            }
+        }
+        if t0 > t1 {
+            return;
+        }
+        // Clamp away the last ulps of round-off so the casts below stay in range.
+        let at = |t: f64| {
+            (
+                (x0 + t * dx).round().clamp(lo_x, hi_x),
+                (y0 + t * dy).round().clamp(lo_y, hi_y),
+            )
+        };
+        (a, b) = (at(t0), at(t1));
+    }
+    // Both endpoints are within the margin box, so the walk has at most
+    // max(w, h) + 2m + 1 ≤ 4·(w + h) points; the `take` only guards the arithmetic.
+    let cap = 4 * (w as usize + h as usize);
+    for (x, y) in geom::line(a.0 as i32, a.1 as i32, b.0 as i32, b.1 as i32).take(cap) {
+        f(x, y);
+    }
+}
+
 /// `n` cells times `k` sub-cells per cell, saturated to a `u16` axis.
 fn sub_axis(n: u16, k: u32) -> u16 {
     u16::try_from(u32::from(n) * k).unwrap_or(u16::MAX)
@@ -50,8 +125,9 @@ fn sub_axis(n: u16, k: u32) -> u16 {
 
 /// A braille dot lattice: `2·w × 4·h` square dots over a `w × h` cell region (CORE-R41).
 ///
-/// Each cell stores its dot mask and one ink, that of its brightest lit dot (highest
-/// `level`; ties go to the dot set last), since a terminal cell has one colour.
+/// Each cell stores its dot mask and one ink, that of its most intense lit dot (highest
+/// `level`, or `|level − 128|` for [`Role::Div`]; ties go to the dot set last), since a
+/// terminal cell has one colour.
 /// Masks and inks are separate arrays so `blit` scans a dense byte array, which is
 /// mostly zeros for sparse line art.
 #[derive(Debug, Clone)]
@@ -127,7 +203,7 @@ impl Dots {
         let Some((i, bit)) = self.locate(x, y) else {
             return;
         };
-        if self.masks[i] == 0 || ink.level >= self.inks[i].level {
+        if self.masks[i] == 0 || intensity(ink) >= intensity(self.inks[i]) {
             self.inks[i] = ink;
         }
         self.masks[i] |= bit;
@@ -141,6 +217,15 @@ impl Dots {
             // Saturating casts: anything huge lands off the lattice.
             self.set(x.round() as i32, y.round() as i32, ink);
         }
+    }
+
+    /// Light the Bresenham segment from `(x0, y0)` to `(x1, y1)` (dot units, rounded),
+    /// both endpoints inclusive, clipped to the lattice (CORE-R51). Non-finite endpoints
+    /// draw nothing, and the walk is capped at `4·(dot width + dot height)` steps, so
+    /// wild coordinates stay cheap.
+    pub fn line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, ink: Ink) {
+        let size = self.dot_size();
+        segment(x0, y0, x1, y1, size, |x, y| self.set(x, y, ink));
     }
 
     /// Whether dot `(x, y)` is lit; `false` off the lattice.
@@ -173,6 +258,127 @@ impl Dots {
         for (i, &mask) in (start..).zip(masks) {
             if mask != 0 {
                 canvas.put((i % w) as i32, (i / w) as i32, braille(mask), self.inks[i]);
+            }
+        }
+    }
+}
+
+/// A long-exposure `f32` buffer at [`Dots`] resolution (CORE-R55): particles and
+/// strokes [`deposit`](Self::deposit) weight into it, [`decay`](Self::decay) fades it,
+/// and [`to_dots`](Self::to_dots) thresholds it onto a lattice. For trails, attractor
+/// histograms and aurora curtains, where what matters is where things *have been*.
+#[derive(Debug, Clone)]
+pub struct Density {
+    /// Lattice size in dots.
+    dots: Size,
+    /// Row-major, `dots.w × dots.h`.
+    buf: Vec<f32>,
+}
+
+impl Default for Density {
+    /// A 1×1-cell buffer, the placeholder until a scene's first `resize`.
+    fn default() -> Self {
+        Self::new(Size::new(1, 1))
+    }
+}
+
+impl Density {
+    /// A zeroed buffer over `cells` terminal cells (`2·w × 4·h` dots).
+    pub fn new(cells: Size) -> Self {
+        let mut d = Self {
+            dots: Size::new(1, 1),
+            buf: Vec::new(),
+        };
+        d.resize(cells);
+        d
+    }
+
+    /// Buffer dimensions in dots, as [`Dots::dot_size`].
+    pub fn dot_size(&self) -> Size {
+        self.dots
+    }
+
+    /// Resize to `cells` and zero. Reuses the buffer unless it must grow.
+    pub fn resize(&mut self, cells: Size) {
+        self.dots = Size::new(
+            sub_axis(cells.width(), Dots::CELL_W as u32),
+            sub_axis(cells.height(), Dots::CELL_H as u32),
+        );
+        self.buf.clear();
+        self.buf.resize(self.dots.area(), 0.0);
+    }
+
+    /// Zero every dot.
+    pub fn clear(&mut self) {
+        self.buf.fill(0.0);
+    }
+
+    /// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the buffer as is):
+    /// an exponential fade, `k = exp(−dt / τ)` per step.
+    pub fn decay(&mut self, k: f32) {
+        if k.is_nan() || k >= 1.0 {
+            return;
+        }
+        let k = k.max(0.0);
+        for v in &mut self.buf {
+            *v *= k;
+        }
+    }
+
+    #[inline]
+    fn index(&self, x: i32, y: i32) -> Option<usize> {
+        let (w, h) = (i32::from(self.dots.width()), i32::from(self.dots.height()));
+        ((0..w).contains(&x) && (0..h).contains(&y))
+            .then(|| y as usize * usize::from(self.dots.width()) + x as usize)
+    }
+
+    #[inline]
+    fn add(&mut self, x: i32, y: i32, w: f32) {
+        if let Some(i) = self.index(x, y) {
+            self.buf[i] += w;
+        }
+    }
+
+    /// Add `w` at the dot nearest to `(x, y)` (dot units). Non-finite coordinates or
+    /// weights and off-buffer dots are ignored.
+    #[inline]
+    pub fn deposit(&mut self, x: f64, y: f64, w: f32) {
+        if x.is_finite() && y.is_finite() && w.is_finite() {
+            // Saturating casts: anything huge lands off the buffer.
+            self.add(x.round() as i32, y.round() as i32, w);
+        }
+    }
+
+    /// Add `w` at every dot of the [`Dots::line`] segment from `(x0, y0)` to `(x1, y1)`
+    /// (CORE-R51 rules: rounded, inclusive, clipped, capped).
+    pub fn deposit_line(&mut self, x0: f64, y0: f64, x1: f64, y1: f64, w: f32) {
+        if w.is_finite() {
+            let size = self.dots;
+            segment(x0, y0, x1, y1, size, |x, y| self.add(x, y, w));
+        }
+    }
+
+    /// The value at dot `(x, y)`, or `None` off the buffer.
+    #[inline]
+    pub fn get(&self, x: i32, y: i32) -> Option<f32> {
+        self.index(x, y).map(|i| self.buf[i])
+    }
+
+    /// The row-major values (`dot_size().width()` per row).
+    pub fn as_slice(&self) -> &[f32] {
+        &self.buf
+    }
+
+    /// Light every dot whose value is `≥ threshold` on `dots` with `map(value)`, in one
+    /// row-major pass. `dots` should cover the same cells; dots outside it are skipped,
+    /// and a NaN threshold lights nothing.
+    pub fn to_dots(&self, dots: &mut Dots, threshold: f32, mut map: impl FnMut(f32) -> Ink) {
+        let w = usize::from(self.dots.width());
+        for (y, row) in self.buf.chunks_exact(w).enumerate() {
+            for (x, &v) in row.iter().enumerate() {
+                if v >= threshold {
+                    dots.set(x as i32, y as i32, map(v));
+                }
             }
         }
     }

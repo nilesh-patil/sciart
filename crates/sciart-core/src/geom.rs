@@ -1,4 +1,4 @@
-//! Geometry helpers shared by generators (CORE-R16..R18, CORE-R45).
+//! Geometry helpers shared by generators (CORE-R16..R18, CORE-R45, CORE-R50).
 
 /// Terminal cells are ~2x taller than wide; scale x by this for round shapes.
 pub const ASPECT: f64 = 2.0;
@@ -51,12 +51,52 @@ impl Camera {
     /// `None` for non-finite input or output, and for points at or behind the eye
     /// (`z ≥ distance − 1e-9`), so callers can `let Some(..) else { continue }`.
     pub fn project(&self, p: [f64; 3], centre: (f64, f64), scale: f64) -> Option<(f64, f64, f64)> {
-        let [x, y, z] = p;
+        self.projector().project(p, centre, scale)
+    }
+
+    /// This view with its rotation's sines and cosines computed once (CORE-R50), for
+    /// projecting many points per frame without four transcendental calls each.
+    pub fn projector(&self) -> Projector {
         let (sy, cy) = self.yaw.sin_cos();
         let (sp, cp) = self.pitch.sin_cos();
+        Projector {
+            sy,
+            cy,
+            sp,
+            cp,
+            distance: self.distance,
+        }
+    }
+}
+
+/// A [`Camera`] with its rotation cached, from [`Camera::projector`] (CORE-R50).
+///
+/// [`Camera::project`] is implemented through this type, so the two are bit-identical.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Projector {
+    sy: f64,
+    cy: f64,
+    sp: f64,
+    cp: f64,
+    distance: f64,
+}
+
+impl Projector {
+    /// `p` in camera space: turned by yaw about y, then by pitch about x. The result's
+    /// `z` is the depth that [`project`](Self::project) reports (larger = nearer).
+    #[inline]
+    pub fn rotate(&self, p: [f64; 3]) -> [f64; 3] {
+        let [x, y, z] = p;
         // R_x(pitch) · R_y(yaw) · p; at yaw = π/2, +x lands on −z (away from the eye).
-        let (x1, z1) = (x * cy + z * sy, z * cy - x * sy);
-        let (y2, z2) = (y * cp - z1 * sp, y * sp + z1 * cp);
+        let (x1, z1) = (x * self.cy + z * self.sy, z * self.cy - x * self.sy);
+        let (y2, z2) = (y * self.cp - z1 * self.sp, y * self.sp + z1 * self.cp);
+        [x1, y2, z2]
+    }
+
+    /// Same contract as [`Camera::project`] (CORE-R45).
+    #[inline]
+    pub fn project(&self, p: [f64; 3], centre: (f64, f64), scale: f64) -> Option<(f64, f64, f64)> {
+        let [x1, y2, z2] = self.rotate(p);
         // An infinite `distance` passes (orthographic); a NaN on either side fails.
         let in_front = z2 < self.distance - 1e-9;
         if !in_front {

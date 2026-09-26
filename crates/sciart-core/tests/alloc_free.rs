@@ -3,14 +3,16 @@
 //!
 //! SPEC-001 promises no heap traffic after construction for `ParticlePool` (CORE-R28),
 //! `Trail` (CORE-R29), `Grid::step` after its first call (CORE-R36), the rasters
-//! (CORE-R41, CORE-R42), resampling (CORE-R43) and the leapfrog integrator (CORE-R44).
+//! (CORE-R41, CORE-R42), resampling (CORE-R43), the leapfrog integrator (CORE-R44) and
+//! the shared M10 scene helpers (CORE-R49..R59).
 //! Counters are per thread, so libtest's parallel threads do not pollute each other.
 
+use std::fmt::Write as _;
 use std::hint::black_box;
 
 use sciart_core::prelude::*;
 use sciart_core::raster::{Dots, Pixels};
-use sciart_core::{grid, ode};
+use sciart_core::{draw, grid, ink, ode};
 use sciart_testalloc::{Allocs, CountingAlloc, measure};
 
 #[global_allocator]
@@ -281,4 +283,155 @@ fn core_r44_verlet_integrate_does_not_allocate() {
     assert_eq!(n, 50);
     assert_free("verlet_integrate", stats);
     black_box(pos);
+}
+
+#[test]
+fn core_r49_stack_text_and_text_mode_do_not_allocate() {
+    let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+    let ink = Ink::new(Role::Text, 150);
+    let (end, stats) = measure(|| {
+        let mut buf = StackText::<48>::new();
+        let _ = write!(buf, "T/Tc {:.2}  N {}  λ₁ {:+.3e}", 2.269_18, 4096, -0.906);
+        let _ = write!(buf, " and a tail far too long to fit in forty-eight bytes");
+        let x = draw::text_mode(&mut canvas, 0, 0, buf.as_str(), "ascii", ink);
+        buf.clear();
+        let _ = write!(buf, "{}", black_box(7u8));
+        draw::text_mode(&mut canvas, x, 1, "ψ²", buf.as_str(), ink)
+    });
+    assert_free("StackText write! / text_mode", stats);
+    black_box((end, canvas.cells()));
+}
+
+#[test]
+fn core_r50_projector_does_not_allocate() {
+    let cam = Camera {
+        yaw: 0.4,
+        pitch: -0.3,
+        distance: 6.0,
+    };
+    let (sum, stats) = measure(|| {
+        let pr = cam.projector();
+        (0..2000)
+            .filter_map(|i| {
+                let t = f64::from(i) * 0.01;
+                pr.project([t.cos(), t.sin(), 0.1 * t], (40.0, 12.0), 8.0)
+            })
+            .map(|(x, y, z)| x + y + z + pr.rotate([1.0, 2.0, 3.0])[2])
+            .sum::<f64>()
+    });
+    assert_free("Projector::project / rotate", stats);
+    black_box(sum);
+}
+
+#[test]
+fn core_r51_r55_dots_line_and_density_do_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut dots = Dots::new(size);
+    let mut density = Density::new(size);
+    let ink = Ink::new(Role::Wave, 180);
+    let ((), stats) = measure(|| {
+        for i in 0..500 {
+            let t = f64::from(i) * 0.013;
+            let (x0, y0, x1, y1) = (
+                200.0 + 150.0 * t.cos(),
+                100.0,
+                200.0 + 300.0 * t.sin(),
+                1e9 * t,
+            );
+            dots.line(x0, y0, x1, y1, ink);
+            density.deposit(x0, y0, 0.5);
+            density.deposit_line(x0, y0, x1, y1, 0.25);
+        }
+        density.decay(0.9);
+        density.to_dots(&mut dots, 0.3, |v| ink::seq(f64::from(v)));
+        black_box(density.get(10, 10));
+        density.clear();
+        density.resize(Size::new(100, 20)); // shrinking reuses the buffer
+        dots.clear();
+    });
+    assert_free("Dots::line / Density", stats);
+}
+
+#[test]
+fn core_r52_sample_map_does_not_allocate_after_rebuild() {
+    let src = Grid::new(Size::new(120, 60), 0.5f32);
+    let mut map = SampleMap::default();
+    map.rebuild(src.size(), Size::new(200, 100));
+    let (sum, stats) = measure(|| {
+        let mut sum = 0.0f32;
+        for y in 0..100 {
+            for x in 0..200 {
+                sum += map.sample(&src, x, y);
+                sum += map.nearest(x, y).0 as f32;
+            }
+        }
+        // Rebuilding within the existing tables' capacity reuses them.
+        map.rebuild(src.size(), Size::new(150, 40));
+        sum
+    });
+    assert_free("SampleMap::sample / nearest / rebuild (not growing)", stats);
+    black_box(sum);
+}
+
+#[test]
+fn core_r53_laplacian9_with_presized_dst_does_not_allocate() {
+    let src = Grid::new(Size::new(200, 100), 0.25f32);
+    let mut dst = Grid::new(Size::new(200, 100), 0.0f32);
+    let ((), stats) = measure(|| {
+        for _ in 0..3 {
+            grid::laplacian9(&src, &mut dst, Edges::Wrap);
+            grid::laplacian9(&src, &mut dst, Edges::Clip);
+        }
+    });
+    assert_free("laplacian9", stats);
+    black_box(dst.as_slice());
+}
+
+#[test]
+fn core_r54_spatial_hash_does_not_allocate_after_first_rebuild() {
+    let mut pts: Vec<[f64; 2]> = (0..500)
+        .map(|i| {
+            let t = f64::from(i);
+            [(t * 7.3) % 200.0, (t * 3.1) % 100.0]
+        })
+        .collect();
+    let mut hash = SpatialHash::new(200.0, 100.0, 5.0);
+    hash.rebuild(&pts);
+    let (n, stats) = measure(|| {
+        let mut n = 0usize;
+        for frame in 0..5 {
+            for p in &mut pts {
+                p[0] = (p[0] + 1.3 + f64::from(frame)) % 200.0;
+            }
+            hash.rebuild(&pts);
+            for p in &pts {
+                hash.for_each_within(*p, 5.0, |i| n += i & 1);
+            }
+        }
+        hash.rebuild(&pts[..100]); // fewer points reuse the buffers
+        n
+    });
+    assert_free("SpatialHash::rebuild / for_each_within", stats);
+    black_box(n);
+}
+
+#[test]
+fn core_r56_r57_r58_r59_scalar_helpers_do_not_allocate() {
+    let (sum, stats) = measure(|| {
+        let mut rng = SplitMix64::new(42);
+        let icdf = InverseCdf::<128>::build(0.0, 10.0, |r| r * r * (-r).exp());
+        let mut sum = 0.0;
+        for _ in 0..1000 {
+            let u = rng.next_f64();
+            sum += icdf.sample(u) + ink::soft_clip(u * 8.0 - 4.0);
+            sum += f64::from(rng.below(17));
+        }
+        sum += ink::seq_value(ink::seq(0.3)) + ink::div_value(ink::div(-0.4));
+        let mut rhs = [1.0; 64];
+        let mut scratch = [0.0; 64];
+        let ok = ode::tridiag_solve(&[-1.0; 64], &[4.0; 64], &[-1.0; 64], &mut rhs, &mut scratch);
+        sum + rhs[0] + f64::from(u8::from(ok))
+    });
+    assert_free("soft_clip / SplitMix64 / InverseCdf / tridiag_solve", stats);
+    black_box(sum);
 }
