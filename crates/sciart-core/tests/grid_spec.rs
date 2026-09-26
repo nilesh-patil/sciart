@@ -1,6 +1,7 @@
-//! SPEC-001 CORE-R33..R36: grid helpers.
+//! SPEC-001 CORE-R33..R36, R43, R48: grid helpers, resampling and capped lattices.
 
 use proptest::prelude::*;
+use sciart_core::grid;
 use sciart_core::prelude::*;
 
 /// A grid whose value at `(x, y)` is `y * 100 + x`, so moved cells are identifiable.
@@ -468,4 +469,213 @@ fn core_r36_step_on_empty_grid_is_a_no_op() {
     let mut scratch = Grid::new(Size::new(2, 2), 1);
     g.step(&mut scratch, |_, _, _| unreachable!("no cells"));
     assert!(g.is_empty());
+}
+
+// ---------------------------------------------------------------- CORE-R43
+
+/// A `w × h` float grid from `f(x, y)`.
+fn field(w: u16, h: u16, f: impl Fn(i32, i32) -> f32) -> Grid<f32> {
+    let mut g = Grid::new(Size::new(w, h), 0.0);
+    for y in 0..i32::from(h) {
+        for x in 0..i32::from(w) {
+            g.set(x, y, f(x, y));
+        }
+    }
+    g
+}
+
+#[test]
+fn core_r43_equal_sizes_are_the_identity() {
+    let src = field(7, 5, |x, y| ((x * 31 + y * 17) % 13) as f32 * 0.37 - 1.1);
+    let mut dst = Grid::new(Size::new(7, 5), f32::NAN);
+    grid::resample_bilinear(&src, &mut dst);
+    assert_eq!(dst, src);
+
+    let src = labelled(7, 5);
+    let mut dst = Grid::new(Size::new(7, 5), -1);
+    grid::resample_nearest(&src, &mut dst);
+    assert_eq!(dst, src);
+}
+
+#[test]
+fn core_r43_dst_keeps_its_size() {
+    let src = field(4, 4, |x, y| (x + y) as f32);
+    let mut dst = Grid::new(Size::new(9, 2), 0.0);
+    grid::resample_bilinear(&src, &mut dst);
+    assert_eq!((dst.width(), dst.height()), (9, 2));
+    let mut dst = Grid::new(Size::new(1, 7), 0);
+    grid::resample_nearest(&labelled(4, 4), &mut dst);
+    assert_eq!((dst.width(), dst.height()), (1, 7));
+}
+
+#[test]
+fn core_r43_bilinear_preserves_linear_ramps_in_the_interior() {
+    // A ramp in physical (cell-centre) coordinates u = (x + ½) / w, v = (y + ½) / h is
+    // resolution independent, so any resampling must reproduce it wherever it does not
+    // have to clamp at the edge.
+    let ramp = |w: u16, h: u16| {
+        move |x: i32, y: i32| {
+            let u = (f64::from(x) + 0.5) / f64::from(w);
+            let v = (f64::from(y) + 0.5) / f64::from(h);
+            (3.0 * u - 2.0 * v) as f32
+        }
+    };
+    for (sw, sh, dw, dh) in [
+        (10, 6, 23, 17),
+        (23, 17, 10, 6),
+        (8, 8, 8, 3),
+        (5, 40, 50, 4),
+    ] {
+        let src = field(sw, sh, ramp(sw, sh));
+        let mut dst = Grid::new(Size::new(dw, dh), 0.0);
+        grid::resample_bilinear(&src, &mut dst);
+        let expected = ramp(dw, dh);
+        let interior = |d: i32, dn: u16, sn: u16| {
+            let s = (f64::from(d) + 0.5) * f64::from(sn) / f64::from(dn) - 0.5;
+            (0.0..=f64::from(sn) - 1.0).contains(&s)
+        };
+        let mut checked = 0;
+        for ((x, y), &v) in dst.iter() {
+            if interior(x, dw, sw) && interior(y, dh, sh) {
+                assert!(
+                    (v - expected(x, y)).abs() < 1e-5,
+                    "{sw}x{sh}->{dw}x{dh} at {x},{y}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(checked > 0);
+    }
+}
+
+#[test]
+fn core_r43_nearest_upsampling_by_two_duplicates_cells() {
+    let src = labelled(2, 2);
+    let mut dst = Grid::new(Size::new(4, 4), -1);
+    grid::resample_nearest(&src, &mut dst);
+    for ((x, y), &v) in dst.iter() {
+        assert_eq!(Some(&v), src.get(x / 2, y / 2), "{x},{y}");
+    }
+}
+
+#[test]
+fn core_r43_empty_src_or_dst_is_a_no_op() {
+    let mut dst = Grid::new(Size::new(3, 3), 2.5f32);
+    grid::resample_bilinear(&Grid::default(), &mut dst);
+    assert!(dst.as_slice().iter().all(|&v| v == 2.5));
+    let mut empty = Grid::<f32>::default();
+    grid::resample_bilinear(&field(3, 3, |_, _| 1.0), &mut empty);
+    assert!(empty.is_empty());
+
+    let mut dst = Grid::new(Size::new(3, 3), 7);
+    grid::resample_nearest(&Grid::default(), &mut dst);
+    assert!(dst.as_slice().iter().all(|&v| v == 7));
+    let mut empty = Grid::<i32>::default();
+    grid::resample_nearest(&labelled(3, 3), &mut empty);
+    assert!(empty.is_empty());
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(128))]
+
+    /// CORE-R43: constants survive exactly (no `c·(1−f) + c·f` rounding).
+    #[test]
+    fn core_r43_bilinear_preserves_constants_exactly(
+        c in -1e6f32..1e6, sw in 1u16..24, sh in 1u16..24, dw in 1u16..24, dh in 1u16..24,
+    ) {
+        let src = Grid::new(Size::new(sw, sh), c);
+        let mut dst = Grid::new(Size::new(dw, dh), f32::NAN);
+        grid::resample_bilinear(&src, &mut dst);
+        prop_assert!(dst.as_slice().iter().all(|&v| v == c));
+    }
+
+    /// CORE-R43: bilinear output stays within the source range (it interpolates and
+    /// clamps, never extrapolates); nearest only uses values present in the source.
+    #[test]
+    fn core_r43_outputs_come_from_the_source(
+        sw in 1u16..16, sh in 1u16..16, dw in 1u16..32, dh in 1u16..32, salt in 0i32..1000,
+    ) {
+        let src = field(sw, sh, |x, y| ((x * 7 + y * 13 + salt) % 29) as f32);
+        let (lo, hi) = src.as_slice().iter().fold((f32::MAX, f32::MIN), |(a, b), &v| (a.min(v), b.max(v)));
+        let mut dst = Grid::new(Size::new(dw, dh), f32::NAN);
+        grid::resample_bilinear(&src, &mut dst);
+        prop_assert!(dst.as_slice().iter().all(|&v| (lo..=hi).contains(&v)));
+
+        let src = labelled(sw, sh);
+        let mut dst = Grid::new(Size::new(dw, dh), -1);
+        grid::resample_nearest(&src, &mut dst);
+        prop_assert!(dst.as_slice().iter().all(|v| src.as_slice().contains(v)));
+    }
+}
+
+// ---------------------------------------------------------------- CORE-R48
+
+#[test]
+fn core_r48_zero_budget_is_one_by_one() {
+    assert_eq!(
+        grid::lattice_for(Size::new(200, 100), 0, 1.25),
+        Size::new(1, 1)
+    );
+    assert_eq!(grid::lattice_for(Size::new(1, 1), 0, 1.25), Size::new(1, 1));
+}
+
+#[test]
+fn core_r48_small_displays_are_simulated_at_display_size() {
+    assert_eq!(
+        grid::lattice_for(Size::new(40, 20), 10_000, 1.25),
+        Size::new(40, 20)
+    );
+    assert_eq!(
+        grid::lattice_for(Size::new(1, 1), 10_000, 1.25),
+        Size::new(1, 1)
+    );
+}
+
+#[test]
+fn core_r48_large_displays_are_capped_at_the_quantised_aspect() {
+    // Aspect 4 lies nearest 1.25⁶ ≈ 3.815 on the 1.25 ladder.
+    let l = grid::lattice_for(Size::new(400, 100), 10_000, 1.25);
+    let (w, h) = (f64::from(l.width()), f64::from(l.height()));
+    assert!(l.area() <= 10_000, "{l:?}");
+    assert!(l.area() >= 9_500, "not the largest: {l:?}");
+    assert!((w / h - 1.25f64.powi(6)).abs() < 0.05, "{l:?}");
+
+    // `bucket <= 1` (or NaN) keeps the exact aspect.
+    for bucket in [1.0, 0.5, f64::NAN] {
+        let l = grid::lattice_for(Size::new(300, 100), 3_000, bucket);
+        let (w, h) = (f64::from(l.width()), f64::from(l.height()));
+        assert!(
+            (w / h - 3.0).abs() < 0.05 && l.area() <= 3_000,
+            "{bucket}: {l:?}"
+        );
+    }
+}
+
+#[test]
+fn core_r48_resizing_within_a_bucket_keeps_the_lattice() {
+    // 200×100 (aspect 2.0) and 210×100 (2.1) both round to 1.25³; both exceed the cap.
+    let a = grid::lattice_for(Size::new(200, 100), 2_000, 1.25);
+    let b = grid::lattice_for(Size::new(210, 100), 2_000, 1.25);
+    let c = grid::lattice_for(Size::new(400, 205), 2_000, 1.25);
+    assert_eq!(a, b);
+    assert_eq!(a, c);
+    // A different bucket gives a different shape.
+    assert_ne!(a, grid::lattice_for(Size::new(100, 100), 2_000, 1.25));
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(256))]
+
+    /// CORE-R48: bounded by the cap and the display, at least 1×1, for any input.
+    #[test]
+    fn core_r48_lattice_is_capped_bounded_and_never_panics(
+        w in any::<u16>(), h in any::<u16>(),
+        max in prop_oneof![0usize..50_000, any::<usize>()],
+        bucket in prop_oneof![1.0f64..3.0, any::<f64>()],
+    ) {
+        let display = Size::new(w, h);
+        let l = grid::lattice_for(display, max, bucket);
+        prop_assert!(l.width() <= display.width() && l.height() <= display.height(), "{:?}", l);
+        prop_assert!(l.area() <= max.max(1), "{:?} > {}", l, max);
+    }
 }

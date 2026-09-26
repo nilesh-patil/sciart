@@ -5,10 +5,10 @@
 //! Physics: random walkers diffuse in from a launch circle just outside the cluster and
 //! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`.
 //!
-//! Aspect correction: the aggregate lives on the braille sub-cell lattice, 2 × 4 dots per
-//! terminal cell. With cells ~2:1 tall (`ASPECT`), that lattice is *square* — 1/4 row a
-//! side — so walks are isotropic with four equally likely steps ([`walk_step`]), and so
-//! are the contact distance and the size of each frozen particle. (On the raw 2:1 cell
+//! Aspect correction: the aggregate lives on the braille sub-cell lattice ([`Dots`],
+//! 2 × 4 dots per terminal cell). With cells ~2:1 tall (`ASPECT`), that lattice is
+//! *square* — 1/4 row a side — so walks are isotropic with four equally likely steps
+//! ([`walk_step`]), and so are the contact distance and the size of each frozen particle. (On the raw 2:1 cell
 //! grid, even with `ASPECT²`-weighted horizontal steps, vertical contacts reach twice as far
 //! as horizontal ones and a horizontal arm costs twice the particles per row, which grows
 //! vertical needles with `D_f ≈ 1.4`.) The fine lattice also gives 4× the linear
@@ -28,12 +28,13 @@
 //! images: exact for the walk's position, an approximation for its first-passage point)
 //! and only kept if it lands well clear of the crystal.
 
+use std::cell::RefCell;
 use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use rand::Rng;
-use sciart_core::draw;
 use sciart_core::prelude::*;
+use sciart_core::{draw, raster};
 
 pub static META: Meta = Meta {
     name: "crystal_growth",
@@ -46,10 +47,8 @@ pub fn build() -> Box<dyn Generator> {
 }
 
 /// Braille dots per terminal cell; `SUB_Y / SUB_X = ASPECT` makes the dot lattice square.
-const SUB_X: i32 = 2;
-const SUB_Y: i32 = 4;
-/// Braille bit for dot `(dx, dy)` of a cell (Unicode dot numbering 1-2-3-7 / 4-5-6-8).
-const BRAILLE_BIT: [[u8; 4]; 2] = [[0x01, 0x02, 0x04, 0x40], [0x08, 0x10, 0x20, 0x80]];
+const SUB_X: i32 = Dots::CELL_W;
+const SUB_Y: i32 = Dots::CELL_H;
 
 /// Attach-time sentinel for an empty site (real attach times are ≥ 0).
 const EMPTY: f32 = -1.0;
@@ -362,6 +361,10 @@ pub struct CrystalGrowth {
     df_clock: f64,
     label: String,
     label_row: Option<i32>,
+    /// Render-time scratch raster for the crystal, sized in `resize`. The crystal's
+    /// colours change with age every frame, so it is rebuilt in `render`, which takes
+    /// `&self` (CORE-R14): hence the `RefCell`.
+    dots: RefCell<Dots>,
 }
 
 impl Default for CrystalGrowth {
@@ -382,6 +385,7 @@ impl Default for CrystalGrowth {
             df_clock: 0.0,
             label: String::with_capacity(96),
             label_row: None,
+            dots: RefCell::default(),
         }
     }
 }
@@ -484,27 +488,16 @@ impl CrystalGrowth {
     }
 }
 
-/// Braille glyph for a dot mask, with a density-graded ASCII fallback (GEN-R10).
-fn braille(bits: u8) -> Glyph {
-    let ascii = match bits.count_ones() {
-        0 | 1 => '.',
-        2 => ':',
-        3 | 4 => '+',
-        _ => '#',
-    };
-    let ch = char::from_u32(0x2800 + u32::from(bits)).unwrap_or(ascii);
-    Glyph::new(ch, ascii)
-}
-
 impl Generator for CrystalGrowth {
     fn meta(&self) -> &'static Meta {
         &META
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        let lw = (u32::from(size.width()) * SUB_X as u32).min(u32::from(u16::MAX)) as u16;
-        let lh = (u32::from(size.height()) * SUB_Y as u32).min(u32::from(u16::MAX)) as u16;
-        let lattice = Size::new(lw, lh);
+        // The DLA lattice *is* the dot lattice: one site per braille dot.
+        let dots = self.dots.get_mut();
+        dots.resize(size);
+        let lattice = dots.dot_size();
         self.dla = Dla::new(lattice, WALKERS);
         self.chem = Grid::new(lattice, u16::MAX);
         self.queue = Vec::with_capacity(lattice.area());
@@ -566,11 +559,15 @@ impl Generator for CrystalGrowth {
             draw::text_centered(canvas, row, &self.label, Ink::new(Role::Text, 150));
         }
         if self.phase == Phase::Grow {
+            // The vapour is sparse: each walker is a lone dot that replaces its cell
+            // (rather than merging into a `Dots` layer); the crystal then draws over it.
             for &(x, y) in &self.dla.walkers {
-                let bit = BRAILLE_BIT[(x % SUB_X) as usize][(y % SUB_Y) as usize];
-                canvas.put(x / SUB_X, y / SUB_Y, braille(bit), Ink::new(Role::Dim, 110));
+                let glyph = raster::braille(raster::dot_bit(x, y));
+                canvas.put(x / SUB_X, y / SUB_Y, glyph, Ink::new(Role::Dim, 110));
             }
         }
+        let mut dots = self.dots.borrow_mut();
+        dots.clear();
         // Only the terminal cells that can hold crystal: the seed's r_max box.
         let d = &self.dla;
         let r = d.r_max.ceil() as i32 + 1;
@@ -579,26 +576,35 @@ impl Generator for CrystalGrowth {
         let (y0, y1) = ((d.seed.1 - r).max(0), (d.seed.1 + r).min(lh - 1));
         for cy in y0 / SUB_Y..=y1 / SUB_Y {
             for cx in x0 / SUB_X..=x1 / SUB_X {
-                let (mut bits, mut youngest, mut chem, mut has_seed) = (0u8, EMPTY, 0u16, false);
-                for (dx, col) in BRAILLE_BIT.iter().enumerate() {
-                    for (dy, &bit) in col.iter().enumerate() {
-                        let (x, y) = (cx * SUB_X + dx as i32, cy * SUB_Y + dy as i32);
+                // A cell's colour comes from all its crystal sites together (youngest
+                // age, melting front, seed), not from its single brightest dot, so
+                // collect the sites first and light them with one shared ink.
+                let mut sites = [(0, 0); (SUB_X * SUB_Y) as usize];
+                let mut n = 0;
+                let (mut youngest, mut chem, mut has_seed) = (EMPTY, 0u16, false);
+                for dy in 0..SUB_Y {
+                    for dx in 0..SUB_X {
+                        let (x, y) = (cx * SUB_X + dx, cy * SUB_Y + dy);
                         if let Some(&a) = d.attach.get(x, y)
                             && a >= 0.0
                         {
-                            bits |= bit;
+                            sites[n] = (x, y);
+                            n += 1;
                             youngest = youngest.max(a);
                             chem = chem.max(self.chem.get(x, y).copied().unwrap_or(0));
                             has_seed |= (x, y) == d.seed;
                         }
                     }
                 }
-                if bits != 0 {
+                if n > 0 {
                     let ink = self.cell_ink(youngest, chem, has_seed);
-                    canvas.put(cx, cy, braille(bits), ink);
+                    for &(x, y) in &sites[..n] {
+                        dots.set(x, y, ink);
+                    }
                 }
             }
         }
+        dots.blit(canvas);
     }
 }
 
@@ -645,12 +651,11 @@ mod tests {
         let dot_w = 1.0 / (sciart_core::geom::ASPECT * f64::from(SUB_X));
         let dot_h = 1.0 / f64::from(SUB_Y);
         assert!((dot_w - dot_h).abs() < 1e-12);
-        // Every mask maps to its own braille glyph and a pure-ASCII fallback.
-        for bits in 0..=255u8 {
-            let g = braille(bits);
-            assert_eq!(g.unicode as u32, 0x2800 + u32::from(bits));
-            assert!(g.ascii.is_ascii());
-        }
+        // The DLA lattice is the dot lattice of the screen.
+        let size = Size::new(80, 24);
+        let mut g = CrystalGrowth::default();
+        g.resize(size, &mut Ctx::new(1, size));
+        assert_eq!(g.dla.attach.size(), Size::new(160, 96));
     }
 
     #[test]

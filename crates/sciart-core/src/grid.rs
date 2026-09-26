@@ -248,6 +248,102 @@ impl<T> Grid<T> {
     }
 }
 
+/// Source coordinate sampled by destination index `d`: cell centres aligned, so
+/// `(d + ½) / dn = (s + ½) / sn` (CORE-R43). Exact for equal sizes.
+#[inline]
+fn centre_of(d: usize, dn: usize, sn: usize) -> f64 {
+    (d as f64 + 0.5) * sn as f64 / dn as f64 - 0.5
+}
+
+/// Fill `dst` (keeping its size) by bilinear sampling of `src`, cell-centre aligned and
+/// clamped at the edges (CORE-R43). No-op if either grid is empty; never allocates.
+///
+/// For moving a continuous field (concentration, ρ, u) onto a new simulation lattice
+/// after a resize (ADR-0012). Interpolation uses `a + (b − a)·f`, so a constant field
+/// comes through bit-exact, and equal sizes are the identity.
+pub fn resample_bilinear(src: &Grid<f32>, dst: &mut Grid<f32>) {
+    if src.is_empty() || dst.is_empty() {
+        return;
+    }
+    let (sw, sh) = (usize::from(src.width), usize::from(src.height));
+    let (dw, dh) = (usize::from(dst.width), usize::from(dst.height));
+    // Neighbouring source index pair and weight along one axis.
+    let taps = |d: usize, dn: usize, sn: usize| {
+        let s = centre_of(d, dn, sn).clamp(0.0, (sn - 1) as f64);
+        let i0 = s as usize; // s ≥ 0, so truncation is floor
+        let i1 = (i0 + 1).min(sn - 1);
+        (i0, i1, (s - i0 as f64) as f32)
+    };
+    let lerp = |a: f32, b: f32, f: f32| if f == 0.0 { a } else { a + (b - a) * f };
+    for (y, row) in dst.cells.chunks_exact_mut(dw).enumerate() {
+        let (y0, y1, fy) = taps(y, dh, sh);
+        let (r0, r1) = (&src.cells[y0 * sw..][..sw], &src.cells[y1 * sw..][..sw]);
+        for (x, out) in row.iter_mut().enumerate() {
+            let (x0, x1, fx) = taps(x, dw, sw);
+            let top = lerp(r0[x0], r0[x1], fx);
+            let bottom = lerp(r1[x0], r1[x1], fx);
+            *out = lerp(top, bottom, fy);
+        }
+    }
+}
+
+/// Fill `dst` (keeping its size) by nearest-neighbour sampling of `src`, cell-centre
+/// aligned (CORE-R43), so only values present in `src` appear. For discrete states such
+/// as Ising spins. No-op if either grid is empty; never allocates.
+pub fn resample_nearest<T: Clone>(src: &Grid<T>, dst: &mut Grid<T>) {
+    if src.is_empty() || dst.is_empty() {
+        return;
+    }
+    let (sw, sh) = (usize::from(src.width), usize::from(src.height));
+    let (dw, dh) = (usize::from(dst.width), usize::from(dst.height));
+    // floor((d + ½)·sn/dn) in integers: exact, and the identity for equal sizes.
+    let nearest = |d: usize, dn: usize, sn: usize| ((2 * d + 1) * sn / (2 * dn)).min(sn - 1);
+    for (y, row) in dst.cells.chunks_exact_mut(dw).enumerate() {
+        let src_row = &src.cells[nearest(y, dh, sh) * sw..][..sw];
+        for (x, out) in row.iter_mut().enumerate() {
+            out.clone_from(&src_row[nearest(x, dw, sw)]);
+        }
+    }
+}
+
+/// A capped simulation lattice for a display region measured in square units
+/// (ADR-0012, CORE-R48).
+///
+/// The display aspect `w / h` is snapped to the nearest power of `bucket` (e.g. 1.25;
+/// `bucket ≤ 1` or NaN keeps the exact aspect), and the result is the largest lattice of
+/// that aspect with `w·h ≤ max_nodes`, clamped per axis to the display (so small
+/// displays simulate at display size) and at least 1×1 (`max_nodes = 0` ⇒ 1×1).
+///
+/// Because the uncapped shape depends only on the bucket and `max_nodes`, any display at
+/// least that large in both axes, within one bucket, maps to the same lattice: resizing
+/// there never touches simulation state.
+pub fn lattice_for(display: Size, max_nodes: usize, bucket: f64) -> Size {
+    if max_nodes == 0 {
+        return Size::new(1, 1);
+    }
+    let (dw, dh) = (display.width(), display.height());
+    let aspect = f64::from(dw) / f64::from(dh);
+    let snapped = if bucket > 1.0 {
+        let step = bucket.ln();
+        ((aspect.ln() / step).round() * step).exp()
+    } else {
+        aspect
+    };
+    // Degenerate buckets (∞, 1 + ε) can produce 0, ∞ or NaN here: fall back to exact.
+    let aspect = if snapped.is_finite() && snapped > 0.0 {
+        snapped
+    } else {
+        aspect
+    };
+    // h·(aspect·h) = max_nodes. Flooring both axes (and the w ≤ max/h guard for float
+    // round-off and the 1-wide/1-tall extremes) keeps w·h ≤ max_nodes.
+    let h_ideal = (max_nodes as f64 / aspect).sqrt();
+    let h = (h_ideal as usize).clamp(1, max_nodes);
+    let w = ((h_ideal * aspect) as usize).clamp(1, max_nodes / h);
+    // Both are ≤ the display's u16 axes after the `min`, so the casts are lossless.
+    Size::new(w.min(usize::from(dw)) as u16, h.min(usize::from(dh)) as u16)
+}
+
 /// Which cells count as neighbours (CORE-R35).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Hood {

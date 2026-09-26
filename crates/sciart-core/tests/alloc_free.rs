@@ -2,12 +2,15 @@
 //! allocator (ADR-0009). Own test binary: a binary has exactly one global allocator.
 //!
 //! SPEC-001 promises no heap traffic after construction for `ParticlePool` (CORE-R28),
-//! `Trail` (CORE-R29) and `Grid::step` after its first call (CORE-R36). Counters are
-//! per thread, so libtest's parallel threads do not pollute each other.
+//! `Trail` (CORE-R29), `Grid::step` after its first call (CORE-R36), the rasters
+//! (CORE-R41, CORE-R42), resampling (CORE-R43) and the leapfrog integrator (CORE-R44).
+//! Counters are per thread, so libtest's parallel threads do not pollute each other.
 
 use std::hint::black_box;
 
 use sciart_core::prelude::*;
+use sciart_core::raster::{Dots, Pixels};
+use sciart_core::{grid, ode};
 use sciart_testalloc::{Allocs, CountingAlloc, measure};
 
 #[global_allocator]
@@ -185,4 +188,97 @@ fn core_r36_grid_step_with_presized_scratch_never_allocates() {
         }
     });
     assert_free("Grid::step with pre-sized scratch", stats);
+}
+
+#[test]
+fn core_r41_dots_set_plot_clear_blit_do_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut dots = Dots::new(size);
+    let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+    let ink = Ink::new(Role::Particle, 200);
+    let ((), stats) = measure(|| {
+        for frame in 0..3 {
+            dots.clear();
+            for i in 0..4000 {
+                let t = f64::from(i) * 0.01 + f64::from(frame);
+                dots.plot(200.0 + 180.0 * t.cos(), 100.0 + 90.0 * t.sin(), ink);
+                dots.set(i % 400, i / 20, ink);
+            }
+            black_box(dots.is_lit(3, 3));
+            dots.blit(&mut canvas);
+            canvas.set_mode(GlyphMode::Ascii);
+            dots.blit(&mut canvas);
+            canvas.set_mode(GlyphMode::Unicode);
+        }
+    });
+    assert_free("Dots set/plot/clear/blit", stats);
+    black_box(canvas.cells());
+}
+
+#[test]
+fn core_r42_pixels_set_fill_blit_do_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut px = Pixels::new(size);
+    let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+    let ((), stats) = measure(|| {
+        px.fill(Ink::new(Role::Seq, 10));
+        for y in 0..100 {
+            for x in 0..200 {
+                px.set(x, y, Ink::new(Role::Div, ((x + y) % 256) as u8));
+            }
+        }
+        black_box(px.get(5, 5));
+        px.blit(&mut canvas, |_, _, top, _| Some(('#', top)));
+        canvas.set_mode(GlyphMode::Ascii);
+        px.blit(&mut canvas, |_, _, top, bottom| {
+            (top.level > bottom.level).then_some(('^', top))
+        });
+        px.clear();
+    });
+    assert_free("Pixels set/fill/get/blit/clear", stats);
+    black_box(canvas.cells());
+}
+
+#[test]
+fn core_r43_resampling_does_not_allocate() {
+    let src = Grid::new(Size::new(120, 60), 0.5f32);
+    let mut up = Grid::new(Size::new(200, 100), 0.0f32);
+    let mut down = Grid::new(Size::new(37, 11), 0.0f32);
+    let spins = Grid::new(Size::new(64, 64), -1i8);
+    let mut spins_dst = Grid::new(Size::new(100, 30), 0i8);
+    let ((), stats) = measure(|| {
+        grid::resample_bilinear(&src, &mut up);
+        grid::resample_bilinear(&src, &mut down);
+        grid::resample_nearest(&spins, &mut spins_dst);
+    });
+    assert_free("resample_bilinear / resample_nearest", stats);
+    black_box((up.as_slice(), down.as_slice(), spins_dst.as_slice()));
+}
+
+#[test]
+fn core_r44_verlet_integrate_does_not_allocate() {
+    // A small N-body-like system: 16 bodies in 2-D, pairwise softened gravity.
+    let mut pos: Vec<f64> = (0..32).map(|i| f64::from(i).sin() * 5.0).collect();
+    let mut vel = vec![0.0; 32];
+    let mut acc = vec![0.0; 32];
+    let gravity = |p: &[f64], a: &mut [f64]| {
+        a.fill(0.0);
+        for i in 0..16 {
+            for j in 0..16 {
+                if i != j {
+                    let (dx, dy) = (p[2 * j] - p[2 * i], p[2 * j + 1] - p[2 * i + 1]);
+                    let r2 = dx * dx + dy * dy + 0.1;
+                    let k = 1.0 / (r2 * r2.sqrt());
+                    a[2 * i] += dx * k;
+                    a[2 * i + 1] += dy * k;
+                }
+            }
+        }
+    };
+    gravity(&pos, &mut acc);
+    let (n, stats) =
+        measure(|| ode::verlet_integrate(&mut pos, &mut vel, &mut acc, 0.5, 0.01, gravity));
+    assert_eq!(n, 50);
+    assert_free("verlet_integrate", stats);
+    black_box(pos);
 }
