@@ -2,7 +2,7 @@
 
 **Status**: Approved (spec interview, 2026-09-26)
 **Branch**: `feat/rust-rewrite`
-**Supersedes**: the Python implementation in `tools-py/` (kept as reference until M8 cutover)
+**Supersedes**: the Python prototype (removed at the M8 cutover; its design notes are archived in `docs/archive/python-prototype-spec.md`)
 
 ## Executive Summary
 
@@ -188,9 +188,9 @@ property (proptest over sizes/resizes/dt), snapshot (insta, seeded), benchmarks
 
 ## Constraints & Assumptions
 
-- Python implementation stays in `tools-py/` until M8; no Python changes on this branch.
+- The Python implementation was kept until M8 and then removed (M8 cutover).
 - No hosted CI; pixi `rs-ci` is the gate (run before every commit).
-- Generator count and categories match `visuals.md` (26 incl. starfield).
+- Generator count and categories match the registry (26 incl. starfield).
 
 ## Future Considerations
 

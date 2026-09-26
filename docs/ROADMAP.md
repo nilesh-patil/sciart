@@ -69,10 +69,10 @@ Shared helpers first: RK4 integrator, scene timeline/state machine.
 - [x] Snapshots recorded and reviewed; benches < 1 ms at 200×50 [GEN-R8]
 
 ## M8 — Parity & cutover
-- [ ] All 26 registered; every requirement ID cited by a test [TEST-R1]
-- [ ] All benches < 5 ms at 200×50 [GEN-R8]
-- [ ] Remove `tools-py/`, `tests/` (Python), Python deps and `run_*` tasks from `pixi.toml`; update the contributor guide, `visuals.md`
-- [ ] Open PR `feat/rust-rewrite` → `main`
+- [x] All 26 registered; every requirement ID cited by a test — 166/169 cited, 3 manual; enforced by `crates/sciart/tests/spec_traceability.rs` [TEST-R1]
+- [x] All benches < 5 ms at 200×50 — max 0.55 ms (chemical_reaction) [GEN-R8]
+- [x] Remove `tools-py/`, `tests/` (Python), Python deps and `run_*` tasks from `pixi.toml`; update the contributor guide; Python-era docs (`visuals.md`, `specs.md`, improvement notes, issue-01) moved to `docs/archive/`
+- [x] Open PR `feat/rust-rewrite` → `main` (draft)
 
 ## M9 — Future (unscheduled)
 - `sciart record`, braille hi-res canvas, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config.

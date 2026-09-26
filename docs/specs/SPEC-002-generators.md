@@ -2,7 +2,7 @@
 
 **Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches) · **Status**: M1, M4–M7 (Batches A–D) implemented
 
-Ports the Python stability contract (`docs/issue-01-simulator-stability.md`, R1) to Rust
+Ports the Python stability contract (`docs/archive/issue-01-simulator-stability.md`, R1) to Rust
 and extends it for real-time animation.
 
 ## Registry
