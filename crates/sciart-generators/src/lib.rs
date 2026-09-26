@@ -22,16 +22,23 @@ macro_rules! registry {
 }
 
 registry![
+    black_hole,
+    brownian_motion,
     constellation_map,
     cosmic_microwave_background,
     doppler_effect,
     exoplanet_transit,
+    galaxy_collision,
     gravitational_lensing,
+    molecular_dynamics,
     moon_phases,
+    particle_accelerator,
     pulsar,
+    rocket_launch,
     satellite_orbit,
     solar_system,
     starfield,
+    stellar_nursery,
     wave_interference,
 ];
 

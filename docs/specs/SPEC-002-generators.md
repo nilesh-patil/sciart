@@ -1,6 +1,6 @@
 # SPEC-002: Generators & registry
 
-**Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches) · **Status**: M1 + M4 (Batch A) implemented
+**Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches) · **Status**: M1 + M4 (Batch A) + M5 (Batch B) implemented
 
 Ports the Python stability contract (`docs/issue-01-simulator-stability.md`, R1) to Rust
 and extends it for real-time animation.
@@ -105,3 +105,51 @@ Shared helpers: `sciart_core::draw` (CORE-R22..R27). All lengths below are in **
 - **Data**: star positions from real J2000 RA/Dec and visual magnitudes, gnomonic projection about the figure centre (east left, north up); only stars on the conventional stick figure are included (e.g. ε Cru omitted).
 - **Inks**: constellation stars `Star`, lines `Structure`, tracing pen tip `Accent`, name `Text`, background `Dim`.
 - **Acceptance**: `CON-A1` every edge references valid stars and every star is on at least one edge; `CON-A2` tracing progress 0 draws no segment, 1 draws all, and drawn length is monotone in progress; `CON-A3` the constellation index advances every 12 s and wraps.
+
+---
+## Batch B — particle systems (M5)
+Shared helpers: `sciart_core::particles` (CORE-R28..R32). Pools are sized in `resize` from the area and are
+bounded (GEN-R8); particles are respawned rather than reallocated. Positions are in **rows** unless stated
+(x on screen = `cx + x·ASPECT`). Physics uses `dt` from `update` only.
+
+### black_hole  (Astronomy, M5)
+- **Intent**: an Interstellar-style black hole: a dark shadow, a thin bright photon ring, and a tilted accretion disk whose far side is lensed up over the shadow; the approaching side glows brighter.
+- **Model**: shadow radius `rs = R(0.14)`; ISCO `r_in = 2.2 rs`; disk out to `R(0.95)`; inclination 78° (disk ellipse flattening `cos i`); particles on circular orbits `ω(r) = kepler_omega(gm, r)` with the ISCO period fixed at 2.5 s; relativistic beaming for shading only: level ∝ `(1 + 0.55·β_los)³` with `β_los` the line-of-sight velocity fraction. Particles slowly drift inward (`dr/dt = −0.02 r`); inside `r_in` they plunge and are respawned at the outer edge. The far half of the disk is drawn at its weak-field lensed image positions (`θE² = 2·R_s·depth`): the bright primary is lifted into an arc over the shadow, a faint secondary appears below; there is no separate unlensed copy. Pool `clamp(area/6, 24, 1600)`, initially uniform in `ln r` (the steady state of the drift).
+- **Inks**: disk `Hot` (level from radius and beaming), photon ring `Accent`, lensed arc `Hot` dimmer, shadow = blank.
+- **Acceptance**: `BH-A1` ω strictly decreases with r and the ISCO period is 2.5 s; `BH-A2` no disk particle is drawn inside the shadow when it is behind the hole (far side, projected distance < rs); `BH-A3` the approaching half is brighter on average than the receding half; `BH-A4` the pool size stays constant after warm-up (respawn, no growth).
+
+### galaxy_collision  (Astronomy, M5)
+- **Intent**: two spiral galaxies passing each other and pulling out tidal tails and bridges (Toomre & Toomre 1972).
+- **Model**: restricted three-body: two cores (masses `M1 = 1`, `M2 = 0.8`) on a bound, eccentric, softened (`ε = 0.3` of disk radius) orbit integrated with kick-drift-kick leapfrog at `dt` sub-stepped to ≤ 1/120 s; massless test stars (`≈ 0.04·area`, max 900, split ∝ mass) start on circular orbits `v = √(G M r² / (r² + ε²)^{3/2})` in disks of radius `Rd`, one prograde and one inclined/retrograde, projected to the screen. Cores start at apocentre of an orbit with `a = 3.5 Rd`, `e = 0.63` (Kepler period mapped to 24 s). A cycle is 40 s (approach, pericentre ≈ 12 s, tails, second close passage ≈ 36 s — a conservative restricted three-body model cannot merge) then restarts from a re-seeded configuration (galaxy 2 spin 40–140°); the camera eases to frame both cores.
+- **Inks**: galaxy 1 stars `Cold`, galaxy 2 `Hot`, cores `Accent`; star level by local density or distance to core.
+- **Acceptance**: `GAL-A1` the core pair conserves energy within 1 % over a full cycle (leapfrog); `GAL-A2` initial star speeds equal the softened circular speed; `GAL-A3` after pericentre some stars are farther than `2·Rd` from both cores (tails form); `GAL-A4` the cycle restarts at 40 s.
+
+### stellar_nursery  (Astronomy, M5)
+- **Intent**: a glowing emission nebula with dark dust pillars where gas streams onto protostars that ignite, flare bipolar jets, then shine.
+- **Model**: nebula brightness = slowly drifting domain-warped sum of sines (≤ 6 terms, drawn only where above a threshold); 2–3 dust pillars as tapered vertical shapes that occlude; 3–5 protostars at seeded positions; a gas-particle pool (`≈ 0.03·area`, max 600) spawned in the nebula, accelerating toward the nearest protostar (`a = gm / (d² + ε²)`), absorbed within 0.8 rows, adding mass; a protostar ignites when mass ≥ `M_ign` (brightness ramps over 1 s) and then emits short-lived jet particles along a seeded axis; after 25 s of shining it fades (2.5 s) and is replaced by a new protostar elsewhere. Gas is stored in polar coordinates about its target: only the radial motion follows the softened gravity, the swirl is kinematic (pure rotation), which keeps NUR-A1 exact; new gas targets the nearest *accreting* protostar. Ignited stars ionise a growing bubble of nebula; pillar rims glow `Hot` as ionisation fronts; jets are pulsed (Herbig–Haro knots); jet pool `clamp(area/60, 4, 240)`.
+- **Inks**: nebula `Wave`/`Hot` blend by level, pillars `Structure` (dark), gas `Particle`, protostars `Star`, jets `Accent`.
+- **Acceptance**: `NUR-A1` a gas particle's distance to its target protostar is non-increasing until absorption (for dt ≤ 1/60); `NUR-A2` protostar mass is non-decreasing while it accretes and ignition happens exactly when mass first reaches `M_ign`; `NUR-A3` particle pools never exceed capacity.
+
+### brownian_motion  (Physics & Chemistry, M5)
+- **Intent**: a large pollen grain jittering among fast solvent molecules, leaving a fading random-walk trail, with a live mean-squared-displacement readout.
+- **Model**: grain obeys the Langevin/Ornstein–Uhlenbeck equation `dv = −γ v dt + σ √dt ξ` (γ = 2 s⁻¹, σ chosen so the diffusion constant `D = σ²/(2γ²)` gives ~3 rows/√s), exact OU update for the velocity; reflecting walls; trail of the last 180 positions (`Trail`); `≈ 0.02·area` (max 400) visible solvent molecules moving ballistically with Maxwell–Boltzmann velocities and reflecting walls, occasionally flashing where they "hit" the grain; readout `D̂` from the time-averaged MSD at a 2 s lag with the exact OU inertial correction (a single grain's `r²/4t` from the start never converges). The joint position–velocity OU transition is sampled exactly; walls are exact specular reflections via folding (method of images).
+- **Inks**: grain `Accent`, trail `Structure` fading by age, molecules `Particle`, readout `Text`.
+- **Acceptance**: `BRO-A1` the stationary velocity variance per axis converges to `σ²/(2γ)` (seeded statistical test, 5 %); `BRO-A2` the ensemble MSD at time t is `4Dt` within 10 % for t ≫ 1/γ (seeded, many walkers); `BRO-A3` the grain and molecules always stay inside the box; the trail length is ≤ 180.
+
+### molecular_dynamics  (Physics & Chemistry, M5)
+- **Intent**: a Lennard-Jones fluid in a box that is slowly heated and cooled so it melts into a gas and condenses back into droplets/crystals.
+- **Model**: reduced LJ units, `U(r) = 4(r⁻¹² − r⁻⁶)` shifted at cutoff 2.5; `N = clamp(area/45, 8, 160)` atoms at a density that fits the box (1 LJ σ ≈ 1.6 rows horizontally-corrected); velocity-Verlet with `dt_md ≤ 0.004` sub-steps per frame; cell list for O(N) forces; reflecting walls; atoms start on a triangular crystal; below `r = 0.8` the potential continues linearly so forces stay finite; a 30 s temperature cycle by gentle velocity rescaling (Berendsen, τ = 1 s) between T = 0.25 and 1.6.
+- **Inks**: atoms `Cold`→`Hot` by kinetic energy; box `Structure`; readout `T = …` `Text`.
+- **Acceptance**: `MD-A1` the force equals `−dU/dr` (finite-difference check) and vanishes beyond the cutoff; `MD-A2` with the thermostat off, total energy drifts < 1 % over 5 simulated seconds; `MD-A3` atoms always stay inside the box; `MD-A4` the thermostat moves temperature toward its target.
+
+### particle_accelerator  (Physics & Chemistry, M5)
+- **Intent**: a collider ring where two counter-rotating bunches accelerate, meet at the detector, and burst into a shower of curling tracks.
+- **Model**: ring = ellipse `R(0.8)`; bunches at angles `−π/2 + φ(t)` and `−π/2 − φ(t)` (mirror images about the vertical axis), so they meet only when `φ ≡ 0` (the detector, top) or `φ ≡ π` (a second, quieter interaction point, bottom); `dφ/dt` ramps linearly from 0.5 to 6 rad/s over 10 s; after the ramp the bunches collide at the detector each time they meet; each collision spawns 20–40 shower tracks with random momentum `p`, charge ±1, moving in a uniform magnetic field so each follows a circle of radius `r = p/B` (curling clockwise for +, counter-clockwise for −), losing momentum as `dp/dt = −0.8 p` (closed-form inward spiral, exact for any dt; non-relativistic: speed = p, radius = p/B) and fading after ≤ 2 s. Pool capped at 128. Collisions flash; the bottom interaction point only glints. Cycle 20 s; the first shower comes after the 10 s ramp.
+- **Inks**: ring `Structure`, bunches `Accent` with short trails, tracks `Hot` (+) / `Cold` (−), detector `Text` label.
+- **Acceptance**: `ACC-A1` the two bunches are always mirror images about the vertical axis and meet only at the two interaction points; `ACC-A2` a shower track's curvature radius equals `p/B` and its turning sign equals its charge; `ACC-A3` showers only spawn at the detector after the ramp and the pool never exceeds capacity.
+
+### rocket_launch  (Space Exploration, M5)
+- **Intent**: a launch from countdown to orbit: vapour venting, ignition, a rising rocket with a flickering flame, billowing exhaust that cools into smoke, and stage separation.
+- **Model**: 22 s cycle — countdown 4 s (vapour puffs, "T−3 … 1" text), ignition 1 s (hold-down, exhaust spreads along the pad), flight: first stage burns 8 s with thrust `F`, exhaust speed `ve`, mass flow `ṁ = F/ve`, `a = F/m − g`; stage separation (the spent stage tumbles and falls away), second stage burns until the rocket exits the top; the view is fixed on the pad until altitude exceeds 60 % of the height, then the camera follows (ground scrolls away). Exhaust particles (`≈ 0.08·area`, max 1500) emitted backward with spread, slowed by drag, rising buoyantly as they cool from `Hot` to grey smoke. Rocket drawn from a small ASCII sprite (≥ 5 rows tall at h ≥ 20, a 1-cell glyph when tiny). Units are scaled for the screen (toy vehicle, `ve` ≈ 110–165 m/s; rows-per-metre chosen so 60 % height is reached 5 s after liftoff); the rocket equation is exact with `t` and `m0` measured from liftoff. Countdown vapour and the separation puff use a separate vapour pool, so "exhaust only while burning" holds strictly. Captions `LIFTOFF`, `STAGE SEPARATION`, `STAGE 2 IGNITION` and a telemetry line (T+, ALT, VEL) are shown.
+- **Inks**: rocket body `Text`, flame `Hot`/`Accent`, smoke `Dim`, ground/tower `Structure`, countdown `Text`.
+- **Acceptance**: `ROC-A1` during first-stage burn the velocity matches the rocket equation `v = ve ln(m0/m) − g t` within 1 %; `ROC-A2` exhaust spawns only while an engine burns, and the pool never exceeds capacity; `ROC-A3` altitude is non-decreasing from liftoff until stage separation and the cycle restarts at 22 s.

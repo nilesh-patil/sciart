@@ -49,8 +49,12 @@ Shared helpers first: orbit/ellipse drawing, disc/ring fill, sine fields.
 
 ## M5 — Batch B: particle systems (7)
 Shared helpers first: `ParticlePool` (fixed-capacity, respawn), Keplerian speed, gaussian spawn.
-- [ ] black_hole · [ ] galaxy_collision · [ ] stellar_nursery · [ ] brownian_motion
-- [ ] molecular_dynamics · [ ] particle_accelerator · [ ] rocket_launch
+- [x] `sciart_core::particles` — ParticlePool, Trail, gaussian, kepler_*, plot [CORE-R28..R32]
+- [x] black_hole · [x] galaxy_collision · [x] stellar_nursery · [x] brownian_motion
+- [x] molecular_dynamics · [x] particle_accelerator · [x] rocket_launch
+- [x] Snapshots recorded and reviewed; all Batch B benches < 0.5 ms at 200×50 [GEN-R8]
+- [ ] Follow-up: MD density (1σ ≈ 1.6 rows) makes the gas phase sparse on small terminals; consider denser packing
+- [ ] Follow-up: the pool "no allocation" guarantee (CORE-R28) is by construction only — no counting-allocator test (`unsafe_code = forbid`)
 
 ## M6 — Batch C: grid / automata / stochastic (4)
 Shared helpers first: `Grid<T>` with resize-rebuild, neighbourhood iteration.

@@ -1,0 +1,28 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
+                                                                                
+                                                                             o  
+    .    .         o                            ...                             
+                                            OOO.. ..                            
+                                           O@@@@   ..                           
+                                           OO@@O  .   .                         
+                                              ....                              
+    .                                        ..                           .     
+       .                                     ..          o   .                  
+                                          ...                             o     
+                                         .                               .      
+      o        .                        .            .          o               
+                                                                             o. 
+                                      .                    o              .     
+                         .                                           o          
+             o                                        o                         
+                          o                                       .             
+                                     oo                                o        
+                         .                                                      
+                                                                               .
+.                                                                               
+                             .                           o                   .  
+       .                                                                        
+               <dr^2>/4t  D^ = 4.63   D = 2.25 rows^2/s   t = 5s
