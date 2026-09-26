@@ -6,23 +6,23 @@ expression: frame
 |                                                                              |
 |                                                                              |
 |                                                                              |
-|                                                                              |
-|                                                                              |
-|                            O .O . O                                          |
-|                             . .. .    O   O                                  |
-|                            . O .O . O. . . ...O .O                           |
-|                           O ..O. .. . ..O .O .. . .                          |
-|                            . ....O.  O ..O. . .O .O                          |
-|                            .O. O . O. .. .. O . O.                           |
-|                           O..O. . ....O . O... ..                            |
-|                           . .. .O . O .. . ..O .O                            |
-|                            O. O .O .. .O.. O . .                             |
-|                                    . O .O .. . O                             |
-|                                           . O                                |
-|                                           O.                                 |
-|                                                                              |
+|                                      .O. O.O. O.O..O                         |
+|                           O..O.O.O..O...O.O..O.O .O.O                        |
+|                   O      O..O.O.O..O.O.. ...O.O..O.O.                        |
+|                      O .O.O .O.O..O.O..O.O.O.O..O.O..O                       |
+|                      ..O.O..O.O..O.O..O.O... ..O.O.O                         |
+|                     O.O..O.O.O. O.O..O.O..O.O...O..O.O                       |
+|                      O...O..O..O.O.O .O.O..O..O ..O.O.                       |
+|                      . O...O.O..O.O..O.O..O.O..OO..O..O                      |
+|                       O.O...O..O.O..O.O .O.O..O...O.O.                       |
+|                        O..O...O.O..O.O..O.O..O.O... ..O                      |
+|                        O.O.O.. O..O.O..O.O..O.O..O.O..                       |
+|                         O..O.O...O.O..O.O..O.O..O.O..O                       |
+|                        O..O.O. O. ...O.O..O.O. O.O. O                        |
+|                         .O.O.O .O.O .               O                        |
+|                        O.O. O                                                |
 |                                                                              |
 |                                                                              |
 |                                                                              |
 +------------------------------------------------------------------------------+
-       T = 0.20 -> 0.26 heating   U/N = -2.25   N = 42   LJ reduced units
+      T = 0.21 -> 0.25 heating   U/N = -2.52   N = 159   LJ reduced units

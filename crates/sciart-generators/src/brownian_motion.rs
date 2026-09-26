@@ -226,6 +226,8 @@ pub struct BrownianMotion {
     flashes: ParticlePool<Flash>,
     label: String,
     label_row: Option<i32>,
+    /// Canvas width in cells, for fitting the readout.
+    width: usize,
 }
 
 impl Default for BrownianMotion {
@@ -245,6 +247,7 @@ impl Default for BrownianMotion {
             flashes: ParticlePool::with_capacity(FLASH_MAX),
             label: String::with_capacity(64),
             label_row: None,
+            width: 0,
         }
     }
 }
@@ -280,16 +283,33 @@ impl BrownianMotion {
         }
     }
 
+    /// Readout, e.g. `D^ (MSD@2s) = 2.31   D = 2.25 rows^2/s   t = 42s`: the estimate named
+    /// by its estimator (time-averaged MSD at the lag τ, inertia-corrected — see [`d_hat`]),
+    /// then the true D, then the elapsed time. On narrow screens trailing parts are dropped
+    /// rather than clipped; below the estimator alone the label is empty (not drawn).
+    ///
+    /// [`d_hat`]: Self::d_hat
     fn refresh_label(&mut self) {
+        let lag = LAG_TICKS as f64 * TICK;
+        let d_hat = self.d_hat();
+        // Longest first; the first that fits with a 1-cell margin each side wins.
+        for parts in (1..=3).rev() {
+            self.label.clear();
+            let _ = match d_hat {
+                Some(d) => write!(self.label, "D^ (MSD@{lag:.0}s) = {d:.2}"),
+                None => write!(self.label, "D^ (MSD@{lag:.0}s) = ..."),
+            };
+            if parts >= 2 {
+                let _ = write!(self.label, "   D = {D:.2} rows^2/s");
+            }
+            if parts >= 3 {
+                let _ = write!(self.label, "   t = {:.0}s", self.t);
+            }
+            if self.label.len() + 2 <= self.width {
+                return;
+            }
+        }
         self.label.clear();
-        let _ = match self.d_hat() {
-            Some(d) => write!(
-                self.label,
-                "<dr^2>/4t  D^ = {d:.2}   D = {D:.2} rows^2/s   t = {:.0}s",
-                self.t
-            ),
-            None => write!(self.label, "<dr^2>/4t  D^ = ...   D = {D:.2} rows^2/s"),
-        };
     }
 
     fn move_molecules(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -344,7 +364,8 @@ impl Generator for BrownianMotion {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
         // Bottom row is the readout when there is room for it.
-        self.label_row = (size.height() >= 8).then(|| i32::from(size.height()) - 1);
+        self.width = usize::from(size.width());
+ self.label_row = (size.height() >= 8).then(|| i32::from(size.height()) - 1);
         let rows = if self.label_row.is_some() { h - 1.0 } else { h };
         self.mol_box = Bounds {
             x0: 0.0,
@@ -660,7 +681,47 @@ mod tests {
         // ~75 independent 2 s windows: s.e. ≈ 12 %; 40 % is a loose, non-flaky sanity bound.
         let d = g.d_hat().expect("estimate after 150 s");
         assert!((d / D - 1.0).abs() < 0.4, "D^ = {d}");
-        assert!(g.label.contains("D^ ="), "{}", g.label);
+        // The label names the estimator actually used and shows its value.
+        assert!(g.label.contains(&format!("D^ (MSD@2s) = {d:.2}")), "{}", g.label);
+    }
+
+    #[test]
+    fn bro_readout_names_the_estimator_and_fits_every_width() {
+        // The lag in the label is the estimator's lag, not a hard-coded string.
+        assert_eq!(LAG_TICKS as f64 * TICK, 2.0);
+        let mut ctx = seeded(9);
+        let mut g = BrownianMotion::default();
+        for w in 1..=120u16 {
+            let size = Size::new(w, 20);
+            ctx.set_size(size);
+            g.resize(size, &mut ctx);
+            for _ in 0..(if w % 10 == 0 { 200 } else { 2 }) {
+                g.update(SIM_DT, &mut ctx);
+            }
+            let label = g.label.clone();
+            assert!(label.is_ascii(), "{w}: {label}");
+            // Never clipped: the label plus a 1-cell margin each side fits, or it is empty.
+            assert!(label.is_empty() || label.len() + 2 <= usize::from(w), "{w}: {label}");
+            assert!(!label.contains("4t"), "{w}: stale estimator name: {label}");
+            if !label.is_empty() {
+                assert!(label.starts_with("D^ (MSD@2s) = "), "{w}: {label}");
+            }
+            // Parts are dropped, never the estimator: 20 columns is enough for it.
+            if w >= 20 {
+                assert!(!label.is_empty(), "{w}: readout missing");
+            }
+            // The frame shows exactly the label on the bottom row.
+            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+            g.render(&mut canvas);
+            let bottom = &canvas.to_lines()[19];
+            assert_eq!(bottom.contains("D^ (MSD@2s)"), !label.is_empty(), "{w}: {bottom}");
+        }
+        // Wide terminals get every part.
+        g.resize(Size::new(120, 30), &mut ctx);
+        for _ in 0..200 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        assert!(g.label.contains("D = 2.25 rows^2/s") && g.label.contains("t = "));
     }
 
     #[test]

@@ -15,6 +15,7 @@ rand.workspace = true
 criterion.workspace = true
 insta.workspace = true
 proptest.workspace = true
+sciart-testalloc.workspace = true
 
 [[bench]]
 name = "frame"
