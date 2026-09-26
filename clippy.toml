@@ -1,0 +1,9 @@
+# GEN-R7 / ADR-0008: generators are deterministic - no wall clock, no global RNG.
+# The binary crate opts out at the few call sites that legitimately need the clock.
+disallowed-methods = [
+    { path = "std::time::Instant::now", reason = "use dt / ctx.time (ADR-0003)" },
+    { path = "std::time::SystemTime::now", reason = "use dt / ctx.time (ADR-0003)" },
+    { path = "rand::rng", reason = "use ctx.rng (ADR-0008)" },
+    { path = "rand::thread_rng", reason = "use ctx.rng (ADR-0008)" },
+    { path = "rand::random", reason = "use ctx.rng (ADR-0008)" },
+]
