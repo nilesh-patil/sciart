@@ -74,5 +74,18 @@ Shared helpers first: RK4 integrator, scene timeline/state machine.
 - [x] Remove `tools-py/`, `tests/` (Python), Python deps and `run_*` tasks from `pixi.toml`; update the contributor guide; Python-era docs (`visuals.md`, `specs.md`, improvement notes, issue-01) moved to `docs/archive/`
 - [x] Open PR `feat/rust-rewrite` → `main` (draft)
 
+## M10 — Batch E: scientific art (16)
+Design: [docs/design/M10-scientific-art-batch.md](design/M10-scientific-art-batch.md) · ADR-0010..0012 · scene specs in SPEC-002 "Batch E" (15 new scenes + the `chemical_reaction` upgrade).
+Shared helpers first: layered raster, colormap roles, capped lattices, leapfrog, 3-D camera.
+- [x] Core foundation — `Cell.bg`/`put_bg`, `raster::{Dots, Pixels}`, `grid::{resample_bilinear, resample_nearest, lattice_for}`, `ode::{verlet_step, verlet_integrate}`, `geom::Camera`, `Role::{Seq, Div}` + `ink::{seq, div}`, `Category::{Biology, Chemistry}`; themes and `paint` backgrounds; `rs-ci` green [CORE-R40..R48, RND-R6, RND-R7]
+- [x] `crystal_growth` migrated onto `raster::Dots`, snapshots byte-identical [CRY-A1..A4, CORE-R41]
+- [ ] Physics fields: vortex_street [VOR-A1..A7] · ising_model [ISING-A1..A6] · strange_attractors [ATT-A1..A8]
+- [ ] Astronomy: aurora [AUR-A1..A7] · solar_surface [SUN-A1..A7] · three_body [TB-A1..A6] · globular_cluster [GC-A1..A8]
+- [ ] Chemistry: chemical_reaction upgrade (Pixels + `Seq`, preset walk, capped lattice; moves to `Category::Chemistry`) [CHEM-A1..A7] · belousov_zhabotinsky [BZ-A1..A8]
+- [ ] Chemistry: electron_orbitals [ORB-A1..A7] · molecule_viewer [MOL-A1..A6] · liesegang_rings [LIES-A1..A7]
+- [ ] Biology: boids_flocking [BOID-A1..A6] · physarum [PHY-A1..A6] · dna_helix [DNA-A1..A6] · action_potential [AP-A1..A8]
+- [ ] Snapshots recorded and reviewed for all 16; benches < 1 ms at 200×50 (hard limit 5 ms) [GEN-R8, GEN-R11]; every new ID cited by a test [TEST-R1]; taste, physics and performance review per scene
+- [ ] Follow-up proposals (unscheduled): `sciart record` (GIF/asciicast export for taste review); GitHub Actions CI (+ cargo-deny); `Role::Spectrum` for true spectral line colour
+
 ## M9 — Future (unscheduled)
-- `sciart record`, braille hi-res canvas, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config.
+- `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
