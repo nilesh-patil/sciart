@@ -10,6 +10,7 @@ pub mod draw;
 mod generator;
 pub mod geom;
 mod ink;
+pub mod particles;
 mod size;
 mod stage;
 
@@ -18,6 +19,7 @@ pub use clock::FixedStep;
 pub use ctx::Ctx;
 pub use generator::{Category, Generator, Meta};
 pub use ink::{Ink, Role};
+pub use particles::{ParticlePool, Trail};
 pub use size::Size;
 pub use stage::Stage;
 
@@ -27,7 +29,7 @@ pub const SIM_DT: f64 = 1.0 / 60.0;
 /// Everything a generator module needs: `use sciart_core::prelude::*;`
 pub mod prelude {
     pub use crate::{
-        Canvas, Category, Cell, Ctx, FixedStep, Generator, Glyph, GlyphMode, Ink, Meta, Role,
-        SIM_DT, Size, Stage,
+        Canvas, Category, Cell, Ctx, FixedStep, Generator, Glyph, GlyphMode, Ink, Meta,
+        ParticlePool, Role, SIM_DT, Size, Stage, Trail,
     };
 }
