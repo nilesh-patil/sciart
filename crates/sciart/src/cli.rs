@@ -1,10 +1,12 @@
-//! Command-line interface (SPEC-005 CLI-R1..R4).
+//! Command-line interface (SPEC-005 CLI-R1..R5).
 
 use std::fmt;
+use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
 use sciart_generators::{Entry, find, registry};
 use sciart_render::Theme;
+use serde::Deserialize;
 
 #[derive(Debug, Parser)]
 #[command(
@@ -16,21 +18,33 @@ pub struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// Frames per second
-    #[arg(long, global = true, default_value_t = 30, value_parser = clap::value_parser!(u16).range(1..=120))]
-    pub fps: u16,
+    /// Frames per second [default: 30]
+    #[arg(long, global = true, value_parser = clap::value_parser!(u16).range(1..=120))]
+    pub fps: Option<u16>,
+
+    /// Seconds between automatic scene changes in `sim` [default: 15]
+    #[arg(long, global = true, value_parser = positive_secs)]
+    pub interval: Option<f64>,
 
     /// RNG seed for a reproducible run (random when omitted)
     #[arg(long, global = true)]
     pub seed: Option<u64>,
 
-    /// Color theme
-    #[arg(long, global = true, value_enum, default_value_t = ThemeArg::Astro)]
-    pub theme: ThemeArg,
+    /// Color theme [default: astro]
+    #[arg(long, global = true, value_enum)]
+    pub theme: Option<ThemeArg>,
 
     /// Use pure-ASCII glyphs
     #[arg(long, global = true)]
     pub ascii: bool,
+
+    /// Start with the status line (HUD) visible
+    #[arg(long, global = true)]
+    pub hud: bool,
+
+    /// Config file [default: $XDG_CONFIG_HOME/sciart/config.toml or ~/.config/sciart/config.toml]
+    #[arg(long, global = true)]
+    pub config: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Subcommand)]
@@ -43,7 +57,8 @@ pub enum Command {
     List,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ThemeArg {
     Astro,
     Rainbow,
@@ -60,6 +75,14 @@ impl From<ThemeArg> for Theme {
     }
 }
 
+/// CLI-R5: a finite number of seconds > 0.
+fn positive_secs(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
+        _ => Err(format!("'{s}' is not a positive number of seconds")),
+    }
+}
+
 impl Cli {
     /// No subcommand means `sim` (CLI-R1).
     pub fn command(&self) -> Command {
@@ -67,28 +90,50 @@ impl Cli {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub struct UnknownGenerator(pub String);
+/// Errors that exit with code 2 (CLI-R2, CFG-R2..R4).
+#[derive(Debug, PartialEq)]
+pub enum UsageError {
+    UnknownGenerator(String),
+    AllDisabled,
+    Config(String),
+}
 
-impl fmt::Display for UnknownGenerator {
+impl fmt::Display for UsageError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let names: Vec<_> = registry().iter().map(|e| e.meta.name).collect();
-        write!(
-            f,
-            "unknown generator '{}'. Available: {}",
-            self.0,
-            names.join(", ")
-        )
+        match self {
+            UsageError::UnknownGenerator(name) => {
+                let names: Vec<_> = registry().iter().map(|e| e.meta.name).collect();
+                write!(
+                    f,
+                    "unknown generator '{name}'. Available: {}",
+                    names.join(", ")
+                )
+            }
+            UsageError::AllDisabled => {
+                f.write_str("every generator is disabled in the config file; nothing to show")
+            }
+            UsageError::Config(msg) => write!(f, "config: {msg}"),
+        }
     }
 }
 
-/// Generators a `sim`/`run` command will use (CLI-R2).
-pub fn select(command: &Command) -> Result<Vec<&'static Entry>, UnknownGenerator> {
+/// Generators a command will use. `disabled` filters `sim` only (CLI-R2, CFG-R4).
+pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Entry>, UsageError> {
     match command {
         Command::Run { name } => find(name)
             .map(|e| vec![e])
-            .ok_or_else(|| UnknownGenerator(name.clone())),
-        Command::Sim | Command::List => Ok(registry().iter().collect()),
+            .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
+        Command::Sim | Command::List => {
+            let entries: Vec<_> = registry()
+                .iter()
+                .filter(|e| !disabled.iter().any(|d| d == e.meta.name))
+                .collect();
+            if entries.is_empty() {
+                Err(UsageError::AllDisabled)
+            } else {
+                Ok(entries)
+            }
+        }
     }
 }
 
@@ -108,12 +153,13 @@ pub fn list_lines() -> Vec<String> {
 }
 
 #[cfg(test)]
+pub(crate) fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
+    Cli::try_parse_from(std::iter::once("sciart").chain(args.iter().copied()))
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
-
-    fn parse(args: &[&str]) -> Result<Cli, clap::Error> {
-        Cli::try_parse_from(std::iter::once("sciart").chain(args.iter().copied()))
-    }
 
     #[test]
     fn cli_r1_no_subcommand_is_sim() {
@@ -131,8 +177,11 @@ mod tests {
             "--seed",
             "7",
             "--ascii",
+            "--hud",
             "--theme",
             "mono",
+            "--interval",
+            "2.5",
         ])
         .unwrap();
         assert_eq!(
@@ -142,28 +191,41 @@ mod tests {
             }
         );
         assert_eq!(
-            (cli.fps, cli.seed, cli.ascii, cli.theme),
-            (60, Some(7), true, ThemeArg::Mono)
+            (
+                cli.fps,
+                cli.seed,
+                cli.ascii,
+                cli.hud,
+                cli.theme,
+                cli.interval
+            ),
+            (
+                Some(60),
+                Some(7),
+                true,
+                true,
+                Some(ThemeArg::Mono),
+                Some(2.5)
+            )
         );
     }
 
     #[test]
     fn cli_r2_unknown_generator_is_an_error_listing_valid_names() {
-        let err = select(&Command::Run {
-            name: "nope".into(),
-        })
+        let err = select(
+            &Command::Run {
+                name: "nope".into(),
+            },
+            &[],
+        )
         .unwrap_err();
-        assert_eq!(err, UnknownGenerator("nope".into()));
+        assert_eq!(err, UsageError::UnknownGenerator("nope".into()));
         assert!(err.to_string().contains("starfield"));
-        assert_eq!(
-            select(&Command::Run {
-                name: "starfield".into()
-            })
-            .unwrap()
-            .len(),
-            1
-        );
-        assert_eq!(select(&Command::Sim).unwrap().len(), registry().len());
+        let run = Command::Run {
+            name: "starfield".into(),
+        };
+        assert_eq!(select(&run, &[]).unwrap().len(), 1);
+        assert_eq!(select(&Command::Sim, &[]).unwrap().len(), registry().len());
     }
 
     #[test]
@@ -172,8 +234,8 @@ mod tests {
             let err = parse(&["--fps", bad]).unwrap_err();
             assert_eq!(err.exit_code(), 2, "--fps {bad}");
         }
-        assert_eq!(parse(&["--fps", "120"]).unwrap().fps, 120);
-        assert_eq!(parse(&[]).unwrap().fps, 30);
+        assert_eq!(parse(&["--fps", "120"]).unwrap().fps, Some(120));
+        assert_eq!(parse(&[]).unwrap().fps, None, "default applied in Settings");
     }
 
     #[test]
@@ -188,5 +250,32 @@ mod tests {
             "starfield\tbasic\t{}",
             sciart_generators::starfield::META.description
         )));
+    }
+
+    #[test]
+    fn cli_r5_interval_must_be_positive_and_finite() {
+        for bad in ["0", "-1", "nan", "inf", "soon"] {
+            let err = parse(&["--interval", bad]).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "--interval {bad}");
+        }
+        assert_eq!(parse(&["--interval", "0.5"]).unwrap().interval, Some(0.5));
+    }
+
+    #[test]
+    fn cfg_r4_disabled_filters_sim_but_not_run() {
+        let all: Vec<String> = registry().iter().map(|e| e.meta.name.to_string()).collect();
+        assert!(matches!(
+            select(&Command::Sim, &all),
+            Err(UsageError::AllDisabled)
+        ));
+        let run = Command::Run {
+            name: "starfield".into(),
+        };
+        assert_eq!(select(&run, &all).unwrap().len(), 1);
+        let unrelated = vec!["not_a_generator".to_string()];
+        assert_eq!(
+            select(&Command::Sim, &unrelated).unwrap().len(),
+            registry().len()
+        );
     }
 }

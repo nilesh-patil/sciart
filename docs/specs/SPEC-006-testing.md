@@ -16,6 +16,7 @@
 | Contract | `#[test]` table over `registry()` | `crates/sciart-generators/tests/contract.rs` | GEN-R4..R10 for **every** generator: long run, fixed resize sequence, 1×1/1×8/8×1/2×2, motion, determinism, ASCII purity |
 | Property | `proptest` | `crates/sciart-generators/tests/props.rs`, core `tests/` | random `(size, dt)` op sequences per generator; FixedStep invariants |
 | Snapshot | `insta` | `crates/sciart-generators/tests/snapshots.rs` | seed 42, 80×24, ASCII mode, frames after 0 s / 1 s / 5 s |
+| End-to-end | `portable-pty` | `crates/sciart/tests/pty_smoke.rs` | real binary in an 80×24 pty: draws, restores the terminal (RND-R5), keys work, HUD visible |
 | Bench | `criterion` | `crates/sciart-generators/benches/frame.rs` | update(1/60)+render at 200×50 and 400×100 per generator |
 
 - **TEST-R1** Every implemented requirement ID is cited by ≥ 1 test name (`core_r10_…`), or has a non-test verification listed here:
@@ -25,7 +26,7 @@
   | GEN-R3 | Process: `registry!` macro + contract suite iterates `registry()` |
   | GEN-R7 | `clippy.toml` `disallowed-methods` + `-D warnings` in `rs-lint` (checked by injecting `Instant::now`/`rand::random` into starfield: both flagged) |
   | GEN-R8 | `pixi run rs-bench` (starfield: 18 µs @ 200×50, 71 µs @ 400×100 on M-series, 2026-09-26) |
-  | RND-R5 | Manual pty smoke test: `script` + `stty cols 80 rows 24`, press `q` ⇒ exit 0, alt-screen enter/leave balanced |
+  | RND-R5 | `crates/sciart/tests/pty_smoke.rs::rnd_r5_run_draws_stars_and_restores_the_terminal` (80×24 pty: stars on screen, `q` ⇒ exit 0, alt-screen enter/leave balanced) |
   | TEST-R* | Process (this document) |
 - **TEST-R2** Snapshot changes are reviewed with `cargo insta review`; never blindly accepted.
 - **TEST-R3** `pixi run rs-ci` = `cargo fmt --check` + `cargo clippy --workspace --all-targets -- -D warnings` + `cargo test --workspace`. Must pass before every commit.
