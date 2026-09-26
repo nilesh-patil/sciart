@@ -40,8 +40,12 @@ Tick items as they land. Requirement IDs in brackets link each item to its spec.
 
 ## M4 — Batch A: analytic / time-driven scenes (10)
 Shared helpers first: orbit/ellipse drawing, disc/ring fill, sine fields.
-- [ ] solar_system · [ ] pulsar · [ ] moon_phases · [ ] exoplanet_transit · [ ] satellite_orbit
-- [ ] doppler_effect · [ ] wave_interference · [ ] cosmic_microwave_background · [ ] gravitational_lensing · [ ] constellation_map
+- [x] `sciart_core::draw` helpers (orbit, disc, field, ramp, text_centered, fit_radius) [CORE-R22..R27]
+- [x] solar_system · [x] pulsar · [x] moon_phases · [x] exoplanet_transit · [x] satellite_orbit
+- [x] doppler_effect · [x] wave_interference · [x] cosmic_microwave_background · [x] gravitational_lensing · [x] constellation_map
+- [x] Snapshots recorded and reviewed; all Batch A benches ≤ 0.3 ms at 200×50 [GEN-R8]
+- [ ] Follow-up: HUD truncates on narrow terminals with long scene names (flags like `PAUSED` fall off the right edge) — prioritise flags or elide the name [RND-R4]
+- [ ] Follow-up: CMB with 6 modes looks stripy; consider more modes / a power-spectrum weighting
 
 ## M5 — Batch B: particle systems (7)
 Shared helpers first: `ParticlePool` (fixed-capacity, respawn), Keplerian speed, gaussian spawn.

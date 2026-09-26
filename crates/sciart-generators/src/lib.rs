@@ -21,7 +21,19 @@ macro_rules! registry {
     };
 }
 
-registry![starfield];
+registry![
+    constellation_map,
+    cosmic_microwave_background,
+    doppler_effect,
+    exoplanet_transit,
+    gravitational_lensing,
+    moon_phases,
+    pulsar,
+    satellite_orbit,
+    solar_system,
+    starfield,
+    wave_interference,
+];
 
 /// Every generator, sorted by name (GEN-R1).
 pub fn registry() -> &'static [Entry] {

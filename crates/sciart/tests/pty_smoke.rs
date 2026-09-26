@@ -148,7 +148,9 @@ fn rnd_r5_run_draws_stars_and_restores_the_terminal() {
 
 #[test]
 fn rnd_r4_rt_r9_hud_reflects_keys() {
-    let mut s = Session::start(&["sim", "--hud", "--ascii", "--seed", "3"]);
+    // A short scene name keeps the whole HUD inside the 80-column pty; `sim` would start on a
+    // seed-dependent scene whose long name can push `| PAUSED |` past the right edge.
+    let mut s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "3"]);
     s.wait_for("HUD", |t| {
         t.contains("starfield | ") && t.contains("| astro |")
     });
