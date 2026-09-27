@@ -24,7 +24,7 @@ pub static META: Meta = Meta {
     name: "solar_surface",
     category: Category::SunPlanets,
     description: "The granulated Sun turning slowly, with sunspots, limb loops and coronal rain",
-    title: "Solar surface · boiling granules",
+    title: "Solar surface · convection cells",
     captions: &[],
 };
 

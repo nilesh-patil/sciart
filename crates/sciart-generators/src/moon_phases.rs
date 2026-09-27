@@ -14,7 +14,7 @@ pub static META: Meta = Meta {
     name: "moon_phases",
     category: Category::EarthSky,
     description: "The Moon through a full lunation, with craters and the phase name",
-    title: "Moon phases · sunlit half",
+    title: "Moon phases · half always sunlit",
     captions: &[],
 };
 

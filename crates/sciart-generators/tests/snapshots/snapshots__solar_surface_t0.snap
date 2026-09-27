@@ -1,5 +1,6 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
                                    '''''''''                                    
@@ -25,4 +26,4 @@ expression: frame
                         ''::=======+===++=+==+======::''                        
                           ''':::=================::'''                          
                              ''''::::::=:::::::'''                              
- Solar surface - boiling granules  ''''''''''              day 0.0  Teff 5772 K
+ Solar surface - convection cells  ''''''''''              day 0.0  Teff 5772 K

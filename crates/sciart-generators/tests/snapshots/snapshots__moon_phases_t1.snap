@@ -1,5 +1,6 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
                     .     .                 .           .     .                 
@@ -25,4 +26,4 @@ expression: frame
    .                  .         *+++++:::.    ...           .       .        .  
                                               .      .                          
       .                     .  Last Quarter  61%   .      .                     
- Moon phases - sunlit half        .  .                               .
+ Moon phases - half always sunlit .  .                               .

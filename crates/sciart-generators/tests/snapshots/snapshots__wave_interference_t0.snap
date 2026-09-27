@@ -1,5 +1,6 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
 oo...ooO0@@@@000OOOOoOOOO00 Two-Source Interference o...o0@@0o...oO@@0O...oO000o
@@ -25,4 +26,4 @@ oO0@0OooooOoo.....ooOoo.....ooOooooO0@0Oo...o0@0Oo...oO0OOooooOOOOoooOoooooOOOOo
 ..ooOOooooO0@@@00OOOoOOO00@@@0OooooOOoo...O0@@0o...o0@@0o...oO00Oo..oOOOOOooooOO
 ooooOOoo...ooO00@@@@@@@@@00Ooo...ooOOooooO000Oo...o0@@0o...oO0@0o...oO00Oo..oOOO
 OOOOO0OOo.......ooooOoooo.......oOO0OOOOOOOOOo...o0@@0o...oO@@0o...oO00Oo...oO00
- Interference - crests add up O00000OooooOOoo..oO000Oo...oO@@0O...oO0@0o...oO00O
+ Interference - crests add up    000OooooOOoo..oO000Oo...oO@@0O...oO0@0o...oO00O

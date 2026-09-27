@@ -13,7 +13,7 @@ pub static META: Meta = Meta {
     name: "constellation_map",
     category: Category::EarthSky,
     description: "A star chart tracing and naming one constellation at a time",
-    title: "Constellations · ancient figures",
+    title: "Constellations · star patterns",
     captions: &[],
 };
 

@@ -111,6 +111,8 @@ fn test_r6_resize_churn_returns_to_the_same_live_bytes() {
         let _ = writeln!(table, "{name:<28} {live:?}");
     }
     println!("{table}");
+    // Live bytes count allocations, i.e. capacity, not length: growth inside a `Vec`'s
+    // spare capacity is invisible here until the buffer reallocates (about doubles).
     let leaks: Vec<_> = rows
         .iter()
         .filter(|(_, live)| live[WARMUP_CYCLES..].iter().any(|&l| l != 0))

@@ -1,8 +1,9 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
- figure-8  Moore 1993                                                           
+ Moore 1993                                                                     
                                                                                 
                                                                                 
                                                                                 

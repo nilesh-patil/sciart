@@ -38,7 +38,7 @@ pub static META: Meta = Meta {
     name: "action_potential",
     category: Category::Biophysics,
     description: "A nerve impulse racing down an axon, with an oscilloscope trace of the spike",
-    title: "Nerve spike · ion channels fire",
+    title: "Nerve spike · ion channels open",
     captions: &[],
 };
 

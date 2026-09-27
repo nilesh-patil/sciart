@@ -1,10 +1,12 @@
 //! Two coherent point sources and their interference pattern (SPEC-002 `wave_interference`).
 
 use std::f64::consts::TAU;
+use std::ops::Range;
 
 use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "wave_interference",
@@ -32,6 +34,8 @@ const RAMP: [Glyph; 6] = [
 ];
 const SOURCE: Glyph = Glyph::new('✱', '*');
 const TITLE: &str = " Two-Source Interference ";
+/// Blank cells kept after the science title on the last row (`WAVE-A3`).
+const TITLE_GAP: usize = 3;
 
 /// Wavelength in rows for a screen `h` rows tall.
 pub(crate) fn wavelength(h: u16) -> f64 {
@@ -56,6 +60,9 @@ pub struct WaveInterference {
     sin_sum: Vec<f64>,
     cos_sum: Vec<f64>,
     title: bool,
+    /// Cell indices just after the science title's span, left blank so the field's faint
+    /// `.` cells don't read as an ellipsis continuing it (`WAVE-A3`).
+    quiet: Range<usize>,
 }
 
 impl WaveInterference {
@@ -82,6 +89,11 @@ impl Generator for WaveInterference {
         self.sources = ys.map(|y| (sx * ASPECT, y));
         self.width = w;
         self.title = size.height() > 8;
+        self.quiet = title::span(size, &Title::new(META.title, None)).map_or(0..0, |(y, cols)| {
+            // Both are non-negative: the span's row is h − 1 and its columns start at 0.
+            let (row, end) = (y as usize * w, cols.end as usize);
+            row + end.min(w)..row + (end + TITLE_GAP).min(w)
+        });
         self.sin_sum.clear();
         self.cos_sum.clear();
         self.sin_sum.reserve(size.area());
@@ -108,7 +120,7 @@ impl Generator for WaveInterference {
 
     fn render(&self, canvas: &mut Canvas) {
         let phase = (OMEGA * self.t).sin_cos();
-        for i in 0..self.sin_sum.len() {
+        for i in (0..self.sin_sum.len()).filter(|i| !self.quiet.contains(i)) {
             let v = (self.cell_amplitude(i, phase) + 2.0) / 4.0;
             let level = (35.0 + 220.0 * v.clamp(0.0, 1.0)) as u8;
             let (x, y) = ((i % self.width) as i32, (i / self.width) as i32);
@@ -192,6 +204,22 @@ mod tests {
             let expected = amplitude(d(g.sources[0]), d(g.sources[1]), k, t);
             let i = y as usize * 90 + x as usize;
             assert!((g.cell_amplitude(i, phase) - expected).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn wave_a3_three_cells_after_the_title_stay_blank() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            let mut stage = Stage::new(build(), 1, size, GlyphMode::Unicode);
+            let (_, cols) = title::span(size, &Title::new(META.title, None)).unwrap();
+            let end = cols.end as usize;
+            for _ in 0..40 {
+                stage.step(0.05);
+                let last = stage.render().to_lines().pop().unwrap();
+                let row: Vec<char> = last.chars().collect();
+                assert_eq!(row[end..end + TITLE_GAP], [' '; TITLE_GAP], "{last}");
+                assert_ne!(row[end + TITLE_GAP], ' ', "the field resumes: {last}");
+            }
         }
     }
 }

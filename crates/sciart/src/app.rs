@@ -1,5 +1,4 @@
 //! Terminal event loop: the only place that touches the wall clock and the terminal.
-#![allow(clippy::disallowed_methods)] // wall clock is the binary's job (ADR-0008)
 
 use std::time::{Duration, Instant};
 
@@ -60,10 +59,10 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
 
     let mut pacer = Pacer::new(opts.fps, opts.low_power_fps, opts.idle_after);
     let mut fps = FpsMeter::default();
-    let mut last = Instant::now();
+    let mut last = wall_clock();
 
     loop {
-        let now = Instant::now();
+        let now = wall_clock();
         let elapsed = now.duration_since(last).as_secs_f64();
         last = now;
         fps.record(elapsed);
@@ -82,7 +81,7 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         // Handle input until the next frame is due (RT-R8: the rate can change here).
         let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
         let next = now + frame_time;
-        while event::poll(next.saturating_duration_since(Instant::now()))? {
+        while event::poll(next.saturating_duration_since(wall_clock()))? {
             match event::read()? {
                 Event::Key(key) => {
                     pacer.input();
@@ -99,6 +98,13 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
             }
         }
     }
+}
+
+/// The event loop's only clock. The allow is scoped to this call, so the rest of the file
+/// stays under the GEN-R7 clock ban and the TEST-R8 leak bans.
+#[allow(clippy::disallowed_methods)] // wall clock is the binary's job (ADR-0008)
+fn wall_clock() -> Instant {
+    Instant::now()
 }
 
 fn draw(f: &mut Frame<'_>, runtime: &Runtime, status: &HudExtras<'_>) {

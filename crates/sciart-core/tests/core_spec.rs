@@ -730,6 +730,18 @@ fn core_r74_dims_linearly_from_8_to_10_seconds() {
     }
 }
 
+#[test]
+fn core_r74_r76_readouts_never_outshine_the_dimmed_title() {
+    let t = Title::new(SPOTS, None);
+    let mut c = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+    title::draw(&mut c, &t, 1e6);
+    let dimmest = (1..30)
+        .filter_map(|x| c.get(x, 23).filter(|cell| cell.ch != ' '))
+        .map(|cell| cell.ink.level)
+        .min();
+    assert_eq!(dimmest, Some(title::READOUT_LEVEL));
+}
+
 proptest! {
     #[test]
     fn core_r74_span_is_exactly_the_cells_draw_writes(w in 1u16..160, h in 1u16..40) {

@@ -1,5 +1,6 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
+assertion_line: 18
 expression: frame
 ---
                                                                                 
@@ -25,4 +26,4 @@ expression: frame
                               . :.     ...+                                     
                                                                                 
                                                                                 
- Murmuration - match 7 neighbours                                    N 192  k=7
+ Murmuration - each bird tracks 7                                    N 192  k=7
