@@ -107,6 +107,9 @@ const GRID_LABEL_LEVEL: f64 = 90.0;
 const MIN_COS_C: f64 = 0.2;
 /// Graticule labels per axis.
 const MAX_LABELS: usize = 8;
+/// Simulated seconds over which one chart is built ahead (CON-A10), well inside a 12 s
+/// show: the next chart is always ready before it is due.
+const BUILD_SECS: f64 = 4.0;
 
 /// A catalogue star: J2000 right ascension and declination in degrees, visual magnitude
 /// and B–V colour index (Hipparcos).
@@ -275,6 +278,12 @@ const PEN: Glyph = Glyph::new('•', 'o');
 /// Rows of the chart area at `size`: all but the name block (CON-A7).
 fn chart_rows(size: Size) -> f64 {
     f64::from(size.height().saturating_sub(NAME_ROWS).max(1))
+}
+
+/// Chart-building units to spend on a step of `dt` s: a whole chart per [`BUILD_SECS`],
+/// at least one (CON-A10).
+fn build_slice(units: usize, dt: f64) -> usize {
+    ((units as f64 * (dt / BUILD_SECS).clamp(0.0, 1.0)).ceil() as usize).max(1)
 }
 
 /// Which constellation is showing at time `t`, and seconds into its slot (CON-A3).
@@ -548,6 +557,10 @@ struct BgStar {
     y: i32,
     phase: f64,
     rate: f64,
+    /// Its `Dim` level where a chart keeps it, and the draw against that chart's keep
+    /// share (the share is only known once the chart is built, CON-A10).
+    level: u8,
+    keep: f64,
     /// `Dim` level on each figure's chart, 0 where that chart leaves it out.
     levels: [u8; FIGURES.len()],
 }
@@ -575,6 +588,11 @@ pub struct ConstellationMap {
     /// Milky Way dust density per chart and cell, chart-major: [`dust`] over `DUST_PEAK`,
     /// as 0–255 (one byte a cell keeps six charts small at any size, TEST-R7).
     dust: Vec<u8>,
+    /// Build progress per chart, in units: its cells' dust, then its background-star
+    /// levels (CON-A10).
+    built: [usize; FIGURES.len()],
+    /// The chart and fade (bits) that `sky`, `bloom` and `ticks` were last drawn for.
+    still: Option<(usize, u64)>,
     /// The figure's strokes.
     dots: Dots,
     /// Blooms round the brightest stars (Unicode only: a half-block glow has no ASCII
@@ -758,6 +776,7 @@ impl ConstellationMap {
     /// dots a byte `u`; a dot is dust while `u < 256·p·fade`, `p` the cell's [`dust`]
     /// probability, so the dust is fixed from frame to frame and fading only drops dots.
     fn draw_dust(&mut self, idx: usize, fade: f64) {
+        self.ensure_chart(idx);
         let w = self.width as usize;
         let cells = w * self.height as usize;
         let salt = (idx as u64 + 1).wrapping_mul(DUST_SALT);
@@ -786,33 +805,86 @@ impl ConstellationMap {
         }
     }
 
-    /// Chart `k`'s dust density per cell, appended to `self.dust`; none on the title row.
-    fn build_dust(&mut self, k: usize) {
+    /// Work units of one chart: a dust value per cell, then a level per background star.
+    fn chart_units(&self) -> usize {
+        self.dust.len() / FIGURES.len() + self.bg.len()
+    }
+
+    /// Build up to `budget` more units of chart `k` (CON-A10); returns the units spent.
+    /// Cell dust is [`dust`] at the cell centre (none on the title row); a background
+    /// star is kept where its draw falls under the chart's galactic-latitude share.
+    fn build_chart(&mut self, k: usize, budget: usize) -> usize {
+        let (w, h) = (self.width.max(1) as usize, self.height);
+        let cells = self.dust.len() / FIGURES.len();
+        let total = cells + self.bg.len();
         let chart = self.charts[k];
-        for cy in 0..self.height {
-            for cx in 0..self.width {
-                let (ra, dec) = chart.sky_of((f64::from(cx) + 0.5, f64::from(cy) + 0.5));
-                let (l, b) = galactic(ra, dec);
-                let q = if cy < self.height - 1 {
+        let from = self.built[k];
+        let to = total.min(from.saturating_add(budget));
+        for u in from..to {
+            if u < cells {
+                let (cx, cy) = ((u % w) as i32, (u / w) as i32);
+                self.dust[k * cells + u] = if cy < h - 1 {
+                    let (ra, dec) = chart.sky_of((f64::from(cx) + 0.5, f64::from(cy) + 0.5));
+                    let (l, b) = galactic(ra, dec);
                     ink::level(255.0 * dust(l, b) / DUST_PEAK)
                 } else {
                     0
                 };
-                self.dust.push(q);
+            } else {
+                let star = &mut self.bg[u - cells];
+                let (ra, dec) = chart.sky_of((f64::from(star.x), f64::from(star.y)));
+                let b = galactic(ra, dec).1 / BG_PLANE_DEG;
+                let share = BG_KEEP.0 + (BG_KEEP.1 - BG_KEEP.0) * (-b * b).exp();
+                star.levels[k] = if star.keep < share { star.level } else { 0 };
             }
+        }
+        self.built[k] = to.max(from);
+        to.saturating_sub(from)
+    }
+
+    /// Spend one step's slice on the charts still to build, the showing one and then the
+    /// next ones first, so each is complete long before it shows (CON-A10).
+    fn build_ahead(&mut self, dt: f64) {
+        let mut budget = build_slice(self.chart_units(), dt);
+        let (idx, _) = current(self.t);
+        for j in 0..FIGURES.len() {
+            if budget == 0 {
+                break;
+            }
+            budget -= self.build_chart((idx + j) % FIGURES.len(), budget);
+        }
+    }
+
+    /// Finish chart `k` now: the chart about to be drawn must be whole.
+    fn ensure_chart(&mut self, k: usize) {
+        self.build_chart(k, usize::MAX);
+    }
+
+    /// Every chart built, as `resize` used to leave them (tests).
+    #[cfg(test)]
+    fn build_all(&mut self) {
+        for k in 0..FIGURES.len() {
+            self.ensure_chart(k);
         }
     }
 
     fn rasterise(&mut self) {
-        self.dots.clear();
-        self.sky.clear();
-        self.bloom.clear();
         let (idx, local) = current(self.t);
         let fade = Self::fade(local);
-        self.draw_dust(idx, fade);
-        self.draw_graticule(idx, fade);
+        // The background-star levels too, which `render` reads (CON-A10).
+        self.ensure_chart(idx);
+        // Dust, graticule and blooms depend on the chart and its fade only, so they are
+        // redrawn only while it fades in or out (CON-A10): the dust is most of a frame.
+        if self.still != Some((idx, fade.to_bits())) {
+            self.sky.clear();
+            self.bloom.clear();
+            self.draw_dust(idx, fade);
+            self.draw_graticule(idx, fade);
+            self.draw_blooms(idx, fade);
+            self.still = Some((idx, fade.to_bits()));
+        }
+        self.dots.clear();
         self.draw_strokes(idx, local / TRACE, fade);
-        self.draw_blooms(idx, fade);
     }
 
     /// Graticule labels, `+50°` and `11h30m` (Unicode only, like the graticule).
@@ -866,13 +938,14 @@ impl Generator for ConstellationMap {
                     .collect()
             })
             .collect();
+        // Each chart's dust and star levels are built lazily (CON-A10): the showing one by
+        // `rasterise` below, the others a slice per `update`.
         self.dust.clear();
-        for k in 0..FIGURES.len() {
-            self.build_dust(k);
-        }
+        self.dust.resize(FIGURES.len() * size.area(), 0);
+        self.built = [0; FIGURES.len()];
+        self.still = None;
         let (w, h) = (size.width(), size.height());
         let n = ((size.area() as f64 * BG_DENSITY) as usize).min(BG_MAX);
-        let charts = &self.charts;
         self.bg = (0..n)
             .map(|_| {
                 let (x, y) = (ctx.rng.random_range(0..w), ctx.rng.random_range(0..h));
@@ -880,18 +953,14 @@ impl Generator for ConstellationMap {
                 let v: f64 = ctx.rng.random_range(0.0..1.0);
                 let level = ink::level(30.0 + 110.0 * v * v * v);
                 let keep: f64 = ctx.rng.random_range(0.0..1.0);
-                let levels = std::array::from_fn(|k| {
-                    let (ra, dec) = charts[k].sky_of((f64::from(x), f64::from(y)));
-                    let b = galactic(ra, dec).1 / BG_PLANE_DEG;
-                    let share = BG_KEEP.0 + (BG_KEEP.1 - BG_KEEP.0) * (-b * b).exp();
-                    if keep < share { level } else { 0 }
-                });
                 BgStar {
                     x: i32::from(x),
                     y: i32::from(y),
                     phase: ctx.rng.random_range(0.0..TAU),
                     rate: ctx.rng.random_range(1.0..3.5),
-                    levels,
+                    level,
+                    keep,
+                    levels: [0; FIGURES.len()],
                 }
             })
             .collect();
@@ -903,6 +972,7 @@ impl Generator for ConstellationMap {
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
+        self.build_ahead(dt);
         self.rasterise();
     }
 
@@ -1338,6 +1408,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ConstellationMap::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.build_all();
         let shown = |k: usize| g.bg.iter().filter(|s| s.levels[k] > 0).count();
         assert!(
             shown(3) > 2 * shown(1),
@@ -1349,6 +1420,7 @@ mod tests {
 
     /// Chart `k`'s dust dots drawn at `fade`, as a lit-dot mask.
     fn dust_at(g: &mut ConstellationMap, k: usize, fade: f64) -> Vec<bool> {
+        g.still = None; // the sky is redrawn here, not by `rasterise`
         g.sky.clear();
         g.draw_dust(k, fade);
         let d = g.sky.dot_size();
@@ -1516,5 +1588,62 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn con_a10_charts_built_ahead_match_charts_built_in_resize() {
+        let size = Size::new(120, 40);
+        // A whole cycle of the six charts and into the next, fine and coarse steps,
+        // and a resize half a second before a hand-over.
+        for dt in [SIM_DT, 0.25] {
+            let (mut lazy, mut eager) = (ConstellationMap::default(), ConstellationMap::default());
+            let (mut c1, mut c2) = (Ctx::new(5, size), Ctx::new(5, size));
+            lazy.resize(size, &mut c1);
+            eager.resize(size, &mut c2);
+            eager.build_all();
+            assert!(
+                lazy.built.iter().filter(|&&b| b > 0).count() == 1,
+                "resize builds one"
+            );
+            let steps = (80.0 / dt) as usize;
+            for i in 0..steps {
+                if i == (35.5 / dt) as usize {
+                    let other = Size::new(90, 30);
+                    for (g, c) in [(&mut lazy, &mut c1), (&mut eager, &mut c2)] {
+                        g.resize(other, c);
+                        g.resize(size, c);
+                    }
+                    eager.build_all();
+                }
+                lazy.update(dt, &mut c1);
+                eager.update(dt, &mut c2);
+                if i % 7 == 0 {
+                    let (mut a, mut b) = (
+                        Canvas::new(size, GlyphMode::Unicode),
+                        Canvas::new(size, GlyphMode::Unicode),
+                    );
+                    lazy.render(&mut a);
+                    eager.render(&mut b);
+                    assert!(a.cells() == b.cells(), "dt {dt}, t = {:.2}", lazy.t);
+                }
+            }
+            // Built ahead: every chart is complete long before the cycle ends.
+            let units = lazy.chart_units();
+            assert!(lazy.built.iter().all(|&b| b == units), "{:?}", lazy.built);
+        }
+    }
+
+    #[test]
+    fn con_a10_update_builds_at_most_one_slice() {
+        let size = Size::new(200, 50);
+        let mut g = ConstellationMap::default();
+        let mut ctx = Ctx::new(1, size);
+        g.resize(size, &mut ctx);
+        let units = g.chart_units();
+        let before: usize = g.built.iter().sum();
+        g.update(SIM_DT, &mut ctx);
+        let after: usize = g.built.iter().sum();
+        assert_eq!(after - before, build_slice(units, SIM_DT));
+        assert!(build_slice(units, SIM_DT) * 240 >= units, "a chart in 4 s");
     }
 }
