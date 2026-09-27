@@ -25,7 +25,7 @@ pub static META: Meta = Meta {
     category: Category::EarthSky,
     description: "Auroral curtains folding over a still northern lake at night",
     title: "Aurora · electrons light the air",
-    captions: &[],
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -78,6 +78,13 @@ const BEATS: [(&str, f64); 4] = [
     ("expansion", 15.0),
     ("recovery", 20.0),
 ];
+/// The title's caption during each beat, in `BEATS` order (AUR-A9).
+const CAPTIONS: [&str; BEATS.len()] = [
+    "growth phase",
+    "substorm onset",
+    "substorm expansion",
+    "pulsating recovery",
+];
 /// Beat boundaries, derived from `BEATS`; every keyframe knot is written relative to
 /// them, so the keyframes and the label never drift apart and the onset segments keep
 /// their `out_quad` easing (`curve` matches `ONSET` exactly).
@@ -103,18 +110,25 @@ const E_SAT: f64 = 0.9;
 /// curtains stays black.
 const GREEN_LIT: f32 = 0.14;
 const RED_LIT: f32 = 0.2;
-/// The red fringe is drawn in `Accent` (the theme's magenta) at levels up to this: dark
-/// `Hot` is a rust brown and bright `Hot` an orange, while a deep magenta-crimson is how
-/// the 630 nm crown reads over green in photographs (mixed with the blue N₂⁺ light).
-/// The pink hem, also `Accent`, starts at `HEM_LEVEL`, well above it.
-const RED_LEVEL_MAX: f64 = 110.0;
-const RED: Role = Role::Accent;
+/// The red fringe is drawn in the `HAlpha` ramp at levels up to this, its dark crimson
+/// end, which is how the 630 nm crown reads over green in photographs. The pink hem, the
+/// same ramp's rose, runs from `HEM_LEVEL`, well above it, to `HEM_LEVEL_MAX`.
+const RED_LEVEL_MAX: f64 = 155.0;
+/// The crown starts at this crimson rather than the core floor: the ramp's darkest
+/// maroon, next to the green, read as brown mud rather than red light.
+const RED_LEVEL_MIN: f64 = 56.0;
+const RED: Role = Role::Ramp(Ramp::HAlpha);
+/// Green 557.7 nm light: the `Aurora` ramp, deep teal where faint (false colour: the faint
+/// green mixed with blue N₂⁺ 427.8 nm, as photographs show it) to lime-white in the rays.
+const GREEN: Role = Role::Ramp(Ramp::Aurora);
 /// Red-dominant light shows only where the green's own tone is at least this: the
 /// crown caps each ray and fold with crimson and so follows the curtains' envelope.
 /// Diffuse red far above the green would be cut flat by the top fade (a lid) and stand
 /// as a slab over the sky; at the naked eye's photopic weight it is below notice there.
 const CROWN_GREEN: f32 = 0.03;
-const HEM_LEVEL: f64 = 190.0;
+const HEM_LEVEL: f64 = 196.0;
+/// The hem tops out here, in the ramp's rose: above it `HAlpha` pales to near-white.
+const HEM_LEVEL_MAX: f64 = 212.0;
 /// Emission fades in under the top edge over this share of the pixel rows (at least
 /// `TOP_FADE_MIN_PX`), as a smoothstep applied to the tone before the threshold: a crown
 /// overhead thins into dark sky over ≈ 10 cell rows (keeping the label in clear air), so
@@ -135,7 +149,14 @@ const GLOW_DEG: f64 = 8.0;
 /// than being carried into it.
 const GLOW_MAX: f64 = 0.2;
 const GLOW_MIN: f64 = 0.02;
-const LAKE_GAIN: f32 = 0.45;
+/// The lake mirrors the sky at this share of its level, each pixel a 3 × 2 box sum of the
+/// sky pixels round its source of the same light, over 6 (so a run's ends soften), and
+/// fading with depth to `1 − LAKE_DEPTH_FADE` of that at the lake's far edge: soft
+/// streaks of water rather than pixel noise.
+const LAKE_GAIN: f32 = 0.25;
+const LAKE_DEPTH_FADE: f32 = 0.6;
+/// Ripple crests dim a lake row by up to this share, as bands rather than gaps.
+const CREST_DIM: f32 = 0.45;
 /// A sky run whose brightest pixel is below this level is not mirrored (see
 /// `View::reflect`).
 const LAKE_MIN_LEVEL: u8 = 40;
@@ -145,8 +166,8 @@ const RIPPLE_SHIFT: f32 = 0.04;
 /// ratio V(630)/V(557.7) ≈ 0.27. The emission profiles stay physical; this is how bright
 /// the red *looks*, so the diffuse fringe stays a fringe.
 const RED_WEIGHT: f32 = 0.27;
-/// Minimum pink-hem tone for an `Accent` pixel: type-B hems mark only the brightest arc.
-const HEM_TONE: f32 = 0.6;
+/// Minimum pink-hem tone for a hem pixel: type-B hems mark only the brightest arc.
+const HEM_TONE: f32 = 0.5;
 /// Layers per column: one crossing per curtain plus room for three more where folds
 /// double back; a seventh merges into the nearest (see `View::push_layer`).
 const MAX_LAYERS: usize = 6;
@@ -195,11 +216,11 @@ const ASCII_COLON: u8 = 70;
 const ASCII_RED_BRIGHT: u8 = 60;
 /// The roles of auroral light: green, and the red crown and pink hem (the skyglow is
 /// `Seq`).
-const EMISSION: [Role; 2] = [Role::Particle, RED];
+const EMISSION: [Role; 2] = [GREEN, RED];
 
-/// A pink-hem pixel: `Accent` above the red crown's levels.
+/// A pink-hem pixel: `RED` above the red crown's levels.
 fn is_hem(ink: Ink) -> bool {
-    ink.role == Role::Accent && f64::from(ink.level) > RED_LEVEL_MAX
+    ink.role == RED && f64::from(ink.level) > RED_LEVEL_MAX
 }
 
 // --- Physics (pure) -----------------------------------------------------------------
@@ -971,7 +992,7 @@ impl Glow {
     /// the level ramps from the core floor `ink::MIN_VISIBLE_LEVEL` (CORE-R66; to 255 for
     /// green, to `RED_LEVEL_MAX` for red), so every lit run starts from the theme's
     /// dimmest shade of its role and no fade ends in a bright lid. The pink hem is crisp
-    /// and bright: `HEM_LEVEL` and up.
+    /// and bright: `HEM_LEVEL` to `HEM_LEVEL_MAX`.
     fn ink(self) -> Option<Ink> {
         let red = self.red > 0.5;
         let lit = if red { RED_LIT } else { GREEN_LIT };
@@ -980,14 +1001,20 @@ impl Glow {
         }
         let v = f64::from((self.tone - lit) / (1.0 - lit));
         let (role, lo, hi) = if self.hem {
-            (Role::Accent, HEM_LEVEL, 255.0)
+            (RED, HEM_LEVEL, HEM_LEVEL_MAX)
         } else if red {
-            (RED, ink::MIN_VISIBLE_LEVEL, RED_LEVEL_MAX)
+            (RED, RED_LEVEL_MIN, RED_LEVEL_MAX)
         } else {
-            (Role::Particle, ink::MIN_VISIBLE_LEVEL, 255.0)
+            (GREEN, ink::MIN_VISIBLE_LEVEL, 255.0)
         };
         Some(Ink::new(role, ink::level(lo + (hi - lo) * v)))
     }
+}
+
+/// A lake row's gain at depth share `depth ∈ [0, 1)` below the shore and ripple phase
+/// `sin` (crests at +1): fading with depth, and dimmed on the crests (AUR-A7).
+fn lake_row_gain(depth: f32, sin: f32) -> f32 {
+    (1.0 - LAKE_DEPTH_FADE * depth) * (1.0 - CREST_DIM * sin.max(0.0).powi(2))
 }
 
 /// Height (px) of the emission fade under the top edge for a view `rows` pixels tall.
@@ -1046,15 +1073,6 @@ struct LivePatch {
     gain: f64,
 }
 
-/// Which parts of the label fit.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Label {
-    #[default]
-    None,
-    Short,
-    Full,
-}
-
 /// Everything derived from the terminal size (rebuilt in `resize`) plus the raster.
 #[derive(Debug, Default)]
 struct View {
@@ -1093,7 +1111,8 @@ struct View {
     layers: Vec<[Layer; MAX_LAYERS]>,
     nlayers: Vec<u8>,
     pixels: Pixels,
-    label: Label,
+    /// Whether the AL readout fits.
+    label: bool,
 }
 
 impl View {
@@ -1135,13 +1154,7 @@ impl View {
             layers: vec![[Layer::default(); MAX_LAYERS]; w],
             nlayers: vec![0; w],
             pixels: Pixels::new(size),
-            label: if w < 24 || h < 10 {
-                Label::None
-            } else if w < 60 {
-                Label::Short
-            } else {
-                Label::Full
-            },
+            label: w >= 24 && h >= 10,
             ..Self::default()
         };
         view.build_silhouette(setting);
@@ -1527,7 +1540,7 @@ impl View {
                     .any(|&nx| (y - 1..=y + 1).any(|ny| accent(&self.pixels, nx, ny)));
                 if !run {
                     let level = self.pixels.get(x, y).map_or(0, |i| i.level);
-                    self.pixels.set(x, y, Ink::new(Role::Particle, level));
+                    self.pixels.set(x, y, Ink::new(GREEN, level));
                 }
             }
         }
@@ -1571,33 +1584,66 @@ impl View {
         }
     }
 
-    /// Mirror the sky into the lake at 0.45× level with a ripple whose wavefronts travel
-    /// toward the viewer. Whole rows drop out on the crests, so mirrored rays read as
-    /// vertical streaks cut by horizontal ripple gaps; the x-dependent phase only shifts
-    /// pixels sideways, by at most `RIPPLE_SHIFT·d` px, so the water stays still. The lake
+    /// Mirror the sky into the lake at `LAKE_GAIN`× level with a ripple whose wavefronts
+    /// travel toward the viewer. The crests dim whole rows by up to `CREST_DIM`, so
+    /// mirrored rays read as vertical streaks crossed by darker ripple bands; the
+    /// x-dependent phase only shifts pixels sideways, by at most `RIPPLE_SHIFT·d` px, so
+    /// the water stays still. Deeper rows fade (`LAKE_DEPTH_FADE`). The lake
     /// copies the skyglow and the sky's lit pixels with their roles, dimming only the
     /// level (never below the core floor `ink::MIN_VISIBLE_LEVEL`). Each column's lit
     /// run is reflected whole or not at all: only runs whose brightest pixel reaches
     /// `LAKE_MIN_LEVEL` (`run_peaks`), since a faint run's copy could not be dimmer than
     /// the theme's floor, while cutting the dim ends off bright runs would leave shards.
     /// The ridge and spires mirror as a black band cut out of the reflected glow.
+    /// One past the lake's last pixel row: the title's cell row and the one above it
+    /// stay dark, so no reflection crowds the title (GEN-R13).
+    fn lake_end(&self) -> usize {
+        self.rows.saturating_sub(4).max(self.y_h)
+    }
+
+    /// The lake's copy of sky pixel `(sx, src)` at `gain` (depth and ripple, ≤ 1), or
+    /// `None` where the water shows nothing (AUR-A7): the skyglow, and every pixel of a
+    /// sky run whose brightest pixel reaches `LAKE_MIN_LEVEL`, dimmed to `LAKE_GAIN·gain`
+    /// of the 3 × 2 box sum over 6 of the pixels of its light in its row and the one above
+    /// (soft ends where the box leaves the run).
+    fn lake_ink(&self, sx: usize, src: usize, gain: f32) -> Option<Ink> {
+        let sky = self.pixels.get(sx as i32, src as i32)?;
+        let emission =
+            EMISSION.contains(&sky.role) && self.run_peak[src * self.w + sx] >= LAKE_MIN_LEVEL;
+        if sky.role != Role::Seq && !emission {
+            return None;
+        }
+        let xs = sx.saturating_sub(1)..=(sx + 1).min(self.w - 1);
+        let sum: f32 = (src.saturating_sub(1)..=src)
+            .flat_map(|y| xs.clone().map(move |x| (x, y)))
+            .filter_map(|(x, y)| self.pixels.get(x as i32, y as i32))
+            .filter(|i| i.role == sky.role)
+            .map(|i| f32::from(i.level))
+            .sum();
+        let level = (LAKE_GAIN * gain * sum / 6.0).round() as u8;
+        let level = if emission {
+            level.max(ink::MIN_VISIBLE_LEVEL as u8)
+        } else {
+            level
+        };
+        Some(Ink::new(sky.role, level))
+    }
+
     fn reflect(&mut self, t: f64) {
         if !self.lake {
             return;
         }
         self.run_peaks();
-        let floor = ink::MIN_VISIBLE_LEVEL as u8;
-        for y in self.y_h..self.rows {
+        let depth = (self.lake_end() - self.y_h).max(1) as f32;
+        for y in self.y_h..self.lake_end() {
             let k = y - self.y_h;
             let Some(src) = self.y_h.checked_sub(k + 1) else {
                 break;
             };
             let d = (k + 1) as f64;
             let (sp, cp) = (0.9 * d - 1.7 * t).sin_cos();
-            if sp > 0.9 {
-                continue;
-            }
             let (sp, cp) = (sp as f32, cp as f32);
+            let gain = lake_row_gain(k as f32 / depth, sp);
             for x in 0..self.w {
                 // sin(0.9d − 1.7t + 0.13x) by angle addition: no per-pixel trig.
                 let s = sp * self.ripple_cos[x] + cp * self.ripple_sin[x];
@@ -1605,21 +1651,11 @@ impl View {
                 let Ok(sx) = usize::try_from(sx) else {
                     continue;
                 };
-                let Some(sky) = self.pixels.get(sx as i32, src as i32) else {
-                    continue;
-                };
-                let level = (LAKE_GAIN * f32::from(sky.level)).round() as u8;
-                let level = if sky.role == Role::Seq {
-                    level
-                } else if EMISSION.contains(&sky.role)
-                    && self.run_peak[src * self.w + sx] >= LAKE_MIN_LEVEL
+                if sx < self.w
+                    && let Some(ink) = self.lake_ink(sx, src, gain)
                 {
-                    level.max(floor)
-                } else {
-                    continue;
-                };
-                self.pixels
-                    .set(x as i32, y as i32, Ink::new(sky.role, level));
+                    self.pixels.set(x as i32, y as i32, ink);
+                }
             }
         }
     }
@@ -1821,19 +1857,16 @@ impl Aurora {
         }
     }
 
-    /// ` AL -620 nT  expansion `: AL rounded to 10 nT, then the beat's name, with a
-    /// blank gutter cell on each side (CORE-R67) so the label never merges into the
-    /// curtain.
+    /// ` AL -620 nT `: AL rounded to 10 nT, with a blank gutter cell on each side
+    /// (CORE-R67) so the label never merges into the curtain. The beat is the title's
+    /// caption, so it is not repeated here (AUR-A9).
     fn draw_label(&self, canvas: &mut Canvas) {
-        if self.view.label == Label::None {
+        if !self.view.label {
             return;
         }
         let al = (al_from(self.params.activity) / 10.0).round() as i32 * 10;
-        let mut buf = StackText::<32>::new();
+        let mut buf = StackText::<16>::new();
         let _ = write!(buf, "AL {al} nT");
-        if self.view.label == Label::Full {
-            let _ = write!(buf, "  {}", self.timeline.at(self.t).label);
-        }
         draw::label(canvas, 0, 0, buf.as_str(), LABEL_INK);
     }
 }
@@ -1867,6 +1900,10 @@ impl Generator for Aurora {
         self.sample(dt);
         self.update_patches();
         self.rasterise();
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        CAPTIONS.get(self.timeline.at(self.t).index).copied()
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -2332,18 +2369,18 @@ mod tests {
         assert_eq!(glow(0.99 * GREEN_LIT, 0.2, false).ink(), None);
         assert_eq!(
             glow(GREEN_LIT, 0.2, false).ink(),
-            Some(Ink::new(Role::Particle, FLOOR))
+            Some(Ink::new(GREEN, FLOOR))
         );
-        assert_eq!(
-            glow(1.0, 0.2, false).ink(),
-            Some(Ink::new(Role::Particle, 255))
-        );
+        assert_eq!(glow(1.0, 0.2, false).ink(), Some(Ink::new(GREEN, 255)));
         // Red-dominant light has its own, higher threshold and stays a deep crimson
-        // (`Accent` ≤ RED_LEVEL_MAX); the hem is bright `Accent` from HEM_LEVEL.
+        // (`RED` ≤ RED_LEVEL_MAX); the hem is bright `RED` from HEM_LEVEL.
         const { assert!(RED_LIT > GREEN_LIT) };
         assert_eq!(glow(0.99 * RED_LIT, 0.8, false).ink(), None);
         assert!(glow(0.99 * RED_LIT, 0.4, false).ink().is_some());
-        assert_eq!(glow(RED_LIT, 0.8, false).ink(), Some(Ink::new(RED, FLOOR)));
+        assert_eq!(
+            glow(RED_LIT, 0.8, false).ink(),
+            Some(Ink::new(RED, RED_LEVEL_MIN as u8))
+        );
         // The crown needs the green's tail under it: no red slab over empty sky.
         let bare = Glow {
             green: 0.99 * CROWN_GREEN,
@@ -2361,7 +2398,7 @@ mod tests {
         );
         assert_eq!(
             glow(GREEN_LIT, 0.0, true).ink(),
-            Some(Ink::new(Role::Accent, HEM_LEVEL as u8))
+            Some(Ink::new(RED, HEM_LEVEL as u8))
         );
         // Hem and crown must not blur.
         const { assert!(HEM_LEVEL > RED_LEVEL_MAX + 40.0) };
@@ -2529,9 +2566,7 @@ mod tests {
                     if !(0..v.w as i32).contains(&cx) || !(0..v.y_h as i32).contains(&cy) {
                         continue;
                     }
-                    let lit = |x: i32, y: i32| {
-                        v.pixels.get(x, y).is_some_and(|i| i.role == Role::Particle)
-                    };
+                    let lit = |x: i32, y: i32| v.pixels.get(x, y).is_some_and(|i| i.role == GREEN);
                     let (kx, ky) = ((fa / 2.5).floor() as i32, (fe / 3.0).floor() as i32);
                     let core = (-kx..=kx).all(|dx| (-ky..=ky).all(|dy| lit(cx + dx, cy + dy)));
                     assert!(
@@ -2570,7 +2605,7 @@ mod tests {
                 let level = |x: usize, y: usize| {
                     v.pixels
                         .get(x as i32, y as i32)
-                        .filter(|i| i.role == Role::Particle)
+                        .filter(|i| i.role == GREEN)
                         .map_or(0, |i| i.level)
                 };
                 let arc = (0..v.y_h)
@@ -2735,22 +2770,20 @@ mod tests {
                 px(x, y).role == Role::Seq
                     || run_peak(v, x, y).is_some_and(|peak| peak >= LAKE_MIN_LEVEL)
             };
-            let dimmed = |i: Ink| {
-                let level = (LAKE_GAIN * f32::from(i.level)).round() as u8;
-                if i.role == Role::Seq {
-                    level
-                } else {
-                    level.max(ink::MIN_VISIBLE_LEVEL as u8)
-                }
-            };
-            for y in v.y_h..v.rows {
+            // The two bottom cell rows stay dark for the title (GEN-R13).
+            assert_eq!(v.lake_end(), v.rows - 4);
+            for y in v.lake_end()..v.rows {
+                assert!((0..v.w).all(|x| px(x, y) == Ink::BLANK), "row {y}");
+            }
+            let depth = (v.lake_end() - v.y_h) as f32;
+            for y in v.y_h..v.lake_end() {
                 let d = (y - v.y_h + 1) as f64;
                 let src = v.y_h - (y - v.y_h) - 1;
-                if (0.9 * d - 1.7 * a.t).sin() > 0.9 {
-                    // A ripple crest: the whole row drops out.
-                    assert!((0..v.w).all(|x| px(x, y) == Ink::BLANK), "row {y}");
-                    continue;
-                }
+                // No row drops out: a crest only dims it.
+                let gain = lake_row_gain(
+                    (y - v.y_h) as f32 / depth,
+                    (0.9 * d - 1.7 * a.t).sin() as f32,
+                );
                 rows += 1;
                 for x in 0..v.w {
                     sky_lit += usize::from(mirrored(x, src));
@@ -2759,13 +2792,22 @@ mod tests {
                         continue;
                     }
                     lake_lit += 1;
-                    // Each lit lake pixel is a dimmed copy (never under the core floor)
-                    // of a mirrored sky pixel a ripple shift away, with its role (so red
-                    // over green reflects as red over green).
-                    let copy = (x.saturating_sub(3)..(x + 4).min(v.w)).any(|sx| {
-                        let s = px(sx, src);
-                        mirrored(sx, src) && s.role == ink.role && ink.level == dimmed(s)
-                    });
+                    // Each lit lake pixel is a dimmed, box-averaged copy (never under
+                    // the core floor) of a mirrored sky pixel a ripple shift away, with
+                    // its role (so red over green reflects as red over green), and never
+                    // brighter than `LAKE_GAIN` of the sky it mirrors.
+                    let copy = (x.saturating_sub(3)..(x + 4).min(v.w))
+                        .any(|sx| mirrored(sx, src) && v.lake_ink(sx, src, gain) == Some(ink));
+                    let peak = (x.saturating_sub(4)..(x + 5).min(v.w))
+                        .flat_map(|sx| [px(sx, src).level, px(sx, src.saturating_sub(1)).level])
+                        .max()
+                        .unwrap_or(0);
+                    assert!(
+                        f32::from(ink.level)
+                            <= (LAKE_GAIN * gain * f32::from(peak))
+                                .max(ink::MIN_VISIBLE_LEVEL as f32)
+                                + 1.0
+                    );
                     assert!(
                         copy,
                         "t = {}: lake pixel {x},{y} {ink:?} mirrors nothing",
@@ -2782,6 +2824,49 @@ mod tests {
                 a.t
             );
         }
+    }
+
+    #[test]
+    fn aur_a7_lake_pixel_is_the_dimmed_box_mean_of_its_source() {
+        // Hand-set sky: a green run three pixels wide on a sky row and the row above it,
+        // with empty sky either side. The copy of its middle pixel is
+        // round(LAKE_GAIN · gain · (sum of the six) / 6); one end loses the three pixels
+        // past the run (soft ends), and deeper rows and ripple crests dim it.
+        let (mut a, _) = census(56);
+        let v = &mut a.view;
+        // A row that `run_peaks` scans (only the emitting rows can hold emission).
+        let src = v.emit_rows.0 + 1;
+        assert!(src < v.emit_rows.1.min(v.y_h - 1));
+        let x0 = v.w / 2;
+        let levels = [[80u8, 90, 100], [100, 120, 140]];
+        for (row, y) in [src - 1, src].into_iter().enumerate() {
+            v.pixels.set(x0 as i32 - 2, y as i32, Ink::BLANK);
+            v.pixels.set(x0 as i32 + 2, y as i32, Ink::BLANK);
+            for (i, &l) in levels[row].iter().enumerate() {
+                v.pixels
+                    .set((x0 + i) as i32 - 1, y as i32, Ink::new(GREEN, l));
+            }
+        }
+        v.run_peaks();
+        let sum: f32 = levels.iter().flatten().map(|&l| f32::from(l)).sum();
+        let want = |gain: f32, sum: f32| {
+            Some(Ink::new(
+                GREEN,
+                (LAKE_GAIN * gain * sum / 6.0).round() as u8,
+            ))
+        };
+        assert_eq!(v.lake_ink(x0, src, 1.0), want(1.0, sum));
+        assert_eq!(
+            v.lake_ink(x0 + 1, src, 1.0),
+            want(1.0, 90.0 + 100.0 + 120.0 + 140.0)
+        );
+        assert_eq!(v.lake_ink(x0, src, 0.5), want(0.5, sum));
+        // The row gain: full at the shore between crests, fading with depth, dimmed on
+        // a crest, and never zero.
+        assert_eq!(lake_row_gain(0.0, -0.3), 1.0);
+        assert!(lake_row_gain(0.9, 0.0) < lake_row_gain(0.2, 0.0));
+        assert!((lake_row_gain(0.0, 1.0) - (1.0 - CREST_DIM)).abs() < 1e-6);
+        assert!(lake_row_gain(1.0, 1.0) > 0.2);
     }
 
     #[test]
@@ -2816,9 +2901,11 @@ mod tests {
                         .iter()
                         .any(|dx| (-1..=1).any(|dy| accent(x as i32 + dx, y + dy)));
                     assert!(run, "t = {}: isolated hem pixel at {x},{y}", a.t);
-                    // Crisp: bright pink, never the crown's deep crimson.
-                    let level = v.pixels.get(x as i32, y).map_or(0, |i| i.level);
-                    assert!(f64::from(level) >= HEM_LEVEL - 0.5, "hem level {level}");
+                    // Crisp: rose pink, never the crown's deep crimson nor the ramp's
+                    // near-white top.
+                    let level = f64::from(v.pixels.get(x as i32, y).map_or(0, |i| i.level));
+                    assert!(level >= HEM_LEVEL - 0.5, "hem level {level}");
+                    assert!(level <= HEM_LEVEL_MAX + 0.5, "hem level {level}");
                 }
             }
             assert!(hems > 0, "no hem at t = {}", a.t);
@@ -2986,31 +3073,31 @@ mod tests {
     }
 
     #[test]
-    fn aur_label_is_rounded_and_fits_the_width() {
-        let (a, _) = scene(80, 24);
-        let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
-        a.render(&mut canvas);
-        let top = &canvas.to_lines()[0];
-        assert!(top.starts_with(" AL -"), "{top}");
-        assert!(top.contains(" nT  growth "), "{top}");
-        // The expansion peak: a blank gutter cell right after the label.
-        let (mut a, mut ctx) = scene(80, 24);
-        for _ in 0..56 {
-            a.update(0.25, &mut ctx);
+    fn aur_a9_captions_follow_the_beat_and_the_label_is_al_only() {
+        // Loop times 1, 13, 20 and 40 s fall in growth, onset, expansion and recovery.
+        for (t, caption) in [1.0, 13.0, 20.0, 40.0].into_iter().zip(CAPTIONS) {
+            let (mut a, mut ctx) = scene(80, 24);
+            let steps = ((t + LOOP - START_T) % LOOP / 0.25).round() as usize;
+            for _ in 0..steps {
+                a.update(0.25, &mut ctx);
+            }
+            assert_eq!(a.caption(), Some(caption), "t = {t}");
+            assert!(META.captions.contains(&caption));
+            let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
+            a.render(&mut canvas);
+            let top = &canvas.to_lines()[0];
+            assert!(top.starts_with(" AL -"), "{top}");
+            // A blank gutter cell right after the label, and no beat word.
+            let end = top.find(" nT").map(|i| i + " nT".len());
+            assert_eq!(
+                end.and_then(|e| top.as_bytes().get(e)),
+                Some(&b' '),
+                "{top}"
+            );
+            for &(beat, _) in &BEATS {
+                assert!(!top.contains(beat), "{top}");
+            }
         }
-        let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
-        a.render(&mut canvas);
-        let top = &canvas.to_lines()[0];
-        let end = top.find("expansion").map(|i| i + "expansion".len());
-        assert_eq!(
-            end.and_then(|e| top.as_bytes().get(e)),
-            Some(&b' '),
-            "{top}"
-        );
-        let (a, _) = scene(40, 24);
-        let mut canvas = Canvas::new(Size::new(40, 24), GlyphMode::Ascii);
-        a.render(&mut canvas);
-        assert!(!canvas.to_lines()[0].contains("growth"));
         let (a, _) = scene(20, 24);
         let mut canvas = Canvas::new(Size::new(20, 24), GlyphMode::Ascii);
         a.render(&mut canvas);
@@ -3055,7 +3142,7 @@ mod tests {
                     capped += usize::from((y + 1..(y + 12).min(v.y_h)).any(|g| {
                         v.pixels
                             .get(x as i32, g as i32)
-                            .is_some_and(|i| i.role == Role::Particle)
+                            .is_some_and(|i| i.role == GREEN)
                     }));
                 }
                 tops.extend(top);
@@ -3091,7 +3178,7 @@ mod tests {
                 }
                 let ch = lines[cy].chars().nth(cx);
                 match c.ink.role {
-                    Role::Particle => {
+                    GREEN => {
                         assert!(matches!(ch, Some(',' | ':' | '!' | '|')), "{ch:?}");
                         commas += usize::from(ch == Some(','));
                     }

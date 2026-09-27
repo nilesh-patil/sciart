@@ -2,7 +2,7 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
- AL -130 nT  growth                                                             
+ AL -130 nT                                                                     
          .                                                                      
                               .                                                 
                                                                     .           
@@ -23,6 +23,6 @@ expression: frame
 ________________________________________________________________________________
                                                                                 
                                                                                 
-     -                                                                   --     
-     -   - --                                                       -------     
- Aurora - electrons light the air                                ------
+-    -                                                                   --     
+                                                                                
+ Aurora - growth phase

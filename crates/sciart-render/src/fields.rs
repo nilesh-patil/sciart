@@ -121,6 +121,17 @@ const BLACKBODY_WHITE_K: f64 = 6500.0;
 /// law under the CIE 1931 2° observer, normalised to its brightest channel, then dimmed
 /// below the white point so that lightness climbs from `BLACKBODY_DARK_L` to the full colour.
 fn blackbody(ink: Ink) -> Rgb {
+    encode(blackbody_linear(ink))
+}
+
+/// CIE L* of the [`blackbody`] colour at the ink's level: what `mono` paints, so a star
+/// is as bright in grey as in colour (RND-R11).
+pub(crate) fn blackbody_lightness(ink: Ink) -> f64 {
+    lightness(luminance(blackbody_linear(ink)))
+}
+
+/// The linear sRGB behind [`blackbody`].
+fn blackbody_linear(ink: Ink) -> [f64; 3] {
     let kelvin = ink::blackbody_kelvin(ink);
     let [x, y, z] = planck_xyz(kelvin);
     let rgb = xyz_to_linear_srgb([x, y, z]).map(|c| c.max(0.0));
@@ -132,7 +143,7 @@ fn blackbody(ink: Ink) -> Rgb {
     let s = ((kelvin / ink::BLACKBODY_MIN_K).ln() / span).clamp(0.0, 1.0);
     let target = BLACKBODY_DARK_L + (full - BLACKBODY_DARK_L) * s;
     let k = (luminance_of(target) / luminance(rgb)).min(1.0);
-    encode(rgb.map(|c| c * k))
+    rgb.map(|c| c * k)
 }
 
 /// Tristimulus XYZ of Planck's law at `kelvin`, up to a common scale: a 5 nm Riemann sum
