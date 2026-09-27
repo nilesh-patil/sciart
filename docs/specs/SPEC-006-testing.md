@@ -17,7 +17,7 @@
 | Property | `proptest` | `crates/sciart-generators/tests/props.rs`, core `tests/` | random `(size, dt)` op sequences per generator; FixedStep invariants |
 | Snapshot | `insta` | `crates/sciart-generators/tests/snapshots.rs` | seed 42, 80×24, ASCII mode, frames after 0 s / 1 s / 5 s |
 | End-to-end | `portable-pty` | `crates/sciart/tests/pty_smoke.rs` | real binary in an 80×24 pty: draws, restores the terminal (RND-R5), keys work, HUD visible |
-| Bench | `criterion` | `crates/sciart-generators/benches/frame.rs` | update(1/60)+render at 200×50 and 400×100 per generator |
+| Bench | `criterion` | `crates/sciart-generators/benches/frame.rs` | update(1/60)+render at 200×50 and 400×100 per generator; the slowest known hand-over frames (`worst`) and resize hitches (`resize`) |
 | Leak (M11) | `sciart_testalloc` live bytes | `crates/sciart-generators/tests/leak_free.rs` | resize churn and a live-bytes ceiling per generator (TEST-R6, TEST-R7) |
 
 - **TEST-R1** Every requirement ID defined in `docs/specs` (bold `**X-RN**` requirements and backticked `X-AN` IDs on `- **Acceptance**` lines) is cited by ≥ 1 test — in its name (chains like `core_r9_r10_…` count), the comments/attributes directly above it, or its body — or is listed here as manual. Enforced by `crates/sciart/tests/spec_traceability.rs`, which also rejects citations of undefined IDs and stale manual entries (its `MANUAL` list must match this table):
