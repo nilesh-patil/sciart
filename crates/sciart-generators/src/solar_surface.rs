@@ -17,7 +17,8 @@ use rand::Rng;
 use sciart_core::geom::v3::{axpy, cross, dot, norm};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::{geom, ink};
+use sciart_core::title::{self, Title};
+use sciart_core::{draw, geom, ink};
 
 pub static META: Meta = Meta {
     name: "solar_surface",
@@ -631,14 +632,6 @@ struct Cell {
     w: f32,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-enum Label {
-    #[default]
-    None,
-    Short,
-    Full,
-}
-
 /// Everything derived from the terminal size, plus the raster.
 #[derive(Debug, Default)]
 struct View {
@@ -666,7 +659,8 @@ struct View {
     /// thread bridges a group's spots without crossing their penumbrae.
     in_spot: Vec<bool>,
     pixels: Pixels,
-    label: Label,
+    /// Whether the day readout is drawn at all: small terminals keep every cell for the Sun.
+    label: bool,
 }
 
 impl View {
@@ -737,13 +731,7 @@ impl View {
             disc_i: vec![f32::NAN; w * rows],
             in_spot: vec![false; w * rows],
             pixels: Pixels::new(size),
-            label: if w < 30 || h < 10 {
-                Label::None
-            } else if w < 60 {
-                Label::Short
-            } else {
-                Label::Full
-            },
+            label: w >= 30 && h >= 10,
         }
     }
 
@@ -1211,18 +1199,27 @@ impl SolarSurface {
         Some((ch, ink::seq(v)))
     }
 
-    /// `day 12.4  Teff 5772 K`, bottom-left.
+    /// `day 12.4  Teff 5772 K`, bottom-right and clear of the title (GEN-R13); `Teff`
+    /// is dropped first when the row is too narrow, then the whole readout.
     fn draw_label(&self, canvas: &mut Canvas) {
-        if self.view.label == Label::None {
+        if !self.view.label {
             return;
         }
+        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
         let mut buf = StackText::<32>::new();
         let _ = write!(buf, "day {:.1}", DAYS_PER_SEC * self.t);
-        if self.view.label == Label::Full {
-            let _ = write!(buf, "  Teff {TEFF_K} K");
-        }
+        let day = buf.len();
+        let _ = write!(buf, "  Teff {TEFF_K} K");
+        // ASCII only, so byte lengths are char counts and every cut is a char boundary.
+        let n = if buf.len() <= room {
+            buf.len()
+        } else if day <= room {
+            day
+        } else {
+            return;
+        };
         let row = i32::from(canvas.size().height()) - 1;
-        canvas.text(1, row, buf.as_str(), LABEL_INK);
+        draw::label_right(canvas, row, &buf.as_str()[..n], LABEL_INK);
     }
 }
 
@@ -2318,14 +2315,19 @@ mod tests {
     }
 
     #[test]
-    fn sun_label_and_tiny_sizes() {
-        let (mut s, mut ctx) = scene(80, 24);
-        for _ in 0..40 {
-            s.update(0.25, &mut ctx);
+    fn sun_gen_r13_label_and_tiny_sizes() {
+        // Right-aligned, clear of the title: "Sun · convection and sunspots" takes cols
+        // 0..31 from 52 wide, which leaves 19 chars there, so Teff is dropped.
+        for (w, want) in [(80, " day 3.0  Teff 5772 K "), (52, " day 3.0 ")] {
+            let (mut s, mut ctx) = scene(w, 24);
+            for _ in 0..40 {
+                s.update(0.25, &mut ctx);
+            }
+            let mut canvas = Canvas::new(Size::new(w, 24), GlyphMode::Ascii);
+            s.render(&mut canvas);
+            assert!(canvas.to_lines()[23].ends_with(want), "{w}");
         }
-        let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
-        s.render(&mut canvas);
-        assert_eq!(&canvas.to_lines()[23][..22], " day 3.0  Teff 5772 K ");
+        let (mut s, mut ctx) = scene(80, 24);
         for (w, h) in [(1, 1), (3, 2), (50, 12), (300, 1)] {
             s.resize(Size::new(w, h), &mut ctx);
             s.update(0.25, &mut ctx);

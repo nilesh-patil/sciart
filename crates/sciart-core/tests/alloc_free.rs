@@ -484,11 +484,15 @@ fn core_r74_r76_title_and_label_right_do_not_allocate() {
         let t = title::Title::new("Strange attractor · chaos", Some("Rössler"));
         let fit = t.fit(canvas.size());
         let span = title::span(canvas.size(), &t);
+        let room = title::readout_room(canvas.size(), &t);
         title::draw(&mut canvas, &t, 9.0);
         let lead = draw::label_right(&mut canvas, 23, "T 5772 K λ", Ink::new(Role::Text, 150));
-        black_box((fit, span));
+        black_box((fit, span, room));
         lead
     });
-    assert_free("title::{fit, span, draw} / label_right", stats);
+    assert_free(
+        "title::{fit, span, readout_room, draw} / label_right",
+        stats,
+    );
     black_box(lead);
 }

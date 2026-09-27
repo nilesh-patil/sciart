@@ -31,7 +31,8 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::{ease, geom, ink, ode};
+use sciart_core::title::{self, Title};
+use sciart_core::{draw, ease, geom, ink, ode};
 
 pub static META: Meta = Meta {
     name: "action_potential",
@@ -1201,11 +1202,13 @@ impl ActionPotential {
         }
     }
 
+    /// The readout, right-aligned on the bottom row clear of the title (GEN-R13).
     fn draw_label(&self, canvas: &mut Canvas) {
-        let (w, h) = (self.cells.width(), self.cells.height());
-        if w < 10 || h < 3 {
+        let h = self.cells.height();
+        if h < 3 {
             return;
         }
+        let room = title::readout_room(self.cells, &Title::new(META.title, self.caption()));
         let beat = self.timeline.at(self.step as f64 / SUB_PER_S as f64).label;
         let mut speed = StackText::<8>::new();
         // Writing into a StackText never fails.
@@ -1214,18 +1217,20 @@ impl ActionPotential {
             None => write!(speed, "--.-"),
         };
         let mut label = StackText::<80>::new();
-        let _ = match w {
-            100.. => write!(
+        // Each threshold is its form's length with the longest beat and a 4-char speed,
+        // so the form follows the room, never the beat. The temperature stays in every
+        // form: 12.3 m/s is right for 6.3 °C, not the textbook 21 m/s at 18.5 °C.
+        let _ = match room {
+            62.. => write!(
                 label,
                 "Hodgkin-Huxley 1952 | squid axon 6.3C | v={speed} m/s | {beat}"
             ),
-            // ≤ 38 characters from column 1. The temperature stays in every form with a
-            // velocity: 12.3 m/s is right for 6.3 °C, not the textbook 21 m/s at 18.5 °C.
-            40.. => write!(label, "HH squid 6.3C | v={speed} m/s | {beat}"),
-            36.. => write!(label, "HH 6.3C | v={speed} m/s | {beat}"),
-            _ => write!(label, "HH 6.3C"),
+            38.. => write!(label, "HH squid 6.3C | v={speed} m/s | {beat}"),
+            32.. => write!(label, "HH 6.3C | v={speed} m/s | {beat}"),
+            7.. => write!(label, "HH 6.3C"),
+            _ => return,
         };
-        canvas.text(1, i32::from(h) - 1, label.as_str(), LABEL_INK);
+        draw::label_right(canvas, i32::from(h) - 1, label.as_str(), LABEL_INK);
     }
 }
 
@@ -1863,42 +1868,51 @@ mod tests {
         assert_eq!(drawn.count(), 3, "every primary dendrite is drawn");
     }
 
-    fn label(w: u16, t: f64) -> String {
-        let (_, lines) = ascii_frame(Size::new(w, 12), t);
-        lines[11].trim().to_string()
+    /// The bottom row of a blank `w`×12 canvas holding only the readout, at scene time `t`.
+    fn readout(w: u16, t: f64, speed: Option<f64>) -> String {
+        let size = Size::new(w, 12);
+        let mut ap = ActionPotential::default();
+        ap.resize(size, &mut Ctx::new(1, size));
+        ap.step = (t * SUB_PER_S as f64) as u64;
+        ap.meter.speed = speed;
+        let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+        ap.draw_label(&mut canvas);
+        canvas.to_lines().swap_remove(11)
     }
 
     #[test]
-    fn ap_label_forms_fit_their_widths() {
-        assert_eq!(
-            label(100, 0.0),
-            "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s | single"
-        );
-        // Every form keeps the temperature: the velocity means nothing without it.
-        assert_eq!(label(99, 0.0), "HH squid 6.3C | v=--.- m/s | single");
-        assert_eq!(label(40, 0.0), "HH squid 6.3C | v=--.- m/s | single");
-        assert_eq!(label(39, 0.0), "HH 6.3C | v=--.- m/s | single");
-        assert_eq!(label(36, 0.0), "HH 6.3C | v=--.- m/s | single");
-        assert_eq!(label(35, 0.0), "HH 6.3C");
-        // The longest readings still fit, with the column-1 offset.
-        for (w, beat_at) in [(40u16, 14.0), (36, 16.0)] {
-            let size = Size::new(w, 12);
-            let mut ap = ActionPotential::default();
-            ap.resize(size, &mut Ctx::new(1, size));
-            ap.step = (beat_at * SUB_PER_S as f64) as u64;
-            ap.meter.speed = Some(12.3);
-            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
-            ap.draw_label(&mut canvas);
-            let row = canvas.to_lines()[11].clone();
-            let beat = if beat_at < 15.5 {
-                "collision"
-            } else {
-                "threshold"
-            };
-            assert!(
-                row.trim_end().ends_with(&format!("v=12.3 m/s | {beat}")),
-                "w={w}: {row:?}"
-            );
+    fn ap_gen_r13_label_forms_follow_the_room_right_of_the_title() {
+        let long = "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s | single";
+        let mid = "HH squid 6.3C | v=--.- m/s | single";
+        let short = "HH 6.3C | v=--.- m/s | single";
+        // The room is w − 2 minus the title span: 33 cells from w = 55, where the full
+        // title fits, 13 for the phenomenon below that, none below w = 22.
+        for (w, want) in [
+            (97u16, long),
+            (96, mid),
+            (73, mid),
+            (72, short),
+            (67, short),
+            (66, "HH 6.3C"),
+            (55, "HH 6.3C"),
+            (54, mid),
+            (52, short),
+            (46, "HH 6.3C"),
+            (21, "HH 6.3C"),
+            (9, "HH 6.3C"),
+            (8, ""),
+        ] {
+            let row = readout(w, 0.0, None);
+            // Whole, never clipped, and ending one blank cell from the right edge.
+            assert_eq!(row.trim(), want, "w={w}");
+            assert!(row.ends_with(&format!("{want} ")), "w={w}: {row:?}");
+        }
+        // The longest beats fit the least room of their form.
+        for (w, t, want) in [
+            (73, 14.0, "HH squid 6.3C | v=12.3 m/s | collision"),
+            (67, 16.0, "HH 6.3C | v=12.3 m/s | threshold"),
+        ] {
+            assert_eq!(readout(w, t, Some(12.3)).trim(), want, "w={w}");
         }
     }
 

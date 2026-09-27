@@ -1,4 +1,4 @@
-//! Stability contract for EVERY registered generator (SPEC-002 GEN-R1..R10, GEN-R12).
+//! Stability contract for EVERY registered generator (SPEC-002 GEN-R1..R10, GEN-R12, GEN-R13).
 //!
 //! Port of the Python `tests/test_generator_contract.py`, extended for animation.
 //! New generators are covered automatically once they are in the registry.
@@ -278,6 +278,37 @@ fn gen_r12_live_captions_are_declared() {
                 assert!(
                     e.meta.captions.contains(&caption),
                     "caption {caption:?} at {secs} s is not in meta.captions"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn gen_r13_no_scene_text_in_the_title_span() {
+    // Title hidden, so any text left in its span is the scene's own; Unicode only, since
+    // ASCII art fallbacks may use letters.
+    for_each_generator("title span", |e| {
+        for size in [Size::new(80, 24), Size::new(40, 12)] {
+            let mut stage = Stage::new((e.build)(), 42, size, GlyphMode::Unicode);
+            stage.set_title_visible(false);
+            let mut steps = 0;
+            for secs in [0, 1, 5] {
+                while steps < secs * 60 {
+                    stage.step(SIM_DT);
+                    steps += 1;
+                }
+                let title = stage.title();
+                let canvas = stage.render();
+                let Some((y, cols)) = title::span(size, &title) else {
+                    continue;
+                };
+                let row: String = cols
+                    .map(|x| canvas.get(x, y).map_or(' ', |c| c.ch))
+                    .collect();
+                assert!(
+                    !row.chars().any(char::is_alphanumeric),
+                    "{size:?} at {secs} s: {row:?}"
                 );
             }
         }

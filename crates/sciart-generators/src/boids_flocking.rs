@@ -22,6 +22,7 @@ use rand::Rng;
 use sciart_core::particles::{gaussian, gaussian2};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::title::{self, Title};
 use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
@@ -962,10 +963,14 @@ impl Generator for Boids {
                 FALCON_INK,
             );
         }
-        if Self::shows_label(self.cells) {
-            // One dark cell either side, so the label never looks glued to a bird.
+        let title = Title::new(META.title, self.caption());
+        if Self::shows_label(self.cells)
+            && self.label.len() <= title::readout_room(self.cells, &title)
+        {
+            // Right of the title (GEN-R13), with one dark cell either side, so the label
+            // never looks glued to a bird.
             let y = i32::from(self.cells.height()) - 1;
-            draw::label(canvas, 0, y, self.label.as_str(), LABEL_INK);
+            draw::label_right(canvas, y, self.label.as_str(), LABEL_INK);
         }
     }
 }
@@ -1356,12 +1361,13 @@ mod tests {
                         .map(|x| canvas.get(x, y).map_or(' ', |c| c.ch))
                         .collect();
                     assert_eq!(
-                        row.trim_end(),
-                        label.trim_end(),
+                        row.trim_start(),
+                        label.trim_start(),
                         "{size:?} t = {}: label row {row:?}",
                         b.time()
                     );
-                    for x in [0, label.len() as i32 - 1] {
+                    let w = i32::from(size.width());
+                    for x in [w - label.len() as i32, w - 1] {
                         assert_eq!(canvas.get(x, y).copied(), Some(Cell::BLANK), "x = {x}");
                     }
                 }

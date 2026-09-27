@@ -8,6 +8,7 @@ use std::f64::consts::TAU;
 use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "constellation_map",
@@ -451,7 +452,9 @@ impl Generator for ConstellationMap {
         } else {
             lx - 1 - len
         };
-        canvas.text(x, ly, lead.name, label_ink);
+        // Text stays above the bottom row, which belongs to the science title (GEN-R13);
+        // only on the tiniest charts does the α star itself sit on it.
+        canvas.text(x, ly.min(self.height - 2), lead.name, label_ink);
 
         let bottom = pos.iter().map(|p| p.1).fold(0.0, f64::max).round() as i32;
         let row = (bottom + 2).min(self.height - 2).max(0);
@@ -459,11 +462,17 @@ impl Generator for ConstellationMap {
         let name_ink = Ink::new(Role::Text, Self::scaled(255.0, fade));
         Self::title(canvas, row, fig.name, shown, name_ink);
         let epithet_shown = shown.saturating_sub(fig.name.chars().count() + 2);
-        if epithet_shown > 0 && row + 1 < self.height {
-            let n = fig.epithet.chars().count().min(epithet_shown);
-            let x = (self.width - fig.epithet.chars().count() as i32) / 2;
+        let len = fig.epithet.chars().count();
+        // Centred under the name; on the bottom row it is nudged right past the title
+        // with a blank between (GEN-R13), and dropped when it then no longer fits.
+        let mut x = (self.width - len as i32) / 2;
+        if row + 1 == self.height - 1 {
+            let span = title::span(canvas.size(), &Title::new(META.title, self.caption()));
+            x = x.max(span.map_or(0, |(_, cols)| cols.end + 1));
+        }
+        if epithet_shown > 0 && row + 1 < self.height && x + len as i32 <= self.width {
             let ink = Ink::new(Role::Text, Self::scaled(140.0, fade));
-            for (i, ch) in fig.epithet.chars().take(n).enumerate() {
+            for (i, ch) in fig.epithet.chars().take(len.min(epithet_shown)).enumerate() {
                 canvas.put(x + i as i32, row + 1, Glyph::ascii(ch), ink);
             }
         }
@@ -596,6 +605,34 @@ mod tests {
         assert_eq!(lines_at(0.0), 0);
         assert!(lines_at(2.0) > 0);
         assert!(lines_at(TRACE + 0.5) >= lines_at(2.0));
+    }
+
+    #[test]
+    fn con_gen_r13_names_stay_clear_of_the_title() {
+        for size in [Size::new(80, 24), Size::new(40, 12), Size::new(30, 6)] {
+            let mut g = ConstellationMap::default();
+            let mut ctx = Ctx::new(1, size);
+            g.resize(size, &mut ctx);
+            g.bg.clear();
+            let (y, cols) = title::span(size, &Title::new(META.title, None)).unwrap();
+            for (k, fig) in FIGURES.iter().enumerate() {
+                // Fully typed out, before the fade. Unicode, whose star glyphs are not letters.
+                g.t = k as f64 * SHOW + SHOW - FADE - 0.1;
+                let mut c = Canvas::new(size, GlyphMode::Unicode);
+                g.render(&mut c);
+                let lines = c.to_lines();
+                let bottom: String = lines[y as usize].chars().take(cols.end as usize).collect();
+                assert!(
+                    !bottom.chars().any(char::is_alphanumeric),
+                    "{size:?} {}: {bottom:?}",
+                    fig.name
+                );
+                if size.width() == 80 {
+                    let text = lines.concat();
+                    assert!(text.contains(fig.epithet), "{}", fig.name);
+                }
+            }
+        }
     }
 
     #[test]

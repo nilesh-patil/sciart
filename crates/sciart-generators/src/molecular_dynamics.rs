@@ -29,6 +29,7 @@ use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::particles::{gaussian2, plot};
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "molecular_dynamics",
@@ -285,7 +286,17 @@ pub struct MolecularDynamics {
     ay: Vec<f64>,
     cells: CellList,
     view: View,
-    label: String,
+    readout: Readout,
+}
+
+/// What the bottom-right readout shows, sampled after each step: the energy sum is too
+/// costly to redo in `render`, which only formats it.
+#[derive(Debug, Default, Clone, Copy)]
+struct Readout {
+    temperature: f64,
+    target: f64,
+    mode: &'static str,
+    u_per_atom: f64,
 }
 
 impl MolecularDynamics {
@@ -410,24 +421,56 @@ impl MolecularDynamics {
         }
     }
 
-    fn refresh_label(&mut self) {
+    fn refresh_readout(&mut self) {
         let heating = self.t.rem_euclid(CYCLE) < CYCLE / 2.0;
-        let u_per_atom = self.potential_energy() / self.n().max(1) as f64;
-        let mode = if self.thermostat_off {
-            "NVE"
-        } else if heating {
-            "heating"
-        } else {
-            "cooling"
+        self.readout = Readout {
+            temperature: self.temperature(),
+            target: target_temperature(self.t),
+            mode: if self.thermostat_off {
+                "NVE"
+            } else if heating {
+                "heating"
+            } else {
+                "cooling"
+            },
+            u_per_atom: self.potential_energy() / self.n().max(1) as f64,
         };
-        self.label.clear();
-        let _ = write!(
-            self.label,
-            "T = {:.2} -> {:.2} {mode}   U/N = {u_per_atom:+.2}   N = {}   LJ reduced units",
-            self.temperature(),
-            target_temperature(self.t),
-            self.n()
-        );
+    }
+
+    /// The readout, right-aligned on the label row and clear of the title (GEN-R13). The
+    /// longest form that fits wins: the units note goes first, then the energy and atom
+    /// count, then the target temperature; nothing when even `T = … heating` does not fit.
+    fn draw_readout(&self, canvas: &mut Canvas, row: i32) {
+        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let Readout {
+            temperature: t,
+            target,
+            mode,
+            u_per_atom: u,
+        } = self.readout;
+        let n = self.n();
+        // Typically 70 bytes at most; the slack keeps a runaway temperature from truncating
+        // it. Writing into a StackText never fails.
+        let mut text = StackText::<128>::new();
+        for form in 0..4 {
+            text.clear();
+            let _ = match form {
+                0 => write!(
+                    text,
+                    "T = {t:.2} -> {target:.2} {mode}   U/N = {u:+.2}   N = {n}   LJ reduced units"
+                ),
+                1 => write!(
+                    text,
+                    "T = {t:.2} -> {target:.2} {mode}   U/N = {u:+.2}   N = {n}"
+                ),
+                2 => write!(text, "T = {t:.2} -> {target:.2} {mode}"),
+                _ => write!(text, "T = {t:.2} {mode}"),
+            };
+            if text.len() <= room {
+                draw::label_right(canvas, row, text.as_str(), Ink::new(Role::Text, 170));
+                return;
+            }
+        }
     }
 
     fn to_screen(&self, x: f64, y: f64) -> (f64, f64) {
@@ -507,7 +550,7 @@ impl Generator for MolecularDynamics {
         self.ay.resize(n, 0.0);
         self.cells.setup(lx, ly, n);
         self.compute_forces();
-        self.refresh_label();
+        self.refresh_readout();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -526,7 +569,7 @@ impl Generator for MolecularDynamics {
                 berendsen_lambda(self.temperature(), target_temperature(self.t), dt, TAU_T);
             self.scale_velocities(lambda);
         }
-        self.refresh_label();
+        self.refresh_readout();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -569,10 +612,8 @@ impl Generator for MolecularDynamics {
             plot(canvas, c, r, ATOM, ink);
         }
 
-        if let Some(row) = self.view.label_row
-            && usize::from(canvas.size().width()) >= self.label.len() + 2
-        {
-            draw::text_centered(canvas, row, &self.label, Ink::new(Role::Text, 170));
+        if let Some(row) = self.view.label_row {
+            self.draw_readout(canvas, row);
         }
     }
 }
@@ -881,5 +922,38 @@ mod tests {
         assert!(lines[29].contains("T = "), "{}", lines[29]);
         assert!(frame.cells().iter().any(|c| c.ch == 'O'));
         assert!(lines[0].starts_with('+'));
+    }
+
+    #[test]
+    fn md_gen_r13_readout_is_right_aligned_and_shortened_clear_of_the_title() {
+        let readout = |w: u16| {
+            let size = Size::new(w, 24);
+            let (g, _) = fresh(w, 24, 42);
+            let mut c = Canvas::new(size, GlyphMode::Ascii);
+            g.render(&mut c);
+            let row = c.to_lines().pop().unwrap();
+            let span = title::span(size, &Title::new(META.title, None));
+            let free = span.map_or(0, |(_, cols)| cols.end as usize);
+            let lead = row.len() - row.trim_start().len();
+            assert!(lead > free || row.trim().is_empty(), "{w}: {row:?}");
+            assert!(row.ends_with(' '), "{w}: {row:?}");
+            row.trim().to_owned()
+        };
+        let full = readout(200);
+        assert!(full.starts_with("T = 0.40 -> ") && full.ends_with("   LJ reduced units"));
+        // "Gas to liquid · atoms stick" takes cols 0..29 at 80 wide: 49 chars are left.
+        let r = readout(80);
+        assert!(
+            r.contains("U/N = ") && r.contains("N = ") && !r.contains("LJ"),
+            "{r}"
+        );
+        let r = readout(60);
+        assert!(
+            r.starts_with("T = 0.40 -> ") && r.ends_with(" heating"),
+            "{r}"
+        );
+        // Only "Gas to liquid" fits at 40 wide (cols 0..15): 23 chars are left.
+        assert_eq!(readout(40), "T = 0.40 heating");
+        assert_eq!(readout(30), "");
     }
 }
