@@ -1158,6 +1158,17 @@ impl Generator for RocketLaunch {
     }
 }
 
+/// Whole seconds on the mission clock (ROC-A8): a countdown shows the seconds still to go
+/// (T−2 until 1 s is left), the climb the seconds elapsed, so the row-0 clock and the big
+/// countdown always agree.
+fn clock_secs(met: f64) -> u32 {
+    (if met < 0.0 {
+        (-met).ceil()
+    } else {
+        met.floor()
+    }) as u32
+}
+
 impl RocketLaunch {
     /// Countdown, event callouts, telemetry and the Δv bar.
     fn draw_text(&self, canvas: &mut Canvas) {
@@ -1168,7 +1179,7 @@ impl RocketLaunch {
         let y = h / 5;
         if met < 0.0 {
             // T−3 … T−1 over the last seconds, the clock the whole way.
-            let n = (-met).ceil() as u8;
+            let n = clock_secs(met);
             let mut buf = StackText::<8>::new();
             let _ = write!(buf, "T-{n}");
             label_centred(canvas, y, buf.as_str(), ink);
@@ -1197,7 +1208,7 @@ impl RocketLaunch {
     fn telemetry(&self, canvas: &mut Canvas, met: f64, s: &Sample) {
         let mut buf = StackText::<80>::new();
         let sign = if met < 0.0 { '-' } else { '+' };
-        let secs = met.abs().floor() as u32;
+        let secs = clock_secs(met);
         let v = s.y[VX].hypot(s.y[VH]);
         let _ = write!(
             buf,
@@ -1427,6 +1438,28 @@ mod tests {
             t += 0.25;
         }
         assert!(g.t < 1.5, "looped: t = {}", g.t);
+    }
+
+    #[test]
+    fn roc_a8_the_telemetry_clock_counts_down_with_the_big_countdown() {
+        // A countdown shows the whole seconds still to go: at T−1.5 s both read 2.
+        let size = Size::new(160, 48);
+        for t in [0.3, 0.5, 1.2, 1.5, 2.0, COUNTDOWN - 0.4] {
+            let g = scene_at(size, t);
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let rows = canvas.to_lines();
+            let n = (-g.met()).ceil() as u32;
+            assert!(
+                rows[0].contains(&format!("T-00:{n:02}")),
+                "t {t}: {}",
+                rows[0]
+            );
+            assert!(
+                rows.iter().any(|r| r.contains(&format!(" T-{n} "))),
+                "t {t}"
+            );
+        }
     }
 
     #[test]

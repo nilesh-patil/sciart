@@ -2,7 +2,7 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
- T-00:04  ALT   0.0 km  VEL    0 m/s  q  0.0 kPa                                
+ T-00:05  ALT   0.0 km  VEL    0 m/s  q  0.0 kPa                                
                                                                                 
                                                                                 
                                                                                 
