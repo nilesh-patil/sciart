@@ -21,22 +21,30 @@
 //! 4. the sim box is never smaller than [`MIN_BOX`] per side nor denser than
 //!    1/[`MIN_AREA_PER_ATOM`]; on a tiny terminal the box is larger than the screen and
 //!    simply clipped.
+//!
+//! Look (all rasterised in `update`/`resize`; `render` only blits): the box fills the
+//! canvas above the title row. Atoms are shaded half-block balls in the blackbody colour
+//! of their smoothed kinetic energy ([`heat_u`], false colour), and hot atoms leave dim
+//! Ice-ramp streaks in a fading [`Density`]. On large terminals a top-right inset plots the
+//! live speed histogram against the exact 2-D Maxwell–Boltzmann bins ([`mb_bins`]); atoms
+//! pass behind it.
 
 use std::f64::consts::TAU;
 use std::fmt::Write as _;
 
 use sciart_core::draw;
-use sciart_core::geom::ASPECT;
-use sciart_core::particles::{gaussian2, plot};
+use sciart_core::geom::{ASPECT, v3};
+use sciart_core::particles::gaussian2;
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
+use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "molecular_dynamics",
     category: Category::PhysicalChemistry,
     description: "A Lennard-Jones fluid melting and condensing as it is heated and cooled",
     title: "Condensation · cool atoms cling",
-    captions: &[],
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -58,11 +66,14 @@ const R_MIN: f64 = 1.122_462_048_309_373;
 /// vapour (ρ ≈ 0.01) covering about a third of the box — droplets, not a percolating
 /// sponge; hot, it is a uniform supercritical gas with ~2 σ between atoms.
 const RHO: f64 = 0.25;
+/// Spacing of the closest-packed crystal's rows, `R_MIN·√3/2` σ.
+const ROW_H: f64 = R_MIN * 0.866_025_403_784_438_6;
 /// Screen rows per σ (x is additionally stretched by ASPECT), chosen per terminal: as small
 /// as legibility allows on small screens (for more atoms), growing on large screens once
-/// N hits [`N_MAX`]. At `S_MIN` the closest-packed crystal rows (`R_MIN·√3/2 σ`) are 1.07
-/// rows apart, so neighbouring atoms never share a cell.
-const S_MIN: f64 = 1.1;
+/// N hits [`N_MAX`]. At `S_MIN` the crystal's rows are exactly one terminal row (two
+/// pixels) apart: neighbouring atoms never share a cell, and single-pixel atoms (80×24)
+/// land on evenly spaced pixel rows instead of beating into a blank row every ~7 rows.
+const S_MIN: f64 = 1.0 / ROW_H;
 const S_MAX: f64 = 2.5;
 /// Reduced time units per simulated second. 6 τ/s gives nucleation and coarsening ~60 τ of
 /// sub-critical time per cycle (droplets by ~10 s after the peak) at a thermal speed of
@@ -87,14 +98,99 @@ const MIN_BOX: f64 = 3.0;
 const MIN_AREA_PER_ATOM: f64 = 2.5;
 /// Start slightly warmer than the cycle's floor so the crystal visibly shivers at once.
 const T_START: f64 = 0.4;
-/// Pairs closer than this get a faint bond dot (shows lattices and droplets).
-const BOND_R2: f64 = 1.3 * 1.3;
-/// Kinetic energy splitting Cold from Hot ink.
-const KE_SPLIT: f64 = 0.45;
+/// 2-D LJ critical temperature for the potential truncated and shifted at r_c = 2.5
+/// (Smit & Frenkel 1991, J. Chem. Phys. 94, 5663; the full potential's is ≈ 0.53). The
+/// caption switches when the thermostat *target* crosses it (MD-A9), not on a measured
+/// phase.
+const T_C_2D: f64 = 0.46;
+/// The two acts: condensing below T_c, a supercritical gas above it (GEN-R12).
+const CAPTIONS: [&str; 2] = ["cool atoms cling", "hot atoms scatter"];
+
+// The look (SPEC-002 molecular_dynamics, Draw). Atoms are balls of this radius, σ: a hair
+// under half the LJ contact distance, so touching atoms read as touching balls.
+const ATOM_R: f64 = 0.5;
+/// Kinetic energy → blackbody colour (MD-A6): `u = ln(1 + e/E_KNEE)/ln(1 + E_TOP/E_KNEE)`
+/// ([`heat_u`]).
+const E_KNEE: f64 = 0.08;
+const E_TOP: f64 = 4.0;
+/// An atom's colour follows its kinetic energy smoothed over this time (s): the
+/// instantaneous energy of one atom is exponentially distributed, so unsmoothed a crystal
+/// at one temperature reads as white-and-brown speckle.
+const HEAT_TAU: f64 = 0.4;
+/// Level swing of a ball's shading (about ±25 levels): the lit side runs hotter, the limb
+/// cooler. With the edge coverage (down to `RIM`) this is why only a ball's centre follows
+/// the colour key exactly (SPEC-002 Stylisation).
+const SHADE: f64 = 70.0;
+const RIM: f64 = 0.75;
+/// Balls smaller than this (pixels) are one pixel: at 80×24 (r ≈ 1.1 px, neighbours
+/// ≈ 2.5 px apart) shaded discs merge into a mosaic, single pixels keep dark gaps.
+const SINGLE_PIXEL: f64 = 1.25;
+/// Light from the upper left and front, in screen axes (y down), normalised.
+const LIGHT: [f64; 3] = [
+    -0.451_129_236_405_377,
+    -0.551_380_177_828_794,
+    0.701_756_589_963_920,
+];
+/// Streaks: fade time (s), tone curve, and the top of the Ice ramp they may reach: level
+/// 51, well under any atom that streaks (`255·heat_u(E_STREAK)` ≈ 110, ≈ 64 at its dimmest
+/// rim pixel), so atoms stay the brightest thing in every theme, Mono included.
+const TRAIL_TAU: f64 = 0.12;
+const TRAIL_KNEE: f32 = 0.02;
+const TRAIL_WHITE: f32 = 0.25;
+/// Smoothed heat above which an atom streaks: the cold phase sits near 0.25.
+const E_STREAK: f64 = 0.35;
+const TRAIL_MAX: f64 = 0.2;
+
+// The Maxwell–Boltzmann inset (MD-A7): one speed bin per panel column.
+const INSET_W: i32 = 26;
+const INSET_H: i32 = 6;
+/// Smallest canvas that gets the inset: below it the panel would cover over a tenth of the
+/// box and its bars and curve merge into one braille blob.
+const INSET_MIN: (u16, u16) = (100, 30);
+const BINS: usize = INSET_W as usize;
+/// Speed range of the bins; the last bin also holds every faster atom.
+const V_MAX: f64 = 4.0;
+const HIST_TAU: f64 = 0.3;
+/// The MB peak sits at this fraction of the plot height.
+const PEAK: f64 = 0.92;
+const CURVE_INK: Ink = Ink::new(Role::Text, 150);
+/// The legend: `speeds` in the bars' colour at T = 1, `Maxwell-Boltzmann` in the curve's.
+const BARS_KEY: f64 = 1.0;
 
 const NONE: usize = usize::MAX;
-const ATOM: Glyph = Glyph::new('●', 'O');
-const BOND: Glyph = Glyph::new('·', '.');
+
+/// Blackbody ramp position `u = min(1, ln(1 + e/E_KNEE)/ln(1 + E_TOP/E_KNEE))` of an atom
+/// with kinetic energy `e` (LJ units; NaN and negatives are 0) (MD-A6). Level `255·u` of
+/// `Role::Blackbody` is `1000 K · 30^u`. False colour: the reduced LJ temperature is not
+/// kelvin, but hotter-is-whiter reads at a glance.
+pub(crate) fn heat_u(e: f64) -> f64 {
+    let e = if e.is_nan() { 0.0 } else { e.max(0.0) };
+    ((e / E_KNEE).ln_1p() / (E_TOP / E_KNEE).ln_1p()).min(1.0)
+}
+
+/// Exact 2-D Maxwell–Boltzmann probability of each speed bin at temperature `t`, the
+/// last bin including the tail beyond [`V_MAX`] (MD-A7): `exp(−v₀²/2T) − exp(−v₁²/2T)`.
+pub(crate) fn mb_bins(t: f64) -> [f64; BINS] {
+    let t = if t > 0.0 && t.is_finite() { t } else { 1e-9 };
+    let tail = |v: f64| (-v * v / (2.0 * t)).exp();
+    std::array::from_fn(|b| {
+        let (v0, v1) = (bin_edge(b), bin_edge(b + 1));
+        if b + 1 == BINS {
+            tail(v0)
+        } else {
+            tail(v0) - tail(v1)
+        }
+    })
+}
+
+fn bin_edge(b: usize) -> f64 {
+    V_MAX * b as f64 / BINS as f64
+}
+
+/// Bin of speed `v` (NaN ⇒ 0, beyond the range ⇒ the last bin).
+fn bin_of(v: f64) -> usize {
+    ((v / V_MAX * BINS as f64).max(0.0) as usize).min(BINS - 1)
+}
 
 /// Shifted LJ pair potential with the linear core continuation, 0 at and beyond `RC`
 /// (MD-A1).
@@ -266,9 +362,9 @@ struct View {
     /// Screen position (cols, rows) of sim coordinate (0, 0).
     c0: f64,
     r0: f64,
-    /// Border rectangle (left, top, right, bottom) when there is room for one.
-    border: Option<(i32, i32, i32, i32)>,
     label_row: Option<i32>,
+    /// Top-left cell of the Maxwell–Boltzmann panel, when there is room for it.
+    inset: Option<(i32, i32)>,
 }
 
 #[derive(Debug, Default)]
@@ -287,6 +383,19 @@ pub struct MolecularDynamics {
     cells: CellList,
     view: View,
     readout: Readout,
+    /// Each atom's kinetic energy smoothed over [`HEAT_TAU`]: what its colour shows.
+    heat: Vec<f64>,
+    /// Smoothed fraction of atoms per speed bin (MD-A7).
+    hist: [f64; BINS],
+    /// Long exposure of the atoms' kinetic energy: the streaks. One value per display
+    /// *pixel* (a `Density` over half the cells each way, addressed in pixel units), since
+    /// the streaks are drawn at pixel resolution.
+    glow: Density,
+    tone: Tone,
+    /// Streaks and balls over the sim box's rows, rebuilt in `update`/`resize`.
+    pixels: Pixels,
+    /// The inset's braille plot, over its rows only.
+    plot: Dots,
 }
 
 /// What the bottom-right readout shows, sampled after each step: the energy sum is too
@@ -295,7 +404,6 @@ pub struct MolecularDynamics {
 struct Readout {
     temperature: f64,
     target: f64,
-    mode: &'static str,
     u_per_atom: f64,
 }
 
@@ -392,22 +500,27 @@ impl MolecularDynamics {
     }
 
     /// Place `n` atoms: a compact triangular crystal at the LJ minimum spacing when it fits,
+    /// centred in the box below `top` (σ, the inset's bottom edge) or else in the whole box;
     /// otherwise an even lattice spread over the whole box (guard 1).
-    fn place_atoms(&mut self, n: usize) {
+    fn place_atoms(&mut self, n: usize, top: f64) {
         let (lx, ly) = (self.lx, self.ly);
-        let row_h = R_MIN * 3f64.sqrt() / 2.0;
         let cols = (n as f64).sqrt().ceil().max(1.0) as usize;
         let rows = n.div_ceil(cols);
-        let (bw, bh) = ((cols as f64 - 0.5) * R_MIN, (rows - 1) as f64 * row_h);
+        let (bw, bh) = ((cols as f64 - 0.5) * R_MIN, (rows - 1) as f64 * ROW_H);
         self.x.clear();
         self.y.clear();
         if bw + 2.0 <= lx && bh + 2.0 <= ly {
-            let (x0, y0) = ((lx - bw) / 2.0, (ly - bh) / 2.0);
+            let top = if bh + 2.0 <= ly - top { top } else { 0.0 };
+            let (x0, y0) = ((lx - bw) / 2.0, top + (ly - top - bh) / 2.0);
+            // The first row on a pixel centre, so rows a whole number of pixels apart (at
+            // S_MIN) all round the same way.
+            let py = self.to_pixel(x0, y0).1;
+            let y0 = y0 + (py.floor() + 0.5 - py) / (2.0 * self.view.scale);
             for k in 0..n {
                 let (i, j) = (k % cols, k / cols);
                 let shift = if j % 2 == 1 { 0.5 * R_MIN } else { 0.0 };
                 self.x.push(x0 + i as f64 * R_MIN + shift);
-                self.y.push(y0 + j as f64 * row_h);
+                self.y.push(y0 + j as f64 * ROW_H);
             }
         } else {
             let cols = ((n as f64 * lx / ly).sqrt().round() as usize).clamp(1, n);
@@ -422,49 +535,37 @@ impl MolecularDynamics {
     }
 
     fn refresh_readout(&mut self) {
-        let heating = self.t.rem_euclid(CYCLE) < CYCLE / 2.0;
         self.readout = Readout {
             temperature: self.temperature(),
             target: target_temperature(self.t),
-            mode: if self.thermostat_off {
-                "NVE"
-            } else if heating {
-                "heating"
-            } else {
-                "cooling"
-            },
             u_per_atom: self.potential_energy() / self.n().max(1) as f64,
         };
     }
 
     /// The readout, right-aligned on the label row and clear of the title (GEN-R13). The
     /// longest form that fits wins: the units note goes first, then the energy and atom
-    /// count, then the target temperature; nothing when even `T = … heating` does not fit.
+    /// count, then the target temperature; nothing when even `T 0.40` does not fit.
     fn draw_readout(&self, canvas: &mut Canvas, row: i32) {
         let room = title::readout_room(canvas.size(), &Title::of(self));
         let Readout {
             temperature: t,
             target,
-            mode,
             u_per_atom: u,
         } = self.readout;
         let n = self.n();
-        // Typically 70 bytes at most; the slack keeps a runaway temperature from truncating
+        // Typically 45 bytes at most; the slack keeps a runaway temperature from truncating
         // it. Writing into a StackText never fails.
-        let mut text = StackText::<128>::new();
+        let mut text = StackText::<96>::new();
         for form in 0..4 {
             text.clear();
             let _ = match form {
                 0 => write!(
                     text,
-                    "T = {t:.2} -> {target:.2} {mode}   U/N = {u:+.2}   N = {n}   LJ reduced units"
+                    "T {t:.2} -> {target:.2}  U/N {u:+.2}  N {n}  LJ units"
                 ),
-                1 => write!(
-                    text,
-                    "T = {t:.2} -> {target:.2} {mode}   U/N = {u:+.2}   N = {n}"
-                ),
-                2 => write!(text, "T = {t:.2} -> {target:.2} {mode}"),
-                _ => write!(text, "T = {t:.2} {mode}"),
+                1 => write!(text, "T {t:.2} -> {target:.2}  U/N {u:+.2}  N {n}"),
+                2 => write!(text, "T {t:.2} -> {target:.2}"),
+                _ => write!(text, "T {t:.2}"),
             };
             if text.len() <= room {
                 draw::label_right(
@@ -478,11 +579,140 @@ impl MolecularDynamics {
         }
     }
 
-    fn to_screen(&self, x: f64, y: f64) -> (f64, f64) {
+    /// Continuous pixel coordinates of sim point `(x, y)`: pixel `(i, j)` spans
+    /// `[i, i + 1) × [j, j + 1)`, and cell `(c, r)` holds pixels `c` and rows `2r, 2r + 1`.
+    fn to_pixel(&self, x: f64, y: f64) -> (f64, f64) {
+        let v = &self.view;
         (
-            self.view.c0 + x * self.view.scale * ASPECT,
-            self.view.r0 + y * self.view.scale,
+            v.c0 + x * v.scale * ASPECT + 0.5,
+            2.0 * (v.r0 + y * v.scale) + 1.0,
         )
+    }
+
+    /// Lay each hot atom's excess heat along its path: `(heat − E_STREAK)² · h`, so atoms
+    /// rattling in a droplet or crystal leave nothing and only the gas streaks.
+    fn deposit_streaks(&mut self, h: f64) {
+        for i in 0..self.n() {
+            let excess = (self.heat[i] - E_STREAK).max(0.0);
+            if excess > 0.0 {
+                let (px, py) = self.to_pixel(self.x[i], self.y[i]);
+                // Pixel j spans [j, j + 1); `deposit` rounds to the nearest.
+                let w = (excess * excess * h) as f32;
+                self.glow.deposit(px - 0.5, py - 0.5, w);
+            }
+        }
+    }
+
+    /// Fold each atom's kinetic energy into its smoothed heat with weight `a`.
+    fn sample_heat(&mut self, a: f64) {
+        for ((h, vx), vy) in self.heat.iter_mut().zip(&self.vx).zip(&self.vy) {
+            *h += a * (0.5 * (vx * vx + vy * vy) - *h);
+        }
+    }
+
+    /// Fold the current speeds into the smoothed histogram with weight `a` (1 = replace).
+    fn sample_speeds(&mut self, a: f64) {
+        let mut count = [0usize; BINS];
+        for (vx, vy) in self.vx.iter().zip(&self.vy) {
+            count[bin_of(vx.hypot(*vy))] += 1;
+        }
+        let n = self.n().max(1) as f64;
+        for (h, c) in self.hist.iter_mut().zip(count) {
+            *h += a * (c as f64 / n - *h);
+        }
+    }
+
+    /// Rebuild the picture: streaks, then shaded balls, then the inset (the M10 raster
+    /// convention: `render` only blits).
+    fn rasterise(&mut self) {
+        let (glow, tone) = (&self.glow, &self.tone);
+        self.pixels.shade(|x, y| {
+            let level = tone.level(glow.get(x, y).unwrap_or(0.0));
+            if level == 0 {
+                Ink::BLANK
+            } else {
+                ink::ramp(Ramp::Ice, TRAIL_MAX * f64::from(level) / 255.0)
+            }
+        });
+        let r = ATOM_R * 2.0 * self.view.scale;
+        for i in 0..self.n() {
+            let (cx, cy) = self.to_pixel(self.x[i], self.y[i]);
+            paint_ball(&mut self.pixels, cx, cy, r, 255.0 * heat_u(self.heat[i]));
+        }
+        self.plot.clear();
+        if let Some((x0, _)) = self.view.inset {
+            // A dark panel the atoms pass behind (one cell of margin).
+            let rows = 2 * (INSET_H + 1);
+            for y in 0..rows {
+                for x in x0 - 1..x0 + INSET_W + 1 {
+                    self.pixels.set(x, y, Ink::BLANK);
+                }
+            }
+            self.plot_speeds(x0);
+        }
+    }
+
+    /// Bars of the smoothed histogram in their bins' colours, and the exact MB bin
+    /// probabilities at the measured T as a dotted grey curve, on rows 1..INSET_H (MD-A7).
+    /// A braille cell has one ink, so the curve is drawn first and a bar reaching its
+    /// cell recolours it: the grey shows where the live bars fall short of the law.
+    fn plot_speeds(&mut self, x0: i32) {
+        let mb = mb_bins(self.readout.temperature);
+        let peak = mb.iter().copied().fold(0.0, f64::max).max(1e-9);
+        let (bottom, height) = (
+            INSET_H * Dots::CELL_H - 1,
+            f64::from((INSET_H - 1) * Dots::CELL_H),
+        );
+        let dots = |p: f64| ((p / peak * PEAK * height).round() as i32).clamp(0, height as i32);
+        for (b, (&frac, &p)) in self.hist.iter().zip(&mb).enumerate() {
+            let x = (x0 + b as i32) * Dots::CELL_W;
+            let v = 0.5 * (bin_edge(b) + bin_edge(b + 1));
+            // The curve: one dot per bin, on the bin's right-hand column so it never hides
+            // under a bar of the same height.
+            let top = dots(p);
+            if top > 0 {
+                self.plot.set(x + 1, bottom + 1 - top, CURVE_INK);
+            }
+            let bar = Ink::new(Role::Blackbody, ink::level(255.0 * heat_u(0.5 * v * v)));
+            for k in 0..dots(frac) {
+                self.plot.set(x, bottom - k, bar);
+                self.plot.set(x + 1, bottom - k, bar);
+            }
+        }
+    }
+}
+
+/// A Lambert-shaded ball of radius `r` pixels centred at `(cx, cy)` in blackbody level
+/// `base`: the lit side runs hotter, the limb cooler, and edge pixels dim to `RIM` of their
+/// level. Balls under [`SINGLE_PIXEL`] are one pixel at `base`.
+fn paint_ball(pixels: &mut Pixels, cx: f64, cy: f64, r: f64, base: f64) {
+    if r < SINGLE_PIXEL {
+        let ink = Ink::new(Role::Blackbody, ink::level(base));
+        pixels.set(cx.floor() as i32, cy.floor() as i32, ink);
+        return;
+    }
+    let (x0, x1) = ((cx - r).floor() as i32, (cx + r).ceil() as i32);
+    let (y0, y1) = ((cy - r).floor() as i32, (cy + r).ceil() as i32);
+    for y in y0..y1 {
+        for x in x0..x1 {
+            // Coverage from a 2×2 supersample: edge pixels glow a little dimmer (redder),
+            // so a ball a few pixels wide still reads round.
+            let mut cover = 0.0;
+            for (sx, sy) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)] {
+                let (dx, dy) = (f64::from(x) + sx - cx, f64::from(y) + sy - cy);
+                if dx * dx + dy * dy <= r * r {
+                    cover += 0.25;
+                }
+            }
+            if cover == 0.0 {
+                continue;
+            }
+            let (nx, ny) = ((f64::from(x) + 0.5 - cx) / r, (f64::from(y) + 0.5 - cy) / r);
+            let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
+            let lit = 0.35 + 0.65 * v3::dot([nx, ny, nz], LIGHT).max(0.0);
+            let level = (base + SHADE * (lit - 0.7)) * (RIM + (1.0 - RIM) * cover);
+            pixels.set(x, y, Ink::new(Role::Blackbody, ink::level(level)));
+        }
     }
 }
 
@@ -494,13 +724,8 @@ impl Generator for MolecularDynamics {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         let (w, h) = (i32::from(size.width()), i32::from(size.height()));
         let label_row = (h >= 8).then_some(h - 1);
-        let hb = if label_row.is_some() { h - 1 } else { h };
-        // Interior (cols, rows) inside a 1-cell border when there is room for one.
-        let (border, ic0, ir0, iw, ih) = if w >= 6 && hb >= 4 {
-            (Some((0, 0, w - 1, hb - 1)), 1, 1, w - 2, hb - 2)
-        } else {
-            (None, 0, 0, w, hb)
-        };
+        // The box fills the canvas above the title row; its walls are the screen edges.
+        let (iw, ih) = (w, if label_row.is_some() { h - 1 } else { h });
         let (iw1, ih1) = (f64::from(iw - 1).max(0.0), f64::from(ih - 1).max(0.0));
         let (scale, n) = layout(iw1, ih1);
         let screen_lx = iw1 / (scale * ASPECT);
@@ -519,20 +744,31 @@ impl Generator for MolecularDynamics {
         self.ly = ly;
 
         // Center the sim box on the interior (it is clipped when larger than the screen).
-        let (icx, icy) = (
-            f64::from(ic0) + f64::from(iw - 1).max(0.0) / 2.0,
-            f64::from(ir0) + f64::from(ih - 1).max(0.0) / 2.0,
-        );
+        let (icx, icy) = (iw1 / 2.0, ih1 / 2.0);
+        let inset = (size.width() >= INSET_MIN.0 && size.height() >= INSET_MIN.1)
+            .then_some((w - INSET_W - 1, 0));
+        // The start crystal sits below the inset (its bottom margin row, in σ).
+        let r0 = icy - ly / 2.0 * scale;
+        let top = inset.map_or(0.0, |_| (f64::from(INSET_H + 1) - r0) / scale);
         self.view = View {
             scale,
             c0: icx - lx / 2.0 * scale * ASPECT,
-            r0: icy - ly / 2.0 * scale,
-            border,
+            r0,
             label_row,
+            inset,
         };
+        let box_cells = Size::new(size.width(), ih.max(1) as u16);
+        // Pixel resolution: `w × 2·h` pixels are the dots of `⌈w/2⌉ × ⌈h/2⌉` cells.
+        self.glow.resize(Size::new(
+            box_cells.width().div_ceil(2),
+            box_cells.height().div_ceil(2),
+        ));
+        self.pixels.resize(box_cells);
+        self.plot.resize(Size::new(size.width(), INSET_H as u16));
+        self.tone = Tone::asinh(TRAIL_KNEE, TRAIL_WHITE);
 
         self.t = 0.0;
-        self.place_atoms(n);
+        self.place_atoms(n, top);
         self.vx.clear();
         self.vy.clear();
         for _ in 0..n {
@@ -556,6 +792,13 @@ impl Generator for MolecularDynamics {
         self.cells.setup(lx, ly, n);
         self.compute_forces();
         self.refresh_readout();
+        // Every atom starts at the mean kinetic energy per atom (2-D equipartition:
+        // ⟨v²/2⟩ = T), not its own instantaneous one: that is exponentially distributed, and
+        // the opening crystal would read as the speckle HEAT_TAU exists to smooth away.
+        self.heat.clear();
+        self.heat.resize(n, self.temperature());
+        self.sample_speeds(1.0);
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -565,8 +808,10 @@ impl Generator for MolecularDynamics {
         let span = dt * TIME_SCALE;
         let steps = (span / DT_MD_MAX).ceil().max(1.0);
         let h = span / steps;
+        self.glow.decay((-dt / TRAIL_TAU).exp() as f32);
         for _ in 0..steps as usize {
             self.verlet(h);
+            self.deposit_streaks(h);
         }
         self.t += dt;
         if !self.thermostat_off {
@@ -575,51 +820,45 @@ impl Generator for MolecularDynamics {
             self.scale_velocities(lambda);
         }
         self.refresh_readout();
+        self.sample_heat(1.0 - (-dt / HEAT_TAU).exp());
+        self.sample_speeds(1.0 - (-dt / HIST_TAU).exp());
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        if let Some((l, t, r, b)) = self.view.border {
-            let ink = Ink::new(Role::Structure, 110);
-            for x in l + 1..r {
-                canvas.put(x, t, Glyph::new('─', '-'), ink);
-                canvas.put(x, b, Glyph::new('─', '-'), ink);
-            }
-            for y in t + 1..b {
-                canvas.put(l, y, Glyph::new('│', '|'), ink);
-                canvas.put(r, y, Glyph::new('│', '|'), ink);
-            }
-            canvas.put(l, t, Glyph::new('┌', '+'), ink);
-            canvas.put(r, t, Glyph::new('┐', '+'), ink);
-            canvas.put(l, b, Glyph::new('└', '+'), ink);
-            canvas.put(r, b, Glyph::new('┘', '+'), ink);
-        }
-
-        // Bonds first so atoms draw over them. The cell list is current: it was rebuilt
-        // after the last drift.
-        self.cells.for_each_pair(|i, j| {
-            let (dx, dy) = (self.x[i] - self.x[j], self.y[i] - self.y[j]);
-            if dx * dx + dy * dy < BOND_R2 {
-                let (c, r) =
-                    self.to_screen((self.x[i] + self.x[j]) / 2.0, (self.y[i] + self.y[j]) / 2.0);
-                plot(canvas, c, r, BOND, Ink::new(Role::Structure, 70));
+        self.pixels.blit(canvas, |_, _, top, bottom| {
+            // A ball wins the cell; else the brighter streak half.
+            let ink = if top.role == Role::Blackbody
+                || bottom.role != Role::Blackbody && top.level >= bottom.level
+            {
+                top
+            } else {
+                bottom
+            };
+            match ink.role {
+                Role::Blackbody => Some(('o', ink)),
+                Role::Ramp(_) => Some(('.', ink)),
+                _ => None,
             }
         });
-
-        for i in 0..self.n() {
-            let e = 0.5 * (self.vx[i] * self.vx[i] + self.vy[i] * self.vy[i]);
-            let ink = if e < KE_SPLIT {
-                Ink::new(Role::Cold, (140.0 + 115.0 * (1.0 - e / KE_SPLIT)) as u8)
-            } else {
-                let u = ((e - KE_SPLIT) / 2.0).min(1.0);
-                Ink::new(Role::Hot, (140.0 + 115.0 * u) as u8)
-            };
-            let (c, r) = self.to_screen(self.x[i], self.y[i]);
-            plot(canvas, c, r, ATOM, ink);
+        if let Some((x0, y0)) = self.view.inset {
+            self.plot.blit(canvas);
+            let key = Ink::new(Role::Blackbody, ink::level(255.0 * heat_u(BARS_KEY)));
+            canvas.text(x0, y0, "speeds", key);
+            let mb = "Maxwell-Boltzmann";
+            canvas.text(x0 + INSET_W - mb.len() as i32, y0, mb, CURVE_INK);
         }
-
         if let Some(row) = self.view.label_row {
             self.draw_readout(canvas, row);
         }
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        Some(if target_temperature(self.t) < T_C_2D {
+            CAPTIONS[0]
+        } else {
+            CAPTIONS[1]
+        })
     }
 }
 
@@ -816,7 +1055,7 @@ mod tests {
     }
 
     #[test]
-    fn md_temperature_cycle_spans_the_spec_range() {
+    fn md_a4_temperature_cycle_spans_the_spec_range() {
         assert!((target_temperature(0.0) - T_LO).abs() < 1e-12);
         assert!((target_temperature(15.0) - T_HI).abs() < 1e-12);
         assert!((target_temperature(30.0) - T_LO).abs() < 1e-12);
@@ -850,11 +1089,10 @@ mod tests {
     }
 
     #[test]
-    fn md_atom_count_follows_the_area() {
-        // Small screens: σ sits at its legibility floor and N = ρ·area/σ² — 159 at 80x24,
-        // 3.8x the old fixed-scale count (42).
+    fn md_a5_atom_count_follows_the_area() {
+        // Small screens: σ sits at its legibility floor and N = ρ·area/σ² — 205 at 80x24.
         let (g, _) = fresh(80, 24, 1);
-        let a1 = 77.0 * 20.0 / ASPECT;
+        let a1 = 79.0 * 22.0 / ASPECT;
         assert_eq!(g.view.scale, S_MIN);
         assert_eq!(g.n(), (RHO * a1 / (S_MIN * S_MIN)).round() as usize);
         assert!(g.n() >= 120, "N = {}", g.n());
@@ -878,13 +1116,13 @@ mod tests {
     }
 
     #[test]
-    fn md_glyphs_stay_legible_at_contact() {
+    fn md_a5_glyphs_stay_legible_at_contact() {
         // Triangular-lattice rows (the closest vertical packing, r_min·√3/2 σ apart) must land
         // at least one terminal row apart, or crystal rows alias onto each other.
         for (w, h) in [(1, 1), (20, 10), (80, 24), (100, 30), (200, 50), (400, 100)] {
             let (g, _) = fresh(w, h, 3);
             let s = g.view.scale;
-            assert!(R_MIN * 3f64.sqrt() / 2.0 * s >= 1.0, "{w}x{h}: {s} rows/σ");
+            assert!(ROW_H * s >= 1.0 - 1e-12, "{w}x{h}: {s} rows/σ");
             assert!((S_MIN..=S_MAX).contains(&s), "{w}x{h}: {s} rows/σ");
         }
     }
@@ -916,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn md_renders_box_atoms_and_readout_in_ascii() {
+    fn md_renders_balls_streaks_inset_and_readout_in_ascii() {
         let mut stage = Stage::new(build(), 42, Size::new(100, 30), GlyphMode::Ascii);
         for _ in 0..60 {
             stage.step(SIM_DT);
@@ -924,9 +1162,191 @@ mod tests {
         let frame = stage.render();
         let lines = frame.to_lines();
         assert!(lines.iter().all(|l| l.is_ascii()));
-        assert!(lines[29].contains("T = "), "{}", lines[29]);
-        assert!(frame.cells().iter().any(|c| c.ch == 'O'));
-        assert!(lines[0].starts_with('+'));
+        assert!(lines[29].contains("T 0."), "{}", lines[29]);
+        assert!(frame.cells().iter().any(|c| c.ch == 'o'));
+        assert!(lines[0].contains("speeds") && lines[0].contains("Maxwell-Boltzmann"));
+    }
+
+    #[test]
+    fn md_a6_atoms_glow_in_blackbody_by_kinetic_energy() {
+        let mut prev = 0.0;
+        for k in 0..=500 {
+            let u = heat_u(f64::from(k) * 0.01);
+            assert!(u >= prev, "e = {}", f64::from(k) * 0.01);
+            prev = u;
+        }
+        assert_eq!(heat_u(0.0), 0.0);
+        assert_eq!(heat_u(4.0), 1.0);
+        assert_eq!(heat_u(50.0), 1.0);
+        for e in [f64::NAN, f64::NEG_INFINITY, -1.0] {
+            assert_eq!(heat_u(e), 0.0, "{e}");
+        }
+        assert_eq!(heat_u(f64::INFINITY), 1.0);
+        // Level 255·u of the Blackbody role is 1000 K · 30^u (the spec's K(e)).
+        let kelvin = |e: f64| {
+            ink::blackbody_kelvin(Ink::new(Role::Blackbody, ink::level(255.0 * heat_u(e))))
+        };
+        for e in [0.1, 0.25, 1.0, 3.0] {
+            let want = 1000.0 * 30f64.powf(heat_u(e));
+            assert!((kelvin(e) / want - 1.0).abs() < 0.01, "e {e}");
+        }
+        assert!(kelvin(0.25) < 4000.0 && kelvin(1.0) > 6000.0);
+        // Every ball pixel is Blackbody; streaks are the Ice ramp; nothing else is drawn.
+        let (mut g, mut ctx) = fresh(200, 50, 3);
+        g.t = 12.0;
+        g.set_temperature(1.0);
+        for _ in 0..30 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let px = g.pixels.pixel_size();
+        let (mut balls, mut streaks) = (0, 0);
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                match g.pixels.get(x, y).unwrap().role {
+                    Role::Blackbody => balls += 1,
+                    Role::Ramp(Ramp::Ice) => streaks += 1,
+                    Role::Background => {}
+                    r => panic!("unexpected {r:?}"),
+                }
+            }
+        }
+        assert!(balls > g.n() && streaks > 0, "{balls} {streaks}");
+    }
+
+    #[test]
+    fn md_a7_speed_histogram_matches_maxwell_boltzmann() {
+        for t in [0.25, 0.5, 1.0] {
+            let sum: f64 = mb_bins(t).iter().sum();
+            assert!((sum - 1.0).abs() < 1e-12, "T {t}: {sum}");
+        }
+        let (mut g, mut ctx) = fresh(200, 50, 7);
+        g.t = 12.0; // near the hot peak, where the target barely moves
+        for _ in 0..(6.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let sum: f64 = g.hist.iter().sum();
+        assert!((sum - 1.0).abs() < 1e-9, "{sum}");
+        let mb = mb_bins(g.temperature());
+        let l1: f64 = g.hist.iter().zip(&mb).map(|(a, b)| (a - b).abs()).sum();
+        assert!(l1 < 0.25, "L1 {l1:.3} at T {:.2}", g.temperature());
+    }
+
+    #[test]
+    fn md_a8_box_keeps_off_the_title_row_and_the_inset_off_the_title() {
+        for (w, h) in [
+            (200, 50),
+            (120, 40),
+            (100, 30),
+            (99, 40),
+            (160, 29),
+            (80, 24),
+            (40, 12),
+            (30, 7),
+        ] {
+            let size = Size::new(w, h);
+            let (mut g, mut ctx) = fresh(w, h, 5);
+            for _ in 0..30 {
+                g.update(0.05, &mut ctx);
+            }
+            let mut c = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut c);
+            let last = i32::from(h) - 1;
+            if h >= 8 {
+                // Only the readout (Text) may sit on the title row.
+                for x in 0..i32::from(w) {
+                    let cell = c.get(x, last).unwrap();
+                    assert!(
+                        matches!(cell.ink.role, Role::Text | Role::Background),
+                        "{w}x{h}: {x} {cell:?}"
+                    );
+                }
+            }
+            let big = w >= INSET_MIN.0 && h >= INSET_MIN.1;
+            assert_eq!(g.view.inset.is_some(), big, "{w}x{h}");
+            if let Some((x0, y0)) = g.view.inset {
+                let span = title::span(size, &Title::of(&g)).map_or(0, |(_, c)| c.end);
+                assert!(x0 >= span && y0 + INSET_H < last, "{w}x{h}");
+                assert!(x0 + INSET_W < i32::from(w), "{w}x{h}");
+            }
+        }
+    }
+
+    #[test]
+    fn md_a8_atoms_start_clear_of_the_inset_and_pass_behind_it() {
+        for (w, h) in [(120, 40), (100, 30), (200, 50)] {
+            let (mut g, mut ctx) = fresh(w, h, 5);
+            let (x0, _) = g.view.inset.expect("inset");
+            // The panel and its one-cell margin, in cells.
+            let inside = |c: i32, r: i32| (x0 - 1..x0 + INSET_W + 1).contains(&c) && r <= INSET_H;
+            for i in 0..g.n() {
+                let (px, py) = g.to_pixel(g.x[i], g.y[i]);
+                let (c, r) = (px.floor() as i32, (py / 2.0).floor() as i32);
+                assert!(!inside(c, r), "{w}x{h}: atom {i} starts at ({c}, {r})");
+            }
+            // Whatever the atoms do, no ball or streak pixel is drawn in the panel.
+            let mut t = 0.0;
+            for until in [0.0, 5.0, 60.0] {
+                while t < until {
+                    g.update(0.05, &mut ctx);
+                    t += 0.05;
+                }
+                for y in 0..2 * (INSET_H + 1) {
+                    for x in x0 - 1..x0 + INSET_W + 1 {
+                        assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK), "{w}x{h} t {t}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn md_a6_the_opening_crystal_is_one_colour() {
+        // Heat starts at the mean kinetic energy, not each atom's exponentially
+        // distributed instantaneous one, so t = 0 shows no speckle.
+        for (w, h) in [(80, 24), (120, 40), (200, 50)] {
+            let (g, _) = fresh(w, h, 42);
+            let levels = g.heat.iter().map(|&e| 255.0 * heat_u(e));
+            let (lo, hi) = levels.fold((f64::MAX, f64::MIN), |(a, b), l| (a.min(l), b.max(l)));
+            assert!(hi - lo <= 10.0, "{w}x{h}: levels {lo:.0}..{hi:.0}");
+        }
+    }
+
+    #[test]
+    fn md_a5_start_crystal_rows_land_on_evenly_spaced_pixel_rows() {
+        // At the legibility floor the crystal's rows are two pixels apart exactly, so the
+        // single-pixel atoms of 80x24 show no blank pixel row through the crystal.
+        let (g, _) = fresh(80, 24, 42);
+        assert_eq!(g.view.scale, S_MIN);
+        let mut rows: Vec<i32> = (0..g.n())
+            .map(|i| g.to_pixel(g.x[i], g.y[i]).1.floor() as i32)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        assert!(rows.len() > 5, "{rows:?}");
+        assert!(rows.windows(2).all(|p| p[1] - p[0] == 2), "{rows:?}");
+    }
+
+    #[test]
+    fn md_a6_atoms_outshine_their_streaks() {
+        // Luminance order holds in every theme (Mono maps both roles by level): an atom
+        // hot enough to streak is brighter than the brightest streak, even at its rim.
+        let atom = 255.0 * heat_u(E_STREAK);
+        assert!(TRAIL_MAX * 255.0 < RIM * (atom - SHADE * 0.35), "{atom}");
+    }
+
+    #[test]
+    fn md_a9_caption_follows_the_target_across_t_c() {
+        let (mut g, _) = fresh(80, 24, 1);
+        for k in 0..600 {
+            g.t = f64::from(k) * 0.05;
+            let want = if target_temperature(g.t) < T_C_2D {
+                "cool atoms cling"
+            } else {
+                "hot atoms scatter"
+            };
+            assert_eq!(g.caption(), Some(want), "t {}", g.t);
+        }
+        assert_eq!(META.captions, &CAPTIONS);
     }
 
     #[test]
@@ -937,7 +1357,7 @@ mod tests {
             let mut c = Canvas::new(size, GlyphMode::Ascii);
             g.render(&mut c);
             let row = c.to_lines().pop().unwrap();
-            let span = title::span(size, &Title::new(META.title, None));
+            let span = title::span(size, &Title::of(&g));
             // Four blanks after the title text, which ends at `cols.end - 2`.
             let free = span.map_or(0, |(_, cols)| cols.end as usize + 2);
             let lead = row.len() - row.trim_start().len();
@@ -946,22 +1366,20 @@ mod tests {
             row.trim().to_owned()
         };
         let full = readout(200);
-        assert!(full.starts_with("T = 0.40 -> ") && full.ends_with("   LJ reduced units"));
-        // Beside the full "Condensation · cool atoms cling" (32 cells, from w = 57) the
-        // room is w − 38.
-        let r = readout(100);
         assert!(
-            r.contains("U/N = ") && r.contains("N = ") && !r.contains("LJ"),
-            "{r}"
+            full.starts_with("T 0.40 -> ") && full.ends_with("  LJ units"),
+            "{full}"
         );
+        // Beside the full title (32 cells) the room is w − 38, at most w/2.
+        assert!(readout(100).ends_with("  LJ units"));
         let r = readout(80);
         assert!(
-            r.starts_with("T = 0.40 -> ") && r.ends_with(" heating"),
+            r.contains("U/N ") && r.contains("  N ") && !r.contains("LJ"),
             "{r}"
         );
-        assert_eq!(readout(60), "T = 0.40 heating");
-        // Beside "Gas to liquid" alone the room is w − 19.
-        assert_eq!(readout(40), "T = 0.40 heating");
-        assert_eq!(readout(30), "");
+        let r = readout(60);
+        assert!(r.starts_with("T 0.40 -> ") && !r.contains("U/N"), "{r}");
+        // Beside "Condensation" alone (w < 57) the room is w − 18.
+        assert_eq!(readout(30), "T 0.40");
     }
 }
