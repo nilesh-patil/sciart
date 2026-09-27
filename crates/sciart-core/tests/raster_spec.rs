@@ -387,3 +387,28 @@ fn core_r42_background_role_pixels_count_as_empty() {
         }
     );
 }
+
+#[test]
+fn core_r42_half_block_is_the_unicode_cell_rule_of_blit() {
+    // Every (top, bottom) pair: `half_block` on one cell equals `blit` of that pair.
+    for (top, bottom) in [
+        (Ink::BLANK, Ink::BLANK),
+        (A, Ink::BLANK),
+        (Ink::BLANK, B),
+        (A, B),
+    ] {
+        let mut px = Pixels::new(Size::new(1, 1));
+        px.set(0, 0, top);
+        px.set(0, 1, bottom);
+        let mut blitted = Canvas::new(Size::new(1, 1), GlyphMode::Unicode);
+        blitted.put(0, 0, X, C);
+        let mut direct = blitted.clone();
+        px.blit(&mut blitted, |_, _, _, _| None);
+        raster::half_block(&mut direct, 0, 0, top, bottom);
+        assert_eq!(
+            cell(&direct, 0, 0),
+            cell(&blitted, 0, 0),
+            "{top:?} {bottom:?}"
+        );
+    }
+}

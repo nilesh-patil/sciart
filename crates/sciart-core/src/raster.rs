@@ -596,13 +596,20 @@ impl Pixels {
                     }
                     continue;
                 }
-                match (is_empty(top), is_empty(bottom)) {
-                    (true, true) => {}
-                    (false, true) => canvas.put(x, y, UPPER, top),
-                    (true, false) => canvas.put(x, y, LOWER, bottom),
-                    (false, false) => canvas.put_bg(x, y, UPPER, top, bottom),
-                }
+                half_block(canvas, x, y, top, bottom);
             }
         }
+    }
+}
+
+/// Draw one cell from its two pixels by the Unicode rule of [`Pixels::blit`] (CORE-R42),
+/// for a scene that composites an overlay over a blitted buffer.
+#[inline]
+pub fn half_block(canvas: &mut Canvas, x: i32, y: i32, top: Ink, bottom: Ink) {
+    match (is_empty(top), is_empty(bottom)) {
+        (true, true) => {}
+        (false, true) => canvas.put(x, y, UPPER, top),
+        (true, false) => canvas.put(x, y, LOWER, bottom),
+        (false, false) => canvas.put_bg(x, y, UPPER, top, bottom),
     }
 }

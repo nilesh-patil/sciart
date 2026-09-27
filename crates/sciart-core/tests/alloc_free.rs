@@ -514,3 +514,11 @@ fn core_r74_r76_title_and_label_right_do_not_allocate() {
     );
     black_box(lead);
 }
+
+#[test]
+fn core_r28_default_pool_is_empty_with_capacity_zero_and_allocates_nothing() {
+    let (pool, stats) = measure(ParticlePool::<P>::default);
+    assert_free("ParticlePool::default", stats);
+    assert!(pool.is_empty());
+    assert_eq!(pool.capacity(), 0);
+}
