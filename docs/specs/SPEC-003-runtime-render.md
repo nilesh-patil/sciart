@@ -1,6 +1,6 @@
 # SPEC-003: Runtime & rendering
 
-**Crates**: `crates/sciart` (runtime), `crates/sciart-render` · **Milestones**: M1 (minimal), M2 (full) · **Status**: Implemented through M3
+**Crates**: `crates/sciart` (runtime), `crates/sciart-render` · **Milestones**: M1 (minimal), M2 (full) · **Status**: Implemented through M3; RND-R6/R7 in M10
 
 ## Runtime (pure state machine, no terminal access)
 - **RT-R1** `Runtime` owns the active generator list, the current index, a `Canvas`, a `Ctx`, and a `FixedStep`. It is driven only by `tick(elapsed)`, `handle(Action)` and `resize(Size)` — fully unit-testable.
