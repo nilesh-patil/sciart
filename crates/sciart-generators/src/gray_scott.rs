@@ -1,5 +1,5 @@
 //! Living Turing patterns from the Gray–Scott reaction–diffusion system
-//! `U + 2V → 3V, V → P` (SPEC-002 `chemical_reaction`).
+//! `U + 2V → 3V, V → P` (SPEC-002 `gray_scott`).
 //!
 //! Model (Pearson 1993, dimensionless, grid spacing 1 lattice node):
 //!
@@ -61,7 +61,7 @@ use sciart_core::prelude::*;
 use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
-    name: "chemical_reaction",
+    name: "gray_scott",
     category: Category::Chemistry,
     description: "Gray-Scott reaction-diffusion growing living Turing patterns",
     title: "Chemical spots · feed and kill",
@@ -69,7 +69,7 @@ pub static META: Meta = Meta {
 };
 
 pub fn build() -> Box<dyn Generator> {
-    Box::new(ChemicalReaction::new(None))
+    Box::new(GrayScott::new(None))
 }
 
 /// Diffusion of the autocatalyst V, nodes² per reaction time unit. Pearson's value (1e-5 at
@@ -104,7 +104,7 @@ const SEED_R0: (f32, f32) = (1.5, 3.0);
 /// under a seeded mask of `PASSAGE_BLOCK`-node blocks, each active with probability
 /// `PASSAGE_SHARE`. About four in five moving spots fade over the morph's second half, so
 /// the mitosis hold inherits room to divide instead of a jammed field, as a culture split
-/// into fresh medium. Tuning measurements are in SPEC-002 `chemical_reaction`.
+/// into fresh medium. Tuning measurements are in SPEC-002 `gray_scott`.
 const PASSAGE_KAPPA: f32 = 0.02;
 const PASSAGE_BLOCK: usize = 6;
 const PASSAGE_SHARE: f64 = 0.8;
@@ -170,7 +170,7 @@ const fn preset(name: &'static str, f: f32, k: f32, rate: f64, hold: f64, morph:
 /// never a start slot. Loops, swarm and moving spots (Márquez-Neila's "spots and loops"
 /// and "moving spots", with swarm between them) sit just right of the saddle-node curve
 /// at low F; they keep a dark majority and never stop moving. Timings and the rejected
-/// regimes are measured in SPEC-002 `chemical_reaction`.
+/// regimes are measured in SPEC-002 `gray_scott`.
 pub(crate) const PRESETS: [Preset; 5] = [
     preset("mitosis", 0.0367, 0.0649, 400.0, 8.0, 6.0),
     preset("coral", 0.0545, 0.062, 400.0, 3.0, 6.0),
@@ -458,7 +458,7 @@ pub(crate) fn uniform_states(f: f64, k: f64) -> ([(f64, f64); 3], usize) {
 }
 
 #[derive(Debug)]
-pub struct ChemicalReaction {
+pub struct GrayScott {
     /// Simulated seconds since start, and the seeded walk offset (a whole slot).
     t: f64,
     t0: f64,
@@ -485,7 +485,7 @@ pub struct ChemicalReaction {
     size: Size,
 }
 
-impl ChemicalReaction {
+impl GrayScott {
     pub(crate) fn new(slot: Option<usize>) -> Self {
         Self {
             t: 0.0,
@@ -632,7 +632,7 @@ impl ChemicalReaction {
     }
 }
 
-impl Generator for ChemicalReaction {
+impl Generator for GrayScott {
     fn meta(&self) -> &'static Meta {
         &META
     }
@@ -732,10 +732,10 @@ mod tests {
         a.iter().map(|&x| f64::from(x)).sum::<f64>() / a.len() as f64
     }
 
-    fn scene(slot: Option<usize>, seed: u64, w: u16, h: u16) -> (ChemicalReaction, Ctx) {
+    fn scene(slot: Option<usize>, seed: u64, w: u16, h: u16) -> (GrayScott, Ctx) {
         let size = Size::new(w, h);
         let mut ctx = Ctx::new(seed, size);
-        let mut g = ChemicalReaction::new(slot);
+        let mut g = GrayScott::new(slot);
         g.resize(size, &mut ctx);
         (g, ctx)
     }
@@ -810,12 +810,12 @@ mod tests {
         });
     }
 
-    fn active(g: &ChemicalReaction) -> usize {
+    fn active(g: &GrayScott) -> usize {
         g.v.as_slice().iter().filter(|&&x| x > 0.1).count()
     }
 
     /// Advance a scene to visit time `t` (simulated seconds) in 60 Hz frames.
-    fn run_to(g: &mut ChemicalReaction, ctx: &mut Ctx, t: f64) {
+    fn run_to(g: &mut GrayScott, ctx: &mut Ctx, t: f64) {
         while g.t < t - 0.5 * SIM_DT {
             g.update(SIM_DT, ctx);
         }
@@ -976,7 +976,7 @@ mod tests {
 
     /// Applies the unclamped reference Euler sub-step (core `laplacian9`) to the live
     /// fields, asserts every result lies in [0, 1], and returns the largest new v.
-    fn unclamped_step_in_unit_interval(g: &ChemicalReaction, c: Coeffs, id: &str) -> f32 {
+    fn unclamped_step_in_unit_interval(g: &GrayScott, c: Coeffs, id: &str) -> f32 {
         let (mut lu, mut lv) = (Grid::default(), Grid::default());
         laplacian9(&g.u, &mut lu, Edges::Wrap);
         laplacian9(&g.v, &mut lv, Edges::Wrap);
@@ -1204,7 +1204,7 @@ mod tests {
         assert_eq!(ascii_cell(Ink::BLANK, Ink::BLANK), None);
 
         let mut s = Stage::new(
-            Box::new(ChemicalReaction::new(Some(0))),
+            Box::new(GrayScott::new(Some(0))),
             42,
             Size::new(80, 24),
             GlyphMode::Unicode,
@@ -1244,7 +1244,7 @@ mod tests {
 
         let label = |w: u16, h: u16| {
             let mut s = Stage::new(
-                Box::new(ChemicalReaction::new(Some(2))),
+                Box::new(GrayScott::new(Some(2))),
                 1,
                 Size::new(w, h),
                 GlyphMode::Ascii,
@@ -1259,7 +1259,7 @@ mod tests {
         assert!(!label(80, 5).contains("F="));
         // The name switches at mid-morph: loops → swarm morphs over 24–32 s of the visit.
         let mut s = Stage::new(
-            Box::new(ChemicalReaction::new(Some(2))),
+            Box::new(GrayScott::new(Some(2))),
             1,
             Size::new(80, 24),
             GlyphMode::Ascii,
@@ -1299,7 +1299,7 @@ mod tests {
     /// An ASCII frame below the label row.
     type Frame = Vec<Vec<char>>;
 
-    fn ascii_frame(g: &ChemicalReaction, size: Size) -> Frame {
+    fn ascii_frame(g: &GrayScott, size: Size) -> Frame {
         let mut canvas = Canvas::new(size, GlyphMode::Ascii);
         g.render(&mut canvas);
         canvas
@@ -1312,7 +1312,7 @@ mod tests {
 
     /// Share of the half-block pixels below the label row that are near-black: the
     /// terminal background or `Seq` below level 32 (the dim violet halo).
-    fn near_black_share(g: &ChemicalReaction) -> f64 {
+    fn near_black_share(g: &GrayScott) -> f64 {
         let px = g.pixels.pixel_size();
         let (mut n, mut dark) = (0usize, 0usize);
         for y in 2..i32::from(px.height()) {

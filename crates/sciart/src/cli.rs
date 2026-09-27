@@ -274,6 +274,22 @@ mod tests {
             "starfield\tdeep-cosmos\t{}",
             sciart_generators::starfield::META.description
         )));
+        for (old, _) in sciart_generators::ALIASES {
+            assert!(
+                !lines.iter().any(|l| l.starts_with(&format!("{old}\t"))),
+                "GEN-R14: retired name {old} listed"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_r2_gen_r14_run_accepts_a_retired_name() {
+        let run = Command::Run {
+            name: "chemical_reaction".into(),
+        };
+        let picked = select(&run, &[]).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].meta.name, "gray_scott");
     }
 
     #[test]
