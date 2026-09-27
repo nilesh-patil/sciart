@@ -64,8 +64,9 @@ fn bp_x(u: f64) -> f64 {
 // Sequence (DNA-A3).
 // ---------------------------------------------------------------------------------------
 
-/// Pairs laid out at most: enough for the width at any aspect ratio (a floor in
-/// [`View::new`]); 512 B of sequence on the stack.
+/// Pairs laid out at most: enough to span the width at any aspect ratio up to w/h ≈ 50;
+/// beyond that the height fit wins and the duplex ends short of the right edge
+/// ([`View::new`]). 512 B of sequence on the stack.
 pub(crate) const N_MAX: usize = 512;
 pub(crate) type Seq = [u8; N_MAX];
 
@@ -339,6 +340,14 @@ const SWAY_DEPTH: f64 = 13.0;
 const MAX_MAGNIFY: f64 = 1.1;
 /// Rungs are drawn at least this many columns apart, so the ladder keeps its rhythm.
 const RUNG_GAP: f64 = 2.0;
+/// The fork runs only on views where the zoom-1 backbone radius is at least this many
+/// rows: below it (h ≲ 14) the arms, daughters and helicase share too few rows and knot
+/// into braille, so the view keeps the intact helix, zoomed in, all cycle.
+const FORK_MIN_ROWS: f64 = 1.75;
+/// From this zoom-1 backbone radius (rows) the near strands are drawn 2 dots wide: on
+/// large views a 1-dot thread is outweighed by the full-cell `│` rungs, and the depth
+/// cue needs the area.
+const BOLD_MIN_ROWS: f64 = 4.5;
 
 /// Per-size framing (rebuilt in `resize`).
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -354,6 +363,10 @@ pub(crate) struct View {
     /// Every `stride`-th rung is drawn: 1 unless pairs are under `RUNG_GAP` columns
     /// apart at zoom 1.
     pub stride: usize,
+    /// Whether the replication fork is shown ([`FORK_MIN_ROWS`]).
+    pub fork: bool,
+    /// Whether near strands are 2 dots wide ([`BOLD_MIN_ROWS`]).
+    pub bold: bool,
 }
 
 impl View {
@@ -377,6 +390,22 @@ impl View {
             n: (across + 2 * MARGIN).min(N_MAX),
             width: w / (ASPECT * scale),
             stride: (RUNG_GAP / columns_per_bp).ceil().max(1.0) as usize,
+            fork: scale * R >= FORK_MIN_ROWS,
+            bold: scale * R >= BOLD_MIN_ROWS,
+        }
+    }
+
+    /// The story as this view shows it: without room for the fork, the intact helix
+    /// stays zoomed in all cycle, while the `reset` fade and the new sequence still run.
+    pub fn shown(&self, snap: Snapshot) -> Snapshot {
+        if self.fork {
+            snap
+        } else {
+            Snapshot {
+                tau: None,
+                zoom: ZOOM_IN,
+                ..snap
+            }
         }
     }
 
@@ -713,9 +742,19 @@ pub(crate) fn helicase(geo: &Geo, view: &View, snap: &Snapshot) -> Option<Ring> 
 }
 
 /// Sample one backbone run into the far (`z_local < 0`) or near braille layer, joining
-/// consecutive samples with lines. The `τ = 0` fallback is inert: without a fork only
-/// the parents exist, and a parent's freshness age `τ − (−∞)` is infinite at any τ.
-fn trace(far: &mut Dots, near: &mut Dots, geo: &Geo, snap: &Snapshot, seg: Segment, per_bp: f64) {
+/// consecutive samples with lines; when `bold`, near lines get a twin one dot along the
+/// screen normal (below a rightward stroke), so the near strand is 2 dots wide. The
+/// `τ = 0` fallback is inert: without a fork only the parents exist, and a parent's
+/// freshness age `τ − (−∞)` is infinite at any τ.
+fn trace(
+    far: &mut Dots,
+    near: &mut Dots,
+    geo: &Geo,
+    snap: &Snapshot,
+    seg: Segment,
+    per_bp: f64,
+    bold: bool,
+) {
     let steps = ((seg.u1 - seg.u0) * per_bp).ceil().max(0.0) as usize;
     let role = match seg.strand {
         Strand::Watson | Strand::Crick => Role::Structure,
@@ -736,13 +775,24 @@ fn trace(far: &mut Dots, near: &mut Dots, geo: &Geo, snap: &Snapshot, seg: Segme
         let lit = fresh(backbone_level(s.z_local), tau - made_at(seg.strand, u));
         let ink = Ink::new(role, level(lit * snap.fade));
         let (dx, dy) = to_dots(s.x, s.y);
-        let layer = if s.z_local < 0.0 {
-            &mut *far
-        } else {
-            &mut *near
-        };
+        let is_near = s.z_local >= 0.0;
+        let layer = if is_near { &mut *near } else { &mut *far };
         match prev {
-            Some((px, py)) => layer.line(px, py, dx, dy, ink),
+            Some((px, py)) => {
+                layer.line(px, py, dx, dy, ink);
+                if bold && is_near {
+                    // One whole dot across the stroke (down for a flat one, sideways for
+                    // a steep one), so the twin is the same staircase shifted, not a
+                    // ragged second one.
+                    let (ex, ey) = (dx - px, dy - py);
+                    let (nx, ny) = if ex.abs() >= ey.abs() {
+                        (0.0, 1.0)
+                    } else {
+                        (-ey.signum(), 0.0)
+                    };
+                    layer.line(px + nx, py + ny, dx + nx, dy + ny, ink);
+                }
+            }
             None => layer.plot(dx, dy, ink),
         }
         prev = Some((dx, dy));
@@ -850,6 +900,12 @@ impl DnaHelix {
         }
     }
 
+    /// Rasterise the story as this view shows it at the current time.
+    fn refresh(&mut self) {
+        let snap = self.view.shown(self.story.at(self.t));
+        self.rasterise(&snap);
+    }
+
     /// Rebuild the backbone layers, rungs, helicase and label for `snap` at the
     /// current time.
     fn rasterise(&mut self, snap: &Snapshot) {
@@ -862,9 +918,9 @@ impl DnaHelix {
         let arc_per_bp = (R * TWIST).hypot(RISE);
         let dots_per_bp = f64::from(Dots::CELL_H) * geo.k * MAX_MAGNIFY * arc_per_bp;
         let per_bp = (dots_per_bp / 4.0).ceil().clamp(2.0, 32.0);
-        let (far, near) = (&mut self.far, &mut self.near);
+        let (far, near, bold) = (&mut self.far, &mut self.near, self.view.bold);
         for_each_segment(snap, self.view.n, |seg| {
-            trace(far, near, &geo, snap, seg, per_bp);
+            trace(far, near, &geo, snap, seg, per_bp, bold);
         });
         self.ring_marks = helicase(&geo, &self.view, snap).and_then(|ring| {
             trace_ring(&mut self.far, &mut self.near, &geo, &ring);
@@ -956,19 +1012,17 @@ impl Generator for DnaHelix {
         self.near.resize(size);
         // Up to two daughter rungs per pair.
         self.rungs.reserve(2 * self.view.n);
-        let snap = self.story.at(self.t);
-        self.rasterise(&snap);
+        self.refresh();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         self.t += dt;
-        let snap = self.story.at(self.t);
         // One new sequence per reset midpoint, drawn while every level is 0.
-        while self.draws < snap.draws {
+        while self.draws < self.story.at(self.t).draws {
             draw_sequence(&mut ctx.rng, &mut self.seq);
             self.draws += 1;
         }
-        self.rasterise(&snap);
+        self.refresh();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1257,7 +1311,8 @@ mod tests {
             let view = View::new(size);
             for k in 0..200 {
                 let t = 24.0 * f64::from(k) / 200.0;
-                let snap = story.at(t);
+                // What the view shows: small views keep the zoomed-in intact helix.
+                let snap = view.shown(story.at(t));
                 let geo = Geo::new(&view, t, &snap);
                 for_each_segment(&snap, view.n, |seg| {
                     for i in 0..=((seg.u1 - seg.u0) * 20.0) as usize {
@@ -1340,9 +1395,70 @@ mod tests {
         let mut scene = DnaHelix::new();
         scene.resize(size, &mut Ctx::new(42, size));
         scene.t = t;
-        let snap = scene.story.at(t);
-        scene.rasterise(&snap);
+        scene.refresh();
         scene
+    }
+
+    /// Lit dots of a braille layer.
+    fn lit_dots(d: &Dots) -> usize {
+        let s = d.dot_size();
+        (0..i32::from(s.width()))
+            .flat_map(|x| (0..i32::from(s.height())).map(move |y| (x, y)))
+            .filter(|&(x, y)| d.is_lit(x, y))
+            .count()
+    }
+
+    #[test]
+    fn dna_a2_near_strands_are_bold_on_large_views() {
+        // Each strand spends half its length in front of its axis, so without bolding
+        // the near and far layers light about as many dots.
+        for (size, bold) in [
+            (Size::new(200, 50), true),
+            (Size::new(120, 36), true),
+            (Size::new(80, 24), false),
+            (Size::new(40, 12), false),
+        ] {
+            assert_eq!(View::new(size).bold, bold, "{size:?}");
+            for t in [0.5, 2.0, 9.0, 20.0] {
+                let scene = scene_at(size, t);
+                let ratio = lit_dots(&scene.near) as f64 / lit_dots(&scene.far) as f64;
+                if bold {
+                    assert!(ratio >= 1.5, "{size:?} t = {t}: near/far {ratio:.2}");
+                } else {
+                    assert!(ratio <= 1.3, "{size:?} t = {t}: near/far {ratio:.2}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dna_a4_small_views_keep_the_intact_helix() {
+        let story = Story::new();
+        for (size, fork) in [
+            (Size::new(40, 12), false),
+            (Size::new(200, 10), false),
+            (Size::new(40, 13), false),
+            (Size::new(50, 14), true),
+            (Size::new(80, 24), true),
+        ] {
+            let view = View::new(size);
+            assert_eq!(view.fork, fork, "{size:?}");
+            for k in 0..240 {
+                let t = 24.0 * f64::from(k) / 240.0;
+                let (snap, shown) = (story.at(t), view.shown(story.at(t)));
+                if fork {
+                    assert_eq!(shown, snap);
+                } else {
+                    assert_eq!(shown.tau, None, "{size:?} t = {t}");
+                    assert_eq!(shown.zoom, ZOOM_IN, "{size:?} t = {t}");
+                    assert_eq!((shown.fade, shown.draws), (snap.fade, snap.draws));
+                }
+            }
+            // What the scene draws in mid-unwind: daughters and half-rungs only with a fork.
+            let scene = scene_at(size, 10.0);
+            let half = scene.rungs.iter().any(|r| r.ink_b.is_none());
+            assert_eq!(half || scene.ring_marks.is_some(), fork, "{size:?}");
+        }
     }
 
     #[test]
@@ -1425,7 +1541,8 @@ mod tests {
                 }
                 prev = now;
                 // It starts at the first on-screen pair.
-                let geo = Geo::new(&scene.view, scene.t, &scene.story.at(scene.t));
+                let snap = scene.view.shown(scene.story.at(scene.t));
+                let geo = Geo::new(&scene.view, scene.t, &snap);
                 let x = geo.sample(Strand::Watson, start as f64).unwrap().x;
                 assert!(x > -0.5, "{size:?} t = {}: {x}", scene.t);
             }
