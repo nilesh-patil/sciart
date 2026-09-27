@@ -223,7 +223,7 @@ struct Frame {
 impl Frame {
     /// Vertical midpoint of the box at camera yaw `yaw` (world units).
     fn mid(&self, yaw: f64) -> f64 {
-        (self.top + self.bottom) / 2.0 + self.swing * (3.0 * yaw).cos()
+        (self.top + self.bottom) / 2.0 + self.swing * (3.0 * yaw).cos_det()
     }
 }
 
@@ -365,7 +365,11 @@ const fn spec(k: Attractor) -> &'static Spec {
 
 /// Thomas' cyclically symmetric flow `ẋ = sin y − bx` (and cyclic).
 pub(crate) fn thomas(b: f64, [x, y, z]: V3) -> V3 {
-    [y.sin() - b * x, z.sin() - b * y, x.sin() - b * z]
+    [
+        y.sin_det() - b * x,
+        z.sin_det() - b * y,
+        x.sin_det() - b * z,
+    ]
 }
 
 /// Halvorsen's cyclically symmetric flow `ẋ = −ax − 4y − 4z − y²` (and cyclic).
@@ -985,7 +989,7 @@ impl StrangeAttractors {
     fn view(&self, g: &Gallery) -> (Projector, (f64, f64), f64) {
         let (from, to, w) = g.pair();
         let pitch = ease::lerp(spec(from).pitch, spec(to).pitch, w)
-            + PITCH_WOBBLE * (TAU * g.t() / PITCH_PERIOD).sin();
+            + PITCH_WOBBLE * (TAU * g.t() / PITCH_PERIOD).sin_det();
         let scale = ease::lerp(fit(from, self.size).ln(), fit(to, self.size).ln(), w).exp();
         let yaw = camera_yaw(g.t(), from, to, w);
         let mid = |k: Attractor| spec(k).frame.mid(yaw);
@@ -1012,7 +1016,7 @@ impl StrangeAttractors {
             proj,
             centre,
             scale,
-            dim: 1.0 - MORPH_DIM * (PI * g.pair().2).sin(),
+            dim: 1.0 - MORPH_DIM * (PI * g.pair().2).sin_det(),
             floor,
         }
     }
@@ -1172,7 +1176,11 @@ mod tests {
     type M3 = [[f64; 3]; 3];
 
     fn thomas_jacobian(b: f64, [x, y, z]: V3) -> M3 {
-        [[-b, y.cos(), 0.0], [0.0, -b, z.cos()], [x.cos(), 0.0, -b]]
+        [
+            [-b, y.cos_det(), 0.0],
+            [0.0, -b, z.cos_det()],
+            [x.cos_det(), 0.0, -b],
+        ]
     }
 
     fn halvorsen_jacobian(a: f64, [x, y, z]: V3) -> M3 {
@@ -1474,7 +1482,7 @@ mod tests {
                             distance: DISTANCE,
                         };
                         let pr = cam.projector();
-                        let swing = f.swing * (3.0 * yaw).cos();
+                        let swing = f.swing * (3.0 * yaw).cos_det();
                         let (mut xs, mut ys) = (Vec::with_capacity(N), Vec::with_capacity(N));
                         for &p in &pts {
                             let (x, y, _) = pr.project(world(k, p), (0.0, 0.0), 1.0).unwrap();

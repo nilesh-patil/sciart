@@ -206,7 +206,7 @@ pub(crate) struct Spiral {
 
 impl Spiral {
     pub(crate) fn new(x: f64, y: f64, p: f64, dir: f64, qb: f64, k: f64) -> Self {
-        let (s, c) = dir.sin_cos();
+        let (s, c) = dir.sin_cos_det();
         Self {
             x0: x,
             y0: y,
@@ -224,7 +224,7 @@ impl Spiral {
     /// `e^{−λt}` as `(re, im)`.
     fn decay(&self, t: f64) -> (f64, f64) {
         let m = (-self.k * t).exp();
-        let (s, c) = (self.qb * t).sin_cos();
+        let (s, c) = (self.qb * t).sin_cos_det();
         (m * c, m * s)
     }
 
@@ -313,7 +313,7 @@ pub(crate) fn vee(p_k: f64, theta: f64) -> [(f64, f64); 2] {
     // Equal masses share the energy: E* = m_K / 2 each.
     let e_star = 0.5 * M_K;
     let p_star = (e_star * e_star - M_PI * M_PI).sqrt();
-    let (s, c) = theta.sin_cos();
+    let (s, c) = theta.sin_cos_det();
     [1.0, -1.0].map(|sign| {
         (
             gamma * sign * p_star * c + beta_gamma * e_star,
@@ -679,7 +679,7 @@ impl ParticleAccelerator {
             let age = self.t - tw.born - tw.delay;
             if (0.0..0.6).contains(&age) {
                 let mid = tw.r0 + 0.5 * tw.len;
-                let (x, y) = view.dot(mid * tw.phi.cos(), mid * tw.phi.sin());
+                let (x, y) = view.dot(mid * tw.phi.cos_det(), mid * tw.phi.sin_det());
                 let amount = (18.0 * tw.e * dt * (1.0 - age / 0.6)) as f32;
                 self.exposure.splat(x, y, &DEPOSIT_KERNEL, amount);
             }
@@ -765,7 +765,7 @@ impl ParticleAccelerator {
                 for _ in 0..rng.random_range(1..=2) {
                     let dir: f64 = rng.random_range(-0.9..0.9);
                     let d = rng.random_range(0.08..0.3);
-                    let (cx, cy) = (vx + d * dir.cos(), vy + d * dir.sin());
+                    let (cx, cy) = (vx + d * dir.cos_det(), vy + d * dir.sin_det());
                     let e = rng.random_range(0.15..0.45);
                     let share = rng.random_range(0.25..0.75);
                     for (q, p) in [(1.0, e * share), (-1.0, e * (1.0 - share))] {
@@ -878,7 +878,7 @@ impl ParticleAccelerator {
         let n = ((TAU * r * per_unit).ceil() as usize).clamp(8, 4000);
         for i in 0..n {
             let a = TAU * i as f64 / n as f64;
-            let (x, y) = self.chamber_dot(cx + 1.02 * r * a.cos(), cy + 1.02 * r * a.sin());
+            let (x, y) = self.chamber_dot(cx + 1.02 * r * a.cos_det(), cy + 1.02 * r * a.sin_det());
             self.dots.plot(x, y, rim);
         }
         let cross = ink::ramp(FILM_RAMP, 0.4 * lit);
@@ -972,17 +972,17 @@ fn circle(dots: &mut Dots, view: View, r: f64, ink: Ink) {
     let n = ((TAU * r * view.dots_per_m()).ceil() as usize).clamp(8, 4000);
     for i in 0..n {
         let a = TAU * i as f64 / n as f64;
-        let (x, y) = view.dot(r * a.cos(), r * a.sin());
+        let (x, y) = view.dot(r * a.cos_det(), r * a.sin_det());
         dots.plot(x, y, ink);
     }
 }
 
 /// A regular `sides`-gon of inradius `r` m (muon wheels are dodecagons).
 fn polygon(dots: &mut Dots, view: View, r: f64, sides: u32, ink: Ink) {
-    let rc = r / (PI / f64::from(sides)).cos();
+    let rc = r / (PI / f64::from(sides)).cos_det();
     let corner = |i: u32| {
         let a = TAU * (f64::from(i) + 0.5) / f64::from(sides);
-        view.dot(rc * a.cos(), rc * a.sin())
+        view.dot(rc * a.cos_det(), rc * a.sin_det())
     };
     for i in 0..sides {
         let ((x0, y0), (x1, y1)) = (corner(i), corner(i + 1));
@@ -1007,7 +1007,7 @@ fn draw_tower(dots: &mut Dots, view: View, t: f64, tw: &Tower, fade: f64) {
     let strokes = ((2.0 * TOWER_HALF * outer).ceil() as i32).clamp(1, 16);
     for s in 0..=strokes {
         let a = tw.phi + TOWER_HALF * (2.0 * f64::from(s) / f64::from(strokes) - 1.0);
-        let (sn, c) = a.sin_cos();
+        let (sn, c) = a.sin_cos_det();
         let (x0, y0) = view.dot(tw.r0 * c, tw.r0 * sn);
         let (x1, y1) = view.dot((tw.r0 + len) * c, (tw.r0 + len) * sn);
         dots.line(x0, y0, x1, y1, ink);
@@ -1217,7 +1217,10 @@ mod tests {
         // A neutral path is a straight line.
         let n = Spiral::new(0.0, 0.0, 2.0, 0.3, 0.0, 0.0);
         let (x, y) = n.pos(1.5);
-        assert!((x - 3.0 * 0.3f64.cos()).abs() < 1e-12 && (y - 3.0 * 0.3f64.sin()).abs() < 1e-12);
+        assert!(
+            (x - 3.0 * 0.3f64.cos_det()).abs() < 1e-12
+                && (y - 3.0 * 0.3f64.sin_det()).abs() < 1e-12
+        );
     }
 
     #[test]
@@ -1275,8 +1278,8 @@ mod tests {
             let pt = rng.random_range(0.05..30.0);
             let qb = charge(&mut rng) * GEV_PER_TM * B_SOLENOID;
             let sp = Spiral::new(
-                r0 * a.cos(),
-                r0 * a.sin(),
+                r0 * a.cos_det(),
+                r0 * a.sin_det(),
                 pt,
                 rng.random_range(0.0..TAU),
                 qb,

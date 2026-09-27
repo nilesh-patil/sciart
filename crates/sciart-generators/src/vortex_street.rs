@@ -1011,7 +1011,7 @@ fn seam_taper(p: &FlowParams, y: f64) -> f64 {
 /// Inlet speed `U(t)/U₀` at simulated time `t` (VOR-A8): a slow breath that keeps Re
 /// within ±8 % of its mean.
 pub(crate) fn breath(t: f64) -> f64 {
-    1.0 + BREATH_AMP * (2.0 * PI * t / BREATH_PERIOD).sin()
+    1.0 + BREATH_AMP * (2.0 * PI * t / BREATH_PERIOD).sin_det()
 }
 
 /// Bilinear lattice velocity at `(x, y)` (lattice units, rows down): x clamped to the
@@ -1047,7 +1047,7 @@ pub(crate) fn advect(lat: &Lattice, (x, y): (f64, f64), n: f64) -> (f64, f64) {
 /// the front stagnation point and [`PORT_GAP`] nodes outside the rim.
 pub(crate) fn dye_ports(p: &FlowParams) -> [(f64, f64); PORTS] {
     let r = 0.5 * p.d + PORT_GAP;
-    let (s, c) = PORT_ANGLE_DEG.to_radians().sin_cos();
+    let (s, c) = PORT_ANGLE_DEG.to_radians().sin_cos_det();
     [-1.0, 1.0].map(|side| (p.xc - r * c, p.yc + side * r * s))
 }
 
@@ -1616,7 +1616,7 @@ mod tests {
         let mut lat = Lattice::new(Size::new(w as u16, h as u16), |_, _| false);
         let k = 2.0 * PI / h as f64;
         for (i, u) in lat.ux.as_mut_slice().iter_mut().enumerate() {
-            *u = (0.01 * (k * (i / w) as f64).sin()) as f32;
+            *u = (0.01 * (k * (i / w) as f64).sin_det()) as f32;
         }
         lat.equilibrate();
         let amplitude = |lat: &Lattice| {
@@ -1624,7 +1624,7 @@ mod tests {
             (0..n)
                 .map(|i| {
                     let (rho, jx, _) = moments(&node(lat, i));
-                    jx / rho * (k * (i / w) as f64).sin()
+                    jx / rho * (k * (i / w) as f64).sin_det()
                 })
                 .sum::<f64>()
                 * 2.0

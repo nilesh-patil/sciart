@@ -471,7 +471,7 @@ impl BrownianMotion {
             let rd = r * f64::from(Dots::CELL_H);
             let n = (TAU * rd).ceil().min(4096.0) as usize;
             for k in (0..n).step_by(2) {
-                let (s, c) = (TAU * k as f64 / n as f64).sin_cos();
+                let (s, c) = (TAU * k as f64 / n as f64).sin_cos_det();
                 let (x, y) = ((cx + rd * c).round(), (cy + rd * s).round());
                 if (y as i32) < floor {
                     self.dots.plot(x, y, ink);

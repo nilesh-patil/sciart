@@ -374,8 +374,8 @@ impl Dla {
         } else {
             let th = rng.random_range(0.0..TAU);
             (
-                (f64::from(self.seed.0) + r * th.cos()).round() as i32,
-                (f64::from(self.seed.1) + r * th.sin()).round() as i32,
+                (f64::from(self.seed.0) + r * th.cos_det()).round() as i32,
+                (f64::from(self.seed.1) + r * th.sin_det()).round() as i32,
             )
         };
         (x.clamp(0, (w - 1).max(0)), y.clamp(0, (h - 1).max(0)))
@@ -448,8 +448,8 @@ impl Dla {
             // First passage out of a crystal-free disc of radius `jump` is uniform on its rim.
             let th = rng.random_range(0.0..TAU);
             let (jx, jy) = (
-                f64::from(x) + jump * th.cos(),
-                f64::from(y) + jump * th.sin(),
+                f64::from(x) + jump * th.cos_det(),
+                f64::from(y) + jump * th.sin_det(),
             );
             let (fx, fy) = (fold(jx, w - 1), fold(jy, h - 1));
             // A mirrored landing is kept only well clear of the crystal; else a unit step.

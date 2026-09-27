@@ -140,15 +140,16 @@ pub(crate) fn deriv(p: &Params, y: &[f64; 4]) -> [f64; 4] {
     let [th1, th2, w1, w2] = *y;
     let Params { m1, m2, l1, l2, g } = *p;
     let delta = th1 - th2;
-    let (sd, cd) = delta.sin_cos();
-    let den = 2.0 * m1 + m2 - m2 * (2.0 * delta).cos();
-    let a1 = (-g * (2.0 * m1 + m2) * th1.sin()
-        - m2 * g * (th1 - 2.0 * th2).sin()
+    let (sd, cd) = delta.sin_cos_det();
+    let den = 2.0 * m1 + m2 - m2 * (2.0 * delta).cos_det();
+    let a1 = (-g * (2.0 * m1 + m2) * th1.sin_det()
+        - m2 * g * (th1 - 2.0 * th2).sin_det()
         - 2.0 * sd * m2 * (w2 * w2 * l2 + w1 * w1 * l1 * cd))
         / (l1 * den);
-    let a2 =
-        2.0 * sd * (w1 * w1 * l1 * (m1 + m2) + g * (m1 + m2) * th1.cos() + w2 * w2 * l2 * m2 * cd)
-            / (l2 * den);
+    let a2 = 2.0
+        * sd
+        * (w1 * w1 * l1 * (m1 + m2) + g * (m1 + m2) * th1.cos_det() + w2 * w2 * l2 * m2 * cd)
+        / (l2 * den);
     [w1, w2, a1, a2]
 }
 
@@ -163,9 +164,9 @@ pub(crate) fn energy(p: &Params, y: &[f64; 4]) -> f64 {
     let m = m1 + m2;
     let kinetic = 0.5 * m * l1 * l1 * w1 * w1
         + 0.5 * m2 * l2 * l2 * w2 * w2
-        + m2 * l1 * l2 * w1 * w2 * (th1 - th2).cos();
+        + m2 * l1 * l2 * w1 * w2 * (th1 - th2).cos_det();
     // 1 − cos θ = 2 sin²(θ/2) keeps small-angle energies accurate (no cancellation).
-    let lift = |th: f64| 2.0 * (0.5 * th).sin().powi(2);
+    let lift = |th: f64| 2.0 * (0.5 * th).sin_det().powi(2);
     let potential = m * g * l1 * lift(th1) + m2 * g * l2 * lift(th2);
     kinetic + potential
 }
@@ -173,8 +174,8 @@ pub(crate) fn energy(p: &Params, y: &[f64; 4]) -> f64 {
 /// Positions of the upper and lower bobs relative to the pivot, model units, y down
 /// (DP-A4): always derived from the angles, so both rods are rigid by construction.
 pub(crate) fn bobs(p: &Params, th1: f64, th2: f64) -> [(f64, f64); 2] {
-    let (s1, c1) = th1.sin_cos();
-    let (s2, c2) = th2.sin_cos();
+    let (s1, c1) = th1.sin_cos_det();
+    let (s2, c2) = th2.sin_cos_det();
     let b1 = (p.l1 * s1, p.l1 * c1);
     [b1, (b1.0 + p.l2 * s2, b1.1 + p.l2 * c2)]
 }
@@ -711,7 +712,7 @@ mod tests {
         let p = Params { m2: 1e-12, ..SCENE };
         let y = [0.7, 0.2, 0.3, -0.4];
         let d = deriv(&p, &y);
-        assert!((d[2] + p.g / p.l1 * 0.7f64.sin()).abs() < 1e-9, "{d:?}");
+        assert!((d[2] + p.g / p.l1 * 0.7f64.sin_det()).abs() < 1e-9, "{d:?}");
     }
 
     #[test]

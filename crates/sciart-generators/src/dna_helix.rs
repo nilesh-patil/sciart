@@ -452,7 +452,7 @@ pub(crate) fn camera(view: &View, t: f64, zoom: f64) -> Camera {
     let half = view.width / (2.0 * zoom);
     let sway = YAW_SWAY.min((SWAY_DEPTH / half).min(1.0).asin());
     Camera {
-        yaw: sway * (TAU * t / YAW_PERIOD).sin(),
+        yaw: sway * (TAU * t / YAW_PERIOD).sin_det(),
         pitch: PITCH_TILT,
         distance: EYE.max(EYE_PER_HALF_WIDTH * half),
     }
@@ -539,7 +539,7 @@ impl Geo {
     /// World position of `strand` at pair position `u`: `(x, y₀ + R cos θ, R sin θ)`.
     pub fn world(&self, strand: Strand, u: f64) -> [f64; 3] {
         let theta = self.phi + TWIST * (u - MARGIN as f64) + strand.slot();
-        let (s, c) = theta.sin_cos();
+        let (s, c) = theta.sin_cos_det();
         [bp_x(u), self.axis(strand, u) + R * c, R * s]
     }
 
@@ -860,7 +860,7 @@ pub(crate) fn trace_ring(layer: &mut Dots, geo: &Geo, ring: &Ring) {
         let r = band * RING * R;
         let mut prev: Option<(f64, f64)> = None;
         for i in 0..=RING_SAMPLES {
-            let (s, c) = (TAU * i as f64 / RING_SAMPLES as f64).sin_cos();
+            let (s, c) = (TAU * i as f64 / RING_SAMPLES as f64).sin_cos_det();
             let p = std::array::from_fn(|k| ring.centre[k] + r * (c * ring.e1[k] + s * ring.e2[k]));
             let Some((x, y, _)) = geo.project(p) else {
                 prev = None;
@@ -1166,7 +1166,7 @@ mod tests {
         let major = PITCH - minor;
         assert!((minor - 12.50).abs() < 0.05, "{minor}");
         assert!((major - 23.20).abs() < 0.05, "{major}");
-        let chord = 2.0 * 5.9 * (DELTA / 2.0).sin();
+        let chord = 2.0 * 5.9 * (DELTA / 2.0).sin_det();
         assert!((chord - 10.5).abs() < 0.1, "{chord}");
         // Right-handed: positive torsion of successive chords at 0.5 bp steps.
         let geo = Geo::new(&View::new(Size::new(80, 24)), 0.7, &snap_at(0.7));

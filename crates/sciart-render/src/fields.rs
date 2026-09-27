@@ -6,7 +6,7 @@
 
 use std::sync::LazyLock;
 
-use sciart_core::{Ink, Ramp, Role, ink};
+use sciart_core::{Ink, Ramp, Role, Trig, ink};
 
 use crate::theme::Rgb;
 
@@ -208,7 +208,7 @@ fn xyz_to_linear_srgb([x, y, z]: [f64; 3]) -> [f64; 3] {
 /// OKLCh (Ottosson 2020) to sRGB, lowering the chroma until the colour is in gamut, so
 /// hue and lightness are kept exactly and only saturation gives way.
 fn oklch(l: f64, c: f64, hue_deg: f64) -> Rgb {
-    let (sin, cos) = hue_deg.to_radians().sin_cos();
+    let (sin, cos) = hue_deg.to_radians().sin_cos_det();
     let at = |c: f64| oklab_to_linear_srgb(l, c * cos, c * sin);
     let in_gamut = |rgb: [f64; 3]| rgb.iter().all(|v| (-1e-9..=1.0 + 1e-9).contains(v));
     let (mut lo, mut hi) = (0.0, c);

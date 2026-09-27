@@ -147,7 +147,7 @@ pub(crate) fn aberrate(beta: f64, cos_rest: f64) -> f64 {
 /// The rest-frame angle of a photon seen at lab angle `lab` (radians from the motion),
 /// the inverse of [`aberrate`]: `cos θ′ = (cos θ − β)/(1 − β cos θ)`, same side (DOP-A4).
 pub(crate) fn rest_angle(beta: f64, lab: f64) -> f64 {
-    let (s, c) = lab.sin_cos();
+    let (s, c) = lab.sin_cos_det();
     let cos_rest = ((c - beta) / (1.0 - beta * c)).clamp(-1.0, 1.0);
     cos_rest.acos().copysign(s)
 }
@@ -382,8 +382,8 @@ impl DopplerEffect {
             match f.wave {
                 Wave::Sound => {
                     let n = ((span * per_rad).ceil() as usize).clamp(2, MAX_SAMPLES);
-                    let (ds, dc) = (span / n as f64).sin_cos();
-                    let (mut s, mut c) = start.sin_cos();
+                    let (ds, dc) = (span / n as f64).sin_cos_det();
+                    let (mut s, mut c) = start.sin_cos_det();
                     for _ in 0..=n {
                         // Up the ramp with the pitch heard that way (DOP-A8). A fading
                         // front loses its dots one by one, never all at once.
@@ -408,8 +408,8 @@ impl DopplerEffect {
                     };
                     let density = per_rad * fade.max(0.3) * shown;
                     let n = ((span * density).ceil() as usize).clamp(2, MAX_SAMPLES);
-                    let (ds, dc) = (span / n as f64).sin_cos();
-                    let (mut s, mut c) = start.sin_cos();
+                    let (ds, dc) = (span / n as f64).sin_cos_det();
+                    let (mut s, mut c) = start.sin_cos_det();
                     for _ in 0..=n {
                         let den = 1.0 + BETA * c;
                         let (lc, ls) = (aberrate(BETA, c), s / (GAMMA * den));
@@ -649,14 +649,14 @@ mod tests {
         let (m, wave) = g.speed();
         assert_eq!((m, wave), (M_FAST, Wave::Sound));
         let a = mach_half_angle(m).unwrap();
-        assert!((a.sin() - 1.0 / 1.6).abs() < 1e-12);
+        assert!((a.sin_det() - 1.0 / 1.6).abs() < 1e-12);
         let mut tangent = 0;
         for f in g.fronts.iter().filter(|f| f.t0 > 18.0) {
             let r = f.radius(g.t);
             // Distance from the front's centre to both cone lines through the source.
             let (dx, dy) = (g.sx - f.x0, g.sy - f.y0);
             for side in [1.0, -1.0] {
-                let (ux, uy) = (-a.cos(), side * a.sin());
+                let (ux, uy) = (-a.cos_det(), side * a.sin_det());
                 let d = (dx * uy - dy * ux).abs();
                 assert!((d - r).abs() < 1e-9, "front {:.2}: {d} vs {r}", f.t0);
             }

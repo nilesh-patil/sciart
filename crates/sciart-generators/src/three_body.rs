@@ -127,7 +127,7 @@ pub(crate) fn lagrange_ics(e: f64) -> ([f64; 6], [f64; 6], f64) {
     let v = (mu * (1.0 - e)).sqrt();
     let (mut pos, mut vel) = ([0.0; 6], [0.0; 6]);
     for i in 0..3 {
-        let (s, c) = (90f64 + 120.0 * i as f64).to_radians().sin_cos();
+        let (s, c) = (90f64 + 120.0 * i as f64).to_radians().sin_cos_det();
         pos[2 * i] = c;
         pos[2 * i + 1] = s;
         vel[2 * i] = -s * v;

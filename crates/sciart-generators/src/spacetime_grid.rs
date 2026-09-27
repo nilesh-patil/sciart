@@ -287,7 +287,7 @@ impl Binary {
         let s = self.state(t);
         let m = self.m1 + self.m2;
         let (r1, r2) = (s.a * self.m2 / m, s.a * self.m1 / m);
-        let (sn, c) = s.phase.sin_cos();
+        let (sn, c) = s.phase.sin_cos_det();
         [(-r1 * c, -r1 * sn), (r2 * c, r2 * sn)]
     }
 
@@ -310,7 +310,7 @@ impl Binary {
     /// The strain a distant face-on detector records at `t`: `S cos 2Ψ` (SPT-A6).
     pub(crate) fn strain(&self, t: f64) -> f64 {
         let s = self.state(t);
-        s.strain * (2.0 * s.pattern).cos()
+        s.strain * (2.0 * s.pattern).cos_det()
     }
 
     /// The strain envelope's largest value, the inset's full scale.
@@ -389,7 +389,7 @@ impl Body {
 fn ring(dots: &mut Dots, (dx, dy): (f64, f64), r: f64, ink: Ink) {
     let steps = (TAU * r).ceil().clamp(8.0, 512.0) as usize;
     for k in 0..steps {
-        let (s, c) = (TAU * k as f64 / steps as f64).sin_cos();
+        let (s, c) = (TAU * k as f64 / steps as f64).sin_cos_det();
         dots.plot(dx + r * c, dy + r * s, ink);
     }
 }
@@ -475,7 +475,7 @@ pub(crate) fn envelope(r: f64) -> f64 {
 #[cfg(test)]
 pub(crate) fn wave(bin: &Binary, r: f64, phi: f64, t: f64) -> f64 {
     let s = bin.state(t - r / WAVE_SPEED);
-    WAVE_AMP * envelope(r) * s.strain * (2.0 * (phi - s.pattern)).cos()
+    WAVE_AMP * envelope(r) * s.strain * (2.0 * (phi - s.pattern)).cos_det()
 }
 
 /// Fixed world data of one mesh sample, stored as `f32` (a large mesh holds ~20 000):
@@ -487,7 +487,7 @@ struct Base([f32; 6]);
 impl Base {
     fn new(x: f64, y: f64) -> Self {
         let r = x.hypot(y);
-        let (s2, c2) = (2.0 * y.atan2(x)).sin_cos();
+        let (s2, c2) = (2.0 * y.atan2(x)).sin_cos_det();
         Self([x, y, r, c2, s2, envelope(r)].map(|v| v as f32))
     }
 
@@ -524,7 +524,7 @@ struct Camera {
 impl Camera {
     /// Normalised perspective coordinates `(u, v, depth)` of a world point.
     fn view(cos_yaw: f64, sin_yaw: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
-        let (cp, sp) = (PITCH.cos(), PITCH.sin());
+        let (cp, sp) = (PITCH.cos_det(), PITCH.sin_det());
         let (xr, yr) = (x * cos_yaw - y * sin_yaw, x * sin_yaw + y * cos_yaw);
         let d = (yr * cp - z * sp + CAM_DIST).max(0.1);
         let up = yr * sp + z * cp;
@@ -610,7 +610,7 @@ impl SpacetimeGrid {
         let extent = |lx: f64| {
             let (mut u0, mut u1, mut v0, mut v1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
             for yaw in [-YAW_AMP, 0.0, YAW_AMP] {
-                let (s, c) = f64::sin_cos(yaw);
+                let (s, c) = f64::sin_cos_det(yaw);
                 for (x, y, z) in [
                     (-lx, -1.0, 0.0),
                     (lx, -1.0, 0.0),
@@ -690,7 +690,7 @@ impl SpacetimeGrid {
         let lx = self.lx;
         let (mut left, mut right) = (f64::INFINITY, f64::NEG_INFINITY);
         for yaw in [-YAW_AMP, 0.0, YAW_AMP] {
-            let (s, c) = f64::sin_cos(yaw);
+            let (s, c) = f64::sin_cos_det(yaw);
             for k in 0..=64 {
                 let f = f64::from(k) / 64.0;
                 // The far edge, the left edge and the right edge.
@@ -731,7 +731,7 @@ impl SpacetimeGrid {
     fn refresh(&mut self) {
         let bin = self.binary();
         let t = self.t;
-        let (sy, cy) = (YAW_AMP * (TAU * t / YAW_PERIOD).sin()).sin_cos();
+        let (sy, cy) = (YAW_AMP * (TAU * t / YAW_PERIOD).sin_det()).sin_cos_det();
         self.cam.cos_yaw = cy;
         self.cam.sin_yaw = sy;
         let masses = bin.masses(t);
@@ -741,7 +741,7 @@ impl SpacetimeGrid {
             let [bx, by, r, c2, s2, env] = b.get();
             let well = well_depth(bx, by, &masses);
             let s = bin.state(t - r / WAVE_SPEED);
-            let (sn, c) = (2.0 * s.pattern).sin_cos();
+            let (sn, c) = (2.0 * s.pattern).sin_cos_det();
             // cos 2(φ − Ψ) = cos 2φ cos 2Ψ + sin 2φ sin 2Ψ
             let crest = c2 * c + s2 * sn;
             let envn = env * s.strain * sheet_gain(s.speed, self.max_speed);
@@ -1022,7 +1022,7 @@ mod tests {
             assert!(ref_z < 0.0, "well points down");
             for j in 0..16 {
                 let th = TAU * f64::from(j) / 16.0;
-                let z = well_depth(mx + r * th.cos(), my + r * th.sin(), &masses);
+                let z = well_depth(mx + r * th.cos_det(), my + r * th.sin_det(), &masses);
                 assert!((z - ref_z).abs() < 1e-12, "not symmetric at r={r} th={th}");
             }
             if k < 200 {
@@ -1076,7 +1076,7 @@ mod tests {
                 let [(x1, y1), (x2, y2)] = b.positions(tr);
                 let psi = (y2 - y1).atan2(x2 - x1);
                 let amp = WAVE_AMP * envelope(r) * b.state(tr).strain;
-                let expect = amp * (2.0 * (phi - psi)).cos();
+                let expect = amp * (2.0 * (phi - psi)).cos_det();
                 assert!(
                     (w - expect).abs() < 1e-9,
                     "r={r} phi={phi} t={t}: {w} vs {expect}"

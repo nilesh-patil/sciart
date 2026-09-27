@@ -1,5 +1,5 @@
-//! Source-level rules that the type system cannot express (GEN-R3, GEN-R7, GEN-R15,
-//! TEST-R8).
+//! Source-level rules that the type system cannot express (GEN-R3, GEN-R6, GEN-R7,
+//! GEN-R15, TEST-R8, TEST-R9).
 //!
 //! These read the crate's own sources and SPEC-002 at test time, so they fail the moment
 //! a module is added without a registry line, a generator reaches for the clock, or a
@@ -113,6 +113,47 @@ fn test_r8_clippy_config_bans_deliberate_leaks() {
 }
 
 #[test]
+fn gen_r6_core_r90_clippy_config_bans_fusable_trig() {
+    // A sin + cos pair in one function becomes one `sincos` whose sine differs in the last
+    // bit, depending on inlining; so frames differed between dev and release builds.
+    let clippy = fs::read_to_string(workspace_root().join("clippy.toml")).expect("clippy.toml");
+    for path in [
+        "f64::sin",
+        "f64::cos",
+        "f64::sin_cos",
+        "f32::sin",
+        "f32::cos",
+        "f32::sin_cos",
+    ] {
+        assert!(
+            clippy.contains(&format!("path = \"{path}\"")),
+            "GEN-R6: clippy.toml disallowed-methods must ban `{path}` (use sciart_core::trig)"
+        );
+    }
+}
+
+#[test]
+fn test_r9_rs_ci_runs_the_snapshot_suite_in_release() {
+    let pixi = fs::read_to_string(workspace_root().join("pixi.toml")).expect("pixi.toml");
+    let task = |name: &str| {
+        pixi.lines()
+            .find(|l| l.starts_with(&format!("{name} = ")))
+            .unwrap_or_else(|| panic!("TEST-R9: pixi.toml has no `{name}` task"))
+            .to_owned()
+    };
+    let snap = task("rs-snap-release");
+    assert!(
+        snap.contains("--release") && snap.contains("--test snapshots"),
+        "TEST-R9: rs-snap-release must run the snapshot suite in release: {snap}"
+    );
+    let ci = task("rs-ci");
+    assert!(
+        ci.contains("\"rs-snap-release\""),
+        "TEST-R9: rs-ci must depend on rs-snap-release: {ci}"
+    );
+}
+
+#[test]
 fn gen_r7_core_and_generators_never_touch_clock_or_global_rng() {
     // Belt and braces for the clippy ban: also catches the escape hatch
     // (`allow(clippy::disallowed_methods)`) and APIs clippy's list does not name.
@@ -133,8 +174,14 @@ fn gen_r7_core_and_generators_never_touch_clock_or_global_rng() {
     let mut hits = Vec::new();
     for file in dirs.iter().flat_map(|d| rust_sources(d)) {
         let text = fs::read_to_string(&file).expect("read source");
+        // CORE-R90: `trig.rs` is the one module allowed to call libm's sin/cos.
+        let trig = file.ends_with("sciart-core/src/trig.rs");
         for (n, line) in text.lines().enumerate() {
-            for bad in FORBIDDEN.iter().filter(|b| line.contains(**b)) {
+            let allowed = |b: &&&str| trig && **b == "disallowed_methods";
+            for bad in FORBIDDEN
+                .iter()
+                .filter(|b| line.contains(**b) && !allowed(b))
+            {
                 hits.push(format!("{}:{}: `{bad}`", file.display(), n + 1));
             }
         }

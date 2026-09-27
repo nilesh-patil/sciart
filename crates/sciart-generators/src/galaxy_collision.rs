@@ -188,7 +188,11 @@ fn update_accels(cores: &mut [Body; 2], stars: &mut ParticlePool<Star>) {
 
 /// Unit spin axis at inclination `inc` from +z and azimuth `az`.
 fn axis(inc: f64, az: f64) -> V3 {
-    [inc.sin() * az.cos(), inc.sin() * az.sin(), inc.cos()]
+    [
+        inc.sin_det() * az.cos_det(),
+        inc.sin_det() * az.sin_det(),
+        inc.cos_det(),
+    ]
 }
 
 /// Orthonormal disk basis `(e1, e2)` with `e1 × e2 = n`, so stars placed at
@@ -298,7 +302,7 @@ impl Encounter {
             let r = R_MIN + (RD - R_MIN) * rng.random_range(0.0f64..1.0);
             let arm = if rng.random_bool(0.5) { 0.0 } else { PI };
             let phi = arm - ARM_WIND * (r / R_MIN).ln() + gaussian(rng, 0.0, 0.35);
-            let (c, s) = (phi.cos(), phi.sin());
+            let (c, s) = (phi.cos_det(), phi.sin_det());
             let radial = add(scale(e1, c), scale(e2, s));
             let tangent = add(scale(e1, -s), scale(e2, c));
             let thick = scale(spins[g], gaussian(rng, 0.0, 0.02 * RD));
@@ -337,7 +341,7 @@ impl Encounter {
         let r = x.hypot(y).max(R_MIN);
         let inside = 1.0 - ease::smoothstep((r - ARM_R_IN) / (ARM_R_OUT - ARM_R_IN));
         let psi = 2.0 * (y.atan2(x) + ARM_WIND * (r / R_MIN).ln() - TAU * self.t / ARM_PERIOD);
-        (psi.cos(), inside)
+        (psi.cos_det(), inside)
     }
 
     /// Advance by `dt` real seconds: velocity-Verlet (kick-drift-kick) sub-stepped to
@@ -398,10 +402,10 @@ impl View {
         let t = rng.random_range(18f64.to_radians()..40f64.to_radians());
         let r = rng.random_range(-12f64.to_radians()..12f64.to_radians());
         Self {
-            cos_t: t.cos(),
-            sin_t: t.sin(),
-            cos_r: r.cos(),
-            sin_r: r.sin(),
+            cos_t: t.cos_det(),
+            sin_t: t.sin_det(),
+            cos_r: r.cos_det(),
+            sin_r: r.sin_det(),
             flip: if rng.random_bool(0.5) { 1.0 } else { -1.0 },
         }
     }
@@ -923,7 +927,7 @@ mod tests {
         let mut sim = encounter(0, 13);
         let probe = |sim: &Encounter, g: u8, r: f64, phi: f64| {
             let (e1, e2) = sim.disks[usize::from(g)];
-            let d = add(scale(e1, r * phi.cos()), scale(e2, r * phi.sin()));
+            let d = add(scale(e1, r * phi.cos_det()), scale(e2, r * phi.sin_det()));
             let s = Star {
                 body: Body {
                     pos: add(sim.cores[usize::from(g)].pos, d),

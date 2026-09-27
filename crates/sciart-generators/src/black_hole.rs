@@ -159,20 +159,22 @@ fn feather(r: f64) -> f64 {
 /// `λ = L_z / E = −b cos ψ sin i` and the true (geometric) Kepler `Ω = r^{-3/2}`.
 pub(crate) fn redshift(r: f64, b: f64, psi: f64) -> f64 {
     let omega = r.powf(-1.5);
-    (1.0 - 3.0 / r).max(0.0).sqrt() / (1.0 + omega * b * psi.cos() * INCLINATION.sin())
+    (1.0 - 3.0 / r).max(0.0).sqrt() / (1.0 + omega * b * psi.cos_det() * INCLINATION.sin_det())
 }
 
 /// Sweep angle at which a ray from the observer at screen angle `psi` first reaches the
 /// disk plane: `r̂(γ) = cos γ ô + sin γ ê` meets `n̂·r̂ = 0` (SPEC-002).
 fn first_crossing(psi: f64) -> f64 {
-    INCLINATION.cos().atan2(-psi.sin() * INCLINATION.sin())
+    INCLINATION
+        .cos_det()
+        .atan2(-psi.sin_det() * INCLINATION.sin_det())
 }
 
 /// Disk azimuth of the ray's position at sweep angle `gamma` (on the disk plane).
 fn disk_azimuth(psi: f64, gamma: f64) -> f64 {
-    let (sg, cg) = gamma.sin_cos();
-    let (sp, cp) = psi.sin_cos();
-    let along_d = sg * sp * INCLINATION.cos() - cg * INCLINATION.sin();
+    let (sg, cg) = gamma.sin_cos_det();
+    let (sp, cp) = psi.sin_cos_det();
+    let along_d = sg * sp * INCLINATION.cos_det() - cg * INCLINATION.sin_det();
     geom::wrap(along_d.atan2(sg * cp), TAU)
 }
 
@@ -277,7 +279,7 @@ impl Geodesics {
     pub(crate) fn u(&self, b: f64, phi: f64) -> f64 {
         let Some((k, fb)) = Self::row(b) else {
             // u = sin φ / b + (1 − cos φ)² / b², first order in M/b.
-            return phi.sin() / b + (1.0 - phi.cos()).powi(2) / (b * b);
+            return phi.sin_det() / b + (1.0 - phi.cos_det()).powi(2) / (b * b);
         };
         let x = (phi / Self::DPHI).clamp(0.0, (NPHI - 1) as f64);
         let j = (x as usize).min(NPHI - 2);
@@ -331,7 +333,7 @@ impl Geodesics {
                 .map(|k| coarse + 0.32 - 0.08 * f64::from(k))
                 .find(|&b| on_disk(b))
                 .unwrap_or(coarse);
-            let (x, y) = (b * psi.cos(), b * psi.sin());
+            let (x, y) = (b * psi.cos_det(), b * psi.sin_det());
             half_w = half_w.max(x.abs());
             top = top.max(y);
             bottom = bottom.max(-y);
@@ -344,11 +346,11 @@ impl Geodesics {
 /// from: the source sits at angle `b/D − α` from the hole, on the ray's side (SPEC-002).
 fn sky_coords(b: f64, psi: f64, phi_end: f64) -> (f64, f64) {
     let delta = b / OBSERVER - (phi_end - PI);
-    let (sd, cd) = delta.sin_cos();
-    let (sp, cp) = psi.sin_cos();
+    let (sd, cd) = delta.sin_cos_det();
+    let (sp, cp) = psi.sin_cos_det();
     // dir = −cos δ ô + sin δ ê, ê = (cos ψ, sin ψ, 0), ô = (0, 0, 1).
     let dir = [sd * cp, sd * sp, -cd];
-    let (si, ci) = INCLINATION.sin_cos();
+    let (si, ci) = INCLINATION.sin_cos_det();
     let along_x = dir[0];
     let along_d = dir[1] * ci - dir[2] * si;
     let along_n = dir[1] * si + dir[2] * ci;
@@ -388,8 +390,12 @@ fn paint_stars(rng: &mut impl Rng) -> Box<[u8]> {
             let a = rng.random_range(0.0..TAU);
             let off = 0.12 * (rng.random_range(-1.0f64..1.0)).powi(3);
             let p = geom::v3::add(
-                geom::v3::scale(e1, a.cos() * off.cos()),
-                geom::v3::axpy(a.sin() * off.cos(), e2, geom::v3::scale(pole, off.sin())),
+                geom::v3::scale(e1, a.cos_det() * off.cos_det()),
+                geom::v3::axpy(
+                    a.sin_det() * off.cos_det(),
+                    e2,
+                    geom::v3::scale(pole, off.sin_det()),
+                ),
             );
             (p[1].atan2(p[0]), p[2].clamp(-1.0, 1.0).asin())
         } else {
@@ -437,7 +443,7 @@ fn layers(t: f64) -> [(f64, f64, u64); 2] {
         let shifted = t.max(0.0) + j as f64 * 0.5 * LIFE;
         let generation = (shifted / LIFE).floor();
         let age = shifted - generation * LIFE;
-        (age, (PI * age / LIFE).sin(), generation as u64)
+        (age, (PI * age / LIFE).sin_det(), generation as u64)
     })
 }
 
@@ -922,7 +928,7 @@ mod tests {
         for b in [8.0, 15.0, 40.0] {
             let phi = 0.3;
             let u = g.u(b, phi);
-            assert!((u - phi.sin() / b).abs() < 2.0 / (b * b), "b={b}");
+            assert!((u - phi.sin_det() / b).abs() < 2.0 / (b * b), "b={b}");
         }
     }
 
@@ -967,7 +973,7 @@ mod tests {
                     assert!(b > B_CRIT, "order-1 image inside the shadow: b={b} ψ={psi}");
                     // Above the hole it is the thin lensing ring; below, the lower arc
                     // (the far side's underside, bent under the hole).
-                    if psi.sin() >= 0.0 {
+                    if psi.sin_det() >= 0.0 {
                         above += 1;
                         assert!(b < B_CRIT + 0.8, "b={b} ψ={psi}");
                     } else {
@@ -1005,7 +1011,10 @@ mod tests {
                 if T_PEAK * f.powf(DISPLAY_EXP) < 2.0 * T_SHOW {
                     continue;
                 }
-                let (x, y) = (cx + b * scale * psi.cos(), cy - b * scale * psi.sin());
+                let (x, y) = (
+                    cx + b * scale * psi.cos_det(),
+                    cy - b * scale * psi.sin_det(),
+                );
                 // Either pixel when the ring runs along a pixel edge.
                 let lit = [y - 0.3, y + 0.3]
                     .into_iter()

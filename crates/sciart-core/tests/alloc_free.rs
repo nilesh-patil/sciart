@@ -204,7 +204,7 @@ fn core_r41_dots_set_plot_clear_blit_do_not_allocate() {
             dots.clear();
             for i in 0..4000 {
                 let t = f64::from(i) * 0.01 + f64::from(frame);
-                dots.plot(200.0 + 180.0 * t.cos(), 100.0 + 90.0 * t.sin(), ink);
+                dots.plot(200.0 + 180.0 * t.cos_det(), 100.0 + 90.0 * t.sin_det(), ink);
                 dots.set(i % 400, i / 20, ink);
             }
             black_box(dots.is_lit(3, 3));
@@ -261,7 +261,7 @@ fn core_r43_resampling_does_not_allocate() {
 #[test]
 fn core_r44_verlet_integrate_does_not_allocate() {
     // A small N-body-like system: 16 bodies in 2-D, pairwise softened gravity.
-    let mut pos: Vec<f64> = (0..32).map(|i| f64::from(i).sin() * 5.0).collect();
+    let mut pos: Vec<f64> = (0..32).map(|i| f64::from(i).sin_det() * 5.0).collect();
     let mut vel = vec![0.0; 32];
     let mut acc = vec![0.0; 32];
     let gravity = |p: &[f64], a: &mut [f64]| {
@@ -315,7 +315,7 @@ fn core_r50_projector_does_not_allocate() {
         (0..2000)
             .filter_map(|i| {
                 let t = f64::from(i) * 0.01;
-                pr.project([t.cos(), t.sin(), 0.1 * t], (40.0, 12.0), 8.0)
+                pr.project([t.cos_det(), t.sin_det(), 0.1 * t], (40.0, 12.0), 8.0)
             })
             .map(|(x, y, z)| x + y + z + pr.rotate([1.0, 2.0, 3.0])[2])
             .sum::<f64>()
@@ -334,9 +334,9 @@ fn core_r51_r55_dots_line_and_density_do_not_allocate() {
         for i in 0..500 {
             let t = f64::from(i) * 0.013;
             let (x0, y0, x1, y1) = (
-                200.0 + 150.0 * t.cos(),
+                200.0 + 150.0 * t.cos_det(),
                 100.0,
-                200.0 + 300.0 * t.sin(),
+                200.0 + 300.0 * t.sin_det(),
                 1e9 * t,
             );
             dots.line(x0, y0, x1, y1, ink);

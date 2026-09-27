@@ -195,7 +195,7 @@ pub(crate) fn longitude(b: usize, day: f64) -> f64 {
 
 /// Ecliptic position (AU) of body `b` on mission day `day`.
 fn planet_pos(b: usize, day: f64) -> [f64; 2] {
-    let (s, c) = longitude(b, day).sin_cos();
+    let (s, c) = longitude(b, day).sin_cos_det();
     [BODIES[b].a * c, BODIES[b].a * s]
 }
 
@@ -222,7 +222,7 @@ fn stumpff(z: f64) -> (f64, f64) {
         (0.5 - z / 24.0, 1.0 / 6.0 - z / 120.0)
     } else if z > 0.0 {
         let s = z.sqrt();
-        ((1.0 - s.cos()) / z, (s - s.sin()) / (s * z))
+        ((1.0 - s.cos_det()) / z, (s - s.sin_det()) / (s * z))
     } else {
         let s = (-z).sqrt();
         ((s.cosh() - 1.0) / -z, (s.sinh() - s) / (s * -z))
@@ -273,7 +273,7 @@ pub(crate) fn lambert(r1: [f64; 2], r2: [f64; 2], dt: f64) -> ([f64; 2], [f64; 2
     } else {
         TAU - cos.acos()
     };
-    let a = theta.sin() * (n1 * n2 / (1.0 - cos)).sqrt();
+    let a = theta.sin_det() * (n1 * n2 / (1.0 - cos)).sqrt();
     let y = |z: f64| {
         let (c, s) = stumpff(z);
         n1 + n2 + a * (z * s - 1.0) / c.sqrt()
@@ -385,7 +385,7 @@ impl Path {
         let speed = (v_inf * v_inf + 2.0 * GM / norm(r0)).sqrt();
         let phi = r0[1].atan2(r0[0]);
         let leg = |gamma: f64| {
-            let (s, c) = (phi + gamma).sin_cos();
+            let (s, c) = (phi + gamma).sin_cos_det();
             Leg {
                 t0: NEPTUNE_CA,
                 r0,
@@ -584,7 +584,7 @@ impl Proj {
 
     pub(crate) fn screen(&self, r: f64, phi: f64) -> (f64, f64) {
         let d = self.rows(r);
-        let (s, c) = (phi + self.turn).sin_cos();
+        let (s, c) = (phi + self.turn).sin_cos_det();
         (self.cx + d * c * ASPECT, self.cy - d * s)
     }
 }
@@ -777,7 +777,7 @@ impl VoyagerJourney {
         let rd = rows * f64::from(Dots::CELL_H);
         let n = ((TAU * rd).ceil() as usize).clamp(8, 8192);
         for i in (0..n).step_by(stride.max(1)) {
-            let (s, c) = (TAU * i as f64 / n as f64).sin_cos();
+            let (s, c) = (TAU * i as f64 / n as f64).sin_cos_det();
             let (x, y) = (ox + rd * c, oy - rd * s);
             if !self.in_inset(x, y) {
                 self.dots.plot(x, y, ink);
@@ -1200,7 +1200,7 @@ mod tests {
             let f = path.fix(day);
             let p = planet_pos(k, day);
             let (a, lon) = (BODIES[k].a, longitude(k, day));
-            let miss = (f.r * f.phi.cos() - p[0]).hypot(f.r * f.phi.sin() - p[1]);
+            let miss = (f.r * f.phi.cos_det() - p[0]).hypot(f.r * f.phi.sin_det() - p[1]);
             assert!(miss < 1e-6 * a, "encounter {k}: {miss} AU off");
             assert_eq!(mission_day(KEY_T[k]), day, "clock at encounter {k}");
             for (w, h) in SIZES {
@@ -1717,7 +1717,7 @@ mod tests {
         let a = 0.5 * (r1 + r2);
         let t = PI * (a.powi(3) / GM).sqrt();
         let th = PI - 1e-6;
-        let (v1, _) = lambert([r1, 0.0], [r2 * th.cos(), r2 * th.sin()], t);
+        let (v1, _) = lambert([r1, 0.0], [r2 * th.cos_det(), r2 * th.sin_det()], t);
         let vp = (GM * (2.0 / r1 - 1.0 / a)).sqrt();
         assert!((norm(v1) - vp).abs() < 1e-4 * vp, "{} vs {vp}", norm(v1));
     }

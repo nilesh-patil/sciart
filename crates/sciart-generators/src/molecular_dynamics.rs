@@ -253,7 +253,7 @@ pub(crate) fn berendsen_lambda(t: f64, t0: f64, dt: f64, tau: f64) -> f64 {
 /// Thermostat target at scene time `t`: `T_LO + (T_HI − T_LO)·u²` with
 /// `u = (1 − cos 2πt/30)/2` — starts cold, lingers there, peaks at 15 s, cold again at 30 s.
 pub(crate) fn target_temperature(t: f64) -> f64 {
-    let u = 0.5 * (1.0 - (TAU * t / CYCLE).cos());
+    let u = 0.5 * (1.0 - (TAU * t / CYCLE).cos_det());
     T_LO + (T_HI - T_LO) * u * u
 }
 

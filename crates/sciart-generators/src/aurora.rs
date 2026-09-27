@@ -295,7 +295,7 @@ fn relax_by(r: f64, target: f64, decay: f64) -> f64 {
 /// One ray family: `max(0, cos(κ s + φ))⁶`, narrow bright rays with mean 5/32.
 #[inline]
 fn ray_term(s: f64, kappa: f64, phase: f64) -> f64 {
-    let c = (kappa * s + phase).cos().max(0.0);
+    let c = (kappa * s + phase).cos_det().max(0.0);
     let c2 = c * c;
     c2 * c2 * c2
 }
@@ -648,7 +648,7 @@ impl Curtain {
                 let wa = st.fold_w[j][k] * folds[k];
                 if wa != 0.0 {
                     let kappa = FOLD_KAPPA[k];
-                    let (sn, cs) = (kappa * s + self.theta[k]).sin_cos();
+                    let (sn, cs) = (kappa * s + self.theta[k]).sin_cos_det();
                     xi += wa * sn;
                     dxi += wa * kappa * cs;
                 }
@@ -1126,7 +1126,7 @@ impl View {
         let tan_e = (0..y_h).map(|y| elev(y).tan() as f32).collect();
         let ext = (0..y_h)
             .map(|y| {
-                let sin_e = elev(y).max(2f64.to_radians()).sin();
+                let sin_e = elev(y).max(2f64.to_radians()).sin_det();
                 (-0.12 * (1.0 / sin_e - 1.0)).exp() as f32
             })
             .collect();
@@ -1149,8 +1149,8 @@ impl View {
             emit_rows: NO_ROWS,
             blur: [vec![0.0; w], vec![0.0; w]],
             run_peak: vec![0; w * y_h],
-            ripple_cos: (0..w).map(|x| (0.13 * x as f64).cos() as f32).collect(),
-            ripple_sin: (0..w).map(|x| (0.13 * x as f64).sin() as f32).collect(),
+            ripple_cos: (0..w).map(|x| (0.13 * x as f64).cos_det() as f32).collect(),
+            ripple_sin: (0..w).map(|x| (0.13 * x as f64).sin_det() as f32).collect(),
             layers: vec![[Layer::default(); MAX_LAYERS]; w],
             nlayers: vec![0; w],
             pixels: Pixels::new(size),
@@ -1641,7 +1641,7 @@ impl View {
                 break;
             };
             let d = (k + 1) as f64;
-            let (sp, cp) = (0.9 * d - 1.7 * t).sin_cos();
+            let (sp, cp) = (0.9 * d - 1.7 * t).sin_cos_det();
             let (sp, cp) = (sp as f32, cp as f32);
             let gain = lake_row_gain(k as f32 / depth, sp);
             for x in 0..self.w {
@@ -1822,8 +1822,8 @@ impl Aurora {
             let star = self.setting.stars[usize::from(s.idx)];
             let base = 175.0 - 16.0 * (star.mag + 1.0);
             let ext = f64::from(v.ext[(2 * s.cy) as usize]);
-            let depth = 0.15 + 0.45 * (1.0 - star.e.sin());
-            let twinkle = 1.0 - depth * (0.5 + 0.5 * (star.rate * self.t + star.phase).sin());
+            let depth = 0.15 + 0.45 * (1.0 - star.e.sin_det());
+            let twinkle = 1.0 - depth * (0.5 + 0.5 * (star.rate * self.t + star.phase).sin_det());
             let level = (base * ext * twinkle).clamp(25.0, 200.0) as u8;
             let glyph = if s.bright { STAR_BRIGHT } else { STAR_DIM };
             canvas.put(s.cx, s.cy, glyph, Ink::new(Role::Star, level));
@@ -2158,7 +2158,7 @@ mod tests {
             let a = v.alpha_at(x as f64 + 0.5);
             // Straight arc at 300 km: the lower border is above the horizon iff z_b
             // exceeds the curvature drop at d = 300 / cos α.
-            if a.abs() < ALPHA_MAX && zb > drop_km(300.0 / a.cos()) {
+            if a.abs() < ALPHA_MAX && zb > drop_km(300.0 / a.cos_det()) {
                 assert_eq!(count, 1, "column {x} (α {:.1}°)", a.to_degrees());
                 above += 1;
             }
@@ -2202,7 +2202,7 @@ mod tests {
         }
         let (dd, h) = (300.0f64, 100.0);
         let eb = (h / dd).atan();
-        assert!((slant_factor(0.0, 0.0, dd, h) - 1.0 / eb.cos()).abs() < 1e-9);
+        assert!((slant_factor(0.0, 0.0, dd, h) - 1.0 / eb.cos_det()).abs() < 1e-9);
     }
 
     #[test]
@@ -2782,7 +2782,7 @@ mod tests {
                 // No row drops out: a crest only dims it.
                 let gain = lake_row_gain(
                     (y - v.y_h) as f32 / depth,
-                    (0.9 * d - 1.7 * a.t).sin() as f32,
+                    (0.9 * d - 1.7 * a.t).sin_det() as f32,
                 );
                 rows += 1;
                 for x in 0..v.w {

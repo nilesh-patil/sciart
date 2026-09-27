@@ -53,20 +53,20 @@ pub(crate) fn wavelength(h: u16) -> f64 {
 
 /// Source separation in rows at time `t` (WAVE-A5).
 pub(crate) fn separation(h: f64, t: f64) -> f64 {
-    SEPARATION * h * (1.0 + SWEEP * (TAU * t / SWEEP_PERIOD).sin())
+    SEPARATION * h * (1.0 + SWEEP * (TAU * t / SWEEP_PERIOD).sin_det())
 }
 
 /// Superposed displacement of two unit waves at distances `d1`, `d2` (WAVE-A1, WAVE-A2).
 #[cfg(test)]
 pub(crate) fn amplitude(d1: f64, d2: f64, k: f64, t: f64) -> f64 {
-    (k * d1 - OMEGA * t).sin() + (k * d2 - OMEGA * t).sin()
+    (k * d1 - OMEGA * t).sin_det() + (k * d2 - OMEGA * t).sin_det()
 }
 
 /// Displacement and envelope `(a, E)` at distances `d1`, `d2`, with `(sin ωt, cos ωt)`
 /// precomputed: `a = S cos ωt − C sin ωt`, `E = |e^{ikd₁} + e^{ikd₂}| = √(S² + C²)`.
 #[inline]
 fn wave(d1: f64, d2: f64, k: f64, (sw, cw): (f64, f64)) -> (f64, f64) {
-    let ((s1, c1), (s2, c2)) = ((k * d1).sin_cos(), (k * d2).sin_cos());
+    let ((s1, c1), (s2, c2)) = ((k * d1).sin_cos_det(), (k * d2).sin_cos_det());
     let (s, c) = (s1 + s2, c1 + c2);
     (s * cw - c * sw, (s * s + c * c).sqrt())
 }
@@ -127,7 +127,7 @@ impl WaveInterference {
     fn rasterise(&mut self) {
         self.place_sources();
         let ph = 2 * usize::from(self.height);
-        let phase = (OMEGA * self.t).sin_cos();
+        let phase = (OMEGA * self.t).sin_cos_det();
         let (fw, k) = (self.field_w, self.k);
         // The sources sit symmetrically about the middle row, and swapping d₁ and d₂
         // leaves a and E unchanged, so each row is computed once and mirrored.
@@ -277,7 +277,7 @@ mod tests {
     fn wave_a1_bisector_amplitude_is_twice_a_single_wave() {
         for d in [0.0, 1.3, 7.7, 25.0] {
             for t in [0.0, 0.2, 1.1, 9.4] {
-                let expected = 2.0 * (K * d - OMEGA * t).sin();
+                let expected = 2.0 * (K * d - OMEGA * t).sin_det();
                 assert!((amplitude(d, d, K, t) - expected).abs() < 1e-12);
             }
         }
@@ -297,9 +297,9 @@ mod tests {
     #[test]
     fn wave_a1_a4_fast_form_matches_the_reference_and_its_envelope() {
         for (d1, d2, t) in [(3.0, 4.2, 0.3), (10.0, 10.0, 1.7), (2.5, 7.5, 5.0)] {
-            let (a, e) = wave(d1, d2, K, (OMEGA * t).sin_cos());
+            let (a, e) = wave(d1, d2, K, (OMEGA * t).sin_cos_det());
             assert!((a - amplitude(d1, d2, K, t)).abs() < 1e-9);
-            let want = 2.0 * (K * (d1 - d2) / 2.0).cos().abs();
+            let want = 2.0 * (K * (d1 - d2) / 2.0).cos_det().abs();
             assert!((e - want).abs() < 1e-9 && a.abs() <= e + 1e-9);
         }
     }
@@ -335,7 +335,7 @@ mod tests {
                 // Levels through one period, the sources held where they are at t = 0.
                 let (lo, hi) = (0..12).fold((255u8, 0u8), |(lo, hi), i| {
                     let wt = OMEGA * period * f64::from(i) / 12.0;
-                    let (a, e) = wave(d1, d2, g.k, wt.sin_cos());
+                    let (a, e) = wave(d1, d2, g.k, wt.sin_cos_det());
                     let v = brightness(a, e, vig);
                     let l = if v < DARK {
                         0

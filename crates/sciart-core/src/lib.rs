@@ -20,6 +20,7 @@ mod stage;
 pub mod text;
 pub mod timeline;
 pub mod title;
+pub mod trig;
 
 pub use canvas::{Canvas, Cell, Glyph, GlyphMode};
 pub use clock::FixedStep;
@@ -35,6 +36,7 @@ pub use size::Size;
 pub use stage::Stage;
 pub use text::StackText;
 pub use timeline::{Beat, Timeline, ease};
+pub use trig::Trig;
 
 /// Simulation step used by the runtime (ADR-0003).
 pub const SIM_DT: f64 = 1.0 / 60.0;
@@ -45,6 +47,6 @@ pub mod prelude {
         Beat, Camera, Canvas, Category, Cell, Ctx, Density, Dots, Edges, FixedStep, Generator,
         Glow, Glyph, GlyphMode, Grid, Hood, Ink, InverseCdf, Meta, ParticlePool, Pixels, Projector,
         Ramp, Role, SIM_DT, SampleMap, Size, SpatialHash, SplitMix64, StackText, Stage, Timeline,
-        Trail,
+        Trail, Trig,
     };
 }

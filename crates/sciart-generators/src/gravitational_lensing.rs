@@ -126,7 +126,7 @@ fn hero_profile(q: (f64, f64), cos_inc: f64, pa: (f64, f64), arms: f64) -> f64 {
     }
     let rho = rho2.sqrt();
     // Arms wound with a 20° pitch: phase constant along ln ρ = tan(pitch)·angle.
-    let arm = (2.0 * (v.atan2(u) - rho.max(1e-3).ln() / 0.364)).cos();
+    let arm = (2.0 * (v.atan2(u) - rho.max(1e-3).ln() / 0.364)).cos_det();
     let disk = (-rho / 0.35).exp() * (1.0 + arms * arm);
     let bulge = (-(rho / 0.1).powi(2)).exp();
     let rim = 1.0 - rho2 * rho2;
@@ -172,7 +172,7 @@ fn paint_field(rng: &mut impl Rng) -> Grid<f32> {
         let (cx, cy) = (rng.random_range(0.0..PERIOD), rng.random_range(0.0..PERIOD));
         let a = rng.random_range(0.04..0.14);
         let q = rng.random_range(0.35..1.0);
-        let (s, c) = rng.random_range(0.0..PI).sin_cos();
+        let (s, c) = rng.random_range(0.0..PI).sin_cos_det();
         let peak = FIELD_FAINT + FIELD_SPAN * rng.random_range(0.0f64..1.0).powi(3);
         let reach = (4.0 * a / texel).ceil() as i32;
         let (ix, iy) = ((cx / texel) as i32, (cy / texel) as i32);
@@ -241,10 +241,10 @@ impl GravitationalLensing {
         let s = (self.pass_t / PASS).clamp(0.0, 1.0);
         let x = 2.0 * s - 1.0;
         let along = SWEEP * (x * (1.0 - LINGER) + LINGER * x * x * x);
-        let (sn, c) = self.pass_dir.sin_cos();
+        let (sn, c) = self.pass_dir.sin_cos_det();
         let centre = (along * c - self.impact * sn, along * sn + self.impact * c);
         // Fading in and out hides the start and end of a pass.
-        (centre, (PI * s).sin().powf(0.6))
+        (centre, (PI * s).sin_det().powf(0.6))
     }
 
     /// The hero's light on the lens axis `β = 0`, which the critical curve `|θ| = θE`
@@ -259,7 +259,7 @@ impl GravitationalLensing {
         self.pass_dir = ctx.rng.random_range(-0.6..0.6);
         self.cos_inc = ctx.rng.random_range(0.45..0.95);
         self.impact = ctx.rng.random_range(-1.0..1.0) * IMPACT * self.cos_inc;
-        self.pa = ctx.rng.random_range(0.0..PI).sin_cos();
+        self.pa = ctx.rng.random_range(0.0..PI).sin_cos_det();
     }
 
     /// Node centres in θE units, row-major over the lattice.
@@ -338,7 +338,7 @@ impl Generator for GravitationalLensing {
         if !self.seeded {
             self.seeded = true;
             self.field = paint_field(&mut ctx.rng);
-            self.drift_dir = ctx.rng.random_range(0.0..TAU).sin_cos();
+            self.drift_dir = ctx.rng.random_range(0.0..TAU).sin_cos_det();
             self.pass_t = ctx.rng.random_range(0.0..PASS);
             self.tone = Tone::asinh(KNEE, WHITE);
             self.new_pass(ctx);
@@ -471,7 +471,7 @@ mod tests {
         g.raster();
         let (c, te) = (g.centre, g.theta_e_px);
         let at = |r: f64, a: f64| {
-            let (x, y) = (c.0 + r * te * a.cos(), c.1 + r * te * a.sin());
+            let (x, y) = (c.0 + r * te * a.cos_det(), c.1 + r * te * a.sin_det());
             g.pixels.get(x as i32, y as i32).unwrap()
         };
         for k in 0..32 {
@@ -514,7 +514,7 @@ mod tests {
             // The whole critical curve images the axis: the ring is closed.
             for k in 0..16 {
                 let a = TAU * f64::from(k) / 16.0;
-                let (x, y) = (c.0 + te * a.cos(), c.1 + te * a.sin());
+                let (x, y) = (c.0 + te * a.cos_det(), c.1 + te * a.sin_det());
                 let p = g.pixels.get(x as i32, y as i32).unwrap();
                 assert_eq!(p.role, Role::Ramp(Ramp::Ice), "gap at {a}, t={}", g.t);
             }

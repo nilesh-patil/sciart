@@ -492,7 +492,7 @@ pub(crate) fn pose(timeline: &Timeline, start: usize, t: f64) -> Pose {
         molecule: (start as i64 + cycle).rem_euclid(MOLECULES as i64) as usize,
         s,
         yaw: OMEGA * tau + YAW0,
-        pitch: PITCH_MEAN + PITCH_SWING * (TAU * t / PITCH_PERIOD).sin(),
+        pitch: PITCH_MEAN + PITCH_SWING * (TAU * t / PITCH_PERIOD).sin_det(),
     }
 }
 

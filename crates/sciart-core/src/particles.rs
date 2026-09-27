@@ -8,6 +8,7 @@ use std::f64::consts::TAU;
 
 use rand::Rng;
 
+use crate::trig::Trig;
 use crate::{Canvas, Glyph, Ink};
 
 /// A bounded, unordered set of live particles (CORE-R28).
@@ -205,7 +206,7 @@ fn box_muller(rng: &mut impl Rng) -> (f64, f64) {
     let u1 = 1.0 - rng.random::<f64>();
     let u2 = rng.random::<f64>();
     let r = (-2.0 * u1.ln()).sqrt();
-    let (s, c) = (TAU * u2).sin_cos();
+    let (s, c) = (TAU * u2).sin_cos_det();
     (r * c, r * s)
 }
 

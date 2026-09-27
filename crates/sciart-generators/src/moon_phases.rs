@@ -149,7 +149,7 @@ pub(crate) fn phase_at(t: f64) -> f64 {
 /// behind the viewer at full moon, from screen-right at first quarter.
 pub(crate) fn sun_direction(phase: f64) -> [f64; 3] {
     let a = TAU * phase;
-    [a.sin(), 0.0, -a.cos()]
+    [a.sin_det(), 0.0, -a.cos_det()]
 }
 
 /// Lambert term `n·L` for the visible-hemisphere point `(nx, ny)`; negative ⇒ night side
@@ -161,13 +161,13 @@ pub(crate) fn illumination(nx: f64, ny: f64, light: [f64; 3]) -> f64 {
 
 /// Fraction of the visible disc that is lit, `(1 − cos 2πp)/2` (MOON-A3).
 pub(crate) fn illuminated_fraction(phase: f64) -> f64 {
-    (1.0 - (TAU * phase).cos()) / 2.0
+    (1.0 - (TAU * phase).cos_det()) / 2.0
 }
 
 /// Earth's lit fraction seen from the Moon, `(1 + cos 2πp)/2`: full Earth at new Moon
 /// (MOON-A5).
 pub(crate) fn earth_phase(phase: f64) -> f64 {
-    (1.0 + (TAU * phase).cos()) / 2.0
+    (1.0 + (TAU * phase).cos_det()) / 2.0
 }
 
 /// Lommel–Seeliger reflectance `A·μ0/(μ0 + μ)` (MOON-A4): no limb darkening at full Moon.
@@ -182,8 +182,8 @@ pub(crate) fn reflectance(albedo: f64, mu0: f64, mu: f64) -> f64 {
 /// Libration (deg) at time `t`: longitude and latitude of the sub-observer point (MOON-A6).
 pub(crate) fn libration(t: f64) -> (f64, f64) {
     (
-        LIB_LON.0 * (TAU * t / LIB_LON.1).sin(),
-        LIB_LAT.0 * (TAU * t / LIB_LAT.1).sin(),
+        LIB_LON.0 * (TAU * t / LIB_LON.1).sin_det(),
+        LIB_LAT.0 * (TAU * t / LIB_LAT.1).sin_det(),
     )
 }
 
@@ -202,8 +202,8 @@ pub(crate) fn phase_name(phase: f64) -> &'static str {
 
 /// Unit vector of selenographic `(lon, lat)` (rad): x east, y north, z toward Earth.
 fn body(lon: f64, lat: f64) -> [f64; 3] {
-    let (so, co) = lon.sin_cos();
-    let (sa, ca) = lat.sin_cos();
+    let (so, co) = lon.sin_cos_det();
+    let (sa, ca) = lat.sin_cos_det();
     [ca * so, sa, ca * co]
 }
 
@@ -232,8 +232,8 @@ struct Libration {
 
 impl Libration {
     fn new(lon: f64, lat: f64) -> Self {
-        let (sin_l, cos_l) = lon.sin_cos();
-        let (sin_b, cos_b) = lat.sin_cos();
+        let (sin_l, cos_l) = lon.sin_cos_det();
+        let (sin_b, cos_b) = lat.sin_cos_det();
         Self {
             sin_b,
             cos_b,
@@ -322,8 +322,12 @@ impl Surface {
                 albedo[i] *= 1.0 + 0.08 * (-((q - 1.0) / 0.15).powi(2)).exp();
             });
             if rays > 0.0 {
-                let east = [lon.cos(), 0.0, -lon.sin()];
-                let north = [-lat.sin() * lon.sin(), lat.cos(), -lat.sin() * lon.cos()];
+                let east = [lon.cos_det(), 0.0, -lon.sin_det()];
+                let north = [
+                    -lat.sin_det() * lon.sin_det(),
+                    lat.cos_det(),
+                    -lat.sin_det() * lon.cos_det(),
+                ];
                 // Each ray: a direction, a length and a width, drawn once per crater.
                 let streaks: [(f64, f64, f64); RAYS] = std::array::from_fn(|_| {
                     let angle = rng.random_range(-PI..PI);
@@ -378,8 +382,8 @@ impl Surface {
         let (j0, j1) = (Self::row(lat + reach), Self::row(lat - reach));
         for j in j0..=j1 {
             let tl = Self::lat_of(j);
-            let span = if tl.cos() > reach.sin() {
-                (reach.sin() / tl.cos()).clamp(-1.0, 1.0).asin() + 0.05
+            let span = if tl.cos_det() > reach.sin_det() {
+                (reach.sin_det() / tl.cos_det()).clamp(-1.0, 1.0).asin() + 0.05
             } else {
                 PI
             };
@@ -410,12 +414,14 @@ impl Surface {
             let seed = k as f64 * 2.4;
             Self::around(lon, lat, reach, &mut |i, _, v| {
                 // Local east/north offsets of the texel from the centre, in half-extents.
-                let x = (v[0] * lon.cos() - v[2] * lon.sin()) / (a * deg);
-                let y = (v[1] * lat.cos() - (v[0] * lon.sin() + v[2] * lon.cos()) * lat.sin())
+                let x = (v[0] * lon.cos_det() - v[2] * lon.sin_det()) / (a * deg);
+                let y = (v[1] * lat.cos_det()
+                    - (v[0] * lon.sin_det() + v[2] * lon.cos_det()) * lat.sin_det())
                     / (b * deg);
                 let theta = y.atan2(x);
-                let lobes =
-                    1.0 + 0.15 * (2.0 * theta + seed).sin() + 0.1 * (3.0 * theta - seed).sin();
+                let lobes = 1.0
+                    + 0.15 * (2.0 * theta + seed).sin_det()
+                    + 0.1 * (3.0 * theta - seed).sin_det();
                 let ragged = 0.3 * (value_noise(i % TEX_W, i / TEX_W, 6, 0x6d61 << 40) - 0.5);
                 let q = x.hypot(y) / lobes + ragged;
                 // A soft shore, at half cover on the outline `q = 1`.
@@ -447,7 +453,7 @@ impl Surface {
         let step = TAU / TEX_W as f64;
         let (e, w) = ((x + 1) % TEX_W, (x + TEX_W - 1) % TEX_W);
         let (n, s) = (y.saturating_sub(1), (y + 1).min(TEX_H - 1));
-        let cos = Self::lat_of(y).cos().max(0.3);
+        let cos = Self::lat_of(y).cos_det().max(0.3);
         let gx = (h[y * TEX_W + e] - h[y * TEX_W + w]) / (2.0 * step * cos);
         let gy = (h[n * TEX_W + x] - h[s * TEX_W + x]) / (((s - n).max(1)) as f64 * step);
         let k = (MAX_TILT / gx.hypot(gy)).min(1.0);
@@ -572,8 +578,8 @@ impl MoonPhases {
         // terminator, so it shades the day side without moving the day–night line.
         let relief = ease::smoothstep(nz / RELIEF_MU) * ease::smoothstep(mu0_smooth / RELIEF_MU0);
         let (gx, gy) = (f64::from(tex.gx) * relief, f64::from(tex.gy) * relief);
-        let (so, co) = lon.sin_cos();
-        let (sa, ca) = lat.sin_cos();
+        let (so, co) = lon.sin_cos_det();
+        let (sa, ca) = lat.sin_cos_det();
         let east = [co, 0.0, -so];
         let north = [-sa * so, ca, -sa * co];
         let tilted = v3::unit(v3::axpy(-gx, east, v3::axpy(-gy, north, b)));
@@ -690,7 +696,7 @@ impl Generator for MoonPhases {
             if dx * dx + dy * dy <= 1.1 {
                 continue;
             }
-            let tw = 0.5 + 0.5 * (ph + rate * self.t).sin();
+            let tw = 0.5 + 0.5 * (ph + rate * self.t).sin_det();
             canvas.put(
                 x as i32,
                 y as i32,
@@ -929,8 +935,8 @@ mod tests {
         for (i, &c) in cover.iter().enumerate() {
             let (lon, lat) = (Surface::lon_of(i % TEX_W), Surface::lat_of(i / TEX_W));
             if lon.abs() < PI / 2.0 {
-                all += lat.cos();
-                mare += if c > 0.5 { lat.cos() } else { 0.0 };
+                all += lat.cos_det();
+                mare += if c > 0.5 { lat.cos_det() } else { 0.0 };
             }
         }
         let share = mare / all;
@@ -975,7 +981,7 @@ mod tests {
                 _ => 0.0,
             }
         };
-        let (sunward, far) = (at(-0.55 * r / lat.cos()), at(0.55 * r / lat.cos()));
+        let (sunward, far) = (at(-0.55 * r / lat.cos_det()), at(0.55 * r / lat.cos_det()));
         assert!(
             far > sunward + 0.05,
             "far wall {far} vs sunward wall {sunward}"
@@ -1026,7 +1032,7 @@ mod tests {
                 for i in 0..720 {
                     let a = f64::from(i) * TAU / 720.0;
                     for rho in [0.9, 0.95, 0.98, 0.99, 0.995] {
-                        let (nx, ny) = (rho * a.cos(), rho * a.sin());
+                        let (nx, ny) = (rho * a.cos_det(), rho * a.sin_det());
                         let nz = (1.0 - rho * rho).sqrt();
                         let mu0 = illumination(nx, ny, frame.light);
                         let Shade::Lit(v) = m.shade(nx, ny, &frame) else {

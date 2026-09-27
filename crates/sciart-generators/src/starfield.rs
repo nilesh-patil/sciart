@@ -185,7 +185,7 @@ impl MilkyWay {
 
     /// Offset (cells) of the dust lane's centre from the band's line at column `x`.
     fn lane_offset(&self, x: f64, w: f64, h: f64) -> f64 {
-        LANE_WANDER * h * (1.3 * TAU * x / w + self.lane).sin()
+        LANE_WANDER * h * (1.3 * TAU * x / w + self.lane).sin_det()
     }
 
     /// The star cloud's weight at column `x`, 0 far from it and 1 on it.
@@ -211,7 +211,7 @@ impl MilkyWay {
             .clumps
             .iter()
             .zip(CLUMP_WAVES)
-            .map(|(&p, l)| (TAU * x / (l * w) + p + off / h * 4.0).sin())
+            .map(|(&p, l)| (TAU * x / (l * w) + p + off / h * 4.0).sin_det())
             .sum::<f64>()
             / CLUMP_WAVES.len() as f64;
         band * lane * (1.0 + CLUMP * clump) * (1.0 + BULGE * self.bulge_at(x, w))

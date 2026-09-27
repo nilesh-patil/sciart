@@ -65,8 +65,8 @@ proptest! {
     fn core_r61_wrap_angle_is_the_same_direction(a in -1e4f64..1e4) {
         let w = geom::wrap_angle(a);
         prop_assert!((-PI..PI).contains(&w), "{} -> {}", a, w);
-        prop_assert!((w.sin() - a.sin()).abs() < 1e-9);
-        prop_assert!((w.cos() - a.cos()).abs() < 1e-9);
+        prop_assert!((w.sin_det() - a.sin_det()).abs() < 1e-9);
+        prop_assert!((w.cos_det() - a.cos_det()).abs() < 1e-9);
     }
 }
 
