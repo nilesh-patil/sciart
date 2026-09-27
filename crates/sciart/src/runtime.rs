@@ -377,8 +377,10 @@ mod tests {
     const fn meta(name: &'static str) -> Meta {
         Meta {
             name,
-            category: Category::Basic,
+            category: Category::Physics,
             description: "test",
+            title: "Test scene · fixture",
+            captions: &[],
         }
     }
     static OK_META: Meta = meta("ok");

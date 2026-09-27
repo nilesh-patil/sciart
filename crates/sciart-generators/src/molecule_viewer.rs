@@ -24,6 +24,8 @@ pub static META: Meta = Meta {
     name: "molecule_viewer",
     category: Category::Chemistry,
     description: "Tumbling ball-and-stick models of real molecules, from water to buckminsterfullerene",
+    title: "Molecule · atoms share electrons",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

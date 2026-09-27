@@ -43,8 +43,10 @@ use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "vortex_street",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A von Karman vortex street shed from a cylinder at Re ~ 130",
+    title: "Vortex street · eddies peel off",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

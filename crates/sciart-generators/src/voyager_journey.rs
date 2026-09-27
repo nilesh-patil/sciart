@@ -21,8 +21,10 @@ use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
     name: "voyager_journey",
-    category: Category::SpaceExploration,
+    category: Category::Voyages,
     description: "Voyager 2 Grand Tour past Jupiter, Saturn, Uranus and Neptune",
+    title: "Voyager 2 · planets fling it on",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

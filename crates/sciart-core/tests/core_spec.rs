@@ -5,6 +5,7 @@ use std::f64::consts::FRAC_PI_2;
 use proptest::prelude::*;
 use rand::Rng;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Form, Title};
 use sciart_core::{geom, ink};
 
 const STAR: Glyph = Glyph::new('★', '*');
@@ -172,8 +173,10 @@ struct Dot {
 
 static DOT_META: Meta = Meta {
     name: "dot",
-    category: Category::Basic,
+    category: Category::Physics,
     description: "a moving dot",
+    title: "Moving dot · steady drift",
+    captions: &[],
 };
 
 impl Generator for Dot {
@@ -207,18 +210,29 @@ fn core_r14_generator_is_object_safe_and_send() {
 }
 
 #[test]
-fn core_r14_category_labels() {
-    assert_eq!(Category::Astronomy.label(), "astronomy");
-    assert_eq!(Category::SpaceExploration.label(), "space-exploration");
-    assert_eq!(Category::PhysicsChemistry.label(), "physics-chemistry");
-    assert_eq!(Category::Basic.label(), "basic");
-}
-
-#[test]
-fn core_r47_biology_and_chemistry_categories() {
-    assert_eq!(Category::Biology.label(), "biology");
-    assert_eq!(Category::Chemistry.label(), "chemistry");
-    assert_eq!(Category::PhysicsChemistry.label(), "physics-chemistry");
+fn core_r77_categories_have_unique_ids_and_labels() {
+    use Category::*;
+    let table = [
+        (DeepCosmos, "deep-cosmos", "Deep Cosmos"),
+        (SunPlanets, "sun-planets", "Sun & Planets"),
+        (EarthSky, "earth-sky", "Earth & Sky"),
+        (Voyages, "voyages", "Voyages"),
+        (Physics, "physics", "Forces & Waves"),
+        (Chemistry, "chemistry", "Reactions"),
+        (Biology, "biology", "Living Systems"),
+        (PhysicalChemistry, "physical-chemistry", "States of Matter"),
+        (Biophysics, "biophysics", "Physics of Life"),
+        (Biochemistry, "biochemistry", "Molecules of Life"),
+        (LivingMatter, "living-matter", "Life from Matter"),
+    ];
+    assert_eq!(Category::ALL, table.map(|(c, _, _)| c));
+    for (c, id, label) in table {
+        assert_eq!((c.id(), c.label()), (id, label));
+        assert!(id.chars().all(|ch| ch.is_ascii_lowercase() || ch == '-'));
+    }
+    let ids: std::collections::BTreeSet<_> = Category::ALL.map(Category::id).into();
+    let labels: std::collections::BTreeSet<_> = Category::ALL.map(Category::label).into();
+    assert_eq!((ids.len(), labels.len()), (11, 11));
 }
 
 // ---------- colormap inks ----------
@@ -513,4 +527,274 @@ fn core_r21_panicking_render_keeps_previous_frame() {
         vec!["1  "],
         "front buffer must survive"
     );
+}
+
+// ---------- Science titles (M11) ----------
+
+/// Paints every cell `#` over a background ink, so tests see exactly which cells the
+/// title overwrote; reports a live caption.
+#[derive(Debug, Default)]
+struct Fill;
+
+static FILL_META: Meta = Meta {
+    name: "fill",
+    category: Category::Physics,
+    description: "every cell painted",
+    title: "Solid fill · every cell",
+    captions: &["act two"],
+};
+
+const FILL_BG: Ink = Ink::new(Role::Seq, 9);
+
+fn fill(canvas: &mut Canvas) {
+    let (w, h) = (canvas.size().width(), canvas.size().height());
+    for y in 0..i32::from(h) {
+        for x in 0..i32::from(w) {
+            canvas.put_bg(x, y, Glyph::ascii('#'), INK, FILL_BG);
+        }
+    }
+}
+
+impl Generator for Fill {
+    fn meta(&self) -> &'static Meta {
+        &FILL_META
+    }
+    fn resize(&mut self, _size: Size, _ctx: &mut Ctx) {}
+    fn update(&mut self, _dt: f64, _ctx: &mut Ctx) {}
+    fn render(&self, canvas: &mut Canvas) {
+        fill(canvas);
+    }
+    fn caption(&self) -> Option<&'static str> {
+        Some(FILL_META.captions[0])
+    }
+}
+
+const SPOTS: &str = "Chemical spots · feed and kill";
+
+fn row(canvas: &Canvas, y: usize) -> String {
+    canvas.to_lines().swap_remove(y)
+}
+
+#[test]
+fn core_r71_title_splits_at_first_separator_and_caption_replaces_mechanism() {
+    let t = Title::new(SPOTS, None);
+    assert_eq!(
+        (t.phenomenon, t.mechanism),
+        ("Chemical spots", "feed and kill")
+    );
+    let t = Title::new("Strange attractor · chaos", Some("Rössler"));
+    assert_eq!(
+        (t.phenomenon, t.mechanism),
+        ("Strange attractor", "Rössler")
+    );
+    let t = Title::new("Aurora", None);
+    assert_eq!((t.phenomenon, t.mechanism), ("Aurora", ""));
+    let t = Title::new("Aurora", Some("green"));
+    assert_eq!((t.phenomenon, t.mechanism), ("Aurora", "green"));
+    let t = Title::new("a · b · c", None);
+    assert_eq!((t.phenomenon, t.mechanism), ("a", "b · c"));
+}
+
+#[test]
+fn core_r71_caption_defaults_to_none_and_meta_carries_title_data() {
+    let dot = Dot::default();
+    assert_eq!(dot.caption(), None);
+    assert_eq!(dot.meta().title, "Moving dot · steady drift");
+    assert!(dot.meta().captions.is_empty());
+    assert_eq!(Fill.caption(), Some("act two"));
+}
+
+#[test]
+fn core_r72_ascii_of_defines_the_title_charset() {
+    for c in ' '..='~' {
+        assert_eq!(title::ascii_of(c), Some(c), "{c:?}");
+    }
+    for (c, a) in [('·', '-'), ('–', '-'), ('á', 'a'), ('é', 'e'), ('ö', 'o')] {
+        assert_eq!(title::ascii_of(c), Some(a), "{c:?}");
+    }
+    for c in ['\n', '\t', '\u{7f}', '—', 'σ', '★', '世', 'ü', 'Ö'] {
+        assert_eq!(title::ascii_of(c), None, "{c:?}");
+    }
+}
+
+#[test]
+fn core_r72_width_is_display_cells_of_each_form() {
+    let t = Title::new("Rössler · chaos", None);
+    assert_eq!(t.width(Form::Phenomenon), 7);
+    assert_eq!(t.width(Form::Full), 15);
+    let bare = Title::new("Aurora", None);
+    assert_eq!(bare.width(Form::Full), 6);
+    assert_eq!(bare.width(Form::Phenomenon), 6);
+}
+
+#[test]
+fn core_r73_fit_examples() {
+    let t = Title::new(SPOTS, None); // full 30 cells, phenomenon 14
+    assert_eq!(t.fit(Size::new(80, 24)), Some(Form::Full)); // limit 48
+    assert_eq!(t.fit(Size::new(54, 24)), Some(Form::Full)); // limit 32 = 30 + 2
+    assert_eq!(t.fit(Size::new(53, 24)), Some(Form::Phenomenon)); // limit 31
+    assert_eq!(t.fit(Size::new(27, 24)), Some(Form::Phenomenon)); // limit 16 = 14 + 2
+    assert_eq!(t.fit(Size::new(26, 24)), None);
+    assert_eq!(t.fit(Size::new(200, 5)), None, "hidden below 6 rows");
+    assert_eq!(t.fit(Size::new(200, 6)), Some(Form::Full));
+}
+
+fn rank(f: Option<Form>) -> u8 {
+    match f {
+        None => 0,
+        Some(Form::Phenomenon) => 1,
+        Some(Form::Full) => 2,
+    }
+}
+
+proptest! {
+    #[test]
+    fn core_r73_fit_is_whole_forms_within_limit_and_monotone_in_width(
+        w in 1u16..400,
+        h in 1u16..80,
+        which in 0usize..3,
+    ) {
+        let t = Title::new(["Murmuration · copy 7 neighbours", SPOTS, "Aurora"][which], None);
+        let fit = t.fit(Size::new(w, h));
+        let limit = usize::from(w) * 3 / 5;
+        if h < 6 {
+            prop_assert_eq!(fit, None);
+        } else if t.width(Form::Full) + 2 <= limit {
+            prop_assert_eq!(fit, Some(Form::Full));
+        } else if t.width(Form::Phenomenon) + 2 <= limit {
+            prop_assert_eq!(fit, Some(Form::Phenomenon));
+        } else {
+            prop_assert_eq!(fit, None);
+        }
+        prop_assert!(rank(t.fit(Size::new(w.saturating_add(1), h))) >= rank(fit));
+    }
+}
+
+#[test]
+fn core_r74_draw_layout_inks_and_cleared_background() {
+    let mut c = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+    fill(&mut c);
+    title::draw(&mut c, &Title::new(SPOTS, None), 0.0);
+    // Gutter at 0, 30 text cells from 1, pad at 31.
+    assert_eq!(row(&c, 23), format!(" {SPOTS} {}", "#".repeat(48)));
+    for y in 0..23 {
+        assert_eq!(row(&c, y), "#".repeat(80), "row {y} untouched");
+    }
+    let cell = |x| *c.get(x, 23).unwrap();
+    assert_eq!(cell(0).ink, Ink::BLANK);
+    assert_eq!(cell(31).ink, Ink::BLANK);
+    for x in 1..31 {
+        let level = if x <= 14 { 170 } else { 110 };
+        assert_eq!(cell(x).ink, Ink::new(Role::Text, level), "col {x}");
+    }
+    for x in 0..=31 {
+        assert_eq!(cell(x).bg, Ink::BLANK, "col {x} background cleared");
+    }
+    assert_eq!(cell(32).bg, FILL_BG, "art after the pad is kept");
+}
+
+#[test]
+fn core_r74_ascii_mode_writes_the_ascii_form() {
+    let mut c = Canvas::new(Size::new(80, 8), GlyphMode::Ascii);
+    let t = Title::new("Strange attractor · chaos", Some("Rössler"));
+    title::draw(&mut c, &t, 0.0);
+    assert!(row(&c, 7).starts_with(" Strange attractor - Rossler "));
+    assert!(c.cells().iter().all(|cell| cell.ch.is_ascii()));
+}
+
+#[test]
+fn core_r74_dims_linearly_from_8_to_10_seconds() {
+    let t = Title::new(SPOTS, None);
+    let levels = |time: f64| {
+        let mut c = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+        title::draw(&mut c, &t, time);
+        let level = |x| c.get(x, 23).unwrap().ink.level;
+        (level(1), level(20))
+    };
+    assert_eq!(levels(0.0), (170, 110));
+    assert_eq!(levels(8.0), (170, 110));
+    assert_eq!(levels(9.0), (130, 100));
+    assert_eq!(levels(10.0), (90, 90));
+    assert_eq!(levels(1e6), (90, 90));
+    for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(levels(bad), (170, 110), "non-finite time counts as 0");
+    }
+}
+
+proptest! {
+    #[test]
+    fn core_r74_span_is_exactly_the_cells_draw_writes(w in 1u16..160, h in 1u16..40) {
+        let size = Size::new(w, h);
+        let t = Title::new(SPOTS, None);
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        fill(&mut c);
+        title::draw(&mut c, &t, 3.0);
+        let span = title::span(size, &t);
+        prop_assert_eq!(span.is_some(), t.fit(size).is_some());
+        for y in 0..i32::from(h) {
+            for x in 0..i32::from(w) {
+                let touched = c.get(x, y).unwrap().ch != '#';
+                let inside = span.as_ref().is_some_and(|(r, cols)| *r == y && cols.contains(&x));
+                prop_assert_eq!(touched, inside, "cell ({}, {})", x, y);
+            }
+        }
+        if let Some((r, cols)) = span {
+            prop_assert_eq!(r, i32::from(h) - 1);
+            prop_assert_eq!(cols.start, 0);
+        }
+    }
+}
+
+#[test]
+fn core_r75_stage_draws_the_live_title_after_the_scene() {
+    let mut stage = Stage::new(Box::new(Fill), 1, Size::new(60, 8), GlyphMode::Unicode);
+    assert_eq!(stage.title(), Title::new(FILL_META.title, Some("act two")));
+
+    stage.set_title_visible(true);
+    let want = " Solid fill · act two ";
+    assert!(row(stage.render(), 7).starts_with(want));
+    assert_eq!(row(stage.frame(), 6), "#".repeat(60));
+
+    stage.set_title_visible(false);
+    assert!(
+        stage.render().cells().iter().all(|c| c.ch == '#'),
+        "hidden: exactly the scene's frame"
+    );
+
+    stage.set_title_visible(true);
+    stage.resize(Size::new(50, 10));
+    assert!(
+        row(stage.render(), 9).starts_with(want),
+        "visibility survives resize"
+    );
+}
+
+#[test]
+fn core_r75_stage_dims_the_title_by_scene_time() {
+    let mut stage = Stage::new(Box::new(Fill), 1, Size::new(60, 8), GlyphMode::Unicode);
+    stage.set_title_visible(true);
+    assert_eq!(stage.render().get(1, 7).unwrap().ink.level, 170);
+    for _ in 0..10 {
+        stage.step(1.0);
+    }
+    assert_eq!(stage.render().get(1, 7).unwrap().ink.level, 90);
+}
+
+#[test]
+fn core_r21_r75_panicking_render_keeps_previous_titled_frame() {
+    let mut stage = Stage::new(
+        Box::new(Probe::new(1)),
+        7,
+        Size::new(20, 6),
+        GlyphMode::Ascii,
+    );
+    stage.set_title_visible(true);
+    let first = stage.render().to_lines();
+    assert!(first[5].starts_with(" Moving dot "), "{first:?}");
+
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        stage.render();
+    }));
+    assert!(result.is_err());
+    assert_eq!(stage.frame().to_lines(), first);
 }

@@ -28,6 +28,8 @@ pub static META: Meta = Meta {
     name: "boids_flocking",
     category: Category::Biology,
     description: "A starling murmuration at dusk, rippling away from a stooping falcon",
+    title: "Murmuration · copy 7 neighbours",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

@@ -32,8 +32,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "molecular_dynamics",
-    category: Category::PhysicsChemistry,
+    category: Category::PhysicalChemistry,
     description: "A Lennard-Jones fluid melting and condensing as it is heated and cooled",
+    title: "Gas to liquid · atoms stick",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

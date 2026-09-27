@@ -18,8 +18,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "cosmic_microwave_background",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "A shimmering Planck-style map of the CMB anisotropies",
+    title: "Oldest light · early sound waves",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

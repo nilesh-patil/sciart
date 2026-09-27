@@ -21,7 +21,7 @@ Options:
 - **CLI-R1** No subcommand ⇒ `sim`.
 - **CLI-R2** `run <unknown>` exits with code 2 and prints the valid names.
 - **CLI-R3** `--fps` outside `1..=120` is rejected by clap with code 2.
-- **CLI-R4** `list` output: one line per generator, `name<TAB>category<TAB>description`, sorted by name.
+- **CLI-R4** `list` output: one line per generator, `name<TAB>category<TAB>description`, sorted by name. Since M11 the category column is `category.id()` (kebab-case ASCII, CORE-R77), and retired names (GEN-R14) are not listed.
 
 ## Config file (M2)
 ```toml

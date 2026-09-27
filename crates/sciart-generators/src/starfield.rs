@@ -8,8 +8,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "starfield",
-    category: Category::Basic,
+    category: Category::DeepCosmos,
     description: "Parallax starfield drifting past, stars twinkling in and out",
+    title: "Parallax · near stars rush by",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

@@ -42,6 +42,8 @@ pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
     category: Category::Chemistry,
     description: "Belousov-Zhabotinsky dish: spiral and target oxidation waves sweeping a dark medium",
+    title: "Chemical clock · spiral waves",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

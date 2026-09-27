@@ -1,28 +1,80 @@
 use crate::{Canvas, Ctx, Size};
 
+/// Where a scene belongs (CORE-R77, ADR-0013). Sky scenes are sorted by setting; the rest
+/// by which of physics (P), chemistry (C) and biology (B) its model needs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Category {
-    Astronomy,
-    SpaceExploration,
-    /// Physics scenes, and the molecular/crystal/Brownian scenes that predate
-    /// `Chemistry` (CORE-R47).
-    PhysicsChemistry,
-    Basic,
-    /// Life-science scenes (CORE-R47).
-    Biology,
-    /// Chemistry scenes (CORE-R47).
+    /// Deep space: galaxies, clusters, black holes, the early universe.
+    DeepCosmos,
+    /// The Sun, planets, moons and comets.
+    SunPlanets,
+    /// The sky as seen from Earth's surface or atmosphere.
+    EarthSky,
+    /// Human spacecraft and missions.
+    Voyages,
+    /// P: a physical law (forces, flow, fields, waves, statistical or quantum mechanics).
+    Physics,
+    /// C: reaction kinetics, molecular structure or a phase change.
     Chemistry,
+    /// B: an organism, tissue, cell or artificial life.
+    Biology,
+    /// P×C.
+    PhysicalChemistry,
+    /// P×B.
+    Biophysics,
+    /// C×B.
+    Biochemistry,
+    /// P×C×B.
+    LivingMatter,
 }
 
 impl Category {
+    /// Every category, in display order.
+    pub const ALL: [Category; 11] = [
+        Category::DeepCosmos,
+        Category::SunPlanets,
+        Category::EarthSky,
+        Category::Voyages,
+        Category::Physics,
+        Category::Chemistry,
+        Category::Biology,
+        Category::PhysicalChemistry,
+        Category::Biophysics,
+        Category::Biochemistry,
+        Category::LivingMatter,
+    ];
+
+    /// Stable kebab-case identifier, printed by `sciart list` (CLI-R4).
+    pub const fn id(self) -> &'static str {
+        match self {
+            Category::DeepCosmos => "deep-cosmos",
+            Category::SunPlanets => "sun-planets",
+            Category::EarthSky => "earth-sky",
+            Category::Voyages => "voyages",
+            Category::Physics => "physics",
+            Category::Chemistry => "chemistry",
+            Category::Biology => "biology",
+            Category::PhysicalChemistry => "physical-chemistry",
+            Category::Biophysics => "biophysics",
+            Category::Biochemistry => "biochemistry",
+            Category::LivingMatter => "living-matter",
+        }
+    }
+
+    /// Display name, as written in SPEC-002's scene headings (GEN-R15).
     pub const fn label(self) -> &'static str {
         match self {
-            Category::Astronomy => "astronomy",
-            Category::SpaceExploration => "space-exploration",
-            Category::PhysicsChemistry => "physics-chemistry",
-            Category::Basic => "basic",
-            Category::Biology => "biology",
-            Category::Chemistry => "chemistry",
+            Category::DeepCosmos => "Deep Cosmos",
+            Category::SunPlanets => "Sun & Planets",
+            Category::EarthSky => "Earth & Sky",
+            Category::Voyages => "Voyages",
+            Category::Physics => "Forces & Waves",
+            Category::Chemistry => "Reactions",
+            Category::Biology => "Living Systems",
+            Category::PhysicalChemistry => "States of Matter",
+            Category::Biophysics => "Physics of Life",
+            Category::Biochemistry => "Molecules of Life",
+            Category::LivingMatter => "Life from Matter",
         }
     }
 }
@@ -32,6 +84,10 @@ pub struct Meta {
     pub name: &'static str,
     pub category: Category,
     pub description: &'static str,
+    /// `Phenomenon · mechanism`, drawn by `Stage` (CORE-R71; content rules GEN-R12).
+    pub title: &'static str,
+    /// Every caption [`Generator::caption`] can return; empty for a single-act scene.
+    pub captions: &'static [&'static str],
 }
 
 /// A scene (CORE-R14). Call protocol (CORE-R15), guaranteed by the runtime:
@@ -45,4 +101,10 @@ pub trait Generator: Send {
     fn resize(&mut self, size: Size, ctx: &mut Ctx);
     fn update(&mut self, dt: f64, ctx: &mut Ctx);
     fn render(&self, canvas: &mut Canvas);
+
+    /// The live act's caption, which replaces the title's mechanism; an entry of
+    /// `meta().captions` (CORE-R71).
+    fn caption(&self) -> Option<&'static str> {
+        None
+    }
 }

@@ -8,8 +8,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "wave_interference",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "Two coherent sources whose ripples interfere into bright and dark bands",
+    title: "Interference · crests add up",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

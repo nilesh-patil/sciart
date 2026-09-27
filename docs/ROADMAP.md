@@ -92,5 +92,20 @@ Shared helpers first: layered raster, colormap roles, capped lattices, leapfrog,
 - [ ] Second-round review follow-ups (minor, non-blocking): aurora red-crown ramp, thinner spruce ridge, gentler lake ripple, `Glow::red` doc and `ASCII_LAKE_BRIGHT` const, top-fade spec wording · solar_surface 2 px polar margin at small sizes, ASCII loop glyphs by pixel pair, interlaced-granulation spec note, `SpatialHash::reserve` (CORE-R54 amendment) to replace the dummy rebuild · chemical_reaction ASCII `HALO_DOT` 13→20 · electron_orbitals fade window on the framing weight, shorter label outside the beat · ising_model ASCII polarity follows the majority · liesegang_rings legend leaves with the first ratio · three_body `MOTH_FULL_SCALE`, triangle clear of adjacent trail cells · dna_helix zoom-aware rung stride · molecule_viewer rear-bond dotting threshold, tilted planar molecules · physarum third inoculum blur pass · action_potential dendrite spacing and deterministic third primary · belousov_zhabotinsky free-end spacing in `plan_seeds`
 - [ ] Follow-up proposals (unscheduled): `sciart record` (GIF/asciicast export for taste review); GitHub Actions CI (+ cargo-deny); `Role::Spectrum` for true spectral line colour
 
+## M11 — Science titles, P×C×B taxonomy, leak guards
+Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1–§4 · ADR-0013, ADR-0014 · branch `feat/m11-sciart-titles`.
+- [x] `title` module (split, charset, fit, span, two-tone draw with the 8–10 s dim), `Meta.title`/`captions`, `Generator::caption`, `Stage::title`/`set_title_visible` (hidden until the snapshots are re-recorded), `draw::label_right` [CORE-R71..R76]
+- [x] `Category` rebuilt: split sky + Voyages + the P×C×B lattice (11 categories), every scene re-filed; `list` prints category ids [CORE-R77, CLI-R4]
+- [x] Titles for all 41 scenes (design §3; brownian_motion from the curator proposal); strange_attractors names the shown attractor through `caption()` [GEN-R12]
+- [ ] Title contract over the registry; contract and alloc suites draw the title [GEN-R12, GEN-R11]
+- [ ] Renames `chemical_reaction` → `gray_scott`, `crystal_growth` → `fractal_growth`, old names kept as aliases [GEN-R2, GEN-R14]
+- [ ] SPEC-002 scene headings carry each scene's category label [GEN-R15]
+- [ ] Bottom-left kept free of scene text: readout moves to `draw::label_right`, label clamps [GEN-R13]
+- [ ] Runtime: title visible iff setting on and HUD off, category-interleaved cycle order [RT-R5, RT-R12, RT-R13]
+- [ ] HUD shows the title; rainbow text is grey [RND-R8, RND-R9]
+- [ ] `title` config key, `--no-title`, retired names in `disabled` [CFG-R6, CFG-R7, CLI-R7]
+- [ ] Leak guards: live-bytes churn and ceiling, clippy bans on `Box::leak`/`mem::forget` [TEST-R6..R8]
+- [ ] Titles on by default; all snapshots re-recorded and reviewed [CORE-R75, TEST-R2]
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).

@@ -19,6 +19,7 @@ mod size;
 mod stage;
 pub mod text;
 pub mod timeline;
+pub mod title;
 
 pub use canvas::{Canvas, Cell, Glyph, GlyphMode};
 pub use clock::FixedStep;

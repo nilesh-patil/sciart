@@ -33,8 +33,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "radioactive_decay",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A lattice of nuclei decaying through a chain beside live Bateman curves",
+    title: "Decay chain · random yet lawful",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

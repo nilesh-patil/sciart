@@ -9,8 +9,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "doppler_effect",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A moving source compressing wavefronts ahead and stretching them behind",
+    title: "Doppler effect · waves bunch up",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

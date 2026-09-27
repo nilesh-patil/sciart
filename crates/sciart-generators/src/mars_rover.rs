@@ -39,8 +39,10 @@ use sciart_core::{draw, rng};
 
 pub static META: Meta = Meta {
     name: "mars_rover",
-    category: Category::SpaceExploration,
+    category: Category::Voyages,
     description: "A rocker-bogie rover crossing Martian dunes, drilling and phoning home",
+    title: "Mars rover · rocker–bogie drive",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

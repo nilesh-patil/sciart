@@ -30,8 +30,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "moon_landing",
-    category: Category::SpaceExploration,
+    category: Category::Voyages,
     description: "Apollo 11 powered descent to Tranquility Base",
+    title: "Apollo 11 · powered descent",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

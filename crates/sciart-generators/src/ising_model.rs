@@ -24,8 +24,10 @@ use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "ising_model",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "The Ising ferromagnet quenched, reheated and cooled through its critical point",
+    title: "Magnet · spins align as it cools",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

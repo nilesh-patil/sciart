@@ -1,6 +1,6 @@
 # SPEC-001: sciart-core
 
-**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10 · **Status**: Implemented (CORE-R1..R70; R60..R70 from the post-M10 audit)
+**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10, M11 · **Status**: Implemented (CORE-R1..R70; R60..R70 from the post-M10 audit); CORE-R71..R77 specified for M11
 
 Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
@@ -31,8 +31,8 @@ Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
 ### Generator trait
 - **CORE-R14** Trait (object-safe, `Send`):
-  `meta() -> &'static Meta`, `resize(Size, &mut Ctx)`, `update(f64, &mut Ctx)`, `render(&self, &mut Canvas)`.
-  `Meta { name: &'static str, category: Category, description: &'static str }`.
+  `meta() -> &'static Meta`, `resize(Size, &mut Ctx)`, `update(f64, &mut Ctx)`, `render(&self, &mut Canvas)`, and (M11) `caption(&self) -> Option<&'static str>` with a default body (CORE-R71).
+  `Meta { name: &'static str, category: Category, description: &'static str, title: &'static str, captions: &'static [&'static str] }` (CORE-R71, CORE-R77).
 - **CORE-R15** Call protocol guaranteed by callers: `resize` before the first `update`/`render`, and again whenever size changes; `render` receives a cleared canvas of the same size last passed to `resize`.
 
 ### Geometry helpers
@@ -84,7 +84,7 @@ Sub-cell rendering (ADR-0010), colormap roles (ADR-0011), capped/resampled latti
 - **CORE-R44** `ode::verlet_step(pos: &mut [f64], vel: &mut [f64], acc: &mut [f64], h, accel)` performs one kick–drift–kick leapfrog step, where `accel(pos, acc_out)` writes accelerations and `acc` must hold `a(pos)` on entry (it holds `a(pos')` on exit). Mismatched slice lengths make it a no-op. `ode::verlet_integrate(pos, vel, acc, dt, h_max, accel) -> usize` covers `dt` with equal substeps under the same count rules as `integrate` (CORE-R37: `MIN_STEP`, `MAX_STEPS`, no steps for `dt ≤ 0` or non-finite). Properties: exact for constant acceleration; time-reversible (step with `h`, negate `vel`, step again ⇒ start within 1e-12 relative); for the harmonic oscillator the energy error stays bounded (no secular drift) over 10⁴ periods at `h = T/50`. It does not allocate.
 - **CORE-R45** `geom::Camera { yaw, pitch, distance }` (radians; `distance = f64::INFINITY` ⇒ orthographic). `project(&self, p: [f64; 3], centre: (f64, f64), scale: f64) -> Option<(f64, f64, f64)>` rotates `p` by yaw (about y) then pitch (about x) and returns screen `(x, y)` in cell units, with x stretched by `ASPECT`, y pointing down, `scale` in rows per world unit and perspective factor `d / (d − z)`. It also returns `depth = z` (larger = nearer). It returns `None` for non-finite input or points at or behind the eye (`z ≥ distance − 1e-9`). The origin maps to `centre`; `yaw = π/2` maps +x onto the depth axis.
 - **CORE-R46** `Role` gains `Seq` (sequential field: level 0 = low, 255 = high) and `Div` (signed field: level 128 = zero, 0 = most negative, 255 = most positive) (ADR-0011). `ink::seq(v)` maps `v ∈ [0, 1]` and `ink::div(v)` maps `v ∈ [−1, 1]` onto those levels (clamped, NaN ⇒ low/zero).
-- **CORE-R47** `Category` gains `Biology` (label `"biology"`) and `Chemistry` (label `"chemistry"`). `PhysicsChemistry` keeps its label for existing scenes.
+- ~~CORE-R47~~ Superseded by CORE-R77 (M11): the `Category` enum is redefined, and `Basic` and `PhysicsChemistry` are removed.
 - **CORE-R48** `grid::lattice_for(display: Size, max_nodes: usize, bucket: f64) -> Size` picks a capped simulation lattice for a display region in square units (ADR-0012). The aspect `display.w / display.h` is quantised to the nearest power of `bucket` (`bucket > 1`, for example `1.25`; otherwise treated as exact). It returns the largest lattice with that aspect and `w·h ≤ max_nodes`, never larger than `display` in either dimension, at least 1×1, and never panicking for any input (`max_nodes = 0` ⇒ 1×1). Two displays in the same aspect bucket whose sizes are both at or above the cap map to the same lattice, so resizing within a bucket does not touch simulation state.
 
 ### Shared scene helpers (M10, from the spec critics)
@@ -116,3 +116,29 @@ Each replaces code that two or more scenes had written for themselves. The scene
 - **CORE-R68** `grid::regrid_bilinear(field: &mut Grid<f32>, size, scratch)` and `grid::regrid_nearest<T: Clone>(field, size, scratch)` carry a field onto a new lattice (ADR-0012). They reshape `scratch` to `size` without preserving its contents (reusing its buffer), fill it by `resample_bilinear`/`resample_nearest` of `field`, and swap, so `field` becomes the resampled grid and `scratch` holds the old one. They are no-ops when `field` is empty or already `size`. `grid::centre_of(d: f64, dn, sn) = (d + ½)·sn/dn − ½` is the shared cell-centre-aligned axis map.
 - **CORE-R69** `grid::lattice_for_aspect(aspect, max_nodes) -> Size` is the uncapped shape behind `lattice_for` (CORE-R48): the largest lattice of that aspect with `w·h ≤ max_nodes`, at least 1×1 and at most `u16::MAX` per axis. It never panics (a degenerate aspect gives 1 column; `max_nodes = 0` ⇒ 1×1). `lattice_for(display, max, bucket)` is `lattice_for_aspect(snapped aspect, max)` clamped to `display`.
 - **CORE-R70** `SplitMix64::mix(z)` (a `const fn`) is the SplitMix64 finaliser, and `next_u64` is `mix` of the Weyl state. `rng::hash01(key) ∈ [0, 1)` is the top 53 bits of `mix(key)`, a stateless per-key uniform. `rng::cell_key(x, y)` packs `x` into the high and `y` into the low 32 bits, so distinct cells get distinct keys.
+
+### Science titles and categories (M11)
+
+Every scene shows a short science title at the bottom-left, drawn once, centrally, by `Stage` (ADR-0014). Scenes supply only data. Title content rules are GEN-R12; the scene-side layout rule is GEN-R13.
+
+- **CORE-R71** `Meta.title: &'static str` is a `Phenomenon · mechanism` string (content rules: GEN-R12). `Meta.captions: &'static [&'static str]` lists every caption the scene's `caption()` can return (empty for a single-act scene). `Generator::caption(&self) -> Option<&'static str>` defaults to `None`; a scene with acts returns the live act's caption, a `&'static str` from `Meta.captions`, so it cannot allocate (GEN-R11). `title::Title::new(title, caption)` splits `title` at its first ` · ` into `phenomenon` and `mechanism` (the whole string and an empty mechanism when there is no separator), then replaces `mechanism` with the caption when it is `Some`. `Title` is `Copy`, holds only `&'static str` and never allocates.
+- **CORE-R72** `title::ascii_of(c: char) -> Option<char>` defines the title charset (ADR-0014): printable ASCII (`' '..='~'`) maps to itself, `·` and `–` map to `-`, and `á`, `é`, `ö` map to `a`, `e`, `o`; every other char gives `None`. Every allowed char is one cell wide, so a title's ASCII form is as wide as its Unicode form. `Title::width(form)` is the display width (`unicode-width`) of `Form::Phenomenon` (the phenomenon alone) or `Form::Full` (`phenomenon · mechanism`, or the phenomenon alone when the mechanism is empty).
+- **CORE-R73** `Title::fit(&self, size) -> Option<Form>` is pure and allocation-free. With `limit = ⌊3·w/5⌋` it returns `Full` if `width(Full) + 2 ≤ limit`, else `Phenomenon` if `width(Phenomenon) + 2 ≤ limit`, else `None`, and always `None` when `h < 6`. The `+ 2` is the gutter and pad cells of CORE-R74. A form is shown whole or not at all, so a title is never clipped mid-word, and the chosen form never gets shorter as `w` grows.
+- **CORE-R74** `title::draw(canvas, title: &Title, time: f64)` draws the fitted form on row `h − 1` with the same cell layout as `draw::label(canvas, 0, h − 1, …)` (CORE-R67): an `Ink::BLANK` gutter cell at column 0, the text from column 1, and one `Ink::BLANK` pad cell after it. It touches no other cell, so half-block art keeps the rest of the row. Each char goes through `Canvas::put` as `Glyph::new(c, ascii_of(c).unwrap_or('?'))`, which also clears the cell background (CORE-R40), so ASCII mode output stays pure ASCII. Inks: the phenomenon is `Role::Text` level 170; the ` · ` separator and the mechanism are level 110. From `time = 8 s` (scene time, `ctx.time`) both levels ease linearly to 90, reached at 10 s: `ink::level(lerp(base, 90, clamp((time − 8)/2, 0, 1)))`, with non-finite `time` treated as 0. This is deterministic, and frames at t ≤ 8 s are unchanged by it. `title::span(size, title) -> Option<(i32, Range<i32>)>` returns the row and the column range that `draw` writes (`0..width + 2`), or `None` when `fit` hides the title. `draw` never panics for any size ≥ 1×1 and never allocates.
+- **CORE-R75** `Stage::render` draws the title (CORE-R74) after `generator.render` and before the swap, from `meta().title`, `generator.caption()` and the stage's `ctx.time`, so every consumer of `Stage` (runtime, snapshots, contract, props, alloc and bench suites) sees the same frame. `Stage::set_title_visible(bool)` (default `true`) switches it; when hidden, the frame is exactly the generator's. The flag survives `resize`. A panic inside `generator.render` still leaves the previous complete frame (CORE-R21).
+- **CORE-R76** `draw::label_right(canvas, y, s, ink) -> i32` is the right-aligned mirror of `draw::label` (CORE-R67): an `Ink::BLANK` cell in the last column `w − 1`, `s` ending in column `w − 2`, and an `Ink::BLANK` cell just before its first char. Chars are counted, one cell each (CORE-R4), and the text is clipped at column 0. It returns the column of the leading blank (negative when clipped), so a scene can shorten or drop a readout that would reach the title span (GEN-R13). It never allocates.
+- **CORE-R77** (supersedes CORE-R47; ADR-0013) `Category` has exactly these eleven variants, listed in this order by `Category::ALL`. `id()` is the kebab-case ASCII identifier (printed by `sciart list`, CLI-R4); `label()` is the display name. Both are `const fn` returning `&'static str`, and ids and labels are each unique.
+
+ | Variant | `id()` | `label()` | Lattice cell (ADR-0013) |
+ |---------|--------|-----------|-------------------------|
+ | `DeepCosmos` | `deep-cosmos` | Deep Cosmos | setting: deep space |
+ | `SunPlanets` | `sun-planets` | Sun & Planets | setting: the Sun, planets, moons, comets |
+ | `EarthSky` | `earth-sky` | Earth & Sky | setting: seen from Earth's surface or atmosphere |
+ | `Voyages` | `voyages` | Voyages | setting: human spacecraft or mission |
+ | `Physics` | `physics` | Forces & Waves | P |
+ | `Chemistry` | `chemistry` | Reactions | C |
+ | `Biology` | `biology` | Living Systems | B |
+ | `PhysicalChemistry` | `physical-chemistry` | States of Matter | P×C |
+ | `Biophysics` | `biophysics` | Physics of Life | P×B |
+ | `Biochemistry` | `biochemistry` | Molecules of Life | C×B |
+ | `LivingMatter` | `living-matter` | Life from Matter | P×C×B |

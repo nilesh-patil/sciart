@@ -22,8 +22,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "galaxy_collision",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "Two spiral galaxies colliding and pulling out tidal tails",
+    title: "Galaxy collision · tidal tails",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
