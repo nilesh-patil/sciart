@@ -100,13 +100,9 @@ const SEED_R0: (f32, f32) = (1.5, 3.0);
 /// Passaging on the return to mitosis (CHEM-A8): during the spots → mitosis morph an extra
 /// sink `−κ·m²·mask·v` (κ per reaction unit, m the morph's smoothstep) clears the nodes
 /// under a seeded mask of `PASSAGE_BLOCK`-node blocks, each active with probability
-/// `PASSAGE_SHARE`, so about four in five moving spots fade out and the mitosis hold
-/// inherits room to divide, as a culture split into fresh medium. Measured at 80×24:
-/// masking half the blocks left ≈ 20 survivors that refilled the torus within ≈ 6 s and
-/// the hold still froze for its last 2–4 s (4 s change 0.07–0.11); with κ·m the spots
-/// died by mid-morph and its last 4 s were still (0.06–0.12). With m² they fade over the
-/// morph's second half and every 4 s window from the spots or mitosis slot changes
-/// ≥ 15 % (12 seeds each).
+/// `PASSAGE_SHARE`. About four in five moving spots fade over the morph's second half, so
+/// the mitosis hold inherits room to divide instead of a jammed field, as a culture split
+/// into fresh medium. Tuning measurements are in SPEC-002 `chemical_reaction`.
 const PASSAGE_KAPPA: f32 = 0.02;
 const PASSAGE_BLOCK: usize = 6;
 const PASSAGE_SHARE: f64 = 0.8;
@@ -116,12 +112,9 @@ const PASSAGE_SHARE: f64 = 0.8;
 /// put 36 % of the coral beat's pixels there, with no internal grading).
 const V_FULL: f32 = 0.40;
 /// Below this share of `V_FULL` (v = 0.12) a pixel is substrate, not pattern: the thin
-/// v ≈ 0.05–0.12 tails between neighbouring spots and loops fall to the halo or to black,
-/// so even the loops keep a near-black majority (CHEM-A8). At 0.125 (v = 0.05) those
-/// tails read as a wall of `:` and `+` and loops kept ≈ 35 % near-black; at 0.25
-/// (v = 0.10) loops averaged ≈ 53 % with frames down to 47 %, and ASCII frames with
-/// under 45 % blank or `.`; 0.3 gives ≈ 58 % (frames ≥ 48 %). Spots lose only their
-/// outermost ring, which the halo still grades.
+/// tails between neighbouring spots and loops fall to the halo or to black, so dense
+/// regimes keep a near-black majority (CHEM-A8; tuning history in SPEC-002). Spots lose
+/// only their outermost ring, which the halo still grades.
 const Q_MIN: f32 = 0.3;
 /// Substrate depletion `1 − u` where the dim halo starts to fade in, where it saturates,
 /// and its peak Seq value.
@@ -148,11 +141,10 @@ pub(crate) struct Coeffs {
 pub(crate) struct Preset {
     name: &'static str,
     c: Coeffs,
-    /// Reaction time units per simulated second. Mitosis and coral run at 400, so spots
-    /// visibly bud and divide within seconds. The moving regimes evolve far faster in
-    /// reaction time: at 400, loops renewed ≈ 60 % of the ASCII cells in 0.25 s (13 % per
-    /// frame) and read as a boiling field. Loops 70, swarm 110 and spots 150 keep ≤ 4 %
-    /// per frame and ≤ 35 % per 0.25 s while ≥ 50 % still changes per 4 s (CHEM-A8).
+    /// Reaction time units per simulated second. Mitosis and coral run fast, so spots
+    /// visibly bud and divide within seconds; the moving regimes evolve far faster in
+    /// reaction time and run slower, so they jostle like organisms instead of boiling
+    /// (CHEM-A8; measurements in SPEC-002).
     rate: f64,
     hold: f64,
     morph: f64,
@@ -169,19 +161,14 @@ const fn preset(name: &'static str, f: f32, k: f32, rate: f64, hold: f64, morph:
 }
 
 /// The walk through Pearson's (F, k) plane, in order (CHEM-A5, CHEM-A8). Mitosis (Sims)
-/// shows division: from seed bumps the spots divide for ≈ 12 s, through the 8 s hold and
-/// into the morph, but once they fill the torus they jam and stop (a 16 s hold froze
-/// for its last 4 s); on later loops the return is passaged ([`PASSAGE_KAPPA`]), so the
-/// hold again starts from a sparse field. Coral (Sims) is the one labyrinth beat: it
-/// grows branches out of the mitosis spots during the morph, and its 3 s hold leaves
-/// while they still branch, before the labyrinth fills the torus and freezes (a 12 s hold
-/// spent ≈ 10 s on a static, blown-out maze); it is never a start slot. The morphs into
-/// and out of it take 6 s, so the bright labyrinth (≥ 50 % `#`/`@`) lasts ≈ 6.5 s
-/// instead of ≈ 8 s. Loops, swarm and moving spots
-/// (Márquez-Neila's "spots and loops" and "moving spots", with swarm between them) sit just
-/// right of the saddle-node curve at low F; they keep a dark majority and never stop
-/// moving. Solitons and pulsating solitons were measured and rejected: both freeze
-/// within ≈ 12 s on this lattice.
+/// shows division until the spots fill the torus and jam, so its hold is short and later
+/// returns are passaged ([`PASSAGE_KAPPA`]). Coral (Sims) is the one labyrinth beat: it
+/// branches out of the mitosis spots during the morph and leaves before the labyrinth
+/// fills the torus and freezes, so its hold and the morphs around it are short and it is
+/// never a start slot. Loops, swarm and moving spots (Márquez-Neila's "spots and loops"
+/// and "moving spots", with swarm between them) sit just right of the saddle-node curve
+/// at low F; they keep a dark majority and never stop moving. Timings and the rejected
+/// regimes are measured in SPEC-002 `chemical_reaction`.
 pub(crate) const PRESETS: [Preset; 5] = [
     preset("mitosis", 0.0367, 0.0649, 400.0, 8.0, 6.0),
     preset("coral", 0.0545, 0.062, 400.0, 3.0, 6.0),
@@ -417,9 +404,9 @@ fn level_table() -> [u8; 256] {
 }
 
 /// The ink of one pixel (CHEM-A7): pattern where `v` is at least [`Q_MIN`] of full scale
-/// (v = 0.12); else
-/// a dim violet halo that fades in with substrate depletion; else `None`, the terminal's
-/// own background. `u` is only read (and so only sampled) off the pattern.
+/// (v = 0.12); else a dim violet halo that fades in with substrate depletion; else
+/// `None`, the terminal's own background. `u` is only read (and so only sampled) off the
+/// pattern.
 pub(crate) fn v_ink(levels: &[u8; 256], u: impl FnOnce() -> f32, v: f32) -> Option<Ink> {
     let q = (v / V_FULL).clamp(0.0, 1.0);
     if q >= Q_MIN {
@@ -883,24 +870,20 @@ mod tests {
             // 0.25 s on. Churn and darkness are averaged over the samples; a single frame
             // may dip a little below the mean's floor.
             let jostle = slot == 2 || slot == 3;
-            let mut sums = [0.0; 5];
-            let mut sample = |t: f64, frame_at: &mut dyn FnMut(f64) -> (Frame, f64)| {
+            // [dark, near-black, change per frame, change per 0.25 s] at hold time `t`.
+            let sample = |frame_at: &mut dyn FnMut(f64) -> (Frame, f64), t: f64| {
                 let (f, near_black) = frame_at(t);
                 let (_, dark, _) = stats(&f, None);
                 assert!(dark >= 0.4, "{id} t {t}: only {dark} blank or '.'");
                 assert!(near_black >= 0.45, "{id} t {t}: {near_black} near-black");
                 let per_frame = stats(&frame_at(t + 2.0 * SIM_DT).0, Some(&f)).2;
                 let per_quarter = stats(&frame_at(t + 0.25).0, Some(&f)).2;
-                for (s, x) in sums
-                    .iter_mut()
-                    .zip([dark, near_black, per_frame, per_quarter, 1.0])
-                {
-                    *s += x;
-                }
+                [dark, near_black, per_frame, per_quarter]
             };
+            let mut samples = Vec::new();
             if jostle {
                 for t in [2.0, 5.0, 8.0] {
-                    sample(t, &mut frame_at);
+                    samples.push(sample(&mut frame_at, t));
                 }
             }
             // 10 s into the hold, or 4 s before the end of a shorter one (mitosis, 8 s).
@@ -916,10 +899,11 @@ mod tests {
             );
             if jostle {
                 for t in [15.0, 18.0] {
-                    sample(t, &mut frame_at);
+                    samples.push(sample(&mut frame_at, t));
                 }
-                let [dark, near_black, per_frame, per_quarter] =
-                    [0, 1, 2, 3].map(|i| sums[i] / sums[4]);
+                let n = samples.len() as f64;
+                let mean = |i: usize| samples.iter().map(|s| s[i]).sum::<f64>() / n;
+                let [dark, near_black, per_frame, per_quarter] = [0, 1, 2, 3].map(mean);
                 assert!(dark >= 0.45, "{id}: on average only {dark} blank or '.'");
                 assert!(
                     near_black >= 0.5,
@@ -946,7 +930,8 @@ mod tests {
         // coral beat (a labyrinth covers ≈ 55 % of the cells at any exposure), and in
         // every 4 s window [4i, 4i + 4] at least 10 % of the cells change. At each
         // frame the unclamped Euler update of the live fields already stays in [0, 1]
-        // with v < 0.6, so the kernel's clamp is only a guard (CHEM-A1).
+        // with v < 0.7 (measured ≤ 0.63, loops colliding), so the kernel's clamp is only
+        // a guard (CHEM-A1).
         let walk = walk();
         let total = walk.total();
         let spots = PRESETS.len() - 1;
