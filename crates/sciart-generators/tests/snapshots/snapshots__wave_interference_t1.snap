@@ -1,6 +1,5 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
-assertion_line: 18
 expression: frame
 ---
 OO0000Oo.........ooooooo... Two-Source Interference 0000o....O0@0O....O0@0O...oO

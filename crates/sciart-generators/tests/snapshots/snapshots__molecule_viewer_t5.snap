@@ -1,6 +1,5 @@
 ---
 source: crates/sciart-generators/tests/snapshots.rs
-assertion_line: 18
 expression: frame
 ---
  CH4  16.04 g/mol                                                               
