@@ -1209,6 +1209,8 @@ mod tests {
             Size::new(80, 24),
             GlyphMode::Unicode,
         );
+        // The scene's own frame: the ASCII check below covers the field, not the title.
+        s.set_title_visible(false);
         for _ in 0..180 {
             s.step(SIM_DT);
         }

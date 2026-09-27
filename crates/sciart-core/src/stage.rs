@@ -23,8 +23,8 @@ impl std::fmt::Debug for Stage {
 }
 
 impl Stage {
-    /// The title starts hidden: M11 turns it on by default (CORE-R75) together with the
-    /// re-recorded snapshots and the scenes' readout moves (GEN-R13).
+    /// The title starts visible (CORE-R75), so every consumer sees the frame the runtime
+    /// shows unless it opts out.
     pub fn new(mut generator: Box<dyn Generator>, seed: u64, size: Size, mode: GlyphMode) -> Self {
         let mut ctx = Ctx::new(seed, size);
         generator.resize(size, &mut ctx);
@@ -33,7 +33,7 @@ impl Stage {
             ctx,
             front: Canvas::new(size, mode),
             back: Canvas::new(size, mode),
-            title_visible: false,
+            title_visible: true,
         }
     }
 

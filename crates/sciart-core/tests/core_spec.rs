@@ -771,7 +771,7 @@ fn core_r75_stage_draws_the_live_title_after_the_scene() {
     let mut stage = Stage::new(Box::new(Fill), 1, Size::new(60, 8), GlyphMode::Unicode);
     assert_eq!(stage.title(), Title::new(FILL_META.title, Some("act two")));
 
-    stage.set_title_visible(true);
+    // Visible by default.
     let want = " Solid fill · act two ";
     assert!(row(stage.render(), 7).starts_with(want));
     assert_eq!(row(stage.frame(), 6), "#".repeat(60));

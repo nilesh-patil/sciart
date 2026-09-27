@@ -1923,6 +1923,8 @@ mod tests {
     #[test]
     fn vor_a7_frame_shows_disc_and_two_signed_rows() {
         let mut s = Stage::new(build(), 42, Size::new(80, 24), GlyphMode::Ascii);
+        // The scene's own frame: the title would sit on the calm inflow's last row.
+        s.set_title_visible(false);
         for _ in 0..30 {
             s.step(SIM_DT);
         }

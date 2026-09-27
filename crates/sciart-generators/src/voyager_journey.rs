@@ -868,6 +868,8 @@ mod tests {
     fn voy_a4_neptune_is_drawn_throughout_the_cycle() {
         for (w, h) in [(200, 50), (60, 16)] {
             let mut stage = Stage::new(build(), 3, Size::new(w, h), GlyphMode::Ascii);
+            // The scene's own frame: the title may cover Neptune low on the bottom row.
+            stage.set_title_visible(false);
             for s in 0..56 {
                 for _ in 0..60 {
                     stage.step(SIM_DT);
