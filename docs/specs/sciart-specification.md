@@ -46,6 +46,7 @@ benchmark layers).
 | RNG | Injected, seedable `rand_chacha::ChaCha8Rng`; no global RNG in generators | [ADR-0008](../adr/0008-injected-rng.md) |
 | Categories (M11) | Sky settings + physics × chemistry × biology lattice, 11 categories | [ADR-0013](../adr/0013-pxcxb-taxonomy.md) |
 | Titles (M11) | One science title per scene, drawn by `Stage` | [ADR-0014](../adr/0014-central-science-titles.md) |
+| Field colour (M12) | Phase, blackbody and six named ramps as semantic roles | [ADR-0015](../adr/0015-phase-blackbody-named-ramps.md) |
 | CLI / config | clap (derive) + TOML file, flags override file | [SPEC-005](SPEC-005-cli-config.md) |
 | Tests | built-in test + proptest + insta + criterion | [SPEC-006](SPEC-006-testing.md) |
 

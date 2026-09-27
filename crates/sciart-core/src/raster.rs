@@ -48,13 +48,15 @@ pub fn braille(mask: u8) -> Glyph {
 
 /// How strongly an ink stands out, for picking a cell's one ink among its dots
 /// (CORE-R41): its `level`, except for a signed [`Role::Div`] field, whose zero sits at
-/// 128, so a deep negative lobe (low level) must beat a faint positive one.
+/// 128, so a deep negative lobe (low level) must beat a faint positive one, and a
+/// [`Role::Phase`] field, whose level is an angle: all its dots tie, so the last one set
+/// wins (CORE-R78).
 #[inline]
 fn intensity(ink: Ink) -> u8 {
-    if ink.role == Role::Div {
-        ink.level.abs_diff(128)
-    } else {
-        ink.level
+    match ink.role {
+        Role::Div => ink.level.abs_diff(128),
+        Role::Phase => 0,
+        _ => ink.level,
     }
 }
 
