@@ -388,6 +388,68 @@ fn core_r42_background_role_pixels_count_as_empty() {
     );
 }
 
+// ---------------------------------------------------------------- CORE-R84
+
+#[test]
+fn core_r84_cell_bg_is_the_more_intense_lit_pixel_of_the_cell() {
+    let mut px = Pixels::new(Size::new(3, 1));
+    // Cell 0: both lit, the bottom brighter; cell 1: top only; cell 2: both empty.
+    px.set(0, 0, B);
+    px.set(0, 1, A);
+    px.set(1, 0, C);
+    assert_eq!(px.cell_bg(0, 0), A);
+    assert_eq!(px.cell_bg(1, 0), C);
+    assert_eq!(px.cell_bg(2, 0), Ink::BLANK);
+    // A tie goes to the top; a lone bottom pixel stands for its cell.
+    px.set(2, 0, Ink::new(Role::Star, 90));
+    px.set(2, 1, B);
+    assert_eq!(px.cell_bg(2, 0), Ink::new(Role::Star, 90));
+    px.set(1, 0, Ink::BLANK);
+    px.set(1, 1, B);
+    assert_eq!(px.cell_bg(1, 0), B);
+    // Off the buffer: blank.
+    assert_eq!(px.cell_bg(3, 0), Ink::BLANK);
+    assert_eq!(px.cell_bg(0, 1), Ink::BLANK);
+    assert_eq!(px.cell_bg(-1, 0), Ink::BLANK);
+}
+
+#[test]
+fn core_r84_blit_over_puts_the_pixels_behind_lit_cells_only() {
+    let mut dots = Dots::new(Size::new(3, 2));
+    dots.set(0, 0, A);
+    dots.set(5, 7, C);
+    let mut under = Pixels::new(Size::new(3, 2));
+    under.set(0, 1, B);
+    under.set(1, 0, C);
+    let mut plain = Canvas::new(Size::new(3, 2), GlyphMode::Unicode);
+    dots.blit(&mut plain);
+    let mut c = Canvas::new(Size::new(3, 2), GlyphMode::Unicode);
+    c.put_bg(1, 0, X, A, B);
+    dots.blit_over(&mut c, &under);
+    for (x, y) in [(0, 0), (2, 1)] {
+        let (got, want) = (cell(&c, x, y), cell(&plain, x, y));
+        assert_eq!((got.ch, got.ink), (want.ch, want.ink), "same dots as blit");
+        assert_eq!(got.bg, under.cell_bg(x, y));
+    }
+    assert_eq!(cell(&c, 0, 0).bg, B);
+    assert_eq!(cell(&c, 2, 1).bg, Ink::BLANK);
+    // Unlit cells keep what was drawn before, even over a lit pixel.
+    assert_eq!(
+        cell(&c, 1, 0),
+        Cell {
+            ch: 'x',
+            ink: A,
+            bg: B
+        }
+    );
+    // ASCII mode has no half blocks: plain `blit`.
+    let mut ascii = Canvas::new(Size::new(3, 2), GlyphMode::Ascii);
+    let mut ascii_plain = Canvas::new(Size::new(3, 2), GlyphMode::Ascii);
+    dots.blit_over(&mut ascii, &under);
+    dots.blit(&mut ascii_plain);
+    assert_eq!(ascii.cells(), ascii_plain.cells());
+}
+
 #[test]
 fn core_r42_half_block_is_the_unicode_cell_rule_of_blit() {
     // Every (top, bottom) pair: `half_block` on one cell equals `blit` of that pair.
