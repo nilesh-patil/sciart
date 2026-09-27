@@ -324,7 +324,12 @@ impl Generator for CosmicMicrowaveBackground {
         let room = title::readout_room(canvas.size(), &Title::of(self));
         if self.readout && READOUT.len() <= room {
             let y = i32::from(self.height) - 1;
-            draw::label_right(canvas, y, READOUT, Ink::new(Role::Text, 200));
+            draw::label_right(
+                canvas,
+                y,
+                READOUT,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
         }
     }
 }

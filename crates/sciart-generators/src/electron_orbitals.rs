@@ -124,7 +124,7 @@ const NUCLEUS: Glyph = Glyph::new('•', 'o');
 const NUCLEUS_INK: Ink = Ink::new(Role::Accent, 180);
 /// The nucleus is drawn over its cell when at most this many of the 8 dots are lit.
 const NUCLEUS_MAX_DOTS: usize = 2;
-const LABEL_INK: Ink = Ink::new(Role::Text, 150);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Number of gallery states.
 const K: usize = GALLERY.len();
@@ -1658,19 +1658,21 @@ mod tests {
             "2p_z → 3d_z²  Hα 656.5 nm  slowed 10¹⁵"
         );
 
-        // The slow-down goes first: the 40-char label needs w − 37 ≥ 40.
-        let mut s = scene(1, 76, 12);
+        // The slow-down goes first: the 40-char label needs w − 37 ≥ 40 and, as a readout
+        // never takes over half the row (CORE-R76), w/2 ≥ 40.
+        let mut s = scene(1, 79, 12);
         into_transition(&mut s);
         assert_eq!(label(&s, GlyphMode::Ascii), "2p_z -> 3d_z2  H-a 656.5 nm");
-        let mut s = scene(1, 77, 12);
+        let mut s = scene(1, 80, 12);
         into_transition(&mut s);
         assert!(label(&s, GlyphMode::Ascii).ends_with("slowed 1e15"));
 
-        // "2p_z -> 3d_z2  H-a 656.5 nm" is 27 chars: the line part needs w − 19 ≥ 27.
-        let mut s = scene(1, 45, 12);
+        // "2p_z -> 3d_z2  H-a 656.5 nm" is 27 chars: beside the phenomenon alone (below
+        // w = 55) the line part needs w − 19 ≥ 27 and w/2 ≥ 27.
+        let mut s = scene(1, 53, 12);
         into_transition(&mut s);
         assert_eq!(label(&s, GlyphMode::Ascii), "2p_z -> 3d_z2");
-        let mut s = scene(1, 46, 12);
+        let mut s = scene(1, 54, 12);
         into_transition(&mut s);
         assert!(label(&s, GlyphMode::Ascii).ends_with("H-a 656.5 nm"));
 

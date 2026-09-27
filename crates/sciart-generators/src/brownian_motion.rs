@@ -489,7 +489,12 @@ impl Generator for BrownianMotion {
         if let Some(row) = self.label_row
             && !self.label.is_empty()
         {
-            draw::label_right(canvas, row, &self.label, Ink::new(Role::Text, 170));
+            draw::label_right(
+                canvas,
+                row,
+                &self.label,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
         }
     }
 }

@@ -13,7 +13,7 @@ pub static META: Meta = Meta {
     name: "constellation_map",
     category: Category::EarthSky,
     description: "A star chart tracing and naming one constellation at a time",
-    title: "Sky chart · brightness sets size",
+    title: "Constellations · ancient figures",
     captions: &[],
 };
 
@@ -456,9 +456,9 @@ impl Generator for ConstellationMap {
         canvas.text(x, ly.min(self.height - 2), lead.name, label_ink);
 
         let bottom = pos.iter().map(|p| p.1).fold(0.0, f64::max).round() as i32;
-        // Name and epithet both stay above the title row: an epithet beside the title
-        // would read as one sentence with it (GEN-R13).
-        let row = (bottom + 2).min(self.height - 3).max(0);
+        // Name and epithet stay a blank row above the title row: an epithet beside or
+        // right above the title would read as one block of text with it (GEN-R13).
+        let row = (bottom + 2).min(self.height - 4).max(0);
         let shown = (since * TYPE_RATE) as usize;
         let name_ink = Ink::new(Role::Text, Self::scaled(255.0, fade));
         Self::title(canvas, row, fig.name, shown, name_ink);
@@ -626,8 +626,14 @@ mod tests {
                     fig.name
                 );
                 if size.width() == 80 {
-                    let text = lines.concat();
-                    assert!(text.contains(fig.epithet), "{}", fig.name);
+                    // A blank row between the epithet and the title, so name, epithet
+                    // and title do not stack into one block of text.
+                    let row = lines.iter().position(|l| l.contains(fig.epithet));
+                    assert!(
+                        row.is_some_and(|r| r + 2 <= y as usize),
+                        "{}: {row:?}",
+                        fig.name
+                    );
                 }
             }
         }

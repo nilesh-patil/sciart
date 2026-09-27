@@ -282,6 +282,34 @@ fn gen_r12_live_captions_are_declared() {
 }
 
 #[test]
+fn gen_r13_core_r76_title_row_readouts_use_the_readout_level() {
+    // Title hidden, so every text char on row h − 1 is a scene readout; one shared level
+    // keeps the numbers below the title's phenomenon however the scene's art is inked.
+    for_each_generator("readout level", |e| {
+        for size in [Size::new(80, 24), Size::new(40, 12), Size::new(200, 50)] {
+            let mut stage = Stage::new((e.build)(), 42, size, GlyphMode::Unicode);
+            stage.set_title_visible(false);
+            for _ in 0..60 {
+                stage.step(SIM_DT);
+            }
+            let y = i32::from(size.height()) - 1;
+            let canvas = stage.render();
+            for x in 0..i32::from(size.width()) {
+                let cell = canvas.get(x, y).unwrap();
+                if cell.ink.role == Role::Text && cell.ch.is_alphanumeric() {
+                    assert_eq!(
+                        cell.ink.level,
+                        title::READOUT_LEVEL,
+                        "{size:?} column {x} {:?}",
+                        cell.ch
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
 fn gen_r13_no_scene_text_in_the_title_span_or_its_readout_gap() {
     // Title hidden, so any text left there is the scene's own; Unicode only, since ASCII
     // art fallbacks may use letters. The checked cells run from the span to where the

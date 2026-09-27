@@ -233,7 +233,12 @@ impl Generator for DopplerEffect {
             && let Some(legend) = LEGENDS.iter().find(|s| s.len() <= room)
         {
             let y = i32::from(self.height) - 1;
-            draw::label_right(canvas, y, legend, Ink::new(Role::Text, 170));
+            draw::label_right(
+                canvas,
+                y,
+                legend,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
         }
     }
 }
@@ -352,11 +357,14 @@ mod tests {
     #[test]
     fn dop_gen_r13_legend_names_pitch_and_sits_right_of_the_title() {
         // Beside the full "Doppler effect · waves bunch up" (31 cells) the room is w − 37,
-        // so the long legend needs 81 columns; beside "Doppler effect" alone it is w − 20.
+        // beside "Doppler effect" alone w − 20, and never over w/2 (CORE-R76): the long
+        // legend (44) needs 88 columns and the middle one (32) 69.
         for (w, h, legend) in [
-            (81, 24, LEGENDS[0]),
-            (80, 24, LEGENDS[1]),
-            (54, 12, LEGENDS[1]),
+            (88, 24, LEGENDS[0]),
+            (87, 24, LEGENDS[1]),
+            (69, 24, LEGENDS[1]),
+            (68, 24, LEGENDS[2]),
+            (54, 12, LEGENDS[2]),
             (40, 12, LEGENDS[2]),
         ] {
             let mut stage = Stage::new(build(), 3, Size::new(w, h), GlyphMode::Ascii);

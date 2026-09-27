@@ -467,7 +467,12 @@ impl MolecularDynamics {
                 _ => write!(text, "T = {t:.2} {mode}"),
             };
             if text.len() <= room {
-                draw::label_right(canvas, row, text.as_str(), Ink::new(Role::Text, 170));
+                draw::label_right(
+                    canvas,
+                    row,
+                    text.as_str(),
+                    Ink::new(Role::Text, title::READOUT_LEVEL),
+                );
                 return;
             }
         }

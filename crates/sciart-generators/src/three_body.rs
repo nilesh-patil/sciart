@@ -15,7 +15,7 @@ pub static META: Meta = Meta {
     category: Category::Physics,
     description: "Three equal suns dancing periodic three-body orbits: figure-8, Lagrange, Broucke, moth",
     title: "Three bodies · periodic orbits",
-    captions: &[],
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -46,6 +46,9 @@ const ROLES: [Role; 3] = [Role::Hot, Role::Cold, Role::Accent];
 const HEAD: Glyph = Glyph::new('●', '@');
 /// Index of the Lagrange orbit, the one that gets its triangle drawn.
 const LAGRANGE: usize = 1;
+/// Each orbit's short name, in gallery order; the shown one is the title's caption
+/// (GEN-R12), `Three bodies · figure-8`.
+const CAPTIONS: [&str; 5] = ["figure-8", "Lagrange", "Broucke A1", "Broucke R4", "moth I"];
 
 /// One periodic solution: published initial conditions plus how to show it.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -127,7 +130,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
     [
         Orbit {
             label: "figure-8  Moore 1993",
-            short: "figure-8",
+            short: CAPTIONS[0],
             pos: [x1, y1, -x1, -y1, 0.0, 0.0],
             vel: [-vx3 / 2.0, -vy3 / 2.0, -vx3 / 2.0, -vy3 / 2.0, vx3, vy3],
             period: 6.325_913_98,
@@ -138,7 +141,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Lagrange triangle  1772",
-            short: "Lagrange",
+            short: CAPTIONS[1],
             pos: lx,
             vel: lv,
             period: lt,
@@ -149,7 +152,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Broucke A1  1975",
-            short: "Broucke A1",
+            short: CAPTIONS[2],
             pos: [-0.989_262_004_3, 0.0, 2.209_617_724_1, 0.0, -1.220_355_719_7, 0.0],
             vel: [0.0, 1.916_924_418_5, 0.0, 0.191_026_873_8, 0.0, -2.107_951_292_4],
             period: 6.283_247,
@@ -160,7 +163,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "Broucke R4  1975",
-            short: "Broucke R4",
+            short: CAPTIONS[3],
             pos: [0.873_304_709_1, 0.0, -0.625_403_028_8, 0.0, -0.247_901_680_3, 0.0],
             vel: [0.0, 1.010_776_443_6, 0.0, -1.683_353_345_8, 0.0, 0.672_576_902_2],
             period: 5.396_075,
@@ -171,7 +174,7 @@ pub(crate) fn orbits() -> [Orbit; 5] {
         },
         Orbit {
             label: "moth I  Suvakov 2013",
-            short: "moth I",
+            short: CAPTIONS[4],
             pos: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
             vel: [mvx, mvy, mvx, mvy, -2.0 * mvx, -2.0 * mvy],
             period: 14.894_089,
@@ -541,6 +544,10 @@ impl Generator for ThreeBody {
             canvas.text(1, 0, label, Ink::new(Role::Text, 150));
         }
     }
+
+    fn caption(&self) -> Option<&'static str> {
+        Some(self.orbits[self.phase.seg].short)
+    }
 }
 
 #[cfg(test)]
@@ -790,6 +797,21 @@ mod tests {
             assert!(g.trails.iter().all(Trail::is_empty));
             start += o.run_secs() + FADE;
         }
+    }
+
+    #[test]
+    fn gen_r12_caption_names_the_shown_orbit() {
+        let mut ctx = Ctx::new(0, Size::new(80, 24));
+        let mut g = ThreeBody::new();
+        g.resize(Size::new(80, 24), &mut ctx);
+        let mut seen = [false; 5];
+        // One whole loop of the gallery (≈ 69.4 s, TB-A5).
+        for _ in 0..70 * 4 {
+            g.update(0.25, &mut ctx);
+            assert_eq!(g.caption(), Some(CAPTIONS[g.phase.seg]));
+            seen[g.phase.seg] = true;
+        }
+        assert_eq!(seen, [true; 5]);
     }
 
     #[test]

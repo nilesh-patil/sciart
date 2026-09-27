@@ -91,12 +91,16 @@ fn live_add(by: i64) {
     let _ = LIVE.try_with(|c| c.set(c.get().wrapping_add(by)));
 }
 
+/// Count an allocation of `size` bytes that returned `p`. The attempt always counts; the
+/// bytes are live only when it succeeded, since a null return allocated nothing.
 #[inline]
-fn record_alloc(size: usize) {
+fn record_alloc(size: usize, p: *mut u8) {
     INSTALLED.store(true, Ordering::Relaxed);
     bump(&ALLOCS, 1);
     bump(&BYTES, size as u64);
-    live_add(size as i64);
+    if !p.is_null() {
+        live_add(size as i64);
+    }
 }
 
 fn snapshot() -> Allocs {
@@ -126,17 +130,19 @@ pub struct CountingAlloc;
 unsafe impl GlobalAlloc for CountingAlloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record_alloc(layout.size());
         // SAFETY: the caller upholds `GlobalAlloc::alloc`'s preconditions (non-zero
         // size layout), which are exactly `System::alloc`'s.
-        unsafe { System.alloc(layout) }
+        let p = unsafe { System.alloc(layout) };
+        record_alloc(layout.size(), p);
+        p
     }
 
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record_alloc(layout.size());
         // SAFETY: same preconditions as `alloc`, forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
+        let p = unsafe { System.alloc_zeroed(layout) };
+        record_alloc(layout.size(), p);
+        p
     }
 
     #[inline]
@@ -153,10 +159,14 @@ unsafe impl GlobalAlloc for CountingAlloc {
         INSTALLED.store(true, Ordering::Relaxed);
         bump(&REALLOCS, 1);
         bump(&BYTES, new_size as u64);
-        live_add(new_size as i64 - layout.size() as i64);
         // SAFETY: the caller guarantees `ptr`/`layout` describe a live block from this
         // allocator (hence from `System`) and that `new_size` is valid for `layout`.
-        unsafe { System.realloc(ptr, layout, new_size) }
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        // On failure the old block stays live at its old size.
+        if !p.is_null() {
+            live_add(new_size as i64 - layout.size() as i64);
+        }
+        p
     }
 }
 

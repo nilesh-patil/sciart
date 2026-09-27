@@ -178,7 +178,7 @@ const SCOPE_MIN_COLS: i32 = 12;
 const ARBOR_SEGS: usize = 7;
 const TRACE_INK: Ink = Ink::new(Role::Accent, 210);
 const TICK_INK: Ink = Ink::new(Role::Dim, 120);
-const LABEL_INK: Ink = Ink::new(Role::Text, 160);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const ELECTRODE_INK: Ink = Ink::new(Role::Accent, 200);
 /// `Div` levels this close to 128 are drawn as background: 6 above rest (+0.2 mV, so
 /// sub-threshold responses show) and 12 below (−3.7 mV, so only the recent
@@ -1885,25 +1885,24 @@ mod tests {
         let long = "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s | single";
         let mid = "HH squid 6.3C | v=--.- m/s | single";
         let short = "HH 6.3C | v=--.- m/s | single";
-        // The room is w − 2 minus the title's gutter and text and the 4-cell gap: w − 37
-        // from w = 55, where the full title fits, w − 17 for the phenomenon below that, and
-        // w − 2 below w = 22, where the title hides.
+        // The room is w − 2 minus the title's gutter and text and the 4-cell gap, and at
+        // most w/2 (CORE-R76): min(w − 37, w/2) from w = 55, where the full title fits,
+        // min(w − 17, w/2) for the phenomenon below that, and w/2 below w = 22, where the
+        // title hides.
         for (w, want) in [
-            (99u16, long),
-            (98, mid),
-            (75, mid),
-            (74, short),
+            (124u16, long),
+            (123, mid),
+            (76, mid),
+            (75, short),
             (69, short),
             (68, "HH 6.3C"),
             (55, "HH 6.3C"),
-            (54, short),
-            (49, short),
-            (48, "HH 6.3C"),
+            (54, "HH 6.3C"),
             (24, "HH 6.3C"),
             (23, ""),
             (21, "HH 6.3C"),
-            (9, "HH 6.3C"),
-            (8, ""),
+            (14, "HH 6.3C"),
+            (13, ""),
         ] {
             let row = readout(w, 0.0, None);
             // Whole, never clipped, and ending one blank cell from the right edge.
@@ -1912,7 +1911,7 @@ mod tests {
         }
         // The longest beats fit the least room of their form.
         for (w, t, want) in [
-            (75, 14.0, "HH squid 6.3C | v=12.3 m/s | collision"),
+            (76, 14.0, "HH squid 6.3C | v=12.3 m/s | collision"),
             (69, 16.0, "HH 6.3C | v=12.3 m/s | threshold"),
         ] {
             assert_eq!(readout(w, t, Some(12.3)).trim(), want, "w={w}");

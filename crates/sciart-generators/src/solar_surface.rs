@@ -157,7 +157,7 @@ const V_KNOT_CORE: f64 = V_LOOP + 0.9 * V_KNOT;
 const FILAMENT: f64 = 0.6;
 /// IAU nominal solar effective temperature (K).
 const TEFF_K: u32 = 5772;
-const LABEL_INK: Ink = Ink::new(Role::Text, 150);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 // --- Physics (pure) -----------------------------------------------------------------
 

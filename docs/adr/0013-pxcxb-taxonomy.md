@@ -26,7 +26,8 @@ that matches:
    - **C**: kinetics that transform chemical species (atoms regrouping into molecules or ions;
      nuclear transmutation is P), fuel turnover, molecular or electronic structure as the
      subject, or a phase change (including ordering transitions such as magnetisation);
-   - **P**: a law beyond the diffusion that carries a chemistry: force and mechanics, flow,
+   - **P**: a law beyond diffusion that only carries a chemistry (diffusion counts as P when
+     the transport itself sets the shape, as in Laplacian growth): force and mechanics, flow,
      circuits and fields, free-energy or stat-mech sampling, quantum mechanics, waves and optics,
      or deterministic chaos in a continuous flow (an ODE system in phase space).
 
@@ -46,9 +47,11 @@ The assignment of the 41 existing scenes is the table in `docs/design/M11-titles
   `Astronomy` and `SpaceExploration` disappear, so anything parsing the old ids breaks.
 − Borderline scenes need the rule applied carefully (e.g. `electron_orbitals` is C by
   "electronic structure as the subject", plus P for quantum mechanics → States of Matter;
-  `fractal_growth` is P (a random-walk transport law with no chemistry riding on it) × C
-  (deposition, a phase change) → States of Matter; `ising_model` is P (Glauber sampling) × C
-  (an ordering transition) → States of Matter; `brownian_motion` is P only (Langevin
+  `fractal_growth` is P (Laplacian growth: the walkers sample the diffusion field's harmonic
+  measure, and that transport, not a reaction, sets the fractal) × C (deposition, a phase
+  change) → States of Matter, while `liesegang_rings` stays C because its bands are set by
+  reaction and nucleation thresholds, with diffusion only supplying the species;
+  `ising_model` is P (Glauber sampling) × C (an ordering transition) → States of Matter; `brownian_motion` is P only (Langevin
   mechanics: no species, fuel, structure or phase change) → Forces & Waves; and
   `radioactive_decay` is P, since nuclear transmutation is not chemistry).
 − Categories are unequal in size (Forces & Waves and Deep Cosmos hold 9 scenes each, most

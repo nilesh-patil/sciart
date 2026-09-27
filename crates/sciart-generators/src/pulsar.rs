@@ -10,7 +10,7 @@ pub static META: Meta = Meta {
     name: "pulsar",
     category: Category::DeepCosmos,
     description: "A lighthouse neutron star: two sweeping beams, dipole field loops, flashes",
-    title: "Pulsar · spinning neutron star",
+    title: "Pulsar · lighthouse beams sweep",
     captions: &[],
 };
 

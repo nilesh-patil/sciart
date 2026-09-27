@@ -103,7 +103,7 @@ const N_MIN: usize = 64;
 /// deposit, `τ·ln(1/D_MIN)` ≈ 0.253 s (its segment `j` updates old is lit iff
 /// `e^{−j·dt/τ} ≥ D_MIN`, i.e. `j ≤ 15`), so frame 0 already shows full-length threads.
 const PRIME_STEPS: usize = 16;
-const LABEL_INK: Ink = Ink::new(Role::Text, 150);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Parameters of the gallery flows (SPEC-002 Model).
 const LORENZ: (f64, f64, f64) = (10.0, 28.0, 8.0 / 3.0);

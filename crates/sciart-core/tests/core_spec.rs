@@ -754,7 +754,7 @@ proptest! {
     }
 
     #[test]
-    fn core_r76_gen_r13_readout_room_keeps_four_blanks_after_the_title_text(
+    fn core_r76_gen_r13_readout_room_keeps_four_blanks_and_half_the_row(
         w in 1u16..160,
         h in 1u16..40,
     ) {
@@ -764,13 +764,16 @@ proptest! {
         // at `cols.end - 2`, so its pad, two more blanks and the lead make four.
         let free = title::span(size, &t).map_or(0, |(_, cols)| cols.end + 2);
         let room = title::readout_room(size, &t);
+        let half = usize::from(w) / 2;
         let lead = |n: usize| {
             let mut c = Canvas::new(size, GlyphMode::Unicode);
             draw::label_right(&mut c, i32::from(h) - 1, &"x".repeat(n), Ink::new(Role::Text, 150))
         };
+        prop_assert!(room <= half, "room {} is over half of {}", room, w);
         if w >= 2 {
             prop_assert!(lead(room) >= free, "room {} leaves the lead at {}", room, lead(room));
-            prop_assert!(lead(room + 1) < free);
+            // Maximal: one more char would reach the gap, unless the half-row cap bound it.
+            prop_assert!(room == half || lead(room + 1) < free);
         } else {
             prop_assert_eq!(room, 0);
         }
