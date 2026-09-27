@@ -6,8 +6,8 @@
 //! horizon (Ballerini et al. 2008; Hemelrijk & Hildenbrandt 2011). A falcon stoops every
 //! 14 s; birds near it turn away and their neighbours copy the escape manoeuvre a couple
 //! of substeps later (Hemelrijk et al. 2015), so the agitation wave outruns any bird, as
-//! Potts (1984) observed when he found manoeuvres passing between neighbours faster than
-//! a bird's startle reaction (his chorus-line hypothesis). Hemelrijk et al. also showed
+//! Potts (1984) observed in dunlin flocks when he found manoeuvres passing between
+//! neighbours faster than a bird's startle reaction (his chorus-line hypothesis). Hemelrijk et al. also showed
 //! the dark band of such waves is orientation, not density: here an alarmed bird banks
 //! hard, which draws it as a 4-dot stroke in the bright `Star` ink.
 //!
@@ -500,7 +500,9 @@ impl Falcon {
         let mut p = add(self.pos, v);
         // Should it still reach a wall, it glances off (a specular pull-up) rather than
         // sliding along the frame.
-        if reflect(&mut p[0], &mut v[0], w) | reflect(&mut p[1], &mut v[1], h) {
+        let hx = reflect(&mut p[0], &mut v[0], w);
+        let hy = reflect(&mut p[1], &mut v[1], h);
+        if hx || hy {
             self.angle = v[1].atan2(v[0]);
         }
         self.pos = p;
@@ -524,6 +526,10 @@ pub(crate) struct Boids {
     /// Height of the open sky, the box minus the label row when the label is drawn: the
     /// soft bounds, the specular wall and the drawing all keep the flock in it.
     sky: f64,
+    /// `room(w, sky)` and the soft-bound margin (dots): they depend on the box alone, so
+    /// `resize` computes them once instead of for every bird every substep.
+    room: f64,
+    margin: f64,
     /// Per-bird pull toward the flock centroid (s⁻²): `KAPPA_I` scaled down with N.
     kappa_i: f64,
     /// Per-substep weight of the bank EMA.
@@ -562,6 +568,8 @@ impl Boids {
             w: 1.0,
             h: 1.0,
             sky: 1.0,
+            room: 1.0,
+            margin: 1.0,
             kappa_i: KAPPA_I,
             bank_k: (1.0 - (-H / BANK_TAU).exp()) as f32,
             pos: vec![[0.0; 2]; N_MAX],
@@ -600,18 +608,12 @@ impl Boids {
         (12.0 * self.n as f64 / PI).sqrt() * self.sigma
     }
 
-    /// Soft-bound margin, a fraction of the sky's shorter side (narrower in a small
-    /// sky, where a wide cushion leaves the flock no room between the walls).
-    fn margin(&self) -> f64 {
-        ease::lerp(MARGIN_SMALL, MARGIN, room(self.w, self.sky)) * self.w.min(self.sky)
-    }
-
     /// The roost wanders on a slow Lissajous path, so the flock never settles. Each
     /// amplitude is capped by the free sky, so a flock at the roost clears the soft-bound
     /// margin instead of being flattened against a wall, and it shrinks to 0 in a small
     /// sky, where the flock should wheel about the middle.
     fn roost(&self, t: f64) -> V2 {
-        let (r, m, room) = (self.flock_radius(), self.margin(), room(self.w, self.sky));
+        let (r, m, room) = (self.flock_radius(), self.margin, self.room);
         let amp = |len: f64, frac: f64| room * (frac * len).min((0.5 * len - r - m).max(0.0));
         [
             0.5 * self.w + amp(self.w, 0.25) * (TAU * t / 23.0).sin(),
@@ -726,7 +728,7 @@ impl Boids {
             }
         }
         a = add(a, add(pull, scale(sub(centre, p), self.kappa_i)));
-        let m = self.margin();
+        let m = self.margin;
         let bound = [soft_bound(p[0], self.w, m), soft_bound(p[1], self.sky, m)];
         a = add(a, scale(bound, A_B * s));
         let mag = norm(a);
@@ -787,7 +789,7 @@ impl Boids {
             );
         }
 
-        let kappa = ease::lerp(KAPPA_SMALL, KAPPA, room(self.w, self.sky));
+        let kappa = ease::lerp(KAPPA_SMALL, KAPPA, self.room);
         let pull = scale(sub(self.roost(t), centre), kappa);
         let noise = (2.0 * D_THETA * H).sqrt();
         for i in 0..n {
@@ -893,11 +895,16 @@ impl Generator for Boids {
         let sky = (h - label_row).max(1.0);
         let (n, sigma) = population(size);
         // A small sky gets a smaller, slower flock (see `room`).
-        let sigma = (sigma * ease::lerp(SIGMA_SMALL, 1.0, room(w, sky))).clamp(0.5, 4.0);
+        let room = room(w, sky);
+        let sigma = (sigma * ease::lerp(SIGMA_SMALL, 1.0, room)).clamp(0.5, 4.0);
         if self.ready {
             self.rescale(n, sigma, w, h, &mut ctx.rng);
         }
         (self.n, self.sigma, self.w, self.h, self.sky) = (n, sigma, w, h, sky);
+        // The soft-bound margin is a fraction of the sky's shorter side, narrower in a
+        // small sky, where a wide cushion leaves the flock no room between the walls.
+        self.room = room;
+        self.margin = ease::lerp(MARGIN_SMALL, MARGIN, room) * w.min(sky);
         self.kappa_i = trap_stiffness(n);
         // Scaling can carry a bird past the top of a new label row; the wall puts it back.
         for i in 0..n {

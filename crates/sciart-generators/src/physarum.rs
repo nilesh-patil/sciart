@@ -39,8 +39,8 @@ const MAX_SITES: usize = 20_000;
 const BUCKET: f64 = 1.25;
 /// Agents per lattice site (5 %), within the population range Jones explored.
 const DENSITY: f64 = 0.05;
-/// `DENSITY · MAX_SITES`: every agent buffer is allocated once at this size (GEN-R11).
-const MAX_AGENTS: usize = 1000;
+/// Every agent buffer is allocated once at this size (GEN-R11).
+const MAX_AGENTS: usize = (DENSITY * MAX_SITES as f64) as usize;
 /// Chemoattractant deposited per move, and its decay per step.
 const DEP_T: f32 = 5.0;
 const DECAY: f32 = 0.1;
@@ -62,6 +62,7 @@ const BEATS: [(&str, f64); 4] = [
     ("fade", 6.0),
     ("rest", 2.0),
 ];
+const EXPLORE: usize = 0;
 const FADE: usize = 2;
 const REST: usize = 3;
 const FADE_SECS: f64 = BEATS[FADE].1;
@@ -330,8 +331,9 @@ struct Agent {
     death: f32,
 }
 
-/// The colony on its lattice: trail, occupancy, agents and food. Pure simulation, with
-/// no notion of the display or the timeline.
+/// The colony on its lattice: the sensed trail `T`, the drawn field `V`, occupancy,
+/// agents and food. It knows nothing of pixels or beats; the scene passes fade times to
+/// `starve`.
 #[derive(Debug, Clone)]
 pub(crate) struct Colony {
     /// The chemoattractant the agents sense, food pinning included.
@@ -671,7 +673,7 @@ impl Physarum {
             // A young inoculum is a flat stack of deposits about 2.5× its bright-half
             // mean, which that reference alone paints as one saturated disc; exposing for
             // its peak keeps `#` for the hottest spots of the drop.
-            let (target, k) = if start.index == 0 && start.local < BLOOM_SECS {
+            let (target, k) = if start.index == EXPLORE && start.local < BLOOM_SECS {
                 (bright.max(BLOOM_PEAK * peak), self.k_bloom)
             } else {
                 (bright, self.k_ref)
@@ -684,9 +686,7 @@ impl Physarum {
             self.next = self.draw_plan(rng);
         }
         if self.timeline.cycle(t1) != self.timeline.cycle(t0) {
-            let lattice = self.colony.lattice();
-            self.colony.inoculate(self.next, population(lattice), rng);
-            self.show_now();
+            self.inoculate(self.next, rng);
         } else {
             let k = self.k_shown;
             for (s, &v) in self
@@ -698,6 +698,15 @@ impl Physarum {
                 *s += (v - *s) * k;
             }
         }
+    }
+
+    /// A new colony at `plan`, exposed for the soft drop itself: every bloom opens on the
+    /// same drop, whatever the old network's reference was (PHY-A7).
+    fn inoculate(&mut self, plan: Plan, rng: &mut impl Rng) {
+        let lattice = self.colony.lattice();
+        self.colony.inoculate(plan, population(lattice), rng);
+        self.t_ref = self.colony.vis_bright_mean().0;
+        self.show_now();
     }
 
     /// Reset the drawn field to `V` (a new colony, or a new lattice).
@@ -762,6 +771,11 @@ impl Physarum {
     }
 }
 
+/// The label is drawn only on terminals of at least 40×12 cells, in a row of its own.
+fn shows_label(size: Size) -> bool {
+    size.width() >= 40 && size.height() >= 12
+}
+
 /// The tone `u ∈ [0, 1]` a trail pixel stands for (0 for an empty pixel).
 fn tone(ink: Ink) -> f64 {
     if ink.role == Role::Seq {
@@ -798,17 +812,19 @@ impl Generator for Physarum {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        let display = Size::new(size.width(), size.height().saturating_mul(2));
+        // The plate stops above the label row, so its absorbing edge keeps every tube off
+        // the row and the label sits under the organism, not inside it.
+        let plate = if shows_label(size) {
+            Size::new(size.width(), size.height() - 1)
+        } else {
+            size
+        };
+        let display = Size::new(plate.width(), plate.height().saturating_mul(2));
         let lattice = grid::lattice_for(display, MAX_SITES, BUCKET);
         if !self.ready {
             self.colony = Colony::new(lattice);
             let plan = self.draw_plan(&mut ctx.rng);
-            self.colony
-                .inoculate(plan, population(lattice), &mut ctx.rng);
-            // Expose the first frame for the soft drop itself; later cycles inherit the
-            // old network's reference and brighten in as it adapts.
-            self.t_ref = self.colony.vis_bright_mean().0;
-            self.show_now();
+            self.inoculate(plan, &mut ctx.rng);
             self.ready = true;
         } else if lattice != self.colony.lattice() {
             let beat = self.timeline.at(self.time());
@@ -819,7 +835,7 @@ impl Generator for Physarum {
         }
         self.cells = size;
         self.map.rebuild(lattice, display);
-        self.pixels.resize(size);
+        self.pixels.resize(plate);
         self.relabel();
         self.rasterise();
     }
@@ -846,7 +862,7 @@ impl Generator for Physarum {
                 canvas.put(px, py.div_euclid(2), Glyph::ascii('@'), self.flake_ink);
             }
         }
-        if self.cells.width() >= 40 && self.cells.height() >= 12 {
+        if shows_label(self.cells) {
             // One dark cell either side, so the label never looks glued to a tube.
             let y = i32::from(self.cells.height()) - 1;
             draw::label(canvas, 0, y, self.label.as_str(), LABEL_INK);
@@ -1128,10 +1144,13 @@ mod tests {
         for _ in 0..600 {
             c.step(&mut rng, true);
         }
-        let (cv, above, giant, fed) = network_stats(&c.trail, &food);
+        let (cv, above, giant, _) = network_stats(&c.trail, &food);
         assert!(cv >= 1.2, "cv {cv}");
         assert!((0.2..=0.45).contains(&above), "fraction above mean {above}");
         assert!(giant >= 0.85, "giant component {giant}");
+        // The links are judged on the unpinned drawn field `V` in both runs: on `T` the
+        // pinning itself would hold every fed flake centre above the mean.
+        let (_, _, _, fed) = network_stats(&c.vis, &food);
         assert!(fed >= 4, "{fed} of 5 flakes in the giant component");
 
         // Control: the same colony without food pinning grows a network too, but it does
@@ -1140,7 +1159,7 @@ mod tests {
         for _ in 0..600 {
             c.step(&mut rng, false);
         }
-        let (_, _, _, unfed) = network_stats(&c.trail, &food);
+        let (_, _, _, unfed) = network_stats(&c.vis, &food);
         assert!(unfed <= 3, "{unfed} of 5 flakes linked without pinning");
     }
 
@@ -1149,7 +1168,7 @@ mod tests {
         // < 1.5 s in a debug build.
         let run = || {
             let (mut p, mut ctx) = scene(Size::new(40, 24), 42);
-            assert_eq!(p.colony.lattice(), Size::new(40, 48));
+            assert_eq!(p.colony.lattice(), Size::new(40, 46));
             let first = p.colony.plan;
             let (mut sum, mut count) = (0.0f64, 0);
             while p.time() < 47.9 - 1e-9 {
@@ -1282,14 +1301,15 @@ mod tests {
         };
         let (max0, mean0) = stats(&p.colony.trail);
         let (food0, beat0) = (p.colony.plan.n_food, p.timeline.at(p.time()).index);
+        assert_eq!(p.colony.lattice(), Size::new(197, 98));
         p.resize(Size::new(80, 24), &mut ctx);
-        assert_eq!(p.colony.lattice(), Size::new(80, 48));
+        assert_eq!(p.colony.lattice(), Size::new(80, 46));
         let (max1, mean1) = stats(&p.colony.trail);
         assert!(max1 <= max0);
         assert!((mean1 / mean0 - 1.0).abs() < 0.2, "mean {mean0} -> {mean1}");
         check_exclusion(&p.colony);
         // The population is trimmed to the model's 5 % of the new lattice.
-        let target = population(Size::new(80, 48));
+        let target = population(Size::new(80, 46));
         assert!(
             p.colony.agents.len() <= target,
             "{} agents > {target}",
@@ -1306,7 +1326,7 @@ mod tests {
         run_to(&mut p, &mut ctx, 12.0);
         p.resize(Size::new(200, 50), &mut ctx);
         check_exclusion(&p.colony);
-        assert!(p.colony.agents.len() * 10 >= population(Size::new(197, 100)) * 9);
+        assert!(p.colony.agents.len() * 10 >= population(Size::new(197, 98)) * 9);
     }
 
     #[test]
@@ -1348,6 +1368,35 @@ mod tests {
                 );
             }
         }
+
+        // The plate ends above the label row: over two cycles (1 s samples) the row holds
+        // the label and nothing else, so the label sits under the organism.
+        let (mut p, mut ctx) = scene(size, 42);
+        let y = i32::from(size.height()) - 1;
+        let label = format!(" {} ", p.label.as_str());
+        while p.time() < 100.0 - 1e-9 {
+            let next = p.time().round() + 1.0;
+            run_to(&mut p, &mut ctx, next);
+            for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {
+                let mut canvas = Canvas::new(size, mode);
+                p.render(&mut canvas);
+                let row = &canvas.to_lines()[y as usize];
+                assert_eq!(
+                    row.trim_end(),
+                    label.trim_end(),
+                    "{mode:?} t = {}",
+                    p.time()
+                );
+                for x in 0..i32::from(size.width()) {
+                    let cell = canvas.get(x, y).copied().unwrap_or(Cell::BLANK);
+                    assert!(
+                        cell == Cell::BLANK || cell.ink == LABEL_INK,
+                        "{mode:?} t = {}: trail at x = {x}",
+                        p.time()
+                    );
+                }
+            }
+        }
     }
 
     #[test]
@@ -1365,11 +1414,25 @@ mod tests {
             let hit = cells.iter().filter(|c| of.contains(c)).count();
             hit as f64 / lit.max(1) as f64
         };
+        let lit = |cells: &[char]| cells.iter().filter(|c| ".:+#".contains(**c)).count();
+        let first = frame(&p);
         // Each bloom (the first and the second cycle's) is a drop with a `+` core and a
         // `:` rim, not one saturated `#` disc (exposed for the bright half alone, `#`
         // peaks at ≈ 44 % of the lit cells; here ≈ 12 %).
         for start in [0.0, 48.0] {
             run_to(&mut p, &mut ctx, start);
+            // Every bloom opens on the same soft drop as the first: not an underexposed
+            // haze under the old network's reference.
+            let open = frame(&p);
+            let ratio = lit(&open) as f64 / lit(&first) as f64;
+            assert!(
+                (0.8..=1.2).contains(&ratio),
+                "t = {start}: {} lit cells vs {} at t = 0",
+                lit(&open),
+                lit(&first)
+            );
+            let core = share(&open, &['+', '#']);
+            assert!(core > 0.0, "t = {start}: no `+`/`#` core");
             while p.time() < start + 1.5 - 1e-9 {
                 p.update(2.0 * STEP, &mut ctx);
                 let hot = share(&frame(&p), &['#']);
