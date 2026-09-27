@@ -1,0 +1,22 @@
+---
+source: crates/sciart-generators/tests/snapshots.rs
+expression: frame
+---
+ Re~145  St~0.17                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                                
+                                                                    ...         
+                                                      ...           .xxx.       
+                    ....xxxxxxxxxxx..              ...o..         .xxxxxx.      
+         xXxXXXXXXXXXXXXXXxxxxXXXXXXxx.           .oooo..        .xxxXXxxx      
+       .X@@@@@xXXXXXXXxX ooooo xXXXXXXxx         .oooooo.       .xxxXXXXxx.     
+       x@@@@@@@.xxxx..oOOOOOooo. xXXXXXxx       .ooOOooo.       .xxXXXXxx.      
+       o@@@@@@@xx .oOOOOOOOOoo... xXXXXxx.      .oOOOOoo.       .xxxxxxxx.      
+       .O@@@@@OoOooOOOOOOOOo..     .xxxxxx.     ooOOOOoo         .xxxxxx.       
+         oOOOOOOOOOOOOOoooo.         .xxx..     ooOOOOo.         ..xxxx..       
+                ......                 .......  .oOOoo.            .....        
+                                      .....  .oooooo..              ....        
+                                          .........
