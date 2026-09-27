@@ -4,7 +4,7 @@
 
 use std::hint::black_box;
 
-use sciart_testalloc::{Allocs, CountingAlloc, measure};
+use sciart_testalloc::{Allocs, CountingAlloc, live_bytes, measure};
 
 #[global_allocator]
 static GLOBAL: CountingAlloc = CountingAlloc;
@@ -65,6 +65,25 @@ fn ignores_allocations_on_other_threads() {
     // other test threads allocate concurrently.
     let ((), stats) = measure(|| {});
     assert_eq!(stats, Allocs::default());
+}
+
+#[test]
+fn test_r6_live_bytes_track_alloc_realloc_and_free() {
+    let start = live_bytes();
+    let mut v = Vec::<u8>::with_capacity(black_box(10));
+    assert_eq!(live_bytes() - start, 10);
+    // Growth is counted as the size delta, not as a second block.
+    v.reserve_exact(black_box(30));
+    assert_eq!(live_bytes() - start, v.capacity() as i64);
+    v.shrink_to(black_box(4));
+    assert_eq!(live_bytes() - start, v.capacity() as i64);
+    drop(v);
+    assert_eq!(live_bytes(), start);
+    // A block kept alive stays counted: exactly what a leak looks like.
+    let kept = black_box(Box::new([0u8; 24]));
+    assert_eq!(live_bytes() - start, 24);
+    drop(kept);
+    assert_eq!(live_bytes(), start);
 }
 
 #[test]
