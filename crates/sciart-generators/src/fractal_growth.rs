@@ -37,7 +37,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, raster};
+use sciart_core::{draw, grid, raster};
 
 pub static META: Meta = Meta {
     name: "fractal_growth",
@@ -55,8 +55,19 @@ pub fn build() -> Box<dyn Generator> {
 const SUB_X: i32 = Dots::CELL_W;
 const SUB_Y: i32 = Dots::CELL_H;
 
+/// Most lattice sites (ADR-0012, CRY-A5): 200×50 (80 000 dots) is uncapped; larger
+/// terminals grow the crystal in a centred window of about this many dots.
+const MAX_NODES: usize = 1 << 17;
+
 /// Attach-time sentinel for an empty site (real attach times are ≥ 0).
 const EMPTY: f32 = -1.0;
+
+/// Capacity of the site pool and the melt queue for a `lattice`: growth ends once a
+/// quarter of the sites are crystal (`FractalGrowth::update`), so this never fills in a
+/// normal cycle; `Dla::step_walker` refuses to stick beyond it.
+fn pool(lattice: Size) -> usize {
+    lattice.area() / 4 + 1
+}
 /// Walker-step budget per simulated second at 200×50 (the spec caps a frame at 4000; with
 /// the jump accelerations a crystal needs far fewer). Measured cost grows ~R^2.5 with the
 /// crystal radius R, so the budget scales as `(R / R_REF)^2.5` for a ~15 s growth at any
@@ -170,7 +181,7 @@ impl Dla {
         Self {
             seed: (0, 0),
             attach: Grid::new(lattice, EMPTY),
-            cells: Vec::with_capacity(lattice.area()),
+            cells: Vec::with_capacity(pool(lattice)),
             walkers: vec![(0, 0); walkers],
             turn: 0,
             free: Grid::new(lattice, FREE_CAP),
@@ -291,7 +302,12 @@ impl Dla {
             return;
         }
         let d = self.dist(x, y);
-        if d <= self.r_max + TOUCH_REACH && self.touches(x, y) && rng.random::<f64>() < self.p_stick
+        // Never stick to a full pool (growth is over by then, see `pool`): no reallocation.
+        let room = self.cells.len() < self.cells.capacity();
+        if room
+            && d <= self.r_max + TOUCH_REACH
+            && self.touches(x, y)
+            && rng.random::<f64>() < self.p_stick
         {
             self.attach.set(x, y, t as f32);
             self.cells.push((x, y));
@@ -371,6 +387,8 @@ pub struct FractalGrowth {
     /// The crystal rasterised for the current state, sized in `resize` and rebuilt by
     /// [`FractalGrowth::rasterise`] after every state change; `render` only blits it.
     dots: Dots,
+    /// The lattice's top-left dot in the display: the capped lattice is centred (CRY-A5).
+    origin: (i32, i32),
 }
 
 /// The state that colours the crystal: phase, clock and melting threshold.
@@ -423,6 +441,7 @@ impl Default for FractalGrowth {
             label: String::with_capacity(96),
             label_row: None,
             room: 0,
+            origin: (0, 0),
             dots: Dots::default(),
         }
     }
@@ -518,12 +537,14 @@ impl FractalGrowth {
             melt_k: self.melt_k,
         };
         let (dots, d, chem_map) = (&mut self.dots, &self.dla, &self.chem);
+        let (ox, oy) = self.origin;
         dots.clear();
-        // Only the terminal cells that can hold crystal: the seed's r_max box.
+        // Only the terminal cells that can hold crystal: the seed's r_max box, in display
+        // dots (lattice site (x, y) is display dot (ox + x, oy + y)).
         let r = d.r_max.ceil() as i32 + 1;
         let (lw, lh) = d.dims();
-        let (x0, x1) = ((d.seed.0 - r).max(0), (d.seed.0 + r).min(lw - 1));
-        let (y0, y1) = ((d.seed.1 - r).max(0), (d.seed.1 + r).min(lh - 1));
+        let (x0, x1) = ((d.seed.0 - r).max(0) + ox, (d.seed.0 + r).min(lw - 1) + ox);
+        let (y0, y1) = ((d.seed.1 - r).max(0) + oy, (d.seed.1 + r).min(lh - 1) + oy);
         for cy in y0 / SUB_Y..=y1 / SUB_Y {
             for cx in x0 / SUB_X..=x1 / SUB_X {
                 // A cell's colour comes from all its crystal sites together (youngest
@@ -535,14 +556,15 @@ impl FractalGrowth {
                 for dy in 0..SUB_Y {
                     for dx in 0..SUB_X {
                         let (x, y) = (cx * SUB_X + dx, cy * SUB_Y + dy);
-                        if let Some(&a) = d.attach.get(x, y)
+                        let site = (x - ox, y - oy);
+                        if let Some(&a) = d.attach.get(site.0, site.1)
                             && a >= 0.0
                         {
                             sites[n] = (x, y);
                             n += 1;
                             youngest = youngest.max(a);
-                            chem = chem.max(chem_map.get(x, y).copied().unwrap_or(0));
-                            has_seed |= (x, y) == d.seed;
+                            chem = chem.max(chem_map.get(site.0, site.1).copied().unwrap_or(0));
+                            has_seed |= site == d.seed;
                         }
                     }
                 }
@@ -563,15 +585,24 @@ impl Generator for FractalGrowth {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        // The DLA lattice *is* the dot lattice: one site per braille dot.
+        // One site per braille dot, in a window of at most MAX_NODES dots centred in the
+        // display (ADR-0012). A resize reseeds, so nothing needs resampling.
         self.dots.resize(size);
-        let lattice = self.dots.dot_size();
+        let display = self.dots.dot_size();
+        let lattice = grid::lattice_for(display, MAX_NODES, 0.0);
+        let margin = |d: u16, l: u16| i32::from(d - l) / 2;
+        self.origin = (
+            margin(display.width(), lattice.width()),
+            margin(display.height(), lattice.height()),
+        );
         self.dla = Dla::new(lattice, WALKERS);
         self.chem = Grid::new(lattice, u16::MAX);
-        self.queue = Vec::with_capacity(lattice.area());
-        // R(0.85) in rows; a row is SUB_Y lattice spacings.
-        let r_rows = draw::fit_radius(size, GROW_FRAC);
-        self.r_target = r_rows * f64::from(SUB_Y);
+        self.queue = Vec::with_capacity(pool(lattice));
+        // R(0.85) of the screen in lattice spacings (a row is SUB_Y), within the window.
+        let window = f64::from(lattice.width().min(lattice.height())) / 2.0;
+        self.r_target =
+            (draw::fit_radius(size, GROW_FRAC) * f64::from(SUB_Y)).min(GROW_FRAC * window);
+        let r_rows = self.r_target / f64::from(SUB_Y);
         self.steps_per_sec =
             (STEPS_REF * (r_rows / R_REF_ROWS).powf(COST_EXP)).clamp(STEPS_MIN, STEPS_MAX);
         self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
@@ -628,6 +659,7 @@ impl Generator for FractalGrowth {
             // The vapour is sparse: each walker is a lone dot that replaces its cell
             // (rather than merging into a `Dots` layer); the crystal then draws over it.
             for &(x, y) in &self.dla.walkers {
+                let (x, y) = (x + self.origin.0, y + self.origin.1);
                 let glyph = raster::braille(raster::dot_bit(x, y));
                 canvas.put(x / SUB_X, y / SUB_Y, glyph, Ink::new(Role::Dim, 110));
             }
@@ -755,6 +787,69 @@ mod tests {
             prev.copy_from_slice(d.attach.as_slice());
         }
         assert!(d.cells.len() > 100, "grew only {}", d.cells.len());
+    }
+
+    #[test]
+    fn cry_a5_lattice_is_capped_and_centred() {
+        for (w, h) in [
+            (1, 1),
+            (80, 24),
+            (200, 50),
+            (250, 70),
+            (500, 150),
+            (900, 20),
+        ] {
+            let size = Size::new(w, h);
+            let mut g = FractalGrowth::default();
+            g.resize(size, &mut Ctx::new(1, size));
+            let display = g.dots.dot_size();
+            let lattice = g.dla.attach.size();
+            assert!(lattice.area() <= MAX_NODES, "{w}x{h}: {lattice:?}");
+            if display.area() <= MAX_NODES {
+                assert_eq!(lattice, display, "{w}x{h}: uncapped");
+            }
+            let (ox, oy) = g.origin;
+            let right = i32::from(display.width()) - i32::from(lattice.width()) - ox;
+            let bottom = i32::from(display.height()) - i32::from(lattice.height()) - oy;
+            assert!(
+                (0..=1).contains(&(right - ox)),
+                "{w}x{h}: x margins {ox} {right}"
+            );
+            assert!(
+                (0..=1).contains(&(bottom - oy)),
+                "{w}x{h}: y margins {oy} {bottom}"
+            );
+        }
+    }
+
+    #[test]
+    fn cry_a5_a_full_cycle_at_500x150_stays_in_the_window_without_reallocating() {
+        let size = Size::new(500, 150);
+        let mut ctx = Ctx::new(5, size);
+        let mut g = FractalGrowth::default();
+        g.resize(size, &mut ctx);
+        let (pool_cap, queue_cap) = (g.dla.cells.capacity(), g.queue.capacity());
+        let (ox, oy) = g.origin;
+        let (lw, lh) = g.dla.dims();
+        let window = |x: i32, y: i32| (ox..ox + lw).contains(&x) && (oy..oy + lh).contains(&y);
+        let mut saw_melt = false;
+        for _ in 0..(40.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            saw_melt |= g.phase == Phase::Melt;
+            for &(x, y) in &g.dla.walkers {
+                assert!(window(x + ox, y + oy), "walker ({x}, {y})");
+            }
+        }
+        assert!(saw_melt, "grew, held and melted within 40 s");
+        assert_eq!(g.dla.cells.capacity(), pool_cap, "site pool reallocated");
+        assert_eq!(g.queue.capacity(), queue_cap, "melt queue reallocated");
+        // Every lit dot of the raster lies in the window.
+        let d = g.dots.dot_size();
+        for y in 0..i32::from(d.height()) {
+            for x in 0..i32::from(d.width()) {
+                assert!(!g.dots.is_lit(x, y) || window(x, y), "dot ({x}, {y})");
+            }
+        }
     }
 
     #[test]
