@@ -37,7 +37,7 @@ use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, ease, ink};
+use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
@@ -129,6 +129,7 @@ const BUCKET: f64 = 1.25;
 /// `v` scale for the excitation-cycle phase: `a − b₀`, the unquenched value, so the
 /// quench fades tails instead of brightening them.
 const R_SCALE: f32 = A - B0;
+/// Phases below this show as the resting medium (the terminal background).
 const S_MIN: f32 = 0.06;
 /// Reseeded fronts brighten over this many seconds (display only, SPEC-002 Motion).
 const FADE_IN_S: f64 = 0.5;
@@ -461,9 +462,9 @@ pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
     seeds
 }
 
-/// The excitation-cycle phase `s ∈ [0, 1]` of a node (SPEC-002 Inks): palest at the
-/// fresh front, orange at the back of the plateau, then red → violet → black as the
-/// medium recovers.
+/// The excitation-cycle phase `s ∈ [0, 1]` of a node (SPEC-002 Inks): 1 at the fresh
+/// front, falling over the excited plateau (`s ≥ 0.55`), then down the recovering tail
+/// to 0 at rest.
 fn phase(u: f32, v: f32) -> f32 {
     let r = (v / R_SCALE).clamp(0.0, 1.0);
     if u >= 0.5 {
@@ -473,12 +474,56 @@ fn phase(u: f32, v: f32) -> f32 {
     }
 }
 
-/// The phase as a colour; the resting medium is the terminal background.
+/// Ferroin ramp position for a phase, piecewise linear between these knots (BZ-A9): the
+/// leading edge (`s ≥ 0.92`, the front's first node or two) takes the pale-azure top,
+/// the rest of the plateau saturated blue-violet, and the tail a dark crimson-to-wine
+/// fade into the blank rest.
+const FERROIN_KNOTS: [(f32, f32); 6] = [
+    (S_MIN, 0.03),
+    (0.30, 0.14),
+    (0.55, 0.45),
+    (0.88, 0.66),
+    (0.92, 0.86),
+    (1.00, 1.00),
+];
+
+/// The ferroin level of a phase `s ≥ S_MIN` (BZ-A9): never falling as `s` rises, 255 at 1.
+const fn phase_level(s: f32) -> u8 {
+    let mut i = 1;
+    while i < FERROIN_KNOTS.len() - 1 && s > FERROIN_KNOTS[i].0 {
+        i += 1;
+    }
+    let ((s0, t0), (s1, t1)) = (FERROIN_KNOTS[i - 1], FERROIN_KNOTS[i]);
+    let t = t0 + (t1 - t0) * (s - s0) / (s1 - s0);
+    // Round half up; the clamp keeps it in 0..=255 for s outside the knots.
+    (t.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
+}
+
+/// The phase as a colour in the ferroin ramp (BZ-A9). The ramp borrows the indicator's
+/// colours (red ferroin, blue ferriin), so fronts read blue and the tail reddens as the
+/// medium recovers, echoing the indicator; hue and lightness together encode the phase
+/// `s`, not the ferriin concentration `v` (false colour), so the red comes earlier than
+/// ferriin actually falls. The resting medium, ferroin-red in a real dish, is left to the
+/// terminal background so the waves carry the colour.
 fn phase_ink(s: f32) -> Ink {
+    /// [`phase_level`] at `s = i/1023`, built at compile time: one lookup per pixel.
+    const LEVELS: [u8; 1024] = {
+        let mut t = [0; 1024];
+        let mut i = 0;
+        while i < t.len() {
+            t[i] = phase_level(i as f32 / 1023.0);
+            i += 1;
+        }
+        t
+    };
     if s < S_MIN {
         Ink::BLANK
     } else {
-        ink::seq(f64::from(s))
+        // `s ≤ 1` (phase's range), and the `min` guards the index anyway.
+        Ink::new(
+            Role::Ramp(Ramp::Ferroin),
+            LEVELS[((s * 1023.0 + 0.5) as usize).min(1023)],
+        )
     }
 }
 
@@ -491,9 +536,17 @@ fn phase_word(index: usize, room: usize) -> &'static str {
     }
 }
 
-/// ASCII for a cell from the brighter of its two pixels (SPEC-002 ASCII).
+/// ASCII for a cell from the brighter of its two pixels (SPEC-002 ASCII): the M10
+/// thresholds `s` = 0.85, 0.70, 0.40, 0.20, read through [`phase_level`]; the resting
+/// medium is blank.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let lit = |i: Ink| i.role == Role::Seq;
+    const AT: [u8; 4] = [
+        phase_level(0.85),
+        phase_level(0.70),
+        phase_level(0.40),
+        phase_level(0.20),
+    ];
+    let lit = |i: Ink| i.role != Role::Background;
     let ink = match (lit(top), lit(bottom)) {
         (false, false) => return None,
         (true, false) => top,
@@ -502,10 +555,10 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         (true, true) => bottom,
     };
     let ch = match ink.level {
-        217.. => '@',
-        179.. => '#',
-        102.. => '+',
-        51.. => ':',
+        l if l >= AT[0] => '@',
+        l if l >= AT[1] => '#',
+        l if l >= AT[2] => '+',
+        l if l >= AT[3] => ':',
         _ => '.',
     };
     Some((ch, ink))
@@ -958,6 +1011,10 @@ mod tests {
         // v decays as e^{-t}: the 2 s (3 tu) quench leaves ≈ 0.047, far below both the
         // 0.1 a pacemaker needs and the ≈ 0.23 that still shades (SPEC-002 BZ-A7).
         assert!(max(&bz.v) < 0.06, "max v = {}", max(&bz.v));
+        assert!(
+            bz.pixels_iter().all(|i| i == Ink::BLANK),
+            "the quenched dish is at rest"
+        );
         assert!((WAVES_STEPS..CYCLE_STEPS).all(|s| !pacemaker_fires(s)));
         assert!(pacemaker_fires(PM_FIRST) && pacemaker_fires(PM_FIRST + PM_PERIOD));
 
@@ -1030,30 +1087,71 @@ mod tests {
             }
             let px: Vec<Ink> = bz.pixels_iter().collect();
             let n = px.len() as f64;
-            let lit = px.iter().filter(|i| i.role == Role::Seq).count() as f64 / n;
-            let pale = px
-                .iter()
-                .filter(|i| i.role == Role::Seq && i.level >= 217)
-                .count() as f64
-                / n;
+            let share = |p: &dyn Fn(Ink) -> bool| px.iter().filter(|&&i| p(i)).count() as f64 / n;
+            let lit = share(&|i| i.role != Role::Background);
+            let pale = share(&|i| i.role != Role::Background && i.level >= phase_level(0.85));
             assert!((0.20..=0.70).contains(&lit), "t={until}: lit {lit:.3}");
             assert!((0.01..=0.12).contains(&pale), "t={until}: pale {pale:.3}");
         }
     }
 
-    /// Brightest Seq level on screen.
+    /// Brightest level on screen (0 for a resting dish).
     fn peak_level(bz: &Bz) -> u8 {
-        bz.pixels_iter()
-            .filter(|i| i.role == Role::Seq)
-            .map(|i| i.level)
-            .max()
-            .unwrap_or(0)
+        bz.pixels_iter().map(|i| i.level).max().unwrap_or(0)
+    }
+
+    #[test]
+    fn bz_a9_ferroin_inks_rise_with_phase_on_a_blank_rest() {
+        let rest = Ink::BLANK;
+        assert_eq!(phase_ink(phase(0.0, 0.0)), rest, "resting medium");
+        let mut last = 0;
+        for i in 6..=100 {
+            let ink = phase_ink(i as f32 / 100.0);
+            assert_eq!(ink.role, Role::Ramp(Ramp::Ferroin));
+            assert!(ink.level >= last, "s {i}%");
+            last = ink.level;
+        }
+        assert_eq!(last, 255);
+        // A pale rim only at the leading edge, a saturated body, a dark tail.
+        assert!(phase_level(0.92) >= 219, "rim {}", phase_level(0.92));
+        assert!(phase_level(0.88) <= 170, "plateau {}", phase_level(0.88));
+        assert!(phase_level(0.55) <= 115, "back of the plateau");
+        assert!(phase_level(0.10) <= 16, "tail {}", phase_level(0.10));
+
+        // On a planar wave the rim (s ≥ 0.92) is at most 2 nodes deep, behind a lit body
+        // at least 5 times as deep.
+        let (mut u, mut v, mut lap) = grids(160, 3);
+        for y in 0..3 {
+            for x in 0..3 {
+                u.set(x, y, 1.0);
+            }
+        }
+        run(&mut u, &mut v, &mut lap, steps(10.0));
+        let row: Vec<f32> = (0..160)
+            .map(|x| phase(*u.get(x, 1).unwrap(), *v.get(x, 1).unwrap()))
+            .collect();
+        let rim = row.iter().filter(|&&s| s >= 0.92).count();
+        let body = row.iter().filter(|&&s| (S_MIN..0.92).contains(&s)).count();
+        assert!((1..=2).contains(&rim), "rim {rim} nodes");
+        assert!(body >= 5 * rim, "body {body} nodes");
+        // The ASCII keeps the M10 thresholds on s, and the resting dish stays blank.
+        let at = phase_ink;
+        assert_eq!(ascii_cell(rest, rest), None);
+        assert_eq!(ascii_cell(at(0.9), rest).map(|c| c.0), Some('@'));
+        assert_eq!(ascii_cell(rest, at(0.75)).map(|c| c.0), Some('#'));
+        assert_eq!(ascii_cell(at(0.5), at(0.3)).map(|c| c.0), Some('+'));
+        assert_eq!(ascii_cell(at(0.25), rest).map(|c| c.0), Some(':'));
+        assert_eq!(ascii_cell(at(0.1), rest).map(|c| c.0), Some('.'));
+        let (bz, _) = scene(Size::new(80, 24), 42);
+        let roles = [Role::Ramp(Ramp::Ferroin), Role::Background];
+        assert!(bz.pixels_iter().all(|i| roles.contains(&i.role)));
     }
 
     #[test]
     fn bz_a7_reseeded_fronts_fade_in_without_touching_the_model() {
         let (mut bz, mut ctx) = scene(Size::new(80, 24), 42);
-        assert!(peak_level(&bz) >= 217, "the first seeding shows at once");
+        let pale = phase_level(0.85);
+        assert!(peak_level(&bz) >= pale, "the first seeding shows at once");
         for _ in 0..62 * 4 {
             bz.update(0.25, &mut ctx);
         }
@@ -1063,7 +1161,7 @@ mod tests {
         assert_eq!(bz.step, CYCLE_STEPS + 1);
         assert!(max(&bz.u) > 0.9, "the model reseeds at full strength");
         assert!(
-            peak_level(&bz) < 51,
+            peak_level(&bz) < phase_level(0.2),
             "reseed pops in at {}",
             peak_level(&bz)
         );
@@ -1074,7 +1172,7 @@ mod tests {
             assert!(now >= last, "fade-in dimmed {last} -> {now}");
             last = now;
         }
-        assert!(last >= 217, "fronts at full brightness 0.5 s in: {last}");
+        assert!(last >= pale, "fronts at full brightness 0.5 s in: {last}");
     }
 
     #[test]
@@ -1093,11 +1191,10 @@ mod tests {
             }
         }
         bz.rasterise();
-        for ink in bz.pixels_iter().filter(|i| i.role == Role::Seq) {
+        for ink in bz.pixels_iter().filter(|&i| i != Ink::BLANK) {
             assert!(
-                ink.level >= 217,
-                "halo level {} ahead of the front",
-                ink.level
+                ink.level >= phase_level(0.85),
+                "halo {ink:?} ahead of the front"
             );
         }
     }
