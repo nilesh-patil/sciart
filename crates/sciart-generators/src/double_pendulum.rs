@@ -189,6 +189,34 @@ fn wrap_pi(a: f64) -> f64 {
     a - TAU * (a / TAU).round()
 }
 
+/// The widest each readout form (long, mid, short) can be for any separation in
+/// `[0, π√2]`, start separation `1e-3` and finite energy drift (`dp_gen_r13_form_widths_
+/// bound_every_value`). `render` picks a form by this width, not its current length, so
+/// the choice never flips as the numbers change width.
+const FORM_WIDTHS: [usize; 3] = [84, 34, 14];
+/// Front padding for the readout forms.
+const PAD: &str =
+    "                                                                                        ";
+
+/// The readout forms, unpadded: long
+/// `|dtheta| 3.1e-2 rad = 31.0x start (3.4 e-folds)   energy drift 2e-9   t 12/45s`, mid
+/// `|dtheta| 3.1e-2 (3.4 e-folds)` (no drift: its width varies most), short `e-folds 3.4`.
+pub(crate) fn write_forms(out: &mut [String; 3], sep: f64, sep0: f64, drift: f64, t: f64) {
+    let growth = sep / sep0.max(1e-300);
+    let folds = growth.max(1e-300).ln();
+    let [long, mid, short] = out;
+    long.clear();
+    mid.clear();
+    short.clear();
+    let _ = write!(
+        long,
+        "|dtheta| {sep:.1e} rad = {growth:.1}x start ({folds:.1} e-folds)   \
+         energy drift {drift:.0e}   t {t:.0}/{RUN_SECONDS:.0}s"
+    );
+    let _ = write!(mid, "|dtheta| {sep:.1e} ({folds:.1} e-folds)");
+    let _ = write!(short, "e-folds {folds:.1}");
+}
+
 /// Angular separation of two states, `√(Δθ₁² + Δθ₂²)` with each difference wrapped to
 /// `(−π, π]` (DP-A3) — a full turn apart is the same configuration.
 pub(crate) fn separation(a: &[f64; 4], b: &[f64; 4]) -> f64 {
@@ -316,22 +344,19 @@ impl DoublePendulum {
     }
 
     fn refresh_labels(&mut self) {
-        let growth = self.sep / self.sep0.max(1e-300);
-        let folds = growth.max(1e-300).ln();
-        let (sep, drift, t) = (self.sep, self.drift, self.run_t);
-        let [long, mid, short] = &mut self.labels;
-        long.clear();
-        mid.clear();
-        short.clear();
-        let _ = write!(
-            long,
-            "|dtheta| {sep:.1e} rad = {growth:>7.1}x start ({folds:>4.1} e-folds)   \
-             energy drift {drift:.0e}   t {t:>2.0}/{RUN_SECONDS:.0}s"
+        write_forms(
+            &mut self.labels,
+            self.sep,
+            self.sep0,
+            self.drift,
+            self.run_t,
         );
-        // No drift here: its width varies (0e0, 3e-7), and at 80×24 the half-row room
-        // (CORE-R76) would then flip the readout between forms.
-        let _ = write!(mid, "|dtheta| {sep:.1e} ({folds:>4.1} e-folds)");
-        let _ = write!(short, "e-folds {folds:>4.1}");
+        for (label, width) in self.labels.iter_mut().zip(FORM_WIDTHS) {
+            // Padded at the front, so the readout's left edge holds still while its
+            // numbers change width; capacity 96 ≥ every width, so this never reallocates.
+            let pad = width.saturating_sub(label.len());
+            label.insert_str(0, &PAD[..pad.min(PAD.len())]);
+        }
     }
 
     /// Draw a rod from `p` to `q` (cells), endpoints excluded, with a glyph that follows
@@ -510,7 +535,11 @@ impl Generator for DoublePendulum {
         // Right-aligned, clear of the title (GEN-R13).
         let room = title::readout_room(canvas.size(), &Title::of(self));
         if let Some(row) = self.label_row
-            && let Some(label) = self.labels.iter().find(|l| l.len() <= room)
+            && let Some((label, _)) = self
+                .labels
+                .iter()
+                .zip(FORM_WIDTHS)
+                .find(|&(l, width)| width <= room && l.len() <= room)
         {
             sciart_core::draw::label_right(
                 canvas,
@@ -525,7 +554,7 @@ impl Generator for DoublePendulum {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::f64::consts::FRAC_PI_2;
+    use std::f64::consts::{FRAC_PI_2, SQRT_2};
 
     #[test]
     fn dp_a2_caption_reports_in_phase_slow_and_anti_phase_fast_modes() {
@@ -776,6 +805,39 @@ mod tests {
                     g.update(SIM_DT, &mut ctx);
                 }
             }
+        }
+    }
+
+    #[test]
+    fn dp_gen_r13_form_widths_bound_every_value() {
+        let seps = [0.0, 5e-324, 1e-300, 1.2e-10, 1e-3, 0.123, 4.4, PI * SQRT_2];
+        let drifts = [0.0, 5e-324, 1e-16, 3e-7, 0.5, 9.9, 1e308, f64::MAX];
+        let mut widest = [0; 3];
+        let mut forms: [String; 3] = Default::default();
+        for sep in seps {
+            for drift in drifts {
+                for t in [0.0, 9.4, 44.6, RUN_SECONDS] {
+                    write_forms(&mut forms, sep, 1e-3, drift, t);
+                    for (w, f) in widest.iter_mut().zip(&forms) {
+                        *w = (*w).max(f.len());
+                    }
+                }
+            }
+        }
+        assert_eq!(widest, FORM_WIDTHS, "the widths are tight bounds");
+        assert!(PAD.len() >= FORM_WIDTHS[0]);
+    }
+
+    #[test]
+    fn dp_gen_r13_readout_is_padded_at_the_front_only() {
+        let mut g = DoublePendulum::default();
+        g.resize(Size::new(200, 50), &mut seeded(3));
+        for (label, width) in g.labels.iter().zip(FORM_WIDTHS) {
+            assert_eq!(label.len(), width, "{label:?}");
+            let text = label.trim_start();
+            assert!(!text.contains("x start") || text.contains(" = "), "{text}");
+            // No run of padding inside the text: separators are at most 3 spaces.
+            assert!(!text.contains("    "), "inner padding: {text:?}");
         }
     }
 
