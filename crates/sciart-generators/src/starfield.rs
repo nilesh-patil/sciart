@@ -90,7 +90,12 @@ impl Generator for Starfield {
         for s in &self.stars {
             if let Some(b) = brightness(s, self.time) {
                 let level = 70 + (b as u8) * 46;
-                canvas.put(s.x as i32, s.y as i32, GLYPHS[b], Ink::new(Role::Star, level));
+                canvas.put(
+                    s.x as i32,
+                    s.y as i32,
+                    GLYPHS[b],
+                    Ink::new(Role::Star, level),
+                );
             }
         }
     }
@@ -124,13 +129,24 @@ mod tests {
         g.update(1.0, &mut ctx);
         for s in &g.stars {
             let expected = f64::from(s.layer) * SPEED;
-            assert!((s.x - expected).abs() < 1e-9, "layer {} moved {}", s.layer, s.x);
+            assert!(
+                (s.x - expected).abs() < 1e-9,
+                "layer {} moved {}",
+                s.layer,
+                s.x
+            );
         }
     }
 
     #[test]
     fn brightness_is_bounded() {
-        let star = Star { x: 0.0, y: 0.0, layer: LAYERS, phase: 0.0, rate: 2.0 };
+        let star = Star {
+            x: 0.0,
+            y: 0.0,
+            layer: LAYERS,
+            phase: 0.0,
+            rate: 2.0,
+        };
         for i in 0..1000 {
             if let Some(b) = brightness(&star, f64::from(i) * 0.01) {
                 assert!(b < GLYPHS.len());

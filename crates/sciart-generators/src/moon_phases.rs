@@ -231,7 +231,13 @@ impl Generator for MoonPhases {
             // "{name}  {pct}%" drawn in pieces so render never allocates (GEN-R11).
             let name = phase_name(phase);
             let pct = ((100.0 * illuminated_fraction(phase)).round() as u32).min(100);
-            let digits = if pct >= 100 { 3 } else if pct >= 10 { 2 } else { 1 };
+            let digits = if pct >= 100 {
+                3
+            } else if pct >= 10 {
+                2
+            } else {
+                1
+            };
             let mut buf = [b'%'; 4];
             let mut n = pct;
             for slot in buf[..digits].iter_mut().rev() {
