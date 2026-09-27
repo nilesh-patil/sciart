@@ -29,7 +29,7 @@ pub use geom::{Camera, Projector};
 pub use grid::{Edges, Grid, Hood, SampleMap};
 pub use ink::{Ink, Ramp, Role};
 pub use particles::{InverseCdf, ParticlePool, SpatialHash, Trail};
-pub use raster::{Density, Dots, Pixels};
+pub use raster::{Density, Dots, Pixels, Tone};
 pub use rng::SplitMix64;
 pub use size::Size;
 pub use stage::Stage;

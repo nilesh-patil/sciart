@@ -354,6 +354,24 @@ fn core_r51_r55_dots_line_and_density_do_not_allocate() {
 }
 
 #[test]
+fn core_r81_tone_and_to_pixels_do_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut density = Density::new(size);
+    let mut pixels = Pixels::new(size);
+    for i in 0..400 {
+        density.deposit(f64::from(i), f64::from(i % 200), 3.0);
+    }
+    let (tone, stats) = measure(|| {
+        let tone = sciart_core::raster::Tone::asinh(0.2, 30.0);
+        density.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
+        black_box(tone.level(4.0));
+        tone
+    });
+    black_box(tone);
+    assert_free("Tone::asinh / Density::to_pixels", stats);
+}
+
+#[test]
 fn core_r52_sample_map_does_not_allocate_after_rebuild() {
     let src = Grid::new(Size::new(120, 60), 0.5f32);
     let mut map = SampleMap::default();
