@@ -16,6 +16,9 @@
 //! On screen a radial fade τ(r), shared by both slots, thins the far dust, so the drawn
 //! density is exactly `τ(r)·(M(χ)/2)·|Ψ(t)|²`.
 //!
+//! The only liberty with time is stated on screen: `ω` is the true Bohr frequency `ΔE/h`
+//! divided by a round per-line factor that the label prints (`Lyα 121.6 nm  slowed 4×10¹⁵`).
+//!
 //! Raster convention (M10): points are projected into [`Dots`] at the end of `update` and
 //! `resize`; `render` draws the nucleus, blits, redraws the nucleus over a nearly empty
 //! node cell and writes the label.
@@ -97,13 +100,14 @@ const PITCH_XYZ: f64 = 0.0;
 const PITCH_WOBBLE: f64 = 0.10;
 /// Display fade of the far dust, so the cloud ends inside the frame: a point is proposed
 /// iff `v < p_k·τ(r)`, where the taper τ is 1 inside `r_in` and falls linearly to 0 at
-/// `r_out`. The window is the r₉₀ and r₉₇ of the states on screen, blended geometrically
+/// `r_out`. The window is the r₈₈ and r₉₅ of the states on screen, blended geometrically
 /// with weight c_b² and shared by both slots, so the displayed density is exactly
 /// `τ(r)·(M(χ)/2)|Ψ|²` (ORB-A4). Given a proposal, `v/p_k` is a fixed uniform independent
-/// of `u`, so the fade is shimmer-free.
-const R_FADE: (f64, f64) = (0.90, 0.97);
-/// Display-compressed Bohr frequency of Lyman-α (Hz); others scale as `√ΔE`.
-const F_LYMAN_ALPHA: f64 = 2.0;
+/// of `u`, so the fade is shimmer-free. (r₉₀, r₉₇) left lone single-dot braille cells a
+/// few columns out from the lobes, which read as grain rather than charge cloud.
+const R_FADE: (f64, f64) = (0.88, 0.95);
+/// Planck constant (eV·s, exact since the 2019 SI): the true Bohr frequency is `ΔE/h`.
+const H_EV_S: f64 = 4.135_667_696e-15;
 /// Hydrogen Rydberg energy with the reduced mass, `R∞hc·μ/mₑ` (eV), and `hc` (eV·nm; the
 /// label strings are checked against it).
 const RYDBERG_H: f64 = 13.598_287;
@@ -247,7 +251,7 @@ impl Fade {
         outer: f64::INFINITY,
     };
 
-    /// The window of one orbital: its `r₉₀` and `r₉₇`.
+    /// The window of one orbital: its `r₈₈` and `r₉₅`.
     fn of(orb: Orb) -> Self {
         let r = |q: f64| radius_quantile(orb.n(), orb.l(), q);
         Self {
@@ -370,21 +374,54 @@ pub(crate) fn line_nm(na: u32, nb: u32) -> f64 {
     HC / gap(na, nb)
 }
 
-/// Display beat frequency: monotone `2 Hz·√(ΔE/ΔE_Lyα)`.
-fn beat_hz(na: u32, nb: u32) -> f64 {
-    F_LYMAN_ALPHA * (gap(na, nb) / gap(1, 2)).sqrt()
+/// An α line the gallery crosses (n ↔ n + 1): its label, and the stated factor by which
+/// the display slows time for its beat.
+#[derive(Debug)]
+pub(crate) struct Line {
+    /// Label parts (Unicode, ASCII): the line, and the slow-down it is shown at.
+    name: (&'static str, &'static str),
+    slowed: (&'static str, &'static str),
+    /// The cloud sloshes at the true Bohr frequency `ΔE/h` divided by this: one honest time
+    /// dilation per transition, round so the label can say it exactly. Chosen for a calm
+    /// beat (0.62 / 0.46 / 0.32 Hz) that stays monotone in ΔE, as the physics is.
+    slowdown: f64,
 }
 
-/// The line label for a transition, rounded from `line_nm` (Unicode, ASCII). Only the
-/// α lines (Δn = 1) the gallery crosses are named; any other pair shows no line rather
-/// than a wrong one (ORB-A3 checks every gallery pair).
-fn line_label(na: u32, nb: u32) -> (&'static str, &'static str) {
+/// Lyα, Hα, Pα (index: lower n − 1).
+const LINES: [Line; 3] = [
+    Line {
+        name: ("Lyα 121.6 nm", "Ly-a 121.6 nm"),
+        slowed: ("slowed 4×10¹⁵", "slowed 4e15"),
+        slowdown: 4e15,
+    },
+    Line {
+        name: ("Hα 656.5 nm", "H-a 656.5 nm"),
+        slowed: ("slowed 10¹⁵", "slowed 1e15"),
+        slowdown: 1e15,
+    },
+    Line {
+        name: ("Pα 1876 nm", "P-a 1876 nm"),
+        slowed: ("slowed 5×10¹⁴", "slowed 5e14"),
+        slowdown: 5e14,
+    },
+];
+
+/// The line of an `n_a ↔ n_b` transition, if it is one the gallery crosses (ORB-A3 checks
+/// every gallery pair has one); any other pair shows no line and no beat rather than a
+/// wrong one.
+pub(crate) fn line(na: u32, nb: u32) -> Option<&'static Line> {
     match (na.min(nb), na.max(nb)) {
-        (1, 2) => ("Lyα 121.6 nm", "Ly-a 121.6 nm"),
-        (2, 3) => ("Hα 656.5 nm", "H-a 656.5 nm"),
-        (3, 4) => ("Pα 1876 nm", "P-a 1876 nm"),
-        _ => ("", ""),
+        (1, 2) => Some(&LINES[0]),
+        (2, 3) => Some(&LINES[1]),
+        (3, 4) => Some(&LINES[2]),
+        _ => None,
     }
+}
+
+/// Display beat frequency (Hz): the true Bohr frequency `ΔE/h` slowed by the line's
+/// stated factor.
+pub(crate) fn beat_hz(na: u32, nb: u32) -> f64 {
+    line(na, nb).map_or(0.0, |l| gap(na, nb) / H_EV_S / l.slowdown)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -644,7 +681,7 @@ fn dominant_sign(c: (f64, f64), psi: (f64, f64)) -> f64 {
 pub(crate) struct Atom {
     samplers: Box<[Sampler]>,
     r90: [f64; K],
-    /// Display fade window per orbital (`r₉₀`, `r₉₇`, a₀; see `R_FADE`).
+    /// Display fade window per orbital (`r₈₈`, `r₉₅`, a₀; see `R_FADE`).
     r_fade: [Fade; K],
     /// `slots[cur]` holds `GALLERY[at]`; the other holds `GALLERY[at + 1]`.
     slots: [Slot; 2],
@@ -735,10 +772,9 @@ impl Atom {
         live.prepare(&self.samplers[live.orb], self.m[live.orb], rng, budget);
     }
 
+    /// Advance by `dt > 0` s (finite; the scene's `update` filters every other value).
     pub(crate) fn step(&mut self, dt: f64) {
-        if !(dt.is_finite() && dt > 0.0) {
-            return;
-        }
+        debug_assert!(dt.is_finite() && dt > 0.0, "dt = {dt}");
         self.t += dt;
         self.sync();
         let beat = self.timeline.at(self.t);
@@ -855,6 +891,11 @@ impl Atom {
         a.lerp(b, self.mix.c_b * self.mix.c_b)
     }
 
+    /// The camera for the blended pose at the Timeline clock (the rock is phased to it).
+    fn camera(&self) -> Camera {
+        self.pose().camera(self.t)
+    }
+
     /// Whether a state with l ≥ 1 is on screen (only the 1s hold has none).
     fn has_node(&self) -> bool {
         let next = self.phase != Phase::Hold && GALLERY[self.next()].l() >= 1;
@@ -928,14 +969,6 @@ impl ElectronOrbitals {
         (f64::from(x) + 0.5, f64::from(y) + 0.5)
     }
 
-    /// The camera for the blended pose at the Timeline clock (the rock is phased to it).
-    fn camera(&self) -> Camera {
-        match &self.atom {
-            Some(atom) => atom.pose().camera(atom.t),
-            None => GALLERY[0].pose().camera(0.0),
-        }
-    }
-
     /// Lit dots of the nucleus cell.
     fn nucleus_dots(&self) -> usize {
         let (x, y) = self.nucleus();
@@ -984,7 +1017,8 @@ impl ElectronOrbitals {
     }
 
     /// Bottom-left: the state in a hold, `a → b  line` during a transition. Parts are
-    /// dropped, never clipped: the line first, then the arrow part (leaving `a`).
+    /// dropped, never clipped: the slow-down first, then the line, then the arrow part
+    /// (leaving `a`).
     fn label(&self, canvas: &mut Canvas) {
         let Some(atom) = &self.atom else {
             return;
@@ -1002,17 +1036,23 @@ impl ElectronOrbitals {
             len + 2 <= w
         };
         let (a, b) = (GALLERY[atom.at], GALLERY[atom.next()]);
+        let (name, slowed) =
+            line(a.n(), b.n()).map_or((("", ""), ("", "")), |l| (l.name, l.slowed));
         let parts = [
             a.name(),
             (" → ", " -> "),
             b.name(),
             ("  ", "  "),
-            line_label(a.n(), b.n()),
+            name,
+            ("  ", "  "),
+            slowed,
         ];
         let shown = if atom.phase == Phase::Hold {
             &parts[..1]
         } else if fits(&parts) {
             &parts[..]
+        } else if fits(&parts[..5]) {
+            &parts[..5]
         } else if fits(&parts[..3]) {
             &parts[..3]
         } else {
@@ -1041,18 +1081,22 @@ impl Generator for ElectronOrbitals {
                 self.atom = Some(Atom::new(first, stage(size), rng));
             }
         }
-        self.rasterise(self.camera());
+        if let Some(cam) = self.atom.as_ref().map(Atom::camera) {
+            self.rasterise(cam);
+        }
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         let Some(atom) = &mut self.atom else {
             return;
         };
+        // The one dt guard (`Atom::step` only asserts it).
         if !(dt.is_finite() && dt > 0.0) {
             return;
         }
         atom.step(dt);
-        self.rasterise(self.camera());
+        let cam = atom.camera();
+        self.rasterise(cam);
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1237,10 +1281,15 @@ mod tests {
         let d = dipole(Orb::S1, Orb::P2z);
         let exact = 2f64.powf(7.5) / 3f64.powi(5);
         assert!((d[2] - exact).abs() < 1e-4, "<1s|z|2p_z> = {}", d[2]);
-        for (i, &a) in GALLERY.iter().enumerate() {
+        // The documented |d_ab| around the loop, the wrap included (all > 0.5 a₀).
+        let table = [0.7449, 2.452, 5.188, 2.995, 3.867, 3.867, 2.123, 0.7449];
+        for (i, (&a, want)) in GALLERY.iter().zip(table).enumerate() {
             let b = GALLERY[(i + 1) % GALLERY.len()];
             let d = norm(dipole(a, b));
-            assert!(d > 0.5, "|<{a:?}|r|{b:?}>| = {d}");
+            assert!(
+                (d - want).abs() < 1e-3 && d > 0.5,
+                "|<{a:?}|r|{b:?}>| = {d}, want {want}"
+            );
         }
         for ((na, nb), want, text) in [
             ((1, 2), 121.57, "121.6"),
@@ -1255,14 +1304,17 @@ mod tests {
                 format!("{nm:.1}")
             };
             assert_eq!(rounded, text);
-            let (u, a) = line_label(nb, na);
+            let (u, a) = line(nb, na).unwrap().name;
             assert!(u.contains(text) && a.contains(text) && a.is_ascii());
         }
+        assert!(line(1, 3).is_none() && beat_hz(1, 3) == 0.0);
         // Every transition of the loop, the wrap included, names the line `line_nm` gives
         // (the first number in the label, to its printed precision).
         for (i, &a) in GALLERY.iter().enumerate() {
             let b = GALLERY[(i + 1) % GALLERY.len()];
-            let (u, ascii) = line_label(a.n(), b.n());
+            let (u, ascii) = line(a.n(), b.n())
+                .unwrap_or_else(|| panic!("{a:?} -> {b:?}: no line"))
+                .name;
             let nm = line_nm(a.n(), b.n());
             for label in [u, ascii] {
                 let printed: f64 = label
@@ -1274,6 +1326,43 @@ mod tests {
                     "{a:?} -> {b:?}: {label:?} vs {nm}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn orb_a3_beats_are_bohr_frequencies_slowed_by_the_stated_factor() {
+        // The label states the slow-down exactly ("slowed 4×10¹⁵" / "slowed 4e15"), and the
+        // beat is the true Bohr frequency ΔE/h divided by it: Lyα is 2.466 PHz.
+        let lya = gap(1, 2) / H_EV_S;
+        assert!((lya / 2.466e15 - 1.0).abs() < 1e-3, "Lyα {lya} Hz");
+        let sup = |d: char| {
+            "⁰¹²³⁴⁵⁶⁷⁸⁹"
+                .chars()
+                .nth(d.to_digit(10).unwrap() as usize)
+                .unwrap()
+        };
+        let mut last = f64::INFINITY;
+        for ((na, nb), want) in [((1, 2), 0.6165), ((2, 3), 0.4567), ((3, 4), 0.3197)] {
+            let l = line(na, nb).unwrap();
+            let (u, a) = l.slowed;
+            let factor: f64 = a.strip_prefix("slowed ").unwrap().parse().unwrap();
+            assert_eq!(factor, l.slowdown, "{a}");
+            let (mantissa, exp) = a.strip_prefix("slowed ").unwrap().split_once('e').unwrap();
+            let exp: String = exp.chars().map(sup).collect();
+            let text = match mantissa {
+                "1" => format!("slowed 10{exp}"),
+                m => format!("slowed {m}×10{exp}"),
+            };
+            assert_eq!(u, text);
+            let f = beat_hz(na, nb);
+            assert!((f - gap(na, nb) / H_EV_S / factor).abs() < 1e-12);
+            assert!((f - want).abs() < 1e-3, "{na}->{nb}: {f} Hz");
+            // Calm (≤ 0.7 Hz), ordered as the physics is, and ≥ 0.9 cycles per 3 s beat.
+            assert!(
+                f <= 0.7 && f < last && f * BEAT >= 0.9,
+                "{na}->{nb}: {f} Hz"
+            );
+            last = f;
         }
     }
 
@@ -1450,11 +1539,11 @@ mod tests {
     }
 
     #[test]
-    fn orb_a5_no_step_pops_more_than_twelve_percent() {
-        // Over 1s → 2p_z, the worst pair (Lyα beats fastest). The sampler toggles ≤ 12 %
-        // per step (measured 10.7). The display fade adds the drift of the shared window,
-        // which widens 3× over the transition: ≤ 14 % (measured 12.9; ≤ 7.7 for the pairs
-        // without 1s).
+    fn orb_a5_no_step_pops_more_than_six_percent() {
+        // Over 1s → 2p_z, the worst pair (Lyα beats fastest, 0.62 Hz). The sampler toggles
+        // ≤ 6 % per step (measured 4.7, against the 2.7 % ω bound plus ≤ 2 % of χ drift).
+        // The display fade adds the drift of the shared window, which widens 3× over the
+        // transition: ≤ 7 % (measured 5.1).
         let set = |atom: &Atom, fade: Fade| {
             let mut set = HashSet::new();
             atom.for_each_visible(fade, |s, i, _, _| {
@@ -1474,7 +1563,7 @@ mod tests {
             }
             prev = now;
         }
-        for (worst, bound, what) in [(worst[0], 0.12, "sampler"), (worst[1], 0.14, "display")] {
+        for (worst, bound, what) in [(worst[0], 0.06, "sampler"), (worst[1], 0.07, "display")] {
             assert!(
                 worst <= bound,
                 "{what}: a step toggled {:.1} % of the visible points",
@@ -1547,11 +1636,20 @@ mod tests {
         assert!(bottom_row(&s, GlyphMode::Unicode).starts_with(" 2p_z "));
         into_transition(&mut s);
         let row = bottom_row(&s, GlyphMode::Ascii);
-        assert!(
-            row.is_ascii() && row.starts_with(" 2p_z -> 3d_z2  H-a 656.5 nm"),
-            "{row:?}"
+        assert_eq!(row.trim_end(), " 2p_z -> 3d_z2  H-a 656.5 nm  slowed 1e15");
+        assert_eq!(
+            bottom_row(&s, GlyphMode::Unicode).trim_end(),
+            " 2p_z → 3d_z²  Hα 656.5 nm  slowed 10¹⁵"
         );
-        assert!(bottom_row(&s, GlyphMode::Unicode).starts_with(" 2p_z → 3d_z²  Hα 656.5 nm"));
+
+        // The slow-down goes first: the 40-char label needs w ≥ 42.
+        let mut s = scene(1, 41, 12);
+        into_transition(&mut s);
+        let row = bottom_row(&s, GlyphMode::Ascii);
+        assert_eq!(row.trim_end(), " 2p_z -> 3d_z2  H-a 656.5 nm", "{row:?}");
+        let mut s = scene(1, 42, 12);
+        into_transition(&mut s);
+        assert!(bottom_row(&s, GlyphMode::Ascii).contains("slowed 1e15"));
 
         // "2p_z -> 3d_z2  H-a 656.5 nm" is 27 chars: the line part needs w ≥ 29.
         let mut s = scene(1, 28, 12);
@@ -1615,7 +1713,8 @@ mod tests {
     /// so this sweeps its camera over any part of the rock.
     fn at_clock(s: &mut ElectronOrbitals, k: usize, t: f64) {
         s.atom.as_mut().unwrap().t = ROCK_PERIOD * k as f64 + t;
-        s.rasterise(s.camera());
+        let cam = s.atom.as_ref().unwrap().camera();
+        s.rasterise(cam);
     }
 
     /// `scene` redrawn with the scene's own camera `t` s into the state's visit.
@@ -1750,7 +1849,7 @@ mod tests {
         let cx = s.nucleus().0;
         at_clock(&mut s, p2x, MID_HOLD);
         assert!(
-            s.camera().yaw.abs() < 1e-12,
+            s.atom.as_ref().unwrap().camera().yaw.abs() < 1e-12,
             "2p_x is broadside at mid-hold"
         );
         for t in cycle() {
@@ -1768,7 +1867,7 @@ mod tests {
 
     #[test]
     fn orb_a7_nucleus_glints_through_the_2p_z_node() {
-        // Over the whole camera cycle (measured 0.83 of frames on the old 16 s cycle).
+        // Over the whole 13 s camera cycle (measured 0.83 of frames).
         let mut s = scene(1, 80, 24);
         let (x, y) = s.nucleus();
         let frames = 13 * 60;
@@ -1791,7 +1890,7 @@ mod tests {
     fn orb_a7_4f_xyz_keeps_its_nodal_plane_open() {
         // The nucleus row (origin at the cell centre) holds ≤ 50 % of the lit cells of the
         // fullest row at the hold's own camera, over the whole cycle at 0.25 s steps
-        // (measured 0.24–0.46 on the old 16 s cycle).
+        // (measured 0.24–0.45 over the 13 s cycle).
         let f4xyz = 5;
         assert_eq!(GALLERY[f4xyz], Orb::F4xyz);
         let mut s = scene(f4xyz, 80, 24);
@@ -1828,7 +1927,7 @@ mod tests {
         let f4xyz = 5;
         let mut s = scene(f4xyz, 80, 24);
         at_clock(&mut s, f4xyz, MID_HOLD);
-        let yaw = s.camera().yaw;
+        let yaw = s.atom.as_ref().unwrap().camera().yaw;
         assert!((yaw - FRAC_PI_2).abs() < 0.02, "mid-hold yaw {yaw}");
         let (node, lobe) = node_and_lobe_columns(&s);
         assert!(
@@ -1900,7 +1999,7 @@ mod tests {
 
     #[test]
     fn orb_a7_far_dust_fades_out() {
-        // The fade ends at r₉₇, so no hold scatters specks beyond 1.25 ρ_k at 80×24
+        // The fade ends at r₉₅, so no hold scatters specks beyond 1.25 ρ_k at 80×24
         // (measured 0 over 16 camera clocks for every state; a taper out to r₉₉ leaves up
         // to 4 per frame).
         for (k, orb) in GALLERY.iter().enumerate() {

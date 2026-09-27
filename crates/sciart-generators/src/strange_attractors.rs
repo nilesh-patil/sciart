@@ -51,6 +51,9 @@ const BURN_S: f64 = 40.0;
 const STRIDE_S: f64 = 0.15;
 /// Seeded Gaussian offset of the scout's fixed start (native units).
 const START_JITTER: f64 = 1e-3;
+/// Scout restarts after an escape (each from the start offset by `START_JITTER·i`) before
+/// it gives up and fills its slot from the samples it has, so `run` always terminates.
+const MAX_RESTARTS: u32 = 8;
 /// Scout RK4 steps per 1/60 s while the next slot fills in the background.
 const SCOUT_STEPS_PER_TICK: f64 = 400.0;
 /// Blow-up guard: a particle beyond `|x̂|∞ = ESCAPE` in the pre-rotation normalised
@@ -207,11 +210,11 @@ const fn spec(k: Attractor) -> &'static Spec {
             rho: 1.02,
             up: Up::Z,
             start: [0.1, 0.0, 0.0],
-            pitch: 0.35,
+            pitch: 0.48,
             frame: Frame {
                 x: 1.01,
-                top: -0.80,
-                bottom: 0.91,
+                top: -0.82,
+                bottom: 0.94,
                 swing: 0.0,
             },
             // Its six parameters (41 chars) exceed the 24-char cap: name only (ATT-A7).
@@ -377,6 +380,7 @@ pub(crate) struct Scout {
     x: V3,
     steps: usize,
     filled: usize,
+    restarts: u32,
 }
 
 impl Scout {
@@ -387,6 +391,7 @@ impl Scout {
             x: start.map(|v| gaussian(rng, v, START_JITTER)),
             steps: 0,
             filled: 0,
+            restarts: 0,
         }
     }
 
@@ -396,16 +401,37 @@ impl Scout {
     }
 
     /// Advance by at most `budget` RK4 steps, writing samples into `slot` (length `N`).
-    pub(crate) fn run(&mut self, slot: &mut [V3], mut budget: usize) {
+    pub(crate) fn run(&mut self, slot: &mut [V3], budget: usize) {
+        let k = self.k;
+        self.run_field(slot, budget, |p| field(k, p));
+    }
+
+    /// [`Scout::run`] with the vector field as a parameter (the tests inject escapes).
+    fn run_field(&mut self, slot: &mut [V3], mut budget: usize, mut f: impl FnMut(V3) -> V3) {
         let (k, s) = (self.k, spec(self.k));
         let burn = (BURN_S * s.rate / s.h_max).round() as usize;
         let stride = ((STRIDE_S * s.rate / s.h_max).round() as usize).max(1);
         while budget > 0 && self.filled < N {
-            ode::rk4_step(&mut self.x, 0.0, s.h_max, |_, p| field(k, *p));
+            ode::rk4_step(&mut self.x, 0.0, s.h_max, |_, p| f(*p));
             budget -= 1;
             if escaped(k, self.x) {
-                // Restart, burn-in included, so no transient sample is kept.
-                (self.x, self.steps) = (s.start, 0);
+                self.restarts += 1;
+                if self.restarts > MAX_RESTARTS {
+                    // Unreachable with the gallery's in-basin starts, but `run(.., MAX)`
+                    // must terminate: repeat the samples taken (the start if none).
+                    for i in self.filled..N {
+                        slot[bit_reversed(i)] = match self.filled {
+                            0 => s.start,
+                            m => slot[bit_reversed(i % m)],
+                        };
+                    }
+                    self.filled = N;
+                    return;
+                }
+                // Restart, burn-in included, so no transient sample is kept; each restart
+                // is offset, so a start that escaped is not replayed exactly.
+                let offset = START_JITTER * f64::from(self.restarts);
+                (self.x, self.steps) = (s.start.map(|v| v + offset), 0);
                 continue;
             }
             self.steps += 1;
@@ -760,11 +786,14 @@ pub(crate) fn n_eff(size: Size) -> usize {
     (1usize << n.ilog2()).clamp(N_MIN, N)
 }
 
-/// Rows per world unit that fit attractor `k`'s [`Frame`] into the [`stage_rows`].
+/// Rows per world unit that fit attractor `k`'s [`Frame`] into the [`stage_rows`]; positive
+/// even at zero area, so the morph's log-lerp of two fits stays finite.
 fn fit(k: Attractor, size: Size) -> f64 {
     let f = spec(k).frame;
     let (w, rows) = (f64::from(size.width()), f64::from(stage_rows(size)));
-    (FILL_H * rows / (f.bottom - f.top)).min(FILL_W * w / (2.0 * ASPECT * f.x))
+    (FILL_H * rows / (f.bottom - f.top))
+        .min(FILL_W * w / (2.0 * ASPECT * f.x))
+        .max(f64::MIN_POSITIVE)
 }
 
 /// Whether the label shows (and row h−1 is kept free of threads).
@@ -893,6 +922,10 @@ impl StrangeAttractors {
         let Some(g) = &self.gallery else {
             return;
         };
+        // Zero area: nothing to plot (the density holds no dots), so skip the projections.
+        if self.size.area() == 0 {
+            return;
+        }
         let pen = self.pen(g);
         for (i, prev) in self.prev[..g.n()].iter_mut().enumerate() {
             let Some((dot, w)) = pen.mark(g.displayed(i)) else {
@@ -912,6 +945,9 @@ impl StrangeAttractors {
         let Some(g) = &self.gallery else {
             return;
         };
+        if self.size.area() == 0 {
+            return;
+        }
         let pen = self.pen(g);
         let fade = (-SIM_DT / TAU_S).exp();
         for (i, prev) in self.prev[..g.n()].iter_mut().enumerate() {
@@ -1344,6 +1380,122 @@ mod tests {
     }
 
     #[test]
+    fn att_a4_rates_give_1_2_half_widths_per_second() {
+        // The model rates r_k are set so the mean normalised speed |f|·r_k/s_k is 1.2 box
+        // half-widths per simulated second for every attractor, peaking at ≈ 9/s in
+        // Rössler's fold (measured 1.20–1.22; peak 9.06).
+        for k in GALLERY {
+            let s = spec(k);
+            let mut x = s.start;
+            let burn = (BURN_S * s.rate / s.h_max).round() as usize;
+            let span = if k == Attractor::Thomas {
+                1000.0
+            } else {
+                100.0
+            };
+            let steps = (span / s.h_max).round() as usize;
+            let (mut sum, mut peak) = (0.0, 0.0f64);
+            for i in 0..burn + steps {
+                ode::rk4_step(&mut x, 0.0, s.h_max, |_, p| field(k, *p));
+                if i >= burn {
+                    let v = field(k, x);
+                    let speed = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt() * s.rate / s.half;
+                    sum += speed;
+                    peak = peak.max(speed);
+                }
+            }
+            let mean = sum / steps as f64;
+            assert!(
+                (1.1..=1.3).contains(&mean),
+                "{k:?}: mean {mean} half-widths/s"
+            );
+            if k == Attractor::Rossler {
+                assert!((8.0..=10.0).contains(&peak), "Rössler peak {peak}");
+            }
+        }
+    }
+
+    #[test]
+    fn att_a4_aizawa_fill_threshold_rejects_its_inner_attractor() {
+        // Negative control for the 0.9 fill bound: from (0.2, 0.1, 0.5) Aizawa settles on
+        // its coexisting non-chaotic attractor, whose z extent is only 0.82 of the box
+        // (measured 1.226 of 1.49), while the in-basin scout ensembles reach ≥ 0.9 of it.
+        let k = Attractor::Aizawa;
+        let (h, z_box) = (0.02, 1.49);
+        let mut x = [0.2, 0.1, 0.5];
+        let (mut lo, mut hi) = (f64::MAX, f64::MIN);
+        for i in 0..(600.0 / h) as usize {
+            ode::rk4_step(&mut x, 0.0, h, |_, p| field(k, *p));
+            if f64::from(i as u32) * h >= 100.0 {
+                let z = normalised(k, x)[2];
+                (lo, hi) = (lo.min(z), hi.max(z));
+            }
+        }
+        assert!(
+            hi - lo < 0.9 * z_box,
+            "inner attractor z extent {}",
+            hi - lo
+        );
+        assert!(
+            hi - lo > 0.7 * z_box,
+            "inner attractor z extent {}",
+            hi - lo
+        );
+        let pts = ensemble(k, 0);
+        let z = pts.iter().map(|&p| normalised(k, p)[2]);
+        let (lo, hi) = z.fold((f64::MAX, f64::MIN), |(a, b), v| (a.min(v), b.max(v)));
+        assert!(hi - lo >= 0.9 * z_box, "chaotic z extent {}", hi - lo);
+    }
+
+    #[test]
+    fn att_a5_a_scout_that_always_escapes_still_terminates() {
+        // A start that escapes every time (here: a field that is never finite) must not
+        // spin forever in `run(.., usize::MAX)`: after MAX_RESTARTS restarts from offset
+        // starts the scout fills its slot and stops.
+        let mut slot = vec![[0.0; 3]; N];
+        let mut scout = Scout::new(Attractor::Lorenz, &mut rng(9));
+        scout.run_field(&mut slot, usize::MAX, |_| [f64::NAN; 3]);
+        assert!(scout.done());
+        assert!(slot.iter().flatten().all(|v| v.is_finite()));
+
+        // Escapes that stop once the start is offset: samples resume after a fresh burn-in.
+        let k = Attractor::Lorenz;
+        let mut scout = Scout::new(k, &mut rng(9));
+        let mut calls = 0usize;
+        scout.run_field(&mut slot, usize::MAX, |p| {
+            calls += 1;
+            if calls <= 4 {
+                [f64::NAN; 3]
+            } else {
+                field(k, p)
+            }
+        });
+        assert!(scout.done());
+        assert!(slot.iter().all(|&p| !escaped(k, p)));
+    }
+
+    #[test]
+    fn att_a8_zero_area_sizes_keep_the_view_finite() {
+        // A zero-width (or zero-height) terminal fits no rows: the scale is clamped rather
+        // than log-lerping ln 0 = −∞ into NaN, and nothing is plotted.
+        for (w, h) in [(0, 24), (80, 0), (0, 0)] {
+            let (mut s, mut ctx, _) = scene(w, h, GlyphMode::Unicode, 0);
+            for _ in 0..8 {
+                s.update(0.25, &mut ctx);
+                let g = s.gallery.as_ref().unwrap();
+                let (_, centre, scale) = s.view(g);
+                assert!(
+                    scale.is_finite()
+                        && scale > 0.0
+                        && centre.0.is_finite()
+                        && centre.1.is_finite(),
+                    "{w}x{h}: scale {scale}, centre {centre:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn att_a5_gallery_stays_bounded_and_replaces_a_nan_particle() {
         let mut r = rng(5);
         let mut g = Gallery::new(0, 64, &mut r);
@@ -1708,23 +1860,26 @@ mod tests {
         assert!(uneven <= 2, "Halvorsen's margins differ by {uneven} rows");
 
         // The bounds below hold for seeds 0–23 as well as 42 (chaos makes the per-seed
-        // numbers platform-sensitive, so no bound leans on seed 42's own values).
+        // numbers platform-sensitive, so no bound leans on seed 42's own values), except the
+        // mid-morph span, which Halvorsen → Rössler misses for about half of those seeds
+        // (0.72–0.85; see below), as the Halvorsen margins above do for seeds 6, 22 and 23
+        // (the seed figures below are for the other 21).
         //
-        // Frame 0 already shows threads: 0.93 of the first hold's mean (seeds 0–23: ≥ 0.90).
+        // Frame 0 already shows threads: 0.96 of the first hold's mean (seeds 0–23: ≥ 0.87).
         let opening = lit_of(holds[0].0);
         assert!(
             first as f64 >= 0.85 * opening,
             "frame 0 lights {first} cells, the hold {opening:.0}"
         );
         // Holds fill the frame: silhouettes span ≥ 0.72 of the rows above the label, 0.8 on
-        // average (seeds 0–23: ≥ 0.74, mean ≥ 0.82).
+        // average (seeds 0–23: ≥ 0.75, mean ≥ 0.84).
         for &(k, _, rows) in &holds {
             assert!(rows >= 0.72 * 23.0, "{k:?} spans {rows:.1} rows");
         }
         let mean = holds.iter().map(|h| h.2).sum::<f64>() / 5.0;
         assert!(mean >= 0.8 * 23.0, "holds span {mean:.1} rows on average");
         // Aizawa's shell covers its disc where the others are sheets and bands, so it lights
-        // more cells, but never twice as many (1.35× their mean; seeds 0–23: 1.45–1.82×).
+        // more cells, but never twice as many (1.33× their mean; seeds 0–23: 1.40–1.75×).
         let others = GALLERY[..].iter().filter(|&&k| k != Attractor::Aizawa);
         let others = others.map(|&k| lit_of(k)).sum::<f64>() / 4.0;
         let aizawa = lit_of(Attractor::Aizawa);
