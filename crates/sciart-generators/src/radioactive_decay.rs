@@ -917,6 +917,9 @@ impl Generator for RadioactiveDecay {
         // Keys this step's reservoir draws: the closure cannot borrow `ctx.rng` while
         // `step_nuclei` does.
         let salt: u64 = ctx.rng.random();
+        // A lattice sweep draws once per live nucleus: a SplitMix64 seeded from `ctx.rng`
+        // keeps that cheap and deterministic (CORE-R57, RAD-A9).
+        let mut draws = SplitMix64::from_rng(&mut ctx.rng);
         let counts = &mut self.counts;
         let events = &mut self.events;
         let cap = events.capacity();
@@ -926,7 +929,7 @@ impl Generator for RadioactiveDecay {
             self.lattice.as_mut_slice(),
             &tr,
             dt,
-            &mut ctx.rng,
+            &mut draws,
             |i, from, to| {
                 counts[from as usize] -= 1;
                 counts[to as usize] += 1;
@@ -1184,6 +1187,34 @@ mod tests {
         // is exact, the step size must not matter. 20 s covers the N_B peak (6.8 s) and
         // 2.5 half-lives of A; checked once per simulated second (20 × 2 binomial checks).
         run_rad_a2(2024, &[0.25, SIM_DT, 0.17, 0.25, 0.05, 0.25]);
+    }
+
+    #[test]
+    fn rad_a9_the_scene_itself_follows_bateman_within_4_sigma() {
+        let size = Size::new(200, 50);
+        let mut ctx = seeded(42);
+        let mut g = RadioactiveDecay::default();
+        g.resize(size, &mut ctx);
+        let n0 = g.n0();
+        assert!(n0 > 10_000, "{n0} nuclei");
+        for step in 1..=(20.0 / SIM_DT).round() as usize {
+            g.update(SIM_DT, &mut ctx);
+            if step % 60 == 0 {
+                let (fa, fb, _) = bateman(g.t);
+                let (ok_a, ma, sa) = within_4_sigma(g.counts[0], n0, fa);
+                let (ok_b, mb, sb) = within_4_sigma(g.counts[1], n0, fb);
+                assert!(
+                    ok_a,
+                    "t={:.1} N_A={} vs {ma:.1} ± {sa:.1}",
+                    g.t, g.counts[0]
+                );
+                assert!(
+                    ok_b,
+                    "t={:.1} N_B={} vs {mb:.1} ± {sb:.1}",
+                    g.t, g.counts[1]
+                );
+            }
+        }
     }
 
     #[test]
