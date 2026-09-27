@@ -41,6 +41,7 @@ and each keeps `Ink` at two bytes.
   | `HAlpha` | crimson → rose → pale pink | emission nebulae (Hα 656 nm), prominences, the Hubble-palette red |
   | `Aurora` | deep teal → emerald → lime-white | auroral O I 557.7 nm, fluorescence (GFP-like), bioluminescence |
   | `Plasma` | indigo → violet → lavender-white | gas discharges, lightning, synchrotron glow, pulsar beams |
+ | `Starlight` | near-black → neutral grey → pale warm white | unresolved starlight (a globular cluster's glow, the Milky Way); added in M12 |
 
   Each ramp is a 256-level table built once from OKLCh: lightness linear in level, hue linear
   between the two ends, chroma lowered only where sRGB cannot hold it.

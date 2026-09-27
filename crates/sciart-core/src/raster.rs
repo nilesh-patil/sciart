@@ -16,7 +16,7 @@
 //! (GEN-R11). A scene draws into one, then `blit`s it onto the canvas; a cell holds a
 //! single glyph, so one region uses one raster.
 
-use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink};
+use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink, rng};
 
 /// Bit of dot `(dx, dy)` within its braille cell, indexed `[dx][dy]`: standard Unicode
 /// dot numbering 1-2-3-7 down the left column and 4-5-6-8 down the right, dot `n` being
@@ -59,6 +59,20 @@ fn intensity(ink: Ink) -> u8 {
         Role::Div => ink.level.abs_diff(128),
         Role::Phase => 0,
         _ => ink.level,
+    }
+}
+
+/// The more intense of two inks, `a` on a tie, by the measure a [`Dots`] cell uses to
+/// pick its ink (CORE-R87): the one colour to keep when a cell's two pixels must become a
+/// single glyph (a [`Pixels::blit`] ASCII fallback) or a single background
+/// ([`Pixels::cell_bg`]). An empty ink loses to any drawn one.
+#[inline]
+pub fn stronger(a: Ink, b: Ink) -> Ink {
+    match (is_empty(a), is_empty(b)) {
+        (_, true) => a,
+        (true, false) => b,
+        (false, false) if intensity(b) > intensity(a) => b,
+        (false, false) => a,
     }
 }
 
@@ -729,18 +743,14 @@ impl Pixels {
         self.index(x, y).map(|i| self.px[i])
     }
 
-    /// The one ink that stands for cell `(x, y)`'s two pixels (CORE-R84): the more
-    /// intense non-empty one (the top on a tie), or [`Ink::BLANK`] when both are empty or
-    /// the cell is off the buffer. [`Dots::blit_over`] puts it behind a cell's dots.
+    /// The one ink that stands for cell `(x, y)`'s two pixels (CORE-R84): the
+    /// [`stronger`] of the two, or [`Ink::BLANK`] when both are empty or the cell is off
+    /// the buffer. [`Dots::blit_over`] puts it behind a cell's dots.
     #[inline]
     pub fn cell_bg(&self, x: i32, y: i32) -> Ink {
-        let lit = |py: i32| self.get(x, py).filter(|&i| !is_empty(i));
-        match (lit(2 * y), lit(2 * y + 1)) {
-            (Some(t), Some(b)) if intensity(b) > intensity(t) => b,
-            (Some(t), _) => t,
-            (None, Some(b)) => b,
-            (None, None) => Ink::BLANK,
-        }
+        let px = |py: i32| self.get(x, py).unwrap_or(Ink::BLANK);
+        let ink = stronger(px(2 * y), px(2 * y + 1));
+        if is_empty(ink) { Ink::BLANK } else { ink }
     }
 
     /// Give every glyph already drawn over this buffer's pixels its cell's
@@ -780,6 +790,32 @@ impl Pixels {
             for (x, px) in row.iter_mut().enumerate() {
                 // Both fit: x < w ≤ u16::MAX, y < 2·h ≤ 2·u16::MAX.
                 *px = shader(x as i32, y as i32);
+            }
+        }
+    }
+
+    /// Dissolve a glow's faint fringe into the empty sky (CORE-R89), so it ends in the
+    /// terminal's black instead of a ramp's tinted floor. A pixel of intensity `i` (as for
+    /// [`stronger`]) below `floor` is emptied when `i < floor / 2`, and in the band
+    /// `[floor / 2, floor)` kept only where `2·i / floor − 1 > hash01(cell_key(x, y))`.
+    /// The threshold is white noise, not an ordered dither, so the thinning fringe reads as
+    /// scattered light rather than a checkerboard, and the half-floor cut keeps that band
+    /// narrow. Pixels at or above `floor`, and `Phase` pixels (no intensity), are untouched;
+    /// `floor = 0` changes nothing. Deterministic and allocation-free.
+    pub fn dissolve(&mut self, floor: u8) {
+        let w = usize::from(self.cells.width());
+        let half = f64::from(floor) / 2.0;
+        for (y, row) in self.px.chunks_exact_mut(w.max(1)).enumerate() {
+            for (x, px) in row.iter_mut().enumerate() {
+                let i = intensity(*px);
+                if is_empty(*px) || px.role == Role::Phase || i >= floor {
+                    continue;
+                }
+                // Both fit: x < w ≤ u16::MAX, y < 2·h ≤ 2·u16::MAX.
+                let keep = (f64::from(i) - half) / half;
+                if keep <= rng::hash01(rng::cell_key(x as i32, y as i32)) {
+                    *px = Ink::BLANK;
+                }
             }
         }
     }
