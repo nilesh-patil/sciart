@@ -135,11 +135,44 @@ Shared helpers: `sciart_core::draw` (CORE-R22..R27). All lengths below are in **
 - **Inks**: `f > 0` ⇒ `Hot`, else `Cold`, level ∝ `min(|f|/2.7σ, 1)`.
 - **Acceptance**: `CMB-A1` `|f| ≤ 1`; `CMB-A2` smooth — horizontally adjacent cells differ by at most `Σ|kₓᵢ| / (ASPECT·N)`, and adjacent-cell correlation is ≥ 0.9 horizontally and ≥ 0.7 vertically; `CMB-A3` a 200×50 frame contains both hot and cold cells; `CMB-A4` isotropic, not stripy — the direction tensor `Σ k̂k̂ᵀ` has anisotropy ≤ 0.05 and the two-point correlation at equal aspect-corrected lags agrees across directions within 0.1 (mode ensemble at 0°/90°/±45°, 1–6 rows; and sampled on a 200×50 screen, horizontal vs vertical, 1–3 rows); `CMB-A5` CMB-like spectrum — `D_ℓ` peaks at ℓ ∈ [200, 240] with `D_220/D_10 ∈ [4.5, 6]`, a trough then a second peak, and damping; the most populated Δln ℓ = 0.5 band of modes is centred at ℓ ∈ [140, 300].
 
-### gravitational_lensing  (Deep Cosmos, M4)
-- **Intent**: background stars drifting behind a massive lens, each seen as two images, and a galaxy that periodically lines up into an Einstein ring.
-- **Model**: point lens with Einstein radius `θE = R(0.35)`; lens equation `β = θ − θE² θ/|θ|²`; for a source at `β` the images are `θ± = β̂ (|β| ± √(|β|² + 4θE²))/2`; 160 seeded stars drifting at 0.6 rows/s (wrapping); an extended source (radius 1.5 rows) crossing near the lens every 12 s, rendered by inverse ray-shooting within `2.5 θE`. Images with `|μ| < 0.05` are not drawn (in practice only far minor images, which otherwise clutter the Einstein disc; real ones are ≈ `u⁻⁴` faint).
-- **Inks**: images `Star` (level by magnification), ring/arcs `Accent`, lens `Structure`.
-- **Acceptance**: `LENS-A1` both images map back to `β` through the lens equation; `LENS-A2` as `β → 0` both images approach radius `θE`; `LENS-A3` for `|β| ≫ θE` the primary image ≈ `β` and the secondary → 0.
+### gravitational_lensing  (Deep Cosmos, M4, M12)
+- **Intent**: a galaxy-scale strong lens in the style of the SLACS survey: a small golden elliptical in
+  a dark field of faint blue background galaxies, a few of them stretched into tangential arcs round a
+  faint dashed critical curve; every 14 s a larger spiral passes behind, slows as it lines up and closes
+  into a bright Einstein ring for a few seconds.
+- **Model**: singular isothermal sphere (SIS), the standard first model of a galaxy lens; in units of the
+  Einstein radius `θE = R(0.4)`, `β = θ − θ̂`. Inverse ray-shooting on a lattice capped at 24 000 nodes
+  (ADR-0012): each node stores its source-plane `β` (built in `resize`) and every step takes the source
+  surface brightness there, which lensing conserves. Sources: a tileable 192 × 192 texture (period 6 θE)
+  of 28 seeded exponential ellipses (scale 0.04–0.14 θE, axis ratio 0.35–1, peak `0.03 + 0.5 u³` with `u`
+  uniform, so most are faint smudges and a few are bright), drifting at 0.12 θE/s; plus the hero spiral
+  (radius 0.6 θE, exponential disk with two logarithmic arms of 20° pitch and contrast 0.55, and a bulge,
+  seeded inclination `cos i ∈ [0.45, 0.95]` and position angle) crossing `±2.2 θE` along
+  `2.2 (0.4 x + 0.6 x³)`, `x ∈ [−1, 1]`, so it slows near closest approach, at a seeded impact parameter
+  `|p| < 0.35 · 0.6 cos i θE` (within 35 % of its minor semi-axis, so the lens axis crosses its bright
+  disk on every pass), fading in and out over each pass. Lens light: a round Sérsic n = 2 core,
+  `1.5 exp(−3.67 √(r / 0.2 θE))`, plus a faint `0.06 / (1 + (r / 0.2 θE)²)` halo, the sum tapered to
+  zero by a smoothstep between 0.3 and 0.6 θE; below the faintest visible level it is halftoned with an
+  ordered 4 × 4 Bayer threshold per node (kept at that level where `v / v_min` exceeds the threshold,
+  fixed per resize), so the glow thins out into an even dot pattern instead of ending on an edge, and a
+  dark gap is left between it and the critical curve. Brightness maps to levels through
+  `Tone::asinh(0.08, 1.1)` (CORE-R81); levels below `MIN_VISIBLE_LEVEL` are dropped (CORE-R66). The
+  critical curve `|θ| = θE` is drawn as 36 faint dashes where nothing shines. Display pixels sample the
+  lattice bilinearly (`SampleMap`; 1:1 at 200 × 50).
+- **Stylisation (stated)**: the relative motion is sped up enormously (real lens alignments change over
+  millions of years); background galaxies are illustrative ellipses; colours are false (Ice for the blue,
+  star-forming sources, Ember for the lens's old stars); the lens light is round like its mass, its faint
+  edge is halftoned, and it is cut off inside the critical curve (tapered to zero by 0.6 θE) so the ring
+  reads against dark sky — real lens galaxies' light extends well beyond θE (θE is typically about half
+  their effective radius); lens and source light are not summed: each pixel shows the brighter, in its own
+  colour.
+- **Motion**: arcs slide round the ring as the field drifts; the hero forms, holds and breaks the ring
+  each pass.
+- **Resize**: lattice, `β` map, lens light and sample map; textures and pass state survive.
+- **Inks**: source light `Ramp(Ice)`, lens light `Ramp(Ember)`, critical curve `Structure` 40. ASCII
+  fallback: brightness ramp (shared with black_hole).
+- **Captions**: `meta.captions = ["Einstein ring"]`; see LENS-A6.
+- **Acceptance**: `LENS-A1` *(changed)* every SIS image maps back to `β` through `β = θ − θE θ̂`; `LENS-A2` *(changed)* for `|β| < θE` there are two images, on opposite sides, at `|θ| = θE ± |β|`, so both approach `θE` as `β → 0`; `LENS-A3` *(changed)* for `|β| > θE` there is one image, displaced outward by exactly `θE`; `LENS-A4` *(new)* surface brightness is conserved: every node shows the source brightness at its own `β` (recomputed from `θ`), so nothing lensed is brighter than the brightest source; `LENS-A5` *(new; was an unnumbered test)* an aligned hero lights the whole circle `|θ| = θE` and leaves `|θ| < 0.3 θE` free of source light; `LENS-A6` *(new)* `caption()` is `Einstein ring` exactly while the hero's arm-averaged surface brightness on the lens axis (`β = 0`, which the whole critical curve images) is ≥ 0.05, the ring is then closed, and every pass closes it for at least 2 s (checked over 400 seeded passes); `LENS-A7` *(new)* the field is a quiet ground: no field texel exceeds 0.75 (half the hero's peak), and without the hero at least 60 % of the frame is dark; `LENS-A8` *(new)* the lens glow fades out through an ordered halftone and leaves a gap for the ring: at 200 × 50, in 0.025 θE annuli from 0.2 to 0.95 θE, the share of lens-lit pixels starts full, is zero from 0.65 θE out, never rises by more than 0.1 outward, and passes through at least three annuli strictly between 10 % and 90 %; and every 4 × 4 block of a uniform light `k/16` of the faintest visible level keeps exactly `k` dots.
 
 ### constellation_map  (Earth & Sky, M4)
 - **Intent**: a star chart that traces one constellation at a time, then names it, over a twinkling sky.
@@ -154,11 +187,71 @@ Shared helpers: `sciart_core::particles` (CORE-R28..R32). Pools are sized in `re
 bounded (GEN-R8); particles are respawned rather than reallocated. Positions are in **rows** unless stated
 (x on screen = `cx + x·ASPECT`). Physics uses `dt` from `update` only.
 
-### black_hole  (Deep Cosmos, M5)
-- **Intent**: an Interstellar-style black hole: a dark shadow, a thin bright photon ring, and a tilted accretion disk whose far side is lensed up over the shadow; the approaching side glows brighter.
-- **Model**: shadow radius `rs = R(0.14)`; ISCO `r_in = 2.2 rs`; disk out to `R(0.95)`; inclination 78° (disk ellipse flattening `cos i`); particles on circular orbits `ω(r) = kepler_omega(gm, r)` with the ISCO period fixed at 2.5 s; relativistic beaming for shading only: level ∝ `(1 + 0.55·β_los)³` with `β_los` the line-of-sight velocity fraction. Particles slowly drift inward (`dr/dt = −0.02 r`); inside `r_in` they plunge and are respawned at the outer edge. The far half of the disk is drawn at its weak-field lensed image positions (`θE² = 2·R_s·depth`): the bright primary is lifted into an arc over the shadow, a faint secondary appears below; there is no separate unlensed copy. Pool `clamp(area/6, 24, 1600)`, initially uniform in `ln r` (the steady state of the drift).
-- **Inks**: disk `Hot` (level from radius and beaming), photon ring `Accent`, lensed arc `Hot` dimmer, shadow = blank.
-- **Acceptance**: `BH-A1` ω strictly decreases with r and the ISCO period is 2.5 s; `BH-A2` no disk particle is drawn inside the shadow when it is behind the hole (far side, projected distance < rs); `BH-A3` the approaching half is brighter on average than the receding half; `BH-A4` the pool size stays constant after warm-up (respawn, no growth).
+### black_hole  (Deep Cosmos, M5, M12)
+- **Intent**: a Luminet-style black hole (Luminet 1979; *Interstellar*): a black shadow, the thin
+  lensing ring (secondary image) hugging it, and an inclined accretion disk whose far side is lensed up
+  over the shadow and, as a lower arc, under it; the approaching (left) side burns white-gold, the
+  receding side dull ember; the hot gas visibly streams in sheared spiral clumps; behind it a quiet field
+  of steady point stars, crowding along a Milky Way band, lensed round the hole. The disk is the
+  brightest thing on screen.
+- **Model** (units `G = c = M = 1`): Schwarzschild null geodesics from the Binet equation
+  `u'' = −u + 3u²` (`u = 1/r`), integrated once per scene with RK4 into a table `u(b, φ)` over 320
+  impact parameters (asinh-spaced about `b_c = 3√3`) × 257 sweep angles `φ ∈ [0, 2π]`, plus each ray's
+  end angle (capture at `u = ½` or escape at `u = 0`); beyond `b = 48` the first-order weak-field orbit
+  and the second-order deflection are used. A camera ray at impact parameter `b` and screen angle `ψ`
+  crosses the disk plane (inclination 80°) at `γ_n = γ₀(ψ) + nπ`, `γ₀ = atan2(cos i, −sin ψ sin i)`; the
+  thin, opaque disk (`6 ≤ r ≤ 24`, ISCO to outer edge) is hit by the first crossing that lands on it —
+  order 0 (direct image) or order 1 (the secondary image: the lensing ring above the shadow, the
+  brightest photon subring, and the lower arc below it). The fainter n ≥ 2 subrings are omitted. Per hit
+  the redshift is `g = √(1 − 3/r) / (1 + Ω b cos ψ sin i)`, `Ω = r^{-3/2}`: `√(1 − 3/r)` is the
+  gravitational redshift times the transverse (time-dilation) Doppler shift, the denominator the
+  line-of-sight Doppler shift. The emitted temperature follows the Newtonian (Shakura–Sunyaev)
+  zero-torque thin-disk profile `T ∝ [r⁻³(1 − √(6/r))]^{1/4}` (peak at `r = 49/36 · 6`; the relativistic
+  Page–Thorne correction is omitted), the bolometric weight `(g T)⁴`. A pixel sums `F = Σ (gT/T_peak)⁴ ·
+  clump` over 2 × 2 supersamples (partial coverage cools and dims the edges) and shows the blackbody
+  colour of the display temperature (see Stylisation). Nodes within 0.8 of the shadow's edge trace the
+  order-1 image with 6 × 6 samples. Clumps: a log-normal multiplier (mean 1, σ_ln = 0.45, easing to 0
+  between 0.8 and 1 × the outer radius so no clump shows past the feathered rim) over 48 `ln r`
+  × 256 `φ` bins, made of two layers of seeded noise born 3 s apart and weighted `sin(π age / 6 s)` (so
+  `w₀² + w₁² = 1`); each layer is carried by the disk flow — Kepler ω rescaled so the ISCO period is
+  2.5 s, inward drift `dr/dt = −0.02 r` — in closed form (gas now at `(r, φ)` came from
+  `ln r + 0.02 age`, turned by `ω(r)(1 − e^{−0.03 age})/0.03`), so differential rotation shears it into
+  spiral streaks before it is replaced. Escaping rays look up the sky in the direction they came from
+  (observer at `D = 60`: screen angle `b / D`, source angle `b / D − α(b)` with `α = φ_end − π`). Stars:
+  2400 seeded points (a quarter crowd a tilted great circle, the Milky Way band), one per texel of a
+  1024 × 512 equirectangular map, levels 40–150. Of the supersamples that see a texel on one side of
+  the hole (`ψ ≥ 0` or `ψ < 0`; a star's direct and lensed images lie on opposite sides), only the one
+  nearest the texel's centre carries its star, so each image is a single pixel and, as the sky turns by
+  whole texels, never drops out between texels. Tracing runs in `resize` on a lattice capped at 24 000 nodes (ADR-0012;
+  200 × 50 is traced 1:1); each step advects the clump texture, sums the hit list and looks up the sky.
+  The camera fit uses the disk image's traced extent: the outer edge spans 90 % of the width, with one
+  cell clear above and two below (title row).
+- **Stylisation (stated)**: colour contrast is exaggerated: the display temperature is
+  `T_peak · F^{3/4} = T_peak (gT/T_peak)³` with `T_peak = 6 000 K`; from 600 K to 4 500 K it is mapped
+  onto 1 000–4 500 K (the coolest blackbody level up) and lifted in log T by the power 0.8, so the dim
+  receding and outer disk glows as a continuous ember envelope round its clumps; above 4 500 K it is
+  rolled off in log T as `x/(1 + x)` towards 10 000 K (never clipping), so the disk runs from white
+  through gold to ember in visible colours (real disks peak in the UV or X-rays and their colour
+  contrast is far smaller). The
+  redshift `g` is computed exactly, but the display cubes its colour effect along with the radial
+  temperature contrast, so the Doppler colour asymmetry is exaggerated by the same power; the ordering —
+  approaching side brighter and bluer, the gravitational redshift towards the ISCO — is physical. Colour
+  is false. The lensing ring is drawn at full coverage wherever it touches a pixel, so it reads as a
+  one-pixel line (it is thinner than a pixel). Stars are points whose lensed images keep their brightness
+  (magnification is not shown); sky rays deflected by more than π (the sky's own photon subrings, within
+  ~0.15 M of the shadow's edge) are not traced and are drawn dark. The Milky Way is shown only as a
+  crowding of stars, not as diffuse light. The outer 45 % of the disk is feathered to zero emission. The clumps are
+  illustrative turbulence, regenerated every 6 s. The star field drifts slowly round the disk axis (once
+  per 150 s). The disk is infinitely thin and opaque; plunging gas inside the ISCO is not drawn; the sky
+  mixes an observer at infinity (for the disk) with one at `D = 60` (for the sky angles).
+- **Motion**: clumps stream and shear with the differential rotation (inner orbit 2.5 s); the lensed
+  star field drifts round the hole.
+- **Resize**: lattice, hit list, per-node star texels and sample map; the geodesic table, image extent,
+  star map and clump noise are size-independent and survive.
+- **Inks**: disk `Blackbody` (the display temperature), stars `Star` (levels 40–150, below the disk's
+  hottest level in every theme), shadow and empty sky blank. ASCII
+  fallback: brightness ramp `.:-=+*#%@` from the brighter half-pixel's level.
+- **Acceptance**: `BH-A1` ω strictly decreases with r and the ISCO period is 2.5 s; `BH-A2` *(changed)* the shadow is black: no ray with `b < b_c` receives sky light, and the only disk light inside the shadow is the direct image of the near half (the far half is seen only outside it); `BH-A3` *(changed)* the approaching half is bluer and brighter: `g(ψ = π) > g(ψ = 0)` at every radius and the mean Blackbody level of the left half of the image exceeds the right's; `BH-A4` *(changed)* the clumps ride the disk flow: a parcel orbiting at Kepler ω while drifting in at `dr/dt = −0.02 r` maps back to its birth position through the layer's closed-form transport, the two layers' weights satisfy `w₀² + w₁² = 1`, and the clump multiplier averages 1 with at least 5 % of bins below 0.6 and above 1.6; `BH-A5` *(new)* the geodesic table is right: rays are captured iff `b < 3√3` (outside the table's resolution there), for `b ≥ 20` the deflection matches `4/b + 15π/(4b²) + 128/(3b³)` within 1 %, and early on every ray is the straight line `u = sin φ / b` to first order; `BH-A6` *(new)* the order-1 (secondary) image lies outside the shadow; above the hole (`sin ψ ≥ 0`) it is a thin lensing ring, `b < b_c + 0.8`, drawn without gaps (at 120 × 40 and 200 × 50 every pixel it passes through above the shadow, where its gas is hot enough to show, is lit), and below it the wider lower arc; `BH-A7` *(new)* through the poles of the image (`cos ψ = 0`) there is no line-of-sight Doppler shift: `g = √(1 − 3/r)`, gravitational redshift times the transverse (time-dilation) Doppler shift; the emitted temperature peaks at `r = 49/36 · r_isco` and is 0 at the ISCO; `BH-A8` *(new)* the sky is a quiet field of steady point stars: over a full turn of the star field, stars light at most 5 % of the frame's pixels; however strongly lensed, a star shows in at most two nodes (one per image); and at 80 × 24, 120 × 40 and 200 × 50 over 20 s, a star image that vanishes with no star within two pixels has lasted at least 0.55 s on average; `BH-A9` *(new)* the disk is the hero and never clips: the display temperature starts at the coolest blackbody level, rises strictly and continuously (also at 4 500 K), lifts the dim disk (2 000 K shows above 2 600 K) and stays below 10 000 K, fewer than 5 % of the disk's pixels come within 3 % of it, and the disk's hottest level exceeds every star's (at 80 × 24, 120 × 40 and 200 × 50).
 
 ### galaxy_collision  (Deep Cosmos, M5)
 - **Intent**: two spiral galaxies passing each other and pulling out tidal tails and bridges (Toomre & Toomre 1972).
@@ -354,11 +447,62 @@ Shared helpers: `sciart_core::grid` (CORE-R33..R36) plus `particles` and `draw`.
 - **Perf**: at the 400 rate (mitosis, coral), 80×24 runs 3 840 nodes × 13.3 sub-steps ≈ 51 k cell updates per frame and 200×50 (and above) 5 000 nodes ≈ 67 k (~3 ns each); loops, swarm and spots run 2.3, 3.7 and 5 sub-steps per frame. The passaging sink adds one multiply per node and sub-step during one morph. The view samples v for every pixel and u only off the pattern, plus the ink mapping and the blit. Measured (`cargo bench`, frame = update + render, seed 42, M12 on a machine at load average ≈ 36): 0.30 ms mean at 200×50; worst frame over a whole walk ≈ 0.37 ms (minimum of 5 replays per frame, seeds 1 and 42). The exposure adds one pass over ≤ 5 120 nodes per `update`. The first resize's 200-sub-step pre-roll is a one-off scene-entry cost of ≈ 2 ms. (M10 round 3: 0.26 ms at 200×50, 0.90 ms at 400×100.) The simulation is capped at any size; the view grows with the display (every pixel samples v bilinearly), so 400×100 costs ≈ 3× 200×50 (informational, GEN-R8 is measured at 200×50). `render` and steady `update` stay allocation-free.
 - **Acceptance**: `CHEM-A1` u, v stay finite and in `[0, 1]` for any dt ≤ 0.25, and the kernel's clamp is only a guard: at every 4 s frame of the whole-walk runs of CHEM-A8 (seeds 1 and 7), the unclamped reference Euler update of the live fields (core `laplacian9`) is already in `[0, 1]` and its v stays below 0.7 (measured ≤ 0.63, loops colliding); `CHEM-A2` the uniform state `(u, v) = (1, 0)` is a fixed point; `CHEM-A3` with the reaction terms off, diffusion conserves `Σu` and `Σv` (periodic); `CHEM-A4` from each start slot (mitosis, loops, swarm, spots) and seeds 1, 2, 3 and 7, an 80×24 run develops structure within 10 s: var(v) > 3e-3 and at most 90 % of the ASCII cells between row 0 and the readout row are blank or `.`; from the mitosis slot the number of nodes with v > 0.1 at least doubles (the moving regimes are already developed by the pre-roll); and no reseed happens in the first 20 s; `CHEM-A5` the preset table is exactly the five presets above (names, F, k, rates, holds, morphs); `preset_at(t)` visits them in order, equals each preset exactly during its hold (its F, k and rate), is between preset i and i + 1 at mid-morph with the rate at the midpoint of the two rates, changes F and k by ≤ 1e-4 and the rate by ≤ 1 per 10 ms across the whole walk, keeps the rate within [70, 400], and wraps at 119 s; every seeded visit opens at the start of a start slot, all four occur over 40 seeds, and coral never does; at every 10 ms of the walk both Euler positivity bounds hold, F, k > 0, and F − 4(F + k)² ∈ [−0.005, +0.0015]; at mid-morph F is the midpoint and k − k_sn(F) is the midpoint of the endpoints' offsets; `k_sn` solves the curve to 1e-12; `uniform_states(F, k)` returns (1, 0) plus, iff F > 4(F + k)², the two non-trivial homogeneous states `v± = [F ± √(F² − 4F(F + k)²)]/(2(F + k))`, `u = (F + k)/v`, each with ODE residual < 1e-9 in f64; one full walk plus 2 s from the mitosis slot at 80×24 for seeds 1, 5, 7 and 11 never reseeds; `CHEM-A6` for displays 1×1 … 1000×300 `lattice_size` gives ≤ 5 120 nodes and at least 32×16, equals `(max(w, 32), max(2h, 16))` whenever that has ≤ 4 500 nodes, gives 80×48 at 80×24, 40×24 at 40×12, 100×50 at 200×50 and 80×63 at 120×50, and gives 200×50, 300×75 and 400×100 one shared lattice (100×50); a resize that keeps the lattice leaves u and v bit-identical; in the mitosis hold, 200×50 → 120×50 → 200×50 resamples with the reseed counter unchanged, keeping mean v within 5 % of before, and 2 s later std(v) is within 30 % of before with still no reseed; `CHEM-A7` for `v_top` ∈ {0.24, 0.33, 0.45}, `v_ink(u, v, v_top)` is `None` iff v < 0.12 and the halo level rounds to 0, and is otherwise `Role::Ramp(Aurora)` with level non-decreasing in v for fixed u; the level at v = 0.12 is in [60, 90], at `v_top` it is 255, and at the midpoint of [0.12, v_top] it is ≤ 140; the halo level rises by at most 1 per 0.01 of depletion from 0 to `ink::ramp(Aurora, 0.1)`; a pattern pixel never reads u; `exposure_target` of a uniform ramp of pattern values is its 97th percentile to within one bin, ignores substrate nodes (v < 0.12), is 0.45 with no pattern and clamps to [0.24, 0.45]; in live 80×24 frames (seed 7: mitosis at 4 s and 16 s, loops, swarm and spots at 10 s) 3–35 % of the body pixels (level ≥ 66) are at level ≥ 200; `ascii_cell` leaves levels < 13 blank, gives `.` for 13–65 and `:` from 66, and uses the brighter half; an 80×24 Unicode frame after 3 s uses only `Ramp(Aurora)`, `Text` and `Background` inks; with the title hidden every row of the 80×24 ASCII frame above the readout row is from `.:+#@` and blank; `CHEM-A8` from each start slot at 80×24 and 200×50 (seeds 1 and 7), 10 s into the hold (3.9 s into the 8 s mitosis hold) at most 50 % of the ASCII cells between row 0 and the readout row are `#` or `@` and at least 20 % are blank or `.`; at least 5 % of cells change in the next 4 s; and in the loops, swarm and spots holds at least 30 % change between 20 s and 24 s. In the loops and swarm holds at 80×24 and 200×50 (seeds 1 and 7), sampled at 2, 5, 8, 15 and 18 s, each sample with the frame 1/30 s later and the frame 0.25 s later: on average over the samples at most 4 % of the ASCII cells change per frame and at most 35 % per 0.25 s, at least 50 % of the half-block pixels below row 0 are near-black (`Ink::BLANK` or the halo, level below 32) and at least 45 % of the ASCII cells are blank or `.`, and no single sample has under 45 % near-black or under 40 % blank or `.`. Over the whole walk and on through the passaged return to mitosis and its hold (to 136 s), from the mitosis slot at 80×24, and from the spots slot through the first return and its hold (to 48 s), seeds 1 and 7: each frame at 4i s has at most 50 % `#`/`@` cells (60 % in the coral beat, from mid-morph into coral to the end of the morph out of it: a labyrinth covers ≈ 55 % of the cells at any exposure, measured 0.51–0.56), and in every 4 s window [4i, 4i + 4] at least 10 % of the cells change, with no exemption. `passage_mask` is a pure function of lattice and seed (different seeds give different masks), holds only 0 and 1, is constant on blocks (at most one change of value per 5 nodes along a row), and marks 55–85 % of the nodes on average over 8 seeds at 80×48, 100×50, 32×16 and 40×24; `CHEM-A9` for each preset i, `caption()` is caption i in mid-hold and at 45 % of morph i → i + 1, and caption i + 1 at 55 %; the readout ends at the last column with a blank cell each side; at 80×24, 60×12, 40×12, 30×12 and 20×8 (loops slot) it is exactly `Pearson F=.018 k=.051` when `readout_room` ≥ 21, exactly `F=.018 k=.051` when 13 ≤ room < 21, and absent below 13; its ink is `Text` at `title::READOUT_LEVEL`.
 
-### spacetime_grid  (Deep Cosmos, M6)
-- **Intent**: the rubber-sheet picture of general relativity: a perspective grid dimpled by two orbiting masses, with gravitational-wave ripples spreading outward.
-- **Model**: a `(nx × ny)` vertex mesh (`Grid<[f64; 3]>` or similar) on the plane, depth `z = −Σ mᵢ / √(rᵢ² + ε²)` plus a quadrupole wave term `A·cos(2(φ − Ω(t − r/c)))·f(r)` with retarded time (`c` = wave speed in grid units, amplitude decaying ~ `1/√r` and tapered near the sources); binary on a circular orbit (angular speed Ω, masses `m₁ ≥ m₂` about the centre of mass), inspiralling on a Newtonian (Peters) chirp `a = a₀(1−τ/τc)^{1/4}` with Kepler Ω and closed-form phase, reset at `a = 0.55 a₀` with continuous phase (a circular mode is kept for SPT-A2); wave amplitude grows ∝ `1/a`; `c` is artistic (λ comparable to the orbit so the spiral fits the sheet); the mesh is viewed from a tilted camera (pitch ≈ 55°) and projected with perspective, drawn as polylines with slope-aware glyphs, drawn far-band to near (painter's order) so near lines win; crossings merge into `┼`/`╳`; masses drawn as bright spheres above their wells.
-- **Inks**: grid lines `Structure` (level by depth/nearness), wells `Cold`, masses `Sun`/`Star`, wave crests `Wave`.
-- **Acceptance**: `SPT-A1` for a single mass the depth is radially symmetric and strictly increases in magnitude toward the mass; `SPT-A2` the binary keeps its centre of mass fixed and its separation constant (non-inspiral mode); `SPT-A3` the wave term has period π in the azimuth and its phase at radius r equals the source phase at `t − r/c`.
+### spacetime_grid  (Deep Cosmos, M6, M12)
+- **Intent**: the rubber-sheet picture of a binary black-hole merger (GW150914): a dim purple braille
+  mesh funnelling down into two orbiting black holes — dark cores with hot, glowing rims — with cooling
+  orbit trails; quadrupole ripples spiral outward as magenta-to-orange crests and tighten as the orbit
+  shrinks; the holes plunge and merge in a flash; the merger's burst sweeps across the sheet as an
+  expanding band of light while the single remnant rings down; a strain inset (top-left) draws the chirp
+  a distant detector would record, brightening to the merger.
+- **Model**: sheet height `z = −K Σ m / √(d² + ε²)` (softened Newtonian wells, `K = 0.16`, `ε = 0.16`)
+  plus the quadrupole wave `A f(r) S(t_r) cos 2(φ − Ψ(t_r))` with retarded time `t_r = t − r/c`,
+  `c = 0.35` sheet units/s, `A = 0.08` and `f(r) = (1 − e^{−(r/0.5)²}) √(0.5/r)`, the 2-D sheet's
+  energy-conserving fall-off (real strain falls as 1/r). The source runs a 20.1 s cycle: *inspiral* on
+  the Newtonian Peters chirp `a = a₀(1 − τ/τc)^{1/4}` (τc = 15 s, Ω₀ = 2π/4 s), Kepler Ω and closed-form
+  phase, from `a₀` to `0.5 a₀`, strain `S = a₀/a` (`h ∝ a²Ω² ∝ 1/a`), eased in over the first 2 s;
+  *merger* (0.5 s): `a = a_m(1 − s²) → 0` while the orbital speed doubles linearly, `S` rises by 2.2×,
+  and 5 % of the mass is radiated; then one remnant of `0.95 (m₁ + m₂)` at the centre of mass with an
+  `m = 2` *ringdown*, `S ∝ e^{−τ/0.35 s}`, pattern speed 1.2 × the end-of-plunge orbital speed (which is
+  `2 Ω_m`), i.e. `2.4 Ω_m`; *quiet* for 5.5 s while the burst runs off the sheet; then a cut (0.5 s dip
+  to dark each side) to a new binary at a new angle. Merger flash: `s²` through the plunge, 1 at
+  coalescence, then `e^{−τ/0.3 s}`. Mesh: perspective camera (pitch 55°, slow yaw sway), lines every ~7
+  columns / ~2.8 rows, 3 samples per edge, rasterised as braille `Dots` segments with the parts inside
+  each black hole's moat clipped out, fitted into rows 1 … h − 3 (a clear top row; the title row and a
+  gap below). Display low-pass: waves shorter than 2.5 line spacings are faded by `(Ω_max/Ω)²` instead of
+  aliasing into moiré. Black holes on their own `Dots` layer (drawn in `update`): a hot two-dot rim of
+  radius `0.12 m^{1/3}` (× (1 + flash); at least 2.5 dots) round a dark core, graded by a cooler halo
+  ring 2.5 dots further out (in braille cells of its own), in a dark moat to 1.4 × that radius plus a
+  dot that the mesh and trails keep out of, and a 1 s orbit trail that cools as it fades. The camera fit
+  includes the remnant's lifted well bottom, derived from `K`, `ε`, the radiated fraction and the lift. Inset:
+  the source strain, signed-square-root scaled to the merger peak, over the last 4 s, one sample per dot
+  column, in a 3-row strip at the top-left, `w/6` columns (12–22) wide (cleared under, labelled `strain`
+  above its left end); the mesh slides right into any free margin, and where that is not enough the
+  sheet is narrowed (its scale kept) until the inset has its full width; it narrows to stay two columns
+  clear of the mesh, and is dropped when narrower than 12 columns or on canvases under 48 × 16.
+- **Stylisation (stated)**: the rubber sheet is a metaphor (Newtonian potential depth, not a metric); the
+  wells follow the masses instantly (Newtonian), only the ripples travel at c; wave speed, amplitude and
+  time scales are artistic (real ripples are vastly weaker and longer than the orbit); merger and
+  ringdown are phenomenological, not numerical relativity; the black holes are drawn as dark cores with
+  hot Blackbody rims so they read in their funnels — the rims mark them (black holes emit no light), rim
+  size is not horizon size, and the merger flash is a visual cue for the energy radiated; the display
+  low-pass hides the shortest ringdown ripples on the sheet (the inset shows them), but the mesh's light
+  still carries the unfiltered wave energy density (`∝ h²`), so the burst reads as a band of light where
+  its ripples are too fine to draw; the loop restarts with a cut.
+- **Motion**: black holes orbit and spiral in (4 s → 1.4 s orbits), brighter crests stream outward; a
+  merger flash and ringdown every 20 s.
+- **Resize**: mesh sample lists, camera fit and sheet width, low-pass limit, the three `Dots` layers and
+  the inset.
+- **Inks**: mesh `Seq` (a field of sheet energy; inferno-like in astro): resting level 60, + 45 in
+  wells, + 110 on full crests (troughs dimmed by up to 30 %), + 220 × the wave's normalised energy
+  density `(f(r) S(t_r) / max)²`; nearness shades it by at most 30 % and the foreground edge fades; all
+  scaled by the cut and brightened up to 1.6 × by the merger flash; capped at level 210, and at 170
+  within 2.5 moat radii of a black hole (easing back to 210 by 3.5), so the rims win in their funnels.
+  Rims `Blackbody` (30 000 K and 25 000 K, levels ≥ 240; remnant 30 000 K), halo rings at 0.15 × the rim
+  temperature, warming with the flash; trails cooling from 0.35 × to 0.1 × the rim temperature.
+  Inset trace `Ramp(Aurora)` from level 110 (quiet) to 255 (merger peak) with a dim axis, label `Text` at
+  `title::READOUT_LEVEL`.
+- **Captions**: `meta.captions = ["merger", "ringdown"]`; see SPT-A7.
+- **Acceptance**: `SPT-A1` single-mass well radially symmetric, deepening toward the mass; `SPT-A2` circular binary: fixed centre of mass and constant separation; `SPT-A3` the wave has period π in azimuth and its phase at radius r equals the source phase at `t − r/c` (inspiral); `SPT-A4` *(new)* the merger is continuous: separation shrinks monotonically to 0, phase and well depth are continuous at both joins, the centre of mass stays fixed, and afterwards one mass `0.95 (m₁ + m₂)` sits at the centre; `SPT-A5` *(new)* the strain envelope peaks at the merger, then decays as `e^{−τ/τ_rd}` while the pattern turns faster than at the end of the inspiral; `SPT-A6` *(new)* the inset draws the (scaled) source strain at every dot column of its window, its rectangle stays inside the canvas and above the title row (none below 48 × 16), no mesh dot ever enters its cleared box, and from 120 columns up it has its full width (at least 20 columns); `SPT-A7` *(new)* `caption()` is `merger` from 0.5 s before the plunge until 0.5 s after coalescence, `ringdown` from then until 2.5 s after coalescence, and `None` otherwise; `SPT-A8` *(new)* the merger is the brightest moment: the flash is 1 at coalescence, 0 through the inspiral and from 3 s after it, and it raises the mesh level; `SPT-A9` *(new)* the black holes sit in deep funnels and outshine the mesh: at 80 × 24, outside the cut, the sheet under the heavier mass lies at least 2 rows below the sheet 0.5 units to either side of it, no mesh dot lies inside a black hole's moat, the brightest rim level is at least 1.5 × every mesh cell's level within two moat radii (about three disc radii) of a black hole, and the camera fit's lowest point equals the remnant's lifted well bottom; `SPT-A10` *(new)* the chirp and the burst light up the sheet: at 120 × 40, the mean on-screen mesh level over the last 3 s of the inspiral exceeds that over its early half, the mean over the 3 s after coalescence is at least 1.4 × the early-inspiral mean, crests reach level 120 during the inspiral and the burst reaches level 180.
 
 ---
 ## Batch D — physics sims & narrative scenes (M7)
