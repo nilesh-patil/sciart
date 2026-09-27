@@ -112,6 +112,12 @@ const TAIL_W: f64 = 6.0;
 const TAIL_V: (f64, f64) = (0.69, 0.36);
 /// A second pacemaker once the lattice holds this many nodes.
 const TWO_PACERS: usize = 8000;
+/// Seed segments keep half a wavelength apart, so no two seeded comets (each ≤ 6 nodes
+/// from its segment) touch or cross (BZ-A7).
+const SEED_GAP: f64 = 0.5 * LAMBDA;
+/// A fallback segment is never shrunk below this many nodes: shorter ones cannot launch
+/// a wave (BZ-A2's radius-0.5 case), and the dish would sit dark until the pacemaker.
+const MIN_FALLBACK_LEN: f64 = 3.0;
 
 // ---- Display (SPEC-002 Resize, Inks, ASCII, Label) ----
 
@@ -294,6 +300,33 @@ fn unit(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
     }
 }
 
+/// Distance from `p` to the segment `a → b`.
+fn point_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+    let (d, len) = unit(a, b);
+    let t = ((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]).clamp(0.0, len);
+    (p[0] - a[0] - t * d[0]).hypot(p[1] - a[1] - t * d[1])
+}
+
+/// Shortest distance between two seed segments: 0 if they cross, else the nearest
+/// endpoint-to-segment distance.
+pub(crate) fn segment_gap(f: &Front, g: &Front) -> f64 {
+    let side = |p: [f64; 2], a: [f64; 2], b: [f64; 2]| {
+        (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+    };
+    let straddles = |f: &Front, g: &Front| side(g.a, f.a, f.b) * side(g.b, f.a, f.b) < 0.0;
+    if straddles(f, g) && straddles(g, f) {
+        return 0.0;
+    }
+    [
+        point_segment(f.a, g.a, g.b),
+        point_segment(f.b, g.a, g.b),
+        point_segment(g.a, f.a, f.b),
+        point_segment(g.b, f.a, f.b),
+    ]
+    .into_iter()
+    .fold(f64::INFINITY, f64::min)
+}
+
 /// Whether `p` keeps `margin` nodes from every wall of a `w × h` lattice.
 fn clear_of_walls(p: [f64; 2], w: f64, h: f64, margin: f64) -> bool {
     (margin..=w - 1.0 - margin).contains(&p[0]) && (margin..=h - 1.0 - margin).contains(&p[1])
@@ -318,8 +351,9 @@ fn to_wall(p: [f64; 2], d: [f64; 2], w: f64, h: f64) -> f64 {
 }
 
 /// The segment of length `len` centred on `mid` along `d`, shrunk in 10 % steps (not
-/// below `min_len`) until its free ends keep the wall margin; `None` if it never fits.
-/// An anchored segment extends its `b` end to the wall and only checks `a`.
+/// below `min_len`) until its free ends keep the wall margin and it passes `ok`; `None`
+/// if it never does. An anchored segment extends its end nearer a wall to that wall
+/// and returns it as `b`; only its free end `a` is checked against the walls.
 fn fit(
     mid: [f64; 2],
     d: [f64; 2],
@@ -327,22 +361,31 @@ fn fit(
     anchored: bool,
     min_len: f64,
     lat: (f64, f64),
+    ok: impl Fn(&Front) -> bool,
 ) -> Option<Front> {
     let (w, h) = lat;
     let n = [-d[1], d[0]];
     let mut len = len;
     loop {
         let half = 0.5 * len;
-        let a = [mid[0] - d[0] * half, mid[1] - d[1] * half];
+        let mut a = [mid[0] - d[0] * half, mid[1] - d[1] * half];
         let mut b = [mid[0] + d[0] * half, mid[1] + d[1] * half];
         if anchored {
-            let reach = to_wall(b, d, w, h);
-            b = [b[0] + d[0] * reach, b[1] + d[1] * reach];
+            // Anchor the end nearer its wall: extending the far end would draw a front
+            // across the whole dish and leave no room for the others. `a` stays free.
+            let back = [-d[0], -d[1]];
+            let (reach_b, reach_a) = (to_wall(b, d, w, h), to_wall(a, back, w, h));
+            if reach_a < reach_b {
+                (a, b) = (b, [a[0] + back[0] * reach_a, a[1] + back[1] * reach_a]);
+            } else {
+                b = [b[0] + d[0] * reach_b, b[1] + d[1] * reach_b];
+            }
         }
+        let f = Front { a, b, n, anchored };
         let fits = clear_of_walls(a, w, h, WALL_MARGIN)
             && (anchored || clear_of_walls(b, w, h, WALL_MARGIN));
-        if fits {
-            return Some(Front { a, b, n, anchored });
+        if fits && ok(&f) {
+            return Some(f);
         }
         if len <= min_len {
             return None;
@@ -352,8 +395,9 @@ fn fit(
 }
 
 /// Draw one cycle's fronts and pacemakers for a `lat`-node lattice (SPEC-002 Model,
-/// BZ-A7): `k` broken fronts with midpoints apart and free ends clear of the walls,
-/// 30 % of them anchored to a wall.
+/// BZ-A7): up to `k` broken fronts, free ends clear of the walls and segments `SEED_GAP`
+/// apart, 30 % of them anchored to a wall. A front that finds no room is dropped, so a
+/// crowded dish gets fewer fronts instead of two tangled ones.
 pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
     let (w, h) = (f64::from(lat.width()), f64::from(lat.height()));
     let nodes = lat.area();
@@ -363,8 +407,13 @@ pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
         pacers: [[0.0; 2]; 2],
         n_pacers: if nodes >= TWO_PACERS { 2 } else { 1 },
     };
-    let mut mids = [[0.0; 2]; MAX_FRONTS];
     for i in 0..k {
+        let apart = |f: &Front| {
+            seeds.fronts[..i]
+                .iter()
+                .flatten()
+                .all(|g| segment_gap(f, g) >= SEED_GAP)
+        };
         let mut last = None;
         for _ in 0..SEED_TRIES {
             let len = rng.random_range(1.2..=2.0) * LAMBDA;
@@ -376,34 +425,31 @@ pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
             let anchored = rng.random_bool(ANCHOR_P);
             let d = [cos, sin];
             last = Some((mid, d, len, anchored));
-            let crowded = mids[..i]
-                .iter()
-                .any(|m| (m[0] - mid[0]).hypot(m[1] - mid[1]) < 1.5 * LAMBDA);
-            if crowded {
-                continue;
-            }
-            if let Some(f) = fit(mid, d, len, anchored, 0.8 * LAMBDA, (w, h)) {
+            if let Some(f) = fit(mid, d, len, anchored, 0.8 * LAMBDA, (w, h), apart) {
                 seeds.fronts[i] = Some(f);
-                mids[i] = mid;
                 break;
             }
         }
-        if seeds.fronts[i].is_none()
+        if i == 0
+            && seeds.fronts[0].is_none()
             && let Some((mid, d, len, anchored)) = last
         {
-            // No draw fitted: shrink the last one as far as needed, else clip it.
-            let f = fit(mid, d, len, anchored, 1.0, (w, h)).unwrap_or_else(|| {
-                let clip = |p: [f64; 2]| [p[0].clamp(0.0, w - 1.0), p[1].clamp(0.0, h - 1.0)];
-                let half = 0.5 * len;
-                Front {
-                    a: clip([mid[0] - d[0] * half, mid[1] - d[1] * half]),
-                    b: clip([mid[0] + d[0] * half, mid[1] + d[1] * half]),
-                    n: [-d[1], d[0]],
-                    anchored: false,
-                }
-            });
-            seeds.fronts[i] = Some(f);
-            mids[i] = mid;
+            // A dish too small for any draw still gets one front: the last draw shrunk
+            // as far as needed (never so short it cannot launch a wave), else clipped
+            // to the lattice.
+            let f = fit(mid, d, len, anchored, MIN_FALLBACK_LEN, (w, h), |_| true).unwrap_or_else(
+                || {
+                    let clip = |p: [f64; 2]| [p[0].clamp(0.0, w - 1.0), p[1].clamp(0.0, h - 1.0)];
+                    let half = 0.5 * len;
+                    Front {
+                        a: clip([mid[0] - d[0] * half, mid[1] - d[1] * half]),
+                        b: clip([mid[0] + d[0] * half, mid[1] + d[1] * half]),
+                        n: [-d[1], d[0]],
+                        anchored: false,
+                    }
+                },
+            );
+            seeds.fronts[0] = Some(f);
         }
     }
     for p in &mut seeds.pacers {
@@ -790,7 +836,8 @@ mod tests {
             if k % 8 == 0 {
                 tips(&u, &v, &mut window);
             }
-            if k % window_steps == 0 {
+            // Every 4 tu window, and the trailing 48–50 tu one too.
+            if k % window_steps == 0 || k == steps(30.0) {
                 assert!(!window.is_empty(), "no tip found in window ending {k}");
                 let span = |f: fn(&(i32, i32)) -> i32| {
                     window.iter().map(f).max().unwrap() - window.iter().map(f).min().unwrap()
@@ -801,6 +848,13 @@ mod tests {
                     sx <= 4 && sy <= 4,
                     "tip blocks spread {sx}×{sy}: {window:?}"
                 );
+                // The core drifts ≈ 1 node per turn: the probe must stay ≥ λ from it.
+                let n = window.len() as f64;
+                let (mx, my) = window.iter().fold((0.0, 0.0), |m, p| {
+                    (m.0 + f64::from(p.0) / n, m.1 + f64::from(p.1) / n)
+                });
+                let far = (f64::from(probe.0) - mx).hypot(f64::from(probe.1) - my);
+                assert!(far >= LAMBDA, "probe only {far:.1} nodes from the core");
                 window.clear();
             }
         }
@@ -912,18 +966,54 @@ mod tests {
 
         for (w, h) in [(64u16, 40u16), (80, 48), (197, 100), (100, 64)] {
             let (fw, fh) = (f64::from(w), f64::from(h));
+            let k = ((fw * fh / NODES_PER_FRONT).round() as usize).clamp(1, MAX_FRONTS);
             let mut rng = SplitMix64::new(u64::from(w) * 31 + u64::from(h));
+            let mut dropped = 0;
             for _ in 0..50 {
                 let seeds = plan_seeds(Size::new(w, h), &mut rng);
-                for f in seeds.fronts.iter().flatten() {
+                let fronts: Vec<&Front> = seeds.fronts.iter().flatten().collect();
+                dropped += k - fronts.len();
+                for (i, f) in fronts.iter().enumerate() {
                     assert!(clear_of_walls(f.a, fw, fh, WALL_MARGIN), "{w}x{h}: {f:?}");
                     assert!(
                         f.anchored || clear_of_walls(f.b, fw, fh, WALL_MARGIN),
                         "{w}x{h}: {f:?}"
                     );
+                    // Seeded comets never touch or cross.
+                    for g in &fronts[..i] {
+                        let gap = segment_gap(f, g);
+                        assert!(gap >= SEED_GAP, "{w}x{h}: gap {gap:.1}: {f:?} {g:?}");
+                    }
                 }
             }
+            // The rule rarely costs a front: ≤ 1 in 10 is dropped for want of room.
+            assert!(
+                5 * dropped <= k * 50 / 2,
+                "{w}x{h}: {dropped} of {} dropped",
+                k * 50
+            );
         }
+        // A dish too small for the rules still gets its one front.
+        let tiny = plan_seeds(Size::new(20, 8), &mut SplitMix64::new(3));
+        assert_eq!(tiny.fronts.iter().flatten().count(), 1);
+    }
+
+    #[test]
+    fn bz_a7_segment_gap_measures_crossings_and_clearance() {
+        let seg = |a: [f64; 2], b: [f64; 2]| Front {
+            a,
+            b,
+            n: [0.0, 1.0],
+            anchored: false,
+        };
+        let h = seg([0.0, 0.0], [10.0, 0.0]);
+        assert_eq!(segment_gap(&h, &seg([5.0, -3.0], [5.0, 3.0])), 0.0, "an X");
+        assert!((segment_gap(&h, &seg([2.0, 4.0], [8.0, 4.0])) - 4.0).abs() < 1e-12);
+        // Past the end: the nearest points are the two endpoints.
+        let gap = segment_gap(&h, &seg([13.0, 4.0], [20.0, 4.0]));
+        assert!((gap - 5.0).abs() < 1e-12, "{gap}");
+        // A T: one end touching the other segment.
+        assert!(segment_gap(&h, &seg([5.0, 0.0], [5.0, 7.0])).abs() < 1e-12);
     }
 
     #[test]
@@ -978,7 +1068,7 @@ mod tests {
         for _ in 0..30 {
             bz.update(SIM_DT, &mut ctx);
             let now = peak_level(&bz);
-            assert!(now + 8 >= last, "fade-in dimmed {last} -> {now}");
+            assert!(now >= last, "fade-in dimmed {last} -> {now}");
             last = now;
         }
         assert!(last >= 217, "fronts at full brightness 0.5 s in: {last}");
