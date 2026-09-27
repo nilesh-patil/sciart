@@ -26,6 +26,8 @@ pub struct Options {
     pub theme: Theme,
     pub glyphs: GlyphMode,
     pub hud: bool,
+    /// Science title on (CFG-R6, CLI-R7).
+    pub title: bool,
     /// Auto-cycle period; `None` for `run` (RT-R5).
     pub interval: Option<f64>,
     pub keep_awake: Mode,
@@ -50,6 +52,7 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
     let size = Size::new(area.width, area.height);
     let mut runtime = Runtime::new(opts.entries, opts.seed, size, opts.glyphs, None)
         .with_hud(opts.hud)
+        .with_title(opts.title)
         .with_theme(opts.theme);
     if let Some(interval) = opts.interval {
         runtime = runtime.with_interval(interval);
@@ -109,6 +112,7 @@ fn draw(f: &mut Frame<'_>, runtime: &Runtime, status: &HudExtras<'_>) {
     } else if runtime.hud() {
         let hud = Hud {
             generator: runtime.current_name().unwrap_or("-"),
+            title: runtime.title(),
             fps: status.fps,
             theme: runtime.theme(),
             seed: status.seed,

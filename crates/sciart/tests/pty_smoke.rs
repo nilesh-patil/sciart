@@ -1,5 +1,6 @@
 //! End-to-end: the real binary in an 80x24 pseudo-terminal, screen decoded by a vt100
-//! emulator (SPEC-006 end-to-end layer; RND-R4, RND-R5, RT-R6, RT-R9, CFG-R2, CFG-R3).
+//! emulator (SPEC-006 end-to-end layer; RND-R4, RND-R5, RND-R9, RT-R6, RT-R9, RT-R12, CLI-R7,
+//! CFG-R2, CFG-R3).
 //! Unix only (portable-pty's native backend).
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // real-time timeouts against a real process (ADR-0008 applies to generators)
@@ -146,40 +147,98 @@ fn rnd_r5_run_draws_stars_and_restores_the_terminal() {
     assert_eq!(count(&raw, ALT_LEAVE), 1, "left alternate screen once");
 }
 
+/// starfield's science title as the HUD and `--ascii` write it (`·` → `-`, CORE-R72).
+const STARFIELD_TITLE: &str = "Parallax - near stars rush by";
+
+fn last_row(screen: &str) -> &str {
+    screen.lines().last().unwrap_or_default()
+}
+
 #[test]
 fn rnd_r4_rt_r9_hud_reflects_keys() {
-    // A fixed short-named scene keeps theme and seed on screen at 80 columns. Flags never fall
-    // off the edge (RND-R4 fitting, see the long-name test below), but key hints may be
+    // A fixed scene keeps theme and seed on screen at 80 columns. Flags never fall off the edge
+    // (RND-R4 fitting, see the long-title test below), but key hints and the seed may be
     // dropped, so assertions don't rely on a separator after a flag.
     let mut s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "3"]);
     s.wait_for("HUD", |t| {
-        t.contains("starfield | ") && t.contains("| astro |")
+        t.contains(&format!("{STARFIELD_TITLE} | ")) && t.contains("| astro |")
     });
     s.press("t");
     s.wait_for("theme change", |t| t.contains("| rainbow |"));
     s.press(" ");
     s.wait_for("pause", |t| t.contains("| PAUSED"));
     s.press("h");
-    s.wait_for("HUD hidden", |t| !t.contains("seed 3"));
+    s.wait_for("HUD hidden", |t| !t.contains("PAUSED"));
     let (status, _) = s.quit();
     assert!(status.success());
 }
 
-/// RND-R4 regression: at 80 columns the full HUD of a long scene name is ~100 characters, and
-/// plain clipping used to cut `PAUSED` off the right edge. Priority fitting drops key hints and
-/// seed instead, so the flag stays visible. No `--seed`: a random 20-digit seed is the realistic
-/// (worst) case.
+/// RND-R4 regression: at 80 columns the full HUD of a long name is ~100 characters, and plain
+/// clipping used to cut `PAUSED` off the right edge. Priority fitting drops key hints and seed
+/// instead, so the flag stays visible. The 32-column title is the longest allowed (GEN-R12). No
+/// `--seed`: a random 20-digit seed is the realistic (worst) case.
 #[test]
-fn rnd_r4_hud_keeps_paused_visible_with_a_long_scene_name_at_80_columns() {
+fn rnd_r4_r9_hud_keeps_paused_visible_with_a_long_title_at_80_columns() {
+    let title = "Oldest light - early sound waves | ";
     let mut s = Session::start(&["run", "cosmic_microwave_background", "--hud", "--ascii"]);
-    s.wait_for("HUD", |t| t.contains("cosmic_microwave_background | "));
+    s.wait_for("HUD", |t| t.contains(title));
     s.press(" ");
     let screen = s.wait_for("PAUSED on an 80-column HUD", |t| t.contains("| PAUSED"));
-    let hud_row = screen.lines().last().unwrap_or_default();
-    assert!(
-        hud_row.starts_with("cosmic_microwave_background | "),
-        "{hud_row:?}"
-    );
+    let hud_row = last_row(&screen);
+    assert!(hud_row.starts_with(title), "{hud_row:?}");
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
+/// RT-R12: with the HUD off the title sits at the bottom-left of the canvas (after the col-0
+/// gutter, CORE-R74). Started under the HUD and then paused, hiding the HUD must still bring
+/// the canvas title back: the frozen frame is re-rendered, not stepped.
+#[test]
+fn rt_r12_rnd_r9_title_moves_between_hud_and_canvas_even_while_paused() {
+    let args = [
+        "run",
+        "starfield",
+        "--hud",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("title in the HUD", |t| {
+        last_row(t).starts_with(&format!("{STARFIELD_TITLE} | "))
+    });
+    s.press(" ");
+    s.wait_for("pause", |t| t.contains("| PAUSED"));
+    s.press("h");
+    let screen = s.wait_for("canvas title under the frozen frame", |t| {
+        last_row(t).starts_with(&format!(" {STARFIELD_TITLE} "))
+    });
+    assert!(!screen.contains("PAUSED"), "HUD gone:\n{screen}");
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
+/// CLI-R7: `--no-title` leaves the canvas bare and the HUD falls back to the scene id.
+#[test]
+fn cli_r7_no_title_shows_the_id_in_the_hud_and_nothing_on_the_canvas() {
+    let args = [
+        "run",
+        "starfield",
+        "--no-title",
+        "--hud",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("id in the HUD", |t| last_row(t).starts_with("starfield | "));
+    s.press("h");
+    let screen = s.wait_for("HUD hidden", |t| !t.contains("starfield |"));
+    assert!(!screen.contains("Parallax"), "no title anywhere:\n{screen}");
     let (status, _) = s.quit();
     assert!(status.success());
 }
@@ -225,7 +284,7 @@ fn cfg_r3_unknown_key_exits_2_with_location() {
 #[test]
 fn ka_r3_caffeinate_lives_and_dies_with_sciart() {
     let s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "1"]);
-    s.wait_for("keep-awake in HUD", |t| t.contains("| caffeinate:on |"));
+    s.wait_for("keep-awake in HUD", |t| t.contains("| caffeinate:on"));
     let pattern = format!("caffeinate -dimsu -w {}", s.pid());
     let running = || {
         Command::new("pgrep")

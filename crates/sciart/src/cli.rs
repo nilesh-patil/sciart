@@ -43,6 +43,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub hud: bool,
 
+    /// Hide the science title (the HUD then shows the scene id)
+    #[arg(long, global = true)]
+    pub no_title: bool,
+
     /// How to keep the machine awake [default: caffeinate on macOS, off elsewhere]
     #[arg(long, global = true, value_enum)]
     pub keep_awake: Option<KeepAwakeArg>,
@@ -141,16 +145,22 @@ impl fmt::Display for UsageError {
     }
 }
 
-/// Generators a command will use. `disabled` filters `sim` only (CLI-R2, CFG-R4).
+/// Generators a command will use. `disabled` filters `sim` only, retired names included
+/// (CLI-R2, CFG-R4, CFG-R7).
 pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Entry>, UsageError> {
     match command {
         Command::Run { name } => find(name)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
         Command::Sim | Command::List => {
+            let disabled: Vec<&str> = disabled
+                .iter()
+                .filter_map(|d| find(d))
+                .map(|e| e.meta.name)
+                .collect();
             let entries: Vec<_> = registry()
                 .iter()
-                .filter(|e| !disabled.iter().any(|d| d == e.meta.name))
+                .filter(|e| !disabled.contains(&e.meta.name))
                 .collect();
             if entries.is_empty() {
                 Err(UsageError::AllDisabled)
@@ -290,6 +300,13 @@ mod tests {
         let picked = select(&run, &[]).unwrap();
         assert_eq!(picked.len(), 1);
         assert_eq!(picked[0].meta.name, "gray_scott");
+    }
+
+    #[test]
+    fn cli_r7_no_title_flag() {
+        assert!(!parse(&[]).unwrap().no_title);
+        assert!(parse(&["--no-title"]).unwrap().no_title);
+        assert!(parse(&["run", "starfield", "--no-title"]).unwrap().no_title);
     }
 
     #[test]
