@@ -43,8 +43,10 @@ use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "vortex_street",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "A von Karman vortex street shed from a cylinder at Re ~ 130",
+    title: "Vortex street · eddies peel off",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -1217,6 +1219,9 @@ impl Generator for VortexStreet {
         }
         self.pixels.resize(size);
         // The hysteresis stack holds at most one entry per pixel (`drop_faint_islands`).
+        // Cleared first: `reserve` counts from the length, and the last island is left
+        // in it, so the capacity would creep with each resize (TEST-R6).
+        self.stack.clear();
         self.stack.reserve(self.pixels.pixel_size().area());
         self.map.rebuild(self.vort.size(), self.pixels.pixel_size());
         self.size = Some(size);
@@ -1918,6 +1923,8 @@ mod tests {
     #[test]
     fn vor_a7_frame_shows_disc_and_two_signed_rows() {
         let mut s = Stage::new(build(), 42, Size::new(80, 24), GlyphMode::Ascii);
+        // The scene's own frame: the title would sit on the calm inflow's last row.
+        s.set_title_visible(false);
         for _ in 0..30 {
             s.step(SIM_DT);
         }

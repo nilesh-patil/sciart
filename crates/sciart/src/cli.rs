@@ -43,6 +43,10 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub hud: bool,
 
+    /// Hide the science title (the HUD then shows the scene id)
+    #[arg(long, global = true)]
+    pub no_title: bool,
+
     /// How to keep the machine awake [default: caffeinate on macOS, off elsewhere]
     #[arg(long, global = true, value_enum)]
     pub keep_awake: Option<KeepAwakeArg>,
@@ -141,16 +145,22 @@ impl fmt::Display for UsageError {
     }
 }
 
-/// Generators a command will use. `disabled` filters `sim` only (CLI-R2, CFG-R4).
+/// Generators a command will use. `disabled` filters `sim` only, retired names included
+/// (CLI-R2, CFG-R4, CFG-R7).
 pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Entry>, UsageError> {
     match command {
         Command::Run { name } => find(name)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
         Command::Sim | Command::List => {
+            let disabled: Vec<&str> = disabled
+                .iter()
+                .filter_map(|d| find(d))
+                .map(|e| e.meta.name)
+                .collect();
             let entries: Vec<_> = registry()
                 .iter()
-                .filter(|e| !disabled.iter().any(|d| d == e.meta.name))
+                .filter(|e| !disabled.contains(&e.meta.name))
                 .collect();
             if entries.is_empty() {
                 Err(UsageError::AllDisabled)
@@ -161,7 +171,7 @@ pub fn select(command: &Command, disabled: &[String]) -> Result<Vec<&'static Ent
     }
 }
 
-/// `name<TAB>category<TAB>description`, sorted by name (CLI-R4).
+/// `name<TAB>category id<TAB>description`, sorted by name (CLI-R4).
 pub fn list_lines() -> Vec<String> {
     registry()
         .iter()
@@ -169,7 +179,7 @@ pub fn list_lines() -> Vec<String> {
             format!(
                 "{}\t{}\t{}",
                 e.meta.name,
-                e.meta.category.label(),
+                e.meta.category.id(),
                 e.meta.description
             )
         })
@@ -271,9 +281,32 @@ mod tests {
         assert_eq!(lines, sorted);
         assert!(lines.iter().all(|l| l.split('\t').count() == 3));
         assert!(lines.contains(&format!(
-            "starfield\tbasic\t{}",
+            "starfield\tdeep-cosmos\t{}",
             sciart_generators::starfield::META.description
         )));
+        for (old, _) in sciart_generators::ALIASES {
+            assert!(
+                !lines.iter().any(|l| l.starts_with(&format!("{old}\t"))),
+                "GEN-R14: retired name {old} listed"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_r2_gen_r14_run_accepts_a_retired_name() {
+        let run = Command::Run {
+            name: "chemical_reaction".into(),
+        };
+        let picked = select(&run, &[]).unwrap();
+        assert_eq!(picked.len(), 1);
+        assert_eq!(picked[0].meta.name, "gray_scott");
+    }
+
+    #[test]
+    fn cli_r7_no_title_flag() {
+        assert!(!parse(&[]).unwrap().no_title);
+        assert!(parse(&["--no-title"]).unwrap().no_title);
+        assert!(parse(&["run", "starfield", "--no-title"]).unwrap().no_title);
     }
 
     #[test]

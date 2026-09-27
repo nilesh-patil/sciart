@@ -58,6 +58,7 @@ fn add(a: Allocs, b: Allocs) -> Allocs {
 }
 
 fn run_scene(entry: &Entry, size: Size) -> Report {
+    // Titles are on by default (CORE-R75): the title and `caption()` are measured too.
     let mut stage = Stage::new((entry.build)(), SEED, size, GlyphMode::Unicode);
     for _ in 0..WARMUP_STEPS {
         stage.step(SIM_DT);

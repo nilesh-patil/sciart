@@ -22,11 +22,14 @@ use sciart_core::grid::{self, SampleMap};
 use sciart_core::ink::{self, seq_value};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "physarum",
     category: Category::Biology,
     description: "A slime mould spreading a lace of veins that thickens into a transport network",
+    title: "Slime mould · trails reinforce",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -85,7 +88,7 @@ const FLAKE_OUT: f64 = 1.0;
 /// dark. A lower floor lights the diffuse attractant around every tube, which fattens
 /// the veins into blobs.
 const U_FLOOR: f64 = 0.45;
-const LABEL_INK: Ink = Ink::new(Role::Text, 110);
+const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// `(cos, sin)` of the 16 headings, `k · 22.5°` with y down.
 pub(crate) const DIRS: [(f32, f32); 16] = {
@@ -862,10 +865,13 @@ impl Generator for Physarum {
                 canvas.put(px, py.div_euclid(2), Glyph::ascii('@'), self.flake_ink);
             }
         }
-        if shows_label(self.cells) {
-            // One dark cell either side, so the label never looks glued to a tube.
+        // Bottom-right, clear of the title (GEN-R13), with one dark cell either side so the
+        // label never looks glued to a tube.
+        if shows_label(self.cells)
+            && self.label.len() <= title::readout_room(self.cells, &Title::of(self))
+        {
             let y = i32::from(self.cells.height()) - 1;
-            draw::label(canvas, 0, y, self.label.as_str(), LABEL_INK);
+            draw::label_right(canvas, y, self.label.as_str(), LABEL_INK);
         }
     }
 }
@@ -1330,7 +1336,7 @@ mod tests {
     }
 
     #[test]
-    fn phy_a7_flakes_stay_cool_until_reached_and_the_label_has_a_margin() {
+    fn phy_a7_gen_r13_flakes_stay_cool_and_the_label_sits_right_with_a_margin() {
         let size = Size::new(80, 24);
         let (p, _) = scene(size, 42);
         let flakes: Vec<(i32, i32)> = p.flakes[..p.n_flakes].to_vec();
@@ -1357,10 +1363,11 @@ mod tests {
                     assert_eq!(canvas.get(px, py / 2).map(|c| c.ch), Some('@'));
                 }
             }
-            // The label keeps one dark cell on either side.
+            // The label is right-aligned (GEN-R13) and keeps one dark cell on either side.
             let y = i32::from(size.height()) - 1;
-            let end = 1 + p.label.as_str().len() as i32;
-            for x in [0, end] {
+            let last = i32::from(size.width()) - 1;
+            let lead = last - 1 - p.label.as_str().len() as i32;
+            for x in [lead, last] {
                 assert_eq!(
                     canvas.get(x, y).copied(),
                     Some(Cell::BLANK),
@@ -1373,7 +1380,7 @@ mod tests {
         // the label and nothing else, so the label sits under the organism.
         let (mut p, mut ctx) = scene(size, 42);
         let y = i32::from(size.height()) - 1;
-        let label = format!(" {} ", p.label.as_str());
+        let label = format!("{:>80}", format!(" {} ", p.label.as_str()));
         while p.time() < 100.0 - 1e-9 {
             let next = p.time().round() + 1.0;
             run_to(&mut p, &mut ctx, next);
@@ -1381,12 +1388,7 @@ mod tests {
                 let mut canvas = Canvas::new(size, mode);
                 p.render(&mut canvas);
                 let row = &canvas.to_lines()[y as usize];
-                assert_eq!(
-                    row.trim_end(),
-                    label.trim_end(),
-                    "{mode:?} t = {}",
-                    p.time()
-                );
+                assert_eq!(row, &label, "{mode:?} t = {}", p.time());
                 for x in 0..i32::from(size.width()) {
                     let cell = canvas.get(x, y).copied().unwrap_or(Cell::BLANK);
                     assert!(

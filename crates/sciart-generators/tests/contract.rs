@@ -1,15 +1,18 @@
-//! Stability contract for EVERY registered generator (SPEC-002 GEN-R1..R10).
+//! Stability contract for EVERY registered generator (SPEC-002 GEN-R1..R10, GEN-R12, GEN-R13).
 //!
 //! Port of the Python `tests/test_generator_contract.py`, extended for animation.
 //! New generators are covered automatically once they are in the registry.
 
+use std::collections::BTreeMap;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Form, Title};
 use sciart_generators::{Entry, find, registry};
 
 const SEED: u64 = 99;
 
+/// Titles are on by default (CORE-R75), so every check below also covers the title.
 fn stage(entry: &Entry, size: Size, mode: GlyphMode) -> Stage {
     Stage::new((entry.build)(), SEED, size, mode)
 }
@@ -191,6 +194,152 @@ fn gen_r10_ascii_mode_is_pure_ascii() {
                 .filter(|c| !c.is_ascii())
                 .collect();
             assert!(bad.is_empty(), "non-ASCII glyphs in ASCII mode: {bad:?}");
+        }
+    });
+}
+
+/// Chars that would turn a title into a formula or markup (GEN-R12).
+const FORMULA: &[char] = &['=', '^', '_', '*', '/', '<', '>'];
+
+fn check_title_chars(s: &str) {
+    for c in s.chars() {
+        assert!(
+            title::ascii_of(c).is_some() && !FORMULA.contains(&c),
+            "{c:?} is not allowed in a title: {s:?}"
+        );
+    }
+}
+
+fn check_part(what: &str, s: &str) {
+    assert!(
+        !s.is_empty() && s.trim() == s,
+        "{what} must be non-empty and trimmed: {s:?}"
+    );
+}
+
+#[test]
+fn gen_r12_every_title_and_caption_is_valid() {
+    for_each_generator("titles", |e| {
+        let meta = e.meta;
+        assert_eq!(
+            meta.title.matches(title::SEPARATOR).count(),
+            1,
+            "exactly one ` · ` in {:?}",
+            meta.title
+        );
+        check_title_chars(meta.title);
+        let t = Title::new(meta.title, None);
+        check_part("phenomenon", t.phenomenon);
+        check_part("mechanism", t.mechanism);
+        assert!(t.width(Form::Full) <= 32, "{:?} over 32 cells", meta.title);
+        assert!(
+            t.width(Form::Phenomenon) <= 20,
+            "{:?} over 20 cells",
+            t.phenomenon
+        );
+        for &caption in meta.captions {
+            check_part("caption", caption);
+            check_title_chars(caption);
+            assert!(!caption.contains(title::SEPARATOR), "{caption:?}");
+            let live = Title::new(meta.title, Some(caption));
+            assert!(live.width(Form::Full) <= 32, "{live:?} over 32 cells");
+        }
+    });
+}
+
+#[test]
+fn gen_r12_titles_are_unique() {
+    let mut owners: BTreeMap<&str, Vec<&str>> = BTreeMap::new();
+    for e in registry() {
+        owners.entry(e.meta.title).or_default().push(e.meta.name);
+    }
+    owners.retain(|_, names| names.len() > 1);
+    assert!(owners.is_empty(), "shared titles: {owners:?}");
+}
+
+#[test]
+fn gen_r12_live_captions_are_declared() {
+    for_each_generator("captions", |e| {
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = (e.build)();
+        g.resize(size, &mut ctx);
+        let mut steps = 0;
+        for secs in [0, 1, 5, 20] {
+            while steps < secs * 60 {
+                g.update(SIM_DT, &mut ctx);
+                ctx.advance(SIM_DT);
+                steps += 1;
+            }
+            if let Some(caption) = g.caption() {
+                assert!(
+                    e.meta.captions.contains(&caption),
+                    "caption {caption:?} at {secs} s is not in meta.captions"
+                );
+            }
+        }
+    });
+}
+
+#[test]
+fn gen_r13_core_r76_title_row_readouts_use_the_readout_level() {
+    // Title hidden, so every text char on row h − 1 is a scene readout; one shared level
+    // keeps the numbers below the title's phenomenon however the scene's art is inked.
+    for_each_generator("readout level", |e| {
+        for size in [Size::new(80, 24), Size::new(40, 12), Size::new(200, 50)] {
+            let mut stage = Stage::new((e.build)(), 42, size, GlyphMode::Unicode);
+            stage.set_title_visible(false);
+            for _ in 0..60 {
+                stage.step(SIM_DT);
+            }
+            let y = i32::from(size.height()) - 1;
+            let canvas = stage.render();
+            for x in 0..i32::from(size.width()) {
+                let cell = canvas.get(x, y).unwrap();
+                if cell.ink.role == Role::Text && cell.ch.is_alphanumeric() {
+                    assert_eq!(
+                        cell.ink.level,
+                        title::READOUT_LEVEL,
+                        "{size:?} column {x} {:?}",
+                        cell.ch
+                    );
+                }
+            }
+        }
+    });
+}
+
+#[test]
+fn gen_r13_no_scene_text_in_the_title_span_or_its_readout_gap() {
+    // Title hidden, so any text left there is the scene's own; Unicode only, since ASCII
+    // art fallbacks may use letters. The checked cells run from the span to where the
+    // longest title-row readout may start, so the gap (CORE-R76) is covered too.
+    for_each_generator("title span", |e| {
+        for size in [Size::new(80, 24), Size::new(40, 12)] {
+            let mut stage = Stage::new((e.build)(), 42, size, GlyphMode::Unicode);
+            stage.set_title_visible(false);
+            let mut steps = 0;
+            for secs in [0, 1, 5] {
+                while steps < secs * 60 {
+                    stage.step(SIM_DT);
+                    steps += 1;
+                }
+                let title = stage.title();
+                let canvas = stage.render();
+                let Some((y, _)) = title::span(size, &title) else {
+                    continue;
+                };
+                let text_from = i32::from(size.width())
+                    - 1
+                    - i32::try_from(title::readout_room(size, &title)).unwrap();
+                let row: String = (0..text_from)
+                    .map(|x| canvas.get(x, y).map_or(' ', |c| c.ch))
+                    .collect();
+                assert!(
+                    !row.chars().any(char::is_alphanumeric),
+                    "{size:?} at {secs} s: {row:?}"
+                );
+            }
         }
     });
 }

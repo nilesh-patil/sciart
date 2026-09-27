@@ -14,8 +14,10 @@ use sciart_core::prelude::*;
 
 pub static META: Meta = Meta {
     name: "spacetime_grid",
-    category: Category::Astronomy,
+    category: Category::DeepCosmos,
     description: "A rubber-sheet spacetime dimpled by an orbiting binary emitting gravitational waves",
+    title: "Gravitational waves · inspiral",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {

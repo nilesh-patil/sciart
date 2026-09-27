@@ -24,6 +24,8 @@ pub static META: Meta = Meta {
     name: "molecule_viewer",
     category: Category::Chemistry,
     description: "Tumbling ball-and-stick models of real molecules, from water to buckminsterfullerene",
+    title: "Molecule · atoms share electrons",
+    captions: &CAPTIONS,
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -117,7 +119,7 @@ const fn bd(a: u8, b: u8, order: Order) -> Bond {
 
 /// r(OH) 0.9572 Å, ∠HOH 104.52° (Benedict, Gailar & Plyler 1956); plane = xy.
 static WATER: Table = Table {
-    name: "water",
+    name: CAPTIONS[0],
     formula: "H2O",
     mass: "18.02",
     atoms: &[
@@ -130,7 +132,7 @@ static WATER: Table = Table {
 
 /// T_d, r(CH) 1.087 Å: hydrogens on alternate cube corners, `1.087/√3` per axis.
 static METHANE: Table = Table {
-    name: "methane",
+    name: CAPTIONS[1],
     formula: "CH4",
     mass: "16.04",
     atoms: &[
@@ -152,7 +154,7 @@ static METHANE: Table = Table {
 /// ∠COH 105.4° (NIST CCCBDB experimental); C–H 1.09 Å at tetrahedral angles. The mirror
 /// plane (C, C, O and the two anti hydrogens) is xy.
 static ETHANOL: Table = Table {
-    name: "ethanol",
+    name: CAPTIONS[2],
     formula: "C2H6O",
     mass: "46.07",
     atoms: &[
@@ -180,7 +182,7 @@ static ETHANOL: Table = Table {
 
 /// D₆h, r(CC) 1.397, r(CH) 1.084 Å (Herzberg 1966); ring in xy, `√3/2 = 0.866 025 4`.
 static BENZENE: Table = Table {
-    name: "benzene",
+    name: CAPTIONS[3],
     formula: "C6H6",
     mass: "78.11",
     atoms: &[
@@ -216,7 +218,7 @@ static BENZENE: Table = Table {
 /// Caffeine, the PubChem CID 2519 3-D conformer, atoms and bonds in its SDF order (the
 /// purine plane is already xy). Kekulé orders: C2=O, C6=O, C4=C5 and C8=N9.
 static CAFFEINE: Table = Table {
-    name: "caffeine",
+    name: CAPTIONS[4],
     formula: "C8H10N4O2",
     mass: "194.19",
     atoms: &[
@@ -432,17 +434,21 @@ pub(crate) fn gallery() -> Vec<Model> {
         .into_iter()
         .map(Model::from_table)
         .collect();
-    models.push(Model::new(
-        "buckminsterfullerene",
-        "C60",
-        "720.66",
-        atoms,
-        bonds,
-    ));
+    models.push(Model::new(CAPTIONS[5], "C60", "720.66", atoms, bonds));
     models
 }
 
 const MOLECULES: usize = 6;
+/// Molecule names in gallery order; the shown one is the title's caption (GEN-R12),
+/// `Molecule · caffeine`.
+const CAPTIONS: [&str; MOLECULES] = [
+    "water",
+    "methane",
+    "ethanol",
+    "benzene",
+    "caffeine",
+    "buckminsterfullerene",
+];
 /// C60: 60 atoms + 90 bonds.
 const MAX_ATOMS: usize = C60_ATOMS;
 const MAX_ITEMS: usize = 150;
@@ -1011,6 +1017,10 @@ impl Generator for MoleculeViewer {
         paint(canvas, model, &frame, &frame.order[..frame.items]);
         let room = usize::from(canvas.size().width()).saturating_sub(2);
         canvas.text(1, 0, model.label(room), LABEL_INK);
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        Some(CAPTIONS[self.pose().molecule])
     }
 }
 
@@ -1608,6 +1618,21 @@ mod tests {
             })
             .collect();
         assert_eq!(starts.len(), 6, "{starts:?}");
+    }
+
+    #[test]
+    fn gen_r12_caption_names_the_shown_molecule() {
+        let size = Size::new(80, 24);
+        let mut ctx = Ctx::new(7, size);
+        let mut g = MoleculeViewer::new();
+        g.resize(size, &mut ctx);
+        for _ in 0..MOLECULES * 2 {
+            let m = g.pose().molecule;
+            let caption = g.caption().unwrap();
+            assert_eq!(caption, CAPTIONS[m]);
+            assert!(g.models[m].labels[0].starts_with(caption), "{caption}");
+            g.update(SLOT / 2.0, &mut ctx);
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! A frost dendrite growing from a seed by diffusion-limited aggregation (Witten–Sander),
 //! glowing at its growing tips, then melting from the tips inward and regrowing
-//! (SPEC-002 `crystal_growth`).
+//! (SPEC-002 `fractal_growth`).
 //!
 //! Physics: random walkers diffuse in from a launch circle just outside the cluster and
 //! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`.
@@ -36,16 +36,19 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 use sciart_core::{draw, raster};
 
 pub static META: Meta = Meta {
-    name: "crystal_growth",
-    category: Category::PhysicsChemistry,
+    name: "fractal_growth",
+    category: Category::PhysicalChemistry,
     description: "A dendrite growing by diffusion-limited aggregation, then melting and regrowing",
+    title: "Fractal growth · walkers stick",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
-    Box::new(CrystalGrowth::default())
+    Box::new(FractalGrowth::default())
 }
 
 /// Braille dots per terminal cell; `SUB_Y / SUB_X = ASPECT` makes the dot lattice square.
@@ -340,7 +343,7 @@ enum Phase {
 }
 
 #[derive(Debug)]
-pub struct CrystalGrowth {
+pub struct FractalGrowth {
     dla: Dla,
     phase: Phase,
     /// Seconds since this crystal was seeded (attach times are on this clock).
@@ -363,8 +366,10 @@ pub struct CrystalGrowth {
     df_clock: f64,
     label: String,
     label_row: Option<i32>,
+    /// Chars the readout may take on its row, right of the title (GEN-R13).
+    room: usize,
     /// The crystal rasterised for the current state, sized in `resize` and rebuilt by
-    /// [`CrystalGrowth::rasterise`] after every state change; `render` only blits it.
+    /// [`FractalGrowth::rasterise`] after every state change; `render` only blits it.
     dots: Dots,
 }
 
@@ -399,7 +404,7 @@ impl Tint {
     }
 }
 
-impl Default for CrystalGrowth {
+impl Default for FractalGrowth {
     fn default() -> Self {
         Self {
             dla: Dla::default(),
@@ -417,12 +422,13 @@ impl Default for CrystalGrowth {
             df_clock: 0.0,
             label: String::with_capacity(96),
             label_row: None,
+            room: 0,
             dots: Dots::default(),
         }
     }
 }
 
-impl CrystalGrowth {
+impl FractalGrowth {
     fn reseed(&mut self, ctx: &mut Ctx) {
         let p = ctx.rng.random_range(P_STICK.0..=P_STICK.1);
         // The lattice centre is the terminal centre: the crystal sits mid-screen.
@@ -444,17 +450,22 @@ impl CrystalGrowth {
         self.df = mass_radius_dimension(dists, FIT_LO, FIT_HI_FRAC * d.r_max).or(self.df);
     }
 
+    /// Readout, e.g. `p_s 0.62   N 812   D_f 1.71` (the title names the process). Parts
+    /// that would reach the title are dropped from the left, whole, so the measured
+    /// dimension goes last (GEN-R13); in-place edits of a pre-sized string, no allocation.
     fn refresh_label(&mut self) {
+        const SEP: &str = "   ";
         self.label.clear();
         let d = &self.dla;
-        let _ = write!(
-            self.label,
-            "diffusion-limited aggregation   p_s {:.2}   N {}",
-            d.p_stick,
-            d.cells.len()
-        );
+        let _ = write!(self.label, "p_s {:.2}{SEP}N {}", d.p_stick, d.cells.len());
         if let Some(df) = self.df {
-            let _ = write!(self.label, "   D_f {df:.2}");
+            let _ = write!(self.label, "{SEP}D_f {df:.2}");
+        }
+        while self.label.len() > self.room {
+            match self.label.find(SEP) {
+                Some(i) => self.label.replace_range(..i + SEP.len(), ""),
+                None => self.label.clear(),
+            }
         }
     }
 
@@ -546,7 +557,7 @@ impl CrystalGrowth {
     }
 }
 
-impl Generator for CrystalGrowth {
+impl Generator for FractalGrowth {
     fn meta(&self) -> &'static Meta {
         &META
     }
@@ -564,6 +575,7 @@ impl Generator for CrystalGrowth {
         self.steps_per_sec =
             (STEPS_REF * (r_rows / R_REF_ROWS).powf(COST_EXP)).clamp(STEPS_MIN, STEPS_MAX);
         self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
+        self.room = title::readout_room(size, &Title::of(self));
         self.reseed(ctx);
         self.rasterise();
     }
@@ -612,11 +624,6 @@ impl Generator for CrystalGrowth {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        if let Some(row) = self.label_row
-            && usize::from(canvas.size().width()) >= self.label.len() + 2
-        {
-            draw::text_centered(canvas, row, &self.label, Ink::new(Role::Text, 150));
-        }
         if self.phase == Phase::Grow {
             // The vapour is sparse: each walker is a lone dot that replaces its cell
             // (rather than merging into a `Dots` layer); the crystal then draws over it.
@@ -626,6 +633,17 @@ impl Generator for CrystalGrowth {
             }
         }
         self.dots.blit(canvas);
+        // Last, so no walker or crystal dot lands inside the text.
+        if let Some(row) = self.label_row
+            && !self.label.is_empty()
+        {
+            draw::label_right(
+                canvas,
+                row,
+                &self.label,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
+        }
     }
 }
 
@@ -674,7 +692,7 @@ mod tests {
         assert!((dot_w - dot_h).abs() < 1e-12);
         // The DLA lattice is the dot lattice of the screen.
         let size = Size::new(80, 24);
-        let mut g = CrystalGrowth::default();
+        let mut g = FractalGrowth::default();
         g.resize(size, &mut Ctx::new(1, size));
         assert_eq!(g.dla.attach.size(), Size::new(160, 96));
     }
@@ -800,7 +818,7 @@ mod tests {
     fn cry_cycle_grows_holds_melts_and_reseeds() {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
-        let mut g = CrystalGrowth::default();
+        let mut g = FractalGrowth::default();
         g.resize(size, &mut ctx);
         let (mut shrank, mut reseeded, mut held) = (false, false, false);
         let mut prev = g.dla.cells.len();
@@ -816,6 +834,42 @@ mod tests {
             prev = g.dla.cells.len();
         }
         assert!(held && shrank && reseeded, "{held} {shrank} {reseeded}");
+    }
+
+    #[test]
+    fn cry_gen_r13_readout_drops_whole_parts_from_the_left() {
+        let mut ctx = seeded(1);
+        let mut g = FractalGrowth::default();
+        // The room is w − 6 minus the title text (gutter, 4-cell gap, trailing blank):
+        // the full title (30 cells) at 80 wide, the phenomenon (14) at 40; at most half
+        // the row, so 44 becomes 40 at 80 wide (CORE-R76).
+        for (size, room) in [(Size::new(80, 24), 40), (Size::new(40, 12), 20)] {
+            ctx.set_size(size);
+            g.resize(size, &mut ctx);
+            assert_eq!(g.room, room, "{size:?}");
+        }
+        g.dla.p_stick = 0.62;
+        g.df = Some(1.71);
+        for (room, want) in [
+            (80, "p_s 0.62   N 1   D_f 1.71"),
+            (25, "p_s 0.62   N 1   D_f 1.71"),
+            (24, "N 1   D_f 1.71"),
+            (13, "D_f 1.71"),
+            (8, "D_f 1.71"),
+            (7, ""),
+        ] {
+            g.room = room;
+            g.refresh_label();
+            assert_eq!(g.label, want, "room {room}");
+        }
+        // Drawn right-aligned, a blank cell either side, over any walker under it.
+        g.room = 22;
+        g.refresh_label();
+        g.phase = Phase::Grow;
+        g.dla.walkers[0] = (30 * SUB_X, 11 * SUB_Y);
+        let mut canvas = Canvas::new(Size::new(40, 12), GlyphMode::Ascii);
+        g.render(&mut canvas);
+        assert!(canvas.to_lines()[11].ends_with(" N 1   D_f 1.71 "));
     }
 
     #[test]

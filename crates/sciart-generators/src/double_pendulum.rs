@@ -18,11 +18,14 @@ use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::ode;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "double_pendulum",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "Twin double pendulums diverging chaotically from almost identical starts",
+    title: "Double pendulum · twins diverge",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -325,10 +328,9 @@ impl DoublePendulum {
             "|dtheta| {sep:.1e} rad = {growth:>7.1}x start ({folds:>4.1} e-folds)   \
              energy drift {drift:.0e}   t {t:>2.0}/{RUN_SECONDS:.0}s"
         );
-        let _ = write!(
-            mid,
-            "|dtheta| {sep:.1e} ({folds:>4.1} e-folds)  dE/E {drift:.0e}"
-        );
+        // No drift here: its width varies (0e0, 3e-7), and at 80×24 the half-row room
+        // (CORE-R76) would then flip the readout between forms.
+        let _ = write!(mid, "|dtheta| {sep:.1e} ({folds:>4.1} e-folds)");
         let _ = write!(short, "e-folds {folds:>4.1}");
     }
 
@@ -505,10 +507,17 @@ impl Generator for DoublePendulum {
         }
         sciart_core::particles::plot(canvas, pivot.0, pivot.1, PIVOT, Ink::new(Role::Text, 230));
 
+        // Right-aligned, clear of the title (GEN-R13).
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         if let Some(row) = self.label_row
-            && let Some(label) = self.labels.iter().find(|l| l.len() as i32 + 2 <= width)
+            && let Some(label) = self.labels.iter().find(|l| l.len() <= room)
         {
-            sciart_core::draw::text_centered(canvas, row, label, Ink::new(Role::Text, 170));
+            sciart_core::draw::label_right(
+                canvas,
+                row,
+                label,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
         }
     }
 }
@@ -736,6 +745,35 @@ mod tests {
                         assert!((0.0..f64::from(w)).contains(&x), "{w}x{h}: x {x}");
                         assert!((0.0..rows).contains(&y), "{w}x{h}: y {y}");
                     }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dp_gen_r13_readout_is_the_longest_form_right_of_the_title() {
+        // Long, mid and short forms: the room right of the title decides.
+        for (size, form) in [
+            (Size::new(200, 50), 0),
+            (Size::new(80, 24), 1),
+            (Size::new(40, 12), 2),
+        ] {
+            let mut g = DoublePendulum::default();
+            let mut ctx = seeded(3);
+            g.resize(size, &mut ctx);
+            // At the start and once the energy drift is non-zero: the form must not
+            // change with the width of the numbers.
+            for _ in 0..2 {
+                let mut canvas = Canvas::new(size, GlyphMode::Ascii);
+                g.render(&mut canvas);
+                let bottom = &canvas.to_lines()[usize::from(size.height()) - 1];
+                let label = &g.labels[form];
+                assert!(
+                    bottom.ends_with(&format!(" {label} ")),
+                    "{size:?}: {bottom:?}"
+                );
+                for _ in 0..60 {
+                    g.update(SIM_DT, &mut ctx);
                 }
             }
         }

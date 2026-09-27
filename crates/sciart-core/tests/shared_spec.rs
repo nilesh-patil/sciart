@@ -246,6 +246,39 @@ fn core_r67_label_has_a_blank_gutter_either_side() {
     assert_eq!(c.to_lines()[0], "## λ=5 ## lo");
 }
 
+// ---------------------------------------------------------------- CORE-R76
+
+#[test]
+fn core_r76_label_right_mirrors_label() {
+    let hashes = |w| {
+        let mut c = Canvas::new(Size::new(w, 1), GlyphMode::Unicode);
+        for x in 0..i32::from(w) {
+            c.put(x, 0, Glyph::ascii('#'), Ink::new(Role::Star, 1));
+        }
+        c
+    };
+    let ink = Ink::new(Role::Text, 200);
+
+    let mut c = hashes(12);
+    assert_eq!(draw::label_right(&mut c, 0, "λ=5", ink), 7);
+    assert_eq!(c.to_lines()[0], "####### λ=5 ");
+    assert_eq!(c.get(7, 0).unwrap().ink, Ink::BLANK);
+    assert_eq!(c.get(8, 0).unwrap().ink, ink);
+    assert_eq!(c.get(10, 0).unwrap().ink, ink);
+    assert_eq!(c.get(11, 0).unwrap().ink, Ink::BLANK);
+
+    // Clipped at column 0; the returned column goes negative.
+    let mut c = hashes(12);
+    assert_eq!(draw::label_right(&mut c, 0, "a much longer text", ink), -8);
+    assert_eq!(c.to_lines()[0], "longer text ");
+
+    // Off-canvas rows and a 1-column canvas are harmless.
+    let mut c = hashes(1);
+    assert_eq!(draw::label_right(&mut c, 0, "ab", ink), -3);
+    assert_eq!(c.to_lines()[0], " ");
+    assert_eq!(draw::label_right(&mut c, 5, "ab", ink), -3);
+}
+
 // ---------------------------------------------------------------- CORE-R68
 
 #[test]

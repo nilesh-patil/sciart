@@ -5,17 +5,21 @@
 //! particle's momentum is its speed and the field `B` is its cyclotron frequency.
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::ops::Range;
 
 use rand::Rng;
 use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::particles::plot;
 use sciart_core::prelude::*;
+use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "particle_accelerator",
-    category: Category::PhysicsChemistry,
+    category: Category::Physics,
     description: "Counter-rotating bunches colliding into curling particle showers",
+    title: "Collider · magnets curl tracks",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -450,21 +454,36 @@ impl Generator for ParticleAccelerator {
         }
 
         // Beam-energy gauge along the bottom row: fills during the ramp.
-        if self.height >= 12 && w >= 24 {
+        if let Some(cols) = gauge_cols(canvas.size(), &Title::of(self)) {
             let y = i32::from(self.height) - 1;
-            let cells = (w / 4).clamp(8, 40) as i32;
-            let x0 = (w as i32 - cells) / 2;
+            let cells = f64::from(cols.end - cols.start);
             let fill = (ramp_omega(self.tau) - OMEGA0) / (OMEGA1 - OMEGA0);
-            for i in 0..cells {
-                let (g, ink) = if f64::from(i) + 0.5 <= fill * f64::from(cells) {
+            for x in cols.clone() {
+                let (g, ink) = if f64::from(x - cols.start) + 0.5 <= fill * cells {
                     (Glyph::new('━', '='), Ink::new(Role::Accent, 170))
                 } else {
                     (Glyph::new('─', '-'), Ink::new(Role::Dim, 90))
                 };
-                canvas.put(x0 + i, y, g, ink);
+                canvas.put(x, y, g, ink);
             }
         }
     }
+}
+
+/// Columns of the beam-energy gauge on the bottom row: a quarter of the width, centred,
+/// but kept 4 blank cells clear of the title's text like a readout (GEN-R13, CORE-R76)
+/// and shortened to end before the last column; `None` below 8 cells, so it is never a
+/// stub.
+fn gauge_cols(size: Size, title: &Title) -> Option<Range<i32>> {
+    let w = i32::from(size.width());
+    if size.height() < 12 || w < 24 {
+        return None;
+    }
+    let start = title::span(size, title).map_or(1, |(_, cols)| cols.end + 3);
+    let cells = (w / 4).clamp(8, 40);
+    let x0 = ((w - cells) / 2).max(start);
+    let end = (x0 + cells).min(w - 1);
+    (end - x0 >= 8).then_some(x0..end)
 }
 
 #[cfg(test)]
@@ -477,6 +496,34 @@ mod tests {
         let mut g = ParticleAccelerator::new();
         g.resize(size, &mut ctx);
         (g, ctx)
+    }
+
+    #[test]
+    fn gen_r13_collider_gauge_clears_title_span() {
+        let title = Title::new(META.title, None);
+        // At 80×24 the centred gauge (columns 30..50) would sit under the title's text.
+        let size = Size::new(80, 24);
+        let (_, text) = title::span(size, &title).unwrap();
+        let (g, _) = fresh(80, 24);
+        let cols = gauge_cols(size, &title).unwrap();
+        assert!(cols.start >= text.end + 3, "{cols:?} vs title {text:?}");
+        assert_eq!(cols.len(), 20, "full length when it fits");
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let row: String = canvas.to_lines()[23]
+            .chars()
+            .skip(cols.start as usize)
+            .collect();
+        assert!(row.starts_with(&"─".repeat(20)), "{row:?}");
+        // Wide canvases keep it centred; narrow ones shorten it or drop a stub.
+        assert_eq!(gauge_cols(Size::new(200, 50), &title), Some(80..120));
+        for w in 24..=120u16 {
+            let size = Size::new(w, 24);
+            if let Some(cols) = gauge_cols(size, &title) {
+                let free = title::span(size, &title).map_or(1, |(_, c)| c.end + 3);
+                assert!(cols.start >= free && cols.end < i32::from(w) && cols.len() >= 8);
+            }
+        }
     }
 
     /// Wrap an angle into (−π, π].

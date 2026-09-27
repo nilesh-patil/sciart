@@ -44,6 +44,8 @@ benchmark layers).
 | Fault isolation | `catch_unwind` + per-session quarantine | [ADR-0006](../adr/0006-panic-quarantine.md) |
 | Task runner | pixi tasks wrapping cargo (no hosted CI yet) | [ADR-0007](../adr/0007-pixi-task-runner.md) |
 | RNG | Injected, seedable `rand_chacha::ChaCha8Rng`; no global RNG in generators | [ADR-0008](../adr/0008-injected-rng.md) |
+| Categories (M11) | Sky settings + physics × chemistry × biology lattice, 11 categories | [ADR-0013](../adr/0013-pxcxb-taxonomy.md) |
+| Titles (M11) | One science title per scene, drawn by `Stage` | [ADR-0014](../adr/0014-central-science-titles.md) |
 | CLI / config | clap (derive) + TOML file, flags override file | [SPEC-005](SPEC-005-cli-config.md) |
 | Tests | built-in test + proptest + insta + criterion | [SPEC-006](SPEC-006-testing.md) |
 
@@ -113,17 +115,18 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
 
 ### F2: Simulation mode — `sciart sim` (default subcommand)
 - **Story**: As a user I leave it running; scenes change automatically.
-- **Acceptance**: auto-advances every `--interval` seconds (default 15) to a random
-  non-quarantined generator, never the same one twice in a row (when >1 available).
+- **Acceptance**: auto-advances every `--interval` seconds (default 15) to the next
+  non-quarantined generator in a seeded, category-interleaved order (RT-R13, M11), never the same
+  one twice in a row (when >1 available).
 - Keys: `n`/`→` next, `p`/`←` previous (history), `space` pause/resume the auto-cycle **and** the
   simulation, `r` reset current generator, `h` toggle HUD, `t` cycle theme, `q`/`Esc`/`Ctrl-C` quit
   (RT-R9). The same keys work in `run` mode.
 
 ### F3: `sciart list`
-- Prints `name  category  description` for every registered generator, sorted by name.
+- Prints `name  category  description` for every registered generator, sorted by name (category id since M11, CLI-R4).
 
 ### F4: HUD overlay
-- Toggleable one-line status bar: generator name, measured FPS, theme, keep-awake state,
+- Toggleable one-line status bar: science title (M11, RND-R9; the id when titles are off), measured FPS, theme, keep-awake state,
   paused flag, quarantine count. Off by default; `--hud` or `h` enables.
 
 ### F5: Low-power mode
@@ -144,6 +147,11 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
 Reimagined for continuous animation (Python output is inspiration, not oracle). Ported in
 technique batches — see [ROADMAP](../ROADMAP.md). Each scene: seeded, resize-safe,
 < 5 ms/frame, snapshot-tested.
+
+### F9: Science titles (M11)
+- Every scene shows a short `Phenomenon · mechanism` title at the bottom-left, fitted to the width and
+  dimmed after 8 s; it moves into the HUD while the HUD is on. `title = false` or `--no-title` hides it.
+  See ADR-0014, CORE-R71..R76, GEN-R12/R13, RT-R12, RND-R8/R9, CFG-R6, CLI-R7.
 
 ## UI/UX Specifications
 

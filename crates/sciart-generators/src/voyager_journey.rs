@@ -21,8 +21,10 @@ use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
     name: "voyager_journey",
-    category: Category::SpaceExploration,
+    category: Category::Voyages,
     description: "Voyager 2 Grand Tour past Jupiter, Saturn, Uranus and Neptune",
+    title: "Voyager 2 · planets fling it on",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -866,6 +868,8 @@ mod tests {
     fn voy_a4_neptune_is_drawn_throughout_the_cycle() {
         for (w, h) in [(200, 50), (60, 16)] {
             let mut stage = Stage::new(build(), 3, Size::new(w, h), GlyphMode::Ascii);
+            // The scene's own frame: the title may cover Neptune low on the bottom row.
+            stage.set_title_visible(false);
             for s in 0..56 {
                 for _ in 0..60 {
                     stage.step(SIM_DT);

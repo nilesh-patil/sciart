@@ -26,6 +26,9 @@
 //! counter would see other tests' allocations; a thread-local one sees only the code
 //! under test (plus anything *it* does on this thread). Work spawned onto other threads
 //! is not counted, which is fine for the synchronous code measured here.
+//!
+//! Besides the call counters, [`live_bytes`] tracks the net heap footprint of the thread
+//! for the leak guards (TEST-R6, TEST-R7).
 
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
@@ -69,6 +72,8 @@ thread_local! {
     static REALLOCS: Cell<u64> = const { Cell::new(0) };
     static DEALLOCS: Cell<u64> = const { Cell::new(0) };
     static BYTES: Cell<u64> = const { Cell::new(0) };
+    // Signed: a thread may free blocks another thread allocated.
+    static LIVE: Cell<i64> = const { Cell::new(0) };
 }
 
 /// Set on the first allocation routed through [`CountingAlloc`], so [`measure`] can
@@ -80,11 +85,22 @@ fn bump(counter: &'static std::thread::LocalKey<Cell<u64>>, by: u64) {
     let _ = counter.try_with(|c| c.set(c.get().wrapping_add(by)));
 }
 
+/// Add `by` (possibly negative) to this thread's live-byte count.
 #[inline]
-fn record_alloc(size: usize) {
+fn live_add(by: i64) {
+    let _ = LIVE.try_with(|c| c.set(c.get().wrapping_add(by)));
+}
+
+/// Count an allocation of `size` bytes that returned `p`. The attempt always counts; the
+/// bytes are live only when it succeeded, since a null return allocated nothing.
+#[inline]
+fn record_alloc(size: usize, p: *mut u8) {
     INSTALLED.store(true, Ordering::Relaxed);
     bump(&ALLOCS, 1);
     bump(&BYTES, size as u64);
+    if !p.is_null() {
+        live_add(size as i64);
+    }
 }
 
 fn snapshot() -> Allocs {
@@ -114,22 +130,25 @@ pub struct CountingAlloc;
 unsafe impl GlobalAlloc for CountingAlloc {
     #[inline]
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
-        record_alloc(layout.size());
         // SAFETY: the caller upholds `GlobalAlloc::alloc`'s preconditions (non-zero
         // size layout), which are exactly `System::alloc`'s.
-        unsafe { System.alloc(layout) }
+        let p = unsafe { System.alloc(layout) };
+        record_alloc(layout.size(), p);
+        p
     }
 
     #[inline]
     unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        record_alloc(layout.size());
         // SAFETY: same preconditions as `alloc`, forwarded unchanged.
-        unsafe { System.alloc_zeroed(layout) }
+        let p = unsafe { System.alloc_zeroed(layout) };
+        record_alloc(layout.size(), p);
+        p
     }
 
     #[inline]
     unsafe fn dealloc(&self, ptr: *mut u8, layout: Layout) {
         bump(&DEALLOCS, 1);
+        live_add(-(layout.size() as i64));
         // SAFETY: the caller guarantees `ptr` came from this allocator with `layout`;
         // every block this allocator hands out came from `System`, so that holds there.
         unsafe { System.dealloc(ptr, layout) }
@@ -142,7 +161,12 @@ unsafe impl GlobalAlloc for CountingAlloc {
         bump(&BYTES, new_size as u64);
         // SAFETY: the caller guarantees `ptr`/`layout` describe a live block from this
         // allocator (hence from `System`) and that `new_size` is valid for `layout`.
-        unsafe { System.realloc(ptr, layout, new_size) }
+        let p = unsafe { System.realloc(ptr, layout, new_size) };
+        // On failure the old block stays live at its old size.
+        if !p.is_null() {
+            live_add(new_size as i64 - layout.size() as i64);
+        }
+        p
     }
 }
 
@@ -161,6 +185,19 @@ pub fn measure<R>(f: impl FnOnce() -> R) -> (R, Allocs) {
     let out = f();
     let after = snapshot();
     (out, after.since(before))
+}
+
+/// Bytes allocated minus bytes freed on the current thread since it started, with a
+/// `realloc` counted as its size delta (TEST-R6). Only differences are meaningful: take
+/// one reading before and one after the code under test. Negative when the thread has
+/// freed more than it allocated (blocks handed over from other threads).
+///
+/// # Panics
+/// If [`CountingAlloc`] is not the global allocator of this test binary: the count would
+/// then stay at zero and hide every leak.
+pub fn live_bytes() -> i64 {
+    assert_installed();
+    LIVE.with(Cell::get)
 }
 
 /// Whether [`CountingAlloc`] is this binary's global allocator.

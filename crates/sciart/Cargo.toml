@@ -27,6 +27,7 @@ toml.workspace = true
 
 [dev-dependencies]
 portable-pty.workspace = true
+proptest.workspace = true
 tempfile.workspace = true
 vt100.workspace = true
 

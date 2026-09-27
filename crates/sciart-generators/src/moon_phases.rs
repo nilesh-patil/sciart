@@ -12,8 +12,10 @@ use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "moon_phases",
-    category: Category::Astronomy,
+    category: Category::EarthSky,
     description: "The Moon through a full lunation, with craters and the phase name",
+    title: "Moon phases · sunlit half",
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -138,13 +140,14 @@ impl Generator for MoonPhases {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         let (w, h) = (size.width(), size.height());
-        // Two rows are kept for the label once there is room for a recognisable disc.
+        // Two rows are kept below the disc once there is room for a recognisable one: the
+        // label's, at most h − 2, and the bottom row, which belongs to the title (GEN-R13).
         let disc_h = if h >= 8 { h - 2 } else { h };
         self.cx = f64::from(w / 2);
         self.cy = f64::from(disc_h / 2);
         self.r = draw::fit_radius(Size::new(w, disc_h), 0.9);
         self.label_y =
-            (h >= 8).then(|| ((self.cy + self.r).ceil() as i32 + 1).min(i32::from(h) - 1));
+            (h >= 8).then(|| ((self.cy + self.r).ceil() as i32 + 1).min(i32::from(h) - 2));
         self.w = f64::from(w);
         self.h = f64::from(h);
         if self.spots.is_empty() {
@@ -360,5 +363,20 @@ mod tests {
         assert!(lit(&stage_at(15.0)) > 500);
         let full = stage_at(15.0).to_lines().join("\n");
         assert!(full.contains("Full Moon  100%"), "{full}");
+    }
+
+    #[test]
+    fn moon_gen_r13_label_sits_between_the_disc_and_the_title_row() {
+        for (w, h) in [(40, 12), (80, 24), (30, 8), (200, 50), (60, 9)] {
+            let size = Size::new(w, h);
+            let mut moon = MoonPhases::default();
+            moon.resize(size, &mut Ctx::new(1, size));
+            let y = moon.label_y.expect("label shown");
+            assert!(y <= i32::from(h) - 2, "{w}x{h}: label on row {y}");
+            assert!(
+                f64::from(y) > moon.cy + moon.r,
+                "{w}x{h}: label on the disc"
+            );
+        }
     }
 }
