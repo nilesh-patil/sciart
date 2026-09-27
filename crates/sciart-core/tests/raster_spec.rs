@@ -526,3 +526,42 @@ fn core_r82_disc_is_clipped_to_the_lattice() {
     d.disc(2.0, 3.0, 1e12, A);
     assert_eq!(lit(&d).len(), 6 * 8);
 }
+
+// ---------------------------------------------------------------- CORE-R86
+
+#[test]
+fn core_r86_backdrop_puts_the_pixels_behind_glyphs_drawn_over_them() {
+    let size = Size::new(4, 2);
+    let mut px = Pixels::new(size);
+    // Cell (0, 0): both pixels set; cell (1, 0): top only; cell (2, 0): none.
+    px.set(0, 0, A);
+    px.set(0, 1, B);
+    px.set(1, 0, C);
+    let mut c = Canvas::new(size, GlyphMode::Unicode);
+    px.blit(&mut c, |_, _, _, _| None);
+    for x in 0..3 {
+        c.put(x, 0, Glyph::new('─', '-'), A);
+    }
+    // A label's blank over the pixels counts too.
+    px.set(3, 1, B);
+    c.put(3, 0, Glyph::ascii(' '), A);
+    px.backdrop(&mut c);
+    assert_eq!(cell(&c, 3, 0).bg, B, "a label gap takes the backdrop");
+    assert_eq!(
+        cell(&c, 0, 0).bg,
+        A,
+        "the cell's `cell_bg`, its more intense pixel"
+    );
+    assert_eq!(cell(&c, 1, 0).bg, C, "top pixel when the bottom is empty");
+    assert_eq!(cell(&c, 2, 0).bg, Ink::BLANK, "no pixels, no backdrop");
+    assert_eq!(
+        (cell(&c, 0, 0).ch, cell(&c, 0, 0).ink),
+        ('─', A),
+        "glyph kept"
+    );
+    // ASCII canvases have no half blocks to match: untouched.
+    let mut a = Canvas::new(size, GlyphMode::Ascii);
+    a.put(0, 0, X, A);
+    px.backdrop(&mut a);
+    assert_eq!(cell(&a, 0, 0).bg, Ink::BLANK);
+}

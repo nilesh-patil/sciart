@@ -24,16 +24,22 @@
 //! so resizes never desync the story; only the dust, the dust devils and the seeds are
 //! state, drawn from `ctx.rng`.
 //!
-//! **Sky.** A 90 s sol with a real-ish solar geometry at Jezero's latitude. Martian dust
-//! forward-scatters blue light, so around the low sun the sky turns blue while the rest
-//! stays butterscotch; Phobos, orbiting faster than Mars spins, rises in the west.
+//! **Sky.** A 90 s sol with a real-ish solar geometry at Jezero's latitude, on a warped
+//! clock (an easy day, a lingering sunset, a brief night). Martian dust forward-scatters
+//! blue light, so around the low sun a soft blue aureole grows while the rest of the sky
+//! stays butterscotch, both on one Blackbody ramp; sky and aureole fade together through
+//! a shortened dusty twilight, and only then do the stars come out (MR-A4). Phobos,
+//! orbiting faster than Mars spins, rises in the west. The rover dims with the daylight
+//! (MR-A9).
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
+use sciart_core::ink::{self, ramp};
 use sciart_core::particles::{gaussian, plot};
 use sciart_core::prelude::*;
+use sciart_core::text::StackText;
 use sciart_core::timeline::ease;
 use sciart_core::{draw, rng};
 
@@ -495,17 +501,26 @@ fn smooth(edge0: f64, edge1: f64, x: f64) -> f64 {
     ease::smoothstep((x - edge0) / (edge1 - edge0))
 }
 
-/// Blue forward-scattered glow around a low sun: on between ~25° and −16° elevation.
+/// The aureole's Gaussian radius, as a share of the Sun's height range (the horizon row).
+const GLOW_R: f64 = 0.42;
+/// The aureole's peak on the sky's Blackbody ramp: level 144 (~6900 K), a pale
+/// blue-white just past the white point (level 140), where the ramp is lightest (MR-A4).
+const AUREOLE_TOP: f64 = 0.565;
+
+/// Blue forward-scattered glow around a low sun: on below ~25° elevation, fading out
+/// with the twilight by −12°.
 fn glow_strength(e_deg: f64) -> f64 {
-    smooth(25.0, 6.0, e_deg) * smooth(-16.0, -5.0, e_deg)
+    smooth(25.0, 4.0, e_deg) * smooth(-12.0, -2.0, e_deg)
 }
 
+/// The sky's brightness: full above 8°, fading through a long dusty twilight to −14°.
 fn daylight(e_deg: f64) -> f64 {
-    smooth(-6.0, 8.0, e_deg)
+    smooth(-14.0, 8.0, e_deg)
 }
 
+/// How dark it is for the stars: they come out once the aureole has gone (MR-A4).
 fn night(e_deg: f64) -> f64 {
-    smooth(-4.0, -14.0, e_deg)
+    smooth(-11.0, -18.0, e_deg)
 }
 
 // ---------------------------------------------------------------------------------------
@@ -561,25 +576,6 @@ const DEVILS: usize = 2;
 // Glyphs.
 // ---------------------------------------------------------------------------------------
 
-// Solid fills carry the picture in colour; each has its own ASCII fallback so ASCII
-// mode stays legible (the sky falls back to blank, not to a wall of `#`).
-const SKY: [Glyph; 4] = [
-    Glyph::new('█', ' '),
-    Glyph::new('▓', ' '),
-    Glyph::new('▒', ' '),
-    Glyph::new('░', ' '),
-];
-const GLOW: [Glyph; 4] = [
-    Glyph::new('█', '*'),
-    Glyph::new('▓', ':'),
-    Glyph::new('▒', '.'),
-    Glyph::new('░', '.'),
-];
-const SUN: Glyph = Glyph::new('█', '@');
-const FAR_FILL: Glyph = Glyph::new('█', ':');
-const MID_FILL: Glyph = Glyph::new('█', '+');
-const GROUND: Glyph = Glyph::new('█', '#');
-const PEBBLE: Glyph = Glyph::new('▓', '%');
 /// Rover deck and camera head.
 const HULL: Glyph = Glyph::new('█', '=');
 const TYRE: Glyph = Glyph::new('█', 'o');
@@ -607,12 +603,6 @@ fn link_glyph(dx: f64, dy: f64) -> Glyph {
         _ if up_right => Glyph::new('╱', '/'),
         _ => Glyph::new('╲', '\\'),
     }
-}
-
-/// Hash of a screen cell, `[0, 1)`: a stable dither pattern.
-#[inline]
-fn cell_hash(x: i32, y: i32, salt: u64) -> f64 {
-    rng::hash01(salt ^ rng::cell_key(x, y))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -691,6 +681,43 @@ impl View {
 // The scene.
 // ---------------------------------------------------------------------------------------
 
+/// Depth layers of the landscape, back to front (MR-A5).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Layer {
+    Sky,
+    Far,
+    Mid,
+    Near,
+}
+
+/// The layer covering pixel row `py` of a column whose far, mid and near surfaces sit at
+/// pixel rows `tops`: the nearest layer whose surface lies above the pixel's centre, so a
+/// column always reads sky, then far, mid and near ground, going down (MR-A5).
+pub(crate) fn layer_at(tops: [f64; 3], py: i32) -> Layer {
+    let y = f64::from(py) + 0.5;
+    if y >= tops[2] {
+        Layer::Near
+    } else if y >= tops[1] {
+        Layer::Mid
+    } else if y >= tops[0] {
+        Layer::Far
+    } else {
+        Layer::Sky
+    }
+}
+
+/// This frame's light: the Sun's cell, its blue glow, daylight, darkness, whether the
+/// disc is up, and the glow's radius (rows).
+#[derive(Debug, Clone, Copy)]
+struct SkyLight {
+    sun: P2,
+    glow: f64,
+    day: f64,
+    dark: f64,
+    sun_up: bool,
+    r_glow: f64,
+}
+
 /// Seeded, size-independent state drawn once from `ctx.rng` (MR-A2).
 #[derive(Debug, Clone, Copy, PartialEq)]
 struct World {
@@ -715,6 +742,17 @@ pub struct MarsRover {
     dust_acc: f64,
     devils: [Option<Devil>; DEVILS],
     devil_timer: f64,
+    /// Sky, Sun, Phobos and ground as half blocks, rasterised in `update`.
+    px: Pixels,
+    /// Night stars as braille dots over the black sky, rasterised in `update`.
+    dots: Dots,
+    /// Stars as dot coordinates and base levels, rebuilt on resize.
+    stars: Vec<(i32, i32, u8)>,
+    /// Pixel rows of the far, mid and near surfaces per column, this frame.
+    tops: Vec<[f64; 3]>,
+    /// Daylight in the sky, in [0, 1], and on the rover and the dust, in [0.35, 1].
+    day: f64,
+    light: f64,
 }
 
 impl Default for MarsRover {
@@ -728,6 +766,12 @@ impl Default for MarsRover {
             dust_acc: 0.0,
             devils: [None; DEVILS],
             devil_timer: 0.0,
+            px: Pixels::default(),
+            dots: Dots::default(),
+            stars: Vec::new(),
+            tops: Vec::new(),
+            day: 1.0,
+            light: 1.0,
         }
     }
 }
@@ -835,6 +879,21 @@ impl Generator for MarsRover {
         }
         self.layout = Layout::new(size);
         self.dust.set_capacity(DUST_MAX.min(size.area() / 4));
+        self.px.resize(size);
+        self.dots.resize(size);
+        self.tops.clear();
+        self.tops.resize(usize::from(size.width()), [0.0; 3]);
+        let dot = self.dots.dot_size();
+        self.stars.clear();
+        // Below the readout row (dot rows 0..4).
+        self.stars.extend((0..size.area() / 30).map(|_| {
+            (
+                ctx.rng.random_range(0..i32::from(dot.width())),
+                ctx.rng.random_range(4..i32::from(dot.height()).max(5)),
+                ctx.rng.random_range(60..255u8),
+            )
+        }));
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -852,6 +911,7 @@ impl Generator for MarsRover {
         for _ in 0..n {
             self.substep(&w, h, ctx);
         }
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -866,15 +926,27 @@ impl Generator for MarsRover {
             base: l.near_base,
         };
         let beat = self.plan.at(self.t);
-        let hour = hour_angle(self.t);
-        let e = sun_elevation(hour);
-        let sun = (
-            l.w * (0.5 + 0.3 * hour.sin()),
-            l.horizon - (l.horizon - 1.0) * e.sin() / max_elevation().sin(),
-        );
-        self.draw_sky(canvas, &w, sun, e.to_degrees());
-        self.draw_bodies(canvas, &w, &beat, sun, e.to_degrees());
-        self.draw_layers(canvas, &w, cam, daylight(e.to_degrees()));
+        self.px.blit(canvas, |x, y, _, _| {
+            // ASCII: the sky stays blank but for the Sun and its aureole; ground layers
+            // keep their old marks.
+            let (top, bottom) = (self.px.get(x, 2 * y), self.px.get(x, 2 * y + 1));
+            let ink = bottom.filter(|i| i.role != Role::Background).or(top)?;
+            let tops = *self.tops.get(usize::try_from(x).ok()?)?;
+            match layer_at(tops, 2 * y + 1) {
+                Layer::Sky => match ink.level {
+                    255 => Some(('@', ink)),
+                    // The aureole: the sky's ramp past its white point.
+                    l if ink.role == Role::Blackbody && l > 140 => Some(('.', ink)),
+                    _ => None,
+                },
+                Layer::Far => Some((':', ink)),
+                Layer::Mid => Some(('+', ink)),
+                Layer::Near => Some(('#', ink)),
+            }
+        });
+        self.dots.blit(canvas);
+        self.draw_orbiter(canvas, &beat);
+        self.draw_devils(canvas, &w, cam);
         self.draw_drill_marks(canvas, &w, &view, &beat);
         let pose = solve_pose(|x| w.near.eval(x), rover_x);
         self.draw_dust(canvas, &view);
@@ -882,7 +954,9 @@ impl Generator for MarsRover {
         if beat.index == PH_TRANSMIT {
             self.draw_signal(canvas, &view, &pose, &beat);
         }
-        self.draw_captions(canvas, &w, &beat, hour);
+        self.draw_captions(canvas, &w, &beat, hour_angle(self.t));
+        // Struts, dust and labels keep the landscape behind them (MR-A6).
+        self.px.backdrop(canvas);
     }
 }
 
@@ -891,105 +965,166 @@ impl Generator for MarsRover {
 // ---------------------------------------------------------------------------------------
 
 impl MarsRover {
-    /// Butterscotch dust-laden sky by day (brighter towards the horizon), a blue glow
-    /// of forward-scattered light around a low sun, a rose dusk band, stars at night.
-    ///
-    /// The sky is solid block glyphs whose coverage fades with the light, so it reads
-    /// as a sky colour rather than as texture; a per-cell hash dithers the fade.
-    fn draw_sky(&self, canvas: &mut Canvas, w: &World, sun: P2, e_deg: f64) {
+    /// The Sun's cell position for hour angle `hour` and elevation `e`: across the sky
+    /// with the hour, down to the horizon row at sunset.
+    fn sun_cell(&self, hour: f64, e: f64) -> P2 {
         let l = self.layout;
-        let glow = glow_strength(e_deg);
-        let day = daylight(e_deg);
-        let dark = night(e_deg);
-        let r_glow = (0.35 * l.horizon).max(2.0);
-        let rows = l.far_base.ceil().clamp(0.0, l.h) as i32;
-        let cols = l.w as i32;
-        for y in 0..rows {
-            let fy = f64::from(y);
-            let a = (fy / l.horizon.max(1.0)).clamp(0.0, 1.0);
-            for x in 0..cols {
-                let n = cell_hash(x, y, w.salt) - 0.5;
-                let (dx, dy) = ((f64::from(x) - sun.0) / ASPECT, fy - sun.1);
-                let g = glow * (-(dx.hypot(dy)) / r_glow).exp();
-                let band = glow * smooth(0.75, 1.0, a) * (1.0 - g).powi(3);
-                // The zenith darkens first; the dusty horizon holds the light longest.
-                let cover = (1.6 * day * (0.55 + 0.45 * a)).max(g) + 0.015 * n;
-                let aureole = day * (-(dx.hypot(dy)) / (1.6 * l.s)).exp();
-                let shade = match cover {
-                    c if c > 0.8 => 0,
-                    c if c > 0.55 => 1,
-                    c if c > 0.3 => 2,
-                    c if c > 0.1 => 3,
-                    _ => {
-                        self.draw_star(canvas, w, x, y, dark);
-                        continue;
+        (
+            l.w * (0.5 + 0.3 * hour.sin()),
+            l.horizon - (l.horizon - 1.0) * e.sin() / max_elevation().sin(),
+        )
+    }
+
+    /// Pixel rows of the far, mid and near surfaces over column `c`.
+    fn layer_tops(&self, w: &World, cam: f64, c: i32) -> [f64; 3] {
+        let l = self.layout;
+        let (dxc, fc) = (l.dx(), f64::from(c) + 0.5);
+        [
+            2.0 * (l.far_base - l.s * w.far.height(cam * PARALLAX_FAR + fc * dxc)),
+            2.0 * (l.mid_base - l.s * w.mid.height(cam * PARALLAX_MID + fc * dxc)),
+            2.0 * (l.near_base - l.s * w.near.height(cam + fc * dxc)),
+        ]
+    }
+
+    /// Paint the sky, the Sun, Phobos and the three ground layers into the half-block
+    /// buffer (MR-A4, MR-A5). False colour in the scene's palette: the dusty sky, its blue
+    /// sunset aureole and the far ridges on the Blackbody ramp, the rust ground in Ember.
+    fn rasterise(&mut self) {
+        let Some(w) = self.world else { return };
+        let l = self.layout;
+        let cam = camera(&l, self.rover_x(&w));
+        let hour = hour_angle(self.t);
+        let e = sun_elevation(hour);
+        let e_deg = e.to_degrees();
+        let sky = SkyLight {
+            sun: self.sun_cell(hour, e),
+            glow: glow_strength(e_deg),
+            day: daylight(e_deg),
+            dark: night(e_deg),
+            sun_up: e_deg > 0.0,
+            r_glow: (GLOW_R * l.horizon).max(2.0),
+        };
+        let light = 0.45 + 0.55 * sky.day;
+        let far_light = 0.2 + 0.8 * sky.day;
+        self.day = sky.day;
+        self.light = 0.35 + 0.65 * sky.day;
+        // Which way the near slopes must face to catch the Sun.
+        let toward = if hour.sin() >= 0.0 { 1.0 } else { -1.0 };
+        let size = self.px.pixel_size();
+        let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
+        for c in 0..pw {
+            let tops = self.layer_tops(&w, cam, c);
+            self.tops[c as usize] = tops;
+            let xn = cam + (f64::from(c) + 0.5) * l.dx();
+            let (_, slope) = w.near.eval(xn);
+            let facing = (slope * toward).clamp(-1.0, 1.0);
+            let wc = (xn / l.dx()).floor() as i32;
+            for py in 0..ph {
+                let ink = match layer_at(tops, py) {
+                    Layer::Sky => self.sky_pixel(c, py, &sky),
+                    // The far ridges take the dusty air's own ramp, a muted brown
+                    // between the sky and the rust foreground (aerial perspective),
+                    // lit by the sky, so they sink to a dim silhouette at night.
+                    Layer::Far => {
+                        let crest = f64::from(py) + 0.5 - tops[0] < 2.0;
+                        let level = (0.25 + if crest { 0.03 } else { 0.0 }) * far_light;
+                        Ink::new(Role::Blackbody, ink::level(255.0 * level))
+                    }
+                    Layer::Mid => {
+                        let crest = f64::from(py) + 0.5 - tops[1] < 2.0;
+                        ramp(Ramp::Ember, (0.32 + if crest { 0.06 } else { 0.0 }) * light)
+                    }
+                    Layer::Near => {
+                        let depth = (f64::from(py) + 0.5 - tops[2]) / 2.0;
+                        let n = rng::hash01(w.salt ^ rng::cell_key(wc, py));
+                        let base = if depth < 1.0 {
+                            0.62 + 0.08 * facing
+                        } else if n < 0.06 {
+                            0.58
+                        } else {
+                            0.50 - 0.03 * depth.min(3.0) + 0.04 * n
+                        };
+                        ramp(Ramp::Ember, base * light)
                     }
                 };
-                let blue = g > 0.6 * day + 0.08 * n;
-                let glyph = if blue { GLOW[shade] } else { SKY[shade] };
-                let ink = if blue {
-                    Ink::new(Role::Cold, (40.0 + 215.0 * g) as u8)
-                } else if band > 0.3 + 0.1 * n {
-                    Ink::new(Role::Accent, (10.0 + 40.0 * band) as u8)
-                } else {
-                    let lvl = day * (40.0 + 70.0 * a * a) + 120.0 * aureole;
-                    Ink::new(Role::Sun, lvl.min(255.0) as u8)
-                };
-                canvas.put(x, y, glyph, ink);
+                self.px.set(c, py, ink);
             }
         }
-    }
-
-    fn draw_star(&self, canvas: &mut Canvas, w: &World, x: i32, y: i32, dark: f64) {
-        if dark <= 0.0 {
-            return;
-        }
-        let s = cell_hash(x, y, w.salt ^ 0x57a2);
-        if s < 0.02 * dark {
-            let tw = (self.t * 2.3 + 2000.0 * s).sin();
-            let glyph = if s < 0.003 {
-                Glyph::new('✦', '*')
-            } else {
-                DOT
-            };
-            let lvl = 90.0 + 140.0 * dark * (0.75 + 0.25 * tw);
-            canvas.put(x, y, glyph, Ink::new(Role::Star, lvl as u8));
-        }
-    }
-
-    /// Sun, Phobos and the relay orbiter.
-    fn draw_bodies(&self, canvas: &mut Canvas, w: &World, beat: &Beat, sun: P2, e_deg: f64) {
-        let l = self.layout;
-        if e_deg > -4.0 {
-            let lvl = (170.0 + 85.0 * daylight(e_deg)) as u8;
-            draw::disc(canvas, sun.0, sun.1, 0.6 * l.s, |d, _, _| {
-                Some(if d < 0.6 {
-                    (SUN, Ink::new(Role::Sun, lvl))
-                } else {
-                    (SUN, Ink::new(Role::Sun, lvl.saturating_sub(40)))
-                })
-            });
-        }
-        // Phobos: rises in the west (right), sets in the east (left).
+        // Phobos: rises in the west (right), sets in the east (left); hidden by ridges.
         let p = geom::wrap(self.t + w.phobos_phase, PHOBOS_PERIOD);
         if p < PHOBOS_UP {
             let u = p / PHOBOS_UP;
-            let x = l.w * (0.95 - 0.9 * u);
-            let y = l.horizon - 0.55 * l.horizon * (PI * u).sin();
-            let lvl = 150.0 + 100.0 * night(e_deg);
-            plot(canvas, x, y, PIXEL, Ink::new(Role::Structure, lvl as u8));
-        }
-        // Relay orbiter crossing during stow and transmit.
-        if let Some((ox, oy)) = self.orbiter(beat) {
-            let blink = beat.index == PH_TRANSMIT && (self.t * 6.0).sin() > 0.0;
-            let ink = Ink::new(Role::Accent, if blink { 255 } else { 190 });
-            plot(canvas, ox, oy, PIXEL, ink);
-            if l.s >= TINY_SCALE {
-                // Solar panels.
-                let panel = Ink::new(Role::Structure, 170);
-                plot(canvas, ox - 1.0, oy, WING, panel);
-                plot(canvas, ox + 1.0, oy, WING, panel);
+            let x = (l.w * (0.95 - 0.9 * u)).floor() as i32;
+            let y = (2.0 * (l.horizon - 0.55 * l.horizon * (PI * u).sin())).floor() as i32;
+            if self
+                .tops
+                .get(x as usize)
+                .is_some_and(|&t| layer_at(t, y) == Layer::Sky)
+            {
+                let lvl = 150.0 + 100.0 * sky.dark;
+                self.px.set(x, y, Ink::new(Role::Structure, lvl as u8));
             }
+        }
+        // Stars, where the sky has gone black, twinkling.
+        self.dots.clear();
+        if sky.dark > 0.0 {
+            for (i, &(x, y, level)) in self.stars.iter().enumerate() {
+                // Whole-sky cells only: braille in a skyline cell would replace its half
+                // block, and the backdrop would put the ridge colour behind the star.
+                if self.px.cell_bg(x / Dots::CELL_W, y / Dots::CELL_H) == Ink::BLANK {
+                    let tw = 0.8 + 0.2 * (self.t * 2.3 + 2.4 * i as f64).sin();
+                    let level = f64::from(level) * sky.dark * tw;
+                    self.dots.set(x, y, Ink::new(Role::Star, level as u8));
+                }
+            }
+        }
+    }
+
+    /// One sky pixel (MR-A4), all on the Blackbody ramp, which runs dark red, tan, white,
+    /// pale blue: butterscotch (its tan stretch) by day, paler toward the dusty horizon and
+    /// whitening around the Sun, fading to black through the twilight by level. A low Sun
+    /// wears a pale blue aureole, a Gaussian in angle that lifts the level to
+    /// `AUREOLE_TOP`, just past white: the ramp's lightness peaks at its white point, so a
+    /// bluer target would ring the Sun with a white rim round a dimmer core, where a real
+    /// aureole is brightest at the Sun. The Sun is the white-hot top of the Ember ramp,
+    /// the brightest ink of every theme.
+    fn sky_pixel(&self, x: i32, py: i32, s: &SkyLight) -> Ink {
+        let l = self.layout;
+        let (fx, fy) = (f64::from(x) + 0.5, (f64::from(py) + 0.5) / 2.0);
+        let a = (fy / l.horizon.max(1.0)).clamp(0.0, 1.0);
+        let d = ((fx - s.sun.0) / ASPECT).hypot(fy - s.sun.1);
+        if s.sun_up && d < 0.6 * l.s {
+            return ramp(Ramp::Ember, 1.0);
+        }
+        // Past 3 radii the Gaussian is under 1e-4: skip the `exp`.
+        let g = if d < 3.0 * s.r_glow {
+            s.glow * (-(d / s.r_glow).powi(2)).exp()
+        } else {
+            0.0
+        };
+        let aureole = (-d / (1.6 * l.s)).exp();
+        let base = s.day * (0.34 + 0.08 * a * a + 0.14 * aureole);
+        let level = 255.0 * (base + (AUREOLE_TOP - base).max(0.0) * g);
+        if level < ink::MIN_VISIBLE_LEVEL {
+            Ink::BLANK
+        } else {
+            Ink::new(Role::Blackbody, ink::level(level))
+        }
+    }
+
+    /// The relay orbiter crossing during stow and transmit.
+    fn draw_orbiter(&self, canvas: &mut Canvas, beat: &Beat) {
+        let Some((ox, oy)) = self.orbiter(beat) else {
+            return;
+        };
+        let blink = beat.index == PH_TRANSMIT && (self.t * 6.0).sin() > 0.0;
+        let ink = Ink::new(Role::Accent, if blink { 255 } else { 190 });
+        plot(canvas, ox, oy, PIXEL, ink);
+        if self.layout.s >= TINY_SCALE {
+            // Solar panels.
+            let panel = Ink::new(Role::Structure, 170);
+            plot(canvas, ox - 1.0, oy, WING, panel);
+            plot(canvas, ox + 1.0, oy, WING, panel);
         }
     }
 
@@ -1006,55 +1141,13 @@ impl MarsRover {
         ))
     }
 
-    /// Far ridges, mid plain and near ground, back to front: solid fills whose ink
-    /// level carries the depth cue, with half-block crests for sub-row relief. The
-    /// dust devils stand on the mid plain, so they go between mid and near.
-    fn draw_layers(&self, canvas: &mut Canvas, w: &World, cam: f64, light: f64) {
-        let l = self.layout;
-        let dxc = l.dx();
-        let h = l.h as i32;
-        let lit = |v: f64| (v * (0.45 + 0.55 * light)) as u8;
-        for c in 0..l.w as i32 {
-            let fc = f64::from(c) + 0.5;
-            let far = l.far_base - l.s * w.far.height(cam * PARALLAX_FAR + fc * dxc);
-            let mid = l.mid_base - l.s * w.mid.height(cam * PARALLAX_MID + fc * dxc);
-            fill_column(canvas, c, far, h, |depth, _| {
-                (
-                    FAR_FILL,
-                    Ink::new(Role::Dim, lit(if depth == 0 { 120.0 } else { 85.0 })),
-                )
-            });
-            fill_column(canvas, c, mid, h, |depth, _| {
-                (
-                    MID_FILL,
-                    Ink::new(Role::Hot, lit(if depth == 0 { 120.0 } else { 90.0 })),
-                )
-            });
-        }
-        self.draw_devils(canvas, w, cam);
-        for c in 0..l.w as i32 {
-            let xn = cam + (f64::from(c) + 0.5) * dxc;
-            let near = l.near_base - l.s * w.near.height(xn);
-            // Speckle hashed on world columns so the texture scrolls with the ground.
-            let wc = (xn / dxc).floor() as i64 as u64;
-            fill_column(canvas, c, near, h, |depth, row| {
-                let n = rng::hash01(w.salt ^ wc.wrapping_mul(0x9e37_79b9) ^ row as u64);
-                match depth {
-                    0 => (GROUND, Ink::new(Role::Hot, lit(240.0))),
-                    _ if n < 0.08 => (PEBBLE, Ink::new(Role::Hot, lit(215.0))),
-                    1 => (GROUND, Ink::new(Role::Hot, lit(205.0))),
-                    2 => (GROUND, Ink::new(Role::Hot, lit(185.0))),
-                    _ => (GROUND, Ink::new(Role::Hot, lit(165.0))),
-                }
-            });
-        }
-    }
-
     /// A dust devil: a tapering, swirling column of dust leaning with the wind. It
     /// veils what is behind it rather than punching glyph-shaped holes in it.
     fn draw_devils(&self, canvas: &mut Canvas, w: &World, cam: f64) {
         let l = self.layout;
         let k = l.s * ASPECT;
+        // Devils are raised by the day's heating: gone by night.
+        let day = self.day;
         for dv in self.devils.iter().flatten() {
             let alpha = smooth(0.0, 2.0, dv.age) * smooth(dv.life, dv.life - 2.5, dv.age);
             let base_col = (dv.x - cam * PARALLAX_MID) * k;
@@ -1076,7 +1169,7 @@ impl MarsRover {
                     }
                     // Swirl: dust bands rotating around the column's axis.
                     let band = ((q.asin() + 4.0 * self.t - 1.7 * f64::from(j)).sin() + 1.0) * 0.5;
-                    let v = a * (0.35 + 0.65 * band) * (1.0 - q * q);
+                    let v = a * (0.35 + 0.65 * band) * (1.0 - q * q) * day;
                     if v < 0.12 {
                         continue;
                     }
@@ -1117,15 +1210,28 @@ impl MarsRover {
             let f = (p.age / p.life).clamp(0.0, 1.0);
             let (x, y) = view.at((p.x, p.y));
             let g = if f < 0.3 { Glyph::new('∙', '.') } else { DOT };
-            let fallback = (g, Ink::new(Role::Particle, (200.0 - 130.0 * f) as u8));
-            veil(canvas, x, y, (60.0 * (1.0 - f)) as u8, fallback);
+            // Dimmed with the daylight, like the rover that kicks it up (MR-A9).
+            let fallback = (g, self.lit(Role::Particle, (200.0 - 130.0 * f) as u8));
+            veil(
+                canvas,
+                x,
+                y,
+                (60.0 * (1.0 - f) * self.light) as u8,
+                fallback,
+            );
         }
+    }
+
+    /// A rover or wheel ink at `level`, dimmed with the daylight so the rover sits in the
+    /// dusk rather than on it (MR-A9).
+    fn lit(&self, role: Role, level: u8) -> Ink {
+        Ink::new(role, ink::level(f64::from(level) * self.light))
     }
 
     fn draw_rover(&self, canvas: &mut Canvas, w: &World, view: &View, pose: &Pose, beat: &Beat) {
         let j = pose.joints();
         let hubs = [j.front, j.middle, j.rear];
-        let body_ink = Ink::new(Role::Text, 235);
+        let body_ink = self.lit(Role::Text, 235);
         let spin = odometer(self.t) / WHEEL_R;
         let wheel = WHEEL[((-spin / FRAC_PI_2).floor() as i64).rem_euclid(4) as usize];
         if view.s < TINY_SCALE {
@@ -1134,7 +1240,7 @@ impl MarsRover {
             segment(canvas, a, b, HULL, body_ink);
             for hub in hubs {
                 let (x, y) = view.at(hub);
-                plot(canvas, x, y, wheel, Ink::new(Role::Structure, 230));
+                plot(canvas, x, y, wheel, self.lit(Role::Structure, 230));
             }
             let m = view.at(pose.body(1.7, 2.6));
             plot(
@@ -1142,7 +1248,7 @@ impl MarsRover {
                 m.0,
                 m.1,
                 Glyph::new('╻', '|'),
-                Ink::new(Role::Structure, 200),
+                self.lit(Role::Structure, 200),
             );
             return;
         }
@@ -1159,7 +1265,7 @@ impl MarsRover {
             };
             segment(canvas, sa, sb, g, ink);
         };
-        let link = Ink::new(Role::Structure, 150);
+        let link = self.lit(Role::Structure, 150);
         for (a, b) in [
             (j.pivot, j.front),
             (j.pivot, j.bogie),
@@ -1170,7 +1276,7 @@ impl MarsRover {
         }
         // RTG: the power source angled off the back of the deck.
         for dv in [0.0, 0.35] {
-            let rtg = Ink::new(Role::Structure, 105);
+            let rtg = self.lit(Role::Structure, 105);
             strut(
                 canvas,
                 pose.body(-2.2, 0.7 + dv),
@@ -1180,7 +1286,7 @@ impl MarsRover {
         }
         // Body: a tilted box with half-block edges, then mast and camera head.
         fill_box(canvas, view, pose, (-2.2, 2.2), BODY_V, body_ink);
-        let belly = Ink::new(Role::Structure, 200);
+        let belly = self.lit(Role::Structure, 200);
         fill_box(
             canvas,
             view,
@@ -1189,14 +1295,14 @@ impl MarsRover {
             (BODY_V.0, BODY_V.0 + 0.45),
             belly,
         );
-        let mast = Ink::new(Role::Structure, 185);
+        let mast = self.lit(Role::Structure, 185);
         strut(
             canvas,
             pose.body(1.7, BODY_V.1),
             pose.body(1.7, MAST_TOP),
             mast,
         );
-        let head = Ink::new(Role::Text, 250);
+        let head = self.lit(Role::Text, 250);
         fill_box(canvas, view, pose, HEAD_U, HEAD_V, head);
         let eye = view.at(pose.body(HEAD_U.1, 0.5 * (HEAD_V.0 + HEAD_V.1)));
         plot(
@@ -1219,7 +1325,7 @@ impl MarsRover {
         };
         let (sa, ca) = aim.sin_cos();
         let half = 0.6;
-        let dish = Ink::new(Role::Structure, 225);
+        let dish = self.lit(Role::Structure, 225);
         let (d0, d1) = (
             add(post, (-half * ca, half * sa)),
             add(post, (half * ca, -half * sa)),
@@ -1230,17 +1336,17 @@ impl MarsRover {
         }
         // Robotic arm with its turret, and the drill bit while coring.
         let (s, e, t) = arm(pose, &w.near, arm_extension(beat));
-        let arm_ink = Ink::new(Role::Structure, 205);
+        let arm_ink = self.lit(Role::Structure, 205);
         strut(canvas, s, e, arm_ink);
         strut(canvas, e, t, arm_ink);
         let (se, st) = (view.at(e), view.at(t));
-        plot(canvas, se.0, se.1, JOINT, Ink::new(Role::Structure, 240));
+        plot(canvas, se.0, se.1, JOINT, self.lit(Role::Structure, 240));
         plot(
             canvas,
             st.0,
             st.1,
             Glyph::new('▣', '#'),
-            Ink::new(Role::Text, 240),
+            self.lit(Role::Text, 240),
         );
         if beat.index == PH_DRILL {
             let bit = if (self.t * 24.0).sin() > 0.0 {
@@ -1257,10 +1363,10 @@ impl MarsRover {
         let r = WHEEL_R * view.s;
         if r >= 0.8 {
             draw::disc(canvas, x, y, r + 0.2, |_, _, _| {
-                Some((TYRE, Ink::new(Role::Structure, 70)))
+                Some((TYRE, self.lit(Role::Structure, 70)))
             });
         }
-        plot(canvas, x, y, glyph, Ink::new(Role::Structure, 245));
+        plot(canvas, x, y, glyph, self.lit(Role::Structure, 245));
     }
 
     fn draw_signal(&self, canvas: &mut Canvas, view: &View, pose: &Pose, beat: &Beat) {
@@ -1294,7 +1400,7 @@ impl MarsRover {
         }
         let width = l.w as usize;
         let cycle = (self.t / CYCLE).floor() as i64;
-        let mut right = LineBuf::default();
+        let mut right = StackText::<48>::new();
         let _ = match beat.index {
             PH_DRIVE => write!(right, "DRIVE {:.1} m", drive_profile(beat.local).0 * UNIT_M),
             PH_DEPLOY => write!(right, "ARM DEPLOY"),
@@ -1302,7 +1408,7 @@ impl MarsRover {
             PH_STOW => write!(right, "ARM STOW"),
             _ => write!(right, "UHF RELAY > ORBITER"),
         };
-        let mut left = LineBuf::default();
+        let mut left = StackText::<48>::new();
         let lmst = (12.0 + hour.to_degrees() / 15.0).rem_euclid(24.0);
         // The sol number ticks over at local midnight.
         let midnight = SOL_KNOTS[2].0
@@ -1316,7 +1422,7 @@ impl MarsRover {
             (lmst.fract() * 60.0).floor() as u32
         );
         let ink = Ink::new(Role::Text, 170);
-        let (ll, rl) = (left.len, right.len);
+        let (ll, rl) = (left.len(), right.len());
         if rl + 2 <= width {
             canvas.text((width - rl - 1) as i32, 0, right.as_str(), ink);
         }
@@ -1326,15 +1432,12 @@ impl MarsRover {
     }
 }
 
-/// Glyphs that cover their cell: dust in front of them lightens them instead of
-/// replacing them, since a glyph cell has no background to blend with.
-const COVER: [Glyph; 13] = [
-    GROUND, PEBBLE, MID_FILL, FAR_FILL, HULL, SKY[0], SKY[1], SKY[2], SKY[3], GLOW[0], GLOW[1],
-    GLOW[2], GLOW[3],
-];
+/// The highest Blackbody level a dust veil lifts the sky to: ~5000 K, a warm tan below
+/// the ramp's white point, so dust never pales the sky into its blue end (MR-A10).
+const DUST_WARM: u8 = 118;
 
-/// Semi-transparent overlay: brighten a covering glyph already in the cell by `boost`,
-/// or draw `fallback` over empty or line-art cells.
+/// Semi-transparent overlay: lighten the half-block landscape (or the rover's hull)
+/// already in the cell by `boost`, or draw `fallback` over empty or line-art cells.
 fn veil(canvas: &mut Canvas, x: f64, y: f64, boost: u8, fallback: (Glyph, Ink)) {
     let (x, y) = (x.round(), y.round());
     let size = canvas.size();
@@ -1347,39 +1450,22 @@ fn veil(canvas: &mut Canvas, x: f64, y: f64, boost: u8, fallback: (Glyph, Ink)) 
     let Some(cell) = canvas.get(xi, yi).copied() else {
         return;
     };
+    let up = |i: Ink| match i.role {
+        Role::Background => i,
+        // Dust over the sky stays tan, short of the ramp's white point (MR-A10).
+        Role::Blackbody => {
+            let cap = i.level.max(DUST_WARM);
+            Ink::new(i.role, i.level.saturating_add(boost).min(cap))
+        }
+        _ => Ink::new(i.role, i.level.saturating_add(boost)),
+    };
     let ascii = canvas.mode() == GlyphMode::Ascii;
-    let under = COVER.iter().find(|g| {
-        if ascii {
-            g.ascii == cell.ch && !matches!(g.ascii, ' ' | '.')
-        } else {
-            g.unicode == cell.ch
-        }
-    });
-    match under {
-        Some(&g) => {
-            let ink = Ink::new(cell.ink.role, cell.ink.level.saturating_add(boost));
-            canvas.put(xi, yi, g, ink);
-        }
-        None => canvas.put(xi, yi, fallback.0, fallback.1),
-    }
-}
-
-/// Fill column `c` from the surface at fractional row `top` down to the bottom;
-/// `shade(depth, row)` picks each cell's glyph and ink.
-fn fill_column(
-    canvas: &mut Canvas,
-    c: i32,
-    top: f64,
-    h: i32,
-    mut shade: impl FnMut(i32, i32) -> (Glyph, Ink),
-) {
-    if !top.is_finite() {
-        return;
-    }
-    let first = top.round().clamp(-1.0, f64::from(h)) as i32;
-    for row in first.max(0)..h {
-        let (g, ink) = shade(row - first, row);
-        canvas.put(c, row, g, ink);
+    if !ascii && matches!(cell.ch, '▀' | '▄') {
+        canvas.put_bg(xi, yi, Glyph::new(cell.ch, '#'), up(cell.ink), up(cell.bg));
+    } else if cell.ch == if ascii { HULL.ascii } else { HULL.unicode } {
+        canvas.put(xi, yi, HULL, up(cell.ink));
+    } else {
+        canvas.put(xi, yi, fallback.0, fallback.1);
     }
 }
 
@@ -1456,39 +1542,6 @@ fn segment(canvas: &mut Canvas, a: P2, b: P2, glyph: Glyph, ink: Ink) {
     }
 }
 
-/// A fixed-capacity text buffer, so `render` can format numbers without allocating.
-struct LineBuf {
-    bytes: [u8; 48],
-    len: usize,
-}
-
-impl Default for LineBuf {
-    fn default() -> Self {
-        Self {
-            bytes: [0; 48],
-            len: 0,
-        }
-    }
-}
-
-impl LineBuf {
-    fn as_str(&self) -> &str {
-        std::str::from_utf8(&self.bytes[..self.len]).unwrap_or("")
-    }
-}
-
-impl std::fmt::Write for LineBuf {
-    fn write_str(&mut self, s: &str) -> std::fmt::Result {
-        let end = self.len + s.len();
-        if end > self.bytes.len() {
-            return Err(std::fmt::Error);
-        }
-        self.bytes[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1551,25 +1604,402 @@ mod tests {
         }
     }
 
+    /// Cells whose glyph or background ink has `role`, rendered at sim time `t`.
+    fn count_at(t: f64, role: Role) -> usize {
+        let mut s = Stage::new(build(), 5, Size::new(120, 40), GlyphMode::Unicode);
+        while s.ctx().time() < t {
+            s.step(0.25);
+        }
+        s.render()
+            .cells()
+            .iter()
+            .filter(|c| c.ink.role == role || c.bg.role == role)
+            .count()
+    }
+
     #[test]
-    fn sunset_glows_blue_around_the_sun_but_noon_does_not() {
-        let size = Size::new(120, 40);
-        let cold_near_sun = |t: f64| {
-            let mut s = Stage::new(build(), 5, size, GlyphMode::Unicode);
-            while s.ctx().time() < t {
-                s.step(0.25);
-            }
-            s.render()
-                .cells()
-                .iter()
-                .filter(|c| c.ink.role == Role::Cold)
-                .count()
-        };
-        // Sun elevation: ~2° at t = 47 s (just before sunset), ~57° near t = 12 s.
+    fn mr_a4_sky_is_butterscotch_by_day_pale_round_a_low_sun_and_dark_at_night() {
+        // Sun elevation: ~2° at t = 47 s (just before sunset), ~57° near t = 12 s, and
+        // well below the horizon at t = 70 s.
         assert!(sun_elevation(hour_angle(47.0)).to_degrees() < 5.0);
         assert!(sun_elevation(hour_angle(12.0)).to_degrees() > 50.0);
-        assert!(cold_near_sun(47.0) > 60, "no blue glow at sunset");
-        assert_eq!(cold_near_sun(12.0), 0, "blue glow at noon");
+        assert!(sun_elevation(hour_angle(70.0)).to_degrees() < -30.0);
+        // One Blackbody ramp for the whole sky: butterscotch (its tan stretch) by day, past
+        // white into its blue end around a low Sun.
+        let sky_levels = |t: f64| {
+            let (g, _) = scene_at(t);
+            let mut levels = Vec::new();
+            for py in 0..80 {
+                for x in 0..120 {
+                    let ink = g.px.get(x, py).unwrap();
+                    if layer_at(g.tops[x as usize], py) == Layer::Sky && ink.level < 255 {
+                        assert_ne!(ink.role, Role::Ramp(Ramp::Ice), "t {t}: a second sky ramp");
+                        if ink.role == Role::Blackbody {
+                            levels.push(ink.level);
+                        }
+                    }
+                }
+            }
+            levels
+        };
+        let noon = sky_levels(12.0);
+        assert!(noon.len() > 120 * 40 / 2, "a Blackbody day sky");
+        let tan = noon.iter().filter(|&&l| (70..=125).contains(&l)).count();
+        assert!(tan * 10 > noon.len() * 9, "butterscotch day sky");
+        // The aureole: toward white (level 140, 6500 K) and the pale blue-white just past it.
+        let pale = sky_levels(47.0).iter().filter(|&&l| l >= 128).count();
+        assert!(pale > 30, "no pale glow at sunset: {pale}");
+        assert!(count_at(70.0, Role::Star) > 5, "stars at night");
+    }
+
+    #[test]
+    fn mr_a4_far_ridges_take_the_dusty_air_and_the_near_ground_is_rust() {
+        let (g, _) = scene_at(12.0);
+        let mut roles = [None; 3];
+        for py in 0..80 {
+            for x in 0..120 {
+                let slot = match layer_at(g.tops[x as usize], py) {
+                    Layer::Far => 0,
+                    Layer::Mid => 1,
+                    Layer::Near => 2,
+                    Layer::Sky => continue,
+                };
+                roles[slot] = g.px.get(x, py).map(|i| i.role);
+            }
+        }
+        assert_eq!(
+            roles[0],
+            Some(Role::Blackbody),
+            "far ridge in the sky's ramp"
+        );
+        assert_eq!(roles[2], Some(Role::Ramp(Ramp::Ember)), "rust foreground");
+    }
+
+    /// A scene at 120×40 stepped to sim time `t`, and its rendered frame.
+    fn scene_at(t: f64) -> (MarsRover, Canvas) {
+        scene_sized(t, Size::new(120, 40))
+    }
+
+    fn scene_sized(t: f64, size: Size) -> (MarsRover, Canvas) {
+        let mut ctx = Ctx::new(5, size);
+        let mut g = MarsRover::default();
+        g.resize(size, &mut ctx);
+        while g.t < t {
+            g.update(0.25, &mut ctx);
+        }
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        (g, canvas)
+    }
+
+    #[test]
+    fn mr_a4_stars_come_out_only_once_the_aureole_has_faded() {
+        for i in 0..=600 {
+            let e = -30.0 + 0.1 * f64::from(i);
+            if night(e) > 0.0 {
+                assert!(glow_strength(e) < 0.05, "stars and glow together at {e}°");
+            }
+        }
+        // The sky fades with the glow: dusk is still lit where the aureole is strong.
+        for i in 0..=400 {
+            let e = -20.0 + 0.1 * f64::from(i);
+            if glow_strength(e) > 0.5 {
+                assert!(daylight(e) > 0.2, "glow on a black sky at {e}°");
+            }
+        }
+    }
+
+    /// Relative luminance of `ink` under the astro theme: the Blackbody ramp's lightness
+    /// peaks at its white point, so a level is not a brightness.
+    fn luminance(ink: Ink) -> f64 {
+        let sciart_render::Rgb(r, g, b) = sciart_render::Theme::Astro.color(ink, 0, 0);
+        let lin = |c: u8| (f64::from(c) / 255.0).powf(2.2);
+        0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+    }
+
+    #[test]
+    fn mr_a4_the_aureole_fades_away_from_the_sun() {
+        let (g, _) = scene_at(47.0);
+        let l = g.layout;
+        let hour = hour_angle(g.t);
+        let sun = g.sun_cell(hour, sun_elevation(hour));
+        let r = (GLOW_R * l.horizon).max(2.0);
+        // Mean sky luminance in rings around the Sun, going out: brightest at the Sun,
+        // with no bright rim round a dimmer core.
+        let mut rings = [(0.0f64, 0u32); 6];
+        for py in 0..80 {
+            for x in 0..120 {
+                let d = ((f64::from(x) + 0.5 - sun.0) / ASPECT)
+                    .hypot((f64::from(py) + 0.5) / 2.0 - sun.1);
+                let ring = (d / (0.4 * r)) as usize;
+                let ink = g.px.get(x, py).unwrap();
+                let sky = layer_at(g.tops[x as usize], py) == Layer::Sky;
+                if ring < rings.len() && sky && ink.role == Role::Blackbody {
+                    rings[ring].0 += luminance(ink);
+                    rings[ring].1 += 1;
+                }
+            }
+        }
+        // Rings the ridge hides (at sunset, the inner ones) have no sky to judge.
+        let seen: Vec<f64> = rings
+            .iter()
+            .filter(|s| s.1 >= 20)
+            .map(|&(sum, n)| sum / f64::from(n))
+            .collect();
+        for w in seen.windows(2) {
+            assert!(w[1] <= w[0] + 0.01, "{seen:?}");
+        }
+        assert!(seen[0] > 2.0 * seen[seen.len() - 1], "{seen:?}");
+        // And pixel by pixel at 200×50, straight up from the setting Sun: no sky pixel nearer
+        // the Sun is dimmer than one further out (a white ring round a bluer core would be).
+        for t in [45.0, 47.0, 50.0] {
+            let (g, _) = scene_sized(t, Size::new(200, 50));
+            let hour = hour_angle(g.t);
+            let sun = g.sun_cell(hour, sun_elevation(hour));
+            let x = sun.0 as i32;
+            let mut last = f64::INFINITY;
+            for py in (0..(2.0 * sun.1) as i32).rev() {
+                let ink = g.px.get(x, py).unwrap();
+                if layer_at(g.tops[x as usize], py) != Layer::Sky || ink.role != Role::Blackbody {
+                    continue;
+                }
+                let lum = luminance(ink);
+                // 0.03: the aureole's top, just past the white point, is 3 % under it.
+                assert!(
+                    lum <= last + 0.03,
+                    "t {t}: pixel row {py} brighter than below: {ink:?}"
+                );
+                last = lum;
+            }
+        }
+    }
+
+    #[test]
+    fn mr_a4_far_ridges_darken_into_the_night() {
+        // Mean luminance of the far ridges and the near ground at sim time `t`.
+        let means = |t: f64| {
+            let (g, _) = scene_at(t);
+            let (mut far, mut near) = ((0.0, 0u32), (0.0, 0u32));
+            for py in 0..80 {
+                for x in 0..120 {
+                    let ink = g.px.get(x, py).unwrap();
+                    match layer_at(g.tops[x as usize], py) {
+                        Layer::Far => {
+                            assert_ne!(ink, Ink::BLANK, "t {t}: the ridge is always there");
+                            far = (far.0 + luminance(ink), far.1 + 1);
+                        }
+                        Layer::Near => near = (near.0 + luminance(ink), near.1 + 1),
+                        _ => {}
+                    }
+                }
+            }
+            (far.0 / f64::from(far.1), near.0 / f64::from(near.1))
+        };
+        let (far_day, _) = means(12.0);
+        let (far, near) = means(70.0);
+        // At night a dim silhouette, not sunlit hills: no brighter than the foreground.
+        assert!(
+            far <= near,
+            "far {far} brighter than the near ground {near} at night"
+        );
+        assert!(
+            far < far_day / 3.0,
+            "far ridge at night {far}, by day {far_day}"
+        );
+    }
+
+    #[test]
+    fn mr_a10_dust_veils_stay_warm_over_the_sky() {
+        // A veil lightens the dust-coloured sky toward tan, never past the ramp's white
+        // point into its blue end.
+        let size = Size::new(4, 2);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let sky = Ink::new(Role::Blackbody, 100);
+        let ember = ramp(Ramp::Ember, 0.4);
+        canvas.put_bg(0, 0, Glyph::new('▀', '#'), sky, sky);
+        canvas.put_bg(1, 0, Glyph::new('▀', '#'), ember, ember);
+        veil(&mut canvas, 0.0, 0.0, 70, (LIGHT, Ink::new(Role::Hot, 100)));
+        veil(&mut canvas, 1.0, 0.0, 70, (LIGHT, Ink::new(Role::Hot, 100)));
+        let c = canvas.get(0, 0).copied().unwrap();
+        assert!(
+            c.ink.level >= sky.level && c.ink.level <= DUST_WARM,
+            "{c:?}"
+        );
+        assert!(c.bg.level >= sky.level && c.bg.level <= DUST_WARM, "{c:?}");
+        let e = canvas.get(1, 0).copied().unwrap();
+        assert!(
+            e.ink.level > ember.level,
+            "the ground still lightens: {e:?}"
+        );
+        // In the scene: through a day with live devils and wheel dust, no Blackbody cell is
+        // lifted past both its own sky pixel and the warm cap.
+        let size = Size::new(200, 50);
+        let mut ctx = Ctx::new(5, size);
+        let mut g = MarsRover::default();
+        g.resize(size, &mut ctx);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let mut veiled = 0;
+        while g.t < 40.0 {
+            g.update(0.25, &mut ctx);
+            canvas.clear();
+            g.render(&mut canvas);
+            for y in 0..50 {
+                for x in 0..200 {
+                    let cell = canvas.get(x, y).copied().unwrap();
+                    let under = [g.px.get(x, 2 * y), g.px.get(x, 2 * y + 1)]
+                        .into_iter()
+                        .flatten()
+                        .filter(|i| i.role == Role::Blackbody)
+                        .map(|i| i.level)
+                        .max()
+                        .unwrap_or(0);
+                    for ink in [cell.ink, cell.bg] {
+                        if ink.role == Role::Blackbody && ink.level > under {
+                            veiled += 1;
+                            assert!(ink.level <= DUST_WARM, "t {}: {cell:?} at {x},{y}", g.t);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(veiled > 20, "dust veiled the sky: {veiled}");
+    }
+
+    #[test]
+    fn mr_a7_the_sun_tops_its_ramp_in_every_theme() {
+        // A ramp's top level is its brightest in every theme; a 6000 K blackbody reads
+        // mid-grey in mono, a hole in the bright sky.
+        for t in [12.0, 30.0] {
+            let (g, _) = scene_at(t);
+            let (mut sun, mut others) = (0, 0u8);
+            for py in 0..80 {
+                for x in 0..120 {
+                    let ink = g.px.get(x, py).unwrap();
+                    if matches!(ink.role, Role::Ramp(_)) && ink.level == 255 {
+                        sun += 1;
+                    } else if matches!(ink.role, Role::Ramp(_)) {
+                        others = others.max(ink.level);
+                    }
+                }
+            }
+            assert!(
+                sun > 0 && others < 245,
+                "t={t}: sun {sun}, brightest other {others}"
+            );
+        }
+    }
+
+    #[test]
+    fn mr_a8_night_stars_are_braille_and_keep_off_the_readout() {
+        let (_, canvas) = scene_at(70.0);
+        let mut stars = 0;
+        for y in 0..40 {
+            for x in 0..120 {
+                let cell = canvas.get(x, y).unwrap();
+                if cell.ink.role == Role::Star {
+                    assert_ne!(y, 0, "star in the readout row at {x}");
+                    assert!(('\u{2801}'..='\u{28FF}').contains(&cell.ch), "{cell:?}");
+                    stars += 1;
+                }
+            }
+        }
+        assert!(stars > 20, "{stars} stars");
+        // Only in all-sky cells: a star in a cell whose other pixel is ridge would turn the
+        // skyline's half block into braille over a solid ridge-coloured cell.
+        let size = Size::new(200, 50);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = MarsRover::default();
+        g.resize(size, &mut ctx);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        while g.t < SOL {
+            g.update(1.0 / 6.0, &mut ctx);
+            if g.t < 60.0 {
+                continue;
+            }
+            canvas.clear();
+            g.render(&mut canvas);
+            for y in 0..50 {
+                for x in 0..200 {
+                    if canvas.get(x, y).unwrap().ink.role == Role::Star {
+                        assert_eq!(g.px.cell_bg(x, y), Ink::BLANK, "t {}: star at {x},{y}", g.t);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mr_a9_the_rover_dims_with_the_daylight() {
+        let hull = |canvas: &Canvas| {
+            canvas
+                .cells()
+                .iter()
+                .filter(|c| c.ch == HULL.unicode && c.ink.role == Role::Text)
+                .map(|c| c.ink.level)
+                .max()
+                .unwrap_or(0)
+        };
+        let (day, night) = (hull(&scene_at(12.0).1), hull(&scene_at(70.0).1));
+        assert!(day > 200, "day hull {day}");
+        assert!(
+            f64::from(night) < 0.6 * f64::from(day),
+            "night hull {night}"
+        );
+    }
+
+    #[test]
+    fn mr_a5_every_column_stacks_sky_far_mid_near_downward() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(3, size);
+        let mut g = MarsRover::default();
+        g.resize(size, &mut ctx);
+        let w = g.world.unwrap();
+        for _ in 0..20 {
+            g.update(0.5, &mut ctx);
+            let cam = camera(&g.layout, g.rover_x(&w));
+            for c in 0..120 {
+                let tops = g.layer_tops(&w, cam, c);
+                let mut last = Layer::Sky;
+                for py in 0..80 {
+                    let l = layer_at(tops, py);
+                    assert!(l >= last, "column {c}: {l:?} above {last:?} at pixel {py}");
+                    last = l;
+                }
+                assert_eq!(last, Layer::Near, "column {c} ends in the near ground");
+            }
+        }
+    }
+
+    #[test]
+    fn mr_a6_rover_line_art_keeps_the_sky_behind_it() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(5, size);
+        let mut g = MarsRover::default();
+        g.resize(size, &mut ctx);
+        for _ in 0..(10.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut checked = 0;
+        for y in 0..40 {
+            for x in 0..120 {
+                let cell = canvas.get(x, y).unwrap();
+                let backed =
+                    g.px.get(x, 2 * y + 1)
+                        .is_some_and(|i| i.role != Role::Background);
+                if cell.ch != ' ' && !matches!(cell.ch, '▀' | '▄' | '█') && backed {
+                    checked += 1;
+                    assert_ne!(
+                        cell.bg,
+                        Ink::BLANK,
+                        "black box behind {:?} at {x},{y}",
+                        cell.ch
+                    );
+                }
+            }
+        }
+        assert!(checked > 5, "some rover line art over the landscape");
     }
 
     #[test]

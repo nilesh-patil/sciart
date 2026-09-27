@@ -1,5 +1,5 @@
 //! Sub-cell rasters layered onto a [`Canvas`] (SPEC-001 CORE-R41, CORE-R42, CORE-R51,
-//! CORE-R55, CORE-R64, CORE-R65, CORE-R85, ADR-0010).
+//! CORE-R55, CORE-R64, CORE-R65, CORE-R85, CORE-R86, ADR-0010).
 //!
 //! - [`Dots`]: a braille lattice of 2 × 4 dots per cell, one ink per cell. With cells
 //!   ~2:1 tall ([`ASPECT`](crate::geom::ASPECT)) the dots are *square*, so line art,
@@ -740,6 +740,34 @@ impl Pixels {
             (Some(t), _) => t,
             (None, Some(b)) => b,
             (None, None) => Ink::BLANK,
+        }
+    }
+
+    /// Give every glyph already drawn over this buffer's pixels its cell's
+    /// [`cell_bg`](Self::cell_bg) as background (CORE-R86), so line art, sprites and
+    /// labels drawn after [`blit`](Self::blit) do not punch black boxes into a half-block
+    /// picture. Glyphs and inks are kept; cells that already have a background, half and
+    /// full blocks, and cells over empty pixels are left alone. Unicode only: an ASCII
+    /// canvas has no half blocks to match.
+    pub fn backdrop(&self, canvas: &mut Canvas) {
+        if canvas.mode() != GlyphMode::Unicode {
+            return;
+        }
+        let w = self.cells.width().min(canvas.size().width());
+        let h = self.cells.height().min(canvas.size().height());
+        for y in 0..i32::from(h) {
+            for x in 0..i32::from(w) {
+                let Some(&cell) = canvas.get(x, y) else {
+                    continue;
+                };
+                if cell.bg != Ink::BLANK || matches!(cell.ch, '▀' | '▄' | '█') {
+                    continue;
+                }
+                let under = self.cell_bg(x, y);
+                if under != Ink::BLANK {
+                    canvas.put_bg(x, y, Glyph::ascii(cell.ch), cell.ink, under);
+                }
+            }
         }
     }
 
