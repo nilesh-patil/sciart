@@ -179,7 +179,7 @@ fn rnd_r4_rt_r9_hud_reflects_keys() {
 /// `--seed`: a random 20-digit seed is the realistic (worst) case.
 #[test]
 fn rnd_r4_r9_hud_keeps_paused_visible_with_a_long_title_at_80_columns() {
-    let title = "Oldest light - early sound waves | ";
+    let title = " Oldest light - early sound waves | ";
     let mut s = Session::start(&["run", "cosmic_microwave_background", "--hud", "--ascii"]);
     s.wait_for("HUD", |t| t.contains(title));
     s.press(" ");
@@ -191,8 +191,9 @@ fn rnd_r4_r9_hud_keeps_paused_visible_with_a_long_title_at_80_columns() {
 }
 
 /// RT-R12: with the HUD off the title sits at the bottom-left of the canvas (after the col-0
-/// gutter, CORE-R74). Started under the HUD and then paused, hiding the HUD must still bring
-/// the canvas title back: the frozen frame is re-rendered, not stepped.
+/// gutter, CORE-R74), in the same columns as in the HUD (RND-R9). Started under the HUD and
+/// then paused, hiding the HUD must still bring the canvas title back: the frozen frame is
+/// re-rendered, not stepped.
 #[test]
 fn rt_r12_rnd_r9_title_moves_between_hud_and_canvas_even_while_paused() {
     let args = [
@@ -207,15 +208,14 @@ fn rt_r12_rnd_r9_title_moves_between_hud_and_canvas_even_while_paused() {
     ];
     let mut s = Session::start(&args);
     s.wait_for("title in the HUD", |t| {
-        last_row(t).starts_with(&format!("{STARFIELD_TITLE} | "))
+        last_row(t).starts_with(&format!(" {STARFIELD_TITLE} | "))
     });
     s.press(" ");
     s.wait_for("pause", |t| t.contains("| PAUSED"));
     s.press("h");
-    let screen = s.wait_for("canvas title under the frozen frame", |t| {
-        last_row(t).starts_with(&format!(" {STARFIELD_TITLE} "))
+    s.wait_for("canvas title under the frozen frame, HUD gone", |t| {
+        last_row(t).starts_with(&format!(" {STARFIELD_TITLE} ")) && !t.contains("PAUSED")
     });
-    assert!(!screen.contains("PAUSED"), "HUD gone:\n{screen}");
     let (status, _) = s.quit();
     assert!(status.success());
 }
@@ -235,7 +235,9 @@ fn cli_r7_no_title_shows_the_id_in_the_hud_and_nothing_on_the_canvas() {
         "off",
     ];
     let mut s = Session::start(&args);
-    s.wait_for("id in the HUD", |t| last_row(t).starts_with("starfield | "));
+    s.wait_for("id in the HUD", |t| {
+        last_row(t).starts_with(" starfield | ")
+    });
     s.press("h");
     let screen = s.wait_for("HUD hidden", |t| !t.contains("starfield |"));
     assert!(!screen.contains("Parallax"), "no title anywhere:\n{screen}");

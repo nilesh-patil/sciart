@@ -575,7 +575,7 @@ impl Generator for FractalGrowth {
         self.steps_per_sec =
             (STEPS_REF * (r_rows / R_REF_ROWS).powf(COST_EXP)).clamp(STEPS_MIN, STEPS_MAX);
         self.label_row = (size.height() >= 12).then(|| i32::from(size.height()) - 1);
-        self.room = title::readout_room(size, &Title::new(META.title, self.caption()));
+        self.room = title::readout_room(size, &Title::of(self));
         self.reseed(ctx);
         self.rasterise();
     }
@@ -834,9 +834,9 @@ mod tests {
     fn cry_gen_r13_readout_drops_whole_parts_from_the_left() {
         let mut ctx = seeded(1);
         let mut g = FractalGrowth::default();
-        // The room is w − 2 minus the title span: the full title (32 cells) at 80 wide,
-        // the phenomenon (16) at 40.
-        for (size, room) in [(Size::new(80, 24), 46), (Size::new(40, 12), 22)] {
+        // The room is w − 6 minus the title text (gutter, 4-cell gap, trailing blank):
+        // the full title (30 cells) at 80 wide, the phenomenon (14) at 40.
+        for (size, room) in [(Size::new(80, 24), 44), (Size::new(40, 12), 20)] {
             ctx.set_size(size);
             g.resize(size, &mut ctx);
             assert_eq!(g.room, room, "{size:?}");

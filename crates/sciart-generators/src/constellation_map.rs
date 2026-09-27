@@ -8,7 +8,6 @@ use std::f64::consts::TAU;
 use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::prelude::*;
-use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
     name: "constellation_map",
@@ -457,19 +456,16 @@ impl Generator for ConstellationMap {
         canvas.text(x, ly.min(self.height - 2), lead.name, label_ink);
 
         let bottom = pos.iter().map(|p| p.1).fold(0.0, f64::max).round() as i32;
-        let row = (bottom + 2).min(self.height - 2).max(0);
+        // Name and epithet both stay above the title row: an epithet beside the title
+        // would read as one sentence with it (GEN-R13).
+        let row = (bottom + 2).min(self.height - 3).max(0);
         let shown = (since * TYPE_RATE) as usize;
         let name_ink = Ink::new(Role::Text, Self::scaled(255.0, fade));
         Self::title(canvas, row, fig.name, shown, name_ink);
         let epithet_shown = shown.saturating_sub(fig.name.chars().count() + 2);
         let len = fig.epithet.chars().count();
-        // Centred under the name; on the bottom row it is nudged right past the title
-        // with a blank between (GEN-R13), and dropped when it then no longer fits.
-        let mut x = (self.width - len as i32) / 2;
-        if row + 1 == self.height - 1 {
-            let span = title::span(canvas.size(), &Title::new(META.title, self.caption()));
-            x = x.max(span.map_or(0, |(_, cols)| cols.end + 1));
-        }
+        // Centred under the name, and dropped when it does not fit.
+        let x = (self.width - len as i32) / 2;
         if epithet_shown > 0 && row + 1 < self.height && x + len as i32 <= self.width {
             let ink = Ink::new(Role::Text, Self::scaled(140.0, fade));
             for (i, ch) in fig.epithet.chars().take(len.min(epithet_shown)).enumerate() {
@@ -481,6 +477,8 @@ impl Generator for ConstellationMap {
 
 #[cfg(test)]
 mod tests {
+    use sciart_core::title::{self, Title};
+
     use super::*;
 
     #[test]
@@ -608,20 +606,20 @@ mod tests {
     }
 
     #[test]
-    fn con_gen_r13_names_stay_clear_of_the_title() {
+    fn con_gen_r13_names_stay_off_the_title_row() {
         for size in [Size::new(80, 24), Size::new(40, 12), Size::new(30, 6)] {
             let mut g = ConstellationMap::default();
             let mut ctx = Ctx::new(1, size);
             g.resize(size, &mut ctx);
             g.bg.clear();
-            let (y, cols) = title::span(size, &Title::new(META.title, None)).unwrap();
+            let (y, _) = title::span(size, &Title::new(META.title, None)).unwrap();
             for (k, fig) in FIGURES.iter().enumerate() {
                 // Fully typed out, before the fade. Unicode, whose star glyphs are not letters.
                 g.t = k as f64 * SHOW + SHOW - FADE - 0.1;
                 let mut c = Canvas::new(size, GlyphMode::Unicode);
                 g.render(&mut c);
                 let lines = c.to_lines();
-                let bottom: String = lines[y as usize].chars().take(cols.end as usize).collect();
+                let bottom = &lines[y as usize];
                 assert!(
                     !bottom.chars().any(char::is_alphanumeric),
                     "{size:?} {}: {bottom:?}",

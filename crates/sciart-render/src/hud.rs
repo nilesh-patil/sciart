@@ -11,7 +11,7 @@ use std::fmt::{self, Write};
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::Stylize;
+use ratatui::style::{Style, Stylize};
 use ratatui::text::Line;
 use ratatui::widgets::Widget;
 use sciart_core::title::{Form, Title, ascii_of};
@@ -297,13 +297,19 @@ impl Write for Counter {
 
 impl Widget for &Hud<'_> {
     fn render(self, area: Rect, buf: &mut Buffer) {
-        if area.height == 0 {
+        if area.height == 0 || area.width == 0 {
             return;
         }
-        let row = Rect::new(area.x, area.bottom() - 1, area.width, 1);
-        Line::from(self.fit(usize::from(area.width)))
+        let (x, y) = (area.x, area.bottom() - 1);
+        // One reversed lead cell, so the name starts in column 1 like the canvas title's
+        // text (CORE-R74) and does not shift when the HUD is toggled (RND-R9).
+        buf[(x, y)]
+            .set_symbol(" ")
+            .set_style(Style::new().reversed());
+        let width = area.width - 1;
+        Line::from(self.fit(usize::from(width)))
             .reversed()
-            .render(row, buf);
+            .render(Rect::new(x + 1, y, width, 1), buf);
     }
 }
 
@@ -624,7 +630,7 @@ mod tests {
     }
 
     #[test]
-    fn rnd_r4_renders_only_the_last_row_fitted_and_reversed() {
+    fn rnd_r4_r9_renders_only_the_last_row_fitted_and_reversed_after_a_lead_cell() {
         let area = Rect::new(0, 0, 12, 3);
         let mut buf = Buffer::empty(area);
         for y in 0..3 {
@@ -635,8 +641,9 @@ mod tests {
         assert_eq!(buf[(0, 0)].symbol(), "#");
         assert_eq!(buf[(0, 1)].symbol(), "#");
         let bottom: String = (0..12).map(|x| buf[(x, 2)].symbol().to_string()).collect();
-        // Fitted, not clipped mid-field (was `starfield | ` before RND-R4 fitting).
-        assert_eq!(bottom, "starfield   ");
+        // Fitted, not clipped mid-field (was `starfield | ` before RND-R4 fitting), after a
+        // lead cell (RND-R9).
+        assert_eq!(bottom, " starfield  ");
         assert!(buf[(0, 2)].modifier.contains(Modifier::REVERSED));
     }
 
@@ -646,7 +653,7 @@ mod tests {
         let mut buf = Buffer::empty(area);
         cmb().render(area, &mut buf);
         let bottom: String = (0..40).map(|x| buf[(x, 1)].symbol().to_string()).collect();
-        assert_eq!(bottom, "cosmic_microwave_background | PAUSED    ");
+        assert_eq!(bottom, " cosmic_microwave_background | PAUSED   ");
     }
 
     #[test]

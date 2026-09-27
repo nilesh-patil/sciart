@@ -13,7 +13,7 @@ pub static META: Meta = Meta {
     name: "exoplanet_transit",
     category: Category::SunPlanets,
     description: "A planet transiting a limb-darkened star while its light curve dips",
-    title: "Exoplanet · planet dims its star",
+    title: "Planet transit · starlight dips",
     captions: &[],
 };
 

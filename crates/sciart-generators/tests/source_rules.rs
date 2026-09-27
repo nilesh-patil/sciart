@@ -98,7 +98,13 @@ fn gen_r7_clippy_config_bans_wall_clock_and_global_rng() {
 #[test]
 fn test_r8_clippy_config_bans_deliberate_leaks() {
     let clippy = fs::read_to_string(workspace_root().join("clippy.toml")).expect("clippy.toml");
-    for path in ["std::boxed::Box::leak", "std::mem::forget"] {
+    for path in [
+        "std::boxed::Box::leak",
+        "std::vec::Vec::leak",
+        "std::string::String::leak",
+        "std::mem::forget",
+        "std::mem::ManuallyDrop::new",
+    ] {
         assert!(
             clippy.contains(&format!("path = \"{path}\"")),
             "TEST-R8: clippy.toml disallowed-methods must ban `{path}`"

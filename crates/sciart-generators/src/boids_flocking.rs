@@ -963,7 +963,7 @@ impl Generator for Boids {
                 FALCON_INK,
             );
         }
-        let title = Title::new(META.title, self.caption());
+        let title = Title::of(self);
         if Self::shows_label(self.cells)
             && self.label.len() <= title::readout_room(self.cells, &title)
         {

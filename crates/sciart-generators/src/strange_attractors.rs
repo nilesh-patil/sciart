@@ -999,7 +999,7 @@ impl StrangeAttractors {
             return;
         };
         let s = spec(k);
-        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         // Both variants have the same char count (ATT-A7), so one check serves both modes.
         if s.params.is_empty() || s.params_ascii.chars().count() > room {
             return;
@@ -1751,12 +1751,12 @@ mod tests {
                 "{k:?} quotes {quoted} of {params}"
             );
         }
-        // Lorenz's 15-char set against "Strange attractor" (cols 0..19 from 32 wide, the
-        // full title from 47): dropped at 35 columns, shown at 36.
+        // Lorenz's 15-char set beside "Strange attractor" alone (from 32 wide, the full
+        // title from 47), where the room is w − 23: dropped at 37 columns, shown at 38.
         for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {
-            let (s, _, mut c) = scene(35, 12, mode, 0);
+            let (s, _, mut c) = scene(37, 12, mode, 0);
             assert_eq!(label_row(&s, &mut c).trim(), "", "{mode:?}");
-            let (s, _, mut c) = scene(36, 12, mode, 0);
+            let (s, _, mut c) = scene(38, 12, mode, 0);
             assert!(label_row(&s, &mut c).contains("8/3"), "{mode:?}");
         }
         for (w, h) in [(11, 24), (80, 7)] {

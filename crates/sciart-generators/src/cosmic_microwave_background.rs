@@ -321,7 +321,7 @@ impl Generator for CosmicMicrowaveBackground {
             }
         }
         // Bottom-right, clear of the title (GEN-R13); dropped when the row is too narrow.
-        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         if self.readout && READOUT.len() <= room {
             let y = i32::from(self.height) - 1;
             draw::label_right(canvas, y, READOUT, Ink::new(Role::Text, 200));

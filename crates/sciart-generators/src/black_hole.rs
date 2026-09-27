@@ -19,7 +19,7 @@ pub static META: Meta = Meta {
     name: "black_hole",
     category: Category::DeepCosmos,
     description: "A black hole with a beamed, lensed accretion disk and photon ring",
-    title: "Black hole · gravity bends light",
+    title: "Black hole · infalling gas glows",
     captions: &[],
 };
 

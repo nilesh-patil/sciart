@@ -35,7 +35,7 @@ pub static META: Meta = Meta {
     name: "molecular_dynamics",
     category: Category::PhysicalChemistry,
     description: "A Lennard-Jones fluid melting and condensing as it is heated and cooled",
-    title: "Gas to liquid · atoms stick",
+    title: "Gas to liquid · cool atoms cling",
     captions: &[],
 };
 
@@ -441,7 +441,7 @@ impl MolecularDynamics {
     /// longest form that fits wins: the units note goes first, then the energy and atom
     /// count, then the target temperature; nothing when even `T = … heating` does not fit.
     fn draw_readout(&self, canvas: &mut Canvas, row: i32) {
-        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         let Readout {
             temperature: t,
             target,
@@ -933,7 +933,8 @@ mod tests {
             g.render(&mut c);
             let row = c.to_lines().pop().unwrap();
             let span = title::span(size, &Title::new(META.title, None));
-            let free = span.map_or(0, |(_, cols)| cols.end as usize);
+            // Four blanks after the title text, which ends at `cols.end - 2`.
+            let free = span.map_or(0, |(_, cols)| cols.end as usize + 2);
             let lead = row.len() - row.trim_start().len();
             assert!(lead > free || row.trim().is_empty(), "{w}: {row:?}");
             assert!(row.ends_with(' '), "{w}: {row:?}");
@@ -941,18 +942,20 @@ mod tests {
         };
         let full = readout(200);
         assert!(full.starts_with("T = 0.40 -> ") && full.ends_with("   LJ reduced units"));
-        // "Gas to liquid · atoms stick" takes cols 0..29 at 80 wide: 49 chars are left.
-        let r = readout(80);
+        // Beside the full "Gas to liquid · cool atoms cling" (32 cells, from w = 57) the
+        // room is w − 38.
+        let r = readout(100);
         assert!(
             r.contains("U/N = ") && r.contains("N = ") && !r.contains("LJ"),
             "{r}"
         );
-        let r = readout(60);
+        let r = readout(80);
         assert!(
             r.starts_with("T = 0.40 -> ") && r.ends_with(" heating"),
             "{r}"
         );
-        // Only "Gas to liquid" fits at 40 wide (cols 0..15): 23 chars are left.
+        assert_eq!(readout(60), "T = 0.40 heating");
+        // Beside "Gas to liquid" alone the room is w − 19.
         assert_eq!(readout(40), "T = 0.40 heating");
         assert_eq!(readout(30), "");
     }

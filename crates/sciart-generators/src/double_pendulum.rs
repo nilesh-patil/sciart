@@ -509,7 +509,7 @@ impl Generator for DoublePendulum {
         sciart_core::particles::plot(canvas, pivot.0, pivot.1, PIVOT, Ink::new(Role::Text, 230));
 
         // Right-aligned, clear of the title (GEN-R13).
-        let room = title::readout_room(canvas.size(), &Title::new(META.title, self.caption()));
+        let room = title::readout_room(canvas.size(), &Title::of(self));
         if let Some(row) = self.label_row
             && let Some(label) = self.labels.iter().find(|l| l.len() <= room)
         {

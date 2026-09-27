@@ -868,8 +868,7 @@ impl Generator for Physarum {
         // Bottom-right, clear of the title (GEN-R13), with one dark cell either side so the
         // label never looks glued to a tube.
         if shows_label(self.cells)
-            && self.label.len()
-                <= title::readout_room(self.cells, &Title::new(META.title, self.caption()))
+            && self.label.len() <= title::readout_room(self.cells, &Title::of(self))
         {
             let y = i32::from(self.cells.height()) - 1;
             draw::label_right(canvas, y, self.label.as_str(), LABEL_INK);
