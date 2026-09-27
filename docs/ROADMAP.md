@@ -79,12 +79,14 @@ Design: [docs/design/M10-scientific-art-batch.md](design/M10-scientific-art-batc
 Shared helpers first: layered raster, colormap roles, capped lattices, leapfrog, 3-D camera.
 - [x] Core foundation — `Cell.bg`/`put_bg`, `raster::{Dots, Pixels}`, `grid::{resample_bilinear, resample_nearest, lattice_for}`, `ode::{verlet_step, verlet_integrate}`, `geom::Camera`, `Role::{Seq, Div}` + `ink::{seq, div}`, `Category::{Biology, Chemistry}`; themes and `paint` backgrounds; `rs-ci` green [CORE-R40..R48, RND-R6, RND-R7]
 - [x] `crystal_growth` migrated onto `raster::Dots`, snapshots byte-identical [CRY-A1..A4, CORE-R41]
-- [ ] Physics fields: vortex_street [VOR-A1..A7] · ising_model [ISING-A1..A6] · strange_attractors [ATT-A1..A8]
-- [ ] Astronomy: aurora [AUR-A1..A7] · solar_surface [SUN-A1..A7] · three_body [TB-A1..A6] · globular_cluster [GC-A1..A8]
-- [ ] Chemistry: chemical_reaction upgrade (Pixels + `Seq`, preset walk, capped lattice; moves to `Category::Chemistry`) [CHEM-A1..A7] · belousov_zhabotinsky [BZ-A1..A8]
-- [ ] Chemistry: electron_orbitals [ORB-A1..A7] · molecule_viewer [MOL-A1..A6] · liesegang_rings [LIES-A1..A7]
-- [ ] Biology: boids_flocking [BOID-A1..A6] · physarum [PHY-A1..A6] · dna_helix [DNA-A1..A6] · action_potential [AP-A1..A8]
-- [ ] Snapshots recorded and reviewed for all 16; benches < 1 ms at 200×50 (hard limit 5 ms) [GEN-R8, GEN-R11]; every new ID cited by a test [TEST-R1]; taste, physics and performance review per scene
+- [x] Physics fields: vortex_street [VOR-A1..A8] · ising_model [ISING-A1..A6] · strange_attractors [ATT-A1..A8]
+- [x] Astronomy: aurora [AUR-A1..A7] · solar_surface [SUN-A1..A7] · three_body [TB-A1..A7] · globular_cluster [GC-A1..A9]
+- [x] Chemistry: chemical_reaction upgrade (Pixels + `Seq`, preset walk, capped lattice; moves to `Category::Chemistry`) [CHEM-A1..A8] · belousov_zhabotinsky [BZ-A1..A8]
+- [x] Chemistry: electron_orbitals [ORB-A1..A7] · molecule_viewer [MOL-A1..A6] · liesegang_rings [LIES-A1..A7]
+- [x] Biology: boids_flocking [BOID-A1..A7] · physarum [PHY-A1..A7] · dna_helix [DNA-A1..A6] · action_potential [AP-A1..A8]
+- [x] Snapshots recorded and reviewed for all 16; benches < 1 ms at 200×50 (max 0.47 ms, aurora; hard limit 5 ms) [GEN-R8, GEN-R11]; every new ID cited by a test [TEST-R1]; taste, physics and performance review per scene; SPEC-002 brought in line with the delivered code
+- [x] `rs-fmt`/`rs-lint` also run `rustfmt` on each scene file (modules declared inside `registry!` are invisible to `cargo fmt`)
+- [ ] Review follow-ups (minor, non-blocking; listed in the M10 integration notes): e.g. solar_surface spot granulation and umbra pixel floor, aurora patch size and ridge glow, physarum later-bloom exposure, vortex_street start-up specks, mono-theme `Seq`/`Div` floors (ADR-0011), liesegang ASCII haze class, three_body Lagrange triangle fade-in, extra pinning tests (ATT rates, ORB dipoles, GC reseed buffers)
 - [ ] Follow-up proposals (unscheduled): `sciart record` (GIF/asciicast export for taste review); GitHub Actions CI (+ cargo-deny); `Role::Spectrum` for true spectral line colour
 
 ## M9 — Future (unscheduled)
