@@ -93,50 +93,60 @@ const START_T: f64 = 8.0;
 /// Emission for tone 1 − 1/e: a growth arc reads faint, an expansion curtain saturates
 /// only in its rays.
 const E_SAT: f64 = 0.9;
-/// A pixel is lit when its tone exceeds `LIT_THRESHOLD × b`, with `b` its fixed dither
-/// threshold in [0, 1) (a strand for curtain green, square blue noise for diffuse
-/// light; see `Dither`): the theme floors lit roles at 30 % brightness, so tones below
-/// 0.3 are shown by pixel density rather than by level.
-const LIT_THRESHOLD: f32 = 0.3;
-/// Tones below this stay dark: the faintest haze is dropped, not scattered.
-const TONE_FLOOR: f32 = 0.04;
-/// Red-dominant pixels need this tone (lit ≥ 30 % of the time): below it the red
-/// fringe's sparse tail would scatter as isolated specks over a dome larger than the
-/// green arc, so it is trimmed and the fringe keeps an envelope over the curtain tops.
-const RED_TONE_FLOOR: f32 = 0.09;
+/// Tones at which green and red light begin to show. The theme floors lit roles at 30 %
+/// brightness, so fainter light is left dark rather than scattered as a dither: each
+/// column lights one contiguous run where its emission profile crosses the threshold,
+/// and the level ramps up from there (`Glow::ink`). Rays that reach higher end higher,
+/// so the curtain's top edge is combed into vertical streaks, and the sky between the
+/// curtains stays black.
+const GREEN_LIT: f32 = 0.14;
+const RED_LIT: f32 = 0.2;
+/// The red fringe is drawn in `Accent` (the theme's magenta) at levels up to this: dark
+/// `Hot` is a rust brown and bright `Hot` an orange, while a deep magenta-crimson is how
+/// the 630 nm crown reads over green in photographs (mixed with the blue N₂⁺ light).
+/// The pink hem, also `Accent`, starts at `HEM_LEVEL`, well above it.
+const RED_LEVEL_MAX: f64 = 110.0;
+const RED: Role = Role::Accent;
+/// Red-dominant light shows only where the green's own tone is at least this: the
+/// crown caps each ray and fold with crimson and so follows the curtains' envelope.
+/// Diffuse red far above the green would be cut flat by the top fade (a lid) and stand
+/// as a slab over the sky; at the naked eye's photopic weight it is below notice there.
+const CROWN_GREEN: f32 = 0.03;
+const HEM_LEVEL: f64 = 190.0;
 /// Emission fades in under the top edge over this share of the pixel rows (at least
-/// `TOP_FADE_MIN_PX`), as a smoothstep, applied to the tone before the density
-/// threshold: a crown overhead thins into dark sky over ≈ 10 cell rows (keeping the
-/// label in clear air), so its top edge follows the curtains' own red envelope
-/// rather than meeting a lid.
+/// `TOP_FADE_MIN_PX`), as a smoothstep applied to the tone before the threshold: a crown
+/// overhead thins into dark sky over ≈ 10 cell rows (keeping the label in clear air), so
+/// its top edge follows the curtains' own envelope rather than meeting a lid.
 const TOP_FADE: f64 = 0.2;
 const TOP_FADE_MIN_PX: f64 = 3.0;
 /// O(¹D) atoms diffuse tens of km during their 110 s lifetime, so the red emission is
 /// smoothed along the arc by a Gaussian of this width (≈ 20 km at 300 km) before it is
-/// dithered: where folds double back and the layer count steps, the red ramps instead
+/// thresholded: where folds double back and the layer count steps, the red ramps instead
 /// of standing as a wall.
 const RED_DIFFUSE_DEG: f64 = 4.0;
-/// Horizon skyglow: every sky pixel below this elevation glows, brightest at the
-/// horizon and falling quadratically to black, so the ridge and spruce spires (at most
-/// 4° + 4°) stand against it as a crisp black edge.
+/// Horizon skyglow: sky pixels below this elevation (or below the tallest silhouette plus
+/// `GLOW_CLEAR_PX`, if higher) glow, brightest at the horizon, so the ridge and spruce
+/// spires stand against it as a crisp black edge.
 const GLOW_DEG: f64 = 8.0;
-/// Skyglow `Seq` value at the horizon: the low, near-black end of the ramp, since lit
-/// roles are floored at 30 % brightness and could not fade out.
-const GLOW_MAX: f64 = 0.14;
-/// The top share of the glow that thins out by pixel density: below it the band is
-/// continuous, so the silhouette cuts a clean black edge into it.
-const GLOW_FEATHER: f64 = 0.2;
-/// The red share R/(G+R) over which lit pixels turn from green to red.
-const RED_BAND: (f32, f32) = (0.3, 0.7);
+/// Skyglow `Seq` value at the horizon and at the glow's top edge, falling quadratically
+/// between: the ramp's black end is a dark navy, so the glow stops just above it rather
+/// than being carried into it.
+const GLOW_MAX: f64 = 0.2;
+const GLOW_MIN: f64 = 0.02;
 const LAKE_GAIN: f32 = 0.45;
+/// A sky run whose brightest pixel is below this level is not mirrored (see
+/// `View::reflect`).
+const LAKE_MIN_LEVEL: u8 = 40;
+/// Sideways ripple displacement per pixel row below the shore.
+const RIPPLE_SHIFT: f32 = 0.04;
 /// Display weight of red 630 nm against green 557.7 nm: the photopic luminous efficiency
 /// ratio V(630)/V(557.7) ≈ 0.27. The emission profiles stay physical; this is how bright
 /// the red *looks*, so the diffuse fringe stays a fringe.
 const RED_WEIGHT: f32 = 0.27;
 /// Minimum pink-hem tone for an `Accent` pixel: type-B hems mark only the brightest arc.
 const HEM_TONE: f32 = 0.6;
-/// Layers per column: 3 curtains, each doubled back once by a fold in the oblique sky.
-/// A further layer merges its amplitudes into the one at the nearest distance.
+/// Layers per column: one crossing per curtain plus room for three more where folds
+/// double back; a seventh merges into the nearest (see `View::push_layer`).
 const MAX_LAYERS: usize = 6;
 
 const STARS: usize = 1200;
@@ -144,15 +154,51 @@ const STAR_FRACTION: f64 = 0.02;
 const PATCHES: usize = 6;
 /// Peak of `green_profile(·, 0, H_GREEN)`, reached at u ≈ 3 km.
 const GREEN_PEAK: f64 = 0.80;
-/// Pulsating-patch green: 0.35× the peak green of a unit-flux arc.
-const PATCH_GAIN: f64 = 0.35 * GREEN_PEAK;
+/// Pulsating-patch green: 0.45× the peak green of a unit-flux arc, so a patch at full
+/// pulse stays dimmer than the recovery arc, the focal point.
+const PATCH_GAIN: f64 = 0.45 * GREEN_PEAK;
+/// Display floor on the patch half-extents (px): a 6–12° patch is only 4–7 columns at
+/// 80×24, a smudge rather than a patch. The floor is frame-relative, at most
+/// `PATCH_FLOOR_SHARE` of the width and of the pixel rows, so on a small frame a patch
+/// never swells into a cloud half the sky wide (`patch_floor_px`).
+const PATCH_MIN_PX: (f64, f64) = (5.0, 3.0);
+const PATCH_FLOOR_SHARE: (f64, f64) = (0.07, 1.0 / 12.0);
+/// Gaussian support of a patch, in half-extents.
+const PATCH_REACH: f64 = 1.6;
+/// Patch azimuths are stratified over ±`PATCH_SPAN_DEG` with ±`PATCH_JITTER_DEG` of
+/// jitter (strata 15° apart, ≈ 9 px at 80×24 where the floor makes a patch 10 px
+/// wide): they all drift at the same rate, so neighbours keep apart instead of fusing
+/// into one amorphous blob.
+const PATCH_SPAN_DEG: f64 = 45.0;
+const PATCH_JITTER_DEG: f64 = 3.0;
+
+/// Patch half-extent floor (px) for a frame `w` columns by `rows` pixel rows.
+fn patch_floor_px(w: usize, rows: usize) -> (f64, f64) {
+    (
+        PATCH_MIN_PX.0.min(PATCH_FLOOR_SHARE.0 * w as f64),
+        PATCH_MIN_PX.1.min(PATCH_FLOOR_SHARE.1 * rows as f64),
+    )
+}
 
 const LABEL_INK: Ink = Ink::new(Role::Text, 150);
 const RIDGE_INK: Ink = Ink::new(Role::Dim, 70);
 const STAR_DIM: Glyph = Glyph::new('·', '.');
 const STAR_BRIGHT: Glyph = Glyph::new('✦', '*');
-/// ASCII green: ':' from this level up, ',' below (stars keep '.' and '*').
+/// ASCII green by level: '|', '!', ':' from these levels up, ',' below (stars keep '.'
+/// and '*').
+const ASCII_BAR: u8 = 200;
+const ASCII_BANG: u8 = 130;
 const ASCII_COLON: u8 = 70;
+/// ASCII red: '"' from this level up, '\'' below.
+const ASCII_RED_BRIGHT: u8 = 60;
+/// The roles of auroral light: green, and the red crown and pink hem (the skyglow is
+/// `Seq`).
+const EMISSION: [Role; 2] = [Role::Particle, RED];
+
+/// A pink-hem pixel: `Accent` above the red crown's levels.
+fn is_hem(ink: Ink) -> bool {
+    ink.role == Role::Accent && f64::from(ink.level) > RED_LEVEL_MAX
+}
 
 // --- Physics (pure) -----------------------------------------------------------------
 
@@ -306,20 +352,20 @@ const K_OFF2: Knots = &[
 ];
 const K_OFF3: Knots = &[(0.0, 330.0), (LOOP, 330.0)];
 const K_A1: Knots = &[
-    (0.0, 0.25),
+    (0.0, 0.35),
     (ONSET, 0.4),
     (BREAKUP, 1.0),
     (PEAK, 1.0),
     (RECOVERY, 0.75),
-    (LOOP, 0.25),
+    (LOOP, 0.35),
 ];
 const K_A2: Knots = &[
-    (0.0, 0.15),
-    (ONSET, 0.25),
+    (0.0, 0.3),
+    (ONSET, 0.3),
     (EXPANSION, 0.3),
     (EXPANSION + 6.0, 0.55),
     (RECOVERY, 0.4),
-    (LOOP, 0.15),
+    (LOOP, 0.3),
 ];
 const K_A3: Knots = &[
     (0.0, 0.0),
@@ -347,12 +393,12 @@ const K_FOLD: Knots = &[
     (LOOP, 0.15),
 ];
 const K_RAYS: Knots = &[
-    (0.0, 0.1),
-    (ONSET, 0.1),
+    (0.0, 0.04),
+    (ONSET, 0.04),
     (BREAKUP, 0.8),
     (RECOVERY, 0.8),
-    (RECOVERY + 12.0, 0.1),
-    (LOOP, 0.1),
+    (RECOVERY + 12.0, 0.04),
+    (LOOP, 0.04),
 ];
 const K_VRAY: Knots = &[
     (0.0, 1.0),
@@ -670,6 +716,24 @@ const NEAR_FOREST: Forest = Forest {
     half: 0.35,
 };
 const BIG_TREE_F: f64 = 60.0;
+/// Display floor (px) for the far spires: at 80×24 (f ≈ 35 px/rad) a 3° spruce is under
+/// 2 px and the comb reads as a ruled line, so the far forest is stretched upward until
+/// a 3° spire (its height cap) stands this high (widths unchanged, so the spires get
+/// spikier, not wider).
+const SPIRE_MIN_PX: f64 = 3.0;
+/// The skyglow stands at least this far (px) above the tallest silhouette, so every
+/// spire is cut out of the glow rather than out of the black sky.
+const GLOW_CLEAR_PX: f64 = 1.5;
+
+/// Height factor for the spires at scale `f` (px/rad): 1 for the near forest, and for
+/// the far one the stretch that lifts a spire at its 3° height cap to `SPIRE_MIN_PX`.
+fn spire_lift(f: f64) -> f64 {
+    if f > BIG_TREE_F {
+        1.0
+    } else {
+        (SPIRE_MIN_PX / (f * FAR_FOREST.height.1.to_radians())).max(1.0)
+    }
+}
 
 /// The seeded, size-independent setting: star catalogue, ridge, both forests and
 /// patches.
@@ -717,9 +781,12 @@ impl Setting {
             (0..n).map(|_| rng.random_range(0.0..1.0)).collect()
         });
         let trees = plant(rng, FAR_FOREST);
-        let patches = std::array::from_fn(|_| Patch {
-            alpha: rng.random_range(-50.0f64..50.0).to_radians(),
-            e: rng.random_range(35.0f64..60.0).to_radians(),
+        let patches = std::array::from_fn(|i| Patch {
+            alpha: (-PATCH_SPAN_DEG
+                + 2.0 * PATCH_SPAN_DEG * (i as f64 + 0.5) / PATCHES as f64
+                + rng.random_range(-PATCH_JITTER_DEG..PATCH_JITTER_DEG))
+            .to_radians(),
+            e: rng.random_range(25.0f64..45.0).to_radians(),
             half_a: rng.random_range(3.0f64..6.0).to_radians(),
             half_e: rng.random_range(1.5f64..3.0).to_radians(),
             period: rng.random_range(4.0..12.0),
@@ -759,8 +826,9 @@ impl Setting {
     }
 
     /// Highest spire top (rad) over the azimuth interval `[lo, hi]`, if any tree
-    /// reaches into it: a triangle profile maximised over the interval.
-    fn tree_top(&self, trees: &[Tree], lo: f64, hi: f64) -> Option<f64> {
+    /// reaches into it: a triangle profile, its height scaled by `lift`, maximised over
+    /// the interval.
+    fn tree_top(&self, trees: &[Tree], lift: f64, lo: f64, hi: f64) -> Option<f64> {
         let first = trees.partition_point(|t| t.alpha + t.half < lo);
         trees[first..]
             .iter()
@@ -773,7 +841,7 @@ impl Setting {
                 } else {
                     0.0
                 };
-                self.ridge(t.alpha) + t.height * (1.0 - gap / t.half).max(0.0)
+                self.ridge(t.alpha) + lift * t.height * (1.0 - gap / t.half).max(0.0)
             })
             .max_by(f64::total_cmp)
     }
@@ -866,175 +934,7 @@ impl Luts {
     }
 }
 
-/// Rows of a column that share one dither threshold: partial coverage breaks into short
-/// field-aligned vertical strands, like the rays themselves, rather than speckle.
-const STRAND_PX: usize = 3;
-
-/// A toroidal blue-noise threshold tile of `w` columns × `g` groups of `px` rows.
-#[derive(Debug, Clone, Copy)]
-struct TileSpec {
-    w: usize,
-    g: usize,
-    px: usize,
-    /// Void-and-cluster energy: a Gaussian of this width (px), measured with a group
-    /// `px` rows tall, truncated at `reach` columns and groups (≈ 3.6σ).
-    sigma: f64,
-    reach: (i32, i32),
-    seed: u64,
-}
-
-/// Curtain green: strands of `STRAND_PX` rows, 128 px × 96 px.
-const STRANDS: TileSpec = TileSpec {
-    w: 128,
-    g: 32,
-    px: STRAND_PX,
-    sigma: 2.2,
-    reach: (8, 3),
-    seed: 0xA0B0,
-};
-/// Diffuse light (the red fringe and the pulsating patches): square pixels, 64 × 64 px,
-/// so a soft glow stipples evenly instead of breaking into ray-like strands.
-const SPECKLE: TileSpec = TileSpec {
-    w: 64,
-    g: 64,
-    px: 1,
-    sigma: 1.5,
-    reach: (5, 5),
-    seed: 0xA0B1,
-};
-
-/// Void-and-cluster ranks (Ulichney 1993) of the tile's cells, as thresholds
-/// `(rank + ½)/n`: every prefix of the ranking is spread as evenly as possible, so any
-/// share of lit cells has neither the clumps and holes of white noise nor the visible
-/// period of an ordered dither. The strand metric counts a cell as 1 × 3 px, so
-/// horizontal neighbours repel most and dense coverage stacks strands into vertical
-/// threads. Energies are integer sums, so the ranking is exact on every platform.
-fn void_and_cluster(spec: TileSpec) -> Vec<f32> {
-    let TileSpec { w, g, px, .. } = spec;
-    let mut rng = SplitMix64::new(spec.seed);
-    let n = w * g;
-    let (rx, rg) = spec.reach;
-    let mut kernel = Vec::new();
-    for dx in -rx..=rx {
-        for dg in -rg..=rg {
-            let d2 = f64::from(dx * dx) + f64::from(dg * dg) * (px * px) as f64;
-            let k = (65536.0 * (-d2 / (2.0 * spec.sigma * spec.sigma)).exp()).round() as i64;
-            kernel.push((dx, dg, k));
-        }
-    }
-    let splat = |energy: &mut [i64], i: usize, sign: i64| {
-        let (x, gi) = ((i / g) as i32, (i % g) as i32);
-        for &(dx, dg, k) in &kernel {
-            let xx = (x + dx).rem_euclid(w as i32) as usize;
-            let gg = (gi + dg).rem_euclid(g as i32) as usize;
-            energy[xx * g + gg] += sign * k;
-        }
-    };
-    // The densest minority point, and the emptiest majority point (first on ties).
-    let tightest = |on: &[bool], e: &[i64]| {
-        (0..n)
-            .filter(|&i| on[i])
-            .fold(None, |best: Option<usize>, i| match best {
-                Some(b) if e[b] >= e[i] => Some(b),
-                _ => Some(i),
-            })
-            .unwrap_or(0)
-    };
-    let largest_void = |on: &[bool], e: &[i64]| {
-        (0..n)
-            .filter(|&i| !on[i])
-            .fold(None, |best: Option<usize>, i| match best {
-                Some(b) if e[b] <= e[i] => Some(b),
-                _ => Some(i),
-            })
-            .unwrap_or(0)
-    };
-    // A random 10 % pattern, relaxed until moving its densest point fills its
-    // emptiest void with that same point.
-    let ones = n / 10;
-    let (mut on, mut energy) = (vec![false; n], vec![0i64; n]);
-    let mut placed = 0;
-    while placed < ones {
-        let i = rng.below(n as u32) as usize;
-        if !on[i] {
-            on[i] = true;
-            splat(&mut energy, i, 1);
-            placed += 1;
-        }
-    }
-    // Each swap lowers the pattern's energy, so this settles in far fewer than `n`
-    // swaps; the bound only guards a tile constant that would make it cycle.
-    for _ in 0..n {
-        let c = tightest(&on, &energy);
-        on[c] = false;
-        splat(&mut energy, c, -1);
-        let v = largest_void(&on, &energy);
-        on[v] = true;
-        splat(&mut energy, v, 1);
-        if v == c {
-            break;
-        }
-    }
-    let mut rank = vec![0usize; n];
-    // Ranks below the pattern: remove the densest points first.
-    let (mut on1, mut e1) = (on.clone(), energy.clone());
-    for r in (0..ones).rev() {
-        let c = tightest(&on1, &e1);
-        on1[c] = false;
-        splat(&mut e1, c, -1);
-        rank[c] = r;
-    }
-    // Ranks above it: fill the emptiest voids.
-    for r in ones..n {
-        let v = largest_void(&on, &energy);
-        on[v] = true;
-        splat(&mut energy, v, 1);
-        rank[v] = r;
-    }
-    rank.iter().map(|&r| (r as f32 + 0.5) / n as f32).collect()
-}
-
-/// The two blue-noise tiles, built once. The cache holds a pure function of constants
-/// (the seed is part of the tile spec, not `ctx.rng`), so every scene and size shares
-/// it and it does not break GEN-R7 determinism.
-fn tiles() -> &'static [Vec<f32>; 2] {
-    static TILES: std::sync::OnceLock<[Vec<f32>; 2]> = std::sync::OnceLock::new();
-    TILES.get_or_init(|| [void_and_cluster(STRANDS), void_and_cluster(SPECKLE)])
-}
-
-/// A fixed dither threshold in [0, 1) for pixel `(x, y)` from tile `tile` built to
-/// `spec`, shared by its group of rows. It never changes, so a still sky does not
-/// shimmer.
-#[inline]
-fn tile_threshold(tile: &[f32], spec: TileSpec, x: usize, y: usize) -> f32 {
-    tile[(x % spec.w) * spec.g + (y / spec.px) % spec.g]
-}
-
-/// The dither thresholds of a view: field-aligned strands for curtain green, square
-/// blue noise for diffuse light.
-#[derive(Debug, Clone, Copy, Default)]
-struct Dither {
-    strands: &'static [f32],
-    speckle: &'static [f32],
-}
-
-impl Dither {
-    fn new() -> Self {
-        let [strands, speckle] = tiles();
-        Self { strands, speckle }
-    }
-
-    #[inline]
-    fn at(self, x: usize, y: usize, soft: bool) -> f32 {
-        if soft {
-            tile_threshold(self.speckle, SPECKLE, x, y)
-        } else {
-            tile_threshold(self.strands, STRANDS, x, y)
-        }
-    }
-}
-
-/// A sky pixel's emission before dithering.
+/// A sky pixel's tone-mapped emission.
 #[derive(Debug, Clone, Copy, Default)]
 struct Glow {
     /// Tone-mapped brightness in [0, 1).
@@ -1043,56 +943,48 @@ struct Glow {
     red: f32,
     /// Inside a bright pink hem.
     hem: bool,
-    /// Diffuse light (red-dominant, or mostly a pulsating patch): dithered with square
-    /// blue noise rather than field-aligned strands.
-    soft: bool,
+    /// The green's own tone here, which gates the red crown (`CROWN_GREEN`).
+    green: f32,
 }
 
 /// A sky pixel's emission before tone mapping.
 #[derive(Debug, Clone, Copy, Default)]
 struct Emit {
+    /// Curtain green, which alone gates the red crown.
     green: f32,
     /// Red after `RED_WEIGHT`, smoothed along the rows by `View::diffuse_red`.
     red: f32,
     pink: f32,
-    /// The pulsating patches' share of `green`.
+    /// Pulsating-patch green: kept apart from the curtains' green so a patch inside the
+    /// lingering red dome never switches the crown on around itself.
     patch: f32,
 }
 
 /// An empty row range for `View::emit_rows`.
 const NO_ROWS: (usize, usize) = (usize::MAX, 0);
 
-/// Chance that a lit pixel is red for red share `red` = R/(G+R): 0 below the band,
-/// 1 above it, smoothstep across it. A pixel carries its whole tone in one role, so a
-/// linear chance would scatter full-brightness red specks through green ray cores.
-fn red_chance(red: f32) -> f32 {
-    ease::smoothstep(f64::from((red - RED_BAND.0) / (RED_BAND.1 - RED_BAND.0))) as f32
-}
-
 impl Glow {
-    /// The pixel's ink at `gain`× brightness under dither threshold `b` ∈ [0, 1), or
-    /// `None` if unlit. Faint emission is expressed by pixel density: the theme floors
-    /// lit roles at 30 % brightness, so a tone below 0.3 is lit for that share of the
-    /// thresholds, a tone below `TONE_FLOOR` never, and a red-dominant one below
-    /// `RED_TONE_FLOOR` never. Among lit pixels `b` is rescaled to be uniform on [0, 1)
-    /// again, so red wins with probability `red_chance`: pure green cores, a pure red
-    /// fringe and a stipple only where the two meet. The pink hem is crisp.
-    fn dither(self, gain: f32, b: f32) -> Option<Ink> {
-        let tone = self.tone * gain;
-        let chance = red_chance(self.red);
-        if tone < TONE_FLOOR || tone <= LIT_THRESHOLD * b || (chance > 0.5 && tone < RED_TONE_FLOOR)
-        {
+    /// The pixel's ink, or `None` below its threshold (`GREEN_LIT`, or `RED_LIT` where
+    /// red dominates, and there only within the green's tail, `CROWN_GREEN`). Above it
+    /// the level ramps from the core floor `ink::MIN_VISIBLE_LEVEL` (CORE-R66; to 255 for
+    /// green, to `RED_LEVEL_MAX` for red), so every lit run starts from the theme's
+    /// dimmest shade of its role and no fade ends in a bright lid. The pink hem is crisp
+    /// and bright: `HEM_LEVEL` and up.
+    fn ink(self) -> Option<Ink> {
+        let red = self.red > 0.5;
+        let lit = if red { RED_LIT } else { GREEN_LIT };
+        if self.tone < lit || red && self.green < CROWN_GREEN {
             return None;
         }
-        let u = b * (LIT_THRESHOLD / tone).max(1.0);
-        let role = if self.hem {
-            Role::Accent
-        } else if chance > u {
-            Role::Hot
+        let v = f64::from((self.tone - lit) / (1.0 - lit));
+        let (role, lo, hi) = if self.hem {
+            (Role::Accent, HEM_LEVEL, 255.0)
+        } else if red {
+            (RED, ink::MIN_VISIBLE_LEVEL, RED_LEVEL_MAX)
         } else {
-            Role::Particle
+            (Role::Particle, ink::MIN_VISIBLE_LEVEL, 255.0)
         };
-        Some(Ink::new(role, ink::level(f64::from(tone * 255.0))))
+        Some(Ink::new(role, ink::level(lo + (hi - lo) * v)))
     }
 }
 
@@ -1126,13 +1018,11 @@ fn box_pass(src: &[f32], dst: &mut [f32], k: usize) {
 }
 
 /// The skyglow `px` pixels above the horizon for a glow `height` px tall, or `None`
-/// where it has faded out: its ink, solid low down, and the share of pixels it covers,
-/// which thins to 0 over the top `GLOW_FEATHER` of the glow. Even the ramp's darkest
-/// ink is not black, so a solid glow would end in a hard line.
-fn skyglow(px: f64, height: f64) -> Option<(Ink, f32)> {
+/// where it has faded out: solid, falling quadratically into the ramp's near-black end,
+/// so it needs no dither to fade.
+fn skyglow(px: f64, height: f64) -> Option<Ink> {
     let k = 1.0 - px.max(0.0) / height;
-    let v = GLOW_MAX * k * k;
-    (k > 0.0).then(|| (ink::seq(v), (k / GLOW_FEATHER).min(1.0) as f32))
+    (k > 0.0).then(|| ink::seq(GLOW_MIN + (GLOW_MAX - GLOW_MIN) * k * k))
 }
 
 /// A star that fits the current view, with its cell and draw attributes.
@@ -1182,7 +1072,6 @@ struct View {
     /// The same without the spruce spires: the bare ridge line.
     ridge_base: Vec<i32>,
     tree: Vec<bool>,
-    dither: Dither,
     /// Box radius (px) of the red diffusion: three passes approximate the Gaussian.
     red_box: usize,
     /// Emission before tone mapping, `w` per sky row, and the rows that hold any
@@ -1191,17 +1080,16 @@ struct View {
     emit_rows: (usize, usize),
     /// Two rows of scratch for the red diffusion.
     blur: [Vec<f32>; 2],
-    /// Skyglow per sky row: its ink and the pixel share it covers (`None` above the
-    /// glow).
-    skyglow: Vec<Option<(Ink, f32)>>,
+    /// Per sky pixel (`w` per row), the brightest level of its column's lit run; valid
+    /// where the pixel is emission (`View::run_peaks`).
+    run_peak: Vec<u8>,
+    /// Skyglow ink per sky row (`None` above the glow).
+    skyglow: Vec<Option<Ink>>,
     ripple_cos: Vec<f32>,
     ripple_sin: Vec<f32>,
     stars: Vec<ShownStar>,
     layers: Vec<[Layer; MAX_LAYERS]>,
     nlayers: Vec<u8>,
-    /// Undithered sky emission, `w` per sky row: ASCII sky cells re-dither it at cell
-    /// resolution.
-    glow: Vec<Glow>,
     pixels: Pixels,
     label: Label,
 }
@@ -1227,13 +1115,6 @@ impl View {
             y_h,
             lake,
             f,
-            skyglow: {
-                // At least 3 px, so small views keep a readable silhouette.
-                let height = (f * GLOW_DEG.to_radians()).max(3.0);
-                (0..y_h)
-                    .map(|y| skyglow((y_h - y) as f64 - 0.5, height))
-                    .collect()
-            },
             tan_e,
             ext,
             top: {
@@ -1242,16 +1123,15 @@ impl View {
                     .map(|y| ease::smoothstep(y as f64 / fade) as f32)
                     .collect()
             },
-            dither: Dither::new(),
             red_box: box_radius(f * RED_DIFFUSE_DEG.to_radians()),
             emit: vec![Emit::default(); w * y_h],
             emit_rows: NO_ROWS,
             blur: [vec![0.0; w], vec![0.0; w]],
+            run_peak: vec![0; w * y_h],
             ripple_cos: (0..w).map(|x| (0.13 * x as f64).cos() as f32).collect(),
             ripple_sin: (0..w).map(|x| (0.13 * x as f64).sin() as f32).collect(),
             layers: vec![[Layer::default(); MAX_LAYERS]; w],
             nlayers: vec![0; w],
-            glow: vec![Glow::default(); w * y_h],
             pixels: Pixels::new(size),
             label: if w < 24 || h < 10 {
                 Label::None
@@ -1263,6 +1143,12 @@ impl View {
             ..Self::default()
         };
         view.build_silhouette(setting);
+        view.skyglow = {
+            let height = view.glow_px();
+            (0..y_h)
+                .map(|y| skyglow((y_h - y) as f64 - 0.5, height))
+                .collect()
+        };
         view.pick_stars(setting);
         view
     }
@@ -1270,6 +1156,15 @@ impl View {
     #[cfg(test)]
     fn top_fade_px(&self) -> f64 {
         top_fade_px(self.rows)
+    }
+
+    /// Skyglow height (px): `GLOW_DEG`, but at least `GLOW_CLEAR_PX` above the tallest
+    /// silhouette (and 3 px), so small views keep a readable ridge.
+    fn glow_px(&self) -> f64 {
+        let tallest = self.ridge_top.iter().map(|&t| self.y_h as i32 - t).max();
+        (self.f * GLOW_DEG.to_radians())
+            .max(f64::from(tallest.unwrap_or(0)) + GLOW_CLEAR_PX)
+            .max(3.0)
     }
 
     fn alpha_at(&self, x: f64) -> f64 {
@@ -1288,11 +1183,12 @@ impl View {
         let top_row = |e: f64| (self.row_of(e).floor() as i32 + 1).clamp(0, self.y_h as i32);
         let (mut ridge_top, mut ridge_base, mut tree) = (Vec::new(), Vec::new(), Vec::new());
         let trees = setting.trees_for(self.f);
+        let lift = spire_lift(self.f);
         for x in 0..self.w {
             let a = self.alpha_at(x as f64 + 0.5);
             let ridge = setting.ridge(a);
             let base = top_row(ridge);
-            let (top, tip) = match setting.tree_top(trees, a - half, a + half) {
+            let (top, tip) = match setting.tree_top(trees, lift, a - half, a + half) {
                 Some(e) if e > ridge => {
                     let top = top_row(e);
                     // A tip only where a spire's centre is in this column and rises.
@@ -1363,7 +1259,8 @@ impl View {
         self.emit_rows = NO_ROWS;
     }
 
-    /// Add a layer to column `x`; a fifth merges into the one at the nearest distance.
+    /// Add a layer to column `x`; a layer beyond `MAX_LAYERS` merges into the one at the
+    /// nearest distance.
     fn push_layer(&mut self, x: usize, layer: Layer) {
         let n = usize::from(self.nlayers[x]);
         let col = &mut self.layers[x];
@@ -1445,9 +1342,9 @@ impl View {
             y1 = y1.max(l.y_low);
         }
         for p in patches {
-            if (alpha - p.alpha).abs() < 2.0 * p.half_a {
-                y0 = y0.min(self.row_of(p.e + 2.0 * p.half_e) as i32);
-                y1 = y1.max(self.row_of(p.e - 2.0 * p.half_e) as i32 + 1);
+            if (alpha - p.alpha).abs() < PATCH_REACH * p.half_a {
+                y0 = y0.min(self.row_of(p.e + PATCH_REACH * p.half_e) as i32);
+                y1 = y1.max(self.row_of(p.e - PATCH_REACH * p.half_e) as i32 + 1);
             }
         }
         let (y0, y1) = (y0.max(0), y1.min(sil - 1));
@@ -1470,7 +1367,7 @@ impl View {
         for y in y0..=y1 {
             let yu = y as usize;
             let te = self.tan_e[yu];
-            let (mut g, mut r, mut p, mut patch) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
+            let (mut g, mut r, mut p, mut pa) = (0.0f32, 0.0f32, 0.0f32, 0.0f32);
             for (i, l) in layers.iter().enumerate() {
                 if y < l.y_top || y > l.y_low {
                     continue;
@@ -1488,15 +1385,15 @@ impl View {
             for lp in patches {
                 let da = (alpha - lp.alpha) / lp.half_a;
                 let de = ((self.y_h as f64 - f64::from(y) - 0.5) / self.f - lp.e) / lp.half_e;
-                if da.abs() < 2.0 && de.abs() < 2.0 {
-                    patch += (lp.gain * (-da * da - de * de).exp()) as f32;
+                if da.abs() < PATCH_REACH && de.abs() < PATCH_REACH {
+                    pa += (lp.gain * (-da * da - de * de).exp()) as f32;
                 }
             }
             self.emit[yu * self.w + x] = Emit {
-                green: g + patch,
+                green: g,
                 red: RED_WEIGHT * r,
                 pink: p,
-                patch,
+                patch: pa,
             };
         }
     }
@@ -1526,7 +1423,8 @@ impl View {
         }
     }
 
-    /// Tone-map and dither every emitting sky pixel above the silhouette.
+    /// Tone-map every emitting sky pixel above the silhouette and light it if it clears
+    /// its threshold (`Glow::ink`).
     fn shade(&mut self, luts: &Luts) {
         for y in self.emit_rows.0..=self.emit_rows.1 {
             let ext = self.ext[y] * (1.0 / E_SAT as f32);
@@ -1535,19 +1433,22 @@ impl View {
                     continue;
                 }
                 let e = self.emit[y * self.w + x];
-                let sum = e.green + e.red + e.pink;
+                // The crown shows only within the curtains' green tail (`CROWN_GREEN`);
+                // elsewhere the red is below notice and is dropped, so a patch inside the
+                // lingering red dome shows green with no red hood.
+                let green = luts.tone(ext * e.green);
+                let red = if green >= CROWN_GREEN { e.red } else { 0.0 };
+                let sum = e.green + e.patch + red + e.pink;
                 if sum <= 0.0 {
                     continue;
                 }
-                let red = e.red / (e.green + e.red).max(1e-12);
                 let glow = Glow {
                     tone: self.top[y] * luts.tone(ext * sum),
-                    red,
+                    red: red / (e.green + e.patch + red).max(1e-12),
                     hem: e.pink >= 0.25 * e.green && luts.tone(ext * e.pink) >= HEM_TONE,
-                    soft: red_chance(red) > 0.5 || e.patch > 0.5 * sum,
+                    green,
                 };
-                self.glow[y * self.w + x] = glow;
-                if let Some(ink) = glow.dither(1.0, self.dither.at(x, y, glow.soft)) {
+                if let Some(ink) = glow.ink() {
                     self.pixels.set(x as i32, y as i32, ink);
                 }
             }
@@ -1557,16 +1458,54 @@ impl View {
     /// Skyglow in the still-dark sky just above the silhouette of column `x`.
     fn skyglow_column(&mut self, x: usize) {
         for y in (0..self.ridge_top[x]).rev() {
-            let Some((glow, share)) = self.skyglow[y as usize] else {
+            let Some(glow) = self.skyglow[y as usize] else {
                 break;
             };
-            if self.dither.at(x, y as usize, false) < share
-                && self
-                    .pixels
-                    .get(x as i32, y)
-                    .is_some_and(|i| i.role == Role::Background)
+            if self
+                .pixels
+                .get(x as i32, y)
+                .is_some_and(|i| i.role == Role::Background)
             {
                 self.pixels.set(x as i32, y, glow);
+            }
+        }
+    }
+
+    /// Drop specks: lit sky pixels with no lit neighbour (of 8), and pairs whose two
+    /// pixels neighbour only each other. Where a fading arc end or a distant arc on the
+    /// horizon hovers at its threshold it would otherwise crumble into grit. In place is
+    /// safe: a dropped speck touched nothing else, so no other pixel's test changes.
+    fn despeckle(&mut self) {
+        let (lo, hi) = self.emit_rows;
+        let lit =
+            |p: &Pixels, x: i32, y: i32| p.get(x, y).is_some_and(|i| EMISSION.contains(&i.role));
+        // Lit neighbours of (x, y), and the last one found.
+        let around = |p: &Pixels, x: i32, y: i32| {
+            let (mut n, mut last) = (0, (x, y));
+            for dy in -1..=1 {
+                for dx in -1..=1 {
+                    if (dx, dy) != (0, 0) && lit(p, x + dx, y + dy) {
+                        n += 1;
+                        last = (x + dx, y + dy);
+                    }
+                }
+            }
+            (n, last)
+        };
+        for y in lo..=hi.min(self.y_h.saturating_sub(1)) {
+            let y = y as i32;
+            for x in 0..self.w as i32 {
+                if !lit(&self.pixels, x, y) {
+                    continue;
+                }
+                match around(&self.pixels, x, y) {
+                    (0, _) => self.pixels.set(x, y, Ink::BLANK),
+                    (1, (qx, qy)) if around(&self.pixels, qx, qy).0 == 1 => {
+                        self.pixels.set(x, y, Ink::BLANK);
+                        self.pixels.set(qx, qy, Ink::BLANK);
+                    }
+                    _ => {}
+                }
             }
         }
     }
@@ -1575,8 +1514,7 @@ impl View {
     /// of the three rows, so a sloping hem still counts as a run) to green. In place is
     /// safe: a demoted pixel had no hem neighbour, so no other pixel relied on it.
     fn trim_hem(&mut self) {
-        let accent =
-            |p: &Pixels, x: i32, y: i32| p.get(x, y).is_some_and(|i| i.role == Role::Accent);
+        let accent = |p: &Pixels, x: i32, y: i32| p.get(x, y).is_some_and(is_hem);
         for y in 0..self.y_h as i32 {
             for x in 0..self.w as i32 {
                 if !accent(&self.pixels, x, y) {
@@ -1588,7 +1526,44 @@ impl View {
                 if !run {
                     let level = self.pixels.get(x, y).map_or(0, |i| i.level);
                     self.pixels.set(x, y, Ink::new(Role::Particle, level));
-                    self.glow[y as usize * self.w + x as usize].hem = false;
+                }
+            }
+        }
+    }
+
+    /// For every lit sky pixel, the brightest level of its column's contiguous run of
+    /// emission pixels (`reflect` mirrors a run whole or not at all). Only the emitting
+    /// rows can hold emission, so only they are scanned.
+    fn run_peaks(&mut self) {
+        let (lo, hi) = self.emit_rows;
+        let hi = hi.min(self.y_h.saturating_sub(1));
+        if lo > hi {
+            return;
+        }
+        let (w, pixels, peaks) = (self.w, &self.pixels, &mut self.run_peak);
+        let level = |x: usize, y: usize| {
+            pixels
+                .get(x as i32, y as i32)
+                .filter(|i| EMISSION.contains(&i.role))
+                .map(|i| i.level)
+        };
+        for x in 0..w {
+            let mut y = lo;
+            while y <= hi {
+                let start = y;
+                let mut peak = None;
+                while y <= hi
+                    && let Some(l) = level(x, y)
+                {
+                    peak = peak.max(Some(l));
+                    y += 1;
+                }
+                if let Some(peak) = peak {
+                    for yy in start..y {
+                        peaks[yy * w + x] = peak;
+                    }
+                } else {
+                    y += 1;
                 }
             }
         }
@@ -1597,13 +1572,19 @@ impl View {
     /// Mirror the sky into the lake at 0.45× level with a ripple whose wavefronts travel
     /// toward the viewer. Whole rows drop out on the crests, so mirrored rays read as
     /// vertical streaks cut by horizontal ripple gaps; the x-dependent phase only shifts
-    /// pixels sideways. The lake copies the sky's lit pixels and their roles, dimming
-    /// only the level: re-dithering the dimmer glow would light it sparsely at random
-    /// and dissolve the ray structure into snow. Skyglow and silhouette stay dark.
+    /// pixels sideways, by at most `RIPPLE_SHIFT·d` px, so the water stays still. The lake
+    /// copies the skyglow and the sky's lit pixels with their roles, dimming only the
+    /// level (never below the core floor `ink::MIN_VISIBLE_LEVEL`). Each column's lit
+    /// run is reflected whole or not at all: only runs whose brightest pixel reaches
+    /// `LAKE_MIN_LEVEL` (`run_peaks`), since a faint run's copy could not be dimmer than
+    /// the theme's floor, while cutting the dim ends off bright runs would leave shards.
+    /// The ridge and spires mirror as a black band cut out of the reflected glow.
     fn reflect(&mut self, t: f64) {
         if !self.lake {
             return;
         }
+        self.run_peaks();
+        let floor = ink::MIN_VISIBLE_LEVEL as u8;
         for y in self.y_h..self.rows {
             let k = y - self.y_h;
             let Some(src) = self.y_h.checked_sub(k + 1) else {
@@ -1618,17 +1599,25 @@ impl View {
             for x in 0..self.w {
                 // sin(0.9d − 1.7t + 0.13x) by angle addition: no per-pixel trig.
                 let s = sp * self.ripple_cos[x] + cp * self.ripple_sin[x];
-                let sx = x as isize + (0.08 * d as f32 * s).round() as isize;
+                let sx = x as isize + (RIPPLE_SHIFT * d as f32 * s).round() as isize;
                 let Ok(sx) = usize::try_from(sx) else {
                     continue;
                 };
-                if let Some(sky) = self.pixels.get(sx as i32, src as i32)
-                    && matches!(sky.role, Role::Particle | Role::Hot | Role::Accent)
+                let Some(sky) = self.pixels.get(sx as i32, src as i32) else {
+                    continue;
+                };
+                let level = (LAKE_GAIN * f32::from(sky.level)).round() as u8;
+                let level = if sky.role == Role::Seq {
+                    level
+                } else if EMISSION.contains(&sky.role)
+                    && self.run_peak[src * self.w + sx] >= LAKE_MIN_LEVEL
                 {
-                    let level = (LAKE_GAIN * f32::from(sky.level)).round() as u8;
-                    self.pixels
-                        .set(x as i32, y as i32, Ink::new(sky.role, level));
-                }
+                    level.max(floor)
+                } else {
+                    continue;
+                };
+                self.pixels
+                    .set(x as i32, y as i32, Ink::new(sky.role, level));
             }
         }
     }
@@ -1695,14 +1684,21 @@ impl Aurora {
             return;
         }
         let drift = (0.5 * (loop_time(self.t) - RECOVERY)).to_radians();
+        // Before the first resize there is no view to floor the size against.
+        let f = if self.view.f > 0.0 {
+            self.view.f
+        } else {
+            f64::INFINITY
+        };
+        let (floor_a, floor_e) = patch_floor_px(self.view.w, self.view.rows);
         for p in &self.setting.patches {
             let gain = PATCH_GAIN * self.params.patches * patch_pulse(self.t, p.period, p.phase);
             if gain > 1e-3 {
                 self.patches[self.live_patches] = LivePatch {
                     alpha: p.alpha + drift,
                     e: p.e,
-                    half_a: p.half_a,
-                    half_e: p.half_e,
+                    half_a: p.half_a.max(floor_a / f),
+                    half_e: p.half_e.max(floor_e / f),
                     gain,
                 };
                 self.live_patches += 1;
@@ -1726,7 +1722,6 @@ impl Aurora {
             view.splat(&c.samples, zb, if ci == brightest { pink } else { 0.0 });
         }
         view.pixels.clear();
-        view.glow.fill(Glow::default());
         view.clear_emit();
         let patches = &self.patches[..self.live_patches];
         for x in 0..view.w {
@@ -1734,6 +1729,7 @@ impl Aurora {
         }
         view.diffuse_red();
         view.shade(&self.luts);
+        view.despeckle();
         for x in 0..view.w {
             view.skyglow_column(x);
         }
@@ -1743,40 +1739,25 @@ impl Aurora {
         view.reflect(self.t);
     }
 
-    /// The ASCII fallback for one cell. Sky cells: the pair's mean undithered glow,
-    /// dithered at cell resolution, so ASCII density follows brightness as the half
-    /// blocks do. Lake cells: the brighter reflected pixel.
-    fn ascii_cell(&self, cx: i32, cy: i32, top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-        let v = &self.view;
-        let (x, y0) = (cx as usize, 2 * cy as usize);
-        let ink = if y0 < v.y_h {
-            let a = v.glow[y0 * v.w + x];
-            let b = v.glow.get((y0 + 1) * v.w + x).filter(|_| y0 + 1 < v.y_h);
-            let cell = b.map_or(a, |b| {
-                let bright = if a.tone >= b.tone { a } else { *b };
-                Glow {
-                    tone: 0.5 * (a.tone + b.tone),
-                    hem: a.hem || b.hem,
-                    ..bright
-                }
-            });
-            cell.dither(1.0, v.dither.at(x, y0, cell.soft))?
-        } else {
-            let ink = [top, bottom]
-                .into_iter()
-                .filter(|i| i.role != Role::Background)
-                .max_by_key(|i| i.level)?;
+    /// The ASCII fallback for one cell: its brighter emission pixel (a hem pixel wins,
+    /// so the hem stays a line). Skyglow is left blank for the ridge line.
+    fn ascii_cell(&self, cy: i32, top: Ink, bottom: Ink) -> Option<(char, Ink)> {
+        let pair = [top, bottom];
+        let emission = pair.into_iter().filter(|i| EMISSION.contains(&i.role));
+        if 2 * cy as usize >= self.view.y_h {
+            let ink = emission.max_by_key(|i| i.level)?;
             let ch = if ink.level >= 60 { '~' } else { '-' };
             return Some((ch, ink));
-        };
+        }
+        let ink = emission.max_by_key(|&i| (is_hem(i), i.level))?;
         let ch = match ink.role {
-            Role::Hot if ink.level >= 110 => '"',
-            Role::Hot => '\'',
-            Role::Accent => '=',
+            _ if is_hem(ink) => '=',
+            RED if ink.level >= ASCII_RED_BRIGHT => '"',
+            RED => '\'',
             // The faintest green is ',' so a quiet arc never reads as the dim stars '.'.
             _ => match ink.level {
-                200.. => '|',
-                130.. => '!',
+                ASCII_BAR.. => '|',
+                ASCII_BANG.. => '!',
                 ASCII_COLON.. => ':',
                 _ => ',',
             },
@@ -1785,8 +1766,8 @@ impl Aurora {
     }
 
     /// Stars in cells whose two pixels are empty, twinkling more toward the horizon.
-    /// ASCII sky cells are dithered per cell, so a star also needs a still-blank cell
-    /// (always true in Unicode mode when both pixels are empty).
+    /// A star also needs a still-blank cell (always true in Unicode mode when both
+    /// pixels are empty).
     fn draw_stars(&self, canvas: &mut Canvas) {
         let v = &self.view;
         for s in &v.stars {
@@ -1812,8 +1793,9 @@ impl Aurora {
     }
 
     /// ASCII only, in still-blank cells: the bare ridge line, one `_` per column in the
-    /// cell holding its top pixel (spire flanks do not lift it), with spire tips `^` in
-    /// the cell holding the spire's top pixel when that lies above the line. A `_` sits
+    /// cell holding its top pixel (spire flanks do not lift it), with a spire tip `^` in
+    /// the cell just above the line wherever a spire's top pixel lies above it, so the
+    /// forest is one comb however tall its spires. A `_` sits
     /// at the foot of its cell, so the ridge (only 1–3 px tall at 80×24) reads as one
     /// continuous shoreline rather than dashes offset by a cell.
     fn draw_ridge_ascii(&self, canvas: &mut Canvas) {
@@ -1829,10 +1811,10 @@ impl Aurora {
             if let Some(cy) = base {
                 put(x, cy, '_');
             }
-            if let Some(tip) = cell(v.ridge_top[x]).filter(|_| v.tree[x])
-                && base.is_none_or(|b| tip < b)
+            if let Some(b) = base
+                && cell(v.ridge_top[x]).is_some_and(|tip| v.tree[x] && tip < b)
             {
-                put(x, tip, '^');
+                put(x, b - 1, '^');
             }
         }
     }
@@ -1886,8 +1868,8 @@ impl Generator for Aurora {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.view.pixels.blit(canvas, |cx, cy, top, bottom| {
-            self.ascii_cell(cx, cy, top, bottom)
+        self.view.pixels.blit(canvas, |_, cy, top, bottom| {
+            self.ascii_cell(cy, top, bottom)
         });
         self.draw_stars(canvas);
         if canvas.mode() == GlyphMode::Ascii {
@@ -1927,7 +1909,11 @@ mod tests {
     }
 
     fn scene(w: u16, h: u16) -> (Aurora, Ctx) {
-        let mut ctx = Ctx::new(7, Size::new(w, h));
+        scene_seeded(w, h, 7)
+    }
+
+    fn scene_seeded(w: u16, h: u16, seed: u64) -> (Aurora, Ctx) {
+        let mut ctx = Ctx::new(seed, Size::new(w, h));
         let mut a = Aurora::new();
         a.resize(Size::new(w, h), &mut ctx);
         (a, ctx)
@@ -2272,15 +2258,13 @@ mod tests {
         (a, canvas)
     }
 
-    const EMISSION: [Role; 3] = [Role::Particle, Role::Hot, Role::Accent];
-
     #[test]
     fn aur_a7_expansion_frame_respects_silhouette_lake_stars_and_hem() {
         let (a, canvas) = census(56);
         assert!((a.t - 22.0).abs() < 1e-9);
         let v = &a.view;
         let px = |x: usize, y: usize| v.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
-        let (mut sky, mut lit, mut sky_max, mut accent) = (0, 0, 0u8, 0);
+        let (mut sky, mut lit, mut sky_max, mut hems) = (0, 0, 0u8, 0);
         for x in 0..v.w {
             for y in 0..v.y_h {
                 let ink = px(x, y);
@@ -2293,12 +2277,12 @@ mod tests {
                     lit += 1;
                     sky_max = sky_max.max(ink.level);
                 }
-                accent += usize::from(ink.role == Role::Accent);
+                hems += usize::from(is_hem(ink));
             }
         }
         let frac = f64::from(lit) / f64::from(sky);
         assert!((0.15..=0.70).contains(&frac), "lit fraction {frac:.3}");
-        assert!(accent > 0, "no pink hem at the expansion peak");
+        assert!(hems > 0, "no pink hem at the expansion peak");
         for x in 0..v.w {
             for y in v.y_h..v.rows {
                 let ink = px(x, y);
@@ -2323,215 +2307,479 @@ mod tests {
 
         let (a, _) = census(4);
         let v = &a.view;
-        let hem = (0..v.w).any(|x| {
-            (0..v.rows).any(|y| {
-                v.pixels
-                    .get(x as i32, y as i32)
-                    .is_some_and(|i| i.role == Role::Accent)
-            })
-        });
+        let hem = (0..v.w)
+            .any(|x| (0..v.rows).any(|y| v.pixels.get(x as i32, y as i32).is_some_and(is_hem)));
         assert!(!hem, "pink hem during growth");
     }
 
-    /// Every sky threshold of the view's `soft` or strand dither, row by row.
-    fn thresholds(v: &View, soft: bool) -> Vec<f32> {
-        (0..v.rows)
-            .flat_map(|y| (0..v.w).map(move |x| v.dither.at(x, y, soft)))
-            .collect()
-    }
-
-    /// Variance of the lit count over `cols` × `groups` windows of `spec`'s cells at lit
-    /// share `p`, relative to the binomial variance of independent cells.
-    fn window_variance(v: &View, spec: TileSpec, (cols, groups): (usize, usize), p: f32) -> f64 {
-        let soft = spec.px == 1;
-        let mut counts = Vec::new();
-        for g0 in (0..v.rows / spec.px - groups).step_by(groups) {
-            for x0 in (0..v.w - cols).step_by(cols) {
-                let lit = (0..groups)
-                    .flat_map(|g| (0..cols).map(move |x| (x0 + x, (g0 + g) * spec.px)))
-                    .filter(|&(x, y)| v.dither.at(x, y, soft) < p)
-                    .count();
-                counts.push(lit as f64);
-            }
-        }
-        let m = mean_of(&counts);
-        let var = counts.iter().map(|c| (c - m) * (c - m)).sum::<f64>() / counts.len() as f64;
-        let n = (cols * groups) as f64;
-        var / (n * f64::from(p) * (1.0 - f64::from(p)))
-    }
-
-    fn mean_of(xs: &[f64]) -> f64 {
-        xs.iter().sum::<f64>() / xs.len() as f64
-    }
-
-    fn glow(tone: f32, red: f32) -> Glow {
+    fn glow(tone: f32, red: f32, hem: bool) -> Glow {
         Glow {
             tone,
             red,
-            hem: false,
-            soft: false,
+            hem,
+            green: 1.0,
         }
     }
 
     #[test]
-    fn aur_dither_breaks_into_even_strands_and_red_stipples_only_the_transition_band() {
-        let (a, _) = scene(200, 50);
+    fn aur_a8_light_is_thresholded_into_ramped_levels() {
+        // Below its threshold a pixel stays dark; at it the level starts from the core
+        // floor `ink::MIN_VISIBLE_LEVEL` (CORE-R66); above it the level ramps
+        // monotonically to the top.
+        const FLOOR: u8 = ink::MIN_VISIBLE_LEVEL as u8;
+        assert_eq!(glow(0.99 * GREEN_LIT, 0.2, false).ink(), None);
+        assert_eq!(
+            glow(GREEN_LIT, 0.2, false).ink(),
+            Some(Ink::new(Role::Particle, FLOOR))
+        );
+        assert_eq!(
+            glow(1.0, 0.2, false).ink(),
+            Some(Ink::new(Role::Particle, 255))
+        );
+        // Red-dominant light has its own, higher threshold and stays a deep crimson
+        // (`Accent` ≤ RED_LEVEL_MAX); the hem is bright `Accent` from HEM_LEVEL.
+        const { assert!(RED_LIT > GREEN_LIT) };
+        assert_eq!(glow(0.99 * RED_LIT, 0.8, false).ink(), None);
+        assert!(glow(0.99 * RED_LIT, 0.4, false).ink().is_some());
+        assert_eq!(glow(RED_LIT, 0.8, false).ink(), Some(Ink::new(RED, FLOOR)));
+        // The crown needs the green's tail under it: no red slab over empty sky.
+        let bare = Glow {
+            green: 0.99 * CROWN_GREEN,
+            ..glow(1.0, 0.8, false)
+        };
+        assert_eq!(bare.ink(), None);
+        let green_only = Glow {
+            green: 0.0,
+            ..glow(1.0, 0.2, false)
+        };
+        assert!(green_only.ink().is_some());
+        assert_eq!(
+            glow(1.0, 0.8, false).ink(),
+            Some(Ink::new(RED, RED_LEVEL_MAX as u8))
+        );
+        assert_eq!(
+            glow(GREEN_LIT, 0.0, true).ink(),
+            Some(Ink::new(Role::Accent, HEM_LEVEL as u8))
+        );
+        // Hem and crown must not blur.
+        const { assert!(HEM_LEVEL > RED_LEVEL_MAX + 40.0) };
+        for red in [0.1f32, 0.9] {
+            let mut prev = 0;
+            for i in 0..=100 {
+                if let Some(ink) = glow(i as f32 / 100.0, red, false).ink() {
+                    assert!(ink.level >= FLOOR, "level {} under the floor", ink.level);
+                    assert!(ink.level >= prev, "level falls at tone {i}%");
+                    prev = ink.level;
+                }
+            }
+        }
+    }
+
+    /// The view's lit emission pixels in rows `0..y1`, row-major.
+    fn lit_mask(v: &View, y1: usize) -> Vec<bool> {
+        (0..y1)
+            .flat_map(|y| (0..v.w).map(move |x| (x, y)))
+            .map(|(x, y)| {
+                v.pixels
+                    .get(x as i32, y as i32)
+                    .is_some_and(|i| EMISSION.contains(&i.role))
+            })
+            .collect()
+    }
+
+    /// Sizes of the 8-connected components of `lit` (`w` wide).
+    fn components(lit: &[bool], w: usize) -> Vec<usize> {
+        let mut seen = vec![false; lit.len()];
+        let mut sizes = Vec::new();
+        for start in 0..lit.len() {
+            if !lit[start] || seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let (mut stack, mut size) = (vec![start], 0);
+            while let Some(i) = stack.pop() {
+                size += 1;
+                let (x, y) = ((i % w) as i32, (i / w) as i32);
+                for dy in -1..=1 {
+                    for dx in -1..=1 {
+                        let (nx, ny) = (x + dx, y + dy);
+                        if nx < 0 || ny < 0 || nx as usize >= w {
+                            continue;
+                        }
+                        let j = ny as usize * w + nx as usize;
+                        if j < lit.len() && lit[j] && !seen[j] {
+                            seen[j] = true;
+                            stack.push(j);
+                        }
+                    }
+                }
+            }
+            sizes.push(size);
+        }
+        sizes
+    }
+
+    #[test]
+    fn aur_a8_curtains_are_coherent_forms_not_confetti() {
+        // Visit times across the whole loop: growth, breakup, expansion, peak, the
+        // lingering crown, recovery with patches, the late quiet arc. Pixels in specks
+        // (connected groups of ≤ 3) are at most 3 % of the lit sky: the light forms
+        // arcs, curtains and patches, not scatter.
+        for (w, h) in [(80u16, 24u16), (200, 50)] {
+            let (mut a, mut ctx) = scene(w, h);
+            for visit in [0.0, 5.0, 12.0, 20.0, 26.0, 34.0, 42.0] {
+                while a.t < START_T + visit - 1e-9 {
+                    a.update(1.0 / 60.0, &mut ctx);
+                }
+                let v = &a.view;
+                let sizes = components(&lit_mask(v, v.y_h), v.w);
+                let n: usize = sizes.iter().sum();
+                let specks: usize = sizes.iter().filter(|&&s| s <= 3).sum();
+                assert!(n > 0, "{w}x{h} t = {visit}: dark sky");
+                assert!(
+                    specks * 100 <= 3 * n,
+                    "{w}x{h} t = {visit}: {specks} speck pixels of {n} lit"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn aur_a8_growth_arc_is_one_unbroken_band() {
+        // A quiet arc is homogeneous: at 80×24 and 200×50 at scene start, every column
+        // over the frame's middle third is lit, and the arch's lower border (the frame's
+        // focal edge) steps by at most 2 px between neighbouring columns.
+        for (w, h) in [(80u16, 24u16), (200, 50)] {
+            let (a, _) = scene(w, h);
+            let v = &a.view;
+            let lit = lit_mask(v, v.y_h);
+            let mut prev: Option<usize> = None;
+            for x in v.w / 3..2 * v.w / 3 {
+                let top = (0..v.y_h).find(|&y| lit[y * v.w + x]);
+                let Some(top) = top else {
+                    panic!("{w}x{h}: gap in the arc at column {x}");
+                };
+                // The lowest lit pixel of the first run is the arc's lower border.
+                let low = (top..v.y_h)
+                    .take_while(|&y| lit[y * v.w + x])
+                    .last()
+                    .unwrap_or(top);
+                if let Some(p) = prev {
+                    assert!(
+                        p.abs_diff(low) <= 2,
+                        "{w}x{h}: border jumps at {x}: {p} → {low}"
+                    );
+                }
+                prev = Some(low);
+            }
+        }
+    }
+
+    #[test]
+    fn aur_a8_pulsating_patches_read_as_patches() {
+        // The display floor is frame-relative: 5 × 3 px at 80×24 and 200×50, but at most
+        // 7 % of the width and 1/12 of the pixel rows, so a small frame's patches never
+        // swell into clouds half the sky wide.
+        assert_eq!(patch_floor_px(80, 48), (5.0, 3.0));
+        assert_eq!(patch_floor_px(200, 100), (5.0, 3.0));
+        let (fa, fe) = patch_floor_px(40, 24);
+        assert!((fa - 2.8).abs() < 1e-12 && (fe - 2.0).abs() < 1e-12);
+        // Azimuths are stratified over ±45°: each patch stays within 3° of its
+        // stratum's centre (15° apart), so neighbours (all drifting at 0.5°/s) keep apart.
+        for seed in 0..16 {
+            let mut ctx = Ctx::new(seed, Size::new(80, 24));
+            let setting = Setting::seed(&mut ctx.rng);
+            for (i, p) in setting.patches.iter().enumerate() {
+                let centre = -45.0 + 90.0 * (i as f64 + 0.5) / PATCHES as f64;
+                let a = p.alpha.to_degrees();
+                assert!(
+                    (a - centre).abs() <= 3.0 + 1e-9,
+                    "seed {seed}: patch {i} at {a:.1}°"
+                );
+            }
+        }
+        // Recovery at 80×24 and 40×12: every live patch's half-extents are its seeded
+        // ones floored at `patch_floor_px`, and at full pulse it lights a solid core
+        // about its centre (5 × 3 px at 80×24).
+        for (w, h) in [(80u16, 24u16), (40, 12)] {
+            let (mut a, mut ctx) = scene(w, h);
+            let mut seen = 0;
+            while a.t < START_T + 44.0 {
+                a.update(0.25, &mut ctx);
+                let v = &a.view;
+                let (fa, fe) = patch_floor_px(v.w, v.rows);
+                for p in &a.patches[..a.live_patches] {
+                    let (ha, he) = (p.half_a * v.f, p.half_e * v.f);
+                    assert!(
+                        ha >= fa - 1e-9 && he >= fe - 1e-9,
+                        "{w}x{h}: {ha:.2} × {he:.2}"
+                    );
+                    assert!(
+                        ha <= (6f64.to_radians() * v.f).max(fa) + 1e-9
+                            && he <= (3f64.to_radians() * v.f).max(fe) + 1e-9,
+                        "{w}x{h}: patch swollen to {ha:.2} × {he:.2} px"
+                    );
+                    if p.gain < 0.95 * PATCH_GAIN {
+                        continue;
+                    }
+                    let cx = (v.w as f64 / 2.0 + v.f * p.alpha).round() as i32;
+                    let cy = v.row_of(p.e).round() as i32;
+                    if !(0..v.w as i32).contains(&cx) || !(0..v.y_h as i32).contains(&cy) {
+                        continue;
+                    }
+                    let lit = |x: i32, y: i32| {
+                        v.pixels.get(x, y).is_some_and(|i| i.role == Role::Particle)
+                    };
+                    let (kx, ky) = ((fa / 2.5).floor() as i32, (fe / 3.0).floor() as i32);
+                    let core = (-kx..=kx).all(|dx| (-ky..=ky).all(|dy| lit(cx + dx, cy + dy)));
+                    assert!(
+                        core,
+                        "{w}x{h} t = {:.2}: patch at {cx},{cy} is not solid",
+                        a.t
+                    );
+                    seen += 1;
+                }
+            }
+            assert!(seen > 0, "{w}x{h}: no patch at full pulse during recovery");
+        }
+    }
+
+    #[test]
+    fn aur_a8_patches_stay_dimmer_than_the_recovery_arc() {
+        // Early recovery (visit t = 32–36 s): a patch at full pulse peaks below the
+        // brightest curtain light, so the arc stays the focal point.
+        for (w, h) in [(80u16, 24u16), (200, 50)] {
+            let (mut a, mut ctx) = scene(w, h);
+            for visit in [32.0, 34.0, 36.0] {
+                while a.t < START_T + visit - 1e-9 {
+                    a.update(1.0 / 60.0, &mut ctx);
+                }
+                let v = &a.view;
+                let live = &a.patches[..a.live_patches];
+                // Pixels outside every patch's support are curtain light.
+                let in_patch = |x: usize, y: usize| {
+                    let al = v.alpha_at(x as f64 + 0.5);
+                    let e = (v.y_h as f64 - y as f64 - 0.5) / v.f;
+                    live.iter().any(|p| {
+                        ((al - p.alpha) / p.half_a).abs() < PATCH_REACH
+                            && ((e - p.e) / p.half_e).abs() < PATCH_REACH
+                    })
+                };
+                let level = |x: usize, y: usize| {
+                    v.pixels
+                        .get(x as i32, y as i32)
+                        .filter(|i| i.role == Role::Particle)
+                        .map_or(0, |i| i.level)
+                };
+                let arc = (0..v.y_h)
+                    .flat_map(|y| (0..v.w).map(move |x| (x, y)))
+                    .filter(|&(x, y)| !in_patch(x, y))
+                    .map(|(x, y)| level(x, y))
+                    .max()
+                    .unwrap_or(0);
+                for p in live.iter().filter(|p| p.gain >= 0.95 * PATCH_GAIN) {
+                    let cx = (v.w as f64 / 2.0 + v.f * p.alpha).floor();
+                    let cy = v.row_of(p.e).round();
+                    if cx < 0.0 || cx >= v.w as f64 || cy < 0.0 || cy >= v.y_h as f64 {
+                        continue;
+                    }
+                    let core = level(cx as usize, cy as usize);
+                    assert!(core < arc, "{w}x{h} t = {visit}: patch {core} vs arc {arc}");
+                }
+            }
+        }
+    }
+
+    /// Curtain-only green tone at sky pixel (x, y), summed from the column's layers.
+    fn curtain_green_tone(a: &Aurora, x: usize, y: usize) -> f32 {
         let v = &a.view;
-        for (spec, window, tile) in [
-            (STRANDS, (8, 2), &tiles()[0]),
-            (SPECKLE, (4, 4), &tiles()[1]),
-        ] {
-            let soft = spec.px == 1;
-            let t = |x: usize, y: usize| v.dither.at(x, y, soft);
-            assert!(thresholds(v, soft).iter().all(|b| (0.0..1.0).contains(b)));
-            // Field-aligned strands: a threshold is shared by STRAND_PX rows of a column,
-            // so partial coverage reads as short vertical strands, never as speckle.
-            for y in 0..v.rows {
-                for x in 0..v.w {
-                    if y % spec.px != 0 {
-                        assert_eq!(t(x, y), t(x, y - 1), "strand broken at {x},{y}");
-                    }
-                }
-            }
-            // The tile ranks every cell once: thresholds are uniform on [0, 1).
-            let n = spec.w * spec.g;
-            assert_eq!(tile.len(), n);
-            let mut ranks: Vec<usize> = tile
-                .iter()
-                .map(|&b| (b * n as f32 - 0.5).round() as usize)
-                .collect();
-            ranks.sort_unstable();
-            assert!(ranks.iter().enumerate().all(|(i, &r)| i == r));
-            // Even coverage: blue noise clumps and leaves holes far less than independent
-            // (white-noise) cells, at every faint share.
-            for p in [0.1, 0.2, 0.35, 0.5] {
-                let rel = window_variance(v, spec, window, p);
-                assert!(
-                    rel < 0.4,
-                    "{soft}: variance {rel:.2}× binomial at share {p}"
-                );
-            }
-            // No ordered lattice: neither a 4-px Bayer period nor any short offset repeats
-            // the pattern (an ordered dither agrees ≈ 100 % under its period).
-            for (dx, dg) in [
-                (4, 0),
-                (1, 1),
-                (2, 1),
-                (-1, 1),
-                (8, 3),
-                (4, 2),
-                (0, 2),
-                (0, 4),
-            ] {
-                let (mut same, mut n) = (0usize, 0usize);
-                for g in 0..v.rows / spec.px - 4 {
-                    for x in 8..v.w - 8 {
-                        let x2 = (x as i32 + dx) as usize;
-                        let (y, y2) = (g * spec.px, (g + dg) * spec.px);
-                        same += usize::from((t(x, y) < 0.25) == (t(x2, y2) < 0.25));
-                        n += 1;
-                    }
-                }
-                let agree = same as f64 / n as f64;
-                assert!(
-                    agree < 0.8,
-                    "{soft}: offset ({dx}, {dg}) agreement {agree:.3}"
-                );
-            }
-        }
-        let thresh = thresholds(v, false);
-        // A uniform field: lit share ≈ tone/L for faint tones. Red stipples only the
-        // transition band R/(G+R) ∈ (0.3, 0.7): green cores stay pure green (no orange
-        // specks in the brightest rays) and the upper fringe pure red.
-        for (tone, red, expect_red) in [
-            (0.06f32, 0.2f32, Some(0.0)),
-            (0.9, 0.29, Some(0.0)),
-            (0.15, 0.5, None),
-            (0.24, 0.8, Some(1.0)),
-            (0.9, 0.71, Some(1.0)),
-        ] {
-            let g = glow(tone, red);
-            let (mut lit, mut hot) = (0usize, 0usize);
-            for &b in &thresh {
-                if let Some(ink) = g.dither(1.0, b) {
-                    lit += 1;
-                    hot += usize::from(ink.role == Role::Hot);
-                }
-            }
-            if tone < LIT_THRESHOLD {
-                let share = lit as f64 / thresh.len() as f64;
-                let expect = f64::from(tone / LIT_THRESHOLD);
-                assert!(
-                    (share - expect).abs() < 0.02,
-                    "lit {share:.3} vs {expect:.3}"
-                );
-            }
-            let red_share = hot as f64 / lit as f64;
-            match expect_red {
-                Some(e) => assert_eq!(red_share, e, "red share at R/(G+R) = {red}"),
-                // Mid-band: an even stipple.
-                None => assert!((red_share - 0.5).abs() < 0.04, "red {red_share:.3}"),
-            }
-        }
-        let haze = glow(0.9 * TONE_FLOOR, 1.0);
-        assert!(thresh.iter().all(|&b| haze.dither(1.0, b).is_none()));
-        // The red fringe's sparse tail drops out (lit < 30 % of the time), so it keeps
-        // an envelope over the curtain tops instead of scattering as confetti; faint
-        // green at the same tone still stipples.
-        let red_haze = glow(0.95 * RED_TONE_FLOOR, 0.8);
-        assert!(thresh.iter().all(|&b| red_haze.dither(1.0, b).is_none()));
-        let green_haze = glow(0.95 * RED_TONE_FLOOR, 0.2);
-        assert!(thresh.iter().any(|&b| green_haze.dither(1.0, b).is_some()));
-        // Just above the floor, red lights ≈ 30 % of pixels.
-        let edge = glow(1.02 * RED_TONE_FLOOR, 0.8);
-        let lit = thresh
+        let g: f32 = v.layers[x][..usize::from(v.nlayers[x])]
             .iter()
-            .filter(|&&b| edge.dither(1.0, b).is_some())
-            .count();
-        let share = lit as f64 / thresh.len() as f64;
+            .filter(|l| (l.y_top..=l.y_low).contains(&(y as i32)))
+            .map(|l| l.green * a.luts.green(l.h_step, l.altitude(v.tan_e[y]) - l.zb))
+            .sum();
+        a.luts.tone(v.ext[y] * (1.0 / E_SAT as f32) * g)
+    }
+
+    #[test]
+    fn aur_a8_pulsating_patches_raise_no_red_hood() {
+        // Pulsating aurora has no red cap: patch light never passes the crown's green
+        // gate. At 200×50, visit t = 28 s (the lingering red dome over the first
+        // patches), no crown pixel lies within 2 px of a live patch's ellipse unless
+        // curtain green is lit within 12 px below it in the same column (also at 26 and
+        // 27 s, and for the scene seed and the review seed 42).
+        for seed in [7, 42] {
+            let (mut a, mut ctx) = scene_seeded(200, 50, seed);
+            for visit in [26.0, 27.0, 28.0] {
+                while a.t < START_T + visit - 1e-9 {
+                    a.update(1.0 / 60.0, &mut ctx);
+                }
+                assert_no_hood(&a, seed, visit);
+            }
+        }
+    }
+
+    fn assert_no_hood(a: &Aurora, seed: u64, visit: f64) {
+        let v = &a.view;
+        let live = &a.patches[..a.live_patches];
         assert!(
-            (share - 0.3).abs() < 0.03,
-            "red lit share {share:.3} at the floor"
+            visit < 28.0 || !live.is_empty(),
+            "no live patch at visit t = 28 s"
+        );
+        let (mut near, mut hooded) = (0, 0);
+        for x in 0..v.w {
+            for y in 0..v.y_h {
+                let crown = v
+                    .pixels
+                    .get(x as i32, y as i32)
+                    .is_some_and(|i| i.role == RED && !is_hem(i));
+                if !crown {
+                    continue;
+                }
+                let (px, py) = (x as f64 + 0.5, y as f64 + 0.5);
+                let by_patch = live.iter().any(|p| {
+                    let cx = v.w as f64 / 2.0 + v.f * p.alpha;
+                    let cy = v.row_of(p.e) + 0.5;
+                    let (ha, he) = (p.half_a * v.f + 2.0, p.half_e * v.f + 2.0);
+                    ((px - cx) / ha).powi(2) + ((py - cy) / he).powi(2) <= 1.0
+                });
+                if !by_patch {
+                    continue;
+                }
+                near += 1;
+                // As for the crown (AUR-A8): curtain green lit within 12 px below.
+                let capped =
+                    (y + 1..(y + 12).min(v.y_h)).any(|g| curtain_green_tone(a, x, g) >= GREEN_LIT);
+                hooded += usize::from(!capped);
+            }
+        }
+        assert_eq!(
+            hooded, 0,
+            "seed {seed} t = {visit}: {hooded} of {near} crown pixels by a patch hood it"
         );
     }
 
     #[test]
-    fn aur_a7_lake_mirrors_the_lit_sky_as_broken_streaks() {
-        let (a, _) = census(56);
-        let v = &a.view;
-        let px = |x: usize, y: usize| v.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
-        let (mut lake_lit, mut sky_lit, mut rows) = (0usize, 0usize, 0);
-        for y in v.y_h..v.rows {
-            let d = (y - v.y_h + 1) as f64;
-            let src = v.y_h - (y - v.y_h) - 1;
-            if (0.9 * d - 1.7 * a.t).sin() > 0.9 {
-                // A ripple crest: the whole row drops out.
-                assert!((0..v.w).all(|x| px(x, y) == Ink::BLANK), "row {y}");
-                continue;
-            }
-            rows += 1;
+    fn aur_a8_spruce_ridge_stands_black_against_the_glow() {
+        for (w, h) in [(80u16, 24u16), (200, 50), (40, 12)] {
+            let (a, _) = scene(w, h);
+            let v = &a.view;
+            // Spires rise at least SPIRE_MIN_PX over the bare ridge somewhere, even
+            // where 3° is under 2 px.
+            let rise = (0..v.w)
+                .map(|x| v.ridge_base[x] - v.ridge_top[x])
+                .max()
+                .unwrap_or(0);
+            assert!(
+                f64::from(rise) >= SPIRE_MIN_PX - 1.0,
+                "{w}x{h}: spires rise {rise} px"
+            );
+            // The glow stands clear of the tallest silhouette, so each spire is cut out
+            // of it; the lake mirrors the silhouette as black.
+            let tallest = (0..v.w).map(|x| v.y_h as i32 - v.ridge_top[x]).max();
+            let tallest = f64::from(tallest.unwrap_or(0));
+            assert!(v.glow_px() >= tallest + GLOW_CLEAR_PX - 1e-9, "{w}x{h}");
             for x in 0..v.w {
-                sky_lit += usize::from(EMISSION.contains(&px(x, src).role));
-                let ink = px(x, y);
-                if ink == Ink::BLANK {
-                    continue;
+                let top = v.ridge_top[x];
+                assert!(
+                    top <= 0
+                        || v.pixels
+                            .get(x as i32, top - 1)
+                            .is_some_and(|i| i.role != Role::Background),
+                    "{w}x{h}: no glow above the silhouette at column {x}"
+                );
+                if v.lake {
+                    // Silhouette row y mirrors to lake row 2·y_h − 1 − y.
+                    for y in top.max(0)..v.y_h as i32 {
+                        let m = 2 * v.y_h as i32 - 1 - y;
+                        let ink = v.pixels.get(x as i32, m).unwrap_or(Ink::BLANK);
+                        assert!(
+                            ink.role != Role::Seq,
+                            "{w}x{h}: glow in the ridge's reflection at {x},{m}"
+                        );
+                    }
                 }
-                lake_lit += 1;
-                // Each lit lake pixel is a dimmed copy of a lit sky pixel a ripple
-                // shift away: same role (so red over green reflects as red over green).
-                let copy = (x.saturating_sub(3)..(x + 4).min(v.w)).any(|sx| {
-                    let s = px(sx, src);
-                    EMISSION.contains(&s.role)
-                        && s.role == ink.role
-                        && ink.level == (LAKE_GAIN * f32::from(s.level)).round() as u8
-                });
-                assert!(copy, "lake pixel {x},{y} {ink:?} mirrors nothing");
             }
         }
-        assert!(rows > 0);
-        // Lit-ness follows the sky, so the reflection is as dense as its source rows.
-        let ratio = lake_lit as f64 / sky_lit as f64;
-        assert!((0.9..=1.1).contains(&ratio), "lake/sky lit {ratio:.3}");
+    }
+
+    /// The brightest level of the vertical run of emission pixels through sky pixel
+    /// (x, y), or `None` if it is not emission.
+    fn run_peak(v: &View, x: usize, y: usize) -> Option<u8> {
+        let em = |y: usize| {
+            v.pixels
+                .get(x as i32, y as i32)
+                .filter(|i| EMISSION.contains(&i.role))
+                .map(|i| i.level)
+        };
+        em(y)?;
+        let up = (0..=y).rev().map_while(em);
+        let down = (y + 1..v.y_h).map_while(em);
+        up.chain(down).max()
+    }
+
+    #[test]
+    fn aur_a7_lake_mirrors_the_lit_sky_as_broken_streaks() {
+        // Visit t = 12, 14 (the AUR-A7 frame), 20 and 28 s.
+        for steps in [48, 56, 80, 112] {
+            let (a, _) = census(steps);
+            let v = &a.view;
+            let px = |x: usize, y: usize| v.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
+            let (mut lake_lit, mut sky_lit, mut rows) = (0usize, 0usize, 0);
+            // What the water mirrors: the skyglow, and every pixel of a sky run whose
+            // brightest pixel reaches LAKE_MIN_LEVEL, so a run is reflected whole or
+            // not at all and the lake shows streaks rather than shards.
+            let mirrored = |x: usize, y: usize| {
+                px(x, y).role == Role::Seq
+                    || run_peak(v, x, y).is_some_and(|peak| peak >= LAKE_MIN_LEVEL)
+            };
+            let dimmed = |i: Ink| {
+                let level = (LAKE_GAIN * f32::from(i.level)).round() as u8;
+                if i.role == Role::Seq {
+                    level
+                } else {
+                    level.max(ink::MIN_VISIBLE_LEVEL as u8)
+                }
+            };
+            for y in v.y_h..v.rows {
+                let d = (y - v.y_h + 1) as f64;
+                let src = v.y_h - (y - v.y_h) - 1;
+                if (0.9 * d - 1.7 * a.t).sin() > 0.9 {
+                    // A ripple crest: the whole row drops out.
+                    assert!((0..v.w).all(|x| px(x, y) == Ink::BLANK), "row {y}");
+                    continue;
+                }
+                rows += 1;
+                for x in 0..v.w {
+                    sky_lit += usize::from(mirrored(x, src));
+                    let ink = px(x, y);
+                    if ink == Ink::BLANK {
+                        continue;
+                    }
+                    lake_lit += 1;
+                    // Each lit lake pixel is a dimmed copy (never under the core floor)
+                    // of a mirrored sky pixel a ripple shift away, with its role (so red
+                    // over green reflects as red over green).
+                    let copy = (x.saturating_sub(3)..(x + 4).min(v.w)).any(|sx| {
+                        let s = px(sx, src);
+                        mirrored(sx, src) && s.role == ink.role && ink.level == dimmed(s)
+                    });
+                    assert!(
+                        copy,
+                        "t = {}: lake pixel {x},{y} {ink:?} mirrors nothing",
+                        a.t
+                    );
+                }
+            }
+            assert!(rows > 0);
+            // Lit-ness follows the sky, so the reflection is as dense as its source rows.
+            let ratio = lake_lit as f64 / sky_lit as f64;
+            assert!(
+                (0.9..=1.1).contains(&ratio),
+                "t = {}: lake/sky lit {ratio:.3}",
+                a.t
+            );
+        }
     }
 
     #[test]
@@ -2539,8 +2787,7 @@ mod tests {
         for steps in [44, 52, 56] {
             let (a, _) = census(steps);
             let v = &a.view;
-            let accent =
-                |x: i32, y: i32| v.pixels.get(x, y).is_some_and(|i| i.role == Role::Accent);
+            let accent = |x: i32, y: i32| v.pixels.get(x, y).is_some_and(is_hem);
             let mut hems = 0;
             for x in 0..v.w {
                 // Pink is splatted for the brightest curtain only.
@@ -2567,8 +2814,9 @@ mod tests {
                         .iter()
                         .any(|dx| (-1..=1).any(|dy| accent(x as i32 + dx, y + dy)));
                     assert!(run, "t = {}: isolated hem pixel at {x},{y}", a.t);
-                    // ASCII reads the same flag.
-                    assert!(v.glow[y as usize * v.w + x].hem);
+                    // Crisp: bright pink, never the crown's deep crimson.
+                    let level = v.pixels.get(x as i32, y).map_or(0, |i| i.level);
+                    assert!(f64::from(level) >= HEM_LEVEL - 0.5, "hem level {level}");
                 }
             }
             assert!(hems > 0, "no hem at t = {}", a.t);
@@ -2606,24 +2854,20 @@ mod tests {
     }
 
     #[test]
-    fn aur_skyglow_is_solid_and_fades_to_black_above_the_silhouette() {
+    fn aur_skyglow_is_solid_and_fades_to_near_black_above_the_silhouette() {
         assert_eq!(skyglow(9.0, 9.0), None);
-        assert_eq!(skyglow(0.0, 9.0), Some((ink::seq(GLOW_MAX), 1.0)));
-        let horizon = skyglow(0.0, 9.0).map_or(0.0, |(ink, _)| ink::seq_value(ink));
-        assert!(horizon >= 0.135, "a band, not a ragged stripe: {horizon}");
-        let (mut prev, mut prev_share) = (1.0, 1.0);
+        assert_eq!(skyglow(0.0, 9.0), Some(ink::seq(GLOW_MAX)));
+        let mut prev = 1.0;
         for i in 0..90 {
             let px = 0.1 * f64::from(i);
-            let (ink, share) = skyglow(px, 9.0).unwrap_or((Ink::BLANK, 0.0));
+            let ink = skyglow(px, 9.0).expect("solid up to its height");
             let v = ink::seq_value(ink);
+            assert!(v <= prev, "skyglow brightens with elevation at {px}");
             assert!(
-                v <= prev && share <= prev_share,
-                "skyglow brightens with elevation at {px}"
+                v >= GLOW_MIN - 0.5 / 255.0,
+                "glow carried into black at {px}"
             );
-            // Solid over the lower 80 %, where the ridge and spires stand; only the
-            // top edge thins by density.
-            assert!(px > 9.0 * 0.8 - 1e-9 || share == 1.0, "thinned at {px}");
-            (prev, prev_share) = (v, share);
+            prev = v;
         }
         for (w, h) in [(200u16, 50u16), (80, 24), (40, 12)] {
             let (a, _) = scene(w, h);
@@ -2635,16 +2879,9 @@ mod tests {
                     if EMISSION.contains(&ink.role) {
                         continue;
                     }
-                    // Every dark sky pixel in the solid glow glows: no dither holes.
-                    let (glow, share) = v.skyglow[y as usize].unwrap_or((Ink::BLANK, 0.0));
-                    if share == 1.0 {
-                        assert_eq!(ink, glow, "{w}x{h} sky pixel {x},{y}");
-                    } else {
-                        assert!(
-                            ink == glow || ink == Ink::BLANK,
-                            "{w}x{h} sky pixel {x},{y}"
-                        );
-                    }
+                    // Every dark sky pixel in the glow glows: no holes, no dither.
+                    let glow = v.skyglow[y as usize].unwrap_or(Ink::BLANK);
+                    assert_eq!(ink, glow, "{w}x{h} sky pixel {x},{y}");
                     glowing += usize::from(ink.role == Role::Seq);
                 }
             }
@@ -2675,7 +2912,7 @@ mod tests {
             }
         }
         // Every spire stays inside the skyglow, so it reads as a black edge.
-        let glow_px = v.f * GLOW_DEG.to_radians();
+        let glow_px = v.glow_px();
         // Each spire rises ≥ 3 px on average and has flanks: both neighbouring columns
         // stand above the bare ridge, no higher than the tip.
         let tips: Vec<usize> = (1..v.w - 1).filter(|&x| v.tree[x]).collect();
@@ -2714,12 +2951,6 @@ mod tests {
         for y in 0..4 {
             assert_eq!(lit(y), 0, "emission in top pixel row {y}");
         }
-        assert!(
-            lit(8) < lit(16),
-            "no fade over the top rows: {} vs {}",
-            lit(8),
-            lit(16)
-        );
         // The fade scales with the view (20 px of 100 here, ≈ 10 cell rows; never under
         // 3 px) and eases in as a smoothstep, so the crown thins into the dark over
         // rows instead of meeting a lid.
@@ -2741,7 +2972,7 @@ mod tests {
             let mut canvas = Canvas::new(Size::new(200, 50), mode);
             a.view
                 .pixels
-                .blit(&mut canvas, |cx, cy, t, b| a.ascii_cell(cx, cy, t, b));
+                .blit(&mut canvas, |_, cy, t, b| a.ascii_cell(cy, t, b));
             let before = canvas.to_lines();
             a.draw_stars(&mut canvas);
             for (y, (old, new)) in before.iter().zip(canvas.to_lines()).enumerate() {
@@ -2793,29 +3024,13 @@ mod tests {
                 v.pixels
                     .get(x as i32, y as i32)
                     .filter(|i| EMISSION.contains(&i.role))
-                    .map(|i| i.role == Role::Hot)
+                    .map(|i| i.role == RED && !is_hem(i))
             })
             .collect()
     }
 
-    /// Share of pixels matching `kind` in columns `xs` × rows `ys`.
-    fn cover(
-        v: &View,
-        mask: &[Option<bool>],
-        kind: Option<bool>,
-        xs: std::ops::Range<usize>,
-        ys: std::ops::Range<usize>,
-    ) -> f64 {
-        let n = xs.len() * ys.len();
-        let hits = ys
-            .flat_map(|y| xs.clone().map(move |x| (x, y)))
-            .filter(|&(x, y)| mask[y * v.w + x] == kind)
-            .count();
-        hits as f64 / n as f64
-    }
-
     #[test]
-    fn aur_red_crown_is_a_soft_dome_not_a_box() {
+    fn aur_a8_red_crown_caps_the_curtains_not_a_box() {
         // The substorm peak, visit t = 14–22 s (scene t = 22–30 s), at 200×50.
         let (mut a, mut ctx) = scene(200, 50);
         for visit in [14.0, 18.0, 22.0] {
@@ -2824,43 +3039,36 @@ mod tests {
             }
             let v = &a.view;
             let mask = red_mask(v);
-            let red = |xs, ys| cover(v, &mask, Some(true), xs, ys);
-            if visit == 18.0 {
-                // Top edge per column: the first row whose 5 × 4 px neighbourhood is
-                // ≥ 30 % red. It follows the curtains' red envelope, not a lid.
-                let tops: Vec<usize> = (2..v.w - 3)
-                    .filter_map(|x| (0..v.y_h / 2).find(|&y| red(x - 2..x + 3, y..y + 4) >= 0.3))
-                    .collect();
-                assert!(
-                    tops.len() > v.w / 3,
-                    "crown only {} columns wide",
-                    tops.len()
-                );
-                let (lo, hi) = (tops.iter().min().copied(), tops.iter().max().copied());
-                assert!(
-                    hi.zip(lo).is_some_and(|(h, l)| h - l >= 3),
-                    "flat top {lo:?}..{hi:?}"
-                );
-            }
-            // No walls against the dark: across any column boundary, the red coverage of
-            // the 4 px on either side never differs by more than half over more than 5
-            // consecutive rows where the fainter side is dark sky (a green curtain's
-            // edge next to the red fringe is a hue change, not a wall; a sloping flank
-            // moves on within a few rows).
-            for x in 4..v.w - 4 {
-                let mut run = 0;
+            let (mut red, mut capped) = (0usize, 0usize);
+            let mut tops = Vec::new();
+            for x in 0..v.w {
+                let mut top = None;
                 for y in 0..v.y_h {
-                    let (l, r) = (red(x - 4..x, y..y + 1), red(x..x + 4, y..y + 1));
-                    let dim = if l < r { x - 4..x } else { x..x + 4 };
-                    let dark = cover(v, &mask, None, dim, y..y + 1) >= 0.75;
-                    run = if (l - r).abs() > 0.5 && dark {
-                        run + 1
-                    } else {
-                        0
-                    };
-                    assert!(run <= 5, "t = {visit}: red wall at x = {x}, rows ..={y}");
+                    if mask[y * v.w + x] != Some(true) {
+                        continue;
+                    }
+                    red += 1;
+                    top.get_or_insert(y);
+                    // Green light stands below it in the same column: a cap, not a slab.
+                    capped += usize::from((y + 1..(y + 12).min(v.y_h)).any(|g| {
+                        v.pixels
+                            .get(x as i32, g as i32)
+                            .is_some_and(|i| i.role == Role::Particle)
+                    }));
                 }
+                tops.extend(top);
             }
+            assert!(red >= 100, "t = {visit}: only {red} crown pixels");
+            assert!(
+                capped * 100 >= 95 * red,
+                "t = {visit}: {capped} of {red} red pixels cap green"
+            );
+            // Its top edge follows the rays, not a lid.
+            let (lo, hi) = (tops.iter().min().copied(), tops.iter().max().copied());
+            assert!(
+                hi.zip(lo).is_some_and(|(h, l)| h - l >= 6),
+                "t = {visit}: flat crown {lo:?}..{hi:?}"
+            );
         }
     }
 
@@ -2912,44 +3120,6 @@ mod tests {
                 "{w}x{h}: shore steps {steps} times"
             );
         }
-    }
-
-    #[test]
-    fn aur_diffuse_light_is_dithered_without_strands() {
-        // Recovery (visit t = 32 s, scene t = 40 s): pulsating patches and the red fringe.
-        let (mut a, mut ctx) = scene(200, 50);
-        while a.t < START_T + 32.0 - 1e-9 {
-            a.update(1.0 / 60.0, &mut ctx);
-        }
-        assert!(a.live_patches > 0, "no patch alive");
-        let v = &a.view;
-        let (mut soft, mut strand) = (0, 0);
-        for y in 0..v.y_h {
-            for x in 0..v.w {
-                let g = v.glow[y * v.w + x];
-                if g.tone == 0.0 || y as i32 >= v.ridge_top[x] {
-                    continue;
-                }
-                let e = v.emit[y * v.w + x];
-                let patchy = e.patch > 0.5 * (e.green + e.red + e.pink);
-                let reddish = red_chance(g.red) > 0.5;
-                // Red-dominant or patch-dominant light takes the square blue noise,
-                // curtain green the field-aligned strands.
-                assert_eq!(g.soft, patchy || reddish, "{x},{y}");
-                let lit = v
-                    .pixels
-                    .get(x as i32, y as i32)
-                    .is_some_and(|i| EMISSION.contains(&i.role));
-                let want = g.dither(1.0, v.dither.at(x, y, g.soft)).is_some();
-                assert_eq!(lit, want, "{x},{y}");
-                soft += usize::from(g.soft && patchy);
-                strand += usize::from(!g.soft);
-            }
-        }
-        assert!(
-            soft > 50 && strand > 50,
-            "{soft} patch / {strand} strand pixels"
-        );
     }
 
     #[test]
