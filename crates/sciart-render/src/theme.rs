@@ -45,11 +45,8 @@ impl Theme {
             (Theme::Astro, Role::Div) => gradient(&ASTRO_DIV, div_pos(ink)),
             (Theme::Rainbow, Role::Seq) => gradient(&TURBO, ink::seq_value(ink)),
             (Theme::Rainbow, Role::Div) => gradient(&BLUE_RED, div_pos(ink)),
-            // |level − 128| ∈ [0, 128] scaled so both ends reach the top of the grey ramp.
-            (Theme::Mono, Role::Div) => {
-                let d = u16::from(ink.level.abs_diff(128));
-                grey((d * 255 / 127).min(255) as u8)
-            }
+            (Theme::Mono, Role::Seq) => mono_table().seq[usize::from(ink.level)],
+            (Theme::Mono, Role::Div) => mono_table().div[usize::from(ink.level)],
             (Theme::Mono, _) => grey(ink.level),
             (Theme::Astro, role) => scale(astro_base(role), 0.3 + 0.7 * level),
             (Theme::Rainbow, _) => hsv(cell_hue(x, y), 1.0, 0.35 + 0.65 * level),
@@ -57,9 +54,69 @@ impl Theme {
     }
 }
 
-/// `mono`'s ramp: level 0 stays visible (40) on a black terminal.
+/// `mono`'s ramp for object roles: level 0 stays visible (40) on a black terminal.
 fn grey(level: u8) -> Rgb {
     let g = 40 + (u16::from(level) * 215 / 255) as u8;
+    Rgb(g, g, g)
+}
+
+// `mono` colormaps (RND-R6). Fields paint whole regions, often as cell backgrounds, so
+// unlike `grey` their zero must read as "nothing": a floor just above black rather than
+// grey 40, which washed out every dark region. Both ramps are linear in CIE L*, so equal
+// level steps look like equal brightness steps.
+//
+// Grey has one channel, so `Div` cannot be both symmetric in |v| and signed. It keeps
+// zero near black on both sides (zero crossings stay dark, luminance stays monotone in
+// |v|) and encodes the sign in the slope: positive climbs to white (L* 100), negative
+// only to a dim grey (L* 45, just below mid-grey). At equal |v| the positive side is
+// always brighter (ΔL* = 55·|v|), and the extremes sit 55 L* apart, so alternating lobes
+// read as bright/dim. The cost: a strong negative matches a weak positive (|v| ≈ 0.43);
+// scenes that need an exact sign read should also pick glyphs by sign.
+
+/// L* of level 0 (`Seq`) and of zero (`Div`): grey 13 on the sRGB curve.
+const MONO_FLOOR_L: f64 = 3.5;
+/// L* the negative side of `Div` reaches at −1 (grey ≈ 106).
+const MONO_NEG_MAX_L: f64 = 45.0;
+
+struct MonoTable {
+    seq: [Rgb; 256],
+    div: [Rgb; 256],
+}
+
+/// Built once: the sRGB transfer needs `powf`, too costly to evaluate per painted cell.
+fn mono_table() -> &'static MonoTable {
+    static TABLE: std::sync::LazyLock<MonoTable> = std::sync::LazyLock::new(|| {
+        let mut seq = [Rgb(0, 0, 0); 256];
+        let mut div = [Rgb(0, 0, 0); 256];
+        for level in 0..=255u8 {
+            let ink = Ink::new(Role::Seq, level);
+            let s = MONO_FLOOR_L + (100.0 - MONO_FLOOR_L) * ink::seq_value(ink);
+            seq[usize::from(level)] = lightness_grey(s);
+            let v = ink::div_value(ink);
+            let top = if v >= 0.0 { 100.0 } else { MONO_NEG_MAX_L };
+            div[usize::from(level)] = lightness_grey(MONO_FLOOR_L + (top - MONO_FLOOR_L) * v.abs());
+        }
+        MonoTable { seq, div }
+    });
+    &TABLE
+}
+
+/// The sRGB grey of CIE lightness `l ∈ [0, 100]` (D65; CIE 15 / IEC 61966-2-1).
+/// Monotone in `l`, so a monotone L* ramp stays monotone after rounding.
+fn lightness_grey(l: f64) -> Rgb {
+    const KAPPA: f64 = 24389.0 / 27.0;
+    let l = l.clamp(0.0, 100.0);
+    let y = if l > 8.0 {
+        ((l + 16.0) / 116.0).powi(3)
+    } else {
+        l / KAPPA
+    };
+    let c = if y <= 0.003_130_8 {
+        12.92 * y
+    } else {
+        1.055 * y.powf(1.0 / 2.4) - 0.055
+    };
+    let g = (c * 255.0).round().clamp(0.0, 255.0) as u8;
     Rgb(g, g, g)
 }
 
@@ -327,19 +384,70 @@ mod tests {
         assert!(r1 > g1 && r1 > b1, "ends red: {:?}", c(255));
     }
 
+    /// CIE L* (0..=100) of an sRGB grey: the test's independent inverse of the ramp.
+    fn grey_lightness(Rgb(g, _, _): Rgb) -> f64 {
+        let c = f64::from(g) / 255.0;
+        let y = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+        if y > 216.0 / 24389.0 {
+            116.0 * y.cbrt() - 16.0
+        } else {
+            y * 24389.0 / 27.0
+        }
+    }
+
     #[test]
-    fn rnd_r6_mono_is_grey_by_level_and_by_distance_from_zero() {
+    fn rnd_r6_mono_colormaps_are_grey() {
         for level in [0u8, 1, 64, 127, 128, 129, 200, 255] {
             for role in [Role::Seq, Role::Div] {
                 let Rgb(r, g, b) = Theme::Mono.color(Ink::new(role, level), 0, 0);
                 assert!(r == g && g == b, "{role:?} {level}");
             }
         }
+    }
+
+    #[test]
+    fn rnd_r6_mono_seq_starts_near_black_and_rises_evenly_in_lightness() {
         let seq = |l| Theme::Mono.color(Ink::new(Role::Seq, l), 0, 0);
-        assert_eq!(seq(77), Theme::Mono.color(Ink::new(Role::Star, 77), 0, 0));
-        let div = |l| luma(Theme::Mono.color(Ink::new(Role::Div, l), 0, 0));
-        assert_eq!(div(128 + 50), div(128 - 50), "symmetric about zero");
-        assert!(div(128) < div(100) && div(100) < div(0));
+        // A zero field is (almost) the terminal background, not a grey wash.
+        assert!(seq(0).0 <= 20, "near-black at level 0: {:?}", seq(0));
+        assert_eq!(seq(255), Rgb(255, 255, 255));
+        // Equal level steps are equal lightness steps (perceptual, not linear in sRGB).
+        let (l0, l1) = (grey_lightness(seq(0)), grey_lightness(seq(255)));
+        for level in (0..=255u8).step_by(15) {
+            let want = l0 + (l1 - l0) * f64::from(level) / 255.0;
+            let got = grey_lightness(seq(level));
+            assert!(
+                (got - want).abs() < 1.0,
+                "L* at {level}: {got:.1} vs {want:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn rnd_r6_mono_div_keeps_the_sign_legible() {
+        let div = |l| Theme::Mono.color(Ink::new(Role::Div, l), 0, 0);
+        let lightness = |l| grey_lightness(div(l));
+        assert!(div(128).0 <= 20, "zero is near-black: {:?}", div(128));
+        assert_eq!(div(128), Theme::Mono.color(Ink::new(Role::Seq, 0), 0, 0));
+        assert_eq!(div(255), Rgb(255, 255, 255), "+1 reaches white");
+        // The negative side tops out below mid-grey, leaving a clear gap to +1.
+        assert!(
+            (35.0..=50.0).contains(&lightness(0)),
+            "-1 is a dim grey: L* {:.1}",
+            lightness(0)
+        );
+        // At equal |v|, positive is always the brighter, by a visible margin off zero.
+        for d in 1..=127u8 {
+            let (pos, neg) = (lightness(128 + d), lightness(128 - d));
+            assert!(pos > neg, "±{d}: {pos:.1} vs {neg:.1}");
+            if d >= 32 {
+                assert!(pos - neg >= 12.0, "±{d}: ΔL* {:.1}", pos - neg);
+            }
+        }
     }
 
     #[test]
