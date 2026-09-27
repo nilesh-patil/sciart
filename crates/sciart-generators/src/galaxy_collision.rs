@@ -16,6 +16,7 @@ use std::f64::consts::{PI, TAU};
 use rand::Rng;
 use sciart_core::draw;
 use sciart_core::geom::ASPECT;
+use sciart_core::geom::v3::{add, cross, dot, norm, scale, sub};
 use sciart_core::particles::{gaussian, plot};
 use sciart_core::prelude::*;
 
@@ -67,30 +68,7 @@ const CORE: Glyph = Glyph::new('◉', '@');
 const SKY: Glyph = Glyph::new('·', '.');
 const SKY_STARS: usize = 70;
 
-pub(crate) type V3 = [f64; 3];
-
-fn add(a: V3, b: V3) -> V3 {
-    [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
-}
-fn sub(a: V3, b: V3) -> V3 {
-    [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
-}
-fn scale(a: V3, k: f64) -> V3 {
-    [a[0] * k, a[1] * k, a[2] * k]
-}
-fn dot(a: V3, b: V3) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-fn cross(a: V3, b: V3) -> V3 {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-fn norm(a: V3) -> f64 {
-    dot(a, a).sqrt()
-}
+pub(crate) use sciart_core::geom::v3::V3;
 
 /// Model time units per real second: the cores' Kepler period maps to `PERIOD` s.
 pub(crate) fn time_scale() -> f64 {

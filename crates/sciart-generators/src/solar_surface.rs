@@ -14,6 +14,7 @@ use std::f64::consts::{PI, TAU};
 use std::fmt::Write as _;
 
 use rand::Rng;
+use sciart_core::geom::v3::{axpy, cross, dot, norm};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::{geom, ink};
@@ -225,10 +226,6 @@ fn dipole_point(d_b: f64, l: f64, theta: f64) -> [f64; 3] {
     [r * ct, 0.0, 1.0 - d_b + r * st]
 }
 
-fn norm(p: [f64; 3]) -> f64 {
-    (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt()
-}
-
 /// The dipole colatitudes of both footpoints (`|p| = 1`), by bisection on each side of
 /// the apex (SUN-A4).
 pub(crate) fn footpoint_theta(d_b: f64, l: f64) -> (f64, f64) {
@@ -289,7 +286,7 @@ pub(crate) fn granule_contrast(mu: f64) -> f64 {
 }
 
 /// The `Seq` ink for photospheric intensity `i`: `v = 0.12 + 0.78·i`.
-pub(crate) fn seq_level(i: f64) -> Ink {
+pub(crate) fn photosphere_ink(i: f64) -> Ink {
     ink::seq(0.12 + 0.78 * i)
 }
 
@@ -298,27 +295,6 @@ fn sphere(lat: f64, lon: f64) -> [f64; 3] {
     let (sl, cl) = lat.sin_cos();
     let (so, co) = lon.sin_cos();
     [cl * so, sl, cl * co]
-}
-
-fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
-}
-
-fn axpy(k: f64, a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [k * a[0] + b[0], k * a[1] + b[1], k * a[2] + b[2]]
-}
-
-fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-    [
-        a[1] * b[2] - a[2] * b[1],
-        a[2] * b[0] - a[0] * b[2],
-        a[0] * b[1] - a[1] * b[0],
-    ]
-}
-
-/// Wrap a longitude into [−π, π).
-fn wrap_lon(lon: f64) -> f64 {
-    geom::wrap(lon + PI, TAU) - PI
 }
 
 /// The observer's view of heliographic longitude `lon` with the disc centre at
@@ -362,7 +338,7 @@ impl Granule {
 
     /// Advance by `dt`: longitude by the closed form `ω(φ)·dt` (SUN-A2), then age.
     fn advance(&mut self, dt: f64) {
-        self.lon = wrap_lon(self.lon + self.omega * dt);
+        self.lon = geom::wrap_angle(self.lon + self.omega * dt);
         self.age += dt;
     }
 
@@ -563,7 +539,7 @@ impl Region {
     }
 
     fn advance(&mut self, dt: f64) {
-        self.lon = wrap_lon(self.lon + self.omega * dt);
+        self.lon = geom::wrap_angle(self.lon + self.omega * dt);
         self.armed |= self.lon < RESPAWN_LON;
     }
 
@@ -868,7 +844,7 @@ impl View {
             i *= 1.0 + 0.35 * (1.0 - mu) * faculae * gate;
             self.disc_i[usize::from(dp.y) * self.w + usize::from(dp.x)] = i as f32;
             self.pixels
-                .set(i32::from(dp.x), i32::from(dp.y), seq_level(i));
+                .set(i32::from(dp.x), i32::from(dp.y), photosphere_ink(i));
         }
     }
 
@@ -925,7 +901,7 @@ impl View {
         };
         let i = self.disc_i[y as usize * self.w + x as usize];
         if !i.is_nan() {
-            let dark = seq_level(FILAMENT * f64::from(i));
+            let dark = photosphere_ink(FILAMENT * f64::from(i));
             if dark.level < old.level {
                 self.pixels.set(x, y, dark);
             }
@@ -1053,7 +1029,9 @@ impl SolarSurface {
             let lon = if k == 0 {
                 -78f64.to_radians()
             } else {
-                wrap_lon((-78.0 + 120.0 * k as f64 + rng.random_range(-10.0..10.0)).to_radians())
+                geom::wrap_angle(
+                    (-78.0 + 120.0 * k as f64 + rng.random_range(-10.0..10.0)).to_radians(),
+                )
             };
             let h = if k == 0 {
                 LOOP_H.1
@@ -1236,7 +1214,7 @@ impl Generator for SolarSurface {
             r.rain(dt, &mut ctx.rng);
             // Respawn only out of sight, 0–60° further on, so nothing pops on the disc.
             if r.armed && r.lon >= RESPAWN_LON && r.hidden(self.b0) {
-                let lon = wrap_lon(r.lon + ctx.rng.random_range(0.0..RESPAWN_STEP));
+                let lon = geom::wrap_angle(r.lon + ctx.rng.random_range(0.0..RESPAWN_STEP));
                 let lat = region_lat(&mut ctx.rng, self.lat_mean);
                 let h = ctx.rng.random_range(LOOP_H.0..LOOP_H.1);
                 *r = Region::spawn(&mut ctx.rng, lat, lon, h);
@@ -1256,6 +1234,7 @@ impl Generator for SolarSurface {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sciart_core::geom::v3::unit;
 
     /// The spot intensity at normalised distance `q` and azimuth `psi` (24 filaments).
     fn spot_intensity(q: f64, psi: f64) -> f64 {
@@ -1372,7 +1351,7 @@ mod tests {
     /// A region's midpoint (region frame), halfway between its spots on the sphere.
     fn midpoint(r: &Region) -> [f64; 3] {
         let m = axpy(1.0, r.spots[0].centre, r.spots[1].centre);
-        m.map(|c| c / norm(m))
+        unit(m)
     }
 
     /// A region's latitude (its midpoint lies at λ = 0 in the region frame).
@@ -1463,7 +1442,7 @@ mod tests {
             ..Granule::spawn(&mut ctx.rng, 0.0)
         };
         let expect = |lat: f64| omega_deg_per_day(lat) * 3.0;
-        let moved = |from: f64, to: f64| wrap_lon(to - from).to_degrees();
+        let moved = |from: f64, to: f64| geom::wrap_angle(to - from).to_degrees();
         for dts in &schedules {
             assert!((dts.iter().sum::<f64>() - 10.0).abs() < 1e-12);
             let (mut r, mut g) = (region.clone(), granule);
@@ -1678,7 +1657,6 @@ mod tests {
             let chord = axpy(-1.0, big[0], big[LOOP_SAMPLES - 1]);
             let dir = axpy(-dot(chord, up), up, chord);
             let normal = cross(dir, up);
-            let unit = |v: [f64; 3]| v.map(|c| c / norm(v));
             let horizontal = |v: [f64; 3]| unit(axpy(-dot(v, up), up, v));
             let shear = dot(horizontal(spot_axis), unit(dir))
                 .abs()

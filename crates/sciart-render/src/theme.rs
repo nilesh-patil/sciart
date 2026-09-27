@@ -1,4 +1,4 @@
-use sciart_core::{Ink, Role};
+use sciart_core::{Ink, Role, ink};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -41,10 +41,10 @@ impl Theme {
         match (self, ink.role) {
             // Colormap roles ignore the per-cell hash and the role-hue scaling: a field
             // needs one smooth, perceptually ordered ramp (RND-R6, ADR-0011).
-            (Theme::Astro, Role::Seq) => gradient(&INFERNO, seq_pos(ink.level)),
-            (Theme::Astro, Role::Div) => gradient(&ASTRO_DIV, div_pos(ink.level)),
-            (Theme::Rainbow, Role::Seq) => gradient(&TURBO, seq_pos(ink.level)),
-            (Theme::Rainbow, Role::Div) => gradient(&BLUE_RED, div_pos(ink.level)),
+            (Theme::Astro, Role::Seq) => gradient(&INFERNO, ink::seq_value(ink)),
+            (Theme::Astro, Role::Div) => gradient(&ASTRO_DIV, div_pos(ink)),
+            (Theme::Rainbow, Role::Seq) => gradient(&TURBO, ink::seq_value(ink)),
+            (Theme::Rainbow, Role::Div) => gradient(&BLUE_RED, div_pos(ink)),
             // |level − 128| ∈ [0, 128] scaled so both ends reach the top of the grey ramp.
             (Theme::Mono, Role::Div) => {
                 let d = u16::from(ink.level.abs_diff(128));
@@ -106,19 +106,10 @@ const BLUE_RED: [Rgb; 5] = [
     Rgb(255, 100, 85),
 ];
 
-/// Position of a `Seq` level along its colormap, in `[0, 1]`.
-fn seq_pos(level: u8) -> f64 {
-    f64::from(level) / 255.0
-}
-
-/// Position of a `Div` level along its colormap, with level 128 (zero) exactly on the
-/// centre stop: 128 levels below it, 127 above, matching `ink::div` (CORE-R46).
-fn div_pos(level: u8) -> f64 {
-    if level < 128 {
-        f64::from(level) / 256.0
-    } else {
-        0.5 + f64::from(level - 128) / 254.0
-    }
+/// Position of a `Div` ink along its colormap, `[−1, 1] → [0, 1]`: level 128 (zero) lands
+/// exactly on the centre stop, through core's inverse of `ink::div` (CORE-R46, CORE-R56).
+fn div_pos(ink: Ink) -> f64 {
+    0.5 * (ink::div_value(ink) + 1.0)
 }
 
 /// Piecewise-linear interpolation of evenly spaced `stops` (at least two) at

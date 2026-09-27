@@ -799,8 +799,8 @@ impl Pen {
     /// Dot and deposit weight of a world point, if it is in front of the eye.
     fn mark(&self, p: V3) -> Option<((i32, i32), f64)> {
         let (x, y, depth) = self.proj.project(p, self.centre, self.scale)?;
-        let sub = (f64::from(Dots::CELL_W), f64::from(Dots::CELL_H));
-        let dot = ((x * sub.0).round() as i32, (y * sub.1).round() as i32);
+        let (dx, dy) = Dots::from_cells(x, y);
+        let dot = (dx.round() as i32, dy.round() as i32);
         let near = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
         Some((dot, self.dim * (DEPOSIT_FAR + DEPOSIT_NEAR * near)))
     }
@@ -889,7 +889,7 @@ impl StrangeAttractors {
     }
 
     /// Deposit each particle's thread segment, then threshold the density into `Dots`.
-    fn draw(&mut self) {
+    fn rasterise(&mut self) {
         let Some(g) = &self.gallery else {
             return;
         };
@@ -1006,7 +1006,7 @@ impl Generator for StrangeAttractors {
         }
         self.t += dt;
         self.density.decay((-dt / TAU_S).exp() as f32);
-        self.draw();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {

@@ -17,6 +17,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use rand::seq::SliceRandom;
+use sciart_core::draw;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::ink::{self, seq_value};
 use sciart_core::prelude::*;
@@ -290,10 +291,9 @@ impl Plan {
 
     /// Map the layout onto a resized lattice, cell-centre aligned.
     fn rescale(&mut self, from: Size, to: Size) {
-        let k = axis_scales(from, to);
-        self.centre = remap(self.centre, k);
+        self.centre = remap(self.centre, from, to);
         for f in &mut self.food[..self.n_food] {
-            let (x, y) = remap((f.0 as f32, f.1 as f32), k);
+            let (x, y) = remap((f.0 as f32, f.1 as f32), from, to);
             let (x, y) = site(x, y);
             *f = (
                 x.clamp(0, i32::from(to.width()) - 1),
@@ -303,22 +303,21 @@ impl Plan {
     }
 }
 
-fn axis_scales(from: Size, to: Size) -> (f32, f32) {
-    (
-        f32::from(to.width()) / f32::from(from.width()),
-        f32::from(to.height()) / f32::from(from.height()),
-    )
-}
-
-/// A position mapped between grids by `axis_scales`, cell-centre aligned.
+/// A position on a `from` grid mapped onto a `to` grid, cell-centre aligned (CORE-R68).
 #[inline]
-fn remap((x, y): (f32, f32), (kx, ky): (f32, f32)) -> (f32, f32) {
-    ((x + 0.5) * kx - 0.5, (y + 0.5) * ky - 0.5)
+fn remap((x, y): (f32, f32), from: Size, to: Size) -> (f32, f32) {
+    let axis = |v: f32, f: u16, t: u16| {
+        grid::centre_of(f64::from(v), usize::from(f), usize::from(t)) as f32
+    };
+    (
+        axis(x, from.width(), to.width()),
+        axis(y, from.height(), to.height()),
+    )
 }
 
 /// The display pixel at the centre of a flake's lattice site.
 fn flake_pixel((fx, fy): (i32, i32), lattice: Size, display: Size) -> (i32, i32) {
-    let (x, y) = remap((fx as f32, fy as f32), axis_scales(lattice, display));
+    let (x, y) = remap((fx as f32, fy as f32), lattice, display);
     site(x, y)
 }
 
@@ -519,11 +518,8 @@ impl Colony {
     /// `target` agents, so the density stays the model's 5 %.
     fn rescale(&mut self, lattice: Size, target: Option<usize>, rng: &mut impl Rng) {
         let from = self.lattice();
-        let k = axis_scales(from, lattice);
         for field in [&mut self.trail, &mut self.vis] {
-            self.scratch.resize(lattice, 0.0);
-            grid::resample_bilinear(field, &mut self.scratch);
-            std::mem::swap(field, &mut self.scratch);
+            grid::regrid_bilinear(field, lattice, &mut self.scratch);
         }
         self.vis_sum = self.vis.as_slice().iter().sum();
         self.scratch.resize(lattice, 0.0);
@@ -532,7 +528,7 @@ impl Colony {
         let occ = &mut self.occ;
         let (w, h) = (i32::from(lattice.width()), i32::from(lattice.height()));
         self.agents.retain_mut(|a| {
-            let (x, y) = remap((a.x, a.y), k);
+            let (x, y) = remap((a.x, a.y), from, lattice);
             let (sx, sy) = site(x, y);
             let (sx, sy) = (sx.clamp(0, w - 1), sy.clamp(0, h - 1));
             (a.x, a.y) = (sx as f32, sy as f32);
@@ -656,7 +652,7 @@ impl Physarum {
     /// One Jones step of the life cycle, over `[t₀, t₁]`: starvation during the fade and
     /// the colony's step (both decided at `t₀`), then the events at `t₁`, the next layout
     /// at rest start and a new colony at each cycle boundary. Because the events land in
-    /// the state before `time()` reads `t₁`, `rasterize` never sees a clock that has run
+    /// the state before `time()` reads `t₁`, `rasterise` never sees a clock that has run
     /// ahead of the colony (PHY-A5).
     fn step(&mut self, rng: &mut impl Rng) {
         let (t0, t1) = (self.time(), (self.steps + 1) as f64 * STEP);
@@ -716,24 +712,21 @@ impl Physarum {
     }
 
     /// Tone-map the drawn field onto the display pixels and lay the oat flakes over it.
-    fn rasterize(&mut self) {
+    fn rasterise(&mut self) {
         let size = self.pixels.pixel_size();
-        let (w, h) = (i32::from(size.width()), i32::from(size.height()));
         let scale = 1.0 / (2.5 * self.t_ref.max(1e-6));
         // `u = √(v)` is below the floor exactly when `v` is below its square, so the
         // dark plate skips the square root.
         let floor = (U_FLOOR * U_FLOOR) as f32;
-        for y in 0..h {
-            for x in 0..w {
-                let v = self.map.sample(&self.shown, x, y) * scale;
-                let ink = if v < floor {
-                    Ink::BLANK
-                } else {
-                    ink::seq(0.2 + 0.8 * f64::from(v.sqrt().min(1.0)))
-                };
-                self.pixels.set(x, y, ink);
+        let (map, shown) = (&self.map, &self.shown);
+        self.pixels.shade(|x, y| {
+            let v = map.sample(shown, x, y) * scale;
+            if v < floor {
+                Ink::BLANK
+            } else {
+                ink::seq(0.2 + 0.8 * f64::from(v.sqrt().min(1.0)))
             }
-        }
+        });
         // The colony's flakes show while it lives and fade out over the last second of
         // the fade; the next colony's fade in over rest, on an empty plate.
         let beat = self.timeline.at(self.time());
@@ -745,7 +738,7 @@ impl Physarum {
             ),
             _ => (self.colony.plan, 1.0),
         };
-        let level = (255.0 * level).round() as u8;
+        let level = ink::level(255.0 * level);
         if level == 0 {
             self.n_flakes = 0;
             return;
@@ -828,7 +821,7 @@ impl Generator for Physarum {
         self.map.rebuild(lattice, display);
         self.pixels.resize(size);
         self.relabel();
-        self.rasterize();
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -842,7 +835,7 @@ impl Generator for Physarum {
         for _ in 0..steps {
             self.step(&mut ctx.rng);
         }
-        self.rasterize();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -856,11 +849,7 @@ impl Generator for Physarum {
         if self.cells.width() >= 40 && self.cells.height() >= 12 {
             // One dark cell either side, so the label never looks glued to a tube.
             let y = i32::from(self.cells.height()) - 1;
-            let end = 1 + self.label.as_str().len() as i32;
-            for x in [0, end] {
-                canvas.put(x, y, Glyph::ascii(' '), Ink::BLANK);
-            }
-            canvas.text(1, y, self.label.as_str(), LABEL_INK);
+            draw::label(canvas, 0, y, self.label.as_str(), LABEL_INK);
         }
     }
 }

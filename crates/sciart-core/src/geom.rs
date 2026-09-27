@@ -1,4 +1,6 @@
-//! Geometry helpers shared by generators (CORE-R16..R18, CORE-R45, CORE-R50).
+//! Geometry helpers shared by generators (CORE-R16..R18, CORE-R45, CORE-R50, CORE-R60..R63).
+
+use std::f64::consts::{PI, TAU};
 
 /// Terminal cells are ~2x taller than wide; scale x by this for round shapes.
 pub const ASPECT: f64 = 2.0;
@@ -16,6 +18,79 @@ pub fn wrap(v: f64, max: f64) -> f64 {
     let w = v.rem_euclid(max);
     // rem_euclid can round up to exactly `max` for tiny negative v.
     if w >= max { 0.0 } else { w }
+}
+
+/// Angle `a` (radians) wrapped into `[−π, π)`, e.g. the signed turn from one heading to
+/// another, `wrap_angle(to − from)` (CORE-R61). Non-finite input gives NaN.
+#[inline]
+pub fn wrap_angle(a: f64) -> f64 {
+    wrap(a + PI, TAU) - PI
+}
+
+/// Plain 3-vectors as `[f64; 3]` (CORE-R60): the handful of operations the 3-D scenes
+/// need, so each scene does not grow its own `dot`/`cross`/`norm`.
+///
+/// Free functions on arrays rather than a newtype, so scene data (`Camera` points,
+/// orbital samples, model atoms) stays plain `[f64; 3]` and needs no conversions.
+/// Every function spells out the same component-wise arithmetic the scenes used, so
+/// swapping one in is bit-identical.
+pub mod v3 {
+    /// A 3-vector.
+    pub type V3 = [f64; 3];
+
+    /// `a + b`.
+    #[inline]
+    pub fn add(a: V3, b: V3) -> V3 {
+        [a[0] + b[0], a[1] + b[1], a[2] + b[2]]
+    }
+
+    /// `a − b`.
+    #[inline]
+    pub fn sub(a: V3, b: V3) -> V3 {
+        [a[0] - b[0], a[1] - b[1], a[2] - b[2]]
+    }
+
+    /// `a · k`.
+    #[inline]
+    pub fn scale(a: V3, k: f64) -> V3 {
+        [a[0] * k, a[1] * k, a[2] * k]
+    }
+
+    /// `k·a + b` (BLAS `axpy`).
+    #[inline]
+    pub fn axpy(k: f64, a: V3, b: V3) -> V3 {
+        [k * a[0] + b[0], k * a[1] + b[1], k * a[2] + b[2]]
+    }
+
+    /// The dot product `a · b`.
+    #[inline]
+    pub fn dot(a: V3, b: V3) -> f64 {
+        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+    }
+
+    /// The cross product `a × b` (right-handed).
+    #[inline]
+    pub fn cross(a: V3, b: V3) -> V3 {
+        [
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0],
+        ]
+    }
+
+    /// The Euclidean length `|a|`.
+    #[inline]
+    pub fn norm(a: V3) -> f64 {
+        dot(a, a).sqrt()
+    }
+
+    /// `a / |a|`; the zero vector gives NaNs (callers normalise non-degenerate
+    /// directions only).
+    #[inline]
+    pub fn unit(a: V3) -> V3 {
+        let n = norm(a);
+        a.map(|c| c / n)
+    }
 }
 
 /// A minimal 3-D view for scenes that spin a model in front of the viewer (CORE-R45).
@@ -93,6 +168,19 @@ impl Projector {
         [x1, y2, z2]
     }
 
+    /// The perspective factor `d / (d − depth)` that [`project`](Self::project) scales
+    /// a point at `depth` by: how much nearer things look bigger (CORE-R63). Exactly 1
+    /// for an orthographic view (`distance = ∞`), so a scene can size sprites by it
+    /// without keeping its own copy of the eye distance.
+    #[inline]
+    pub fn magnification(&self, depth: f64) -> f64 {
+        if self.distance.is_finite() {
+            self.distance / (self.distance - depth)
+        } else {
+            1.0
+        }
+    }
+
     /// Same contract as [`Camera::project`] (CORE-R45).
     #[inline]
     pub fn project(&self, p: [f64; 3], centre: (f64, f64), scale: f64) -> Option<(f64, f64, f64)> {
@@ -139,4 +227,33 @@ pub fn line(x0: i32, y0: i32, x1: i32, y1: i32) -> impl Iterator<Item = (i32, i3
         }
         Some(p)
     })
+}
+
+/// Walk the Bresenham line [`line`] from `(x0, y0)` to `(x1, y1)` as a stroke: `f(k, x,
+/// y, (dx, dy))` gets each cell's index `k` along the line and the step into it, so a
+/// scene can pick a glyph per step (CORE-R62). The first cell takes its outgoing step,
+/// and a lone cell `(0, 1)`, a step down a column. [`draw::step_glyph`] is the default
+/// glyph policy.
+///
+/// [`draw::step_glyph`]: crate::draw::step_glyph
+pub fn stroked_line(
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+    mut f: impl FnMut(i32, i32, i32, (i32, i32)),
+) {
+    let mut cells = line(x0, y0, x1, y1).peekable();
+    let mut prev: Option<(i32, i32)> = None;
+    let mut k = 0;
+    while let Some((x, y)) = cells.next() {
+        let step = match (prev, cells.peek()) {
+            (Some((px, py)), _) => (x - px, y - py),
+            (None, Some(&(nx, ny))) => (nx - x, ny - y),
+            (None, None) => (0, 1),
+        };
+        f(k, x, y, step);
+        prev = Some((x, y));
+        k += 1;
+    }
 }

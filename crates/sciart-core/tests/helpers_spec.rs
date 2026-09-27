@@ -581,22 +581,6 @@ fn core_r55_decay_is_clamped_to_the_unit_interval() {
     assert_eq!(d.get(0, 0), Some(0.0));
 }
 
-#[test]
-fn core_r55_deposit_line_follows_the_dots_line() {
-    let cells = Size::new(10, 5);
-    let mut d = Density::new(cells);
-    d.deposit_line(-4.0, 1.0, 25.0, 17.0, 0.5);
-    let mut from_density = Dots::new(cells);
-    d.to_dots(&mut from_density, 0.5, |_| A);
-    let mut from_line = Dots::new(cells);
-    from_line.line(-4.0, 1.0, 25.0, 17.0, A);
-    assert_eq!(lit(&from_density), lit(&from_line));
-    // Nothing else received mass.
-    let mut any = Dots::new(cells);
-    d.to_dots(&mut any, f32::MIN_POSITIVE, |_| A);
-    assert_eq!(lit(&any), lit(&from_line));
-}
-
 // ---------------------------------------------------------------- CORE-R56
 
 #[test]

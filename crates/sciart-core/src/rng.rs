@@ -1,4 +1,5 @@
-//! A tiny generator for hot inner loops (SPEC-001 CORE-R57).
+//! A tiny generator for hot inner loops (SPEC-001 CORE-R57), and stateless hashes on its
+//! finaliser (CORE-R70).
 //!
 //! `ctx.rng` (ChaCha8) is the scene's one source of randomness (GEN-R7, ADR-0008), but
 //! it is a 136-byte state with block buffering behind `&mut`. A Monte-Carlo sweep over a
@@ -32,21 +33,26 @@ impl SplitMix64 {
         Self::new(rng.next_u64())
     }
 
-    /// The next 64 random bits. Seed 0 yields `0xE220A8397B1DCDAF` first.
+    /// The SplitMix64 finaliser: a bijective 64-bit avalanche, so neighbouring keys give
+    /// independent-looking outputs (CORE-R70).
     #[inline]
-    pub fn next_u64(&mut self) -> u64 {
-        self.state = self.state.wrapping_add(Self::GAMMA);
-        let mut z = self.state;
+    pub const fn mix(mut z: u64) -> u64 {
         z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         z ^ (z >> 31)
     }
 
+    /// The next 64 random bits. Seed 0 yields `0xE220A8397B1DCDAF` first.
+    #[inline]
+    pub fn next_u64(&mut self) -> u64 {
+        self.state = self.state.wrapping_add(Self::GAMMA);
+        Self::mix(self.state)
+    }
+
     /// Uniform in `[0, 1)` from the top 53 bits: every value is a multiple of 2⁻⁵³.
     #[inline]
     pub fn next_f64(&mut self) -> f64 {
-        const SCALE: f64 = 1.0 / (1u64 << 53) as f64;
-        (self.next_u64() >> 11) as f64 * SCALE
+        unit(self.next_u64())
     }
 
     /// Uniform in `0..n` (`0` for `n = 0`), by Lemire's multiply-shift on the top 32
@@ -56,6 +62,28 @@ impl SplitMix64 {
         // (r · n) >> 32 < n for r < 2³², so the narrowing cast is lossless.
         (((self.next_u64() >> 32) * u64::from(n)) >> 32) as u32
     }
+}
+
+/// `[0, 1)` from the top 53 bits of `z`: every value is a multiple of 2⁻⁵³.
+#[inline]
+fn unit(z: u64) -> f64 {
+    const SCALE: f64 = 1.0 / (1u64 << 53) as f64;
+    (z >> 11) as f64 * SCALE
+}
+
+/// A stateless uniform in `[0, 1)` keyed by `key`: the top 53 bits of
+/// [`SplitMix64::mix`]`(key)` (CORE-R70). For per-cell dither and speckle that must hold
+/// still from frame to frame, e.g. `hash01(salt ^ cell_key(x, y))`.
+#[inline]
+pub fn hash01(key: u64) -> f64 {
+    unit(SplitMix64::mix(key))
+}
+
+/// A cell's coordinates packed into one hash key, `x` in the high and `y` in the low 32
+/// bits (two's complement), so distinct cells get distinct keys (CORE-R70).
+#[inline]
+pub const fn cell_key(x: i32, y: i32) -> u64 {
+    ((x as u32 as u64) << 32) | y as u32 as u64
 }
 
 impl RngCore for SplitMix64 {

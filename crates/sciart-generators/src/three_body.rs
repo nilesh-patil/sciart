@@ -5,6 +5,7 @@
 //! lattice, so the state is a pure function of the substep count (TB-A5) and the
 //! unstable orbits never get the time to show their instability.
 
+use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::{geom, ode};
@@ -30,9 +31,6 @@ const HEAD_IN: f64 = 0.3;
 /// Fraction of its period the moth's trail spans: its single period folds into a knot
 /// at small sizes, so only the newest loops are shown and the older ones dissolve.
 const MOTH_TRAIL: f64 = 0.45;
-/// Levels below this are not drawn: every theme keeps level 0 visible, so a fade
-/// must end by removing ink, not by dimming it to nothing.
-const MIN_LEVEL: f64 = 12.0;
 /// Body `i` is drawn in `ROLES[i]` (SPEC-002 Inks).
 const ROLES: [Role; 3] = [Role::Hot, Role::Cold, Role::Accent];
 const HEAD: Glyph = Glyph::new('●', '@');
@@ -242,14 +240,11 @@ impl View {
         )
     }
 
-    /// Braille dot coordinates of `(x, y)`: dot `j` is centred at cell `(j + 0.5)/2`
-    /// across and `(j + 0.5)/4` down, so the dot a point rounds to lies in its cell.
+    /// Braille dot coordinates of `(x, y)` (CORE-R64), so the dot a point rounds to
+    /// lies in its cell.
     fn dot(&self, x: f64, y: f64) -> (f64, f64) {
         let (cx, cy) = self.cell(x, y);
-        (
-            cx * f64::from(Dots::CELL_W) - 0.5,
-            cy * f64::from(Dots::CELL_H) - 0.5,
-        )
+        Dots::from_cells(cx, cy)
     }
 }
 
@@ -416,12 +411,12 @@ impl ThreeBody {
             let pairs = trail.iter().zip(trail.iter().skip(1).chain([&head]));
             for (k, (&a, &b)) in pairs.enumerate() {
                 let level = trail_level((len - 1 - k) as f64 / SAMPLES as f64, span) * fade;
-                if level < MIN_LEVEL {
+                if level < MIN_VISIBLE_LEVEL {
                     continue;
                 }
                 let (p, q) = (view.dot(a.0, a.1), view.dot(b.0, b.1));
                 self.dots
-                    .line(p.0, p.1, q.0, q.1, Ink::new(ROLES[i], level as u8));
+                    .line(p.0, p.1, q.0, q.1, Ink::new(ROLES[i], ink::level(level)));
             }
         }
     }
@@ -431,10 +426,10 @@ impl ThreeBody {
     /// cell in ASCII) and never thickens a trail.
     fn triangle(&mut self) {
         let level = 80.0 * self.phase.fade;
-        if level < MIN_LEVEL {
+        if level < MIN_VISIBLE_LEVEL {
             return;
         }
-        let ink = Ink::new(Role::Dim, level as u8);
+        let ink = Ink::new(Role::Dim, ink::level(level));
         for (i, j) in [(0, 1), (1, 2), (2, 0)] {
             let (a, b) = (self.bodies.body(i), self.bodies.body(j));
             let (p, q) = (self.view.dot(a.0, a.1), self.view.dot(b.0, b.1));
@@ -459,11 +454,7 @@ impl ThreeBody {
     /// Whether any dot of the cell holding dot `(x, y)` is lit (off-lattice: `true`).
     fn cell_lit(&self, x: i32, y: i32) -> bool {
         let (cx, cy) = (x.div_euclid(Dots::CELL_W), y.div_euclid(Dots::CELL_H));
-        let (x0, y0) = (cx * Dots::CELL_W, cy * Dots::CELL_H);
-        let d = self.dots.dot_size();
-        let on = (0..i32::from(d.width())).contains(&x) && (0..i32::from(d.height())).contains(&y);
-        !on || (0..Dots::CELL_H)
-            .any(|sy| (0..Dots::CELL_W).any(|sx| self.dots.is_lit(x0 + sx, y0 + sy)))
+        self.dots.cell_mask(cx, cy).is_none_or(|m| m != 0)
     }
 }
 
@@ -500,7 +491,7 @@ impl Generator for ThreeBody {
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
         let level = head_level(&self.phase);
-        if level >= MIN_LEVEL {
+        if level >= MIN_VISIBLE_LEVEL {
             for (i, role) in ROLES.iter().enumerate() {
                 let (x, y) = self.bodies.body(i);
                 let (cx, cy) = self.view.cell(x, y);
@@ -508,7 +499,7 @@ impl Generator for ThreeBody {
                     cx.floor() as i32,
                     cy.floor() as i32,
                     HEAD,
-                    Ink::new(*role, level as u8),
+                    Ink::new(*role, ink::level(level)),
                 );
             }
         }
@@ -812,7 +803,7 @@ mod tests {
             assert!(trail_level(w[1], MOTH_TRAIL) < trail_level(w[0], MOTH_TRAIL));
         }
         for f in [MOTH_TRAIL, 0.8, 0.999] {
-            assert!(trail_level(f, MOTH_TRAIL) < MIN_LEVEL, "f = {f}");
+            assert!(trail_level(f, MOTH_TRAIL) < MIN_VISIBLE_LEVEL, "f = {f}");
         }
 
         // At the end of the moth's run every lit dot lies near a sample younger than

@@ -910,8 +910,9 @@ impl Default for ElectronOrbitals {
 }
 
 impl ElectronOrbitals {
-    /// The nucleus cell, mid-[`stage`]. The projected origin sits at its middle, so a nodal
-    /// plane through the nucleus empties one whole row instead of half of two.
+    /// The nucleus cell, mid-[`stage`]. The projected origin sits on the dot at its middle
+    /// (see [`rasterise`](Self::rasterise)), so a nodal plane through the nucleus empties
+    /// one whole dot row instead of half of two.
     fn nucleus(&self) -> (i32, i32) {
         let stage = stage(self.size);
         (i32::from(stage.width()) / 2, i32::from(stage.height()) / 2)
@@ -938,40 +939,46 @@ impl ElectronOrbitals {
     /// Lit dots of the nucleus cell.
     fn nucleus_dots(&self) -> usize {
         let (x, y) = self.nucleus();
-        let (x, y) = (x * Dots::CELL_W, y * Dots::CELL_H);
-        (0..Dots::CELL_W * Dots::CELL_H)
-            .filter(|d| self.dots.is_lit(x + d % Dots::CELL_W, y + d / Dots::CELL_W))
-            .count()
+        self.dots.cell_mask(x, y).map_or(0, u8::count_ones) as usize
     }
 
     /// Project every visible point into `Dots`, orbital z up: (x, y, z) ↦ world (x, z, −y).
     /// The far dust fades out through the blended `R_FADE` window, and row h−1 is skipped
     /// while it holds the label (the dust would otherwise speckle the text).
-    fn draw(&mut self, cam: Camera) {
+    fn rasterise(&mut self, cam: Camera) {
         self.dots.clear();
         let Some(atom) = &self.atom else {
             return;
         };
         let (ln_r90, ln_g) = atom.framing();
         let (inv_r90, scale) = ((-ln_r90).exp(), self.radius() * ln_g.exp());
-        let (dw, dh) = (f64::from(Dots::CELL_W), f64::from(Dots::CELL_H));
         // Dot rows round to the nearest integer, so a dot lands on row h−1 from here.
         let floor = if label_shown(self.size) {
-            dh * f64::from(self.size.height() - 1) - 0.5
+            f64::from(Dots::CELL_H) * f64::from(self.size.height() - 1) - 0.5
         } else {
             f64::INFINITY
         };
-        let (proj, centre) = (cam.projector(), self.centre());
+        // The origin is snapped half a dot right and down of the nucleus cell's exact
+        // middle, onto the centre of its dot (2x + 1, 4y + 2) (CORE-R64 coordinates), so a
+        // nodal plane through the nucleus runs along one dot row and empties it rather
+        // than half-emptying the two rows either side.
+        let (cx, cy) = self.centre();
+        let centre = (
+            cx + 0.5 / f64::from(Dots::CELL_W),
+            cy + 0.5 / f64::from(Dots::CELL_H),
+        );
+        let proj = cam.projector();
         let dots = &mut self.dots;
         atom.for_each_visible(atom.fade(), |_, _, [x, y, z], sign| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             if let Some((sx, sy, depth)) = proj.project(world, centre, scale) {
-                if sy * dh >= floor {
+                let (dx, dy) = Dots::from_cells(sx, sy);
+                if dy >= floor {
                     return;
                 }
                 let near = ((depth + 1.0) / 2.0).clamp(0.0, 1.0);
                 let ink = ink::div(sign * (SIGN_FLOOR + SIGN_SPAN * near));
-                dots.plot(sx * dw, sy * dh, ink);
+                dots.plot(dx, dy, ink);
             }
         });
     }
@@ -1034,7 +1041,7 @@ impl Generator for ElectronOrbitals {
                 self.atom = Some(Atom::new(first, stage(size), rng));
             }
         }
-        self.draw(self.camera());
+        self.rasterise(self.camera());
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -1045,7 +1052,7 @@ impl Generator for ElectronOrbitals {
             return;
         }
         atom.step(dt);
-        self.draw(self.camera());
+        self.rasterise(self.camera());
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1067,6 +1074,7 @@ mod tests {
     use std::collections::HashSet;
 
     use super::*;
+    use sciart_core::geom::v3::norm;
 
     type Point = ([f64; 3], f64, f64, f64, f64);
 
@@ -1125,10 +1133,6 @@ mod tests {
         let rad =
             radial_integral(|r| radial(a.n(), a.l(), r) * radial(b.n(), b.l(), r) * r * r * r);
         std::array::from_fn(|i| rad * angular_integral(|d| solid(a, d) * solid(b, d) * d[i]))
-    }
-
-    fn norm(v: [f64; 3]) -> f64 {
-        v.iter().map(|x| x * x).sum::<f64>().sqrt()
     }
 
     #[test]
@@ -1516,7 +1520,7 @@ mod tests {
         s.resize(size, &mut ctx);
         let rng = SplitMix64::from_rng(&mut ctx.rng);
         s.atom = Some(Atom::new(first, stage(size), rng));
-        s.draw(Camera {
+        s.rasterise(Camera {
             yaw: 0.3,
             pitch: PITCH_LOW,
             distance: DISTANCE,
@@ -1611,7 +1615,7 @@ mod tests {
     /// so this sweeps its camera over any part of the rock.
     fn at_clock(s: &mut ElectronOrbitals, k: usize, t: f64) {
         s.atom.as_mut().unwrap().t = ROCK_PERIOD * k as f64 + t;
-        s.draw(s.camera());
+        s.rasterise(s.camera());
     }
 
     /// `scene` redrawn with the scene's own camera `t` s into the state's visit.

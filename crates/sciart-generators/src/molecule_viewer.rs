@@ -12,7 +12,9 @@ use std::f64::consts::TAU;
 use rand::Rng;
 use sciart_core::draw;
 use sciart_core::ease;
+use sciart_core::geom::v3::{dot, norm, sub};
 use sciart_core::geom::{self, ASPECT};
+use sciart_core::ink::level;
 use sciart_core::prelude::*;
 
 use El::{C, H, N, O};
@@ -325,11 +327,7 @@ pub(crate) fn c60(r56: f64, r66: f64) -> (Vec<Atom>, Vec<Bond>) {
 }
 
 pub(crate) fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
-    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
-}
-
-fn norm(p: [f64; 3]) -> f64 {
-    dist(p, [0.0; 3])
+    norm(sub(a, b))
 }
 
 /// Atomic mass, u (IUPAC abridged), used only to find the centre of mass.
@@ -645,11 +643,10 @@ pub(crate) fn scale(view: &View, model: &Model, s: f64) -> f64 {
 }
 
 /// One frame's projection: the camera's projector (two `sin_cos` pairs per frame, not
-/// per atom), its distance, the view centre, the scale and the gallery scale.
+/// per atom), the view centre, the scale and the gallery scale.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Lens {
     proj: Projector,
-    distance: f64,
     centre: (f64, f64),
     /// Rows per Å ([`scale`]).
     k: f64,
@@ -661,7 +658,6 @@ impl Lens {
     pub fn new(cam: &Camera, view: &View, model: &Model, s: f64) -> Self {
         Self {
             proj: cam.projector(),
-            distance: cam.distance,
             centre: (view.cx, view.cy),
             k: scale(view, model, s),
             r_eff: model.r_eff,
@@ -672,7 +668,7 @@ impl Lens {
     /// Project one atom; `None` only for a degenerate view.
     pub fn project(&self, atom: &Atom, bodies: Bodies) -> Option<Proj> {
         let (x, y, depth) = self.proj.project(atom.pos, self.centre, self.k)?;
-        let magnify = self.distance / (self.distance - depth);
+        let magnify = self.proj.magnification(depth);
         let n = nu(depth, self.r_eff);
         let r = ball_radius(atom.el) * self.k * magnify;
         let body = bodies.of(atom.el);
@@ -748,11 +744,10 @@ const REAR_BOND: Glyph = Glyph::new('·', '.');
 /// (Blinn–Phong, `n·H > 0.95`).
 pub(crate) fn shade(nx: f64, ny: f64) -> (f64, bool) {
     let n = [nx, -ny, (1.0 - nx * nx - ny * ny).max(0.0).sqrt()];
-    let dot = |v: [f64; 3]| n[0] * v[0] + n[1] * v[1] + n[2] * v[2];
-    let ndl = dot(LIGHT);
+    let ndl = dot(n, LIGHT);
     (
         AMBIENT + (1.0 - AMBIENT) * ndl.max(0.0),
-        dot(HALF) > SPECULAR,
+        dot(n, HALF) > SPECULAR,
     )
 }
 
@@ -785,18 +780,8 @@ pub(crate) fn covers(p: &Proj, x: i32, y: i32) -> bool {
     if lozenge(p) {
         return f64::from(y) == cy && (f64::from(x) - cx).abs() <= 1.0;
     }
-    let r = p.foot;
-    if r < 0.5 {
-        return false;
-    }
-    let nx = (f64::from(x) - p.x) / (r * ASPECT);
-    let ny = (f64::from(y) - p.y) / r;
-    (nx * nx + ny * ny).sqrt() <= 1.0
-}
-
-/// An ink level from a real value, rounded and clamped to `[0, 255]`.
-fn level(v: f64) -> u8 {
-    v.round().clamp(0.0, 255.0) as u8
+    // Below half a row `disc` paints only the centre cell, already covered above.
+    p.foot >= 0.5 && draw::disc_covers(p.x, p.y, p.foot, x, y)
 }
 
 fn paint_atom(canvas: &mut Canvas, el: El, p: &Proj, s: f64) {
@@ -844,37 +829,6 @@ fn paint_atom(canvas: &mut Canvas, el: El, p: &Proj, s: f64) {
     canvas.put(cx as i32, cy as i32, Glyph::new(glyph.unicode, letter), ink);
 }
 
-/// Glyph for one Bresenham step of `(dx, dy)` cells: `─` along a row, `│` down a
-/// column, `╲`/`╱` where both change. Chosen per step, a shallow line reads `──╲──`
-/// rather than two dash runs with a gap, and a steep one `│╲│`.
-fn step_glyph(dx: i32, dy: i32) -> Glyph {
-    match (dx != 0, dy != 0) {
-        (_, false) => Glyph::new('─', '-'),
-        (false, true) => Glyph::new('│', '|'),
-        _ if (dx > 0) == (dy > 0) => Glyph::new('╲', '\\'),
-        _ => Glyph::new('╱', '/'),
-    }
-}
-
-/// Walk the Bresenham line `(x0, y0) → (x1, y1)`, handing `f` each cell's index and the
-/// glyph of the step into it (the first cell takes its outgoing step's; a lone cell is
-/// `│`).
-fn stroked_line(x0: i32, y0: i32, x1: i32, y1: i32, mut f: impl FnMut(i32, i32, i32, Glyph)) {
-    let mut cells = geom::line(x0, y0, x1, y1).peekable();
-    let mut prev: Option<(i32, i32)> = None;
-    let mut k = 0;
-    while let Some((x, y)) = cells.next() {
-        let (dx, dy) = match (prev, cells.peek()) {
-            (Some((px, py)), _) => (x - px, y - py),
-            (None, Some(&(nx, ny))) => (nx - x, ny - y),
-            (None, None) => (0, 1),
-        };
-        f(k, x, y, step_glyph(dx, dy));
-        prev = Some((x, y));
-        k += 1;
-    }
-}
-
 /// One stroke from `a` to `b` shifted by `(ox, oy)` cells: split at its midpoint into
 /// the two atoms' inks, skipping every cell either ball paints (MOL-A4). A `rear` bond
 /// (both ends in the far half) is dotted, `·` (ASCII `.`), so a cage's near face reads
@@ -889,12 +843,16 @@ fn stroke(
     let (x0, y0) = (a.x.round() as i32 + ox, a.y.round() as i32 + oy);
     let (x1, y1) = (b.x.round() as i32 + ox, b.y.round() as i32 + oy);
     let len = (x1 - x0).abs().max((y1 - y0).abs());
-    stroked_line(x0, y0, x1, y1, |k, x, y, glyph| {
+    geom::stroked_line(x0, y0, x1, y1, |k, x, y, (dx, dy)| {
         if covers(a, x, y) || covers(b, x, y) {
             return;
         }
         let ink = if 2 * k <= len { ia } else { ib };
-        let glyph = if rear { REAR_BOND } else { glyph };
+        let glyph = if rear {
+            REAR_BOND
+        } else {
+            draw::step_glyph(dx, dy)
+        };
         canvas.put(x, y, glyph, ink);
     });
 }
@@ -1057,6 +1015,7 @@ impl Generator for MoleculeViewer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sciart_core::geom::v3::{cross, unit};
 
     /// Cordero et al. (2008) covalent radii, Å.
     fn covalent(el: El) -> f64 {
@@ -1118,31 +1077,13 @@ mod tests {
     }
 
     fn angle(a: [f64; 3], centre: [f64; 3], b: [f64; 3]) -> f64 {
-        let u: [f64; 3] = std::array::from_fn(|k| a[k] - centre[k]);
-        let v: [f64; 3] = std::array::from_fn(|k| b[k] - centre[k]);
-        let dot = u[0] * v[0] + u[1] * v[1] + u[2] * v[2];
-        (dot / (norm(u) * norm(v))).acos().to_degrees()
-    }
-
-    fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-        std::array::from_fn(|k| a[k] - b[k])
-    }
-
-    fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
-        [
-            a[1] * b[2] - a[2] * b[1],
-            a[2] * b[0] - a[0] * b[2],
-            a[0] * b[1] - a[1] * b[0],
-        ]
-    }
-
-    fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
-        a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+        let (u, v) = (sub(a, centre), sub(b, centre));
+        (dot(u, v) / (norm(u) * norm(v))).acos().to_degrees()
     }
 
     fn dihedral(a: [f64; 3], b: [f64; 3], c: [f64; 3], d: [f64; 3]) -> f64 {
         let (b0, b1, b2) = (sub(a, b), sub(c, b), sub(d, c));
-        let b1n = b1.map(|v| v / norm(b1));
+        let b1n = unit(b1);
         let v = sub(b0, b1n.map(|x| x * dot(b0, b1n)));
         let w = sub(b2, b1n.map(|x| x * dot(b2, b1n)));
         dot(cross(b1n, v), w).atan2(dot(v, w)).to_degrees()
@@ -1249,7 +1190,7 @@ mod tests {
             .collect();
         assert_eq!(heavy.len(), 14);
         let normal = cross(sub(heavy[4], heavy[2]), sub(heavy[5], heavy[2]));
-        let unit = normal.map(|v| v / norm(normal));
+        let unit = unit(normal);
         for q in &heavy {
             assert!(dot(sub(*q, heavy[2]), unit).abs() < 0.05);
         }

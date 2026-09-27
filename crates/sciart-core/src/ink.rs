@@ -1,4 +1,5 @@
-//! Semantic inks (CORE-R8) and the colormap-field helpers (CORE-R46, CORE-R56, ADR-0011).
+//! Semantic inks (CORE-R8), ink levels (CORE-R66) and the colormap-field helpers
+//! (CORE-R46, CORE-R56, ADR-0011).
 
 /// What a cell *means*; themes turn roles into colors (ADR-0004, CORE-R8).
 #[non_exhaustive]
@@ -42,6 +43,19 @@ impl Default for Ink {
     fn default() -> Self {
         Self::BLANK
     }
+}
+
+/// Levels below this should not be drawn (CORE-R66): every theme keeps level 0 visible
+/// (a dim ink is still a glyph), so a fade must end by removing ink, not by dimming it to
+/// nothing. Compare the real-valued level before converting it with [`level`].
+pub const MIN_VISIBLE_LEVEL: f64 = 12.0;
+
+/// An ink level from a real value: rounded to the nearest integer and clamped to
+/// `0..=255`; NaN ⇒ 0 (CORE-R66).
+#[inline]
+pub fn level(v: f64) -> u8 {
+    // `clamp` keeps NaN, and the saturating `as u8` maps it to 0.
+    v.round().clamp(0.0, 255.0) as u8
 }
 
 /// A [`Role::Seq`] ink for `v ∈ [0, 1]`: 0 ⇒ level 0, 1 ⇒ 255; clamped, NaN ⇒ 0

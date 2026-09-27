@@ -1,5 +1,5 @@
 //! Dense 2-D fields for automata, lattices and PDEs (SPEC-001 CORE-R33..R36, CORE-R43,
-//! CORE-R48, CORE-R52, CORE-R53).
+//! CORE-R48, CORE-R52, CORE-R53, CORE-R68, CORE-R69).
 //!
 //! One contiguous row-major `Vec<T>`: rows are cache-line friendly for the
 //! `for y { for x { .. } }` sweeps every grid scene does, and the same layout as
@@ -101,6 +101,15 @@ impl<T: Clone> Grid<T> {
         self.width = size.width();
         self.height = size.height();
     }
+
+    /// Change the dimensions to `size` with every cell `fill`, discarding the contents
+    /// but reusing the buffer: the cheap reshape for a buffer about to be overwritten.
+    fn reshape(&mut self, size: Size, fill: T) {
+        self.cells.clear();
+        self.cells.resize(size.area(), fill);
+        self.width = size.width();
+        self.height = size.height();
+    }
 }
 
 impl<T> Grid<T> {
@@ -135,6 +144,12 @@ impl<T> Grid<T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
+    }
+
+    /// Whether the grid is exactly `size` (never true for the empty grid).
+    #[inline]
+    fn size_is(&self, size: Size) -> bool {
+        (self.width, self.height) == (size.width(), size.height())
     }
 
     /// Row-major buffer index of `(x, y)`, or `None` off-grid.
@@ -249,11 +264,39 @@ impl<T> Grid<T> {
     }
 }
 
-/// Source coordinate sampled by destination index `d`: cell centres aligned, so
-/// `(d + ½) / dn = (s + ½) / sn` (CORE-R43). Exact for equal sizes.
+/// Coordinate `d` on an axis of `dn` cells mapped onto an axis of `sn` cells with cell
+/// centres aligned, `(d + ½) / dn = (s + ½) / sn` (CORE-R43, CORE-R68): the convention of
+/// every resampler here and of [`SampleMap`]. `d` may be fractional (an agent's position,
+/// a pixel centre). Exact for equal sizes.
 #[inline]
-fn centre_of(d: usize, dn: usize, sn: usize) -> f64 {
-    (d as f64 + 0.5) * sn as f64 / dn as f64 - 0.5
+pub fn centre_of(d: f64, dn: usize, sn: usize) -> f64 {
+    (d + 0.5) * sn as f64 / dn as f64 - 0.5
+}
+
+/// Carry a continuous field onto a new lattice (ADR-0012, CORE-R68): `scratch` is
+/// reshaped to `size` (its old contents are discarded, its buffer reused), filled by
+/// [`resample_bilinear`] from `field`, and swapped in, so afterwards `field` has `size`
+/// and `scratch` holds the old field. No-op if `field` is empty or already `size`.
+pub fn regrid_bilinear(field: &mut Grid<f32>, size: Size, scratch: &mut Grid<f32>) {
+    if field.is_empty() || field.size_is(size) {
+        return;
+    }
+    scratch.reshape(size, 0.0);
+    resample_bilinear(field, scratch);
+    std::mem::swap(field, scratch);
+}
+
+/// [`regrid_bilinear`] for discrete states: nearest-neighbour via [`resample_nearest`]
+/// (CORE-R68), so only values present in `field` appear.
+pub fn regrid_nearest<T: Clone>(field: &mut Grid<T>, size: Size, scratch: &mut Grid<T>) {
+    if field.is_empty() || field.size_is(size) {
+        return;
+    }
+    // Any value will do as the placeholder: every cell is overwritten by the resample.
+    let fill = field.cells[0].clone();
+    scratch.reshape(size, fill);
+    resample_nearest(field, scratch);
+    std::mem::swap(field, scratch);
 }
 
 /// Fill `dst` (keeping its size) by bilinear sampling of `src`, cell-centre aligned and
@@ -282,7 +325,7 @@ pub fn resample_bilinear(src: &Grid<f32>, dst: &mut Grid<f32>) {
 /// `dn` sampling a source of `sn ≥ 1` (CORE-R43): cell-centre aligned, edge-clamped.
 #[inline]
 fn bilinear_taps(d: usize, dn: usize, sn: usize) -> (usize, usize, f32) {
-    let s = centre_of(d, dn, sn).clamp(0.0, (sn - 1) as f64);
+    let s = centre_of(d as f64, dn, sn).clamp(0.0, (sn - 1) as f64);
     let i0 = s as usize; // s ≥ 0, so truncation is floor
     let i1 = (i0 + 1).min(sn - 1);
     (i0, i1, (s - i0 as f64) as f32)
@@ -356,17 +399,6 @@ impl SampleMap {
         self.xs.extend((0..dw).map(|x| Tap::new(x, dw, sw)));
         self.ys.clear();
         self.ys.extend((0..dh).map(|y| Tap::new(y, dh, sh)));
-    }
-
-    /// The source size the map was built for.
-    pub fn src_size(&self) -> Size {
-        Size::new(self.src.0, self.src.1)
-    }
-
-    /// The destination size the map was built for (1×1 when empty).
-    pub fn dst_size(&self) -> Size {
-        let axis = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
-        Size::new(axis(self.xs.len()), axis(self.ys.len()))
     }
 
     /// Taps for destination `(x, y)`, clamped onto the table.
@@ -493,13 +525,27 @@ pub fn lattice_for(display: Size, max_nodes: usize, bucket: f64) -> Size {
     } else {
         aspect
     };
+    let full = lattice_for_aspect(aspect, max_nodes);
+    Size::new(full.width().min(dw), full.height().min(dh))
+}
+
+/// The largest lattice of aspect `w / h ≈ aspect` with `w·h ≤ max_nodes`, at least 1×1
+/// and at most `u16::MAX` per axis (CORE-R69): the uncapped shape behind [`lattice_for`],
+/// for a scene that picks its own aspect (say, a fixed-bucket channel) rather than a
+/// display's. Never panics: a zero, negative or NaN `aspect` gives 1 column, and `max_nodes
+/// = 0` gives 1×1.
+pub fn lattice_for_aspect(aspect: f64, max_nodes: usize) -> Size {
+    if max_nodes == 0 {
+        return Size::new(1, 1);
+    }
     // h·(aspect·h) = max_nodes. Flooring both axes (and the w ≤ max/h guard for float
-    // round-off and the 1-wide/1-tall extremes) keeps w·h ≤ max_nodes.
+    // round-off and the 1-wide/1-tall extremes) keeps w·h ≤ max_nodes; the float → usize
+    // casts saturate (NaN ⇒ 0), so the clamps also absorb degenerate aspects.
     let h_ideal = (max_nodes as f64 / aspect).sqrt();
     let h = (h_ideal as usize).clamp(1, max_nodes);
     let w = ((h_ideal * aspect) as usize).clamp(1, max_nodes / h);
-    // Both are ≤ the display's u16 axes after the `min`, so the casts are lossless.
-    Size::new(w.min(usize::from(dw)) as u16, h.min(usize::from(dh)) as u16)
+    let axis = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    Size::new(axis(w), axis(h))
 }
 
 /// Which cells count as neighbours (CORE-R35).

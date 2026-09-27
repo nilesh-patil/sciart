@@ -4,7 +4,8 @@
 //! SPEC-001 promises no heap traffic after construction for `ParticlePool` (CORE-R28),
 //! `Trail` (CORE-R29), `Grid::step` after its first call (CORE-R36), the rasters
 //! (CORE-R41, CORE-R42), resampling (CORE-R43), the leapfrog integrator (CORE-R44) and
-//! the shared M10 scene helpers (CORE-R49..R59).
+//! the shared M10 scene helpers (CORE-R49..R59) and the post-M10 audit helpers
+//! (CORE-R60..R70).
 //! Counters are per thread, so libtest's parallel threads do not pollute each other.
 
 use std::fmt::Write as _;
@@ -12,7 +13,7 @@ use std::hint::black_box;
 
 use sciart_core::prelude::*;
 use sciart_core::raster::{Dots, Pixels};
-use sciart_core::{draw, grid, ink, ode};
+use sciart_core::{draw, geom, grid, ink, ode, rng};
 use sciart_testalloc::{Allocs, CountingAlloc, measure};
 
 #[global_allocator]
@@ -340,7 +341,7 @@ fn core_r51_r55_dots_line_and_density_do_not_allocate() {
             );
             dots.line(x0, y0, x1, y1, ink);
             density.deposit(x0, y0, 0.5);
-            density.deposit_line(x0, y0, x1, y1, 0.25);
+            density.deposit(x1, y1, 0.25);
         }
         density.decay(0.9);
         density.to_dots(&mut dots, 0.3, |v| ink::seq(f64::from(v)));
@@ -434,4 +435,44 @@ fn core_r56_r57_r58_r59_scalar_helpers_do_not_allocate() {
     });
     assert_free("soft_clip / SplitMix64 / InverseCdf / tridiag_solve", stats);
     black_box(sum);
+}
+
+#[test]
+fn core_r62_r64_r65_r67_r68_audit_helpers_do_not_allocate() {
+    let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+    let mut dots = Dots::new(Size::new(80, 24));
+    let mut pixels = Pixels::new(Size::new(80, 24));
+    let mut field = Grid::new(Size::new(60, 40), 0.5f32);
+    let mut scratch = Grid::new(Size::new(60, 40), 0.0f32);
+    let mut spins = Grid::new(Size::new(60, 40), 1i8);
+    let mut spin_scratch = Grid::new(Size::new(60, 40), 1i8);
+    let (sum, stats) = measure(|| {
+        let mut sum = 0.0;
+        geom::stroked_line(0, 0, 70, 20, |k, x, y, (dx, dy)| {
+            canvas.put(
+                x,
+                y,
+                draw::step_glyph(dx, dy),
+                Ink::new(Role::Wave, k as u8),
+            );
+        });
+        let end = draw::label(&mut canvas, 1, 23, "T/Tc 1.25 λ", Ink::new(Role::Text, 200));
+        for i in 0..200 {
+            let (x, y) = Dots::from_cells(f64::from(i) * 0.4, f64::from(i % 24));
+            dots.plot(x, y, Ink::new(Role::Star, ink::level(f64::from(i))));
+            sum += f64::from(dots.cell_mask(i % 80, i % 24).unwrap_or(0));
+            sum += rng::hash01(rng::cell_key(i, -i)) + geom::wrap_angle(f64::from(i));
+            sum += f64::from(u8::from(draw::disc_covers(40.0, 12.0, 5.0, i % 80, i % 24)));
+        }
+        pixels.shade(|x, y| ink::seq(f64::from(x + y) / 200.0));
+        // Shrinking regrids reuse the scratch buffers.
+        grid::regrid_bilinear(&mut field, Size::new(50, 30), &mut scratch);
+        grid::regrid_nearest(&mut spins, Size::new(50, 30), &mut spin_scratch);
+        sum + f64::from(end)
+    });
+    assert_free(
+        "stroked_line / label / from_cells / cell_mask / shade / regrid",
+        stats,
+    );
+    black_box((sum, field.len(), spins.len()));
 }
