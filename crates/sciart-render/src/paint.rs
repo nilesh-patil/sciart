@@ -1,13 +1,20 @@
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
-use sciart_core::{Canvas, Role};
+use sciart_core::{Canvas, Ink, Role};
 
 use crate::Theme;
 
 /// Write every canvas cell that fits inside `area` into `buf` (RND-R3).
+///
+/// A `Role::Background` ink means "terminal default", for the foreground (RND-R3) and
+/// for the cell background (RND-R7, CORE-R40) alike.
 pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
     let width = usize::from(canvas.size().width());
+    let rgb = |ink: Ink, x, y| {
+        let c = theme.color(ink, x, y);
+        Color::Rgb(c.0, c.1, c.2)
+    };
     for (i, cell) in canvas.cells().iter().enumerate() {
         let (cx, cy) = ((i % width) as u16, (i / width) as u16);
         if cx >= area.width || cy >= area.height {
@@ -16,13 +23,14 @@ pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
         let Some(out) = buf.cell_mut((area.x + cx, area.y + cy)) else {
             continue;
         };
-        if cell.ink.role == Role::Background {
-            out.set_char(cell.ch).set_style(Style::reset());
-        } else {
-            let rgb = theme.color(cell.ink, cx, cy);
-            out.set_char(cell.ch)
-                .set_style(Style::reset().fg(Color::Rgb(rgb.0, rgb.1, rgb.2)));
+        let mut style = Style::reset();
+        if cell.ink.role != Role::Background {
+            style = style.fg(rgb(cell.ink, cx, cy));
         }
+        if cell.bg.role != Role::Background {
+            style = style.bg(rgb(cell.bg, cx, cy));
+        }
+        out.set_char(cell.ch).set_style(style);
     }
 }
 
@@ -50,6 +58,33 @@ mod tests {
         assert_eq!(buf[(0, 0)].fg, Color::Reset);
         assert_eq!(buf[(1, 1)].symbol(), "★");
         assert_eq!(buf[(1, 1)].fg, Color::Rgb(255, 255, 255));
+    }
+
+    #[test]
+    fn rnd_r7_paints_the_cell_background_ink() {
+        let mut canvas = Canvas::new(Size::new(3, 1), GlyphMode::Unicode);
+        let (top, bottom) = (Ink::new(Role::Seq, 40), Ink::new(Role::Div, 250));
+        canvas.put_bg(0, 0, Glyph::new('▀', '#'), top, bottom);
+        canvas.put(1, 0, Glyph::ascii('x'), top);
+        let area = Rect::new(0, 0, 3, 1);
+        let mut buf = Buffer::empty(area);
+        buf[(1, 0)].set_bg(Color::Red); // stale background must be reset
+
+        paint(&canvas, Theme::Astro, area, &mut buf);
+
+        let rgb = |ink| {
+            let c = Theme::Astro.color(ink, 0, 0);
+            Color::Rgb(c.0, c.1, c.2)
+        };
+        assert_eq!(buf[(0, 0)].symbol(), "▀");
+        assert_eq!(buf[(0, 0)].fg, rgb(top));
+        assert_eq!(buf[(0, 0)].bg, rgb(bottom));
+        assert_eq!(
+            buf[(1, 0)].bg,
+            Color::Reset,
+            "no bg ink: default background"
+        );
+        assert_eq!(buf[(2, 0)].bg, Color::Reset);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use sciart_core::{Ink, Role};
+use sciart_core::{Ink, Role, ink};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Rgb(pub u8, pub u8, pub u8);
@@ -38,15 +38,166 @@ impl Theme {
 
     pub fn color(self, ink: Ink, x: u16, y: u16) -> Rgb {
         let level = f64::from(ink.level) / 255.0;
-        match self {
-            Theme::Astro => scale(astro_base(ink.role), 0.3 + 0.7 * level),
-            Theme::Rainbow => hsv(cell_hue(x, y), 1.0, 0.35 + 0.65 * level),
-            Theme::Mono => {
-                let g = 40 + (u16::from(ink.level) * 215 / 255) as u8;
-                Rgb(g, g, g)
-            }
+        match (self, ink.role) {
+            // Colormap roles ignore the per-cell hash and the role-hue scaling: a field
+            // needs one smooth, perceptually ordered ramp (RND-R6, ADR-0011).
+            (Theme::Astro, Role::Seq) => gradient(&INFERNO, ink::seq_value(ink)),
+            (Theme::Astro, Role::Div) => gradient(&ASTRO_DIV, div_pos(ink)),
+            (Theme::Rainbow, Role::Seq) => gradient(&TURBO, ink::seq_value(ink)),
+            (Theme::Rainbow, Role::Div) => gradient(&BLUE_RED, div_pos(ink)),
+            (Theme::Mono, Role::Seq) => mono_table().seq[usize::from(ink.level)],
+            (Theme::Mono, Role::Div) => mono_table().div[usize::from(ink.level)],
+            (Theme::Mono, _) => grey(ink.level),
+            (Theme::Astro, role) => scale(astro_base(role), 0.3 + 0.7 * level),
+            (Theme::Rainbow, _) => hsv(cell_hue(x, y), 1.0, 0.35 + 0.65 * level),
         }
     }
+}
+
+/// `mono`'s ramp for object roles: level 0 stays visible (40) on a black terminal.
+fn grey(level: u8) -> Rgb {
+    let g = 40 + (u16::from(level) * 215 / 255) as u8;
+    Rgb(g, g, g)
+}
+
+// `mono` colormaps (RND-R6). Fields paint whole regions, often as cell backgrounds, so
+// unlike `grey` their zero must read as "nothing": a floor just above black rather than
+// grey 40, which washed out every dark region. Both ramps are linear in CIE L*, so equal
+// level steps look like equal brightness steps.
+//
+// Grey has one channel, so `Div` cannot be both symmetric in |v| and signed. It keeps
+// zero near black on both sides (zero crossings stay dark, luminance stays monotone in
+// |v|) and encodes the sign in the slope: positive climbs to white (L* 100), negative
+// only to a dim grey (L* 45, just below mid-grey). At equal |v| the positive side is
+// always brighter (ΔL* = 55·|v|), and the extremes sit 55 L* apart, so alternating lobes
+// read as bright/dim. The cost: a strong negative matches a weak positive (|v| ≈ 0.43);
+// scenes that need an exact sign read should also pick glyphs by sign.
+
+/// L* of level 0 (`Seq`) and of zero (`Div`): grey 13 on the sRGB curve.
+const MONO_FLOOR_L: f64 = 3.5;
+/// L* the negative side of `Div` reaches at −1 (grey ≈ 106).
+const MONO_NEG_MAX_L: f64 = 45.0;
+
+struct MonoTable {
+    seq: [Rgb; 256],
+    div: [Rgb; 256],
+}
+
+/// Built once: the sRGB transfer needs `powf`, too costly to evaluate per painted cell.
+fn mono_table() -> &'static MonoTable {
+    static TABLE: std::sync::LazyLock<MonoTable> = std::sync::LazyLock::new(|| {
+        let mut seq = [Rgb(0, 0, 0); 256];
+        let mut div = [Rgb(0, 0, 0); 256];
+        for level in 0..=255u8 {
+            let ink = Ink::new(Role::Seq, level);
+            let s = MONO_FLOOR_L + (100.0 - MONO_FLOOR_L) * ink::seq_value(ink);
+            seq[usize::from(level)] = lightness_grey(s);
+            let v = ink::div_value(ink);
+            let top = if v >= 0.0 { 100.0 } else { MONO_NEG_MAX_L };
+            div[usize::from(level)] = lightness_grey(MONO_FLOOR_L + (top - MONO_FLOOR_L) * v.abs());
+        }
+        MonoTable { seq, div }
+    });
+    &TABLE
+}
+
+/// The sRGB grey of CIE lightness `l ∈ [0, 100]` (D65; CIE 15 / IEC 61966-2-1).
+/// Monotone in `l`, so a monotone L* ramp stays monotone after rounding.
+fn lightness_grey(l: f64) -> Rgb {
+    const KAPPA: f64 = 24389.0 / 27.0;
+    let l = l.clamp(0.0, 100.0);
+    let y = if l > 8.0 {
+        ((l + 16.0) / 116.0).powi(3)
+    } else {
+        l / KAPPA
+    };
+    let c = if y <= 0.003_130_8 {
+        12.92 * y
+    } else {
+        1.055 * y.powf(1.0 / 2.4) - 0.055
+    };
+    let g = (c * 255.0).round().clamp(0.0, 255.0) as u8;
+    Rgb(g, g, g)
+}
+
+// Colormap stops, evenly spaced over levels 0..=255 (RND-R6). Each is non-decreasing in
+// luminance away from its low end (Seq) or its centre (Div); the RND-R1/R6 tests check
+// every level.
+
+/// Inferno-like: deep violet → purple → red → orange → pale yellow.
+const INFERNO: [Rgb; 6] = [
+    Rgb(8, 5, 30),
+    Rgb(72, 12, 104),
+    Rgb(160, 42, 96),
+    Rgb(228, 90, 40),
+    Rgb(250, 175, 20),
+    Rgb(252, 250, 160),
+];
+
+/// Cyan-blue for negative, a centre just above the background, orange for positive.
+const ASTRO_DIV: [Rgb; 5] = [
+    Rgb(120, 215, 255),
+    Rgb(40, 115, 205),
+    Rgb(22, 24, 36),
+    Rgb(205, 95, 30),
+    Rgb(255, 195, 95),
+];
+
+/// Turbo-like hue sweep (indigo → blue → cyan → green → yellow → red). Unlike real
+/// turbo, its ends are lifted so luminance never falls (RND-R6).
+const TURBO: [Rgb; 6] = [
+    Rgb(48, 18, 90),
+    Rgb(45, 100, 235),
+    Rgb(30, 195, 205),
+    Rgb(140, 230, 70),
+    Rgb(250, 175, 30),
+    Rgb(255, 100, 110),
+];
+
+/// Blue for negative, near-black at zero, red for positive.
+const BLUE_RED: [Rgb; 5] = [
+    Rgb(80, 140, 255),
+    Rgb(40, 70, 200),
+    Rgb(24, 22, 34),
+    Rgb(195, 40, 40),
+    Rgb(255, 100, 85),
+];
+
+/// Position of a `Div` ink along its colormap, `[−1, 1] → [0, 1]`: level 128 (zero) lands
+/// exactly on the centre stop, through core's inverse of `ink::div` (CORE-R46, CORE-R56).
+fn div_pos(ink: Ink) -> f64 {
+    0.5 * (ink::div_value(ink) + 1.0)
+}
+
+/// Piecewise-linear interpolation of evenly spaced `stops` (at least two) at
+/// `pos ∈ [0, 1]`.
+///
+/// Rounding each channel on its own lets `r + g + b` dip by one between neighbouring
+/// levels wherever channels move in opposite directions (every hue sweep does), which
+/// would break RND-R6's monotone luminance. So the channel *sum* is rounded as a whole,
+/// and the ±1 of slack goes to the channel whose own rounding was furthest off.
+fn gradient(stops: &[Rgb], pos: f64) -> Rgb {
+    let segments = stops.len().saturating_sub(1).max(1);
+    let x = pos.clamp(0.0, 1.0) * segments as f64;
+    let i = (x as usize).min(segments - 1);
+    let t = x - i as f64;
+    let (a, b) = (stops[i], stops.get(i + 1).copied().unwrap_or(stops[i]));
+    let lerp = |p: u8, q: u8| f64::from(p) + (f64::from(q) - f64::from(p)) * t;
+    let exact = [lerp(a.0, b.0), lerp(a.1, b.1), lerp(a.2, b.2)];
+    let mut out = exact.map(f64::round);
+    // Each channel is off by at most ½, so the slack is −1, 0 or +1.
+    let slack = exact.iter().sum::<f64>().round() - out.iter().sum::<f64>();
+    let err = |k: usize, out: &[f64; 3]| out[k] - exact[k];
+    if slack > 0.0 {
+        // Rounded down the most ⇒ strictly below its exact value ≤ 255: room for +1.
+        let k = (0..3).min_by(|&p, &q| err(p, &out).total_cmp(&err(q, &out)));
+        out[k.unwrap_or(0)] += 1.0;
+    } else if slack < 0.0 {
+        let k = (0..3).max_by(|&p, &q| err(p, &out).total_cmp(&err(q, &out)));
+        out[k.unwrap_or(0)] -= 1.0;
+    }
+    let channel = |v: f64| v.clamp(0.0, 255.0) as u8;
+    Rgb(channel(out[0]), channel(out[1]), channel(out[2]))
 }
 
 fn astro_base(role: Role) -> Rgb {
@@ -100,7 +251,7 @@ fn hsv(h: f64, s: f64, v: f64) -> Rgb {
 mod tests {
     use super::*;
 
-    const ROLES: [Role; 12] = [
+    const ROLES: [Role; 14] = [
         Role::Background,
         Role::Dim,
         Role::Star,
@@ -113,7 +264,23 @@ mod tests {
         Role::Structure,
         Role::Accent,
         Role::Text,
+        Role::Seq,
+        Role::Div,
     ];
+
+    fn luma(Rgb(r, g, b): Rgb) -> u32 {
+        u32::from(r) + u32::from(g) + u32::from(b)
+    }
+
+    /// How far a level is from "nothing": the level itself, except for `Div`, whose
+    /// zero sits at 128 (RND-R6 amends RND-R1).
+    fn magnitude(role: Role, level: u8) -> u8 {
+        if role == Role::Div {
+            level.abs_diff(128)
+        } else {
+            level
+        }
+    }
 
     #[test]
     fn rnd_r1_color_is_pure() {
@@ -128,13 +295,157 @@ mod tests {
     }
 
     #[test]
-    fn rnd_r1_brighter_level_is_not_darker() {
-        let luma = |Rgb(r, g, b): Rgb| u32::from(r) + u32::from(g) + u32::from(b);
+    fn rnd_r1_r6_brighter_level_is_not_darker() {
         for theme in Theme::ALL {
             for role in ROLES {
-                let lo = theme.color(Ink::new(role, 10), 5, 5);
-                let hi = theme.color(Ink::new(role, 250), 5, 5);
-                assert!(luma(hi) >= luma(lo), "{theme:?}/{role:?}");
+                // For Div, 128 ± 120 are both "bright" and 128 ± 5 are both "dim".
+                let (lo, hi) = if role == Role::Div {
+                    ([123, 133], [8, 248])
+                } else {
+                    ([10, 10], [250, 250])
+                };
+                for (l, h) in lo.into_iter().zip(hi) {
+                    assert!(magnitude(role, h) >= magnitude(role, l));
+                    let dim = theme.color(Ink::new(role, l), 5, 5);
+                    let bright = theme.color(Ink::new(role, h), 5, 5);
+                    assert!(luma(bright) >= luma(dim), "{theme:?}/{role:?} {l} vs {h}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r6_colormap_luminance_is_monotone_at_every_level() {
+        for theme in Theme::ALL {
+            // Seq: non-decreasing in level.
+            let seq = |l| luma(theme.color(Ink::new(Role::Seq, l), 9, 4));
+            for l in 1..=255u8 {
+                assert!(seq(l) >= seq(l - 1), "{theme:?} Seq at {l}");
+            }
+            // Div: non-decreasing in |level − 128|, on both sides of zero.
+            let div = |l| luma(theme.color(Ink::new(Role::Div, l), 9, 4));
+            for d in 1..=127u8 {
+                assert!(div(128 + d) >= div(128 + d - 1), "{theme:?} Div +{d}");
+                assert!(div(128 - d) >= div(128 - d + 1), "{theme:?} Div -{d}");
+            }
+            assert!(div(0) >= div(1), "{theme:?} Div -128");
+        }
+    }
+
+    #[test]
+    fn rnd_r6_colormaps_ignore_the_cell_position() {
+        for theme in Theme::ALL {
+            for role in [Role::Seq, Role::Div] {
+                for level in [0, 64, 128, 200, 255] {
+                    let ink = Ink::new(role, level);
+                    let first = theme.color(ink, 0, 0);
+                    for (x, y) in [(1, 0), (17, 3), (199, 49), (u16::MAX, 7)] {
+                        assert_eq!(theme.color(ink, x, y), first, "{theme:?}/{role:?}");
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r6_astro_seq_runs_violet_red_orange_pale_yellow() {
+        let c = |l| Theme::Astro.color(Ink::new(Role::Seq, l), 0, 0);
+        let Rgb(_, g, b) = c(0);
+        assert!(b > g && luma(c(0)) < 80, "deep violet: {:?}", c(0));
+        let Rgb(r2, g2, b2) = c(150);
+        assert!(r2 > g2 && r2 > b2, "red in the middle: {:?}", c(150));
+        let Rgb(r3, g3, b3) = c(200);
+        assert!(r3 > g3 && g3 > b3, "orange: {:?}", c(200));
+        let Rgb(r4, g4, b4) = c(255);
+        assert!(r4 > 230 && g4 > 230 && b4 < g4, "pale yellow: {:?}", c(255));
+    }
+
+    #[test]
+    fn rnd_r6_div_zero_is_dark_and_the_signs_differ_in_hue() {
+        for theme in [Theme::Astro, Theme::Rainbow] {
+            let c = |l| theme.color(Ink::new(Role::Div, l), 0, 0);
+            assert!(
+                luma(c(128)) < 120,
+                "{theme:?}: zero near background {:?}",
+                c(128)
+            );
+            let (Rgb(nr, _, nb), Rgb(pr, _, pb)) = (c(0), c(255));
+            assert!(nb > nr, "{theme:?}: negative is blue {:?}", c(0));
+            assert!(pr > pb, "{theme:?}: positive is warm {:?}", c(255));
+        }
+    }
+
+    #[test]
+    fn rnd_r6_rainbow_seq_sweeps_hue_from_blue_to_red() {
+        let c = |l| Theme::Rainbow.color(Ink::new(Role::Seq, l), 0, 0);
+        let (Rgb(r0, _, b0), Rgb(_, g_mid, _), Rgb(r1, g1, b1)) = (c(0), c(128), c(255));
+        assert!(b0 > r0, "starts blue/violet: {:?}", c(0));
+        assert!(g_mid > 180, "green/cyan in the middle: {:?}", c(128));
+        assert!(r1 > g1 && r1 > b1, "ends red: {:?}", c(255));
+    }
+
+    /// CIE L* (0..=100) of an sRGB grey: the test's independent inverse of the ramp.
+    fn grey_lightness(Rgb(g, _, _): Rgb) -> f64 {
+        let c = f64::from(g) / 255.0;
+        let y = if c <= 0.04045 {
+            c / 12.92
+        } else {
+            ((c + 0.055) / 1.055).powf(2.4)
+        };
+        if y > 216.0 / 24389.0 {
+            116.0 * y.cbrt() - 16.0
+        } else {
+            y * 24389.0 / 27.0
+        }
+    }
+
+    #[test]
+    fn rnd_r6_mono_colormaps_are_grey() {
+        for level in [0u8, 1, 64, 127, 128, 129, 200, 255] {
+            for role in [Role::Seq, Role::Div] {
+                let Rgb(r, g, b) = Theme::Mono.color(Ink::new(role, level), 0, 0);
+                assert!(r == g && g == b, "{role:?} {level}");
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r6_mono_seq_starts_near_black_and_rises_evenly_in_lightness() {
+        let seq = |l| Theme::Mono.color(Ink::new(Role::Seq, l), 0, 0);
+        // A zero field is (almost) the terminal background, not a grey wash.
+        assert!(seq(0).0 <= 20, "near-black at level 0: {:?}", seq(0));
+        assert_eq!(seq(255), Rgb(255, 255, 255));
+        // Equal level steps are equal lightness steps (perceptual, not linear in sRGB).
+        let (l0, l1) = (grey_lightness(seq(0)), grey_lightness(seq(255)));
+        for level in (0..=255u8).step_by(15) {
+            let want = l0 + (l1 - l0) * f64::from(level) / 255.0;
+            let got = grey_lightness(seq(level));
+            assert!(
+                (got - want).abs() < 1.0,
+                "L* at {level}: {got:.1} vs {want:.1}"
+            );
+        }
+    }
+
+    #[test]
+    fn rnd_r6_mono_div_keeps_the_sign_legible() {
+        let div = |l| Theme::Mono.color(Ink::new(Role::Div, l), 0, 0);
+        let lightness = |l| grey_lightness(div(l));
+        assert!(div(128).0 <= 20, "zero is near-black: {:?}", div(128));
+        assert_eq!(div(128), Theme::Mono.color(Ink::new(Role::Seq, 0), 0, 0));
+        assert_eq!(div(255), Rgb(255, 255, 255), "+1 reaches white");
+        // The negative side tops out below mid-grey, leaving a clear gap to +1.
+        assert!(
+            (35.0..=50.0).contains(&lightness(0)),
+            "-1 is a dim grey: L* {:.1}",
+            lightness(0)
+        );
+        // At equal |v|, positive is always the brighter, by a visible margin off zero.
+        for d in 1..=127u8 {
+            let (pos, neg) = (lightness(128 + d), lightness(128 - d));
+            assert!(pos > neg, "±{d}: {pos:.1} vs {neg:.1}");
+            if d >= 32 {
+                assert!(pos - neg >= 12.0, "±{d}: ΔL* {:.1}", pos - neg);
             }
         }
     }

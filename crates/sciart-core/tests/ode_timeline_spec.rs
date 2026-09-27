@@ -1,4 +1,4 @@
-//! SPEC-001 CORE-R37..R39: RK4 integrator, looping timeline, easing curves.
+//! SPEC-001 CORE-R37..R39, R44: RK4 and leapfrog integrators, looping timeline, easing curves.
 
 use std::f64::consts::TAU;
 
@@ -174,6 +174,175 @@ fn core_r37_zero_dimensional_state_is_fine() {
     let mut y: [f64; 0] = [];
     ode::rk4_step(&mut y, 0.0, 0.1, |_, _| []);
     assert_eq!(ode::integrate(&mut y, 0.0, 1.0, 0.5, |_, _| []), 2);
+}
+
+// ---------------------------------------------------------------- CORE-R44
+
+/// Harmonic oscillator `x'' = −x` in any number of independent dimensions.
+fn spring(pos: &[f64], acc: &mut [f64]) {
+    for (a, x) in acc.iter_mut().zip(pos) {
+        *a = -x;
+    }
+}
+
+/// Nonlinear pendulum `θ'' = −sin θ`, to check reversibility beyond linear forces.
+fn pendulum(pos: &[f64], acc: &mut [f64]) {
+    for (a, x) in acc.iter_mut().zip(pos) {
+        *a = -x.sin();
+    }
+}
+
+#[test]
+fn core_r44_exact_for_constant_acceleration() {
+    let g = [-9.81, 0.5];
+    let (x0, v0) = ([0.0, 1.0], [2.0, -1.0]);
+    let (mut pos, mut vel, mut acc) = (x0, v0, g);
+    let t = 1.3;
+    let n = ode::verlet_integrate(&mut pos, &mut vel, &mut acc, t, 0.1, |_, a| {
+        a.copy_from_slice(&g);
+    });
+    assert_eq!(n, 13);
+    for i in 0..2 {
+        let x = x0[i] + v0[i] * t + 0.5 * g[i] * t * t;
+        assert!((pos[i] - x).abs() < 1e-12, "x[{i}] = {} vs {x}", pos[i]);
+        assert!((vel[i] - (v0[i] + g[i] * t)).abs() < 1e-12);
+    }
+}
+
+#[test]
+fn core_r44_step_is_kick_drift_kick_and_leaves_acc_at_the_new_position() {
+    let (mut pos, mut vel, mut acc) = ([1.0], [0.5], [-1.0]);
+    let h = 0.1;
+    let mut calls = 0;
+    ode::verlet_step(&mut pos, &mut vel, &mut acc, h, |p, a| {
+        calls += 1;
+        spring(p, a);
+    });
+    let v_half = 0.5 - 0.5 * h; // a(1) = -1
+    let x1 = 1.0 + h * v_half;
+    assert_eq!(calls, 1, "one force evaluation per step");
+    assert!((pos[0] - x1).abs() < 1e-15);
+    assert!((acc[0] + x1).abs() < 1e-15, "acc holds a(pos') on exit");
+    assert!((vel[0] - (v_half + 0.5 * h * -x1)).abs() < 1e-15);
+}
+
+#[test]
+fn core_r44_time_reversible() {
+    for (name, force) in [
+        ("spring", spring as fn(&[f64], &mut [f64])),
+        ("pendulum", pendulum),
+    ] {
+        let start = ([2.5, -0.3, 1.0], [0.1, 1.7, -0.4]);
+        let (mut pos, mut vel) = start;
+        let mut acc = [0.0; 3];
+        force(&pos, &mut acc);
+        // One step, and a long run, forward then back.
+        for steps in [1, 500] {
+            for _ in 0..steps {
+                ode::verlet_step(&mut pos, &mut vel, &mut acc, 0.05, force);
+            }
+            vel.iter_mut().for_each(|v| *v = -*v);
+            for _ in 0..steps {
+                ode::verlet_step(&mut pos, &mut vel, &mut acc, 0.05, force);
+            }
+            vel.iter_mut().for_each(|v| *v = -*v);
+            let tol = if steps == 1 { 1e-12 } else { 1e-9 };
+            for i in 0..3 {
+                let (x, v) = (start.0[i], start.1[i]);
+                assert!(
+                    (pos[i] - x).abs() <= tol * x.abs().max(1.0),
+                    "{name}/{steps}: x"
+                );
+                assert!(
+                    (vel[i] - v).abs() <= tol * v.abs().max(1.0),
+                    "{name}/{steps}: v"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn core_r44_harmonic_energy_error_is_bounded_without_secular_drift() {
+    // 10⁴ periods at h = T/50: leapfrog's energy error oscillates with amplitude
+    // ~(ωh)²/8 ≈ 2e-3 relative, but does not grow (symplectic).
+    let h = TAU / 50.0;
+    let (mut pos, mut vel, mut acc) = ([1.0], [0.0], [-1.0]);
+    let energy = |x: f64, v: f64| 0.5 * (x * x + v * v);
+    let e0 = energy(1.0, 0.0);
+    let mut worst_first = 0.0f64;
+    let mut worst_last = 0.0f64;
+    let periods = 10_000;
+    for p in 0..periods {
+        for _ in 0..50 {
+            ode::verlet_step(&mut pos, &mut vel, &mut acc, h, spring);
+            let err = (energy(pos[0], vel[0]) - e0).abs() / e0;
+            if p < 10 {
+                worst_first = worst_first.max(err);
+            } else if p >= periods - 10 {
+                worst_last = worst_last.max(err);
+            }
+        }
+    }
+    assert!(worst_first < 5e-3, "{worst_first}");
+    assert!(
+        worst_last <= worst_first * 1.05,
+        "drift: {worst_first} -> {worst_last}"
+    );
+    // The phase drifts (leapfrog's frequency error is O(h²)), the amplitude does not.
+    let amplitude = pos[0].hypot(vel[0]);
+    assert!((amplitude - 1.0).abs() < 5e-3, "amplitude {amplitude}");
+}
+
+#[test]
+fn core_r44_mismatched_lengths_are_a_no_op() {
+    let (mut pos, mut vel, mut acc) = ([1.0, 2.0], [3.0, 4.0, 5.0], [0.0, 0.0]);
+    let mut called = false;
+    ode::verlet_step(&mut pos, &mut vel, &mut acc, 0.1, |_, _| called = true);
+    let n = ode::verlet_integrate(&mut pos, &mut vel, &mut acc, 1.0, 0.1, |_, _| called = true);
+    assert_eq!(n, 0);
+    assert!(!called);
+    assert_eq!((pos, vel), ([1.0, 2.0], [3.0, 4.0, 5.0]));
+
+    let (mut pos, mut vel, mut acc) = ([1.0], [3.0], [0.0, 0.0]);
+    ode::verlet_step(&mut pos, &mut vel, &mut acc, 0.1, |_, _| called = true);
+    assert!(!called && pos == [1.0] && vel == [3.0]);
+}
+
+#[test]
+fn core_r44_integrate_follows_the_integrate_step_count_rules() {
+    let run = |dt: f64, h_max: f64| {
+        let (mut pos, mut vel, mut acc) = ([1.0], [0.0], [-1.0]);
+        let mut calls = 0usize;
+        let n = ode::verlet_integrate(&mut pos, &mut vel, &mut acc, dt, h_max, |p, a| {
+            calls += 1;
+            spring(p, a);
+        });
+        assert_eq!(n, calls, "one force evaluation per substep");
+        n
+    };
+    for dt in [0.0, -0.0, -1.0, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+        assert_eq!(run(dt, 0.1), 0, "dt={dt}");
+    }
+    assert_eq!(
+        run(0.9, 0.3),
+        3,
+        "exact multiples take no spurious extra step"
+    );
+    assert_eq!(run(1.0, 0.3), 4);
+    assert_eq!(run(0.01, 1.0), 1);
+    assert_eq!(run(0.25, f64::INFINITY), 1);
+    for h_max in [0.0, -1.0, f64::NAN, 1e-300] {
+        assert_eq!(run(0.25, h_max), MAX_STEPS, "h_max={h_max}");
+    }
+    // The substeps are equal and cover dt exactly: same result as manual steps.
+    let (mut a, mut va, mut aa) = ([1.0], [0.0], [-1.0]);
+    let (mut b, mut vb, mut ab) = (a, va, aa);
+    ode::verlet_integrate(&mut a, &mut va, &mut aa, 1.0, 0.25, spring);
+    for _ in 0..4 {
+        ode::verlet_step(&mut b, &mut vb, &mut ab, 0.25, spring);
+    }
+    assert_eq!((a, va, aa), (b, vb, ab));
 }
 
 // ---------------------------------------------------------------- CORE-R38

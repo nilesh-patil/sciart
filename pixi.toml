@@ -9,8 +9,10 @@ version = "0.1.0"
 [tasks]
 rs-build = "cargo build --workspace"
 rs-test = "cargo test --workspace"
-rs-fmt = "cargo fmt --all"
-rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
+# Scene modules are declared inside the `registry!` macro, which `cargo fmt` cannot follow,
+# so they are also formatted/checked file by file.
+rs-fmt = "cargo fmt --all && rustfmt --config-path rustfmt.toml crates/sciart-generators/src/*.rs"
+rs-lint = "cargo fmt --all --check && rustfmt --check --config-path rustfmt.toml crates/sciart-generators/src/*.rs && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
 rs-ci = { depends-on = ["rs-lint", "rs-test"] }
 rs-bench = "cargo bench -p sciart-generators"
 rs-list = "cargo run -q -p sciart -- list"

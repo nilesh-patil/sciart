@@ -114,7 +114,10 @@ fn sample_multipoles(rng: &mut impl Rng) -> [f64; MODES] {
     let step = (b - a) / GRID as f64;
     let mut cdf = [0.0; GRID + 1];
     for i in 0..GRID {
-        let (l0, l1) = ((a + step * i as f64).exp(), (a + step * (i + 1) as f64).exp());
+        let (l0, l1) = (
+            (a + step * i as f64).exp(),
+            (a + step * (i + 1) as f64).exp(),
+        );
         cdf[i + 1] = cdf[i] + 0.5 * (power_per_ln_ell(l0) + power_per_ln_ell(l1)) * step;
     }
     let total = cdf[GRID];
@@ -442,7 +445,10 @@ mod tests {
                 correlation(&g.modes, (1, 0), 2.0),
                 correlation(&g.modes, (0, 1), 2.0),
             );
-            assert!(h >= 0.9 && v >= 0.7,"seed {seed}: rho_h {h:.3}, rho_v {v:.3}");
+            assert!(
+                h >= 0.9 && v >= 0.7,
+                "seed {seed}: rho_h {h:.3}, rho_v {v:.3}"
+            );
         }
     }
 
@@ -504,20 +510,28 @@ mod tests {
             }
             let tr = txx + tyy;
             let aniso = ((txx - tyy).powi(2) + 4.0 * txy * txy).sqrt() / tr;
-            assert!(aniso <= 0.05,"seed {seed}: direction anisotropy {aniso:.3}");
+            assert!(
+                aniso <= 0.05,
+                "seed {seed}: direction anisotropy {aniso:.3}"
+            );
         }
     }
 
     #[test]
     fn cmb_a5_spectrum_has_plateau_and_first_acoustic_peak() {
-        let grid: Vec<f64> = (0..=400).map(|i| (2f64.ln() + f64::from(i) * 0.015).exp()).collect();
+        let grid: Vec<f64> = (0..=400)
+            .map(|i| (2f64.ln() + f64::from(i) * 0.015).exp())
+            .collect();
         let peak = grid
             .iter()
             .copied()
             .filter(|&l| l <= L_MAX)
             .max_by(|a, b| d_ell(*a).total_cmp(&d_ell(*b)))
             .unwrap();
-        assert!((200.0..=240.0).contains(&peak), "first peak at ℓ = {peak:.0}");
+        assert!(
+            (200.0..=240.0).contains(&peak),
+            "first peak at ℓ = {peak:.0}"
+        );
         // Planck: D_220 / D_10 ≈ 5.2; the plateau is flat within 25 % over ℓ = 2..30.
         let ratio = d_ell(220.0) / d_ell(10.0);
         assert!((4.5..=6.0).contains(&ratio), "peak/plateau {ratio:.2}");

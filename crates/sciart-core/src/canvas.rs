@@ -30,13 +30,18 @@ pub enum GlyphMode {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Cell {
     pub ch: char,
+    /// Foreground ink of `ch`.
     pub ink: Ink,
+    /// Background ink; [`Ink::BLANK`] means "no background" (terminal default). Only
+    /// half-block pixels set it (CORE-R40, ADR-0010).
+    pub bg: Ink,
 }
 
 impl Cell {
     pub const BLANK: Cell = Cell {
         ch: ' ',
         ink: Ink::BLANK,
+        bg: Ink::BLANK,
     };
 }
 
@@ -98,14 +103,23 @@ impl Canvas {
     }
 
     /// Draw one glyph; out-of-bounds coordinates are ignored (CORE-R3, CORE-R4).
+    ///
+    /// Clears the cell's background, so overdrawing a half-block pixel never leaves a
+    /// stale background colour behind (CORE-R40).
     pub fn put(&mut self, x: i32, y: i32, glyph: Glyph, ink: Ink) {
+        self.put_bg(x, y, glyph, ink, Ink::BLANK);
+    }
+
+    /// Draw one glyph with a foreground and a background ink, under the same bounds
+    /// and glyph-mode rules as [`put`](Self::put) (CORE-R40).
+    pub fn put_bg(&mut self, x: i32, y: i32, glyph: Glyph, fg: Ink, bg: Ink) {
         let Some(i) = self.index(x, y) else { return };
         let ch = match self.mode {
             GlyphMode::Ascii => glyph.ascii,
             GlyphMode::Unicode if glyph.unicode.width() == Some(1) => glyph.unicode,
             GlyphMode::Unicode => glyph.ascii,
         };
-        self.cells[i] = Cell { ch, ink };
+        self.cells[i] = Cell { ch, ink: fg, bg };
     }
 
     /// Draw a string left-to-right; each char is its own ASCII fallback.

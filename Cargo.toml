@@ -46,6 +46,16 @@ redundant_closure_for_method_calls = "warn"
 semicolon_if_nothing_returned = "warn"
 uninlined_format_args = "warn"
 
+# The M10 scene tests run lattice PDEs, N-body and Monte-Carlo sweeps for simulated
+# minutes; unoptimised they dominate `rs-test`. opt-level 1 keeps debug assertions and
+# overflow checks (and is bit-identical for f64: Rust never contracts to FMA or reorders
+# float ops), while making the numerics several times faster.
+[profile.dev.package.sciart-core]
+opt-level = 1
+
+[profile.dev.package.sciart-generators]
+opt-level = 1
+
 [profile.release]
 panic = "unwind" # ADR-0006: catch_unwind quarantine needs unwinding
 lto = "thin"

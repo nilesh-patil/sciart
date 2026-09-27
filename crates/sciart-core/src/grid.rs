@@ -1,4 +1,5 @@
-//! Dense 2-D fields for automata, lattices and PDEs (SPEC-001 CORE-R33..R36).
+//! Dense 2-D fields for automata, lattices and PDEs (SPEC-001 CORE-R33..R36, CORE-R43,
+//! CORE-R48, CORE-R52, CORE-R53, CORE-R68, CORE-R69).
 //!
 //! One contiguous row-major `Vec<T>`: rows are cache-line friendly for the
 //! `for y { for x { .. } }` sweeps every grid scene does, and the same layout as
@@ -100,6 +101,15 @@ impl<T: Clone> Grid<T> {
         self.width = size.width();
         self.height = size.height();
     }
+
+    /// Change the dimensions to `size` with every cell `fill`, discarding the contents
+    /// but reusing the buffer: the cheap reshape for a buffer about to be overwritten.
+    fn reshape(&mut self, size: Size, fill: T) {
+        self.cells.clear();
+        self.cells.resize(size.area(), fill);
+        self.width = size.width();
+        self.height = size.height();
+    }
 }
 
 impl<T> Grid<T> {
@@ -134,6 +144,12 @@ impl<T> Grid<T> {
     #[inline]
     pub fn is_empty(&self) -> bool {
         self.cells.is_empty()
+    }
+
+    /// Whether the grid is exactly `size` (never true for the empty grid).
+    #[inline]
+    fn size_is(&self, size: Size) -> bool {
+        (self.width, self.height) == (size.width(), size.height())
     }
 
     /// Row-major buffer index of `(x, y)`, or `None` off-grid.
@@ -246,6 +262,290 @@ impl<T> Grid<T> {
         scratch.height = self.height;
         std::mem::swap(self, scratch);
     }
+}
+
+/// Coordinate `d` on an axis of `dn` cells mapped onto an axis of `sn` cells with cell
+/// centres aligned, `(d + ½) / dn = (s + ½) / sn` (CORE-R43, CORE-R68): the convention of
+/// every resampler here and of [`SampleMap`]. `d` may be fractional (an agent's position,
+/// a pixel centre). Exact for equal sizes.
+#[inline]
+pub fn centre_of(d: f64, dn: usize, sn: usize) -> f64 {
+    (d + 0.5) * sn as f64 / dn as f64 - 0.5
+}
+
+/// Carry a continuous field onto a new lattice (ADR-0012, CORE-R68): `scratch` is
+/// reshaped to `size` (its old contents are discarded, its buffer reused), filled by
+/// [`resample_bilinear`] from `field`, and swapped in, so afterwards `field` has `size`
+/// and `scratch` holds the old field. No-op if `field` is empty or already `size`.
+pub fn regrid_bilinear(field: &mut Grid<f32>, size: Size, scratch: &mut Grid<f32>) {
+    if field.is_empty() || field.size_is(size) {
+        return;
+    }
+    scratch.reshape(size, 0.0);
+    resample_bilinear(field, scratch);
+    std::mem::swap(field, scratch);
+}
+
+/// [`regrid_bilinear`] for discrete states: nearest-neighbour via [`resample_nearest`]
+/// (CORE-R68), so only values present in `field` appear.
+pub fn regrid_nearest<T: Clone>(field: &mut Grid<T>, size: Size, scratch: &mut Grid<T>) {
+    if field.is_empty() || field.size_is(size) {
+        return;
+    }
+    // Any value will do as the placeholder: every cell is overwritten by the resample.
+    let fill = field.cells[0].clone();
+    scratch.reshape(size, fill);
+    resample_nearest(field, scratch);
+    std::mem::swap(field, scratch);
+}
+
+/// Fill `dst` (keeping its size) by bilinear sampling of `src`, cell-centre aligned and
+/// clamped at the edges (CORE-R43). No-op if either grid is empty; never allocates.
+///
+/// For moving a continuous field (concentration, ρ, u) onto a new simulation lattice
+/// after a resize (ADR-0012). Interpolation uses `a + (b − a)·f`, so a constant field
+/// comes through bit-exact, and equal sizes are the identity.
+pub fn resample_bilinear(src: &Grid<f32>, dst: &mut Grid<f32>) {
+    if src.is_empty() || dst.is_empty() {
+        return;
+    }
+    let (sw, sh) = (usize::from(src.width), usize::from(src.height));
+    let (dw, dh) = (usize::from(dst.width), usize::from(dst.height));
+    for (y, row) in dst.cells.chunks_exact_mut(dw).enumerate() {
+        let (y0, y1, fy) = bilinear_taps(y, dh, sh);
+        let (r0, r1) = (&src.cells[y0 * sw..][..sw], &src.cells[y1 * sw..][..sw]);
+        for (x, out) in row.iter_mut().enumerate() {
+            let (x0, x1, fx) = bilinear_taps(x, dw, sw);
+            *out = bilerp(r0[x0], r0[x1], r1[x0], r1[x1], fx, fy);
+        }
+    }
+}
+
+/// Neighbouring source indices and weight along one axis for destination index `d` of
+/// `dn` sampling a source of `sn ≥ 1` (CORE-R43): cell-centre aligned, edge-clamped.
+#[inline]
+fn bilinear_taps(d: usize, dn: usize, sn: usize) -> (usize, usize, f32) {
+    let s = centre_of(d as f64, dn, sn).clamp(0.0, (sn - 1) as f64);
+    let i0 = s as usize; // s ≥ 0, so truncation is floor
+    let i1 = (i0 + 1).min(sn - 1);
+    (i0, i1, (s - i0 as f64) as f32)
+}
+
+/// `a + (b − a)·f`, returning `a` itself at `f = 0` so constants survive bit-exactly.
+#[inline]
+fn lerp32(a: f32, b: f32, f: f32) -> f32 {
+    if f == 0.0 { a } else { a + (b - a) * f }
+}
+
+/// Bilinear blend of a 2×2 neighbourhood: along x on both rows, then along y. The one
+/// formula shared by [`resample_bilinear`] and [`SampleMap::sample`] (CORE-R52).
+#[inline]
+fn bilerp(top0: f32, top1: f32, bottom0: f32, bottom1: f32, fx: f32, fy: f32) -> f32 {
+    lerp32(lerp32(top0, top1, fx), lerp32(bottom0, bottom1, fx), fy)
+}
+
+/// Nearest source index for destination index `d`: `floor((d + ½)·sn/dn)` in integers,
+/// exact and the identity for equal sizes (CORE-R43).
+#[inline]
+fn nearest_tap(d: usize, dn: usize, sn: usize) -> usize {
+    ((2 * d + 1) * sn / (2 * dn)).min(sn - 1)
+}
+
+/// One axis of a [`SampleMap`]: the bilinear pair and weight, and the nearest index.
+/// `u16` indices suffice because grid axes are `u16`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Tap {
+    i0: u16,
+    i1: u16,
+    near: u16,
+    f: f32,
+}
+
+impl Tap {
+    fn new(d: usize, dn: usize, sn: usize) -> Self {
+        let (i0, i1, f) = bilinear_taps(d, dn, sn);
+        // Every index is < sn ≤ u16::MAX, so the narrowing is lossless.
+        Self {
+            i0: i0 as u16,
+            i1: i1 as u16,
+            near: nearest_tap(d, dn, sn) as u16,
+            f,
+        }
+    }
+}
+
+/// Precomputed per-axis sampling tables from a simulation lattice onto a display region
+/// (CORE-R52, ADR-0012): the per-cell work of [`resample_bilinear`] /
+/// [`resample_nearest`] without the float divisions, and without a destination grid,
+/// so a scene can sample its capped lattice straight into `Pixels` or `Dots`.
+///
+/// Built in `resize` with [`rebuild`](Self::rebuild); the tables allocate only when
+/// they grow. The [`Default`] map is empty: `sample` gives 0 and `nearest` `(0, 0)`.
+#[derive(Debug, Clone, Default)]
+pub struct SampleMap {
+    src: (u16, u16),
+    xs: Vec<Tap>,
+    ys: Vec<Tap>,
+}
+
+impl SampleMap {
+    /// Tables for sampling a `src` grid at every cell of a `dst` region, with the
+    /// cell-centre, edge-clamp convention of [`resample_bilinear`] (CORE-R52).
+    pub fn rebuild(&mut self, src: Size, dst: Size) {
+        let (sw, sh) = (usize::from(src.width()), usize::from(src.height()));
+        let (dw, dh) = (usize::from(dst.width()), usize::from(dst.height()));
+        self.src = (src.width(), src.height());
+        self.xs.clear();
+        self.xs.extend((0..dw).map(|x| Tap::new(x, dw, sw)));
+        self.ys.clear();
+        self.ys.extend((0..dh).map(|y| Tap::new(y, dh, sh)));
+    }
+
+    /// Taps for destination `(x, y)`, clamped onto the table.
+    #[inline]
+    fn taps(&self, x: i32, y: i32) -> Option<(Tap, Tap)> {
+        let pick = |t: &[Tap], i: i32| {
+            let last = t.len().checked_sub(1)?;
+            // Negative ⇒ 0, beyond ⇒ last: `usize::try_from` fails only for negatives.
+            Some(t[usize::try_from(i).map_or(0, |i| i.min(last))])
+        };
+        Some((pick(&self.xs, x)?, pick(&self.ys, y)?))
+    }
+
+    /// Bilinear value of `src` at destination cell `(x, y)` (clamped onto the region),
+    /// bit-identical to [`resample_bilinear`]'s output for that cell (CORE-R52).
+    ///
+    /// `src` must have the size passed to [`rebuild`](Self::rebuild); any other size
+    /// (a caller bug) and the empty map give 0.
+    #[inline]
+    pub fn sample(&self, src: &Grid<f32>, x: i32, y: i32) -> f32 {
+        if (src.width, src.height) != self.src {
+            return 0.0;
+        }
+        let Some((tx, ty)) = self.taps(x, y) else {
+            return 0.0;
+        };
+        let w = usize::from(src.width);
+        let row = |i: u16| &src.cells[usize::from(i) * w..][..w];
+        let (r0, r1) = (row(ty.i0), row(ty.i1));
+        let (x0, x1) = (usize::from(tx.i0), usize::from(tx.i1));
+        bilerp(r0[x0], r0[x1], r1[x0], r1[x1], tx.f, ty.f)
+    }
+
+    /// The source cell nearest to destination cell `(x, y)` (clamped onto the region),
+    /// the one [`resample_nearest`] copies; `(0, 0)` for the empty map (CORE-R52).
+    #[inline]
+    pub fn nearest(&self, x: i32, y: i32) -> (i32, i32) {
+        self.taps(x, y)
+            .map_or((0, 0), |(tx, ty)| (i32::from(tx.near), i32::from(ty.near)))
+    }
+}
+
+/// The isotropic 9-point Laplacian of `src` into `dst` at unit spacing (CORE-R53):
+/// `(4·(N + S + E + W) + (NE + NW + SE + SW) − 20·c) / 6`.
+///
+/// `Edges::Wrap` is periodic; `Edges::Clip` is zero-flux (Neumann): a ghost cell beyond
+/// a wall repeats the edge cell next to it, so nothing flows through the wall. `dst` is
+/// reshaped to `src` (reusing its buffer when large enough).
+///
+/// Its error is isotropic to leading order, so reaction–diffusion spots stay round
+/// instead of going square on the lattice. Mirror pairs are added first (`W + E`,
+/// `N + S`, `NW + NE`, `SW + SE`), and float addition is commutative, so a mirrored
+/// field gives a bitwise mirrored result and symmetric patterns stay symmetric forever.
+pub fn laplacian9(src: &Grid<f32>, dst: &mut Grid<f32>, edges: Edges) {
+    let (w, h) = (usize::from(src.width), usize::from(src.height));
+    dst.cells.clear();
+    dst.cells.resize(w * h, 0.0);
+    dst.width = src.width;
+    dst.height = src.height;
+    if w == 0 || h == 0 {
+        return;
+    }
+    // Previous/next index along an axis of length n under the edge rule.
+    let around = |i: usize, n: usize| match edges {
+        Edges::Wrap => ((i + n - 1) % n, (i + 1) % n),
+        Edges::Clip => (i.saturating_sub(1), (i + 1).min(n - 1)),
+    };
+    let row = |y: usize| &src.cells[y * w..][..w];
+    for (y, out) in dst.cells.chunks_exact_mut(w).enumerate() {
+        let (yn, ys) = around(y, h);
+        let (north, mid, south) = (row(yn), row(y), row(ys));
+        for (x, o) in out.iter_mut().enumerate() {
+            let (xw, xe) = around(x, w);
+            let orth = (mid[xw] + mid[xe]) + (north[x] + south[x]);
+            let diag = (north[xw] + north[xe]) + (south[xw] + south[xe]);
+            *o = (4.0 * orth + diag - 20.0 * mid[x]) / 6.0;
+        }
+    }
+}
+
+/// Fill `dst` (keeping its size) by nearest-neighbour sampling of `src`, cell-centre
+/// aligned (CORE-R43), so only values present in `src` appear. For discrete states such
+/// as Ising spins. No-op if either grid is empty; never allocates.
+pub fn resample_nearest<T: Clone>(src: &Grid<T>, dst: &mut Grid<T>) {
+    if src.is_empty() || dst.is_empty() {
+        return;
+    }
+    let (sw, sh) = (usize::from(src.width), usize::from(src.height));
+    let (dw, dh) = (usize::from(dst.width), usize::from(dst.height));
+    for (y, row) in dst.cells.chunks_exact_mut(dw).enumerate() {
+        let src_row = &src.cells[nearest_tap(y, dh, sh) * sw..][..sw];
+        for (x, out) in row.iter_mut().enumerate() {
+            out.clone_from(&src_row[nearest_tap(x, dw, sw)]);
+        }
+    }
+}
+
+/// A capped simulation lattice for a display region measured in square units
+/// (ADR-0012, CORE-R48).
+///
+/// The display aspect `w / h` is snapped to the nearest power of `bucket` (e.g. 1.25;
+/// `bucket ≤ 1` or NaN keeps the exact aspect), and the result is the largest lattice of
+/// that aspect with `w·h ≤ max_nodes`, clamped per axis to the display (so small
+/// displays simulate at display size) and at least 1×1 (`max_nodes = 0` ⇒ 1×1).
+///
+/// Because the uncapped shape depends only on the bucket and `max_nodes`, any display at
+/// least that large in both axes, within one bucket, maps to the same lattice: resizing
+/// there never touches simulation state.
+pub fn lattice_for(display: Size, max_nodes: usize, bucket: f64) -> Size {
+    if max_nodes == 0 {
+        return Size::new(1, 1);
+    }
+    let (dw, dh) = (display.width(), display.height());
+    let aspect = f64::from(dw) / f64::from(dh);
+    let snapped = if bucket > 1.0 {
+        let step = bucket.ln();
+        ((aspect.ln() / step).round() * step).exp()
+    } else {
+        aspect
+    };
+    // Degenerate buckets (∞, 1 + ε) can produce 0, ∞ or NaN here: fall back to exact.
+    let aspect = if snapped.is_finite() && snapped > 0.0 {
+        snapped
+    } else {
+        aspect
+    };
+    let full = lattice_for_aspect(aspect, max_nodes);
+    Size::new(full.width().min(dw), full.height().min(dh))
+}
+
+/// The largest lattice of aspect `w / h ≈ aspect` with `w·h ≤ max_nodes`, at least 1×1
+/// and at most `u16::MAX` per axis (CORE-R69): the uncapped shape behind [`lattice_for`],
+/// for a scene that picks its own aspect (say, a fixed-bucket channel) rather than a
+/// display's. Never panics: a zero, negative or NaN `aspect` gives 1 column, and `max_nodes
+/// = 0` gives 1×1.
+pub fn lattice_for_aspect(aspect: f64, max_nodes: usize) -> Size {
+    if max_nodes == 0 {
+        return Size::new(1, 1);
+    }
+    // h·(aspect·h) = max_nodes. Flooring both axes (and the w ≤ max/h guard for float
+    // round-off and the 1-wide/1-tall extremes) keeps w·h ≤ max_nodes; the float → usize
+    // casts saturate (NaN ⇒ 0), so the clamps also absorb degenerate aspects.
+    let h_ideal = (max_nodes as f64 / aspect).sqrt();
+    let h = (h_ideal as usize).clamp(1, max_nodes);
+    let w = ((h_ideal * aspect) as usize).clamp(1, max_nodes / h);
+    let axis = |n: usize| u16::try_from(n).unwrap_or(u16::MAX);
+    Size::new(axis(w), axis(h))
 }
 
 /// Which cells count as neighbours (CORE-R35).

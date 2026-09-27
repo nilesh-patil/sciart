@@ -31,11 +31,11 @@
 use std::f64::consts::{FRAC_PI_2, PI};
 
 use rand::Rng;
-use sciart_core::draw;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::particles::{gaussian, plot};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
+use sciart_core::{draw, rng};
 
 pub static META: Meta = Meta {
     name: "mars_rover",
@@ -63,25 +63,10 @@ const SMOOTHSTEP_SLOPE_MAX: f64 = 1.5;
 
 const _: () = assert!(OCTAVES >= 3, "SPEC-002 mars_rover: at least 3 octaves");
 
-/// SplitMix64 finaliser: a bijective avalanche mix, so distinct lattice points get
-/// independent-looking values.
-#[inline]
-fn mix64(mut z: u64) -> u64 {
-    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    z ^ (z >> 31)
-}
-
-/// `[0, 1)` from the top 53 bits of a hash.
-#[inline]
-fn unit(z: u64) -> f64 {
-    (z >> 11) as f64 * (1.0 / (1u64 << 53) as f64)
-}
-
 /// Value in `[0, 1)` at integer lattice point `i`.
 #[inline]
 fn lattice(seed: u64, i: i64) -> f64 {
-    unit(mix64(seed ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15)))
+    rng::hash01(seed ^ (i as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15))
 }
 
 /// 1-D value noise and its derivative: lattice values joined by smoothstep.
@@ -131,7 +116,7 @@ impl Ridge {
         let (mut h, mut dh) = (0.0, 0.0);
         let (mut weight, mut freq) = (1.0, 1.0 / self.wavelength);
         for k in 0..OCTAVES as u64 {
-            let seed = mix64(
+            let seed = SplitMix64::mix(
                 self.seed
                     .wrapping_add(k.wrapping_mul(0x632b_e59b_d9b4_e019)),
             );
@@ -445,8 +430,7 @@ fn arm(pose: &Pose, near: &Ridge, k: f64) -> (P2, P2, P2) {
 
 /// Interpolate angles along the shorter arc.
 fn lerp_angle(a: f64, b: f64, k: f64) -> f64 {
-    let d = (b - a + PI).rem_euclid(2.0 * PI) - PI;
-    a + d * k
+    a + geom::wrap_angle(b - a) * k
 }
 
 /// Deployment fraction of the arm at a point of the sol.
@@ -626,9 +610,7 @@ fn link_glyph(dx: f64, dy: f64) -> Glyph {
 /// Hash of a screen cell, `[0, 1)`: a stable dither pattern.
 #[inline]
 fn cell_hash(x: i32, y: i32, salt: u64) -> f64 {
-    unit(mix64(
-        salt ^ ((u64::from(x as u32) << 32) | u64::from(y as u32)),
-    ))
+    rng::hash01(salt ^ rng::cell_key(x, y))
 }
 
 // ---------------------------------------------------------------------------------------
@@ -752,13 +734,13 @@ impl MarsRover {
     fn seed(ctx: &mut Ctx) -> World {
         let seed: u64 = ctx.rng.random();
         World {
-            near: Ridge::new(mix64(seed ^ 1), NEAR_AMP, NEAR_WAVE),
-            mid: Ridge::new(mix64(seed ^ 2), MID_AMP, MID_WAVE),
-            far: Ridge::new(mix64(seed ^ 3), FAR_AMP, FAR_WAVE),
+            near: Ridge::new(SplitMix64::mix(seed ^ 1), NEAR_AMP, NEAR_WAVE),
+            mid: Ridge::new(SplitMix64::mix(seed ^ 2), MID_AMP, MID_WAVE),
+            far: Ridge::new(SplitMix64::mix(seed ^ 3), FAR_AMP, FAR_WAVE),
             x0: ctx.rng.random_range(0.0..10_000.0),
             sol0: ctx.rng.random_range(120..1400),
             phobos_phase: ctx.rng.random_range(0.0..PHOBOS_PERIOD),
-            salt: mix64(seed ^ 4),
+            salt: SplitMix64::mix(seed ^ 4),
         }
     }
 
@@ -1054,7 +1036,7 @@ impl MarsRover {
             // Speckle hashed on world columns so the texture scrolls with the ground.
             let wc = (xn / dxc).floor() as i64 as u64;
             fill_column(canvas, c, near, h, |depth, row| {
-                let n = unit(mix64(w.salt ^ wc.wrapping_mul(0x9e37_79b9) ^ row as u64));
+                let n = rng::hash01(w.salt ^ wc.wrapping_mul(0x9e37_79b9) ^ row as u64);
                 match depth {
                     0 => (GROUND, Ink::new(Role::Hot, lit(240.0))),
                     _ if n < 0.08 => (PEBBLE, Ink::new(Role::Hot, lit(215.0))),
