@@ -9,7 +9,7 @@ use std::ops::Range;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::{Canvas, Generator, Glyph, Ink, Role, Size, ink};
+use crate::{Canvas, Generator, Glyph, Ink, Meta, Role, Size, ink};
 
 /// Splits a title into phenomenon and mechanism (CORE-R71).
 pub const SEPARATOR: &str = " · ";
@@ -96,6 +96,13 @@ impl Title {
             .into_iter()
             .find(|&form| self.width(form) + 2 <= limit)
     }
+
+    /// The narrowest canvas width from which [`fit`](Self::fit) always picks
+    /// [`Form::Full`] (at a tall enough height): `⌊3w/5⌋ ≥ n` ⇔ `w ≥ ⌈5n/3⌉`, with `n` the
+    /// full form plus its two pad cells (CORE-R73).
+    pub fn full_fits_from(&self) -> usize {
+        (5 * (self.width(Form::Full) + 2)).div_ceil(3)
+    }
 }
 
 /// The title charset and its one-cell ASCII fallback (CORE-R72): printable ASCII maps to
@@ -132,6 +139,32 @@ pub fn readout_room(size: Size, title: &Title) -> usize {
     let before = span(size, title).map_or(1, |(_, cols)| cols.len() - 1 + READOUT_GAP);
     // One more for the readout's trailing blank in the last column.
     w.saturating_sub(before + 1).min(w / 2)
+}
+
+/// The readout room a captioned scene can count on at `size` whatever its caption
+/// (CORE-R83): the least [`readout_room`] over its title with no caption and with each of
+/// `meta.captions`, at this width and every wider one. A readout sized by it therefore
+/// never comes and goes with the beat, and never grows as the terminal narrows (a
+/// narrower terminal can fall back to the shorter phenomenon-only title and free room).
+/// Scenes compute it in `resize`; it does not allocate.
+pub fn stable_readout_room(size: Size, meta: &Meta) -> usize {
+    let titles = || {
+        std::iter::once(None)
+            .chain(meta.captions.iter().copied().map(Some))
+            .map(|c| Title::new(meta.title, c))
+    };
+    // From this width up every title shows its full form, so its span is fixed and each
+    // `readout_room` only grows with the width: the minimum over wider widths is reached
+    // by this one.
+    let settled = titles().map(|t| t.full_fits_from()).max().unwrap_or(0);
+    let settled = u16::try_from(settled).unwrap_or(u16::MAX).max(size.width());
+    (size.width()..=settled)
+        .map(|w| {
+            let at = Size::new(w, size.height());
+            titles().map(|t| readout_room(at, &t)).min().unwrap_or(0)
+        })
+        .min()
+        .unwrap_or(0)
 }
 
 /// Draw the fitted title on the bottom row, laid out like `draw::label(canvas, 0, h − 1, …)`,

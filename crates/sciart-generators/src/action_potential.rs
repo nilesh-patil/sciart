@@ -24,14 +24,19 @@
 //!
 //! The soma, dendrites and terminal arbor are drawn, not simulated (the real giant axon
 //! is a syncytium grown from the stellate ganglion): the soma shows V of compartment 0
-//! and the arbor fans out the last 0.8 cm of the cable.
+//! and the arbor fans out the last 0.8 cm of the cable. Membrane potential is false
+//! colour on the theme's diverging map (`Role::Div`: amber above rest, blue below, dark
+//! at rest), like a voltage-dye movie. Ions crossing the membrane are symbolic: each short streak stands
+//! for a fixed share of the charge the live Na⁺ (warm, falling in) or K⁺ (cool, drifting
+//! out) current carries through that stretch of axon.
 
 use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::title::{self, Title};
+use sciart_core::rng::{cell_key, hash01};
+use sciart_core::title;
 use sciart_core::{draw, ease, geom, ink, ode};
 
 pub static META: Meta = Meta {
@@ -39,8 +44,12 @@ pub static META: Meta = Meta {
     category: Category::Biophysics,
     description: "A nerve impulse racing down an axon, with an oscilloscope trace of the spike",
     title: "Nerve spike · ion channels open",
-    captions: &[],
+    captions: &CAPTIONS,
 };
+
+/// Captions by beat: train, collision, threshold (`single` shows the title's own
+/// mechanism).
+const CAPTIONS: [&str; 3] = ["refractory slowing", "spikes annihilate", "all-or-none"];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(ActionPotential::default())
@@ -176,15 +185,54 @@ const SCOPE_MIN_ROWS: i32 = 4;
 const SCOPE_MIN_COLS: i32 = 12;
 /// Terminal arbor: trunk end → three primaries, the outer two forking into two each.
 const ARBOR_SEGS: usize = 7;
-const TRACE_INK: Ink = Ink::new(Role::Accent, 210);
+/// An amber-phosphor oscilloscope: the warm side of the membrane's diverging map
+/// (`div` ≈ +0.8).
+const TRACE_INK: Ink = Ink::new(Role::Div, 230);
 const TICK_INK: Ink = Ink::new(Role::Dim, 120);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const ELECTRODE_INK: Ink = Ink::new(Role::Accent, 200);
-/// `Div` levels this close to 128 are drawn as background: 6 above rest (+0.2 mV, so
-/// sub-threshold responses show) and 12 below (−3.7 mV, so only the recent
-/// after-hyperpolarisation tints the axoplasm).
-const FILL_REST_ABOVE: u8 = 6;
-const FILL_REST_BELOW: u8 = 12;
+/// Tones this close to rest are drawn as background in filled regions: +0.2 mV above (so
+/// sub-threshold responses show) and −8 mV below (V ≳ −73 mV), so only the deepest,
+/// most recent after-hyperpolarisation tints the axoplasm, not its long shallow tail.
+const FILL_QUIET_ABOVE: f64 = 6.5 / 127.0;
+const WAKE_FLOOR: f64 = 0.3;
+/// Below rest the map's cool side starts at its dark centre on `WAKE_FLOOR` and rises `WAKE_GAIN` per
+/// unit of tone, to ≈ 0.18 at the −75.9 mV minimum (`|x| ≈ 0.48`): a dim glow just
+/// behind the spike, in keeping with a ≈ 10 mV undershoot beside a ≈ 105 mV spike.
+const WAKE_GAIN: f64 = 1.0;
+/// ASCII tone thresholds (SPEC-002 ASCII): `@` from ≈ +20 mV, `#` from ≈ −20 mV, `+` from
+/// ≈ −63 mV, `~` below ≈ −74 mV (the deep, recent after-hyperpolarisation only).
+const X_AT: f64 = 113.5 / 127.0;
+const X_HASH: f64 = 82.5 / 127.0;
+const X_PLUS: f64 = 16.5 / 127.0;
+const X_TILDE: f64 = -44.5 / 128.0;
+/// Transmitter vesicles: pale glints, apart from the membrane's amber and blue.
+const VESICLE: Role = Role::Star;
+
+// ---- Ions (SPEC-002 Ions) ----
+
+/// Ion streaks alive at once, at most.
+const ION_CAP: usize = 160;
+/// Streaks of each species one spike sends across the whole trunk, whatever its width,
+/// and the charge above `ION_FLOOR` (nC/cm²) one spike carries through a compartment
+/// while that species' current dominates (measured at 6.3 °C), so each streak stands for
+/// a fixed share of it. Na⁺ dominates only on the brief rising edge.
+const IONS_PER_SPIKE: f64 = 12.0;
+const SPIKE_CHARGE_NA: f64 = 70.0;
+const SPIKE_CHARGE_K: f64 = 280.0;
+/// Na⁺ inward, the current that depolarises; K⁺ outward, the one that repolarises. Each
+/// has its own hue, matching the side of the membrane map its current drives V towards.
+const SODIUM: Role = Role::Hot;
+const POTASSIUM: Role = Role::Cold;
+/// A streak's tail, in dots behind its head (against its motion): a 4-dot stroke.
+const ION_TAIL: f64 = 3.0;
+/// Channel currents below this (μA/cm²) spawn nothing: the resting leak is not shown,
+/// only channels opening.
+const ION_FLOOR: f64 = 25.0;
+/// Na⁺ appear this many dots outside the membrane and fall onto it within `ION_LIFE`; K⁺
+/// leave the membrane and drift the same distance out, fading.
+const ION_REACH: f64 = 7.0;
+const ION_LIFE: f64 = 0.35;
 
 /// Stimulus current per end, μA/cm².
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
@@ -350,56 +398,80 @@ fn up_crossing(before: f64, after: f64) -> Option<f64> {
     (before < 0.0 && after >= 0.0).then(|| -before / (after - before))
 }
 
-/// Membrane potential as a `Div` ink (SPEC-002 Inks): square-root transfer above rest,
+/// Membrane potential as a signed tone (SPEC-002 Inks): square-root transfer above rest,
 /// so millivolt-scale responses show; below rest a 3/2-power one, so the shallow tail of
-/// the after-hyperpolarisation stays near the background and only the deep, recent
-/// wake (≈ −0.48 at the −75.9 mV minimum) reads as cool.
-fn potential_ink(v: f64) -> Ink {
+/// the after-hyperpolarisation stays near the background and only the deep, recent wake
+/// (≈ −0.48 at the −75.9 mV minimum) reads.
+fn tone(v: f64) -> f64 {
     let d = v - V_REST;
-    let x = if d >= 0.0 {
+    if d >= 0.0 {
         (d / 105.0).sqrt()
     } else {
         -0.55 * (-d / 12.0).powf(1.5)
-    };
-    ink::div(x)
+    }
 }
 
-/// `potential_ink` for a filled region (axoplasm, soma), left empty within a hair of
-/// rest, where the `Div` centre is indistinguishable from the background anyway. A
+/// The ink of tone `x` on the diverging map: warm above rest, cool below, from its dark
+/// centre at `−WAKE_FLOOR`.
+fn tone_ink(x: f64) -> Ink {
+    if x >= 0.0 {
+        ink::div(x)
+    } else {
+        ink::div(-(-x - WAKE_FLOOR).max(0.0) * WAKE_GAIN)
+    }
+}
+
+/// The tone an ink of [`tone_ink`] stands for (to its level's rounding; any tone in
+/// `[−WAKE_FLOOR, 0)` reads as 0), or `None` for any other ink.
+fn ink_tone(i: Ink) -> Option<f64> {
+    (i.role == Role::Div).then(|| {
+        let d = ink::div_value(i);
+        if d >= 0.0 {
+            d
+        } else {
+            d / WAKE_GAIN - WAKE_FLOOR
+        }
+    })
+}
+
+/// [`tone_ink`] for a filled region (axoplasm, soma), left empty within a hair of
+/// rest, where the map's dark centre is indistinguishable from the background anyway. A
 /// resting axon then reads as its two membrane lines, and the half-block glyphs change
 /// as a spike passes, not only their colours.
 fn fill_ink(v: f64) -> Ink {
-    let i = potential_ink(v);
-    let quiet = if i.level < 128 {
-        128 - i.level <= FILL_REST_BELOW
+    let x = tone(v);
+    if (-WAKE_FLOOR..FILL_QUIET_ABOVE).contains(&x) {
+        Ink::BLANK
     } else {
-        i.level - 128 <= FILL_REST_ABOVE
-    };
-    if quiet { Ink::BLANK } else { i }
+        tone_ink(x)
+    }
 }
 
-/// `potential_ink`, except that near rest a drawn outline shows instead (`Div` rest sits
-/// on the background colour).
+/// [`tone_ink`], except that near rest a drawn outline shows instead.
 fn outline_or_potential(v: f64, outline: Ink) -> Ink {
-    let i = potential_ink(v);
-    if spike_char(i.level).is_some() {
-        i
+    let x = tone(v);
+    if spike_char(x).is_some() {
+        tone_ink(x)
     } else {
         outline
     }
 }
 
-/// ASCII for a `Div` level away from rest (SPEC-002 ASCII thresholds), `None` near rest.
-fn spike_char(level: u8) -> Option<char> {
-    match level {
-        242.. => Some('@'),
-        211.. => Some('#'),
-        145.. => Some('+'),
+/// ASCII for a tone away from rest (SPEC-002 ASCII thresholds), `None` near rest.
+fn spike_char(x: f64) -> Option<char> {
+    if x >= X_AT {
+        Some('@')
+    } else if x >= X_HASH {
+        Some('#')
+    } else if x >= X_PLUS {
+        Some('+')
+    } else if x < X_TILDE {
         // V ≲ −74 mV: the deep, recent after-hyperpolarisation only. The AHP stays
         // below −71.5 mV for 6 ms (1.5 s on screen, two thirds of the axon); below
         // −74 mV it covers about a third, so the resting `=` frames each pulse.
-        ..84 => Some('~'),
-        _ => None,
+        Some('~')
+    } else {
+        None
     }
 }
 
@@ -483,6 +555,17 @@ struct TraceCol {
     bottom: i32,
     entry: i32,
     exit: i32,
+}
+
+/// An ion dot crossing the membrane, in dots: Na⁺ falls in, K⁺ drifts out.
+#[derive(Debug, Clone, Copy)]
+struct Ion {
+    x: f64,
+    y: f64,
+    /// Dots per second, toward (Na⁺) or away from (K⁺) the membrane.
+    vy: f64,
+    age: f64,
+    sodium: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -597,7 +680,7 @@ struct Layout {
     full: bool,
     /// Top pixel row of the axon: its upper membrane, or the only row.
     tube: i32,
-    /// Axoplasm pixel rows between the two membrane rows: 4 on tall screens, else 2.
+    /// Axoplasm pixel rows between the two membrane rows: 2, 4 or 6 by the height.
     fill_px: i32,
     /// First and last pixel column of the trunk.
     trunk: (i32, i32),
@@ -631,8 +714,15 @@ impl Layout {
             };
         }
         let (wi, hi) = (i32::from(size.width()), i32::from(size.height()));
-        // A 3-row tube on tall screens, so the pulse keeps its weight in the frame.
-        let fill_px = if h >= 40.0 { 4 } else { 2 };
+        // The tube thickens with the screen (2, 3, then 4 rows), so the pulse keeps its
+        // weight in the frame.
+        let fill_px = if h >= 48.0 {
+            6
+        } else if h >= 36.0 {
+            4
+        } else {
+            2
+        };
         let rows = fill_px / 2 + 1;
         let scope = w >= 56.0 && h >= 16.0;
         // With the scope the axon sits a little below centre (the scope takes the top);
@@ -755,6 +845,7 @@ struct ActionPotential {
     /// V at the electrode, one sample per `TRACE_EVERY` sub-steps.
     trace: Trail<f32>,
     vesicles: ParticlePool<Vesicle>,
+    ions: ParticlePool<Ion>,
     timeline: Timeline,
     /// Sub-steps run so far: the scene clock.
     step: u64,
@@ -764,6 +855,11 @@ struct ActionPotential {
     layout: Layout,
     /// Compartment position of every trunk pixel column.
     trunk_c: Vec<f64>,
+    /// Ion streaks per trunk column per spike: `IONS_PER_SPIKE` spread over the trunk's
+    /// columns.
+    ion_rate: f64,
+    /// `title::stable_readout_room` at this size.
+    readout_room: usize,
     arbor: Vec<ArborDot>,
     arbor_segs: [ArborSeg; ARBOR_SEGS],
     dendrites: Vec<Seg>,
@@ -773,7 +869,8 @@ struct ActionPotential {
     /// Whether the trace window holds a spike (a sample above −20 mV).
     spike_in_window: bool,
     /// Rasterised in `update`/`resize`; `render` only blits. `art` holds the dendrites,
-    /// the arbor and the trace, which ASCII draws as line art instead.
+    /// the arbor and the trace, which ASCII draws as line art instead, and the ions,
+    /// which ASCII leaves out: its dot-count glyphs would read as voltage glyphs.
     pixels: Pixels,
     dots: Dots,
     art: Dots,
@@ -791,12 +888,15 @@ impl Default for ActionPotential {
             meter: VelocityMeter::default(),
             trace,
             vesicles: ParticlePool::with_capacity(5 * VESICLES_PER_BOUTON),
+            ions: ParticlePool::with_capacity(ION_CAP),
             timeline: Timeline::new(&BEATS),
             step: 0,
             owed: 0.0,
             tree: None,
             layout: Layout::default(),
             trunk_c: Vec::new(),
+            ion_rate: 0.0,
+            readout_room: 0,
             arbor: Vec::new(),
             arbor_segs: [ArborSeg::default(); ARBOR_SEGS],
             dendrites: Vec::new(),
@@ -861,6 +961,66 @@ impl ActionPotential {
         }
     }
 
+    /// Ions for the `substeps` just run (SPEC-002 Ions): per trunk column, the charge
+    /// its compartment's dominant current carried above `ION_FLOOR`, as a share of that
+    /// species' `SPIKE_CHARGE_*`, times `ion_rate`, is the expected number of streaks; the whole part spawns and the rest
+    /// by a hashed coin, so the RNG stream is untouched. Na⁺ starts `ION_REACH` dots
+    /// outside a membrane (above or below the tube, and in either dot column of its cell,
+    /// by coin) and falls onto it; K⁺ starts on it and drifts out.
+    fn spawn_ions(&mut self, substeps: u32) {
+        let l = self.layout;
+        if !l.full || substeps == 0 {
+            return;
+        }
+        let dt_ms = f64::from(substeps) * H_MS;
+        let (top, bottom) = (2 * l.tube, 2 * (l.tube + l.fill_px + 1) + 1);
+        let speed = ION_REACH / ION_LIFE;
+        let c = &self.cable;
+        let tick = SplitMix64::mix(self.step);
+        for (k, (x, &pos)) in (l.trunk.0..).zip(&self.trunk_c).enumerate() {
+            let i = (pos.round() as usize).min(N - 1);
+            let (m, h, n) = (c.m[i], c.h[i], c.n[i]);
+            let n2 = n * n;
+            let i_na = (G_NA * m * m * m * h * (c.v[i] - E_NA)).abs();
+            let i_k = (G_K * n2 * n2 * (c.v[i] - E_K)).abs();
+            // Only the dominant current is shown: Na⁺ on the rising edge, K⁺ on the
+            // repolarising edge behind it, so the two species form separate clusters.
+            let (sodium, current, charge) = if i_na >= i_k {
+                (true, i_na, SPIKE_CHARGE_NA)
+            } else {
+                (false, i_k, SPIKE_CHARGE_K)
+            };
+            let expected = self.ion_rate * (current - ION_FLOOR).max(0.0) / charge * dt_ms;
+            // One key per (sub-step, column, species); `hash01` finalises it, so the
+            // ions of consecutive keys draw independent coins.
+            let key = cell_key(k as i32, i32::from(sodium)) ^ tick;
+            let count = expected.floor() as u32 + u32::from(hash01(key) < expected.fract());
+            for j in 0..count {
+                let coin = hash01(key.wrapping_add(u64::from(j) + 1));
+                let above = coin < 0.5;
+                // The coin's second bit picks the cell's left or right dot column.
+                let dx = f64::from(2 * x) + f64::from(u8::from((2.0 * coin).fract() >= 0.5));
+                let (membrane, out) = if above {
+                    (f64::from(top) - 1.0, -1.0)
+                } else {
+                    (f64::from(bottom) + 1.0, 1.0)
+                };
+                let (y, vy) = if sodium {
+                    (membrane + out * ION_REACH, -out * speed)
+                } else {
+                    (membrane, out * speed)
+                };
+                self.ions.spawn(Ion {
+                    x: dx,
+                    y,
+                    vy,
+                    age: 0.0,
+                    sodium,
+                });
+            }
+        }
+    }
+
     fn rebuild_geometry(&mut self) {
         let l = self.layout;
         self.trunk_c.clear();
@@ -868,6 +1028,7 @@ impl ActionPotential {
         let end = if l.full { TRUNK_END } else { (N - 1) as f64 };
         self.trunk_c
             .extend((l.trunk.0..=l.trunk.1).map(|x| f64::from(x - l.trunk.0) / span * end));
+        self.ion_rate = IONS_PER_SPIKE / self.trunk_c.len().max(1) as f64;
 
         self.arbor.clear();
         self.dendrites.clear();
@@ -1012,11 +1173,20 @@ impl ActionPotential {
         }
         for p in self.vesicles.iter() {
             let fade = 1.0 - p.age / VESICLE_LIFE;
-            self.dots.plot(
-                p.x,
-                p.y,
-                Ink::new(Role::Particle, (60.0 + 180.0 * fade) as u8),
-            );
+            let level = ink::level(255.0 * (0.25 + 0.7 * fade));
+            self.dots.plot(p.x, p.y, Ink::new(VESICLE, level));
+        }
+        for ion in self.ions.iter() {
+            // A 4-dot stroke along its motion, head first. Na⁺ brightens as it lands; K⁺
+            // fades as it leaves.
+            let f = ion.age / ION_LIFE;
+            let ink = if ion.sodium {
+                Ink::new(SODIUM, ink::level(255.0 * (0.7 + 0.3 * f)))
+            } else {
+                Ink::new(POTASSIUM, ink::level(255.0 * (1.0 - 0.4 * f)))
+            };
+            let back = -ion.vy.signum() * ION_TAIL;
+            self.art.line(ion.x, ion.y, ion.x, ion.y + back, ink);
         }
         for (x, &c) in (l.trunk.0..).zip(&self.trunk_c) {
             let ink = fill_ink(v_at(v, c));
@@ -1137,7 +1307,7 @@ impl ActionPotential {
     /// overwrite a drawn cell, so a parent's stroke wins every junction and a fork
     /// reads `\|/`, not a clump. An arbor cell above rest shows its voltage glyph
     /// instead, except at the junction with the trunk; below rest the stroke stays and
-    /// only its `Div` colour carries the after-hyperpolarisation.
+    /// only its blue carries the after-hyperpolarisation.
     fn draw_line_art(&self, canvas: &mut Canvas) {
         for &Seg { a, b, depth, ink } in &self.dendrites {
             let glyph = slope_glyph(a, b);
@@ -1155,9 +1325,10 @@ impl ActionPotential {
             for (k, (x, y)) in cell_line(a, b).enumerate() {
                 // The first two cells of a primary sit on the trunk and at the fork.
                 let junction = i < 3 && k < 2;
-                let ink = potential_ink(v_at(v, ease::lerp(c0, c1, k as f64 / n as f64)));
-                match spike_char(ink.level) {
-                    Some(ch) if !junction && ink.level > 128 => {
+                let u = tone(v_at(v, ease::lerp(c0, c1, k as f64 / n as f64)));
+                let ink = tone_ink(u);
+                match spike_char(u) {
+                    Some(ch) if !junction && u > 0.0 => {
                         canvas.put(x, y, Glyph::ascii(ch), ink);
                     }
                     Some(_) => canvas.put(x, y, Glyph::ascii(glyph), ink),
@@ -1169,11 +1340,12 @@ impl ActionPotential {
 
     fn ascii_cell(&self, x: i32, y: i32, top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         let l = &self.layout;
-        let div = [top, bottom]
+        // The pixel furthest from rest decides.
+        let potential = [top, bottom]
             .into_iter()
-            .filter(|i| i.role == Role::Div)
-            .max_by_key(|i| i.level.abs_diff(128));
-        let spike = div.and_then(|d| spike_char(d.level).map(|ch| (ch, d)));
+            .filter_map(|i| ink_tone(i).map(|x| (x, i)))
+            .max_by(|a, b| a.0.abs().total_cmp(&b.0.abs()));
+        let spike = potential.and_then(|(x, i)| spike_char(x).map(|ch| (ch, i)));
         let on_axon = l.on_axon(x, y);
         if l.near_soma(x, y) && !on_axon {
             // The soma at cell resolution: a rim derived from pixel pairs comes out
@@ -1186,7 +1358,7 @@ impl ActionPotential {
             };
         }
         match spike {
-            // A hyperpolarised bouton keeps its `o`; the cool `Div` colour carries the
+            // A hyperpolarised bouton keeps its `o`; the blue colour carries the
             // after-hyperpolarisation, as on the arbor strokes.
             Some(('~', ink)) if !on_axon => return Some(('o', ink)),
             Some(_) => return spike,
@@ -1208,8 +1380,6 @@ impl ActionPotential {
         if h < 3 {
             return;
         }
-        let room = title::readout_room(self.cells, &Title::of(self));
-        let beat = self.timeline.at(self.step as f64 / SUB_PER_S as f64).label;
         let mut speed = StackText::<8>::new();
         // Writing into a StackText never fails.
         let _ = match self.meter.speed {
@@ -1217,16 +1387,17 @@ impl ActionPotential {
             None => write!(speed, "--.-"),
         };
         let mut label = StackText::<80>::new();
-        // Each threshold is its form's length with the longest beat and a 4-char speed,
-        // so the form follows the room, never the beat. The temperature stays in every
-        // form: 12.3 m/s is right for 6.3 °C, not the textbook 21 m/s at 18.5 °C.
-        let _ = match room {
-            62.. => write!(
+        // Each threshold is its form's length with a 4-char speed. The beat is the
+        // title's caption, not repeated here. The temperature stays in every form:
+        // 12.3 m/s is right for 6.3 °C, not the textbook 21 m/s at 18.5 °C.
+        // Sized for every caption, so the form never flickers with the beat.
+        let _ = match self.readout_room {
+            50.. => write!(
                 label,
-                "Hodgkin-Huxley 1952 | squid axon 6.3C | v={speed} m/s | {beat}"
+                "Hodgkin-Huxley 1952 | squid axon 6.3C | v={speed} m/s"
             ),
-            38.. => write!(label, "HH squid 6.3C | v={speed} m/s | {beat}"),
-            32.. => write!(label, "HH 6.3C | v={speed} m/s | {beat}"),
+            26.. => write!(label, "HH squid 6.3C | v={speed} m/s"),
+            20.. => write!(label, "HH 6.3C | v={speed} m/s"),
             7.. => write!(label, "HH 6.3C"),
             _ => return,
         };
@@ -1237,6 +1408,11 @@ impl ActionPotential {
 impl Generator for ActionPotential {
     fn meta(&self) -> &'static Meta {
         &META
+    }
+
+    fn caption(&self) -> Option<&'static str> {
+        let beat = self.timeline.at(self.step as f64 / SUB_PER_S as f64).index;
+        beat.checked_sub(1).map(|k| CAPTIONS[k])
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
@@ -1250,6 +1426,8 @@ impl Generator for ActionPotential {
         self.dots.resize(size);
         self.art.resize(size);
         self.vesicles.clear();
+        self.ions.clear();
+        self.readout_room = title::stable_readout_room(size, &META);
         self.rebuild_geometry();
         self.rasterise();
     }
@@ -1272,6 +1450,12 @@ impl Generator for ActionPotential {
             p.y += p.vy * dt;
             p.age < VESICLE_LIFE
         });
+        self.ions.retain(|p| {
+            p.age += dt;
+            p.y += p.vy * dt;
+            p.age < ION_LIFE
+        });
+        self.spawn_ions(n as u32);
         self.rasterise();
     }
 
@@ -1845,9 +2029,10 @@ mod tests {
         assert!(l.panel.is_none());
         assert_eq!(l.tube / 2, 5, "axon rows centred at 40x12");
         assert!(l.soma[2] >= 3.5, "soma radius {}", l.soma[2]);
-        // Large tier: a 3-row tube.
+        // Taller tiers: a 3-row tube, then a 4-row one.
+        assert_eq!(Layout::new(Size::new(120, 40)).fill_px, 4);
         let l = Layout::new(Size::new(200, 50));
-        assert_eq!(l.fill_px, 4);
+        assert_eq!(l.fill_px, 6);
         assert_eq!(Layout::new(Size::new(80, 24)).fill_px, 2);
     }
 
@@ -1882,40 +2067,209 @@ mod tests {
 
     #[test]
     fn ap_gen_r13_label_forms_follow_the_room_right_of_the_title() {
-        let long = "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s | single";
-        let mid = "HH squid 6.3C | v=--.- m/s | single";
-        let short = "HH 6.3C | v=--.- m/s | single";
-        // The room is w − 2 minus the title's gutter and text and the 4-cell gap, and at
-        // most w/2 (CORE-R76): min(w − 37, w/2) from w = 55, where the full title fits,
-        // min(w − 17, w/2) for the phenomenon below that, and w/2 below w = 22, where the
-        // title hides.
+        let long = "Hodgkin-Huxley 1952 | squid axon 6.3C | v=--.- m/s";
+        let mid = "HH squid 6.3C | v=--.- m/s";
+        let short = "HH 6.3C | v=--.- m/s";
+        // The room is `title::stable_readout_room` (CORE-R83): the least over the title
+        // with each caption, at this width and every wider one, so the form never
+        // flickers with the beat and only grows with the width.
         for (w, want) in [
             (124u16, long),
-            (123, mid),
-            (76, mid),
-            (75, short),
-            (69, short),
-            (68, "HH 6.3C"),
-            (55, "HH 6.3C"),
-            (54, "HH 6.3C"),
+            (100, long),
+            (99, mid),
+            (64, mid),
+            (63, short),
+            (58, short),
+            (57, "HH 6.3C"),
             (24, "HH 6.3C"),
             (23, ""),
-            (21, "HH 6.3C"),
-            (14, "HH 6.3C"),
-            (13, ""),
+            (10, ""),
         ] {
-            let row = readout(w, 0.0, None);
-            // Whole, never clipped, and ending one blank cell from the right edge.
-            assert_eq!(row.trim(), want, "w={w}");
-            assert!(row.ends_with(&format!("{want} ")), "w={w}: {row:?}");
+            // The form is the same in every beat.
+            for t in [0.0, 5.0, 14.0, 16.0] {
+                let row = readout(w, t, None);
+                // Whole, never clipped, and ending one blank cell from the right edge.
+                assert_eq!(row.trim(), want, "w={w} t={t}");
+                assert!(row.ends_with(&format!("{want} ")), "w={w}: {row:?}");
+            }
         }
-        // The longest beats fit the least room of their form.
-        for (w, t, want) in [
-            (76, 14.0, "HH squid 6.3C | v=12.3 m/s | collision"),
-            (69, 16.0, "HH 6.3C | v=12.3 m/s | threshold"),
-        ] {
-            assert_eq!(readout(w, t, Some(12.3)).trim(), want, "w={w}");
+        assert_eq!(
+            readout(64, 14.0, Some(12.3)).trim(),
+            "HH squid 6.3C | v=12.3 m/s"
+        );
+    }
+
+    #[test]
+    fn ap_a10_captions_follow_the_protocol() {
+        let (mut ap, mut ctx) = scene();
+        let mut seen = Vec::new();
+        for _ in 0..(18 * 4) {
+            ap.update(0.25, &mut ctx);
+            let beat = ap.timeline.at(ap.step as f64 / SUB_PER_S as f64).label;
+            let want = match beat {
+                "single" => None,
+                "train" => Some("refractory slowing"),
+                "collision" => Some("spikes annihilate"),
+                _ => Some("all-or-none"),
+            };
+            assert_eq!(ap.caption(), want, "{beat}");
+            if let Some(c) = want {
+                assert!(META.captions.contains(&c));
+                if !seen.contains(&c) {
+                    seen.push(c);
+                }
+            }
         }
+        assert_eq!(seen.len(), 3);
+    }
+
+    /// Run the seeded 200×50 scene to `t` in frames of 1/60 s.
+    fn run_to(t: f64) -> ActionPotential {
+        let size = Size::new(200, 50);
+        let mut ctx = Ctx::new(42, size);
+        let mut ap = ActionPotential::default();
+        ap.resize(size, &mut ctx);
+        while (ap.step as f64) < t * SUB_PER_S as f64 - 1e-6 {
+            ap.update(SIM_DT, &mut ctx);
+        }
+        ap
+    }
+
+    #[test]
+    fn ap_a11_voltage_diverges_about_rest() {
+        let above = tone_ink(0.5);
+        assert_eq!(above.role, Role::Div);
+        assert!(ink::div_value(above) > 0.0);
+        assert!(ink::div_value(tone_ink(-0.4)) < 0.0);
+        for x in [-0.48, -0.4, -0.32, 0.05, 0.3, 0.7, 0.99] {
+            let back = ink_tone(tone_ink(x)).expect("a potential ink");
+            assert!((back - x).abs() < 0.005, "{x} -> {back}");
+        }
+        // The wake starts at the diverging map's dark centre: its shallow tail fades into
+        // the plate.
+        assert_eq!(tone_ink(-WAKE_FLOOR), ink::div(0.0));
+        // Mid-axon spike at 1.2 s (the pulse left the soma at 0.2 s): above rest ahead of
+        // the wake, below rest in it, nothing else in the axoplasm; the scope trace is the
+        // map's warm side (an amber phosphor).
+        let ap = run_to(1.2);
+        let l = ap.layout;
+        let (mut above, mut below) = (0, 0);
+        for x in l.trunk.0..=l.trunk.1 {
+            for y in l.tube + 1..=l.tube + l.fill_px {
+                let px = ap.pixels.get(x, y).expect("an axon pixel");
+                match px.role {
+                    Role::Div if ink::div_value(px) > 0.0 => above += 1,
+                    Role::Div if ink::div_value(px) < 0.0 => below += 1,
+                    Role::Background => {}
+                    other => panic!("axoplasm in {other:?} {}", px.level),
+                }
+            }
+        }
+        assert!(above > 20 && below > 4, "above {above} below {below}");
+        assert_eq!(TRACE_INK.role, Role::Div);
+        assert!(ink::div_value(TRACE_INK) > 0.5);
+    }
+
+    #[test]
+    fn ap_a11_wake_is_quiet_beside_the_spike() {
+        // The ≈ 10 mV undershoot must not weigh like the ≈ 105 mV spike: over the filled
+        // trunk and soma at 5 s (120×40), the wake's total strength (|div value|) is
+        // under 0.35 of the spike's, and its strongest pixel under 0.2.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut ap = ActionPotential::default();
+        ap.resize(size, &mut ctx);
+        while (ap.step as f64) < 5.0 * SUB_PER_S as f64 - 1e-6 {
+            ap.update(SIM_DT, &mut ctx);
+        }
+        let (mut spike, mut wake, mut peak) = (0.0, 0.0, 0.0_f64);
+        for y in 0..2 * i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let px = ap.pixels.get(x, y).expect("a pixel");
+                if px.role != Role::Div {
+                    continue;
+                }
+                let d = ink::div_value(px);
+                if d > 0.0 {
+                    spike += d;
+                } else {
+                    wake -= d;
+                    peak = peak.max(-d);
+                }
+            }
+        }
+        assert!(spike > 0.0, "no spike at 5 s");
+        assert!(wake < 0.35 * spike, "wake {wake} vs spike {spike}");
+        assert!(peak < 0.2, "wake peak {peak}");
+    }
+
+    #[test]
+    fn ap_a12_ions_cross_where_channels_open() {
+        // At rest no ion is drawn: the leak is not shown.
+        let rest = run_to(0.15);
+        assert!(rest.ions.is_empty(), "{} ions at rest", rest.ions.len());
+        // While the first spike runs down the axon, Na⁺ falls onto the membrane and K⁺
+        // leaves it, only outside the tube and over the trunk.
+        let (mut sodium, mut potassium) = (0, 0);
+        let mut columns = [0; 2];
+        for t in [0.8, 1.2, 1.6] {
+            let ap = run_to(t);
+            let l = ap.layout;
+            // A few streaks per spike, not a dust cloud: under twice `IONS_PER_SPIKE` of
+            // each species at once, each in its own hue, both dot columns used.
+            for na in [true, false] {
+                let n = ap.ions.iter().filter(|i| i.sodium == na).count();
+                assert!(n as f64 <= 2.0 * IONS_PER_SPIKE, "t = {t}: {n} (Na⁺ {na})");
+            }
+            let mut canvas = Canvas::new(ap.cells, GlyphMode::Unicode);
+            ap.art.blit(&mut canvas);
+            for ion in ap.ions.iter() {
+                columns[(ion.x as usize) % 2] += 1;
+                // Its head's cell is drawn in an ion hue (the two species may share one).
+                let (cx, cy) = ((ion.x / 2.0) as i32, (ion.y.round() / 4.0).floor() as i32);
+                let role = canvas.get(cx, cy).map(|c| c.ink.role);
+                assert!(
+                    role == Some(SODIUM) || role == Some(POTASSIUM),
+                    "{ion:?}: {role:?}"
+                );
+            }
+            let (top, bottom) = (
+                f64::from(2 * l.tube),
+                f64::from(2 * (l.tube + l.fill_px + 2)),
+            );
+            let centre = 0.5 * (top + bottom);
+            for ion in ap.ions.iter() {
+                assert!(ion.y < top || ion.y >= bottom, "inside the tube: {ion:?}");
+                let x = ion.x / 2.0;
+                assert!(
+                    (f64::from(l.trunk.0)..f64::from(l.trunk.1 + 1)).contains(&x),
+                    "off the trunk: {ion:?}"
+                );
+                // Toward the axis for Na⁺, away from it for K⁺.
+                let inward = (centre - ion.y).signum() == ion.vy.signum();
+                assert_eq!(inward, ion.sodium, "{ion:?}");
+                if ion.sodium {
+                    sodium += 1;
+                } else {
+                    potassium += 1;
+                }
+            }
+            assert!(ap.ions.len() < ION_CAP, "the pool saturated at t = {t}");
+            // Two clusters: the first spike runs toward the terminal (+x), Na⁺ on its
+            // rising front ahead of K⁺ on the repolarising edge.
+            let mean_x = |na: bool| {
+                let xs: Vec<f64> = ap
+                    .ions
+                    .iter()
+                    .filter(|i| i.sodium == na)
+                    .map(|i| i.x)
+                    .collect();
+                xs.iter().sum::<f64>() / xs.len().max(1) as f64
+            };
+            assert!(mean_x(true) > mean_x(false), "t = {t}: Na⁺ not ahead of K⁺");
+        }
+        assert!(sodium >= 10 && potassium >= 10, "Na {sodium} K {potassium}");
+        assert!(columns[0] > 0 && columns[1] > 0, "dot columns {columns:?}");
     }
 
     #[test]
