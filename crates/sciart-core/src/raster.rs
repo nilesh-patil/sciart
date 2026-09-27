@@ -243,6 +243,33 @@ impl Dots {
         segment(x0, y0, x1, y1, size, |x, y| self.set(x, y, ink));
     }
 
+    /// Light the filled disc of radius `r` (dot units, so round on screen) about `(x, y)`:
+    /// every dot whose centre lies within `r`, plus the dot nearest the centre, so a
+    /// radius below ½ is one dot (CORE-R82). Clipped to the lattice; a non-finite centre
+    /// or radius, or `r < 0`, lights nothing. Bobs, suns and grains in line-art scenes.
+    pub fn disc(&mut self, x: f64, y: f64, r: f64, ink: Ink) {
+        if !(x.is_finite() && y.is_finite() && r.is_finite() && r >= 0.0) {
+            return;
+        }
+        let size = self.dot_size();
+        let (w, h) = (f64::from(size.width()), f64::from(size.height()));
+        // Only the part of the bounding box on the lattice, so a huge r stays cheap.
+        let (x0, x1) = ((x - r).ceil().max(0.0), (x + r).floor().min(w - 1.0));
+        let (y0, y1) = ((y - r).ceil().max(0.0), (y + r).floor().min(h - 1.0));
+        let mut dy = y0;
+        while dy <= y1 {
+            let mut dx = x0;
+            while dx <= x1 {
+                if (dx - x).hypot(dy - y) <= r {
+                    self.set(dx as i32, dy as i32, ink);
+                }
+                dx += 1.0;
+            }
+            dy += 1.0;
+        }
+        self.plot(x, y, ink);
+    }
+
     /// Whether dot `(x, y)` is lit; `false` off the lattice.
     pub fn is_lit(&self, x: i32, y: i32) -> bool {
         self.locate(x, y)

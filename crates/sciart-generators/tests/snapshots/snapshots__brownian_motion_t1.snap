@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-                                                                 .              
-        o                                                                       
-            .                                          o                        
+                       .           .    .     ..              . ..              
+  :. .  :                   . .                . .    .     . .            .    
+    . . :   .     .                 .                            .              
+             .              .                    .  .   ..        . .     .     
+              . .         .       .        .           .      .  .   .     .    
+  :.  .                .                           ...  ...        .            
+.  .       .         . .     :              .    .                       .      
+                  .     ..          .   .      .                         . .    
+     .  .       .    .                :... ooo   .                  .           
+.             .   :      :         :..   @@@@@@o :.        .    .               
+              .       +  .   .  .  :   :#@@@@@@@   .  ..             .      .   
+                        . .      ::.  .+:oo@@@o :   .     ..        .     .     
+   .         .      ..             .:     :.         :  ..      .   .     :.    
+                .          .         .:... +  :     :  .  :         .    .  .   
+     ..     . .  .                  .       .     ..     .  .    . .  .   .     
+     .     .      .             .    .      .     .     :                  .    
+            .      .        .  .     .                  ..     .   .  .       . 
+             .      .              .           ..          .            .       
+         . .        : .              :          .    .                          
+    .                             .                    :                   .    
+          .     .              .     ..         .         .  .        .         
+   .         :  .       .           ..    .      . .               .     . .    
                                                                                 
-                                                                                
-                                                                                
-                      .                      o                                  
-                                                                                
-                                           OOO                       .      o   
-              .                     .     @@@@O                                 
-                          o              .O@@@O                                 
-                      o   .      o      .                                       
-                                                                 .              
-              .                                                                 
-                                                       o         .  .       .   
-            o                        .                  .                       
-                                      .                  o      .               
-            .      o                                                           o
-                                                                         o      
-           o                          .                                         
-                                  o                       .                     
-             o                                      o                           
-                                          .                                .    
- Brownian motion - random kicks             D fit ...  true 2.25 rows^2/s  t 1s
+ Brownian motion - random kicks          D 1-path ...  true 2.25 rows^2/s  t 1s

@@ -1,5 +1,12 @@
-//! Twin double pendulums released 10⁻³ rad apart: they swing as one, then diverge
-//! chaotically, each lower bob tracing a glowing, fading path (SPEC-002 `double_pendulum`).
+//! Twin double pendulums released 10⁻³ rad apart: they swing as one white pendulum, then
+//! split into an aurora-green twin and an Hα-crimson twin, each lower bob tracing a 3 s
+//! fading path. A fan of ghost pendulums, all started inside the 10⁻³ rad gap between the
+//! twins, is drawn as the material line joining their lower bobs; chaos stretches and
+//! folds it across the whole swing (SPEC-002 `double_pendulum`).
+//!
+//! Everything is drawn on a braille [`Dots`] lattice rasterised in `update`/`resize` from
+//! model-space state, so a resize keeps the trails; `render` only blits and writes the
+//! readout.
 //!
 //! Physics: point masses `m₁, m₂` on massless rigid rods `L₁, L₂`, angles `θ₁, θ₂` measured
 //! from the downward vertical. The state `(θ₁, θ₂, ω₁, ω₂)` obeys the exact Lagrangian
@@ -15,10 +22,11 @@ use std::f64::consts::{PI, TAU};
 use std::fmt::Write as _;
 
 use rand::Rng;
-use sciart_core::geom::{self, ASPECT};
-use sciart_core::ode;
+use sciart_core::geom::{ASPECT, wrap_angle};
 use sciart_core::prelude::*;
+use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
+use sciart_core::{ink, ode};
 
 pub static META: Meta = Meta {
     name: "double_pendulum",
@@ -63,30 +71,65 @@ pub(crate) const H_MAX: f64 = 1.0 / 240.0;
 pub(crate) const TWIN_OFFSET: f64 = 1e-3;
 /// Each run lasts this long before restarting from new seeded angles, s (spec).
 pub(crate) const RUN_SECONDS: f64 = 45.0;
-/// Trail sampling tick and length (~2 s of lower-bob path, spec).
-const TICK: f64 = 1.0 / 60.0;
-const TRAIL_LEN: usize = 120;
-/// The opening caption is shown for this long after each release, s.
-const CAPTION_SECONDS: f64 = 6.0;
+/// Trail sampling tick and length: 3 s of lower-bob path at 120 Hz (DP-A7).
+const TICK: f64 = 1.0 / 120.0;
+pub(crate) const TRAIL_LEN: usize = 360;
+/// Ghost pendulums whose starts fill the gap between the twins (DP-A6).
+pub(crate) const GHOSTS: usize = 96;
+/// Links in the ghost line: twin A → 96 ghosts → twin B is 98 samples.
+const LINKS: usize = GHOSTS + 1;
 /// Largest frame step honoured; bounds the per-frame cost whatever the caller passes.
 const MAX_DT: f64 = 0.25;
 /// Slack for accumulated-time comparisons: summing 2700 frame steps of 1/60 s misses
 /// 45 s by ~1e-12, which must still count as "the run is over".
 const TIME_SLACK: f64 = 1e-9;
+/// The twins are drawn as one white pendulum until matching bobs have been `MERGE_DOTS`
+/// apart on screen (a braille cell is 2×4 dots, so closer twins would share cells and
+/// the one drawn last would take them), and in full colour from `SPLIT_DOTS` (DP-A5).
+const MERGE_DOTS: f64 = 4.0;
+const SPLIT_DOTS: f64 = 8.0;
+/// Where a parting twin's ramp value starts: the pale, near-white top every ramp shares,
+/// so the white pendulum turns into two hues without a jump (DP-A5).
+const WHITE_V: f64 = 0.97;
+/// While the twins are one they are drawn in `Text` at `v^WHITE_GAMMA`: at the ramp values a
+/// neutral grey reads dull (the trail head 0.7 would be mid-grey), and a power lift is
+/// monotone, so the brightness order below holds in white too (trail head 0.81, rods 0.87,
+/// bobs 0.91, cores 0.97).
+const WHITE_GAMMA: f64 = 0.6;
 
-const PIVOT: Glyph = Glyph::new('◆', '+');
-const UPPER_BOB: Glyph = Glyph::new('•', 'o');
-const LOWER_BOB: Glyph = Glyph::new('●', 'O');
-const ROD_H: Glyph = Glyph::new('─', '-');
-const ROD_V: Glyph = Glyph::new('│', '|');
-const ROD_UP: Glyph = Glyph::new('╱', '/');
-const ROD_DOWN: Glyph = Glyph::new('╲', '\\');
-/// Trail glyphs, oldest → newest.
-const TRAIL_GLYPHS: [Glyph; 3] = [
-    Glyph::new('·', '.'),
-    Glyph::new('∙', ':'),
-    Glyph::new('•', 'o'),
-];
+/// Twin A is aurora green, twin B Hα crimson: near-complementary false colours, and a
+/// pair no other dynamics scene uses (DP-A5).
+const RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::HAlpha];
+/// Ramp values of the parts of a twin. The pendulum outshines its own trail (capped at
+/// `TRAIL_V`), and the bodies stay below the pale top of the ramp so the hue survives
+/// at the heads; each bob gets a one-dot core near the top as a highlight.
+const ROD_V: f64 = 0.8;
+const BOB_V: f64 = 0.85;
+const CORE_V: f64 = 0.95;
+/// Trail ramp value: `TRAIL_FLOOR` at the tail up to `TRAIL_V` at the newest segment.
+const TRAIL_FLOOR: f64 = 0.12;
+const TRAIL_V: f64 = 0.7;
+/// The pivot hinge, always visible.
+const PIVOT_LEVEL: u8 = 230;
+// The pendulum outshines its own trail, and its core outshines its body (DP-A5).
+const _: () = assert!(TRAIL_V < ROD_V && ROD_V < BOB_V && BOB_V < CORE_V);
+/// Bob and pivot radii, dots; the lower bob grows on tall terminals, where a 2.8-dot disc
+/// reads as a speckle rather than a ball.
+const UPPER_R: f64 = 1.8;
+const LOWER_R: f64 = 2.8;
+const LOWER_R_TALL: f64 = 3.5;
+const TALL_ROWS: u16 = 40;
+const PIVOT_R: f64 = 1.0;
+/// The ghost line at full fade-in, as a ramp value: under the twins and their trails.
+const GHOST_V: f64 = 0.55;
+/// Ghost line segments longer than this (model units) are left out: where the line has
+/// been stretched further than its samples resolve, a chord would be a straight streak
+/// across the swing, not the material line (DP-A6, stated in SPEC-002).
+const GHOST_LINK: f64 = 0.35;
+/// The ghost line fades out as it breaks up: fully shown while at least 70 % of its links
+/// are kept, gone at 30 % or fewer (smoothstep between), so a line stretched past its
+/// samples dissolves instead of salting the frame with lone beads (DP-A6).
+const GHOST_KEPT: (f64, f64) = (0.3, 0.7);
 
 /// Right-hand side of the exact Lagrangian equations of motion (DP-A1).
 ///
@@ -127,34 +170,6 @@ pub(crate) fn energy(p: &Params, y: &[f64; 4]) -> f64 {
     kinetic + potential
 }
 
-/// Angular frequencies `(ω_slow, ω_fast)` of the linearised normal modes (DP-A2).
-///
-/// Linearising about the rest state gives `M θ'' = −K θ` with
-/// `M = [[(m₁+m₂)L₁², m₂L₁L₂], [m₂L₁L₂, m₂L₂²]]`, `K = diag((m₁+m₂)gL₁, m₂gL₂)`.
-/// `det(K − λM) = 0` with `λ = ω²` reduces to
-/// `m₁L₁L₂ λ² − (m₁+m₂) g (L₁+L₂) λ + (m₁+m₂) g² = 0`.
-pub(crate) fn normal_modes(p: &Params) -> (f64, f64) {
-    let Params { m1, m2, l1, l2, g } = *p;
-    let m = m1 + m2;
-    let a = m1 * l1 * l2;
-    let b = m * g * (l1 + l2);
-    let c = m * g * g;
-    // b² − 4ac = (m₁+m₂) g² [(m₁+m₂)(L₁−L₂)² + 4m₂L₁L₂] ≥ 0, written as a sum of
-    // non-negative terms so rounding can never make it negative.
-    let disc = m * g * g * (m * (l1 - l2).powi(2) + 4.0 * m2 * l1 * l2);
-    let fast = (b + disc.sqrt()) / (2.0 * a);
-    // Vieta (λ₊λ₋ = c/a) instead of b − √disc avoids cancellation in the slow root.
-    let slow = c / (a * fast);
-    (slow.sqrt(), fast.sqrt())
-}
-
-/// Mode shape `θ₂/θ₁` of the normal mode with angular frequency `omega` (DP-A2), from the
-/// first row of `(K − ω²M) v = 0`: `θ₂/θ₁ = (m₁+m₂)(g − ω²L₁) / (ω² m₂ L₂)`.
-pub(crate) fn mode_ratio(p: &Params, omega: f64) -> f64 {
-    let l = omega * omega;
-    (p.m1 + p.m2) * (p.g - l * p.l1) / (l * p.m2 * p.l2)
-}
-
 /// Positions of the upper and lower bobs relative to the pivot, model units, y down
 /// (DP-A4): always derived from the angles, so both rods are rigid by construction.
 pub(crate) fn bobs(p: &Params, th1: f64, th2: f64) -> [(f64, f64); 2] {
@@ -162,31 +177,6 @@ pub(crate) fn bobs(p: &Params, th1: f64, th2: f64) -> [(f64, f64); 2] {
     let (s2, c2) = th2.sin_cos();
     let b1 = (p.l1 * s1, p.l1 * c1);
     [b1, (b1.0 + p.l2 * s2, b1.1 + p.l2 * c2)]
-}
-
-/// "small swings: normal modes 2.78 s (in step) & 1.22 s (opposed) -- large: chaos":
-/// the linear prediction the chaotic motion departs from (DP-A2).
-fn modes_caption(p: &Params) -> String {
-    let (slow, fast) = normal_modes(p);
-    let kind = |w: f64| {
-        if mode_ratio(p, w) > 0.0 {
-            "in step"
-        } else {
-            "opposed"
-        }
-    };
-    format!(
-        "small swings: normal modes {:.2} s ({}) & {:.2} s ({}) -- large swings: chaos",
-        TAU / slow,
-        kind(slow),
-        TAU / fast,
-        kind(fast)
-    )
-}
-
-/// `a` wrapped into `(−π, π]`.
-fn wrap_pi(a: f64) -> f64 {
-    a - TAU * (a / TAU).round()
 }
 
 /// The widest each readout form (long, mid, short) can be for any separation in
@@ -218,9 +208,9 @@ pub(crate) fn write_forms(out: &mut [String; 3], sep: f64, sep0: f64, drift: f64
 }
 
 /// Angular separation of two states, `√(Δθ₁² + Δθ₂²)` with each difference wrapped to
-/// `(−π, π]` (DP-A3) — a full turn apart is the same configuration.
+/// `[−π, π)` (DP-A3) — a full turn apart is the same configuration.
 pub(crate) fn separation(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    wrap_pi(a[0] - b[0]).hypot(wrap_pi(a[1] - b[1]))
+    wrap_angle(a[0] - b[0]).hypot(wrap_angle(a[1] - b[1]))
 }
 
 /// Advance one pendulum by `dt` seconds of RK4 substeps no longer than [`H_MAX`].
@@ -240,6 +230,28 @@ pub(crate) fn seeded_start(rng: &mut impl Rng) -> [f64; 4] {
     [th1, th2, 0.0, 0.0]
 }
 
+/// How far the twins have split (DP-A5), from the most their matching bobs have been
+/// apart this run, in dots: 0 up to `MERGE_DOTS`, 1 from `SPLIT_DOTS`, smoothstepped
+/// between. It only grows during a run, so twins that later cross never turn white again.
+pub(crate) fn split(apart_dots: f64) -> f64 {
+    ease::smoothstep((apart_dots - MERGE_DOTS) / (SPLIT_DOTS - MERGE_DOTS))
+}
+
+/// Ghost line visibility (DP-A6): it fades in with the twins' split, since before that
+/// it lies under them, and out as its links break (`kept` = fraction of links joined).
+pub(crate) fn ghost_fade(split: f64, kept: f64) -> f64 {
+    let (lo, hi) = GHOST_KEPT;
+    split * ease::smoothstep((kept - lo) / (hi - lo))
+}
+
+/// Ghost `k`'s start (DP-A6): twin A's, with the lower arm turned `(k + 1)/(GHOSTS + 1)` of
+/// the way to twin B's, so the fan spans exactly the gap between the twins.
+pub(crate) fn ghost_start(a: &[f64; 4], k: usize) -> [f64; 4] {
+    let mut y = *a;
+    y[1] += TWIN_OFFSET * (k + 1) as f64 / (GHOSTS + 1) as f64;
+    y
+}
+
 /// Screen mapping: pivot at `(cx, cy)` cells, `scale` rows per model unit.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct View {
@@ -250,11 +262,12 @@ struct View {
 
 impl View {
     /// Pivot centred in `rows × cols`, scaled so the full reach `L₁ + L₂` in every direction
-    /// stays inside (aspect-corrected). The rounded extremes land on `0` and `size − 1`.
+    /// stays inside (aspect-corrected) with half a row to spare for the lower bob's disc.
+    /// The rounded extremes stay within `0` and `size − 1`.
     fn fit(p: &Params, cols: f64, rows: f64) -> Self {
         let (cx, cy) = (((cols - 1.0) / 2.0).max(0.0), ((rows - 1.0) / 2.0).max(0.0));
         let reach = p.l1 + p.l2;
-        let scale = (cy.min(cx / ASPECT) / reach).max(0.0);
+        let scale = ((cy - 0.5).min((cx - 0.5) / ASPECT) / reach).max(0.0);
         Self { cx, cy, scale }
     }
 
@@ -263,13 +276,50 @@ impl View {
     fn map(&self, (x, y): (f64, f64)) -> (f64, f64) {
         (self.cx + self.scale * x * ASPECT, self.cy + self.scale * y)
     }
+
+    /// Model point → dot coordinates (CORE-R64); the cell centre of a point is its
+    /// fractional cell coordinate plus ½.
+    #[inline]
+    fn dot(&self, p: (f64, f64)) -> (f64, f64) {
+        let (x, y) = self.map(p);
+        Dots::from_cells(x + 0.5, y + 0.5)
+    }
+
+    /// Dots per model unit, the same both ways: `scale` rows of 4 dots vertically,
+    /// `scale · ASPECT` columns of 2 dots horizontally.
+    fn dots_per_unit(&self) -> f64 {
+        self.scale * f64::from(Dots::CELL_H)
+    }
+}
+
+/// Whether neighbouring ghost bobs `a`, `b` (model units) are close enough to join (DP-A6).
+pub(crate) fn ghost_link(a: (f64, f64), b: (f64, f64)) -> bool {
+    (a.0 - b.0).hypot(a.1 - b.1) <= GHOST_LINK
+}
+
+/// A part of twin `i` at ramp value `v` once the twins have split by `split` (DP-A5):
+/// white light while they are one, then its ramp, starting from the pale top.
+fn twin_ink(i: usize, v: f64, split: f64) -> Ink {
+    if split > 0.0 {
+        ink::ramp(RAMPS[i], v + (1.0 - split) * (WHITE_V - v))
+    } else {
+        Ink::new(Role::Text, ink::level(255.0 * v.powf(WHITE_GAMMA)))
+    }
+}
+
+/// A trail sample: both twins' lower bobs (model units) and the twins' `apart` then.
+#[derive(Debug, Clone, Copy)]
+struct Sample {
+    lows: [(f64, f64); 2],
+    apart: f64,
 }
 
 #[derive(Debug)]
 pub struct DoublePendulum {
-    /// The reference pendulum (`Cold`) and its twin (`Hot`).
-    a: [f64; 4],
-    b: [f64; 4],
+    /// The twins: A (aurora) and B (Hα), 10⁻³ rad apart in `θ₂`.
+    twins: [[f64; 4]; 2],
+    /// The ghost fan between them (DP-A6).
+    ghosts: [[f64; 4]; GHOSTS],
     started: bool,
     /// Time since the current release, s.
     run_t: f64,
@@ -278,24 +328,28 @@ pub struct DoublePendulum {
     e0: [f64; 2],
     /// Largest relative energy drift seen this run.
     drift: f64,
-    /// Current and initial separation (DP-A3 readout).
+    /// Current and initial angular separation (DP-A3 readout).
     sep: f64,
     sep0: f64,
-    trail_a: Trail<(f64, f64)>,
-    trail_b: Trail<(f64, f64)>,
+    /// Farthest the twins' matching bobs have been apart this run, model units (DP-A5).
+    apart: f64,
+    /// Lower-bob positions of both twins, oldest → newest (DP-A7).
+    trail: Trail<Sample>,
     view: View,
     label_row: Option<i32>,
+    /// Lower bob radius for the current size, dots.
+    lower_r: f64,
+    /// Everything but the readout, rasterised in `update`/`resize`.
+    dots: Dots,
     /// Readouts in decreasing length; render picks the longest that fits.
     labels: [String; 3],
-    /// What small swings would do, from the linear analysis (DP-A2).
-    modes_caption: String,
 }
 
 impl Default for DoublePendulum {
     fn default() -> Self {
         Self {
-            a: [0.0; 4],
-            b: [0.0; 4],
+            twins: [[0.0; 4]; 2],
+            ghosts: [[0.0; 4]; GHOSTS],
             started: false,
             run_t: 0.0,
             tick_clock: 0.0,
@@ -303,44 +357,53 @@ impl Default for DoublePendulum {
             drift: 0.0,
             sep: 0.0,
             sep0: TWIN_OFFSET,
-            trail_a: Trail::new(TRAIL_LEN),
-            trail_b: Trail::new(TRAIL_LEN),
+            apart: 0.0,
+            trail: Trail::new(TRAIL_LEN),
             view: View::default(),
             label_row: None,
+            lower_r: LOWER_R,
+            dots: Dots::default(),
             labels: std::array::from_fn(|_| String::with_capacity(96)),
-            modes_caption: modes_caption(&SCENE),
         }
     }
 }
 
 impl DoublePendulum {
-    /// Release both twins from a new seeded start.
+    /// Release both twins and the ghost fan from a new seeded start.
     fn release(&mut self, ctx: &mut Ctx) {
-        self.a = seeded_start(&mut ctx.rng);
-        self.b = self.a;
-        self.b[1] += TWIN_OFFSET;
-        self.e0 = [energy(&SCENE, &self.a), energy(&SCENE, &self.b)];
+        let a = seeded_start(&mut ctx.rng);
+        let mut b = a;
+        b[1] += TWIN_OFFSET;
+        self.twins = [a, b];
+        self.ghosts = std::array::from_fn(|k| ghost_start(&a, k));
+        self.e0 = self.twins.map(|y| energy(&SCENE, &y));
         self.drift = 0.0;
-        self.sep0 = separation(&self.a, &self.b);
+        self.sep0 = separation(&a, &b);
         self.sep = self.sep0;
+        self.apart = 0.0;
         self.run_t = 0.0;
         self.tick_clock = 0.0;
-        self.trail_a.clear();
-        self.trail_b.clear();
-        self.push_trails();
+        self.trail.clear();
+        self.push_trail();
         self.started = true;
         self.refresh_labels();
     }
 
-    fn push_trails(&mut self) {
-        self.trail_a.push(bobs(&SCENE, self.a[0], self.a[1])[1]);
-        self.trail_b.push(bobs(&SCENE, self.b[0], self.b[1])[1]);
+    /// Record the trail sample for now, after widening `apart` to the twins' current gap.
+    fn push_trail(&mut self) {
+        let [a, b] = self.twins.map(|y| bobs(&SCENE, y[0], y[1]));
+        let gap = |p: (f64, f64), q: (f64, f64)| (p.0 - q.0).hypot(p.1 - q.1);
+        self.apart = self.apart.max(gap(a[0], b[0])).max(gap(a[1], b[1]));
+        self.trail.push(Sample {
+            lows: [a[1], b[1]],
+            apart: self.apart,
+        });
     }
 
     fn rel_drift(&self) -> f64 {
-        let da = (energy(&SCENE, &self.a) - self.e0[0]).abs() / self.e0[0].max(1e-12);
-        let db = (energy(&SCENE, &self.b) - self.e0[1]).abs() / self.e0[1].max(1e-12);
-        da.max(db)
+        let rel =
+            |i: usize| (energy(&SCENE, &self.twins[i]) - self.e0[i]).abs() / self.e0[i].max(1e-12);
+        rel(0).max(rel(1))
     }
 
     fn refresh_labels(&mut self) {
@@ -359,81 +422,81 @@ impl DoublePendulum {
         }
     }
 
-    /// Draw a rod from `p` to `q` (cells), endpoints excluded, with a glyph that follows
-    /// its on-screen slope.
-    fn rod(canvas: &mut Canvas, p: (f64, f64), q: (f64, f64), ink: Ink) {
-        let (x0, y0, x1, y1) = (
-            p.0.round() as i32,
-            p.1.round() as i32,
-            q.0.round() as i32,
-            q.1.round() as i32,
-        );
-        let (dx, dy) = (q.0 - p.0, q.1 - p.1);
-        let glyph = if dy.abs() < 0.4 * dx.abs() {
-            ROD_H
-        } else if dx.abs() < 0.5 * dy.abs() {
-            ROD_V
-        } else if (dx > 0.0) == (dy < 0.0) {
-            ROD_UP
-        } else {
-            ROD_DOWN
-        };
-        for (x, y) in geom::line(x0, y0, x1, y1) {
-            if (x, y) != (x0, y0) && (x, y) != (x1, y1) {
-                canvas.put(x, y, glyph, ink);
-            }
+    /// Draw everything onto `dots`, dimmest first; a cell keeps its brightest dot (CORE-R41).
+    fn rasterise(&mut self) {
+        self.dots.clear();
+        let view = self.view;
+        let split_of = |apart: f64| split(apart * view.dots_per_unit());
+        let parted = split_of(self.apart);
+
+        // Ghost fan: the material line of starts between the twins, joined in start order
+        // from twin A's lower bob through every ghost's to twin B's (A's colour for the
+        // first half, B's for the second), with a one-dot bead per ghost.
+        let lower = |y: &[f64; 4]| bobs(&SCENE, y[0], y[1])[1];
+        let mut line = [(0.0, 0.0); LINKS + 1];
+        line[0] = lower(&self.twins[0]);
+        line[LINKS] = lower(&self.twins[1]);
+        for (p, y) in line[1..LINKS].iter_mut().zip(&self.ghosts) {
+            *p = lower(y);
         }
-    }
-
-    /// Put a glyph for twin B; where it lands on twin A's ink the cell turns `Accent`, so
-    /// the twins read as one while they are in step.
-    fn put_b(canvas: &mut Canvas, x: f64, y: f64, glyph: Glyph, level: u8) {
-        let (x, y) = (x.round(), y.round());
-        let size = canvas.size();
-        if !((0.0..f64::from(size.width())).contains(&x)
-            && (0.0..f64::from(size.height())).contains(&y))
-        {
-            return;
-        }
-        let (xi, yi) = (x as i32, y as i32);
-        let role = match canvas.get(xi, yi) {
-            Some(c) if c.ink.role == Role::Cold => Role::Accent,
-            _ => Role::Hot,
-        };
-        canvas.put(xi, yi, glyph, Ink::new(role, level));
-    }
-
-    fn put_a(canvas: &mut Canvas, x: f64, y: f64, glyph: Glyph, level: u8) {
-        sciart_core::particles::plot(canvas, x, y, glyph, Ink::new(Role::Cold, level));
-    }
-
-    /// Fading, glowing trail: consecutive samples joined by interpolated dots.
-    fn trail(
-        &self,
-        canvas: &mut Canvas,
-        trail: &Trail<(f64, f64)>,
-        put: fn(&mut Canvas, f64, f64, Glyph, u8),
-    ) {
-        let n = trail.len();
-        let mut prev: Option<(f64, f64)> = None;
-        for (i, &p) in trail.iter().enumerate() {
-            let q = self.view.map(p);
-            // 0 = oldest, 1 = newest.
-            let fresh = (i + 1) as f64 / n.max(1) as f64;
-            let level = (30.0 + 200.0 * fresh.powf(1.6)) as u8;
-            let glyph = TRAIL_GLYPHS[((fresh * 3.0) as usize).min(2)];
-            if let Some(o) = prev {
-                let (dc, dr) = (q.0 - o.0, q.1 - o.1);
-                let steps = dc.abs().max(dr.abs()).ceil().clamp(1.0, 64.0) as usize;
-                for k in 1..=steps {
-                    let f = k as f64 / steps as f64;
-                    put(canvas, o.0 + dc * f, o.1 + dr * f, glyph, level);
+        let kept = line.windows(2).filter(|l| ghost_link(l[0], l[1])).count();
+        let fade = ghost_fade(parted, kept as f64 / LINKS as f64);
+        if 255.0 * GHOST_V * fade >= ink::MIN_VISIBLE_LEVEL {
+            for (k, l) in line.windows(2).enumerate() {
+                let ink = ink::ramp(RAMPS[2 * k / LINKS], GHOST_V * fade);
+                let (d0, d1) = (view.dot(l[0]), view.dot(l[1]));
+                if ghost_link(l[0], l[1]) {
+                    self.dots.line(d0.0, d0.1, d1.0, d1.1, ink);
                 }
-            } else {
-                put(canvas, q.0, q.1, glyph, level);
+                if k < GHOSTS {
+                    self.dots.plot(d1.0, d1.1, ink);
+                }
             }
-            prev = Some(q);
         }
+
+        // Trails: white while the twins are one, then an aurora path and an Hα path. The
+        // twins take turns drawing last, so neither wins every cell they share.
+        let n = self.trail.len();
+        let now = Sample {
+            lows: [line[0], line[LINKS]],
+            apart: self.apart,
+        };
+        let newer = self.trail.iter().skip(1).chain([&now]);
+        for (k, (old, new)) in self.trail.iter().zip(newer).enumerate() {
+            // Age 0 = newest segment, → 1 at the tail.
+            let fresh = 1.0 - (n - 1 - k) as f64 / TRAIL_LEN as f64;
+            let v = TRAIL_FLOOR + (TRAIL_V - TRAIL_FLOOR) * fresh * fresh;
+            let s = split_of(new.apart);
+            let order: &[usize] = match (s > 0.0, k % 2 == 0) {
+                (false, _) => &[0],
+                (true, true) => &[0, 1],
+                (true, false) => &[1, 0],
+            };
+            for &i in order {
+                let (d0, d1) = (view.dot(old.lows[i]), view.dot(new.lows[i]));
+                self.dots.line(d0.0, d0.1, d1.0, d1.1, twin_ink(i, v, s));
+            }
+        }
+
+        // The twins: rods, then bobs with a bright core; one white pendulum until they part.
+        let arms = self
+            .twins
+            .map(|y| bobs(&SCENE, y[0], y[1]).map(|p| view.dot(p)));
+        let twins = if parted > 0.0 { 2 } else { 1 };
+        let pivot = view.dot((0.0, 0.0));
+        for (i, [p1, p2]) in arms.iter().enumerate().take(twins) {
+            let rod = twin_ink(i, ROD_V, parted);
+            self.dots.line(pivot.0, pivot.1, p1.0, p1.1, rod);
+            self.dots.line(p1.0, p1.1, p2.0, p2.1, rod);
+        }
+        for (i, [p1, p2]) in arms.iter().enumerate().take(twins) {
+            for (p, r) in [(p1, UPPER_R), (p2, self.lower_r)] {
+                self.dots.disc(p.0, p.1, r, twin_ink(i, BOB_V, parted));
+                self.dots.plot(p.0, p.1, twin_ink(i, CORE_V, parted));
+            }
+        }
+        self.dots
+            .disc(pivot.0, pivot.1, PIVOT_R, Ink::new(Role::Text, PIVOT_LEVEL));
     }
 }
 
@@ -448,14 +511,21 @@ impl Generator for DoublePendulum {
         self.label_row = (size.height() >= 10).then(|| i32::from(size.height()) - 1);
         let rows = if self.label_row.is_some() { h - 1.0 } else { h };
         self.view = View::fit(&SCENE, w, rows);
-        // The dynamics are in model units, so a resize never restarts a run.
+        self.lower_r = if size.height() >= TALL_ROWS {
+            LOWER_R_TALL
+        } else {
+            LOWER_R
+        };
+        self.dots.resize(size);
+        // The dynamics and trails are in model units, so a resize never restarts a run.
         if !self.started {
             self.release(ctx);
         }
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
-        if dt.is_nan() || dt <= 0.0 {
+        if !(dt.is_finite() && dt > 0.0) {
             return;
         }
         if !self.started {
@@ -469,69 +539,29 @@ impl Generator for DoublePendulum {
                 .min(TICK - self.tick_clock)
                 .min(RUN_SECONDS - self.run_t)
                 .max(0.0);
-            step(&SCENE, &mut self.a, h);
-            step(&SCENE, &mut self.b, h);
+            for y in self.twins.iter_mut().chain(&mut self.ghosts) {
+                step(&SCENE, y, h);
+            }
             left -= h;
             self.run_t += h;
             self.tick_clock += h;
             if self.tick_clock >= TICK - TIME_SLACK {
                 self.tick_clock = 0.0;
-                self.push_trails();
+                self.push_trail();
             }
-            let broken = !(self.a.iter().chain(&self.b).all(|v| v.is_finite()));
+            let broken = !(self.twins.iter().flatten().all(|v| v.is_finite()));
             if self.run_t >= RUN_SECONDS - TIME_SLACK || broken {
                 self.release(ctx);
             }
         }
-        self.sep = separation(&self.a, &self.b);
+        self.sep = separation(&self.twins[0], &self.twins[1]);
         self.drift = self.drift.max(self.rel_drift());
         self.refresh_labels();
+        self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let width = i32::from(canvas.size().width());
-
-        // Opening caption, fading out.
-        if self.run_t < CAPTION_SECONDS && canvas.size().height() >= 14 {
-            let fade = 1.0 - self.run_t / CAPTION_SECONDS;
-            let ink = Ink::new(Role::Text, (60.0 + 170.0 * fade) as u8);
-            for s in [
-                "two double pendulums, released 0.001 rad apart",
-                "released 0.001 rad apart",
-            ] {
-                if s.len() as i32 + 2 <= width {
-                    sciart_core::draw::text_centered(canvas, 0, s, ink);
-                    break;
-                }
-            }
-            // Only on tall terminals: row 1 is otherwise too often under the pendulum.
-            if canvas.size().height() >= 24 && self.modes_caption.len() as i32 + 2 <= width {
-                let ink = Ink::new(Role::Text, (40.0 + 120.0 * fade) as u8);
-                sciart_core::draw::text_centered(canvas, 1, &self.modes_caption, ink);
-            }
-        }
-
-        self.trail(canvas, &self.trail_a, Self::put_a);
-        self.trail(canvas, &self.trail_b, Self::put_b);
-
-        let pivot = self.view.map((0.0, 0.0));
-        for (state, lvl) in [(&self.a, 150u8), (&self.b, 120u8)] {
-            let [p1, p2] = bobs(&SCENE, state[0], state[1]);
-            let (p1, p2) = (self.view.map(p1), self.view.map(p2));
-            Self::rod(canvas, pivot, p1, Ink::new(Role::Structure, lvl));
-            Self::rod(canvas, p1, p2, Ink::new(Role::Structure, lvl));
-        }
-        for (state, put) in [
-            (&self.a, Self::put_a as fn(&mut Canvas, f64, f64, Glyph, u8)),
-            (&self.b, Self::put_b),
-        ] {
-            let [p1, p2] = bobs(&SCENE, state[0], state[1]);
-            let (p1, p2) = (self.view.map(p1), self.view.map(p2));
-            put(canvas, p1.0, p1.1, UPPER_BOB, 220);
-            put(canvas, p2.0, p2.1, LOWER_BOB, 255);
-        }
-        sciart_core::particles::plot(canvas, pivot.0, pivot.1, PIVOT, Ink::new(Role::Text, 230));
-
+        self.dots.blit(canvas);
         // Right-aligned, clear of the title (GEN-R13).
         let room = title::readout_room(canvas.size(), &Title::of(self));
         if let Some(row) = self.label_row
@@ -556,14 +586,6 @@ mod tests {
     use super::*;
     use std::f64::consts::{FRAC_PI_2, SQRT_2};
 
-    #[test]
-    fn dp_a2_caption_reports_in_phase_slow_and_anti_phase_fast_modes() {
-        let c = modes_caption(&SCENE);
-        let (slow, fast) = normal_modes(&SCENE);
-        assert!(c.contains(&format!("{:.2} s (in step)", TAU / slow)), "{c}");
-        assert!(c.contains(&format!("{:.2} s (opposed)", TAU / fast)), "{c}");
-    }
-
     fn seeded(seed: u64) -> Ctx {
         Ctx::new(seed, Size::new(1, 1))
     }
@@ -582,6 +604,34 @@ mod tests {
             t += SIM_DT;
         }
         out
+    }
+
+    /// Angular frequencies `(ω_slow, ω_fast)` of the linearised normal modes (DP-A2).
+    ///
+    /// Linearising about the rest state gives `M θ'' = −K θ` with
+    /// `M = [[(m₁+m₂)L₁², m₂L₁L₂], [m₂L₁L₂, m₂L₂²]]`, `K = diag((m₁+m₂)gL₁, m₂gL₂)`.
+    /// `det(K − λM) = 0` with `λ = ω²` reduces to
+    /// `m₁L₁L₂ λ² − (m₁+m₂) g (L₁+L₂) λ + (m₁+m₂) g² = 0`.
+    fn normal_modes(p: &Params) -> (f64, f64) {
+        let Params { m1, m2, l1, l2, g } = *p;
+        let m = m1 + m2;
+        let a = m1 * l1 * l2;
+        let b = m * g * (l1 + l2);
+        let c = m * g * g;
+        // b² − 4ac = (m₁+m₂) g² [(m₁+m₂)(L₁−L₂)² + 4m₂L₁L₂] ≥ 0, written as a sum of
+        // non-negative terms so rounding can never make it negative.
+        let disc = m * g * g * (m * (l1 - l2).powi(2) + 4.0 * m2 * l1 * l2);
+        let fast = (b + disc.sqrt()) / (2.0 * a);
+        // Vieta (λ₊λ₋ = c/a) instead of b − √disc avoids cancellation in the slow root.
+        let slow = c / (a * fast);
+        (slow.sqrt(), fast.sqrt())
+    }
+
+    /// Mode shape `θ₂/θ₁` of the normal mode with angular frequency `omega` (DP-A2), from the
+    /// first row of `(K − ω²M) v = 0`: `θ₂/θ₁ = (m₁+m₂)(g − ω²L₁) / (ω² m₂ L₂)`.
+    fn mode_ratio(p: &Params, omega: f64) -> f64 {
+        let l = omega * omega;
+        (p.m1 + p.m2) * (p.g - l * p.l1) / (l * p.m2 * p.l2)
     }
 
     const PARAM_SETS: [Params; 4] = [
@@ -737,7 +787,7 @@ mod tests {
         for i in 0..600 {
             g.update(SIM_DT, &mut ctx);
             if i % 37 == 0 {
-                for s in [g.a, g.b] {
+                for s in g.twins {
                     let [(x1, y1), (x2, y2)] = bobs(&SCENE, s[0], s[1]);
                     assert!((x1.hypot(y1) - SCENE.l1).abs() < 1e-12);
                     assert!(((x2 - x1).hypot(y2 - y1) - SCENE.l2).abs() < 1e-12);
@@ -860,8 +910,9 @@ mod tests {
         }
         let mut g = DoublePendulum::default();
         g.resize(Size::new(80, 24), &mut seeded(1));
-        assert_eq!((g.a[0], g.a[2], g.a[3]), (g.b[0], g.b[2], g.b[3]));
-        assert!((g.b[1] - g.a[1] - TWIN_OFFSET).abs() < 1e-15);
+        let [a, b] = g.twins;
+        assert_eq!((a[0], a[2], a[3]), (b[0], b[2], b[3]));
+        assert!((b[1] - a[1] - TWIN_OFFSET).abs() < 1e-15);
     }
 
     #[test]
@@ -877,17 +928,18 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(2);
         g.resize(Size::new(80, 24), &mut ctx);
-        let first = g.a;
+        let first = g.twins[0];
         for _ in 0..(RUN_SECONDS / SIM_DT).round() as usize - 1 {
             g.update(SIM_DT, &mut ctx);
         }
         assert!(g.run_t > RUN_SECONDS - 0.05);
         g.update(SIM_DT, &mut ctx);
         assert!(g.run_t < 1e-9, "{}", g.run_t);
-        assert_ne!(g.a[..2], first[..2]);
-        assert_eq!((g.a[2], g.a[3]), (0.0, 0.0));
-        assert!((separation(&g.a, &g.b) - TWIN_OFFSET).abs() < 1e-12);
-        assert_eq!(g.trail_a.len(), 1);
+        let [a, b] = g.twins;
+        assert_ne!(a[..2], first[..2]);
+        assert_eq!((a[2], a[3]), (0.0, 0.0));
+        assert!((separation(&a, &b) - TWIN_OFFSET).abs() < 1e-12);
+        assert_eq!(g.trail.len(), 1);
     }
 
     #[test]
@@ -898,8 +950,260 @@ mod tests {
         for _ in 0..90 {
             g.update(SIM_DT, &mut ctx);
         }
-        let (a, t) = (g.a, g.run_t);
+        let (a, t) = (g.twins, g.run_t);
         g.resize(Size::new(33, 11), &mut ctx);
-        assert_eq!((g.a, g.run_t), (a, t));
+        assert_eq!((g.twins, g.run_t), (a, t));
+    }
+
+    /// Scene `seed` at `size` after `seconds` of simulated time.
+    fn run(seed: u64, size: Size, seconds: f64) -> DoublePendulum {
+        let mut g = DoublePendulum::default();
+        let mut ctx = seeded(seed);
+        g.resize(size, &mut ctx);
+        for _ in 0..(seconds / SIM_DT).round() as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g
+    }
+
+    /// Roles of the drawn cells above the readout row.
+    fn roles(g: &DoublePendulum, size: Size) -> Vec<Role> {
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let label = usize::from(size.height()) - 1;
+        canvas
+            .cells()
+            .chunks(usize::from(size.width()))
+            .take(label)
+            .flatten()
+            .filter(|c| c.ch != ' ')
+            .map(|c| c.ink.role)
+            .collect()
+    }
+
+    #[test]
+    fn dp_a5_twins_are_one_white_pendulum_until_they_part_into_aurora_and_halpha() {
+        let size = Size::new(80, 24);
+        for seed in 0..4 {
+            let early = roles(&run(seed, size, 1.0), size);
+            assert!(!early.is_empty());
+            assert!(
+                early.iter().all(|&r| r == Role::Text),
+                "seed {seed}: {early:?}"
+            );
+            let late = run(seed, size, 30.0);
+            assert_eq!(split(late.apart * late.view.dots_per_unit()), 1.0);
+            let late = roles(&late, size);
+            for ramp in RAMPS {
+                assert!(late.contains(&Role::Ramp(ramp)), "seed {seed}: {ramp:?}");
+            }
+        }
+    }
+
+    /// The scene at 200×50 with twin B turned rigidly about the pivot so that the lower
+    /// bobs are `dots` apart on screen, and a fresh trail.
+    fn posed(dots: f64) -> (DoublePendulum, Size) {
+        let size = Size::new(200, 50);
+        let mut g = run(1, size, 0.0);
+        let a = [0.4, 0.9, 0.0, 0.0];
+        let reach = bobs(&SCENE, a[0], a[1])[1];
+        let turn = dots / (g.view.dots_per_unit() * reach.0.hypot(reach.1));
+        g.twins = [a, [a[0] + turn, a[1] + turn, 0.0, 0.0]];
+        g.apart = 0.0;
+        g.trail.clear();
+        g.push_trail();
+        g.rasterise();
+        (g, size)
+    }
+
+    #[test]
+    fn dp_a5_twins_sharing_cells_stay_white_and_part_into_even_hues() {
+        assert_eq!(split(MERGE_DOTS), 0.0);
+        assert_eq!(split(SPLIT_DOTS), 1.0);
+        // Two dots apart the twins share braille cells: one white pendulum, not a
+        // two-coloured speckle.
+        let (mut g, size) = posed(2.0);
+        let lit = roles(&g, size);
+        // Drawn once, as twin A: a trail swept with twin B 2 dots off draws exactly the
+        // dots of one swept with twin B on top of A.
+        let sweep = |g: &mut DoublePendulum, gap: f64| {
+            g.trail.clear();
+            for j in 0..40 {
+                let a = [0.4 + 0.02 * f64::from(j), 0.9, 0.0, 0.0];
+                g.twins = [a, [a[0] + gap, a[1] + gap, 0.0, 0.0]];
+                g.push_trail();
+            }
+            g.rasterise();
+            let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+            (0..h)
+                .flat_map(|y| (0..w).map(move |x| (x, y)))
+                .map(|(x, y)| g.dots.cell_mask(x, y))
+                .collect::<Vec<_>>()
+        };
+        let gap = g.twins[1][0] - g.twins[0][0];
+        assert_eq!(
+            sweep(&mut g, gap),
+            sweep(&mut g, 0.0),
+            "twin B drawn while merged"
+        );
+        assert!(
+            !lit.is_empty() && lit.iter().all(|&r| r == Role::Text),
+            "{lit:?}"
+        );
+        // Ten dots apart both hues show in comparable amounts.
+        let (g, size) = posed(10.0);
+        let lit = roles(&g, size);
+        let [a, b] = RAMPS.map(|r| lit.iter().filter(|&&l| l == Role::Ramp(r)).count());
+        assert!(a.min(b) * 3 >= a.max(b) * 2, "aurora {a} vs halpha {b}");
+    }
+
+    #[test]
+    fn dp_a5_parting_twins_start_from_the_pale_top_of_their_ramps() {
+        // Just past the merge the parts are near white in their own hue, then settle on
+        // their own values: the split is one continuous fade, not a jump.
+        assert_eq!(twin_ink(1, ROD_V, 1e-9), ink::ramp(RAMPS[1], WHITE_V));
+        assert_eq!(twin_ink(0, ROD_V, 1.0), ink::ramp(RAMPS[0], ROD_V));
+    }
+
+    #[test]
+    fn dp_a5_merged_pendulum_reads_white_and_keeps_its_brightness_order() {
+        // Before the split the one pendulum is white, not mid-grey: its trail head is at
+        // least 0.78 of full, and the trail, rods, bobs and cores still rise in that order.
+        let white = |v| {
+            let ink = twin_ink(0, v, 0.0);
+            assert_eq!(ink.role, Role::Text);
+            ink.level
+        };
+        assert!(
+            white(TRAIL_V) >= ink::level(255.0 * 0.78),
+            "{}",
+            white(TRAIL_V)
+        );
+        let levels = [TRAIL_V, ROD_V, BOB_V, CORE_V].map(white);
+        assert!(levels.is_sorted_by(|a, b| a < b), "{levels:?}");
+    }
+
+    #[test]
+    fn dp_a6_ghost_starts_fill_the_gap_between_the_twins() {
+        let g = run(7, Size::new(80, 24), 0.0);
+        let [a, b] = g.twins;
+        let mut last = a[1];
+        for y in g.ghosts {
+            assert_eq!((y[0], y[2], y[3]), (a[0], a[2], a[3]));
+            assert!(last < y[1] && y[1] < b[1], "{last} {} {}", y[1], b[1]);
+            last = y[1];
+        }
+    }
+
+    #[test]
+    fn dp_a6_ghost_fan_shows_after_the_twins_part_and_dissolves_as_it_breaks() {
+        assert_eq!(ghost_fade(0.0, 1.0), 0.0);
+        assert_eq!(ghost_fade(1.0, 1.0), 1.0);
+        assert_eq!(ghost_fade(0.5, GHOST_KEPT.1), 0.5);
+        assert_eq!(ghost_fade(1.0, GHOST_KEPT.0), 0.0);
+        assert_eq!(ghost_fade(1.0, 0.0), 0.0);
+        let mut last = 0.0;
+        for i in 0..=60 {
+            let f = ghost_fade(1.0, f64::from(i) / 60.0);
+            assert!(f >= last, "not monotone at {i}");
+            last = f;
+        }
+        // Chaos spreads the fan: once the twins have parted, the ghosts' lower bobs span
+        // much of the reach.
+        for seed in 0..4 {
+            let g = run(seed, Size::new(80, 24), 30.0);
+            let lows: Vec<_> = g
+                .ghosts
+                .iter()
+                .map(|y| bobs(&SCENE, y[0], y[1])[1])
+                .collect();
+            let spread = lows
+                .iter()
+                .flat_map(|p| lows.iter().map(move |q| (p.0 - q.0).hypot(p.1 - q.1)))
+                .fold(0.0, f64::max);
+            assert!(spread > 0.5, "seed {seed}: fan spread {spread}");
+        }
+    }
+
+    #[test]
+    fn dp_a6_ghost_line_joins_neighbours_and_breaks_where_stretched() {
+        assert!(ghost_link((0.0, 0.0), (0.0, GHOST_LINK)));
+        assert!(!ghost_link((0.0, 0.0), (0.0, GHOST_LINK + 1e-9)));
+        // Once the fan has fully faded in, the line is still continuous: every neighbour
+        // pair along twin A → ghosts → twin B is joined (it is not yet stretched past its
+        // samples), so the fan reads as one curve.
+        let mut g = DoublePendulum::default();
+        let mut ctx = seeded(1);
+        g.resize(Size::new(80, 24), &mut ctx);
+        for _ in 0..(RUN_SECONDS / SIM_DT) as usize {
+            if split(g.apart * g.view.dots_per_unit()) >= 1.0 {
+                break;
+            }
+            g.update(SIM_DT, &mut ctx);
+        }
+        assert!(g.run_t > 0.0 && split(g.apart * g.view.dots_per_unit()) >= 1.0);
+        let lower = |y: &[f64; 4]| bobs(&SCENE, y[0], y[1])[1];
+        let line: Vec<_> = std::iter::once(lower(&g.twins[0]))
+            .chain(g.ghosts.iter().map(lower))
+            .chain([lower(&g.twins[1])])
+            .collect();
+        assert!(line.windows(2).all(|w| ghost_link(w[0], w[1])));
+    }
+
+    #[test]
+    fn dp_a5_parted_twins_keep_their_hue_at_the_heads() {
+        // The bob discs sit in the saturated middle of their ramps, below the near-white
+        // top, with only a one-dot core above it.
+        let g = run(0, Size::new(120, 40), 30.0);
+        let tip = g.view.dot(bobs(&SCENE, g.twins[1][0], g.twins[1][1])[1]);
+        let (cx, cy) = ((tip.0 / 2.0) as i32, (tip.1 / 4.0) as i32);
+        let mut canvas = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let hued = [-1, 0, 1]
+            .iter()
+            .flat_map(|dy| [-1, 0, 1].map(|dx| (cx + dx, cy + dy)))
+            .filter_map(|(x, y)| canvas.get(x, y))
+            .filter(|c| {
+                c.ink.role == Role::Ramp(RAMPS[1])
+                    && (ink::seq(ROD_V).level..=ink::seq(BOB_V).level).contains(&c.ink.level)
+            })
+            .count();
+        assert!(
+            hued >= 2,
+            "{hued} saturated cells around twin B's lower bob"
+        );
+    }
+
+    #[test]
+    fn dp_a7_trails_are_three_seconds_in_model_space_and_survive_a_resize() {
+        let mut g = run(3, Size::new(80, 24), 5.0);
+        assert_eq!(g.trail.len(), TRAIL_LEN);
+        assert!((TRAIL_LEN as f64 * TICK - 3.0).abs() < 1e-12);
+        let size = Size::new(120, 40);
+        g.resize(size, &mut seeded(3));
+        let lit = roles(&g, size).len();
+        // Two bobs, two rods and a pivot light well under 60 cells at 120×40; the rest is
+        // the trail, redrawn from model space.
+        assert!(lit > 100, "{lit} cells lit after the resize");
+    }
+
+    #[test]
+    fn dp_a8_gen_r13_no_dots_on_the_readout_row() {
+        for (w, h) in [(80, 24), (40, 12), (200, 50)] {
+            let size = Size::new(w, h);
+            let mut g = DoublePendulum::default();
+            let mut ctx = seeded(5);
+            g.resize(size, &mut ctx);
+            for i in 0..(45.0 / SIM_DT) as usize {
+                g.update(SIM_DT, &mut ctx);
+                if i % 7 == 0 {
+                    let row = i32::from(h) - 1;
+                    assert!(
+                        (0..i32::from(w)).all(|x| g.dots.cell_mask(x, row) == Some(0)),
+                        "{w}x{h}: dots on row {row} at step {i}"
+                    );
+                }
+            }
+        }
     }
 }
