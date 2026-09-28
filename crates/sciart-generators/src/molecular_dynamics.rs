@@ -127,8 +127,17 @@ const HEAT_GAIN: f64 = 1.3;
 const HEAT_FLOOR: f64 = 0.35;
 /// The atoms' colour is relative to the live temperature (MD-A9): the floor, and the
 /// multiple of the mean kinetic energy that reaches the top of the ramp.
-const REL_FLOOR: f64 = 0.35;
-const REL_SPAN: f64 = 2.0;
+const REL_FLOOR: f64 = 0.3;
+/// `e/T` at which an atom leaves the floor, and the span above that to the top (MD-A9).
+const REL_FROM: f64 = 0.7;
+const REL_SPAN: f64 = 0.65;
+/// Atoms at or above this ramp value light their four neighbouring pixels at `HALO_V`
+/// of their level (MD-A10).
+const HALO_FROM: f64 = 0.9;
+const HALO_V: f64 = 0.4;
+/// The solid body pixel under each bead is at this fraction of the bead's level, so the
+/// braille dots on top still read as a lit sphere (MD-A10).
+const BODY_V: f64 = 0.85;
 /// An atom's colour follows its kinetic energy smoothed over this time (s): the
 /// instantaneous energy of one atom is exponentially distributed, so unsmoothed a crystal
 /// at one temperature reads as speckle.
@@ -147,6 +156,8 @@ const TRAIL_WHITE: f32 = 0.25;
 /// near 1.
 const E_STREAK: f64 = 0.5;
 const TRAIL_MAX: f64 = 0.12;
+/// The streaks' top level, `TRAIL_MAX` of the ramp: in ASCII only pixels up to it are `.`.
+const STREAK_TOP: u8 = 31;
 /// Streak pixels whose tone level is below this are left empty (MD-A6): the faint fringe
 /// of a streak was a scatter of near-black navy half-blocks beside the beads.
 const TRAIL_CUT: u8 = 64;
@@ -187,20 +198,21 @@ pub(crate) fn heat_ink(e: f64) -> Ink {
 }
 
 /// An atom's colour relative to the live temperature `t` (MD-A9): Plasma at
-/// `REL_FLOOR + (1 − REL_FLOOR)·clamp(e/(REL_SPAN·t), 0, 1)`, with `e` its smoothed kinetic
-/// energy (LJ units, k_B = 1; in 2-D the mean is `t`). An atom at the mean sits at 0.68,
-/// one at twice the mean or more is near white, and a resting atom keeps the 0.35
-/// floor. So in every phase the atoms hotter than their surroundings (the ones evaporating
-/// off a cluster's edge) glow and the bulk stays calm, instead of the whole condensed
-/// phase sinking to one dim indigo on an absolute scale. A non-positive or NaN `t` reads as
-/// the floor. False colour; the absolute temperature is the readout's job.
+/// `REL_FLOOR + (1 − REL_FLOOR)·clamp((e/t − REL_FROM)/REL_SPAN, 0, 1)²`, with `e` its
+/// smoothed kinetic energy (LJ units, k_B = 1; in 2-D the mean is `t`). An atom at the
+/// mean sits at ≈ 0.45, one at 1.35× the mean or more is white, and a cool one keeps the
+/// 0.3 floor: the squared ramp keeps the bulk calm and spends the top of the ramp on the
+/// few atoms clearly hotter than their surroundings (the ones evaporating off a cluster's
+/// edge), so hot and cold read at a glance. Relative, not absolute: a condensed phase on
+/// an absolute scale sank to one dim indigo. A non-positive or NaN `t` reads as the floor.
+/// False colour; the absolute temperature is the readout's job.
 pub(crate) fn relative_heat_ink(e: f64, t: f64) -> Ink {
     let u = if t > 0.0 && e.is_finite() {
-        (e / (REL_SPAN * t)).clamp(0.0, 1.0)
+        ((e / t - REL_FROM) / REL_SPAN).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    ink::ramp(HEAT_RAMP, REL_FLOOR + (1.0 - REL_FLOOR) * u)
+    ink::ramp(HEAT_RAMP, REL_FLOOR + (1.0 - REL_FLOOR) * u * u)
 }
 
 /// Exact 2-D Maxwell–Boltzmann probability of each speed bin at temperature `t`, the
@@ -685,14 +697,9 @@ impl MolecularDynamics {
             let (px, py) = self.to_pixel(self.x[i], self.y[i]);
             // Dot j spans pixel coordinates [j/2, (j + 1)/2).
             let (dx, dy) = (2.0 * px - 0.5, 2.0 * py - 0.5);
-            paint_atom(
-                &mut self.atoms,
-                dx,
-                dy,
-                r,
-                relative_heat_ink(self.heat[i], t_now),
-                panel,
-            );
+            let ink = relative_heat_ink(self.heat[i], t_now);
+            paint_atom(&mut self.atoms, dx, dy, r, ink, panel);
+            paint_body(&mut self.pixels, (px, py), ink);
         }
         self.plot.clear();
         if let Some((x0, _)) = self.view.inset {
@@ -735,6 +742,36 @@ impl MolecularDynamics {
             }
         }
     }
+}
+
+/// The solid body of an atom on the half-block layer (MD-A10): the one pixel holding its
+/// centre, at [`BODY_V`] of the bead's level. Under the braille bead this fills the bead's
+/// core cell solid (a braille cell over the layer takes its stronger pixel as background),
+/// so an atom reads as a bold filled sphere, while neighbours ≈ 2 pixels apart keep dark
+/// cells between them and the lattice stays legible. An atom at or above [`HALO_FROM`] also
+/// lights its four neighbouring pixels at [`HALO_V`] of its level, a small glow that makes
+/// the hottest atoms stand out. The body never dims a brighter pixel.
+fn paint_body(pixels: &mut Pixels, c: (f64, f64), ink: Ink) {
+    if !(c.0.is_finite() && c.1.is_finite()) {
+        return;
+    }
+    let level = f64::from(ink.level);
+    let mut put = |x: i32, y: i32, v: f64| {
+        let v = Ink::new(ink.role, (level * v).round() as u8);
+        if pixels
+            .get(x, y)
+            .is_some_and(|p| p.role == Role::Background || p.level < v.level)
+        {
+            pixels.set(x, y, v);
+        }
+    };
+    let (x, y) = (c.0.floor() as i32, c.1.floor() as i32);
+    if level / 255.0 >= HALO_FROM {
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            put(x + dx, y + dy, HALO_V);
+        }
+    }
+    put(x, y, BODY_V);
 }
 
 /// A round bead of radius `r` dots centred at dot `(cx, cy)`: dots within `CORE·r` at
@@ -887,7 +924,9 @@ impl Generator for MolecularDynamics {
             } else {
                 bottom
             };
-            matches!(ink.role, Role::Ramp(_)).then_some(('.', ink))
+            // Atom bodies and halos are above the streaks' top; their beads' own ASCII
+            // fallbacks carry them.
+            (matches!(ink.role, Role::Ramp(_)) && ink.level <= STREAK_TOP).then_some(('.', ink))
         });
         self.atoms.blit_over(canvas, &self.pixels);
         if let Some((x0, y0)) = self.view.inset {
@@ -1399,8 +1438,10 @@ mod tests {
         let lv = |e: f64, t: f64| f64::from(relative_heat_ink(e, t).level) / 255.0;
         assert_eq!(relative_heat_ink(1.0, 1.0).role, Role::Ramp(Ramp::Plasma));
         assert!((lv(0.0, 0.3) - REL_FLOOR).abs() < 0.005);
-        assert!((lv(0.3, 0.3) - (REL_FLOOR + (1.0 - REL_FLOOR) / REL_SPAN)).abs() < 0.005);
-        assert!(lv(0.3 * REL_SPAN, 0.3) > 0.99 && lv(5.0, 0.3) > 0.99);
+        assert!((lv(0.3 * REL_FROM, 0.3) - REL_FLOOR).abs() < 0.005);
+        // The mean atom is calm (≈ 0.45), 1.35× the mean is white.
+        assert!((lv(0.3, 0.3) - 0.45).abs() < 0.02, "{}", lv(0.3, 0.3));
+        assert!(lv(0.3 * (REL_FROM + REL_SPAN), 0.3) > 0.99 && lv(5.0, 0.3) > 0.99);
         // Scale-free: the same multiple of the temperature is the same colour.
         for (e, t) in [(0.1, 0.25), (0.5, 1.0), (1.3, 0.7)] {
             assert_eq!(relative_heat_ink(e, t), relative_heat_ink(2.0 * e, 2.0 * t));
@@ -1409,7 +1450,7 @@ mod tests {
             assert!((lv(1.0, t) - REL_FLOOR).abs() < 0.005, "{t}");
         }
         // In the condensed phase (t = 5 s, T ≈ 0.3) the bulk stays calm and the hottest
-        // atoms glow: the brightest 3 % reach ≥ 0.8 while the median is ≤ 0.72.
+        // atoms glow: the brightest 3 % reach ≥ 0.95 while the median is ≤ 0.5.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut g = MolecularDynamics::default();
@@ -1424,7 +1465,7 @@ mod tests {
         let n = levels.len();
         let (median, top) = (levels[n / 2], levels[n - 1 - n * 3 / 100]);
         assert!(
-            median <= 0.72 && top >= 0.8,
+            median <= 0.5 && top >= 0.95,
             "median {median:.2}, top 3 % {top:.2}"
         );
         assert!(levels[0] >= REL_FLOOR - 0.005);
@@ -1455,6 +1496,61 @@ mod tests {
         rows.dedup();
         assert!(rows.len() > 5, "{rows:?}");
         assert!(rows.windows(2).all(|p| p[1] - p[0] == 2), "{rows:?}");
+    }
+
+    #[test]
+    fn md_a10_atoms_have_solid_bodies_and_the_hottest_a_halo() {
+        // One solid body pixel at BODY_V of the bead's ink, and a four-pixel halo only for
+        // atoms at or above HALO_FROM; the body never dims a brighter pixel.
+        let mut px = Pixels::default();
+        px.resize(Size::new(20, 10));
+        let cool = relative_heat_ink(0.3, 0.3);
+        paint_body(&mut px, (4.3, 4.7), cool);
+        assert_eq!(
+            px.get(4, 4).unwrap().level,
+            (f64::from(cool.level) * BODY_V).round() as u8
+        );
+        assert_eq!(px.get(5, 4), Some(Ink::BLANK), "a cool atom has no halo");
+        let hot = relative_heat_ink(1.0, 0.3);
+        assert!(f64::from(hot.level) / 255.0 >= HALO_FROM);
+        paint_body(&mut px, (10.5, 10.5), hot);
+        let body = px.get(10, 10).unwrap().level;
+        for (x, y) in [(9, 10), (11, 10), (10, 9), (10, 11)] {
+            let h = px.get(x, y).unwrap().level;
+            assert!(h > 0 && h < body, "halo ({x},{y}) {h} vs {body}");
+        }
+        paint_body(&mut px, (10.5, 10.5), cool);
+        assert_eq!(
+            px.get(10, 10).unwrap().level,
+            body,
+            "never dims a brighter pixel"
+        );
+        // In the scene the bodies carry the contrast: at 5 s (condensed) the brightest body
+        // pixels (top 2 %) are ≥ 2× the median body pixel and near the top of the ramp.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = MolecularDynamics::default();
+        g.resize(size, &mut ctx);
+        for _ in 0..(5.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let t = g.temperature();
+        let mut bodies: Vec<u8> = (0..g.n())
+            .filter_map(|i| {
+                let (x, y) = g.to_pixel(g.x[i], g.y[i]);
+                g.pixels.get(x.floor() as i32, y.floor() as i32)
+            })
+            .filter(|p| p.role == Role::Ramp(Ramp::Plasma))
+            .map(|p| p.level)
+            .collect();
+        bodies.sort_unstable();
+        let n = bodies.len();
+        assert!(n > g.n() / 2, "{n} bodies");
+        let (median, top) = (bodies[n / 2], bodies[n - 1 - n / 50]);
+        assert!(
+            u32::from(top) >= 2 * u32::from(median) && top >= 200,
+            "median {median}, top {top} (T {t})"
+        );
     }
 
     #[test]

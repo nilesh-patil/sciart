@@ -112,8 +112,8 @@ const GREEN_LIT: f32 = 0.14;
 const RED_LIT: f32 = 0.2;
 /// The red fringe is drawn in the `HAlpha` ramp at levels up to this, its dark crimson
 /// end, which is how the 630 nm crown reads over green in photographs. The pink hem, the
-/// same ramp's rose, runs from `HEM_LEVEL`, well above it, to `HEM_LEVEL_MAX`.
-const RED_LEVEL_MAX: f64 = 155.0;
+/// same ramp's rose, runs from `HEM_LEVEL`, above it, to `HEM_LEVEL_MAX`.
+const RED_LEVEL_MAX: f64 = 100.0;
 /// The crown starts at this crimson rather than the core floor: the ramp's darkest
 /// maroon, next to the green, read as brown mud rather than red light.
 const RED_LEVEL_MIN: f64 = 56.0;
@@ -126,13 +126,12 @@ const GREEN: Role = Role::Ramp(Ramp::Aurora);
 /// Diffuse red far above the green would be cut flat by the top fade (a lid) and stand
 /// as a slab over the sky; at the naked eye's photopic weight it is below notice there.
 const CROWN_GREEN: f32 = 0.03;
-const HEM_LEVEL: f64 = 196.0;
-/// The hem tops out here, in the ramp's rose: above it `HAlpha` pales to near-white.
-const HEM_LEVEL_MAX: f64 = 212.0;
-/// Rose level of the green pixel just above a hem pixel (AUR-A10).
-const HEM_BLEND: [u8; 1] = [120];
-/// Crimson levels of the sky pixels just under the hem, fading toward the ground.
-const HEM_BELOW_FADE: [u8; 1] = [45];
+/// The hem: at most half the ramp (a soft rose glow, not a neon line), brighter where the
+/// curtain above it is (AUR-A10).
+const HEM_LEVEL: f64 = 110.0;
+const HEM_LEVEL_MAX: f64 = 128.0;
+/// Crimson level of the sky pixel just under the hem, about 0.2 of the ramp.
+const HEM_BELOW_FADE: [u8; 1] = [51];
 /// The curtains' ripple (AUR-A10): relative amplitude, wavenumber (rad per column) and
 /// angular speed (rad/s): a slow brightness wave travelling along the arc, as the rays
 /// of a real curtain ripple sideways.
@@ -1592,13 +1591,22 @@ impl View {
     }
 
     /// The pink fringe (AUR-A10): in every column where the pink-carrying curtain's lower
-    /// border is lit, its lowest lit pixel within the 5 km band is the hem (rose, brighter
-    /// where the curtain is), the green above it steps through `HEM_BLEND` into the
-    /// curtain, and the sky below takes `HEM_BELOW_FADE`, so the fringe follows the
-    /// curtain continuously as a soft three-to-four-row gradient rather than dashes where
-    /// the pink alone clears a threshold. A display softening: the real border is sharp.
+    /// border is lit, a soft rose glow (≤ half the ramp, brighter under a brighter curtain)
+    /// sits just under the border and fades over one more row to about 0.2, so the green
+    /// curtain stays whole over it and the fringe follows the curtain continuously. Where
+    /// no sky is free under the border, the rose takes the border pixel only if it is
+    /// brighter than the green there (a max blend). Hem pixels the pink alone lit inside
+    /// the curtain go back to green. A display softening: the real border is sharp.
     fn soften_hem(&mut self) {
         let span = (HEM_LEVEL_MAX - HEM_LEVEL) as f32;
+        for x in 0..self.w as i32 {
+            for y in 0..self.y_h as i32 {
+                if let Some(i) = self.pixels.get(x, y).filter(|&i| is_hem(i)) {
+                    let green = ((f32::from(i.level) - HEM_LEVEL as f32) / span * 255.0) as u8;
+                    self.pixels.set(x, y, Ink::new(GREEN, green.max(i.level)));
+                }
+            }
+        }
         // Pass 1: the border row of each column (−1 where none), so a lone column, with no
         // neighbour on the border within a row, takes no fringe (no confetti).
         let mut border = std::mem::take(&mut self.fringe);
@@ -1620,19 +1628,30 @@ impl View {
             let ridge = self.ridge_top[x].min(self.y_h as i32);
             let xi = x as i32;
             let base = self.pixels.get(xi, yb).map_or(0, |i| i.level);
-            let level = HEM_LEVEL as f32 + span * f32::from(base) / 255.0;
-            self.pixels.set(xi, yb, Ink::new(RED, level.round() as u8));
-            for (k, &blend) in (1..).zip(&HEM_BLEND) {
-                let y = yb - k;
-                if y >= 0
-                    && self.pixels.get(xi, y).is_some_and(|i| i.role == GREEN)
-                    && self.curtain(x, y)
-                {
-                    self.pixels.set(xi, y, Ink::new(RED, blend));
-                }
-            }
+            let level = (HEM_LEVEL as f32 + span * f32::from(base) / 255.0).round() as u8;
+            let free = |p: &Pixels, y: i32| {
+                y < ridge
+                    && p.get(xi, y)
+                        .is_some_and(|i| i == Ink::BLANK || i.role == SKYGLOW)
+            };
+            // Max blend: the rose shows where it outshines what is there.
+            let dimmer = |p: &Pixels, y: i32| {
+                y < ridge
+                    && p.get(xi, y)
+                        .is_some_and(|i| i.role == GREEN && i.level < level)
+            };
+            let hem_row = if free(&self.pixels, yb + 1) || dimmer(&self.pixels, yb + 1) {
+                yb + 1
+            } else if base < level {
+                yb
+            } else {
+                // Under a bright curtain the rose rides just below it regardless: the fringe
+                // stays continuous, the curtain whole.
+                yb + 1
+            };
+            self.pixels.set(xi, hem_row, Ink::new(RED, level));
             for (k, &fade) in (1..).zip(&HEM_BELOW_FADE) {
-                let y = yb + k;
+                let y = hem_row + k;
                 let free = self
                     .pixels
                     .get(xi, y)
@@ -1644,28 +1663,42 @@ impl View {
             }
         }
         self.fringe = border;
-        // Any other hem pixel (a gated one off the border row) steps into the green too.
-        for x in 0..self.w {
-            let xi = x as i32;
-            for y in 1..self.ridge_top[x].min(self.y_h as i32) {
-                let hem = self.pixels.get(xi, y).is_some_and(is_hem);
-                let green = self.pixels.get(xi, y - 1).is_some_and(|i| i.role == GREEN);
-                if hem && green && self.curtain(x, y - 1) {
-                    self.pixels.set(xi, y - 1, Ink::new(RED, HEM_BLEND[0]));
+        // No confetti: a fringe pixel with no fringe beside it (a row either way) goes,
+        // its fade with it.
+        let hem = |p: &Pixels, x: i32, y: i32| p.get(x, y).is_some_and(is_hem);
+        for x in 0..self.w as i32 {
+            for y in 0..self.y_h as i32 {
+                if !hem(&self.pixels, x, y) {
+                    continue;
+                }
+                let run = [x - 1, x + 1]
+                    .iter()
+                    .any(|&nx| (y - 1..=y + 1).any(|ny| hem(&self.pixels, nx, ny)));
+                if run {
+                    continue;
+                }
+                let sky = |y: i32| self.skyglow[y as usize].unwrap_or(Ink::BLANK);
+                self.pixels.set(x, y, sky(y));
+                let below = y + 1;
+                if below < self.y_h as i32
+                    && self.pixels.get(x, below) == Some(Ink::new(RED, HEM_BELOW_FADE[0]))
+                {
+                    self.pixels.set(x, below, sky(below));
                 }
             }
         }
     }
 
     /// Whether sky pixel `(x, y)`'s light is the curtains' alone (a pulsating patch adds
-    /// at most a tenth), so the fringe never marks a patch.
+    /// at most 2 %), so the fringe never marks a patch.
     fn curtain(&self, x: usize, y: i32) -> bool {
         let e = self.emit[y as usize * self.w + x];
         e.patch <= 0.02 * e.green
     }
 
     /// The row of column `x`'s pink border (AUR-A10): the lowest lit curtain pixel within
-    /// the 5 km band of the pink-carrying layer's lowest row, if any.
+    /// the 5 km band of the pink-carrying layer's lowest row, if any, with a sky row under
+    /// it above the ridge for the fringe.
     fn border_row(&self, x: usize) -> Option<i32> {
         let layers = &self.layers[x][..usize::from(self.nlayers[x])];
         let lowest = layers
@@ -1683,7 +1716,7 @@ impl View {
         let yb = (lowest - 4..=lowest.min(ridge - 1))
             .rev()
             .find(|&y| y >= 0 && lit(y))?;
-        self.curtain(x, yb).then_some(yb)
+        (self.curtain(x, yb) && yb + 1 < ridge).then_some(yb)
     }
 
     /// The curtains' travelling ripple for time `t` (AUR-A10): a brightness wave running
@@ -2560,7 +2593,7 @@ mod tests {
             Some(Ink::new(RED, HEM_LEVEL as u8))
         );
         // Hem and crown must not blur.
-        const { assert!(HEM_LEVEL > RED_LEVEL_MAX + 40.0) };
+        const { assert!(HEM_LEVEL > RED_LEVEL_MAX + 8.0) };
         for red in [0.1f32, 0.9] {
             let mut prev = 0;
             for i in 0..=100 {
@@ -2927,11 +2960,15 @@ mod tests {
                     if !is_hem(px(x, y)) {
                         continue;
                     }
-                    // Over a hem pixel: never green straight away (the rose blend, another
-                    // hem pixel, or dark sky); under it only the faint crimson fade.
+                    // A soft glow (≤ half the ramp) under the curtain, which stays whole
+                    // over it; under it only the faint crimson fade.
+                    assert!(px(x, y).level <= 128, "hem at {x},{y} too bright");
                     let above = px(x, y - 1);
-                    assert_ne!(above.role, GREEN, "hard hem edge at {x},{y}");
-                    blended += usize::from(above == Ink::new(RED, HEM_BLEND[0]));
+                    assert!(
+                        above.role != RED || is_hem(above),
+                        "crimson over hem {x},{y}"
+                    );
+                    blended += usize::from(above.role == GREEN);
                     let below = px(x, y + 1);
                     assert!(
                         below.role != RED || is_hem(below) || below.level <= HEM_BELOW_FADE[0],
@@ -2951,8 +2988,7 @@ mod tests {
             }
         }
         assert!(blended > 5, "{blended} hem pixels blend");
-        assert!(HEM_BLEND.windows(2).all(|w| w[0] > w[1]));
-        assert!(f64::from(HEM_BLEND[0]) <= RED_LEVEL_MAX);
+        assert!(f64::from(HEM_BELOW_FADE[0]) <= 0.25 * 255.0);
         // Continuous: wherever the pink curtain's lower border is lit, its column carries
         // the fringe; no dashes along a lit border.
         for steps in [44, 52, 56] {
@@ -2969,7 +3005,7 @@ mod tests {
                 else {
                     continue;
                 };
-                let band = (lowest - 4).max(0)..=lowest.min(v.y_h as i32 - 1);
+                let band = (lowest - 4).max(0)..=(lowest + 1).min(v.y_h as i32 - 1);
                 let at = |y: i32| v.pixels.get(x as i32, y).unwrap_or(Ink::BLANK);
                 if band.clone().any(|y| at(y).role == GREEN || is_hem(at(y))) {
                     lit_cols += 1;
@@ -3153,7 +3189,7 @@ mod tests {
                     hems += 1;
                     // Within the lowest layer's 5 km band, never inside a higher layer.
                     assert!(
-                        y >= lowest - 4 && y <= lowest,
+                        y >= lowest - 4 && y <= lowest + 1,
                         "t = {}: hem at {x},{y}, lowest border {lowest}",
                         a.t
                     );
@@ -3380,11 +3416,10 @@ mod tests {
     }
 
     /// Whether red pixel `(x, y)` belongs to the hem's fringe (AUR-A10), not the crown: a
-    /// hem pixel lies up to `HEM_BLEND.len()` rows below it or `HEM_BELOW_FADE.len()` above.
+    /// hem pixel lies up to `HEM_BELOW_FADE.len()` rows above it.
     fn is_fringe(v: &View, x: i32, y: i32) -> bool {
         let hem = |y: i32| v.pixels.get(x, y).is_some_and(is_hem);
-        (1..=HEM_BLEND.len() as i32).any(|k| hem(y + k))
-            || (1..=HEM_BELOW_FADE.len() as i32).any(|k| hem(y - k))
+        (1..=HEM_BELOW_FADE.len() as i32).any(|k| hem(y - k))
     }
 
     #[test]
