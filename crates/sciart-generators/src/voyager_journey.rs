@@ -208,6 +208,9 @@ pub(crate) const GM: f64 = 2.959_122_082_9e-4;
 /// km/s per AU/day.
 pub(crate) const KM_S: f64 = 1_731.456_836_8;
 
+// Two local 2-D helpers, kept on purpose: `geom::v3` (CORE-R60) is 3-D, and the map is
+// strictly planar (the scene's stylisation). A core `v2` for two one-liners used by a
+// single module would be surface without reuse.
 fn dot(a: [f64; 2], b: [f64; 2]) -> f64 {
     a[0] * b[0] + a[1] * b[1]
 }

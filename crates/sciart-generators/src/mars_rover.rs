@@ -19,18 +19,19 @@
 //! rocker angles) then gives pitch = rocker angle and zero roll, and the far-side wheels
 //! are hidden exactly behind the near ones in this pure side view.
 //!
-//! **Story (MR-A3).** A looping [`Timeline`] sol: drive → deploy arm → drill → stow →
-//! transmit. Rover position, arm pose and captions are pure functions of the sim time,
-//! so resizes never desync the story; only the dust, the dust devils and the seeds are
-//! state, drawn from `ctx.rng`.
+//! **Story (MR-A3).** One work plan per sol, a [`Timeline`] exactly as long as the sol:
+//! drive in the morning → deploy arm → drill → stow → image through the afternoon → UHF
+//! relay at the evening orbiter pass → sleep through the night. Rover position, arm pose
+//! and captions are pure functions of the sim time, so resizes never desync the story;
+//! only the dust, the dust devils and the seeds are state, drawn from `ctx.rng`.
 //!
 //! **Sky.** A 90 s sol with a real-ish solar geometry at Jezero's latitude, on a warped
-//! clock (an easy day, a lingering sunset, a brief night). Martian dust forward-scatters
-//! blue light, so around the low sun a soft blue aureole grows while the rest of the sky
-//! stays butterscotch, both on one Blackbody ramp; sky and aureole fade together through
-//! a shortened dusty twilight, and only then do the stars come out (MR-A4). Phobos,
-//! orbiting faster than Mars spins, rises in the west. The rover dims with the daylight
-//! (MR-A9).
+//! clock (an easy day, a lingering sunset, a brief night). By day the sky is butterscotch
+//! on the Blackbody ramp. Martian dust forward-scatters blue light, so around the low Sun
+//! a blue aureole grows, drawn in `Ramp(Ice)` and dithered into the tan sky; sky and
+//! aureole fade together through a shortened dusty twilight, and only then do the stars
+//! come out (MR-A4). Phobos, orbiting faster than Mars spins, rises in the west. The
+//! rover dims with the daylight (MR-A9).
 
 use std::f64::consts::{FRAC_PI_2, PI};
 
@@ -184,6 +185,10 @@ const BOGIE_C: f64 = 1.2;
 const BOGIE_D: f64 = 0.7;
 const NEWTON_ITERS: usize = 16;
 
+// Local 2-D helpers on tuples, kept on purpose: every world and screen point in this
+// scene is a `(x, y)` tuple that feeds `plot(x, y)` and destructuring directly, while
+// `geom::v3` (CORE-R60) is array-based. Three one-liners do not justify a core `v2`
+// that this scene would have to convert to and from at every call.
 type P2 = (f64, f64);
 
 #[inline]
@@ -236,11 +241,11 @@ impl Pose {
         }
     }
 
-    /// All six hubs: near side (front, middle, rear) then far side, which on a 1-D
-    /// profile coincides with the near side.
-    pub(crate) fn wheel_centers(&self) -> [P2; 6] {
+    /// The near side's hubs (front, middle, rear). On a 1-D profile the far side's
+    /// coincide with them, hidden exactly behind.
+    pub(crate) fn wheel_centers(&self) -> [P2; 3] {
         let j = self.joints();
-        [j.front, j.middle, j.rear, j.front, j.middle, j.rear]
+        [j.front, j.middle, j.rear]
     }
 
     /// Point `(u, v)` of the body frame (pivot origin, x along the deck) in world units.
@@ -328,24 +333,41 @@ fn solve3(a: [[f64; 3]; 3], b: [f64; 3]) -> Option<[f64; 3]> {
 // The sol's work plan (MR-A3) and the drive profile.
 // ---------------------------------------------------------------------------------------
 
+/// One plan per sol, starting at 09:00 with the sol clock (`SOL_KNOTS`): the drive and
+/// the coring by day, imaging through the afternoon, the UHF relay at the evening
+/// orbiter pass with the Sun a few degrees up, then sleep through the night, as a real
+/// rover works (it does not drive in the dark).
 const DRIVE: f64 = 18.0;
 const DEPLOY: f64 = 3.0;
 const DRILL: f64 = 4.0;
 const STOW: f64 = 2.0;
-const TRANSMIT: f64 = 4.0;
-const PLAN: [(&str, f64); 5] = [
+const IMAGE: f64 = 13.0;
+const TRANSMIT: f64 = 6.0;
+const SLEEP: f64 = 44.0;
+const PLAN: [(&str, f64); 7] = [
     ("drive", DRIVE),
     ("deploy arm", DEPLOY),
     ("drill", DRILL),
     ("stow", STOW),
+    ("image", IMAGE),
     ("transmit", TRANSMIT),
+    ("sleep", SLEEP),
 ];
-const CYCLE: f64 = DRIVE + DEPLOY + DRILL + STOW + TRANSMIT;
+const CYCLE: f64 = DRIVE + DEPLOY + DRILL + STOW + IMAGE + TRANSMIT + SLEEP;
 const PH_DRIVE: usize = 0;
 const PH_DEPLOY: usize = 1;
 const PH_DRILL: usize = 2;
 const PH_STOW: usize = 3;
-const PH_TRANSMIT: usize = 4;
+const PH_IMAGE: usize = 4;
+const PH_TRANSMIT: usize = 5;
+/// Perseverance carries 43 tubes: 38 for samples and 5 witness tubes.
+const SAMPLE_TUBES: i64 = 38;
+
+/// The number of the sample cored in plan cycle `cycle`: one per sol, wrapping within
+/// the rover's 38 sample tubes (MR-A3).
+fn sample_number(cycle: i64) -> i64 {
+    cycle.rem_euclid(SAMPLE_TUBES) + 1
+}
 
 /// Cruise speed (units/s ≈ 0.8 m/s): Perseverance's 4 cm/s, time-lapsed ×20 for the screen.
 const CRUISE: f64 = 1.6;
@@ -396,12 +418,15 @@ fn speed_at(t: f64) -> f64 {
 // ---------------------------------------------------------------------------------------
 
 // Body-frame geometry (pivot at the origin, u along the deck, v up; world units).
-/// Deck box height, mast top, camera-head box and the high-gain antenna's dish centre.
+/// Deck box height, mast top, camera-head box, the high-gain antenna's dish centre and
+/// the UHF antenna's tip on the rear deck. Orbiter relay goes over the UHF antenna,
+/// which is not steered; the HGA is the X-band direct-to-Earth dish and stays parked.
 const BODY_V: (f64, f64) = (0.3, 1.8);
 const MAST_TOP: f64 = 3.8;
 const HEAD_U: (f64, f64) = (1.15, 2.35);
 const HEAD_V: (f64, f64) = (3.8, 4.4);
 const HGA: P2 = (-0.9, 2.4);
+const UHF: P2 = (-1.8, BODY_V.1 + 0.7);
 /// Arm shoulder, link lengths, how far ahead of the pivot the drill touches down, and
 /// the turret's height above the ground while drilling.
 const SHOULDER: P2 = (2.2, 0.9);
@@ -456,11 +481,12 @@ fn arm_extension(beat: &Beat) -> f64 {
 // ---------------------------------------------------------------------------------------
 
 const SOL: f64 = 90.0;
+const _: () = assert!(CYCLE == SOL, "SPEC-002 mars_rover: one work plan per sol");
 /// Jezero crater latitude and a southern-summer solar declination.
 const LATITUDE: f64 = 18.4 * PI / 180.0;
 const DECLINATION: f64 = -12.0 * PI / 180.0;
 /// Hour angle (deg) vs sol time (s): day at an easy pace, a lingering sunset, a quick
-/// night. Starts at 09:00 LMST; 315° ≡ −45° closes the loop.
+/// night. Starts at 09:00 local true solar time; 315° ≡ −45° closes the loop.
 const SOL_KNOTS: [(f64, f64); 5] = [
     (0.0, -45.0),
     (40.0, 78.0),
@@ -504,9 +530,47 @@ fn smooth(edge0: f64, edge1: f64, x: f64) -> f64 {
 
 /// The aureole's Gaussian radius, as a share of the Sun's height range (the horizon row).
 const GLOW_R: f64 = 0.42;
-/// The aureole's peak on the sky's Blackbody ramp: level 144 (~6900 K), a pale
-/// blue-white just past the white point (level 140), where the ramp is lightest (MR-A4).
-const AUREOLE_TOP: f64 = 0.565;
+/// The aureole (MR-A4): a pixel turns `Ramp(Ice)` where its glow `g` passes the edge,
+/// dithered in over the band above it.
+const AUREOLE_EDGE: f64 = 0.22;
+const AUREOLE_BAND: f64 = 0.55;
+/// The lift toward the Sun, and the cap, kept under the Sun's top-of-ramp white (MR-A7).
+const AUREOLE_LIFT: f64 = 60.0;
+const AUREOLE_MAX: f64 = 232.0;
+
+/// The `Ramp(Ice)` level as light as Blackbody level `tan` over the sky's tan stretch
+/// (levels 50–125: within 15 % in luminance), so the dithered edge of the aureole
+/// changes hue, not brightness.
+fn ice_matching(tan: f64) -> f64 {
+    // (Blackbody level, Ice level) pairs of equal astro luminance, read off the themes'
+    // tables; linear in between and proportional below the first.
+    const KNOTS: [(f64, f64); 6] = [
+        (48.0, 78.0),
+        (64.0, 102.0),
+        (80.0, 128.0),
+        (96.0, 161.0),
+        (112.0, 197.0),
+        (128.0, 237.0),
+    ];
+    if tan <= KNOTS[0].0 {
+        return tan * KNOTS[0].1 / KNOTS[0].0;
+    }
+    for w in KNOTS.windows(2) {
+        let ((b0, i0), (b1, i1)) = (w[0], w[1]);
+        if tan <= b1 {
+            return ease::lerp(i0, i1, (tan - b0) / (b1 - b0));
+        }
+    }
+    KNOTS[5].1
+}
+
+/// A 4×4 Bayer threshold in (0, 1) for pixel `(x, y)`: an ordered dither reads as a
+/// blend at half-block resolution, where random noise would sparkle.
+fn bayer4(x: i32, y: i32) -> f64 {
+    const M: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+    let i = (y.rem_euclid(4) * 4 + x.rem_euclid(4)) as usize;
+    (f64::from(M[i]) + 0.5) / 16.0
+}
 
 /// Blue forward-scattered glow around a low sun: on below ~25° elevation, fading out
 /// with the twilight by −12°.
@@ -594,6 +658,11 @@ const WHEEL: [Glyph; 4] = [
 ];
 
 /// Link glyph for a screen segment, by its visual angle (rows are ~2× columns).
+///
+/// One glyph per strut on purpose, not `geom::stroked_line` + `draw::step_glyph`
+/// (CORE-R62): those pick a glyph per Bresenham step, which suits long lines, but on a
+/// rover strut only 2–6 cells long a shallow link would read `─╲─╲`, a zigzag rather
+/// than one rigid member.
 fn link_glyph(dx: f64, dy: f64) -> Glyph {
     let a = (dy * ASPECT).atan2(dx).abs();
     let a = if a > FRAC_PI_2 { PI - a } else { a };
@@ -936,8 +1005,8 @@ impl Generator for MarsRover {
             match layer_at(tops, 2 * y + 1) {
                 Layer::Sky => match ink.level {
                     255 => Some(('@', ink)),
-                    // The aureole: the sky's ramp past its white point.
-                    l if ink.role == Role::Blackbody && l > 140 => Some(('.', ink)),
+                    // The blue aureole.
+                    _ if ink.role == Role::Ramp(Ramp::Ice) => Some(('.', ink)),
                     _ => None,
                 },
                 Layer::Far => Some((':', ink)),
@@ -951,9 +1020,15 @@ impl Generator for MarsRover {
         self.draw_drill_marks(canvas, &w, &view, &beat);
         let pose = solve_pose(|x| w.near.eval(x), rover_x);
         self.draw_dust(canvas, &view);
+        let link = self
+            .orbiter(&beat)
+            .map(|o| (view.at(pose.body(UHF.0, UHF.1)), o));
+        if let Some((a, o)) = link {
+            draw_beam(canvas, a, o);
+        }
         self.draw_rover(canvas, &w, &view, &pose, &beat);
-        if beat.index == PH_TRANSMIT {
-            self.draw_signal(canvas, &view, &pose, &beat);
+        if let Some((a, o)) = link {
+            self.draw_packets(canvas, a, o);
         }
         self.draw_captions(canvas, &w, &beat, hour_angle(self.t));
         // Struts, dust and labels keep the landscape behind them (MR-A6).
@@ -976,15 +1051,18 @@ impl MarsRover {
         )
     }
 
-    /// Pixel rows of the far, mid and near surfaces over column `c`.
-    fn layer_tops(&self, w: &World, cam: f64, c: i32) -> [f64; 3] {
+    /// Pixel rows of the far, mid and near surfaces over column `c`, and the near
+    /// ground's slope there (one noise evaluation gives both).
+    fn layer_tops(&self, w: &World, cam: f64, c: i32) -> ([f64; 3], f64) {
         let l = self.layout;
         let (dxc, fc) = (l.dx(), f64::from(c) + 0.5);
-        [
+        let (near, slope) = w.near.eval(cam + fc * dxc);
+        let tops = [
             2.0 * (l.far_base - l.s * w.far.height(cam * PARALLAX_FAR + fc * dxc)),
             2.0 * (l.mid_base - l.s * w.mid.height(cam * PARALLAX_MID + fc * dxc)),
-            2.0 * (l.near_base - l.s * w.near.height(cam + fc * dxc)),
-        ]
+            2.0 * (l.near_base - l.s * near),
+        ];
+        (tops, slope)
     }
 
     /// Paint the sky, the Sun, Phobos and the three ground layers into the half-block
@@ -1014,10 +1092,9 @@ impl MarsRover {
         let size = self.px.pixel_size();
         let (pw, ph) = (i32::from(size.width()), i32::from(size.height()));
         for c in 0..pw {
-            let tops = self.layer_tops(&w, cam, c);
+            let (tops, slope) = self.layer_tops(&w, cam, c);
             self.tops[c as usize] = tops;
             let xn = cam + (f64::from(c) + 0.5) * l.dx();
-            let (_, slope) = w.near.eval(xn);
             let facing = (slope * toward).clamp(-1.0, 1.0);
             let wc = (xn / l.dx()).floor() as i32;
             for py in 0..ph {
@@ -1081,15 +1158,20 @@ impl MarsRover {
         }
     }
 
-    /// One sky pixel (MR-A4), all on the Blackbody ramp, which runs dark red, tan, white,
-    /// pale blue: butterscotch (its tan stretch) by day, paler toward the dusty horizon and
-    /// whitening around the Sun, fading to black through the twilight by level. A low Sun
-    /// wears a pale blue aureole, a Gaussian in angle that lifts the level to
-    /// `AUREOLE_TOP`, just past white: the ramp's lightness peaks at its white point, so a
-    /// bluer target would ring the Sun with a white rim round a dimmer core, where a real
-    /// aureole is brightest at the Sun. The Sun is the white-hot top of the Ember ramp,
-    /// the brightest ink of every theme.
+    /// One sky pixel (MR-A4). The dusty sky is on the Blackbody ramp: butterscotch (its
+    /// tan stretch) by day, paler toward the dusty horizon and round the Sun, fading to
+    /// black through the twilight by level. A low Sun wears a blue aureole, a Gaussian in
+    /// angle, in `Ramp(Ice)`: Blackbody cannot hold it, since its blue end lies past its
+    /// white point and would ring the Sun with white, and cannot dim without turning tan.
+    /// Ice darkens as a blue. Its level tracks the tan sky's lightness (`ice_matching`)
+    /// plus a lift toward the Sun, so luminance still falls outward, and an ordered dither
+    /// blends the two hues over the aureole's edge instead of drawing a hue contour. The
+    /// Sun is the white-hot top of the Ember ramp, the brightest ink of every theme.
     fn sky_pixel(&self, x: i32, py: i32, s: &SkyLight) -> Ink {
+        // Night: no daylight and no glow (the Sun is down whenever `day` is 0).
+        if s.day <= 0.0 && s.glow <= 0.0 {
+            return Ink::BLANK;
+        }
         let l = self.layout;
         let (fx, fy) = (f64::from(x) + 0.5, (f64::from(py) + 0.5) / 2.0);
         let a = (fy / l.horizon.max(1.0)).clamp(0.0, 1.0);
@@ -1097,23 +1179,27 @@ impl MarsRover {
         if s.sun_up && d < 0.6 * l.s {
             return ramp(Ramp::Ember, 1.0);
         }
+        let halo = (-d / (1.6 * l.s)).exp();
+        let tan = 255.0 * s.day * (0.34 + 0.08 * a * a + 0.14 * halo);
         // Past 3 radii the Gaussian is under 1e-4: skip the `exp`.
-        let g = if d < 3.0 * s.r_glow {
+        let g = if s.glow > 0.0 && d < 3.0 * s.r_glow {
             s.glow * (-(d / s.r_glow).powi(2)).exp()
         } else {
             0.0
         };
-        let aureole = (-d / (1.6 * l.s)).exp();
-        let base = s.day * (0.34 + 0.08 * a * a + 0.14 * aureole);
-        let level = 255.0 * (base + (AUREOLE_TOP - base).max(0.0) * g);
-        if level < ink::MIN_VISIBLE_LEVEL {
+        let share = ((g - AUREOLE_EDGE) / AUREOLE_BAND).clamp(0.0, 1.0);
+        if share > bayer4(x, py) {
+            let level = (ice_matching(tan) + AUREOLE_LIFT * g).min(AUREOLE_MAX);
+            return Ink::new(Role::Ramp(Ramp::Ice), ink::level(level));
+        }
+        if tan < ink::MIN_VISIBLE_LEVEL {
             Ink::BLANK
         } else {
-            Ink::new(Role::Blackbody, ink::level(level))
+            Ink::new(Role::Blackbody, ink::level(tan))
         }
     }
 
-    /// The relay orbiter crossing during stow and transmit.
+    /// The relay orbiter crossing the evening sky during the UHF pass.
     fn draw_orbiter(&self, canvas: &mut Canvas, beat: &Beat) {
         let Some((ox, oy)) = self.orbiter(beat) else {
             return;
@@ -1130,11 +1216,10 @@ impl MarsRover {
     }
 
     fn orbiter(&self, beat: &Beat) -> Option<P2> {
-        let u = match beat.index {
-            PH_STOW => beat.local / (STOW + TRANSMIT),
-            PH_TRANSMIT => (STOW + beat.local) / (STOW + TRANSMIT),
-            _ => return None,
-        };
+        if beat.index != PH_TRANSMIT {
+            return None;
+        }
+        let u = beat.local / TRANSMIT;
         let l = self.layout;
         Some((
             l.w * (0.08 + 0.84 * u),
@@ -1314,18 +1399,17 @@ impl MarsRover {
             Glyph::new('◘', 'o'),
             Ink::new(Role::Accent, 200),
         );
-        // High-gain antenna: a dish on a post, aimed at the orbiter while transmitting.
+        // High-gain antenna: the X-band dish for direct-to-Earth links, parked; the relay
+        // to the orbiter goes over the small UHF mast on the rear deck.
         let post = pose.body(HGA.0, HGA.1);
         strut(canvas, pose.body(HGA.0, BODY_V.1), post, link);
-        let aim = match self.orbiter(beat) {
-            Some(o) if beat.index == PH_TRANSMIT => {
-                let hp = view.at(post);
-                // Angle of the dish axis from the vertical, in world terms.
-                ((o.0 - hp.0) / ASPECT).atan2(hp.1 - o.1)
-            }
-            _ => pose.phi - 0.5,
-        };
-        let (sa, ca) = aim.sin_cos_det();
+        strut(
+            canvas,
+            pose.body(UHF.0, BODY_V.1),
+            pose.body(UHF.0, UHF.1),
+            link,
+        );
+        let (sa, ca) = (pose.phi - 0.5).sin_cos_det();
         let half = 0.6;
         let dish = self.lit(Role::Structure, 225);
         let (d0, d1) = (
@@ -1371,26 +1455,13 @@ impl MarsRover {
         plot(canvas, x, y, glyph, self.lit(Role::Structure, 245));
     }
 
-    fn draw_signal(&self, canvas: &mut Canvas, view: &View, pose: &Pose, beat: &Beat) {
-        let Some(o) = self.orbiter(beat) else { return };
-        let a = view.at(pose.body(HGA.0, HGA.1));
+    /// Data packets climbing from the UHF antenna at `a` to the orbiter at `o`.
+    fn draw_packets(&self, canvas: &mut Canvas, a: P2, o: P2) {
         const PACKETS: usize = 5;
         for i in 0..PACKETS {
             let q = (i as f64 / PACKETS as f64 + self.t * 0.9).fract();
             let (x, y) = (ease::lerp(a.0, o.0, q), ease::lerp(a.1, o.1, q));
             plot(canvas, x, y, PIXEL, Ink::new(Role::Wave, 240));
-        }
-        // Faint beam.
-        let n = ((o.0 - a.0).abs().max((o.1 - a.1).abs()) / 3.0).min(200.0) as usize;
-        for i in 1..n {
-            let q = i as f64 / n as f64;
-            let (x, y) = (ease::lerp(a.0, o.0, q), ease::lerp(a.1, o.1, q));
-            if canvas
-                .get(x.round() as i32, y.round() as i32)
-                .is_some_and(|c| c.ch == ' ')
-            {
-                plot(canvas, x, y, DOT, Ink::new(Role::Wave, 110));
-            }
         }
     }
 
@@ -1406,12 +1477,16 @@ impl MarsRover {
         let _ = match beat.index {
             PH_DRIVE => write!(right, "DRIVE {:.1} m", drive_profile(beat.local).0 * UNIT_M),
             PH_DEPLOY => write!(right, "ARM DEPLOY"),
-            PH_DRILL => write!(right, "CORING SAMPLE #{}", cycle + 1),
+            PH_DRILL => write!(right, "CORING SAMPLE #{}", sample_number(cycle)),
             PH_STOW => write!(right, "ARM STOW"),
-            _ => write!(right, "UHF RELAY > ORBITER"),
+            PH_IMAGE => write!(right, "MASTCAM-Z IMAGING"),
+            PH_TRANSMIT => write!(right, "UHF RELAY > ORBITER"),
+            _ => write!(right, "SLEEP"),
         };
         let mut left = StackText::<48>::new();
-        let lmst = (12.0 + hour.to_degrees() / 15.0).rem_euclid(24.0);
+        // Local true solar time: 12 h at the Sun's transit (no equation of time, which
+        // on Mars reaches ~±50 min, so not LMST).
+        let ltst = (12.0 + hour.to_degrees() / 15.0).rem_euclid(24.0);
         // The sol number ticks over at local midnight.
         let midnight = SOL_KNOTS[2].0
             + (SOL_KNOTS[3].0 - SOL_KNOTS[2].0) * (180.0 - SOL_KNOTS[2].1)
@@ -1419,9 +1494,9 @@ impl MarsRover {
         let sol = i64::from(w.sol0) + ((self.t - midnight) / SOL).floor() as i64 + 1;
         let _ = write!(
             left,
-            "SOL {sol}  LMST {:02}:{:02}",
-            lmst.floor() as u32,
-            (lmst.fract() * 60.0).floor() as u32
+            "SOL {sol}  LTST {:02}:{:02}",
+            ltst.floor() as u32,
+            (ltst.fract() * 60.0).floor() as u32
         );
         let ink = Ink::new(Role::Text, 170);
         let (ll, rl) = (left.len(), right.len());
@@ -1459,6 +1534,13 @@ fn veil(canvas: &mut Canvas, x: f64, y: f64, boost: u8, fallback: (Glyph, Ink)) 
             let cap = i.level.max(DUST_WARM);
             Ink::new(i.role, i.level.saturating_add(boost).min(cap))
         }
+        // The aureole stays under the Sun's white (MR-A7).
+        Role::Ramp(Ramp::Ice) => Ink::new(
+            i.role,
+            i.level
+                .saturating_add(boost)
+                .min(i.level.max(AUREOLE_MAX as u8)),
+        ),
         _ => Ink::new(i.role, i.level.saturating_add(boost)),
     };
     let ascii = canvas.mode() == GlyphMode::Ascii;
@@ -1522,6 +1604,24 @@ fn fill_box(canvas: &mut Canvas, view: &View, pose: &Pose, u: (f64, f64), v: (f6
         };
         for r in r0 as i32..r1 as i32 {
             canvas.put(c, r, HULL, ink);
+        }
+    }
+}
+
+/// The faint UHF link from `a` to `o`: a dot every third cell over the sky, drawn before
+/// the rover so it passes behind it. Over the half-block picture the dot replaces the
+/// half block and `backdrop` puts the sky back behind it (CORE-R86), so the link shows by
+/// day as well as by night.
+fn draw_beam(canvas: &mut Canvas, a: P2, o: P2) {
+    let n = ((o.0 - a.0).abs().max((o.1 - a.1).abs()) / 3.0).min(200.0) as usize;
+    for i in 1..n {
+        let q = i as f64 / n as f64;
+        let (x, y) = (ease::lerp(a.0, o.0, q), ease::lerp(a.1, o.1, q));
+        if canvas
+            .get(x.round() as i32, y.round() as i32)
+            .is_some_and(|c| matches!(c.ch, ' ' | '▀' | '▄'))
+        {
+            plot(canvas, x, y, DOT, Ink::new(Role::Wave, 150));
         }
     }
 }
@@ -1626,31 +1726,42 @@ mod tests {
         assert!(sun_elevation(hour_angle(47.0)).to_degrees() < 5.0);
         assert!(sun_elevation(hour_angle(12.0)).to_degrees() > 50.0);
         assert!(sun_elevation(hour_angle(70.0)).to_degrees() < -30.0);
-        // One Blackbody ramp for the whole sky: butterscotch (its tan stretch) by day, past
-        // white into its blue end around a low Sun.
-        let sky_levels = |t: f64| {
+        // A Blackbody sky, butterscotch (its tan stretch) by day; a blue `Ramp(Ice)`
+        // aureole round a low Sun, and only there.
+        let sky = |t: f64| {
             let (g, _) = scene_at(t);
-            let mut levels = Vec::new();
+            let hour = hour_angle(g.t);
+            let sun = g.sun_cell(hour, sun_elevation(hour));
+            let r = (GLOW_R * g.layout.horizon).max(2.0);
+            let (mut tan, mut blue) = (Vec::new(), 0);
             for py in 0..80 {
                 for x in 0..120 {
                     let ink = g.px.get(x, py).unwrap();
-                    if layer_at(g.tops[x as usize], py) == Layer::Sky && ink.level < 255 {
-                        assert_ne!(ink.role, Role::Ramp(Ramp::Ice), "t {t}: a second sky ramp");
-                        if ink.role == Role::Blackbody {
-                            levels.push(ink.level);
+                    if layer_at(g.tops[x as usize], py) != Layer::Sky || ink.level == 255 {
+                        continue;
+                    }
+                    match ink.role {
+                        Role::Blackbody => tan.push(ink.level),
+                        Role::Ramp(Ramp::Ice) => {
+                            let d = ((f64::from(x) + 0.5 - sun.0) / ASPECT)
+                                .hypot((f64::from(py) + 0.5) / 2.0 - sun.1);
+                            assert!(d < 3.0 * r, "t {t}: blue sky far from the Sun at {x},{py}");
+                            blue += 1;
                         }
+                        _ => {}
                     }
                 }
             }
-            levels
+            (tan, blue)
         };
-        let noon = sky_levels(12.0);
+        let (noon, noon_blue) = sky(12.0);
         assert!(noon.len() > 120 * 40 / 2, "a Blackbody day sky");
+        assert_eq!(noon_blue, 0, "no aureole with the Sun high");
         let tan = noon.iter().filter(|&&l| (70..=125).contains(&l)).count();
         assert!(tan * 10 > noon.len() * 9, "butterscotch day sky");
-        // The aureole: toward white (level 140, 6500 K) and the pale blue-white just past it.
-        let pale = sky_levels(47.0).iter().filter(|&&l| l >= 128).count();
-        assert!(pale > 30, "no pale glow at sunset: {pale}");
+        let (_, dusk_blue) = sky(47.0);
+        assert!(dusk_blue > 60, "no blue aureole at sunset: {dusk_blue}");
+        assert_eq!(sky(70.0).1, 0, "no aureole at night");
         assert!(count_at(70.0, Role::Star) > 5, "stars at night");
     }
 
@@ -1736,7 +1847,7 @@ mod tests {
                 let ring = (d / (0.4 * r)) as usize;
                 let ink = g.px.get(x, py).unwrap();
                 let sky = layer_at(g.tops[x as usize], py) == Layer::Sky;
-                if ring < rings.len() && sky && ink.role == Role::Blackbody {
+                if ring < rings.len() && sky && is_sky_ink(ink) {
                     rings[ring].0 += luminance(ink);
                     rings[ring].1 += 1;
                 }
@@ -1752,28 +1863,85 @@ mod tests {
             assert!(w[1] <= w[0] + 0.01, "{seen:?}");
         }
         assert!(seen[0] > 2.0 * seen[seen.len() - 1], "{seen:?}");
-        // And pixel by pixel at 200×50, straight up from the setting Sun: no sky pixel nearer
-        // the Sun is dimmer than one further out (a white ring round a bluer core would be).
+        // And at 200×50, straight up from the setting Sun, over 4-pixel windows (one
+        // dither period): the sky never brightens going out (no bright rim round the
+        // blue core).
         for t in [45.0, 47.0, 50.0] {
             let (g, _) = scene_sized(t, Size::new(200, 50));
             let hour = hour_angle(g.t);
             let sun = g.sun_cell(hour, sun_elevation(hour));
             let x = sun.0 as i32;
-            let mut last = f64::INFINITY;
+            let mut column = Vec::new();
             for py in (0..(2.0 * sun.1) as i32).rev() {
                 let ink = g.px.get(x, py).unwrap();
-                if layer_at(g.tops[x as usize], py) != Layer::Sky || ink.role != Role::Blackbody {
-                    continue;
+                if layer_at(g.tops[x as usize], py) == Layer::Sky && is_sky_ink(ink) {
+                    column.push(luminance(ink));
                 }
-                let lum = luminance(ink);
-                // 0.03: the aureole's top, just past the white point, is 3 % under it.
-                assert!(
-                    lum <= last + 0.03,
-                    "t {t}: pixel row {py} brighter than below: {ink:?}"
-                );
-                last = lum;
+            }
+            let means: Vec<f64> = column
+                .chunks_exact(4)
+                .map(|c| c.iter().sum::<f64>() / 4.0)
+                .collect();
+            assert!(means.len() >= 3, "t {t}: too little sky above the Sun");
+            for w in means.windows(2) {
+                assert!(w[1] <= w[0] + 0.02, "t {t}: {means:?}");
             }
         }
+    }
+
+    #[test]
+    fn mr_a4_the_aureole_edge_changes_hue_not_brightness() {
+        for tan in (50..=125u8).step_by(5) {
+            let bb = luminance(Ink::new(Role::Blackbody, tan));
+            let ice = luminance(Ink::new(
+                Role::Ramp(Ramp::Ice),
+                ink::level(ice_matching(f64::from(tan))),
+            ));
+            assert!(
+                (ice / bb - 1.0).abs() < 0.15,
+                "level {tan}: ice {ice} vs tan {bb}"
+            );
+        }
+    }
+
+    /// The sky's own inks: the tan Blackbody sky and the blue aureole.
+    fn is_sky_ink(ink: Ink) -> bool {
+        matches!(ink.role, Role::Blackbody | Role::Ramp(Ramp::Ice))
+    }
+
+    #[test]
+    fn mr_a4_the_aureole_is_blue_in_every_theme() {
+        // At sunset the aureole's pixels are blue in astro (b > r) and brighter than the
+        // tan sky around them in mono, so it reads in every theme.
+        let (g, _) = scene_at(47.0);
+        let (mut blue, mut tan) = ((0.0, 0u32), (0.0, 0u32));
+        for py in 0..80 {
+            for x in 0..120 {
+                let ink = g.px.get(x, py).unwrap();
+                if layer_at(g.tops[x as usize], py) != Layer::Sky {
+                    continue;
+                }
+                let mono = |i: Ink| {
+                    let sciart_render::Rgb(r, _, _) = sciart_render::Theme::Mono.color(i, 0, 0);
+                    f64::from(r)
+                };
+                match ink.role {
+                    Role::Ramp(Ramp::Ice) => {
+                        let sciart_render::Rgb(r, _, b) =
+                            sciart_render::Theme::Astro.color(ink, 0, 0);
+                        assert!(b > r, "not blue: {ink:?}");
+                        blue = (blue.0 + mono(ink), blue.1 + 1);
+                    }
+                    Role::Blackbody => tan = (tan.0 + mono(ink), tan.1 + 1),
+                    _ => {}
+                }
+            }
+        }
+        assert!(blue.1 > 0 && tan.1 > 0);
+        assert!(
+            blue.0 / f64::from(blue.1) > tan.0 / f64::from(tan.1),
+            "mono aureole {blue:?} vs sky {tan:?}"
+        );
     }
 
     #[test]
@@ -1960,7 +2128,7 @@ mod tests {
             g.update(0.5, &mut ctx);
             let cam = camera(&g.layout, g.rover_x(&w));
             for c in 0..120 {
-                let tops = g.layer_tops(&w, cam, c);
+                let (tops, _) = g.layer_tops(&w, cam, c);
                 let mut last = Layer::Sky;
                 for py in 0..80 {
                     let l = layer_at(tops, py);
@@ -2005,7 +2173,7 @@ mod tests {
     }
 
     #[test]
-    fn dust_rises_while_driving_and_drilling_and_settles_otherwise() {
+    fn mr_a3_dust_rises_while_driving_and_drilling_and_settles_otherwise() {
         let size = Size::new(160, 48);
         let mut ctx = Ctx::new(9, size);
         let mut g = MarsRover::default();
@@ -2087,7 +2255,7 @@ mod tests {
     #[test]
     fn mr_a3_sol_timeline_visits_phases_in_order_and_loops() {
         let tl = sol_timeline();
-        let want = [DRIVE, DEPLOY, DRILL, STOW, TRANSMIT];
+        let want = [DRIVE, DEPLOY, DRILL, STOW, IMAGE, TRANSMIT, SLEEP];
         assert!((tl.total() - want.iter().sum::<f64>()).abs() < 1e-12);
         let h = 1e-3;
         let (mut last, mut since, mut seen) = (tl.at(0.0).index, 0.0, Vec::new());
@@ -2097,20 +2265,69 @@ mod tests {
             let i = tl.at(t).index;
             since += h;
             if i != last {
-                assert_eq!(i, (last + 1) % 5, "phase order");
+                assert_eq!(i, (last + 1) % want.len(), "phase order");
                 seen.push((last, since));
                 last = i;
                 since = 0.0;
             }
         }
-        assert!(seen.len() >= 9);
-        for &(i, d) in &seen[..9] {
+        assert!(seen.len() >= 13);
+        for &(i, d) in &seen[..13] {
             assert!((d - want[i]).abs() < 2.0 * h, "phase {i} lasted {d}");
         }
     }
 
     #[test]
-    fn rover_moves_only_while_driving_and_continuously() {
+    fn mr_a3_one_plan_per_sol_works_by_day_relays_at_dusk_and_sleeps_at_night() {
+        let tl = sol_timeline();
+        assert_eq!(tl.total(), SOL);
+        for i in 0..(2.0 * SOL * 10.0) as i32 {
+            let t = f64::from(i) * 0.1;
+            let e = sun_elevation(hour_angle(t)).to_degrees();
+            match tl.at(t).index {
+                // Driving and coring in full daylight.
+                PH_DRIVE | PH_DEPLOY | PH_DRILL | PH_STOW => {
+                    assert!(e > 20.0, "work at {t} s with the Sun at {e:.1}°");
+                }
+                // The relay pass in the evening, the Sun low but up.
+                PH_TRANSMIT => assert!((0.0..20.0).contains(&e), "relay at {e:.1}°"),
+                _ => {}
+            }
+            // After dark the rover is asleep and still.
+            if e < 0.0 {
+                assert!(tl.at(t).index > PH_TRANSMIT, "awake at {t} s, Sun {e:.1}°");
+                assert_eq!(speed_at(t), 0.0);
+            }
+        }
+        // One core per sol, numbered within Perseverance's 38 sample tubes.
+        assert_eq!(sample_number(0), 1);
+        assert!((0..500).all(|c| (1..=SAMPLE_TUBES).contains(&sample_number(c))));
+        assert_eq!(sample_number(SAMPLE_TUBES), 1);
+    }
+
+    #[test]
+    fn mr_a11_the_uhf_link_shows_against_the_evening_sky() {
+        // The relay pass, Sun still up: packets and a dotted link over the lit sky, and
+        // the readout names the UHF relay.
+        let start = DRIVE + DEPLOY + DRILL + STOW + IMAGE;
+        assert!(sun_elevation(hour_angle(start + 2.0)) > 0.0);
+        let (g, canvas) = scene_at(start + 2.0);
+        let o = g
+            .orbiter(&g.plan.at(g.t))
+            .expect("orbiter up during the relay");
+        let beam = canvas
+            .cells()
+            .iter()
+            .filter(|c| c.ch == DOT.unicode && c.ink.role == Role::Wave)
+            .count();
+        assert!(beam >= 4, "link dots over the sky: {beam}");
+        let row0: String = (0..120).map(|x| canvas.get(x, 0).unwrap().ch).collect();
+        assert!(row0.contains("UHF RELAY"), "{row0}");
+        assert!(o.1 < g.layout.horizon, "orbiter in the sky");
+    }
+
+    #[test]
+    fn mr_a3_rover_moves_only_while_driving_and_continuously() {
         let tl = sol_timeline();
         let mut prev = odometer(0.0);
         for i in 1..=6200 {
