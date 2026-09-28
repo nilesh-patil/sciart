@@ -30,7 +30,7 @@ and each keeps `Ink` at two bytes.
   rises from a dark red (L* ≈ 12) to white near 6500 K and then stays blue-white (L* ≥ 75), so
   hotter never reads as dimmer on the red side.
 - **`Role::Ramp(Ramp)`**: a sequential field in a named ramp (`ink::ramp(ramp, v)`, `v ∈ [0, 1]`,
-  read back with `ink::seq_value`). Six ramps, one hue family each, all with a near-black low end
+  read back with `ink::seq_value`). Eight ramps (six at M11; M12 added `Starlight` and `Sulfur`), one hue family each, all with a near-black low end
   (L* ≈ 4) and lightness increasing evenly to a pale top (L* ≥ 93):
 
   | Ramp | Hue path | Meant for |
@@ -42,6 +42,7 @@ and each keeps `Ink` at two bytes.
   | `Aurora` | deep teal → emerald → lime-white | auroral O I 557.7 nm, fluorescence (GFP-like), bioluminescence |
   | `Plasma` | indigo → violet → lavender-white | gas discharges, lightning, synchrotron glow, pulsar beams |
  | `Starlight` | near-black → neutral grey → pale warm white | unresolved starlight (a globular cluster's glow, the Milky Way); added in M12 |
+ | `Sulfur` | near-black olive → chrome yellow → pale lemon | the *Physarum* plasmodium, pollen and sulfur yellows; added in M12 so a yellow organism need not borrow Ember's orange |
 
   Each ramp is a 256-level table built once from OKLCh: lightness linear in level, hue linear
   between the two ends, chroma lowered only where sRGB cannot hold it.
