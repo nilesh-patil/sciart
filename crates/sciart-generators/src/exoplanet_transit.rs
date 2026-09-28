@@ -3,8 +3,9 @@
 //!
 //! Parameters follow HD 189733 b; the orbit is drawn much closer than the real one so it
 //! fits the frame. The light curve integrates the quadratic limb-darkening law over the
-//! occulted part of the disc (tabulated once per build), the star's lightness follows the
-//! same limb-darkening law in false colour, and the planet shows its phase. Star, planet and orbit are rasterised in
+//! occulted part of the disc (tabulated once per build), the star is drawn in true colour
+//! at the brightness temperature of that same law (pale peach at the centre, orange at the
+//! limb), and the planet shows its phase. Star, planet and orbit are rasterised in
 //! `update`/`resize`; `render` blits and writes the labels.
 
 use std::f64::consts::{PI, TAU};
@@ -13,6 +14,8 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::geom::v3;
 use sciart_core::prelude::*;
+use sciart_core::raster::disc_pixels;
+use sciart_core::stellar::{brightness_temperature, limb_darkening};
 use sciart_core::title::{self, Title};
 use sciart_core::{draw, ink, rng};
 
@@ -40,11 +43,14 @@ const A: f64 = 2.4;
 /// Orbital period in simulated seconds.
 const PERIOD: f64 = 14.0;
 
-/// False colour: the disc is drawn on the `Ember` ramp at value
-/// `STAR_V0 + (1 − STAR_V0)·I^STAR_GAMMA`, so its lightness falls with the intensity from
-/// a pale-gold centre to a deep orange-red limb, as in a limb-darkened photograph.
-const STAR_V0: f64 = 0.2;
-const STAR_GAMMA: f64 = 1.3;
+/// Effective temperature of HD 189733 (K, Bouchy et al. 2005), drawn at the disc centre.
+/// Every star pixel is `Blackbody` at the 550 nm brightness temperature of its mean
+/// intensity (CORE-R94): ≈ 4000 K at the limb, where `I = 1 − u1 − u2 = 0.26`.
+const TEFF: f64 = 5050.0;
+/// A star pixel whose mean intensity (limb darkening × the share of it that shines) is
+/// below this (≈ 3200 K) is not drawn, so the edge and the silhouette's rim fade out
+/// rather than ending in a dark red ring.
+const STAR_MIN_I: f64 = 0.05;
 
 /// Flux table over `d ∈ [0, 1 + P]` and the radial quadrature steps per entry.
 const FLUX_N: usize = 256;
@@ -61,8 +67,10 @@ const STRIP_HI: f64 = 0.3;
 const STRIP_LO: f64 = 1.35;
 /// Photometric scatter of the observations, in transit depths.
 const NOISE: f64 = 0.07;
-const MODEL_INK: Ink = Ink::new(Role::Ramp(Ramp::Ember), 230);
-const NOW_INK: Ink = Ink::new(Role::Ramp(Ramp::Ember), 255);
+/// The model curve in lavender, apart from the peach star and the blue planet; "now" in
+/// white.
+const MODEL_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 200);
+const NOW_INK: Ink = Ink::new(Role::Star, 255);
 const OBS_INK: Ink = Ink::new(Role::Structure, 150);
 const BASELINE_INK: Ink = Ink::new(Role::Dim, 30);
 const ORBIT_INK: Ink = Ink::new(Role::Dim, 30);
@@ -75,12 +83,6 @@ const SILHOUETTE_COVER: f64 = 0.95;
 /// `PLANET_FULL_COVER`, so a planet a few pixels across is a round blot (TRAN-A9).
 const PLANET_MIN_COVER: f64 = 0.3;
 const PLANET_FULL_COVER: f64 = 0.75;
-
-/// Quadratic limb darkening `I(μ) = 1 − u1(1 − μ) − u2(1 − μ)²` (TRAN-A4).
-pub(crate) fn limb_intensity(mu: f64, u: (f64, f64)) -> f64 {
-    let m = 1.0 - mu.clamp(0.0, 1.0);
-    1.0 - u.0 * m - u.1 * m * m
-}
 
 /// Relative flux of a limb-darkened unit star with a planet of radius `p` centred `d`
 /// away (TRAN-A4): `1 − ∫ I(r)·L(r) dr / π(1 − u1/3 − u2/6)`, where `L(r)` is the length
@@ -106,7 +108,7 @@ pub(crate) fn ld_flux(d: f64, p: f64, u: (f64, f64)) -> f64 {
     let blocked: f64 = (0..QUAD_N)
         .map(|k| {
             let r = lo + (k as f64 + 0.5) * step;
-            limb_intensity((1.0 - r * r).max(0.0).sqrt(), u) * arc(r)
+            limb_darkening((1.0 - r * r).max(0.0).sqrt(), u) * arc(r)
         })
         .sum();
     1.0 - blocked * step / (PI * (1.0 - u.0 / 3.0 - u.1 / 6.0))
@@ -133,19 +135,6 @@ fn scatter(k: i64) -> f64 {
 /// nothing rather than in near-black pixels.
 fn visible(ramp: Ramp, v: f64) -> Option<Ink> {
     (255.0 * v >= ink::MIN_VISIBLE_LEVEL).then(|| ink::ramp(ramp, v))
-}
-
-/// Share of pixel `(x, y)` inside the circle of radius `r` about `c`, from a 4 × 4 grid
-/// of samples, so a small disc comes out round rather than as a plus (TRAN-A9).
-fn pixel_cover(x: i32, y: i32, c: (f64, f64), r: f64) -> f64 {
-    let inside = (0..16)
-        .filter(|k| {
-            let sx = f64::from(x) + (f64::from(k % 4) + 0.5) / 4.0;
-            let sy = f64::from(y) + (f64::from(k / 4) + 0.5) / 4.0;
-            (sx - c.0).hypot(sy - c.1) <= r
-        })
-        .count();
-    inside as f64 / 16.0
 }
 
 /// Photometer strip layout, in cells and dots.
@@ -228,21 +217,20 @@ impl ExoplanetTransit {
         }
     }
 
-    /// The `Ember` value of the disc at unit-disc offset `(nx, ny)`, or `None` off it
-    /// (TRAN-A7).
-    fn star_value(nx: f64, ny: f64) -> Option<f64> {
+    /// Limb-darkened intensity of the disc at unit-disc offset `(nx, ny)`, 1 at the
+    /// centre, or `None` off it (TRAN-A7).
+    fn star_intensity(nx: f64, ny: f64) -> Option<f64> {
         let r2 = nx * nx + ny * ny;
-        (r2 <= 1.0).then(|| {
-            let i = limb_intensity((1.0 - r2).sqrt(), (U1, U2));
-            STAR_V0 + (1.0 - STAR_V0) * i.powf(STAR_GAMMA)
-        })
+        (r2 <= 1.0).then(|| limb_darkening((1.0 - r2).sqrt(), (U1, U2)))
     }
 
-    /// Star pixel ink at `(nx, ny)` with a share `cover` of it hidden by the planet: its
-    /// mean brightness, so the silhouette's edge is anti-aliased; `None` once too dim to
-    /// see.
-    fn star_ink(nx: f64, ny: f64, cover: f64) -> Option<Ink> {
-        Self::star_value(nx, ny).and_then(|v| visible(Ramp::Ember, v * (1.0 - cover)))
+    /// Star pixel ink at `(nx, ny)` when only a share `lit` of the pixel shines (the rest
+    /// is off the disc or behind the planet): `Blackbody` at the brightness temperature
+    /// of its mean intensity, so edges are anti-aliased by cooling and dimming, as in a
+    /// slightly blurred photograph; `None` below `STAR_MIN_I` (TRAN-A7, TRAN-A9).
+    fn star_ink(nx: f64, ny: f64, lit: f64) -> Option<Ink> {
+        let i = Self::star_intensity(nx, ny)? * lit;
+        (i >= STAR_MIN_I).then(|| ink::blackbody(brightness_temperature(TEFF, i)))
     }
 
     /// The planet's lit-side ink for a normal `(nx, ny)` (clamped onto the disc, for rim
@@ -305,32 +293,27 @@ impl ExoplanetTransit {
         let rp = rs * P;
         let r_hat = v3::unit(pos);
         let behind = pos[2] < 0.0;
-        for y in (py - rp).floor() as i32 - 1..=(py + rp).ceil() as i32 {
-            for x in (px - rp).floor() as i32 - 1..=(px + rp).ceil() as i32 {
-                if behind && self.pixels.get(x, y).is_some_and(|i| i != Ink::BLANK) {
-                    continue;
-                }
-                let cover = pixel_cover(x, y, (px, py), rp);
-                if cover == 0.0 {
-                    continue;
-                }
-                let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-                let (nx, ny) = ((fx - px) / rp, (fy - py) / rp);
-                let (sx, sy) = ((fx - cx) / rs, (fy - cy) / rs);
-                let ink = if sx * sx + sy * sy <= 1.0 {
-                    Self::star_ink(sx, sy, cover).filter(|_| cover < SILHOUETTE_COVER)
-                } else {
-                    Self::planet_ink(nx, ny, r_hat, cover)
-                };
-                self.pixels.set(x, y, ink.unwrap_or(Ink::BLANK));
+        let pixels = &mut self.pixels;
+        disc_pixels((px, py), rp, |x, y, cover| {
+            if behind && pixels.get(x, y).is_some_and(|i| i != Ink::BLANK) {
+                return;
             }
-        }
+            let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+            let (nx, ny) = ((fx - px) / rp, (fy - py) / rp);
+            let (sx, sy) = ((fx - cx) / rs, (fy - cy) / rs);
+            let ink = if sx * sx + sy * sy <= 1.0 {
+                Self::star_ink(sx, sy, 1.0 - cover).filter(|_| cover < SILHOUETTE_COVER)
+            } else {
+                Self::planet_ink(nx, ny, r_hat, cover)
+            };
+            pixels.set(x, y, ink.unwrap_or(Ink::BLANK));
+        });
         self.draw_strip();
     }
 
-    /// The star, pixel by pixel (TRAN-A7): static, so shaded in `resize`. Limb pixels
-    /// take the limb's value times the share of the pixel the disc covers, so the edge is
-    /// anti-aliased rather than stepped.
+    /// The star, pixel by pixel (TRAN-A7): static, so shaded in `resize`. A limb pixel
+    /// takes the limb's intensity times the share of it the disc covers (its centre
+    /// clamped onto the disc), so the edge is anti-aliased rather than stepped.
     fn shade_star(&mut self) {
         self.star.clear();
         let (cx, cy, rs) = (self.cx, self.cy, self.rs);
@@ -338,23 +321,20 @@ impl ExoplanetTransit {
             i32::from(self.size.width()),
             2 * i32::from(self.size.height()),
         );
-        let (x0, x1) = ((cx - rs).floor() as i32, (cx + rs).ceil() as i32);
-        let (y0, y1) = ((cy - rs).floor() as i32, (cy + rs).ceil() as i32);
-        for y in y0.max(0)..=y1.min(rows - 1) {
-            for x in x0.max(0)..=x1.min(w - 1) {
-                let (nx, ny) = (
-                    (f64::from(x) + 0.5 - cx) / rs,
-                    (f64::from(y) + 0.5 - cy) / rs,
-                );
-                let k = nx.hypot(ny).max(1.0);
-                let cover = pixel_cover(x, y, (cx, cy), rs);
-                let ink =
-                    Self::star_value(nx / k, ny / k).and_then(|v| visible(Ramp::Ember, v * cover));
-                if let Some(ink) = ink {
-                    self.star.push((x, y, ink));
-                }
+        let star = &mut self.star;
+        disc_pixels((cx, cy), rs, |x, y, cover| {
+            if !(0..w).contains(&x) || !(0..rows).contains(&y) {
+                return;
             }
-        }
+            let (nx, ny) = (
+                (f64::from(x) + 0.5 - cx) / rs,
+                (f64::from(y) + 0.5 - cy) / rs,
+            );
+            let k = nx.hypot(ny).max(1.0);
+            if let Some(ink) = Self::star_ink(nx / k, ny / k, cover) {
+                star.push((x, y, ink));
+            }
+        });
     }
 
     /// The scrolling light curve over the last `STRIP_SPAN`, newest sample at the right
@@ -397,13 +377,15 @@ impl ExoplanetTransit {
             .into_iter()
             .filter(|i| i.role != Role::Background)
             .max_by_key(|i| i.level)?;
-        let ch = if ink.role == Role::Ramp(Ramp::Ember) {
-            match ink.level {
-                l if l >= 220 => '@',
-                l if l >= 180 => '#',
-                l if l >= 140 => '*',
-                l if l >= 100 => '+',
-                l if l >= 60 => ':',
+        // The star by temperature, which falls with its intensity: 5050 K at the centre,
+        // ≈ 4000 K at the limb, ≈ 3200 K where an edge pixel fades out.
+        let ch = if ink.role == Role::Blackbody {
+            match ink::blackbody_kelvin(ink) {
+                k if k >= 4800.0 => '@',
+                k if k >= 4500.0 => '#',
+                k if k >= 4200.0 => '*',
+                k if k >= 3800.0 => '+',
+                k if k >= 3500.0 => ':',
                 _ => '.',
             }
         } else {
@@ -592,8 +574,8 @@ mod tests {
     #[test]
     fn tran_a4_limb_darkened_flux() {
         // The law itself: 1 at the centre, 1 − u1 − u2 at the limb, monotone.
-        assert!((limb_intensity(1.0, (U1, U2)) - 1.0).abs() < 1e-12);
-        assert!((limb_intensity(0.0, (U1, U2)) - (1.0 - U1 - U2)).abs() < 1e-12);
+        assert!((limb_darkening(1.0, (U1, U2)) - 1.0).abs() < 1e-12);
+        assert!((limb_darkening(0.0, (U1, U2)) - (1.0 - U1 - U2)).abs() < 1e-12);
         // Without limb darkening the quadrature reproduces the exact overlap model.
         for k in 0..=400 {
             let d = 1.3 * f64::from(k) / 400.0;
@@ -686,18 +668,22 @@ mod tests {
     }
 
     #[test]
-    fn tran_a7_star_lightness_follows_the_limb_darkening_law() {
-        // Full value at the centre, falling with I(μ) all the way to a dim limb.
-        let value = |r: f64| ExoplanetTransit::star_value(r, 0.0).unwrap();
-        assert!((value(0.0) - 1.0).abs() < 1e-12);
+    fn tran_a7_star_is_true_colour_at_the_brightness_temperature_of_the_law() {
+        // Teff at the centre, falling with I(μ) by Wien to ≈ 4000 K at the limb.
+        let kelvin =
+            |r: f64| ink::blackbody_kelvin(ExoplanetTransit::star_ink(r, 0.0, 1.0).unwrap());
+        // One Blackbody level is 1.3 % in temperature.
+        let near = |a: f64, b: f64| (a / b - 1.0).abs() < 0.007;
+        assert!(near(kelvin(0.0), TEFF), "{}", kelvin(0.0));
         for k in 0..=100 {
             let r = f64::from(k) / 100.0;
-            let i = limb_intensity((1.0 - r * r).max(0.0).sqrt(), (U1, U2));
-            assert!((value(r) - (STAR_V0 + (1.0 - STAR_V0) * i.powf(STAR_GAMMA))).abs() < 1e-12);
+            let i = limb_darkening((1.0 - r * r).max(0.0).sqrt(), (U1, U2));
+            let want = brightness_temperature(TEFF, i);
+            assert!(near(kelvin(r), want), "r={r}: {} vs {want}", kelvin(r));
         }
-        // Visibly darker by mid-radius (not flat until the limb), and a dim limb.
-        assert!(value(0.7) < 0.85, "{}", value(0.7));
-        assert!(value(1.0) < 0.4, "{}", value(1.0));
+        assert!((3900.0..4100.0).contains(&kelvin(1.0)), "{}", kelvin(1.0));
+        // Cooler, and so darker and redder, by mid-radius, not flat until the limb.
+        assert!(kelvin(0.7) < 0.97 * TEFF, "{}", kelvin(0.7));
         // Drawn: along a radius the level never rises, and the disc ends within a pixel of
         // its radius (anti-aliased, no glow), every star pixel above the visible floor.
         let size = Size::new(200, 50);
@@ -711,7 +697,7 @@ mod tests {
             if ink == Ink::BLANK {
                 break;
             }
-            assert_eq!(ink.role, Role::Ramp(Ramp::Ember), "x={x}");
+            assert_eq!(ink.role, Role::Blackbody, "x={x}");
             assert!(ink.level <= last, "x={x}: {} after {last}", ink.level);
             last = ink.level;
             lit += 1;
@@ -778,7 +764,7 @@ mod tests {
         );
         assert_eq!(
             g.pixels.get(g.cx as i32, g.cy as i32).unwrap().role,
-            Role::Ramp(Ramp::Ember)
+            Role::Blackbody
         );
         // The silhouette's rim is anti-aliased: star pixels part-covered by the planet
         // are darker than the unobscured disc there, but not blank.
@@ -790,9 +776,9 @@ mod tests {
                 let d = (fx - x).hypot(fy - y);
                 if (rp - 0.3..rp + 0.3).contains(&d) {
                     let (sx, sy) = ((fx - g.cx) / g.rs, (fy - g.cy) / g.rs);
-                    let bare = ExoplanetTransit::star_ink(sx, sy, 0.0).unwrap();
+                    let bare = ExoplanetTransit::star_ink(sx, sy, 1.0).unwrap();
                     let got = g.pixels.get(xx, yy).unwrap();
-                    assert_eq!(got.role, Role::Ramp(Ramp::Ember), "({xx}, {yy})");
+                    assert_eq!(got.role, Role::Blackbody, "({xx}, {yy})");
                     assert!(got.level < bare.level, "({xx}, {yy}): {got:?} vs {bare:?}");
                     rim += 1;
                 }
@@ -839,7 +825,7 @@ mod tests {
                     if (fx - g.cx).hypot(fy - g.cy) <= g.rs + 1.0 {
                         continue;
                     }
-                    let cover = pixel_cover(xx, yy, (x, y), rp);
+                    let cover = sciart_core::raster::disc_cover(xx, yy, (x, y), rp);
                     let got = g
                         .pixels
                         .get(xx, yy)

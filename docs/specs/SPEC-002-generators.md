@@ -236,8 +236,8 @@ Shared helpers: `sciart_core::draw` (CORE-R22..R27). All lengths below are in **
 - **Model**:
   - Parameters after HD 189733 b: `p = Rp/R* = 0.155`, `b = 0.66`, `T_eff = 5050 K`. The planet's blue
     colour follows Evans et al. (2013).
-  - Limb darkening is quadratic, `I(μ) = 1 − u1(1 − μ) − u2(1 − μ)²`, `u1 = 0.62`, `u2 = 0.12` (V band,
-    approximate).
+  - Limb darkening is quadratic, `I(μ) = 1 − u1(1 − μ) − u2(1 − μ)²` (`stellar::limb_darkening`,
+    CORE-R93), `u1 = 0.62`, `u2 = 0.12` (V band, approximate).
   - **Stylised**: the orbit is drawn at `a/R* = 2.4` (real 8.8), and the period is 14 s.
   - Orbit, φ = 2πt/P, φ = 0 at mid-transit: `(x, y, z) = (a sin φ, b cos φ, a sin i cos φ)`, z toward the
     observer, `cos i = b/a`.
@@ -249,33 +249,38 @@ Shared helpers: `sciart_core::draw` (CORE-R22..R27). All lengths below are in **
     vector, drawn in `Ice` at `0.25 + 0.4·cos`. **Boosted**: the planet's reflected light is ~10⁻⁴ of the
     star's; its phases are drawn visible as an illustration. The night side is not drawn. In front of
     the disc the planet is a silhouette; behind it (occultation), hidden.
-  - Silhouette edge *(changed)*: a star pixel's cover is the share of a 4 × 4 grid of samples inside
-    the planet, so a small silhouette is a round blot, not a plus; a part-covered pixel shows its mean
-    value, `v·(1 − cover)`, and is blank from cover 0.95 or once below the visible floor (CORE-R66).
+  - Silhouette edge *(changed)*: the planet's pixels and their cover come from `raster::disc_pixels` /
+    `disc_cover` (CORE-R95: `clamp(r + ½ − d, 0, 1)` from the pixel centre's distance), so a small
+    silhouette is a round blot, not a plus; a part-covered star pixel is drawn at the brightness
+    temperature of its mean intensity, `I·(1 − cover)`, and is blank from cover 0.95 or once that
+    intensity is below 0.05.
   - Day side edge *(changed)*: off the star, a pixel shows the planet from 0.3 cover, its value scaled
     by `min(1, cover/0.75)` with the normal clamped onto the rim, so a planet 2 px in radius (80×24) is a
     round blot, not a plus or a square.
   - Occultation *(changed)*: behind the star, the planet is drawn only on pixels the star left empty,
     so at ingress and egress it slips under the limb.
 - **Star shading** *(changed)*:
-  - **False colour**: each disc pixel is `Ramp(Ember)` at `v = 0.2 + 0.8·I(μ)^1.3`, so lightness follows
-    the limb-darkening law itself: pale gold at the centre (v = 1), visibly darker from mid-radius, deep
-    orange-red at the limb (v ≈ 0.34). The ramp's reddening toward the limb stands in for the real
-    brightness-temperature drop (≈ 1000 K); the star's true colour (5050 K, pale peach) is not shown.
-  - No glow *(changed)*: the ramp's dark end made any glow past the limb a maroon outline. Instead the
-    limb is anti-aliased: a limb pixel takes the limb value times the share of it the disc covers (4 × 4
-    samples), and is dropped below the visible floor.
+  - **True colour**: each disc pixel is `Blackbody` at the 550 nm brightness temperature of its
+    limb-darkened intensity (`stellar::brightness_temperature(5050 K, I)`, CORE-R94): pale peach at the
+    centre (`T_eff` = 5050 K), visibly cooler, darker and redder from mid-radius, orange at the limb
+    (≈ 4000 K, where `I = 1 − u1 − u2 = 0.26`).
+  - No glow *(changed)*: the limb is anti-aliased instead: via `raster::disc_pixels` (CORE-R95) a limb
+    pixel takes the limb's intensity (its centre clamped onto the disc) times the share of it the disc
+    covers, drawn at that intensity's brightness temperature, so edges fade by cooling and dimming as in
+    a slightly blurred photograph; a pixel whose mean intensity is below 0.05 (≈ 3200 K) is not drawn,
+    so the edge and the silhouette's rim fade out rather than ending in a dark red ring.
   - The star is static and shaded once per size.
 - **Photometer strip**: size `clamp(h/4, 4, 12)` rows ending on h − 2, 2-dot margins, newest sample
   right, σ = 0.07·depth scatter from a stateless Box–Muller of `hash01`, `Dim` 30 baseline,
-  ` relative flux ` label, `depth 2.6 %` readout, the newest model point `Ember` 255 on a 7-dot tick.
+  ` relative flux ` label, `depth 2.6 %` readout, the newest model point `Star` 255 (white) on a 7-dot tick.
   *(Changed)*: it spans the last 0.55 period (7.7 s), so the dip fills about a quarter of its width, and
-  it is brighter: model `Ramp(Ember)` 230, observations `Structure` 150.
+  it is brighter: model `Ramp(Plasma)` 200 (lavender, apart from the peach star and the blue planet),
+  observations `Structure` 150.
 - **Layout**: unchanged (star centred above the strip, `R* = min(0.4·rows_px, 0.94 w / 2(a + p))`,
   faint `Dim` 30 orbit off the disc, 80 background stars `Dim` 30–90).
-- **ASCII**: star cells by `Ember` level: `@` ≥ 220, `#` ≥ 180, `*` ≥ 140, `+` ≥ 100, `:` ≥ 60, `.` below
-  (the anti-aliased limb). Day side `o`.
-- **Acceptance**: `TRAN-A1` *(changed)*: `ld_flux(d, p, u) = 1` for |d| ≥ 1 + p, with and without limb darkening, and the scene's flux is 1 whenever the planet's sky distance is ≥ 1 + p; `TRAN-A2` *(changed)*: without limb darkening, a planet wholly on the disc blocks p² (within 0.2 %); `TRAN-A3` *(changed)*: the test-only exact circle-overlap area (the uniform-disc reference for TRAN-A4) matches the lens area 2π/3 − √3/2, is continuous at contact, symmetric in its radii and non-increasing in d; `TRAN-A4`: the law is 1 at μ = 1 and `1 − u1 − u2` at μ = 0; with u = 0 `ld_flux` matches the uniform reference within 3·10⁻⁴ on d ∈ [0, 1.3]; the central depth is > p² and within 3 % of `p²/(1 − u1/3 − u2/6)`; the scene's deepest flux is `F(b)`; `TRAN-A5` *(changed)*: F = 1 whenever z ≤ 0; at 200×50, 120×40 and 80×24, at every phase with the planet behind (z < 0), every star pixel is unchanged: no planet pixel lands on the star; `TRAN-A6`: at φ = π/4, π/2, 3π/4, 5π/4, 3π/2 the lit share of the planet's pixels at 200×50 is within 0.05 of `(1 − z/a)/2`; `TRAN-A7` *(changed)*: the disc value is `0.2 + 0.8·I(μ)^1.3` (1 at the centre), below 0.85 at r = 0.7 and below 0.4 at the limb; drawn at 200×50, the level along a radius never rises, the lit run ends within a pixel of `R*`, and every star pixel is at or above the visible floor; `TRAN-A8`: at 200×50 the strip ends on row h − 2; spanning 0.55 period, every sample keeps its value and moves one dot left per `0.55·P/W` s; mid-transit, the strip's lowest model dot sits at `F(b)`; `TRAN-A9` *(new)*: Mid-transit at 200×50: the planet's centre pixel is empty and the disc centre is `Ember`; every star pixel whose centre lies within 0.3 px of the planet's rim is `Ember` darker than the bare disc there (anti-aliased), at least 8 of them. At 80×24 (rp ≈ 2 px), over eight positions a pixel of drift apart, every pixel centred within rp − 0.75 of the planet is blank (a round blot, not a plus). Off the star, at 64 phases, every pixel at least half covered by the planet whose rim-clamped normal faces the star is `Ice`, and none under 0.3 cover is. No strip below 24×12. In `mono`, at 16 phases, every `Ice` pixel is darker than the disc centre.
+- **ASCII**: star cells by temperature, which falls with intensity: `@` ≥ 4800 K, `#` ≥ 4500 K, `*` ≥
+  4200 K, `+` ≥ 3800 K, `:` ≥ 3500 K, `.` below (the anti-aliased limb). Day side `o`.
+- **Acceptance**: `TRAN-A1` *(changed)*: `ld_flux(d, p, u) = 1` for |d| ≥ 1 + p, with and without limb darkening, and the scene's flux is 1 whenever the planet's sky distance is ≥ 1 + p; `TRAN-A2` *(changed)*: without limb darkening, a planet wholly on the disc blocks p² (within 0.2 %); `TRAN-A3` *(changed)*: the test-only exact circle-overlap area (the uniform-disc reference for TRAN-A4) matches the lens area 2π/3 − √3/2, is continuous at contact, symmetric in its radii and non-increasing in d; `TRAN-A4`: the law is 1 at μ = 1 and `1 − u1 − u2` at μ = 0; with u = 0 `ld_flux` matches the uniform reference within 3·10⁻⁴ on d ∈ [0, 1.3]; the central depth is > p² and within 3 % of `p²/(1 − u1/3 − u2/6)`; the scene's deepest flux is `F(b)`; `TRAN-A5` *(changed)*: F = 1 whenever z ≤ 0; at 200×50, 120×40 and 80×24, at every phase with the planet behind (z < 0), every star pixel is unchanged: no planet pixel lands on the star; `TRAN-A6`: at φ = π/4, π/2, 3π/4, 5π/4, 3π/2 the lit share of the planet's pixels at 200×50 is within 0.05 of `(1 − z/a)/2`; `TRAN-A7` *(changed)*: every disc pixel is `Blackbody` at the brightness temperature of `I(μ)` (within 0.7 % over 101 radii): `T_eff` at the centre, below `0.97 T_eff` at r = 0.7 and 3900–4100 K at the limb; drawn at 200×50, the level along a radius never rises, the lit run ends within a pixel of `R*`, and every star pixel is at or above the visible floor; `TRAN-A8`: at 200×50 the strip ends on row h − 2; spanning 0.55 period, every sample keeps its value and moves one dot left per `0.55·P/W` s; mid-transit, the strip's lowest model dot sits at `F(b)`; `TRAN-A9` *(new)*: Mid-transit at 200×50: the planet's centre pixel is empty and the disc centre is `Blackbody`; every star pixel whose centre lies within 0.3 px of the planet's rim is `Blackbody` darker than the bare disc there (anti-aliased), at least 8 of them. At 80×24 (rp ≈ 2 px), over eight positions a pixel of drift apart, every pixel centred within rp − 0.75 of the planet is blank (a round blot, not a plus). Off the star, at 64 phases, every pixel at least half covered by the planet whose rim-clamped normal faces the star is `Ice`, and none under 0.3 cover is. No strip below 24×12. In `mono`, at 16 phases, every `Ice` pixel is darker than the disc centre.
 
 ### satellite_orbit  (Voyages, M4, M12)
 - **Intent**: the Earth turning beneath the orbits we actually fly. The ISS and a Starlink train skim just above the air, a GPS plane rings the planet in MEO, three geostationary weather satellites hang over their own longitudes as the continents pass under them, and a Molniya satellite loops high over the north. Each satellite is a bright head with a short fading trail, so the fleet reads as motion at a glance.

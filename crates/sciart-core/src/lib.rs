@@ -17,6 +17,7 @@ pub mod raster;
 pub mod rng;
 mod size;
 mod stage;
+pub mod stellar;
 pub mod text;
 pub mod timeline;
 pub mod title;
