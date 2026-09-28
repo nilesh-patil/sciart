@@ -26,7 +26,7 @@ use sciart_core::ode::rk4_step;
 use sciart_core::particles::gaussian2;
 use sciart_core::prelude::*;
 use sciart_core::rng::{cell_key, hash01};
-use sciart_core::{Tone, draw, ease};
+use sciart_core::{Tone, draw, ease, raster};
 
 pub static META: Meta = Meta {
     name: "rocket_launch",
@@ -401,6 +401,15 @@ const SKY_FALL: f64 = 0.3;
 /// radius and glare radius in the same units, and the glare's peak added to the haze.
 const SUN_AT: (f64, f64) = (0.42, 0.34);
 const SUN_R: f64 = 0.035;
+
+/// The Sun's centre in pixels for a view `rows` pixels tall: `SUN_AT`, snapped to a pixel
+/// centre so the disc is symmetric (ROC-A10).
+fn sun_centre(rows: f64) -> (f64, f64) {
+    (
+        (SUN_AT.0 * rows).floor() + 0.5,
+        (SUN_AT.1 * rows).floor() + 0.5,
+    )
+}
 const SUN_GLOW_R: f64 = 0.22;
 const SUN_GLARE: f64 = 0.55;
 const VEHICLE_M: f64 = 70.0;
@@ -982,11 +991,14 @@ fn backdrop(cam: &Camera, px: i32, py: i32) -> (Ink, bool) {
         // The Sun low in the east (ROC-A10): a white disc at a fixed place on screen (at
         // infinity it does not move as the camera climbs) in a glare that brightens the
         // blue round it, fading with the air as the sky does.
-        let (sx, sy) = (SUN_AT.0 * cam.rows, SUN_AT.1 * cam.rows);
-        let d = (f64::from(px) + 0.5 - sx).hypot(f64::from(py) + 0.5 - sy) / cam.rows;
-        if d < SUN_R {
+        let (sx, sy) = sun_centre(cam.rows);
+        // A round disc: centred on a pixel centre, every pixel at least half covered
+        // (CORE-R95), at least 2 px in radius.
+        let r_px = (SUN_R * cam.rows).max(2.0);
+        if raster::disc_cover(px, py, (sx, sy), r_px) >= 0.5 {
             return Ink::new(Role::Ramp(Ramp::Ice), 255);
         }
+        let d = (f64::from(px) + 0.5 - sx).hypot(f64::from(py) + 0.5 - sy) / cam.rows;
         let glare = SUN_GLARE * (-(d / SUN_GLOW_R).powi(2)).exp();
         // A smooth ramp down to the last visible level (CORE-R66), held there solid over
         // the next half of the fall, then black: the air ends on its faintest blue, with
@@ -1542,7 +1554,26 @@ mod tests {
     fn roc_a10_a_low_sun_glares_in_the_morning_sky() {
         let g = scene_at(Size::new(120, 40), 5.0);
         let rows = g.cam.rows;
-        let (sx, sy) = (SUN_AT.0 * rows, SUN_AT.1 * rows);
+        let (sx, sy) = sun_centre(rows);
+        // Round: four-fold symmetric about its centre.
+        for (dx, dy) in [(3.0, 0.0), (0.0, 3.0), (2.0, 2.0)] {
+            let lit = |x: f64, y: f64| backdrop(&g.cam, x as i32, y as i32).0.level == 255;
+            let all = [
+                (dx, dy),
+                (-dx, dy),
+                (dx, -dy),
+                (-dx, -dy),
+                (dy, dx),
+                (-dy, -dx),
+            ]
+            .iter()
+            .map(|&(a, b)| lit(sx + a, sy + b))
+            .collect::<Vec<_>>();
+            assert!(
+                all.iter().all(|&l| l == all[0]),
+                "asymmetric at {dx},{dy}: {all:?}"
+            );
+        }
         let at = |x: f64, y: f64| backdrop(&g.cam, x as i32, y as i32).0;
         assert_eq!(at(sx, sy), Ink::new(Role::Ramp(Ramp::Ice), 255));
         // The glare brightens the blue round the disc, falling off with distance.

@@ -320,11 +320,13 @@ impl Starfield {
             // A camera-exposure streak over the last `STREAK_TIME` of travel (stylised: an
             // eye sees none), so the parallax reads in any single frame; too short to
             // show for the far layers. It stops short of a bright star's glyph cell and is
-            // always two dots, a tick rather than a dotted line.
+            // a tick, never a dotted line: one dot behind a faint (one-dot) star, two behind a
+            // glyph.
             let len = f64::from(Dots::CELL_W) * speed(s.layer) * STREAK_TIME;
             let gap = if faint { 1.0 } else { f64::from(Dots::CELL_W) };
             if len > gap {
-                self.sky.line(x - gap - 1.0, y, x - gap, y, STREAK);
+                let tail = if faint { 0.0 } else { 1.0 };
+                self.sky.line(x - gap - tail, y, x - gap, y, STREAK);
             }
         }
     }
