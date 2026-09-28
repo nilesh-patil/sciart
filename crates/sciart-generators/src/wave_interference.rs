@@ -235,6 +235,10 @@ impl Generator for WaveInterference {
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
+        // A NaN or infinite t would stay in the phase for good (GEN-R4).
+        if !(dt.is_finite() && dt >= 0.0) {
+            return;
+        }
         self.t += dt;
         self.rasterise();
     }
@@ -271,6 +275,19 @@ mod tests {
         g.t = t;
         g.rasterise();
         g
+    }
+
+    #[test]
+    fn gen_r4_wave_update_ignores_a_non_finite_or_negative_dt() {
+        let mut g = scene(80, 24, 1.5);
+        let mut ctx = Ctx::new(1, Size::new(80, 24));
+        for dt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1] {
+            g.update(dt, &mut ctx);
+            assert_eq!(g.t, 1.5, "dt = {dt}");
+        }
+        // A good step afterwards still advances the clock.
+        g.update(0.25, &mut ctx);
+        assert_eq!(g.t, 1.75);
     }
 
     #[test]
@@ -409,14 +426,15 @@ mod tests {
             } else if i < 0.1 {
                 dark = Some(len);
             }
-            // The gap columns are never lit, and the screen stays well under the
+            // The gap columns are never lit, and the screen tops out at
+            // SCREEN_LOW + SCREEN_SPAN = 180 (plus rounding), about 30 % under the
             // brightest crest (level 255), so the detector never outshines the field.
             for x in g.field_w..x0 {
                 assert_eq!(g.pixels.get(x as i32, py as i32), Some(Ink::BLANK));
             }
             for x in x0..x0 + sw {
                 let p = g.pixels.get(x as i32, py as i32).unwrap();
-                assert!(p.level <= 229, "screen ({x}, {py}) {p:?}");
+                assert!(p.level <= 181, "screen ({x}, {py}) {p:?}");
             }
         }
         let (bright, dark) = (bright.expect("an antinode row"), dark.expect("a node row"));

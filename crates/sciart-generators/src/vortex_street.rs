@@ -44,7 +44,7 @@ use sciart_core::{Tone, draw, ease, ink, raster};
 pub static META: Meta = Meta {
     name: "vortex_street",
     category: Category::Physics,
-    description: "A von Karman vortex street shed from a cylinder at Re ~ 130",
+    description: "A von Karman vortex street shed from a cylinder at laminar Re ~ 90-150",
     title: "Vortex street · eddies peel off",
     captions: &[],
 };
@@ -85,6 +85,10 @@ const BREATH_PERIOD: f64 = 47.0;
 /// the inlet's adjustment, which clear after ≈ 110–160 steps; 160 ≈ x_c/U, one flush of
 /// the run-up. ≈ 1.6 M lattice updates: a one-off ≈ 12–20 ms on a release scene switch.
 const PREROLL_STEPS: usize = 160;
+/// Pre-roll steps per `update` after a watchdog restart: ≈ 1.1 ms of kernel, so the
+/// restart stays inside the frame budget, spread over 10 updates (≈ 0.17 s at 60 Hz)
+/// while the analytic start is shown (VOR-A13).
+const PREROLL_PER_UPDATE: usize = 16;
 /// Minimum distance of the cylinder centre from the inlet, in diameters: on square
 /// displays 15 % of the width would put the front only ≈ 4 nodes past the inlet sponge,
 /// and the calm inflow would fill with the inlet's disturbances.
@@ -601,6 +605,20 @@ impl Lattice {
         lat
     }
 
+    /// Turn this lattice back into a fresh [`Self::channel`] for `p` in place, keeping
+    /// every buffer, and return true; false (nothing changed) when it is not `p`'s wind
+    /// tunnel. The mask, the sponge ramp and the inlet rows depend only on `p`, which is
+    /// a function of the lattice size; the moments and `f` are left for [`init_street`],
+    /// which overwrites them all, and the spare buffer is zeroed as `channel` leaves it.
+    fn reset_channel(&mut self, p: &FlowParams, scale: f64) -> bool {
+        if (self.w, self.h) != (p.w, p.h) || self.inflow.len() != p.h || self.sponge.is_empty() {
+            return false;
+        }
+        self.next.fill(0.0);
+        self.set_inlet(p, scale);
+        true
+    }
+
     /// Set the inlet and the outlet sponge's target to the stream at `scale · U₀`. The
     /// potential flow is linear in U, so the whole inlet profile scales. The inlet carries
     /// the flow's Bernoulli density `1 + 1.5 (U² − |u|²)`, as the start state does
@@ -1086,12 +1104,24 @@ impl Default for Probe {
 
 impl Probe {
     fn at(p: &FlowParams) -> Self {
-        let x = (p.xc + PROBE_D * p.d).round() as usize;
-        let y = p.yc.round() as usize;
         Self {
-            index: y.min(p.h - 1) * p.w + x.min(p.w - 1),
+            index: Self::index(p),
             ..Self::default()
         }
+    }
+
+    /// The lattice index of the probe node `(x_c + PROBE_D·D, round(y_c))`.
+    fn index(p: &FlowParams) -> usize {
+        let x = (p.xc + PROBE_D * p.d).round() as usize;
+        let y = p.yc.round() as usize;
+        y.min(p.h - 1) * p.w + x.min(p.w - 1)
+    }
+
+    /// [`Self::at`] in place: the crossing history is cleared, its buffer kept.
+    fn reset_at(&mut self, p: &FlowParams) {
+        self.index = Self::index(p);
+        self.armed = false;
+        self.crossings.clear();
     }
 
     /// Record an upward crossing of u_y (with hysteresis) at lattice step `step`.
@@ -1116,6 +1146,8 @@ pub struct VortexStreet {
     since_check: f64,
     probe: Probe,
     reinits: u32,
+    /// Pre-roll steps still owed after a restart (see [`Self::restart`]).
+    preroll: usize,
     /// Soft-clipped vorticity over the visible columns, and its map onto the pixels.
     vort: Grid<f32>,
     map: SampleMap,
@@ -1151,18 +1183,31 @@ impl VortexStreet {
         self.lat = lat;
     }
 
-    /// Start from the analytic street and pre-roll [`PREROLL_STEPS`]: the potential flow
-    /// slips at the no-slip wall and starts impulsively, and the few steps it takes the
-    /// slip sheet to diffuse and the start-up pressure pulse to leave are not shown. The
-    /// old flow's dye goes with it (VOR-A10); clearing keeps the pool's buffer.
+    /// Start from the analytic street and owe [`PREROLL_STEPS`] of pre-roll: the potential
+    /// flow slips at the no-slip wall and starts impulsively, and the few steps it takes
+    /// the slip sheet to diffuse and the start-up pressure pulse to leave are not shown.
+    /// The old flow's dye goes with it (VOR-A10). On the lattice already in place (the
+    /// watchdog's case) every buffer is reused, so the restart does not allocate
+    /// (GEN-R11, VOR-A13); only the first resize builds the wind tunnel.
     fn restart(&mut self, p: &FlowParams, rng: &mut impl Rng) {
-        self.lat = Lattice::channel(p, self.inlet_scale());
+        let scale = self.inlet_scale();
+        if !self.lat.reset_channel(p, scale) {
+            self.lat = Lattice::channel(p, scale);
+        }
         init_street(&mut self.lat, p, rng);
-        for _ in 0..PREROLL_STEPS {
+        self.preroll = PREROLL_STEPS;
+        self.probe.reset_at(p);
+        self.dye.clear();
+    }
+
+    /// Run up to `max` of the owed pre-roll steps. The scene's clock and the dye stand
+    /// still meanwhile: these steps are the start, not the show.
+    fn run_preroll(&mut self, p: &FlowParams, max: usize) {
+        let n = self.preroll.min(max);
+        for _ in 0..n {
             step(&mut self.lat, p, Bc::Channel);
         }
-        self.probe = Probe::at(p);
-        self.dye.clear();
+        self.preroll -= n;
     }
 
     /// Recompute the vorticity and rasterise it into the pixels: the fluid, then the
@@ -1328,8 +1373,10 @@ impl VortexStreet {
         }
     }
 
-    /// `Re≈140` and, once measured and at width ≥ 40, `  St≈0.18` (row 0, column 1); both
-    /// follow the breathing inlet. St is on the gap speed, St·(1 − D/H) (see [`strouhal`]).
+    /// `Re≈140` and, once measured and at width ≥ 40, `  St*≈0.18` (row 0, column 1); both
+    /// follow the breathing inlet. St* is St on the gap speed, St·(1 − D/H) (see
+    /// [`strouhal`]); the star tells it from the free-stream St. At 17 cells the full label
+    /// always fits where St is shown, so there is no shorter form.
     fn label(&self, canvas: &mut Canvas) {
         let (Some(p), Some(size)) = (self.params, self.size) else {
             return;
@@ -1348,8 +1395,8 @@ impl VortexStreet {
         let _ = write!(uni, "Re≈{re}");
         let _ = write!(asc, "Re~{re}");
         if let Some(st) = st {
-            let _ = write!(uni, "  St≈{st:.2}");
-            let _ = write!(asc, "  St~{st:.2}");
+            let _ = write!(uni, "  St*≈{st:.2}");
+            let _ = write!(asc, "  St*~{st:.2}");
         }
         draw::text_mode(canvas, 1, 0, uni.as_str(), asc.as_str(), LABEL_INK);
     }
@@ -1371,7 +1418,12 @@ impl Generator for VortexStreet {
         }) {
             let p = flow_params(lat_size);
             match self.params {
-                None => self.restart(&p, &mut ctx.rng),
+                // The first frame is already past the start-up transient: the whole
+                // pre-roll runs here, a one-off outside the frame budget.
+                None => {
+                    self.restart(&p, &mut ctx.rng);
+                    self.run_preroll(&p, PREROLL_STEPS);
+                }
                 Some(old) => {
                     self.regrid(&p);
                     self.probe = Probe::at(&p);
@@ -1409,6 +1461,15 @@ impl Generator for VortexStreet {
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         let Some(p) = self.params else { return };
         if !(dt.is_finite() && dt > 0.0) {
+            return;
+        }
+        // After a watchdog restart: pre-roll a slice per update and keep showing the
+        // analytic start until it is done, then pick up from there (VOR-A13).
+        if self.preroll > 0 {
+            self.run_preroll(&p, PREROLL_PER_UPDATE);
+            if self.preroll == 0 {
+                self.rasterise();
+            }
             return;
         }
         self.acc += dt * STEPS_PER_S;
@@ -2396,11 +2457,11 @@ mod tests {
             s.step(SIM_DT);
         }
         let row = s.render().to_lines()[0].clone();
-        assert!(row.contains("  St≈0."), "{row}");
+        assert!(row.contains("  St*≈0."), "{row}");
         // The label shows St on the gap speed, St·(1 − D/H), comparable with
         // Williamson's unconfined St ≈ 0.18 at Re 140–150 (free-stream basis: ≈ 0.21).
         let st: f64 = row
-            .split("St≈")
+            .split("St*≈")
             .nth(1)
             .and_then(|s| s.split_whitespace().next())
             .and_then(|s| s.parse().ok())
@@ -2408,6 +2469,11 @@ mod tests {
         assert!((0.16..=0.19).contains(&st), "St {st}: {row}");
         // At t = 10 s the inlet runs at breath(10) ≈ 1.078 U₀: Re 137.5 → ≈ 148.
         assert_eq!(re_of(&row), 150, "{row}");
+        // ASCII spells the gap-speed Strouhal number St*~.
+        s.set_glyph_mode(GlyphMode::Ascii);
+        let row = s.render().to_lines()[0].clone();
+        assert!(row.starts_with(" Re~150  St*~0."), "{row}");
+        s.set_glyph_mode(GlyphMode::Unicode);
         s.resize(Size::new(15, 24));
         assert!(!s.render().to_lines()[0].contains("Re"));
         s.resize(Size::new(39, 24));
@@ -2506,6 +2572,84 @@ mod tests {
         g.restart(&p, &mut ctx.rng);
         assert!(g.dye.is_empty());
         assert_eq!(g.dye.capacity(), DYE_CAP);
+    }
+
+    /// Every heap buffer of the lattice and the probe, as (address, capacity).
+    fn buffers(g: &VortexStreet) -> Vec<(usize, usize)> {
+        let l = &g.lat;
+        let v = |p: *const u8, c: usize| (p as usize, c);
+        vec![
+            v(l.f.as_ptr().cast(), l.f.capacity()),
+            v(l.next.as_ptr().cast(), l.next.capacity()),
+            v(l.rho.as_slice().as_ptr().cast(), l.rho.as_slice().len()),
+            v(l.ux.as_slice().as_ptr().cast(), l.ux.as_slice().len()),
+            v(l.uy.as_slice().as_ptr().cast(), l.uy.as_slice().len()),
+            v(l.solid.as_ptr().cast(), l.solid.capacity()),
+            v(l.near_solid.as_ptr().cast(), l.near_solid.capacity()),
+            v(l.inflow.as_ptr().cast(), l.inflow.capacity()),
+            v(l.sponge.as_ptr().cast(), l.sponge.capacity()),
+        ]
+    }
+
+    #[test]
+    fn vor_a13_watchdog_restart_reuses_the_lattice_and_spreads_the_preroll() {
+        let (mut g, mut ctx) = scene(Size::new(120, 40));
+        for _ in 0..90 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        let p = g.params.unwrap();
+        let (before, crossings) = (buffers(&g), g.probe.crossings.capacity());
+        // The update's only draws are the restart's, so a clone replays them.
+        let mut rng = ctx.rng.clone();
+        // A blown-up node trips the watchdog at the end of the next update. The steps
+        // before it spread the NaN; the check reads ρ after them.
+        g.lat.rho.as_mut_slice()[p.w + 3] = f32::NAN;
+        g.lat.f[p.w + 3] = f32::NAN;
+        g.since_check = CHECK_EVERY;
+        g.update(SIM_DT, &mut ctx);
+        assert_eq!(g.reinits, 1);
+        assert_eq!(g.preroll, PREROLL_STEPS);
+        assert_eq!(
+            buffers(&g),
+            before,
+            "restart must reuse every buffer (GEN-R11)"
+        );
+        assert_eq!(g.probe.crossings.capacity(), crossings);
+        assert!(g.dye.is_empty() && g.probe.crossings.is_empty());
+        // The pre-roll runs PREROLL_PER_UPDATE steps per update, the scene clock holds,
+        // and no dye is released until it is done.
+        let restart_steps = g.steps;
+        let mut updates = 0;
+        while g.preroll > 0 {
+            let left = g.preroll;
+            g.update(SIM_DT, &mut ctx);
+            updates += 1;
+            assert_eq!(left - g.preroll, left.min(PREROLL_PER_UPDATE));
+            assert_eq!(g.steps, restart_steps);
+            assert!(g.dye.is_empty());
+        }
+        assert_eq!(updates, PREROLL_STEPS.div_ceil(PREROLL_PER_UPDATE));
+        assert_eq!(buffers(&g), before);
+        // Bit-identical to a fresh wind tunnel started from the same draw and pre-rolled
+        // in one go, as the first resize does.
+        let scale = breath(restart_steps as f64 / STEPS_PER_S);
+        let mut fresh = Lattice::channel(&p, scale);
+        init_street(&mut fresh, &p, &mut rng);
+        for _ in 0..PREROLL_STEPS {
+            step(&mut fresh, &p, Bc::Channel);
+        }
+        assert!(
+            fresh
+                .f
+                .iter()
+                .zip(&g.lat.f)
+                .all(|(a, b)| a.to_bits() == b.to_bits()),
+            "in-place restart differs from a fresh lattice"
+        );
+        assert!(g.lat.healthy());
+        // Then the flow runs on as usual.
+        g.update(SIM_DT, &mut ctx);
+        assert!(g.steps > restart_steps && !g.dye.is_empty());
     }
 
     #[test]

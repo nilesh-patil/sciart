@@ -2,7 +2,7 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
- Re~145  St~0.18                                                                
+ Re~145  St*~0.18                                                               
                                                                                 
                                                                                 
                                                                                 
