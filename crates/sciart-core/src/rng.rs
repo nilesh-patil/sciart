@@ -86,6 +86,25 @@ pub const fn cell_key(x: i32, y: i32) -> u64 {
     ((x as u32 as u64) << 32) | y as u32 as u64
 }
 
+/// Smooth 2-D value noise in `[0, 1]` (CORE-R97): lattice corners every `cell` units carry
+/// `hash01(salt ^ cell_key(i, j))`, blended bilinearly with smoothstep weights. Stateless,
+/// so a cloud or clump texture holds still between frames without a stored field.
+pub fn value_noise(salt: u64, x: f64, y: f64, cell: f64) -> f64 {
+    use crate::timeline::ease;
+    let (u, v) = (x / cell, y / cell);
+    let (i, j) = (u.floor(), v.floor());
+    // Saturating float→int casts: far-off or NaN coordinates stay finite, never panic.
+    let corner = |di: i32, dj: i32| {
+        hash01(salt ^ cell_key((i as i32).wrapping_add(di), (j as i32).wrapping_add(dj)))
+    };
+    let (fu, fv) = (ease::smoothstep(u - i), ease::smoothstep(v - j));
+    ease::lerp(
+        ease::lerp(corner(0, 0), corner(1, 0), fu),
+        ease::lerp(corner(0, 1), corner(1, 1), fu),
+        fv,
+    )
+}
+
 impl RngCore for SplitMix64 {
     #[inline]
     fn next_u32(&mut self) -> u32 {
