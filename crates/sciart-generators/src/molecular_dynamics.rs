@@ -17,7 +17,7 @@
 //! 3. below [`R_CAP`] the potential continues *linearly* (constant repulsive force), so a
 //!    pathological overlap produces a large but finite kick instead of ∞/NaN. Because U and
 //!    F stay consistent (F = −dU/dr everywhere), energy conservation is unaffected; at the
-//!    temperatures used here (T ≲ 1.6) pairs never get that close (U(R_CAP) ≈ 43 ε).
+//!    temperatures used here (T ≤ 1.0, the cycle's peak) pairs never get that close (U(R_CAP) ≈ 43 ε).
 //! 4. the sim box is never smaller than [`MIN_BOX`] per side nor denser than
 //!    1/[`MIN_AREA_PER_ATOM`]; on a tiny terminal the box is larger than the screen and
 //!    simply clipped.
@@ -110,9 +110,11 @@ const CAPTIONS: [&str; 2] = ["cool atoms cling", "hot atoms scatter"];
 // under half the LJ contact distance, so touching atoms read as touching balls.
 const ATOM_R: f64 = 0.5;
 /// Kinetic energy → blackbody colour (MD-A6): `u = ln(1 + e/E_KNEE)/ln(1 + E_TOP/E_KNEE)`
-/// ([`heat_u`]).
-const E_KNEE: f64 = 0.08;
-const E_TOP: f64 = 4.0;
+/// ([`heat_u`]). The knee puts the cold phase (ē ≈ 0.25, u ≈ 0.23, ≈ 2 200 K) low on the
+/// ramp, a copper glow well clear of the gallery's many ambers, while ē = 1 still reaches
+/// ≈ 7 300 K white.
+const E_KNEE: f64 = 0.4;
+const E_TOP: f64 = 3.0;
 /// An atom's colour follows its kinetic energy smoothed over this time (s): the
 /// instantaneous energy of one atom is exponentially distributed, so unsmoothed a crystal
 /// at one temperature reads as white-and-brown speckle.
@@ -132,13 +134,14 @@ const LIGHT: [f64; 3] = [
     0.701_756_589_963_920,
 ];
 /// Streaks: fade time (s), tone curve, and the top of the Ice ramp they may reach: level
-/// 51, well under any atom that streaks (`255·heat_u(E_STREAK)` ≈ 110, ≈ 64 at its dimmest
+/// 51, well under any atom that streaks (`255·heat_u(E_STREAK)` ≈ 97, ≈ 54 at its dimmest
 /// rim pixel), so atoms stay the brightest thing in every theme, Mono included.
 const TRAIL_TAU: f64 = 0.12;
 const TRAIL_KNEE: f32 = 0.02;
 const TRAIL_WHITE: f32 = 0.25;
-/// Smoothed heat above which an atom streaks: the cold phase sits near 0.25.
-const E_STREAK: f64 = 0.35;
+/// Smoothed heat above which an atom streaks: the cold phase sits near 0.25, the hot gas
+/// near 1.
+const E_STREAK: f64 = 0.5;
 const TRAIL_MAX: f64 = 0.2;
 
 // The Maxwell–Boltzmann inset (MD-A7): one speed bin per panel column.
@@ -1031,7 +1034,7 @@ mod tests {
 
     #[test]
     fn md_a4_thermostat_heats_and_cools_the_fluid() {
-        // Heating: 1 s before the peak (target ≈ 1.6), system at T = 0.3.
+        // Heating: 1 s before the peak (target ≈ 1.0), system at T = 0.3.
         let (mut g, mut ctx) = fresh(100, 30, 4);
         g.t = 14.0;
         g.set_temperature(0.3);
@@ -1042,7 +1045,8 @@ mod tests {
         assert!(t1 > 0.6, "heated to {t1}");
         assert!((t1 - target).abs() < (0.3 - target).abs());
 
-        // Cooling: near the end of a cycle (target ≈ 0.25), system at T = 1.6.
+        // Cooling: near the end of a cycle (target ≈ 0.25), system at T = 1.6, a deliberate
+        // overshoot above the 1.0 peak so the pull is large.
         let (mut g, mut ctx) = fresh(100, 30, 5);
         g.t = 29.0;
         g.set_temperature(1.6);
@@ -1176,7 +1180,8 @@ mod tests {
             prev = u;
         }
         assert_eq!(heat_u(0.0), 0.0);
-        assert_eq!(heat_u(4.0), 1.0);
+        assert_eq!(heat_u(3.0), 1.0);
+        assert!(heat_u(2.9) < 1.0);
         assert_eq!(heat_u(50.0), 1.0);
         for e in [f64::NAN, f64::NEG_INFINITY, -1.0] {
             assert_eq!(heat_u(e), 0.0, "{e}");
@@ -1190,7 +1195,12 @@ mod tests {
             let want = 1000.0 * 30f64.powf(heat_u(e));
             assert!((kelvin(e) / want - 1.0).abs() < 0.01, "e {e}");
         }
-        assert!(kelvin(0.25) < 4000.0 && kelvin(1.0) > 6000.0);
+        // The cold phase glows copper (< 2 500 K), not amber; the hot gas is white.
+        assert!(
+            kelvin(0.25) < 2500.0 && kelvin(1.0) > 6000.0,
+            "{}",
+            kelvin(0.25)
+        );
         // Every ball pixel is Blackbody; streaks are the Ice ramp; nothing else is drawn.
         let (mut g, mut ctx) = fresh(200, 50, 3);
         g.t = 12.0;

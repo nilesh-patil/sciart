@@ -1008,6 +1008,10 @@ impl Generator for MoleculeViewer {
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
+        // A NaN clock would feed `Timeline::at(NaN)` for good; zero dt changes nothing.
+        if !dt.is_finite() || dt <= 0.0 {
+            return;
+        }
         self.t += dt;
         self.rasterise();
     }
@@ -1708,5 +1712,21 @@ mod tests {
         for ch in ['H', 'C', 'N', 'O', 'h', 'c'] {
             assert!(seen.contains(&ch), "{ch} never shown: {seen:?}");
         }
+    }
+
+    #[test]
+    fn mol_gen_r4_ignores_non_finite_and_non_positive_dt() {
+        // Hardening beyond GEN-R4's [0, 0.25]: a NaN dt would poison the clock for good.
+        let size = Size::new(80, 24);
+        let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(3, size));
+        g.resize(size, &mut ctx);
+        g.update(1.5, &mut ctx);
+        let t0 = g.t;
+        for dt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
+            g.update(dt, &mut ctx);
+            assert_eq!(g.t, t0, "dt {dt}");
+        }
+        g.update(0.25, &mut ctx);
+        assert_eq!(g.t, t0 + 0.25);
     }
 }

@@ -1086,11 +1086,6 @@ mod tests {
         assert_eq!(text(80, 3), None);
     }
 
-    /// Fraction of antiparallel bonds, from the tracked lattice.
-    fn walls(l: &Lattice) -> f64 {
-        wall_density(l)
-    }
-
     #[test]
     fn ising_a7_kawasaki_swaps_conserve_m_obey_detailed_balance_and_coarsen() {
         for t in [0.5, 1.0, 0.6 * T_C, 3.0] {
@@ -1128,7 +1123,7 @@ mod tests {
             l.swaps(200 * l.len() as u64, &thr, &mut rng);
             assert_consistent(&l);
             assert_eq!(l.magnetisation(), m0, "M changed");
-            rho.push(walls(&l));
+            rho.push(wall_density(&l));
         }
         assert!(rho.windows(2).all(|w| w[1] < w[0]), "{rho:?}");
         assert!(rho[3] < 0.2, "{rho:?}");
@@ -1171,11 +1166,11 @@ mod tests {
         while s.t < 89.9 {
             s.update(0.1, &mut ctx);
         }
-        let labyrinth = walls(&s.lattice);
+        let labyrinth = wall_density(&s.lattice);
         while s.t < 90.0 {
             s.update(SIM_DT, &mut ctx);
         }
-        let quenched = walls(&s.lattice);
+        let quenched = wall_density(&s.lattice);
         assert!(
             labyrinth < 0.3 && quenched > 0.4,
             "{labyrinth} -> {quenched}"

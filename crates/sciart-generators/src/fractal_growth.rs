@@ -1,7 +1,8 @@
 //! Diffusion-limited aggregation (Witten–Sander) in two acts that alternate: a frost
 //! dendrite growing from a seed, then a metal forest electrodeposited on a cathode strip.
-//! Each grows, glows in the colours of its arrival times, dissolves from the tips inward
-//! and hands over to the other (SPEC-002 `fractal_growth`).
+//! Each grows, glows in the colours of its arrival times, melts back from the tips inward
+//! (a staged hand-over, not modelled dissolution) and hands over to the other (SPEC-002
+//! `fractal_growth`).
 //!
 //! Physics: random walkers diffuse in from a launch curve just outside the aggregate and
 //! freeze onto it when they touch it (8-neighbourhood) with sticking probability `p_s`. The
@@ -45,6 +46,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
+use sciart_core::text::StackText;
 use sciart_core::title::{self, Title};
 use sciart_core::{draw, grid, ink, raster};
 
@@ -59,6 +61,10 @@ pub static META: Meta = Meta {
 pub fn build() -> Box<dyn Generator> {
     Box::new(FractalGrowth::default())
 }
+
+/// Readout buffer (bytes): the longest form, `p_s 1.00   N 131072   D_f ~2.0` (N ≤
+/// [`MAX_NODES`]), is 33.
+const LABEL_CAP: usize = 48;
 
 /// The acts' captions (GEN-R12): walkers stick to a seed, then ions deposit on a cathode.
 const CAPTIONS: [&str; 2] = ["walkers stick", "ions deposit"];
@@ -523,7 +529,7 @@ pub struct FractalGrowth {
     melt_k: f64,
     df: Option<f64>,
     df_clock: f64,
-    label: String,
+    label: StackText<LABEL_CAP>,
     label_row: Option<i32>,
     /// Chars the readout may take on its row, right of the title (GEN-R13).
     room: [usize; 2],
@@ -583,7 +589,7 @@ impl Default for FractalGrowth {
             melt_k: 0.0,
             df: None,
             df_clock: 0.0,
-            label: String::with_capacity(96),
+            label: StackText::new(),
             label_row: None,
             room: [0; 2],
             origin: (0, 0),
@@ -631,24 +637,24 @@ impl FractalGrowth {
     /// Readout, e.g. `p_s 0.62   N 812   D_f ~1.6` (the title names the process; the
     /// forest shows no D_f, its mass–height law is another fit). Parts that would reach
     /// the title are dropped from the left, whole, so the measured dimension goes last
-    /// (GEN-R13); in-place edits of a pre-sized string, no allocation.
+    /// (GEN-R13). Stack buffers only, so no allocation by construction (GEN-R11).
     fn refresh_label(&mut self) {
         const SEP: &str = "   ";
-        self.label.clear();
         let d = &self.dla;
         // The cathode is not deposit: count only what grew (the frost's seed is N's 1).
         let grown = d.cells.len() - if d.line { d.roots } else { 0 };
-        let _ = write!(self.label, "p_s {:.2}{SEP}N {grown}", d.p_stick);
+        let mut full = StackText::<LABEL_CAP>::new();
+        let _ = write!(full, "p_s {:.2}{SEP}N {grown}", d.p_stick);
         if let Some(df) = self.df {
-            let _ = write!(self.label, "{SEP}D_f ~{df:.1}");
+            let _ = write!(full, "{SEP}D_f ~{df:.1}");
         }
         let room = self.room[usize::from(self.act == Act::Forest)];
-        while self.label.len() > room {
-            match self.label.find(SEP) {
-                Some(i) => self.label.replace_range(..i + SEP.len(), ""),
-                None => self.label.clear(),
-            }
+        let mut text = full.as_str();
+        while text.len() > room {
+            text = text.find(SEP).map_or("", |i| &text[i + SEP.len()..]);
         }
+        self.label.clear();
+        let _ = self.label.write_str(text);
     }
 
     /// Chemical distance of every crystal site from the seed or cathode (8-neighbour BFS).
@@ -860,7 +866,7 @@ impl Generator for FractalGrowth {
             draw::label_right(
                 canvas,
                 row,
-                &self.label,
+                self.label.as_str(),
                 Ink::new(Role::Text, title::READOUT_LEVEL),
             );
         }
@@ -1250,7 +1256,7 @@ mod tests {
         ] {
             g.room = [room; 2];
             g.refresh_label();
-            assert_eq!(g.label, want, "room {room}");
+            assert_eq!(g.label.as_str(), want, "room {room}");
         }
         // Drawn right-aligned, a blank cell either side, over any walker under it.
         g.room = [22; 2];
