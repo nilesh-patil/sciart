@@ -49,10 +49,15 @@ const SCREEN_LOW: f64 = 40.0;
 const SCREEN_SPAN: f64 = 140.0;
 /// The profile curve never drops below this level, so its node rows still read as a line.
 const PROFILE_LOW: f64 = 90.0;
-/// The faint fill under the profile, `FILL_LOW + FILL_SPAN·I`: a shaded area, far under the
-/// curve and the film, so the curve's edge carries the shape (WAVE-A8).
-const FILL_LOW: f64 = 16.0;
-const FILL_SPAN: f64 = 40.0;
+/// The intensity bar under the profile, `FILL_LOW + FILL_SPAN·I` (WAVE-A8, WAVE-A9): a solid
+/// bar per row, as long and as bright as that row's intensity, still under the curve and
+/// the film (≤ 140 against their 180), so the curve's edge carries the shape.
+const FILL_LOW: f64 = 40.0;
+const FILL_SPAN: f64 = 100.0;
+/// The screen is `1/SCREEN_FRAC` of the width, at least `SCREEN_MIN` columns: wide enough
+/// for the bars to read as a histogram of the fringes (WAVE-A9).
+const SCREEN_FRAC: usize = 12;
+const SCREEN_MIN: usize = 4;
 
 /// Wavelength in rows for a screen `h` rows tall.
 pub(crate) fn wavelength(h: u16) -> f64 {
@@ -260,7 +265,11 @@ impl Generator for WaveInterference {
         self.height = size.height();
         self.k = TAU / wavelength(size.height());
         // A screen only when it leaves the field most of the width.
-        let sw = if w >= 24 { (w / 24).max(3) } else { 0 };
+        let sw = if w >= 24 {
+            (w / SCREEN_FRAC).max(SCREEN_MIN)
+        } else {
+            0
+        };
         self.field_w = if sw > 0 { w - sw - SCREEN_GAP } else { w };
         self.screen = (w - sw, sw);
         self.pixels.resize(size);
@@ -449,6 +458,39 @@ mod tests {
             let (e1, e2) = g.distances(WaveInterference::at(120, 50));
             assert!((d1 - e2).abs() < 1e-9 && (d2 - e1).abs() < 1e-9);
         }
+    }
+
+    #[test]
+    fn wave_a9_the_screen_is_an_intensity_bar_chart() {
+        // A twelfth of the width, and per row a solid bar from the film whose length and
+        // level both follow I: bright fringes fill most of the bar width brightly, nodes
+        // leave it (almost) empty.
+        let g = scene(120, 40, 0.0);
+        let (x0, sw) = g.screen;
+        assert_eq!(sw, 10);
+        let film = x0 + sw - 1;
+        let (mut bright, mut dark) = (0, 0);
+        for py in 0..80 {
+            let i = g.intensity(f64::from(py) + 0.5);
+            let bar: Vec<Ink> = (x0..film)
+                .filter_map(|x| g.pixels.get(x as i32, py))
+                .filter(|p| *p != Ink::BLANK)
+                .collect();
+            if i > 0.9 {
+                bright += 1;
+                assert!(
+                    bar.len() >= (sw - 1) * 8 / 10,
+                    "row {py}: {} of {}",
+                    bar.len(),
+                    sw - 1
+                );
+                assert!(bar.iter().all(|p| p.level >= 130), "row {py}");
+            } else if i < 0.05 {
+                dark += 1;
+                assert!(bar.len() <= 1, "row {py}: {}", bar.len());
+            }
+        }
+        assert!(bright > 0 && dark > 0, "{bright} {dark}");
     }
 
     #[test]

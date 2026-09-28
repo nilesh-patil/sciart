@@ -150,6 +150,10 @@ const GLOW_FLOOR: f64 = 0.06;
 const GLOW_TOP: f64 = 0.48;
 /// Tone levels below this are dissolved into the black sky (CORE-R89).
 const GLOW_DISSOLVE: u8 = 22;
+/// A glow pixel under this tone level (0.1 of the glow's range) with no lit pixel among
+/// its eight neighbours is dropped (ATT-A12): the dissolved fringe otherwise leaves lone
+/// specks scattered around the cloud's edge.
+const ISOLATED_BELOW: u8 = 26;
 
 /// Parameters of the gallery flows (SPEC-002 Model).
 const LORENZ: (f64, f64, f64) = (10.0, 28.0, 8.0 / 3.0);
@@ -951,6 +955,30 @@ fn glow_tone(size: Size) -> Tone {
     Tone::asinh((GLOW_KNEE * mean) as f32, (GLOW_WHITE * mean) as f32)
 }
 
+/// Empty every pixel dimmer than `below` that has no lit pixel among its eight neighbours
+/// (ATT-A12). One in-place pass: an isolated pixel has no lit neighbour to affect, so
+/// removing it never changes another pixel's verdict. No allocation.
+fn drop_isolated(pixels: &mut Pixels, below: u8) {
+    let size = pixels.pixel_size();
+    let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+    let lit = |p: Option<Ink>| p.is_some_and(|i| i.role != Role::Background);
+    for y in 0..h {
+        for x in 0..w {
+            let Some(p) = pixels.get(x, y) else { continue };
+            if p.role == Role::Background || p.level >= below {
+                continue;
+            }
+            let alone = (-1..=1)
+                .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                .filter(|&d| d != (0, 0))
+                .all(|(dx, dy)| !lit(pixels.get(x + dx, y + dy)));
+            if alone {
+                pixels.set(x, y, Ink::BLANK);
+            }
+        }
+    }
+}
+
 /// Splat a particle's weight into the glow at its dot, bilinearly in pixel units, never
 /// on the label row.
 fn splat(glow: &mut Glow, pen: &Pen, (x, y): (i32, i32), w: f32) {
@@ -1217,6 +1245,7 @@ impl StrangeAttractors {
         self.glow
             .to_pixels(&mut self.pixels, &self.tone, |l| glow_ink(palette, l));
         self.pixels.dissolve(GLOW_DISSOLVE);
+        drop_isolated(&mut self.pixels, glow_ink(palette, ISOLATED_BELOW).level);
     }
 
     /// The attractor the swarm mostly shows: the target once a morph is half done.
@@ -1958,6 +1987,52 @@ mod tests {
     /// cells in the lower band of the shown palette, covering
     /// more of the stage than the threads alone and never on the label row; ASCII keeps
     /// only the threads (it has no half blocks).
+    #[test]
+    fn att_a12_lone_dim_glow_specks_are_dropped() {
+        let mut px = Pixels::default();
+        px.resize(Size::new(10, 5));
+        let (dim, bright) = (ink::ramp(Ramp::Ice, 0.05), ink::ramp(Ramp::Ice, 0.4));
+        px.set(1, 1, dim); // alone and dim: dropped
+        px.set(8, 1, bright); // alone but bright: kept
+        px.set(4, 6, dim); // dim with a diagonal neighbour: kept
+        px.set(5, 7, dim);
+        let below = ink::ramp(Ramp::Ice, 0.1).level;
+        drop_isolated(&mut px, below);
+        assert_eq!(px.get(1, 1), Some(Ink::BLANK));
+        assert_eq!(px.get(8, 1), Some(bright));
+        assert_eq!((px.get(4, 6), px.get(5, 7)), (Some(dim), Some(dim)));
+        // In the scene no glow pixel under the cut stands alone.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut gal = StrangeAttractors::default();
+        gal.resize(size, &mut ctx);
+        for _ in 0..(10.0 / SIM_DT) as usize {
+            gal.update(SIM_DT, &mut ctx);
+        }
+        let k = gal.shown().unwrap();
+        let cut = glow_ink(spec(k).palette, ISOLATED_BELOW).level;
+        let lit = |x: i32, y: i32| {
+            gal.pixels
+                .get(x, y)
+                .is_some_and(|p| p.role != Role::Background)
+        };
+        for y in 0..80 {
+            for x in 0..120 {
+                let Some(p) = gal.pixels.get(x, y) else {
+                    continue;
+                };
+                if p.role == Role::Background || p.level >= cut {
+                    continue;
+                }
+                let neighbours = (-1..=1)
+                    .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
+                    .filter(|&d| d != (0, 0) && lit(x + d.0, y + d.1))
+                    .count();
+                assert!(neighbours > 0, "lone dim speck at ({x},{y})");
+            }
+        }
+    }
+
     #[test]
     fn att_a11_a_long_exposure_cloud_glows_under_the_threads() {
         let top = glow_ink(Ramp::Ice, 255).level;

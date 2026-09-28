@@ -22,8 +22,9 @@
 //!
 //! Each nucleus is a square of 2 × 2 half-block pixels on a pitch of 3, so the lattice reads
 //! as separate nuclei on a quiet black ground rather than as one-pixel noise (RAD-A5). The
-//! species differ in hue *and* grey level, so they read apart in mono too: A a warm
-//! `HAlpha` crimson, B a teal `Ice`, stable C a dim neutral `Starlight` ash. Events are
+//! parent and daughter differ in hue and grey level: A a warm `HAlpha` rose, B a teal
+//! `Ice`, while stable C sinks to a near-black `Plasma` ember of the ground, so the
+//! lattice fades out as it decays. Events are
 //! the brightest thing on the lattice (RAD-A8): a decay flashes its nucleus at the top of
 //! the daughter's ramp and eases back to the daughter's colour over [`FLASH`] s, long
 //! enough for the eye to follow, and a uniform sample of decays also burst (a small ring)
@@ -129,23 +130,25 @@ const BURST: f64 = 0.12;
 const BURST_R: f64 = 2.5;
 const BURST_GROW: f64 = 2.0;
 
-/// Species palette (RAD-A5; false colour), ordered A, B, C. The species differ in hue and
-/// in level, so they read apart in mono (grey 0.42 / 0.76 / 0.18) as well as in colour:
-/// parent A a warm `HAlpha` crimson, daughter B a teal `Ice`, stable C a dim neutral
-/// `Starlight` ash, so the lattice fades from crimson through teal to grey as it decays.
-/// No amber: that hue is the gallery's most used.
-const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Starlight];
-const SETTLED: [f64; 3] = [0.42, 0.76, 0.18];
-/// Tracks in hues no species uses: α `Plasma` (violet), β `Aurora` (green), at `TRACK_TOP`
-/// of the ramp while moving, fading to `TRACK_FLOOR` of that.
-const ALPHA_RAMP: Ramp = Ramp::Plasma;
-const BETA_RAMP: Ramp = Ramp::Aurora;
+/// Species palette (RAD-A5; false colour), ordered A, B, C: parent A a warm `HAlpha` rose
+/// at 0.6, daughter B a teal `Ice` at 0.7 (a step brighter, so they part in mono too), and
+/// stable C near the ground, a barely-there `Plasma` at 0.07: the lattice fades out as it
+/// decays, and only the flashes carry real brightness. C's curve on the plot is the same
+/// `Plasma` at [`MEASURED`], a clear lavender. No amber: that hue is the gallery's most used.
+const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
+const SETTLED: [f64; 3] = [0.6, 0.7, 0.07];
+/// Tracks in hues no species uses: α `Aurora` (green), β `Starlight` (near white), at
+/// `TRACK_TOP` of the ramp while moving, fading to `TRACK_FLOOR` of that.
+const ALPHA_RAMP: Ramp = Ramp::Aurora;
+const BETA_RAMP: Ramp = Ramp::Starlight;
 const TRACK_TOP: f64 = 0.95;
 const TRACK_FLOOR: f64 = 0.7;
 /// Ramp value of the plot's measured curves (the species' hues, bright on black), and the
 /// analytic reference curves' dim `Structure` level. Measured curves are two dots thick.
 const MEASURED: f64 = 0.9;
-const ANALYTIC_LEVEL: u8 = 70;
+const ANALYTIC_LEVEL: u8 = 55;
+/// The legend chip of C, which the lattice does not draw: a dim tile of its ramp.
+const C_CHIP: f64 = 0.3;
 
 /// Legend chips per species: a nucleus in its lattice ink (ASCII its ASCII lattice glyph),
 /// then its curve's stroke (solid, dashed, dotted, as [`stroke_on`] draws them, so the
@@ -355,8 +358,12 @@ pub(crate) fn log_blend(t: f64) -> f64 {
     ease::smoothstep(((t - LOG_FROM) / LOG_EASE).clamp(0.0, 1.0))
 }
 
-/// The settled ink of species `kind` (RAD-A5).
+/// The settled ink of species `kind` (RAD-A5): stable C is not drawn at all, so the lattice
+/// fades out to the ground as it decays (its flash eases toward C's near-ground level).
 pub(crate) fn settled_ink(kind: Kind) -> Ink {
+    if kind == Kind::C {
+        return Ink::BLANK;
+    }
     ink::ramp(RAMPS[kind as usize], SETTLED[kind as usize])
 }
 
@@ -500,8 +507,9 @@ fn draw_track(dots: &mut Dots, tr: &Track, w: i32, h: i32) {
 }
 
 /// ASCII for lattice cell `(x, y)` from the nuclei under its two pixels (GEN-R10): a hot
-/// flash `*`, then B `o`, then A `-`, then C `,` (light glyphs, so the ground stays quiet);
-/// gaps and off-lattice cells are blank, and no nucleus uses the braille fallbacks
+/// flash `*`, then B `o`, then A `-` (light glyphs, so the ground stays quiet); settled C
+/// (near ground), gaps and off-lattice cells are blank, and no nucleus uses the braille
+/// fallbacks
 /// `.` `:` `+` `#`, so tracks never read as nuclei.
 fn ascii_cell(lattice: &Grid<Nucleus>, geo: &LatticeGeo, x: i32, y: i32) -> Option<(char, Ink)> {
     let mut best: Option<&Nucleus> = None;
@@ -523,7 +531,7 @@ fn ascii_cell(lattice: &Grid<Nucleus>, geo: &LatticeGeo, x: i32, y: i32) -> Opti
         4 => '*',
         3 => 'o',
         2 => '-',
-        _ => ',',
+        _ => return None,
     };
     Some((ch, nucleus_ink(n)))
 }
@@ -885,7 +893,12 @@ impl RadioactiveDecay {
         }
         // Legend: each species as it looks on the lattice, then its curve's stroke in the
         // curve's ink, then the count (Text), one space on.
-        let lattice_ink = [Kind::A, Kind::B, Kind::C].map(settled_ink);
+        // C is not drawn on the lattice, so its chip is a dim tile of its curve's ramp.
+        let lattice_ink = [
+            settled_ink(Kind::A),
+            settled_ink(Kind::B),
+            ink::ramp(RAMPS[2], C_CHIP),
+        ];
         let mut x = p.x0;
         for k in 0..3 {
             if x + 2 >= p.x1 {
@@ -1456,7 +1469,7 @@ mod tests {
             );
         }
         // Unicode draws half blocks and braille; ASCII mode is pure ASCII (GEN-R10), a
-        // hot flash `*` over B `o` over A `-` over C `,`, gaps blank.
+        // hot flash `*` over B `o` over A `-`; settled C and gaps blank.
         let mut c = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut c);
         assert!(matches!(
@@ -1481,7 +1494,6 @@ mod tests {
                     _ if ns.iter().any(|n| flashing(n)) => '*',
                     _ if has(Kind::B) => 'o',
                     _ if has(Kind::A) => '-',
-                    _ if has(Kind::C) => ',',
                     _ => ' ',
                 };
                 assert_eq!(ch, want, "({x},{y})");
@@ -1490,17 +1502,24 @@ mod tests {
     }
 
     #[test]
-    fn rad_a10_species_read_apart_in_grey_and_avoid_amber() {
-        // Levels far apart, so mono separates A, B and C by grey alone; ordered
-        // C < A < B (the ash is the quietest).
+    fn rad_a10_species_read_apart_and_the_lattice_fades_as_it_decays() {
+        // A and B are the lattice's two lit species, at 0.6–0.7 and a step apart so mono
+        // parts them; stable C sinks to the ground (≤ 0.08), so a decayed lattice is dark
+        // and only flashes and tracks carry brightness.
         let lv = [Kind::A, Kind::B, Kind::C].map(|k| f64::from(settled_ink(k).level) / 255.0);
-        assert!(lv[2] + 0.2 <= lv[0] && lv[0] + 0.25 <= lv[1], "{lv:?}");
         assert!(
-            lv[2] * 255.0 >= 2.0 * ink::MIN_VISIBLE_LEVEL,
-            "C stays visible"
+            (0.58..=0.72).contains(&lv[0]) && (0.58..=0.72).contains(&lv[1]),
+            "{lv:?}"
         );
-        // A warm, B teal, C neutral: no amber ramps anywhere in the scene.
-        assert_eq!(RAMPS, [Ramp::HAlpha, Ramp::Ice, Ramp::Starlight]);
+        assert!(lv[0] + 0.08 <= lv[1], "{lv:?}");
+        assert!(lv[2] <= 0.08, "C is near ground: {lv:?}");
+        // A warm, B teal, C a faint violet whose curve is lavender: no amber ramps and no
+        // grey measured curve anywhere in the scene.
+        assert_eq!(RAMPS, [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma]);
+        assert!(
+            !RAMPS.contains(&Ramp::Starlight),
+            "only the theory curves are grey"
+        );
         for r in RAMPS.iter().chain(&[ALPHA_RAMP, BETA_RAMP]) {
             assert!(!matches!(r, Ramp::Ember | Ramp::Sulfur), "{r:?}");
         }
@@ -1663,10 +1682,9 @@ mod tests {
     }
 
     #[test]
-    fn rad_a8_the_lattice_fades_to_ash_as_it_decays() {
-        // C is a dim neutral nucleus, so late in a run the lattice is mostly ash: the mean
-        // level of the nucleus pixels falls well below its fresh value, and every site
-        // stays marked (a nucleus never vanishes).
+    fn rad_a8_the_lattice_fades_out_as_it_decays() {
+        // Settled C is not drawn, so late in a run most sites are dark ground: the mean
+        // level of the nucleus pixels falls well below its fresh value.
         let size = Size::new(120, 40);
         let mut ctx = seeded(5);
         let mut g = RadioactiveDecay::default();
@@ -1677,8 +1695,17 @@ mod tests {
                 .map(|i| {
                     let (x, y) = g.pixel_of(i);
                     let px = g.pixels.get(x, y).unwrap();
-                    assert_ne!(px, Ink::BLANK, "nucleus {i} is drawn");
-                    f64::from(px.level)
+                    let n = g.lattice.as_slice()[i];
+                    if n.kind == Kind::C && n.since >= FLASH {
+                        assert_eq!(px, Ink::BLANK, "settled C {i} is not drawn");
+                    } else {
+                        assert_ne!(px, Ink::BLANK, "nucleus {i} is drawn");
+                    }
+                    if px == Ink::BLANK {
+                        0.0
+                    } else {
+                        f64::from(px.level)
+                    }
                 })
                 .sum();
             sum / n as f64
@@ -1690,7 +1717,7 @@ mod tests {
         }
         let c = f64::from(g.counts[2]) / f64::from(g.n0());
         assert!(
-            c > 0.6 && mean(&g) < 0.75 * fresh,
+            c > 0.6 && mean(&g) < 0.4 * fresh,
             "C {c:.2}, mean {}",
             mean(&g)
         );

@@ -122,6 +122,10 @@ const M_PI: f64 = 0.139_570;
 const CTAU_K: f64 = 0.026_84;
 
 const TRACK_CAP: usize = 192;
+/// Charged hadrons softer than this (GeV) are loopers, drawn thin and dim (ACC-A14).
+const SOFT_PT: f64 = 1.0;
+/// Ramp value of the softest charged hadron (ACC-A12, ACC-A14).
+const SOFT_V: f64 = 0.45;
 const TOWER_CAP: usize = 144;
 const MAX_SAMPLES: usize = 900;
 
@@ -1016,16 +1020,25 @@ fn tower_ink(tw: &Tower, bright: f64) -> Ink {
 
 /// A collider track's ramp and value at full event brightness (ACC-A12, ACC-A13): all clear
 /// of the detector outline. Charged tracks take their charge's hue, for the
-/// softest loopers at 0.45 (so the tracker's centre stays calm) to 0.82 for stiff ones, where each hue is still saturated; muons are
-/// near-white; the K⁰_S flight is a dim neutral dash.
+/// softest loopers at `SOFT_V` (so the tracker's centre stays calm and the stiff jet
+/// tracks carry the event's axis) to 0.82 for stiff ones, where each hue is still
+/// saturated; muons are near-white; the K⁰_S flight is a dim neutral dash.
 fn fresh_tone(flavour: Flavour, pt: f64, positive: bool) -> (Ramp, f64) {
     let charged = if positive { POS_RAMP } else { NEG_RAMP };
     match flavour {
         Flavour::Muon => (MUON_RAMP, 1.0),
         Flavour::Neutral => (NEUTRAL_RAMP, 0.45),
         Flavour::Electron => (charged, 0.82),
-        Flavour::Hadron => (charged, 0.45 + 0.37 * (pt / 10.0).min(1.0)),
+        Flavour::Hadron => (charged, SOFT_V + (0.82 - SOFT_V) * (pt / 10.0).min(1.0)),
     }
+}
+
+/// Whether a track is a soft looper (ACC-A14): a charged hadron under [`SOFT_PT`] curls up
+/// inside the tracker, so it is drawn as a thin dotted trace (every third sample, about
+/// two dots apart) at the
+/// dim end of its ramp, and the stiff tracks read as the jet's axis through the clutter.
+fn is_looper(tr: &CTrack) -> bool {
+    tr.flavour == Flavour::Hadron && tr.pt < SOFT_PT
 }
 
 fn draw_ctrack(dots: &mut Dots, view: View, t: f64, tr: &CTrack, fade: f64) {
@@ -1039,10 +1052,16 @@ fn draw_ctrack(dots: &mut Dots, view: View, t: f64, tr: &CTrack, fade: f64) {
         return;
     }
     let dashed = tr.flavour == Flavour::Neutral;
+    let sparse = is_looper(tr);
     let shown = tr.len * ease::out_quad(age / GROW);
     let speed = tr.path.p(0.0) * view.dots_per_m();
     trace(&tr.path, shown, speed, dots, |j, x, y| {
-        (!dashed || (j / 3) % 2 == 0).then(|| (view.dot(x, y), ink))
+        let on = if dashed {
+            (j / 3) % 2 == 0
+        } else {
+            !sparse || j % 3 == 0
+        };
+        on.then(|| (view.dot(x, y), ink))
     });
 }
 
@@ -1598,6 +1617,53 @@ mod tests {
     /// charge (positive `Ice`, negative `HAlpha`, never through the muon yoke's field flip),
     /// muons `Starlight`, towers as thin `Aurora` (ECAL) and `Plasma` (HCAL) bars, the
     /// outline `Dim`, and no `Ember` anywhere in the act.
+    #[test]
+    fn acc_a14_soft_loopers_are_thin_so_the_jet_axis_reads() {
+        // Draw each track of a collider event alone, whole and fresh: a looper (a charged
+        // hadron under SOFT_PT) lights about half the dots of the same path drawn solid,
+        // and stiff tracks are drawn solid.
+        let (mut g, mut ctx) = fresh(120, 40);
+        run_to(&mut g, &mut ctx, 3.0, &[SIM_DT]);
+        let tracks: Vec<CTrack> = g.tracks.iter().copied().collect();
+        let lit = |tr: &CTrack| {
+            let mut d = Dots::default();
+            d.resize(g.stage);
+            let t = tr.born + tr.delay + GROW;
+            draw_ctrack(&mut d, g.view(), t, tr, 1.0);
+            let s = d.dot_size();
+            (0..i32::from(s.height()))
+                .flat_map(|y| (0..i32::from(s.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| d.is_lit(x, y))
+                .count()
+        };
+        let (mut loopers, mut stiff) = (0, 0);
+        for tr in &tracks {
+            if tr.flavour != Flavour::Hadron {
+                continue;
+            }
+            let solid = CTrack {
+                pt: SOFT_PT.max(tr.pt),
+                ..*tr
+            };
+            let (a, b) = (lit(tr), lit(&solid));
+            if b < 40 {
+                continue;
+            }
+            if is_looper(tr) {
+                loopers += 1;
+                assert!(
+                    (a as f64) < 0.7 * b as f64,
+                    "looper pT {:.2}: {a} of {b}",
+                    tr.pt
+                );
+            } else {
+                stiff += 1;
+                assert_eq!(a, b);
+            }
+        }
+        assert!(loopers > 0 && stiff > 0, "{loopers} loopers, {stiff} stiff");
+    }
+
     #[test]
     fn acc_a13_collider_inks_follow_charge_and_calorimeter() {
         let (mut g, mut ctx) = fresh(120, 40);

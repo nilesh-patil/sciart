@@ -24,7 +24,7 @@
 //!
 //! Look (all rasterised in `update`/`resize`; `render` only blits): the box fills the
 //! canvas above the title row. Atoms are round braille beads coloured by their smoothed
-//! kinetic energy on a cool → hot Ice ramp ([`heat_ink`], false colour), and hot atoms
+//! kinetic energy on a cool → hot Plasma ramp ([`heat_ink`], false colour), and hot atoms
 //! leave dim Plasma-ramp streaks in a fading [`Density`]. On large terminals a top-right inset plots the
 //! live speed histogram against the exact 2-D Maxwell–Boltzmann bins ([`mb_bins`]); atoms
 //! pass behind it.
@@ -111,17 +111,20 @@ const CAPTIONS: [&str; 2] = ["cool atoms cling", "hot atoms scatter"];
 // dark seam and a crystal reads as a lattice of beads rather than a mosaic of tiles.
 const ATOM_R: f64 = 0.42;
 /// Kinetic energy → colour (MD-A6): `u = ln(1 + e/E_KNEE)/ln(1 + E_TOP/E_KNEE)`
-/// ([`heat_u`]), drawn on the Ice ramp from [`ICE_FLOOR`]: the cold phase (ē ≈ 0.25,
-/// u ≈ 0.23) is a deep steel blue, the hot gas (ē = 1, u ≈ 0.59) cyan, the fastest atoms
-/// white. A cool → hot ramp that keeps the scene clear of the gallery's many ambers.
+/// ([`heat_u`]), drawn on the Plasma ramp from [`HEAT_FLOOR`]: the cold phase (ē ≈ 0.25,
+/// u ≈ 0.23) is a deep violet, the hot gas (ē = 1, u ≈ 0.59) a bright lavender, the
+/// fastest atoms near white. One hue family, so the hot/cold story is carried by
+/// brightness in every theme; violet keeps the scene clear of the gallery's many ambers
+/// and its many cold blues.
 const E_KNEE: f64 = 0.4;
 const E_TOP: f64 = 3.0;
-/// Ice-ramp position `clamp(ICE_OFFSET + ICE_GAIN·u, ICE_FLOOR, 1)`: the cold phase
-/// (u ≈ 0.23) at 0.6, a clear steel-cyan; the hot gas (u ≈ 0.59) at 1, white; a crystal
-/// at rest never below 0.4.
-const ICE_OFFSET: f64 = 0.33;
-const ICE_GAIN: f64 = 1.2;
-const ICE_FLOOR: f64 = 0.4;
+/// Plasma-ramp position `clamp(HEAT_OFFSET + HEAT_GAIN·u, HEAT_FLOOR, 1)`: the cold phase
+/// (u ≈ 0.23) at 0.40, the hot gas (u ≈ 0.59) at 0.87, and a crystal at rest never below
+/// 0.35, so cold atoms stay clearly visible.
+const HEAT_RAMP: Ramp = Ramp::Plasma;
+const HEAT_OFFSET: f64 = 0.1;
+const HEAT_GAIN: f64 = 1.3;
+const HEAT_FLOOR: f64 = 0.35;
 /// An atom's colour follows its kinetic energy smoothed over this time (s): the
 /// instantaneous energy of one atom is exponentially distributed, so unsmoothed a crystal
 /// at one temperature reads as speckle.
@@ -140,6 +143,9 @@ const TRAIL_WHITE: f32 = 0.25;
 /// near 1.
 const E_STREAK: f64 = 0.5;
 const TRAIL_MAX: f64 = 0.12;
+/// Streak pixels whose tone level is below this are left empty (MD-A6): the faint fringe
+/// of a streak was a scatter of near-black navy half-blocks beside the beads.
+const TRAIL_CUT: u8 = 64;
 
 // The Maxwell–Boltzmann inset (MD-A7): one speed bin per panel column.
 const INSET_W: i32 = 26;
@@ -167,12 +173,12 @@ pub(crate) fn heat_u(e: f64) -> f64 {
     ((e / E_KNEE).ln_1p() / (E_TOP / E_KNEE).ln_1p()).min(1.0)
 }
 
-/// The colour of kinetic energy `e` (MD-A6): Ice ramp at `clamp(0.33 + 1.2·u(e), 0.4, 1)`,
-/// deep blue (cold) → cyan → white (hot). False colour.
+/// The colour of kinetic energy `e` (MD-A6): Plasma ramp at `clamp(0.1 + 1.3·u(e), 0.35,
+/// 1)`, deep violet (cold) → lavender → near white (hot). False colour.
 pub(crate) fn heat_ink(e: f64) -> Ink {
     ink::ramp(
-        Ramp::Ice,
-        (ICE_GAIN * heat_u(e) + ICE_OFFSET).clamp(ICE_FLOOR, 1.0),
+        HEAT_RAMP,
+        (HEAT_GAIN * heat_u(e) + HEAT_OFFSET).clamp(HEAT_FLOOR, 1.0),
     )
 }
 
@@ -638,7 +644,7 @@ impl MolecularDynamics {
         let (glow, tone) = (&self.glow, &self.tone);
         self.pixels.shade(|x, y| {
             let level = tone.level(glow.get(x, y).unwrap_or(0.0));
-            if level == 0 {
+            if level < TRAIL_CUT {
                 Ink::BLANK
             } else {
                 ink::ramp(Ramp::Plasma, TRAIL_MAX * f64::from(level) / 255.0)
@@ -1198,16 +1204,20 @@ mod tests {
             assert_eq!(heat_u(e), 0.0, "{e}");
         }
         assert_eq!(heat_u(f64::INFINITY), 1.0);
-        // The colour is the Ice ramp at clamp(0.33 + 1.2·u, 0.4, 1): cool → hot is
-        // steel-cyan → white, never an amber, and non-decreasing in e.
+        // The colour is the Plasma ramp at clamp(0.1 + 1.3·u, 0.35, 1): cool → hot is
+        // deep violet → lavender → near white, never an amber or an Ice blue, and
+        // non-decreasing in e. The floor keeps cold atoms visible, and the cold phase and
+        // the hot gas sit far apart, so the hot/cold story reads.
         let level = |e: f64| {
             let ink = heat_ink(e);
-            assert_eq!(ink.role, Role::Ramp(Ramp::Ice));
+            assert_eq!(ink.role, Role::Ramp(Ramp::Plasma));
             f64::from(ink.level) / 255.0
         };
-        assert!((level(0.0) - 0.4).abs() < 0.005);
-        assert!((level(0.25) - 0.6).abs() < 0.02, "{}", level(0.25));
-        assert!(level(1.0) > 0.99 && level(3.0) > 0.99);
+        assert!((level(0.0) - 0.35).abs() < 0.005);
+        assert!((level(0.25) - 0.40).abs() < 0.02, "{}", level(0.25));
+        assert!((level(1.0) - 0.86).abs() < 0.02, "{}", level(1.0));
+        assert!(level(1.0) - level(0.25) >= 0.4);
+        assert!(level(3.0) > 0.99);
         let mut prev = 0.0;
         for k in 0..=300 {
             let l = level(f64::from(k) * 0.01);
@@ -1223,10 +1233,16 @@ mod tests {
         }
         let px = g.pixels.pixel_size();
         let mut streaks = 0;
+        // No faint fringe: a streak pixel is at least its cut level (MD-A6).
+        let cut = ink::ramp(Ramp::Plasma, TRAIL_MAX * f64::from(TRAIL_CUT) / 255.0).level;
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
-                match g.pixels.get(x, y).unwrap().role {
-                    Role::Ramp(Ramp::Plasma) => streaks += 1,
+                let p = g.pixels.get(x, y).unwrap();
+                match p.role {
+                    Role::Ramp(Ramp::Plasma) => {
+                        assert!(p.level >= cut, "faint streak pixel {}", p.level);
+                        streaks += 1;
+                    }
                     Role::Background => {}
                     r => panic!("unexpected {r:?}"),
                 }

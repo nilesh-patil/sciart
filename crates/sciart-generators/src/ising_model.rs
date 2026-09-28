@@ -218,7 +218,7 @@ const SPECK: usize = 6;
 const SPECK_CLASS: u8 = 4;
 /// The Kawasaki act's labyrinth is only a few sites wide, so its walls would drag both
 /// phases to the same mid grey in Mono: there every `|v|` is lifted to at least this, so
-/// up stays ≥ 64 levels above down at every class (`(UP_GAIN − DOWN_GAIN)·0.6·255 ≈ 64`).
+/// up stays ≥ 100 levels above down at every class (`(UP_GAIN − DOWN_GAIN)·0.6·255 ≈ 110`).
 const SWAP_FLOOR: f64 = 0.6;
 /// [`Lattice::classify`]'s cluster marks.
 const UNSEEN: u8 = 0;
@@ -1200,13 +1200,13 @@ mod tests {
         for table in [&glauber, &kawasaki] {
             assert_eq!(table[CLASSES - 1].role, Role::Ramp(DOWN_RAMP));
             assert_eq!(table[2 * CLASSES - 1].role, Role::Ramp(UP_RAMP));
-            assert!(table[2 * CLASSES - 1].level >= table[CLASSES - 1].level + 64);
+            assert!(table[2 * CLASSES - 1].level >= table[CLASSES - 1].level + 100);
             // The floor lifts the walls, never the interior peak.
             assert_eq!(table[2 * CLASSES - 1], glauber[2 * CLASSES - 1]);
         }
         for c in 0..CLASSES {
             let (down, up) = (kawasaki[c].level, kawasaki[CLASSES + c].level);
-            assert!(up >= down + 64, "class {c}: {up} vs {down}");
+            assert!(up >= down + 100, "class {c}: {up} vs {down}");
         }
         // Specks are quiet flecks of their own colour, not black.
         assert!(class_value(usize::from(SPECK_CLASS), DEPTH_CAP) >= 0.2);
