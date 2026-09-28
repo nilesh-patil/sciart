@@ -100,10 +100,11 @@ const fn spec(r: Ramp) -> RampSpec {
             h1: 278.0,
             chroma: 0.17,
         },
-        // hematoxylin purple → eosin magenta → pale pink
+        // wine-rose → eosin rose-pink → pale pink-lilac (hue turns back toward magenta at the
+        // top, so its pale end stays apart from HAlpha's)
         Ramp::Eosin => RampSpec {
-            h0: 312.0,
-            h1: 344.0,
+            h0: 358.0,
+            h1: 325.0,
             chroma: 0.2,
         },
     }

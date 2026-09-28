@@ -266,6 +266,11 @@ const RESET_HALF: f64 = secs(Phase::Reset) / 2.0;
 /// sway, so zoomed in it fills about four fifths of rows [1, h − 1) and still fits them
 /// (DNA-A4).
 const ZOOM_IN: f64 = 2.5;
+/// The opening zoom on views of at least `TALL_ROWS` rows: there the intact helix fills
+/// ≥ 85 % of the rows; on shorter views rounding and the fixed margins leave no room for
+/// it, so they keep `ZOOM_IN`.
+const ZOOM_TALL: f64 = 2.8;
+const TALL_ROWS: f64 = 20.0;
 const DOLLY: f64 = 3.0;
 
 /// The whole story state at one instant (DNA-A6).
@@ -443,6 +448,17 @@ impl View {
         }
     }
 
+    /// The zoom this view draws for the story's `zoom` (`1..=ZOOM_IN`): the same, except
+    /// that tall views stretch the range to `1..=ZOOM_TALL`, linearly, so the dolly stays
+    /// continuous (DNA-A4).
+    pub fn zoom(&self, zoom: f64) -> f64 {
+        if self.h >= TALL_ROWS {
+            1.0 + (zoom - 1.0) * (ZOOM_TALL - 1.0) / (ZOOM_IN - 1.0)
+        } else {
+            zoom
+        }
+    }
+
     /// Pairs on screen: the layout minus its margins.
     pub fn visible(&self) -> std::ops::Range<usize> {
         MARGIN..self.n.saturating_sub(MARGIN)
@@ -519,7 +535,7 @@ pub(crate) struct Geo {
 
 impl Geo {
     pub fn new(view: &View, t: f64, snap: &Snapshot) -> Self {
-        Self::with_camera(view, camera(view, t, snap.zoom), t, snap)
+        Self::with_camera(view, camera(view, t, view.zoom(snap.zoom)), t, snap)
     }
 
     pub fn with_camera(view: &View, cam: Camera, t: f64, snap: &Snapshot) -> Self {
@@ -527,8 +543,8 @@ impl Geo {
             proj: cam.projector(),
             // The middle of rows [1, h − 1) (cell centres at integer y).
             centre: (view.w / 2.0, (view.h - 1.0) / 2.0),
-            k: view.scale * snap.zoom,
-            look_x: view.width / (2.0 * snap.zoom),
+            k: view.scale * view.zoom(snap.zoom),
+            look_x: view.width / (2.0 * view.zoom(snap.zoom)),
             phi: spin_phase(t),
             fork: snap.tau.map(fork),
         }
@@ -1464,8 +1480,8 @@ mod tests {
     #[test]
     fn dna_a4_opening_helix_fills_the_frame() {
         // The `helix` opening is zoomed in on the intact duplex, which needs only ±R (plus
-        // the pitch shear and sway), not the open fork's budget: it fills about 80 % of
-        // rows [1, h − 1). The fit itself is `dna_a4_open_fork_fits_the_frame`.
+        // the pitch shear and sway), not the open fork's budget: it fills at least 85 % of
+        // rows [1, h − 1), centred on them. The fit itself is `dna_a4_open_fork_fits_the_frame`.
         let story = Story::new();
         for size in [Size::new(80, 24), Size::new(200, 50), Size::new(120, 36)] {
             let view = View::new(size);
@@ -1485,7 +1501,17 @@ mod tests {
                     }
                 }
                 let fill = (bottom - top) / (view.h - 2.0);
-                assert!(fill >= 0.72, "{size:?} t = {t}: fills {fill:.2}");
+                assert!(fill >= 0.85, "{size:?} t = {t}: fills {fill:.2}");
+                // Inside rows [1, h − 1) and centred on them to within a row.
+                assert!(
+                    top >= 0.5 && bottom <= view.h - 1.5,
+                    "{size:?} t = {t}: {top}..{bottom}"
+                );
+                let mid = 0.5 * (top + bottom);
+                assert!(
+                    (mid - (view.h - 1.0) / 2.0).abs() <= 1.0,
+                    "{size:?} t = {t}: mid {mid}"
+                );
             }
         }
     }

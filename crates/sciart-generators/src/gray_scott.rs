@@ -134,7 +134,7 @@ const V_TOP_RANGE: (f32, f32) = (0.24, 0.45);
 const EXPOSURE_TAU_S: f64 = 1.5;
 /// Histogram bins over `[V_EDGE, V_TOP_RANGE.1]` used to find `v_top`.
 const EXPOSURE_BINS: usize = 64;
-/// Body ramp: the level at the pattern edge (a dim purple rim, above the halo) and the
+/// Body ramp: the level at the pattern edge (a dim wine rim, above the halo) and the
 /// exponent that keeps the bright top of the ramp for the spine.
 const BODY_EDGE: f64 = 0.26;
 const GAMMA: f64 = 2.0;
@@ -143,9 +143,9 @@ const GAMMA: f64 = 2.0;
 const HALO_MIN: f32 = 0.2;
 const HALO_FULL: f32 = 0.6;
 const HALO_PEAK: f32 = 0.1;
-/// The culture's palette (CHEM-A7): false colour, u and v have no hue. Eosin (hematoxylin
-/// purple → magenta → pale pink) reads as stained tissue and keeps the dish apart from the
-/// gallery's Aurora greens (aurora, ising_model).
+/// The culture's palette (CHEM-A7): false colour, u and v have no hue. Eosin (wine-rose →
+/// rose-pink → pale pink) reads as stained tissue and keeps the dish apart from the
+/// gallery's Aurora greens (aurora).
 const PALETTE: Ramp = Ramp::Eosin;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
@@ -419,7 +419,7 @@ pub(crate) fn lattice_size(display: Size) -> Size {
 }
 
 /// Body level for the pattern position `p = (v − V_EDGE)/(v_top − V_EDGE)` at index
-/// `round(255 p)`: from a dim purple rim at [`BODY_EDGE`] (above the halo's peak, so edges
+/// `round(255 p)`: from a dim wine rim at [`BODY_EDGE`] (above the halo's peak, so edges
 /// stay graded) up to the pale-pink top, `p^GAMMA` keeping the top for the spine.
 fn level_table() -> [u8; 256] {
     std::array::from_fn(|i| {
@@ -429,7 +429,7 @@ fn level_table() -> [u8; 256] {
 }
 
 /// The ink of one pixel (CHEM-A7): pattern where `v ≥ V_EDGE`, shaded against the
-/// exposure `v_top`; else a dim purple halo that fades in with substrate depletion; else
+/// exposure `v_top`; else a dim wine halo that fades in with substrate depletion; else
 /// `None`, the terminal's own background. `u` is only read (and so only sampled) off the
 /// pattern.
 pub(crate) fn v_ink(
@@ -1244,7 +1244,7 @@ mod tests {
                     }
                 }
             }
-            // Exposed: a dim purple rim at the pattern edge, the pale-pink top at v_top.
+            // Exposed: a dim wine rim at the pattern edge, the pale-pink top at v_top.
             let level = |v: f32| v_ink(&levels, || 1.0, v, top).map_or(0, |i| i.level);
             assert!((60..=90).contains(&level(V_EDGE)), "edge {}", level(V_EDGE));
             assert_eq!(level(top), 255, "top {top}");
@@ -1282,7 +1282,7 @@ mod tests {
         assert_eq!(exposure_target(&[0.13; 64]), V_TOP_RANGE.0);
         assert_eq!(exposure_target(&[0.9; 64]), V_TOP_RANGE.1);
         // Live: in every regime a bright ridge (level ≥ 200) runs inside the bodies, and
-        // most of the body stays below it (magenta, not washed out).
+        // most of the body stays below it (rose, not washed out).
         for (slot, t) in [(0, 4.0), (0, 16.0), (2, 10.0), (3, 10.0), (4, 10.0)] {
             let (mut g, mut ctx) = scene(Some(slot), 7, 80, 24);
             run_to(&mut g, &mut ctx, t);
