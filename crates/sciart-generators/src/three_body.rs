@@ -10,7 +10,7 @@ use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{Form, Title};
-use sciart_core::{geom, ode};
+use sciart_core::{Tone, geom, ode};
 
 pub static META: Meta = Meta {
     name: "three_body",
@@ -47,9 +47,69 @@ const MOTH_FULL_SCALE: f64 = 8.0;
 const MOTH_MIN_TRAIL: f64 = 0.25;
 /// Level of Lagrange's triangle once its bodies are in (SPEC-002 Inks).
 const TRIANGLE_LEVEL: f64 = 80.0;
-/// Body `i` is drawn in `RAMPS[i]`, a false-colour triad (TB-A8): orange, cyan and
-/// violet. Aurora and Hα are left to `double_pendulum`'s twins.
-const RAMPS: [Ramp; 3] = [Ramp::Ember, Ramp::Ice, Ramp::Plasma];
+/// Body `i` is drawn in `RAMPS[i]`, a false-colour triad (TB-A8): Hα crimson, cyan
+/// and violet (M12: Hα replaces Ember's orange, which the gallery already uses a lot;
+/// `double_pendulum` pairs Hα with Aurora, a different pair).
+const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
+/// The glow under the lines (TB-A9): each body's trail and head expose a half-block
+/// [`Glow`] of their own, rebuilt every frame from the model-space trail (so a resize
+/// keeps it), tone-mapped by an asinh curve and drawn in the brightest-exposed body's
+/// ramp at up to `GLOW_V`. The trail exposes by its own level (so old loops glow least)
+/// with a 3×3 splat; a head adds a wide halo, so each sun visibly shines, most of all
+/// where Lagrange's three orbits cross. Unicode only: ASCII has no half blocks.
+const GLOW_V: f64 = 0.42;
+const GLOW_KNEE: f32 = 0.4;
+const GLOW_WHITE: f32 = 5.0;
+const TRAIL_GLOW: f32 = 0.5;
+const HEAD_GLOW: f32 = 3.0;
+const STROKE: [(i32, i32, f32); 9] = [
+    (0, 0, 0.36),
+    (-1, 0, 0.12),
+    (1, 0, 0.12),
+    (0, -1, 0.12),
+    (0, 1, 0.12),
+    (-1, -1, 0.04),
+    (1, -1, 0.04),
+    (-1, 1, 0.04),
+    (1, 1, 0.04),
+];
+const HALO_R: i32 = 4;
+const HALO_N: usize = ((2 * HALO_R + 1) * (2 * HALO_R + 1)) as usize;
+/// The halo kernel, `w = (1 − r²/(R + ½)²)²` inside radius `R + ½`.
+const HALO: [(i32, i32, f32); HALO_N] = halo_kernel();
+const _: () = assert!(GLOW_V < HEAD_V);
+
+const fn halo_kernel() -> [(i32, i32, f32); HALO_N] {
+    let mut k = [(0, 0, 0.0f32); HALO_N];
+    let reach = (HALO_R as f32 + 0.5) * (HALO_R as f32 + 0.5);
+    let mut i = 0;
+    let mut dy = -HALO_R;
+    while dy <= HALO_R {
+        let mut dx = -HALO_R;
+        while dx <= HALO_R {
+            let w = 1.0 - (dx * dx + dy * dy) as f32 / reach;
+            k[i] = (dx, dy, if w > 0.0 { w * w } else { 0.0 });
+            i += 1;
+            dx += 1;
+        }
+        dy += 1;
+    }
+    k
+}
+
+/// Splat `kernel` at every pixel along the dot-space segment `a → b` (one per pixel of
+/// length, a pixel being 2 dots; at least one), `w` each.
+fn glow_stroke(glow: &mut Glow, a: (f64, f64), b: (f64, f64), w: f32) {
+    let len = (b.0 - a.0).hypot(b.1 - a.1);
+    if !len.is_finite() {
+        return;
+    }
+    let n = (len / 2.0).ceil().clamp(1.0, 2048.0) as usize;
+    for k in 0..n {
+        let u = (k as f64 + 0.5) / n as f64;
+        glow.splat(a.0 + u * (b.0 - a.0), a.1 + u * (b.1 - a.1), &STROKE, w);
+    }
+}
 /// ASCII heads; in Unicode a head is a disc of `HEAD_R` dots, `HEAD_R_TALL` from
 /// `TALL_ROWS` up, where a smaller disc reads as a speck (TB-A8).
 const HEAD: Glyph = Glyph::ascii('@');
@@ -403,6 +463,10 @@ pub(crate) struct ThreeBody {
     head_r: f64,
     /// Trails (and Lagrange's triangle), rasterised in `update`/`resize`.
     dots: Dots,
+    /// Each body's glow exposure and the toned half-block layer under the dots (TB-A9).
+    glow: [Glow; 3],
+    halo: Pixels,
+    tone: Tone,
     /// Each orbit's label at the current size, chosen in `resize`.
     labels: [Option<&'static str>; 5],
 }
@@ -426,6 +490,9 @@ impl ThreeBody {
             head_r: HEAD_R,
             size,
             dots: Dots::default(),
+            glow: std::array::from_fn(|_| Glow::default()),
+            halo: Pixels::default(),
+            tone: Tone::asinh(GLOW_KNEE, GLOW_WHITE),
             labels: [None; 5],
             orbits,
         }
@@ -483,6 +550,55 @@ impl ThreeBody {
             self.triangle();
         }
         self.heads();
+        self.expose();
+    }
+
+    /// Rebuild the glow from the trails and heads (TB-A9).
+    fn expose(&mut self) {
+        let (view, fade) = (self.view, orbit_fade(&self.phase));
+        let span = trail_span(&self.orbits[self.phase.seg], view.scale);
+        for (i, (glow, trail)) in self.glow.iter_mut().zip(&self.trails).enumerate() {
+            glow.clear();
+            let len = trail.len();
+            let head = self.bodies.body(i);
+            let pairs = trail.iter().zip(trail.iter().skip(1).chain([&head]));
+            for (k, (&a, &b)) in pairs.enumerate() {
+                let f = (len - 1 - k) as f64 / SAMPLES as f64;
+                let level = trail_level(f, span) * fade;
+                if level < MIN_VISIBLE_LEVEL {
+                    continue;
+                }
+                let w = TRAIL_GLOW * (level / 200.0).powi(2) as f32;
+                glow_stroke(glow, view.dot(a.0, a.1), view.dot(b.0, b.1), w);
+            }
+            if head_level(&self.phase) >= MIN_VISIBLE_LEVEL {
+                let (dx, dy) = view.dot(head.0, head.1);
+                glow.splat(dx, dy, &HALO, HEAD_GLOW * fade as f32);
+            }
+        }
+        let (tone, glows) = (&self.tone, &self.glow);
+        let w = i32::from(glows[0].pixel_size().width()).max(1);
+        self.halo.shade(|x, y| {
+            let i = (y * w + x) as usize;
+            let v = glows
+                .each_ref()
+                .map(|g| g.values().get(i).copied().unwrap_or(0.0));
+            let (mut body, mut sum) = (0, 0.0);
+            for (j, &e) in v.iter().enumerate() {
+                sum += e;
+                if e > v[body] {
+                    body = j;
+                }
+            }
+            // Mostly the brightest body's own light, lifted a little by the others'.
+            let e = 0.5 * (v[body] + sum);
+            let value = GLOW_V * f64::from(tone.level(e)) / 255.0;
+            if 255.0 * value < MIN_VISIBLE_LEVEL {
+                Ink::BLANK
+            } else {
+                ink::ramp(RAMPS[body], value)
+            }
+        });
     }
 
     /// Each head as a saturated disc in its body's ramp with a bright one-dot core,
@@ -580,6 +696,10 @@ impl Generator for ThreeBody {
             HEAD_R
         };
         self.dots.resize(size);
+        self.halo.resize(size);
+        for g in &mut self.glow {
+            g.resize(size);
+        }
         self.labels = self.orbits.map(|o| label_for(size, &o));
         self.rasterise();
     }
@@ -602,7 +722,10 @@ impl Generator for ThreeBody {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.dots.blit(canvas);
+        // The glow first (Unicode only), then the lines with the glow carried on as their
+        // cells' background (TB-A9).
+        self.halo.blit(canvas, |_, _, _, _| None);
+        self.dots.blit_over(canvas, &self.halo);
         let level = head_level(&self.phase);
         // Unicode heads are discs on the lattice; ASCII gets a clear `@`.
         if level >= MIN_VISIBLE_LEVEL && canvas.mode() == GlyphMode::Ascii {
@@ -1116,6 +1239,50 @@ mod tests {
                 }
             }
             assert!(added >= 20, "only {added} triangle dots at t = {t}");
+        }
+    }
+
+    #[test]
+    fn tb_a9_every_sun_shines_in_its_own_ramp_under_its_lines() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(0, size);
+        let mut g = ThreeBody::new();
+        g.resize(size, &mut ctx);
+        let lagrange = g.orbits[0].run_secs() + FADE;
+        let cap = ink::ramp(RAMPS[0], GLOW_V).level;
+        for t in [5.0, lagrange + 6.0] {
+            g.t = t - SIM_DT;
+            g.update(SIM_DT, &mut ctx);
+            for (i, ramp) in RAMPS.iter().enumerate() {
+                let (x, y) = g.bodies.body(i);
+                let (dx, dy) = g.view.dot(x, y);
+                let (px, py) = ((dx / 2.0) as i32, (dy / 2.0) as i32);
+                let own = (-4..=4)
+                    .flat_map(|oy| (-4..=4).map(move |ox| (px + ox, py + oy)))
+                    .filter_map(|(x, y)| g.halo.get(x, y))
+                    .filter(|p| p.role == Role::Ramp(*ramp))
+                    .count();
+                assert!(own >= 20, "t {t} body {i}: {own} halo pixels");
+            }
+            let mut c = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut c);
+            for y in 0..80 {
+                for x in 0..120 {
+                    let p = g.halo.get(x, y).unwrap();
+                    assert!(p.level <= cap, "({x},{y}) {p:?}");
+                }
+            }
+            // Heads stay brighter than the glow behind them.
+            for i in 0..3 {
+                let (x, y) = g.bodies.body(i);
+                let (cx, cy) = g.view.cell(x, y);
+                let cell = c.get(cx.floor() as i32, cy.floor() as i32).unwrap();
+                assert!(cell.ink.level > cell.bg.level, "t {t} head {i}: {cell:?}");
+            }
+            // ASCII has no glow.
+            let mut a = Canvas::new(size, GlyphMode::Ascii);
+            g.render(&mut a);
+            assert!(a.cells().iter().all(|c| c.bg == Ink::BLANK));
         }
     }
 

@@ -142,25 +142,37 @@ const VERTEX_FLASH: f64 = 0.5;
 
 // ------------------------------------------------------------------------------ inks
 
-/// Collider palette (false colour): tracks `Ember` by pT, ECAL towers `HAlpha`, HCAL
-/// towers `Ice`, muons `Aurora`, the detector in dim `Structure`, below the dimmest live
-/// track, so even the mono theme tells them apart.
-const TRACK_RAMP: Ramp = Ramp::Ember;
-const ECAL_RAMP: Ramp = Ramp::HAlpha;
-const HCAL_RAMP: Ramp = Ramp::Ice;
-const MUON_RAMP: Ramp = Ramp::Aurora;
-const STRUCTURE_LEVEL: f64 = 48.0;
+/// Collider palette (false colour, ACC-A13), after the event displays' own convention of
+/// colouring tracks by charge: positive tracks `Ice` (cyan), negative `HAlpha` (rose),
+/// each brighter with pT; muons near-white `Starlight`, the brightest thing on screen; the
+/// K⁰_S flight a dim `Starlight` dash. Calorimeter energy is thin radial bars outside the
+/// tracker, `Aurora` in the ECAL and `Plasma` in the HCAL, level by energy. The detector
+/// is a faint `Dim` outline, below the dimmest live track, so even the mono
+/// theme tells them apart and the tracker's centre stays dark.
+const POS_RAMP: Ramp = Ramp::Ice;
+const NEG_RAMP: Ramp = Ramp::HAlpha;
+const MUON_RAMP: Ramp = Ramp::Starlight;
+const NEUTRAL_RAMP: Ramp = Ramp::Starlight;
+const ECAL_RAMP: Ramp = Ramp::Aurora;
+const HCAL_RAMP: Ramp = Ramp::Plasma;
+const STRUCTURE_LEVEL: f64 = 30.0;
+/// The outline's role: `Dim`, the theme's quietest object colour, so the rings recede
+/// to about 0.15 of full brightness behind the event.
+const OUTLINE_ROLE: Role = Role::Dim;
+/// A tower's drawn bar is this fraction of its 5° cell wide (at least one stroke), so
+/// neighbouring towers read as separate bars rather than a solid block.
+const BAR_WIDTH: f64 = 0.25;
 /// The outer two muon wheels' share of the outline level.
 const OUTER_WHEELS: f64 = 0.7;
 /// Chamber palette: warm film, bubbles pale `Ember`; the window is black with a faint rim
 /// and film grain, one dim speck per `1 / FILM_SPECKS` dots, new with each frame. Beam
 /// tracks are dim and sparse, the star's secondaries the brightest bubbles on the film.
 const FILM_RAMP: Ramp = Ramp::Ember;
-/// Collider glow: `Ember`, at most `GLOW_MAX` of the ramp, fading with time constant
-/// `GLOW_TAU` s. The IP flash is a bright pixel and a softer cross; a fresh deposit a soft
-/// 3 × 3 spot (core, edges, corners), so it reads as heat in the tower, not a square.
-const GLOW_RAMP: Ramp = Ramp::Ember;
-const GLOW_MAX: f64 = 0.7;
+/// Collider glow: the crossing's flash at the interaction point, `Ice`, at most `GLOW_MAX`
+/// of the ramp, fading with time constant `GLOW_TAU` s: a bright pixel and a softer cross,
+/// gone within a second so the tracker's centre is dark between crossings.
+const GLOW_RAMP: Ramp = Ramp::Ice;
+const GLOW_MAX: f64 = 0.6;
 const GLOW_TAU: f64 = 0.3;
 /// The glow's asinh tone curve, in splat weight per pixel: linear below `GLOW_KNEE`,
 /// logarithmic above it, full at `GLOW_WHITE`.
@@ -172,17 +184,6 @@ const FLASH_KERNEL: [(i32, i32, f32); 5] = [
     (1, 0, 4.0),
     (0, -1, 4.0),
     (0, 1, 4.0),
-];
-const DEPOSIT_KERNEL: [(i32, i32, f32); 9] = [
-    (0, 0, 0.4),
-    (-1, 0, 0.1),
-    (1, 0, 0.1),
-    (0, -1, 0.1),
-    (0, 1, 0.1),
-    (-1, -1, 0.05),
-    (1, -1, 0.05),
-    (-1, 1, 0.05),
-    (1, 1, 0.05),
 ];
 const FILM_SPECKS: f64 = 0.006;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
@@ -339,6 +340,9 @@ pub(crate) struct CTrack {
     path: Spiral,
     len: f64,
     flavour: Flavour,
+    /// Positive charge (its ink, ACC-A13); kept apart from `path.qb`, whose sign flips
+    /// with the field in the muon's return yoke.
+    positive: bool,
     pt: f64,
     born: f64,
     delay: f64,
@@ -552,10 +556,12 @@ impl ParticleAccelerator {
             },
         };
         let born = self.t;
+        let positive = qb > 0.0;
         self.tracks.spawn(CTrack {
             path,
             len,
             flavour,
+            positive,
             pt,
             born,
             delay,
@@ -568,6 +574,7 @@ impl ParticleAccelerator {
                 path: yoke,
                 len: reach,
                 flavour,
+                positive,
                 pt,
                 born,
                 delay: delay + GROW,
@@ -669,21 +676,6 @@ impl ParticleAccelerator {
         // The crossing's flash at the interaction point: a bright pixel and a softer cross.
         let (x, y) = self.view().dot(0.0, 0.0);
         self.exposure.splat(x, y, &FLASH_KERNEL, 1.0);
-    }
-
-    /// Fresh calorimeter deposits glow for 0.6 s after their tower appears, at a rate that
-    /// makes the glow independent of the step size.
-    fn expose_towers(&mut self, dt: f64) {
-        let view = self.view();
-        for tw in self.towers.iter() {
-            let age = self.t - tw.born - tw.delay;
-            if (0.0..0.6).contains(&age) {
-                let mid = tw.r0 + 0.5 * tw.len;
-                let (x, y) = view.dot(mid * tw.phi.cos_det(), mid * tw.phi.sin_det());
-                let amount = (18.0 * tw.e * dt * (1.0 - age / 0.6)) as f32;
-                self.exposure.splat(x, y, &DEPOSIT_KERNEL, amount);
-            }
-        }
     }
 
     // ------------------------------------------------------------ chamber photographs
@@ -800,15 +792,15 @@ impl ParticleAccelerator {
 
     fn rasterise_collider(&mut self, fade: f64) {
         let view = self.view();
-        // The glow of the crossings and fresh deposits; the detector itself is line art on
-        // black, like an event display.
+        // The glow of the crossings' flashes; the detector itself is line art on black,
+        // like an event display.
         self.exposure
             .to_pixels(&mut self.pixels, &self.tone, |level| {
                 ink::ramp(GLOW_RAMP, GLOW_MAX * fade * f64::from(level) / 255.0)
             });
 
         // Detector outlines.
-        let structure = Ink::new(Role::Structure, (STRUCTURE_LEVEL * fade) as u8);
+        let structure = Ink::new(OUTLINE_ROLE, (STRUCTURE_LEVEL * fade) as u8);
         let dots = &mut self.dots;
         for r in TRACKER_LAYERS {
             circle(dots, view, r, structure);
@@ -818,10 +810,7 @@ impl ParticleAccelerator {
         }
         // The outer two muon wheels a step dimmer, so the frame's edges stay quiet where
         // a wide terminal shows them.
-        let outer = Ink::new(
-            Role::Structure,
-            (OUTER_WHEELS * STRUCTURE_LEVEL * fade) as u8,
-        );
+        let outer = Ink::new(OUTLINE_ROLE, (OUTER_WHEELS * STRUCTURE_LEVEL * fade) as u8);
         for (k, (a, b)) in MUON_STATIONS.into_iter().enumerate() {
             let ink = if k >= 2 { outer } else { structure };
             polygon(dots, view, a, 12, ink);
@@ -995,18 +984,22 @@ fn draw_tower(dots: &mut Dots, view: View, t: f64, tw: &Tower, fade: f64) {
     if age <= 0.0 {
         return;
     }
-    let bright = event_fade(t - tw.born) * fade;
-    let v = (0.45 + 0.55 * (tw.e / 30.0).min(1.0)) * bright;
-    let ink = ink::ramp(if tw.ecal { ECAL_RAMP } else { HCAL_RAMP }, v);
+    let ink = tower_ink(tw, event_fade(t - tw.born) * fade);
     if ink.level == 0 {
         return;
     }
     let len = tw.len * ease::out_quad(age / GROW);
-    // Fill the wedge with radial strokes about one dot apart at its outer edge.
+    // A thin bar down the tower's axis (ACC-A13): radial strokes about one dot apart at
+    // its outer edge across `BAR_WIDTH` of the cell, one stroke on a small stage.
+    let half = BAR_WIDTH * TOWER_HALF;
     let outer = (tw.r0 + len) * view.dots_per_m();
-    let strokes = ((2.0 * TOWER_HALF * outer).ceil() as i32).clamp(1, 16);
+    let strokes = ((2.0 * half * outer).floor() as i32).clamp(0, 1);
     for s in 0..=strokes {
-        let a = tw.phi + TOWER_HALF * (2.0 * f64::from(s) / f64::from(strokes) - 1.0);
+        let a = if strokes == 0 {
+            tw.phi
+        } else {
+            tw.phi + half * (2.0 * f64::from(s) / f64::from(strokes) - 1.0)
+        };
         let (sn, c) = a.sin_cos_det();
         let (x0, y0) = view.dot(tw.r0 * c, tw.r0 * sn);
         let (x1, y1) = view.dot((tw.r0 + len) * c, (tw.r0 + len) * sn);
@@ -1014,15 +1007,24 @@ fn draw_tower(dots: &mut Dots, view: View, t: f64, tw: &Tower, fade: f64) {
     }
 }
 
-/// A collider track's ramp and value at full event brightness (ACC-A12): all clear of the
-/// detector outline. Soft hadrons glow dim red, stiff ones pale gold; the K⁰_S flight is as
-/// bright as the softest hadron and told apart by its dashes.
-fn fresh_tone(flavour: Flavour, pt: f64) -> (Ramp, f64) {
+/// A tower's ink at event brightness `bright` (ACC-A13): its calorimeter's ramp, from 0.5
+/// for the softest deposit to 0.95 at 30 GeV and above.
+fn tower_ink(tw: &Tower, bright: f64) -> Ink {
+    let v = (0.5 + 0.45 * (tw.e / 30.0).min(1.0)) * bright;
+    ink::ramp(if tw.ecal { ECAL_RAMP } else { HCAL_RAMP }, v)
+}
+
+/// A collider track's ramp and value at full event brightness (ACC-A12, ACC-A13): all clear
+/// of the detector outline. Charged tracks take their charge's hue, for the
+/// softest loopers at 0.45 (so the tracker's centre stays calm) to 0.82 for stiff ones, where each hue is still saturated; muons are
+/// near-white; the K⁰_S flight is a dim neutral dash.
+fn fresh_tone(flavour: Flavour, pt: f64, positive: bool) -> (Ramp, f64) {
+    let charged = if positive { POS_RAMP } else { NEG_RAMP };
     match flavour {
-        Flavour::Muon => (MUON_RAMP, 0.95),
-        Flavour::Electron => (ECAL_RAMP, 0.9),
-        Flavour::Neutral => (TRACK_RAMP, 0.45),
-        Flavour::Hadron => (TRACK_RAMP, 0.45 + 0.5 * (pt / 10.0).min(1.0)),
+        Flavour::Muon => (MUON_RAMP, 1.0),
+        Flavour::Neutral => (NEUTRAL_RAMP, 0.45),
+        Flavour::Electron => (charged, 0.82),
+        Flavour::Hadron => (charged, 0.45 + 0.37 * (pt / 10.0).min(1.0)),
     }
 }
 
@@ -1031,7 +1033,7 @@ fn draw_ctrack(dots: &mut Dots, view: View, t: f64, tr: &CTrack, fade: f64) {
     if age <= 0.0 {
         return;
     }
-    let (ramp, v) = fresh_tone(tr.flavour, tr.pt);
+    let (ramp, v) = fresh_tone(tr.flavour, tr.pt, tr.positive);
     let ink = ink::ramp(ramp, v * event_fade(t - tr.born) * fade);
     if ink.level == 0 {
         return;
@@ -1132,7 +1134,6 @@ impl Generator for ParticleAccelerator {
                     self.crossing(ctx);
                 }
                 self.exposure.decay((-dt / GLOW_TAU).exp() as f32);
-                self.expose_towers(dt);
             }
             Act::Chamber => {
                 if act != act0 || (t1 / PHOTO).floor() > (from / PHOTO).floor() {
@@ -1593,13 +1594,59 @@ mod tests {
         assert_eq!(view_radius(rows), VIEW_R.1);
     }
 
+    /// ACC-A13: the collider act is coloured like an event display: charged tracks by
+    /// charge (positive `Ice`, negative `HAlpha`, never through the muon yoke's field flip),
+    /// muons `Starlight`, towers as thin `Aurora` (ECAL) and `Plasma` (HCAL) bars, the
+    /// outline `Dim`, and no `Ember` anywhere in the act.
+    #[test]
+    fn acc_a13_collider_inks_follow_charge_and_calorimeter() {
+        let (mut g, mut ctx) = fresh(120, 40);
+        let allowed = [
+            Role::Ramp(POS_RAMP),
+            Role::Ramp(NEG_RAMP),
+            Role::Ramp(MUON_RAMP),
+            Role::Ramp(ECAL_RAMP),
+            Role::Ramp(HCAL_RAMP),
+            Role::Ramp(GLOW_RAMP),
+            OUTLINE_ROLE,
+            Role::Text,
+            Role::Background,
+        ];
+        let mut canvas = Canvas::new(g.size, GlyphMode::Unicode);
+        let (mut pos, mut neg) = (0, 0);
+        let mut t = 0.5;
+        while t < ACT_COLLIDER - 0.5 {
+            run_to(&mut g, &mut ctx, t, &[SIM_DT]);
+            for tr in g.tracks.iter() {
+                let (ramp, _) = fresh_tone(tr.flavour, tr.pt, tr.positive);
+                match tr.flavour {
+                    Flavour::Hadron | Flavour::Electron => {
+                        assert_eq!(tr.positive, tr.path.qb > 0.0);
+                        assert_eq!(ramp, if tr.positive { POS_RAMP } else { NEG_RAMP });
+                        if tr.positive { pos += 1 } else { neg += 1 }
+                    }
+                    Flavour::Muon => assert_eq!(ramp, MUON_RAMP),
+                    Flavour::Neutral => assert_eq!(ramp, NEUTRAL_RAMP),
+                }
+            }
+            canvas.clear();
+            g.render(&mut canvas);
+            for cell in canvas.cells() {
+                assert!(allowed.contains(&cell.ink.role), "{:?} at t={t}", cell.ink);
+                assert!(allowed.contains(&cell.bg.role), "{:?} at t={t}", cell.bg);
+            }
+            t += 0.37;
+        }
+        assert!(pos > 20 && neg > 20, "{pos} positive, {neg} negative");
+    }
+
     #[test]
     fn acc_a12_the_detector_is_drawn_below_every_fresh_track_even_in_mono() {
         use sciart_render::{Rgb, Theme};
         let luma = |Rgb(r, g, b): Rgb| {
             0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b)
         };
-        let structure = Ink::new(Role::Structure, STRUCTURE_LEVEL as u8);
+        let structure = Ink::new(OUTLINE_ROLE, STRUCTURE_LEVEL as u8);
         // Every flavour's fresh ink, at its softest.
         for flavour in [
             Flavour::Hadron,
@@ -1607,17 +1654,19 @@ mod tests {
             Flavour::Muon,
             Flavour::Neutral,
         ] {
-            let (ramp, v) = fresh_tone(flavour, 0.0);
-            let track = ink::ramp(ramp, v);
-            for theme in [Theme::Astro, Theme::Mono] {
-                let (s, t) = (
-                    luma(theme.color(structure, 0, 0)),
-                    luma(theme.color(track, 0, 0)),
-                );
-                assert!(
-                    s + 10.0 < t,
-                    "{theme:?} {flavour:?}: structure {s}, track {t}"
-                );
+            for positive in [true, false] {
+                let (ramp, v) = fresh_tone(flavour, 0.0, positive);
+                let track = ink::ramp(ramp, v);
+                for theme in [Theme::Astro, Theme::Mono] {
+                    let (s, t) = (
+                        luma(theme.color(structure, 0, 0)),
+                        luma(theme.color(track, 0, 0)),
+                    );
+                    assert!(
+                        s + 10.0 < t,
+                        "{theme:?} {flavour:?}: structure {s}, track {t}"
+                    );
+                }
             }
         }
     }

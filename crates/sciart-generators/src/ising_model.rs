@@ -14,7 +14,8 @@
 //!
 //! The lattice is capped at 16 384 spins (`grid::lattice_for`, ADR-0012) and shown as one
 //! half-block pixel per spin at or below the cap, nearest-sampled above it. Up spins are
-//! the Aurora ramp and down spins H-alpha (false colour). Wall spins sink toward the
+//! ivory (the Starlight ramp) and down spins steel blue (Ice), a light/dark pair that is
+//! colour-blind safe (false colour). Wall spins sink toward the
 //! background by alignment, and interior spins brighten with their chamfer distance from
 //! the nearest wall ([`chamfer`]), so domains read as lit pillows with dark seams and
 //! ordering visibly brightens the screen. Thermal specks (clusters under [`SPECK`] spins)
@@ -95,11 +96,14 @@ const LABEL_INK: Ink = Ink::new(Role::Text, 200);
 const GAUGE: usize = 12;
 const GAUGE_MIN_W: u16 = 48;
 const GAUGE_OFF: Ink = Ink::new(Role::Text, 70);
-/// Up spins in the Aurora ramp, down spins in H-alpha (false colour, ADR-0015). Down is
-/// scaled lower so the two phases stay apart in the Mono theme, where every ramp is one
-/// grey (RND-R11).
-const UP_GAIN: f64 = 0.92;
-const DOWN_GAIN: f64 = 0.5;
+/// Up spins in the Starlight ramp (ivory), down spins in Ice (steel blue) (false colour,
+/// ADR-0015): a light/dark pair that reads without hue, so it is colour-blind safe and
+/// keeps the two phases far apart in Mono (interiors at ≈ 0.86 vs ≈ 0.3 of the ramp,
+/// RND-R11). The model is symmetric under s → −s; only the drawing is not.
+const UP_RAMP: Ramp = Ramp::Starlight;
+const DOWN_RAMP: Ramp = Ramp::Ice;
+const UP_GAIN: f64 = 1.1;
+const DOWN_GAIN: f64 = 0.38;
 
 /// Heat-bath probability that a spin with local field `h = Σ_nn sⱼ` becomes +1 at
 /// temperature `t`: `p₊ = 1 / (1 + e^{−2h/T})` (ISING-A1). `t` is clamped to
@@ -209,7 +213,7 @@ const BEVEL: u8 = 4;
 /// a few flipped spins never punch a dark hollow into a big domain.
 const SPECK: usize = 6;
 /// A speck's shade class, that of a domain's rim (`|v|` 0.45): a quiet fleck of its own
-/// spin's colour (a dim mint fleck in a crimson domain, a dark crimson one in mint), not
+/// spin's colour (a grey fleck in a blue domain, a dark blue one in ivory), not
 /// a black hole in the domain. The ramps' low ends are near black, so lower is no fleck.
 const SPECK_CLASS: u8 = 4;
 /// The Kawasaki act's labyrinth is only a few sites wide, so its walls would drag both
@@ -237,16 +241,16 @@ pub(crate) fn class_value(c: usize, peak: u8) -> f64 {
 }
 
 /// The ink of every shade class, indexed by `(s > 0)·CLASSES + class`: up
-/// `ramp(Aurora, UP_GAIN·v)`, down `ramp(HAlpha, DOWN_GAIN·v)`, for shading that peaks at
+/// `ramp(UP_RAMP, UP_GAIN·v)`, down `ramp(DOWN_RAMP, DOWN_GAIN·v)`, for shading that peaks at
 /// depth `peak`, with `v` lifted linearly from `[0, INTERIOR_PEAK]` onto
 /// `[floor, INTERIOR_PEAK]`. Built once per scene.
 fn inks(peak: u8, floor: f64) -> [Ink; 2 * CLASSES] {
     std::array::from_fn(|i| {
         let v = floor + (1.0 - floor / INTERIOR_PEAK) * class_value(i % CLASSES, peak);
         if i >= CLASSES {
-            ink::ramp(Ramp::Aurora, UP_GAIN * v)
+            ink::ramp(UP_RAMP, UP_GAIN * v)
         } else {
-            ink::ramp(Ramp::HAlpha, DOWN_GAIN * v)
+            ink::ramp(DOWN_RAMP, DOWN_GAIN * v)
         }
     })
 }
@@ -255,8 +259,8 @@ fn inks(peak: u8, floor: f64) -> [Ink; 2 * CLASSES] {
 /// [`inks`], for the ASCII fallback.
 fn signed(ink: Ink) -> f64 {
     match ink.role {
-        Role::Ramp(Ramp::Aurora) => ink::seq_value(ink) / UP_GAIN,
-        Role::Ramp(Ramp::HAlpha) => -ink::seq_value(ink) / DOWN_GAIN,
+        Role::Ramp(UP_RAMP) => ink::seq_value(ink) / UP_GAIN,
+        Role::Ramp(DOWN_RAMP) => -ink::seq_value(ink) / DOWN_GAIN,
         _ => 0.0,
     }
 }
@@ -1194,8 +1198,8 @@ mod tests {
         // so does every class.
         let (glauber, kawasaki) = (inks(DEPTH_CAP, 0.0), inks(BEVEL, SWAP_FLOOR));
         for table in [&glauber, &kawasaki] {
-            assert_eq!(table[CLASSES - 1].role, Role::Ramp(Ramp::HAlpha));
-            assert_eq!(table[2 * CLASSES - 1].role, Role::Ramp(Ramp::Aurora));
+            assert_eq!(table[CLASSES - 1].role, Role::Ramp(DOWN_RAMP));
+            assert_eq!(table[2 * CLASSES - 1].role, Role::Ramp(UP_RAMP));
             assert!(table[2 * CLASSES - 1].level >= table[CLASSES - 1].level + 64);
             // The floor lifts the walls, never the interior peak.
             assert_eq!(table[2 * CLASSES - 1], glauber[2 * CLASSES - 1]);
@@ -1254,6 +1258,29 @@ mod tests {
         );
         // The torus wraps: column 0 is next to the down stripe's column 15.
         assert_eq!(class[at(0, 5)], 3);
+    }
+
+    #[test]
+    fn ising_a10_phases_differ_in_lightness_not_just_hue() {
+        // Colour-blind safe and Mono-proof: up interiors are pale (≥ 0.8 of the ramp),
+        // down interiors dark (≤ 0.35), in two ramps that are neither red nor green.
+        let glauber = inks(DEPTH_CAP, 0.0);
+        let (down, up) = (glauber[CLASSES - 1], glauber[2 * CLASSES - 1]);
+        assert!(f64::from(up.level) >= 0.8 * 255.0, "{up:?}");
+        assert!(f64::from(down.level) <= 0.35 * 255.0, "{down:?}");
+        for ramp in [UP_RAMP, DOWN_RAMP] {
+            assert!(!matches!(ramp, Ramp::HAlpha | Ramp::Aurora | Ramp::Ember));
+        }
+        // The ASCII decoder inverts the tables.
+        for (i, ink) in glauber.iter().enumerate() {
+            let v = class_value(i % CLASSES, DEPTH_CAP);
+            let want = if i >= CLASSES { v } else { -v };
+            assert!(
+                (signed(*ink) - want).abs() < 0.02,
+                "{i}: {} vs {want}",
+                signed(*ink)
+            );
+        }
     }
 
     #[test]

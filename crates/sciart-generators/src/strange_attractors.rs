@@ -17,7 +17,9 @@
 //! cylindrical radius, and the blend is stretched per axis so the swarm keeps its extent.
 //!
 //! Raster convention (M10): the density is decayed, deposited and thresholded into
-//! [`Dots`] at the end of `update` and `resize`; `render` only blits and writes the label.
+//! [`Dots`], and a long-exposure [`Glow`] under it (ATT-A11) toned into half-block
+//! [`Pixels`], at the end of `update` and `resize`; `render` only blits and writes the
+//! label.
 
 use std::f64::consts::{FRAC_1_SQRT_2, PI, SQRT_2, TAU};
 
@@ -27,7 +29,7 @@ use sciart_core::particles::gaussian;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, geom, ink, ode};
+use sciart_core::{Tone, draw, geom, ink, ode};
 
 pub static META: Meta = Meta {
     name: "strange_attractors",
@@ -131,6 +133,23 @@ const N_MIN: usize = 64;
 /// `e^{−j·dt/τ} ≥ D_MIN`, i.e. `j ≤ 15`), so frame 0 already shows full-length threads.
 const PRIME_STEPS: usize = 16;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// Long-exposure glow under the threads (ATT-A11): each displayed particle splats its
+/// weight bilinearly into a half-block [`Glow`] that fades with `GLOW_TAU_S`, so where the
+/// flow keeps returning builds up into a soft cloud (the time-averaged invariant measure)
+/// and the threads ride on it.
+const GLOW_TAU_S: f64 = 1.2;
+/// Tone: the asinh knee and white point as multiples of the mean steady-state value of a
+/// covered pixel, `N_eff · 60 · τ_g / (COVER · pixels)`, so the cloud reads the same at
+/// every size and prefix.
+const GLOW_COVER: f64 = 0.3;
+const GLOW_KNEE: f64 = 0.45;
+const GLOW_WHITE: f64 = 8.0;
+/// Glow ramp values: `FLOOR + (TOP − FLOOR)·level/255`, kept below the threads' band so
+/// the threads stay the brightest thing on screen.
+const GLOW_FLOOR: f64 = 0.06;
+const GLOW_TOP: f64 = 0.48;
+/// Tone levels below this are dissolved into the black sky (CORE-R89).
+const GLOW_DISSOLVE: u8 = 22;
 
 /// Parameters of the gallery flows (SPEC-002 Model).
 const LORENZ: (f64, f64, f64) = (10.0, 28.0, 8.0 / 3.0);
@@ -265,9 +284,9 @@ const fn spec(k: Attractor) -> &'static Spec {
                 bottom: 0.94,
                 swing: 0.0,
             },
-            // Its six parameters exceed the 16-char cap: none are quoted (ATT-A7).
-            params: "",
-            params_ascii: "",
+            // All six, the longest set (ATT-A7); dropped whole where it does not fit.
+            params: "a=.95 b=.7 c=.6 d=3.5 e=.25 f=.1",
+            params_ascii: "a=.95 b=.7 c=.6 d=3.5 e=.25 f=.1",
             palette: Ramp::Ice,
             zoom: 1.0,
             yaw: YAW_PHASE,
@@ -916,6 +935,102 @@ fn thread_ink(palette: Ramp, d: f32, ln_top: f64) -> Ink {
     )
 }
 
+/// Glow colour: the tone level onto the lower band of the shown palette (ATT-A11).
+fn glow_ink(palette: Ramp, level: u8) -> Ink {
+    ink::ramp(
+        palette,
+        GLOW_FLOOR + (GLOW_TOP - GLOW_FLOOR) * f64::from(level) / 255.0,
+    )
+}
+
+/// The glow's tone curve at `size`, scaled to the mean steady-state value of a covered
+/// pixel (ATT-A11), so the cloud's brightness does not depend on the lattice size.
+fn glow_tone(size: Size) -> Tone {
+    let px = f64::from(size.width()) * 2.0 * f64::from(size.height());
+    let mean = n_eff(size) as f64 * 60.0 * GLOW_TAU_S / (GLOW_COVER * px.max(1.0));
+    Tone::asinh((GLOW_KNEE * mean) as f32, (GLOW_WHITE * mean) as f32)
+}
+
+/// Splat a particle's weight into the glow at its dot, bilinearly in pixel units, never
+/// on the label row.
+fn splat(glow: &mut Glow, pen: &Pen, (x, y): (i32, i32), w: f32) {
+    if y >= pen.floor {
+        return;
+    }
+    let px = (f64::from(x) - 0.5) / 2.0;
+    // Bilinear weight must not spill onto the label row's pixels either.
+    let py = ((f64::from(y) - 0.5) / 2.0).min(f64::from(pen.floor / 2 - 1));
+    glow.splat_bilinear(px, py, w);
+}
+
+/// The threads' short exposure at braille-dot resolution: a [`Density`] in 16-bit fixed
+/// point (`1/SCALE` per unit, saturating at `u16::MAX / SCALE` ≈ 64 deposits), half the
+/// memory of the `f32` buffer. At 500×150 that is 1.2 MB, which keeps the scene with its
+/// long-exposure glow under the TEST-R7 ceiling. Decay rounds down, so a lone deposit
+/// always fades to zero; the threshold `D_MIN` is 82 units, far above the rounding.
+#[derive(Debug, Default)]
+struct Exposure {
+    w: usize,
+    h: usize,
+    buf: Vec<u16>,
+}
+
+impl Exposure {
+    const SCALE: f32 = 1024.0;
+
+    /// Resize to `cells` terminal cells (`2·w × 4·h` dots) and zero; reuses the buffer
+    /// unless it must grow.
+    fn resize(&mut self, cells: Size) {
+        self.w = usize::from(cells.width()) * Dots::CELL_W as usize;
+        self.h = usize::from(cells.height()) * Dots::CELL_H as usize;
+        self.buf.clear();
+        self.buf.resize(self.w * self.h, 0);
+    }
+
+    /// Add `w` at the dot nearest to `(x, y)`; non-finite input and off-buffer dots are
+    /// ignored, as [`Density::deposit`].
+    fn deposit(&mut self, x: f64, y: f64, w: f32) {
+        if !(x.is_finite() && y.is_finite() && w.is_finite() && w > 0.0) {
+            return;
+        }
+        let (x, y) = (x.round(), y.round());
+        if x < 0.0 || y < 0.0 || x >= self.w as f64 || y >= self.h as f64 {
+            return;
+        }
+        let v = &mut self.buf[y as usize * self.w + x as usize];
+        let add = (w * Self::SCALE).round().min(f32::from(u16::MAX)) as u16;
+        *v = v.saturating_add(add);
+    }
+
+    /// Multiply every value by `k ∈ [0, 1]`, rounding down (NaN leaves it as is).
+    fn decay(&mut self, k: f32) {
+        if k.is_nan() {
+            return;
+        }
+        // 16-bit fixed-point factor: exact for k = 1, and `v·k` rounds down.
+        let q = (k.clamp(0.0, 1.0) * 65536.0) as u32;
+        for v in &mut self.buf {
+            *v = ((u32::from(*v) * q) >> 16) as u16;
+        }
+    }
+
+    /// Light every dot whose value is `≥ threshold` with `map(value)`, as
+    /// [`Density::to_dots`].
+    fn to_dots(&self, dots: &mut Dots, threshold: f32, mut map: impl FnMut(f32) -> Ink) {
+        let t = (threshold * Self::SCALE).ceil().max(1.0) as u32;
+        if self.w == 0 {
+            return;
+        }
+        for (y, row) in self.buf.chunks_exact(self.w).enumerate() {
+            for (x, &v) in row.iter().enumerate() {
+                if u32::from(v) >= t {
+                    dots.set(x as i32, y as i32, map(f32::from(v) / Self::SCALE));
+                }
+            }
+        }
+    }
+}
+
 /// Camera yaw (rad) at gallery clock `t`, `w` of the way from `from`'s offset to `to`'s.
 fn camera_yaw(t: f64, from: Attractor, to: Attractor, w: f64) -> f64 {
     TAU * t / YAW_PERIOD + ease::lerp(spec(from).yaw, spec(to).yaw, w)
@@ -946,7 +1061,7 @@ impl Pen {
     /// Deposit the thread from `from` (deposited earlier, so skipped unless the particle is
     /// still on it: dwelling brightens a dot, as a long exposure would) to `to`. Longer
     /// jumps than `MAX_SEGMENT` deposit only their end; the label row is never drawn.
-    fn thread(&self, density: &mut Density, from: Option<(i32, i32)>, to: (i32, i32), w: f32) {
+    fn thread(&self, density: &mut Exposure, from: Option<(i32, i32)>, to: (i32, i32), w: f32) {
         let mut put = |(x, y): (i32, i32)| {
             if y < self.floor {
                 density.deposit(f64::from(x), f64::from(y), w);
@@ -967,8 +1082,12 @@ struct StrangeAttractors {
     /// Built at the first resize (the seeded start needs `ctx.rng`).
     gallery: Option<Gallery>,
     size: Size,
-    density: Density,
+    density: Exposure,
     dots: Dots,
+    /// Long-exposure cloud under the threads (ATT-A11), toned into `pixels`.
+    glow: Glow,
+    pixels: Pixels,
+    tone: Tone,
     /// Previous dot of each displayed particle (`None`: forgotten, no thread segment).
     prev: Vec<Option<(i32, i32)>>,
 }
@@ -978,8 +1097,11 @@ impl Default for StrangeAttractors {
         Self {
             gallery: None,
             size: Size::new(1, 1),
-            density: Density::default(),
+            density: Exposure::default(),
             dots: Dots::default(),
+            glow: Glow::default(),
+            pixels: Pixels::default(),
+            tone: Tone::default(),
             prev: vec![None; N],
         }
     }
@@ -1039,6 +1161,7 @@ impl StrangeAttractors {
                 continue;
             };
             pen.thread(&mut self.density, *prev, dot, w as f32);
+            splat(&mut self.glow, &pen, dot, w as f32);
             *prev = Some(dot);
         }
         self.threshold();
@@ -1056,16 +1179,23 @@ impl StrangeAttractors {
         }
         let pen = self.pen(g);
         let fade = (-SIM_DT / TAU_S).exp();
+        // The glow outlives the replay: scale the replayed deposits up to the steady state
+        // of an endless exposure, `1 / (1 − k^(steps + 1))`, so frame 0 already glows.
+        let glow_fade = (-SIM_DT / GLOW_TAU_S).exp();
+        let glow_prime = 1.0 / (1.0 - glow_fade.powi(PRIME_STEPS as i32 + 1));
         for (i, prev) in self.prev[..g.n()].iter_mut().enumerate() {
             let Some((head, w)) = pen.mark(g.displayed(i)) else {
                 *prev = None;
                 continue;
             };
-            let (mut to, mut age) = (head, 1.0);
-            let density = &mut self.density;
+            let (mut to, mut age, mut glow_age) = (head, 1.0, 1.0);
+            let (density, glow) = (&mut self.density, &mut self.glow);
+            splat(glow, &pen, head, (w * glow_prime) as f32);
             g.rewind(i, SIM_DT, PRIME_STEPS, |p| {
                 if let Some((from, _)) = pen.mark(p) {
                     pen.thread(density, Some(from), to, (w * age) as f32);
+                    glow_age *= glow_fade;
+                    splat(glow, &pen, from, (w * glow_prime * glow_age) as f32);
                     (to, age) = (from, age * fade);
                 }
             });
@@ -1077,12 +1207,16 @@ impl StrangeAttractors {
 
     fn threshold(&mut self) {
         self.dots.clear();
+        self.pixels.clear();
         let Some(k) = self.shown() else {
             return;
         };
         let (palette, ln_top) = (spec(k).palette, (1.0 + D_TOP / f64::from(D_MIN)).ln());
         self.density
             .to_dots(&mut self.dots, D_MIN, |d| thread_ink(palette, d, ln_top));
+        self.glow
+            .to_pixels(&mut self.pixels, &self.tone, |l| glow_ink(palette, l));
+        self.pixels.dissolve(GLOW_DISSOLVE);
     }
 
     /// The attractor the swarm mostly shows: the target once a morph is half done.
@@ -1131,6 +1265,9 @@ impl Generator for StrangeAttractors {
         self.size = size;
         self.density.resize(size);
         self.dots.resize(size);
+        self.glow.resize(size);
+        self.pixels.resize(size);
+        self.tone = glow_tone(size);
         let n = n_eff(size);
         match &mut self.gallery {
             Some(g) => g.set_n(n),
@@ -1158,11 +1295,14 @@ impl Generator for StrangeAttractors {
             self.prev[n.min(g.n())..].fill(None);
         }
         self.density.decay((-dt / TAU_S).exp() as f32);
+        self.glow.decay((-dt / GLOW_TAU_S).exp() as f32);
         self.rasterise();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.dots.blit(canvas);
+        // ASCII has no half blocks: the cloud is left out and the threads carry the shape.
+        self.pixels.blit(canvas, |_, _, _, _| None);
+        self.dots.blit_over(canvas, &self.pixels);
         self.label(canvas);
     }
 
@@ -1814,6 +1954,60 @@ mod tests {
         (s, ctx, Canvas::new(size, mode))
     }
 
+    /// ATT-A11: a long-exposure cloud glows under the threads in Unicode mode: half-block
+    /// cells in the lower band of the shown palette, covering
+    /// more of the stage than the threads alone and never on the label row; ASCII keeps
+    /// only the threads (it has no half blocks).
+    #[test]
+    fn att_a11_a_long_exposure_cloud_glows_under_the_threads() {
+        let top = glow_ink(Ramp::Ice, 255).level;
+        for (i, k) in GALLERY.into_iter().enumerate() {
+            for (w, h) in [(80, 24), (200, 50)] {
+                let (mut s, mut ctx, mut c) = scene(w, h, GlyphMode::Unicode, i);
+                for _ in 0..60 {
+                    s.update(SIM_DT, &mut ctx);
+                }
+                c.clear();
+                s.render(&mut c);
+                let palette = Role::Ramp(spec(k).palette);
+                let (mut glow, mut threads) = (0, 0);
+                for (j, cell) in c.cells().iter().enumerate() {
+                    let y = j / usize::from(w);
+                    let block = matches!(cell.ch, '▀' | '▄');
+                    let dots = ('\u{2801}'..='\u{28ff}').contains(&cell.ch);
+                    if block || (dots && cell.bg != Ink::BLANK) {
+                        glow += 1;
+                        let g = if block { cell.ink } else { cell.bg };
+                        assert_eq!(g.role, palette, "{k:?} {w}x{h}");
+                        assert!(g.level <= top, "{k:?}: glow {} > {top}", g.level);
+                        assert!(y + 1 < usize::from(h), "{k:?}: glow on the label row");
+                    }
+                    if dots {
+                        threads += 1;
+                    }
+                }
+                assert!(
+                    glow > threads,
+                    "{k:?} {w}x{h}: {glow} glow vs {threads} threads"
+                );
+            }
+            let (s, _, mut c) = scene(80, 24, GlyphMode::Ascii, i);
+            c.clear();
+            s.render(&mut c);
+            assert!(c.cells().iter().all(|cell| cell.bg == Ink::BLANK), "{k:?}");
+        }
+        // Size-independent tone: a covered pixel's mean steady value tones to the same
+        // level at every size.
+        let mid = |w, h| {
+            let size = Size::new(w, h);
+            let px = f64::from(w) * 2.0 * f64::from(h);
+            let mean = n_eff(size) as f64 * 60.0 * GLOW_TAU_S / (GLOW_COVER * px);
+            glow_tone(size).level(mean as f32)
+        };
+        assert_eq!(mid(80, 24), mid(200, 50));
+        assert!(mid(80, 24) > 100);
+    }
+
     fn label_row(s: &StrangeAttractors, c: &mut Canvas) -> String {
         c.clear();
         s.render(c);
@@ -1845,7 +2039,7 @@ mod tests {
             assert!(s.params_ascii.is_ascii());
         }
         // The name is the title's caption, so the row holds the parameters alone,
-        // right-aligned with a blank either side (Aizawa: nothing).
+        // right-aligned with a blank either side (every act has its set, ATT-A7).
         for (i, k) in GALLERY.into_iter().enumerate() {
             for (mode, params) in [
                 (GlyphMode::Ascii, spec(k).params_ascii),
@@ -1858,21 +2052,21 @@ mod tests {
                 assert!(row.is_ascii() || mode == GlyphMode::Unicode);
             }
         }
-        // Every set is restrained (≤ 16 chars) and quoted whole or, when it does not fit
-        // (Aizawa's six), not at all: one parameter out of several would read as the
-        // attractor's only one.
+        // Every set is quoted whole (Aizawa's six in 32 characters, the longest) and
+        // dropped whole where it does not fit: one parameter out of several would read
+        // as the attractor's only one.
         assert!(
             GALLERY
                 .iter()
-                .all(|&k| spec(k).params.chars().count() <= 16)
+                .all(|&k| spec(k).params.chars().count() <= 32)
         );
         for (k, params) in GALLERY.into_iter().zip([3, 6, 1, 3, 1, 3]) {
             let quoted = spec(k).params.matches('=').count();
-            assert!(
-                quoted == params || quoted == 0,
-                "{k:?} quotes {quoted} of {params}"
-            );
+            assert_eq!(quoted, params, "{k:?} quotes {quoted} of {params}");
         }
+        // Aizawa (gallery index 1): shown whole at 80 columns, dropped whole at 50.
+        let (s, _, mut c) = scene(50, 24, GlyphMode::Unicode, 1);
+        assert_eq!(label_row(&s, &mut c).trim(), "");
         // Lorenz's 15-char set beside "Strange attractor" alone (from 32 wide, the full
         // title from 47), where the room is w − 23: dropped at 37 columns, shown at 38.
         for mode in [GlyphMode::Ascii, GlyphMode::Unicode] {

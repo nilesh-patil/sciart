@@ -7,6 +7,7 @@ use std::f64::consts::TAU;
 use sciart_core::geom::ASPECT;
 use sciart_core::ink::{self, Ramp};
 use sciart_core::prelude::*;
+use sciart_core::raster::stronger;
 use sciart_core::title::{self, Title};
 
 pub static META: Meta = Meta {
@@ -41,10 +42,17 @@ const ASCII_RAMP: [char; 5] = ['.', 'o', 'O', '0', '@'];
 const TITLE_GAP: usize = 3;
 /// Blank columns between the field and the detector screen (`WAVE-A6`).
 const SCREEN_GAP: usize = 2;
-/// Screen bar levels `SCREEN_LOW + SCREEN_SPAN·I`: topping out at 180, about 30 % under the
-/// brightest crest, so the detector reads as an instrument beside the tank, not its hero.
+/// Screen film and profile levels `SCREEN_LOW + SCREEN_SPAN·I`: topping out at 180, about
+/// 30 % under the brightest crest, so the detector reads as an instrument beside the tank,
+/// not its hero.
 const SCREEN_LOW: f64 = 40.0;
 const SCREEN_SPAN: f64 = 140.0;
+/// The profile curve never drops below this level, so its node rows still read as a line.
+const PROFILE_LOW: f64 = 90.0;
+/// The faint fill under the profile, `FILL_LOW + FILL_SPAN·I`: a shaded area, far under the
+/// curve and the film, so the curve's edge carries the shape (WAVE-A8).
+const FILL_LOW: f64 = 16.0;
+const FILL_SPAN: f64 = 40.0;
 
 /// Wavelength in rows for a screen `h` rows tall.
 pub(crate) fn wavelength(h: u16) -> f64 {
@@ -102,6 +110,8 @@ pub struct WaveInterference {
     quiet: (std::ops::Range<i32>, i32),
     sources: [(f64, f64); 2],
     pixels: Pixels,
+    /// The screen's intensity profile, a braille curve over the fill (WAVE-A8).
+    profile: Dots,
 }
 
 impl WaveInterference {
@@ -146,23 +156,28 @@ impl WaveInterference {
                     self.pixels.set(px as i32, y, ink);
                 }
             }
-            // The screen: time-averaged intensity at the field's right edge, as a bar
-            // growing leftward from the right edge (WAVE-A6).
+            // The screen (WAVE-A6, WAVE-A8): the rightmost column is the film, lit by the
+            // time-averaged intensity at the field's edge, and left of it a faint fill
+            // grows leftward from the film with length ∝ I, under the profile curve.
             let (x0, sw) = self.screen;
             if sw > 0 {
-                let (d1, d2) = self.distances(Self::at(fw, py));
-                let (_, e) = wave(d1, d2, k, phase);
-                let i = 0.25 * e * e;
-                let len = bar_len(i, sw);
-                let lit = ink::ramp(PALETTE, (SCREEN_LOW + SCREEN_SPAN * i) / 255.0);
-                for x in x0..x0 + sw {
-                    let ink = if x >= x0 + sw - len { lit } else { Ink::BLANK };
+                let i = self.intensity(py as f64 + 0.5);
+                let film = x0 + sw - 1;
+                let len = bar_len(i, sw - 1);
+                let fill = ink::ramp(PALETTE, (FILL_LOW + FILL_SPAN * i) / 255.0);
+                for x in x0..film {
+                    let ink = if x >= film - len { fill } else { Ink::BLANK };
                     for y in rows {
                         self.pixels.set(x as i32, y, ink);
                     }
                 }
+                let lit = ink::ramp(PALETTE, (SCREEN_LOW + SCREEN_SPAN * i) / 255.0);
+                for y in rows {
+                    self.pixels.set(film as i32, y, lit);
+                }
             }
         }
+        self.trace_profile();
         for (sx, sy) in self.sources {
             let (px, py) = ((sx * ASPECT).round() as i32, (sy * 2.0).round() as i32);
             for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
@@ -173,6 +188,44 @@ impl WaveInterference {
         for x in cols.clone() {
             self.pixels.set(x, 2 * row, Ink::BLANK);
             self.pixels.set(x, 2 * row + 1, Ink::BLANK);
+        }
+    }
+
+    /// Time-averaged intensity `I = E²/4` at the field's right edge, at `y2` half-rows
+    /// (pixel rows) from the top (WAVE-A6).
+    fn intensity(&self, y2: f64) -> f64 {
+        let x = (self.field_w as f64 + 0.5) / ASPECT;
+        let (d1, d2) = self.distances((x, 0.5 * y2));
+        let (_, e) = wave(d1, d2, self.k, (0.0, 1.0));
+        0.25 * e * e
+    }
+
+    /// The profile curve (WAVE-A8): one point per braille dot row, `I` of the way from the
+    /// film's left edge to the screen's, joined row to row, at `PROFILE_LOW..180` by `I`.
+    /// Static in time (`I` is a time average), but redrawn with the sweeping sources.
+    fn trace_profile(&mut self) {
+        self.profile.clear();
+        let (x0, sw) = self.screen;
+        if sw < 2 {
+            return;
+        }
+        let base = f64::from(Dots::CELL_W) * (x0 + sw - 1) as f64 - 0.5;
+        let reach = base - f64::from(Dots::CELL_W) * x0 as f64;
+        let rows = f64::from(Dots::CELL_H) * f64::from(self.height);
+        let mut prev: Option<(f64, f64)> = None;
+        let mut y = 0.0;
+        while y < rows {
+            // Dot row y spans y..y+1 of 4 dots per cell, i.e. 2 pixel rows per 4 dots.
+            let i = self.intensity((y + 0.5) / 2.0);
+            let x = base - i.clamp(0.0, 1.0) * reach;
+            let level = (SCREEN_LOW + SCREEN_SPAN * i).max(PROFILE_LOW) / 255.0;
+            let ink = ink::ramp(PALETTE, level);
+            match prev {
+                Some((px, py)) => self.profile.line(px, py, x, y, ink),
+                None => self.profile.plot(x, y, ink),
+            }
+            prev = Some((x, y));
+            y += 1.0;
         }
     }
 
@@ -211,6 +264,7 @@ impl Generator for WaveInterference {
         self.field_w = if sw > 0 { w - sw - SCREEN_GAP } else { w };
         self.screen = (w - sw, sw);
         self.pixels.resize(size);
+        self.profile.resize(size);
         // The vignette about the sources' fixed midpoint.
         let h = f64::from(size.height());
         let mid = (SOURCE_X * self.field_w as f64 / ASPECT, 0.5 * h);
@@ -249,16 +303,14 @@ impl Generator for WaveInterference {
                 return Some(('*', SOURCE_INK));
             }
             if self.is_screen(x) {
-                let lit = |p: Ink| !matches!(p.role, Role::Background);
-                return match (lit(top), lit(bottom)) {
-                    (true, true) => Some(('#', top)),
-                    (true, false) => Some(('-', top)),
-                    (false, true) => Some(('-', bottom)),
-                    _ => None,
-                };
+                // ASCII: the film as `|`, the fill left to the profile's dots.
+                let (x0, sw) = self.screen;
+                let film = (x0 + sw - 1) as i32;
+                return (x == film).then_some(('|', stronger(top, bottom)));
             }
             ascii_field(top, bottom)
         });
+        self.profile.blit_over(canvas, &self.pixels);
     }
 }
 
@@ -459,5 +511,56 @@ mod tests {
         }
         assert_eq!(src, 8, "two 2×2 sources");
         assert!(ice > 120 * 80 / 3, "{ice}");
+    }
+
+    #[test]
+    fn wave_a8_screen_profile_is_a_smooth_curve_over_a_faint_fill() {
+        let g = scene(120, 40, 0.0);
+        let (x0, sw) = g.screen;
+        let film = (x0 + sw - 1) as i32;
+        // Every profile dot lies in the screen, left of the film, in Ice at ≤ 180.
+        let (mut far_bright, mut far_dark) = (i32::MAX, i32::MIN);
+        let rows = 4 * 40;
+        let mut per_row = 0;
+        for y in 0..rows {
+            let lit: Vec<i32> = (0..240).filter(|&x| g.profile.is_lit(x, y)).collect();
+            if lit.is_empty() {
+                continue;
+            }
+            per_row += 1;
+            let (lo, hi) = (lit[0], lit[lit.len() - 1]);
+            assert!(lo >= 2 * x0 as i32 && hi < 2 * film, "row {y}: {lit:?}");
+            let i = g.intensity((f64::from(y) + 0.5) / 2.0);
+            if i > 0.9 {
+                far_bright = far_bright.min(lo);
+            } else if i < 0.1 {
+                far_dark = far_dark.max(lo);
+            }
+        }
+        // One continuous curve: a dot on every dot row.
+        assert_eq!(per_row, rows);
+        // Bright rows reach further left than dark ones (the profile follows I).
+        assert!(far_bright + 4 < far_dark, "{far_bright} vs {far_dark}");
+        let mut c = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut c);
+        for y in 0..40 {
+            for x in x0 as i32..film {
+                let cell = c.get(x, y).unwrap();
+                if cell.ink.role != Role::Background {
+                    assert_eq!(cell.ink.role, Role::Ramp(Ramp::Ice), "({x},{y})");
+                    assert!(cell.ink.level <= 181, "({x},{y}) {:?}", cell.ink);
+                }
+            }
+        }
+        // The fill stays far under the curve: it never tops FILL_LOW + FILL_SPAN.
+        for py in 0..80 {
+            for x in x0..x0 + sw - 1 {
+                let p = g.pixels.get(x as i32, py).unwrap();
+                assert!(
+                    p.level <= (FILL_LOW + FILL_SPAN) as u8 + 1,
+                    "({x},{py}) {p:?}"
+                );
+            }
+        }
     }
 }
