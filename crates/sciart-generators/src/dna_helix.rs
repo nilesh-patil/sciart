@@ -349,8 +349,10 @@ pub(crate) fn spin_phase(t: f64) -> f64 {
 // ---------------------------------------------------------------------------------------
 
 /// Vertical budget in units of R: the open fork's ±2.7R, turned by the pitch, plus the
-/// sway's edge depth sheared by the pitch and the near side's perspective (DNA-A4).
-const FIT_R: f64 = 6.6;
+/// sway's edge depth sheared by the pitch and the near side's perspective (DNA-A4). M12
+/// tightened it from 6.6 (the fit test still holds at 6.0, not at 5.7), so the daughters
+/// fill the rows instead of floating in a band of empty ones.
+const FIT_R: f64 = 6.0;
 const YAW_SWAY: f64 = 0.2;
 const YAW_PERIOD: f64 = 19.0;
 const PITCH_TILT: f64 = 0.18;
@@ -370,9 +372,9 @@ const MAX_MAGNIFY: f64 = 1.1;
 /// Rungs are drawn at least this many columns apart, so the ladder keeps its rhythm.
 const RUNG_GAP: f64 = 2.0;
 /// The fork runs only on views where the zoom-1 backbone radius is at least this many
-/// rows: below it (h ≲ 15) the arms, daughters and helicase share too few rows and knot
+/// rows (scaled with [`FIT_R`], so the same heights keep the fork): below it (h ≲ 15) the arms, daughters and helicase share too few rows and knot
 /// into braille, so the view keeps the intact helix, zoomed in, all cycle.
-const FORK_MIN_ROWS: f64 = 1.75;
+const FORK_MIN_ROWS: f64 = 1.95;
 /// From this zoom-1 backbone radius (rows) the near strands are drawn 3 dots wide: on
 /// large views a 1-dot thread is outweighed by the full-cell `┃` rungs, and the depth
 /// cue needs the area.
@@ -659,15 +661,18 @@ const NEW: Role = Role::Ramp(Ramp::HAlpha);
 /// ladder stays under the backbones, while near and far rungs still differ.
 const RUNG: f64 = 0.8;
 const RUNG_FLOOR: f64 = 100.0;
-/// Helicase collar radius, in R: snug around the strand, not a halo over the fork. It is
-/// a filled doughnut, traced at these fractions of the radius.
-const RING: f64 = 0.35;
-const RING_BAND: [f64; 4] = [0.55, 0.7, 0.85, 1.0];
-/// Points around the collar; at 200×50 its ≈ 20-dot circumference is fully joined.
-const RING_SAMPLES: usize = 32;
-/// The motor at the fork: the one warm, full-brightness object in the frame.
-const RING_ROLE: Role = Role::Hot;
-const RING_LEVEL: f64 = 255.0;
+/// Helicase collar radius, in R: a ring that reads at a glance (a hexameric DnaB ring is
+/// ≈ 12 nm across, about 3× the duplex, so this is still an understatement) while
+/// clamping only the upper strand (Crick is 1.78 R below the apex). It is a filled
+/// doughnut, traced at these fractions of the radius.
+const RING: f64 = 0.6;
+const RING_BAND: [f64; 9] = [0.4, 0.48, 0.55, 0.63, 0.7, 0.78, 0.85, 0.93, 1.0];
+/// Points around the collar; at 200×50 its ≈ 35-dot circumference is fully joined.
+const RING_SAMPLES: usize = 48;
+/// The motor at the fork: the frame's one chrome-yellow object, apart from the ice and
+/// rose strands and the green and violet pairs (false colour, like every ink here).
+const RING_ROLE: Role = Role::Ramp(Ramp::Sulfur);
+const RING_LEVEL: f64 = 235.0;
 const LABEL_LEVEL: f64 = 150.0;
 const LABEL_BASE_LEVEL: f64 = 220.0;
 
@@ -725,11 +730,11 @@ fn rung_chord(a: (f64, f64), b: (f64, f64)) -> Option<[i32; 4]> {
     (rows >= 2 && 2 * (x1 - x0).abs() <= rows && rows <= 4).then_some([x0, y0, x1, y1])
 }
 
-/// A rung's upright stroke: a thin bar behind the axis, and in front of it a slab two
-/// braille dots wide, so the near ladder reads as a surface while staying under the
-/// 3-dot backbones.
-const BAR: Glyph = Glyph::new('┃', '|');
-const SLAB: Glyph = Glyph::new('▐', '|');
+/// A rung's upright stroke: a half-cell bar (one braille dot wide) behind the axis, and
+/// in front of it a full-cell slab (two dots wide), so the ladder reads as stacked
+/// base-pair plates, near ones solid, while staying under the 3-dot backbones.
+const BAR: Glyph = Glyph::new('▐', '|');
+const SLAB: Glyph = Glyph::new('█', '|');
 
 /// The cells of a rung, as `(x, y, glyph, ink)`, one per row: an upright one straight
 /// down its middle column, a slanted one as a Bresenham chord with `┃` for a step down a
@@ -1692,8 +1697,9 @@ mod tests {
                         }
                     }
                 }
-                // A collar, not a halo: 0.35 R.
-                assert!((RING - 0.35).abs() < 1e-12);
+                // A collar that reads at a glance but still clamps one strand: 0.6 R,
+                // clear of Crick 1.78 R below the apex.
+                assert!((RING - 0.6).abs() < 1e-12);
             }
         }
     }
@@ -1752,6 +1758,21 @@ mod tests {
             scene_at(size, 2.0).render(&mut ascii);
             assert!(cells_with(&ascii, 'o').is_empty(), "{size:?}");
         }
+    }
+
+    #[test]
+    fn dna_a9_rungs_are_two_dots_wide_and_the_helicase_is_sulfur() {
+        // Near rungs fill their cell (two braille dots across), far rungs half of it, so
+        // the ladder reads as solid base-pair slabs under the 3-dot backbones.
+        assert_eq!(SLAB, Glyph::new('█', '|'));
+        assert_eq!(BAR, Glyph::new('▐', '|'));
+        // The motor is the frame's one chrome-yellow object, apart from every strand
+        // and pair ramp.
+        assert_eq!(RING_ROLE, Role::Ramp(Ramp::Sulfur));
+        for b in [A, C, G, T] {
+            assert_ne!(pair_role(b), RING_ROLE);
+        }
+        assert!(![OLD, NEW].contains(&RING_ROLE));
     }
 
     #[test]

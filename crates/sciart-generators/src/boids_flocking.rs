@@ -165,7 +165,7 @@ const SUN_W: f64 = 0.2;
 /// Bird ink as a fraction of its cell's sky value: `LONE_BIRD` for one lit dot, falling
 /// linearly to black at eight (see [`bird_shade`]). A fixed fraction keeps the
 /// bird-to-sky contrast the same at the zenith as on the glow.
-const LONE_BIRD: f64 = 0.25;
+const LONE_BIRD: f64 = 0.06;
 /// Escape-wave shading (SPEC-002 Escape wave): a bird that fired under `FLASH` substeps
 /// ago, the wave front, is drawn `FLASH_LIFT` above its sky (turning edge-on, stylised);
 /// behind the front an alarmed bird banked past `WING_BANK` shows its wing surface and
@@ -179,7 +179,7 @@ const FRONT: u8 = 2;
 /// Reed-bed height in pixels (at most), drawn once the sky has this many rows.
 const REED_PX: f64 = 3.0;
 const REED_MIN_ROWS: i32 = 10;
-/// A bird banked past this draws its wings (4 dots instead of 2).
+/// A bird banked past this also draws its wings (two more dots, either side of its body).
 const WING_BANK: f64 = 35.0 * PI / 180.0;
 /// The falcon glyph by heading octant, 0 = east, clockwise on screen (y down).
 const FALCON_GLYPH: [Glyph; 8] = [
@@ -192,6 +192,14 @@ const FALCON_GLYPH: [Glyph; 8] = [
     Glyph::new('↑', '^'),
     Glyph::new('↗', '/'),
 ];
+
+/// The falcon's silhouette (SPEC-002 Falcon): body length in σ (never under
+/// `HAWK_MIN` dots), and each wing's reach sideways as a share of it, gliding and tucked
+/// in the stoop, the peregrine's teardrop.
+const HAWK_LEN: f64 = 8.0;
+const HAWK_MIN: f64 = 8.0;
+const HAWK_SPAN: f64 = 0.9;
+const HAWK_TUCK: f64 = 0.35;
 
 type V2 = [f64; 2];
 
@@ -616,6 +624,11 @@ pub(crate) struct Boids {
     birds: Dots,
     /// The falcon's tapering streak, and per sky cell the ink of its brightest dot.
     streak: Dots,
+    /// The twin dots that make each bird's body 2 dots thick: drawn in Unicode only, so
+    /// ASCII's dot-count glyphs keep reading density, not stroke weight (BOID-A7).
+    thick: Dots,
+    /// The falcon's silhouette ([`falcon_shape`]), drawn over birds and streak.
+    hawk: Dots,
     streak_ink: Vec<Ink>,
     /// Per sky cell, row-major: its sky value, its birds' ink at the latest rasterisation, and its alarm state
     /// (scratch for `rasterise`).
@@ -661,6 +674,8 @@ impl Boids {
             wave_at: f64::NEG_INFINITY,
             birds: Dots::default(),
             streak: Dots::default(),
+            hawk: Dots::default(),
+            thick: Dots::default(),
             streak_ink: Vec::new(),
             sky_cell: Vec::new(),
             bird_ink: Vec::new(),
@@ -928,7 +943,8 @@ impl Boids {
         };
         let tail = 1.5 * self.sigma;
         let step = self.step as u32;
-        let (birds, alarm_cell) = (&mut self.birds, &mut self.alarm_cell);
+        self.thick.clear();
+        let (birds, thick, alarm_cell) = (&mut self.birds, &mut self.thick, &mut self.alarm_cell);
         let mut alarmed = false;
         for i in 0..self.n {
             let p = self.pos[i];
@@ -945,22 +961,36 @@ impl Boids {
             };
             // The dot ink is unused (`bird_ink` holds each cell's). The alarm state marks
             // every cell the stroke touches, so a wing in the next cell matches its head.
-            let mut plot = |q: V2| {
+            let mut plot = |q: V2, twin: bool| {
                 // Only dots on the grid: `plot` clips the others, and `cell` would clamp
                 // them onto an edge cell that may hold a calm bird.
                 if in_sky(q[1]) && (0.0..2.0 * f64::from(w)).contains(&q[0].round()) {
-                    birds.plot(q[0], q[1], Ink::BLANK);
+                    if twin {
+                        thick.plot(q[0], q[1], Ink::BLANK);
+                    } else {
+                        birds.plot(q[0], q[1], Ink::BLANK);
+                    }
                     let c = &mut alarm_cell[cell(q[0], q[1])];
                     *c = (*c).max(state);
                 }
             };
-            plot(p);
-            plot(sub(p, scale(dir, tail)));
+            // Head and tail, each doubled one whole dot across the stroke (down for a
+            // level bird, sideways for a steep one): a 2-dot-thick body, so the flock
+            // reads as a dark mass rather than a scatter of specks.
+            let across = if dir[0].abs() >= dir[1].abs() {
+                [0.0, 1.0]
+            } else {
+                [1.0, 0.0]
+            };
+            for q in [p, sub(p, scale(dir, tail))] {
+                plot(q, false);
+                plot(add(q, across), true);
+            }
             if banked {
                 let mid = sub(p, scale(dir, 0.5 * tail));
                 let wing = perp(dir);
-                plot(add(mid, wing));
-                plot(sub(mid, wing));
+                plot(add(mid, wing), false);
+                plot(sub(mid, wing), false);
             }
         }
         if alarmed {
@@ -968,7 +998,9 @@ impl Boids {
         }
         for cy in 0..rows {
             for cx in 0..w {
-                let lit = self.birds.cell_mask(cx, cy).unwrap_or(0).count_ones() as usize;
+                let mask = self.birds.cell_mask(cx, cy).unwrap_or(0)
+                    | self.thick.cell_mask(cx, cy).unwrap_or(0);
+                let lit = mask.count_ones() as usize;
                 if lit == 0 {
                     continue;
                 }
@@ -983,9 +1015,30 @@ impl Boids {
             }
         }
         self.streak.clear();
+        self.hawk.clear();
         self.streak_ink.fill(Ink::BLANK);
         if !self.falcon_enabled {
             return;
+        }
+        let tuck = self.timeline.at(self.time()).index == STOOP;
+        let hawk = &mut self.hawk;
+        falcon_shape(
+            self.falcon.pos,
+            self.falcon.angle,
+            self.sigma,
+            tuck,
+            |x, y| {
+                if in_sky(y) && (0.0..2.0 * f64::from(w)).contains(&x.round()) && y >= 0.0 {
+                    hawk.plot(x, y, FALCON_INK);
+                }
+            },
+        );
+        // The head's dot by flooring, as `render` finds the falcon's cell: that cell always
+        // holds silhouette, so the heading glyph shows only for a falcon fully clipped.
+        let [fx, fy] = self.falcon.pos;
+        if in_sky(fy.floor()) {
+            self.hawk
+                .set(fx.floor() as i32, fy.floor() as i32, FALCON_INK);
         }
         let last = self.falcon.streak.len().saturating_sub(1).max(1) as f64;
         let mut prev: Option<(i32, i32)> = None;
@@ -1051,6 +1104,42 @@ impl Boids {
     /// Cell rows of the sky (the label row excluded).
     fn sky_rows(&self) -> i32 {
         ((self.sky / f64::from(Dots::CELL_H)).ceil() as i32).max(1)
+    }
+}
+
+/// The falcon's silhouette in dots, head at `pos` heading `angle` (y down): a body
+/// `max(HAWK_LEN·σ, HAWK_MIN)` long and two swept-back wings, filled as wedges, reaching
+/// `HAWK_SPAN` of it sideways, or `HAWK_TUCK` when `tuck` (the stoop's teardrop). Each
+/// dot is passed to `plot` (the wings are traced as fans of lines from the shoulder).
+pub(crate) fn falcon_shape(
+    pos: V2,
+    angle: f64,
+    sigma: f64,
+    tuck: bool,
+    mut plot: impl FnMut(f64, f64),
+) {
+    let len = (HAWK_LEN * sigma).max(HAWK_MIN);
+    let d = [angle.cos_det(), angle.sin_det()];
+    let n = perp(d);
+    let span = len * if tuck { HAWK_TUCK } else { HAWK_SPAN };
+    let at = |back: f64, side: f64| add(pos, add(scale(d, -back * len), scale(n, side)));
+    let mut line = |a: V2, b: V2| {
+        let steps = (a[0] - b[0]).abs().max((a[1] - b[1]).abs()).ceil().max(1.0) as usize;
+        for k in 0..=steps {
+            let f = k as f64 / steps as f64;
+            plot(ease::lerp(a[0], b[0], f), ease::lerp(a[1], b[1], f));
+        }
+    };
+    // Body: the axis and one line beside it, so it is two dots thick.
+    line(pos, at(1.0, 0.0));
+    line(at(0.1, 0.7), at(0.9, 0.7));
+    // Wings: fans from the shoulder to a swept-back leading and trailing edge.
+    for side in [span, -span] {
+        let tip = at(0.75, side);
+        for k in 0..=3 {
+            let root = at(0.2 + 0.15 * f64::from(k), 0.0);
+            line(root, tip);
+        }
     }
 }
 
@@ -1129,6 +1218,8 @@ impl Generator for Boids {
         let sky_cells = Size::new(size.width(), self.sky_rows() as u16);
         self.birds.resize(sky_cells);
         self.streak.resize(sky_cells);
+        self.hawk.resize(sky_cells);
+        self.thick.resize(sky_cells);
         self.sky_px.resize(sky_cells);
         for layer in [&mut self.bird_ink, &mut self.streak_ink] {
             layer.clear();
@@ -1167,9 +1258,19 @@ impl Generator for Boids {
         let w = i32::from(self.cells.width());
         for cy in 0..self.sky_rows() {
             for cx in 0..w {
-                let bird = self.birds.cell_mask(cx, cy).unwrap_or(0);
+                let bird = self.birds.cell_mask(cx, cy).unwrap_or(0)
+                    | if unicode {
+                        self.thick.cell_mask(cx, cy).unwrap_or(0)
+                    } else {
+                        0
+                    };
                 let streak = self.streak.cell_mask(cx, cy).unwrap_or(0);
-                if bird | streak == 0 {
+                let hawk = if unicode {
+                    self.hawk.cell_mask(cx, cy).unwrap_or(0)
+                } else {
+                    0
+                };
+                if bird | streak | hawk == 0 {
                     continue;
                 }
                 // The reeds are in front of the flock and the falcon's streak.
@@ -1180,7 +1281,11 @@ impl Generator for Boids {
                 // Dark dots on the cell's own sky colour: the sky shows between them. A
                 // cell has one ink, so birds win one the streak crosses: the streak
                 // breaks behind them instead of paling them.
-                let (glyph, ink, ascii) = if bird == 0 {
+                let (glyph, ink, ascii) = if hawk != 0 {
+                    // The falcon owns its cells: its pale silhouette over whatever it
+                    // crosses (Unicode only; ASCII keeps the heading glyph).
+                    (braille(hawk), FALCON_INK, ('.', FALCON_INK))
+                } else if bird == 0 {
                     (
                         braille(streak),
                         self.streak_ink[i],
@@ -1205,9 +1310,11 @@ impl Generator for Boids {
             );
             // On the sky of its cell, so the glyph has no black box around it; behind the
             // reeds, hidden.
+            // Unicode draws the silhouette above; a falcon whose silhouette is wholly
+            // clipped keeps its heading glyph.
             if !unicode {
                 canvas.put(cx, cy, self.falcon.glyph(), FALCON_INK);
-            } else if !self.reed_cell(cx, cy) {
+            } else if !self.reed_cell(cx, cy) && self.hawk.cell_mask(cx, cy).unwrap_or(0) == 0 {
                 let sky = self.sky_ink((cy * w + cx) as usize);
                 canvas.put_bg(cx, cy, self.falcon.glyph(), FALCON_INK, sky);
             }
@@ -1821,7 +1928,11 @@ mod tests {
                             );
                             continue;
                         }
-                        if b.birds.cell_mask(x, y).unwrap_or(0) == 0 || (x, y) == falcon {
+                        // The falcon's silhouette owns its cells (BOID-A11).
+                        if b.birds.cell_mask(x, y).unwrap_or(0) == 0
+                            || (x, y) == falcon
+                            || b.hawk.cell_mask(x, y).unwrap_or(0) != 0
+                        {
                             continue;
                         }
                         // Dots on the cell's own sky, which is exactly the sky of the
@@ -1877,6 +1988,69 @@ mod tests {
         let w = usize::from(b.cells.width());
         for (i, &state) in b.alarm_cell.iter().enumerate().filter(|(i, _)| i % w == 0) {
             assert_eq!(state, CALM, "column 0, row {}", i / w);
+        }
+    }
+
+    #[test]
+    fn boid_a11_falcon_is_a_swept_wing_silhouette_that_tucks_to_stoop() {
+        // Extent of the silhouette along the heading (from the head, + = ahead) and across.
+        let extent = |angle: f64, sigma: f64, tuck: bool| {
+            let (d, n) = (
+                [angle.cos_det(), angle.sin_det()],
+                perp([angle.cos_det(), angle.sin_det()]),
+            );
+            let (mut along, mut across, mut dots) = ([f64::MAX, f64::MIN], [f64::MAX, f64::MIN], 0);
+            falcon_shape([50.0, 50.0], angle, sigma, tuck, |x, y| {
+                let q = sub([x, y], [50.0, 50.0]);
+                let (a, c) = (dot(q, d), dot(q, n));
+                along = [along[0].min(a), along[1].max(a)];
+                across = [across[0].min(c), across[1].max(c)];
+                dots += 1;
+            });
+            (along, across, dots)
+        };
+        for angle in [0.0, 0.7, -2.0, PI] {
+            let (along, across, dots) = extent(angle, 1.0, false);
+            // Nothing ahead of the head; a body at least HAWK_MIN dots long.
+            assert!(
+                along[1] <= 1e-9 && along[0] <= -HAWK_MIN + 1e-9,
+                "{angle}: {along:?}"
+            );
+            // Wings reach ≥ 4 dots either side: many times a starling's 2-dot body.
+            assert!(across[0] <= -4.0 && across[1] >= 4.0, "{angle}: {across:?}");
+            assert!(dots >= 30, "{angle}: {dots}");
+            // Tucked for the stoop: under half the gliding span.
+            let (_, tucked, _) = extent(angle, 1.0, true);
+            assert!(
+                tucked[1] - tucked[0] < 0.5 * (across[1] - across[0]),
+                "{angle}"
+            );
+        }
+        // It scales with σ on large skies.
+        let (big, _, _) = extent(0.0, 2.0, false);
+        assert!(big[0] <= -2.0 * HAWK_LEN + 1e-9);
+    }
+
+    #[test]
+    fn boid_a8_a_bird_is_a_two_dot_thick_stroke() {
+        let size = Size::new(80, 24);
+        let (mut b, _) = scene(size, 42, false);
+        b.n = 1;
+        for (vel, across) in [([30.0, 3.0], [0, 1]), ([2.0, -30.0], [1, 0])] {
+            b.pos[0] = [60.5, 40.5];
+            b.vel[0] = vel;
+            b.bank[0] = 0.0;
+            b.rasterise();
+            let lit: Vec<(i32, i32)> = (0..160)
+                .flat_map(|x| (0..96).map(move |y| (x, y)))
+                .filter(|&(x, y)| b.birds.is_lit(x, y) || b.thick.is_lit(x, y))
+                .collect();
+            assert!(lit.len() >= 4, "{vel:?}: {lit:?}");
+            // Every dot has its twin one dot across the stroke.
+            for &(x, y) in &lit {
+                let twin = |s: i32| lit.contains(&(x + s * across[0], y + s * across[1]));
+                assert!(twin(1) || twin(-1), "{vel:?}: ({x}, {y}) in {lit:?}");
+            }
         }
     }
 
@@ -1969,6 +2143,7 @@ mod tests {
                     let c = canvas.get(x, y).expect("a sky cell");
                     if b.birds.cell_mask(x, y).unwrap_or(0) == 0
                         || b.streak.cell_mask(x, y).unwrap_or(0) != 0
+                        || b.hawk.cell_mask(x, y).unwrap_or(0) != 0
                     {
                         continue;
                     }

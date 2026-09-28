@@ -682,8 +682,17 @@ const HALF: [f64; 3] = [
 const AMBIENT: f64 = 0.3;
 /// Surface whose `n·H` exceeds this is the specular highlight.
 const SPECULAR: f64 = 0.95;
-/// Carbon is CPK grey: the white of hydrogen at this fraction.
-const CARBON: f64 = 0.6;
+/// Carbon is CPK charcoal: the white of hydrogen at this fraction, dark enough that
+/// methane's four white hydrogens read apart from their carbon.
+const CARBON: f64 = 0.45;
+/// The electron-cloud haze behind the model (MOL-A8), in false colour: each atom adds
+/// `HAZE_ATOM·(1 − (d/R)²)³` out to its van der Waals radius `R` on screen, so the cloud
+/// is densest where bonded atoms share it; the sum is capped at `HAZE_PEAK`, far below
+/// the balls, and it grows with the molecule (`s²`). Plasma violet keeps it apart from
+/// every CPK colour.
+const HAZE: Ramp = Ramp::Plasma;
+const HAZE_ATOM: f64 = 0.13;
+const HAZE_PEAK: f64 = 0.22;
 
 /// Lambert intensity and specularity of a unit-sphere point seen at screen offset
 /// `(nx, ny)` of its radius (screen y down): `I = 0.3 + 0.7·max(0, n·L)` and whether
@@ -718,6 +727,8 @@ pub(crate) struct Raster {
     z: Vec<f32>,
     /// What each pixel shows: atom `i` as `i + 1`, a bond as [`STICK_OWNER`], 0 nothing.
     owner: Vec<u8>,
+    /// Scratch for [`Raster::haze`]: the summed cloud per pixel.
+    cloud: Vec<f32>,
     w: i32,
     h: i32,
 }
@@ -731,6 +742,8 @@ impl Raster {
         self.z.resize(px.area(), f32::NEG_INFINITY);
         self.owner.clear();
         self.owner.resize(px.area(), 0);
+        self.cloud.clear();
+        self.cloud.resize(px.area(), 0.0);
     }
 
     /// What pixel `(x, y)` shows ([`Raster::owner`]); 0 off the raster.
@@ -757,6 +770,57 @@ impl Raster {
                 self.z[i] = z as f32;
                 self.owner[i] = owner;
                 self.pixels.set(x, y, ink);
+            }
+        }
+    }
+
+    /// The electron-cloud haze (MOL-A8) on every pixel nothing is drawn on: summed per
+    /// atom into `cloud` over the atom's van der Waals disc, then inked where visible.
+    /// The haze never touches `z` or `owner`, so it stays background to everything else.
+    fn haze(&mut self, model: &Model, proj: &[Proj], s: f64) {
+        let gain = s * s;
+        if gain * HAZE_PEAK * 255.0 < ink::MIN_VISIBLE_LEVEL {
+            return;
+        }
+        self.cloud.fill(0.0);
+        for (p, atom) in proj.iter().zip(&model.atoms) {
+            let (cx, cy) = p.px();
+            // Pixels are square, rows are 2 pixels: the vdW radius in pixels.
+            let r = 2.0 * atom.el.vdw() * p.r / ball_radius(atom.el);
+            if r < 0.5 {
+                continue;
+            }
+            let inv = 1.0 / (r * r);
+            let (x0, x1) = (
+                ((cx - r).floor() as i32).max(0),
+                ((cx + r).ceil() as i32).min(self.w),
+            );
+            let (y0, y1) = (
+                ((cy - r).floor() as i32).max(0),
+                ((cy + r).ceil() as i32).min(self.h),
+            );
+            for y in y0..y1 {
+                let dy = f64::from(y) + 0.5 - cy;
+                let row = (y * self.w) as usize;
+                for x in x0..x1 {
+                    let dx = f64::from(x) + 0.5 - cx;
+                    let q = 1.0 - (dx * dx + dy * dy) * inv;
+                    if q > 0.0 {
+                        self.cloud[row + x as usize] += (HAZE_ATOM * q * q * q) as f32;
+                    }
+                }
+            }
+        }
+        for y in 0..self.h {
+            for x in 0..self.w {
+                let i = (y * self.w + x) as usize;
+                if self.owner[i] != 0 || self.cloud[i] <= 0.0 {
+                    continue;
+                }
+                let v = gain * f64::from(self.cloud[i]).min(HAZE_PEAK);
+                if v * 255.0 >= ink::MIN_VISIBLE_LEVEL {
+                    self.pixels.set(x, y, ink::ramp(HAZE, v));
+                }
             }
         }
     }
@@ -916,6 +980,7 @@ pub(crate) fn paint(raster: &mut Raster, model: &Model, proj: &[Proj], view: &Vi
         // At most MAX_ATOMS (60) atoms, so `i + 1` fits a u8 below STICK_OWNER.
         raster.ball(atom.el, i as u8 + 1, p, ball_top(p, k) - p.depth, s);
     }
+    raster.haze(model, proj, s);
 }
 
 // ---------------------------------------------------------------------------------------
@@ -1023,7 +1088,9 @@ impl Generator for MoleculeViewer {
             } else {
                 bottom
             };
-            (ink.role != Role::Background && ink.level >= ASCII_MIN_LEVEL).then(|| {
+            // The haze is Unicode-only: ASCII's tiers would turn it into a field of `:`.
+            let body = ink.role != Role::Background && ink.role != Role::Ramp(HAZE);
+            (body && ink.level >= ASCII_MIN_LEVEL).then(|| {
                 let tier = usize::from(ink.level) * ASCII_BODY.len() / 256;
                 (ASCII_BODY[tier], ink)
             })
@@ -1432,6 +1499,55 @@ mod tests {
     }
 
     #[test]
+    fn mol_a8_electron_cloud_haze_fills_the_background_out_to_van_der_waals() {
+        let m = by_name("methane");
+        let size = Size::new(120, 40);
+        let (r, proj) = painted(&m, size, &FACE_ON);
+        let k = proj[0].r / ball_radius(m.atoms[0].el);
+        let (mut haze, mut peak) = (0, 0u8);
+        for y in 0..r.h {
+            for x in 0..r.w {
+                let ink = r.pixels.get(x, y).unwrap();
+                // Ball and stick pixels keep their element inks; only background carries
+                // the haze, and it never marks a pixel as drawn.
+                if r.owner(x, y) != 0 {
+                    assert_ne!(ink.role, Role::Ramp(HAZE), "({x}, {y})");
+                    continue;
+                }
+                if ink == Ink::BLANK {
+                    continue;
+                }
+                assert_eq!(ink.role, Role::Ramp(HAZE), "({x}, {y})");
+                assert!(ink.level >= ink::level(ink::MIN_VISIBLE_LEVEL));
+                peak = peak.max(ink.level);
+                haze += 1;
+                // Within some atom's van der Waals radius on screen.
+                let within = proj.iter().zip(&m.atoms).any(|(p, a)| {
+                    let (cx, cy) = p.px();
+                    let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
+                    d <= 2.0 * a.el.vdw() * k * MAX_MAGNIFY + 1.0
+                });
+                assert!(within, "({x}, {y})");
+            }
+        }
+        // A cloud, not a fog: it covers a real area, and stays well under the atoms.
+        assert!(haze > 400, "{haze} haze pixels");
+        assert!(f64::from(peak) <= 255.0 * HAZE_PEAK + 0.5, "{peak}");
+        // It grows with the molecule (s²), like everything else (MOL-A5).
+        let (small, _) = painted(&m, size, &Pose { s: 0.3, ..FACE_ON });
+        let dim = (0..small.h)
+            .flat_map(|y| (0..small.w).map(move |x| (x, y)))
+            .filter_map(|(x, y)| small.pixels.get(x, y))
+            .filter(|i| i.role == Role::Ramp(HAZE))
+            .map(|i| i.level)
+            .max()
+            .unwrap_or(0);
+        assert!(dim < peak / 4, "{dim} vs {peak}");
+        // CPK: hydrogen white, carbon a clearly darker grey.
+        assert!(element_ink(El::C, 1.0).level <= 128);
+    }
+
+    #[test]
     fn mol_a4_the_nearer_surface_wins_every_pixel() {
         // An oxygen and a nearer nitrogen whose balls overlap on screen, bonded.
         let atoms = vec![at(El::O, -0.15, 0.0, -0.5), at(El::N, 0.15, 0.0, 0.5)];
@@ -1505,9 +1621,8 @@ mod tests {
             let m = Model::new("pair", "C2", "0", atoms, vec![bd(0, 1, order)]);
             let (r, proj) = painted(&m, size, &FACE_ON);
             let x = ((proj[0].px().0 + proj[1].px().0) / 2.0).floor() as i32;
-            let lit: Vec<bool> = (0..r.h)
-                .map(|y| r.pixels.get(x, y).unwrap() != Ink::BLANK)
-                .collect();
+            // Drawn model pixels only: the haze (MOL-A8) is background.
+            let lit: Vec<bool> = (0..r.h).map(|y| r.owner(x, y) != 0).collect();
             let n = lit.windows(2).filter(|w| w[1] && !w[0]).count() + usize::from(lit[0]);
             (n, lit.iter().filter(|&&l| l).count())
         };

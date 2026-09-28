@@ -905,7 +905,9 @@ fn stage_rows(size: Size) -> u16 {
 fn thread_ink(palette: Ramp, d: f32, ln_top: f64) -> Ink {
     let u = ((1.0 + f64::from(d) / f64::from(D_MIN)).ln() / ln_top).clamp(0.0, 1.0);
     let floor = match palette {
-        Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin => PALETTE_FLOOR_DEEP,
+        Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin | Ramp::Cobalt | Ramp::Eosin => {
+            PALETTE_FLOOR_DEEP
+        }
         Ramp::Ember | Ramp::Ice | Ramp::Aurora | Ramp::Starlight | Ramp::Sulfur => PALETTE_FLOOR,
     };
     ink::ramp(
@@ -2101,7 +2103,10 @@ mod tests {
         // are no darker on screen than the others'.
         for ramp in Ramp::ALL {
             let floor = thread_ink(ramp, 0.0, ln_top).level;
-            let deep = matches!(ramp, Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin);
+            let deep = matches!(
+                ramp,
+                Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin | Ramp::Cobalt | Ramp::Eosin
+            );
             let want = if deep {
                 PALETTE_FLOOR_DEEP
             } else {

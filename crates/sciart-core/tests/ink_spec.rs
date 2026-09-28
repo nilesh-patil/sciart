@@ -90,7 +90,9 @@ fn core_r80_ramps_are_named_and_listed() {
             Ramp::Aurora,
             Ramp::Plasma,
             Ramp::Starlight,
-            Ramp::Sulfur
+            Ramp::Sulfur,
+            Ramp::Cobalt,
+            Ramp::Eosin
         ]
     );
     let names: Vec<_> = Ramp::ALL.iter().map(|r| r.name()).collect();
@@ -104,7 +106,9 @@ fn core_r80_ramps_are_named_and_listed() {
             "aurora",
             "plasma",
             "starlight",
-            "sulfur"
+            "sulfur",
+            "cobalt",
+            "eosin"
         ]
     );
 }
