@@ -593,6 +593,46 @@ impl Glow {
         }
     }
 
+    /// Add `w` at continuous **pixel** position `(x, y)` (integers are pixel centres; the
+    /// centre of the pixel holding dot `(dx, dy)` is `((dx − 0.5)/2, (dy − 0.5)/2)`),
+    /// split bilinearly over the four nearest pixels (CORE-R92). Motion below a pixel stays
+    /// smooth and a moving source leaves no nearest-pixel stair steps; the in-bounds share
+    /// of `w` is conserved. Non-finite input and off-buffer pixels are ignored.
+    #[inline]
+    pub fn splat_bilinear(&mut self, x: f64, y: f64, w: f32) {
+        if !(x.is_finite() && y.is_finite() && w.is_finite()) {
+            return;
+        }
+        let (pw, ph) = (usize::from(self.px.width()), usize::from(self.px.height()));
+        let (x0, y0) = (x.floor(), y.floor());
+        let (fx, fy) = ((x - x0) as f32, (y - y0) as f32);
+        for (dx, dy, k) in [
+            (0.0, 0.0, (1.0 - fx) * (1.0 - fy)),
+            (1.0, 0.0, fx * (1.0 - fy)),
+            (0.0, 1.0, (1.0 - fx) * fy),
+            (1.0, 1.0, fx * fy),
+        ] {
+            let (px, py) = (x0 + dx, y0 + dy);
+            // Saturating casts: anything huge fails the bounds check.
+            if px >= 0.0 && py >= 0.0 && (px as usize) < pw && (py as usize) < ph {
+                self.buf[py as usize * pw + px as usize] += w * k;
+            }
+        }
+    }
+
+    /// Every pixel value, row-major (`pixel_size().width()` per row).
+    #[inline]
+    pub fn values(&self) -> &[f32] {
+        &self.buf
+    }
+
+    /// Every pixel value, mutable, row-major: for scene-side filters (a blur) between
+    /// splatting and toning.
+    #[inline]
+    pub fn values_mut(&mut self) -> &mut [f32] {
+        &mut self.buf
+    }
+
     /// The value at pixel `(x, y)`, or `None` off the buffer.
     #[inline]
     pub fn get(&self, x: i32, y: i32) -> Option<f32> {

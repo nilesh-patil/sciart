@@ -1,6 +1,6 @@
 # SPEC-001: sciart-core
 
-**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R83 in M12
+**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R92 in M12
 
 Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
@@ -168,6 +168,10 @@ Three more semantic roles for fields (still never RGB, ADR-0004), and a tone-map
 ### Deterministic trigonometry (M12)
 
 - **CORE-R90** `sciart_core::trig::{sin, cos, sin_cos}` (f64), `{sinf, cosf, sin_cosf}` (f32), and the prelude trait `Trig` with methods `sin_det`, `cos_det`, `sin_cos_det` on `f64` and `f32` give the platform libm's single-function results, bit for bit, whatever the build profile, inlining, LTO or codegen-unit split: `x.sin_cos_det() == (x.sin_det(), x.cos_det())` and each equals `sin`/`cos` evaluated on its own. Why: LLVM fuses a `sin` and a `cos` of the same argument in one function into one `sincos` call (`__sincos_stret` on Apple platforms), whose sine differs from libm's `sin` in the last bit for about 0.2 % of arguments; whether a pair lands in one function depends on inlining, which differs between dev and release builds, so the same seed gave different frames (M12: molecular_dynamics' Box–Muller start velocities, amplified by the chaotic gas). Each is a non-inlined wrapper around one libm call, so no function ever holds both halves of a pair (ADR-0016). Every trig call in the workspace goes through them: `clippy.toml` bans `f64::{sin, cos, sin_cos}` and `f32::{sin, cos, sin_cos}`, and only `trig.rs` may call them (GEN-R6).
+
+### Shared helpers lifted in the M12 closing review
+
+- **CORE-R92** `Glow::splat_bilinear(x, y, w)` adds `w` at a continuous *pixel* position (integers are pixel centres) split bilinearly over the four nearest pixels, weights `(1−fx)(1−fy), fx(1−fy), (1−fx)fy, fx·fy`. Off-buffer pixels are skipped, so the in-bounds share of `w` is conserved exactly when all four are on the buffer, and no pixel beyond distance 1 on either axis is touched; non-finite `x`, `y` or `w` deposit nothing. `Glow::values()` / `values_mut()` expose the row-major buffer for scene-side filters (a blur) between splatting and toning. Allocation-free (M12: galaxy_collision had a private copy; pulsar's beam rays and globular_cluster's glow used nearest-pixel `splat`, which quantised a moving source into spokes and stair steps).
 
 ### Title helpers (M12)
 
