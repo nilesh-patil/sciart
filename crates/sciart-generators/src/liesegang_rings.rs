@@ -58,10 +58,16 @@ const DISH_A0: f64 = 3.0;
 /// Header column of the dish's one ratio: right of the full legend and its 2-column gap,
 /// clear of the rim's top arc (LIES-A13).
 const DISH_RATIO_COL: i32 = 1 + "x(n+1)/x(n)".len() as i32 + 2;
-/// The palette of every gel pixel (LIES-A9): silver dichromate's red-brown family, in
+/// The palette of every gel pixel (LIES-A9): silver dichromate's ruby-to-brick red, in
 /// false colour: lightness encodes the amount of precipitate, whereas in a real gel the
-/// densest bands are the darkest; the yellow dichromate gel is drawn black.
-const PALETTE: Ramp = Ramp::Ember;
+/// densest bands are the darkest; the yellow dichromate gel is drawn black. `HAlpha`
+/// (wine → crimson → rose) keeps the scene red, apart from the gallery's many amber
+/// (`Ember`) scenes and from its neighbours' green (`gray_scott`) and violet
+/// (`belousov_zhabotinsky`).
+const PALETTE: Ramp = Ramp::HAlpha;
+/// Ramp position of the densest precipitate: rose, below the ramp's pale-pink top, so a
+/// mature band never reads as white light.
+const BAND_TOP: f64 = 0.85;
 
 /// Nodes per column; node `i` sits at depth `x = i + 1`, the reservoir ghost at `x = 0`.
 pub(crate) const NODES: usize = 160;
@@ -618,7 +624,7 @@ impl<'a> Integral<'a> {
 pub(crate) fn gel_pixel(d: f64, c: f64, junction: bool) -> Option<(f64, Class)> {
     // x^0.75 as √x·⁴√x: two square roots are several times cheaper than `powf`.
     let x = (d / D_FULL).clamp(0.0, 1.0).sqrt();
-    let mut precip = (0.30 + 0.70 * x * x.sqrt()) * (d / D_VIS).clamp(0.0, 1.0);
+    let mut precip = BAND_TOP * (0.30 + 0.70 * x * x.sqrt()) * (d / D_VIS).clamp(0.0, 1.0);
     if junction {
         // Scaled, not capped, so the cap keeps its cloudy gradient below the bands.
         precip *= JUNCTION_DIM;
@@ -889,7 +895,9 @@ impl LiesegangRings {
                     gauges[slot] = Some((lay.ratio_col(slot), &self.tubes[preset], lay.view));
                 }
             }
-            Act::Dish if lay.dish.rim >= 4.0 => {
+            // The ratio (`1.30`) needs columns DISH_RATIO_COL..+4: a narrower header
+            // would clip it to a number that misreads, so it shows whole or not at all.
+            Act::Dish if lay.dish.rim >= 4.0 && i32::from(lay.width) >= DISH_RATIO_COL + 4 => {
                 gauges[0] = Some((DISH_RATIO_COL, &self.dish, lay.dish.view));
             }
             _ => return,
@@ -1326,7 +1334,10 @@ mod tests {
     }
 
     #[test]
-    fn lies_a9_a10_ember_inks_and_a_free_title_row() {
+    fn lies_a9_a10_halpha_inks_below_the_pale_top_and_a_free_title_row() {
+        // The densest bands stop at rose, below HAlpha's pale-pink top (LIES-A9).
+        let top = ink::ramp(Ramp::HAlpha, BAND_TOP).level;
+        assert!(top < 230, "band top {top}");
         for opening in ACTS {
             for (w, h) in [(80u16, 24u16), (40, 12), (200, 50)] {
                 let size = Size::new(w, h);
@@ -1344,9 +1355,12 @@ mod tests {
                             Class::Empty => Role::Background,
                             Class::Liquid => Role::Wave,
                             Class::Glass => Role::Structure,
-                            _ => Role::Ramp(Ramp::Ember),
+                            _ => Role::Ramp(Ramp::HAlpha),
                         };
                         assert_eq!(ink.role, want, "{opening:?} {w}x{h} ({x}, {y})");
+                        if want == Role::Ramp(Ramp::HAlpha) {
+                            assert!(ink.level <= top, "{opening:?} {w}x{h} ({x}, {y}): {ink:?}");
+                        }
                         match class {
                             Class::Liquid => assert_eq!(ink, LIQUID_INK),
                             Class::Glass => assert_eq!(ink, WALL_INK),
@@ -1460,10 +1474,23 @@ mod tests {
         }
         let (s, _) = scene(Size::new(80, 24), 42);
         assert_eq!(s.caption(), Some(CAPTIONS[Act::Rack as usize]));
+        // A narrow dish shows the legend with its whole ratio or neither: never a
+        // clipped `1.` that misreads (the ratio needs columns 14..=17).
+        for w in 12u16..=20 {
+            let (s, _) = scene_in(Act::Dish, Size::new(w, 24), 42);
+            let row = header(&s);
+            let ratio = row.get(14..18).unwrap_or("");
+            let whole = ratio.len() == 4 && ratio.parse::<f64>().is_ok_and(|r| r > 1.0);
+            if w >= 18 {
+                assert!(row.starts_with(" x(n+1)/x(n)  ") && whole, "w={w}: {row:?}");
+            } else {
+                assert_eq!(row.trim(), "", "w={w}: {row:?}");
+            }
+        }
     }
 
     #[test]
-    fn lies_meniscus_is_flat_on_short_terminals() {
+    fn lies_a8_meniscus_is_flat_on_short_terminals() {
         // Below 40 gel rows a 1 px sag only notches single pixels (SPEC-002 Resize).
         let sag = |h| Layout::new(Size::new(80, h)).sag;
         assert_eq!((sag(12), sag(21)), (0.0, 0.0));
@@ -1472,7 +1499,7 @@ mod tests {
     }
 
     #[test]
-    fn lies_ascii_cell_takes_the_ink_of_its_stronger_half() {
+    fn lies_a8_ascii_cell_takes_the_ink_of_its_stronger_half() {
         let haze = Ink::new(Role::Ramp(PALETTE), 0);
         let band = Ink::new(Role::Ramp(PALETTE), 200);
         assert_eq!(
@@ -1594,7 +1621,7 @@ mod tests {
     }
 
     #[test]
-    fn lies_live_ratio_waits_for_a_deeper_nucleus() {
+    fn lies_a8_live_ratio_waits_for_a_deeper_nucleus() {
         let band = |x: f64, start, end| Band {
             x,
             start,
@@ -1620,7 +1647,7 @@ mod tests {
     }
 
     #[test]
-    fn lies_integral_is_an_exact_box_filter() {
+    fn lies_a8_integral_is_an_exact_box_filter() {
         let mut f = [0.0; NODES];
         f[..3].copy_from_slice(&[1.0, 2.0, 4.0]);
         let box_filter = Integral::new(&f);
