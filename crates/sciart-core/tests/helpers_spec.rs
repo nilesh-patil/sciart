@@ -280,7 +280,7 @@ fn core_r51_non_finite_endpoints_draw_nothing() {
 fn ramp_grid(size: Size) -> Grid<f32> {
     let mut g = Grid::new(size, 0.0f32);
     for (i, v) in g.as_mut_slice().iter_mut().enumerate() {
-        *v = ((i * 37 % 101) as f32).sin() * 3.0;
+        *v = ((i * 37 % 101) as f32).sin_det() * 3.0;
     }
     g
 }
@@ -738,7 +738,7 @@ proptest! {
         u in 0.0f64..=1.0, v in 0.0f64..=1.0,
     ) {
         let b = a + len;
-        let icdf = InverseCdf::<32>::build(a, b, |x| (k * x).sin().abs() + c);
+        let icdf = InverseCdf::<32>::build(a, b, |x| (k * x).sin_det().abs() + c);
         let (su, sv) = (icdf.sample(u), icdf.sample(v));
         prop_assert!((a..=b).contains(&su), "{} not in [{}, {}]", su, a, b);
         if u <= v {

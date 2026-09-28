@@ -15,8 +15,8 @@ expression: frame
             \                                 :                          //     
              \oooo                            :                        -----o   
             oo    oo                          v                      //         
-           o        ===+++++#####@@@@@#++++=========================/       o   
-           o        ===+++++#####@@@@@#++++=========================--------o   
+           o        ==+++++#####@@@@@@#++++++=======================/       o   
+           o        ==+++++#####@@@@@@#++++++=======================--------o   
           //oo    oo                                                \\          
  -------//   /oooo                                                    \\\---o   
        |    /                                                            \\     
@@ -25,4 +25,4 @@ expression: frame
            |                                                                    
          //                                                                     
                                                                                 
- Nerve spike - ion channels fire            HH squid 6.3C | v=--.- m/s | single
+ Nerve spike - ion channels open                      HH squid 6.3C  v=--.- m/s

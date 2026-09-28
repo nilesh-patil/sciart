@@ -204,7 +204,7 @@ fn core_r41_dots_set_plot_clear_blit_do_not_allocate() {
             dots.clear();
             for i in 0..4000 {
                 let t = f64::from(i) * 0.01 + f64::from(frame);
-                dots.plot(200.0 + 180.0 * t.cos(), 100.0 + 90.0 * t.sin(), ink);
+                dots.plot(200.0 + 180.0 * t.cos_det(), 100.0 + 90.0 * t.sin_det(), ink);
                 dots.set(i % 400, i / 20, ink);
             }
             black_box(dots.is_lit(3, 3));
@@ -261,7 +261,7 @@ fn core_r43_resampling_does_not_allocate() {
 #[test]
 fn core_r44_verlet_integrate_does_not_allocate() {
     // A small N-body-like system: 16 bodies in 2-D, pairwise softened gravity.
-    let mut pos: Vec<f64> = (0..32).map(|i| f64::from(i).sin() * 5.0).collect();
+    let mut pos: Vec<f64> = (0..32).map(|i| f64::from(i).sin_det() * 5.0).collect();
     let mut vel = vec![0.0; 32];
     let mut acc = vec![0.0; 32];
     let gravity = |p: &[f64], a: &mut [f64]| {
@@ -315,7 +315,7 @@ fn core_r50_projector_does_not_allocate() {
         (0..2000)
             .filter_map(|i| {
                 let t = f64::from(i) * 0.01;
-                pr.project([t.cos(), t.sin(), 0.1 * t], (40.0, 12.0), 8.0)
+                pr.project([t.cos_det(), t.sin_det(), 0.1 * t], (40.0, 12.0), 8.0)
             })
             .map(|(x, y, z)| x + y + z + pr.rotate([1.0, 2.0, 3.0])[2])
             .sum::<f64>()
@@ -334,9 +334,9 @@ fn core_r51_r55_dots_line_and_density_do_not_allocate() {
         for i in 0..500 {
             let t = f64::from(i) * 0.013;
             let (x0, y0, x1, y1) = (
-                200.0 + 150.0 * t.cos(),
+                200.0 + 150.0 * t.cos_det(),
                 100.0,
-                200.0 + 300.0 * t.sin(),
+                200.0 + 300.0 * t.sin_det(),
                 1e9 * t,
             );
             dots.line(x0, y0, x1, y1, ink);
@@ -351,6 +351,59 @@ fn core_r51_r55_dots_line_and_density_do_not_allocate() {
         dots.clear();
     });
     assert_free("Dots::line / Density", stats);
+}
+
+#[test]
+fn core_r81_tone_and_to_pixels_do_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut density = Density::new(size);
+    let mut pixels = Pixels::new(size);
+    for i in 0..400 {
+        density.deposit(f64::from(i), f64::from(i % 200), 3.0);
+    }
+    let (tone, stats) = measure(|| {
+        let tone = sciart_core::raster::Tone::asinh(0.2, 30.0);
+        density.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
+        black_box(tone.level(4.0));
+        tone
+    });
+    black_box(tone);
+    assert_free("Tone::asinh / Density::to_pixels", stats);
+}
+
+#[test]
+fn core_r85_r92_glow_does_not_allocate_after_resize() {
+    let size = Size::new(200, 50);
+    let mut glow = Glow::new(size);
+    let mut pixels = Pixels::new(size);
+    let tone = sciart_core::raster::Tone::asinh(0.4, 6.0);
+    let kernel = [(0, 0, 0.5), (1, 0, 0.25), (0, 1, 0.25)];
+    let ((), stats) = measure(|| {
+        glow.decay(0.9);
+        for i in 0..400 {
+            glow.splat(f64::from(i), f64::from(i % 200), &kernel, 3.0);
+            glow.splat_bilinear(f64::from(i) * 0.37, f64::from(i % 90) * 0.9, 1.0);
+        }
+        black_box(glow.values_mut()[0]);
+        glow.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
+        glow.resize(Size::new(100, 20));
+        glow.clear();
+    });
+    assert_free("Glow", stats);
+}
+
+#[test]
+fn core_r84_blit_over_does_not_allocate() {
+    let size = Size::new(200, 50);
+    let mut dots = Dots::new(size);
+    let mut under = Pixels::new(size);
+    let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+    for i in 0..400 {
+        dots.set(i, i % 200, Ink::new(Role::Star, 200));
+        under.set(i / 2, i % 100, Ink::new(Role::Seq, 90));
+    }
+    let ((), stats) = measure(|| dots.blit_over(&mut canvas, &under));
+    assert_free("Dots::blit_over", stats);
 }
 
 #[test]
@@ -495,4 +548,12 @@ fn core_r74_r76_title_and_label_right_do_not_allocate() {
         stats,
     );
     black_box(lead);
+}
+
+#[test]
+fn core_r28_default_pool_is_empty_with_capacity_zero_and_allocates_nothing() {
+    let (pool, stats) = measure(ParticlePool::<P>::default);
+    assert_free("ParticlePool::default", stats);
+    assert!(pool.is_empty());
+    assert_eq!(pool.capacity(), 0);
 }

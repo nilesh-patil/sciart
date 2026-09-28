@@ -13,8 +13,11 @@ rand.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+font8x8.workspace = true
 insta.workspace = true
+png.workspace = true
 proptest.workspace = true
+sciart-render.workspace = true
 sciart-testalloc.workspace = true
 
 [[bench]]

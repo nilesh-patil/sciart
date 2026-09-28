@@ -730,6 +730,18 @@ fn core_r74_dims_linearly_from_8_to_10_seconds() {
     }
 }
 
+#[test]
+fn core_r74_r76_readouts_never_outshine_the_dimmed_title() {
+    let t = Title::new(SPOTS, None);
+    let mut c = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
+    title::draw(&mut c, &t, 1e6);
+    let dimmest = (1..30)
+        .filter_map(|x| c.get(x, 23).filter(|cell| cell.ch != ' '))
+        .map(|cell| cell.ink.level)
+        .min();
+    assert_eq!(dimmest, Some(title::READOUT_LEVEL));
+}
+
 proptest! {
     #[test]
     fn core_r74_span_is_exactly_the_cells_draw_writes(w in 1u16..160, h in 1u16..40) {
@@ -777,6 +789,47 @@ proptest! {
         } else {
             prop_assert_eq!(room, 0);
         }
+    }
+
+    #[test]
+    fn core_r83_stable_readout_room_fits_every_caption_and_grows_with_width(
+        w in 1u16..240,
+        h in 1u16..40,
+    ) {
+        // Caption lengths span the real scenes' (up to ≈ 30 chars) and beyond.
+        static CAPS: [&str; 4] = [
+            "a",
+            "a much longer caption",
+            "mid caption",
+            "a caption well beyond any real scene's length",
+        ];
+        static M: Meta = Meta {
+            name: "m",
+            category: Category::Physics,
+            description: "d",
+            title: "Phenomenon · mechanism",
+            captions: &CAPS,
+        };
+        let room = title::stable_readout_room(Size::new(w, h), &M);
+        for c in std::iter::once(None).chain(CAPS.iter().copied().map(Some)) {
+            let t = Title::new(M.title, c);
+            prop_assert!(room <= title::readout_room(Size::new(w, h), &t), "{:?}", c);
+        }
+        let wider = title::stable_readout_room(Size::new(w + 1, h), &M);
+        prop_assert!(wider >= room, "w {}: {} then {}", w, room, wider);
+    }
+
+    #[test]
+    fn core_r73_full_fits_from_is_the_narrowest_full_width(
+        w in 1u16..240,
+        len in 0usize..60,
+    ) {
+        const LONG: &str = "a caption that runs on and on well past any real one";
+        let caption = &LONG[..len.min(LONG.len())];
+        let t = Title::new("Phenomenon · mechanism", Some(caption));
+        let size = Size::new(w, 40);
+        let full = t.fit(size) == Some(Form::Full);
+        prop_assert_eq!(full, usize::from(w) >= t.full_fits_from(), "w {} len {}", w, len);
     }
 }
 

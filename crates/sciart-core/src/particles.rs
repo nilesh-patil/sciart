@@ -8,6 +8,7 @@ use std::f64::consts::TAU;
 
 use rand::Rng;
 
+use crate::trig::Trig;
 use crate::{Canvas, Glyph, Ink};
 
 /// A bounded, unordered set of live particles (CORE-R28).
@@ -19,6 +20,14 @@ use crate::{Canvas, Glyph, Ink};
 pub struct ParticlePool<P> {
     items: Vec<P>,
     capacity: usize,
+}
+
+/// An empty pool of capacity 0, the placeholder until a scene sizes it with
+/// [`ParticlePool::set_capacity`]; allocates nothing.
+impl<P> Default for ParticlePool<P> {
+    fn default() -> Self {
+        Self::with_capacity(0)
+    }
 }
 
 impl<P> ParticlePool<P> {
@@ -197,7 +206,7 @@ fn box_muller(rng: &mut impl Rng) -> (f64, f64) {
     let u1 = 1.0 - rng.random::<f64>();
     let u2 = rng.random::<f64>();
     let r = (-2.0 * u1.ln()).sqrt();
-    let (s, c) = (TAU * u2).sin_cos();
+    let (s, c) = (TAU * u2).sin_cos_det();
     (r * c, r * s)
 }
 

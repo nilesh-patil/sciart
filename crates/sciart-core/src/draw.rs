@@ -6,6 +6,7 @@
 use std::f64::consts::TAU;
 
 use crate::geom::ASPECT;
+use crate::trig::Trig;
 use crate::{Canvas, Glyph, GlyphMode, Ink, Size};
 
 /// Upper bound on outline samples, so absurd radii stay cheap.
@@ -21,8 +22,8 @@ pub fn orbit(canvas: &mut Canvas, cx: f64, cy: f64, r: f64, glyph: Glyph, ink: I
     let mut last = None;
     for i in 0..samples {
         let theta = TAU * i as f64 / samples as f64;
-        let x = (cx + r * theta.cos() * ASPECT).round() as i32;
-        let y = (cy + r * theta.sin()).round() as i32;
+        let x = (cx + r * theta.cos_det() * ASPECT).round() as i32;
+        let y = (cy + r * theta.sin_det()).round() as i32;
         if last != Some((x, y)) {
             canvas.put(x, y, glyph, ink);
             last = Some((x, y));
