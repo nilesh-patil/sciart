@@ -76,6 +76,25 @@ pub fn stronger(a: Ink, b: Ink) -> Ink {
     }
 }
 
+/// The ASCII brightness ramp of [`ascii_ramp_cell`], dimmest first.
+pub const ASCII_RAMP: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
+
+/// A [`Pixels::blit`] ASCII fallback for half-block pictures of light (CORE-R91): the
+/// [`stronger`] of the cell's two pixels, drawn as its level on [`ASCII_RAMP`]
+/// (`level · 9 / 256`) in that pixel's ink; `None` (cell untouched) when both are empty.
+/// Lifted out of black_hole, which gravitational_lensing imported it from (M12).
+#[inline]
+pub fn ascii_ramp_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
+    let ink = stronger(top, bottom);
+    if is_empty(ink) {
+        return None;
+    }
+    Some((
+        ASCII_RAMP[usize::from(ink.level) * ASCII_RAMP.len() / 256],
+        ink,
+    ))
+}
+
 /// Walk the dots of the segment `(x0, y0)–(x1, y1)` on a `lattice`-sized dot grid
 /// (CORE-R51), calling `f` for each; `f` must ignore off-lattice dots.
 ///

@@ -18,6 +18,7 @@ use std::f64::consts::{PI, TAU};
 use rand::Rng;
 use sciart_core::grid::lattice_for;
 use sciart_core::prelude::*;
+use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
 use sciart_core::{geom, ink};
@@ -26,7 +27,7 @@ pub static META: Meta = Meta {
     name: "black_hole",
     category: Category::DeepCosmos,
     description: "A ray-traced black hole: lensed accretion disk, lensing ring and a lensed sky",
-    title: "Black hole · infalling gas glows",
+    title: "Black hole · orbiting gas glows",
     captions: &[],
 };
 
@@ -157,24 +158,37 @@ fn feather(r: f64) -> f64 {
 /// redshift `√(1 − 2/r)` times the transverse Doppler (time-dilation) shift of the
 /// orbiting gas; `1 / (1 − Ω λ)` is the line-of-sight Doppler shift, with the photon's
 /// `λ = L_z / E = −b cos ψ sin i` and the true (geometric) Kepler `Ω = r^{-3/2}`.
-pub(crate) fn redshift(r: f64, b: f64, psi: f64) -> f64 {
+pub(crate) fn redshift(r: f64, b: f64, psi: f64, tilt: Tilt) -> f64 {
     let omega = r.powf(-1.5);
-    (1.0 - 3.0 / r).max(0.0).sqrt() / (1.0 + omega * b * psi.cos_det() * INCLINATION.sin_det())
+    (1.0 - 3.0 / r).max(0.0).sqrt() / (1.0 + omega * b * psi.cos_det() * tilt.sin)
+}
+
+/// `sin i` and `cos i` of the disk's `INCLINATION`, evaluated once rather than per ray
+/// (a resize traces ~10⁵ rays).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Tilt {
+    sin: f64,
+    cos: f64,
+}
+
+impl Tilt {
+    pub(crate) fn new() -> Self {
+        let (sin, cos) = INCLINATION.sin_cos_det();
+        Self { sin, cos }
+    }
 }
 
 /// Sweep angle at which a ray from the observer at screen angle `psi` first reaches the
 /// disk plane: `r̂(γ) = cos γ ô + sin γ ê` meets `n̂·r̂ = 0` (SPEC-002).
-fn first_crossing(psi: f64) -> f64 {
-    INCLINATION
-        .cos_det()
-        .atan2(-psi.sin_det() * INCLINATION.sin_det())
+fn first_crossing(psi: f64, tilt: Tilt) -> f64 {
+    tilt.cos.atan2(-psi.sin_det() * tilt.sin)
 }
 
 /// Disk azimuth of the ray's position at sweep angle `gamma` (on the disk plane).
-fn disk_azimuth(psi: f64, gamma: f64) -> f64 {
+fn disk_azimuth(psi: f64, gamma: f64, tilt: Tilt) -> f64 {
     let (sg, cg) = gamma.sin_cos_det();
     let (sp, cp) = psi.sin_cos_det();
-    let along_d = sg * sp * INCLINATION.cos_det() - cg * INCLINATION.sin_det();
+    let along_d = sg * sp * tilt.cos - cg * tilt.sin;
     geom::wrap(along_d.atan2(sg * cp), TAU)
 }
 
@@ -203,6 +217,7 @@ pub(crate) struct Geodesics {
     /// costs one `asinh`, not three (a resize traces ~10⁵ rays).
     t0: f64,
     t1: f64,
+    tilt: Tilt,
 }
 
 impl Geodesics {
@@ -254,7 +269,13 @@ impl Geodesics {
             }
         }
         let (t0, t1) = Self::t_range();
-        Self { u, end, t0, t1 }
+        Self {
+            u,
+            end,
+            t0,
+            t1,
+            tilt: Tilt::new(),
+        }
     }
 
     /// Fractional table row of `b`, or `None` beyond `B_MAX` (weak field).
@@ -311,7 +332,7 @@ impl Geodesics {
     pub(crate) fn trace(&self, b: f64, psi: f64) -> Fate {
         let row = self.row(b);
         let end = self.end_at(row, b);
-        let gamma0 = first_crossing(psi);
+        let gamma0 = first_crossing(psi, self.tilt);
         for order in 0..2u8 {
             let gamma = gamma0 + f64::from(order) * PI;
             if gamma >= end {
@@ -321,7 +342,7 @@ impl Geodesics {
             if u > 0.0 {
                 let r = 1.0 / u;
                 if (ISCO..=R_OUT).contains(&r) {
-                    let phi = disk_azimuth(psi, gamma);
+                    let phi = disk_azimuth(psi, gamma, self.tilt);
                     return Fate::Disk { r, phi, order };
                 }
             }
@@ -362,13 +383,13 @@ impl Geodesics {
 
 /// Unit sky coordinates `(lon / 2π, ½ − lat / π)` of the direction an escaped ray came
 /// from: the source sits at angle `b/D − α` from the hole, on the ray's side (SPEC-002).
-fn sky_coords(b: f64, psi: f64, phi_end: f64) -> (f64, f64) {
+fn sky_coords(b: f64, psi: f64, phi_end: f64, tilt: Tilt) -> (f64, f64) {
     let delta = b / OBSERVER - (phi_end - PI);
     let (sd, cd) = delta.sin_cos_det();
     let (sp, cp) = psi.sin_cos_det();
     // dir = −cos δ ô + sin δ ê, ê = (cos ψ, sin ψ, 0), ô = (0, 0, 1).
     let dir = [sd * cp, sd * sp, -cd];
-    let (si, ci) = INCLINATION.sin_cos_det();
+    let (si, ci) = (tilt.sin, tilt.cos);
     let along_x = dir[0];
     let along_d = dir[1] * ci - dir[2] * si;
     let along_n = dir[1] * si + dir[2] * ci;
@@ -528,8 +549,14 @@ struct Hit {
 
 impl Hit {
     /// The hit of a ray `(b, psi)` on the disk at `(r, phi)`, one of `samples` per node.
-    fn new(node: u32, r: f64, phi: f64, b: f64, psi: f64, samples: usize) -> Self {
-        let t = redshift(r, b, psi) * temperature(r) / T_PEAK;
+    fn new(
+        geo: &Geodesics,
+        node: u32,
+        (r, phi): (f64, f64),
+        (b, psi): (f64, f64),
+        samples: usize,
+    ) -> Self {
+        let t = redshift(r, b, psi, geo.tilt) * temperature(r) / T_PEAK;
         let ia = ((phi / TAU * NA as f64) as usize).min(NA - 1);
         Self {
             node,
@@ -557,7 +584,7 @@ fn trace_ring(
             (c as f64 + 0.5) / RING_SS as f64,
         );
         if let Fate::Disk { r, phi, order: 1 } = geo.trace(b, psi) {
-            hits.push(Hit::new(node, r, phi, b, psi, 1));
+            hits.push(Hit::new(geo, node, (r, phi), (b, psi), 1));
         }
     }
     // The mean over the ring's own samples: full coverage, however thin it is.
@@ -673,10 +700,11 @@ impl BlackHole {
                         // Near the shadow the order-1 image is traced more finely below.
                         Fate::Disk { order: 1, .. } if ring => {}
                         Fate::Disk { r, phi, .. } => {
-                            self.hits.push(Hit::new(node, r, phi, b, psi, SS * SS));
+                            self.hits
+                                .push(Hit::new(geo, node, (r, phi), (b, psi), SS * SS));
                         }
                         Fate::Sky { phi_end } => {
-                            let (u, v) = sky_coords(b, psi, phi_end);
+                            let (u, v) = sky_coords(b, psi, phi_end, geo.tilt);
                             let slot = node * (SS * SS) as u32 + s as u32;
                             let key = 2 * star_texel(u, v) + u32::from(psi >= 0.0);
                             escapes.push((key, off_centre(u, v) as f32, slot));
@@ -849,17 +877,6 @@ impl FluxLevels {
     }
 }
 
-/// ASCII fallback shared by the half-block sky scenes: the brighter half's level on the
-/// ramp `.:-=+*#%@`, in that half's ink (GEN-R10).
-pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    const RAMP: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
-    let ink = [top, bottom]
-        .into_iter()
-        .filter(|p| p.role != Role::Background)
-        .max_by_key(|p| p.level)?;
-    Some((RAMP[usize::from(ink.level) * RAMP.len() / 256], ink))
-}
-
 impl Generator for BlackHole {
     fn meta(&self) -> &'static Meta {
         &META
@@ -883,7 +900,7 @@ impl Generator for BlackHole {
 
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
     }
 }
 
@@ -1025,7 +1042,8 @@ mod tests {
                 let Fate::Disk { r, .. } = g.trace(b, psi) else {
                     continue;
                 };
-                let f = (redshift(r, b, psi) * temperature(r) / T_PEAK).powi(4) * feather(r);
+                let f = (redshift(r, b, psi, Tilt::new()) * temperature(r) / T_PEAK).powi(4)
+                    * feather(r);
                 if T_PEAK * f.powf(DISPLAY_EXP) < 2.0 * T_SHOW {
                     continue;
                 }
@@ -1046,7 +1064,10 @@ mod tests {
     fn bh_a3_approaching_half_is_bluer_and_brighter() {
         for r in [ISCO + 0.1, R_PEAK, 12.0, R_OUT] {
             for b in [0.5 * r, r] {
-                assert!(redshift(r, b, PI) > redshift(r, b, 0.0), "r={r} b={b}");
+                assert!(
+                    redshift(r, b, PI, Tilt::new()) > redshift(r, b, 0.0, Tilt::new()),
+                    "r={r} b={b}"
+                );
             }
         }
         let size = Size::new(200, 50);
@@ -1079,7 +1100,7 @@ mod tests {
         // Along cos ψ = 0 only gravitational redshift × transverse Doppler remains.
         for r in [ISCO, 9.0, R_OUT] {
             for b in [3.0, 10.0] {
-                let g = redshift(r, b, PI / 2.0);
+                let g = redshift(r, b, PI / 2.0, Tilt::new());
                 assert!((g - (1.0 - 3.0 / r).sqrt()).abs() < 1e-12);
             }
         }
