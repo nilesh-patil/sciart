@@ -14,8 +14,10 @@
 //! The picture is a short long exposure: each host has its own exposure buffer at
 //! half-block pixel resolution; stars splat into it every step and it decays with
 //! `EXPOSURE_TAU`, so a few thousand test stars read as smooth glowing disks. Stars beyond
-//! the disk (tails and bridge) go to a second, longer exposure per host that is blurred
-//! before toning, so the sparse streams read as continuous luminous bands. After the
+//! the disk (tails and bridge) go to a second, longer exposure per host whose splats are
+//! pre-blurred, so the sparse streams read as continuous luminous bands. Blurring is
+//! linear and commutes with the exposures' decay, so splatting through the blur kernel
+//! equals blurring the exposure, with no working copies (TEST-R7). After the
 //! first close approach a fixed sample of "cloud" stars lights up as Hα knots where the
 //! stellar density is high (triggered star formation, stylised: the model has no gas).
 
@@ -73,9 +75,9 @@ const EXPOSURE_TAU: f64 = 0.15;
 /// e-folding time (s): a star's light is smeared continuously along its own path, not in
 /// discrete back-splats, so neighbouring stars do not print a comb.
 const TAIL_TAU: f64 = 0.6;
-/// Box-blur passes (radius 1 px each) over the tail buffers before toning: two passes are
-/// a 5-px triangle kernel (σ ≈ 1.15 px), wide enough to merge neighbouring streams into
-/// one band ≥ 3 px across, narrow enough that the tails stay thin.
+/// Box-blur passes (radius 1 px each) folded into every tail splat: two passes are a 5-px
+/// triangle kernel (σ ≈ 1.15 px), wide enough to merge neighbouring streams into one band
+/// ≥ 3 px across, narrow enough that the tails stay thin.
 const TAIL_BLUR_PASSES: usize = 2;
 /// Tail light is lifted by this gain before the shared tone curve: a band a few stars
 /// deep sits on the tone's linear toe, where it would otherwise vanish.
@@ -443,13 +445,8 @@ pub struct GalaxyCollision {
     frame: Frame,
     /// Per-host disk exposure at pixel resolution.
     exposure: [Glow; 2],
-    /// Per-host tail and bridge exposure (longer, blurred before toning).
+    /// Per-host tail and bridge exposure (longer, splatted pre-blurred).
     tails: [Glow; 2],
-    /// The blurred tail and disk light per host, and one line of scratch for the
-    /// separable blur.
-    blurred: [Vec<f32>; 2],
-    disk: [Vec<f32>; 2],
-    scratch: Vec<f32>,
     tone: Tone,
     pixels: Pixels,
     /// Distant field stars, normalized `[0, 1)²` (they do not zoom).
@@ -468,9 +465,6 @@ impl Default for GalaxyCollision {
             },
             exposure: [Glow::default(), Glow::default()],
             tails: [Glow::default(), Glow::default()],
-            blurred: [Vec::new(), Vec::new()],
-            disk: [Vec::new(), Vec::new()],
-            scratch: Vec::new(),
             tone: Tone::asinh(KNEE, WHITE),
             pixels: Pixels::default(),
             sky: Vec::new(),
@@ -557,16 +551,28 @@ impl GalaxyCollision {
             let lit = (1.0 + ARM_CONTRAST * inside * wave) as f32;
             let inside = inside as f32;
             if inside > 0.0 {
-                self.exposure[g].splat_bilinear(x, y, w * lit * inside);
+                splat_blurred(
+                    &mut self.exposure[g],
+                    x,
+                    y,
+                    w * lit * inside,
+                    DISK_BLUR_PASSES,
+                );
             }
             if inside < 1.0 {
-                self.tails[g].splat_bilinear(x, y, wt * (1.0 - inside));
+                splat_blurred(
+                    &mut self.tails[g],
+                    x,
+                    y,
+                    wt * (1.0 - inside),
+                    TAIL_BLUR_PASSES,
+                );
             }
         }
         for (e, core) in self.exposure.iter_mut().zip(&sim.cores) {
             let (x, y) = frame.pixel(core.pos);
             for (dx, dy, k) in NUCLEUS {
-                e.splat_bilinear(x + dx, y + dy, w * BULGE * k);
+                splat_blurred(e, x + dx, y + dy, w * BULGE * k, DISK_BLUR_PASSES);
             }
         }
     }
@@ -581,21 +587,9 @@ impl GalaxyCollision {
     /// convention: `render` only blits).
     fn develop(&mut self) {
         let fade = self.fade();
-        let size = self.exposure[0].pixel_size();
-        let (pw, ph) = (usize::from(size.width()), usize::from(size.height()));
-        for (out, tail) in self.blurred.iter_mut().zip(&self.tails) {
-            out.copy_from_slice(tail.values());
-            for _ in 0..TAIL_BLUR_PASSES {
-                box_blur(out, pw, ph, &mut self.scratch);
-            }
-        }
-        for (out, disk) in self.disk.iter_mut().zip(&self.exposure) {
-            out.copy_from_slice(disk.values());
-            for _ in 0..DISK_BLUR_PASSES {
-                box_blur(out, pw, ph, &mut self.scratch);
-            }
-        }
-        let (tone, [e1, e2], [t1, t2]) = (&self.tone, &self.disk, &self.blurred);
+        let pw = usize::from(self.exposure[0].pixel_size().width());
+        let (tone, [e1, e2], [t1, t2]) = (&self.tone, &self.exposure, &self.tails);
+        let (e1, e2, t1, t2) = (e1.values(), e2.values(), t1.values(), t2.values());
         self.pixels.shade(|x, y| {
             let i = y as usize * pw + x as usize;
             let (a, b) = (e1[i] + TAIL_GAIN * t1[i], e2[i] + TAIL_GAIN * t2[i]);
@@ -632,28 +626,63 @@ impl GalaxyCollision {
     }
 }
 
-/// One radius-1 box-blur pass over a row-major `pw × ph` buffer, separable (rows then
-/// columns), with the edge pixel repeated so no light leaks off the border. `scratch`
-/// holds one line and is sized in `resize` (`max(pw, ph)` values); too small, it is a
-/// no-op rather than an allocation.
-fn box_blur(buf: &mut [f32], pw: usize, ph: usize, scratch: &mut [f32]) {
-    if pw == 0 || ph == 0 || scratch.len() < pw.max(ph) || buf.len() < pw * ph {
+/// Most blur passes [`splat_blurred`] folds in.
+const MAX_BLUR_PASSES: usize = 2;
+/// Taps of 0, 1 and 2 radius-1 box-blur passes: the unit, `[1 1 1]/3`, `[1 2 3 2 1]/9`.
+const BLUR_KERNELS: [&[f32]; MAX_BLUR_PASSES + 1] = [
+    &[1.0],
+    &[1.0 / 3.0; 3],
+    &[1.0 / 9.0, 2.0 / 9.0, 3.0 / 9.0, 2.0 / 9.0, 1.0 / 9.0],
+];
+
+/// The per-axis weights of a bilinear split at fraction `f` convolved with the
+/// `passes`-pass box kernel: `2·passes + 2` taps starting at offset `−passes`.
+fn blur_taps(f: f32, passes: usize) -> ([f32; 2 * MAX_BLUR_PASSES + 2], usize) {
+    let k = BLUR_KERNELS[passes.min(MAX_BLUR_PASSES)];
+    let mut taps = [0.0; 2 * MAX_BLUR_PASSES + 2];
+    for (i, &v) in k.iter().enumerate() {
+        taps[i] += (1.0 - f) * v;
+        taps[i + 1] += f * v;
+    }
+    (taps, k.len() + 1)
+}
+
+/// Add `w` at continuous pixel position `(x, y)` (integers are pixel centres) as
+/// [`Glow::splat_bilinear`] followed by `passes` (≤ 2) radius-1 box blurs of the buffer
+/// would (GAL-A5): blur is linear and commutes with the exposure's decay, so a buffer of
+/// pre-blurred splats *is* the blurred exposure, and the scene keeps no blurred copies
+/// (TEST-R7). The in-bounds share of `w` is conserved; non-finite input is ignored.
+fn splat_blurred(glow: &mut Glow, x: f64, y: f64, w: f32, passes: usize) {
+    if !(x.is_finite() && y.is_finite() && w.is_finite()) {
         return;
     }
-    let mut pass = |n: usize, at: &dyn Fn(usize) -> usize, buf: &mut [f32]| {
-        for k in 0..n {
-            let (l, r) = (k.saturating_sub(1), (k + 1).min(n - 1));
-            scratch[k] = (buf[at(l)] + buf[at(k)] + buf[at(r)]) / 3.0;
-        }
-        for k in 0..n {
-            buf[at(k)] = scratch[k];
-        }
-    };
-    for y in 0..ph {
-        pass(pw, &|k| y * pw + k, buf);
+    let size = glow.pixel_size();
+    let (pw, ph) = (i64::from(size.width()), i64::from(size.height()));
+    let (x0, y0) = (x.floor(), y.floor());
+    // Far off the buffer (or huge): nothing lands.
+    let p = passes.min(MAX_BLUR_PASSES) as i64;
+    if x0 < -(p as f64) - 2.0
+        || y0 < -(p as f64) - 2.0
+        || x0 > (pw + p) as f64
+        || y0 > (ph + p) as f64
+    {
+        return;
     }
-    for x in 0..pw {
-        pass(ph, &|k| k * pw + x, buf);
+    let (x0, y0) = (x0 as i64 - p, y0 as i64 - p);
+    let (hx, n) = blur_taps((x - x.floor()) as f32, passes);
+    let (hy, _) = blur_taps((y - y.floor()) as f32, passes);
+    let buf = glow.values_mut();
+    for (j, &wy) in hy[..n].iter().enumerate() {
+        let py = y0 + j as i64;
+        if !(0..ph).contains(&py) {
+            continue;
+        }
+        for (i, &wx) in hx[..n].iter().enumerate() {
+            let px = x0 + i as i64;
+            if (0..pw).contains(&px) {
+                buf[(py * pw + px) as usize] += w * wx * wy;
+            }
+        }
     }
 }
 
@@ -737,13 +766,6 @@ impl Generator for GalaxyCollision {
         for e in self.exposure.iter_mut().chain(&mut self.tails) {
             e.resize(size);
         }
-        let px = self.pixels.pixel_size();
-        for b in self.blurred.iter_mut().chain(&mut self.disk) {
-            b.clear();
-            b.resize(px.area(), 0.0);
-        }
-        self.scratch
-            .resize(usize::from(px.width().max(px.height())), 0.0);
         let n = star_count(size);
         match &mut self.sim {
             // Keep the running encounter at any new size (GAL-A4). A shrink keeps a prefix
@@ -1162,13 +1184,11 @@ mod tests {
 
     #[test]
     fn gal_a5_tail_blur_conserves_light_and_spreads_it_over_3_px() {
-        let (pw, ph) = (9, 7);
-        let mut buf = vec![0.0_f32; pw * ph];
-        buf[3 * pw + 4] = 1.0;
-        let mut scratch = vec![0.0_f32; pw.max(ph)];
-        for _ in 0..TAIL_BLUR_PASSES {
-            box_blur(&mut buf, pw, ph, &mut scratch);
-        }
+        // A 9 × 7-pixel glow (cells 9 × 4, the last pixel row unused).
+        let mut g = Glow::new(Size::new(9, 4));
+        let pw = usize::from(g.pixel_size().width());
+        splat_blurred(&mut g, 4.0, 3.0, 1.0, TAIL_BLUR_PASSES);
+        let buf = g.values();
         let total: f32 = buf.iter().sum();
         assert!((total - 1.0).abs() < 1e-6, "{total}");
         // A single tail star is a soft blob at least 3 px across in both directions.
@@ -1177,8 +1197,46 @@ mod tests {
             let v = buf[(3 + dy) as usize * pw + (4 + dx) as usize];
             assert!(v > 0.4 * peak, "({dx},{dy}) {v} vs {peak}");
         }
-        // Too small a scratch is a no-op, never a panic or an allocation.
-        box_blur(&mut buf, pw, ph, &mut []);
+        // Equal to a bilinear splat blurred afterwards, at any sub-pixel position: the
+        // fold is exact (one blur pass as three-tap sums along each axis).
+        for (x, y) in [(3.3, 2.6), (4.9, 3.1)] {
+            let mut a = Glow::new(Size::new(9, 4));
+            splat_blurred(&mut a, x, y, 1.0, 1);
+            let mut b = Glow::new(Size::new(9, 4));
+            b.splat_bilinear(x, y, 1.0);
+            let src = b.values().to_vec();
+            let ph = src.len() / pw;
+            let at = |x: i64, y: i64| {
+                if (0..pw as i64).contains(&x) && (0..ph as i64).contains(&y) {
+                    src[y as usize * pw + x as usize]
+                } else {
+                    0.0
+                }
+            };
+            for py in 0..ph as i64 {
+                for px in 0..pw as i64 {
+                    let mut v = 0.0;
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            v += at(px + dx, py + dy) / 9.0;
+                        }
+                    }
+                    let got = a.values()[py as usize * pw + px as usize];
+                    assert!((got - v).abs() < 1e-6, "({px},{py}) {got} vs {v}");
+                }
+            }
+        }
+        // Off the buffer or non-finite: nothing lands, nothing panics.
+        let mut g = Glow::new(Size::new(9, 4));
+        for (x, y) in [
+            (-50.0, 2.0),
+            (1e30, 1.0),
+            (f64::NAN, 1.0),
+            (2.0, f64::INFINITY),
+        ] {
+            splat_blurred(&mut g, x, y, 1.0, 2);
+        }
+        assert!(g.values().iter().all(|&v| v == 0.0));
     }
 
     #[test]
@@ -1201,8 +1259,8 @@ mod tests {
                     return false;
                 }
                 let i = y as usize * pw + x as usize;
-                let tail = TAIL_GAIN * (g.blurred[0][i] + g.blurred[1][i]);
-                let disk = g.disk[0][i] + g.disk[1][i];
+                let tail = TAIL_GAIN * (g.tails[0].values()[i] + g.tails[1].values()[i]);
+                let disk = g.exposure[0].values()[i] + g.exposure[1].values()[i];
                 tail > disk && g.tone.level(tail + disk) > 0
             };
             let (mut lit, mut thick) = (0, 0);

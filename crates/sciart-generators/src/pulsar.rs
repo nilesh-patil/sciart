@@ -42,6 +42,8 @@ const R_STAR: f64 = 0.07;
 /// Closed dipole loops (apex radius, `R_LC`) and the open lines' apex beyond the cylinder.
 const CLOSED: [f64; 2] = [0.4, 0.8];
 const OPEN: f64 = 2.5;
+/// Open lines end this far from the star (`R_LC`), fading to nothing there (PUL-A7).
+const OPEN_REACH: f64 = 1.15;
 /// Magnetic meridians the closed loops and the open lines are drawn in: few loops, so the
 /// co-rotating magnetosphere reads as nested shells rather than a tangle.
 const CLOSED_MERIDIANS: usize = 4;
@@ -100,8 +102,8 @@ const INSET_FEATHER: f64 = 2.0;
 /// A beam whose axis points at us (`axis·ẑ` from `FACING.0` to `FACING.1`) is dimmed by
 /// up to `FACING_DIM` and shortened by up to `FACING_SHORTEN`.
 const FACING: (f64, f64) = (0.3, 0.9);
-const FACING_DIM: f64 = 0.6;
-const FACING_SHORTEN: f64 = 0.6;
+const FACING_DIM: f64 = 0.75;
+const FACING_SHORTEN: f64 = 0.75;
 /// Below this width only the inner closed loop is drawn per meridian: the outer one and
 /// the cylinder crowd the star into a tangle of thin lines.
 const OUTER_LOOP_MIN_WIDTH: u16 = 120;
@@ -110,7 +112,7 @@ const OUTER_LOOP_MIN_WIDTH: u16 = 120;
 const CLOSED_LEVEL: (f64, f64) = (80.0, 150.0);
 const CLOSED_FALLOFF: f64 = 0.65;
 const OPEN_LEVEL: (f64, f64) = (150.0, 200.0);
-const GUIDE_LEVEL: u8 = 90;
+const GUIDE_LEVEL: u8 = 70;
 /// The star: a white-hot core pixel disc and a softer halo around it (radii in pixels).
 const STAR_CORE: (f64, u8) = (0.8, 255);
 const STAR_HALO: (f64, u8) = (1.9, 205);
@@ -351,27 +353,19 @@ impl Pulsar {
         ((phi - PULSE_PHASE + PI) / TAU).floor() as i64
     }
 
-    /// Draw the spin axis and the light cylinder's silhouette, dashed (every other
-    /// segment of 24).
+    /// Draw the spin axis, dashed (every other segment of 24), fading toward its ends. The
+    /// light cylinder is not outlined: a dashed silhouette read as a ghost box round the
+    /// star; the open field lines ending on it mark it instead (PUL-A7).
     fn guides(&mut self) {
-        let ink = Ink::new(Role::Dim, GUIDE_LEVEL);
         let axis = spin_axis();
-        let e2 = cross(axis, [1.0, 0.0, 0.0]);
         let steps = 24;
         for i in (0..steps).step_by(2) {
             let s = |i: usize| CYLINDER_H * (2.0 * i as f64 / steps as f64 - 1.0);
             let (a, b) = (scale(axis, s(i)), scale(axis, s(i + 1)));
-            self.line(a, b, ink);
-            for side in [-1.0, 1.0] {
-                let off = [side, 0.0, 0.0];
-                self.line(add(a, off), add(b, off), ink);
-            }
-            for end in [-CYLINDER_H, CYLINDER_H] {
-                let rim = |i: usize| {
-                    let (s, c) = (TAU * i as f64 / steps as f64).sin_cos_det();
-                    add(scale(axis, end), add([c, 0.0, 0.0], scale(e2, s)))
-                };
-                self.line(rim(i), rim(i + 1), ink);
+            let fade = 1.0 - (s(i) + s(i + 1)).abs() / (2.0 * CYLINDER_H);
+            let level = f64::from(GUIDE_LEVEL) * fade;
+            if level >= ink::MIN_VISIBLE_LEVEL {
+                self.line(a, b, Ink::new(Role::Dim, ink::level(level)));
             }
         }
     }
@@ -408,14 +402,18 @@ impl Pulsar {
                 for i in 1..=LINE_STEPS {
                     let th = start + dir * 0.5 * PI * i as f64 / LINE_STEPS as f64;
                     let p = field_point(OPEN, th, psi, m);
-                    if cylinder_radius(p) > 1.0 {
+                    // Stopped at the light cylinder and within `OPEN_REACH` of the star,
+                    // fading out along the way: a line seen end-on is a short fading
+                    // stroke, never a spike across the frame (PUL-A7).
+                    let r = norm(p);
+                    if cylinder_radius(p) > 1.0 || r > OPEN_REACH {
                         break;
                     }
-                    self.line(
-                        prev,
-                        p,
-                        plasma(depth_level(OPEN_LEVEL, (prev[2] + p[2]) / 2.0)),
-                    );
+                    let fade = (1.0 - r / OPEN_REACH).sqrt();
+                    let level = fade * depth_level(OPEN_LEVEL, (prev[2] + p[2]) / 2.0);
+                    if level >= ink::MIN_VISIBLE_LEVEL {
+                        self.line(prev, p, plasma(level));
+                    }
                     prev = p;
                 }
             }
@@ -715,6 +713,56 @@ mod tests {
         }
         // Degenerate insets never panic and keep two lines.
         assert_eq!(stack_layout(0, 0).0, 2);
+    }
+
+    #[test]
+    fn pul_a7_no_cylinder_box_and_no_line_spikes_across_the_frame() {
+        let size = Size::new(120, 40);
+        let mut g = Pulsar::default();
+        g.resize(size, &mut Ctx::new(3, size));
+        let keep_out = g.inset;
+        for k in 0..40 {
+            g.t = f64::from(k) * 0.07;
+            g.draw_lines(magnetic_axis(phase(g.t)));
+            let d = g.dots.dot_size();
+            for y in 0..i32::from(d.height()) {
+                for x in 0..i32::from(d.width()) {
+                    if !g.dots.is_lit(x, y) {
+                        continue;
+                    }
+                    let (cx, cy) = ((f64::from(x) + 0.5) / 2.0, (f64::from(y) + 0.5) / 4.0);
+                    let in_inset = keep_out.is_some_and(|i| {
+                        (i.x..i.x + i.w).contains(&(cx as i32))
+                            && (i.y..i.y + i.h).contains(&(cy as i32))
+                    });
+                    if in_inset {
+                        continue;
+                    }
+                    let wx = (cx - g.centre.0) / (g.zoom * ASPECT);
+                    let wy = (g.centre.1 - cy) / g.zoom;
+                    // Nothing reaches past the flash's spikes: open lines stop at
+                    // `OPEN_REACH`, the axis at the cylinder's half-height.
+                    assert!(
+                        wx.hypot(wy) <= FLASH_SPIKE + 0.1,
+                        "t={}: dot at ({wx}, {wy})",
+                        g.t
+                    );
+                }
+            }
+            // The only dim guide is the spin axis, near x = 0: no cylinder walls.
+            let mut c = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut c);
+            for (i, cell) in c.cells().iter().enumerate() {
+                let braille = (0x2801..=0x28FF).contains(&(cell.ch as u32));
+                if braille && cell.ink.role == Role::Dim {
+                    let cx = (i % 120) as f64 + 0.5;
+                    let wx = (cx - g.centre.0) / (g.zoom * ASPECT);
+                    assert!(wx.abs() < 0.4, "t={}: dim guide at x {wx}", g.t);
+                }
+            }
+        }
+        // Open lines fade out before `OPEN_REACH`, and the axis toward its ends.
+        const { assert!(OPEN_REACH < CYLINDER_H && OPEN_REACH < FLASH_SPIKE) };
     }
 
     #[test]

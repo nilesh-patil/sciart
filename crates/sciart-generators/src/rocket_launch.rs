@@ -32,7 +32,7 @@ pub static META: Meta = Meta {
     name: "rocket_launch",
     category: Category::Voyages,
     description: "A two-stage gravity-turn launch from the pad through max-Q and staging",
-    title: "Rocket launch · stages drop away",
+    title: "Rocket launch · stage drops away",
     captions: &ACTS,
 };
 
@@ -390,7 +390,13 @@ const STEAM_RATE: f64 = 90.0;
 // ---------------------------------------------------------------------------------------
 
 /// The closest view spans this much altitude (m): pad, tower and a 70 m vehicle.
-const VIEW_MIN: f64 = 240.0;
+const VIEW_MIN: f64 = 150.0;
+/// Day-sky gradient over the frame (ROC-A5): the level is `sky_level(h)` times
+/// `SKY_ZENITH + SKY_HORIZON·exp(−rise / SKY_FALL)`, `rise` the height above the horizon as a
+/// share of the frame: a deep-blue zenith paling to near-white at the horizon.
+const SKY_ZENITH: f64 = 0.5;
+const SKY_HORIZON: f64 = 0.95;
+const SKY_FALL: f64 = 0.3;
 const VEHICLE_M: f64 = 70.0;
 /// Launch tower: x offset from the pad centre and height (m).
 const TOWER_X: f64 = -24.0;
@@ -966,7 +972,7 @@ fn backdrop(cam: &Camera, px: i32, py: i32) -> (Ink, bool) {
     let sky = || {
         let alt = cam.world_h(f64::from(py) + 0.5);
         let rise = ((ground_py - f64::from(py) - 0.5) / cam.rows).max(0.0);
-        let haze = 0.62 + 0.7 * (-rise / 0.18).exp();
+        let haze = SKY_ZENITH + SKY_HORIZON * (-rise / SKY_FALL).exp();
         // A smooth ramp down to the last visible level (CORE-R66), then a stipple of that
         // level thinning into the terminal's black over the next 30 % of the fall
         // (a few pixel rows), so the air has no hard top edge.

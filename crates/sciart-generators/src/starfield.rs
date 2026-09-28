@@ -32,8 +32,8 @@ const DIST: [f64; 4] = [8.0, 4.0, 2.0, 1.0];
 const NEAR_SPEED: f64 = 12.0;
 /// Seconds of travel a star's motion streak spans, and its ink (STAR-A2): 0.25 s is three
 /// cells for the nearest layer and under one dot for the farthest.
-const STREAK_TIME: f64 = 0.25;
-const STREAK: Ink = Ink::new(Role::Star, 70);
+const STREAK_TIME: f64 = 0.14;
+const STREAK: Ink = Ink::new(Role::Star, 42);
 /// Brightness buckets gained per layer nearer: inverse-square dimming, stylised (STAR-A4).
 const LAYER_GAIN: f64 = 0.5;
 
@@ -93,6 +93,16 @@ const BAND_MAX: usize = 8000;
 const BAND_LEVEL: (f64, f64) = (60.0, 150.0);
 /// The brightest the band's light gets, relative to its peak.
 const LIGHT_MAX: f64 = (1.0 + CLUMP) * (1.0 + BULGE);
+/// The focal point (STAR-A7): a spiral galaxy like M31 off the band, at infinity so it
+/// never moves. Semi-major axis as a share of the width (at most `GALAXY_A.1` of the pixel
+/// height), axis ratio (a disc seen ~70° from face-on), and a bright core over an
+/// exponential disc in `Ramp(Starlight)` peaking at `GALAXY_PEAK`, blended with the band
+/// by the brighter. Its place and tilt are seeded.
+const GALAXY_A: (f64, f64) = (0.11, 0.32);
+const GALAXY_AXES: f64 = 0.34;
+const GALAXY_PEAK: f64 = 240.0;
+const GALAXY_CORE: f64 = 0.14;
+const GALAXY_DISC: f64 = 1.7;
 #[derive(Debug, Clone)]
 struct Star {
     /// Cell coordinates; `y` is continuous so faint stars sit on any dot row.
@@ -167,6 +177,9 @@ struct MilkyWay {
     lane: f64,
     /// Position of the bright star cloud along the band (fraction of the width).
     bulge: f64,
+    /// Which end of the frame holds the galaxy (upper right or lower left), and its tilt.
+    galaxy_right: bool,
+    galaxy_tilt: f64,
 }
 
 impl MilkyWay {
@@ -175,7 +188,39 @@ impl MilkyWay {
             clumps: std::array::from_fn(|_| rng.random_range(0.0..TAU)),
             lane: rng.random_range(0.0..TAU),
             bulge: rng.random_range(0.2..0.8),
+            galaxy_right: rng.random_bool(0.5),
+            galaxy_tilt: rng.random_range(-0.1..0.35),
         }
+    }
+
+    /// The galaxy's centre and semi-axes in pixels (x in cells, y in half rows), in the
+    /// quarter of the frame farthest from the band (STAR-A7).
+    fn galaxy(&self, w: f64, h: f64) -> ((f64, f64), f64, f64) {
+        let (fx, off) = if self.galaxy_right {
+            (0.8, -0.37)
+        } else {
+            (0.2, 0.37)
+        };
+        let x = fx * w;
+        let y = (MilkyWay::centre(x, w, h) + off * h).clamp(0.15 * h, 0.8 * h);
+        let a = (GALAXY_A.0 * w).min(GALAXY_A.1 * 2.0 * h).max(1.0);
+        ((x, 2.0 * y), a, a * GALAXY_AXES)
+    }
+
+    /// The galaxy's light at pixel centre `(x, y)`, in units of `GALAXY_PEAK`: a Gaussian
+    /// core over an exponential disc, ending smoothly at 1.6 semi-major axes.
+    fn galaxy_light(&self, x: f64, y: f64, w: f64, h: f64) -> f64 {
+        let ((cx, cy), a, b) = self.galaxy(w, h);
+        let (s, c) = self.galaxy_tilt.sin_cos_det();
+        let (dx, dy) = (x - cx, y - cy);
+        let (u, v) = (dx * c + dy * s, -dx * s + dy * c);
+        let re = (u / a).hypot(v / b);
+        let core = (-(re / GALAXY_CORE).powi(2)).exp();
+        let disc = (-GALAXY_DISC * re).exp() * ease::smoothstep((1.6 - re) / 0.7);
+        // A dust lane along the near side of the inclined disc, clear of the core.
+        let lane = 1.0
+            - 0.55 * (-((v / b - 0.3) / 0.14).powi(2)).exp() * ease::smoothstep((re - 0.2) / 0.2);
+        (0.6 * core + 0.75 * disc * lane).min(1.0)
     }
 
     /// Row (cells) of the band's centre line at column `x`.
@@ -227,7 +272,8 @@ impl Starfield {
         self.glow.shade(|px, py| {
             let (x, y) = (f64::from(px) + 0.5, (f64::from(py) + 0.5) / 2.0);
             let light = mw.light(x, y - MilkyWay::centre(x, w, h), w, h);
-            match ink::level(GLOW_PEAK * light) {
+            let galaxy = GALAXY_PEAK * mw.galaxy_light(x, 2.0 * y, w, h);
+            match ink::level((GLOW_PEAK * light).max(galaxy)) {
                 0 => Ink::BLANK,
                 level => Ink::new(Role::Ramp(Ramp::Starlight), level),
             }
@@ -515,11 +561,11 @@ mod tests {
             let c = MilkyWay::centre(x, w, h);
             let lane = level(x, c + mw.lane_offset(x, w, h));
             let shoulder = level(x, c + mw.lane_offset(x, w, h) + 2.5 * LANE * h);
-            assert_eq!(
-                level(x, c + 4.0 * BAND_SIGMA * h),
-                0,
-                "glow far off the band"
-            );
+            // (Unless the galaxy, STAR-A7, lies there.)
+            let y = c + 4.0 * BAND_SIGMA * h;
+            if mw.galaxy_light(x, 2.0 * y, w, h) == 0.0 {
+                assert_eq!(level(x, y), 0, "glow far off the band");
+            }
             assert_eq!(
                 level(x, c - 4.0 * BAND_SIGMA * h),
                 0,
@@ -538,15 +584,20 @@ mod tests {
         const VISIBLE: u8 = 20;
         let mut peak = 0;
         for x in 0..200 {
+            // Columns through the galaxy (STAR-A7) are not the band's.
+            let galaxy = |py: i32| mw.galaxy_light(f64::from(x) + 0.5, f64::from(py) + 0.5, w, h);
             let col: Vec<u8> = (0..100)
                 .map(|py| {
                     g.glow
                         .get(x, py)
-                        .filter(|&i| i != Ink::BLANK)
+                        .filter(|&i| i != Ink::BLANK && galaxy(py) == 0.0)
                         .map_or(0, |i| i.level)
                 })
                 .collect();
             peak = peak.max(*col.iter().max().unwrap());
+            if (0..100).any(|py| galaxy(py) > 0.0) {
+                continue;
+            }
             let lit = col.iter().filter(|&&l| l >= VISIBLE).count();
             assert!(lit * 3 <= col.len(), "column {x}: {lit} of 100 pixels lit");
             // From the band's outermost pixels at ≥ 2× the fringe, outwards, to the first
@@ -578,6 +629,48 @@ mod tests {
                     "{role:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn star_a7_a_fixed_galaxy_off_the_band_is_the_focal_point() {
+        for (seed, (w, h)) in [(3, (120, 40)), (8, (200, 50)), (11, (80, 24))] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(seed, size);
+            let mut g = Starfield::default();
+            g.resize(size, &mut ctx);
+            let (wf, hf) = (f64::from(w), f64::from(h));
+            let ((cx, cy), a, b) = g.milky_way.galaxy(wf, hf);
+            assert!(a > b && b > 0.0);
+            // Clear of the band: no band light at its centre or along its major axis.
+            let y = cy / 2.0;
+            assert_eq!(
+                g.milky_way
+                    .light(cx, y - MilkyWay::centre(cx, wf, hf), wf, hf),
+                0.0
+            );
+            // Its core is as bright as the band's brightest cloud, and it falls off outward.
+            let px = g.glow.pixel_size();
+            let lvl = |x: i32, y: i32| g.glow.get(x, y).map_or(0, |i| i.level);
+            let max = (0..i32::from(px.height()))
+                .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
+                .map(|(x, y)| lvl(x, y))
+                .max()
+                .unwrap();
+            let core = lvl(cx as i32, cy as i32);
+            assert!(
+                f64::from(core) >= 0.75 * f64::from(max),
+                "seed {seed}: {core} vs {max}"
+            );
+            let rim = lvl(
+                (cx + 0.9 * a).min(f64::from(px.width()) - 1.0) as i32,
+                cy as i32,
+            );
+            assert!(rim < core, "seed {seed}: {rim} vs {core}");
+            // And it stays put: the glow does not move (STAR-A5), so neither does it.
+            let before = g.glow.get(cx as i32, cy as i32);
+            g.update(2.0, &mut ctx);
+            assert_eq!(before, g.glow.get(cx as i32, cy as i32));
         }
     }
 

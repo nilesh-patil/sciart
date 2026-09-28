@@ -18,7 +18,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::{draw, geom, ink};
+use sciart_core::{draw, geom, ink, rng};
 
 pub static META: Meta = Meta {
     name: "aurora",
@@ -129,6 +129,8 @@ const CROWN_GREEN: f32 = 0.03;
 const HEM_LEVEL: f64 = 196.0;
 /// The hem tops out here, in the ramp's rose: above it `HAlpha` pales to near-white.
 const HEM_LEVEL_MAX: f64 = 212.0;
+/// Crimson levels of the pixels under a hem pixel, fading into the sky (AUR-A10).
+const HEM_FADE: [u8; 2] = [120, 64];
 /// Emission fades in under the top edge over this share of the pixel rows (at least
 /// `TOP_FADE_MIN_PX`), as a smoothstep applied to the tone before the threshold: a crown
 /// overhead thins into dark sky over ≈ 10 cell rows (keeping the label in clear air), so
@@ -162,6 +164,14 @@ const CREST_DIM: f32 = 0.45;
 const LAKE_MIN_LEVEL: u8 = 40;
 /// Sideways ripple displacement per pixel row below the shore.
 const RIPPLE_SHIFT: f32 = 0.04;
+/// Glints on the water (AUR-A10): each lake pixel's gain is scaled by `1 − SHIMMER` to 1
+/// by a hash of its row and of `SHIMMER_RUN`-pixel runs drifting along it at
+/// `SHIMMER_DRIFT` px/s, so the mirrored bands break into moving streaks of light.
+const SHIMMER: f32 = 0.45;
+const SHIMMER_RUN: f64 = 4.0;
+const SHIMMER_DRIFT: f64 = 3.0;
+/// Mirrored skyglow pixels whose glint factor is at or below this are left dark.
+const SHIMMER_GAP: f32 = 1.0 - 0.6 * SHIMMER;
 /// Display weight of red 630 nm against green 557.7 nm: the photopic luminous efficiency
 /// ratio V(630)/V(557.7) ≈ 0.27. The emission profiles stay physical; this is how bright
 /// the red *looks*, so the diffuse fringe stays a fringe.
@@ -1017,6 +1027,19 @@ fn lake_row_gain(depth: f32, sin: f32) -> f32 {
     (1.0 - LAKE_DEPTH_FADE * depth) * (1.0 - CREST_DIM * sin.max(0.0).powi(2))
 }
 
+/// The glint factor in `[1 − SHIMMER, 1]` of lake pixel `(x, y)`, `k` rows below the
+/// shore, at time `t` (AUR-A10): alternate rows drift opposite ways, like wind ripples
+/// crossing.
+fn shimmer(x: usize, y: usize, k: usize, t: f64) -> f32 {
+    let drift = if k % 2 == 0 {
+        SHIMMER_DRIFT
+    } else {
+        -SHIMMER_DRIFT
+    } * t;
+    let run = ((x as f64 + drift) / SHIMMER_RUN).floor() as i32;
+    1.0 - SHIMMER * rng::hash01(rng::cell_key(run, y as i32)) as f32
+}
+
 /// Height (px) of the emission fade under the top edge for a view `rows` pixels tall.
 fn top_fade_px(rows: usize) -> f64 {
     (TOP_FADE * rows as f64).max(TOP_FADE_MIN_PX)
@@ -1546,6 +1569,32 @@ impl View {
         }
     }
 
+    /// Fade each hem pixel down into the dark sky below it over `HEM_FADE`'s pixels of
+    /// dimmer crimson (the 1PG band's lower tail, AUR-A10), so the pink border is a glowing
+    /// edge rather than a drawn line. Only empty or skyglow pixels above the ridge take
+    /// the fade; the levels stay under `RED_LEVEL_MAX`, so they are never hem themselves.
+    fn soften_hem(&mut self) {
+        for x in 0..self.w as i32 {
+            let ridge = self.ridge_top[x as usize].min(self.y_h as i32);
+            for y in (0..ridge).rev() {
+                if !self.pixels.get(x, y).is_some_and(is_hem) {
+                    continue;
+                }
+                for (k, &level) in (1..).zip(&HEM_FADE) {
+                    let fy = y + k;
+                    let free = self
+                        .pixels
+                        .get(x, fy)
+                        .is_some_and(|i| i == Ink::BLANK || i.role == Role::Seq);
+                    if fy >= ridge || !free {
+                        break;
+                    }
+                    self.pixels.set(x, fy, Ink::new(RED, level));
+                }
+            }
+        }
+    }
+
     /// For every lit sky pixel, the brightest level of its column's contiguous run of
     /// emission pixels (`reflect` mirrors a run whole or not at all). Only the emitting
     /// rows can hold emission, so only they are scanned.
@@ -1651,8 +1700,13 @@ impl View {
                 let Ok(sx) = usize::try_from(sx) else {
                     continue;
                 };
+                let glint = shimmer(x, y, k, t);
+                let gain = gain * glint;
                 if sx < self.w
                     && let Some(ink) = self.lake_ink(sx, src, gain)
+                    // The mirrored skyglow sits at the ramp's floor, where dimming cannot
+                    // show: its darker glints are gaps instead, so the band ripples.
+                    && (ink.role != Role::Seq || glint > SHIMMER_GAP)
                 {
                     self.pixels.set(x as i32, y as i32, ink);
                 }
@@ -1773,6 +1827,7 @@ impl Aurora {
         }
         if pink > 0.0 {
             view.trim_hem();
+            view.soften_hem();
         }
         view.reflect(self.t);
     }
@@ -2756,6 +2811,37 @@ mod tests {
     }
 
     #[test]
+    fn aur_a10_the_hem_fades_into_the_sky_below_it() {
+        let mut faded = 0;
+        for steps in [20, 32, 48] {
+            let (a, _) = census(steps);
+            let v = &a.view;
+            let px = |x: i32, y: i32| v.pixels.get(x, y).unwrap_or(Ink::BLANK);
+            for y in 0..v.y_h as i32 {
+                for x in 0..v.w as i32 {
+                    if !is_hem(px(x, y)) {
+                        continue;
+                    }
+                    // Under a hem pixel: another hem pixel, green, or the crimson fade,
+                    // dimmer step by step, never a bright edge straight onto black.
+                    let below = px(x, y + 1);
+                    if below.role == RED && !is_hem(below) {
+                        assert!(below.level <= HEM_FADE[0], "{below:?}");
+                        faded += 1;
+                        let next = px(x, y + 2);
+                        if next.role == RED && !is_hem(next) {
+                            assert!(next.level < below.level);
+                        }
+                    }
+                }
+            }
+        }
+        assert!(faded > 5, "{faded} hem pixels fade");
+        assert!(HEM_FADE.windows(2).all(|w| w[0] > w[1]));
+        assert!(f64::from(HEM_FADE[0]) <= RED_LEVEL_MAX);
+    }
+
+    #[test]
     fn aur_a7_lake_mirrors_the_lit_sky_as_broken_streaks() {
         // Visit t = 12, 14 (the AUR-A7 frame), 20 and 28 s.
         for steps in [48, 56, 80, 112] {
@@ -2763,6 +2849,7 @@ mod tests {
             let v = &a.view;
             let px = |x: usize, y: usize| v.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
             let (mut lake_lit, mut sky_lit, mut rows) = (0usize, 0usize, 0);
+            let (mut glow_lake, mut glow_sky) = (0usize, 0usize);
             // What the water mirrors: the skyglow, and every pixel of a sky run whose
             // brightest pixel reaches LAKE_MIN_LEVEL, so a run is reflected whole or
             // not at all and the lake shows streaks rather than shards.
@@ -2786,12 +2873,24 @@ mod tests {
                 );
                 rows += 1;
                 for x in 0..v.w {
-                    sky_lit += usize::from(mirrored(x, src));
+                    // Emission and mirrored skyglow are counted apart: the skyglow's
+                    // copy is broken by dark glints (AUR-A10).
+                    let skyglow = px(x, src).role == Role::Seq;
+                    if skyglow {
+                        glow_sky += 1;
+                    } else {
+                        sky_lit += usize::from(mirrored(x, src));
+                    }
                     let ink = px(x, y);
                     if ink == Ink::BLANK {
                         continue;
                     }
-                    lake_lit += 1;
+                    if ink.role == Role::Seq {
+                        glow_lake += 1;
+                    } else {
+                        lake_lit += 1;
+                    }
+                    let gain = gain * shimmer(x, y, y - v.y_h, a.t);
                     // Each lit lake pixel is a dimmed, box-averaged copy (never under
                     // the core floor) of a mirrored sky pixel a ripple shift away, with
                     // its role (so red over green reflects as red over green), and never
@@ -2823,6 +2922,15 @@ mod tests {
                 "t = {}: lake/sky lit {ratio:.3}",
                 a.t
             );
+            // The mirrored skyglow ripples: about 40 % of it is dark glints (AUR-A10).
+            if glow_sky > 200 {
+                let glow = glow_lake as f64 / glow_sky as f64;
+                assert!(
+                    (0.4..=0.8).contains(&glow),
+                    "t = {}: skyglow copy {glow:.3}",
+                    a.t
+                );
+            }
         }
     }
 

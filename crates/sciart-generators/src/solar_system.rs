@@ -2,18 +2,20 @@
 //! (SPEC-002 `solar_system`).
 //!
 //! An orrery, not a map: orbit spacing, planet sizes and periods are compressed (stated in
-//! the spec). The orbits are ellipses of axis ratio sin 30°, so the system fills a wide
-//! terminal, and each planet is a lit sphere: its phase follows where it sits, gibbous
-//! beyond the Sun and crescent in front of it. Orbits, the belt, trails and Saturn's rings
-//! are braille `Dots` (orbits and belt in a layer of their own, thinned in ASCII); the Sun
-//! and the planet discs are `Pixels` drawn over them, far side first. All are rasterised
-//! in `update`/`resize`, so `render` only blits.
+//! the spec). The view elevation (30°–45°) is chosen per terminal so the orbit ellipses fill
+//! the frame, and each planet is a lit sphere: its phase follows where it sits, gibbous
+//! beyond the Sun and crescent in front of it. The Sun is the hero: a limb-darkened
+//! blackbody disc inside a cooling blackbody glow of 2.4 times its radius. Orbits (tinted in
+//! each planet's hue), the belt, trails and Saturn's rings are braille `Dots`; the glow,
+//! Sun and planet discs are `Pixels` drawn over them, far side first. All are rasterised in
+//! `update`/`resize`, so `render` only blits.
 
 use std::f64::consts::TAU;
 
 use rand::Rng;
 use sciart_core::ink;
 use sciart_core::prelude::*;
+use sciart_core::raster;
 use sciart_core::timeline::ease;
 
 pub static META: Meta = Meta {
@@ -31,14 +33,13 @@ pub fn build() -> Box<dyn Generator> {
 /// Earth's year in simulated seconds.
 const EARTH_PERIOD: f64 = 12.0;
 const EARTH_FRAC: f64 = 0.32;
-const BELT: usize = 360;
-const BELT_FRAC: (f64, f64) = (0.47, 0.55);
+const BELT: usize = 150;
+const BELT_FRAC: (f64, f64) = (0.48, 0.53);
 
-/// The view: 30° above the ecliptic, so a circular orbit is an ellipse of axis ratio
-/// `sin 30° = SQUASH`.
-const SQUASH: f64 = 0.5;
-/// `cos 30°`: how much an orbit's far/near offset moves toward or away from the viewer.
-const DEPTH: f64 = 0.866_025_403_784_438_6;
+/// The view elevation's sine (a circular orbit is an ellipse of this axis ratio) lies
+/// between sin 30° and sin 45°: as round as the frame's aspect allows, so the orrery fills
+/// the height of a tall terminal as well as the width of a wide one (SOL-A11).
+const SQUASH_RANGE: (f64, f64) = (0.5, std::f64::consts::FRAC_1_SQRT_2);
 
 /// IAU nominal solar effective temperature (K), the Sun's colour.
 const SUN_K: f64 = 5772.0;
@@ -51,13 +52,19 @@ const LIMB_COLOUR_GAIN: f64 = 3.0;
 /// Wien's approximation at 550 nm: `λ / c₂` in 1/K.
 const WIEN_550: f64 = 550.0 / 1.438_776_9e7;
 /// Sun radius as a share of the outer orbit radius, at least `SUN_MIN_PX` pixels.
-const SUN_FRAC: f64 = 0.06;
+const SUN_FRAC: f64 = 0.075;
 const SUN_MIN_PX: f64 = 0.8;
+/// The glow reaches `HALO_K` Sun radii. Its colour is the blackbody of a temperature that
+/// falls from `HALO_K0` at the limb to 1000 K at its edge as `(1 − u)^1.5` in log T (`u` the
+/// share of the way out), a warm corona fading into space with no outline (SOL-A12).
+/// **Stylised**: the real corona is invisible beside the disc.
+const HALO_K: f64 = 2.4;
+const HALO_K0: f64 = 4200.0;
 
 /// Planet radius (px) is `s·(R/R_J)^SIZE_POWER`, `s = JUPITER_PX` at an outer orbit of
 /// `REF_ORBIT_PX` (200×50), scaled with it and floored at `JUPITER_MIN_PX`.
 const SIZE_POWER: f64 = 0.4;
-const JUPITER_PX: f64 = 3.5;
+const JUPITER_PX: f64 = 4.5;
 const REF_ORBIT_PX: f64 = 87.0;
 const JUPITER_MIN_PX: f64 = 0.6;
 /// A disc is never smaller than one pixel.
@@ -81,6 +88,10 @@ const TERMINATOR_WIDTH: f64 = 0.5;
 const TRAIL_RAD: f64 = 0.45;
 const TRAIL_MAX_DOTS: f64 = 30.0;
 const TRAIL_LEVEL: (f64, f64) = (0.35, 0.8);
+/// Each orbit is a continuous braille ellipse in its planet's role at this level (0.27 of
+/// full): tinted, but well under every planet (SOL-A7).
+const ORBIT_LEVEL: u8 = 70;
+/// ASCII has no fine line: orbits and belt fall back to a sparse `.` in this ink.
 const ORBIT_INK: Ink = Ink::new(Role::Dim, 40);
 
 /// Saturn's obliquity to its orbit (deg). The ring pole leans this far from the orbit
@@ -89,8 +100,8 @@ const SATURN_TILT_DEG: f64 = 26.7;
 /// The B and A rings, in Saturn radii (B 1.53–1.95, Cassini Division, A 2.03–2.27), each
 /// drawn as one thin ellipse at its middle.
 const RINGS: [(f64, Ink); 2] = [
-    (1.74, Ink::new(Role::Ramp(Ramp::Ember), 200)),
-    (2.15, Ink::new(Role::Ramp(Ramp::Ember), 150)),
+    (1.74, Ink::new(Role::Ramp(Ramp::Sulfur), 200)),
+    (2.15, Ink::new(Role::Ramp(Ramp::Sulfur), 150)),
 ];
 
 struct Planet {
@@ -109,8 +120,9 @@ const fn ramp(r: Ramp, level: u8) -> Ink {
 }
 
 /// One hue per planet, close to its own where a ramp allows: grey Mercury, pale cream
-/// Venus, blue Earth, rust-orange Mars, tan Jupiter, gold Saturn, pale cyan Uranus, deep blue
-/// Neptune. Levels stay ≤ 225, so in `mono` the Sun is the brightest thing on screen.
+/// Venus, blue Earth, rust-red Mars, tan-orange Jupiter (the only amber), pale gold Saturn,
+/// sea-green Uranus, deep blue Neptune. Levels stay ≤ 225, so in `mono` the Sun is the
+/// brightest thing on screen.
 const PLANETS: [Planet; 8] = [
     Planet {
         letter: 'm',
@@ -122,19 +134,19 @@ const PLANETS: [Planet; 8] = [
         letter: 'v',
         frac: 0.24,
         radius: 0.0847,
-        day: ramp(Ramp::Ember, 225),
+        day: ramp(Ramp::Starlight, 215),
     },
     Planet {
         letter: 'e',
         frac: EARTH_FRAC,
         radius: 0.0892,
-        day: ramp(Ramp::Ice, 165),
+        day: ramp(Ramp::Ice, 180),
     },
     Planet {
         letter: 'M',
         frac: 0.42,
         radius: 0.0475,
-        day: ramp(Ramp::Ember, 120),
+        day: ramp(Ramp::HAlpha, 150),
     },
     Planet {
         letter: 'J',
@@ -146,19 +158,19 @@ const PLANETS: [Planet; 8] = [
         letter: 'S',
         frac: 0.74,
         radius: 0.843,
-        day: ramp(Ramp::Ember, 222),
+        day: ramp(Ramp::Sulfur, 205),
     },
     Planet {
         letter: 'U',
         frac: 0.87,
         radius: 0.358,
-        day: ramp(Ramp::Ice, 220),
+        day: ramp(Ramp::Aurora, 185),
     },
     Planet {
         letter: 'N',
         frac: 1.00,
         radius: 0.346,
-        day: ramp(Ramp::Ice, 105),
+        day: ramp(Ramp::Ice, 120),
     },
 ];
 const JUPITER: usize = 4;
@@ -181,18 +193,44 @@ pub(crate) fn planet_px(radius: f64, orbit_px: f64) -> f64 {
 }
 
 /// Screen offset (px, y down) and depth toward the viewer of a point `(x, y, z)` in the
-/// ecliptic frame (x right, y away from the viewer, z north).
-fn project([x, y, z]: [f64; 3]) -> (f64, f64, f64) {
-    (x, -(y * SQUASH + z * DEPTH), -y * DEPTH + z * SQUASH)
+/// ecliptic frame (x right, y away from the viewer, z north), seen from the elevation whose
+/// sine is `squash`.
+fn project([x, y, z]: [f64; 3], squash: f64) -> (f64, f64, f64) {
+    let depth = (1.0 - squash * squash).max(0.0).sqrt();
+    (x, -(y * squash + z * depth), -y * depth + z * squash)
 }
 
 /// Screen offset and depth of the point at angle `t` on a ring of radius `a` (SOL-A6).
 /// The ring plane's pole is fixed in space, so this does not depend on where Saturn is.
-pub(crate) fn ring_offset(a: f64, t: f64) -> (f64, f64, f64) {
+pub(crate) fn ring_offset(a: f64, t: f64, squash: f64) -> (f64, f64, f64) {
     let (st, ct) = SATURN_TILT_DEG.to_radians().sin_cos_det();
     let (s, c) = t.sin_cos_det();
     // Ring-plane axes: e1 = ŷ and e2 = pole × e1 = (−cos T, 0, sin T).
-    project([-a * s * ct, a * c, a * s * st])
+    project([-a * s * ct, a * c, a * s * st], squash)
+}
+
+/// The glow's ink at `u ∈ [0, 1]` of the way from the limb to its edge, or `None` where it
+/// has faded below the visible floor (SOL-A12).
+pub(crate) fn halo_ink(u: f64) -> Option<Ink> {
+    let f = (1.0 - u.clamp(0.0, 1.0)).powf(1.5);
+    let ink = ink::blackbody(1000.0 * (HALO_K0 / 1000.0).powf(f));
+    (f64::from(ink.level) >= ink::MIN_VISIBLE_LEVEL).then_some(ink)
+}
+
+/// The tinted ink of a planet's orbit.
+fn orbit_ink(p: &Planet) -> Ink {
+    Ink::new(p.day.role, ORBIT_LEVEL)
+}
+
+/// The view elevation's sine for a frame of half-extents `half_w × half_h` px: the axis
+/// ratio that fills both, clamped to `SQUASH_RANGE` (SOL-A11). Non-finite ⇒ the lower end.
+pub(crate) fn view_squash(half_w: f64, half_h: f64) -> f64 {
+    let r = half_h / half_w;
+    if r.is_finite() {
+        r.clamp(SQUASH_RANGE.0, SQUASH_RANGE.1)
+    } else {
+        SQUASH_RANGE.0
+    }
 }
 
 /// `ink` with its level scaled by `k`.
@@ -243,9 +281,11 @@ pub struct SolarSystem {
     cx: f64,
     cy: f64,
     outer: f64,
+    /// Sine of the view elevation, set per size in `resize`.
+    squash: f64,
     phases: [f64; 8],
-    /// (orbit fraction, angle, level)
-    belt: Vec<(f64, f64, u8)>,
+    /// (orbit fraction, angle, ink)
+    belt: Vec<(f64, f64, Ink)>,
     /// Pixel of each planet's centre, for the ASCII letters.
     centres: [(i32, i32); 8],
     /// Orbits and the belt: braille in Unicode, a sparse `.` in ASCII, where braille's
@@ -261,7 +301,7 @@ impl SolarSystem {
     fn orbit_xy(&self, frac: f64, theta: f64) -> (f64, f64) {
         let (s, c) = theta.sin_cos_det();
         let r = self.outer * frac;
-        let (dx, dy, _) = project([r * c, r * s, 0.0]);
+        let (dx, dy, _) = project([r * c, r * s, 0.0], self.squash);
         (self.cx + dx, self.cy + dy)
     }
 
@@ -280,19 +320,20 @@ impl SolarSystem {
         self.pixels.clear();
         let outer_dots = 2.0 * self.outer;
 
-        // Orbits: every other dot, so they read as fine dotted ellipses.
+        // Orbits: continuous fine ellipses, each tinted in its planet's hue.
         for p in &PLANETS {
-            let n = (TAU * self.outer * p.frac).ceil().max(8.0) as usize;
+            let n = (TAU * outer_dots * p.frac).ceil().max(8.0) as usize;
+            let ink = orbit_ink(p);
             for k in 0..n {
                 let (x, y) = self.orbit_xy(p.frac, TAU * k as f64 / n as f64);
                 let (x, y) = Self::dot(x, y);
-                self.orbits.plot(x, y, ORBIT_INK);
+                self.orbits.plot(x, y, ink);
             }
         }
-        for &(frac, angle, level) in &self.belt {
+        for &(frac, angle, ink) in &self.belt {
             let (x, y) = self.orbit_xy(frac, angle);
             let (x, y) = Self::dot(x, y);
-            self.orbits.plot(x, y, Ink::new(Role::Dim, level));
+            self.orbits.plot(x, y, ink);
         }
         // Trails behind each planet, fading toward their tail (SOL-A7).
         for (i, p) in PLANETS.iter().enumerate() {
@@ -309,9 +350,16 @@ impl SolarSystem {
         }
         self.draw_rings();
 
-        // The far side of the system, the Sun, and the near side. The Sun has no halo:
-        // its reddened limb is its glow, and any darker ring round it reads as an outline.
+        // The glow, the far side of the system, the Sun, and the near side. The glow
+        // starts at the limb's own colour and cools outward, so it never reads as a ring.
         let r_sun = (SUN_FRAC * self.outer).max(SUN_MIN_PX);
+        let (c, reach) = ((self.cx, self.cy), HALO_K * r_sun);
+        raster::disc_pixels(c, reach, |x, y, _| {
+            let d = (f64::from(x) + 0.5 - c.0).hypot(f64::from(y) + 0.5 - c.1);
+            if let Some(ink) = halo_ink((d - r_sun) / (reach - r_sun)) {
+                self.pixels.set(x, y, ink);
+            }
+        });
         for i in 0..PLANETS.len() {
             if self.phases[i].sin_det() > 0.0 {
                 self.draw_planet(i);
@@ -339,7 +387,7 @@ impl SolarSystem {
             let a = k * r_s;
             let n = (TAU * 2.0 * a).ceil().max(12.0) as usize;
             for j in 0..n {
-                let (u, v, _) = ring_offset(a, TAU * j as f64 / n as f64);
+                let (u, v, _) = ring_offset(a, TAU * j as f64 / n as f64, self.squash);
                 let (dx, dy) = Self::dot(x + u, y + v);
                 self.dots.plot(dx, dy, ink);
             }
@@ -353,7 +401,8 @@ impl SolarSystem {
         let r = planet_px(p.radius, self.outer);
         // The Sun's direction from the planet, in view axes (right, up, toward viewer).
         let (s, c) = self.phases[i].sin_cos_det();
-        let (_, up, toward) = project([-c, -s, 0.0]);
+        let (_, up, toward) = project([-c, -s, 0.0], self.squash);
+        let (squash, depth) = (self.squash, (1.0 - self.squash.powi(2)).sqrt());
         let sun = [-c, -up, toward];
         let night = if r < CORNER_BELOW { NIGHT_SMALL } else { NIGHT };
         disc_pixels(x, y, r, |px, py, nx, ny, shade| {
@@ -361,7 +410,7 @@ impl SolarSystem {
             let lambert = nx * sun[0] + ny * sun[1] + nz * sun[2];
             let day = ease::smoothstep(lambert / TERMINATOR_WIDTH + 0.5);
             // Latitude on the planet (pole along the ecliptic north): the belts are bands.
-            let sin_lat = (ny * DEPTH + nz * SQUASH).abs();
+            let sin_lat = (ny * depth + nz * squash).abs();
             let base = if i == JUPITER && (JUPITER_BELT.0..JUPITER_BELT.1).contains(&sin_lat) {
                 Ink::new(p.day.role, JUPITER_BELT_LEVEL)
             } else {
@@ -377,7 +426,7 @@ impl SolarSystem {
                 let a = k * r;
                 let n = (TAU * 2.0 * a).ceil().max(12.0) as usize;
                 for j in 0..n {
-                    let (u, v, depth) = ring_offset(a, TAU * j as f64 / n as f64);
+                    let (u, v, depth) = ring_offset(a, TAU * j as f64 / n as f64, self.squash);
                     let (qx, qy) = ((x + u).floor(), (y + v).floor());
                     let (dx, dy) = (qx + 0.5 - ox, qy + 0.5 - oy);
                     if depth > 0.0 && dx.hypot(dy) <= rb + 0.5 - MIN_COVER {
@@ -402,8 +451,11 @@ impl SolarSystem {
         {
             return Some((PLANETS[i].letter, ink));
         }
-        let ch = if ink.role == Role::Blackbody {
+        // The Sun's disc is `@`; its cooler glow (under `HALO_K0`) a lighter `*`.
+        let ch = if ink.role == Role::Blackbody && ink::blackbody_kelvin(ink) > HALO_K0 + 100.0 {
             '@'
+        } else if ink.role == Role::Blackbody {
+            '*'
         } else {
             'o'
         };
@@ -428,19 +480,24 @@ impl Generator for SolarSystem {
         // outermost discs.
         let half_w = 0.96 * f64::from(w) / 2.0 - 1.0;
         let half_h = 0.96 * self.cy.min(2.0 * f64::from(rows) - self.cy) - 1.5;
-        self.outer = half_w.min(half_h / SQUASH).max(1.0);
+        self.squash = view_squash(half_w, half_h);
+        self.outer = half_w.min(half_h / self.squash).max(1.0);
         if self.belt.is_empty() {
             // Positions survive resizes; only the scale changes.
             for p in &mut self.phases {
                 *p = ctx.rng.random_range(0.0..TAU);
             }
+            // Sparse rocks: two in three grey stone, one in three rust-brown.
             self.belt = (0..BELT)
                 .map(|_| {
-                    (
-                        ctx.rng.random_range(BELT_FRAC.0..BELT_FRAC.1),
-                        ctx.rng.random_range(0.0..TAU),
-                        ctx.rng.random_range(60..100),
-                    )
+                    let frac = ctx.rng.random_range(BELT_FRAC.0..BELT_FRAC.1);
+                    let angle = ctx.rng.random_range(0.0..TAU);
+                    let ink = if ctx.rng.random_range(0..3) == 0 {
+                        ramp(Ramp::Ember, ctx.rng.random_range(80..120))
+                    } else {
+                        ramp(Ramp::Starlight, ctx.rng.random_range(90..160))
+                    };
+                    (frac, angle, ink)
                 })
                 .collect();
         }
@@ -618,11 +675,12 @@ mod tests {
     fn sol_a6_saturn_rings_hold_one_ellipse_wherever_saturn_is() {
         // The ring pole is tilted 26.7° and seen from 30° above the ecliptic: an ellipse
         // of axis ratio cos 26.7° · sin 30°.
+        const SQUASH: f64 = 0.5;
         let minor = SATURN_TILT_DEG.to_radians().cos_det() * SQUASH;
         assert!((minor - 0.447).abs() < 0.001);
         let lengths: Vec<f64> = (0..3600)
             .map(|j| {
-                let (u, v, _) = ring_offset(1.0, TAU * f64::from(j) / 3600.0);
+                let (u, v, _) = ring_offset(1.0, TAU * f64::from(j) / 3600.0, SQUASH);
                 u.hypot(v)
             })
             .collect();
@@ -634,12 +692,13 @@ mod tests {
         );
         // Half the ring is in front of the planet, half behind.
         let front = (0..360)
-            .filter(|&j| ring_offset(1.0, TAU * f64::from(j) / 360.0).2 > 0.0)
+            .filter(|&j| ring_offset(1.0, TAU * f64::from(j) / 360.0, SQUASH).2 > 0.0)
             .count();
         assert_eq!(front, 180);
         // Drawn: at two phases a quarter orbit apart, every ring dot lies on one of the
         // same two ellipses about the planet.
         let mut s = scene(400, 100);
+        let squash = s.squash;
         for phase in [0.3, 0.3 + TAU / 4.0] {
             s.phases[SATURN] = phase;
             s.dots.clear();
@@ -657,7 +716,8 @@ mod tests {
                     let (dx, dy) = (f64::from(x) - x0, f64::from(y) - y0);
                     let near = RINGS.iter().any(|&(k, _)| {
                         (0..720).any(|j| {
-                            let (u, v, _) = ring_offset(k * r_s, TAU * f64::from(j) / 720.0);
+                            let (u, v, _) =
+                                ring_offset(k * r_s, TAU * f64::from(j) / 720.0, squash);
                             (u - dx).hypot(v - dy) < 1.0
                         })
                     });
@@ -672,7 +732,6 @@ mod tests {
         // one of the disc's own pixels.
         let mut s = scene(80, 24);
         let r = planet_px(PLANETS[SATURN].radius, s.outer);
-        assert!(r < CORNER_BELOW);
         for k in 0..32 {
             s.phases[SATURN] = TAU * f64::from(k) / 32.0;
             s.rasterise();
@@ -709,6 +768,16 @@ mod tests {
                 "{a:?} {b:?}"
             );
         }
+        // Orbits are tinted in their planet's role at 0.25–0.35 of full, under every planet.
+        for p in &PLANETS {
+            let o = orbit_ink(p);
+            assert_eq!(o.role, p.day.role);
+            let share = f64::from(o.level) / 255.0;
+            assert!(
+                (0.25..=0.35).contains(&share) && o.level < p.day.level,
+                "{o:?}"
+            );
+        }
         assert!(ORBIT_INK.role == Role::Dim && ORBIT_INK.level <= 40);
         // Trails: every planet at orbit angle 1 rad, so its trail lies at smaller angles.
         let mut s = scene(200, 50);
@@ -724,7 +793,7 @@ mod tests {
                     continue;
                 }
                 // Back from the screen ellipse to the orbit plane: angle and radius.
-                let (ex, ey) = (f64::from(x) - cx, -(f64::from(y) - cy) / SQUASH);
+                let (ex, ey) = (f64::from(x) - cx, -(f64::from(y) - cy) / s.squash);
                 let off = ey.atan2(ex) - 1.0;
                 let r = ex.hypot(ey) / (2.0 * s.outer);
                 // Anything clearly ahead of the planets must be an orbit dot or a ring.
@@ -790,6 +859,58 @@ mod tests {
                     assert!(full, "r={r} ({x}, {y}): corner ({a}, {b}) of {px:?}");
                 }
             }
+        }
+    }
+
+    #[test]
+    fn sol_a11_the_view_elevation_fills_the_frame_between_30_and_45_degrees() {
+        assert!((view_squash(100.0, 30.0) - 0.5).abs() < 1e-12);
+        assert!((view_squash(56.6, 35.0) - 35.0 / 56.6).abs() < 1e-12);
+        assert!((view_squash(10.0, 100.0) - SQUASH_RANGE.1).abs() < 1e-12);
+        assert_eq!(view_squash(0.0, 0.0), SQUASH_RANGE.0);
+        // At 120×40 the ellipse is rounder than 30° and the outer orbit spans ≥ 90 % of the
+        // usable height, as it spans ≥ 90 % of the width at 200×50.
+        let s = scene(120, 40);
+        assert!(s.squash > 0.55, "{}", s.squash);
+        assert!(2.0 * s.outer * s.squash >= 0.9 * 2.0 * 38.0 * 0.96 - 4.0);
+        let s = scene(200, 50);
+        assert!(2.0 * s.outer >= 0.9 * 200.0 * 0.96 - 4.0, "{}", s.outer);
+    }
+
+    #[test]
+    fn sol_a12_the_sun_glows_cooling_outward_with_no_ring() {
+        // The glow starts at the limb's colour and falls monotonically to nothing.
+        let mut last = f64::INFINITY;
+        let mut ended = false;
+        for k in 0..=100 {
+            match halo_ink(f64::from(k) / 100.0) {
+                Some(ink) => {
+                    assert!(!ended, "glow reappears at {k}");
+                    assert_eq!(ink.role, Role::Blackbody);
+                    let t = ink::blackbody_kelvin(ink);
+                    assert!(t <= last + 1.0, "{k}: {t} > {last}");
+                    last = t;
+                }
+                None => ended = true,
+            }
+        }
+        assert!(ended && halo_ink(1.0).is_none());
+        assert!(ink::blackbody_kelvin(halo_ink(0.0).unwrap()) > 3000.0);
+        // Drawn: at 200×50 the pixels at 1.2 and 1.6 Sun radii from the centre along
+        // the four axes are glow, cooler outward.
+        let s = scene(200, 50);
+        let r = (SUN_FRAC * s.outer).max(SUN_MIN_PX);
+        for (ux, uy) in [(1.0, 0.0), (-1.0, 0.0), (0.0, 1.0), (0.0, -1.0)] {
+            let at = |k: f64| {
+                let p = s.pixels.get(
+                    (s.cx + ux * k * r).floor() as i32,
+                    (s.cy + uy * k * r).floor() as i32,
+                );
+                p.filter(|i| i.role == Role::Blackbody)
+                    .map(ink::blackbody_kelvin)
+            };
+            let (a, b) = (at(1.2).unwrap(), at(1.6).unwrap());
+            assert!(a > b, "{a} {b}");
         }
     }
 

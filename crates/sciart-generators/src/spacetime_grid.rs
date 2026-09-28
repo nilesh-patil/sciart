@@ -12,7 +12,7 @@ use rand::Rng;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::{draw, ink, title};
+use sciart_core::{draw, ink, raster, title};
 
 pub static META: Meta = Meta {
     name: "spacetime_grid",
@@ -140,9 +140,8 @@ const INSET_AXIS: Ink = Ink::new(Role::Ramp(Ramp::Aurora), 60);
 const INSET_LABEL: &str = "strain";
 
 /// Blackbody temperatures of the heavier and lighter mass's rim, and of the remnant's
-/// (K): a hot rim round a dark core, graded by a cooler halo ring `HALO_GAP` dots out (in
-/// braille cells of its own, which show one ink each) at `HALO_K` of the rim's
-/// temperature (≥ 8 750 K: still white-blue, so each marker reads as one cold beacon
+/// (K): a hot rim round a dark core, graded by a cooler one-pixel halo ring at `HALO_K`
+/// of the rim's temperature (≥ 8 750 K: still white-blue, so each marker reads as one cold beacon
 /// rather than a warm star), which warms and brightens with the merger flash. Trails take
 /// one cold hue, `TRAIL_ROLE`, and fade by level only (`TRAIL_LEVELS`), since a
 /// Blackbody level is a temperature. They only mark the black holes, which emit no light
@@ -152,7 +151,12 @@ const REMNANT_K: f64 = 30_000.0;
 const HALO_K: f64 = 0.35;
 const TRAIL_ROLE: Role = Role::Ramp(Ramp::Ice);
 const TRAIL_LEVELS: (f64, f64) = (40.0, 150.0);
-const HALO_GAP: f64 = 2.5;
+/// A black hole's disc (SPT-A12): the hot rim's and the halo's widths in pixels, and the
+/// core's fill, the darkest violet, so the hole reads as a solid dark disc against the
+/// sheet rather than an outline.
+const RIM_PX: f64 = 1.0;
+const HALO_PX: f64 = 1.0;
+const CORE_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 14);
 
 /// A circular binary, optionally on a quadrupole-driven inspiral (Peters 1964, Newtonian
 /// chirp): `a(τ) = a₀(1 − τ/τc)^¼`, hence by Kepler `Ω = Ω₀(1 − τ/τc)^-⅜` and
@@ -438,13 +442,26 @@ impl Body {
     }
 }
 
-/// A one-dot ring of radius `r` dots about `(dx, dy)`.
-fn ring(dots: &mut Dots, (dx, dy): (f64, f64), r: f64, ink: Ink) {
-    let steps = (TAU * r).ceil().clamp(8.0, 512.0) as usize;
-    for k in 0..steps {
-        let (s, c) = (TAU * k as f64 / steps as f64).sin_cos_det();
-        dots.plot(dx + r * c, dy + r * s, ink);
-    }
+/// A black hole as half-block pixels (SPT-A12): a filled dark core (`CORE_INK`) inside a
+/// one-pixel hot `rim`, ringed by a cooler `halo` pixel, all round at any size: the
+/// pixels whose centres lie within each radius of the body's centre (a pixel is 2 × 2
+/// dots, its centre at dot `2p + 0.5`).
+fn disc(px: &mut Pixels, b: &Body, rim: Ink, halo: Ink) {
+    let (cx, cy, r) = ((b.dx - 0.5) / 2.0, (b.dy - 0.5) / 2.0, (b.r / 2.0).max(1.5));
+    let reach = r + HALO_PX;
+    raster::disc_pixels((cx + 0.5, cy + 0.5), reach, |x, y, _| {
+        let d = (f64::from(x) - cx).hypot(f64::from(y) - cy);
+        let ink = if d < r - RIM_PX {
+            CORE_INK
+        } else if d < r {
+            rim
+        } else if d < reach {
+            halo
+        } else {
+            return;
+        };
+        px.set(x, y, ink);
+    });
 }
 
 /// The segment `a–b` with the parts inside the discs `holes` (`(x, y, radius)`, dots)
@@ -662,9 +679,11 @@ pub struct SpacetimeGrid {
     depth_near: f64,
     depth_far: f64,
     max_speed: f64,
-    /// Dot layers: the sheet, the masses with their trails, and the strain trace.
+    /// Dot layers: the sheet, the masses' trails, and the strain trace; the black holes
+    /// themselves are half-block discs.
     mesh: Dots,
     bodies: Dots,
+    discs: Pixels,
     inset: Option<Inset>,
     trace: Dots,
 }
@@ -748,6 +767,7 @@ impl SpacetimeGrid {
         self.pts.resize(self.base.len(), Pt::default());
         self.mesh.resize(size);
         self.bodies.resize(size);
+        self.discs.resize(size);
         self.trace.resize(size);
         // The shortest wave the mesh resolves: 2.5 line spacings.
         let spacing = (2.0 / (self.ny - 1) as f64).max(2.0 * self.lx / (self.nx - 1) as f64);
@@ -875,6 +895,7 @@ impl SpacetimeGrid {
         holes: &[(f64, f64, f64)],
     ) {
         self.bodies.clear();
+        self.discs.clear();
         let (state, masses, flash, dip) = (now.state, now.masses, now.flash, now.dip);
         if dip <= 0.0 {
             return;
@@ -905,12 +926,9 @@ impl SpacetimeGrid {
         }
         let glow = (0.5 + 0.5 * dip) * (1.0 + 0.5 * flash);
         for b in bodies.iter().flatten() {
-            let centre = (b.dx, b.dy);
             let rim = ink::blackbody(b.kelvin * glow);
             let halo = ink::blackbody(HALO_K * b.kelvin * glow);
-            ring(&mut self.bodies, centre, b.r + HALO_GAP, halo);
-            ring(&mut self.bodies, centre, b.r, rim);
-            ring(&mut self.bodies, centre, b.r - 0.7, rim);
+            disc(&mut self.discs, b, rim, halo);
         }
     }
 
@@ -1052,6 +1070,13 @@ impl Generator for SpacetimeGrid {
     fn render(&self, canvas: &mut Canvas) {
         self.mesh.blit(canvas);
         self.bodies.blit(canvas);
+        self.discs.blit(canvas, |_, _, top, bottom| {
+            let ink = raster::stronger(top, bottom);
+            match ink.role {
+                Role::Blackbody => Some(('O', ink)),
+                _ => None,
+            }
+        });
         let Some(r) = self.inset else { return };
         let blank = Glyph::ascii(' ');
         for y in r.y - 1..r.y + r.h {
@@ -1340,6 +1365,48 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn spt_a12_black_holes_are_filled_dark_discs_with_a_hot_rim() {
+        let rim = ink::blackbody(30_000.0);
+        let halo = ink::blackbody(10_000.0);
+        for r in [2.0, 5.0, 9.0, 14.0] {
+            let mut px = Pixels::new(Size::new(40, 20));
+            let b = Body {
+                dx: 40.3,
+                dy: 39.7,
+                r,
+                kelvin: 30_000.0,
+            };
+            disc(&mut px, &b, rim, halo);
+            let (cx, cy) = ((b.dx - 0.5) / 2.0, (b.dy - 0.5) / 2.0);
+            let rp = (r / 2.0).max(1.5);
+            let (mut core, mut hot) = (0, 0);
+            for y in 0..40 {
+                for x in 0..40 {
+                    let d = (f64::from(x) - cx).hypot(f64::from(y) - cy);
+                    let ink = px.get(x, y).unwrap();
+                    // Filled: every pixel well inside is the dark core, the rim is hot,
+                    // and nothing is drawn past the halo.
+                    if d < rp - RIM_PX - 0.01 {
+                        assert_eq!(ink, CORE_INK, "r={r} ({x},{y})");
+                        core += 1;
+                    } else if d < rp - 0.01 {
+                        assert_eq!(ink, rim, "r={r} ({x},{y})");
+                        hot += 1;
+                    } else if d > rp + HALO_PX + 0.01 {
+                        assert_eq!(ink, Ink::BLANK, "r={r} ({x},{y})");
+                    }
+                }
+            }
+            assert!(hot >= 4, "r={r}: {hot} rim pixels");
+            if rp >= 2.0 {
+                assert!(core >= 4, "r={r}: {core} core pixels");
+            }
+        }
+        // Dark: the core's level is at the ramp's floor, far under the mesh's.
+        const { assert!(CORE_INK.level < 20) };
     }
 
     #[test]
