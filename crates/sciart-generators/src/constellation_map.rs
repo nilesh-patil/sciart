@@ -50,15 +50,15 @@ const BG_DENSITY: f64 = 0.12;
 const BG_MAX: usize = 4000;
 const BG_KEEP: (f64, f64) = (0.25, 1.0);
 const BG_PLANE_DEG: f64 = 12.0;
-/// Milky Way glow (CON-A8): each pixel is `Plasma` at `GLOW_LEVEL · p / DUST_PEAK · fade`,
-/// `p` the cell's [`dust`]`(l, b)` density (at most `DUST_PEAK`), and blank below the
-/// visible floor: a smooth unresolved-starlight band, false colour, that thins out with
-/// the density instead of ending at an edge.
+/// Milky Way glow (CON-A8): each pixel is `GLOW_ROLE` at `GLOW_LEVEL · p / DUST_PEAK · fade`,
+/// `p` the cell's [`dust`]`(l, b)` density (at most `DUST_PEAK`), and plain background
+/// below the visible floor (never dithered, so no speckle punches through the wash): a
+/// smooth unresolved-starlight band, false colour, that thins out with the density.
 const DUST_PEAK: f64 = 0.3;
-const GLOW_LEVEL: f64 = 50.0;
-/// Glow pixels under this level are dissolved (scattered, not dithered in a pattern), so
-/// the band's fringe fades into the sky instead of ending at the ramp's lowest colour.
-const GLOW_FRINGE: u8 = 16;
+const GLOW_LEVEL: f64 = 72.0;
+/// The glow's ramp: `Starlight`, whose floor is near black, so the band's fringe meets the
+/// sky without a visible step.
+const GLOW_ROLE: Role = Role::Ramp(Ramp::Starlight);
 /// Star clouds: two octaves of value noise on `CLUMP_DEG` lattices in galactic (l, b),
 /// weighted `CLUMP_WEIGHT`, scale the density between `CLUMP_FLOOR` and 1. The finer
 /// octave gives structure to charts a few degrees across (Crux).
@@ -911,12 +911,11 @@ impl ConstellationMap {
                     GLOW_LEVEL * share * fade
                 };
                 if level >= ink::MIN_VISIBLE_LEVEL {
-                    let ink = Ink::new(Role::Ramp(Ramp::Plasma), ink::level(level));
+                    let ink = Ink::new(GLOW_ROLE, ink::level(level));
                     self.glow.set(cx as i32, py as i32, ink);
                 }
             }
         }
-        self.glow.dissolve(GLOW_FRINGE);
     }
 
     /// The meteor showing at chart time `local`, if any, as a streak from its tail to its
@@ -1624,7 +1623,7 @@ mod tests {
                 if ink == Ink::BLANK {
                     0
                 } else {
-                    assert_eq!(ink.role, Role::Ramp(Ramp::Plasma));
+                    assert_eq!(ink.role, GLOW_ROLE);
                     ink.level.max(1)
                 }
             })
@@ -1708,7 +1707,7 @@ mod tests {
         assert!(rift <= (1.0 - LANE_DEPTH) * lane_max(RIFT_B) + 1e-12);
         // Rendered: the glow covers much of Cygnus's chart and none of Ursa Major's.
         let dusty = |c: &Canvas| {
-            let plasma = |i: Ink| i.role == Role::Ramp(Ramp::Plasma);
+            let plasma = |i: Ink| i.role == GLOW_ROLE;
             c.cells()
                 .iter()
                 .filter(|c| plasma(c.ink) || plasma(c.bg))
@@ -1749,7 +1748,7 @@ mod tests {
         // ASCII has no blooms (nor glow).
         let c = at(&mut g, 6.0, GlyphMode::Ascii);
         assert!(c.cells().iter().all(|c| {
-            let glowing = matches!(c.ink.role, Role::Ramp(Ramp::Plasma | Ramp::Ember));
+            let glowing = matches!(c.ink.role, Role::Ramp(Ramp::Starlight | Ramp::Ember));
             !glowing && c.bg == Ink::BLANK
         }));
     }

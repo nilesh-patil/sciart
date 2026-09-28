@@ -43,7 +43,7 @@ const R_STAR: f64 = 0.07;
 const CLOSED: [f64; 2] = [0.4, 0.8];
 const OPEN: f64 = 2.5;
 /// Open lines end this far from the star (`R_LC`), fading to nothing there (PUL-A7).
-const OPEN_REACH: f64 = 1.15;
+const OPEN_REACH: f64 = 0.8;
 /// Magnetic meridians the closed loops and the open lines are drawn in: few loops, so the
 /// co-rotating magnetosphere reads as nested shells rather than a tangle.
 const CLOSED_MERIDIANS: usize = 4;

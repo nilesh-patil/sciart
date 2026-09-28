@@ -67,8 +67,9 @@ const SIZE_POWER: f64 = 0.4;
 const JUPITER_PX: f64 = 4.5;
 const REF_ORBIT_PX: f64 = 87.0;
 const JUPITER_MIN_PX: f64 = 0.6;
-/// A disc is never smaller than one pixel.
-const MIN_PLANET_PX: f64 = 0.5;
+/// A disc is never smaller than this: 3 × 3 pixels, about 2 × 2 cells, so the inner
+/// planets read as bodies, not specks (SOL-A4).
+const MIN_PLANET_PX: f64 = 1.5;
 /// Discs smaller than this (px) centre on a pixel corner and are drawn at least 1 px in
 /// radius, so they come out as a round 2 × 2 blot (then a 12-pixel one), never a plus.
 const CORNER_BELOW: f64 = 1.5;
@@ -649,24 +650,20 @@ mod tests {
                 assert!(near > far, "phase {k}: {near} vs {far}");
             }
         }
-        // A 2 × 2 blot keeps half its light on the night side: at 80×24 Mars in crescent,
-        // in front of the Sun, is never darker than half its day level.
+        // Every planet, Mars included, is at least a 3 × 3-pixel disc at 80×24 (about 2 × 2
+        // cells), in its own role at every phase.
         let mut s = scene(80, 24);
         const MARS: usize = 3;
         use std::f64::consts::PI;
-        assert!(planet_px(PLANETS[MARS].radius, s.outer) < CORNER_BELOW);
+        assert!(planet_px(PLANETS[MARS].radius, s.outer) >= MIN_PLANET_PX);
         for k in 0..16 {
             s.phases[MARS] = PI + PI * f64::from(k) / 16.0;
             s.rasterise();
             let (x, y) = s.planet_xy(MARS);
-            let floor = scaled(PLANETS[MARS].day, NIGHT_SMALL).level;
-            for (px, py) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
-                let ink = s
-                    .pixels
-                    .get(x.round() as i32 + px, y.round() as i32 + py)
-                    .unwrap();
+            let (cx, cy) = (x.floor() as i32, y.floor() as i32);
+            for (px, py) in (-1..=1).flat_map(|a| (-1..=1).map(move |b| (a, b))) {
+                let ink = s.pixels.get(cx + px, cy + py).unwrap();
                 assert!(ink.role == PLANETS[MARS].day.role, "phase {k}: {ink:?}");
-                assert!(ink.level >= floor, "phase {k}: {} < {floor}", ink.level);
             }
         }
     }
