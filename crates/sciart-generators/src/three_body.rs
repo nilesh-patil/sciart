@@ -10,7 +10,7 @@ use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{Form, Title};
-use sciart_core::{Tone, geom, ode};
+use sciart_core::{Tone, geom, ode, raster};
 
 pub static META: Meta = Meta {
     name: "three_body",
@@ -62,54 +62,10 @@ const GLOW_KNEE: f32 = 0.4;
 const GLOW_WHITE: f32 = 5.0;
 const TRAIL_GLOW: f32 = 0.5;
 const HEAD_GLOW: f32 = 3.0;
-const STROKE: [(i32, i32, f32); 9] = [
-    (0, 0, 0.36),
-    (-1, 0, 0.12),
-    (1, 0, 0.12),
-    (0, -1, 0.12),
-    (0, 1, 0.12),
-    (-1, -1, 0.04),
-    (1, -1, 0.04),
-    (-1, 1, 0.04),
-    (1, 1, 0.04),
-];
-const HALO_R: i32 = 4;
-const HALO_N: usize = ((2 * HALO_R + 1) * (2 * HALO_R + 1)) as usize;
-/// The halo kernel, `w = (1 − r²/(R + ½)²)²` inside radius `R + ½`.
-const HALO: [(i32, i32, f32); HALO_N] = halo_kernel();
+/// Each head's radius-4 halo; strokes use the shared 3×3 `raster::STROKE_KERNEL` (CORE-R96).
+const HALO: [(i32, i32, f32); 81] = raster::halo_kernel(4);
 const _: () = assert!(GLOW_V < HEAD_V);
 
-const fn halo_kernel() -> [(i32, i32, f32); HALO_N] {
-    let mut k = [(0, 0, 0.0f32); HALO_N];
-    let reach = (HALO_R as f32 + 0.5) * (HALO_R as f32 + 0.5);
-    let mut i = 0;
-    let mut dy = -HALO_R;
-    while dy <= HALO_R {
-        let mut dx = -HALO_R;
-        while dx <= HALO_R {
-            let w = 1.0 - (dx * dx + dy * dy) as f32 / reach;
-            k[i] = (dx, dy, if w > 0.0 { w * w } else { 0.0 });
-            i += 1;
-            dx += 1;
-        }
-        dy += 1;
-    }
-    k
-}
-
-/// Splat `kernel` at every pixel along the dot-space segment `a → b` (one per pixel of
-/// length, a pixel being 2 dots; at least one), `w` each.
-fn glow_stroke(glow: &mut Glow, a: (f64, f64), b: (f64, f64), w: f32) {
-    let len = (b.0 - a.0).hypot(b.1 - a.1);
-    if !len.is_finite() {
-        return;
-    }
-    let n = (len / 2.0).ceil().clamp(1.0, 2048.0) as usize;
-    for k in 0..n {
-        let u = (k as f64 + 0.5) / n as f64;
-        glow.splat(a.0 + u * (b.0 - a.0), a.1 + u * (b.1 - a.1), &STROKE, w);
-    }
-}
 /// ASCII heads; in Unicode a head is a disc of `HEAD_R` dots, `HEAD_R_TALL` from
 /// `TALL_ROWS` up, where a smaller disc reads as a speck (TB-A8).
 const HEAD: Glyph = Glyph::ascii('@');
@@ -569,7 +525,12 @@ impl ThreeBody {
                     continue;
                 }
                 let w = TRAIL_GLOW * (level / 200.0).powi(2) as f32;
-                glow_stroke(glow, view.dot(a.0, a.1), view.dot(b.0, b.1), w);
+                glow.stroke(
+                    view.dot(a.0, a.1),
+                    view.dot(b.0, b.1),
+                    &raster::STROKE_KERNEL,
+                    w,
+                );
             }
             if head_level(&self.phase) >= MIN_VISIBLE_LEVEL {
                 let (dx, dy) = view.dot(head.0, head.1);

@@ -547,6 +547,44 @@ fn fade(buf: &mut [f32], k: f32) {
     }
 }
 
+/// The 3 × 3 [`Glow::splat`] kernel for strokes (CORE-R96): centre 0.36, edge
+/// neighbours 0.12, corners 0.04 (sum 1), so a stroked line exposes a soft two-pixel band.
+pub const STROKE_KERNEL: [(i32, i32, f32); 9] = [
+    (0, 0, 0.36),
+    (-1, 0, 0.12),
+    (1, 0, 0.12),
+    (0, -1, 0.12),
+    (0, 1, 0.12),
+    (-1, -1, 0.04),
+    (1, -1, 0.04),
+    (-1, 1, 0.04),
+    (1, 1, 0.04),
+];
+
+/// A round [`Glow::splat`] halo kernel of radius `r` pixels (CORE-R96): every offset of
+/// the `(2r + 1)²` square, row by row, weighted `(1 − d²/(r + ½)²)²` (0 outside radius
+/// `r + ½`), so it is 1 at the centre and falls smoothly to 0. `N` must be `(2r + 1)²`;
+/// usable in a `const` (`const HALO: [_; 49] = halo_kernel(3);`), where a mismatch fails
+/// the build.
+pub const fn halo_kernel<const N: usize>(r: i32) -> [(i32, i32, f32); N] {
+    assert!(r >= 0 && ((2 * r + 1) * (2 * r + 1)) as usize == N);
+    let mut k = [(0, 0, 0.0f32); N];
+    let reach = (r as f32 + 0.5) * (r as f32 + 0.5);
+    let mut i = 0;
+    let mut dy = -r;
+    while dy <= r {
+        let mut dx = -r;
+        while dx <= r {
+            let w = 1.0 - (dx * dx + dy * dy) as f32 / reach;
+            k[i] = (dx, dy, if w > 0.0 { w * w } else { 0.0 });
+            i += 1;
+            dx += 1;
+        }
+        dy += 1;
+    }
+    k
+}
+
 /// A long-exposure `f32` buffer at [`Pixels`] resolution, `w × 2·h` (CORE-R85): points
 /// [`splat`](Self::splat) weight into it by their [`Dots`] position, [`decay`](Self::decay)
 /// fades it, and [`to_pixels`](Self::to_pixels) tone-maps it 1:1 onto a `Pixels` layer. A
@@ -624,6 +662,25 @@ impl Glow {
             if (0..w).contains(&x) && (0..h).contains(&y) && add.is_finite() {
                 self.buf[y as usize * w as usize + x as usize] += add;
             }
+        }
+    }
+
+    /// Stroke the dot-space segment `a → b` (CORE-R96): [`splat`](Self::splat) `kernel`
+    /// at `scale` at `n = clamp(⌈len / 2⌉, 1, 2048)` evenly spaced points (the midpoints
+    /// of `n` equal parts, one per pixel of length, a pixel being 2 dots), so a line's
+    /// exposure per pixel of length does not depend on its length. A non-finite length
+    /// draws nothing; the cap bounds a runaway segment.
+    pub fn stroke(&mut self, a: (f64, f64), b: (f64, f64), kernel: &[(i32, i32, f32)], scale: f32) {
+        let len = (b.0 - a.0).hypot(b.1 - a.1);
+        if !len.is_finite() {
+            return;
+        }
+        let n = (len / f64::from(Self::DOTS_PER_PIXEL))
+            .ceil()
+            .clamp(1.0, 2048.0) as usize;
+        for k in 0..n {
+            let u = (k as f64 + 0.5) / n as f64;
+            self.splat(a.0 + u * (b.0 - a.0), a.1 + u * (b.1 - a.1), kernel, scale);
         }
     }
 
