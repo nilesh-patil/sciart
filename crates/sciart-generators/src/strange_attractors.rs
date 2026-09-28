@@ -1242,8 +1242,14 @@ impl StrangeAttractors {
         let (palette, ln_top) = (spec(k).palette, (1.0 + D_TOP / f64::from(D_MIN)).ln());
         self.density
             .to_dots(&mut self.dots, D_MIN, |d| thread_ink(palette, d, ln_top));
-        self.glow
-            .to_pixels(&mut self.pixels, &self.tone, |l| glow_ink(palette, l));
+        self.glow.to_pixels(&mut self.pixels, &self.tone, |l| {
+            // Nothing under a tenth of the glow's range is drawn (ATT-A12).
+            if l < ISOLATED_BELOW {
+                Ink::BLANK
+            } else {
+                glow_ink(palette, l)
+            }
+        });
         self.pixels.dissolve(GLOW_DISSOLVE);
         drop_isolated(&mut self.pixels, glow_ink(palette, ISOLATED_BELOW).level);
     }
@@ -2001,36 +2007,33 @@ mod tests {
         assert_eq!(px.get(1, 1), Some(Ink::BLANK));
         assert_eq!(px.get(8, 1), Some(bright));
         assert_eq!((px.get(4, 6), px.get(5, 7)), (Some(dim), Some(dim)));
-        // In the scene no glow pixel under the cut stands alone.
+        // In the scene (Chen's hold included) no glow pixel is under a tenth of the glow's
+        // range at all: the fringe ends in black, not in specks.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut gal = StrangeAttractors::default();
         gal.resize(size, &mut ctx);
-        for _ in 0..(10.0 / SIM_DT) as usize {
+        let mut seen = 0;
+        for step in 0..(40.0 / SIM_DT) as usize {
             gal.update(SIM_DT, &mut ctx);
-        }
-        let k = gal.shown().unwrap();
-        let cut = glow_ink(spec(k).palette, ISOLATED_BELOW).level;
-        let lit = |x: i32, y: i32| {
-            gal.pixels
-                .get(x, y)
-                .is_some_and(|p| p.role != Role::Background)
-        };
-        for y in 0..80 {
-            for x in 0..120 {
-                let Some(p) = gal.pixels.get(x, y) else {
-                    continue;
-                };
-                if p.role == Role::Background || p.level >= cut {
-                    continue;
+            if step % 60 != 0 {
+                continue;
+            }
+            let k = gal.shown().unwrap();
+            let cut = glow_ink(spec(k).palette, ISOLATED_BELOW).level;
+            for y in 0..80 {
+                for x in 0..120 {
+                    let Some(p) = gal.pixels.get(x, y) else {
+                        continue;
+                    };
+                    if p.role != Role::Background {
+                        assert!(p.level >= cut, "{k:?}: dim glow pixel at ({x},{y})");
+                        seen += 1;
+                    }
                 }
-                let neighbours = (-1..=1)
-                    .flat_map(|dy| (-1..=1).map(move |dx| (dx, dy)))
-                    .filter(|&d| d != (0, 0) && lit(x + d.0, y + d.1))
-                    .count();
-                assert!(neighbours > 0, "lone dim speck at ({x},{y})");
             }
         }
+        assert!(seen > 1000, "{seen} glow pixels");
     }
 
     #[test]

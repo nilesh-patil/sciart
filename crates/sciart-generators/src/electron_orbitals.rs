@@ -132,9 +132,11 @@ const HC: f64 = 1239.842;
 /// smoothed over the four neighbouring cells): `Ramp::Aurora` under the olive-green
 /// +π/2 dots, `Ramp::Plasma` under the lavender −π/2 dots, so each lobe glows in its own
 /// family and the nodal surfaces between them stay dark. (One exposure, not one per sign:
-/// a second pixel buffer took the scene past the TEST-R7 ceiling.) The cap `HAZE_MAX` is
-/// set so the phase-coloured dots stay ≥ 1.4× the luma of any glow behind them in astro
-/// and ≥ 1.1× in mono (holds). The glow shows in every phase: in a stationary state it is a
+/// a second pixel buffer took the scene past the TEST-R7 ceiling.) M12 round 3 (ORB-A12):
+/// the glow is bright, up to `HAZE_MAX` (two-thirds of the ramp), so the lobes read as
+/// smooth half-block bodies; only one point in [`SPARKLE`] is drawn as a phase-coloured
+/// dot, a sparse sparkle over the body rather than the speckle the full sample made.
+/// The glow shows in every phase: in a stationary state it is a
 /// ~`GLOW_TAU` s exposure (the time-mean is the instantaneous `|ψ|²`); through a transition
 /// it shortens to `GLOW_TAU_MOVING`, so it follows the slosh with a lag well under the
 /// beat period and its colour flips with the winding phase. In mono a winding phase grey
@@ -144,7 +146,9 @@ const GLOW_TAU_MOVING: f64 = 0.25;
 const GLOW_KNEE: f32 = 0.5;
 const GLOW_WHITE: f32 = 8.0;
 const GLOW_FLOOR: f64 = 0.2;
-const HAZE_MAX: u8 = 92;
+const HAZE_MAX: u8 = 170;
+/// One sample point in `SPARKLE` is drawn as a dot (ORB-A12); every point exposes the glow.
+const SPARKLE: usize = 6;
 /// The glow ramps by sign of the phase's sine: `+π/2` lobes, then `−π/2` lobes.
 const GLOW_RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::Plasma];
 /// The display blur of the exposure before toning (ORB-A11), `(dx, dy, weight)` in pixels:
@@ -188,6 +192,24 @@ fn blurred(exposure: &Glow, x: i32, y: i32) -> f32 {
         }
     }
     if wsum > 0.0 { sum / wsum } else { 0.0 }
+}
+
+/// ASCII for one glow cell from its two pixels (ORB-A12, GEN-R10): the stronger pixel's
+/// level over [`HAZE_MAX`] picks `` ` `` `'` `~` `=` in quarters, in that pixel's ink; an empty
+/// cell stays untouched. None of these is a braille dot-count fallback, so the sparkle dots
+/// still read apart from the body.
+fn glow_ascii(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
+    const RAMP: [char; 4] = ['`', '\'', '~', '='];
+    let ink = if top.level >= bottom.level {
+        top
+    } else {
+        bottom
+    };
+    if ink.role == Role::Background || ink.level == 0 {
+        return None;
+    }
+    let q = (usize::from(ink.level) * RAMP.len() / (usize::from(HAZE_MAX) + 1)).min(RAMP.len() - 1);
+    Some((RAMP[q], ink))
 }
 
 /// The glow's own radial window (charge quantiles): points expose it fully inside `r₇₀`
@@ -1240,7 +1262,7 @@ impl ElectronOrbitals {
         let front = &mut self.front;
         let balance = &mut self.balance;
         let weight = 1.0 - keep;
-        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], r, phase| {
+        atom.for_each_visible(atom.fade(), |_, i, [x, y, z], r, phase| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             let Some((sx, sy, depth)) = proj.project(world, centre, scale) else {
                 return;
@@ -1249,12 +1271,17 @@ impl ElectronOrbitals {
             if dy >= floor {
                 return;
             }
-            let mut ink = ink::phase(phase);
-            if let Some(f) = front.get_mut(sx.floor() as i32, sy.floor() as i32) {
-                *f = (*f).max(front_key(depth, ink.level));
-                ink.level = *f as u8;
+            // Every point exposes the glow, the cloud's body; only one in `SPARKLE` is
+            // also drawn as a dot, the phase-coloured sparkle over it (ORB-A12). The
+            // choice is by the point's fixed index, so a dot never flickers in and out.
+            if i % SPARKLE == 0 {
+                let mut ink = ink::phase(phase);
+                if let Some(f) = front.get_mut(sx.floor() as i32, sy.floor() as i32) {
+                    *f = (*f).max(front_key(depth, ink.level));
+                    ink.level = *f as u8;
+                }
+                dots.plot(dx, dy, ink);
             }
-            dots.plot(dx, dy, ink);
             // The pixel holding the dot and its 3×3 neighbourhood: enough to smooth the
             // grain, too little to fill a node.
             let w = weight * glow_fade.taper(r) as f32;
@@ -1385,9 +1412,11 @@ impl Generator for ElectronOrbitals {
     fn render(&self, canvas: &mut Canvas) {
         // Under the cloud, and over it where a node leaves its cell nearly empty (a
         // lobe dot or two from the tilt would otherwise hide it); 1s stays covered.
-        // The glow first (Unicode only: ASCII has no half blocks), then the dots over it
-        // with the glow carried on as their cells' background.
-        self.glow.blit(canvas, |_, _, _, _| None);
+        // The glow first, then the dots over it with the glow carried on as their cells'
+        // background. ASCII has no half blocks, so there the glow's body is a light
+        // character ramp (ORB-A12), and the sparse dots' braille fallbacks sit on it.
+        self.glow
+            .blit(canvas, |_, _, top, bottom| glow_ascii(top, bottom));
         let (x, y) = self.nucleus();
         canvas.put(x, y, NUCLEUS, NUCLEUS_INK);
         self.dots.blit_over(canvas, &self.glow);
@@ -1894,14 +1923,6 @@ mod tests {
     /// Dots stay at least this many times the luma of the glow behind them (ORB-A8): astro,
     /// then mono (whose ±π/2 grey is mid-grey, RND-R10, so there the dots sit just over
     /// the glow and the lobe reads as one smooth grey body).
-    fn dot_over_glow(theme: sciart_render::Theme) -> f64 {
-        if theme == sciart_render::Theme::Mono {
-            1.1
-        } else {
-            1.4
-        }
-    }
-
     /// A lit glow ink, of either sign's ramp (ORB-A9, ORB-A10).
     fn is_glow(ink: Ink) -> bool {
         GLOW_RAMPS.iter().any(|&r| ink.role == Role::Ramp(r)) && ink.level > 0
@@ -2170,8 +2191,15 @@ mod tests {
         );
         for t in cycle() {
             at_clock(&mut s, p2x, t);
-            let cells = cell_dots(&s);
-            let column = |x: i32| -> u32 { cells.iter().map(|r| r[x as usize]).sum() };
+            // The node is judged on the glow, the cloud's body (ORB-A12): the dots are a
+            // sparse sample, too noisy to measure a gap by.
+            let rows = 2 * i32::from(s.size.height());
+            let column = |x: i32| -> u32 {
+                (0..rows)
+                    .filter_map(|y| s.glow.get(x, y))
+                    .map(|p| u32::from(p.level))
+                    .sum()
+            };
             let node = column(cx);
             let lobe = (cx - 3..=cx + 3).map(column).max().unwrap();
             assert!(
@@ -2475,57 +2503,34 @@ mod tests {
             if theme == Theme::Mono {
                 assert!((pos - neg).abs() < 1.0, "{theme:?}: {pos} vs {neg}");
             }
-            // Dots stand out over the brightest glow of either sign behind them (M12:
-            // ≥ 1.4×, the glow now being the cloud's body rather than a faint haze).
-            for ramp in GLOW_RAMPS {
-                let glow = luma(theme.color(Ink::new(Role::Ramp(ramp), HAZE_MAX), 0, 0));
-                assert!(
-                    pos.min(neg) >= dot_over_glow(theme) * glow,
-                    "{theme:?} {ramp:?}: dots {pos}/{neg}, glow {glow}"
-                );
-            }
+            // Both signs' dots show in colour (M12 round 3: the dots are sparkle over the
+            // glow's body, not brighter than it, ORB-A12).
+            assert!(pos.min(neg) > 0.0, "{theme:?}: {pos}/{neg}");
         }
     }
 
     #[test]
-    fn orb_a8_dots_stand_out_over_the_glow_in_every_frame() {
-        // Over a whole loop at 80×24, every dotted cell over a glow: its dots have ≥ 1.4×
-        // the glow's luma in astro for whatever phase they wear, and in mono in holds (in
-        // a transition, phases near 0 are near-black in mono, RND-R10).
-        use sciart_render::{Rgb, Theme};
-        let luma =
-            |c: Rgb| 0.2126 * f64::from(c.0) + 0.7152 * f64::from(c.1) + 0.0722 * f64::from(c.2);
+    fn orb_a12_the_glow_is_the_body_and_the_dots_a_sparse_sparkle() {
+        // The glow reaches two-thirds of the ramp (the body), and over a whole loop at
+        // 80×24 the dotted cells are a minority of the glowing ones: sparkle, not speckle.
+        const { assert!(HAZE_MAX >= 160 && SPARKLE >= 3) };
         let mut s = scene(0, 80, 24);
         let mut ctx = Ctx::new(1, s.size);
         let mut c = Canvas::new(s.size, GlyphMode::Unicode);
-        let mut checked = 0;
+        let (mut glowing, mut dotted) = (0usize, 0usize);
         for _ in 0..(ROCK_PERIOD * K as f64 / 0.1) as usize {
             s.update(0.1, &mut ctx);
-            let hold = s.atom.as_ref().unwrap().phase == Phase::Hold;
             c.clear();
             s.render(&mut c);
-            for cell in c.cells().iter().filter(|c| c.ink.role == Role::Phase) {
-                if !is_glow(cell.bg) {
-                    continue;
-                }
-                let themes: &[Theme] = if hold {
-                    &[Theme::Astro, Theme::Mono]
-                } else {
-                    &[Theme::Astro]
-                };
-                for &theme in themes {
-                    let (dot, bg) = (theme.color(cell.ink, 0, 0), theme.color(cell.bg, 0, 0));
-                    assert!(
-                        luma(dot) >= dot_over_glow(theme) * luma(bg),
-                        "{theme:?}: phase level {} over glow {:?}",
-                        cell.ink.level,
-                        cell.bg
-                    );
-                }
-                checked += 1;
+            for cell in c.cells() {
+                let glow = is_glow(cell.bg) || (is_glow(cell.ink) && cell.ch != ' ');
+                glowing += usize::from(glow);
+                dotted += usize::from(glow && cell.ink.role == Role::Phase);
             }
         }
-        assert!(checked > 1000, "{checked} cells");
+        assert!(glowing > 10_000, "{glowing} glowing cells");
+        let share = dotted as f64 / glowing as f64;
+        assert!(share < 0.6, "dotted share {share:.2}");
     }
 
     #[test]
@@ -2589,7 +2594,11 @@ mod tests {
         let centre = (cx + 0.25, cy + 0.125);
         let proj = atom.camera().projector();
         let mut best: HashMap<(i32, i32), (f64, u8)> = HashMap::new();
-        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], _, phase| {
+        atom.for_each_visible(atom.fade(), |_, i, [x, y, z], _, phase| {
+            // Only the sparkle points are drawn as dots (ORB-A12).
+            if i % SPARKLE != 0 {
+                return;
+            }
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             let (sx, sy, d) = proj.project(world, centre, scale).unwrap();
             if Dots::from_cells(sx, sy).1 >= 4.0 * 23.0 - 0.5 {
@@ -2654,10 +2663,20 @@ mod tests {
                 "label row cell {x}"
             );
         }
-        // ASCII mode draws no glow at all.
+        // ASCII mode draws the glow as its own light character ramp, never as a
+        // background, and is pure ASCII (ORB-A12, GEN-R10).
         let mut a = Canvas::new(s.size, GlyphMode::Ascii);
         s.render(&mut a);
-        assert!(a.cells().iter().all(|c| !is_glow(c.ink) && !is_glow(c.bg)));
+        assert!(a.to_lines().iter().all(|l| l.is_ascii()));
+        let mut body = 0;
+        for c in a.cells() {
+            assert!(!is_glow(c.bg));
+            if is_glow(c.ink) {
+                assert!(['`', '\'', '~', '='].contains(&c.ch), "{:?}", c.ch);
+                body += 1;
+            }
+        }
+        assert!(body > 50, "{body} ASCII glow cells");
         // The glow is the points' own density: in the 2p_z hold the nodal plane (the
         // nucleus row) glows far less than the lobes above and below it, and the glow is
         // feathered (it holds many levels below the cap).

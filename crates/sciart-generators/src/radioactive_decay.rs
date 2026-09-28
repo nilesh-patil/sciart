@@ -96,7 +96,7 @@ const PANEL_MIN_H: i32 = 10;
 /// event; for the first `FLASH_HOT` s it is bright (≥ `BRIGHT` levels) and ASCII shows `*`
 /// (RAD-A8).
 const FLASH: f32 = 0.3;
-const FLASH_HOT: f32 = 0.15;
+const FLASH_HOT: f32 = 0.18;
 /// Nuclei are `NUC × NUC` pixel squares on a pitch of `PITCH` pixels (RAD-A5): a one-pixel
 /// black gap keeps every nucleus a separate dot.
 const NUC: i32 = 2;
@@ -130,13 +130,14 @@ const BURST: f64 = 0.12;
 const BURST_R: f64 = 2.5;
 const BURST_GROW: f64 = 2.0;
 
-/// Species palette (RAD-A5; false colour), ordered A, B, C: parent A a warm `HAlpha` rose
-/// at 0.6, daughter B a teal `Ice` at 0.7 (a step brighter, so they part in mono too), and
+/// Species palette (RAD-A5; false colour), ordered A, B, C: parent A a warm `HAlpha`
+/// crimson at 0.5, daughter B a pale teal `Ice` at 0.8 (far apart in grey, so mono parts
+/// them at a glance), and
 /// stable C near the ground, a barely-there `Plasma` at 0.07: the lattice fades out as it
 /// decays, and only the flashes carry real brightness. C's curve on the plot is the same
 /// `Plasma` at [`MEASURED`], a clear lavender. No amber: that hue is the gallery's most used.
 const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
-const SETTLED: [f64; 3] = [0.6, 0.7, 0.07];
+const SETTLED: [f64; 3] = [0.5, 0.8, 0.07];
 /// Tracks in hues no species uses: α `Aurora` (green), β `Starlight` (near white), at
 /// `TRACK_TOP` of the ramp while moving, fading to `TRACK_FLOOR` of that.
 const ALPHA_RAMP: Ramp = Ramp::Aurora;
@@ -1508,10 +1509,10 @@ mod tests {
         // and only flashes and tracks carry brightness.
         let lv = [Kind::A, Kind::B, Kind::C].map(|k| f64::from(settled_ink(k).level) / 255.0);
         assert!(
-            (0.58..=0.72).contains(&lv[0]) && (0.58..=0.72).contains(&lv[1]),
+            (0.45..=0.55).contains(&lv[0]) && (0.75..=0.82).contains(&lv[1]),
             "{lv:?}"
         );
-        assert!(lv[0] + 0.08 <= lv[1], "{lv:?}");
+        assert!(lv[0] + 0.25 <= lv[1], "mono parts A and B: {lv:?}");
         assert!(lv[2] <= 0.08, "C is near ground: {lv:?}");
         // A warm, B teal, C a faint violet whose curve is lavender: no amber ramps and no
         // grey measured curve anywhere in the scene.
@@ -1564,7 +1565,7 @@ mod tests {
             }
             .ink()
             .level;
-            assert!(f64::from(fresh) >= 1.2 * f64::from(ground_b), "{fresh}");
+            assert!(f64::from(fresh) >= 1.15 * f64::from(ground_b), "{fresh}");
             assert!(faded > ground_a, "{faded}");
         }
         // β tracks are longer than α tracks, every one of them.
