@@ -67,9 +67,11 @@ const M_MAX: usize = 16_384;
 /// Slot preparation (sampling or partner-ψ rewrite) per 1/60 s during a hold.
 const PREP_PER_TICK: f64 = 256.0;
 /// Framing: the r₉₀ sphere of the widest state (4f) spans `FIT` of the [`stage`] height,
-/// and state k is drawn at `g_k = (r₉₀,k / r₉₀,4f)^GLIDE` of that: smaller, but never a dot.
-const FIT: f64 = 0.75;
-const GLIDE: f64 = 0.3;
+/// and state k is drawn at `g_k = (r₉₀,k / r₉₀,4f)^GLIDE` of that: 0.79 / 0.89 / 0.95 / 1
+/// for 1s / 2p / 3d / 4f. Every hold is the hero and fills 0.64–0.8 of the stage, while
+/// the size still grows with n, so the loop keeps its sense of scale.
+const FIT: f64 = 0.8;
+const GLIDE: f64 = 0.1;
 /// Camera (world unit = the blended r₉₀): every state has its own [`Pose`], blended with
 /// weight c_b²; the yaw rocks about it and the pitch wobbles in quadrature, so the atom
 /// always moves but no state is ever seen from its blind side.
@@ -155,7 +157,7 @@ const SPLAT: [(i32, i32, f32); 5] = [
 const NUCLEUS: Glyph = Glyph::new('•', 'o');
 const NUCLEUS_INK: Ink = Ink::new(Role::Accent, 180);
 /// The nucleus is drawn over its cell when at most this many of the 8 dots are lit.
-const NUCLEUS_MAX_DOTS: usize = 2;
+const NUCLEUS_MAX_DOTS: usize = 3;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Number of gallery states.
@@ -345,14 +347,22 @@ fn factorial(n: u32) -> f64 {
     (1..=n).map(f64::from).product()
 }
 
-/// `R_nl(r)/r^l`: finite at the origin, so `ψ` needs no direction there.
-fn radial_reduced(n: u32, l: u32, r: f64) -> f64 {
+/// The constant factor of [`radial_reduced`]: the normalisation times `(2/n)^l`.
+fn radial_coeff(n: u32, l: u32) -> f64 {
     let nf = f64::from(n);
     let norm = ((2.0 / nf).powi(3) * factorial(n - l - 1) / (2.0 * nf * factorial(n + l))).sqrt();
-    let rho = 2.0 * r / nf;
     norm * (2.0 / nf).powi(l as i32)
-        * (-rho / 2.0).exp()
-        * laguerre(n - l - 1, f64::from(2 * l + 1), rho)
+}
+
+/// `R_nl(r)/r^l` given its [`radial_coeff`]: finite at the origin, so `ψ` needs no direction.
+fn radial_shape(n: u32, l: u32, coeff: f64, r: f64) -> f64 {
+    let rho = 2.0 * r / f64::from(n);
+    coeff * (-rho / 2.0).exp() * laguerre(n - l - 1, f64::from(2 * l + 1), rho)
+}
+
+/// `R_nl(r)/r^l`.
+fn radial_reduced(n: u32, l: u32, r: f64) -> f64 {
+    radial_shape(n, l, radial_coeff(n, l), r)
 }
 
 /// Hydrogen radial function `R_nl(r)` (a₀ = 1).
@@ -378,9 +388,15 @@ fn solid(orb: Orb, [x, y, z]: [f64; 3]) -> f64 {
 }
 
 /// `ψ(p)` in atomic units.
+#[cfg(test)]
 pub(crate) fn psi(orb: Orb, p: [f64; 3]) -> f64 {
+    psi_with(orb, radial_coeff(orb.n(), orb.l()), p)
+}
+
+/// [`psi`] with the orbital's [`radial_coeff`] precomputed (the slots' hot path).
+fn psi_with(orb: Orb, coeff: f64, p: [f64; 3]) -> f64 {
     let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
-    radial_reduced(orb.n(), orb.l(), r) * solid(orb, p)
+    radial_shape(orb.n(), orb.l(), coeff, r) * solid(orb, p)
 }
 
 /// Radius enclosing probability `q` (trapezoid on a 0.01 a₀ grid, linear inside a step).
@@ -477,6 +493,8 @@ pub(crate) fn beat_omega(na: u32, nb: u32) -> f64 {
 /// Exact separable sampler of `|ψ|²`: `r²R² dr · Θ² d cos θ · Φ² dφ`.
 #[derive(Debug)]
 struct Sampler {
+    /// The orbital's [`radial_coeff`], so ψ skips its factorials and roots per point.
+    coeff: f64,
     r: InverseCdf<KNOTS>,
     mu: InverseCdf<KNOTS>,
     phi: InverseCdf<KNOTS>,
@@ -497,6 +515,7 @@ impl Sampler {
             solid(orb, [s * phi.cos_det(), s * phi.sin_det(), 0.5]).powi(2)
         };
         Self {
+            coeff: radial_coeff(n, l),
             r: InverseCdf::build(0.0, r_max, |r| (r * radial(n, l, r)).powi(2)),
             mu: InverseCdf::build(-1.0, 1.0, meridian),
             phi: InverseCdf::build(0.0, TAU, parallel),
@@ -575,18 +594,21 @@ impl Slot {
     }
 
     /// Spend up to `budget` points of work sampling up to `target` points, then rewriting
-    /// partner ψ; returns the unspent budget.
+    /// partner ψ; returns the unspent budget. `samplers` is the whole gallery's (the
+    /// partner's ψ needs its radial coefficient).
     fn prepare(
         &mut self,
-        sampler: &Sampler,
+        samplers: &[Sampler],
         target: usize,
         rng: &mut SplitMix64,
         mut budget: usize,
     ) -> usize {
         let (orb, partner) = (GALLERY[self.orb], GALLERY[self.partner]);
+        let sampler = &samplers[self.orb];
+        let (own_c, partner_c) = (sampler.coeff, samplers[self.partner].coeff);
         while budget > 0 && self.partner_done < self.len() {
             let i = self.partner_done;
-            self.other[i] = psi(partner, self.pos(i)) as f32;
+            self.other[i] = psi_with(partner, partner_c, self.pos(i)) as f32;
             self.partner_done += 1;
             budget -= 1;
         }
@@ -598,8 +620,8 @@ impl Slot {
             self.z.push(p32[2]);
             // ψ from the stored (f32) position, so every later evaluation agrees.
             let p = p32.map(f64::from);
-            self.psi.push(psi(orb, p) as f32);
-            self.other.push(psi(partner, p) as f32);
+            self.psi.push(psi_with(orb, own_c, p) as f32);
+            self.other.push(psi_with(partner, partner_c, p) as f32);
             self.u.push(rng.next_f64() as f32);
             self.v.push(rng.next_f64() as f32);
             self.partner_done += 1;
@@ -715,10 +737,32 @@ pub(crate) fn visible(p: f64, c: (f64, f64), cos_wt: f64, psi: (f64, f64), u: f6
 /// 0 and π, a half turn apart and equally far from 0, so every theme (mono included:
 /// RND-R10 greys phase by its distance from 0) draws the two lobes of a real state equally
 /// bright, as their equal `|ψ|²` demands.
+#[cfg(test)]
 pub(crate) fn phase_of(c: (f64, f64), psi: (f64, f64), theta: (f64, f64)) -> f64 {
+    phase_at(c, psi, Turns::of(theta))
+}
+
+/// `(sin θ, cos θ)` of both terms' phases: constant over a frame, so taken once per step
+/// rather than per visible point.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Turns {
+    a: (f64, f64),
+    b: (f64, f64),
+}
+
+impl Turns {
+    pub(crate) fn of(theta: (f64, f64)) -> Self {
+        Self {
+            a: theta.0.sin_cos_det(),
+            b: theta.1.sin_cos_det(),
+        }
+    }
+}
+
+/// [`phase_of`] with the terms' phases given as [`Turns`].
+fn phase_at(c: (f64, f64), psi: (f64, f64), turns: Turns) -> f64 {
     let (a, b) = (c.0 * psi.0, c.1 * psi.1);
-    let (sa, ca) = theta.0.sin_cos_det();
-    let (sb, cb) = theta.1.sin_cos_det();
+    let ((sa, ca), (sb, cb)) = (turns.a, turns.b);
     FRAC_PI_2 + (a * sa + b * sb).atan2(a * ca + b * cb)
 }
 
@@ -766,6 +810,8 @@ pub(crate) struct Atom {
     /// The terms' phases `(θ_a, θ_b)` from [`gauge`] (0 in a hold), for the phase
     /// colouring; `θ_a − θ_b = ωt` since the rise.
     theta: (f64, f64),
+    /// `theta`'s sines and cosines, for [`phase_at`].
+    turns: Turns,
     rng: SplitMix64,
 }
 
@@ -801,6 +847,7 @@ impl Atom {
             m,
             mix: Mixture::new(0.0, m[at], m[next], 1.0),
             theta: (0.0, 0.0),
+            turns: Turns::of((0.0, 0.0)),
             rng,
         };
         atom.prepare(usize::MAX);
@@ -825,12 +872,7 @@ impl Atom {
         );
         if self.phase == Phase::Hold {
             let live = &mut self.slots[self.cur];
-            live.prepare(
-                &self.samplers[live.orb],
-                m[live.orb],
-                &mut self.rng,
-                usize::MAX,
-            );
+            live.prepare(&self.samplers, m[live.orb], &mut self.rng, usize::MAX);
         } else {
             self.prepare(usize::MAX);
         }
@@ -842,8 +884,8 @@ impl Atom {
         let [a, b] = &mut self.slots;
         let (live, free) = if self.cur == 0 { (a, b) } else { (b, a) };
         let rng = &mut self.rng;
-        let budget = free.prepare(&self.samplers[free.orb], self.m[free.orb], rng, budget);
-        live.prepare(&self.samplers[live.orb], self.m[live.orb], rng, budget);
+        let budget = free.prepare(&self.samplers, self.m[free.orb], rng, budget);
+        live.prepare(&self.samplers, self.m[live.orb], rng, budget);
     }
 
     /// Advance by `dt > 0` s (finite; the scene's `update` filters every other value).
@@ -860,6 +902,7 @@ impl Atom {
         } else {
             gauge(omega, since_rise)
         };
+        self.turns = Turns::of(self.theta);
         self.mix = Mixture::new(
             chi(self.phase, beat.progress),
             self.m[self.at],
@@ -916,12 +959,13 @@ impl Atom {
             * ease::smoothstep(((HOLD - local) / GLOW_OUT).clamp(0.0, 1.0))
     }
 
-    /// Calls `f(slot, i, position (a₀), phase)` for every point visible through `fade`: one
-    /// radial window for both slots, so the drawn density is exactly `τ(r)·(M(χ)/2)|Ψ|²`.
+    /// Calls `f(slot, i, position (a₀), radius (a₀), phase)` for every point visible through
+    /// `fade`: one radial window for both slots, so the drawn density is exactly
+    /// `τ(r)·(M(χ)/2)|Ψ|²`.
     pub(crate) fn for_each_visible(
         &self,
         fade: Fade,
-        mut f: impl FnMut(usize, usize, [f64; 3], f64),
+        mut f: impl FnMut(usize, usize, [f64; 3], f64, f64),
     ) {
         let mx = self.mix;
         let own = [
@@ -935,13 +979,13 @@ impl Atom {
             let slot = &self.slots[s];
             for i in 0..self.m[slot.orb].min(slot.len()) {
                 let pos = slot.pos(i);
-                let taper =
-                    fade.taper((pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt());
+                let r = (pos[0] * pos[0] + pos[1] * pos[1] + pos[2] * pos[2]).sqrt();
+                let taper = fade.taper(r);
                 let psi = (f64::from(slot.psi[i]), f64::from(slot.other[i]));
                 let (u, v) = (f64::from(slot.u[i]), f64::from(slot.v[i]));
                 if visible(p * taper, c, mx.cos_wt, psi, u, v) {
                     let ab = if is_b { (psi.1, psi.0) } else { psi };
-                    f(s, i, pos, phase_of((mx.c_a, mx.c_b), ab, self.theta));
+                    f(s, i, pos, r, phase_at((mx.c_a, mx.c_b), ab, self.turns));
                 }
             }
         }
@@ -957,8 +1001,8 @@ impl Atom {
     /// The larger state of the pair sets the scale while it holds at least half the weight:
     /// into a larger state the framing eases over the rise, `1 − (1 − 2w)₊²`, out of one
     /// over the fall, `(2w − 1)₊²`. Mixing a smaller state's scale in would draw the larger
-    /// one bigger than in its own hold (× `(r₉₀,b/r₉₀,a)^{0.7(1−W)}`, 1.47 for 1s → 2p_z
-    /// at W = ½), pushing its dust off the frame. `w` is flat in time at every phase
+    /// one bigger than in its own hold (× `(r₉₀,b/r₉₀,a)^{(1−GLIDE)(1−W)}`, 1.64 for
+    /// 1s → 2p_z at W = ½), pushing its dust off the frame. `w` is flat in time at every phase
     /// boundary, so the framing moves smoothly.
     fn glide(&self) -> f64 {
         let w = self.mix.c_b * self.mix.c_b;
@@ -1133,7 +1177,7 @@ impl ElectronOrbitals {
         let (dots, exposure) = (&mut self.dots, &mut self.exposure);
         let front = &mut self.front;
         let weight = 1.0 - keep;
-        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], phase| {
+        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], r, phase| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             let Some((sx, sy, depth)) = proj.project(world, centre, scale) else {
                 return;
@@ -1150,7 +1194,6 @@ impl ElectronOrbitals {
             dots.plot(dx, dy, ink);
             // The pixel holding the dot, plus an eighth to each of its four neighbours:
             // enough to smooth the grain, too little to fill a node.
-            let r = (x * x + y * y + z * z).sqrt();
             exposure.splat(dx, dy, &SPLAT, weight * glow_fade.taper(r) as f32);
         });
         self.exposure
@@ -1640,7 +1683,7 @@ mod tests {
         for cos_wt in [1.0, -1.0] {
             atom.mix = Mixture::new(FRAC_PI_4, atom.m[1], atom.m[2], cos_wt);
             let mut pts = Vec::new();
-            atom.for_each_visible(Fade::NONE, |_, _, p, _| pts.push(p));
+            atom.for_each_visible(Fade::NONE, |_, _, p, _, _| pts.push(p));
             // Both slots hold M_MAX points here, so M(χ)/2 = 8192 are visible on average.
             let n = pts.len() as f64;
             assert_eq!((atom.m[1], atom.m[2]), (M_MAX, M_MAX));
@@ -1666,7 +1709,7 @@ mod tests {
     /// The points on screen: visible through the atom's own display window.
     fn visible_set(atom: &Atom) -> HashSet<(usize, usize)> {
         let mut set = HashSet::new();
-        atom.for_each_visible(atom.fade(), |s, i, _, _| {
+        atom.for_each_visible(atom.fade(), |s, i, _, _, _| {
             set.insert((s, i));
         });
         set
@@ -1703,7 +1746,7 @@ mod tests {
         // transition: ≤ 7 % (measured 5.1).
         let set = |atom: &Atom, fade: Fade| {
             let mut set = HashSet::new();
-            atom.for_each_visible(fade, |s, i, _, _| {
+            atom.for_each_visible(fade, |s, i, _, _, _| {
                 set.insert((s, i));
             });
             set
@@ -2435,7 +2478,7 @@ mod tests {
         let centre = (cx + 0.25, cy + 0.125);
         let proj = atom.camera().projector();
         let mut best: HashMap<(i32, i32), (f64, u8)> = HashMap::new();
-        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], phase| {
+        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], _, phase| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             let (sx, sy, d) = proj.project(world, centre, scale).unwrap();
             if Dots::from_cells(sx, sy).1 >= 4.0 * 23.0 - 0.5 {

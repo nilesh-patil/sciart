@@ -48,7 +48,7 @@ use rand::Rng;
 
 use sciart_core::ink;
 use sciart_core::prelude::*;
-use sciart_core::rng::hash01;
+use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
 
@@ -120,13 +120,17 @@ const BURST_GROW: f64 = 2.0;
 
 /// Species palette (RAD-A5; false colour). The ground is dim and calm, and the species
 /// differ in texture as well as hue, so the lattice is no three-colour checkerboard:
-/// parent A is a flat dim `Ember` half-block pixel, daughter B a cool `Aurora` 2×2 cluster
+/// parent A is a dim `Ember` half-block pixel whose level carries a fixed per-site grain
+/// (`A_BASE · (1 ± A_GRAIN)`, hashed from its site), so a fresh all-A lattice reads as a
+/// mosaic of separate nuclei rather than a flat fill; daughter B a cool `Aurora` 2×2 cluster
 /// of braille dots filling its pixel (dots light less of the cell than a block, so B sits
 /// higher on its ramp and reads at least as strongly as A), and stable C an empty site,
 /// so the lattice hollows out from a warm field to black as B comes and goes.
 /// C's ramp is its curve's.
 const RAMPS: [Ramp; 3] = [Ramp::Ember, Ramp::Aurora, Ramp::Plasma];
 const A_BASE: f64 = 0.16;
+/// Relative spread of A's per-site grain: levels span `A_BASE · (1 ± A_GRAIN)`, mean `A_BASE`.
+const A_GRAIN: f64 = 0.4;
 const B_MARK: f64 = 0.45;
 /// Tracks in hues no species uses: α `HAlpha`, β `Ice`, at `TRACK_TOP` of the ramp while
 /// moving, fading to `TRACK_FLOOR` of that.
@@ -157,6 +161,12 @@ const SEG_V: Glyph = Glyph::new('│', '|');
 const AXIS_CORNER: Glyph = Glyph::new('└', '+');
 const AXIS_TICK_X: Glyph = Glyph::new('┴', '+');
 const AXIS_TICK_Y: Glyph = Glyph::new('┤', '+');
+/// The y-axis ticks as population fractions with their labels (RAD-A6): N₀/2 on the
+/// linear plot (read the half-life off the A curve), each decade on the log plot. The
+/// labels sit just inside the axis, over the curves (a crossing curve loses a cell or two; the label stays legible) (a panel has ≥ 22 data
+/// columns, so a 3-character label always fits).
+const TICKS_LINEAR: [(f64, &str); 1] = [(0.5, "50%")];
+const TICKS_LOG: [(f64, &str); 2] = [(0.1, "10%"), (0.01, "1%")];
 /// `A ─α→ B ─β→ C`.
 const HEADER: [Glyph; 13] = [
     Glyph::ascii('A'),
@@ -341,15 +351,19 @@ pub(crate) fn log_blend(t: f64) -> f64 {
     ease::smoothstep(((t - LOG_FROM) / LOG_EASE).clamp(0.0, 1.0))
 }
 
-/// The half-block ink of the lattice pixel of nucleus `n` (RAD-A5): A is a dim `Ember`
-/// pixel; B and C leave it empty (B is dots on the marks layer, C nothing). A never
-/// flashes: nothing decays into it, and a restart is not a decay.
-pub(crate) fn nucleus_pixel(n: &Nucleus) -> Ink {
-    if n.kind == Kind::A {
-        ink::ramp(RAMPS[0], A_BASE)
-    } else {
-        Ink::BLANK
-    }
+/// The ink of an A nucleus at lattice site `(x, y)` (RAD-A5): `Ember` at
+/// `A_BASE · (1 ± A_GRAIN)`, a fixed hash of the site, so neighbouring nuclei differ and
+/// the full field shows its grain. Built once per resize (`RadioactiveDecay::grain`).
+pub(crate) fn a_ink(x: i32, y: i32) -> Ink {
+    let u = 2.0 * hash01(cell_key(x, y)) - 1.0;
+    ink::ramp(RAMPS[0], A_BASE * (1.0 + A_GRAIN * u))
+}
+
+/// The half-block ink of the lattice pixel of nucleus `n` whose site's A ink is `a`
+/// (RAD-A5): A is its dim grain pixel; B and C leave it empty (B is dots on the marks
+/// layer, C nothing). A never flashes: nothing decays into it, and a restart is not a decay.
+pub(crate) fn nucleus_pixel(n: &Nucleus, a: Ink) -> Ink {
+    if n.kind == Kind::A { a } else { Ink::BLANK }
 }
 
 /// Whether a nucleus is flashing: it decayed less than [`FLASH`] s ago (RAD-A8).
@@ -594,6 +608,8 @@ pub struct RadioactiveDecay {
     t: f64,
     /// One nucleus per lattice pixel: `lat_w × 2·rows` (RAD-A5).
     lattice: Grid<Nucleus>,
+    /// Each site's A ink ([`a_ink`]), in lattice order; static per resize.
+    grain: Vec<Ink>,
     /// Lattice size in pixels.
     lat_w: i32,
     lat_h: i32,
@@ -622,6 +638,7 @@ impl Default for RadioactiveDecay {
         Self {
             t: 0.0,
             lattice: Grid::default(),
+            grain: Vec::new(),
             lat_w: 0,
             lat_h: 0,
             counts: [0; 3],
@@ -676,11 +693,16 @@ impl RadioactiveDecay {
     }
 
     /// Give the free track slots to decays drawn uniformly from `events` (a partial
-    /// Fisher–Yates shuffle), so a full pool favours no part of the lattice.
+    /// Fisher–Yates shuffle), so a full pool favours no part of the lattice. Slots are
+    /// counted per track: an `A → C` event needs two, and when only one is left it keeps
+    /// its α and loses its β.
     fn spawn_tracks(&mut self, ctx: &mut Ctx) {
         let n = self.events.len();
-        let take = n.min(self.tracks.capacity() - self.tracks.len());
-        for k in 0..take {
+        let mut free = self.tracks.capacity() - self.tracks.len();
+        for k in 0..n {
+            if free == 0 {
+                break;
+            }
             let j = ctx.rng.random_range(k..n);
             self.events.swap(k, j);
             let (i, from, to) = self.events[k];
@@ -689,9 +711,10 @@ impl RadioactiveDecay {
             let beta = to == Kind::C;
             // A → B: α; B → C: β⁻; A → C within one step: both.
             for is_alpha in [true, false] {
-                if (is_alpha && !alpha) || (!is_alpha && !beta) {
+                if (is_alpha && !alpha) || (!is_alpha && !beta) || free == 0 {
                     continue;
                 }
+                free -= 1;
                 let theta = ctx.rng.random::<f64>() * TAU;
                 let (speed, omega, scatter, run, life) = if is_alpha {
                     (ALPHA_SPEED, ALPHA_OMEGA, 0.0, ALPHA_RUN, ALPHA_LIFE)
@@ -722,9 +745,9 @@ impl RadioactiveDecay {
         self.pixels.clear();
         self.marks.clear();
         let gw = usize::from(self.lattice.width()).max(1);
-        for (i, n) in self.lattice.as_slice().iter().enumerate() {
+        for (i, (n, &a)) in self.lattice.as_slice().iter().zip(&self.grain).enumerate() {
             let (x, y) = ((i % gw) as i32, (i / gw) as i32);
-            self.pixels.set(x, y, nucleus_pixel(n));
+            self.pixels.set(x, y, nucleus_pixel(n, a));
             if let Some(ink) = nucleus_mark(n) {
                 for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
                     self.marks.set(2 * x + dx, 2 * y + dy, ink);
@@ -787,6 +810,16 @@ impl RadioactiveDecay {
         }
     }
 
+    /// The y-axis ticks on the current axis blend: `(row, label)` (RAD-A6).
+    fn y_ticks(&self, p: &Panel) -> impl Iterator<Item = (i32, &'static str)> {
+        let m = log_blend(self.t);
+        let ticks: &'static [(f64, &str)] = if m < 0.5 { &TICKS_LINEAR } else { &TICKS_LOG };
+        ticks.iter().map(move |&(f, label)| {
+            let row = (p.dot_y(plot_y(f, m)) / f64::from(Dots::CELL_H)).floor() as i32;
+            (row.clamp(p.top, p.bottom), label)
+        })
+    }
+
     fn draw_panel(&self, canvas: &mut Canvas, p: &Panel) {
         let text = Ink::new(Role::Text, 200);
         // The time-axis labels can land on the title row, so they share its readout tone.
@@ -811,7 +844,7 @@ impl RadioactiveDecay {
         // Legend: each species as it looks on the lattice, then its curve's stroke in the
         // curve's ink, then the count (Text), one space on.
         let lattice_ink = [
-            nucleus_pixel(&Nucleus::FRESH),
+            ink::ramp(RAMPS[0], A_BASE),
             ink::ramp(RAMPS[1], B_MARK),
             ink::ramp(RAMPS[2], MEASURED),
         ];
@@ -830,11 +863,9 @@ impl RadioactiveDecay {
         for y in p.top..=p.bottom {
             canvas.put(p.x0, y, SEG_V, axis);
         }
-        let m = log_blend(self.t);
-        let ticks: &[f64] = if m < 0.5 { &[0.5] } else { &[0.1, 0.01] };
-        for &f in ticks {
-            let row = (p.dot_y(plot_y(f, m)) / f64::from(Dots::CELL_H)).floor() as i32;
-            canvas.put(p.x0, row.clamp(p.top, p.bottom), AXIS_TICK_Y, axis);
+        for (row, label) in self.y_ticks(p) {
+            canvas.put(p.x0, row, AXIS_TICK_Y, axis);
+            canvas.text(p.col_x(0), row, label, faint);
         }
         let ax_row = p.bottom + 1;
         canvas.put(p.x0, ax_row, AXIS_CORNER, axis);
@@ -894,6 +925,8 @@ impl Generator for RadioactiveDecay {
         let lattice = Size::new(self.lat_w as u16, self.lat_h as u16);
         self.lattice = Grid::new(lattice, Nucleus::FRESH);
         self.n0 = self.lattice.len() as u32;
+        let gw = i32::from(self.lattice.width()).max(1);
+        self.grain = (0..self.n0 as i32).map(|i| a_ink(i % gw, i / gw)).collect();
         self.pixels.resize(size);
         self.marks.resize(size);
         self.dots.resize(size);
@@ -1219,7 +1252,6 @@ mod tests {
 
     #[test]
     fn rad_a3_populations_always_sum_to_n0() {
-        let mut stage = Stage::new(build(), 3, Size::new(90, 24), GlyphMode::Unicode);
         let mut ctx = seeded(5);
         let mut g = RadioactiveDecay::default();
         for (k, size) in [Size::new(90, 24), Size::new(7, 3), Size::new(200, 50)]
@@ -1234,8 +1266,6 @@ mod tests {
                 assert_eq!(g.counts, census(g.lattice.as_slice()));
             }
         }
-        stage.step(SIM_DT);
-        let _ = stage.render();
     }
 
     #[test]
@@ -1386,9 +1416,12 @@ mod tests {
         // the intermediate reads as strongly as the parent, in a hue of its own; a flash
         // at the top of the daughter's ramp; fresh A (a restart) does not flash.
         let at = |kind, since| Nucleus { kind, since };
-        let a = nucleus_pixel(&Nucleus::FRESH);
-        assert!(f64::from(a.level) >= 2.0 * ink::MIN_VISIBLE_LEVEL, "{a:?}");
-        assert!(2 * a.level <= ink::ramp(RAMPS[1], B_MARK).level);
+        // Every site's A grain, dimmest to brightest, stays in that band.
+        let (lo, hi) = g.grain.iter().fold((255u8, 0u8), |(lo, hi), a| {
+            (lo.min(a.level), hi.max(a.level))
+        });
+        assert!(f64::from(lo) >= 2.0 * ink::MIN_VISIBLE_LEVEL, "{lo}");
+        assert!(2 * hi <= ink::ramp(RAMPS[1], B_MARK).level, "{hi}");
         assert_ne!(RAMPS[0], RAMPS[1]);
         assert_eq!(nucleus_mark(&Nucleus::FRESH), None);
         assert_eq!(nucleus_mark(&at(Kind::C, 1.0)), None);
@@ -1448,7 +1481,7 @@ mod tests {
         assert!(b(FLASH).unwrap().level < BRIGHT_LEVEL);
         // Tracks stand well clear of the ground: fresh, ≥ 3× A's pixel and ≥ 2× B's dots;
         // fading, still above both.
-        let ground_a = nucleus_pixel(&Nucleus::FRESH).level;
+        let ground_a = ink::ramp(RAMPS[0], A_BASE * (1.0 + A_GRAIN)).level;
         let ground_b = ink::ramp(RAMPS[1], B_MARK).level;
         let mut ctx = seeded(2);
         let mut g = RadioactiveDecay::default();
@@ -1596,11 +1629,52 @@ mod tests {
                 .count();
             n as f64 / f64::from(w * rows)
         };
-        assert_eq!(empty(&g), 0.0, "a fresh run is a full field");
+        assert_eq!(empty(&g), 0.0, "a fresh run marks every site");
         for _ in 0..(30.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
         }
         assert!(empty(&g) > 0.6, "{}", empty(&g));
+    }
+
+    #[test]
+    fn rad_a5_a_fresh_lattice_is_a_grain_of_separate_nuclei_not_a_flat_fill() {
+        // At t = 0 every site is A; its pixel levels differ from site to site so the field
+        // reads as a mosaic of nuclei, while the mean stays at A_BASE (the ground stays dim,
+        // RAD-A8).
+        let size = Size::new(120, 40);
+        let mut ctx = seeded(4);
+        let mut g = RadioactiveDecay::default();
+        g.resize(size, &mut ctx);
+        let mut levels = [0u32; 256];
+        let mut sum = 0.0;
+        let mut differs = 0usize;
+        for (i, n) in g.lattice.as_slice().iter().enumerate() {
+            let (x, y) = g.pixel_of(i);
+            let px = g.pixels.get(x, y).unwrap();
+            assert_eq!((n.kind, px.role), (Kind::A, Role::Ramp(Ramp::Ember)));
+            assert_eq!(px, a_ink(x, y), "the grain is a fixed hash of the site");
+            levels[px.level as usize] += 1;
+            sum += f64::from(px.level);
+            if g.pixels
+                .get(x + 1, y)
+                .is_some_and(|q| x + 1 < g.lat_w && q != px)
+            {
+                differs += 1;
+            }
+        }
+        let n = g.lattice.len() as f64;
+        let distinct = levels.iter().filter(|&&c| c > 0).count();
+        assert!(distinct >= 12, "{distinct} distinct levels");
+        let mean = sum / n;
+        assert!((mean - A_BASE * 255.0).abs() < 1.5, "mean {mean}");
+        assert!(
+            differs as f64 > 0.8 * n * (1.0 - 1.0 / f64::from(g.lat_w)),
+            "{differs}"
+        );
+        // A resize rebuilds the same grain for the same site.
+        g.resize(Size::new(90, 30), &mut ctx);
+        assert_eq!(g.grain[0], a_ink(0, 0));
+        assert_eq!(g.grain.len(), g.lattice.len());
     }
 
     #[test]
@@ -1616,7 +1690,7 @@ mod tests {
         assert!(row.starts_with("█─ "), "{row:?}");
         assert!(row.contains("⠛╌ 0") && row.contains(" ┈ 0"), "{row:?}");
         // The A chip wears the lattice's ink, its stroke the curve's.
-        assert_eq!(c.get(p.x0, 1).unwrap().ink, nucleus_pixel(&Nucleus::FRESH));
+        assert_eq!(c.get(p.x0, 1).unwrap().ink, ink::ramp(RAMPS[0], A_BASE));
         assert_eq!(
             c.get(p.x0 + 1, 1).unwrap().ink,
             ink::ramp(RAMPS[0], MEASURED)
@@ -1678,6 +1752,75 @@ mod tests {
         }
         assert!(g.resets >= 1 && seen == [true, true]);
         assert!(META.captions.contains(&CAPTION_LINEAR) && META.captions.contains(&CAPTION_LOG));
+    }
+
+    #[test]
+    fn rad_a6_y_ticks_are_labelled_as_fractions_of_n0() {
+        // Linear plot: `50%` on the N₀/2 tick; log plot: `10%` and `1%` on the decades.
+        // Labels sit just inside the axis on their tick's row, over the curves.
+        let size = Size::new(120, 36);
+        let mut ctx = seeded(6);
+        let mut g = RadioactiveDecay::default();
+        g.resize(size, &mut ctx);
+        let p = g.panel.unwrap();
+        let text_at = |g: &RadioactiveDecay, want: &[&str]| {
+            let mut c = Canvas::new(size, GlyphMode::Ascii);
+            // Only the panel text: no curves over the labels.
+            let bare = RadioactiveDecay {
+                t: g.t,
+                panel: g.panel,
+                t_axis: g.t_axis,
+                ..RadioactiveDecay::default()
+            };
+            bare.render(&mut c);
+            for (row, label) in g.y_ticks(&p) {
+                let got: String = (0..label.len() as i32)
+                    .map(|k| c.get(p.col_x(0) + k, row).unwrap().ch)
+                    .collect();
+                assert_eq!(got, label);
+                assert_eq!(c.get(p.x0, row).unwrap().ch, '+', "tick at row {row}");
+            }
+            let labels: Vec<_> = g.y_ticks(&p).map(|(_, l)| l).collect();
+            assert_eq!(labels, want);
+        };
+        text_at(&g, &["50%"]);
+        for _ in 0..(25.0 / 0.25) as usize {
+            g.update(0.25, &mut ctx);
+        }
+        text_at(&g, &["10%", "1%"]);
+        // Decades land a third of the plot apart on the log axis.
+        let rows: Vec<_> = g.y_ticks(&p).map(|(r, _)| r).collect();
+        let third = f64::from(p.bottom - p.top + 1) / 3.0;
+        assert!(
+            (f64::from(rows[1] - rows[0]) - third).abs() <= 1.0,
+            "{rows:?}"
+        );
+    }
+
+    #[test]
+    fn rad_a8_track_slots_are_counted_per_track() {
+        // Every event in a full step is an A → C double decay (two tracks each): the pool
+        // fills to exactly its capacity, and the last event keeps its α when one slot is left.
+        let mut ctx = seeded(7);
+        let mut g = RadioactiveDecay::default();
+        g.resize(Size::new(120, 40), &mut ctx);
+        let cap = g.tracks.capacity();
+        assert!(cap % 2 == 0 && cap >= 4);
+        g.tracks.clear();
+        // One pre-existing track leaves an odd number of free slots.
+        g.events.clear();
+        g.events.push((0, Kind::A, Kind::B));
+        g.spawn_tracks(&mut ctx);
+        assert_eq!(g.tracks.len(), 1);
+        g.events.clear();
+        for i in 0..cap as u32 {
+            g.events.push((i, Kind::A, Kind::C));
+        }
+        g.spawn_tracks(&mut ctx);
+        assert_eq!(g.tracks.len(), cap);
+        let alphas = g.tracks.iter().filter(|t| t.alpha).count();
+        // 1 + (cap − 1) slots: ⌈(cap − 1)/2⌉ doubles, the last with only its α.
+        assert_eq!(alphas, 1 + (cap - 1).div_ceil(2));
     }
 
     #[test]
