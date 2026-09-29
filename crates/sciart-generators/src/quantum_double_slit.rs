@@ -615,11 +615,14 @@ pub struct QuantumDoubleSlit {
     strip_x: i32,
     pixels: Pixels,
     dots: Dots,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl QuantumDoubleSlit {
     fn new() -> Self {
         Self {
+            dirty: true,
             size: Size::new(1, 1),
             geo: Geometry::for_aspect(1.0),
             adi: Adi::default(),
@@ -935,7 +938,7 @@ impl Generator for QuantumDoubleSlit {
             self.start();
         }
         self.layout(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -975,7 +978,15 @@ impl Generator for QuantumDoubleSlit {
         let now = self.peaks();
         let decay = (-dt * std::f64::consts::LN_2 / PEAK_HALF_LIFE_S).exp();
         self.peak = [0, 1].map(|i| now[i].max(self.peak[i] * decay));
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1194,10 +1205,12 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = QuantumDoubleSlit::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut seen = Vec::new();
         let mut before_tunnel = 0;
         for f in 0..(3.0 * ACT_S * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let c = g.caption();
             if seen.last() != Some(&c) {
                 seen.push(c);
@@ -1255,8 +1268,10 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = QuantumDoubleSlit::new();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..90 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             // Rows of the right quarter of the view (next to the screen) that show wave.
             let (view, ph) = (g.view_px, 2 * i32::from(h));

@@ -276,11 +276,14 @@ pub struct Spinodal {
     /// `(cycle, act)` of the running quench.
     act: (i64, usize),
     pending: f64,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Spinodal {
     fn default() -> Self {
         Self {
+            dirty: true,
             size: Size::new(1, 1),
             psi: Grid::default(),
             scratch: Scratch::default(),
@@ -354,7 +357,7 @@ impl Generator for Spinodal {
         self.size = size;
         self.pixels.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -376,7 +379,15 @@ impl Generator for Spinodal {
             n += 1;
         }
         self.pending = self.pending.min(1.0);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -395,6 +406,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = Spinodal::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -468,6 +480,7 @@ mod tests {
         for i in 0..(2.2 * ACT_S * 60.0) as usize {
             let dt = [SIM_DT, 0.25, 0.0, 0.1][i % 4];
             g.update(dt, &mut ctx);
+            g.prepare();
             if i % 50 == 0 {
                 let bad = g.psi.as_slice().iter().find(|x| !(-1.2..=1.2).contains(*x));
                 assert!(bad.is_none(), "ψ = {bad:?} at frame {i}");
@@ -480,10 +493,12 @@ mod tests {
         let (mut g, mut ctx) = scene(200, 50, 1);
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let m0 = mean(&g.psi);
         for size in [(80, 24), (13, 40), (1, 1), (200, 50)] {
             g.resize(Size::new(size.0, size.1), &mut ctx);
+            g.prepare();
             assert!((mean(&g.psi) - m0).abs() < 1e-6, "{size:?}");
         }
     }
@@ -494,6 +509,7 @@ mod tests {
         assert_eq!(g.caption(), Some("spinodal"));
         for _ in 0..(ACT_S * 60.0) as usize + 2 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.caption(), Some("droplets ripen"));
         assert!((mean(&g.psi) - f64::from(ACT_MEAN[1])).abs() < 1e-5);
@@ -560,6 +576,7 @@ mod tests {
         let (mut g, mut ctx) = scene(120, 40, 42);
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(formed(&g.psi));
     }

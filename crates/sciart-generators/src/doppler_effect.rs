@@ -391,11 +391,14 @@ pub struct DopplerEffect {
     light_inks: [Ink; LUT],
     dots: Dots,
     ready: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl DopplerEffect {
     fn new() -> Self {
         Self {
+            dirty: true,
             timeline: Timeline::new(&BEATS),
             t: 0.0,
             sx: 0.0,
@@ -699,7 +702,7 @@ impl Generator for DopplerEffect {
         }
         let bound = max_fronts(self.diag) as usize;
         self.fronts.reserve(bound.saturating_sub(self.fronts.len()));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -730,7 +733,15 @@ impl Generator for DopplerEffect {
         self.anchor += (self.target_anchor() - self.anchor) * (1.0 - (-dt / ANCHOR_TAU).exp());
         self.prune();
         debug_assert!(self.fronts.len() as f64 <= max_fronts(self.diag));
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -783,6 +794,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = DopplerEffect::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -800,6 +812,7 @@ mod tests {
         // cruise beat (Mach 0.5) lasts 6 s.
         for _ in 0..(4.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let stepped: Vec<_> = g.fronts.iter().filter(|f| f.t0 > 0.0).copied().collect();
         assert!(stepped.len() >= 10, "{} fronts", stepped.len());
@@ -819,6 +832,7 @@ mod tests {
         let (mut g, mut ctx) = fresh(400, 50);
         for _ in 0..12 {
             g.update(0.23, &mut ctx);
+            g.prepare();
         }
         let (ahead, behind) = axis_crossings(&g.fronts, g.t, g.sx);
         assert!(ahead.len() >= 5);
@@ -837,9 +851,11 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             // 3000 steps × ≈ 1/40 s covers the whole 48 s loop, Mach 1 included.
             for i in 0..3000 {
                 g.update(if i % 7 == 0 { 0.25 } else { SIM_DT }, &mut ctx);
+                g.prepare();
                 assert!(
                     g.fronts.len() as f64 <= max_fronts(g.diag),
                     "{w}x{h}: {} fronts > {}",
@@ -858,6 +874,7 @@ mod tests {
         // Into the supersonic hold (18–26 s), then 5 s more at constant Mach 1.6.
         while g.t < 23.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (m, wave) = g.speed();
         assert_eq!((m, wave), (M_FAST, Wave::Sound));
@@ -941,6 +958,7 @@ mod tests {
         // 15 s into the light act: its fronts fill the screen, the sound ones are gone.
         while g.t < 26.0 + 15.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.fronts.iter().all(|f| f.wave == Wave::Light));
         let ((n_ahead, t_ahead), (n_behind, t_behind)) = halves(&g);
@@ -962,6 +980,7 @@ mod tests {
         let mut seen: Vec<&str> = Vec::new();
         for _ in 0..(2.0 * 48.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let c = g.caption().unwrap();
             if seen.last() != Some(&c) {
                 seen.push(c);
@@ -1002,6 +1021,7 @@ mod tests {
             let (mut g, mut ctx) = fresh(w, h);
             for i in 0..(50.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 let frac = (g.sx - g.cam()) / g.width;
                 assert!(
                     (ANCHOR_SLOW - 1e-9..=ANCHOR_FAST + 1e-9).contains(&frac),
@@ -1118,6 +1138,7 @@ mod tests {
         let (mut g, mut ctx) = fresh(120, 40);
         while g.t < 3.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut frame = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
         g.render(&mut frame);
@@ -1145,6 +1166,7 @@ mod tests {
             let (mut g, mut ctx) = fresh(w, h);
             while g.t < 26.0 - SIM_DT {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if g.t < 18.0 {
                     continue;
                 }
@@ -1183,6 +1205,7 @@ mod tests {
             for _ in 0..(48.0 / SIM_DT) as usize {
                 let before: Vec<Front> = g.fronts.iter().copied().collect();
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 cams.push((g.t, g.cam(), g.speed().1));
                 for f in before {
                     let live = f.radius(g.t) <= REACH * g.diag && g.shown(f.wave, f.m) > 0.0;
@@ -1284,6 +1307,7 @@ mod tests {
             // A whole 48 s loop and into the next, so both hand-overs are covered.
             for step in 1..=(50.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if step % 30 != 0 && !(2870..2890).contains(&step) {
                     continue;
                 }
@@ -1331,6 +1355,7 @@ mod tests {
             while g.t < 48.0 {
                 for _ in 0..6 {
                     g.update(SIM_DT, &mut ctx);
+                    g.prepare();
                 }
                 let mut frame = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
                 g.render(&mut frame);

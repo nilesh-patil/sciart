@@ -681,11 +681,14 @@ pub struct RadioactiveDecay {
     /// The nuclei as half-block pixels; the tracks and the plot's curves over it in `dots`.
     pixels: Pixels,
     dots: Dots,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for RadioactiveDecay {
     fn default() -> Self {
         Self {
+            dirty: true,
             t: 0.0,
             lattice: Grid::default(),
             geo: LatticeGeo::default(),
@@ -992,7 +995,7 @@ impl Generator for RadioactiveDecay {
         self.tracks.set_capacity(cap);
         self.events = Vec::with_capacity(cap);
         self.restart();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1048,7 +1051,15 @@ impl Generator for RadioactiveDecay {
             self.resets += 1;
             self.restart();
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1279,10 +1290,12 @@ mod tests {
         let mut ctx = seeded(42);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let n0 = g.n0();
         assert!(n0 > 1_000, "{n0} nuclei");
         for step in 1..=(20.0 / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if step % 60 == 0 {
                 let (fa, fb, _) = bateman(g.t);
                 let (ok_a, ma, sa) = within_4_sigma(g.counts[0], n0, fa);
@@ -1310,9 +1323,11 @@ mod tests {
             .enumerate()
         {
             g.resize(size, &mut ctx);
+            g.prepare();
             for i in 0..240 {
                 let dt = [SIM_DT, 0.25, 0.0, 0.11][(i + k) % 4];
                 g.update(dt, &mut ctx);
+                g.prepare();
                 assert_eq!(g.counts.iter().sum::<u32>(), g.n0(), "RAD-A3");
                 assert_eq!(g.counts, census(g.lattice.as_slice()));
             }
@@ -1329,9 +1344,11 @@ mod tests {
         let mut ctx = seeded(9);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         let n0 = f64::from(g.n0());
         for _ in 0..(90.0 / 0.25) as usize {
             g.update(0.25, &mut ctx);
+            g.prepare();
             // Invariant after every update: never left below the threshold (RAD-A3 too).
             let live = f64::from(g.counts[0] + g.counts[1]);
             assert!(live >= RESET_FRAC * n0);
@@ -1348,6 +1365,7 @@ mod tests {
         let mut ctx = seeded(1);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         let p = g.panel.expect("100×30 has a plot panel");
         assert!(p.x1 - p.x0 >= PANEL_MIN_W);
         // The lattice stays left of the panel with a gutter.
@@ -1355,6 +1373,7 @@ mod tests {
         assert!(last.0 < p.x0 - 1 && g.lat_w < p.x0);
         for size in [Size::new(50, 30), Size::new(100, 9), Size::new(1, 1)] {
             g.resize(size, &mut ctx);
+            g.prepare();
             assert!(g.panel.is_none(), "{size:?}");
             assert!(g.n0() >= 1);
         }
@@ -1366,9 +1385,11 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut seen = 0;
         for _ in 0..120 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             assert!(g.tracks.len() <= g.tracks.capacity());
             seen += g.tracks.len();
             // Tracks are braille strokes clipped to the lattice: no pixel right of it or
@@ -1403,12 +1424,14 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = RadioactiveDecay::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let titled = title::span(size, &Title::new(META.title, Some(CAPTION_LINEAR))).is_some();
             let rows = if titled { h - 1 } else { h };
             assert_eq!(g.lat_h, 2 * i32::from(rows), "{w}x{h}");
             let last = i32::from(h) - 1;
             for _ in 0..40 {
                 g.update(0.25, &mut ctx);
+                g.prepare();
                 let panel = g.panel.take();
                 let mut canvas = Canvas::new(size, GlyphMode::Ascii);
                 g.render(&mut canvas);
@@ -1427,6 +1450,7 @@ mod tests {
         let mut ctx = seeded(3);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let p = g.panel.unwrap();
         // Lattice pixels lat_w × 2·29 (29 rows above the title row), nuclei on a pitch of 3.
         assert_eq!((g.lat_w, g.lat_h), (p.x0 - 2, 58));
@@ -1437,6 +1461,7 @@ mod tests {
         assert_eq!(g.n0() as usize, g.lattice.len());
         for _ in 0..240 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g.rasterise();
         // Every nucleus fills its 2×2 pixels with its ink; every gap pixel is empty.
@@ -1554,8 +1579,10 @@ mod tests {
         let mut ctx = seeded(2);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         while g.tracks.len() < 2 || g.tracks.iter().all(|t| t.alpha) {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         for tr in g.tracks.iter() {
             let fresh = Track { age: 0.0, ..*tr }.ink().level;
@@ -1616,12 +1643,14 @@ mod tests {
         let mut ctx = seeded(9);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (w, rows) = (g.lat_w, g.lat_h / 2);
         let cells = f64::from(w * rows);
         let (mut sum, mut worst, mut frames) = (0.0, 0.0f64, 0);
         let mut c = Canvas::new(size, GlyphMode::Unicode);
         for i in 0..(50.0 / 0.1) as usize {
             g.update(if i % 2 == 0 { SIM_DT } else { 0.1 }, &mut ctx);
+            g.prepare();
             c.clear();
             g.render(&mut c);
             let bright = (0..rows)
@@ -1658,10 +1687,12 @@ mod tests {
         let mut ctx = seeded(42);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         let h = f64::from(g.lat_h);
         let mut rows = Vec::new();
         for _ in 0..(20.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             // Tracks spawned this step have not aged yet.
             rows.extend(g.tracks.iter().filter(|t| t.age == 0.0).map(|t| t.y0 / h));
         }
@@ -1690,6 +1721,7 @@ mod tests {
         let mut ctx = seeded(5);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let mean = |g: &RadioactiveDecay| {
             let n = g.lattice.len();
             let sum: f64 = (0..n)
@@ -1715,6 +1747,7 @@ mod tests {
         assert_eq!(fresh, f64::from(settled_ink(Kind::A).level));
         for _ in 0..(30.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let c = f64::from(g.counts[2]) / f64::from(g.n0());
         assert!(
@@ -1732,6 +1765,7 @@ mod tests {
         let mut ctx = seeded(4);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let geo = g.geo;
         assert!(geo.nx >= 20 && geo.ny >= 20, "{geo:?}");
         let (x0, y0) = geo.origin(0, 0);
@@ -1761,6 +1795,7 @@ mod tests {
         let mut ctx = seeded(1);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let p = g.panel.unwrap();
         let mut c = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut c);
@@ -1817,9 +1852,11 @@ mod tests {
         let mut ctx = seeded(8);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         let mut seen = [false; 2];
         for _ in 0..(60.0 / 0.25) as usize {
             g.update(0.25, &mut ctx);
+            g.prepare();
             let want = if g.t >= LOG_FROM + 0.5 * LOG_EASE {
                 CAPTION_LOG
             } else {
@@ -1840,6 +1877,7 @@ mod tests {
         let mut ctx = seeded(6);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let p = g.panel.unwrap();
         let text_at = |g: &RadioactiveDecay, want: &[&str]| {
             let mut c = Canvas::new(size, GlyphMode::Ascii);
@@ -1864,6 +1902,7 @@ mod tests {
         text_at(&g, &["50%"]);
         for _ in 0..(25.0 / 0.25) as usize {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         text_at(&g, &["10%", "1%"]);
         // Decades land a third of the plot apart on the log axis.
@@ -1882,6 +1921,7 @@ mod tests {
         let mut ctx = seeded(7);
         let mut g = RadioactiveDecay::default();
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         let cap = g.tracks.capacity();
         assert!(cap % 2 == 0 && cap >= 4);
         g.tracks.clear();
@@ -1907,10 +1947,12 @@ mod tests {
         let mut ctx = seeded(12);
         let mut g = RadioactiveDecay::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let p = g.panel.unwrap();
         for steps in [600, 900] {
             for _ in 0..steps {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let m = log_blend(g.t);
             let n0 = f64::from(g.n0());

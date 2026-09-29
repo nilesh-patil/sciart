@@ -390,11 +390,14 @@ struct Lenia {
     scratch: Grid<f32>,
     map: SampleMap,
     pixels: Pixels,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Lenia {
     fn default() -> Self {
         Self {
+            dirty: true,
             world: World::default(),
             seed_mass: 1.0,
             owed: 0.0,
@@ -614,7 +617,7 @@ impl Generator for Lenia {
             }
         }
         self.map.rebuild(lat, px);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -649,7 +652,15 @@ impl Generator for Lenia {
             );
             self.world.damage(bite, DAMAGE_R);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -804,6 +815,7 @@ mod tests {
         let mut ctx = Ctx::new(8, Size::new(160, 50));
         let mut g = Lenia::default();
         g.resize(Size::new(160, 50), &mut ctx);
+        g.prepare();
         // Kill every creature but the heaviest.
         let (hx, hy) = g.world.heaviest();
         let (w, h) = (i32::from(g.world.a.width()), i32::from(g.world.a.height()));
@@ -820,14 +832,17 @@ mod tests {
             .copy_from_slice(g.world.a.as_slice());
         let m_one = g.world.mass();
         g.update(0.1, &mut ctx);
+        g.prepare();
         assert!(g.hatch_at.is_some(), "a birth is scheduled");
         let born = g.hatch_at.unwrap_or(0.0);
         while g.time < born - 0.2 {
             g.update(1.0 / 60.0, &mut ctx);
+            g.prepare();
         }
         assert!(g.world.mass() < 1.3 * m_one, "no birth before the delay");
         while g.time < born + 0.5 {
             g.update(1.0 / 60.0, &mut ctx);
+            g.prepare();
         }
         assert!(g.world.mass() > 1.6 * m_one, "a glider hatched");
         assert!(g.birth.is_some());
@@ -856,9 +871,11 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = Lenia::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let mut frame = 0usize;
             while g.time < secs {
                 g.update(1.0 / 60.0, &mut ctx);
+                g.prepare();
                 frame += 1;
                 if frame % 15 == 0 {
                     let n = lit_pixels(&g);
@@ -873,8 +890,10 @@ mod tests {
         let mut ctx = Ctx::new(42, Size::new(80, 24));
         let mut g = Lenia::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         g.world.a.fill(0.0);
         g.update(0.1, &mut ctx);
+        g.prepare();
         assert!(g.world.mass() > 0.5 * g.seed_mass);
     }
 }

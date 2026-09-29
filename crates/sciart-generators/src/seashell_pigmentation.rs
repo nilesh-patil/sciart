@@ -230,11 +230,14 @@ struct Shell {
     pixels: Pixels,
     /// Shell geometry in pixels: centre x, body top, body height, half-width.
     body: (f64, f64, f64, f64),
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Shell {
     fn default() -> Self {
         Self {
+            dirty: true,
             lip: Lip::default(),
             rows: Vec::new(),
             rows_cap: 1,
@@ -480,7 +483,7 @@ impl Generator for Shell {
         let index = self.timeline.at(self.time).index;
         self.lip.reset(n, REGIMES[index], &mut ctx.rng);
         self.new_shell(index, &mut ctx.rng);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -498,7 +501,15 @@ impl Generator for Shell {
             self.owed -= 1.0;
             self.grow_row(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -591,10 +602,12 @@ mod tests {
         let mut ctx = Ctx::new(4, Size::new(80, 24));
         let mut g = Shell::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for _ in 0..40 {
             let (before, owed) = (g.total_rows, g.owed);
             let dt = 0.1;
             g.update(dt, &mut ctx);
+            g.prepare();
             let expected = (owed + dt / g.row_s).floor() as u64;
             assert_eq!(g.total_rows - before, expected);
             if expected > 0 {
@@ -611,9 +624,11 @@ mod tests {
         let mut ctx = Ctx::new(5, Size::new(80, 24));
         let mut g = Shell::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for (k, c) in CAPTIONS.iter().enumerate() {
             while g.time < k as f64 * REGIME_S + 1.0 {
                 g.update(0.25, &mut ctx);
+                g.prepare();
             }
             assert_eq!(g.caption(), Some(*c));
             assert_eq!(g.lip.p, REGIMES[k]);
@@ -627,9 +642,11 @@ mod tests {
         let mut ctx = Ctx::new(6, Size::new(80, 24));
         let mut g = Shell::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         assert_eq!(g.lip.p, WAVES);
         for _ in 0..120 {
             g.update(0.1, &mut ctx);
+            g.prepare();
             assert_eq!(g.lip.p, WAVES);
         }
         assert!(g.lip.peaks(0.5) >= 2, "{} lines", g.lip.peaks(0.5));
@@ -641,8 +658,10 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = Shell::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.time < 10.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let px = g.pixels.pixel_size();
         let lit_rows = (0..i32::from(px.height()))

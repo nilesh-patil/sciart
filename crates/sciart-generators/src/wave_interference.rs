@@ -117,6 +117,8 @@ pub struct WaveInterference {
     pixels: Pixels,
     /// The screen's intensity profile, a braille curve over the fill (WAVE-A8).
     profile: Dots,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl WaveInterference {
@@ -294,7 +296,7 @@ impl Generator for WaveInterference {
                     y,
                 )
             });
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -303,7 +305,15 @@ impl Generator for WaveInterference {
             return;
         }
         self.t += dt;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -333,6 +343,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut g = WaveInterference::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         g.t = t;
         g.rasterise();
         g
@@ -344,10 +355,12 @@ mod tests {
         let mut ctx = Ctx::new(1, Size::new(80, 24));
         for dt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -0.1] {
             g.update(dt, &mut ctx);
+            g.prepare();
             assert_eq!(g.t, 1.5, "dt = {dt}");
         }
         // A good step afterwards still advances the clock.
         g.update(0.25, &mut ctx);
+        g.prepare();
         assert_eq!(g.t, 1.75);
     }
 

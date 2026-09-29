@@ -425,6 +425,8 @@ pub(crate) struct ThreeBody {
     tone: Tone,
     /// Each orbit's label at the current size, chosen in `resize`.
     labels: [Option<&'static str>; 5],
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl ThreeBody {
@@ -432,6 +434,7 @@ impl ThreeBody {
         let orbits = orbits();
         let size = Size::new(1, 1);
         Self {
+            dirty: true,
             timeline: timeline(&orbits),
             t: 0.0,
             phase: Phase {
@@ -662,7 +665,7 @@ impl Generator for ThreeBody {
             g.resize(size);
         }
         self.labels = self.orbits.map(|o| label_for(size, &o));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -679,7 +682,15 @@ impl Generator for ThreeBody {
             self.start_run(phase.seg);
         }
         self.advance_to(target);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -917,14 +928,18 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let (mut fine, mut coarse) = (ThreeBody::new(), ThreeBody::new());
         fine.resize(Size::new(80, 24), &mut ctx);
+        fine.prepare();
         coarse.resize(Size::new(80, 24), &mut ctx);
+        coarse.prepare();
         for _ in 0..70 {
             for _ in 0..60 {
                 fine.update(SIM_DT, &mut ctx);
+                fine.prepare();
             }
             for _ in 0..4 {
                 let (seg, before) = (coarse.phase.seg, coarse.n_done);
                 coarse.update(0.25, &mut ctx);
+                coarse.prepare();
                 let taken = if coarse.phase.seg == seg && coarse.n_done >= before {
                     coarse.n_done - before
                 } else {
@@ -945,13 +960,16 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut start = 0.0;
         for seg in 0..=5 {
             // Land just inside run `seg` (seg 5 = the figure-8 again, next loop), from
             // deep inside the previous fade.
             g.update(1.0, &mut ctx);
+            g.prepare();
             g.t = start - 0.5;
             g.update(0.5 + 1e-6, &mut ctx);
+            g.prepare();
             let o = g.orbits[seg % 5];
             assert_eq!(g.phase.seg, seg % 5);
             assert_eq!(g.n_done, 0);
@@ -966,10 +984,12 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut seen = [false; 5];
         // One whole loop of the gallery (≈ 69.4 s, TB-A5).
         for _ in 0..70 * 4 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             assert_eq!(g.caption(), Some(CAPTIONS[g.phase.seg]));
             seen[g.phase.seg] = true;
         }
@@ -1077,9 +1097,11 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let before: f64 = g.orbits[..4].iter().map(|o| o.run_secs() + FADE).sum();
         g.t = before + g.orbits[4].run_secs() - 0.05 - SIM_DT;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert_eq!(g.phase.seg, 4);
         let mut young = Vec::new();
         for trail in &g.trails {
@@ -1133,6 +1155,7 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let start = g.orbits[0].run_secs() + FADE;
         let lit = |d: &Dots| {
             let s = d.dot_size();
@@ -1143,10 +1166,12 @@ mod tests {
         };
         g.t = start;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert_eq!(g.phase.seg, LAGRANGE);
         assert!(lit(&g.dots) > 0, "blank first frame");
         g.t = start + FADE_IN - SIM_DT;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         g.dots.clear();
         g.trails_onto_dots();
         let trails = lit(&g.dots);
@@ -1177,10 +1202,12 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let start = g.orbits[0].run_secs() + FADE;
         for t in [1.0, 4.0, 9.0] {
             g.t = start + t - SIM_DT;
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert_eq!(g.phase.seg, LAGRANGE);
             g.dots.clear();
             g.trails_onto_dots();
@@ -1209,11 +1236,13 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let lagrange = g.orbits[0].run_secs() + FADE;
         let cap = ink::ramp(RAMPS[0], GLOW_V).level;
         for t in [5.0, lagrange + 6.0] {
             g.t = t - SIM_DT;
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             for (i, ramp) in RAMPS.iter().enumerate() {
                 let (x, y) = g.bodies.body(i);
                 let (dx, dy) = g.view.dot(x, y);
@@ -1262,8 +1291,10 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         for i in 0..3 {
             let (x, y) = g.bodies.body(i);
@@ -1300,8 +1331,10 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(3.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);

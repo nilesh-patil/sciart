@@ -657,11 +657,14 @@ pub(crate) struct Physarum {
     /// the beat.
     readout_room: usize,
     ready: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Physarum {
     fn new() -> Self {
         Self {
+            dirty: true,
             colony: Colony::new(Size::new(1, 1)),
             next: Plan::EMPTY,
             timeline: Timeline::new(&BEATS),
@@ -946,7 +949,7 @@ impl Generator for Physarum {
         self.map.rebuild(lattice, display);
         self.pixels.resize(plate);
         self.relabel();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -960,7 +963,15 @@ impl Generator for Physarum {
         for _ in 0..steps {
             self.step(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1058,12 +1069,14 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut p = Physarum::new();
         p.resize(size, &mut ctx);
+        p.prepare();
         (p, ctx)
     }
 
     fn run_to(p: &mut Physarum, ctx: &mut Ctx, t: f64) {
         while p.time() < t - 1e-9 {
             p.update(STEP, ctx);
+            p.prepare();
         }
     }
 
@@ -1284,6 +1297,7 @@ mod tests {
             let (mut sum, mut count) = (0.0f64, 0);
             while p.time() < 47.9 - 1e-9 {
                 p.update(STEP, &mut ctx);
+                p.prepare();
                 let t = p.time();
                 if (10.0..40.0).contains(&t) {
                     sum += p
@@ -1351,6 +1365,7 @@ mod tests {
         let (mut last, mut changes) = (drawn(&p), 0);
         while p.time() < 2.0 * 48.0 + 1.0 {
             p.update(STEP, &mut ctx);
+            p.prepare();
             let (flakes, level) = drawn(&p);
             if p.n_flakes > 0 {
                 assert_eq!(p.flake_ink.role, Role::Blackbody);
@@ -1400,6 +1415,7 @@ mod tests {
         let lattice = a.colony.lattice();
         assert_eq!(lattice, Size::new(197, 101));
         a.resize(Size::new(240, 64), &mut ca);
+        a.prepare();
         assert_eq!(a.colony.lattice(), lattice);
         assert_eq!(a.colony.trail, b.colony.trail);
         run_to(&mut a, &mut ca, 4.0);
@@ -1420,6 +1436,7 @@ mod tests {
         let (food0, beat0) = (p.colony.plan.n_food, p.timeline.at(p.time()).index);
         assert_eq!(p.colony.lattice(), Size::new(197, 98));
         p.resize(Size::new(80, 24), &mut ctx);
+        p.prepare();
         assert_eq!(p.colony.lattice(), Size::new(80, 46));
         let (max1, mean1) = stats(&p.colony.trail);
         assert!(max1 <= max0);
@@ -1442,6 +1459,7 @@ mod tests {
         let (mut p, mut ctx) = scene(Size::new(80, 24), 9);
         run_to(&mut p, &mut ctx, 12.0);
         p.resize(Size::new(200, 50), &mut ctx);
+        p.prepare();
         check_exclusion(&p.colony);
         assert!(p.colony.agents.len() * 10 >= population(Size::new(197, 98)) * 9);
     }
@@ -1548,6 +1566,7 @@ mod tests {
             assert!(core > 0.0, "t = {start}: no `+`/`#` core");
             while p.time() < start + 1.5 - 1e-9 {
                 p.update(2.0 * STEP, &mut ctx);
+                p.prepare();
                 let hot = share(&frame(&p), &['#']);
                 assert!(hot <= 0.2, "t = {}: `#` share {hot}", p.time());
             }
@@ -1559,6 +1578,7 @@ mod tests {
         let mut prev = frame(&p);
         for _ in 0..60 {
             p.update(2.0 * STEP, &mut ctx);
+            p.prepare();
             let next = frame(&p);
             for (a, b) in prev.iter().zip(&next) {
                 let on = *a != ' ' || *b != ' ';
@@ -1623,6 +1643,7 @@ mod tests {
         let mut seen = Vec::new();
         while p.time() < 48.0 {
             p.update(0.25, &mut ctx);
+            p.prepare();
             let want = match p.timeline.at(p.time()).index {
                 EXPLORE => Some("veins seek food"),
                 FADE => Some("network starves"),

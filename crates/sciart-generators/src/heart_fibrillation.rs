@@ -173,11 +173,14 @@ struct Heart {
     ecg_rows: u16,
     cells: Size,
     readout_room: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Heart {
     fn default() -> Self {
         Self {
+            dirty: true,
             medium: Medium::default(),
             model: MODEL,
             u: Grid::default(),
@@ -733,7 +736,7 @@ impl Generator for Heart {
         self.ecg.clear();
         self.ecg.resize(cols, 0.0);
         self.head = 0.0;
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -749,7 +752,15 @@ impl Generator for Heart {
         }
         let sample = self.ecg_sample();
         self.sweep(dt, sample);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -779,12 +790,14 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = Heart::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
     fn run_s(g: &mut Heart, ctx: &mut Ctx, secs: f64) {
         for _ in 0..(secs * 60.0).round() as usize {
             g.update(SIM_DT, ctx);
+            g.prepare();
         }
     }
 
@@ -870,6 +883,7 @@ mod tests {
             let (mut g, mut ctx) = heart_at(size);
             for k in 0..(42 * 4) {
                 g.update(if k % 2 == 0 { 0.25 } else { 0.0 }, &mut ctx);
+                g.prepare();
                 for (&u, &v) in g.u.as_slice().iter().zip(g.v.as_slice()) {
                     assert!((0.0..=1.0).contains(&u) && (0.0..=excitable::AP_V_MAX).contains(&v));
                 }

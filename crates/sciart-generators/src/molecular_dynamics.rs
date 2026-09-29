@@ -445,6 +445,8 @@ pub struct MolecularDynamics {
     atoms: Dots,
     /// The inset's braille plot, over its rows only.
     plot: Dots,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 /// What the bottom-right readout shows, sampled after each step: the energy sum is too
@@ -888,7 +890,7 @@ impl Generator for MolecularDynamics {
         self.heat.clear();
         self.heat.resize(n, self.temperature());
         self.sample_speeds(1.0);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -912,7 +914,15 @@ impl Generator for MolecularDynamics {
         self.refresh_readout();
         self.sample_heat(1.0 - (-dt / HEAT_TAU).exp());
         self.sample_speeds(1.0 - (-dt / HIST_TAU).exp());
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -959,6 +969,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = MolecularDynamics::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -1026,6 +1037,7 @@ mod tests {
         // Let the crystal melt a little so pairs straddle cell boundaries in every direction.
         for _ in 0..45 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g.compute_forces();
         let (u_cells, u_all) = (g.potential_energy(), potential_energy(&g));
@@ -1056,6 +1068,7 @@ mod tests {
         let e0 = total_energy(&g);
         for _ in 0..(5.0 / frame_dt).round() as usize {
             g.update(frame_dt, &mut ctx);
+            g.prepare();
         }
         let e1 = total_energy(&g);
         (e0, e1, (e1 - e0).abs() / e0.abs())
@@ -1083,12 +1096,14 @@ mod tests {
             let size = Size::new(w, h);
             ctx.set_size(size);
             g.resize(size, &mut ctx);
+            g.prepare();
             assert!(
                 min_pair_distance(&g) >= 0.99 * R_MIN.min(1.2),
                 "{w}x{h}: overlap"
             );
             for k in 0..36 {
                 g.update(dts[k % dts.len()], &mut ctx);
+                g.prepare();
                 for i in 0..g.n() {
                     assert!(
                         (0.0..=g.lx).contains(&g.x[i]) && (0.0..=g.ly).contains(&g.y[i]),
@@ -1125,6 +1140,7 @@ mod tests {
         g.set_temperature(0.3);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (t1, target) = (g.temperature(), target_temperature(g.t));
         assert!(t1 > 0.6, "heated to {t1}");
@@ -1137,6 +1153,7 @@ mod tests {
         g.set_temperature(1.6);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (t1, target) = (g.temperature(), target_temperature(g.t));
         assert!(t1 < 1.2, "cooled to {t1}");
@@ -1227,6 +1244,7 @@ mod tests {
         let (mut hot, mut cold, mut nh, mut nc) = (0.0, 0.0, 0u32, 0u32);
         while g.t < 33.0 {
             g.update(0.05, &mut ctx);
+            g.prepare();
             if (14.0..19.0).contains(&g.t) {
                 hot += coordination(&g);
                 nh += 1;
@@ -1299,6 +1317,7 @@ mod tests {
         g.set_temperature(1.0);
         for _ in 0..30 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let px = g.pixels.pixel_size();
         let mut streaks = 0;
@@ -1352,6 +1371,7 @@ mod tests {
         g.t = 12.0; // near the hot peak, where the target barely moves
         for _ in 0..(6.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let sum: f64 = g.hist.iter().sum();
         assert!((sum - 1.0).abs() < 1e-9, "{sum}");
@@ -1376,6 +1396,7 @@ mod tests {
             let (mut g, mut ctx) = fresh(w, h, 5);
             for _ in 0..30 {
                 g.update(0.05, &mut ctx);
+                g.prepare();
             }
             let mut c = Canvas::new(size, GlyphMode::Unicode);
             g.render(&mut c);
@@ -1417,6 +1438,7 @@ mod tests {
             for until in [0.0, 5.0, 60.0] {
                 while t < until {
                     g.update(0.05, &mut ctx);
+                    g.prepare();
                     t += 0.05;
                 }
                 for y in 0..2 * (INSET_H + 1) {
@@ -1455,8 +1477,10 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = MolecularDynamics::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(5.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let t = g.temperature();
         assert!(t < 0.5, "condensed: T {t}");
@@ -1531,8 +1555,10 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = MolecularDynamics::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(5.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let t = g.temperature();
         let mut bodies: Vec<u8> = (0..g.n())

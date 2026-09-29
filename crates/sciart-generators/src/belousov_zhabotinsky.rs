@@ -173,11 +173,14 @@ struct Bz {
     /// `title::stable_readout_room` at this size: the label never changes form with
     /// the caption (CORE-R83).
     readout_room: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Bz {
     fn default() -> Self {
         Self {
+            dirty: true,
             u: Grid::default(),
             v: Grid::default(),
             lap: Grid::default(),
@@ -581,7 +584,7 @@ impl Generator for Bz {
             }
         }
         self.map.rebuild(lat, px);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -595,7 +598,15 @@ impl Generator for Bz {
         for _ in 0..n as u32 {
             self.substep(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -901,6 +912,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut bz = Bz::default();
         bz.resize(size, &mut ctx);
+        bz.prepare();
         (bz, ctx)
     }
 
@@ -927,16 +939,20 @@ mod tests {
         let (mut bz, mut ctx) = scene(Size::new(240, 60), 5);
         for _ in 0..30 {
             bz.update(SIM_DT, &mut ctx);
+            bz.prepare();
         }
         let (u, v) = (bz.u.clone(), bz.v.clone());
         bz.resize(Size::new(250, 62), &mut ctx);
+        bz.prepare();
         assert_eq!((&bz.u, &bz.v), (&u, &v), "same bucket must not touch state");
 
         let mut rng = SplitMix64::new(9);
         for _ in 0..12 {
             let size = Size::new(rng.random_range(1..=300), rng.random_range(1..=90));
             bz.resize(size, &mut ctx);
+            bz.prepare();
             bz.update(0.1, &mut ctx);
+            bz.prepare();
             assert!(in_unit(&bz), "fields left [0, 1] after resize to {size:?}");
         }
     }
@@ -947,6 +963,7 @@ mod tests {
         // Up to the end of the quench: 62 s in 0.25 s updates.
         for _ in 0..62 * 4 {
             bz.update(0.25, &mut ctx);
+            bz.prepare();
         }
         assert_eq!(bz.step, CYCLE_STEPS, "clock at the cycle end");
         assert!(max(&bz.u) < 1e-3, "max u = {}", max(&bz.u));
@@ -1025,6 +1042,7 @@ mod tests {
         for until in [10, 20, 30] {
             while t < until * 60 {
                 bz.update(SIM_DT, &mut ctx);
+                bz.prepare();
                 t += 1;
             }
             let px: Vec<Ink> = bz.pixels_iter().collect();
@@ -1096,10 +1114,12 @@ mod tests {
         assert!(peak_level(&bz) >= pale, "the first seeding shows at once");
         for _ in 0..62 * 4 {
             bz.update(0.25, &mut ctx);
+            bz.prepare();
         }
         // One sub-step past the wrap: fronts are painted at full strength in the model
         // but still dark on screen.
         bz.update(1.0 / SUB_PER_S as f64, &mut ctx);
+        bz.prepare();
         assert_eq!(bz.step, CYCLE_STEPS + 1);
         assert!(max(&bz.u) > 0.9, "the model reseeds at full strength");
         assert!(
@@ -1110,6 +1130,7 @@ mod tests {
         let mut last = peak_level(&bz);
         for _ in 0..30 {
             bz.update(SIM_DT, &mut ctx);
+            bz.prepare();
             let now = peak_level(&bz);
             assert!(now >= last, "fade-in dimmed {last} -> {now}");
             last = now;

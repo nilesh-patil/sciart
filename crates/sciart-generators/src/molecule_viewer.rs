@@ -1013,11 +1013,14 @@ pub(crate) struct MoleculeViewer {
     symbols: [(i32, i32, char); MAX_ATOMS],
     n_symbols: usize,
     label_row: Option<i32>,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl MoleculeViewer {
     pub fn new() -> Self {
         Self {
+            dirty: true,
             models: gallery(),
             timeline: gallery_timeline(),
             t: GROW,
@@ -1069,7 +1072,7 @@ impl Generator for MoleculeViewer {
         if self.start.is_none() {
             self.start = Some(ctx.rng.random_range(0..MOLECULES));
         }
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -1078,7 +1081,15 @@ impl Generator for MoleculeViewer {
             return;
         }
         self.t += dt;
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1696,8 +1707,10 @@ mod tests {
             .map(|seed| {
                 let mut g = MoleculeViewer::new();
                 g.resize(size, &mut Ctx::new(seed, size));
+                g.prepare();
                 // A later resize keeps the start.
                 g.resize(Size::new(40, 12), &mut Ctx::new(seed + 100, size));
+                g.prepare();
                 g.pose().molecule
             })
             .collect();
@@ -1710,12 +1723,14 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = MoleculeViewer::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..MOLECULES * 2 {
             let m = g.pose().molecule;
             let caption = g.caption().unwrap();
             assert_eq!(caption, CAPTIONS[m]);
             assert!(g.models[m].labels[0].starts_with(caption), "{caption}");
             g.update(SLOT / 2.0, &mut ctx);
+            g.prepare();
         }
     }
 
@@ -1782,9 +1797,11 @@ mod tests {
         let size = Size::new(80, 24);
         let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(3, size));
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         for _ in 0..120 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             canvas.clear();
             g.render(&mut canvas);
             let caption = g.caption().unwrap_or_default();
@@ -1805,10 +1822,12 @@ mod tests {
         let size = Size::new(80, 24);
         let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(1, size));
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut canvas = Canvas::new(size, GlyphMode::Ascii);
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..(60.0 / 0.5) as usize {
             g.update(0.5, &mut ctx);
+            g.prepare();
             canvas.clear();
             g.render(&mut canvas);
             let lines = canvas.to_lines();
@@ -1835,13 +1854,17 @@ mod tests {
         let size = Size::new(80, 24);
         let (mut g, mut ctx) = (MoleculeViewer::new(), Ctx::new(3, size));
         g.resize(size, &mut ctx);
+        g.prepare();
         g.update(1.5, &mut ctx);
+        g.prepare();
         let t0 = g.t;
         for dt in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0, 0.0] {
             g.update(dt, &mut ctx);
+            g.prepare();
             assert_eq!(g.t, t0, "dt {dt}");
         }
         g.update(0.25, &mut ctx);
+        g.prepare();
         assert_eq!(g.t, t0 + 0.25);
     }
 }

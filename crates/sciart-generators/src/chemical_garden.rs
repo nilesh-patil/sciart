@@ -397,11 +397,14 @@ struct Garden {
     /// Pixel rows the tank spans (above the title row).
     rows: f64,
     started: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Garden {
     fn default() -> Self {
         Self {
+            dirty: true,
             tank: Tank::default(),
             time: 0.0,
             act: usize::MAX,
@@ -659,7 +662,7 @@ impl Generator for Garden {
             self.act = GARDEN;
             self.tank.plant(false, &mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -684,7 +687,15 @@ impl Generator for Garden {
                 self.tank.plant(self.act == VENT, &mut ctx.rng);
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -781,9 +792,11 @@ mod tests {
         let mut ctx = Ctx::new(4, Size::new(80, 24));
         let mut g = Garden::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         assert_eq!(g.caption(), Some("osmotic bursts"));
         while g.time < GARDEN_S + 1.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let c = g.caption().unwrap_or("");
         assert_eq!(c, "life's vents?");
@@ -817,8 +830,10 @@ mod tests {
         let mut ctx = Ctx::new(6, Size::new(80, 24));
         let mut g = Garden::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         while g.time < GARDEN_S + VENT_S + 12.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             if g.time > 3.0 {
                 assert!(
                     !g.tank.segments.is_empty(),

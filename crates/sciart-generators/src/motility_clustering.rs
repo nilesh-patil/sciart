@@ -296,11 +296,14 @@ struct Motility {
     cells: Size,
     readout_room: usize,
     clustered: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Motility {
     fn default() -> Self {
         Self {
+            dirty: true,
             world: Box2::new((1.0, 1.0), CAP),
             full: 0,
             dilute: 0,
@@ -455,7 +458,7 @@ impl Generator for Motility {
         self.world.forces();
         self.world.active = self.target();
         self.world.forces();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -473,7 +476,15 @@ impl Generator for Motility {
             let (v0, dr) = self.params();
             self.world.step(v0, dr, h, &mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -585,8 +596,10 @@ mod tests {
             let mut ctx = Ctx::new(1, size);
             let mut g = Motility::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..30 {
                 g.update(0.25, &mut ctx);
+                g.prepare();
                 assert!(g.world.active <= g.world.swimmers.len() && g.world.swimmers.len() <= CAP);
             }
         }
@@ -607,9 +620,11 @@ mod tests {
         let mut ctx = Ctx::new(1, Size::new(80, 24));
         let mut g = Motility::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut seen = Vec::new();
         for _ in 0..((DILUTE_S + CROWD_S + DISPERSE_S + 2.0) * 4.0) as usize {
             g.update(0.25, &mut ctx);
+            g.prepare();
             let c = g.caption().unwrap_or("");
             if seen.last() != Some(&c) {
                 seen.push(c);

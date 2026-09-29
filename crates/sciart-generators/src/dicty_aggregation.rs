@@ -146,11 +146,14 @@ struct Dicty {
     /// Glow level to cell level (gamma [`CELL_GAMMA`], up to [`CELL_MAX`]).
     cell_lut: [u8; 256],
     seeded: bool,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Dicty {
     fn default() -> Self {
         Self {
+            dirty: true,
             u: Grid::default(),
             v: Grid::default(),
             lap: Grid::default(),
@@ -426,7 +429,7 @@ impl Generator for Dicty {
         }
         self.density();
         self.map.rebuild(lat, px);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -445,7 +448,15 @@ impl Generator for Dicty {
         for _ in 0..n as u32 {
             self.substep(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -462,6 +473,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = Dicty::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -551,6 +563,7 @@ mod tests {
         let v0 = variance(&g);
         for _ in 0..(50 * 60) {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert_eq!(g.cells.len(), n);
         }
         let v1 = variance(&g);
