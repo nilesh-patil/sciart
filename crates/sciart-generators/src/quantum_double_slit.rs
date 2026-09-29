@@ -293,8 +293,69 @@ pub(crate) struct Adi {
     off: Vec<C64>,
     line: Vec<C64>,
     col: Vec<C64>,
+    /// `LANES` lines interleaved (`[i·LANES + k]`), source and result, for the batched
+    /// sweeps.
+    quad_src: Vec<C64>,
+    quad_dst: Vec<C64>,
     a: f64,
     flip: bool,
+}
+
+/// Lines solved together in the ADI sweeps: the tridiagonal recurrences are latency-bound
+/// chains, so interleaving independent lines lets them overlap. Each line's arithmetic is
+/// exactly the scalar path's, so ψ is bit-identical.
+const LANES: usize = 8;
+
+/// `(1 − iA)` of `LANES` interleaved lines of `n` from `src` into `dst`, Dirichlet ends:
+/// [`Adi::explicit`] per lane.
+#[inline(always)]
+fn explicit_lanes(a: f64, e: impl Fn(usize, usize) -> C64, src: &[C64], dst: &mut [C64], n: usize) {
+    for i in 0..n {
+        for k in 0..LANES {
+            let left = if i > 0 {
+                src[(i - 1) * LANES + k]
+            } else {
+                C64::ZERO
+            };
+            let right = if i + 1 < n {
+                src[(i + 1) * LANES + k]
+            } else {
+                C64::ZERO
+            };
+            dst[i * LANES + k] = e(i, k) * src[i * LANES + k] + times_i((left + right).scale(a));
+        }
+    }
+}
+
+/// [`tridiag_apply_c`] on `LANES` interleaved lines of `n` in `buf`, each with its own
+/// factors `inv[k]`, `cp[k]` and the shared sub-diagonal `sub`.
+#[inline(always)]
+fn apply_lanes(
+    sub: &[C64],
+    inv: &[&[C64]; LANES],
+    cp: &[&[C64]; LANES],
+    buf: &mut [C64],
+    n: usize,
+) {
+    if n == 0 || sub.len() < n || inv.iter().chain(cp).any(|l| l.len() < n) {
+        return;
+    }
+    let mut d = [C64::ZERO; LANES];
+    for k in 0..LANES {
+        d[k] = buf[k] * inv[k][0];
+        buf[k] = d[k];
+    }
+    for i in 1..n {
+        for k in 0..LANES {
+            d[k] = (buf[i * LANES + k] - sub[i] * d[k]) * inv[k][i];
+            buf[i * LANES + k] = d[k];
+        }
+    }
+    for i in (0..n - 1).rev() {
+        for k in 0..LANES {
+            buf[i * LANES + k] = buf[i * LANES + k] - cp[k][i] * buf[(i + 1) * LANES + k];
+        }
+    }
 }
 
 impl Adi {
@@ -319,6 +380,8 @@ impl Adi {
             off: vec![C64::new(0.0, -a); m],
             line: vec![C64::ZERO; m],
             col: vec![C64::ZERO; m],
+            quad_src: vec![C64::ZERO; LANES * m],
+            quad_dst: vec![C64::ZERO; LANES * m],
             a,
             flip: false,
         };
@@ -395,7 +458,31 @@ impl Adi {
     fn sweep_x(&mut self) {
         let (w, a) = (self.w, self.a);
         let f = &self.sets[self.active];
-        for y in 0..self.h {
+        let batched = self.h / LANES * LANES;
+        for y0 in (0..batched).step_by(LANES) {
+            let (src, dst) = (
+                &mut self.quad_src[..LANES * w],
+                &mut self.quad_dst[..LANES * w],
+            );
+            for k in 0..LANES {
+                let row = &self.psi[(y0 + k) * w..(y0 + k + 1) * w];
+                for (x, &v) in row.iter().enumerate() {
+                    src[x * LANES + k] = v;
+                }
+            }
+            explicit_lanes(a, |x, k| f.e[(y0 + k) * w + x], src, dst, w);
+            let rows = |k: usize| (y0 + k) * w..(y0 + k + 1) * w;
+            let inv = std::array::from_fn(|k| &f.inv_x[rows(k)]);
+            let cp = std::array::from_fn(|k| &f.cp_x[rows(k)]);
+            apply_lanes(&self.off[..w], &inv, &cp, dst, w);
+            for k in 0..LANES {
+                let row = &mut self.psi[rows(k)];
+                for (x, v) in row.iter_mut().enumerate() {
+                    *v = dst[x * LANES + k];
+                }
+            }
+        }
+        for y in batched..self.h {
             let r = y * w..(y + 1) * w;
             let e = &f.e[r.clone()];
             let line = &mut self.line[..w];
@@ -413,7 +500,27 @@ impl Adi {
     fn sweep_y(&mut self) {
         let (w, h, a) = (self.w, self.h, self.a);
         let f = &self.sets[self.active];
-        for x in 0..w {
+        let batched = w / LANES * LANES;
+        for x0 in (0..batched).step_by(LANES) {
+            let (src, dst) = (
+                &mut self.quad_src[..LANES * h],
+                &mut self.quad_dst[..LANES * h],
+            );
+            for y in 0..h {
+                src[y * LANES..(y + 1) * LANES]
+                    .copy_from_slice(&self.psi[y * w + x0..y * w + x0 + LANES]);
+            }
+            explicit_lanes(a, |y, k| f.e[y * w + x0 + k], src, dst, h);
+            let cols = |k: usize| (x0 + k) * h..(x0 + k + 1) * h;
+            let inv = std::array::from_fn(|k| &f.inv_y[cols(k)]);
+            let cp = std::array::from_fn(|k| &f.cp_y[cols(k)]);
+            apply_lanes(&self.off[..h], &inv, &cp, dst, h);
+            for y in 0..h {
+                self.psi[y * w + x0..y * w + x0 + LANES]
+                    .copy_from_slice(&dst[y * LANES..(y + 1) * LANES]);
+            }
+        }
+        for x in batched..w {
             for y in 0..h {
                 self.col[y] = self.psi[y * w + x];
             }
@@ -779,6 +886,16 @@ impl QuantumDoubleSlit {
         let (view, carrier) = (self.view_px, self.carrier);
         let tunnel = act == 2;
         let cutoff = if tunnel { 0.5 * CUTOFF } else { CUTOFF };
+        // Below this `a` a pixel is blank for sure: `t` is under both the knee's zero
+        // (`cutoff/2`) or under the taper's zero (`raw ≤ WAVE_TOP·vis·t < WAVE_FLOOR/2`);
+        // shrunk by 0.1 % so rounding never flips a lit pixel.
+        let t_blank = (0.5 * cutoff).max(0.5 * WAVE_FLOOR / (WAVE_TOP * vis));
+        let a_blank = 0.999
+            * if tunnel {
+                t_blank.powf(4.0 / 3.0)
+            } else {
+                t_blank.powf(1.0 / 0.8)
+            };
         self.pixels.shade(|x, y| {
             if x == view {
                 return if y % 2 == 0 { SCREEN_INK } else { Ink::BLANK };
@@ -828,6 +945,10 @@ impl QuantumDoubleSlit {
             // act uses `v^¾` either way, lower cut, so the weak transmitted wave shows at
             // its true, smaller share.
             let a = v.min(1.0);
+            // Certainly blank (see `a_blank`): skip the power law.
+            if a < a_blank {
+                return Ink::BLANK;
+            }
             let t = if tunnel {
                 a.sqrt() * a.sqrt().sqrt()
             } else {

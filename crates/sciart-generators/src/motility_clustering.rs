@@ -45,7 +45,7 @@ const DR: f64 = 0.18;
 /// Repulsion stiffness (per second): overlap at a head-on stall is `v₀/k ≈ 0.075σ`.
 const K: f64 = 80.0;
 /// Sub-steps per second (keeps `k·h` well below 1).
-const SUB_PER_S: f64 = 240.0;
+const SUB_PER_S: f64 = 160.0;
 /// Dispersal: speed and tumbling factors (`Pe` falls 12×).
 const DISPERSE_V: f64 = 0.5;
 const DISPERSE_DR: f64 = 6.0;
