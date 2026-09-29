@@ -194,8 +194,13 @@ impl PlanetaryNebula {
 
     /// Normalised bubble radius `q` of sky offset `(x, y)` (H) for a bubble of
     /// equatorial radius `r_b` about `axis`, and the cosine to the axis.
+    #[cfg(test)]
     fn q(x: f64, y: f64, r_b: f64, axis: (f64, f64)) -> (f64, f64) {
-        let rho = x.hypot(y);
+        Self::q_at(x, y, x.hypot(y), r_b, axis)
+    }
+
+    /// [`Self::q`] with `rho = x.hypot(y)` already known (the per-pixel path).
+    fn q_at(x: f64, y: f64, rho: f64, r_b: f64, axis: (f64, f64)) -> (f64, f64) {
         if rho == 0.0 || r_b <= 0.0 {
             return (if r_b > 0.0 { 0.0 } else { f64::INFINITY }, 1.0);
         }
@@ -216,29 +221,101 @@ impl PlanetaryNebula {
         ease::smoothstep(tau / 1.5) * (1.0 - ease::smoothstep((tau - T_FADE) / 4.5))
     }
 
-    /// Everything the per-pixel emission needs this frame.
-    fn frame(&self) -> Frame {
+    /// Everything the per-pixel emission needs this frame. Whatever does not depend on
+    /// the pixel is worked out here once, not per pixel (GEN-R8 at 500×150: ~150 k pixels
+    /// a frame); each value is computed exactly as the per-pixel code did, so frames are
+    /// bit-identical.
+    /// A radius (H) beyond which this frame's emission is exactly zero, so those pixels
+    /// are blank without shading: past the last ring that can show, the visible haze
+    /// (where [`Frame::emission`] would skip it), the [O III] halo (`q ≥ HALO_REACH` at the
+    /// bubble's longest radius) and the FLIERs. A 1e-6 relative margin covers rounding
+    /// (`hypot` vs `x² + y²`, and `cos² ≤ 1`), so the cut never changes a pixel.
+    fn reach(r_b: f64, tip: f64, haze_on: f64, px: f64, rings: &[Option<RingNow>]) -> f64 {
+        let thick = RING_THICK * px;
+        let mut reach = rings
+            .iter()
+            .map_while(|g| *g)
+            .filter(|g| g.r > thick && g.r < RING_FADE.0 + RING_FADE.1)
+            .map(|g| g.r * (1.0 + RING_WOBBLE))
+            .fold(0.0, f64::max);
+        // Haze shows while HAZE·haze_on·e^(−ρ/0.45)·RING_MAX ≥ EDGE_DITHER / 1.35.
+        let haze_peak = HAZE * haze_on * f64::from(RING_MAX) * 1.35 / EDGE_DITHER;
+        if haze_peak > 1.0 {
+            reach = reach.max(0.45 * haze_peak.ln());
+        }
+        if r_b > 0.0 {
+            reach = reach
+                .max(HALO_REACH * bubble_radius(r_b, 1.0))
+                .max(tip + FLIER_R + 0.6 * px);
+        }
+        reach * (1.0 + 1e-6) + 1e-9
+    }
+
+    fn frame(&self, px: f64) -> Frame {
         let (front, rim_glow) = self.ionisation();
+        let tau = self.tau();
+        let (t, r_b, axis) = (self.t, self.bubble(), self.axis());
+        let (s, co) = (INNER_TILT.sin_det(), INNER_TILT.cos_det());
+        let mut rings = [None; RINGS];
+        for (k, slot) in rings.iter_mut().enumerate() {
+            *slot = ring_radius(k, tau).map(|r| RingNow {
+                r,
+                dim: (-r / 0.75).exp(),
+                fade: 1.0 - ease::smoothstep((r - RING_FADE.0) / RING_FADE.1),
+                tint: 0.55 + 0.45 * hash01(cell_key(k as i32, 77)),
+            });
+        }
+        let drift = FLIER_DRIFT * (tau - T_WIND).max(0.0);
+        let tip = bubble_radius(r_b, 1.0) * (FLIER_AT + drift);
+        let flier = |sign: f64| Flier {
+            at: (sign * tip * axis.0, sign * tip * axis.1),
+            flicker: 0.8 + 0.2 * (FLICKER * t + 2.0 * sign).sin_det(),
+        };
+        let haze_on = 1.0 - ease::smoothstep((tau - T_WIND) / 4.0);
         Frame {
-            tau: self.tau(),
-            t: self.t,
-            r_b: self.bubble(),
-            axis: self.axis(),
+            cut2: Self::reach(r_b, tip, haze_on, px, &rings).powi(2),
+            r_b,
+            axis,
+            inner_axis: (axis.0 * co - axis.1 * s, axis.0 * s + axis.1 * co),
             front,
             rim_glow,
+            haze_on,
+            rings,
+            fliers: [flier(1.0), flier(-1.0)],
         }
     }
+}
+
+/// AGB ring `k` this frame: its radius and the per-ring factors of its emission.
+#[derive(Debug, Clone, Copy)]
+struct RingNow {
+    r: f64,
+    dim: f64,
+    fade: f64,
+    tint: f64,
+}
+
+/// A FLIER this frame: its centre (H) and flicker factor.
+#[derive(Debug, Clone, Copy)]
+struct Flier {
+    at: (f64, f64),
+    flicker: f64,
 }
 
 /// A snapshot of the nebula's state for shading one frame.
 #[derive(Debug, Clone, Copy)]
 struct Frame {
-    tau: f64,
-    t: f64,
+    /// Squared radius (H²) beyond which the frame is blank ([`PlanetaryNebula::reach`]).
+    cut2: f64,
     r_b: f64,
     axis: (f64, f64),
+    inner_axis: (f64, f64),
     front: f64,
     rim_glow: f64,
+    haze_on: f64,
+    /// Launched rings in launch order; `None` from the first not yet launched.
+    rings: [Option<RingNow>; RINGS],
+    fliers: [Flier; 2],
 }
 
 impl Frame {
@@ -246,23 +323,27 @@ impl Frame {
     /// one pixel in H.
     /// `tex(x, y)` gives the AGB wind's `(warp, clumps)` texture there ([`wind_texture`]).
     fn emission(&self, x: f64, y: f64, px: f64, tex: impl Fn() -> (f64, f64)) -> (f64, f64, f64) {
-        let tau = self.tau;
         let rho = x.hypot(y);
         // The AGB wind is clumpy: a domain-warped texture fixed to the gas, which also
         // nudges each ring's radius a little so the rings read as puffed-off shells, not
         // a target (rings stay evenly spaced on average, PNE-A1). The noise is only
         // sampled where a ring or the haze can show (it is the frame's main cost).
-        let haze_on = 1.0 - ease::smoothstep((tau - T_WIND) / 4.0);
-        let haze = HAZE * haze_on * (-rho / 0.45).exp();
+        let haze_on = self.haze_on;
+        // Once the fast wind has cleared the haze, skip its exp (the product is 0 anyway).
+        let haze = if haze_on == 0.0 {
+            0.0
+        } else {
+            HAZE * haze_on * (-rho / 0.45).exp()
+        };
         let thick = RING_THICK * px;
         let reach = |r: f64| {
             rho < r * (1.0 + RING_WOBBLE) && rho > (r - thick - 2.0 * px) * (1.0 - RING_WOBBLE)
         };
-        let near_ring = (0..RINGS)
-            .filter_map(|k| ring_radius(k, tau))
-            .any(|r| r > thick && r < RING_FADE.0 + RING_FADE.1 && reach(r));
+        let launched = || self.rings.iter().map_while(|ring| *ring);
+        let near_ring =
+            launched().any(|g| g.r > thick && g.r < RING_FADE.0 + RING_FADE.1 && reach(g.r));
         if !near_ring && haze * f64::from(RING_MAX) < EDGE_DITHER / 1.35 {
-            return self.nebula(x, y, px, 0.0);
+            return self.nebula(x, y, rho, px, 0.0);
         }
         let (warp, clumps) = tex();
         let rho_ring = rho * (1.0 + RING_WOBBLE * warp);
@@ -270,35 +351,31 @@ impl Frame {
         // well before the outermost one (no hard outer edge).
         let mut ring = 0.0;
         if near_ring {
-            for k in 0..RINGS {
-                let Some(r) = ring_radius(k, tau) else { break };
+            for g in launched() {
+                let r = g.r;
                 if r <= thick || rho_ring >= r || rho_ring < r - thick - 2.0 * px {
                     continue;
                 }
                 let p =
                     shell_path(rho_ring, r - thick, r) / (r * r - (r - thick) * (r - thick)).sqrt();
-                ring += p
-                    * (-r / 0.75).exp()
-                    * (1.0 - ease::smoothstep((r - RING_FADE.0) / RING_FADE.1))
-                    * (0.55 + 0.45 * hash01(cell_key(k as i32, 77)));
+                ring += p * g.dim * g.fade * g.tint;
             }
         }
         // The giant's dusty wind: a faint haze thinning outward, gone once the core is
         // exposed and the fast wind clears it.
-        self.nebula(x, y, px, (ring + haze) * clumps)
+        self.nebula(x, y, rho, px, (ring + haze) * clumps)
     }
 
-    /// `(O III, N II, ring)` for the bubble and its knots, given the AGB `ring` emission.
-    fn nebula(&self, x: f64, y: f64, px: f64, ring: f64) -> (f64, f64, f64) {
+    /// `(O III, N II, ring)` for the bubble and its knots, given the AGB `ring` emission;
+    /// `rho` is `x.hypot(y)`.
+    fn nebula(&self, x: f64, y: f64, rho: f64, px: f64, ring: f64) -> (f64, f64, f64) {
         let r_b = self.r_b;
         if r_b <= 0.0 {
             return (0.0, 0.0, ring);
         }
         let (axis, front, rim_glow) = (self.axis, self.front, self.rim_glow);
-        let (q, c) = PlanetaryNebula::q(x, y, r_b, axis);
-        let (s, co) = (INNER_TILT.sin_det(), INNER_TILT.cos_det());
-        let inner_axis = (axis.0 * co - axis.1 * s, axis.0 * s + axis.1 * co);
-        let (q2, _) = PlanetaryNebula::q(x, y, r_b * INNER_SCALE, inner_axis);
+        let (q, c) = PlanetaryNebula::q_at(x, y, rho, r_b, axis);
+        let (q2, _) = PlanetaryNebula::q_at(x, y, rho, r_b * INNER_SCALE, self.inner_axis);
         // [O III]: the ionised interior, brightest in the shells' limbs.
         let mut oiii = 0.0;
         if q < 1.0 && q < front {
@@ -322,14 +399,10 @@ impl Frame {
             let half = 0.5 * (RIM_BAND.1 - RIM_BAND.0);
             nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * (0.5 + 0.5 * c * c);
         }
-        let drift = FLIER_DRIFT * (self.tau - T_WIND).max(0.0);
-        let tip = bubble_radius(r_b, 1.0) * (FLIER_AT + drift);
-        for sign in [1.0, -1.0] {
-            let (fx, fy) = (sign * tip * axis.0, sign * tip * axis.1);
-            let d = (x - fx).hypot(y - fy) / (FLIER_R + 0.6 * px);
+        for f in &self.fliers {
+            let d = (x - f.at.0).hypot(y - f.at.1) / (FLIER_R + 0.6 * px);
             if d < 1.0 {
-                let flicker = 0.8 + 0.2 * (FLICKER * self.t + 2.0 * sign).sin_det();
-                nii = f64::max(nii, rim_glow * (1.0 - d * d) * 1.3 * flicker);
+                nii = f64::max(nii, rim_glow * (1.0 - d * d) * 1.3 * f.flicker);
             }
         }
         (oiii, nii, ring)
@@ -341,12 +414,15 @@ impl PlanetaryNebula {
         let env = self.envelope() as f32;
         let (cx, cy, h) = (self.centre.0, self.centre.1, self.h.max(1e-9));
         let px = 1.0 / h;
-        let frame = self.frame();
+        let frame = self.frame(px);
         let (tone, wind) = (&self.tone, &self.wind);
         let width = usize::from(self.pixels.pixel_size().width());
         self.pixels.shade(|ix, iy| {
             let x = (f64::from(ix) + 0.5 - cx) / h;
             let y = (cy - f64::from(iy) - 0.5) / h;
+            if x * x + y * y > frame.cut2 {
+                return Ink::BLANK;
+            }
             let i = iy as usize * width + ix as usize;
             let tex = || {
                 wind.get(i).map_or_else(
@@ -474,6 +550,31 @@ mod tests {
         let mut g = PlanetaryNebula::default();
         g.resize(size, &mut ctx);
         (g, ctx)
+    }
+
+    #[test]
+    fn gen_r8_reach_cut_only_skips_pixels_that_are_blank() {
+        // The per-frame cut radius must be conservative: every sky point beyond it emits
+        // exactly nothing, and nothing tones to level 0, at every stage of the loop.
+        let (mut g, _) = built(Size::new(500, 150));
+        assert_eq!(g.tone.level(0.0), 0);
+        let px = 1.0 / g.h;
+        let mut t = 0.0;
+        while t < LOOP {
+            g.t = t;
+            let f = g.frame(px);
+            for i in 0..720 {
+                let a = f64::from(i) * std::f64::consts::TAU / 720.0;
+                for step in 0..40 {
+                    let rho = f.cut2.sqrt() * (1.0 + 1e-7) + f64::from(step) * 0.02;
+                    let (s, c) = a.sin_cos_det();
+                    let (x, y) = (rho * c, rho * s);
+                    let e = f.emission(x, y, px, || wind_texture(x, y));
+                    assert_eq!(e, (0.0, 0.0, 0.0), "t {t} at ({x}, {y})");
+                }
+            }
+            t += 0.5;
+        }
     }
 
     #[test]
