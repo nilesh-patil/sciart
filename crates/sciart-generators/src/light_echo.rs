@@ -58,8 +58,15 @@ const DUST_LEVEL: f64 = 20.0;
 const GENERATIONS: [(f64, f32); 3] = [(0.0, 1.0), (LOOP, 0.55), (2.0 * LOOP, 0.25)];
 /// Light-curve tables.
 const LUT: usize = 512;
-/// Echo levels drawn in true blackbody colour (the rest ride the Ember ramp).
-const BLACKBODY_FROM: u8 = 165;
+/// Echo inks: the highest level (short of white), the faintest echo drawn (fainter light
+/// leaves the dust's own grey, so the far rings end cleanly instead of in dark-red
+/// streaks), and the emission temperature from which the light is blue-white (Ice).
+const HIGHLIGHT_MAX: u8 = 236;
+const ECHO_FLOOR: u8 = 38;
+pub(crate) const HOT_FROM: f32 = 5_500.0;
+/// Echo weight fades out beyond this sky radius (half-heights) over `VIGNETTE_SPAN`.
+const VIGNETTE_AT: f64 = 0.95;
+const VIGNETTE_SPAN: f64 = 0.5;
 /// Inverse-square dilution, softened (stylised): weight `∝ 1 / r^DILUTION`.
 const DILUTION: f64 = 1.0;
 
@@ -138,6 +145,7 @@ impl Dust {
                 let y = (j as f64 + 0.5 - half) / half;
                 let rho = x.hypot(y);
                 let cavity = ease::smoothstep((rho - CAVITY * 0.5) / CAVITY);
+                let vignette = 1.0 - ease::smoothstep((rho - VIGNETTE_AT) / VIGNETTE_SPAN);
                 let mut cell = [Sample::default(); N_SHEETS];
                 let mut total = 0.0;
                 for (k, (s, &z0)) in cell.iter_mut().zip(&SHEETS).enumerate() {
@@ -152,7 +160,7 @@ impl Dust {
                     let z = z0 + RIPPLE * (value_noise(sk ^ 4, x * 1.6, y * 1.6, 1.0) - 0.5);
                     let r2 = rho * rho + z * z;
                     s.lag = lag(rho, z) as f32;
-                    s.weight = (density * henyey_greenstein(z / r2.sqrt())
+                    s.weight = (vignette * density * henyey_greenstein(z / r2.sqrt())
                         / r2.powf(DILUTION / 2.0)) as f32;
                     total += density;
                 }
@@ -198,7 +206,7 @@ impl LightEcho {
                 (light_curve(te) as f32, temperature(te) as f32)
             })
             .collect();
-        self.tone = Tone::asinh(0.12, 1.3);
+        self.tone = Tone::asinh(0.15, 2.2);
         self.t = ctx.rng.random_range(4.0..8.0);
     }
 
@@ -245,15 +253,18 @@ impl LightEcho {
                 let i = ny as usize * w + nx as usize;
                 (map.sample(light, x, y), kelvin.as_slice()[i], unlit[i])
             };
-            let level = tone.level(v);
-            if f64::from(level) >= ink::MIN_VISIBLE_LEVEL && kv > 0.0 {
-                // Colour is the outburst's temperature when this light left the star:
-                // the true blackbody colour where the echo is bright, and below that a
-                // hot (Ice) or cool (Ember) ramp carrying the brightness.
-                if level >= BLACKBODY_FROM {
-                    return ink::blackbody(f64::from(kv));
-                }
-                return Ink::new(Role::Ramp(Ramp::Ember), level.max(dust));
+            // Highlights roll off on the asinh curve and stop short of white, so the
+            // brightest bands keep their gradation instead of clipping to flat steps.
+            let level = tone.level(v).min(HIGHLIGHT_MAX);
+            if level >= ECHO_FLOOR && kv > 0.0 {
+                // Colour is the outburst's temperature when this light left the star: the
+                // hot first peak blue-white (Ice), the cooling later light amber (Ember).
+                let ramp = if kv >= HOT_FROM {
+                    Ramp::Ice
+                } else {
+                    Ramp::Ember
+                };
+                return Ink::new(Role::Ramp(ramp), level.max(dust));
             }
             if dust > 0 {
                 Ink::new(Role::Ramp(Ramp::Starlight), dust)
@@ -386,6 +397,30 @@ mod tests {
         assert_eq!(g.dust.unlit, dust);
         let again: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
         assert_eq!(again, samples);
+    }
+
+    #[test]
+    fn echo_a6_highlights_roll_off_and_hot_light_is_blue_white() {
+        let (mut g, _) = built(Size::new(120, 40));
+        let (mut ice, mut ember) = (0, 0);
+        for t in [1.0, 3.0, 6.0, 12.0] {
+            g.t = t;
+            g.raster();
+            let px = g.pixels.pixel_size();
+            for y in 0..i32::from(px.height()) {
+                for x in 0..i32::from(px.width()) {
+                    let ink = g.pixels.get(x, y).unwrap();
+                    match ink.role {
+                        Role::Ramp(Ramp::Ice) => ice += 1,
+                        Role::Ramp(Ramp::Ember) => ember += 1,
+                        _ => continue,
+                    }
+                    assert!(ink.level <= HIGHLIGHT_MAX, "clipped at {x},{y} t={t}");
+                }
+            }
+        }
+        // Both the hot (early) and the cool (late) light show, the cool light dominating.
+        assert!(ice > 50 && ember > ice, "ice {ice}, ember {ember}");
     }
 
     #[test]

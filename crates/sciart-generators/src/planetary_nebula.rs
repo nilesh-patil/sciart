@@ -82,10 +82,30 @@ const RING_MAX: f32 = 80.0;
 /// Outer [O III] halo: reach (bubble radii) and brightness; the interior texture salt.
 const HALO_REACH: f64 = 1.7;
 const HALO_GLOW: f64 = 0.16;
+/// AGB rings fade out from this radius (H) over this span, and wobble in radius by up
+/// to this share with the clumpy wind.
+const RING_FADE: (f64, f64) = (0.18, 0.6);
+const RING_WOBBLE: f64 = 0.04;
+/// Ring/haze levels from here up to the visibility threshold are dithered.
+const EDGE_DITHER: f64 = 8.5;
 /// Peak of the AGB wind haze (share of the ring ink cap).
 const HAZE: f64 = 0.55;
 const TEXTURE_SALT: u64 = 0x5eed_ca75;
 const NII_MAX: u8 = 205;
+
+/// The AGB wind's clumpy texture at sky offset `(x, y)` (H): a warp in `[−½, ½]` and a
+/// brightness factor in `[0.55, 1.35]`. Fixed to the gas, so it is tabulated per pixel
+/// on resize.
+pub(crate) fn wind_texture(x: f64, y: f64) -> (f64, f64) {
+    let warp = value_noise(TEXTURE_SALT ^ 0xa6b, x * 5.0, y * 5.0, 1.0) - 0.5;
+    let clump = value_noise(
+        TEXTURE_SALT ^ 0xc1,
+        x * 8.0 + 2.0 * warp,
+        y * 8.0 - 2.0 * warp,
+        1.0,
+    );
+    (warp, 0.55 + 0.8 * clump * clump)
+}
 
 /// Radius of AGB ring `k` at loop time `t` (H), or `None` before it is launched.
 pub(crate) fn ring_radius(k: usize, t: f64) -> Option<f64> {
@@ -129,6 +149,8 @@ pub struct PlanetaryNebula {
     h: f64,
     tone: Tone,
     pixels: Pixels,
+    /// Per pixel: [`wind_texture`] quantised to bytes (warp, clumps).
+    wind: Vec<(u8, u8)>,
     stars: Vec<(i32, i32, u8)>,
 }
 
@@ -222,27 +244,52 @@ struct Frame {
 impl Frame {
     /// `(O III, N II, ring)` emission at sky offset `(x, y)` (H units, y up); `px` is
     /// one pixel in H.
-    fn emission(&self, x: f64, y: f64, px: f64) -> (f64, f64, f64) {
+    /// `tex(x, y)` gives the AGB wind's `(warp, clumps)` texture there ([`wind_texture`]).
+    fn emission(&self, x: f64, y: f64, px: f64, tex: impl Fn() -> (f64, f64)) -> (f64, f64, f64) {
         let tau = self.tau;
         let rho = x.hypot(y);
-        // AGB rings: thin shells, dimmer as they spread.
-        let mut ring = 0.0;
+        // The AGB wind is clumpy: a domain-warped texture fixed to the gas, which also
+        // nudges each ring's radius a little so the rings read as puffed-off shells, not
+        // a target (rings stay evenly spaced on average, PNE-A1). The noise is only
+        // sampled where a ring or the haze can show (it is the frame's main cost).
+        let haze_on = 1.0 - ease::smoothstep((tau - T_WIND) / 4.0);
+        let haze = HAZE * haze_on * (-rho / 0.45).exp();
         let thick = RING_THICK * px;
-        for k in 0..RINGS {
-            let Some(r) = ring_radius(k, tau) else { break };
-            if r <= thick || rho >= r || rho < r - thick - 2.0 * px {
-                continue;
+        let reach = |r: f64| {
+            rho < r * (1.0 + RING_WOBBLE) && rho > (r - thick - 2.0 * px) * (1.0 - RING_WOBBLE)
+        };
+        let near_ring = (0..RINGS)
+            .filter_map(|k| ring_radius(k, tau))
+            .any(|r| r > thick && r < RING_FADE.0 + RING_FADE.1 && reach(r));
+        if !near_ring && haze * f64::from(RING_MAX) < EDGE_DITHER / 1.35 {
+            return self.nebula(x, y, px, 0.0);
+        }
+        let (warp, clumps) = tex();
+        let rho_ring = rho * (1.0 + RING_WOBBLE * warp);
+        // AGB rings: thin shells, dimmer as they spread, fading softly into the haze
+        // well before the outermost one (no hard outer edge).
+        let mut ring = 0.0;
+        if near_ring {
+            for k in 0..RINGS {
+                let Some(r) = ring_radius(k, tau) else { break };
+                if r <= thick || rho_ring >= r || rho_ring < r - thick - 2.0 * px {
+                    continue;
+                }
+                let p =
+                    shell_path(rho_ring, r - thick, r) / (r * r - (r - thick) * (r - thick)).sqrt();
+                ring += p
+                    * (-r / 0.75).exp()
+                    * (1.0 - ease::smoothstep((r - RING_FADE.0) / RING_FADE.1))
+                    * (0.55 + 0.45 * hash01(cell_key(k as i32, 77)));
             }
-            let p = shell_path(rho, r - thick, r) / (r * r - (r - thick) * (r - thick)).sqrt();
-            ring += p
-                * (-r / 0.75).exp()
-                * (1.0 - ease::smoothstep((r - 0.75) / 0.35))
-                * (0.55 + 0.45 * hash01(cell_key(k as i32, 77)));
         }
         // The giant's dusty wind: a faint haze thinning outward, gone once the core is
         // exposed and the fast wind clears it.
-        let haze_on = 1.0 - ease::smoothstep((tau - T_WIND) / 4.0);
-        ring += HAZE * haze_on * (-rho / 0.35).exp();
+        self.nebula(x, y, px, (ring + haze) * clumps)
+    }
+
+    /// `(O III, N II, ring)` for the bubble and its knots, given the AGB `ring` emission.
+    fn nebula(&self, x: f64, y: f64, px: f64, ring: f64) -> (f64, f64, f64) {
         let r_b = self.r_b;
         if r_b <= 0.0 {
             return (0.0, 0.0, ring);
@@ -295,11 +342,24 @@ impl PlanetaryNebula {
         let (cx, cy, h) = (self.centre.0, self.centre.1, self.h.max(1e-9));
         let px = 1.0 / h;
         let frame = self.frame();
-        let tone = &self.tone;
+        let (tone, wind) = (&self.tone, &self.wind);
+        let width = usize::from(self.pixels.pixel_size().width());
         self.pixels.shade(|ix, iy| {
             let x = (f64::from(ix) + 0.5 - cx) / h;
             let y = (cy - f64::from(iy) - 0.5) / h;
-            let (o, n, r) = frame.emission(x, y, px);
+            let i = iy as usize * width + ix as usize;
+            let tex = || {
+                wind.get(i).map_or_else(
+                    || wind_texture(x, y),
+                    |&(w, c)| {
+                        (
+                            f64::from(w) / 255.0 - 0.5,
+                            0.55 + 0.8 * f64::from(c) / 255.0,
+                        )
+                    },
+                )
+            };
+            let (o, n, r) = frame.emission(x, y, px, tex);
             let lo = tone.level(o as f32 * env);
             let ln = tone.level(n as f32 * env).min(NII_MAX);
             let lr = (r as f32 * env * RING_MAX).min(RING_MAX);
@@ -309,6 +369,13 @@ impl PlanetaryNebula {
                 Ink::new(Role::Ramp(Ramp::Aurora), lo)
             } else if f64::from(lr) >= ink::MIN_VISIBLE_LEVEL {
                 Ink::new(Role::Ramp(Ramp::Ember), lr as u8)
+            } else if f64::from(lr) >= EDGE_DITHER
+                && hash01(cell_key(ix, iy))
+                    < (f64::from(lr) - EDGE_DITHER) / (ink::MIN_VISIBLE_LEVEL - EDGE_DITHER)
+            {
+                // The faint outskirts thin out pixel by pixel (a fixed dither) instead of
+                // stopping at the visibility threshold in one hard edge.
+                Ink::new(Role::Ramp(Ramp::Ember), ink::MIN_VISIBLE_LEVEL as u8)
             } else {
                 Ink::BLANK
             }
@@ -355,6 +422,19 @@ impl Generator for PlanetaryNebula {
         let (w, hh) = (f64::from(px.width()), f64::from(px.height()));
         self.centre = (w / 2.0, hh / 2.0);
         self.h = (hh / 2.0).min(w / 2.6);
+        self.wind.clear();
+        let hu = self.h.max(1e-9);
+        for iy in 0..px.height() {
+            for ix in 0..px.width() {
+                let x = (f64::from(ix) + 0.5 - self.centre.0) / hu;
+                let y = (self.centre.1 - f64::from(iy) - 0.5) / hu;
+                let (warp, clumps) = wind_texture(x, y);
+                self.wind.push((
+                    ink::level(255.0 * (warp + 0.5)),
+                    ink::level(255.0 * (clumps - 0.55) / 0.8),
+                ));
+            }
+        }
         self.stars.clear();
         for k in 0..(size.area() / 60) as i32 {
             let x = (hash01(cell_key(k, 13)) * w) as i32;

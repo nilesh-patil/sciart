@@ -56,17 +56,27 @@ const HOLD: f64 = -0.2;
 pub(crate) const DOCK: f64 = -0.03;
 /// Phasing Δv, set so the hops end exactly at the hold point.
 pub(crate) const DV: f64 = (HOLD - START) * N / (6.0 * PI * HOPS);
-/// Radial exaggeration on screen.
-const X_EXAG: f64 = 5.0;
-/// Top of the Earth's limb, as a share of the height.
-const LIMB_TOP: f64 = 0.88;
-/// How long a burn's arrow shows (s).
+/// Screen layout, as shares of the size: the Earth's limb (a band ~15 % of the height),
+/// the chaser's start and the station along the width, and the rows of the station's
+/// altitude and of the hops' lowest dip, so the path spans ~70 % of the width and of the
+/// height above the limb whatever the size (the radial axis is exaggerated to fit).
+const LIMB_TOP: f64 = 0.85;
+const START_COL: f64 = 0.13;
+const STATION_COL: f64 = 0.83;
+const TOP_ROW: f64 = 0.2;
+const DIP_ROW: f64 = 0.75;
+/// How long a burn's arrow and plume flash show (s).
 const BURN_SHOW: f64 = 1.2;
-/// Trail length (s) and samples.
+/// The recent trail with a glow under it (s).
 const TRAIL: f64 = 4.0;
-const TRAIL_N: usize = 48;
+/// Planned-path samples, and the dotted plan's spacing (dots of arc length).
+const PLAN_N: usize = 1200;
+const PLAN_GAP: f64 = 3.0;
 /// Exhaust dots in a thruster puff.
 const PUFF_DOTS: i32 = 18;
+/// The inertial inset needs this many columns and rows (below it, a disc of a few
+/// pixels reads as a notched square).
+const INSET_MIN: (f64, f64) = (100.0, 30.0);
 
 /// LVLH state `(x, y, ẋ, ẏ)`.
 pub(crate) type State = [f64; 4];
@@ -141,6 +151,20 @@ fn burn(t: f64) -> Option<(f64, f64)> {
         .find(|&(at, _)| t >= at && t < at + BURN_SHOW)
 }
 
+/// Chaser sprite, left to right from the nose cell: offset, glyph, part.
+const CHASER: [(i32, Glyph, CraftPart); 4] = [
+    (-3, Glyph::new('━', '='), CraftPart::Array),
+    (-2, Glyph::new('▐', '['), CraftPart::Hull),
+    (-1, Glyph::new('█', '#'), CraftPart::Hull),
+    (0, Glyph::new('▶', '>'), CraftPart::Nose),
+];
+#[derive(Debug, Clone, Copy)]
+enum CraftPart {
+    Array,
+    Hull,
+    Nose,
+}
+
 #[derive(Debug, Default)]
 pub struct OrbitalRendezvous {
     seeded: bool,
@@ -148,94 +172,118 @@ pub struct OrbitalRendezvous {
     timeline: Option<Timeline>,
     pixels: Pixels,
     dots: Dots,
-    /// The whole loop's planned path in dot coordinates.
+    /// The whole loop's path in dot coordinates, `PLAN_N` samples evenly in time.
     plan: Vec<(f64, f64)>,
+    /// The plan resampled every `PLAN_GAP` dots of arc length, with each dot's loop
+    /// time: the dotted "still to fly" path.
+    plan_dots: Vec<(f64, f64, f64)>,
     stars: Vec<(i32, i32, u8)>,
     salt: u64,
-    /// Screen: cells, and the LVLH panel's origin (station, cells) and scale (cells per
-    /// unit along track).
+    /// Screen: cells, the station's cell position, and cells per unit along track
+    /// (right) and radially (up).
     w: f64,
     h: f64,
     origin: (f64, f64),
-    scale: f64,
+    scale: (f64, f64),
+}
+
+/// Light pixel `(x, y)` with `ink` unless a brighter pixel of the same role is there.
+fn glow_max(pixels: &mut Pixels, x: i32, y: i32, ink: Ink) {
+    if let Some(old) = pixels.get(x, y)
+        && (old.role != ink.role || old.level < ink.level)
+    {
+        pixels.set(x, y, ink);
+    }
 }
 
 impl OrbitalRendezvous {
     /// LVLH `(x, y)` → cell position.
     fn to_cells(&self, x: f64, y: f64) -> (f64, f64) {
         (
-            self.origin.0 + y * self.scale,
-            self.origin.1 - x * X_EXAG * self.scale / sciart_core::geom::ASPECT,
+            self.origin.0 + y * self.scale.0,
+            self.origin.1 - x * self.scale.1,
         )
     }
 
+    /// The chaser's cell (its nose), held off the station's sprite so it docks at the
+    /// port instead of overlapping the panels.
+    fn chaser_cell(&self, t: f64) -> (f64, f64) {
+        let s = chaser(t);
+        let (cx, cy) = self.to_cells(s[0], s[1]);
+        (cx.min(self.origin.0 - 5.0), cy)
+    }
+
     fn earth(&mut self) {
-        // Earth's limb along the bottom: a huge disc, ocean and drifting clouds, a thin
-        // bright atmosphere at the edge.
+        // Earth's limb along the bottom: a huge disc, a deep ocean under soft streaks of
+        // cloud streaming with the orbit, a bright atmosphere at the edge and a faint
+        // airglow above it, every pixel shaded by its signed distance to the limb so the
+        // edge is antialiased below the half-block.
         let ps = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()));
         let r = 3.0 * pw;
         let c = (0.5 * pw, LIMB_TOP * ph + r);
         let drift = 0.9 * self.t;
         let salt = self.salt;
-        let deep = 0.12 * ph;
-        for y in ((LIMB_TOP * ph) as i32 - 3).max(0)..i32::from(ps.height()) {
+        let deep = 0.14 * ph;
+        let cloud_at = |fx: f64, depth: f64| {
+            // Foreshortened toward the limb: √depth squeezes the streaks near the edge.
+            let (u, v) = (fx + drift, 3.2 * depth.max(0.0).sqrt());
+            // Streaks: stretched along the flow, warped, with a finer grain.
+            let warp = value_noise(salt ^ 1, 0.3 * u, v, 6.0) - 0.5;
+            let streak = value_noise(salt, 0.35 * u + 6.0 * warp, 3.5 * v, 6.0);
+            let fine = value_noise(salt ^ 2, 0.8 * u, 5.0 * v, 4.0);
+            let k = (0.75 * streak + 0.25 * fine - 0.55) / 0.2;
+            let k = k.clamp(0.0, 1.0);
+            k * k * (3.0 - 2.0 * k)
+        };
+        for y in ((LIMB_TOP * ph) as i32 - 6).max(0)..i32::from(ps.height()) {
             for x in 0..i32::from(ps.width()) {
                 let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
                 let depth = r - (fx - c.0).hypot(fy - c.1);
-                if depth < -2.5 {
+                if depth < -4.0 {
                     continue;
                 }
-                let ink = if depth < 0.0 {
-                    // The airglow above the limb, fading out over 2.5 pixels.
-                    let v = 0.55 * (1.0 + depth / 2.5).powi(2);
-                    if v * 255.0 < ink::MIN_VISIBLE_LEVEL {
-                        continue;
-                    }
-                    ink::ramp(Ramp::Ice, v)
-                } else if depth < 1.0 {
-                    // The bright atmosphere at the limb, antialiased into the ocean.
-                    ink::ramp(Ramp::Ice, 0.72 - 0.2 * depth)
-                } else {
-                    // Clouds: domain-warped noise, streaming with the orbit.
-                    let (u, v) = (fx + drift, fy * 2.2);
-                    let wx = value_noise(salt ^ 1, u, v, 9.0) - 0.5;
-                    let cloud = value_noise(salt, u + 9.0 * wx, v, 4.0);
-                    let ocean = 0.34 + 0.2 * (1.0 - depth / deep).max(0.0);
-                    if cloud > 0.63 {
-                        let k = ((cloud - 0.63) / 0.2).min(1.0);
-                        Ink::new(Role::Ramp(Ramp::Starlight), ink::level(150.0 + 95.0 * k))
-                    } else {
-                        ink::ramp(Ramp::Ice, ocean)
-                    }
+                // Outside: airglow fading over a few pixels; inside: ocean and cloud with
+                // the atmosphere's bright rim. Blended by the pixel's cover of the disc.
+                let air = 0.5 * (depth.min(0.0) / 1.1).exp();
+                let inside = {
+                    let ocean = 0.3 + 0.2 * (1.0 - depth / deep).max(0.0);
+                    let surface = ocean + (0.93 - ocean) * 0.9 * cloud_at(fx, depth);
+                    let rim = (-depth.max(0.0) / 1.4).exp();
+                    surface + (0.8 - surface).max(0.0) * rim
                 };
-                self.pixels.set(x, y, ink);
+                let cover = (depth + 0.5).clamp(0.0, 1.0);
+                let v = cover * inside + (1.0 - cover) * air;
+                if v * 255.0 < ink::MIN_VISIBLE_LEVEL {
+                    continue;
+                }
+                self.pixels.set(x, y, ink::ramp(Ramp::Ice, v));
             }
         }
     }
 
     /// Inertial inset (top right): Earth, the station's circular orbit and both craft,
-    /// the chaser's radius and lead exaggerated.
+    /// the chaser's radius and lead exaggerated. Only where the disc has enough pixels
+    /// to read as round.
     fn inset(&mut self) {
-        if self.w < 60.0 || self.h < 18.0 {
+        if self.w < INSET_MIN.0 || self.h < INSET_MIN.1 {
             return;
         }
-        let ps = self.pixels.pixel_size();
-        let r = (0.085 * f64::from(ps.height())).max(3.0);
-        let c = (f64::from(ps.width()) - 2.2 * r, 1.6 * r);
+        // Orbit radius in dots (square); a pixel is 2 × 2 dots.
+        let rd = 0.3 * self.h;
+        let (dcx, dcy) = (2.0 * self.w - 1.3 * rd - 4.0, 1.2 * rd + 2.0);
         let pixels = &mut self.pixels;
-        disc_pixels(c, 0.45 * r, |x, y, cover| {
-            if cover > 0.3 {
-                pixels.set(x, y, ink::ramp(Ramp::Ice, 0.55));
-            }
+        disc_pixels((dcx / 2.0, dcy / 2.0), 0.24 * rd, |x, y, cover| {
+            // A lit hemisphere: brighter toward the Sun (upper left), antialiased edge.
+            pixels.set(x, y, ink::ramp(Ramp::Ice, cover * 0.55));
         });
-        let orbit = Ink::new(Role::Ramp(Ramp::Starlight), 70);
-        let (dcx, dcy) = Dots::from_cells(c.0, c.1 / 2.0);
-        let rd = 2.0 * r;
-        for i in 0..72 {
-            let a = TAU * f64::from(i) / 72.0;
-            let (s, co) = a.sin_cos_det();
-            self.dots.plot(dcx + rd * co, dcy + rd * s, orbit);
+        let orbit = Ink::new(Role::Ramp(Ramp::Starlight), 60);
+        for i in 0..96 {
+            if i % 2 == 0 {
+                let a = TAU * f64::from(i) / 96.0;
+                let (s, co) = a.sin_cos_det();
+                self.dots.plot(dcx + rd * co, dcy + rd * s, orbit);
+            }
         }
         let theta = -N * self.t;
         let s = chaser(self.t);
@@ -259,44 +307,71 @@ impl OrbitalRendezvous {
                 .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
         }
         self.earth();
-        // Planned path, faint; the recent trail, bright.
-        let plan = Ink::new(Role::Ramp(Ramp::Aurora), 135);
-        for (i, &(x, y)) in self.plan.iter().enumerate() {
-            if i % 3 != 2 {
+        let now = self.t.rem_euclid(LOOP);
+        // Still to fly: a dim dotted line.
+        let plan = Ink::new(Role::Ramp(Ramp::Aurora), 105);
+        for &(x, y, at) in &self.plan_dots {
+            if at > now {
                 self.dots.plot(x, y, plan);
             }
         }
-        for i in 1..=TRAIL_N {
-            let back = TRAIL * i as f64 / TRAIL_N as f64;
-            let tt = self.t - back;
-            if tt.rem_euclid(LOOP) > self.t.rem_euclid(LOOP) {
-                break;
+        // Flown: a solid line, brightest near the chaser and fading with age, over a
+        // soft glow along the last few seconds.
+        let step = LOOP / PLAN_N as f64;
+        let flown = ((now / step) as usize).min(PLAN_N - 1);
+        let (hx, hy) = {
+            let (cx, cy) = self.chaser_cell(self.t);
+            Dots::from_cells(cx, cy + 0.5)
+        };
+        let mut prev = None;
+        for i in 0..=flown {
+            let (x, y) = if i == flown { (hx, hy) } else { self.plan[i] };
+            let age = now - i as f64 * step;
+            if let Some((px, py)) = prev {
+                let level = 180.0 + 70.0 * (-age / 8.0).exp();
+                self.dots.line(
+                    px,
+                    py,
+                    x,
+                    y,
+                    Ink::new(Role::Ramp(Ramp::Aurora), level as u8),
+                );
             }
-            let s = chaser(tt);
-            let (cx, cy) = self.to_cells(s[0], s[1]);
-            let (x, y) = Dots::from_cells(cx, cy);
-            let fade = 1.0 - back / TRAIL;
-            self.dots.disc(
-                x,
-                y,
-                0.4 + 0.5 * fade,
-                ink::ramp(Ramp::Aurora, 0.5 + 0.5 * fade),
-            );
+            if age < TRAIL && i % 2 == 0 {
+                // Pixel = 2 × 2 dots; a faint glow under the line.
+                let fade = 1.0 - age / TRAIL;
+                let (gx, gy) = ((x / 2.0) as i32, (y / 2.0) as i32);
+                let glow = ink::ramp(Ramp::Aurora, 0.04 + 0.09 * fade);
+                glow_max(&mut self.pixels, gx, gy, glow);
+            }
+            prev = Some((x, y));
         }
-        // Thruster puff while a burn fires: a spreading cone of exhaust dots opposite the
-        // Δv, fading as it grows.
+        // A burn: the plume flashes (a hot glow at the burn marker that swells and
+        // fades) and a spreading cone of exhaust dots streams opposite the Δv.
         if let Some((at, dir)) = burn(self.t) {
-            let age = (self.t.rem_euclid(LOOP) - at).max(0.0);
-            let s = chaser(self.t);
-            let (cx, cy) = self.to_cells(s[0], s[1]);
-            let (x0, y0) = Dots::from_cells(cx + 0.5, cy + 0.5);
-            let puff = ink::ramp(Ramp::Sulfur, 0.9 - 0.5 * (age / BURN_SHOW));
-            for k in 0..PUFF_DOTS {
-                let u = hash01(cell_key(k, 7));
-                let v = hash01(cell_key(k, 9)) - 0.5;
+            let age = (now - at).clamp(0.0, BURN_SHOW);
+            let k = 1.0 - age / BURN_SHOW;
+            let (cx, cy) = self.chaser_cell(self.t);
+            // The engine end: ahead of the nose for a retrograde burn, behind the array
+            // for a prograde one.
+            let nozzle = if dir < 0.0 { cx + 1.5 } else { cx - 3.5 };
+            let (x0, y0) = Dots::from_cells(nozzle, cy + 0.5);
+            let flash_r = 0.8 + 1.4 * (age / BURN_SHOW).sqrt();
+            let pixels = &mut self.pixels;
+            disc_pixels((x0 / 2.0, y0 / 2.0), flash_r, |x, y, cover| {
+                let d = (f64::from(x) + 0.5 - x0 / 2.0).hypot(f64::from(y) + 0.5 - y0 / 2.0);
+                let v = (0.7 + 0.3 * k) * cover * (1.0 - 0.2 * d / flash_r);
+                if v >= 0.62 {
+                    glow_max(pixels, x, y, ink::ramp(Ramp::Sulfur, v));
+                }
+            });
+            let puff = ink::ramp(Ramp::Sulfur, 0.95 - 0.5 * (age / BURN_SHOW));
+            for n in 0..PUFF_DOTS {
+                let u = hash01(cell_key(n, 7));
+                let v = hash01(cell_key(n, 9)) - 0.5;
                 let reach = (2.0 + 9.0 * age) * (0.3 + 0.7 * u);
                 self.dots
-                    .plot(x0 - dir * (3.0 + reach), y0 + v * reach * 0.9, puff);
+                    .plot(x0 - dir * (1.0 + reach), y0 + v * reach * 0.9, puff);
             }
         }
         self.inset();
@@ -319,19 +394,30 @@ impl Generator for OrbitalRendezvous {
         self.dots.resize(size);
         self.w = f64::from(size.width());
         self.h = f64::from(size.height());
-        self.scale = 0.8 * self.w;
-        self.origin = (0.86 * self.w, 0.46 * self.h);
-        // Keep the lowest dip above the Earth's limb.
-        let dip = 4.0 * DV / N * X_EXAG * self.scale / sciart_core::geom::ASPECT;
-        if dip > 0.33 * self.h {
-            self.scale *= 0.33 * self.h / dip;
-        }
+        // Scale each axis to the trajectory: along track from the start gap to the
+        // station, radially from the station's altitude to the hops' lowest dip.
+        self.origin = (STATION_COL * self.w, TOP_ROW * self.h);
+        let dip = 4.0 * DV / N;
+        self.scale = (
+            (STATION_COL - START_COL) * self.w / -START,
+            (DIP_ROW - TOP_ROW) * self.h / dip,
+        );
         self.plan.clear();
-        let n = 600;
-        for i in 0..n {
-            let s = chaser(LOOP * f64::from(i) / f64::from(n));
+        self.plan_dots.clear();
+        let mut carry = 0.0;
+        for i in 0..PLAN_N {
+            let at = LOOP * i as f64 / PLAN_N as f64;
+            let s = chaser(at);
             let (cx, cy) = self.to_cells(s[0], s[1]);
-            self.plan.push(Dots::from_cells(cx, cy));
+            let p = Dots::from_cells(cx.min(self.origin.0 - 5.0), cy + 0.5);
+            if let Some(&(qx, qy)) = self.plan.last() {
+                carry += (p.0 - qx).hypot(p.1 - qy);
+            }
+            if i == 0 || carry >= PLAN_GAP {
+                carry = 0.0;
+                self.plan_dots.push((p.0, p.1, at));
+            }
+            self.plan.push(p);
         }
         let ps = self.pixels.pixel_size();
         self.stars.clear();
@@ -372,49 +458,44 @@ impl Generator for OrbitalRendezvous {
             canvas.put(sx + dx, sy - 1, Glyph::new('▄', '_'), panel);
             canvas.put(sx + dx, sy + 1, Glyph::new('▀', '-'), panel);
         }
-        let s = chaser(self.t);
-        let (cx, cy) = self.to_cells(s[0], s[1]);
+        let (cx, cy) = self.chaser_cell(self.t);
         let (cx, cy) = (cx.floor() as i32, cy.floor() as i32);
-        if (cx, cy) != (sx, sy) {
-            // A two-cell craft: service module and a bright nose.
-            let body = Ink::new(Role::Ramp(Ramp::Aurora), 170);
-            if (cx - 1, cy) != (sx + 4, sy) {
-                canvas.put(cx - 1, cy, Glyph::new('▐', '['), body);
-            }
-            canvas.put(
-                cx,
-                cy,
-                Glyph::new('▶', '>'),
-                Ink::new(Role::Ramp(Ramp::Aurora), 240),
-            );
-        }
         // Where each burn fired so far this loop: a small star on the path.
+        let now = self.t.rem_euclid(LOOP);
         for (at, _) in BURNS {
-            if self.t.rem_euclid(LOOP) >= at {
-                let b = chaser(at);
-                let (bx, by) = self.to_cells(b[0], b[1]);
+            if now >= at {
+                let (bx, by) = self.chaser_cell(at);
                 let (bx, by) = (bx.floor() as i32, by.floor() as i32);
-                if (bx, by) != (cx, cy) && canvas.get(bx, by).is_some_and(|c| c.ch != '═') {
-                    canvas.put(bx, by, Glyph::new('✶', '*'), Ink::new(Role::Accent, 150));
+                let on_craft = by == cy && (cx - 3..=cx).contains(&bx);
+                if !on_craft && canvas.get(bx, by).is_some_and(|c| c.ch != '═') {
+                    canvas.put(bx, by, Glyph::new('✶', '*'), Ink::new(Role::Accent, 160));
                 }
             }
+        }
+        // The chaser: a solar array, a two-cell hull and a bright nose, pointing
+        // prograde (toward the station).
+        for (dx, glyph, part) in CHASER {
+            let ink = match part {
+                CraftPart::Array => Ink::new(Role::Ramp(Ramp::Cobalt), 170),
+                CraftPart::Hull => Ink::new(
+                    Role::Ramp(Ramp::Starlight),
+                    if dx == -1 { 215 } else { 185 },
+                ),
+                CraftPart::Nose => Ink::new(Role::Ramp(Ramp::Aurora), 245),
+            };
+            canvas.put(cx + dx, cy, glyph, ink);
         }
         // A burn: Δv arrow beside the chaser (the plume points the other way).
         if let Some((_, dir)) = burn(self.t) {
             let accent = Ink::new(Role::Accent, 220);
-            let (arrow, plume) = if dir < 0.0 {
-                (Glyph::new('←', '<'), Glyph::new('≈', '~'))
+            let (arrow, at) = if dir < 0.0 {
+                (Glyph::new('←', '<'), cx - 5)
             } else {
-                (Glyph::new('→', '>'), Glyph::new('≈', '~'))
+                (Glyph::new('→', '>'), cx + 2)
             };
-            canvas.put(cx + dir as i32 * 2, cy, arrow, accent);
-            canvas.put(
-                cx - dir as i32,
-                cy,
-                plume,
-                Ink::new(Role::Ramp(Ramp::Sulfur), 220),
-            );
+            canvas.put(at, cy, arrow, accent);
         }
+        self.pixels.backdrop(canvas);
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -501,5 +582,53 @@ mod tests {
         assert_eq!(tl.at(T_PHASE).label, PHASING);
         assert_eq!(tl.at(T_RAISE + 1e-9).label, RAISE);
         assert_eq!(tl.at(T_APPROACH).label, DOCKING);
+    }
+
+    #[test]
+    fn rdv_a6_the_view_is_scaled_to_the_trajectory() {
+        for (w, h) in [(80, 24), (120, 40), (200, 50), (500, 150)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(3, size);
+            let mut g = OrbitalRendezvous::default();
+            g.resize(size, &mut ctx);
+            let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+            for i in 0..=400 {
+                let (x, y) = g.chaser_cell(LOOP * f64::from(i) / 400.0);
+                (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
+            }
+            let (fw, fh) = (f64::from(w), f64::from(h));
+            let above_limb = LIMB_TOP * fh;
+            assert!(
+                (x1 - x0) / fw > 0.6,
+                "{w}x{h}: width share {}",
+                (x1 - x0) / fw
+            );
+            let hs = (y1 - y0) / above_limb;
+            assert!((0.6..0.8).contains(&hs), "{w}x{h}: height share {hs}");
+            assert!(
+                y1 + 1.0 < above_limb,
+                "{w}x{h}: dip {y1} vs limb {above_limb}"
+            );
+            // The chaser's nose never enters the station sprite.
+            assert!(x1 < g.origin.0 - 4.0);
+        }
+    }
+
+    #[test]
+    fn rdv_a7_the_inset_is_drawn_only_where_its_disc_is_round() {
+        for (w, h, want) in [(80, 24, false), (99, 40, false), (120, 40, true)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(3, size);
+            let mut g = OrbitalRendezvous::default();
+            g.resize(size, &mut ctx);
+            // The inset's orbit ring is the only Starlight line work in the dots.
+            let orbit = Ink::new(Role::Ramp(Ramp::Starlight), 60);
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.dots.blit(&mut canvas);
+            let found = (0..i32::from(h)).any(|y| {
+                (0..i32::from(w)).any(|x| canvas.get(x, y).is_some_and(|c| c.ink == orbit))
+            });
+            assert_eq!(found, want, "{w}x{h}");
+        }
     }
 }

@@ -34,7 +34,7 @@ const EXPAND: f64 = 36.0;
 const FADE: f64 = 4.0;
 pub(crate) const LOOP: f64 = EXPAND + FADE;
 /// Model time at the loop's start and the Sedov–Taylor transition time (model s).
-const T0: f64 = 0.8;
+const T0: f64 = 0.3;
 const T_ST: f64 = 8.0;
 /// Blast-wave radius at the end of the expansion, in half-heights.
 const R_END: f64 = 0.9;
@@ -48,8 +48,7 @@ const FINGER_OUT: f64 = 0.18;
 const FINGER_IN: f64 = 0.054;
 /// Reverse shock (units of `R_f`), easing inward over the expansion.
 const REVERSE: (f64, f64) = (0.62, 0.45);
-/// Blast-wave shell thickness (units of `R_f`) and the band (pixels) it is drawn in.
-const RIM_THICK: f64 = 0.022;
+/// How far (pixels) the blast wave's outward glow reaches beyond its one-pixel line.
 const RIM_BAND: f64 = 2.5;
 /// Rayleigh–Taylor modes: count, wavenumber range, seed amplitude, growth rate and cap.
 const RT_MODES: usize = 24;
@@ -66,8 +65,10 @@ const NOISE_SPAN: f64 = 1.2;
 /// the contact radius out (or from the reverse shock, if that is farther out).
 const EJECTA_INNER: f64 = 0.82;
 /// Blast-wave wobble (share of `R_f`) and the angular fineness of the ejecta streaks.
-const RIM_WOBBLE: f64 = 0.045;
+const RIM_WOBBLE: f64 = 0.06;
 const STREAK: f64 = 7.0;
+/// A lit knot's weight in the ejecta it sits in.
+const KNOT_WEIGHT: f32 = 0.9;
 /// A knot's soft glow.
 const KNOT_BLOB: [(i32, i32, f32); 9] = halo_kernel(1);
 /// Level caps: a thin, faint forward shock under the bright ejecta.
@@ -129,6 +130,54 @@ fn shell_path(rho: f64, inner: f64, outer: f64) -> f64 {
         0.0
     };
     o - i
+}
+
+/// Blur `buf` (`w × h`, row-major) in place with the separable 3 × 3 binomial kernel
+/// `[1 2 1]/4 ⊗ [1 2 1]/4`, edges clamped; `rows` is scratch for two rows (`2·w`), so the
+/// blur costs no frame-sized buffer (TEST-R7).
+fn blur121(buf: &mut [f32], rows: &mut [f32], w: usize, h: usize) {
+    if w == 0 || h == 0 || buf.len() < w * h || rows.len() < 2 * w {
+        return;
+    }
+    let (prev, cur) = rows.split_at_mut(w);
+    for y in 0..h {
+        let row = &mut buf[y * w..(y + 1) * w];
+        cur[..w].copy_from_slice(row);
+        for x in 0..w {
+            row[x] = 0.25 * (cur[x.saturating_sub(1)] + cur[(x + 1).min(w - 1)]) + 0.5 * cur[x];
+        }
+    }
+    // Vertical: `prev` holds the row above as it was before this pass.
+    prev.copy_from_slice(&buf[..w]);
+    for y in 0..h {
+        cur[..w].copy_from_slice(&buf[y * w..(y + 1) * w]);
+        let down = (y + 1).min(h - 1) * w;
+        for x in 0..w {
+            let below = if y + 1 < h { buf[down + x] } else { cur[x] };
+            buf[y * w + x] = 0.25 * (prev[x] + below) + 0.5 * cur[x];
+        }
+        prev.copy_from_slice(&cur[..w]);
+    }
+}
+
+/// Pack a rim strength in `[0, 1]` (6 bits) and the dominant element (2 bits).
+fn pack(rim: f32, element: Element) -> u8 {
+    let e = match element {
+        Element::Silicon => 0,
+        Element::Iron => 1,
+        Element::Oxygen => 2,
+    };
+    ((rim.clamp(0.0, 1.0) * 63.0).round() as u8) << 2 | e
+}
+
+/// The inverse of [`pack`].
+fn unpack(v: u8) -> (f32, Element) {
+    let element = match v & 3 {
+        1 => Element::Iron,
+        2 => Element::Oxygen,
+        _ => Element::Silicon,
+    };
+    (f32::from(v >> 2) / 63.0, element)
 }
 
 /// Bilinear sample of the `(clump, iron)` texture at comoving position `(u, v)` (`R_f`).
@@ -211,9 +260,11 @@ pub struct SupernovaRemnant {
     angle: Vec<u16>,
     knot_glow: Glow,
     iron_glow: Glow,
-    tone_rim: Tone,
     tone_ejecta: Tone,
-    tone_knot: Tone,
+    /// Per pixel: the rim's strength and the dominant element, packed (the ejecta field
+    /// itself is built in `knot_glow`'s buffer); two rows of blur scratch.
+    aux: Vec<u8>,
+    rows: Vec<f32>,
     pixels: Pixels,
     stars: Vec<(i32, i32, u8)>,
 }
@@ -242,7 +293,7 @@ impl SupernovaRemnant {
         let salt: u64 = ctx.rng.random();
         self.salt = salt;
         // Low-order modes for the blast wave's wobble round the rim.
-        let wob: [(f64, f64); 5] = std::array::from_fn(|_| {
+        let wob: [(f64, f64); 3] = std::array::from_fn(|_| {
             (
                 ctx.rng.random_range(0.0..TAU),
                 ctx.rng.random_range(0.4..1.0),
@@ -256,7 +307,7 @@ impl SupernovaRemnant {
                     .enumerate()
                     .map(|(k, &(ph, a))| a * ((k as f64 + 2.0) * th + ph).sin_det())
                     .sum();
-                (v / 3.0).clamp(-1.0, 1.0) as f32
+                (v / 2.2).clamp(-1.0, 1.0) as f32
             })
             .collect();
         self.clumps = (0..NOISE * NOISE)
@@ -268,10 +319,8 @@ impl SupernovaRemnant {
             })
             .collect();
         self.knots = ParticlePool::with_capacity(KNOTS);
-        self.tone_rim = Tone::asinh(0.25, 1.0);
         self.tone_ejecta = Tone::asinh(0.25, 2.6);
-        self.tone_knot = Tone::asinh(0.15, 1.6);
-        self.tau = ctx.rng.random_range(3.0..6.0);
+        self.tau = ctx.rng.random_range(1.0..1.3);
         self.explode(ctx);
         self.light_knots();
     }
@@ -366,30 +415,33 @@ impl SupernovaRemnant {
             };
             glow.splat(2.0 * x + 1.0, 2.0 * y + 1.0, &KNOT_BLOB, 0.45 * b);
         }
+        // Pass 1, per pixel: the blast wave's rim, the ejecta's emission (knots added in)
+        // and which element dominates.
         let (angle, centre) = (&self.angle, self.centre);
         let (finger, clumps, wobble, salt) = (&self.finger, &self.clumps, &self.wobble, self.salt);
-        let (kg, ig) = (self.knot_glow.values(), self.iron_glow.values());
-        let (t_rim, t_ej, t_kn) = (&self.tone_rim, &self.tone_ejecta, &self.tone_knot);
-        let width = usize::from(self.pixels.pixel_size().width());
-        let rim_norm = 1.0 / (rf * (1.0 - (1.0 - RIM_THICK) * (1.0 - RIM_THICK)).sqrt()).max(1e-9);
-        let env32 = env as f32;
-        self.pixels.shade(|x, y| {
-            let i = y as usize * width + x as usize;
-            let Some(&a) = angle.get(i) else {
-                return Ink::BLANK;
-            };
-            let (dx, dy) = (f64::from(x) + 0.5 - centre.0, centre.1 - f64::from(y) - 0.5);
+        // The ejecta field is written over the knot glow in place (each pixel reads its
+        // knot light before overwriting it), saving a frame-sized buffer.
+        let (kg, ig) = (self.knot_glow.values_mut(), self.iron_glow.values());
+        let ps = self.pixels.pixel_size();
+        let (width, height) = (usize::from(ps.width()), usize::from(ps.height()));
+        for (i, &a) in angle.iter().enumerate() {
+            let (x, y) = ((i % width) as f64, (i / width) as f64);
+            let (dx, dy) = (x + 0.5 - centre.0, centre.1 - y - 0.5);
             let r = dx.hypot(dy);
             let a = usize::from(a);
             let p = f64::from(finger[a]);
             let rc = contact_frac(p) * rf;
-            // Blast wave: the limb of a thin shell, only within a few pixels of R_f(θ),
-            // which wobbles a little where the surrounding gas is lumpy.
+            // Blast wave: a one-pixel line at R_f(θ) (antialiased inward), fading softly
+            // outward over a couple of pixels; R_f wobbles at low order where the
+            // surrounding gas is lumpy.
             let rfa = rf * (1.0 + RIM_WOBBLE * f64::from(wobble[a]));
-            let rim = if (rfa - r).abs() <= RIM_BAND && r <= rfa {
-                shell_path(r, rfa * (1.0 - RIM_THICK), rfa) * rim_norm
-            } else {
+            let d = r - rfa;
+            let rim = if !(-1.0..=RIM_BAND).contains(&d) || rf <= 0.0 {
                 0.0
+            } else if d < 0.0 {
+                (1.0 + d) as f32
+            } else {
+                (0.45 * (-d / 0.8).exp()) as f32
             };
             // Shocked ejecta between the reverse shock and the contact: densest near the
             // contact (so the shell reads as a ring, not a disc), clumpy in comoving
@@ -426,22 +478,35 @@ impl SupernovaRemnant {
             } else {
                 (0.0, Element::Silicon)
             };
-            let kv = kg.get(i).copied().unwrap_or(0.0);
             let iv = ig.get(i).copied().unwrap_or(0.0);
-            let l_rim = t_rim.level((rim as f32) * env32).min(RIM_MAX);
-            let l_ej = t_ej.level((ej as f32) * env32).min(EJECTA_MAX);
-            let l_kn = t_kn.level((kv + 0.5 * ej as f32 * kv.min(1.0)) * env32);
-            let l_fe = t_kn.level(iv * env32);
-            let best = l_rim.max(l_ej).max(l_kn).max(l_fe);
-            if f64::from(best) < ink::MIN_VISIBLE_LEVEL {
+            let Some(slot) = kg.get_mut(i) else { continue };
+            // Knots brighten the filaments they sit in; the colour stays the smooth
+            // element map's (a per-knot tint would speckle).
+            *slot = ej as f32 + KNOT_WEIGHT * (*slot + iv);
+            if let Some(a) = self.aux.get_mut(i) {
+                *a = pack(rim, element);
+            }
+        }
+        // Pass 2: a 3 × 3 binomial blur of the ejecta, so the R–T fingers read as smooth
+        // filaments, not pixel grain.
+        blur121(self.knot_glow.values_mut(), &mut self.rows, width, height);
+        // Pass 3: tone-map into inks.
+        let t_ej = &self.tone_ejecta;
+        let (aux, ej_buf) = (&self.aux, self.knot_glow.values());
+        let env32 = env as f32;
+        self.pixels.shade(|x, y| {
+            let i = y as usize * width + x as usize;
+            let (Some(&packed), Some(&ej)) = (aux.get(i), ej_buf.get(i)) else {
+                return Ink::BLANK;
+            };
+            let (rim, element) = unpack(packed);
+            let l_rim = ink::level(f64::from(rim * env32) * f64::from(RIM_MAX));
+            let l_ej = t_ej.level(ej * env32).min(EJECTA_MAX);
+            if f64::from(l_rim.max(l_ej)) < ink::MIN_VISIBLE_LEVEL {
                 return Ink::BLANK;
             }
-            if best == l_rim {
+            if l_rim >= l_ej {
                 Ink::new(Role::Ramp(RIM), l_rim)
-            } else if best == l_fe {
-                Ink::new(Role::Ramp(IRON), l_fe)
-            } else if best == l_kn {
-                Ink::new(Role::Ramp(SILICON), l_kn)
             } else {
                 let ramp = match element {
                     Element::Iron => IRON,
@@ -496,6 +561,11 @@ impl Generator for SupernovaRemnant {
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
         self.centre = (w / 2.0, h / 2.0);
         self.half = (h / 2.0).min(w / 2.0 / R_END * 0.95);
+        let n = usize::from(px.width()) * usize::from(px.height());
+        self.aux.clear();
+        self.aux.resize(n, 0);
+        self.rows.clear();
+        self.rows.resize(2 * usize::from(px.width()), 0.0);
         self.angle.clear();
         let n = usize::from(px.width()) * usize::from(px.height());
         self.angle.reserve_exact(n);
