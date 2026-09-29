@@ -1,18 +1,19 @@
 //! The James Webb Space Telescope unfolding on its way to L2 (SPEC-002 `jwst_unfolding`).
 //!
 //! A diorama driven by a looping `Timeline` of the real deployment sequence, compressed:
-//! the sunshield pallets drop, the tower lifts the telescope, the mid-booms stretch the
-//! shield and its five layers tension one by one, the secondary mirror swings out and the
-//! two mirror wings fold into place. The last act cuts to a halo orbit around L2 in the
+//! the fairing opens on the folded observatory, the sunshield pallets drop, the tower
+//! lifts the telescope, the mid-booms stretch the shield and its five layers tension one
+//! by one (the Sun-facing layer first), the secondary mirror swings out and the two
+//! mirror wings fold into place. The last act cuts to a halo orbit around L2 in the
 //! Sun–Earth rotating frame. The observatory is modelled in metres in a body frame (x
 //! along the shield's long axis, y up from the shield towards the telescope, z out of
-//! the mirror) and drawn through `geom::Camera` as filled polygons (half-block pixels)
-//! with line work in braille dots.
+//! the mirror) and drawn through `geom::Camera` as shaded convex polygons on half-block
+//! pixels, with edges and struts in braille dots.
 
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use rand::Rng;
-use sciart_core::geom::{self, v3, v3::V3};
+use sciart_core::geom::{self, v3::V3};
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
 use sciart_core::rng::{cell_key, hash01};
@@ -24,9 +25,10 @@ pub static META: Meta = Meta {
     category: Category::Voyages,
     description: "The James Webb Space Telescope unfolding its sunshield and mirror on the way to L2",
     title: "JWST · unfolding in space",
-    captions: &[SHIELD, LAYERS, MIRROR, ORBIT],
+    captions: &[FAIRING, SHIELD, LAYERS, MIRROR, ORBIT],
 };
 
+const FAIRING: &str = "fairing opens";
 const SHIELD: &str = "sunshield opens";
 const LAYERS: &str = "layers tension";
 const MIRROR: &str = "mirror unfolds";
@@ -37,50 +39,57 @@ pub fn build() -> Box<dyn Generator> {
 }
 
 /// Deployment beats (s), in the order they happened (JWST-A1).
-const BEATS: [(&str, f64); 6] = [
+const BEATS: [(&str, f64); 7] = [
+    ("fairing", 3.5),
     ("pallets", 5.0),
-    ("tower", 4.0),
+    ("tower", 3.0),
     ("layers", 10.0),
-    ("secondary", 5.0),
-    ("wings", 8.0),
-    ("orbit", 18.0),
+    ("secondary", 4.0),
+    ("wings", 7.0),
+    ("orbit", 16.0),
 ];
-const B_PALLETS: usize = 0;
-const B_TOWER: usize = 1;
-const B_LAYERS: usize = 2;
-const B_SECONDARY: usize = 3;
-const B_WINGS: usize = 4;
-const B_ORBIT: usize = 5;
+const B_FAIRING: usize = 0;
+const B_PALLETS: usize = 1;
+const B_TOWER: usize = 2;
+const B_LAYERS: usize = 3;
+const B_SECONDARY: usize = 4;
+const B_WINGS: usize = 5;
+const B_ORBIT: usize = 6;
 /// Share of the layers beat spent extending the mid-booms, then each layer's share.
-const BOOMS: f64 = 0.35;
+const BOOMS: f64 = 0.3;
 const LAYER_SHARE: f64 = (1.0 - BOOMS) / 5.0;
 
-/// Sunshield outline in the x–z plane (m): an elongated hexagon, 21 m × 14 m.
-const SHIELD_OUTLINE: [(f64, f64); 6] = [
-    (-10.5, 0.0),
-    (-3.6, 7.1),
-    (3.6, 7.1),
-    (10.5, 0.0),
-    (3.6, -7.1),
-    (-3.6, -7.1),
-];
+/// Sunshield outline in the x–z plane (m): an elongated hexagon, 21 m × 14 m, split
+/// into its fore (z ≥ 0) and aft halves, each listed round its perimeter.
+const FORE: [(f64, f64); 4] = [(-10.5, 0.0), (-3.6, 7.1), (3.6, 7.1), (10.5, 0.0)];
+const AFT: [(f64, f64); 4] = [(-10.5, 0.0), (10.5, 0.0), (3.6, -7.1), (-3.6, -7.1)];
 /// Visual spacing between tensioned layers (m; exaggerated).
-const LAYER_GAP: f64 = 0.28;
-/// Mirror: segment circumradius (m) and the primary's centre height, stowed and lifted.
+const LAYER_GAP: f64 = 0.32;
+/// Mirror: segment circumradius (m), the drawn share of it (the rest is the dark gap),
+/// and the primary's centre height, stowed and lifted.
 const SEG: f64 = 0.76;
+const SEG_FILL: f64 = 0.84;
 const MIRROR_Y: f64 = 4.2;
 const TOWER_LIFT: f64 = 1.2;
 /// Secondary mirror distance in front of the primary (m).
 const SM_DIST: f64 = 7.0;
 /// Camera: base yaw, sway, pitch, eye distance (m).
 const YAW: f64 = 0.38;
-const SWAY: f64 = 0.25;
-const PITCH: f64 = 0.42;
+const SWAY: f64 = 0.22;
+const PITCH: f64 = 0.3;
 const EYE: f64 = 70.0;
+/// Polygon cap per frame.
+const MAX_POLYS: usize = 48;
+/// Depth slack (m) for line work lying on a surface.
+const DEPTH_EPS: f64 = 0.05;
+/// The gold of the mirror (beryllium coated in gold): orange-gold to pale gold.
+const GOLD: Ramp = Ramp::Ember;
 
-/// How far each part is deployed at loop time `t`, 0 (stowed) to 1.
+/// How far each part is deployed at loop time `t`, 0 (stowed) to 1. `layers[k]` counts
+/// from the telescope side (k = 0, layer 5) to the Sun side (k = 4, layer 1).
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub(crate) struct Deploy {
+    pub fairing: f64,
     pub pallets: f64,
     pub tower: f64,
     pub booms: f64,
@@ -106,11 +115,13 @@ pub(crate) fn deploy(timeline: &Timeline, t: f64) -> Deploy {
     let lp = done(B_LAYERS);
     let mut layers = [0.0; 5];
     for (k, l) in layers.iter_mut().enumerate() {
-        let from = BOOMS + LAYER_SHARE * k as f64;
+        // Layer 1 (Sun side, k = 4) first, as flown.
+        let from = BOOMS + LAYER_SHARE * (4 - k) as f64;
         *l = e((lp - from) / LAYER_SHARE);
     }
     let wp = done(B_WINGS);
     Deploy {
+        fairing: e(done(B_FAIRING)),
         pallets: e(done(B_PALLETS)),
         tower: e(done(B_TOWER)),
         booms: e(lp / BOOMS),
@@ -139,32 +150,77 @@ fn segments() -> [(i32, i32); 18] {
     out
 }
 
-/// A convex polygon queued for painting: up to 6 pixel-space vertices, its depth and ink.
+/// Centre of segment `(q, r)` in the mirror plane (m).
+fn segment_centre(q: i32, r: i32) -> (f64, f64) {
+    (
+        1.5 * SEG * f64::from(q),
+        3f64.sqrt() * SEG * (f64::from(r) + f64::from(q) / 2.0),
+    )
+}
+
+/// How a polygon is shaded: a flat level, or the mirror's specular sweep added to it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Shade {
+    Flat,
+    Specular,
+    Sheen,
+}
+
+/// A convex polygon queued for painting: up to 6 pixel-space vertices, its depth, ramp,
+/// base level and a linear level gradient in pixel x and y.
 #[derive(Debug, Clone, Copy)]
 struct Poly {
     pts: [(f64, f64); 6],
+    /// Each corner's depth (larger = nearer).
+    z: [f64; 6],
     n: usize,
     depth: f64,
-    ink: Ink,
+    ramp: Ramp,
+    level: f64,
+    grad: (f64, f64),
+    shade: Shade,
 }
 
 impl Default for Poly {
     fn default() -> Self {
         Self {
             pts: [(0.0, 0.0); 6],
+            z: [0.0; 6],
             n: 0,
             depth: 0.0,
-            ink: Ink::BLANK,
+            ramp: Ramp::Starlight,
+            level: 0.0,
+            grad: (0.0, 0.0),
+            shade: Shade::Flat,
         }
     }
 }
 
+impl Poly {
+    fn centre(&self) -> (f64, f64) {
+        let n = self.n.max(1) as f64;
+        let (sx, sy) = self.pts[..self.n]
+            .iter()
+            .fold((0.0, 0.0), |a, p| (a.0 + p.0, a.1 + p.1));
+        (sx / n, sy / n)
+    }
+}
+
 /// Fill a convex polygon (pixel coordinates) into `pixels`: every pixel whose centre is
-/// inside all edges, either winding.
-fn fill_convex(pixels: &mut Pixels, p: &Poly) {
+/// inside all edges, either winding, shaded by its gradient and `spec` for specular ones.
+fn fill_convex(pixels: &mut Pixels, zbuf: &mut [f32], p: &Poly, spec: &impl Fn(f64, f64) -> f64) {
     if p.n < 3 {
         return;
     }
+    // The polygon's depth plane `z = a·x + b·y + c` from three of its corners, for
+    // depth-testing the line work drawn over it.
+    let (p0, p1, p2) = (p.pts[0], p.pts[1], p.pts[2]);
+    let (z0, z1, z2) = (p.z[0], p.z[1], p.z[2]);
+    let (ux, uy, uz) = (p1.0 - p0.0, p1.1 - p0.1, z1 - z0);
+    let (vx, vy, vz) = (p2.0 - p0.0, p2.1 - p0.1, z2 - z0);
+    let (nx, ny, nz) = (uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx);
+    let plane = (nz.abs() > 1e-9).then(|| (-nx / nz, -ny / nz, z0 + (nx * p0.0 + ny * p0.1) / nz));
+    let zw = usize::from(pixels.pixel_size().width());
     let pts = &p.pts[..p.n];
     let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
     for &(x, y) in pts {
@@ -178,6 +234,7 @@ fn fill_convex(pixels: &mut Pixels, p: &Poly) {
     if !(x0.is_finite() && y1.is_finite()) || x1 < 0.0 || y1 < 0.0 || x0 > w || y0 > h {
         return;
     }
+    let c = p.centre();
     let (ix0, ix1) = (x0.max(0.0).floor() as i32, x1.min(w - 1.0).ceil() as i32);
     let (iy0, iy1) = (y0.max(0.0).floor() as i32, y1.min(h - 1.0).ceil() as i32);
     for iy in iy0..=iy1 {
@@ -187,12 +244,24 @@ fn fill_convex(pixels: &mut Pixels, p: &Poly) {
             for i in 0..p.n {
                 let (ax, ay) = pts[i];
                 let (bx, by) = pts[(i + 1) % p.n];
-                let c = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
-                pos |= c > 0.0;
-                neg |= c < 0.0;
+                let cr = (bx - ax) * (cy - ay) - (by - ay) * (cx - ax);
+                pos |= cr > 0.0;
+                neg |= cr < 0.0;
             }
-            if !(pos && neg) {
-                pixels.set(ix, iy, p.ink);
+            if pos && neg {
+                continue;
+            }
+            let mut level = p.level + p.grad.0 * (cx - c.0) + p.grad.1 * (cy - c.1);
+            match p.shade {
+                Shade::Flat => {}
+                Shade::Specular => level += spec(cx, cy),
+                Shade::Sheen => level += 0.4 * spec(cx, cy),
+            }
+            let level = level.clamp(ink::MIN_VISIBLE_LEVEL, 255.0);
+            pixels.set(ix, iy, ink::ramp(p.ramp, level / 255.0));
+            let z = plane.map_or(p.depth, |(a, b, c)| a * cx + b * cy + c);
+            if let Some(slot) = zbuf.get_mut(iy as usize * zw + ix as usize) {
+                *slot = z as f32;
             }
         }
     }
@@ -204,6 +273,8 @@ pub struct JwstUnfolding {
     t: f64,
     timeline: Option<Timeline>,
     pixels: Pixels,
+    /// Per pixel: depth of the polygon painted there (−∞ for sky).
+    zbuf: Vec<f32>,
     dots: Dots,
     polys: Vec<Poly>,
     stars: Vec<(i32, i32, u8)>,
@@ -227,7 +298,7 @@ impl JwstUnfolding {
     }
 
     fn projector(&self) -> Projector {
-        let sway = SWAY * (TAU * self.t / 50.0).sin_det();
+        let sway = SWAY * (TAU * self.t / 48.0).sin_det();
         Camera {
             yaw: YAW + sway,
             pitch: PITCH,
@@ -242,72 +313,49 @@ impl JwstUnfolding {
         Some((x, 2.0 * y, z))
     }
 
-    fn push(&mut self, pr: &Projector, pts: &[V3], ink: Ink) {
-        let mut poly = Poly {
-            ink,
-            ..Poly::default()
-        };
+    fn push(&mut self, pr: &Projector, pts: &[V3], template: Poly) {
+        let mut poly = template;
+        poly.n = 0;
         let mut depth = 0.0;
         for &p in pts.iter().take(6) {
             let Some((x, y, z)) = self.project(pr, p) else {
                 return;
             };
             poly.pts[poly.n] = (x, y);
+            poly.z[poly.n] = z;
             poly.n += 1;
             depth += z;
         }
         poly.depth = depth / poly.n.max(1) as f64;
-        if self.polys.len() < self.polys.capacity() {
+        if self.polys.len() < MAX_POLYS {
             self.polys.push(poly);
         }
     }
 
-    /// Sunshield half (`side = ±1` for fore/aft) of layer `k`.
-    fn shield_half(&mut self, pr: &Projector, d: &Deploy, k: usize, side: f64) {
+    /// One half (`fore`/aft) of sunshield layer `k` in body coordinates.
+    fn shield_half(d: &Deploy, k: usize, fore: bool) -> [V3; 4] {
         let tension = d.layers[k];
         // Folded up against the telescope until the pallets drop.
         let fold = (1.0 - d.pallets) * FRAC_PI_2 * 0.96;
-        let width = ease::lerp(0.18, 1.0, d.booms);
-        let y = -LAYER_GAP * k as f64 * tension - 0.05 * k as f64;
-        let mut pts = [[0.0; 3]; 4];
-        let mut n = 0;
-        for &(x, z) in &SHIELD_OUTLINE {
-            if z * side < 0.0 {
-                continue;
-            }
-            // Slack layers sag and crumple a little.
-            let sag = (1.0 - tension) * d.booms * 0.35 * (x * 0.9 + k as f64).sin_det();
-            let (x, z) = (x * width, z * ease::lerp(0.55, 1.0, d.pallets.min(1.0)));
-            let (s, c) = fold.sin_cos_det();
-            let (yy, zz) = (y + sag + z.abs() * s, z * c);
-            if n < 4 {
-                pts[n] = [x, yy, zz];
-                n += 1;
-            }
+        let (s, c) = fold.sin_cos_det();
+        let width = ease::lerp(0.16, 1.0, d.booms);
+        let depth = ease::lerp(0.55, 1.0, d.pallets);
+        let y = -LAYER_GAP * k as f64 * ease::lerp(0.15, 1.0, tension);
+        let outline = if fore { FORE } else { AFT };
+        let mut out = [[0.0; 3]; 4];
+        for (o, &(x, z)) in out.iter_mut().zip(&outline) {
+            // Slack layers billow a little.
+            let sag = (1.0 - tension) * d.booms * 0.3 * (x * 0.8 + k as f64).sin_det();
+            let (x, z) = (x * width, z * depth);
+            *o = [x, y + sag + z.abs() * s, z * c];
         }
-        // Order the half-outline's points around its perimeter.
-        let order = if side > 0.0 {
-            [0, 1, 2, 3]
-        } else {
-            [0, 3, 2, 1]
-        };
-        let quad = [pts[order[0]], pts[order[1]], pts[order[2]], pts[order[3]]];
-        let level = if tension > 0.0 {
-            ease::lerp(70.0, 150.0 + 18.0 * k as f64, tension)
-        } else {
-            55.0 + 6.0 * k as f64
-        };
-        let ink = Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level));
-        self.push(pr, &quad, ink);
+        out
     }
 
     /// Primary-mirror segment `(q, r)`: its six corners (body frame) and whether it is
     /// on a wing (`Some(0)` left, `Some(1)` right).
-    fn segment(&self, d: &Deploy, q: i32, r: i32) -> ([V3; 6], Option<usize>) {
-        let (cx, cy) = (
-            1.5 * SEG * f64::from(q),
-            3f64.sqrt() * SEG * (f64::from(r) + f64::from(q) / 2.0),
-        );
+    fn segment(d: &Deploy, q: i32, r: i32) -> ([V3; 6], Option<usize>) {
+        let (cx, cy) = segment_centre(q, r);
         let my = MIRROR_Y + TOWER_LIFT * d.tower;
         let wing = match q {
             -2 => Some(0),
@@ -316,10 +364,9 @@ impl JwstUnfolding {
         };
         let mut out = [[0.0; 3]; 6];
         for (i, o) in out.iter_mut().enumerate() {
-            let a = PI / 3.0 * i as f64;
-            let (s, c) = a.sin_cos_det();
-            let (x, y) = (cx + 1.04 * SEG * c, cy + 1.04 * SEG * s);
-            // A slight parabolic dish, so the segments catch the light differently.
+            let (s, c) = (PI / 3.0 * i as f64).sin_cos_det();
+            let (x, y) = (cx + SEG_FILL * SEG * c, cy + SEG_FILL * SEG * s);
+            // A slight parabolic dish.
             let z = 0.02 * (x * x + y * y);
             *o = [x, my + y, z];
         }
@@ -337,94 +384,198 @@ impl JwstUnfolding {
         (out, wing)
     }
 
-    /// Where the secondary mirror is: swung from folded against the primary to its
-    /// place `SM_DIST` in front.
-    fn secondary(&self, d: &Deploy) -> (V3, V3) {
+    /// The secondary mirror: swung from folded down across the primary to its place
+    /// `SM_DIST` in front of it.
+    fn secondary(d: &Deploy) -> V3 {
         let my = MIRROR_Y + TOWER_LIFT * d.tower;
-        let hinge = [0.0, my - 2.6, 0.3];
         let angle = (1.0 - d.secondary) * 1.35;
         let (s, c) = angle.sin_cos_det();
-        let arm = [0.0, 2.6 * s, SM_DIST * c + 0.4];
-        (hinge, v3::add(hinge, arm))
+        // The boom pivots at the primary's lower edge: folded, the secondary lies low
+        // across the mirror's face; deployed, it stands `SM_DIST` out on the axis.
+        [0.0, my - 2.6 * s, 0.3 + SM_DIST * c]
+    }
+
+    /// Queue the fairing halves: shut around the folded observatory, then split and
+    /// drift away.
+    fn fairing(&mut self, pr: &Projector, open: f64) {
+        if open >= 1.0 {
+            return;
+        }
+        let spread = 12.0 * open * open;
+        let lean = 0.35 * open;
+        for side in [-1.0, 1.0] {
+            // Half an ogive in outline: straight sides and a nose, leaning outward
+            // about its base as it drifts away.
+            let pts = [
+                [0.0, -3.0],
+                [3.4, -3.0],
+                [3.4, 8.5],
+                [1.6, 11.5],
+                [0.0, 12.2],
+            ];
+            let mut quad = [[0.0; 3]; 5];
+            for (o, &[u, v]) in quad.iter_mut().zip(&pts) {
+                o[0] = side * (u + spread + (v + 3.0) * lean);
+                o[1] = v - spread * 0.2;
+                o[2] = 3.2 + spread * 0.4;
+            }
+            let template = Poly {
+                ramp: Ramp::Starlight,
+                level: 150.0,
+                grad: (-side * 6.0, -0.4),
+                ..Poly::default()
+            };
+            self.push(pr, &quad, template);
+        }
     }
 
     fn draw_observatory(&mut self) {
         let d = self.state();
         let pr = self.projector();
         self.polys.clear();
-        // Spacecraft bus under the shield (sun side).
+        // Spacecraft bus under the shield (Sun side).
         let bus = [
-            [-1.4, -1.8, 1.4],
-            [1.4, -1.8, 1.4],
-            [1.4, -0.4, 1.4],
-            [-1.4, -0.4, 1.4],
+            [-1.4, -2.2, 1.4],
+            [1.4, -2.2, 1.4],
+            [1.4, -0.9, 1.4],
+            [-1.4, -0.9, 1.4],
         ];
-        self.push(&pr, &bus, Ink::new(Role::Ramp(Ramp::Starlight), 60));
+        let bus_poly = Poly {
+            ramp: Ramp::Starlight,
+            level: 70.0,
+            ..Poly::default()
+        };
+        self.push(&pr, &bus, bus_poly);
+        // Solar array, stowed along the bus until the fairing opens.
+        let array = [
+            [1.4, -1.9, 1.2],
+            [1.4 + 5.2 * d.fairing, -1.9, 1.2],
+            [1.4 + 5.2 * d.fairing, -1.2, 1.2],
+            [1.4, -1.2, 1.2],
+        ];
+        let array_poly = Poly {
+            ramp: Ramp::Cobalt,
+            level: 95.0,
+            ..Poly::default()
+        };
+        self.push(&pr, &array, array_poly);
+        // Sunshield layers: Kapton, magenta to lavender with a sheen across each layer.
         for k in 0..5 {
-            for side in [1.0, -1.0] {
-                self.shield_half(&pr, &d, k, side);
+            let tension = d.layers[k];
+            let base = if tension > 0.0 {
+                ease::lerp(95.0, 165.0 - 12.0 * k as f64, tension)
+            } else {
+                80.0 - 6.0 * k as f64
+            };
+            for fore in [true, false] {
+                let q = Self::shield_half(&d, k, fore);
+                let template = Poly {
+                    ramp: Ramp::Plasma,
+                    level: base,
+                    grad: (0.9, -0.5),
+                    shade: Shade::Sheen,
+                    ..Poly::default()
+                };
+                self.push(&pr, &q, template);
             }
         }
-        // Mirror segments: gold, lit by a slow glint sweeping across.
-        let glint_at = 3.0 * (TAU * self.t / 9.0).sin_det();
+        // Primary mirror segments.
         for (q, r) in segments() {
-            let (pts, wing) = self.segment(&d, q, r);
-            let (cx, cy) = (
-                1.5 * SEG * f64::from(q),
-                3f64.sqrt() * SEG * (f64::from(r) + f64::from(q) / 2.0),
-            );
-            let glint = (-((0.8 * cx + 0.6 * cy - glint_at) / 1.2).powi(2)).exp();
+            let (pts, wing) = Self::segment(&d, q, r);
             let fold = wing.map_or(0.0, |s| 1.0 - d.wings[s]);
-            let jitter = hash01(cell_key(q, r)) * 20.0;
-            let level = 130.0 + jitter + 90.0 * glint - 60.0 * fold;
-            self.push(
-                &pr,
-                &pts,
-                Ink::new(Role::Ramp(Ramp::Sulfur), ink::level(level)),
-            );
+            let jitter = hash01(cell_key(q, r)) * 16.0;
+            let template = Poly {
+                ramp: GOLD,
+                level: 168.0 + jitter - 70.0 * fold,
+                grad: (-0.6, -0.9),
+                shade: Shade::Specular,
+                ..Poly::default()
+            };
+            self.push(&pr, &pts, template);
         }
+        self.fairing(&pr, d.fairing);
         // Painter's order: far first.
         self.polys
             .sort_unstable_by(|a, b| a.depth.total_cmp(&b.depth));
         self.pixels.clear();
+        self.zbuf.fill(f32::NEG_INFINITY);
         for &(x, y, l) in &self.stars {
             self.pixels
                 .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
         }
+        // A bright band sweeping across the gold.
+        let sweep = self.t * 9.0 % 160.0 - 40.0;
+        let spec =
+            move |x: f64, y: f64| 90.0 * (-((0.7 * x + 0.5 * y - sweep) / 5.0).powi(2)).exp();
         for p in &self.polys {
-            fill_convex(&mut self.pixels, p);
+            fill_convex(&mut self.pixels, &mut self.zbuf, p, &spec);
         }
-        // Line work: tower, secondary struts and mirror, shield edges.
+        // Line work: shield layer edges (hidden behind the gold), tower, struts.
         self.dots.clear();
-        let strut = Ink::new(Role::Ramp(Ramp::Starlight), 150);
-        let my = MIRROR_Y + TOWER_LIFT * d.tower;
-        self.line(&pr, [0.0, -0.4, 0.0], [0.0, my - 2.8, -0.6], strut);
-        let (_, sm) = self.secondary(&d);
-        for anchor in [
-            [0.0, my + 2.9, 0.2],
-            [-2.6, my - 1.5, 0.2],
-            [2.6, my - 1.5, 0.2],
-        ] {
-            self.line(&pr, anchor, sm, strut);
-        }
-        if let Some((x, y, _)) = self.project(&pr, sm) {
-            let pixels = &mut self.pixels;
-            disc_pixels((x, y), 0.9, |ix, iy, cover| {
-                if cover > 0.2 {
-                    pixels.set(ix, iy, Ink::new(Role::Ramp(Ramp::Sulfur), 235));
+        if d.fairing > 0.3 {
+            for k in 0..5 {
+                let edge = ink::ramp(Ramp::Plasma, 0.62 + 0.3 * d.layers[k]);
+                for fore in [true, false] {
+                    let q = Self::shield_half(&d, k, fore);
+                    for i in 0..4 {
+                        // The fold line between the two halves is not an edge.
+                        let hinge = if fore { 3 } else { 0 };
+                        if i == hinge && d.pallets > 0.5 {
+                            continue;
+                        }
+                        self.line(&pr, q[i], q[(i + 1) % 4], edge);
+                    }
                 }
-            });
+            }
+            let strut = Ink::new(Role::Ramp(Ramp::Starlight), 235);
+            let my = MIRROR_Y + TOWER_LIFT * d.tower;
+            self.line(&pr, [0.0, -0.9, 0.2], [0.0, my - 2.9, -0.5], strut);
+            let sm = Self::secondary(&d);
+            for anchor in [
+                [0.0, my + 3.1, 0.2],
+                [-2.7, my - 1.6, 0.2],
+                [2.7, my - 1.6, 0.2],
+            ] {
+                self.line(&pr, anchor, sm, strut);
+            }
+            if let Some((x, y, _)) = self.project(&pr, sm) {
+                let pixels = &mut self.pixels;
+                disc_pixels((x, y), 1.1, |ix, iy, cover| {
+                    if cover > 0.2 {
+                        pixels.set(ix, iy, Ink::new(Role::Ramp(GOLD), 240));
+                    }
+                });
+            }
         }
     }
 
-    /// A 3-D segment in braille dots.
+    /// A 3-D segment in braille dots, depth-tested against the painted polygons so
+    /// edges and struts behind a surface stay hidden.
     fn line(&mut self, pr: &Projector, a: V3, b: V3, ink: Ink) {
         let (Some(pa), Some(pb)) = (self.project(pr, a), self.project(pr, b)) else {
             return;
         };
         let (ax, ay) = Dots::from_cells(pa.0, pa.1 / 2.0);
         let (bx, by) = Dots::from_cells(pb.0, pb.1 / 2.0);
-        self.dots.line(ax, ay, bx, by, ink);
+        let n = ((bx - ax).abs().max((by - ay).abs()).ceil() as usize).clamp(1, 2048);
+        let width = usize::from(self.pixels.pixel_size().width());
+        for i in 0..=n {
+            let f = i as f64 / n as f64;
+            let (x, y) = (ax + (bx - ax) * f, ay + (by - ay) * f);
+            let z = pa.2 + (pb.2 - pa.2) * f;
+            // A pixel is 2 × 2 dots.
+            let (px, py) = ((x / 2.0).floor(), (y / 2.0).floor());
+            if px < 0.0 || py < 0.0 {
+                continue;
+            }
+            let covered = self
+                .zbuf
+                .get(py as usize * width + px as usize)
+                .is_some_and(|&d| z < f64::from(d) - DEPTH_EPS);
+            if !covered {
+                self.dots.plot(x, y, ink);
+            }
+        }
     }
 
     /// The last act: the Sun–Earth rotating frame, JWST cruising out to a halo orbit
@@ -450,8 +601,7 @@ impl JwstUnfolding {
             }
         });
         // The Moon on its orbit.
-        let moon_a = TAU * self.t / 14.0;
-        let (ms, mc) = moon_a.sin_cos_det();
+        let (ms, mc) = (TAU * self.t / 14.0).sin_cos_det();
         let mr = 0.16 * h;
         let moon = (earth.0 + mr * mc * 1.4, earth.1 + mr * ms * 0.6);
         disc_pixels(moon, (0.02 * h).max(0.7), |x, y, cover| {
@@ -471,45 +621,24 @@ impl JwstUnfolding {
         };
         let faint = Ink::new(Role::Ramp(Ramp::Starlight), 60);
         let steps = 96;
-        for i in 0..steps {
+        for i in (0..steps).step_by(2) {
             let (a0, a1) = (
                 TAU * f64::from(i) / f64::from(steps),
                 TAU * f64::from(i + 1) / f64::from(steps),
             );
             let (p0, p1) = (halo(a0), halo(a1));
-            if i % 2 == 0 {
-                let (x0, y0) = Dots::from_cells(p0.0, p0.1 / 2.0);
-                let (x1, y1) = Dots::from_cells(p1.0, p1.1 / 2.0);
-                self.dots.line(x0, y0, x1, y1, faint);
-            }
+            let (x0, y0) = Dots::from_cells(p0.0, p0.1 / 2.0);
+            let (x1, y1) = Dots::from_cells(p1.0, p1.1 / 2.0);
+            self.dots.line(x0, y0, x1, y1, faint);
         }
         let cross = Ink::new(Role::Ramp(Ramp::Starlight), 90);
         let (cx, cy) = Dots::from_cells(l2.0, l2.1 / 2.0);
         self.dots.line(cx - 2.0, cy, cx + 2.0, cy, cross);
         self.dots.line(cx, cy - 2.0, cx, cy + 2.0, cross);
         // JWST: cruise out (first quarter), then ride the halo loop.
-        let cruise = ease::in_out_cubic(progress / 0.25);
-        let loop_a = TAU * (progress - 0.25).max(0.0) / 0.75 * 1.5 + PI;
-        let target = halo(loop_a);
         let start = (earth.0 + er * 1.6, earth.1);
-        let pos = if progress < 0.25 {
-            let bend = 0.12 * h * (PI * cruise).sin_det();
-            (
-                ease::lerp(start.0, halo(PI).0, cruise),
-                ease::lerp(start.1, halo(PI).1, cruise) - bend,
-            )
-        } else {
-            target
-        };
-        // Its wake.
-        let trail = Ink::new(Role::Ramp(Ramp::Sulfur), 120);
-        for i in 1..24 {
-            let back = f64::from(i) * 0.012;
-            let p = progress - back;
-            if p < 0.0 {
-                break;
-            }
-            let q = if p < 0.25 {
+        let place = |p: f64| {
+            if p < 0.25 {
                 let c = ease::in_out_cubic(p / 0.25);
                 let bend = 0.12 * h * (PI * c).sin_det();
                 (
@@ -518,22 +647,27 @@ impl JwstUnfolding {
                 )
             } else {
                 halo(TAU * (p - 0.25) / 0.75 * 1.5 + PI)
-            };
-            let (x, y) = Dots::from_cells(q.0, q.1 / 2.0);
-            if i % 2 == 1 {
-                self.dots.plot(x, y, trail);
             }
+        };
+        let pos = place(progress);
+        let trail = Ink::new(Role::Ramp(GOLD), 120);
+        for i in (1..24).step_by(2) {
+            let p = progress - f64::from(i) * 0.012;
+            if p < 0.0 {
+                break;
+            }
+            let q = place(p);
+            let (x, y) = Dots::from_cells(q.0, q.1 / 2.0);
+            self.dots.plot(x, y, trail);
         }
-        // The telescope: a silver kite (sunshield, facing the Sun) with a gold dot.
+        // The telescope: a lavender kite (sunshield, facing the Sun) with a gold dot.
         let (px, py) = (pos.0.floor() as i32, pos.1.floor() as i32);
-        let shield = Ink::new(Role::Ramp(Ramp::Starlight), 200);
+        let shield = Ink::new(Role::Ramp(Ramp::Plasma), 200);
         for (dx, dy) in [(-1, 0), (-1, -1), (-1, 1), (-2, 0)] {
             self.pixels.set(px + dx, py + dy, shield);
         }
-        self.pixels
-            .set(px, py, Ink::new(Role::Ramp(Ramp::Sulfur), 240));
-        self.pixels
-            .set(px + 1, py, Ink::new(Role::Ramp(Ramp::Sulfur), 180));
+        self.pixels.set(px, py, Ink::new(Role::Ramp(GOLD), 240));
+        self.pixels.set(px + 1, py, Ink::new(Role::Ramp(GOLD), 180));
         // The Sun's glow on the left edge.
         for y in 0..ps.height() {
             let dy = (f64::from(y) + 0.5 - 0.5 * h) / (0.5 * h);
@@ -568,15 +702,21 @@ impl Generator for JwstUnfolding {
         if !self.seeded {
             self.seeded = true;
             self.timeline = Some(Timeline::new(&BEATS));
-            self.polys = Vec::with_capacity(32);
-            self.t = ctx.rng.random_range(0.0..0.5);
+            self.polys = Vec::with_capacity(MAX_POLYS);
+            self.t = ctx.rng.random_range(0.0..0.3);
         }
         self.pixels.resize(size);
+        let ps = self.pixels.pixel_size();
+        self.zbuf.clear();
+        self.zbuf.resize(
+            usize::from(ps.width()) * usize::from(ps.height()),
+            f32::NEG_INFINITY,
+        );
         self.dots.resize(size);
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-        self.centre = (0.5 * w, 0.6 * h);
-        // Fit the 21 m shield across and ~13 m of height.
-        self.scale = (0.86 * w / (21.0 * geom::ASPECT)).min(0.8 * h / 16.0);
+        self.centre = (0.5 * w, 0.64 * h);
+        // Fit the 21 m shield across and ~12 m of height.
+        self.scale = (0.9 * w / (22.0 * geom::ASPECT)).min(0.85 * h / 10.5);
         let ps = self.pixels.pixel_size();
         self.stars.clear();
         for k in 0..(size.area() / 45) as i32 {
@@ -601,6 +741,7 @@ impl Generator for JwstUnfolding {
 
     fn caption(&self) -> Option<&'static str> {
         Some(match self.beat_index() {
+            B_FAIRING => FAIRING,
             B_PALLETS | B_TOWER => SHIELD,
             B_LAYERS => LAYERS,
             B_SECONDARY | B_WINGS => MIRROR,
@@ -628,24 +769,27 @@ mod tests {
 
     #[test]
     fn jwst_a1_beats_run_in_the_real_order() {
+        let fairing = first(|d| d.fairing);
         let pallets = first(|d| d.pallets);
         let tower = first(|d| d.tower);
-        let layers = first(|d| d.layers[0]);
+        let booms = first(|d| d.booms);
+        let layers = first(|d| d.layers[4]);
         let secondary = first(|d| d.secondary);
         let wings = first(|d| d.wings[0]);
-        assert!(pallets < tower && tower < layers && layers < secondary && secondary < wings);
+        let order = [fairing, pallets, tower, booms, layers, secondary, wings];
+        assert!(order.windows(2).all(|w| w[0] < w[1]), "{order:?}");
     }
 
     #[test]
-    fn jwst_a2_layers_tension_one_at_a_time() {
+    fn jwst_a2_layers_tension_one_at_a_time_sun_side_first() {
         let tl = timeline();
         for i in 0..5000 {
             let d = deploy(&tl, f64::from(i) * 0.01);
             let moving = d.layers.iter().filter(|&&l| l > 0.0 && l < 1.0).count();
             assert!(moving <= 1, "t = {}: {:?}", f64::from(i) * 0.01, d.layers);
-            // In order: a layer only starts once the one before is taut.
-            for k in 1..5 {
-                assert!(d.layers[k] == 0.0 || d.layers[k - 1] == 1.0);
+            // Layer 1 (k = 4) first: a layer only starts once the one Sunward is taut.
+            for k in 0..4 {
+                assert!(d.layers[k] == 0.0 || d.layers[k + 1] == 1.0);
             }
         }
     }
@@ -657,7 +801,12 @@ mod tests {
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
         let wings_end: f64 = BEATS[..=B_WINGS].iter().map(|b| b.1).sum();
-        for t in [wings_end - 8.0 + 0.1, wings_end - 4.0, wings_end - 0.1] {
+        let wings_len = BEATS[B_WINGS].1;
+        for t in [
+            wings_end - wings_len + 0.1,
+            wings_end - wings_len / 2.0,
+            wings_end - 0.1,
+        ] {
             g.t = t;
             g.update(0.0, &mut ctx);
             let d = g.state();
@@ -665,7 +814,7 @@ mod tests {
             let ps = g.pixels.pixel_size();
             let mut shown = 0;
             for (q, r) in segments() {
-                let (pts, _) = g.segment(&d, q, r);
+                let (pts, _) = JwstUnfolding::segment(&d, q, r);
                 let (mut sx, mut sy) = (0.0, 0.0);
                 for p in pts {
                     let (x, y, _) = g.project(&pr, p).unwrap();
@@ -677,7 +826,7 @@ mod tests {
                     && sx < f64::from(ps.width())
                     && sy < f64::from(ps.height());
                 let ink = g.pixels.get(sx as i32, sy as i32).unwrap_or(Ink::BLANK);
-                if on && ink.role == Role::Ramp(Ramp::Sulfur) {
+                if on && ink.role == Role::Ramp(GOLD) {
                     shown += 1;
                 }
             }
@@ -695,6 +844,7 @@ mod tests {
         for i in 0..500 {
             g.t = f64::from(i) * 0.1;
             let want = match tl.at(g.t).label {
+                "fairing" => FAIRING,
                 "pallets" | "tower" => SHIELD,
                 "layers" => LAYERS,
                 "secondary" | "wings" => MIRROR,

@@ -57,8 +57,8 @@ const FEATURES: [(f64, f64); 7] = [
 /// Jet on screen: start of the jet (fraction of width), length (fraction of width),
 /// position angle (radians, up from the right), half-opening and the base half-width
 /// (pixels per jet length).
-const CORE_X: f64 = 0.2;
-const JET_LEN: f64 = 0.72;
+const CORE_X: f64 = 0.27;
+const JET_LEN: f64 = 0.54;
 const JET_PA: f64 = 0.12;
 const OPENING: f64 = 0.036;
 const BASE_WIDTH: f64 = 0.006;
@@ -78,6 +78,32 @@ const GC_PER_CELL: f64 = 1.0 / 55.0;
 /// Readout ink (GEN-R13).
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const KNOT_HALO: [(i32, i32, f32); 25] = halo_kernel(2);
+/// Synchrotron colours: the jet violet to white at its brightest, the lobes teal.
+const JET: Ramp = Ramp::Plasma;
+const LOBE: Ramp = Ramp::Ice;
+/// Lobe centre (jet lengths past the core), half-length and half-width (jet lengths),
+/// the counter-lobe's distance and relative glow, and the lobes' level cap.
+const LOBE_AT: f64 = 1.02;
+const LOBE_LEN: f64 = 0.13;
+const LOBE_WIDTH: f64 = 0.1;
+const COUNTER_LOBE: f64 = 0.36;
+const COUNTER_GLOW: f64 = 0.3;
+const LOBE_MAX: u8 = 125;
+/// The terminal hotspot (jet lengths).
+const HOTSPOT: f64 = 0.95;
+
+/// Lobe emissivity at offset `(u, v)` from its centre (jet lengths, `u` along the jet):
+/// a diffuse cocoon brightening to a bow-shock arc on its leading edge.
+fn lobe(u: f64, v: f64) -> f64 {
+    let q = ((u / LOBE_LEN).powi(2) + (v / LOBE_WIDTH).powi(2)).sqrt();
+    if q >= 1.2 {
+        return 0.0;
+    }
+    let cocoon = 0.09 * (1.0 - (q / 1.2).powi(2));
+    let front = ease::smoothstep(u / LOBE_LEN + 0.2);
+    let arc = 0.22 * front * (-((q - 0.95) / 0.12).powi(2)).exp();
+    cocoon + arc
+}
 
 /// Apparent transverse speed in units of `c` (JET-A1).
 pub(crate) fn beta_app(beta: f64, sin_t: f64, cos_t: f64) -> f64 {
@@ -113,7 +139,9 @@ impl Knot {
         let s = self.s();
         let fade_in = ease::smoothstep(self.age / 0.8);
         let fade_out = 1.0 - ease::smoothstep((s - 0.85) / 0.2);
-        boost * fade_in * fade_out * (1.0 - 0.45 * s)
+        // Knots flicker as their shocks brighten and fade.
+        let pulse = 0.75 + 0.25 * (2.3 * self.age + 7.0 * self.size).sin_det();
+        boost * fade_in * fade_out * (1.0 - 0.45 * s) * pulse
     }
 }
 
@@ -136,6 +164,8 @@ pub struct RelativisticJet {
     host: Vec<u8>,
     clusters: Vec<(i32, i32, u8)>,
     glow: Glow,
+    /// The radio lobes (unbeamed).
+    lobe_glow: Glow,
     tone: Tone,
     pixels: Pixels,
     readout_room: usize,
@@ -229,9 +259,10 @@ impl RelativisticJet {
         let px = self.pixels.pixel_size();
         let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
         // Jet body over its bounding box, both sides of the core.
-        let reach = self.half_width(1.0) + 2.0;
-        let a = self.at(1.0, 0.0);
-        let b = self.at(-1.0, 0.0);
+        self.lobe_glow.clear();
+        let reach = self.half_width(1.0) + LOBE_WIDTH * self.len + 2.0;
+        let a = self.at(1.0 + LOBE_LEN * 1.3, 0.0);
+        let b = self.at(-COUNTER_LOBE - LOBE_LEN * 1.3, 0.0);
         let (x0, x1) = (a.0.min(b.0) - reach, a.0.max(b.0) + reach);
         let (y0, y1) = (a.1.min(b.1) - reach, a.1.max(b.1) + reach);
         let (ax, ay) = self.axis;
@@ -252,6 +283,17 @@ impl RelativisticJet {
                     self.glow
                         .splat_bilinear(f64::from(x), f64::from(y), v as f32);
                 }
+                // Lobes are not beamed: the counter-lobe shows, fainter, where the
+                // counter-jet cannot.
+                let lobe = if along >= 0.0 {
+                    lobe(along - LOBE_AT, d / self.len)
+                } else {
+                    COUNTER_GLOW * lobe(-along - COUNTER_LOBE, -d / self.len)
+                };
+                if lobe > 0.0 {
+                    self.lobe_glow
+                        .splat_bilinear(f64::from(x), f64::from(y), lobe as f32);
+                }
             }
         }
         // Knots and the HST-1 flare.
@@ -267,21 +309,34 @@ impl RelativisticJet {
             &KNOT_HALO,
             (0.25 + 1.4 * self.flare()) as f32,
         );
+        // The terminal hotspot, where the jet slams into the intergalactic gas.
+        let (tx, ty) = self.at(HOTSPOT, 0.0);
+        let pulse = 0.85 + 0.15 * (0.9 * self.t).sin_det();
+        self.glow
+            .splat(2.0 * tx, 2.0 * ty, &KNOT_HALO, (1.1 * pulse) as f32);
         let (host, tone, values) = (&self.host, &self.tone, self.glow.values());
+        let lobes = self.lobe_glow.values();
         let width = usize::from(px.width());
         self.pixels.shade(|x, y| {
             let i = y as usize * width + x as usize;
             let jet = tone.level(values.get(i).copied().unwrap_or(0.0));
+            let lobe = tone
+                .level(lobes.get(i).copied().unwrap_or(0.0))
+                .min(LOBE_MAX);
             let h = host.get(i).copied().unwrap_or(0);
-            if u16::from(jet) * 2 >= u16::from(h) && f64::from(jet) >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::Cobalt), jet)
+            if u16::from(jet) * 2 >= u16::from(h)
+                && jet >= lobe
+                && f64::from(jet) >= ink::MIN_VISIBLE_LEVEL
+            {
+                Ink::new(Role::Ramp(JET), jet)
+            } else if lobe >= h && f64::from(lobe) >= ink::MIN_VISIBLE_LEVEL {
+                Ink::new(Role::Ramp(LOBE), lobe)
             } else if f64::from(h) >= ink::MIN_VISIBLE_LEVEL {
                 Ink::new(Role::Ramp(Ramp::Starlight), h)
             } else {
                 Ink::BLANK
             }
         });
-        self.pixels.dissolve(26);
         for &(x, y, l) in &self.clusters {
             let under = self.pixels.get(x, y).map_or(0, |i| i.level);
             if under < l / 2 {
@@ -312,6 +367,7 @@ impl Generator for RelativisticJet {
         }
         self.pixels.resize(size);
         self.glow.resize(size);
+        self.lobe_glow.resize(size);
         let px = self.pixels.pixel_size();
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
         self.half = h / 2.0;
@@ -322,7 +378,7 @@ impl Generator for RelativisticJet {
         self.readout_room = title::stable_readout_room(size, &META);
         // Host: de Vaucouleurs profile, toned once.
         let re = HOST_RE * self.half.max(1.0);
-        let host_tone = Tone::asinh(0.03, 1.0);
+        let host_tone = Tone::asinh(0.09, 1.0);
         self.host.clear();
         for y in 0..px.height() {
             for x in 0..px.width() {
@@ -330,7 +386,12 @@ impl Generator for RelativisticJet {
                 let dy = f64::from(y) + 0.5 - self.core.1;
                 let r = dx.hypot(dy) / re;
                 let i = HOST_PEAK * (-7.67 * (r.max(0.02).powf(0.25) - HOST_CORE.powf(0.25))).exp();
-                self.host.push(host_tone.level(i.min(1.0) as f32 * 1.1));
+                // Tapered so the halo sinks into the sky with no visible rim.
+                // The taper works on the toned level, so the halo reaches the faintest
+                // visible level gently and the cut there is one near-black step.
+                let taper = 1.0 - ease::smoothstep((r - 0.35) / 0.9);
+                let level = f64::from(host_tone.level(i.min(1.0) as f32 * 1.1)) * taper;
+                self.host.push(level as u8);
             }
         }
         // Globular clusters: a swarm thinning outward from the core.
@@ -449,7 +510,7 @@ mod tests {
         for y in 0..i32::from(px.height()) {
             for x in 0..(g.core.0 - 6.0) as i32 {
                 let ink = g.pixels.get(x, y).unwrap();
-                assert_ne!(ink.role, Role::Ramp(Ramp::Cobalt), "counter-jet at {x},{y}");
+                assert_ne!(ink.role, Role::Ramp(JET), "counter-jet at {x},{y}");
             }
         }
     }

@@ -10,7 +10,7 @@
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
-use sciart_core::rng::{cell_key, hash01};
+use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 use sciart_core::{Tone, ink};
 
@@ -32,26 +32,31 @@ pub fn build() -> Box<dyn Generator> {
 
 /// Acts (s) and their indices.
 const ACTS: [(&str, f64); 4] = [
-    (SHELLS, 18.0),
-    (FAST_WIND, 15.0),
-    (IONISED, 12.0),
+    (SHELLS, 6.0),
+    (FAST_WIND, 8.0),
+    (IONISED, 26.0),
     ("fade", 5.0),
 ];
 const ACT_WIND: usize = 1;
 const ACT_IONISED: usize = 2;
 const ACT_FADE: usize = 3;
-const T_WIND: f64 = 18.0;
-const T_IONISED: f64 = 33.0;
-const T_FADE: f64 = 45.0;
+const T_WIND: f64 = 6.0;
+const T_IONISED: f64 = 14.0;
+const T_FADE: f64 = 40.0;
+const LOOP: f64 = 45.0;
+/// Rings already puffed off when the loop starts, so the first frame shows shells.
+const PRE_RINGS: f64 = 5.0;
 /// AGB rings: launch interval (s), count, expansion speed (H/s), relative thickness.
 pub(crate) const RING_EVERY: f64 = 2.2;
 pub(crate) const RINGS: usize = 9;
 pub(crate) const V_SHELL: f64 = 0.042;
-const RING_THICK: f64 = 0.9;
+const RING_THICK: f64 = 2.2;
 /// Fast-wind bubble: equatorial radius at full size (H), growth time (s), prolateness
 /// `R(θ) = R_b (1 + P cos² θ)`, shell thickness (fraction of the radius).
 const BUBBLE_R: f64 = 0.36;
-const BUBBLE_GROW: f64 = 13.0;
+const BUBBLE_GROW: f64 = 7.0;
+/// Slow further growth through the ionised act (share of the full radius, over s).
+const BUBBLE_CREEP: (f64, f64) = (0.25, 32.0);
 pub(crate) const PROLATE: f64 = 0.6;
 const BUBBLE_THICK: f64 = 0.2;
 /// The Cat's Eye's second, tilted inner bubble: size and tilt relative to the first.
@@ -67,13 +72,24 @@ const RIM_BAND: (f64, f64) = (0.9, 1.04);
 /// Symmetry axis on the sky (radians) and its precession.
 const AXIS: f64 = 1.0;
 const PRECESS: f64 = 0.12;
+/// Slow turn of the axis on the sky (rad/s).
+const TURN: f64 = 0.012;
+/// FLIER drift outward (bubble radii per s) and flicker rate (rad/s).
+const FLIER_DRIFT: f64 = 0.004;
+const FLICKER: f64 = 3.1;
 /// Ink caps.
-const RING_MAX: f32 = 60.0;
+const RING_MAX: f32 = 80.0;
+/// Outer [O III] halo: reach (bubble radii) and brightness; the interior texture salt.
+const HALO_REACH: f64 = 1.7;
+const HALO_GLOW: f64 = 0.16;
+/// Peak of the AGB wind haze (share of the ring ink cap).
+const HAZE: f64 = 0.55;
+const TEXTURE_SALT: u64 = 0x5eed_ca75;
 const NII_MAX: u8 = 205;
 
 /// Radius of AGB ring `k` at loop time `t` (H), or `None` before it is launched.
 pub(crate) fn ring_radius(k: usize, t: f64) -> Option<f64> {
-    let t0 = k as f64 * RING_EVERY;
+    let t0 = (k as f64 - PRE_RINGS) * RING_EVERY;
     (t >= t0).then_some(V_SHELL * (t - t0))
 }
 
@@ -131,7 +147,7 @@ impl PlanetaryNebula {
 
     /// Loop time in `[0, total)`.
     fn tau(&self) -> f64 {
-        self.t.rem_euclid(T_FADE + 5.0)
+        self.t.rem_euclid(LOOP)
     }
 
     /// Equatorial bubble radius now (H).
@@ -140,13 +156,16 @@ impl PlanetaryNebula {
         if t <= 0.0 {
             0.0
         } else {
-            BUBBLE_R * ease::out_quad(t / BUBBLE_GROW)
+            let creep = (t / BUBBLE_CREEP.1).min(1.0);
+            BUBBLE_R
+                * ((1.0 - BUBBLE_CREEP.0) * ease::out_quad(t / BUBBLE_GROW)
+                    + BUBBLE_CREEP.0 * creep)
         }
     }
 
     /// Symmetry axis now: unit vector on screen (x right, y up).
     fn axis(&self) -> (f64, f64) {
-        let a = AXIS + PRECESS * (std::f64::consts::TAU * self.t / 50.0).sin_det();
+        let a = AXIS + TURN * self.t + PRECESS * (std::f64::consts::TAU * self.t / 50.0).sin_det();
         let (s, c) = a.sin_cos_det();
         (c, s)
     }
@@ -165,13 +184,14 @@ impl PlanetaryNebula {
     /// Ionisation: how far out (in `q`) the front has swept, and the rim's [N II] glow.
     fn ionisation(&self) -> (f64, f64) {
         let tau = self.tau();
-        let front = ION_REACH * ease::smoothstep((tau - T_IONISED + 1.0) / 8.0);
-        let rim = ease::smoothstep((tau - T_WIND - 5.0) / 7.0);
+        let front = ION_REACH * ease::smoothstep((tau - T_IONISED + 0.5) / 4.0);
+        let rim = ease::smoothstep((tau - T_WIND - 2.0) / 5.0);
         (front, rim)
     }
 
     fn envelope(&self) -> f64 {
-        1.0 - ease::smoothstep((self.tau() - T_FADE) / 4.5)
+        let tau = self.tau();
+        ease::smoothstep(tau / 1.5) * (1.0 - ease::smoothstep((tau - T_FADE) / 4.5))
     }
 
     /// Everything the per-pixel emission needs this frame.
@@ -179,6 +199,7 @@ impl PlanetaryNebula {
         let (front, rim_glow) = self.ionisation();
         Frame {
             tau: self.tau(),
+            t: self.t,
             r_b: self.bubble(),
             axis: self.axis(),
             front,
@@ -191,6 +212,7 @@ impl PlanetaryNebula {
 #[derive(Debug, Clone, Copy)]
 struct Frame {
     tau: f64,
+    t: f64,
     r_b: f64,
     axis: (f64, f64),
     front: f64,
@@ -208,14 +230,19 @@ impl Frame {
         let thick = RING_THICK * px;
         for k in 0..RINGS {
             let Some(r) = ring_radius(k, tau) else { break };
-            if r <= thick || rho >= r || rho < r - 3.0 * px {
+            if r <= thick || rho >= r || rho < r - thick - 2.0 * px {
                 continue;
             }
             let p = shell_path(rho, r - thick, r) / (r * r - (r - thick) * (r - thick)).sqrt();
             ring += p
-                * (0.35 + 0.65 * (-r / 0.9).exp())
+                * (-r / 0.75).exp()
+                * (1.0 - ease::smoothstep((r - 0.75) / 0.35))
                 * (0.55 + 0.45 * hash01(cell_key(k as i32, 77)));
         }
+        // The giant's dusty wind: a faint haze thinning outward, gone once the core is
+        // exposed and the fast wind clears it.
+        let haze_on = 1.0 - ease::smoothstep((tau - T_WIND) / 4.0);
+        ring += HAZE * haze_on * (-rho / 0.35).exp();
         let r_b = self.r_b;
         if r_b <= 0.0 {
             return (0.0, 0.0, ring);
@@ -232,6 +259,14 @@ impl Frame {
             oiii += 0.6 * shell_profile(q2, 0.25).min(1.6);
             // Soft edge on the sweeping front.
             oiii *= ease::smoothstep((front - q) / 0.12);
+            // Filamentary texture fixed to the nebula (axis-aligned coordinates).
+            let (u, v) = (x * axis.0 + y * axis.1, -x * axis.1 + y * axis.0);
+            let n = value_noise(TEXTURE_SALT, u * 14.0, v * 14.0, 1.0);
+            oiii *= 0.8 + 0.35 * n;
+        } else if q < HALO_REACH && front > 0.0 {
+            // The faint ionised halo beyond the bubble.
+            let fall = 1.0 - ease::smoothstep((q - 1.0) / (HALO_REACH - 1.0));
+            oiii = HALO_GLOW * fall * (front / ION_REACH);
         }
         // [N II]: the rim band (it glows once the core is hot), and the FLIERs.
         let mut nii = 0.0;
@@ -240,12 +275,14 @@ impl Frame {
             let half = 0.5 * (RIM_BAND.1 - RIM_BAND.0);
             nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * (0.5 + 0.5 * c * c);
         }
-        let tip = bubble_radius(r_b, 1.0) * FLIER_AT;
+        let drift = FLIER_DRIFT * (self.tau - T_WIND).max(0.0);
+        let tip = bubble_radius(r_b, 1.0) * (FLIER_AT + drift);
         for sign in [1.0, -1.0] {
             let (fx, fy) = (sign * tip * axis.0, sign * tip * axis.1);
             let d = (x - fx).hypot(y - fy) / (FLIER_R + 0.6 * px);
             if d < 1.0 {
-                nii = f64::max(nii, rim_glow * (1.0 - d * d) * 1.3);
+                let flicker = 0.8 + 0.2 * (FLICKER * self.t + 2.0 * sign).sin_det();
+                nii = f64::max(nii, rim_glow * (1.0 - d * d) * 1.3 * flicker);
             }
         }
         (oiii, nii, ring)
@@ -271,7 +308,7 @@ impl PlanetaryNebula {
             } else if f64::from(lo) >= ink::MIN_VISIBLE_LEVEL {
                 Ink::new(Role::Ramp(Ramp::Aurora), lo)
             } else if f64::from(lr) >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::Starlight), lr as u8)
+                Ink::new(Role::Ramp(Ramp::Ember), lr as u8)
             } else {
                 Ink::BLANK
             }
@@ -394,18 +431,23 @@ mod tests {
     #[test]
     fn pne_a3_oiii_inside_and_nii_on_the_rim_or_tips() {
         let (mut g, mut ctx) = built(Size::new(200, 50));
-        g.t = 40.0;
+        g.t = 30.0;
         g.update(0.0, &mut ctx);
         let px = g.pixels.pixel_size();
         let (mut nii, mut near) = (0, 0);
-        let tip = bubble_radius(g.bubble(), 1.0) * FLIER_AT * g.h;
+        let drift = FLIER_DRIFT * (g.tau() - T_WIND).max(0.0);
+        let tip = bubble_radius(g.bubble(), 1.0) * (FLIER_AT + drift) * g.h;
         let axis = g.axis();
         for iy in 0..i32::from(px.height()) {
             for ix in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(ix, iy).unwrap();
                 let (q, d) = rim_distance(&g, ix, iy);
                 if ink.role == Role::Ramp(Ramp::Aurora) {
-                    assert!(q < 1.0, "[O III] outside the bubble at q = {q}");
+                    let halo_cap = g.tone.level(HALO_GLOW as f32);
+                    assert!(
+                        q < 1.0 || ink.level <= halo_cap,
+                        "bright [O III] outside the bubble at q = {q}"
+                    );
                 }
                 if ink.role == Role::Ramp(Ramp::HAlpha) {
                     nii += 1;
@@ -440,7 +482,7 @@ mod tests {
             }
         }
         assert!(
-            (r - best.0) <= px,
+            (r - best.0) <= thick + px,
             "peak {} px inside the edge",
             (r - best.0) / px
         );
@@ -463,7 +505,7 @@ mod tests {
             g.update(SIM_DT, &mut ctx);
             let tau = g.tau();
             // Skip the instants right at a boundary.
-            if [T_WIND, T_IONISED, 50.0]
+            if [T_WIND, T_IONISED, LOOP]
                 .iter()
                 .any(|b| (tau - b).abs() < 0.05)
                 || tau < 0.05

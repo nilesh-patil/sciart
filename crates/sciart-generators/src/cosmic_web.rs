@@ -33,7 +33,7 @@ pub(crate) const MODES: usize = 48;
 const MAX_NODES: usize = 16_384;
 /// Mode wavenumbers in box periods along the height: log-uniform in this range. The box
 /// is taken as `BOX_ASPECT` heights wide, so modes are round on screen.
-const N_RANGE: (f64, f64) = (1.6, 16.0);
+const N_RANGE: (f64, f64) = (1.6, 22.0);
 const BOX_ASPECT: f64 = 2.0;
 /// Loop: collapse, hold and relax (s).
 const RISE: f64 = 20.0;
@@ -41,16 +41,25 @@ const HOLD: f64 = 5.0;
 const RELAX: f64 = 5.0;
 pub(crate) const LOOP: f64 = RISE + HOLD + RELAX;
 /// First shell crossing at this fraction of `D_max` (SPEC-002).
-const CROSSING_AT: f64 = 0.7;
+const CROSSING_AT: f64 = 0.4;
+/// A particle freezes this far past its own shell-crossing growth.
+const FREEZE: f32 = 1.0;
+/// Pan across the box, lattice cells per second.
+const PAN: f64 = 0.35;
 /// Growth still creeping on during the hold, from this fraction of `D_max`.
 const HOLD_FROM: f64 = 0.94;
+/// Scene start in loop time: growth ≈ 0.3.
+const START: f64 = 2.3;
 /// Tone curve over density in particles per node (mean 1), and the halo threshold.
-const KNEE: f32 = 2.0;
-const WHITE: f32 = 16.0;
-const HALO: f32 = 5.0;
-/// Faint fringe dissolved into the black of the voids (CORE-R89).
-const FRINGE: u8 = 26;
-const HALO_LEVEL: u8 = 230;
+const KNEE: f32 = 1.4;
+const WHITE: f32 = 7.0;
+const HALO: f32 = 3.2;
+/// Density subtracted before toning, so the mean fog sits at the ramp's near-black foot
+/// and the voids end in black on a smooth ramp (no dither).
+const FLOOR: f32 = 0.82;
+const GAMMA: f32 = 1.2;
+/// Halo nodes: gold-white, hotter (whiter) the denser.
+const HALO_K: (f64, f64) = (4_200.0, 7_500.0);
 
 /// One potential mode: wavevector in box periods (integers, so it tiles the box), its
 /// amplitude, phase at cycle 0 and phase step per cycle.
@@ -68,12 +77,32 @@ pub(crate) struct Mode {
 pub(crate) fn growth(t: f64) -> f64 {
     let t = t.rem_euclid(LOOP);
     if t < RISE {
-        HOLD_FROM * ease::smoothstep(t / RISE)
+        // Fast at first, slowing as the web sharpens: no long uniform fog.
+        let x = (t / RISE).clamp(0.0, 1.0);
+        HOLD_FROM * (1.0 - (1.0 - x).powi(2))
     } else if t < RISE + HOLD {
         HOLD_FROM + (1.0 - HOLD_FROM) * ease::smoothstep((t - RISE) / HOLD)
     } else {
         1.0 - ease::smoothstep((t - RISE - HOLD) / RELAX)
     }
+}
+
+/// Growth (un-normalised) at which a node whose smallest deformation eigenvalue is
+/// `lam` crosses shells, `−1/λ`; ∞ if it never does.
+fn freeze_at(lam: f64) -> f32 {
+    if lam < 0.0 {
+        (-1.0 / lam) as f32
+    } else {
+        f32::INFINITY
+    }
+}
+
+/// Position of the particle from node `(qx, qy)` with displacement `s` at growth `k`
+/// (un-normalised), frozen at its own shell-crossing growth `at` (WEB-A1):
+/// `x = q + min(k, at)·s`.
+pub(crate) fn displaced(qx: f32, qy: f32, s: (f32, f32), k: f32, at: f32) -> (f32, f32) {
+    let k = k.min(at);
+    (qx + k * s.0, qy + k * s.1)
 }
 
 /// Density bins of [`halo_threshold`]'s histogram and its range (particles per node).
@@ -197,13 +226,15 @@ pub struct CosmicWeb {
     tables: Tables,
     /// Displacements (lattice cells, un-normalised) of the current cycle, and of the
     /// next one, filled a chunk per step; `next_done` particles are ready.
-    disp: Vec<(f32, f32)>,
-    next: Vec<(f32, f32)>,
+    disp: Vec<(f32, f32, f32)>,
+    next: Vec<(f32, f32, f32)>,
     next_done: usize,
     next_tables: Tables,
     cycle: i64,
     density: Grid<f32>,
     scratch: Grid<f32>,
+    /// The density after one blur pass: the caustics' sharp version.
+    sharp: Grid<f32>,
     map: SampleMap,
     tone: Tone,
     pixels: Pixels,
@@ -228,12 +259,13 @@ impl CosmicWeb {
             let k = (f64::from(m.nx) / BOX_ASPECT).hypot(f64::from(m.ny));
             // δ ∝ k⁻¹ (P ∝ k⁻²), ψ = δ / k², with a Rayleigh-distributed amplitude.
             let rayleigh = (-2.0 * ctx.rng.random_range(1e-6f64..1.0).ln()).sqrt();
-            m.amp = rayleigh * k.powi(-3);
+            m.amp = rayleigh * k.powf(-2.7);
             m.phase = ctx.rng.random_range(0.0..TAU);
             m.step = ctx.rng.random_range(0.8..TAU - 0.8);
         }
         self.tone = Tone::asinh(KNEE, WHITE);
-        self.t = ctx.rng.random_range(3.0..9.0);
+        // Start where D ≈ 0.3 D_max: a faint web already on screen.
+        self.t = START;
     }
 
     fn dims(&self) -> (usize, usize) {
@@ -253,7 +285,7 @@ impl CosmicWeb {
             for i in 0..w {
                 let ((sx, sy), lam) = self.tables.at(&self.modes, w, h, i, j);
                 lam_min = lam_min.min(lam);
-                self.disp.push((sx as f32, sy as f32));
+                self.disp.push((sx as f32, sy as f32, freeze_at(lam)));
             }
         }
         lam_min
@@ -269,8 +301,8 @@ impl CosmicWeb {
         }
         let end = (self.next_done + count).min(n);
         for idx in self.next_done..end {
-            let ((sx, sy), _) = self.next_tables.at(&self.modes, w, h, idx % w, idx / w);
-            self.next.push((sx as f32, sy as f32));
+            let ((sx, sy), lam) = self.next_tables.at(&self.modes, w, h, idx % w, idx / w);
+            self.next.push((sx as f32, sy as f32, freeze_at(lam)));
         }
         self.next_done = end;
     }
@@ -281,11 +313,16 @@ impl CosmicWeb {
         self.density.fill(0.0);
         let dmax = self.norm / CROSSING_AT;
         let k = (d * dmax) as f32;
+        let freeze = FREEZE;
+        // A slow pan across the periodic box keeps the held web moving.
+        let pan = (PAN * self.t).rem_euclid(w as f64) as f32;
         let (wf, hf) = (w as f32, h as f32);
         let cells = self.density.as_mut_slice();
-        for (idx, &(sx, sy)) in self.disp.iter().enumerate() {
-            let x = (idx % w) as f32 + k * sx;
-            let y = (idx / w) as f32 + k * sy;
+        for (idx, &(sx, sy, at)) in self.disp.iter().enumerate() {
+            // A particle stops at its own shell crossing (adhesion-like): it stays in
+            // the caustic instead of streaming through and smearing it out.
+            let (x, y) = displaced((idx % w) as f32, (idx / w) as f32, (sx, sy), k, at * freeze);
+            let x = x + pan;
             let (x, y) = (x.rem_euclid(wf), y.rem_euclid(hf));
             let (x0, y0) = (x.floor(), y.floor());
             let (fx, fy) = (x - x0, y - y0);
@@ -302,8 +339,12 @@ impl CosmicWeb {
     /// particles several cells apart, whose bare deposits alias into a moiré.
     fn smooth(&mut self) {
         let (w, h) = self.dims();
-        self.scratch.resize(self.density.size(), 0.0);
-        for _ in 0..2 {
+        for pass in 0..3 {
+            if pass == 1 {
+                self.sharp
+                    .as_mut_slice()
+                    .copy_from_slice(self.density.as_slice());
+            }
             let (src, dst) = (self.density.as_slice(), self.scratch.as_mut_slice());
             for j in 0..h {
                 let row = &src[j * w..(j + 1) * w];
@@ -321,6 +362,16 @@ impl CosmicWeb {
                 }
             }
         }
+        // Sharp caustics where matter has gathered, the smooth field in the voids.
+        for (d, &s) in self
+            .density
+            .as_mut_slice()
+            .iter_mut()
+            .zip(self.sharp.as_slice())
+        {
+            let k = ((s - 1.2) / 1.5).clamp(0.0, 1.0);
+            *d += (s - *d) * k;
+        }
     }
 
     fn raster(&mut self) {
@@ -337,16 +388,18 @@ impl CosmicWeb {
                 map.sample(density, x, y)
             };
             if v >= halo {
-                return Ink::new(Role::Ramp(Ramp::Starlight), HALO_LEVEL);
+                let k = f64::from((v - halo) / halo).clamp(0.0, 1.0);
+                return ink::blackbody(ease::lerp(HALO_K.0, HALO_K.1, k));
             }
-            let level = tone.level(v);
+            // A gamma below the tone darkens the fog so the filaments carry the frame.
+            let t = f32::from(tone.level(v - FLOOR)) / 255.0;
+            let level = (255.0 * t.powf(GAMMA)) as u8;
             if f64::from(level) < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
             } else {
-                Ink::new(Role::Ramp(Ramp::Ferroin), level)
+                Ink::new(Role::Ramp(Ramp::Plasma), level)
             }
         });
-        self.pixels.dissolve(FRINGE);
     }
 }
 
@@ -377,6 +430,7 @@ impl Generator for CosmicWeb {
         self.next.reserve(w * h);
         self.next_tables.build(&self.modes, self.cycle + 1, w, h);
         self.scratch.resize(lattice, 0.0);
+        self.sharp.resize(lattice, 0.0);
         self.next_done = 0;
         self.raster();
     }
@@ -444,13 +498,38 @@ mod tests {
         // D = 0: every node holds exactly one particle's worth.
         assert!(g.density.as_slice().iter().all(|&v| (v - 1.0).abs() < 1e-5));
         for &(i, j) in &[(0usize, 0usize), (5, 7), (w - 1, h - 1), (w / 2, h / 3)] {
-            let (sx, sy) = g.disp[j * w + i];
+            let (sx, sy, _) = g.disp[j * w + i];
             let direct = displacement_direct(&g.modes, 0, w, h, (i as f64, j as f64));
             assert!((f64::from(sx) - direct.0).abs() <= 1e-6 * direct.0.abs().max(1.0));
             assert!((f64::from(sy) - direct.1).abs() <= 1e-6 * direct.1.abs().max(1.0));
             let (tab, _) = g.tables.at(&g.modes, w, h, i, j);
             assert!((tab.0 - direct.0).abs() < 1e-9 && (tab.1 - direct.1).abs() < 1e-9);
         }
+        // Before its own crossing a particle sits at q + D·s exactly; after, it stays put.
+        let s = (0.3f32, -0.7f32);
+        assert_eq!(displaced(4.0, 9.0, s, 0.0, 2.0), (4.0, 9.0));
+        assert_eq!(
+            displaced(4.0, 9.0, s, 1.5, 2.0),
+            (4.0 + 1.5 * 0.3, 9.0 - 1.5 * 0.7)
+        );
+        assert_eq!(
+            displaced(4.0, 9.0, s, 3.0, 2.0),
+            displaced(4.0, 9.0, s, 2.0, 2.0)
+        );
+        assert_eq!(
+            displaced(4.0, 9.0, s, 3.0, f32::INFINITY),
+            (4.0 + 0.9, 9.0 - 2.1)
+        );
+    }
+
+    #[test]
+    fn web_a6_the_web_is_sharpest_in_the_hold_not_smeared() {
+        let (mut g, _) = built(Size::new(200, 50));
+        g.fill_all(0);
+        g.deposit(growth(15.0));
+        let mid = contrast(&g);
+        g.deposit(growth(RISE + HOLD / 2.0));
+        assert!(contrast(&g) >= mid, "{} < {mid}", contrast(&g));
     }
 
     #[test]
@@ -526,7 +605,7 @@ mod tests {
         g.update(SIM_DT * 2.0, &mut ctx);
         assert_eq!(g.cycle, 1);
         for &(i, j) in &[(1usize, 2usize), (w - 2, h - 1)] {
-            let (sx, sy) = g.disp[j * w + i];
+            let (sx, sy, _) = g.disp[j * w + i];
             let direct = displacement_direct(&g.modes, 1, w, h, (i as f64, j as f64));
             assert!((f64::from(sx) - direct.0).abs() <= 1e-5 * direct.0.abs().max(1.0));
             assert!((f64::from(sy) - direct.1).abs() <= 1e-5 * direct.1.abs().max(1.0));

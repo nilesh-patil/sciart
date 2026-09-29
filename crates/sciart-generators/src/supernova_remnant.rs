@@ -12,7 +12,7 @@ use std::f64::consts::TAU;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
+use sciart_core::raster::{ascii_ramp_cell, disc_pixels, halo_kernel};
 use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 use sciart_core::{Tone, ink};
@@ -34,7 +34,7 @@ const EXPAND: f64 = 36.0;
 const FADE: f64 = 4.0;
 pub(crate) const LOOP: f64 = EXPAND + FADE;
 /// Model time at the loop's start and the Sedov–Taylor transition time (model s).
-const T0: f64 = 2.0;
+const T0: f64 = 0.8;
 const T_ST: f64 = 8.0;
 /// Blast-wave radius at the end of the expansion, in half-heights.
 const R_END: f64 = 0.9;
@@ -49,8 +49,8 @@ const FINGER_IN: f64 = 0.054;
 /// Reverse shock (units of `R_f`), easing inward over the expansion.
 const REVERSE: (f64, f64) = (0.62, 0.45);
 /// Blast-wave shell thickness (units of `R_f`) and the band (pixels) it is drawn in.
-const RIM_THICK: f64 = 0.035;
-const RIM_BAND: f64 = 3.0;
+const RIM_THICK: f64 = 0.022;
+const RIM_BAND: f64 = 2.5;
 /// Rayleigh–Taylor modes: count, wavenumber range, seed amplitude, growth rate and cap.
 const RT_MODES: usize = 24;
 const RT_K: (u32, u32) = (5, 22);
@@ -65,9 +65,30 @@ const NOISE_SPAN: f64 = 1.2;
 /// Emitting ejecta sit in the outer part of the shocked shell, from this fraction of
 /// the contact radius out (or from the reverse shock, if that is farther out).
 const EJECTA_INNER: f64 = 0.82;
+/// Blast-wave wobble (share of `R_f`) and the angular fineness of the ejecta streaks.
+const RIM_WOBBLE: f64 = 0.045;
+const STREAK: f64 = 7.0;
+/// A knot's soft glow.
+const KNOT_BLOB: [(i32, i32, f32); 9] = halo_kernel(1);
+/// Level caps: a thin, faint forward shock under the bright ejecta.
+const RIM_MAX: u8 = 85;
+const EJECTA_MAX: u8 = 215;
+/// Chandra-style element colours: the forward shock's synchrotron cyan, Si/S teal-green,
+/// Fe orange-red, O blue.
+const RIM: Ramp = Ramp::Ice;
+const SILICON: Ramp = Ramp::Aurora;
+const IRON: Ramp = Ramp::Ember;
+const OXYGEN: Ramp = Ramp::Cobalt;
+
+/// Which element dominates a patch of ejecta.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Element {
+    Silicon,
+    Iron,
+    Oxygen,
+}
 /// Ejecta knots (SNR-A5), the share rich in iron, and their afterglow.
 pub(crate) const KNOTS: usize = 1500;
-const IRON_SHARE: f64 = 0.3;
 const KNOT_TAU: f64 = 1.5;
 const KNOT_FLOOR: f64 = 0.25;
 /// Iron-rich sector of the shell (radians) and its half-width.
@@ -178,6 +199,10 @@ pub struct SupernovaRemnant {
     sin_k: Vec<f32>,
     /// Finger perturbation `p(θ)` this frame, per angle bin.
     finger: Vec<f32>,
+    /// The blast wave's radial wobble per angle bin, in `[−1, 1]`.
+    wobble: Vec<f32>,
+    /// Salt of the ejecta's streak texture.
+    salt: u64,
     clumps: Vec<(f32, f32)>,
     knots: ParticlePool<Knot>,
     /// Screen centre, half-height (pixels), and per pixel: radius and angle bin.
@@ -215,13 +240,31 @@ impl SupernovaRemnant {
         }
         self.finger = vec![0.0; ANGLES];
         let salt: u64 = ctx.rng.random();
+        self.salt = salt;
+        // Low-order modes for the blast wave's wobble round the rim.
+        let wob: [(f64, f64); 5] = std::array::from_fn(|_| {
+            (
+                ctx.rng.random_range(0.0..TAU),
+                ctx.rng.random_range(0.4..1.0),
+            )
+        });
+        self.wobble = (0..ANGLES)
+            .map(|j| {
+                let th = TAU * j as f64 / ANGLES as f64;
+                let v: f64 = wob
+                    .iter()
+                    .enumerate()
+                    .map(|(k, &(ph, a))| a * ((k as f64 + 2.0) * th + ph).sin_det())
+                    .sum();
+                (v / 3.0).clamp(-1.0, 1.0) as f32
+            })
+            .collect();
         self.clumps = (0..NOISE * NOISE)
             .map(|i| {
                 let (x, y) = ((i % NOISE) as f64, (i / NOISE) as f64);
-                let clump = 0.65 * value_noise(salt, x, y, 5.0)
-                    + 0.35 * value_noise(salt ^ 0x9e37, x, y, 2.2);
+                let oxygen = value_noise(salt, x, y, 8.0);
                 let iron = value_noise(salt ^ 0x51ed, x, y, 11.0);
-                (clump as f32, iron as f32)
+                (oxygen as f32, iron as f32)
             })
             .collect();
         self.knots = ParticlePool::with_capacity(KNOTS);
@@ -240,9 +283,7 @@ impl SupernovaRemnant {
             let u = ctx.rng.random_range(0.5..0.97);
             let a = ctx.rng.random_range(0.0..TAU);
             let near_iron = sciart_core::geom::wrap_angle(a - IRON_AT).abs() < IRON_HALF;
-            let iron = ctx
-                .rng
-                .random_bool(if near_iron { 0.75 } else { IRON_SHARE * 0.1 });
+            let iron = ctx.rng.random_bool(if near_iron { 0.75 } else { 0.0 });
             self.knots.spawn(Knot {
                 u,
                 dir: a.sin_cos_det(),
@@ -323,12 +364,10 @@ impl SupernovaRemnant {
             } else {
                 &mut self.knot_glow
             };
-            glow.splat_bilinear(x, y, b);
-            glow.splat_bilinear(x - 1.2 * c, y + 1.2 * s, 0.35 * b);
-            glow.splat_bilinear(x - 2.4 * c, y + 2.4 * s, 0.15 * b);
+            glow.splat(2.0 * x + 1.0, 2.0 * y + 1.0, &KNOT_BLOB, 0.45 * b);
         }
         let (angle, centre) = (&self.angle, self.centre);
-        let (finger, clumps) = (&self.finger, &self.clumps);
+        let (finger, clumps, wobble, salt) = (&self.finger, &self.clumps, &self.wobble, self.salt);
         let (kg, ig) = (self.knot_glow.values(), self.iron_glow.values());
         let (t_rim, t_ej, t_kn) = (&self.tone_rim, &self.tone_ejecta, &self.tone_knot);
         let width = usize::from(self.pixels.pixel_size().width());
@@ -344,60 +383,74 @@ impl SupernovaRemnant {
             let a = usize::from(a);
             let p = f64::from(finger[a]);
             let rc = contact_frac(p) * rf;
-            // Blast wave: the limb of a thin shell, only within a few pixels of R_f.
-            let rim = if (rf - r).abs() <= RIM_BAND && r <= rf {
-                shell_path(r, rf * (1.0 - RIM_THICK), rf) * rim_norm
+            // Blast wave: the limb of a thin shell, only within a few pixels of R_f(θ),
+            // which wobbles a little where the surrounding gas is lumpy.
+            let rfa = rf * (1.0 + RIM_WOBBLE * f64::from(wobble[a]));
+            let rim = if (rfa - r).abs() <= RIM_BAND && r <= rfa {
+                shell_path(r, rfa * (1.0 - RIM_THICK), rfa) * rim_norm
             } else {
                 0.0
             };
             // Shocked ejecta between the reverse shock and the contact: densest near the
             // contact (so the shell reads as a ring, not a disc), clumpy in comoving
             // coordinates, brightest in the fingers.
-            let (ej, iron) = if r < rc && rf > 0.0 {
+            let (ej, element) = if r < rc && rf > 0.0 {
                 let inner = rr.max(EJECTA_INNER * rc);
                 let peak = (rc * rc - inner * inner).sqrt().max(1e-9);
                 let path = shell_path(r, inner, rc) / peak;
-                let (clump, iron) = sample_noise(clumps, dx / rf, dy / rf);
-                let finger_boost = (0.7 + 1.2 * p.max(0.0) / 0.25).min(2.0);
-                let hollow = ease::smoothstep((r / rc - 0.45) / 0.4);
-                let v = hollow * path * path * (0.08 + 3.0 * clump * clump * clump) * finger_boost;
-                // Iron sits in a broad patch, broken up by the clumps.
+                // Radial filaments: noise fine in angle, slow along the radius, so the
+                // ejecta streak outward like the fingers they are.
+                let (ux, uy) = (dx / r.max(1e-9), dy / r.max(1e-9));
+                let q = r / rf;
+                let streak = value_noise(salt, STREAK * ux + 1.3 * q, STREAK * uy - 1.3 * q, 1.0);
+                let texture = 0.3 + 1.1 * streak * streak;
+                let finger_boost = (0.55 + 2.0 * p.max(0.0) / 0.25).min(2.4);
+                let hollow = ease::smoothstep((q / (rc / rf) - 0.45) / 0.4);
+                let v = hollow * path * path * texture * finger_boost;
+                // Element map: broad comoving patches (Chandra false colour).
+                let (o_rich, fe_rich) = sample_noise(clumps, dx / rf, dy / rf);
                 let th = a as f64 / ANGLES as f64 * TAU;
                 let sector = 1.0
                     - ease::smoothstep(
                         (sciart_core::geom::wrap_angle(th - IRON_AT).abs() - IRON_HALF * 0.5)
                             / IRON_HALF,
                     );
-                (v, iron * (0.4 + 0.9 * sector) > 0.62)
+                let element = if fe_rich * (0.4 + 0.9 * sector) > 0.6 {
+                    Element::Iron
+                } else if o_rich > 0.6 {
+                    Element::Oxygen
+                } else {
+                    Element::Silicon
+                };
+                (v, element)
             } else {
-                (0.0, false)
+                (0.0, Element::Silicon)
             };
             let kv = kg.get(i).copied().unwrap_or(0.0);
             let iv = ig.get(i).copied().unwrap_or(0.0);
-            let l_rim = t_rim.level((rim as f32) * env32);
-            let l_ej = t_ej.level((ej as f32) * env32);
+            let l_rim = t_rim.level((rim as f32) * env32).min(RIM_MAX);
+            let l_ej = t_ej.level((ej as f32) * env32).min(EJECTA_MAX);
             let l_kn = t_kn.level((kv + 0.5 * ej as f32 * kv.min(1.0)) * env32);
-            let l_fe = t_kn.level(iv * env32).min(200);
-            // Ejecta hues stop short of Ferroin's azure top, which is the rim's.
-            let l_ej = l_ej.min(160);
-            let l_kn = l_kn.min(205);
+            let l_fe = t_kn.level(iv * env32);
             let best = l_rim.max(l_ej).max(l_kn).max(l_fe);
             if f64::from(best) < ink::MIN_VISIBLE_LEVEL {
                 return Ink::BLANK;
             }
             if best == l_rim {
-                Ink::new(Role::Ramp(Ramp::Cobalt), l_rim)
+                Ink::new(Role::Ramp(RIM), l_rim)
             } else if best == l_fe {
-                Ink::new(Role::Ramp(Ramp::Sulfur), l_fe)
+                Ink::new(Role::Ramp(IRON), l_fe)
             } else if best == l_kn {
-                Ink::new(Role::Ramp(Ramp::Ferroin), l_kn)
-            } else if iron {
-                Ink::new(Role::Ramp(Ramp::Sulfur), (f64::from(l_ej) * 0.85) as u8)
+                Ink::new(Role::Ramp(SILICON), l_kn)
             } else {
-                Ink::new(Role::Ramp(Ramp::Ferroin), l_ej)
+                let ramp = match element {
+                    Element::Iron => IRON,
+                    Element::Oxygen => OXYGEN,
+                    Element::Silicon => SILICON,
+                };
+                Ink::new(Role::Ramp(ramp), l_ej)
             }
         });
-        self.pixels.dissolve(30);
         // Background stars, then the central compact object and the flash.
         for &(x, y, l) in &self.stars {
             if self.pixels.get(x, y) == Some(Ink::BLANK) {
@@ -577,13 +630,14 @@ mod tests {
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(x, y).unwrap();
-                if ink.role == Role::Ramp(Ramp::Cobalt) {
+                if ink.role == Role::Ramp(RIM) {
                     let (dx, dy) = (
                         f64::from(x) + 0.5 - g.centre.0,
                         g.centre.1 - f64::from(y) - 0.5,
                     );
                     let r = dx.hypot(dy);
-                    assert!((r - rf).abs() <= 3.0, "rim pixel at {r} vs R_f {rf}");
+                    let tol = 3.0 + RIM_WOBBLE * rf;
+                    assert!((r - rf).abs() <= tol, "rim pixel at {r} vs R_f {rf}");
                     n += 1;
                 }
             }
