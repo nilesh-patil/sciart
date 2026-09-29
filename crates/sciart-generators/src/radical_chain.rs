@@ -11,8 +11,8 @@
 //!   `k_b = K_B0 · p · fuel · exp(E_A (1 − 1/T))` (H + O₂ is a collision with O₂, so ∝ p),
 //!   Arrhenius in the local temperature `T` (units of the wall temperature);
 //! - **terminates at the wall** on contact (the first explosion limit's mechanism), or
-//! - **recombines in the gas** at `K_T3 · p` (three-body) plus `K_RR · n/CAPACITY`
-//!   (radical–radical, the flame's own quench), leaving water.
+//! - **recombines in the gas** at `K_T3 · p²` (three-body, H + O₂ + M: ∝ [O₂][M]) plus
+//!   `K_RR · n/CAPACITY` (radical–radical, the flame's own quench), leaving water.
 //!
 //! The diffusion coefficient falls as `1/p` (mean free path), so at low pressure the
 //! walls catch radicals faster than they branch and nothing happens; at `p = 1` (the
@@ -58,9 +58,10 @@ pub(crate) const CAPACITY: usize = 4000;
 pub(crate) const K_B0: f64 = 1.2;
 /// Activation energy in units of the wall temperature.
 const E_A: f64 = 4.0;
-/// Three-body recombination per unit pressure and radical–radical recombination at a
-/// full pool (per second).
-const K_T3: f64 = 0.15;
+/// Three-body recombination per unit pressure squared (it overtakes branching, ∝ p, at
+/// the second limit p = K_B0 / K_T3 = 12, far above the sweep) and radical–radical
+/// recombination at a full pool (per second).
+const K_T3: f64 = 0.1;
 const K_RR: f64 = 4.0;
 /// Initiation (H₂ + O₂ → HO₂ + H) rate at full fuel, radicals per second.
 const K_INIT: f64 = 6.0;
@@ -505,7 +506,7 @@ impl RadicalChain {
     fn rates(&self, p: f64) -> Rates {
         Rates {
             k_b0: K_B0 * p,
-            k_t: K_T3 * p,
+            k_t: K_T3 * p * p,
             diff: diffusion(p),
             heat: true,
         }
@@ -794,10 +795,30 @@ mod tests {
     fn cold(k_b0: f64, p: f64) -> Rates {
         Rates {
             k_b0,
-            k_t: K_T3 * p,
+            k_t: K_T3 * p * p,
             diff: diffusion(p),
             heat: false,
         }
+    }
+
+    #[test]
+    fn chn_a8_three_body_loss_grows_as_p_squared_and_relative_to_branching_as_p() {
+        let g = RadicalChain::default();
+        for p in [0.3, P_LOW, 1.0, P_HIGH] {
+            let (r1, r2) = (g.rates(p), g.rates(2.0 * p));
+            let close = |a: f64, b: f64| (a - b).abs() <= 1e-12 * b.abs();
+            // H + O₂ + M: one power of p for O₂, one for the third body.
+            assert!(
+                close(r2.k_t, 4.0 * r1.k_t),
+                "p {p}: k_t {} -> {}",
+                r1.k_t,
+                r2.k_t
+            );
+            assert!(close(r2.k_b0, 2.0 * r1.k_b0), "p {p}: branching is ∝ p");
+            assert!(close(r2.k_t / r2.k_b0, 2.0 * (r1.k_t / r1.k_b0)), "p {p}");
+        }
+        // The second limit (three-body loss = branching) lies far above the sweep.
+        const { assert!(K_B0 / K_T3 > 3.0 * P_HIGH) };
     }
 
     #[test]
