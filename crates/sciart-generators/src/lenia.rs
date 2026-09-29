@@ -548,20 +548,19 @@ impl Lenia {
     }
 }
 
-/// Two warm hues for one creature (SPEC-002 Inks, Round 3): the thin outer membrane and
-/// halo rose (Eosin), the dense core amber to pale gold (Ember), crossing at matching
-/// lightness so the body reads as one luminous animal.
+/// One muted warm ramp for the creature (M14, ADR-0017; replaces Round 3's rose membrane):
+/// `Ramp(Ember)` at `0.14 + 0.81·√v` (blank below v = 0.02), so the thin membrane is a dim ember, the dense core
+/// amber to pale gold, on a black floor.
 fn lenia_ink(v: f32) -> Ink {
-    let v = f64::from(v);
+    let v = f64::from(v).clamp(0.0, 1.0);
     if v < 0.02 {
+        return Ink::BLANK;
+    }
+    let ink = ink::ramp(Ramp::Ember, 0.14 + 0.81 * v.sqrt());
+    if f64::from(ink.level) < ink::MIN_VISIBLE_LEVEL {
         Ink::BLANK
-    } else if v < 0.3 {
-        ink::ramp(Ramp::Eosin, 0.14 + 0.46 * (v / 0.3).powf(0.7))
     } else {
-        ink::ramp(
-            Ramp::Ember,
-            0.58 + 0.42 * ((v - 0.3) / 0.7).min(1.0).powf(0.8),
-        )
+        ink
     }
 }
 

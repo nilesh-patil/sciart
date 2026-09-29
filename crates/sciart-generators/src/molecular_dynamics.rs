@@ -109,7 +109,7 @@ const CAPTIONS: [&str; 2] = ["cool atoms cling", "hot atoms scatter"];
 // The look (SPEC-002 molecular_dynamics, Draw). Atoms are round braille discs of this
 // radius, σ: under half the LJ contact distance (≈ 0.56 σ), so touching atoms keep a thin
 // dark seam and a crystal reads as a lattice of beads rather than a mosaic of tiles.
-const ATOM_R: f64 = 0.42;
+const ATOM_R: f64 = 0.25;
 /// Kinetic energy → colour (MD-A6): `u = ln(1 + e/E_KNEE)/ln(1 + E_TOP/E_KNEE)`
 /// ([`heat_u`]), drawn on the Plasma ramp from [`HEAT_FLOOR`]: the cold phase (ē ≈ 0.25,
 /// u ≈ 0.23) is a deep violet, the hot gas (ē = 1, u ≈ 0.59) a bright lavender, the
@@ -118,10 +118,9 @@ const ATOM_R: f64 = 0.42;
 /// and its many cold blues.
 const E_KNEE: f64 = 0.4;
 const E_TOP: f64 = 3.0;
-/// Plasma-ramp position `clamp(HEAT_OFFSET + HEAT_GAIN·u, HEAT_FLOOR, 1)`: the cold phase
+/// Colour value `clamp(HEAT_OFFSET + HEAT_GAIN·u, HEAT_FLOOR, 1)`: the cold phase
 /// (u ≈ 0.23) at 0.40, the hot gas (u ≈ 0.59) at 0.87, and a crystal at rest never below
 /// 0.35, so cold atoms stay clearly visible.
-const HEAT_RAMP: Ramp = Ramp::Plasma;
 const HEAT_OFFSET: f64 = 0.1;
 const HEAT_GAIN: f64 = 1.3;
 const HEAT_FLOOR: f64 = 0.35;
@@ -131,13 +130,17 @@ const REL_FLOOR: f64 = 0.3;
 /// `e/T` at which an atom leaves the floor, and the span above that to the top (MD-A9).
 const REL_FROM: f64 = 0.7;
 const REL_SPAN: f64 = 0.65;
-/// Atoms at or above this ramp value light their four neighbouring pixels at `HALO_V`
-/// of their level (MD-A10).
-const HALO_FROM: f64 = 0.9;
-const HALO_V: f64 = 0.4;
-/// The solid body pixel under each bead is at this fraction of the bead's level, so the
-/// braille dots on top still read as a lit sphere (MD-A10).
-const BODY_V: f64 = 0.85;
+/// M14 (ADR-0017): atoms are small beads in `Blackbody`, the colour value `v ∈ [0.3, 1]`
+/// mapped linearly onto levels `ATOM_LO..=ATOM_TOP` (≈ 3000 K … 8000 K): the calm bulk a
+/// warm orange, the hottest atoms near white.
+const ATOM_LO: f64 = 90.0;
+const ATOM_TOP: f64 = 165.0;
+
+/// The `Blackbody` level of colour value `v`.
+fn atom_level(v: f64) -> u8 {
+    let t = ((v - REL_FLOOR) / (1.0 - REL_FLOOR)).clamp(0.0, 1.0);
+    ink::level(ATOM_LO + (ATOM_TOP - ATOM_LO) * t)
+}
 /// An atom's colour follows its kinetic energy smoothed over this time (s): the
 /// instantaneous energy of one atom is exponentially distributed, so unsmoothed a crystal
 /// at one temperature reads as speckle.
@@ -155,19 +158,17 @@ const TRAIL_WHITE: f32 = 0.25;
 /// Smoothed heat above which an atom streaks: the cold phase sits near 0.25, the hot gas
 /// near 1.
 const E_STREAK: f64 = 0.5;
-const TRAIL_MAX: f64 = 0.12;
-/// The streaks' top level, `TRAIL_MAX` of the ramp: in ASCII only pixels up to it are `.`.
+/// The streaks' top level: in ASCII only pixels up to it are `.`.
 const STREAK_TOP: u8 = 31;
-/// Streak pixels whose tone level is below this are left empty (MD-A6): the faint fringe
-/// of a streak was a scatter of near-black navy half-blocks beside the beads.
-const TRAIL_CUT: u8 = 64;
 
 // The Maxwell–Boltzmann inset (MD-A7): one speed bin per panel column.
 const INSET_W: i32 = 26;
 const INSET_H: i32 = 6;
 /// Smallest canvas that gets the inset: below it the panel would cover over a tenth of the
 /// box and its bars and curve merge into one braille blob.
-const INSET_MIN: (u16, u16) = (100, 30);
+/// M14 (ADR-0017): the inset is retired, so no canvas gets it; the histogram is still
+/// kept for MD-A7.
+const INSET_MIN: (u16, u16) = (u16::MAX, u16::MAX);
 const BINS: usize = INSET_W as usize;
 /// Speed range of the bins; the last bin also holds every faster atom.
 const V_MAX: f64 = 4.0;
@@ -191,10 +192,12 @@ pub(crate) fn heat_u(e: f64) -> f64 {
 /// The colour of kinetic energy `e` (MD-A6): Plasma ramp at `clamp(0.1 + 1.3·u(e), 0.35,
 /// 1)`, deep violet (cold) → lavender → near white (hot). False colour.
 pub(crate) fn heat_ink(e: f64) -> Ink {
-    ink::ramp(
-        HEAT_RAMP,
-        (HEAT_GAIN * heat_u(e) + HEAT_OFFSET).clamp(HEAT_FLOOR, 1.0),
-    )
+    Ink::new(Role::Blackbody, atom_level(heat_value(e)))
+}
+
+/// The colour value of kinetic energy `e`: `clamp(0.1 + 1.3·u(e), 0.35, 1)` (MD-A6).
+pub(crate) fn heat_value(e: f64) -> f64 {
+    (HEAT_GAIN * heat_u(e) + HEAT_OFFSET).clamp(HEAT_FLOOR, 1.0)
 }
 
 /// An atom's colour relative to the live temperature `t` (MD-A9): Plasma at
@@ -207,12 +210,17 @@ pub(crate) fn heat_ink(e: f64) -> Ink {
 /// an absolute scale sank to one dim indigo. A non-positive or NaN `t` reads as the floor.
 /// False colour; the absolute temperature is the readout's job.
 pub(crate) fn relative_heat_ink(e: f64, t: f64) -> Ink {
+    Ink::new(Role::Blackbody, atom_level(relative_heat(e, t)))
+}
+
+/// The colour value in `[REL_FLOOR, 1]` behind [`relative_heat_ink`] (MD-A9).
+pub(crate) fn relative_heat(e: f64, t: f64) -> f64 {
     let u = if t > 0.0 && e.is_finite() {
         ((e / t - REL_FROM) / REL_SPAN).clamp(0.0, 1.0)
     } else {
         0.0
     };
-    ink::ramp(HEAT_RAMP, REL_FLOOR + (1.0 - REL_FLOOR) * u * u)
+    REL_FLOOR + (1.0 - REL_FLOOR) * u * u
 }
 
 /// Exact 2-D Maxwell–Boltzmann probability of each speed bin at temperature `t`, the
@@ -676,15 +684,8 @@ impl MolecularDynamics {
     /// Rebuild the picture: streaks, then the atoms' beads, then the inset (the M10 raster
     /// convention: `render` only blits).
     fn rasterise(&mut self) {
-        let (glow, tone) = (&self.glow, &self.tone);
-        self.pixels.shade(|x, y| {
-            let level = tone.level(glow.get(x, y).unwrap_or(0.0));
-            if level < TRAIL_CUT {
-                Ink::BLANK
-            } else {
-                ink::ramp(Ramp::Plasma, TRAIL_MAX * f64::from(level) / 255.0)
-            }
-        });
+        // M14 (ADR-0017): no streaks and no solid bodies: the beads alone on black.
+        self.pixels.clear();
         // The panel and its one-cell margin, in cells: atoms pass behind it.
         let panel = self
             .view
@@ -701,7 +702,6 @@ impl MolecularDynamics {
             let (dx, dy) = (2.0 * px - 0.5, 2.0 * py - 0.5);
             let ink = relative_heat_ink(self.heat[i], t_now);
             paint_atom(&mut self.atoms, dx, dy, r, ink, panel);
-            paint_body(&mut self.pixels, (px, py), ink);
         }
         self.plot.clear();
         if let Some((x0, _)) = self.view.inset {
@@ -744,36 +744,6 @@ impl MolecularDynamics {
             }
         }
     }
-}
-
-/// The solid body of an atom on the half-block layer (MD-A10): the one pixel holding its
-/// centre, at [`BODY_V`] of the bead's level. Under the braille bead this fills the bead's
-/// core cell solid (a braille cell over the layer takes its stronger pixel as background),
-/// so an atom reads as a bold filled sphere, while neighbours ≈ 2 pixels apart keep dark
-/// cells between them and the lattice stays legible. An atom at or above [`HALO_FROM`] also
-/// lights its four neighbouring pixels at [`HALO_V`] of its level, a small glow that makes
-/// the hottest atoms stand out. The body never dims a brighter pixel.
-fn paint_body(pixels: &mut Pixels, c: (f64, f64), ink: Ink) {
-    if !(c.0.is_finite() && c.1.is_finite()) {
-        return;
-    }
-    let level = f64::from(ink.level);
-    let mut put = |x: i32, y: i32, v: f64| {
-        let v = Ink::new(ink.role, (level * v).round() as u8);
-        if pixels
-            .get(x, y)
-            .is_some_and(|p| p.role == Role::Background || p.level < v.level)
-        {
-            pixels.set(x, y, v);
-        }
-    };
-    let (x, y) = (c.0.floor() as i32, c.1.floor() as i32);
-    if level / 255.0 >= HALO_FROM {
-        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            put(x + dx, y + dy, HALO_V);
-        }
-    }
-    put(x, y, BODY_V);
 }
 
 /// A round bead of radius `r` dots centred at dot `(cx, cy)`: dots within `CORE·r` at
@@ -1271,8 +1241,14 @@ mod tests {
         assert!(lines.iter().all(|l| l.is_ascii()));
         assert!(lines[29].contains("T 0."), "{}", lines[29]);
         // Beads fall back to dot counts; streaks are `.`.
-        assert!(frame.cells().iter().any(|c| c.ch == '#' || c.ch == '+'));
-        assert!(lines[0].contains("speeds") && lines[0].contains("Maxwell-Boltzmann"));
+        assert!(
+            frame
+                .cells()
+                .iter()
+                .any(|c| c.ch == '#' || c.ch == '+' || c.ch == ':')
+        );
+        // M14: no inset.
+        assert!(!lines[0].contains("speeds"));
     }
 
     #[test]
@@ -1297,8 +1273,9 @@ mod tests {
         // the hot gas sit far apart, so the hot/cold story reads.
         let level = |e: f64| {
             let ink = heat_ink(e);
-            assert_eq!(ink.role, Role::Ramp(Ramp::Plasma));
-            f64::from(ink.level) / 255.0
+            assert_eq!(ink.role, Role::Blackbody);
+            assert!(f64::from(ink.level) <= ATOM_TOP);
+            heat_value(e)
         };
         assert!((level(0.0) - 0.35).abs() < 0.005);
         assert!((level(0.25) - 0.40).abs() < 0.02, "{}", level(0.25));
@@ -1319,21 +1296,11 @@ mod tests {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
         }
+        // M14: no streak or body pixels; the beads alone.
         let px = g.pixels.pixel_size();
-        let mut streaks = 0;
-        // No faint fringe: a streak pixel is at least its cut level (MD-A6).
-        let cut = ink::ramp(Ramp::Plasma, TRAIL_MAX * f64::from(TRAIL_CUT) / 255.0).level;
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
-                let p = g.pixels.get(x, y).unwrap();
-                match p.role {
-                    Role::Ramp(Ramp::Plasma) => {
-                        assert!(p.level >= cut, "faint streak pixel {}", p.level);
-                        streaks += 1;
-                    }
-                    Role::Background => {}
-                    r => panic!("unexpected {r:?}"),
-                }
+                assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK));
             }
         }
         let dots = g.atoms.dot_size();
@@ -1341,7 +1308,7 @@ mod tests {
             .flat_map(|y| (0..i32::from(dots.width())).map(move |x| (x, y)))
             .filter(|&(x, y)| g.atoms.is_lit(x, y))
             .count();
-        assert!(lit > 4 * g.n() && streaks > 0, "{lit} {streaks}");
+        assert!(lit > 2 * g.n(), "{lit}");
     }
 
     #[test]
@@ -1422,43 +1389,10 @@ mod tests {
     }
 
     #[test]
-    fn md_a8_atoms_start_clear_of_the_inset_and_pass_behind_it() {
-        for (w, h) in [(120, 40), (100, 30), (200, 50)] {
-            let (mut g, mut ctx) = fresh(w, h, 5);
-            let (x0, _) = g.view.inset.expect("inset");
-            // The panel and its one-cell margin, in cells.
-            let inside = |c: i32, r: i32| (x0 - 1..x0 + INSET_W + 1).contains(&c) && r <= INSET_H;
-            for i in 0..g.n() {
-                let (px, py) = g.to_pixel(g.x[i], g.y[i]);
-                let (c, r) = (px.floor() as i32, (py / 2.0).floor() as i32);
-                assert!(!inside(c, r), "{w}x{h}: atom {i} starts at ({c}, {r})");
-            }
-            // Whatever the atoms do, no bead dot or streak pixel is drawn in the panel.
-            let mut t = 0.0;
-            for until in [0.0, 5.0, 60.0] {
-                while t < until {
-                    g.update(0.05, &mut ctx);
-                    g.prepare();
-                    t += 0.05;
-                }
-                for y in 0..2 * (INSET_H + 1) {
-                    for x in x0 - 1..x0 + INSET_W + 1 {
-                        assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK), "{w}x{h} t {t}");
-                    }
-                }
-                for cy in 0..=INSET_H {
-                    for cx in x0 - 1..=x0 + INSET_W {
-                        assert_eq!(g.atoms.cell_mask(cx, cy), Some(0), "{w}x{h} t {t}");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
     fn md_a9_atoms_are_coloured_relative_to_the_live_temperature() {
-        let lv = |e: f64, t: f64| f64::from(relative_heat_ink(e, t).level) / 255.0;
-        assert_eq!(relative_heat_ink(1.0, 1.0).role, Role::Ramp(Ramp::Plasma));
+        let lv = relative_heat;
+        assert_eq!(relative_heat_ink(1.0, 1.0).role, Role::Blackbody);
+        assert!(f64::from(relative_heat_ink(9.0, 1.0).level) <= ATOM_TOP);
         assert!((lv(0.0, 0.3) - REL_FLOOR).abs() < 0.005);
         assert!((lv(0.3 * REL_FROM, 0.3) - REL_FLOOR).abs() < 0.005);
         // The mean atom is calm (≈ 0.45), 1.35× the mean is white.
@@ -1523,69 +1457,34 @@ mod tests {
     }
 
     #[test]
-    fn md_a10_atoms_have_solid_bodies_and_the_hottest_a_halo() {
-        // One solid body pixel at BODY_V of the bead's ink, and a four-pixel halo only for
-        // atoms at or above HALO_FROM; the body never dims a brighter pixel.
-        let mut px = Pixels::default();
-        px.resize(Size::new(20, 10));
-        let cool = relative_heat_ink(0.3, 0.3);
-        paint_body(&mut px, (4.3, 4.7), cool);
-        assert_eq!(
-            px.get(4, 4).unwrap().level,
-            (f64::from(cool.level) * BODY_V).round() as u8
-        );
-        assert_eq!(px.get(5, 4), Some(Ink::BLANK), "a cool atom has no halo");
-        let hot = relative_heat_ink(1.0, 0.3);
-        assert!(f64::from(hot.level) / 255.0 >= HALO_FROM);
-        paint_body(&mut px, (10.5, 10.5), hot);
-        let body = px.get(10, 10).unwrap().level;
-        for (x, y) in [(9, 10), (11, 10), (10, 9), (10, 11)] {
-            let h = px.get(x, y).unwrap().level;
-            assert!(h > 0 && h < body, "halo ({x},{y}) {h} vs {body}");
-        }
-        paint_body(&mut px, (10.5, 10.5), cool);
-        assert_eq!(
-            px.get(10, 10).unwrap().level,
-            body,
-            "never dims a brighter pixel"
-        );
-        // In the scene the bodies carry the contrast: at 5 s (condensed) the brightest body
-        // pixels (top 2 %) are ≥ 2× the median body pixel and near the top of the ramp.
+    fn md_a10_no_bodies_no_halos_the_beads_alone_on_black() {
+        // M14 (ADR-0017): at 5 s (condensed) no pixel is lit and every lit dot is a
+        // `Blackbody` bead at most `ATOM_TOP`; the hottest atoms are the brightest.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut g = MolecularDynamics::default();
         g.resize(size, &mut ctx);
-        g.prepare();
         for _ in 0..(5.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
-            g.prepare();
         }
-        let t = g.temperature();
-        let mut bodies: Vec<u8> = (0..g.n())
-            .filter_map(|i| {
-                let (x, y) = g.to_pixel(g.x[i], g.y[i]);
-                g.pixels.get(x.floor() as i32, y.floor() as i32)
-            })
-            .filter(|p| p.role == Role::Ramp(Ramp::Plasma))
-            .map(|p| p.level)
+        g.prepare();
+        let px = g.pixels.pixel_size();
+        let lit_px = (0..i32::from(px.height()))
+            .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.pixels.get(x, y) != Some(Ink::BLANK))
+            .count();
+        assert_eq!(lit_px, 0);
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut c);
+        let beads: Vec<u8> = c
+            .cells()
+            .iter()
+            .filter(|cell| cell.ink.role == Role::Blackbody)
+            .map(|cell| cell.ink.level)
             .collect();
-        bodies.sort_unstable();
-        let n = bodies.len();
-        assert!(n > g.n() / 2, "{n} bodies");
-        let (median, top) = (bodies[n / 2], bodies[n - 1 - n / 50]);
-        assert!(
-            u32::from(top) >= 2 * u32::from(median) && top >= 200,
-            "median {median}, top {top} (T {t})"
-        );
-    }
-
-    #[test]
-    fn md_a6_atoms_outshine_their_streaks() {
-        // Luminance order holds in every theme (Mono maps both roles by level): an atom
-        // hot enough to streak is brighter than the brightest streak, even at its rim.
-        // Any atom is at least the relative colour's floor (MD-A9).
-        let atom = f64::from(relative_heat_ink(0.0, 1.0).level);
-        assert!(TRAIL_MAX * 255.0 < RIM * atom, "{atom}");
+        assert!(beads.len() > 50, "{} bead cells", beads.len());
+        assert!(beads.iter().all(|&l| f64::from(l) <= ATOM_TOP));
+        assert!(c.cells().iter().all(|cell| cell.bg == Ink::BLANK));
     }
 
     #[test]
