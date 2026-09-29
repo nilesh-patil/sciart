@@ -21,6 +21,10 @@ macro_rules! registry {
     };
 }
 
+/// Shared `pub(crate)` models used by several scenes (not scenes themselves; GEN-R3).
+pub(crate) mod cahn_hilliard;
+pub(crate) mod laplacian_growth;
+
 registry![
     action_potential,
     aurora,
@@ -28,6 +32,7 @@ registry![
     black_hole,
     boids_flocking,
     brownian_motion,
+    catalytic_surface,
     constellation_map,
     cosmic_microwave_background,
     cosmic_web,
@@ -43,6 +48,8 @@ registry![
     gray_scott,
     ising_model,
     jwst_unfolding,
+    kelvin_helmholtz,
+    lichtenberg_discharge,
     liesegang_rings,
     light_echo,
     mars_rover,
@@ -55,6 +62,8 @@ registry![
     physarum,
     planetary_nebula,
     pulsar,
+    quantum_double_slit,
+    radical_chain,
     radioactive_decay,
     relativistic_jet,
     rocket_launch,
@@ -62,6 +71,7 @@ registry![
     solar_surface,
     solar_system,
     spacetime_grid,
+    spinodal_decomposition,
     spiral_galaxy,
     starfield,
     stellar_nursery,

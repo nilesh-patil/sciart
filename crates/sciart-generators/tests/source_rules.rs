@@ -33,12 +33,23 @@ fn rust_sources(dir: &Path) -> Vec<PathBuf> {
 fn gen_r3_every_scene_module_file_is_registered_and_vice_versa() {
     // GEN-R3: one module file + one registry line. A file without a registry line
     // would silently escape the contract/property/snapshot suites.
+    // Shared models are declared `pub(crate) mod <name>;` in lib.rs, outside the registry.
+    let lib = fs::read_to_string(crate_dir().join("src/lib.rs")).expect("lib.rs");
+    let shared: BTreeSet<String> = lib
+        .lines()
+        .filter_map(|l| l.trim().strip_prefix("pub(crate) mod ")?.strip_suffix(';'))
+        .map(str::to_owned)
+        .collect();
     let files: BTreeSet<String> = rust_sources(&crate_dir().join("src"))
         .iter()
         .filter_map(|p| p.file_stem()?.to_str().map(str::to_owned))
-        .filter(|stem| stem != "lib")
+        .filter(|stem| stem != "lib" && !shared.contains(stem))
         .collect();
     let registered: BTreeSet<String> = registry().iter().map(|e| e.meta.name.to_owned()).collect();
+    assert!(
+        shared.is_disjoint(&registered),
+        "GEN-R3: a shared model cannot also be a registered scene"
+    );
     assert_eq!(
         files, registered,
         "GEN-R3: src/<name>.rs files and registry![...] entries must match one-to-one"
