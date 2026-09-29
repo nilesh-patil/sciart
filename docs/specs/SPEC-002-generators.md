@@ -8,13 +8,13 @@ and extends it for real-time animation.
 ## Registry
 - **GEN-R1** `registry() -> &'static [Entry]` lists every generator; `Entry { meta: &'static Meta, build: fn() -> Box<dyn Generator> }`. Names are unique, `snake_case`, and sorted.
 - **GEN-R2** `find(name) -> Option<&'static Entry>` is exact-match on `meta.name`, or on a retired name (GEN-R14).
-- **GEN-R3** Adding a generator requires exactly: one module file + one line in the registry macro. The contract suite picks it up automatically.
+- **GEN-R3** Adding a generator requires exactly: one module file + one line in the registry macro. The contract suite picks it up automatically. Models shared by several scenes live in `src/shared/` (the one `mod shared` block in `lib.rs`), are `pub(crate)` and never registered.
 
 ## Stability contract (every registered generator)
 - **GEN-R4** Never panics for any `Size` with `w, h >= 1` across any sequence of `resize`, `update(dt)` (`0 <= dt <= 0.25`), and `render` calls — including resizes between any two calls.
 - **GEN-R5** Dimension-dependent state is rebuilt in `resize`; `update`/`render` must tolerate the smallest size (1×1).
 - **GEN-R6** Determinism: same seed + same call sequence ⇒ byte-identical `Canvas::to_lines()`, in every build profile: a frame must not depend on the optimiser. Rust never contracts to FMA or reorders float operations, but LLVM does fuse `sin`/`cos` pairs by inlining context, so all trigonometry goes through `sciart_core::trig` (CORE-R90), enforced by `clippy.toml` `disallowed-methods`; the snapshot suite runs in both dev and release builds (TEST-R9).
-- **GEN-R7** No wall-clock reads (`Instant`, `SystemTime`) and no global RNG (`rand::rng()`/`thread_rng`) inside generators; time comes from `dt`/`ctx.time`, randomness from `ctx.rng`. Enforced by `clippy.toml` `disallowed-methods`.
+- **GEN-R7** No wall-clock reads (`Instant`, `SystemTime`) and no global RNG (`rand::rng()`/`thread_rng`) inside generators; time comes from `dt`/`ctx.time`, randomness from `ctx.rng`. Enforced by `clippy.toml` `disallowed-methods` and a source scan of core and generators, `src/shared/` included.
 - **GEN-R8** Performance: `update(1/60)` + `render` < 5 ms at 200×50 in release (criterion bench per generator). Means hide act hand-overs, so the bench also times the slowest known frames (group `worst`: the slowest of 3 frames around each hand-over or peak) and the resize hitches (group `resize`), and `examples/worst_frame` (`pixi run rs-worst`) replays every scene and reports its worst single frame: keep it < 2 ms at 200×50 and < 5 ms at 500×150. A resize is a one-off and may take longer (black_hole's geodesic trace ≈ 14 ms); precompute there, or amortise over the frames before the result is needed, never in one frame of `update`.
 - **GEN-R9** Motion: over 1 simulated second at 200×50 the rendered frame changes (a scene is an animation, not a still). Verified by the contract suite.
 - **GEN-R10** Unicode glyphs must have an ASCII fallback (`Glyph::new(u, a)`); ASCII mode output is pure ASCII.
