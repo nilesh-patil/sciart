@@ -25,6 +25,12 @@ macro_rules! registry {
 pub(crate) mod cahn_hilliard;
 pub(crate) mod laplacian_growth;
 
+/// Models shared by several M13 scenes (`pub(crate)`, not scenes, so not registered).
+mod shared {
+    pub(crate) mod plume;
+    pub(crate) mod vortex_advect;
+}
+
 registry![
     action_potential,
     aurora,
@@ -33,6 +39,8 @@ registry![
     boids_flocking,
     brownian_motion,
     catalytic_surface,
+    comet_breakup,
+    comet_tails,
     constellation_map,
     cosmic_microwave_background,
     cosmic_web,
@@ -46,7 +54,10 @@ registry![
     globular_cluster,
     gravitational_lensing,
     gray_scott,
+    hurricane,
+    io_volcanoes,
     ising_model,
+    jupiter_storms,
     jwst_unfolding,
     kelvin_helmholtz,
     lichtenberg_discharge,
@@ -68,6 +79,8 @@ registry![
     relativistic_jet,
     rocket_launch,
     satellite_orbit,
+    saturn_rings,
+    solar_eruption,
     solar_surface,
     solar_system,
     spacetime_grid,
