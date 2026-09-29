@@ -295,6 +295,8 @@ pub struct SolarSystem {
     /// Trails and Saturn's rings.
     dots: Dots,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SolarSystem {
@@ -505,7 +507,7 @@ impl Generator for SolarSystem {
         self.orbits.resize(size);
         self.dots.resize(size);
         self.pixels.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -515,7 +517,13 @@ impl Generator for SolarSystem {
         for (frac, angle, _) in &mut self.belt {
             *angle = (*angle + angular_speed(*frac) * dt) % TAU;
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -547,6 +555,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut s = SolarSystem::default();
         s.resize(size, &mut Ctx::new(1, size));
+        s.prepare();
         s
     }
 
@@ -568,6 +577,7 @@ mod tests {
         for _ in 0..40 {
             for _ in 0..60 {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
             }
             for (i, p) in PLANETS.iter().enumerate() {
                 let (x, y) = s.planet_xy(i);
@@ -924,6 +934,7 @@ mod tests {
         for _ in 0..20 {
             for _ in 0..30 {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
             }
             for y in 0..100 {
                 for x in 0..200 {

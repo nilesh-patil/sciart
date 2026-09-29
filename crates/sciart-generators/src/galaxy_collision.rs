@@ -451,6 +451,8 @@ pub struct GalaxyCollision {
     pixels: Pixels,
     /// Distant field stars, normalized `[0, 1)²` (they do not zoom).
     sky: Vec<(f64, f64)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for GalaxyCollision {
@@ -468,6 +470,7 @@ impl Default for GalaxyCollision {
             tone: Tone::asinh(KNEE, WHITE),
             pixels: Pixels::default(),
             sky: Vec::new(),
+            dirty: false,
         }
     }
 }
@@ -780,7 +783,7 @@ impl Generator for GalaxyCollision {
             }
             None => self.restart(ctx),
         }
-        self.develop();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -799,7 +802,13 @@ impl Generator for GalaxyCollision {
             f.zoom = (f.zoom.ln() + (zoom.ln() - f.zoom.ln()) * k).exp();
             self.expose(dt);
         }
-        self.develop();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.develop();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -830,8 +839,10 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = GalaxyCollision::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(t / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         (g, ctx)
     }
@@ -950,15 +961,19 @@ mod tests {
         let mut ctx = Ctx::new(8, size);
         let mut g = GalaxyCollision::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let ra = A * (1.0 + E);
         let mut steps = 0;
         while g.sim.as_ref().unwrap().t + SIM_DT < CYCLE - 1e-9 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             steps += 1;
         }
         assert!((g.sim.as_ref().unwrap().separation() - ra).abs() > 0.1);
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let sim = g.sim.as_ref().unwrap();
         assert!(sim.t < 0.05, "t={} after {steps} steps", sim.t);
         assert!((sim.separation() - ra).abs() < 1e-3);
@@ -986,6 +1001,7 @@ mod tests {
         let t = g.sim.as_ref().unwrap().t;
         for small in [Size::new(120, 40), Size::new(80, 24)] {
             g.resize(small, &mut ctx);
+            g.prepare();
             let sim = g.sim.as_ref().unwrap();
             let n = sim.stars.len();
             assert_eq!(n, star_count(small));
@@ -998,6 +1014,7 @@ mod tests {
         }
         // A grow keeps it too (the next cycle starts with the new count).
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         let sim = g.sim.as_ref().unwrap();
         assert_eq!(sim.t, t, "a grow keeps the running encounter");
         let n2 = sim.stars.iter().filter(|s| s.gal == 1).count() as f64;
@@ -1138,8 +1155,10 @@ mod tests {
         let mut ctx = Ctx::new(9, size);
         let mut g = GalaxyCollision::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(40 * 60) {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             for c in &g.sim.as_ref().unwrap().cores {
                 let (x, y) = g.frame.pixel(c.pos);
                 assert!((-0.5..199.5).contains(&x) && (-0.5..99.5).contains(&y));
@@ -1248,8 +1267,10 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut g = GalaxyCollision::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..(20.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let px = g.pixels.pixel_size();
             let (w, h) = (i32::from(px.width()), i32::from(px.height()));
@@ -1322,11 +1343,13 @@ mod tests {
         assert_eq!(knots(&g), 0, "knots before the encounter");
         while g.sim.as_ref().unwrap().close.is_none() {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let t0 = g.sim.as_ref().unwrap().t;
         let (mut most, mut late) = (0, 0);
         while g.sim.as_ref().unwrap().t < t0 + 10.0 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let t = g.sim.as_ref().unwrap().t;
             if t > t0 + 3.0 {
                 most = most.max(knots(&g));

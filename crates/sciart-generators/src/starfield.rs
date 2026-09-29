@@ -129,6 +129,8 @@ pub struct Starfield {
     band: Vec<(f64, f64, Ink)>,
     /// Band stars plus the moving faint stars, rasterised every step.
     sky: Dots,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 fn star_count(size: Size) -> usize {
@@ -358,14 +360,20 @@ impl Generator for Starfield {
         self.paint_glow(size);
         self.scatter_band(size, &mut ctx.rng);
         self.sky.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         for s in &mut self.stars {
             s.x = geom::wrap(s.x + speed(s.layer) * dt, self.width);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -393,6 +401,7 @@ mod tests {
         let mut ctx = Ctx::new(3, size);
         let mut g = Starfield::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -411,6 +420,7 @@ mod tests {
             s.x = 0.0;
         }
         g.update(1.0, &mut ctx);
+        g.prepare();
         for s in &g.stars {
             let want = NEAR_SPEED / DIST[usize::from(s.layer) - 1];
             assert!((s.x - want).abs() < 1e-9, "layer {} moved {}", s.layer, s.x);
@@ -470,6 +480,7 @@ mod tests {
         let before = looks(&g);
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!(before, looks(&g), "a star changed its look");
         // What is drawn is that look: the last bright star drawn owns its cell, and a
@@ -514,6 +525,7 @@ mod tests {
         let (mut g, mut ctx) = built(size);
         let (band, glow) = (g.band.clone(), g.glow.clone());
         g.update(3.0, &mut ctx);
+        g.prepare();
         assert_eq!(band, g.band, "the band stars moved");
         let px = g.glow.pixel_size();
         for y in 0..i32::from(px.height()) {
@@ -643,6 +655,7 @@ mod tests {
             let mut ctx = Ctx::new(seed, size);
             let mut g = Starfield::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let (wf, hf) = (f64::from(w), f64::from(h));
             let ((cx, cy), a, b) = g.milky_way.galaxy(wf, hf);
             assert!(a > b && b > 0.0);
@@ -674,6 +687,7 @@ mod tests {
             // And it stays put: the glow does not move (STAR-A5), so neither does it.
             let before = g.glow.get(cx as i32, cy as i32);
             g.update(2.0, &mut ctx);
+            g.prepare();
             assert_eq!(before, g.glow.get(cx as i32, cy as i32));
         }
     }

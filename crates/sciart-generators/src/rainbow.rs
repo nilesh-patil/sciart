@@ -385,6 +385,8 @@ pub struct Rainbow {
     /// Canvas size (cells).
     cells: (f64, f64),
     t: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Rainbow {
@@ -621,9 +623,7 @@ impl Generator for Rainbow {
                 level: ctx.rng.random_range(RAIN_LEVEL.0..RAIN_LEVEL.1) as u8,
             });
         }
-        self.refresh();
-        self.paint();
-        self.rasterise_rain();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -640,9 +640,15 @@ impl Generator for Rainbow {
                 d.x -= w;
             }
         }
-        self.refresh();
-        self.paint();
-        self.rasterise_rain();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.refresh();
+            self.paint();
+            self.rasterise_rain();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -750,8 +756,10 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = Rainbow::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..120 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             assert!(g.rain.len() <= RAIN_CAP && g.rain.capacity() == RAIN_CAP);
         }
@@ -803,6 +811,7 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let bright = |g: &Rainbow| {
             // Mean level of bow pixels in the left, middle and right thirds (a `Phase`
             // pixel is at the bow's full level).
@@ -828,6 +837,7 @@ mod tests {
         assert!(first.iter().all(|&m| m > 0.0), "{first:?}");
         for _ in 0..(8.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let later = bright(&g);
         let change: f64 = first.iter().zip(&later).map(|(a, b)| (a - b).abs()).sum();
@@ -840,6 +850,7 @@ mod tests {
         let mut ctx = Ctx::new(3, size);
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (elev, _) = Rainbow::sky_state(0.0);
         let row = |d: f64| {
             // Pixel row `d`° above the antisolar point, straight up the middle.
@@ -891,6 +902,7 @@ mod tests {
             let mut ctx = Ctx::new(5, size);
             let mut g = Rainbow::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             // Find a moment of full and of dimmest sunlight within the first minute.
             let target = if sun_low { lo } else { hi };
             let t = (0..600)
@@ -931,6 +943,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let c = 41f64.to_radians().cos_det();
         let s = g.lut_at(c);
         assert!(s.bow > 0.5, "{s:?}");

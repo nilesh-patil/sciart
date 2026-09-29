@@ -192,6 +192,8 @@ pub struct CometBreakup {
     /// When the last fragment struck (s).
     last_strike: f64,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl CometBreakup {
@@ -227,6 +229,7 @@ impl CometBreakup {
             fire_tone: Tone::asinh(0.4, 3.0),
             last_strike: f64::NEG_INFINITY,
             pixels: Pixels::default(),
+            dirty: false,
         };
         g.reset();
         g
@@ -847,14 +850,20 @@ impl Generator for CometBreakup {
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         self.frame = (f64::from(px.width()), f64::from(px.height()));
-        self.compose();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt, &mut ctx.rng);
         }
-        self.compose();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.compose();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -879,6 +888,7 @@ mod tests {
         let mut g = CometBreakup::new();
         let mut ctx = Ctx::new(42, Size::new(100, 30));
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         (g, SplitMix64::new(9))
     }
 

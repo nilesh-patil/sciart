@@ -206,6 +206,8 @@ pub struct Noctilucent {
     /// Star positions (dots) and levels; replotted each step where the sky is dark enough.
     star_list: Vec<(f64, f64, u8)>,
     t: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// Smooth value noise in `[0, 1]` on a 90 km lattice.
@@ -550,16 +552,20 @@ impl Generator for Noctilucent {
             self.star_list.push((x, y, level as u8));
         }
         self.picture.resize(size);
-        self.step_field();
-        self.paint();
-        self.plot_stars();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.step_field();
-        self.paint();
-        self.plot_stars();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.step_field();
+            self.paint();
+            self.plot_stars();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -618,6 +624,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = Noctilucent::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -678,6 +685,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for step in 0..(2.0 * HALF_NIGHT * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if step % 97 != 0 {
                 continue;
             }
@@ -697,6 +705,7 @@ mod tests {
         let before = g.field.as_slice().to_vec();
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let changed = before
             .iter()
@@ -711,6 +720,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..300 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let ps = g.picture.pixel_size();
         let (mut ice, mut sum) = (0, 0.0);
@@ -746,6 +756,7 @@ mod tests {
         for _ in 0..16 {
             for _ in 0..(5.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let mut ice = 0;
             for y in 0..i32::from(ps.height()) {

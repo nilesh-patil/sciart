@@ -686,6 +686,8 @@ pub struct SpacetimeGrid {
     discs: Pixels,
     inset: Option<Inset>,
     trace: Dots,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SpacetimeGrid {
@@ -1059,12 +1061,18 @@ impl Generator for SpacetimeGrid {
             self.bin = Some(bin);
         }
         self.layout(size);
-        self.refresh();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.refresh();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.refresh();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1277,9 +1285,11 @@ mod tests {
             let mut g = SpacetimeGrid::default();
             let mut ctx = Ctx::new(6, size);
             g.resize(size, &mut ctx);
+            g.prepare();
             let Some(r) = g.inset else { continue };
             for _ in 0..240 {
                 g.update(4.0 * SIM_DT, &mut ctx);
+                g.prepare();
                 for y in r.y - 1..r.y + r.h {
                     for x in r.x - 1..=r.x + r.w {
                         assert_eq!(g.mesh.cell_mask(x, y), Some(0), "{w}×{h}: mesh at {x},{y}");
@@ -1292,6 +1302,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = SpacetimeGrid::default();
             g.resize(size, &mut Ctx::new(3, size));
+            g.prepare();
             let full = Inset::for_size(size).expect("inset").w;
             assert!(full >= 20, "{w}×{h}");
             assert_eq!(g.inset.map(|r| r.w), Some(full), "{w}×{h}");
@@ -1300,8 +1311,10 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(2, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..200 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let r = g.inset.expect("inset at 120×40");
         let bin = g.binary();
@@ -1323,6 +1336,7 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(1, Size::new(80, 24));
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let bin = g.binary();
         let cycle = bin.cycle();
         let (mut merger, mut last) = (0.0, None);
@@ -1355,9 +1369,11 @@ mod tests {
             let mut g = SpacetimeGrid::default();
             let mut ctx = Ctx::new(8, size);
             g.resize(size, &mut ctx);
+            g.prepare();
             let cycle = g.binary().cycle();
             for _ in 0..(cycle / (4.0 * SIM_DT)) as usize {
                 g.update(4.0 * SIM_DT, &mut ctx);
+                g.prepare();
                 for y in [0, i32::from(h) - 1] {
                     for x in 0..i32::from(w) {
                         assert_eq!(g.mesh.cell_mask(x, y), Some(0), "{w}×{h}: mesh at {x},{y}");
@@ -1415,6 +1431,7 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(5, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let bin = g.binary();
         let lift = RIM_LIFT * (bin.m1 + bin.m2);
         let mut frames = 0;
@@ -1496,6 +1513,7 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(5, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let bin = g.binary();
         // Mean and brightest on-screen mesh level over 40 frames of cycle time `from..to`.
         let mut over = |from: f64, to: f64| {
@@ -1572,6 +1590,7 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(5, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let bin = g.binary();
         let cycle = bin.cycle();
         // Mean and brightest on-screen mesh level over the 1 s window from `t`.
@@ -1625,6 +1644,7 @@ mod tests {
         );
         let mut g = SpacetimeGrid::default();
         g.resize(Size::new(80, 24), &mut Ctx::new(1, Size::new(80, 24)));
+        g.prepare();
         assert_eq!(g.cam.pitch, p);
     }
 
@@ -1664,8 +1684,10 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(3, Size::new(120, 40));
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         for _ in 0..30 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let bin = g.binary();
         let masses = bin.masses(g.t);
@@ -1686,6 +1708,7 @@ mod tests {
             let mut g = SpacetimeGrid::default();
             let mut ctx = Ctx::new(1, Size::new(w, h));
             g.resize(Size::new(w, h), &mut ctx);
+            g.prepare();
             (g.nx, g.ny)
         };
         let (small, big) = (lines(80, 24), lines(200, 50));

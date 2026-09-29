@@ -760,6 +760,8 @@ pub struct VoyagerJourney {
     /// The mission day and the craft's fix this frame, set by `rasterise`.
     today: f64,
     fix: Fix,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl VoyagerJourney {
@@ -784,6 +786,7 @@ impl VoyagerJourney {
             gains,
             today: LAUNCH,
             fix: Fix::default(),
+            dirty: false,
         }
     }
 
@@ -1157,14 +1160,20 @@ impl Generator for VoyagerJourney {
             inset.is_none_or(|r| !r.holds(cell.0, cell.1))
                 && log.is_none_or(|r| !r.holds(cell.0, cell.1))
         });
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         if dt.is_finite() && dt > 0.0 {
             self.t = geom::wrap(self.t + dt, self.timeline.total());
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1405,6 +1414,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut ctx = Ctx::new(3, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         for s in 0..43 {
             g.t = f64::from(s);
             g.rasterise();
@@ -1433,6 +1443,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = VoyagerJourney::new();
             g.resize(size, &mut Ctx::new(3, size));
+            g.prepare();
             for s in [0.0, 7.3, 18.9, 31.4] {
                 g.t = s;
                 g.rasterise();
@@ -1715,6 +1726,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = VoyagerJourney::new();
             g.resize(size, &mut Ctx::new(1, size));
+            g.prepare();
             g.t = KEY_T[5];
             g.rasterise();
             let f = g.fix;
@@ -1731,6 +1743,7 @@ mod tests {
     fn frame_at(size: Size, t: f64) -> (VoyagerJourney, Vec<String>) {
         let mut g = VoyagerJourney::new();
         g.resize(size, &mut Ctx::new(2, size));
+        g.prepare();
         g.t = t;
         g.rasterise();
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
@@ -1793,6 +1806,7 @@ mod tests {
             let mut g = VoyagerJourney::new();
             let mut ctx = Ctx::new(3, size);
             g.resize(size, &mut ctx);
+            g.prepare();
             let rect = g.inset.expect("inset").keep_out();
             let inside = |(x, y): (f64, f64)| rect.holds(x.round() as i32, y.round() as i32);
             // The map's rim: every orbit, the trail and the craft lie within it.
@@ -1804,6 +1818,7 @@ mod tests {
             for _ in 0..((TOUR + OUTWARD + BEYOND) / (6.0 * SIM_DT)) as usize {
                 for _ in 0..6 {
                     g.update(SIM_DT, &mut ctx);
+                    g.prepare();
                 }
                 let proj = g.proj;
                 for f in g.path.history(g.today, g.fix) {
@@ -1845,6 +1860,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = VoyagerJourney::new();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         let core = (99..=101)
             .flat_map(|x| (49..=51).map(move |y| (x, y)))
             .filter_map(|(x, y)| g.px.get(x, y))

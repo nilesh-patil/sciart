@@ -345,6 +345,8 @@ pub struct IoVolcanoes {
     glow: Glow,
     pixels: Pixels,
     warmed: bool,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl IoVolcanoes {
@@ -371,6 +373,7 @@ impl IoVolcanoes {
             glow: Glow::default(),
             pixels: Pixels::default(),
             warmed: false,
+            dirty: false,
         }
     }
 
@@ -871,15 +874,19 @@ impl IoVolcanoes {
         }
     }
 
-    fn compose(&mut self) {
-        let size = self.pixels.pixel_size();
-        let v = self.view;
-        // Fallout: one band of rows per frame, the display maps rebuilt once per cycle.
+    /// Fallout: one band of rows per step, the display maps rebuilt once per cycle. Part of
+    /// the step, so the bands keep their cadence however often a frame is drawn (GEN-R20).
+    fn fallout_band(&mut self) {
         if self.band == 0 {
             self.smooth_deposits();
         }
         self.paint_deposits(Some(self.band));
         self.band = (self.band + 1) % BANDS;
+    }
+
+    fn compose(&mut self) {
+        let size = self.pixels.pixel_size();
+        let v = self.view;
         let ground = &self.ground;
         self.pixels
             .shade(|x, y| ground.get(x, y).unwrap_or(Ink::BLANK));
@@ -1058,14 +1065,22 @@ impl Generator for IoVolcanoes {
         self.band = 0;
         self.build_canopy(0);
         self.build_canopy(1);
-        self.compose();
+        self.fallout_band();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt, &mut ctx.rng);
         }
-        self.compose();
+        self.fallout_band();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.compose();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1083,8 +1098,10 @@ mod tests {
         let mut g = IoVolcanoes::new();
         let mut ctx = Ctx::new(7, Size::new(w, h));
         g.resize(Size::new(w, h), &mut ctx);
+        g.prepare();
         for _ in 0..(secs / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g
     }

@@ -1866,6 +1866,8 @@ pub struct Aurora {
     patches: [LivePatch; PATCHES],
     live_patches: usize,
     view: View,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Aurora {
@@ -1882,6 +1884,7 @@ impl Aurora {
             patches: [LivePatch::default(); PATCHES],
             live_patches: 0,
             view: View::default(),
+            dirty: false,
         }
     }
 
@@ -2074,7 +2077,7 @@ impl Generator for Aurora {
         }
         self.view = View::new(size, &self.setting);
         self.update_patches();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -2091,7 +2094,13 @@ impl Generator for Aurora {
         }
         self.sample(dt);
         self.update_patches();
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -2147,6 +2156,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, Size::new(w, h));
         let mut a = Aurora::new();
         a.resize(Size::new(w, h), &mut ctx);
+        a.prepare();
         (a, ctx)
     }
 
@@ -2483,6 +2493,7 @@ mod tests {
         let (mut a, mut ctx) = scene(200, 50);
         for _ in 0..steps {
             a.update(0.25, &mut ctx);
+            a.prepare();
         }
         let mut canvas = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
         a.render(&mut canvas);
@@ -2661,6 +2672,7 @@ mod tests {
             for visit in [0.0, 5.0, 12.0, 20.0, 26.0, 34.0, 42.0] {
                 while a.t < START_T + visit - 1e-9 {
                     a.update(1.0 / 60.0, &mut ctx);
+                    a.prepare();
                 }
                 let v = &a.view;
                 let sizes = components(&lit_mask(v, v.y_h), v.w);
@@ -2737,6 +2749,7 @@ mod tests {
             let mut seen = 0;
             while a.t < START_T + 44.0 {
                 a.update(0.25, &mut ctx);
+                a.prepare();
                 let v = &a.view;
                 let (fa, fe) = patch_floor_px(v.w, v.rows);
                 for p in &a.patches[..a.live_patches] {
@@ -2782,6 +2795,7 @@ mod tests {
             for visit in [32.0, 34.0, 36.0] {
                 while a.t < START_T + visit - 1e-9 {
                     a.update(1.0 / 60.0, &mut ctx);
+                    a.prepare();
                 }
                 let v = &a.view;
                 let live = &a.patches[..a.live_patches];
@@ -2842,6 +2856,7 @@ mod tests {
             for visit in [26.0, 27.0, 28.0] {
                 while a.t < START_T + visit - 1e-9 {
                     a.update(1.0 / 60.0, &mut ctx);
+                    a.prepare();
                 }
                 assert_no_hood(&a, seed, visit);
             }
@@ -3323,6 +3338,7 @@ mod tests {
         let (mut a, mut ctx) = scene(200, 50);
         for _ in 0..56 {
             a.update(0.25, &mut ctx);
+            a.prepare();
         }
         let v = &a.view;
         let lit = |y: i32| {
@@ -3377,6 +3393,7 @@ mod tests {
             let steps = ((t + LOOP - START_T) % LOOP / 0.25).round() as usize;
             for _ in 0..steps {
                 a.update(0.25, &mut ctx);
+                a.prepare();
             }
             assert_eq!(a.caption(), Some(caption), "t = {t}");
             assert!(META.captions.contains(&caption));
@@ -3429,6 +3446,7 @@ mod tests {
         for visit in [14.0, 18.0, 22.0] {
             while a.t < START_T + visit - 1e-9 {
                 a.update(1.0 / 60.0, &mut ctx);
+                a.prepare();
             }
             let v = &a.view;
             let mask = red_mask(v);
@@ -3520,15 +3538,19 @@ mod tests {
         let (mut a, mut ctx) = scene(200, 50);
         for _ in 0..30 {
             a.update(0.1, &mut ctx);
+            a.prepare();
         }
         let theta = a.curtains[0].theta;
         let red = a.curtains[1].red;
         a.resize(Size::new(61, 17), &mut ctx);
+        a.prepare();
         assert_eq!(a.curtains[0].theta, theta);
         assert_eq!(a.curtains[1].red, red);
         assert_eq!(a.view.pixels.pixel_size(), Size::new(61, 34));
         a.resize(Size::new(1, 1), &mut ctx);
+        a.prepare();
         a.update(0.25, &mut ctx);
+        a.prepare();
         let mut canvas = Canvas::new(Size::new(1, 1), GlyphMode::Unicode);
         a.render(&mut canvas);
     }

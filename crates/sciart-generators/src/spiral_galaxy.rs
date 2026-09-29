@@ -189,6 +189,8 @@ pub struct SpiralGalaxy {
     knot_glow: Glow,
     tone: Tone,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SpiralGalaxy {
@@ -411,7 +413,7 @@ impl Generator for SpiralGalaxy {
                 ease::smoothstep((r - 0.1) / 0.15) * (1.0 - ease::smoothstep((r - 0.8) / 0.25));
             ((k * bulge) as f32, (k * disc) as f32, dust_w as f32)
         }));
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -422,7 +424,13 @@ impl Generator for SpiralGalaxy {
         }
         self.knots.retain(|k| k.age < KNOT_LIFE);
         self.spawn_knots(dt, ctx);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -439,6 +447,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = SpiralGalaxy::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -563,6 +572,7 @@ mod tests {
         let (mut g, mut ctx) = built(size, 11);
         for _ in 0..1200 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.knots.len() <= KNOTS);
             for k in g.knots.iter() {
                 let (x, y) = k.pos();

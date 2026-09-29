@@ -210,6 +210,8 @@ pub struct OrbitalRendezvous {
     h: f64,
     origin: (f64, f64),
     scale: (f64, f64),
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// Light pixel `(x, y)` with `ink` unless a brighter pixel of the same role is there.
@@ -506,12 +508,18 @@ impl Generator for OrbitalRendezvous {
                 self.stars.push((x, y, l));
             }
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -655,6 +663,7 @@ mod tests {
         let mut ctx = Ctx::new(3, size);
         let mut g = OrbitalRendezvous::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for (t, want) in [
             (T_PHASE + 0.2, PHASING),
             (T_PHASE + 5.0, OVERTAKING),
@@ -678,6 +687,7 @@ mod tests {
             let mut ctx = Ctx::new(3, size);
             let mut g = OrbitalRendezvous::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
             for i in 0..=400 {
                 let (x, y) = g.chaser_cell(LOOP * f64::from(i) / 400.0);
@@ -716,6 +726,7 @@ mod tests {
             let mut ctx = Ctx::new(3, size);
             let mut g = OrbitalRendezvous::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let share = g.origin.0 / f64::from(w);
             assert!(
                 (0.74..=0.78).contains(&share),
@@ -749,6 +760,7 @@ mod tests {
             let mut ctx = Ctx::new(3, size);
             let mut g = OrbitalRendezvous::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             g.t = LOOP - 0.5;
             let mut canvas = Canvas::new(size, GlyphMode::Ascii);
             g.render(&mut canvas);
@@ -775,6 +787,7 @@ mod tests {
             let mut ctx = Ctx::new(3, size);
             let mut g = OrbitalRendezvous::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             // The inset's orbit ring is the only Starlight line work in the dots.
             let orbit = Ink::new(Role::Ramp(Ramp::Starlight), 60);
             let mut canvas = Canvas::new(size, GlyphMode::Unicode);

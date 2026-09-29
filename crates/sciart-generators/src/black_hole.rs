@@ -619,6 +619,8 @@ pub struct BlackHole {
     levels: FluxLevels,
     map: SampleMap,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for BlackHole {
@@ -638,6 +640,7 @@ impl Default for BlackHole {
             levels: FluxLevels::new(),
             map: SampleMap::default(),
             pixels: Pixels::default(),
+            dirty: false,
         }
     }
 }
@@ -888,14 +891,19 @@ impl Generator for BlackHole {
         }
         self.pixels.resize(size);
         self.trace();
-        self.advect();
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.advect();
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.advect();
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -918,6 +926,7 @@ mod tests {
         let mut ctx = Ctx::new(5, size);
         let mut g = BlackHole::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -1142,6 +1151,7 @@ mod tests {
         let (mut g, mut ctx) = scene(Size::new(80, 24));
         for _ in 0..100 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let n = g.tex.len() as f64;
         let mean = g.tex.iter().map(|&v| f64::from(v)).sum::<f64>() / n;
@@ -1201,6 +1211,7 @@ mod tests {
             let mut before: Vec<(i32, i32)> = Vec::new();
             for _ in 0..(20.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 for &(x, y) in &before {
                     let near = (-2..=2).any(|dy| (-2..=2).any(|dx| star(&g, x + dx, y + dy)));
                     vanished += u32::from(!near);
@@ -1239,6 +1250,7 @@ mod tests {
             let (mut g, mut ctx) = scene(Size::new(w, h));
             for _ in 0..120 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let px = g.pixels.pixel_size();
             let inks: Vec<Ink> = (0..i32::from(px.height()))

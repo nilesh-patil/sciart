@@ -297,6 +297,8 @@ pub struct Pulsar {
     /// Exposures so far: keys each exposure's ray jitter.
     exposures: u64,
     readout: bool,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Pulsar {
@@ -317,6 +319,7 @@ impl Default for Pulsar {
             primed: false,
             exposures: 0,
             readout: false,
+            dirty: false,
         }
     }
 }
@@ -579,12 +582,11 @@ impl Pulsar {
         }
     }
 
-    /// Everything for the current time (the M10 raster convention: `render` only blits).
-    fn rasterise(&mut self, dt: f64) {
-        let m = magnetic_axis(phase(self.t));
-        self.expose(m, dt, self.t);
+    /// Everything for the current time (the M10 raster convention: `render` only blits);
+    /// the exposure accumulates per step, so `update` does that part (GEN-R20).
+    fn rasterise(&mut self) {
         self.develop();
-        self.draw_lines(m);
+        self.draw_lines(magnetic_axis(phase(self.t)));
     }
 
     /// The beam exposure as pixels, its faint outer cone dissolved into black space, and
@@ -666,8 +668,7 @@ impl Generator for Pulsar {
             let t = self.t - dt * k as f64;
             self.expose(magnetic_axis(phase(t)), dt, t);
         }
-        self.develop();
-        self.draw_lines(magnetic_axis(phase(self.t)));
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -676,7 +677,14 @@ impl Generator for Pulsar {
         }
         self.t += dt;
         self.receive(&mut ctx.rng);
-        self.rasterise(dt);
+        self.expose(magnetic_axis(phase(self.t)), dt, self.t);
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -720,6 +728,7 @@ mod tests {
         let size = Size::new(120, 40);
         let mut g = Pulsar::default();
         g.resize(size, &mut Ctx::new(3, size));
+        g.prepare();
         let keep_out = g.inset;
         for k in 0..40 {
             g.t = f64::from(k) * 0.07;
@@ -836,10 +845,12 @@ mod tests {
         let mut ctx = Ctx::new(3, size);
         let mut g = Pulsar::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let inset = g.inset.expect("inset at 80x24");
         let (mut brightest_seen, mut steps) = (0u8, 0);
         while steps < (PERIOD * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             steps += 1;
             // The interior: the veil is feathered across the border.
             let f = INSET_FEATHER as i32;
@@ -865,6 +876,7 @@ mod tests {
         let mut ctx = Ctx::new(3, size);
         let mut g = Pulsar::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let inset = g.inset.expect("inset at 80x24");
         g.pixels.fill(plasma(200.0));
         g.dim_inset();
@@ -957,9 +969,11 @@ mod tests {
             let mut ctx = Ctx::new(1, size);
             let mut g = Pulsar::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let mut darkest = 1.0_f64;
             for _ in 0..((PERIOD * 60.0) as usize + 1) {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if receiving(g.t) {
                     darkest = darkest.min(dark_share(&g));
                 }
@@ -978,6 +992,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = Pulsar::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let spike = |g: &Pulsar| {
             let (x, y) = g.dot([0.0; 3]);
             let (x, y) = (x.round() as i32, y.round() as i32);
@@ -988,6 +1003,7 @@ mod tests {
         let (mut on, mut off, mut darkest) = (0, 0, 1.0_f64);
         for _ in 0..((PERIOD * 60.0) as usize + 1) {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if (phase(g.t) - PULSE_PHASE).rem_euclid(TAU) < 0.02 * TAU {
                 on = on.max(spike(&g));
             } else if !receiving(g.t - 0.2) && !receiving(g.t + 0.2) && !receiving(g.t) {

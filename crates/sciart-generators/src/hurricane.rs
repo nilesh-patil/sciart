@@ -188,6 +188,8 @@ pub struct Hurricane {
     /// byte per pixel: the ramp has 256 levels anyway.
     sea: Vec<u8>,
     sea_row: usize,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
     /// A coarse lattice (`height ≤ SMALL`): smoothed picture, fewer inner bands.
     small: bool,
     /// Enhanced-IR `Ramp(Infrared)` value by brightness level, before the height factor.
@@ -217,6 +219,7 @@ impl Hurricane {
             swell_age: SWELL_EVERY,
             sea: Vec::new(),
             sea_row: 0,
+            dirty: false,
             small: false,
             turrets: (0..TURRET_N * TURRET_N)
                 .map(|k| {
@@ -526,10 +529,15 @@ impl Hurricane {
         }
     }
 
-    fn shade(&mut self) {
-        // A sixth of the rows per frame: the whole sea every `SWELL_EVERY` steps.
+    /// A sixth of the sea's rows per step: the whole sea every `SWELL_EVERY` steps. Part
+    /// of the step, not of the raster, so the sea keeps its cadence however often a frame
+    /// is drawn (GEN-R20).
+    fn refresh_sea_share(&mut self) {
         let rows = usize::from(self.pixels.pixel_size().height()).div_ceil(SWELL_EVERY as usize);
         self.refresh_sea(rows);
+    }
+
+    fn shade(&mut self) {
         let ir = self.ir_weight();
         let size = self.pixels.pixel_size();
         let ph = f64::from(size.height());
@@ -658,14 +666,22 @@ impl Generator for Hurricane {
         self.sea.resize(p.area(), 0);
         self.sea_row = 0;
         self.refresh_sea(usize::from(p.height()));
-        self.shade();
+        self.refresh_sea_share();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt);
         }
-        self.shade();
+        self.refresh_sea_share();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -745,8 +761,10 @@ mod tests {
         let mut g = Hurricane::new();
         let mut ctx = Ctx::new(42, Size::new(120, 40));
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g
     }
@@ -784,9 +802,11 @@ mod tests {
         let mut g = storm();
         let mut ctx = Ctx::new(1, Size::new(60, 20));
         g.resize(Size::new(60, 20), &mut ctx);
+        g.prepare();
         let mid_ir = ACTS[0].1 + 0.5 * ACTS[1].1;
         while g.t < mid_ir {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         assert_eq!(g.caption(), Some("infrared"));
         let mut canvas = Canvas::new(Size::new(60, 20), GlyphMode::Unicode);
@@ -807,8 +827,10 @@ mod tests {
         let mut g = Hurricane::new();
         let mut ctx = Ctx::new(3, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.t < t {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let p = g.pixels.pixel_size();
         let inks = (0..i32::from(p.height()))
@@ -983,9 +1005,11 @@ mod tests {
         let mut g = storm();
         let mut ctx = Ctx::new(1, Size::new(120, 40));
         g.resize(Size::new(120, 40), &mut ctx);
+        g.prepare();
         let mid_ir = ACTS[0].1 + 0.5 * ACTS[1].1;
         while g.t < mid_ir {
             g.update(0.25, &mut ctx);
+            g.prepare();
         }
         let p = g.pixels.pixel_size();
         let inks: Vec<Ink> = (0..i32::from(p.height()))
@@ -1009,6 +1033,7 @@ mod tests {
         let mut g = Hurricane::new();
         let mut ctx = Ctx::new(1, Size::new(500, 150));
         g.resize(Size::new(500, 150), &mut ctx);
+        g.prepare();
         assert!(g.lattice.area() <= CAP, "{:?}", g.lattice);
         assert_eq!(g.cloud.size(), g.lattice);
     }

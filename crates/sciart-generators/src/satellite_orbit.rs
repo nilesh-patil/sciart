@@ -376,6 +376,8 @@ pub struct SatelliteOrbit {
     stars: Vec<(i32, i32, u8)>,
     /// Cell of each labelled satellite this frame, when it is on show.
     labels: [Option<(Kind, i32, i32)>; 5],
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for SatelliteOrbit {
@@ -398,6 +400,7 @@ impl Default for SatelliteOrbit {
             dots: Dots::default(),
             stars: Vec::new(),
             labels: [None; 5],
+            dirty: false,
         }
     }
 }
@@ -593,7 +596,7 @@ impl Generator for SatelliteOrbit {
                 ctx.rng.random_range(40..150u8),
             )
         }));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -603,7 +606,13 @@ impl Generator for SatelliteOrbit {
         if dt.is_finite() && dt > 0.0 {
             self.t += dt;
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -673,6 +682,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = SatelliteOrbit::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -694,6 +704,7 @@ mod tests {
         let mut seen_hidden = false;
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let p = eci(&of(&g, Kind::Iss).el, g.real_time());
             let v = drawn(p);
             if hidden(v) {
@@ -774,6 +785,7 @@ mod tests {
         }
         for _ in 0..(DAY / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         for (s, l0) in geos.iter().zip(start) {
             assert!(wrap_angle(sub(&g, s) - l0).abs() < 1e-6, "GEO drifted");
@@ -994,6 +1006,7 @@ mod tests {
         assert_eq!(train.len(), STARLINK_N);
         for _ in 0..240 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let tr = g.real_time();
         for pair in train.windows(2) {
@@ -1024,6 +1037,7 @@ mod tests {
         (0..(secs / SIM_DT) as usize)
             .map(|_| {
                 g.update(SIM_DT, ctx);
+                g.prepare();
                 let mut canvas = Canvas::new(g.size, GlyphMode::Unicode);
                 g.render(&mut canvas);
                 canvas
@@ -1120,6 +1134,7 @@ mod tests {
         let mut pairs = 0;
         for _ in 0..240 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let tr = g.real_time();
             let heads: Vec<[f64; 3]> = g
                 .sats

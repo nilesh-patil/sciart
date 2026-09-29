@@ -374,6 +374,8 @@ pub struct SaturnRings {
     /// The two live clump generations (RING-A9).
     clumps: [ClumpLayer; 2],
     size: Size,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SaturnRings {
@@ -402,6 +404,7 @@ impl SaturnRings {
             spokes: Vec::with_capacity(SPOKES),
             clumps: [ClumpLayer::default(); 2],
             size: Size::new(1, 1),
+            dirty: false,
         }
     }
 
@@ -788,7 +791,7 @@ impl Generator for SaturnRings {
         };
         self.shade_globe();
         self.build_rings();
-        self.shade_rings();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -809,7 +812,13 @@ impl Generator for SaturnRings {
         if dt > 0.0 && ctx.rng.random_bool((dt / 1.5).min(1.0)) {
             self.spawn_spoke(&mut ctx.rng);
         }
-        self.shade_rings();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade_rings();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -864,6 +873,7 @@ mod tests {
         let mut g = SaturnRings::new();
         let mut ctx = Ctx::new(42, Size::new(100, 40));
         g.resize(Size::new(100, 40), &mut ctx);
+        g.prepare();
         // The far ring straight behind the globe's centre shows the globe, not ring.
         let (st, v) = (TILT.sin_det(), g.view);
         let far = |r: f64| (v.cx as i32, (v.cy - v.scale * r * st).floor() as i32);
@@ -897,9 +907,11 @@ mod tests {
         let mut g = SaturnRings::new();
         let mut ctx = Ctx::new(42, Size::new(w, h));
         g.resize(Size::new(w, h), &mut ctx);
+        g.prepare();
         let steps = (t * 60.0).round() as usize;
         for _ in 0..steps {
             g.update(1.0 / 60.0, &mut ctx);
+            g.prepare();
         }
         g
     }

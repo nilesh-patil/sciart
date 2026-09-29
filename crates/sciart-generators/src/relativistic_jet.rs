@@ -198,6 +198,8 @@ pub struct RelativisticJet {
     tone: Tone,
     pixels: Pixels,
     readout_room: usize,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl RelativisticJet {
@@ -460,7 +462,7 @@ impl Generator for RelativisticJet {
             let l = 28 + (hash01(cell_key(k, 3)).powi(3) * 80.0) as u8;
             self.clusters.push((x.floor() as i32, y.floor() as i32, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -479,7 +481,13 @@ impl Generator for RelativisticJet {
             self.next_eject += EJECT_EVERY * ctx.rng.random_range(0.5..1.5);
             self.launch(ctx, false);
         }
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -508,6 +516,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = RelativisticJet::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -534,6 +543,7 @@ mod tests {
         let p0 = g.at(g.knots.iter().next().unwrap().s(), 0.0);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let k = g
             .knots
@@ -605,6 +615,7 @@ mod tests {
         for _ in 0..(120.0 / SIM_DT) as usize {
             let before = g.knots.len();
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.knots.len() <= KNOTS);
             if g.knots.len() > before {
                 let newest = g.knots.iter().last().unwrap();

@@ -400,6 +400,8 @@ pub struct JwstUnfolding {
     scale: f64,
     /// `sin`, `cos` of the camera roll.
     roll: (f64, f64),
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl JwstUnfolding {
@@ -992,12 +994,18 @@ impl Generator for JwstUnfolding {
             let l = 18 + (hash01(cell_key(k, 47)).powi(4) * 150.0) as u8;
             self.stars.push((x, y, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1067,6 +1075,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let wings_end: f64 = BEATS[..=B_WINGS].iter().map(|b| b.1).sum();
         let wings_len = BEATS[B_WINGS].1;
         // Folded, a wing hides behind the centre panel (the camera faces the mirror);
@@ -1078,6 +1087,7 @@ mod tests {
         ] {
             g.t = t;
             g.update(0.0, &mut ctx);
+            g.prepare();
             let d = g.state();
             let pr = g.projector();
             let ps = g.pixels.pixel_size();
@@ -1109,6 +1119,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let tl = timeline();
         for i in 0..500 {
             g.t = f64::from(i) * 0.1;
@@ -1130,11 +1141,13 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = JwstUnfolding::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             // The end of the wings beat: fully deployed; no stars, so every bright
             // neutral pixel is the silver shield (or the bus under it).
             g.stars.clear();
             g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
             g.update(0.0, &mut ctx);
+            g.prepare();
             let ps = g.pixels.pixel_size();
             let (mut gold, mut pale, mut x0, mut x1) = (0, 0, i32::MAX, i32::MIN);
             for y in 0..i32::from(ps.height()) {
@@ -1163,9 +1176,11 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         g.stars.clear();
         g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
         g.update(0.0, &mut ctx);
+        g.prepare();
         g
     }
 
@@ -1262,9 +1277,11 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         g.stars.clear();
         g.t = 5.0;
         g.update(0.0, &mut ctx);
+        g.prepare();
         let d = g.state();
         assert!(d.pallets < 0.3 && d.fairing == 1.0, "{d:?}");
         let pr = g.projector();

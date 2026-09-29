@@ -167,6 +167,8 @@ pub struct StarTrails {
     /// Time since the first exposure began, and the exposure's index.
     t: f64,
     cycle: i64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl StarTrails {
@@ -427,7 +429,7 @@ impl Generator for StarTrails {
             self.t = k as f64 / 60.0;
             self.expose();
         }
-        self.tone_sky();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -444,7 +446,13 @@ impl Generator for StarTrails {
         } else {
             self.fade = (256.0 * ease::smoothstep((phase - EXPOSE) / FADE)) as u16;
         }
-        self.tone_sky();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.tone_sky();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -511,6 +519,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = StarTrails::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -580,6 +589,7 @@ mod tests {
         let mut peak = 0;
         for _ in 0..((EXPOSE - PREROLL) * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             peak = peak.max(lit(&g));
         }
         assert_eq!((g.exposure.as_ptr(), g.exposure.capacity()), (ptr, cap));
@@ -587,6 +597,7 @@ mod tests {
         // Through the fade and into the next exposure: the buffer starts over.
         for _ in 0..(FADE * 60.0) as usize + 2 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert_eq!((g.exposure.as_ptr(), g.exposure.capacity()), (ptr, cap));
         assert!(lit(&g) < peak / 20, "{} vs {peak}", lit(&g));
@@ -597,6 +608,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(80, 24));
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
         g.render(&mut canvas);
@@ -616,6 +628,7 @@ mod tests {
         let (mut g, mut ctx) = built(size);
         for _ in 0..1800 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         // The sky: one blue ramp, darkest at the top, brightest just above the land.
         let w = usize::from(g.sky.pixel_size().width());
@@ -650,6 +663,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..1200 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         for (i, &l) in g.exposure.iter().enumerate() {
             if l > 0 {

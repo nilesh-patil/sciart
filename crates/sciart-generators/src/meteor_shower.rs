@@ -312,6 +312,8 @@ pub struct MeteorShower {
     stars: Dots,
     /// Streaks and recent tracks, in braille: thin and sub-cell.
     streaks: Dots,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl MeteorShower {
@@ -774,7 +776,7 @@ impl Generator for MeteorShower {
             self.meteors.spawn(m);
         }
         self.drift(0.0);
-        self.compose();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -789,7 +791,13 @@ impl Generator for MeteorShower {
         // glow to it.
         self.drift(dt);
         self.fly(dt, &mut ctx.rng);
-        self.compose();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.compose();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -850,6 +858,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = MeteorShower::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -953,6 +962,7 @@ mod tests {
         let before = g.trains.iter().next().expect("a train at the start").pts;
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let after = g.trains.iter().next().expect("still there").pts;
         let moved = before
@@ -987,6 +997,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for step in 0..(6.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if step % 20 != 0 {
                 continue;
             }
@@ -1041,6 +1052,7 @@ mod tests {
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         for _ in 0..(4.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             canvas.clear();
             g.render(&mut canvas);
             for c in canvas.cells() {
@@ -1066,6 +1078,7 @@ mod tests {
         assert!(g.meteors.len() <= MAX_METEORS);
         for _ in 0..3600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.meteors.len() <= MAX_METEORS && g.trains.len() <= MAX_TRAINS);
             assert!(g.meteors.capacity() == MAX_METEORS && g.trains.capacity() == MAX_TRAINS);
         }

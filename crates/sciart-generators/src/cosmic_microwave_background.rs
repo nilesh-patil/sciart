@@ -227,6 +227,8 @@ pub struct CosmicMicrowaveBackground {
     pixels: Pixels,
     dots: Dots,
     inset: Option<Inset>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// The spectrum inset's cells: top-left corner and size.
@@ -449,14 +451,19 @@ impl Generator for CosmicMicrowaveBackground {
         self.pixels.resize(size);
         self.dots.resize(size);
         self.inset = self.fit_inset(size);
-        self.shade();
-        self.draw_inset();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
-        self.shade();
-        self.draw_inset();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+            self.draw_inset();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -505,6 +512,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut g = CosmicMicrowaveBackground::default();
         g.resize(size, &mut Ctx::new(seed, size));
+        g.prepare();
         g
     }
 
@@ -750,6 +758,7 @@ mod tests {
         let mut g = scene(9, 80, 24);
         let before = g.modes.clone();
         g.resize(Size::new(30, 10), &mut Ctx::new(123, Size::new(30, 10)));
+        g.prepare();
         assert_eq!(g.modes, before);
         assert_eq!(g.modes.len(), MODES);
         let (lo, hi) = (TAU / wavenumber(L_MAX), TAU / wavenumber(L_MIN));
@@ -836,6 +845,7 @@ mod tests {
         let mut ctx = Ctx::new(4, Size::new(200, 50));
         for _ in 0..60 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let moved = (0..400)
             .flat_map(|x| (0..200).map(move |y| (x, y)))

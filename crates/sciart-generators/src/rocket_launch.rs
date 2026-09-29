@@ -487,6 +487,8 @@ pub struct RocketLaunch {
     /// Flame flicker in [0, 1), redrawn each update.
     flicker: f64,
     ready: bool,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl RocketLaunch {
@@ -518,6 +520,7 @@ impl RocketLaunch {
             steam_acc: 0.0,
             flicker: 0.0,
             ready: false,
+            dirty: false,
         }
     }
 
@@ -1108,7 +1111,7 @@ impl Generator for RocketLaunch {
             )
         }));
         self.ready = true;
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1136,7 +1139,13 @@ impl Generator for RocketLaunch {
         self.age_steam(dmet.max(dt));
         self.emit_steam(met, alt, dmet.max(dt), ctx);
         self.flicker = ctx.rng.random();
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1323,10 +1332,12 @@ mod tests {
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(7, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let mut before_ignition = true;
         for _ in 0..(70 * 60) {
             let n0 = g.steam.len();
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let met = g.met();
             if met < -IGNITION - 0.05 && before_ignition {
                 assert_eq!(g.steam.len(), 0, "steam before ignition at {met}");
@@ -1450,10 +1461,12 @@ mod tests {
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(1, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let total = g.timeline.total();
         let mut t = 0.0;
         while t < total + 1.0 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             t += 0.25;
         }
         assert!(g.t < 1.5, "looped: t = {}", g.t);
@@ -1503,8 +1516,10 @@ mod tests {
         let mut g = RocketLaunch::new();
         let mut ctx = Ctx::new(3, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         while g.t < t {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g
     }
@@ -1679,11 +1694,13 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = RocketLaunch::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let flame = |i: Ink| matches!(i.role, Role::Blackbody | Role::Ramp(Ramp::Ember));
         let spent = Ink::new(Role::Structure, 120);
         let (w, h) = (80, 48);
         for step in 0..(60.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if step % 10 != 0 || g.met() < SES {
                 continue;
             }
