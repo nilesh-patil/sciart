@@ -611,67 +611,65 @@ fn core_r91_ascii_ramp_cell_draws_the_stronger_pixel_on_the_ramp() {
 
 // ---------------------------------------------------------------- CORE-R89
 
-/// The lit mask of a `n × n`-pixel buffer filled with `ink` and dissolved at `floor`.
-fn dissolved(ink: Ink, floor: u8, n: u16) -> Vec<bool> {
+/// Every pixel of a `n × n`-pixel buffer filled with `ink` and dissolved at `floor`.
+fn dissolved(ink: Ink, floor: u8, n: u16) -> Vec<Ink> {
     let mut p = Pixels::new(Size::new(n, n / 2));
     p.fill(ink);
     p.dissolve(floor);
     let n = i32::from(n);
     (0..n)
         .flat_map(|y| (0..n).map(move |x| (x, y)))
-        .map(|(x, y)| {
-            let px = p.get(x, y).expect("in range");
-            assert!(
-                px == ink || px == Ink::BLANK,
-                "dissolve only empties pixels"
-            );
-            px == ink
-        })
+        .map(|(x, y)| p.get(x, y).expect("in range"))
         .collect()
 }
 
-fn share(mask: &[bool]) -> f64 {
-    mask.iter().filter(|&&b| b).count() as f64 / mask.len() as f64
+/// The one ink a dissolved uniform field holds (CORE-R89: no pattern).
+fn dissolved_uniform(ink: Ink, floor: u8) -> Ink {
+    let px = dissolved(ink, floor, 16);
+    assert!(
+        px.iter().all(|&p| p == px[0]),
+        "{ink:?} at {floor}: not uniform"
+    );
+    px[0]
 }
 
 #[test]
-fn core_r89_dissolve_empties_the_lower_half_and_thins_the_upper_half_of_the_fringe() {
+fn core_r89_dissolve_fades_the_fringe_smoothly_to_black() {
     let seq = |l: u8| Ink::new(Role::Seq, l);
-    // At or above the floor: untouched; below half of it: gone.
-    assert_eq!(share(&dissolved(seq(40), 40, 64)), 1.0);
-    assert_eq!(share(&dissolved(seq(200), 40, 64)), 1.0);
-    assert_eq!(share(&dissolved(seq(19), 40, 64)), 0.0);
-    assert_eq!(share(&dissolved(seq(0), 40, 64)), 0.0);
-    assert_eq!(share(&dissolved(seq(1), 0, 64)), 1.0, "floor 0 is a no-op");
-    // In [floor/2, floor) the share 2·level/floor − 1 survives, on average.
-    for (l, want) in [(30, 0.5), (35, 0.75), (25, 0.25)] {
-        let got = share(&dissolved(seq(l), 40, 64));
-        assert!((got - want).abs() < 0.04, "level {l}: {got} vs {want}");
-    }
-    // Div measures contrast from 128; Phase has no intensity and is left alone.
-    for div in [128 + 30, 128 - 30] {
-        let got = share(&dissolved(Ink::new(Role::Div, div), 40, 64));
-        assert!((got - 0.5).abs() < 0.04, "div {div}: {got}");
-    }
-    assert_eq!(share(&dissolved(Ink::new(Role::Phase, 3), 40, 64)), 1.0);
+    // At or above the floor: untouched; below half of it: gone; floor 0 is a no-op.
+    assert_eq!(dissolved_uniform(seq(40), 40), seq(40));
+    assert_eq!(dissolved_uniform(seq(200), 40), seq(200));
+    assert_eq!(dissolved_uniform(seq(19), 40), Ink::BLANK);
+    assert_eq!(dissolved_uniform(seq(0), 40), Ink::BLANK);
+    assert_eq!(dissolved_uniform(seq(1), 0), seq(1));
+    // In the band the level is `i·smoothstep`: half-way it is halved, and over every
+    // level the output never falls as the input rises (a monotone fade, no cliff).
+    assert_eq!(dissolved_uniform(seq(30), 40), seq(15));
+    let out: Vec<u8> = (0..=255u8)
+        .map(|l| dissolved_uniform(seq(l), 40))
+        .map(|p| if p == Ink::BLANK { 0 } else { p.level })
+        .collect();
+    assert!(out.windows(2).all(|w| w[1] >= w[0]), "{out:?}");
+    assert!((20..38).all(|l| out[l] < l as u8), "the band is dimmed");
+    // Div fades its contrast from 128 on either side; Phase has no intensity.
+    assert_eq!(
+        dissolved_uniform(Ink::new(Role::Div, 158), 40),
+        Ink::new(Role::Div, 143)
+    );
+    assert_eq!(
+        dissolved_uniform(Ink::new(Role::Div, 98), 40),
+        Ink::new(Role::Div, 113)
+    );
+    let phase = Ink::new(Role::Phase, 3);
+    assert_eq!(dissolved_uniform(phase, 40), phase);
 }
 
 #[test]
-fn core_r89_dissolve_has_no_periodic_pattern() {
-    // An ordered dither repeats every 2 or 4 pixels: its mask equals itself shifted by
-    // the period. White noise agrees with a shifted copy only by chance (s² + (1 − s)²).
-    let n = 64usize;
-    let mask = dissolved(Ink::new(Role::Seq, 30), 40, n as u16);
-    for lag in [2, 4, 8] {
-        let (mut same, mut total) = (0usize, 0usize);
-        for y in 0..n {
-            for x in 0..n - lag {
-                same += usize::from(mask[y * n + x] == mask[y * n + x + lag]);
-                same += usize::from(mask[x * n + y] == mask[(x + lag) * n + y]);
-                total += 2;
-            }
-        }
-        let agree = same as f64 / total as f64;
-        assert!(agree < 0.6, "lag {lag}: masks agree {agree}");
+fn core_r89_dissolve_has_no_pattern() {
+    // No ordered or noise dither: a uniform field stays uniform at every band level, so
+    // nothing repeats, and nothing salts the fringe.
+    for l in 0..60u8 {
+        dissolved_uniform(Ink::new(Role::Seq, l), 40);
+        dissolved_uniform(Ink::new(Role::Ramp(Ramp::Aurora), l), 40);
     }
 }
