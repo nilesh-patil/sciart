@@ -354,7 +354,7 @@ impl Pillar {
     /// `phase`: two octaves of 1-D value noise in `[−1, 1]`, weighted by `EROSION`.
     fn erosion(&self, phase: f64, s: f64) -> f64 {
         let salt = phase.to_bits() ^ 0xE205_1011;
-        let n = |bumps: f64, salt: u64| 2.0 * value_noise(salt, s * bumps, 0.5, 1.0) - 1.0;
+        let n = |bumps: f64, salt: u64| 2.0 * rng::value_noise(salt, s * bumps, 0.5, 1.0) - 1.0;
         EROSION.0 * n(EROSION_BUMPS.0, salt) + EROSION.1 * n(EROSION_BUMPS.1, !salt)
     }
 }
@@ -499,20 +499,6 @@ fn smoothed_dust(mask: &[u8], w: usize) -> Vec<f32> {
         }
     }
     out
-}
-
-/// Smooth value noise in `[0, 1)` at pixel `(x, y)` on a lattice of spacing `cell` pixels
-/// (hashed corners, smoothstep-blended): the dust's texture.
-fn value_noise(salt: u64, x: f64, y: f64, cell: f64) -> f64 {
-    let (u, v) = (x / cell, y / cell);
-    let (i, j) = (u.floor(), v.floor());
-    let corner = |di: i32, dj: i32| rng::hash01(salt ^ rng::cell_key(i as i32 + di, j as i32 + dj));
-    let (fu, fv) = (ease::smoothstep(u - i), ease::smoothstep(v - j));
-    ease::lerp(
-        ease::lerp(corner(0, 0), corner(1, 0), fu),
-        ease::lerp(corner(0, 1), corner(1, 1), fu),
-        fv,
-    )
 }
 
 impl StellarNursery {
@@ -710,8 +696,8 @@ impl StellarNursery {
                 // stays dust right up to the sky.
                 let lit_face = ((facing - LIMB_FROM) / (1.0 - LIMB_FROM)).max(0.0);
                 let limb = lit_face * (1.0 - (depth as f64 - 1.0) / LIMB_REACH as f64).max(0.0);
-                let tex = 0.65 * value_noise(self.tex_salt, x as f64, y as f64, TEX_CELL.0)
-                    + 0.35 * value_noise(!self.tex_salt, x as f64, y as f64, TEX_CELL.1);
+                let tex = 0.65 * rng::value_noise(self.tex_salt, x as f64, y as f64, TEX_CELL.0)
+                    + 0.35 * rng::value_noise(!self.tex_salt, x as f64, y as f64, TEX_CELL.1);
                 let head = 1.0 - f64::from(along[i]);
                 let shade = (1.0 - DUST_ALONG) * tex + DUST_ALONG * head;
                 self.dust[i] = ink::level(ease::lerp(DUST_LEVEL.0, DUST_LEVEL.1, shade));

@@ -107,6 +107,19 @@ const fn spec(r: Ramp) -> RampSpec {
             h1: 325.0,
             chroma: 0.2,
         },
+        // dark sienna → rust → tan → cream: Jupiter's belts and zones (M13)
+        Ramp::Sienna => RampSpec {
+            h0: 38.0,
+            h1: 75.0,
+            chroma: 0.11,
+        },
+        // grey → cyan → green → yellow → orange → pale rose-white: the hue runs backwards
+        // round the wheel over the coloured part only; the low third stays grey (M13)
+        Ramp::Infrared => RampSpec {
+            h0: 215.0,
+            h1: -25.0,
+            chroma: 0.17,
+        },
     }
 }
 
@@ -117,13 +130,21 @@ fn ramp(r: Ramp, t: f64) -> Rgb {
     // so the ramps stay apart at both ends. Starlight alone stays grey while faint: an old
     // population's integrated light (B−V ≈ 0.7) is pale yellow-white, so a faint halo or
     // Milky Way must not read as sepia; its warmth shows only where it is bright.
-    let grey = if r == Ramp::Starlight {
-        (2.0 * t).min(1.0)
-    } else {
-        1.0
+    let grey = match r {
+        Ramp::Starlight => (2.0 * t).min(1.0),
+        // An IR enhancement curve leaves warm (dark) surfaces grey and colours only the
+        // cold cloud tops: no chroma below t = 0.3, full chroma from t = 0.42.
+        Ramp::Infrared => ((t - 0.3) / 0.12).clamp(0.0, 1.0),
+        _ => 1.0,
     };
     let c = chroma * grey * (0.3 + 2.8 * t).min(1.0) * (1.0 - 0.7 * t * t);
-    oklch(l, c, h0 + (h1 - h0) * t)
+    // Infrared spends its whole hue path on the coloured (cold) part above t = 0.3.
+    let th = if r == Ramp::Infrared {
+        ((t - 0.3) / 0.7).max(0.0)
+    } else {
+        t
+    };
+    oklch(l, c, h0 + (h1 - h0) * th)
 }
 
 // ---------------------------------------------------------------------------------------
