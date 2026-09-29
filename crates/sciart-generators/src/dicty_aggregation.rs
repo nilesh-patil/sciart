@@ -76,16 +76,22 @@ const FADE_S: f64 = 2.0;
 
 // ---- Display ----
 
-/// Cells: dim amber (a dark-field lawn), at most this level.
-const CELL_ROLE: Role = Role::Ramp(Ramp::Ember);
-const CELL_MAX: u32 = 200;
-const CELL_GAMMA: f64 = 1.4;
-/// Wave fronts: the rising edge only (`v` below `WAVE_V`), cyan-white.
+/// Cells (M14, ADR-0017): one braille dot per amoeba in `Ramp(Sienna)`, from
+/// `CELL_LEVELS.0` on the thin lawn up to `CELL_LEVELS.1` in the mounds by the local cell
+/// density (gamma [`CELL_GAMMA`]); the quiet ground is black.
+const CELL_ROLE: Role = Role::Ramp(Ramp::Sienna);
+const CELL_LEVELS: (f64, f64) = (120.0, 255.0);
+const CELL_GAMMA: f64 = 0.9;
+/// Wave fronts: a faint 1-px anti-aliased line on the `u = ½` contour, the rising edge
+/// only (`v` below `WAVE_V`), in `Ramp(Ice)` at `WAVE_LEVELS` by freshness: full within
+/// 0.3 px of the contour and gone at `LINE_W` px (distance `|u − ½|/|∇u|` × pixels per
+/// node), so no cell-sized steps.
 const WAVE_ROLE: Role = Role::Ramp(Ramp::Ice);
 const WAVE_V: f32 = 0.3;
-const WAVE_MIN: f32 = 0.2;
-/// The faint wake behind the edge fades out as `v` reaches this.
-const WAKE_V: f32 = 0.55;
+#[cfg(test)]
+const WAVE_MIN: f32 = 0.3;
+const WAVE_LEVELS: (f64, f64) = (70.0, 120.0);
+const LINE_W: f64 = 0.9;
 
 /// One amoeba, in lattice units, with the cAMP it sensed last sub-step.
 #[derive(Debug, Clone, Copy, Default)]
@@ -126,6 +132,8 @@ pub(crate) fn chemotaxis(
 struct Dicty {
     u: Grid<f32>,
     v: Grid<f32>,
+    /// `|∇u|` per node for the wave's line, refreshed by `rasterise` (M14).
+    slope: Grid<f32>,
     lap: Grid<f32>,
     /// Excitability per node from the cell density.
     b: Vec<f32>,
@@ -143,7 +151,9 @@ struct Dicty {
     glow: Glow,
     tone: Tone,
     pixels: Pixels,
-    /// Glow level to cell level (gamma [`CELL_GAMMA`], up to [`CELL_MAX`]).
+    /// The cells, one braille dot each (M14).
+    dots: Dots,
+    /// Glow level to cell level (gamma [`CELL_GAMMA`] over [`CELL_LEVELS`]).
     cell_lut: [u8; 256],
     seeded: bool,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
@@ -156,6 +166,7 @@ impl Default for Dicty {
             dirty: true,
             u: Grid::default(),
             v: Grid::default(),
+            slope: Grid::default(),
             lap: Grid::default(),
             b: Vec::new(),
             rho: Vec::new(),
@@ -171,8 +182,10 @@ impl Default for Dicty {
             glow: Glow::default(),
             tone: Tone::asinh(0.3, 6.0),
             pixels: Pixels::default(),
+            dots: Dots::default(),
             cell_lut: std::array::from_fn(|g| {
-                ((g as f64 / 255.0).powf(CELL_GAMMA) * f64::from(CELL_MAX)) as u8
+                let (lo, hi) = CELL_LEVELS;
+                (lo + (hi - lo) * (g as f64 / 255.0).powf(CELL_GAMMA)) as u8
             }),
             seeded: false,
         }
@@ -325,48 +338,71 @@ impl Dicty {
         let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
             .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
-        let (map, u, v, glow, tone) = (&self.map, &self.u, &self.v, &self.glow, &self.tone);
-        let cell_lut = &self.cell_lut;
+        // The cells: one dot each, brighter where they crowd.
+        self.dots.clear();
+        if fade > 0.05 {
+            for c in &self.cells {
+                let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
+                let (px, py) = ((x / 2.0) as i32, (y / 2.0) as i32);
+                let g = self.tone.level(self.glow.get(px, py).unwrap_or(0.0));
+                let level = f64::from(self.cell_lut[usize::from(g)]) * f64::from(fade);
+                self.dots.plot(x, y, Ink::new(CELL_ROLE, ink::level(level)));
+            }
+        }
+        slope_field(&self.u, &mut self.slope);
+        let (map, u, v, slope) = (&self.map, &self.u, &self.v, &self.slope);
+        let ppn = f64::from(sx);
         // Row samplers, rebuilt when the shader moves to the next pixel row (CORE-R104).
-        let (mut row_y, mut ur, mut vr) = (-1, map.row(u, 0), map.row(v, 0));
+        let (mut row_y, mut ur, mut vr, mut gr) =
+            (-1, map.row(u, 0), map.row(v, 0), map.row(slope, 0));
         self.pixels.shade(|x, y| {
             if y != row_y {
-                (row_y, ur, vr) = (y, map.row(u, y), map.row(v, y));
+                (row_y, ur, vr, gr) = (y, map.row(u, y), map.row(v, y), map.row(slope, y));
             }
             // The wave: only its thin rising edge (fresh cAMP where cells are not yet
-            // refractory), a cyan-white ring over the amber lawn, as in the classic
-            // dark-field films.
-            let c = ur.at(x);
-            let vv = vr.at(x);
-            let edge = wave_edge(c, vv) * fade;
-            let g = tone.level(glow.get(x, y).unwrap_or(0.0) * fade);
-            if edge > WAVE_MIN {
-                let k = f64::from((edge - WAVE_MIN) / (1.0 - WAVE_MIN));
-                // Brighter where it crosses cells: they relay the signal.
-                let over = f64::from(g) / 255.0;
-                return Ink::new(WAVE_ROLE, ink::level(150.0 + 75.0 * k + 30.0 * over));
+            // refractory), a faint ice line over the lawn (M14).
+            let (uu, vv) = (ur.at(x), vr.at(x));
+            let fresh = f64::from((1.0 - (vv / WAVE_V).min(1.0)) * fade);
+            if fresh <= 0.0 {
+                return Ink::BLANK;
             }
-            // Cells: dim amber, brightest in mounds; the quiet ground stays black.
-            // A gamma above 1 keeps the fresh, thin lawn quiet and lets streams and
-            // mounds glow.
-            let level = cell_lut[usize::from(g)];
-            if level >= 12 {
-                return Ink::new(CELL_ROLE, level);
-            }
-            // Behind the edge, on bare ground, a faint wake of the wave, so the ring
-            // reads as a glowing front rather than a hard line.
-            let wake = c * (1.0 - (vv / WAKE_V).min(1.0)) * fade;
-            if wake > 0.25 {
-                Ink::new(WAVE_ROLE, ink::level(f64::from(25.0 + 55.0 * wake)))
-            } else {
+            let d = f64::from((uu - 0.5).abs()) / f64::from(gr.at(x).max(1e-4)) * ppn;
+            let k = ((LINE_W - d) / (LINE_W - 0.3)).clamp(0.0, 1.0);
+            let (lo, hi) = WAVE_LEVELS;
+            let level = (lo + (hi - lo) * fresh) * k;
+            if level < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
+            } else {
+                Ink::new(WAVE_ROLE, ink::level(level))
             }
         });
     }
 }
 
+/// `|∇u|` per node by central differences (one-sided at the edges) into `out`.
+fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
+    let (w, h) = (usize::from(u.width()), usize::from(u.height()));
+    if out.size() != u.size() {
+        out.resize(u.size(), 0.0);
+    }
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (p, o) = (u.as_slice(), out.as_mut_slice());
+    for y in 0..h {
+        let (yn, ys) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        for x in 0..w {
+            let (xw, xe) = (x.saturating_sub(1), (x + 1).min(w - 1));
+            let gx = (p[y * w + xe] - p[y * w + xw]) / (xe - xw).max(1) as f32;
+            let gy = (p[ys * w + x] - p[yn * w + x]) / (ys - yn).max(1) as f32;
+            o[y * w + x] = (gx * gx + gy * gy).sqrt();
+        }
+    }
+}
+
 /// How strongly a node draws as a wave edge: its cAMP `u`, only while it is not yet
 /// refractory (`v < WAVE_V`), so a wave shows as a thin rising ring [DICT-A6].
+#[cfg(test)]
 pub(crate) fn wave_edge(u: f32, v: f32) -> f32 {
     u * (1.0 - (v / WAVE_V).min(1.0))
 }
@@ -400,6 +436,7 @@ impl Generator for Dicty {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.pixels.resize(size);
+        self.dots.resize(size);
         self.glow.resize(size);
         let px = self.pixels.pixel_size();
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
@@ -462,6 +499,7 @@ impl Generator for Dicty {
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        self.dots.blit_over(canvas, &self.pixels);
     }
 }
 

@@ -94,15 +94,22 @@ const FLAKE_OUT: f64 = 1.0;
 /// attractant shows as a dark rim about one pixel wide; below `U_HALO` the plate is the
 /// terminal's own dark. The rim stays in the ramp's near-black end, so it antialiases
 /// the half-block edges instead of fattening the veins into blobs.
-const U_FLOOR: f64 = 0.55;
-const U_HALO: f64 = 0.50;
+/// M14 (ADR-0017): a higher floor keeps only each vein's channel (thinner veins), and no
+/// halo rim: the plate is black right up to the tube.
+const U_FLOOR: f64 = 0.57;
+const U_HALO: f64 = U_FLOOR;
 /// Sulfur ramp values: the rim spans `HALO_LO..=HALO_HI` (dark olive), the tubes
 /// `CORE_LO..=1` (chrome yellow to pale lemon at the junctions).
 const HALO_LO: f64 = 0.06;
 const HALO_HI: f64 = 0.30;
-const CORE_LO: f64 = 0.55;
-/// `CORE_LO`'s ink level, `round(0.40 · 255)`: the dimmest tube pixel.
-const CORE_LO_LEVEL: u8 = 140;
+/// M14: the tubes span `CORE_LO..=CORE_TOP` of the ramp (levels 60–230): a darker yellow
+/// fringe and a pale lemon core, which is reached at tone `U_CORE` so thin veins show it
+/// too (a mid-level fill alone read as murky olive).
+const CORE_LO: f64 = 60.0 / 255.0;
+const CORE_TOP: f64 = 230.0 / 255.0;
+const U_CORE: f64 = 0.9;
+/// `CORE_LO`'s ink level: the dimmest tube pixel.
+const CORE_LO_LEVEL: u8 = 60;
 /// Tube tones are raised to this power: a yellow body around a pale channel, with the
 /// thin trunks still luminous.
 const CORE_GAMMA: f64 = 1.2;
@@ -116,7 +123,7 @@ const ASCII_STEP: f64 = (0.9 - U_FLOOR) / 3.0;
 /// cycle would last 50–100 ms, close to the frame rate, so the wave is slowed and runs
 /// one way. It eases in and out over `STREAM_EASE` s at
 /// the ends of the beat, so the bloom and the starving network hold still.
-const STREAM_DEPTH: f64 = 0.2;
+const STREAM_DEPTH: f64 = 0.1;
 const STREAM_EASE: f64 = 2.0;
 const STREAM_WAVE: f64 = 0.3;
 const STREAM_PERIOD: f64 = 3.0;
@@ -876,8 +883,8 @@ fn tube_tone(px: Ink) -> Option<f64> {
     if px.role != ORGANISM || px.level < CORE_LO_LEVEL {
         return None;
     }
-    let t = ((ink::seq_value(px) - CORE_LO) / (1.0 - CORE_LO)).clamp(0.0, 1.0);
-    Some(ease::lerp(U_FLOOR, 1.0, t.powf(CORE_GAMMA.recip())))
+    let t = ((ink::seq_value(px) - CORE_LO) / (CORE_TOP - CORE_LO)).clamp(0.0, 1.0);
+    Some(ease::lerp(U_FLOOR, U_CORE, t.powf(CORE_GAMMA.recip())))
 }
 
 /// ASCII fallback per cell (GEN-R10): the brighter tube pixel's tone, read back from its
@@ -900,10 +907,14 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
 /// tube ramp up to pale lemon at `u = 1`.
 fn organism_ink(u: f64) -> Ink {
     let v = if u < U_FLOOR {
-        ease::lerp(HALO_LO, HALO_HI, (u - U_HALO) / (U_FLOOR - U_HALO))
+        ease::lerp(
+            HALO_LO,
+            HALO_HI,
+            ((u - U_HALO) / (U_FLOOR - U_HALO)).clamp(0.0, 1.0),
+        )
     } else {
-        let t = ((u - U_FLOOR) / (1.0 - U_FLOOR)).min(1.0);
-        ease::lerp(CORE_LO, 1.0, t.powf(CORE_GAMMA))
+        let t = ((u - U_FLOOR) / (U_CORE - U_FLOOR)).min(1.0);
+        ease::lerp(CORE_LO, CORE_TOP, t.powf(CORE_GAMMA))
     };
     ink::ramp(RAMP, v)
 }
@@ -1592,48 +1603,33 @@ mod tests {
     }
 
     #[test]
-    fn phy_a8_sulfur_tubes_with_a_one_pixel_halo() {
+    fn phy_a8_sulfur_tubes_with_no_halo() {
+        // M14 (ADR-0017): Sulfur tubes (levels 60–230) on a black plate, no halo rim.
         let organism = Role::Ramp(Ramp::Sulfur);
         assert_eq!(ORGANISM, organism);
-        let (halo_top, core_bottom) = (ink::ramp(RAMP, HALO_HI), ink::ramp(RAMP, CORE_LO));
-        assert!(halo_top.level < core_bottom.level);
+        let (bottom, top) = (
+            ink::ramp(RAMP, CORE_LO).level,
+            ink::ramp(RAMP, CORE_TOP).level,
+        );
+        assert_eq!((bottom, top), (60, 230));
         for (size, t) in [(Size::new(80, 24), 5.0), (Size::new(200, 50), 20.0)] {
             let (mut p, mut ctx) = scene(size, 42);
             run_to(&mut p, &mut ctx, t);
             let ps = p.pixels.pixel_size();
             let (w, h) = (i32::from(ps.width()), i32::from(ps.height()));
-            let at = |x: i32, y: i32| p.pixels.get(x, y).unwrap_or(Ink::BLANK);
-            let (mut halo, mut near, mut core) = (0, 0, 0);
+            let mut core = 0;
             for y in 0..h {
                 for x in 0..w {
-                    let px = at(x, y);
+                    let px = p.pixels.get(x, y).unwrap_or(Ink::BLANK);
                     if px == Ink::BLANK || px == p.flake_ink {
                         continue;
                     }
                     assert_eq!(px.role, organism, "{size:?} ({x}, {y})");
-                    // Two bands: a dim halo and bright tubes, nothing in between.
-                    let is_core = px.level >= core_bottom.level;
-                    assert!(is_core || px.level <= halo_top.level, "{size:?} {px:?}");
-                    if is_core {
-                        core += 1;
-                        continue;
-                    }
-                    halo += 1;
-                    // The halo is one pixel wide: a core pixel among its 8 neighbours.
-                    let hugs = (-1..=1).any(|dy| {
-                        (-1..=1).any(|dx| {
-                            at(x + dx, y + dy).level >= core_bottom.level
-                                && at(x + dx, y + dy).role == organism
-                        })
-                    });
-                    near += usize::from(hugs);
+                    assert!((bottom..=top).contains(&px.level), "{size:?} {px:?}");
+                    core += 1;
                 }
             }
-            assert!(core > 0 && halo > 0, "{size:?}: core {core} halo {halo}");
-            assert!(
-                near * 10 >= halo * 9,
-                "{size:?}: {near} of {halo} halo pixels hug a tube"
-            );
+            assert!(core > 0, "{size:?}: no tubes");
         }
     }
 
@@ -1673,13 +1669,8 @@ mod tests {
                 assert!(v >= U_FLOOR && (v - u).abs() <= STREAM_DEPTH * u + 1e-12);
             }
             let back = tube_tone(organism_ink(u)).expect("a tube ink");
-            assert!((back - u).abs() < 0.012, "{u} -> {back}");
+            assert!((back - u.min(U_CORE)).abs() < 0.012, "{u} -> {back}");
         }
-        assert_eq!(
-            tube_tone(organism_ink(0.5 * (U_HALO + U_FLOOR))),
-            None,
-            "the halo is not a tube"
-        );
         assert_eq!(CORE_LO_LEVEL, ink::ramp(RAMP, CORE_LO).level);
         // On only while the network consolidates: the bloom and the fade hold still.
         let size = Size::new(80, 24);
