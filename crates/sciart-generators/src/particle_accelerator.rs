@@ -91,15 +91,13 @@ const B_SOLENOID: f64 = 3.8;
 const B_RETURN: f64 = -1.8;
 /// `pT [GeV] = 0.3 B [T] ρ [m]`.
 const GEV_PER_TM: f64 = 0.3;
-/// Detector radii, m (a general-purpose LHC detector, transverse plane).
-/// Tracker barrel layers drawn: the pixel detector's outer layer (Phase-1, 0.16 m) and
-/// three strip layers.
-const TRACKER_LAYERS: [f64; 4] = [0.16, 0.43, 0.8, 1.08];
+/// Detector radii, m (a general-purpose LHC detector, transverse plane). Only two
+/// outlines are drawn (M14, ADR-0017 rule 4): the calorimeter's inner face, where the
+/// tracks stop, and the solenoid, where the field (and the muons' curl) reverses. The
+/// tracker layers and the muon wheels were decoration and are gone.
 const ECAL: (f64, f64) = (1.29, 1.75);
 const HCAL: (f64, f64) = (1.81, 2.95);
 const COIL: (f64, f64) = (2.98, 3.18);
-/// Muon stations (inner, outer radius, m) sandwiched in the iron yoke.
-const MUON_STATIONS: [(f64, f64); 4] = [(4.0, 4.35), (4.9, 5.25), (5.9, 6.25), (6.95, 7.3)];
 /// Muons are drawn to here.
 const MUON_REACH: f64 = 7.3;
 /// The view: `VIEW_R.1` metres span `VIEW_FRAC` of the stage's fit radius once that is at
@@ -167,8 +165,6 @@ const OUTLINE_ROLE: Role = Role::Dim;
 /// A tower's drawn bar is this fraction of its 5° cell wide (at least one stroke), so
 /// neighbouring towers read as separate bars rather than a solid block.
 const BAR_WIDTH: f64 = 0.25;
-/// The outer two muon wheels' share of the outline level.
-const OUTER_WHEELS: f64 = 0.7;
 /// Chamber palette: warm film, bubbles pale `Ember`; the window is black with a faint rim
 /// and film grain, one dim speck per `1 / FILM_SPECKS` dots, new with each frame. Beam
 /// tracks are dim and sparse, the star's secondaries the brightest bubbles on the film.
@@ -807,22 +803,11 @@ impl ParticleAccelerator {
                 ink::ramp(GLOW_RAMP, GLOW_MAX * fade * f64::from(level) / 255.0)
             });
 
-        // Detector outlines.
+        // Detector outlines: just the calorimeter's inner face and the solenoid (M14).
         let structure = Ink::new(OUTLINE_ROLE, (STRUCTURE_LEVEL * fade) as u8);
         let dots = &mut self.dots;
-        for r in TRACKER_LAYERS {
+        for r in [ECAL.0, COIL.0] {
             circle(dots, view, r, structure);
-        }
-        for r in [ECAL.0, ECAL.1, HCAL.0, HCAL.1, COIL.0, COIL.1] {
-            circle(dots, view, r, structure);
-        }
-        // The outer two muon wheels a step dimmer, so the frame's edges stay quiet where
-        // a wide terminal shows them.
-        let outer = Ink::new(OUTLINE_ROLE, (OUTER_WHEELS * STRUCTURE_LEVEL * fade) as u8);
-        for (k, (a, b)) in MUON_STATIONS.into_iter().enumerate() {
-            let ink = if k >= 2 { outer } else { structure };
-            polygon(dots, view, a, 12, ink);
-            polygon(dots, view, b, 12, ink);
         }
 
         // Towers, then tracks over them.
@@ -971,19 +956,6 @@ fn circle(dots: &mut Dots, view: View, r: f64, ink: Ink) {
         let a = TAU * i as f64 / n as f64;
         let (x, y) = view.dot(r * a.cos_det(), r * a.sin_det());
         dots.plot(x, y, ink);
-    }
-}
-
-/// A regular `sides`-gon of inradius `r` m (muon wheels are dodecagons).
-fn polygon(dots: &mut Dots, view: View, r: f64, sides: u32, ink: Ink) {
-    let rc = r / (PI / f64::from(sides)).cos_det();
-    let corner = |i: u32| {
-        let a = TAU * (f64::from(i) + 0.5) / f64::from(sides);
-        view.dot(rc * a.cos_det(), rc * a.sin_det())
-    };
-    for i in 0..sides {
-        let ((x0, y0), (x1, y1)) = (corner(i), corner(i + 1));
-        dots.line(x0, y0, x1, y1, ink);
     }
 }
 

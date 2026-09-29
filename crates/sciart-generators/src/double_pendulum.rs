@@ -665,14 +665,9 @@ impl DoublePendulum {
             let i = (y * w + x) as usize;
             let (a, b) = (va.get(i).copied(), vb.get(i).copied());
             let (a, b) = (a.unwrap_or(0.0), b.unwrap_or(0.0));
-            // Where both twins expose a pixel about equally (superposed), alternate them
-            // on a checkerboard, the glow's analogue of the dashed two-tone lines.
-            let close = (a - b).abs() <= 0.35 * a.max(b);
-            let twin = if close {
-                ((x + y) & 1) as usize
-            } else {
-                usize::from(b > a)
-            };
+            // The brighter twin's hue; no checker where they coincide (M14: no dither), the
+            // dashed two-tone rods carry the superposition.
+            let twin = usize::from(b > a);
             let v = a.max(b) + 0.5 * a.min(b);
             let level = tone.level(v);
             let value = GLOW_V * f64::from(level) / 255.0;
