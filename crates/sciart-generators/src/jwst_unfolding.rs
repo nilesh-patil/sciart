@@ -61,22 +61,26 @@ const LAYER_SHARE: f64 = (1.0 - BOOMS) / 5.0;
 
 /// Sunshield outline in the x–z plane (m): an elongated hexagon, 21 m × 14 m, split
 /// into its fore (z ≥ 0) and aft halves, each listed round its perimeter.
-const FORE: [(f64, f64); 4] = [(-10.5, 0.0), (-3.6, 7.1), (3.6, 7.1), (10.5, 0.0)];
-const AFT: [(f64, f64); 4] = [(-10.5, 0.0), (10.5, 0.0), (3.6, -7.1), (-3.6, -7.1)];
+const FORE: [(f64, f64); 4] = [(-10.5, 0.0), (-1.6, 7.1), (1.6, 7.1), (10.5, 0.0)];
+const AFT: [(f64, f64); 4] = [(-10.5, 0.0), (10.5, 0.0), (1.6, -7.1), (-1.6, -7.1)];
 /// Visual spacing between tensioned layers (m; exaggerated).
 const LAYER_GAP: f64 = 0.22;
 /// Mirror: segment circumradius (m), the drawn share of it (the rest is the dark gap),
 /// and the primary's centre height, stowed and lifted.
-const SEG: f64 = 0.76;
+const SEG: f64 = 1.0;
+#[cfg(test)]
 const SEG_FILL: f64 = 0.84;
-const MIRROR_Y: f64 = 4.2;
+const MIRROR_Y: f64 = 4.6;
 const TOWER_LIFT: f64 = 1.2;
 /// Secondary mirror distance in front of the primary (m).
-const SM_DIST: f64 = 7.0;
-/// Camera: base yaw, sway, pitch, eye distance (m).
-const YAW: f64 = 0.38;
-const SWAY: f64 = 0.22;
-const PITCH: f64 = 0.17;
+const SM_DIST: f64 = 8.0;
+/// Camera: base yaw (deployed, and stowed: the folded stack in profile, JWST-A7), sway,
+/// pitch, eye distance (m), and a roll so the shield reads as a tilted diamond.
+const YAW: f64 = 0.14;
+const YAW_STOWED: f64 = 1.1;
+const ROLL: f64 = 0.08;
+const SWAY: f64 = 0.12;
+const PITCH: f64 = 0.4;
 const EYE: f64 = 70.0;
 /// Polygon cap per frame.
 const MAX_POLYS: usize = 48;
@@ -88,6 +92,15 @@ const GOLD: Ramp = Ramp::Ember;
 const GOLD_LEVEL: f64 = 214.0;
 /// Seconds between glints crossing the frame.
 const GLINT_PERIOD: f64 = 14.0;
+/// The honeycomb's dark gaps (pixels wide) and the backplane showing through them and
+/// the central hole (JWST-A7).
+const GAP_PX: f64 = 1.0;
+const BACKPLANE: u8 = 24;
+const HOLE: u8 = 34;
+/// Sunshield inks: silver Kapton on top, pale greys beneath, violet only on the shadowed
+/// edges (JWST-A8).
+const SILVER: Ramp = Ramp::Starlight;
+const SHADOW_EDGE: Ramp = Ramp::Plasma;
 
 /// How far each part is deployed at loop time `t`, 0 (stowed) to 1. `layers[k]` counts
 /// from the telescope side (k = 0, layer 5) to the Sun side (k = 4, layer 1).
@@ -138,6 +151,7 @@ pub(crate) fn deploy(timeline: &Timeline, t: f64) -> Deploy {
 
 /// The 18 primary segments in axial hex coordinates (flat-top): rings 1 and 2 of a hex
 /// grid, the centre left open.
+#[cfg(test)]
 fn segments() -> [(i32, i32); 18] {
     let mut out = [(0, 0); 18];
     let mut n = 0;
@@ -162,11 +176,99 @@ fn segment_centre(q: i32, r: i32) -> (f64, f64) {
     )
 }
 
+/// The primary as a honeycomb panel (JWST-A7): the centre (`panel` 0, columns |q| ≤ 1)
+/// or a wing (−1 / +1, q = ∓2), rasterised per pixel by mapping the pixel back into the
+/// mirror plane, so every segment is a flat hex with a one-pixel dark gap.
+#[derive(Debug, Clone, Copy, Default)]
+struct Honey {
+    /// Pixel position of the plane point `(x0, 0)`, the 2 × 2 map from plane metres to
+    /// pixels and its inverse.
+    origin: (f64, f64),
+    x0: f64,
+    fwd: [f64; 4],
+    inv: [f64; 4],
+    panel: i32,
+    /// Level taken off while the wing is folded.
+    dim: f64,
+    /// Edge-on (a degenerate map): drawn as a flat strip of gold.
+    flat: bool,
+}
+
+/// The segment holding plane point `(x, y)` (m): axial `(q, r)` of the flat-top grid.
+fn hex_at(x: f64, y: f64) -> (i32, i32) {
+    let q = 2.0 / 3.0 * x / SEG;
+    let r = (-x / 3.0 + 3f64.sqrt() / 3.0 * y) / SEG;
+    let s = -q - r;
+    let (mut rq, mut rr, rs) = (q.round(), r.round(), s.round());
+    let (dq, dr, ds) = ((rq - q).abs(), (rr - r).abs(), (rs - s).abs());
+    if dq > dr && dq > ds {
+        rq = -rr - rs;
+    } else if dr > ds {
+        rr = -rq - rs;
+    }
+    (rq as i32, rr as i32)
+}
+
+/// Which panel a segment belongs to: the wings are the outer columns (q = ∓2).
+fn panel_of(q: i32) -> i32 {
+    match q {
+        -2 => -1,
+        2 => 1,
+        _ => 0,
+    }
+}
+
+impl Honey {
+    /// Ink for pixel centre `(cx, cy)`: `None` off the panel's segments.
+    fn shade(&self, cx: f64, cy: f64, spec: &impl Fn(f64, f64) -> f64) -> Option<Ink> {
+        let (dx, dy) = (cx - self.origin.0, cy - self.origin.1);
+        let [a, b, c, d] = self.inv;
+        let (mx, my) = (self.x0 + a * dx + b * dy, c * dx + d * dy);
+        let (q, r) = hex_at(mx, my);
+        let ring = q.abs().max(r.abs()).max((q + r).abs());
+        if ring == 0 && self.panel == 0 {
+            return Some(Ink::new(Role::Ramp(Ramp::Starlight), HOLE));
+        }
+        if !(1..=2).contains(&ring) || panel_of(q) != self.panel {
+            return None;
+        }
+        let jitter = (hash01(cell_key(q, r)) - 0.5) * 18.0;
+        let (hx, hy) = segment_centre(q, r);
+        let [f0, f1, f2, f3] = self.fwd;
+        let (px, py) = (
+            self.origin.0 + f0 * (hx - self.x0) + f1 * hy,
+            self.origin.1 + f2 * (hx - self.x0) + f3 * hy,
+        );
+        let level =
+            (GOLD_LEVEL + jitter - self.dim + spec(px, py)).clamp(ink::MIN_VISIBLE_LEVEL, 255.0);
+        if !self.flat {
+            // Distance to the hex's nearest edge, in pixels: the edge function's
+            // gradient in pixel space is `invᵀ n`.
+            let (lx, ly) = (mx - hx, my - hy);
+            let h = 3f64.sqrt() / 2.0;
+            let mut worst = f64::MIN;
+            let mut dist = f64::MAX;
+            for (nx, ny) in [(0.0, 1.0), (h, 0.5), (h, -0.5)] {
+                let e = (nx * lx + ny * ly).abs();
+                let g = (a * nx + c * ny).hypot(b * nx + d * ny).max(1e-9);
+                let px_dist = (SEG * h - e) / g;
+                if e > worst {
+                    worst = e;
+                }
+                dist = dist.min(px_dist);
+            }
+            if dist < 0.5 * GAP_PX {
+                return Some(Ink::new(Role::Ramp(Ramp::Starlight), BACKPLANE));
+            }
+        }
+        Some(ink::ramp(GOLD, level / 255.0))
+    }
+}
+
 /// How a polygon is shaded: a flat level, or the mirror's specular sweep added to it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Shade {
     Flat,
-    Specular,
     Sheen,
 }
 
@@ -183,6 +285,7 @@ struct Poly {
     level: f64,
     grad: (f64, f64),
     shade: Shade,
+    honey: Option<Honey>,
 }
 
 impl Default for Poly {
@@ -196,6 +299,7 @@ impl Default for Poly {
             level: 0.0,
             grad: (0.0, 0.0),
             shade: Shade::Flat,
+            honey: None,
         }
     }
 }
@@ -255,15 +359,24 @@ fn fill_convex(pixels: &mut Pixels, zbuf: &mut [f32], p: &Poly, spec: &impl Fn(f
             if pos && neg {
                 continue;
             }
+            let z = plane.map_or(p.depth, |(a, b, c)| a * cx + b * cy + c);
+            if let Some(h) = &p.honey {
+                let Some(ink) = h.shade(cx, cy, spec) else {
+                    continue;
+                };
+                pixels.set(ix, iy, ink);
+                if let Some(slot) = zbuf.get_mut(iy as usize * zw + ix as usize) {
+                    *slot = z as f32;
+                }
+                continue;
+            }
             let mut level = p.level + p.grad.0 * (cx - c.0) + p.grad.1 * (cy - c.1);
             match p.shade {
                 Shade::Flat => {}
-                Shade::Specular => level += spec(cx, cy),
                 Shade::Sheen => level += 0.5 * spec(cx, cy),
             }
             let level = level.clamp(ink::MIN_VISIBLE_LEVEL, 255.0);
             pixels.set(ix, iy, ink::ramp(p.ramp, level / 255.0));
-            let z = plane.map_or(p.depth, |(a, b, c)| a * cx + b * cy + c);
             if let Some(slot) = zbuf.get_mut(iy as usize * zw + ix as usize) {
                 *slot = z as f32;
             }
@@ -285,6 +398,8 @@ pub struct JwstUnfolding {
     /// Screen centre (cells) and rows per metre.
     centre: (f64, f64),
     scale: f64,
+    /// `sin`, `cos` of the camera roll.
+    roll: (f64, f64),
 }
 
 impl JwstUnfolding {
@@ -303,18 +418,25 @@ impl JwstUnfolding {
 
     fn projector(&self) -> Projector {
         let sway = SWAY * (TAU * self.t / 48.0).sin_det();
+        // Stowed, the stack is seen in profile; the view swings round as the pallets
+        // drop.
+        let yaw = ease::lerp(YAW_STOWED, YAW, self.state().pallets);
         Camera {
-            yaw: YAW + sway,
+            yaw: yaw + sway,
             pitch: PITCH,
             distance: EYE,
         }
         .projector()
     }
 
-    /// World point → pixel position and depth.
+    /// World point → pixel position and depth (pixels are square; the view is rolled
+    /// about the screen centre).
     fn project(&self, pr: &Projector, p: V3) -> Option<(f64, f64, f64)> {
         let (x, y, z) = pr.project(p, self.centre, self.scale)?;
-        Some((x, 2.0 * y, z))
+        let (cx, cy) = (self.centre.0, 2.0 * self.centre.1);
+        let (dx, dy) = (x - cx, 2.0 * y - cy);
+        let (s, c) = self.roll;
+        Some((cx + c * dx + s * dy, cy - s * dx + c * dy, z))
     }
 
     fn push(&mut self, pr: &Projector, pts: &[V3], template: Poly) {
@@ -356,8 +478,80 @@ impl JwstUnfolding {
         out
     }
 
+    /// A point of the primary's plane (m, `x` across, `y` up from its centre) in the
+    /// body frame, with the tower's lift and, on a wing (`side` 0 left, 1 right), the
+    /// wing's fold about its hinge.
+    fn mirror_point(d: &Deploy, side: Option<usize>, x: f64, y: f64) -> V3 {
+        let my = MIRROR_Y + TOWER_LIFT * d.tower;
+        let Some(side) = side else {
+            return [x, my + y, 0.0];
+        };
+        let sign = if side == 0 { -1.0 } else { 1.0 };
+        let hinge = sign * 1.5 * SEG * 1.5;
+        let fold = (1.0 - d.wings[side]) * 0.53 * PI;
+        let (s, c) = fold.sin_cos_det();
+        let dx = x - hinge;
+        [hinge + dx * c, my + y, -dx * sign * s]
+    }
+
+    /// Queue one honeycomb panel of the primary (JWST-A7): its bounding rectangle in the
+    /// mirror plane, filled per pixel through the plane map.
+    fn push_panel(&mut self, pr: &Projector, d: &Deploy, panel: i32, spec_dim: f64) {
+        let side = match panel {
+            -1 => Some(0),
+            1 => Some(1),
+            _ => None,
+        };
+        let sign = f64::from(panel);
+        let x0 = sign * 1.5 * SEG * 1.5;
+        let (xa, xb, half_h) = if panel == 0 {
+            (-2.5 * SEG, 2.5 * SEG, 2.5 * 3f64.sqrt() * SEG)
+        } else {
+            let (a, b) = (2.0 * SEG * sign, 4.0 * SEG * sign);
+            (a.min(b), a.max(b), 1.5 * 3f64.sqrt() * SEG)
+        };
+        let at = |x: f64, y: f64| Self::mirror_point(d, side, x, y);
+        let (Some(o), Some(ux), Some(uy)) = (
+            self.project(pr, at(x0, 0.0)),
+            self.project(pr, at(x0 + 1.0, 0.0)),
+            self.project(pr, at(x0, 1.0)),
+        ) else {
+            return;
+        };
+        let fwd = [ux.0 - o.0, uy.0 - o.0, ux.1 - o.1, uy.1 - o.1];
+        let det = fwd[0] * fwd[3] - fwd[1] * fwd[2];
+        let ppm = 2.0 * self.scale;
+        let flat = det.abs() < 0.3 * ppm * ppm;
+        let inv = if det.abs() > 1e-12 {
+            [fwd[3] / det, -fwd[1] / det, -fwd[2] / det, fwd[0] / det]
+        } else {
+            [0.0; 4]
+        };
+        let rect = [
+            at(xa, -half_h),
+            at(xb, -half_h),
+            at(xb, half_h),
+            at(xa, half_h),
+        ];
+        let template = Poly {
+            ramp: GOLD,
+            honey: Some(Honey {
+                origin: (o.0, o.1),
+                x0,
+                fwd,
+                inv,
+                panel,
+                dim: spec_dim,
+                flat,
+            }),
+            ..Poly::default()
+        };
+        self.push(pr, &rect, template);
+    }
+
     /// Primary-mirror segment `(q, r)`: its six corners (body frame) and whether it is
     /// on a wing (`Some(0)` left, `Some(1)` right).
+    #[cfg(test)]
     fn segment(d: &Deploy, q: i32, r: i32) -> ([V3; 6], Option<usize>) {
         let (cx, cy) = segment_centre(q, r);
         let my = MIRROR_Y + TOWER_LIFT * d.tower;
@@ -437,27 +631,58 @@ impl JwstUnfolding {
         let d = self.state();
         let pr = self.projector();
         self.polys.clear();
-        // Spacecraft bus under the shield (Sun side).
-        let bus = [
-            [-1.4, -2.2, 1.4],
-            [1.4, -2.2, 1.4],
-            [1.4, -0.9, 1.4],
-            [-1.4, -0.9, 1.4],
-        ];
-        let bus_poly = Poly {
-            ramp: Ramp::Starlight,
-            level: 70.0,
-            ..Poly::default()
-        };
-        self.push(&pr, &bus, bus_poly);
+        // Spacecraft bus under the shield (Sun side): a box right under the pallets'
+        // hinge line, so the stowed stack reads as one body.
+        let (b0, b1, bz) = (-2.3, -0.05, 1.4);
+        for (face, level) in [
+            (
+                [[-1.4, b0, bz], [1.4, b0, bz], [1.4, b1, bz], [-1.4, b1, bz]],
+                118.0,
+            ),
+            (
+                [
+                    [-1.4, b0, -bz],
+                    [1.4, b0, -bz],
+                    [1.4, b1, -bz],
+                    [-1.4, b1, -bz],
+                ],
+                96.0,
+            ),
+            (
+                [[1.4, b0, -bz], [1.4, b0, bz], [1.4, b1, bz], [1.4, b1, -bz]],
+                104.0,
+            ),
+            (
+                [
+                    [-1.4, b0, -bz],
+                    [-1.4, b0, bz],
+                    [-1.4, b1, bz],
+                    [-1.4, b1, -bz],
+                ],
+                88.0,
+            ),
+        ] {
+            let bus_poly = Poly {
+                ramp: Ramp::Starlight,
+                level,
+                grad: (0.0, -1.2),
+                ..Poly::default()
+            };
+            let before = self.polys.len();
+            self.push(&pr, &face, bus_poly);
+            // The bus hangs under the shield: always painted before it.
+            if let Some(p) = self.polys.get_mut(before) {
+                p.depth -= 100.0;
+            }
+        }
         // Solar array: a thin panel hinged on the bus's side, swung out once the fairing
         // is off.
         let reach = 0.8 + 3.2 * d.fairing;
         let array = [
-            [1.4, -1.75, 1.3],
-            [1.4 + reach, -1.75, 1.3],
-            [1.4 + reach, -1.4, 1.3],
-            [1.4, -1.4, 1.3],
+            [1.4, -1.55, 1.2],
+            [1.4 + reach, -1.55, 1.2],
+            [1.4 + reach, -1.0, 1.2],
+            [1.4, -1.0, 1.2],
         ];
         let array_poly = Poly {
             ramp: Ramp::Cobalt,
@@ -466,22 +691,19 @@ impl JwstUnfolding {
             ..Poly::default()
         };
         self.push(&pr, &array, array_poly);
-        // Sunshield. Stowed, the folded pallets are grey-silver slabs; once the booms
-        // pull the membranes out, the top layer (layer 5, which the camera sees) is a
-        // silver-pink Kapton sheet with a slow sheen, and the four layers under it show
-        // only as violet slivers of shadowed underside along the near edge.
+        // Sunshield (JWST-A8). Stowed, the folded pallets are grey-silver slabs; once the
+        // booms pull the membranes out, the top layer (layer 5, which the camera sees) is
+        // a silver Kapton sheet with a slow sheen, the four layers under it pale greys
+        // showing as slivers along the near edge; violet is kept for their shadowed edges.
         let membrane = d.booms > 0.0;
         for k in 0..5 {
             let tension = d.layers[k];
             let (ramp, base) = if !membrane {
-                (Ramp::Starlight, 132.0 - 8.0 * k as f64)
+                (SILVER, 140.0 - 8.0 * k as f64)
             } else if k == 0 {
-                (Ramp::Eosin, ease::lerp(178.0, 214.0, tension))
+                (SILVER, ease::lerp(172.0, 204.0, tension))
             } else {
-                (
-                    Ramp::Plasma,
-                    ease::lerp(70.0, 108.0, tension) - 6.0 * k as f64,
-                )
+                (SILVER, ease::lerp(104.0, 136.0, tension) - 6.0 * k as f64)
             };
             for fore in [true, false] {
                 let q = Self::shield_half(&d, k, fore);
@@ -506,20 +728,16 @@ impl JwstUnfolding {
                 }
             }
         }
-        // Primary mirror segments: pale gold, each a touch brighter or dimmer (their
-        // coatings and tilts differ), darker while a wing is still folded back.
-        for (q, r) in segments() {
-            let (pts, wing) = Self::segment(&d, q, r);
-            let fold = wing.map_or(0.0, |s| 1.0 - d.wings[s]);
-            let jitter = (hash01(cell_key(q, r)) - 0.5) * 18.0;
-            let template = Poly {
-                ramp: GOLD,
-                level: GOLD_LEVEL + jitter - 55.0 * fold,
-                grad: (-0.25, -0.4),
-                shade: Shade::Specular,
-                ..Poly::default()
+        // Primary mirror: three honeycomb panels of pale-gold hexes, each segment a
+        // touch brighter or dimmer (their coatings and tilts differ), a wing darker while
+        // still folded back.
+        for panel in [-1, 0, 1] {
+            let dim = match panel {
+                -1 => 25.0 * (1.0 - d.wings[0]),
+                1 => 25.0 * (1.0 - d.wings[1]),
+                _ => 0.0,
             };
-            self.push(&pr, &pts, template);
+            self.push_panel(&pr, &d, panel, dim);
         }
         self.fairing(&pr, d.fairing);
         // Painter's order: far first.
@@ -547,10 +765,12 @@ impl JwstUnfolding {
         self.dots.clear();
         if d.fairing > 0.3 {
             for k in 0..5 {
-                let edge = if d.booms > 0.0 {
-                    ink::ramp(Ramp::Plasma, 0.62 + 0.3 * d.layers[k])
+                // Silver edges on the top sheet and the stowed slabs; the layers beneath
+                // show their shadowed edges in violet.
+                let edge = if d.booms > 0.0 && k > 0 {
+                    ink::ramp(SHADOW_EDGE, 0.42 + 0.2 * d.layers[k])
                 } else {
-                    ink::ramp(Ramp::Starlight, 0.8)
+                    ink::ramp(SILVER, 0.86)
                 };
                 for fore in [true, false] {
                     let q = Self::shield_half(&d, k, fore);
@@ -564,21 +784,30 @@ impl JwstUnfolding {
                     }
                 }
             }
-            let strut = Ink::new(Role::Ramp(Ramp::Starlight), 235);
+            // The tower, and the secondary's tripod: dark struts that read against the
+            // gold, a little lighter than the sky.
+            let tower = Ink::new(Role::Ramp(Ramp::Starlight), 150);
+            let strut = Ink::new(Role::Ramp(Ramp::Starlight), 120);
             let my = MIRROR_Y + TOWER_LIFT * d.tower;
-            self.line(&pr, [0.0, -0.9, 0.2], [0.0, my - 2.9, -0.5], strut);
+            self.line(&pr, [0.0, -0.05, 0.2], [0.0, my - 4.3 * SEG, -0.5], tower);
             let sm = Self::secondary(&d);
             for anchor in [
-                [0.0, my + 3.1, 0.2],
-                [-2.7, my - 1.6, 0.2],
-                [2.7, my - 1.6, 0.2],
+                [0.0, my + 4.0 * SEG, 0.2],
+                [-3.5 * SEG, my - 2.1 * SEG, 0.2],
+                [3.5 * SEG, my - 2.1 * SEG, 0.2],
             ] {
                 self.line(&pr, anchor, sm, strut);
             }
             if let Some((x, y, _)) = self.project(&pr, sm) {
+                // The secondary: a small dark baffle with a bright gold mirror in it.
                 let pixels = &mut self.pixels;
-                disc_pixels((x, y), 1.1, |ix, iy, cover| {
+                disc_pixels((x, y), 1.4, |ix, iy, cover| {
                     if cover > 0.2 {
+                        pixels.set(ix, iy, Ink::new(Role::Ramp(Ramp::Starlight), 70));
+                    }
+                });
+                disc_pixels((x, y), 0.8, |ix, iy, cover| {
+                    if cover > 0.3 {
                         pixels.set(ix, iy, Ink::new(Role::Ramp(GOLD), 240));
                     }
                 });
@@ -697,9 +926,9 @@ impl JwstUnfolding {
             let (x, y) = Dots::from_cells(q.0, q.1 / 2.0);
             self.dots.plot(x, y, trail);
         }
-        // The telescope: a lavender kite (sunshield, facing the Sun) with a gold dot.
+        // The telescope: a silver kite (sunshield, facing the Sun) with a gold dot.
         let (px, py) = (pos.0.floor() as i32, pos.1.floor() as i32);
-        let shield = Ink::new(Role::Ramp(Ramp::Plasma), 200);
+        let shield = Ink::new(Role::Ramp(SILVER), 200);
         for (dx, dy) in [(-1, 0), (-1, -1), (-1, 1), (-2, 0)] {
             self.pixels.set(px + dx, py + dy, shield);
         }
@@ -751,9 +980,10 @@ impl Generator for JwstUnfolding {
         );
         self.dots.resize(size);
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-        self.centre = (0.5 * w, 0.64 * h);
+        self.centre = (0.5 * w, 0.66 * h);
         // Fit the 21 m shield to ~60–65 % of the width and ~12 m of height.
-        self.scale = (0.68 * w / (22.0 * geom::ASPECT)).min(0.8 * h / 10.5);
+        self.scale = (0.68 * w / (22.0 * geom::ASPECT)).min(0.62 * h / 11.0);
+        self.roll = ROLL.sin_cos_det();
         let ps = self.pixels.pixel_size();
         self.stars.clear();
         for k in 0..(size.area() / 45) as i32 {
@@ -832,17 +1062,19 @@ mod tests {
     }
 
     #[test]
-    fn jwst_a3_all_eighteen_segments_show_from_the_wings_on() {
+    fn jwst_a3_all_eighteen_segments_show_once_the_wings_are_out() {
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
         let wings_end: f64 = BEATS[..=B_WINGS].iter().map(|b| b.1).sum();
         let wings_len = BEATS[B_WINGS].1;
-        for t in [
-            wings_end - wings_len + 0.1,
-            wings_end - wings_len / 2.0,
-            wings_end - 0.1,
+        // Folded, a wing hides behind the centre panel (the camera faces the mirror);
+        // each wing's hexes show once it has swung out, all 18 at the end of the beat.
+        for (t, want) in [
+            (wings_end - wings_len + 0.1, 12),
+            (wings_end - wings_len / 2.0, 15),
+            (wings_end - 0.1, 18),
         ] {
             g.t = t;
             g.update(0.0, &mut ctx);
@@ -867,7 +1099,7 @@ mod tests {
                     shown += 1;
                 }
             }
-            assert_eq!(shown, 18, "t = {t}");
+            assert!(shown >= want, "t = {t}: {shown} of {want}");
         }
     }
 
@@ -898,7 +1130,9 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = JwstUnfolding::default();
             g.resize(size, &mut ctx);
-            // The end of the wings beat: fully deployed.
+            // The end of the wings beat: fully deployed; no stars, so every bright
+            // neutral pixel is the silver shield (or the bus under it).
+            g.stars.clear();
             g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
             g.update(0.0, &mut ctx);
             let ps = g.pixels.pixel_size();
@@ -910,7 +1144,7 @@ mod tests {
                         gold += 1;
                         pale += usize::from(ink.level >= 190);
                     }
-                    if matches!(ink.role, Role::Ramp(Ramp::Eosin | Ramp::Plasma)) {
+                    if ink.role == Role::Ramp(SILVER) && ink.level >= 90 {
                         (x0, x1) = (x0.min(x), x1.max(x));
                     }
                 }
@@ -922,6 +1156,129 @@ mod tests {
             let share = f64::from(x1 - x0 + 1) / f64::from(ps.width());
             assert!((0.55..0.72).contains(&share), "{w}x{h}: shield {share}");
         }
+    }
+
+    /// The deployed observatory at `size`, stars cleared.
+    fn deployed(size: Size) -> JwstUnfolding {
+        let mut ctx = Ctx::new(42, size);
+        let mut g = JwstUnfolding::default();
+        g.resize(size, &mut ctx);
+        g.stars.clear();
+        g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
+        g.update(0.0, &mut ctx);
+        g
+    }
+
+    #[test]
+    fn jwst_a7_the_primary_is_a_gapped_honeycomb_with_a_hole_and_a_tripod() {
+        let g = deployed(Size::new(120, 40));
+        let d = g.state();
+        let pr = g.projector();
+        // Walking from each segment's centre to the next segment's centre crosses a dark
+        // gap (backplane) between two gold hexes.
+        let mut crossings = 0;
+        for (q, r) in segments() {
+            for (dq, dr) in [(1, 0), (0, 1), (1, -1)] {
+                let (q2, r2) = (q + dq, r + dr);
+                let ring = q2.abs().max(r2.abs()).max((q2 + r2).abs());
+                if !(1..=2).contains(&ring) {
+                    continue;
+                }
+                let (a, b) = (segment_centre(q, r), segment_centre(q2, r2));
+                let side = |q: i32| match panel_of(q) {
+                    -1 => Some(0),
+                    1 => Some(1),
+                    _ => None,
+                };
+                let (pa, pb) = (
+                    g.project(&pr, JwstUnfolding::mirror_point(&d, side(q), a.0, a.1))
+                        .unwrap(),
+                    g.project(&pr, JwstUnfolding::mirror_point(&d, side(q2), b.0, b.1))
+                        .unwrap(),
+                );
+                let (mut gold, mut gap, mut after_gap) = (false, false, false);
+                for i in 0..=40 {
+                    let f = f64::from(i) / 40.0;
+                    let (x, y) = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
+                    let ink = g.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
+                    if ink.role == Role::Ramp(GOLD) {
+                        after_gap |= gap;
+                        gold = true;
+                    } else if gold
+                        && ink.role == Role::Ramp(Ramp::Starlight)
+                        && ink.level <= BACKPLANE
+                    {
+                        gap = true;
+                    }
+                }
+                if after_gap {
+                    crossings += 1;
+                }
+            }
+        }
+        assert!(crossings >= 30, "gapped neighbour pairs: {crossings}");
+        // The central hole is dark, and the secondary sits in front of the mirror on its
+        // tripod.
+        let (hx, hy, _) = g
+            .project(&pr, JwstUnfolding::mirror_point(&d, None, 0.0, 0.0))
+            .unwrap();
+        let hole = g.pixels.get(hx as i32, hy as i32).unwrap();
+        assert_ne!(hole.role, Role::Ramp(GOLD), "hole at the centre");
+        let (sx, sy, _) = g.project(&pr, JwstUnfolding::secondary(&d)).unwrap();
+        assert_eq!(
+            g.pixels.get(sx as i32, sy as i32).map(|i| i.role),
+            Some(Role::Ramp(GOLD))
+        );
+    }
+
+    #[test]
+    fn jwst_a8_the_shield_is_silver_with_violet_only_on_edges_and_no_pink() {
+        for (w, h) in [(80, 24), (120, 40), (200, 50)] {
+            let g = deployed(Size::new(w, h));
+            let ps = g.pixels.pixel_size();
+            let mut silver = 0;
+            for y in 0..i32::from(ps.height()) {
+                for x in 0..i32::from(ps.width()) {
+                    let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                    assert!(
+                        !matches!(
+                            ink.role,
+                            Role::Ramp(Ramp::Eosin | Ramp::HAlpha | Ramp::Plasma)
+                        ),
+                        "{w}x{h}: pink/violet fill at {x},{y}"
+                    );
+                    silver += usize::from(ink.role == Role::Ramp(SILVER) && ink.level >= 160);
+                }
+            }
+            assert!(silver > 40, "{w}x{h}: silver top sheet {silver} px");
+        }
+    }
+
+    #[test]
+    fn jwst_a7_stowed_the_stack_is_one_body_seen_in_profile() {
+        // At 5 s (pallets beat) the camera looks at the stack side-on and the bus joins
+        // the pallets' hinge line: no gap between the bus top and the stack above.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = JwstUnfolding::default();
+        g.resize(size, &mut ctx);
+        g.stars.clear();
+        g.t = 5.0;
+        g.update(0.0, &mut ctx);
+        let d = g.state();
+        assert!(d.pallets < 0.3 && d.fairing == 1.0, "{d:?}");
+        let pr = g.projector();
+        let (bx, by, _) = g.project(&pr, [0.0, -0.3, 0.0]).unwrap();
+        let (tx, ty, _) = g.project(&pr, [0.0, MIRROR_Y, 0.0]).unwrap();
+        // Every pixel on the line from the bus up to the mirror's centre is painted.
+        for i in 0..=30 {
+            let f = f64::from(i) / 30.0;
+            let (x, y) = (bx + (tx - bx) * f, by + (ty - by) * f);
+            let ink = g.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
+            assert_ne!(ink, Ink::BLANK, "gap at {x:.1},{y:.1}");
+        }
+        let yaw = ease::lerp(YAW_STOWED, YAW, d.pallets);
+        assert!(yaw > 0.9, "profile view: yaw {yaw}");
     }
 
     #[test]

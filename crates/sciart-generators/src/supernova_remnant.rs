@@ -64,9 +64,16 @@ const NOISE_SPAN: f64 = 1.2;
 /// Emitting ejecta sit in the outer part of the shocked shell, from this fraction of
 /// the contact radius out (or from the reverse shock, if that is farther out).
 const EJECTA_INNER: f64 = 0.82;
-/// Blast-wave wobble (share of `R_f`) and the angular fineness of the ejecta streaks.
-const RIM_WOBBLE: f64 = 0.06;
+/// Out-of-round shape (share of `R_f`) the whole remnant shares at low angular order
+/// (SNR-A6), and the angular fineness of the ejecta streaks.
+const RIM_WOBBLE: f64 = 0.09;
+/// Wobble modes `m` = 2, 3, 4: relative amplitudes and the slow drift of their phases
+/// (rad/s), so the lopsided shell turns and reshapes as it ploughs into lumpy gas.
+const WOBBLE_AMP: [f64; 3] = [1.0, 0.6, 0.35];
+const WOBBLE_DRIFT: f64 = 0.05;
 const STREAK: f64 = 7.0;
+/// The shell is hollow inside this share of the contact radius.
+const HOLLOW: f64 = 0.45;
 /// A lit knot's weight in the ejecta it sits in.
 const KNOT_WEIGHT: f32 = 0.9;
 /// A knot's soft glow.
@@ -209,6 +216,8 @@ pub(crate) struct Knot {
     dir: (f64, f64),
     iron: bool,
     lit: Option<f64>,
+    /// Angle bin of `dir` (the remnant's shape factor there).
+    bin: u16,
 }
 
 impl Knot {
@@ -248,8 +257,10 @@ pub struct SupernovaRemnant {
     sin_k: Vec<f32>,
     /// Finger perturbation `p(θ)` this frame, per angle bin.
     finger: Vec<f32>,
-    /// The blast wave's radial wobble per angle bin, in `[−1, 1]`.
+    /// The remnant's low-order shape per angle bin this frame, in `[−1, 1]`, and its
+    /// modes (phase, amplitude, drift).
     wobble: Vec<f32>,
+    wob_modes: [(f64, f64, f64); 3],
     /// Salt of the ejecta's streak texture.
     salt: u64,
     clumps: Vec<(f32, f32)>,
@@ -292,24 +303,16 @@ impl SupernovaRemnant {
         self.finger = vec![0.0; ANGLES];
         let salt: u64 = ctx.rng.random();
         self.salt = salt;
-        // Low-order modes for the blast wave's wobble round the rim.
-        let wob: [(f64, f64); 3] = std::array::from_fn(|_| {
+        // Low-order modes of the remnant's shape (m = 2 dominant: a lopsided shell).
+        self.wob_modes = std::array::from_fn(|k| {
             (
                 ctx.rng.random_range(0.0..TAU),
-                ctx.rng.random_range(0.4..1.0),
+                WOBBLE_AMP[k] * ctx.rng.random_range(0.8..1.0),
+                WOBBLE_DRIFT * ctx.rng.random_range(-1.0..1.0),
             )
         });
-        self.wobble = (0..ANGLES)
-            .map(|j| {
-                let th = TAU * j as f64 / ANGLES as f64;
-                let v: f64 = wob
-                    .iter()
-                    .enumerate()
-                    .map(|(k, &(ph, a))| a * ((k as f64 + 2.0) * th + ph).sin_det())
-                    .sum();
-                (v / 2.2).clamp(-1.0, 1.0) as f32
-            })
-            .collect();
+        self.wobble = vec![0.0; ANGLES];
+        self.update_wobble();
         self.clumps = (0..NOISE * NOISE)
             .map(|i| {
                 let (x, y) = ((i % NOISE) as f64, (i / NOISE) as f64);
@@ -338,6 +341,7 @@ impl SupernovaRemnant {
                 dir: a.sin_cos_det(),
                 iron,
                 lit: None,
+                bin: ((a / TAU * ANGLES as f64) as usize % ANGLES) as u16,
             });
         }
         for m in &mut self.modes {
@@ -386,12 +390,38 @@ impl SupernovaRemnant {
         }
     }
 
+    /// The remnant's shape now: modes `m` = 2–4 with slowly drifting phases, normalised
+    /// by the total amplitude so it stays in `[−1, 1]`.
+    fn update_wobble(&mut self) {
+        let tau = self.tau.min(EXPAND);
+        let norm: f64 = self.wob_modes.iter().map(|m| m.1).sum::<f64>().max(1e-9);
+        let modes = self.wob_modes;
+        for (j, w) in self.wobble.iter_mut().enumerate() {
+            let th = TAU * j as f64 / ANGLES as f64;
+            let v: f64 = modes
+                .iter()
+                .enumerate()
+                .map(|(k, &(ph, a, drift))| {
+                    a * ((k as f64 + 2.0) * th + ph + drift * tau).sin_det()
+                })
+                .sum();
+            *w = (v / norm) as f32;
+        }
+    }
+
+    /// The shape factor at an angle bin: every radius (blast wave, contact, reverse shock,
+    /// knots) scales with it, so the ordering SNR-A2 holds at every angle.
+    fn shape(wobble: &[f32], bin: usize) -> f64 {
+        1.0 + RIM_WOBBLE * f64::from(wobble.get(bin).copied().unwrap_or(0.0))
+    }
+
     fn envelope(&self) -> f64 {
         1.0 - ease::smoothstep((self.tau - EXPAND) / FADE)
     }
 
     fn raster(&mut self) {
         self.update_fingers();
+        self.update_wobble();
         let tau = self.tau.min(EXPAND);
         let rf = self.rf_px();
         let rr = reverse_frac(tau) * rf;
@@ -405,7 +435,7 @@ impl SupernovaRemnant {
             if b <= 0.0 {
                 continue;
             }
-            let r = k.frac(tau, r_end) * rf;
+            let r = k.frac(tau, r_end) * rf * Self::shape(&self.wobble, usize::from(k.bin));
             let (s, c) = k.dir;
             let (x, y) = (self.centre.0 + r * c - 0.5, self.centre.1 - r * s - 0.5);
             let glow = if k.iron {
@@ -430,11 +460,13 @@ impl SupernovaRemnant {
             let r = dx.hypot(dy);
             let a = usize::from(a);
             let p = f64::from(finger[a]);
-            let rc = contact_frac(p) * rf;
+            // The whole remnant is out of round at low order where the surrounding gas
+            // is lumpy: R_f, R_c and R_r all scale with the local shape factor.
+            let sh = Self::shape(wobble, a);
+            let rfa = rf * sh;
+            let rc = contact_frac(p) * rfa;
             // Blast wave: a one-pixel line at R_f(θ) (antialiased inward), fading softly
-            // outward over a couple of pixels; R_f wobbles at low order where the
-            // surrounding gas is lumpy.
-            let rfa = rf * (1.0 + RIM_WOBBLE * f64::from(wobble[a]));
+            // outward over a couple of pixels.
             let d = r - rfa;
             let rim = if !(-1.0..=RIM_BAND).contains(&d) || rf <= 0.0 {
                 0.0
@@ -446,18 +478,19 @@ impl SupernovaRemnant {
             // Shocked ejecta between the reverse shock and the contact: densest near the
             // contact (so the shell reads as a ring, not a disc), clumpy in comoving
             // coordinates, brightest in the fingers.
-            let (ej, element) = if r < rc && rf > 0.0 {
-                let inner = rr.max(EJECTA_INNER * rc);
+            // Inside 0.45 R_c the shell is hollow (v = 0): skip the noise there.
+            let (ej, element) = if r < rc && r > HOLLOW * rc && rf > 0.0 {
+                let inner = (rr * sh).max(EJECTA_INNER * rc);
                 let peak = (rc * rc - inner * inner).sqrt().max(1e-9);
                 let path = shell_path(r, inner, rc) / peak;
                 // Radial filaments: noise fine in angle, slow along the radius, so the
                 // ejecta streak outward like the fingers they are.
                 let (ux, uy) = (dx / r.max(1e-9), dy / r.max(1e-9));
-                let q = r / rf;
+                let q = r / rfa;
                 let streak = value_noise(salt, STREAK * ux + 1.3 * q, STREAK * uy - 1.3 * q, 1.0);
                 let texture = 0.3 + 1.1 * streak * streak;
                 let finger_boost = (0.55 + 2.0 * p.max(0.0) / 0.25).min(2.4);
-                let hollow = ease::smoothstep((q / (rc / rf) - 0.45) / 0.4);
+                let hollow = ease::smoothstep((q / (rc / rfa) - HOLLOW) / 0.4);
                 let v = hollow * path * path * texture * finger_boost;
                 // Element map: broad comoving patches (Chandra false colour).
                 let (o_rich, fe_rich) = sample_noise(clumps, dx / rf, dy / rf);
@@ -713,6 +746,41 @@ mod tests {
             }
         }
         assert!(n > 50, "rim drawn ({n} px)");
+    }
+
+    #[test]
+    fn snr_a6_blast_wave_is_out_of_round_at_low_order_and_reshapes_slowly() {
+        for seed in [1_u64, 7, 42, 99, 1234] {
+            let size = Size::new(120, 40);
+            let mut ctx = Ctx::new(seed, size);
+            let mut g = SupernovaRemnant::default();
+            g.resize(size, &mut ctx);
+            for _ in 0..600 {
+                g.update(SIM_DT, &mut ctx);
+            }
+            let radii = |g: &SupernovaRemnant| -> (f64, f64) {
+                let s = (0..ANGLES).map(|j| SupernovaRemnant::shape(&g.wobble, j));
+                s.clone()
+                    .fold((f64::MAX, f64::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)))
+            };
+            let (lo, hi) = radii(&g);
+            assert!(hi / lo >= 1.08, "seed {seed}: out of round {}", hi / lo);
+            assert!(hi / lo <= 1.2, "seed {seed}: too lopsided {}", hi / lo);
+            // Low order: the shape changes sign at most 8 times round the rim (m ≤ 4).
+            let crossings = (0..ANGLES)
+                .filter(|&j| (g.wobble[j] >= 0.0) != (g.wobble[(j + 1) % ANGLES] >= 0.0))
+                .count();
+            assert!(crossings <= 8, "seed {seed}: {crossings} sign changes");
+            // Slowly: one frame later the shape moved by far less than a pixel's share.
+            let before = g.wobble.clone();
+            g.update(SIM_DT, &mut ctx);
+            let moved = before
+                .iter()
+                .zip(&g.wobble)
+                .map(|(a, b)| (a - b).abs())
+                .fold(0.0_f32, f32::max);
+            assert!(moved < 0.01, "seed {seed}: shape jumped {moved}");
+        }
     }
 
     #[test]
