@@ -25,7 +25,7 @@ use rand::Rng;
 use sciart_core::draw;
 use sciart_core::ease;
 use sciart_core::geom::ASPECT;
-use sciart_core::ink::{self, ramp};
+use sciart_core::ink;
 use sciart_core::ode;
 use sciart_core::particles::plot;
 use sciart_core::prelude::*;
@@ -561,13 +561,25 @@ fn regolith(level: f64) -> Ink {
     if level < ink::MIN_VISIBLE_LEVEL {
         Ink::BLANK
     } else {
-        Ink::new(Role::Structure, ink::level(level))
+        Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level))
     }
 }
 
+/// ADR-0017 (M14): the ground is a 1-px horizon line in `Starlight` up to `HORIZON_TOP`
+/// (lit by each slope's Lambert term, `SHADE` in a rim's or the LM's shadow) over a dim,
+/// smooth regolith gradient (`PLAIN.0` below the horizon to `PLAIN.1` at the frame's
+/// foot), with a sparse speckle of rocks (`ROCK_SHARE` of the plain's pixels at
+/// `ROCK_LEVEL`, dimmer toward the viewer) and craters shaded on that dim ground
+/// (black cores, lit far walls up to `PIT_TOP`).
+const HORIZON_TOP: f64 = 90.0;
+const PLAIN: (f64, f64) = (30.0, 13.0);
+const ROCK_SHARE: f64 = 0.012;
+const ROCK_LEVEL: (f64, f64) = (22.0, 55.0);
+const PIT_TOP: f64 = 60.0;
+
 /// Regolith in shadow where it meets the sky: the darkest grey, not black, so a shadowed
 /// stretch of skyline still reads as ground (ML-A8).
-const SHADE: f64 = 16.0;
+const SHADE: f64 = 20.0;
 
 /// How far the sun-side rim's shadow reaches across a crater's floor under the 11° Sun,
 /// in crater radii: `depth / tan 11°` for a mature, shallow mare bowl (depth ≈ D/13).
@@ -645,10 +657,12 @@ struct Sprite {
     k_max: f64,
 }
 
-const ASCENT: Ink = Ink::new(Role::Text, 235);
-/// Gold Kapton foil over the descent stage.
-const DESCENT_STAGE: Ink = Ink::new(Role::Sun, 205);
-const LEGS: Ink = Ink::new(Role::Structure, 170);
+/// ADR-0017 (M14 critic): a pale LM with its descent stage in gold Kapton foil, the
+/// scene's accent, at M11's size.
+const ASCENT: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 225);
+const DESCENT_STAGE: Ink = Ink::new(Role::Ramp(Ramp::Sulfur), 185);
+const LEGS: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 150);
+const WINDOW: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 60);
 
 const LM_TALL: Sprite = Sprite {
     uni: &[
@@ -710,6 +724,8 @@ const LM_HEIGHT: f64 = 7.0;
 /// Where the flag is planted relative to the LM (m, against the direction of travel).
 const FLAG_OFFSET: f64 = 11.0;
 const N_STARS: usize = 48;
+/// The Earth's ramp levels are drawn at this share (ADR-0017: dim).
+const EARTH_DIM: f64 = 0.5;
 
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 struct Star {
@@ -955,9 +971,8 @@ impl Generator for MoonLanding {
             };
             match ink.role {
                 Role::Background => None,
-                Role::Structure if ink.level > 150 => Some(('#', ink)),
-                Role::Structure if ink.level > 70 => Some((':', ink)),
-                Role::Structure => Some(('.', ink)),
+                Role::Ramp(Ramp::Starlight) if ink.level > 70 => Some(('_', ink)),
+                Role::Ramp(Ramp::Starlight) => Some(('.', ink)),
                 _ => Some(('o', ink)),
             }
         });
@@ -1031,7 +1046,8 @@ impl MoonLanding {
     /// small enough to leave the LM the focus.
     fn earth(&self) -> (f64, f64, f64) {
         let (w, h) = (f64::from(self.width), f64::from(self.height));
-        let r = (h / 12.0).clamp(0.8, 3.4);
+        // M14: small (ADR-0017), and dimmed after painting (`dim_earth`).
+        let r = (h / 18.0).clamp(0.7, 2.2);
         (w * (0.5 + 0.3 * self.side), (0.2 * h).max(2.5 + r), r)
     }
 
@@ -1062,9 +1078,40 @@ impl MoonLanding {
         self.px.clear();
         self.dots.clear();
         self.earth_globe().paint(&mut self.px);
+        self.dim_earth();
         self.paint_regolith(&view);
         self.dust_dots(&view);
         self.plume_dots(&view, sprite);
+    }
+
+    /// Dim the painted Earth (ADR-0017: a small, dim Earth): its ramp pixels at
+    /// `EARTH_DIM` of their level (the `Blackbody` land keeps its level, which is a
+    /// temperature, not a brightness).
+    fn dim_earth(&mut self) {
+        let (ex, ey, er) = self.earth();
+        let (x0, x1) = (
+            (ex - er - 1.0).floor() as i32,
+            (ex + er + 1.0).ceil() as i32,
+        );
+        let (y0, y1) = (
+            (2.0 * (ey - er) - 2.0).floor() as i32,
+            (2.0 * (ey + er) + 2.0).ceil() as i32,
+        );
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if let Some(ink) = self.px.get(x, y)
+                    && matches!(ink.role, Role::Ramp(_))
+                {
+                    let level = f64::from(ink.level) * EARTH_DIM;
+                    let dim = if level >= ink::MIN_VISIBLE_LEVEL {
+                        Ink::new(ink.role, ink::level(level))
+                    } else {
+                        Ink::BLANK
+                    };
+                    self.px.set(x, y, dim);
+                }
+            }
+        }
     }
 
     /// The mare in half blocks (ML-A5): the skyline lit by the low Sun through each
@@ -1109,8 +1156,14 @@ impl MoonLanding {
             if !top.is_finite() {
                 continue;
             }
-            if under.contains(&(c as f64)) && top > pad && top <= pad + 2.0 {
-                top = pad;
+            // Under the sprite the line meets the pads, so the LM stands on it (ML-A8): a
+            // surface within two pixels of them is drawn from the higher of the two down to
+            // the lower (at most three pixels), so both the pads' row and the surface pixel
+            // are lit.
+            let mut line_end = top;
+            if under.contains(&(c as f64)) && (top - pad).abs() <= 2.0 {
+                line_end = top.max(pad);
+                top = top.min(pad);
             }
             // World-anchored speckle: one rock per ~2 m of ground.
             let rock = (x * 0.5).floor() as i32;
@@ -1120,22 +1173,22 @@ impl MoonLanding {
                 // The lit surface is two pixels deep. In a rim's or the LM's shadow it is
                 // the darkest grey, not black, so the skyline stays unbroken against the
                 // sky and the shadow reads as a sliver on the ground (ML-A8).
-                let level = if depth < 2.0 {
+                let level = if f64::from(py) - line_end < 1.0 {
+                    // The horizon: one pixel, lit by its slope.
                     if dark {
                         SHADE
                     } else {
-                        20.0 + 160.0 * lit.min(1.5)
+                        (20.0 + 70.0 * lit).min(HORIZON_TOP)
                     }
                 } else {
-                    // Bright rocks and shadowed pits on a plain that darkens toward the
-                    // viewer, so the skyline reads as the far distance.
-                    let n = hash01(cell_key(rock, py));
-                    let speck = match n {
-                        n if n > 0.95 => 60.0,
-                        n if n < 0.04 => -40.0,
-                        n => 24.0 * n,
-                    };
-                    (104.0 - 58.0 * depth / plain + speck).max(12.0)
+                    // A dim, smooth regolith gradient with a sparse speckle of rocks,
+                    // dimmer toward the viewer, so the horizon reads as the far distance.
+                    let near = depth / plain;
+                    if hash01(cell_key(rock, py)) < 1.0 - ROCK_SHARE {
+                        PLAIN.0 + (PLAIN.1 - PLAIN.0) * near
+                    } else {
+                        ROCK_LEVEL.1 - (ROCK_LEVEL.1 - ROCK_LEVEL.0) * near
+                    }
                 };
                 self.px.set(c as i32, py, regolith(level));
             }
@@ -1165,7 +1218,7 @@ impl MoonLanding {
             let (y0, y1) = ((cy - 1.2 * b).floor() as i32, (cy + 1.2 * b).ceil() as i32);
             for y in y0.max(top.ceil() as i32)..=y1 {
                 // The plain's level at this depth, as `paint_regolith` lays it.
-                let base = 104.0 - 58.0 * (f64::from(y) - top) / plain;
+                let base = PLAIN.0 + (PLAIN.1 - PLAIN.0) * (f64::from(y) - top) / plain;
                 for x in x0..=x1 {
                     // Never over another column's skyline: the plain begins below it.
                     let surface = usize::try_from(x)
@@ -1176,12 +1229,13 @@ impl MoonLanding {
                         continue;
                     }
                     let (u, v) = ((f64::from(x) + 0.5 - cx) / a, (f64::from(y) + 0.5 - cy) / b);
+                    // M14: shaded on the dim ground: a black core under the sun-side wall,
+                    // the far wall a little brighter than the plain.
                     if let Some(light) = pit_light(u, v, sun_x) {
-                        // A zero multiple is the black core, whatever the plain's level.
                         let level = if light == 0.0 {
                             0.0
                         } else {
-                            (base * light).clamp(SHADE, 235.0)
+                            (base * light).min(PIT_TOP)
                         };
                         self.px.set(x, y, regolith(level));
                     }
@@ -1195,13 +1249,18 @@ impl MoonLanding {
         for p in &self.dust {
             let fade = 1.0 - (p.age / DUST_LIFE).clamp(0.0, 1.0);
             let (x, y) = Dots::from_cells(view.col(p.x) + 0.5, view.row(p.z));
-            self.dots
-                .plot(x, y, Ink::new(Role::Structure, (90.0 + 160.0 * fade) as u8));
+            self.dots.plot(
+                x,
+                y,
+                Ink::new(Role::Ramp(Ramp::Starlight), (25.0 + 55.0 * fade) as u8),
+            );
         }
     }
 
     /// The descent engine's plume: its hypergolic exhaust is nearly invisible in vacuum,
-    /// so a faint, flickering violet cone of dots (stylised), clipped at the ground.
+    /// so a short cone of `Blackbody` dots (stylised): a white-hot core at the bell
+    /// cooling to orange down the plume, longer with the throttle, flickering, clipped at
+    /// the ground.
     fn plume_dots(&mut self, view: &View, sprite: &Sprite) {
         let lm = self.descent.lm;
         if lm.thrust <= 0.0 || self.descent.touchdown.is_some() {
@@ -1211,24 +1270,26 @@ impl MoonLanding {
         let foot = Self::foot_row(view, lm.z);
         let shear = (lm.theta.tan() * ASPECT * 0.5).clamp(-0.6, 0.6);
         let bell = foot - (n - 1 - sprite.bell) as f64;
-        let throttle = lm.thrust / T_MAX;
-        let len = (1.0 + 3.5 * throttle) * f64::from(Dots::CELL_H);
+        let throttle = (lm.thrust / T_MAX).clamp(0.0, 1.0);
+        let len = (2.0 + 5.0 * throttle).round() as i32;
         let surface = view.row(self.terrain.height(lm.x)) * f64::from(Dots::CELL_H);
         let frame = (self.flicker * 1e6) as u64;
         let (x0, y0) = Dots::from_cells(view.cx + 0.5, bell + 1.0);
-        for j in 0..len.ceil() as i32 {
+        for j in 0..len {
             let y = y0 + f64::from(j);
             if y >= surface {
                 break;
             }
-            let u = f64::from(j) / len;
-            let half = 1.0 + 3.0 * u;
+            let u = f64::from(j) / f64::from(len.max(1));
             let cx = x0 - shear * f64::from(Dots::CELL_W) * f64::from(j) / f64::from(Dots::CELL_H);
-            for i in -(half.ceil() as i32)..=(half.ceil() as i32) {
-                let keep = hash01(frame ^ cell_key(i, j)) < 0.75 * (1.0 - u);
-                if keep && f64::from(i).abs() <= half {
+            // The core: white-hot at the bell, cooling down the plume.
+            self.dots.plot(cx, y, ink::blackbody(6_500.0 - 4_000.0 * u));
+            // A dimmer, cooler fringe either side, flickering.
+            let half = (1.0 + 2.0 * u).round() as i32;
+            for i in [-half, half] {
+                if hash01(frame ^ cell_key(i, j)) < 0.7 * (1.0 - u) {
                     self.dots
-                        .plot(cx + f64::from(i), y, ramp(Ramp::Plasma, 0.62 - 0.35 * u));
+                        .plot(cx + f64::from(i), y, ink::blackbody(2_400.0 - 600.0 * u));
                 }
             }
         }
@@ -1254,11 +1315,7 @@ impl MoonLanding {
                 if cu == ' ' {
                     continue;
                 }
-                let ink = if cu == '▣' {
-                    Ink::new(Role::Cold, 200)
-                } else {
-                    sprite.ink[i]
-                };
+                let ink = if cu == '▣' { WINDOW } else { sprite.ink[i] };
                 plot(canvas, x0 + j as f64, y, Glyph::new(cu, ca), ink);
             }
         }
@@ -1809,7 +1866,9 @@ mod tests {
     }
 
     #[test]
-    fn ml_a7_gold_descent_stage_over_shaded_regolith() {
+    fn ml_a7_a_pale_lm_with_gold_foil_over_dim_regolith() {
+        // ADR-0017 (M14): a pale LM with a foil-gold descent stage (`Sulfur`), a 1-px
+        // horizon over a dim regolith gradient (no bright filled block), a small dim Earth.
         let mut stage = Stage::new(build(), 42, Size::new(120, 40), GlyphMode::Unicode);
         for _ in 0..(12.0 / SIM_DT) as usize {
             stage.step(SIM_DT);
@@ -1821,10 +1880,25 @@ mod tests {
                 .filter(|c| c.ink.role == r || c.bg.role == r)
                 .count()
         };
-        assert!(count(Role::Sun) >= 3, "gold foil");
-        assert!(count(Role::Structure) > 400, "half-block regolith");
-        assert!(count(Role::Ramp(Ramp::Ice)) > 3, "the Earth");
-        assert!(f.cells().iter().any(|c| c.ch == '▀' || c.ch == '▄'));
+        assert_eq!(
+            count(Role::Sun) + count(Role::Structure) + count(Role::Cold),
+            0
+        );
+        assert!(count(Role::Ramp(Ramp::Ice)) > 1, "the Earth");
+        assert!(count(Role::Ramp(Ramp::Sulfur)) >= 3, "gold foil");
+        assert!(
+            count(Role::Ramp(Ramp::Starlight)) > 60,
+            "LM, horizon and ground"
+        );
+        // The ground below the horizon is dim: in the bottom quarter, every half-block
+        // level is at most the horizon's (regolith, rocks, crater walls, the line).
+        for c in &f.cells()[f.cells().len() * 3 / 4..] {
+            for ink in [c.ink, c.bg] {
+                if ink.role == Role::Ramp(Ramp::Starlight) && c.ch != ' ' && c.ch != '·' {
+                    assert!(f64::from(ink.level) <= HORIZON_TOP + 1.0, "{c:?}");
+                }
+            }
+        }
     }
 
     #[test]
