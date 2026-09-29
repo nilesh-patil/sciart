@@ -553,7 +553,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r8_reach_cut_only_skips_pixels_that_are_blank() {
+    fn reach_cut_only_skips_pixels_that_are_blank() {
         // The per-frame cut radius must be conservative: every sky point beyond it emits
         // exactly nothing, and nothing tones to level 0, at every stage of the loop.
         let (mut g, _) = built(Size::new(500, 150));
