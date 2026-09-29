@@ -95,6 +95,17 @@ const DETACH_KICK: f64 = 0.3;
 const FAR_BLUR: usize = 2;
 /// Kepler solve: Newton iterations per frame (warm start).
 const NEWTON_WARM: usize = 3;
+/// ADR-0017 (M14): the dust tail in `Starlight` up to `DUST_TOP` (only the coma, within
+/// `COMA_PX` of the nucleus, keeps its full level), the ion tail as thin rays in `Ice`
+/// up to `ION_TOP`; no Sun glow (it sat cut off in a corner).
+const DUST_TOP: f64 = 130.0;
+const ION_TOP: f64 = 140.0;
+const COMA_PX: f64 = 6.0;
+/// The nucleus's level (its cross at 0.7 of it).
+const NUCLEUS_LEVEL: f64 = 240.0;
+/// A new comet arrives this far into its approach, with its tails seeded (GEN-R19: no
+/// warm-up steps in `resize`).
+const ARRIVE: f64 = 4.0;
 
 /// Barker's mean-anomaly measure `D + D³/3` of true anomaly `nu` (parabolic time).
 fn barker(nu: f64) -> f64 {
@@ -366,7 +377,7 @@ impl CometTails {
             far_glow: Glow::default(),
             scratch: Vec::new(),
             ion_glow: Glow::default(),
-            dust_tone: Tone::asinh(0.12, 7.0),
+            dust_tone: Tone::asinh(0.3, 20.0),
             ion_tone: Tone::asinh(0.3, 8.0),
             pixels: Pixels::default(),
             dirty: false,
@@ -530,7 +541,7 @@ impl CometTails {
     fn follow(&mut self) {
         let anti = self.anti_solar();
         let v = &mut self.view;
-        let off = 0.32 * v.w.min(2.0 * v.h);
+        let off = 0.38 * v.w.min(2.0 * v.h);
         let (nx, ny) = (0.5 * v.w - off * anti[0], 0.5 * v.h + 0.6 * off * anti[1]);
         v.sx = nx - v.scale * self.nucleus[0];
         v.sy = ny + v.scale * self.nucleus[1];
@@ -593,14 +604,7 @@ impl CometTails {
                     let s = run * u * u;
                     let b = v.px(self.tail_point(s, k, 0.0));
                     let w = STREAM_W[usize::from(k)] * (1.0 / (1.0 + s / ION_FALL)) as f32;
-                    // A faint soft body under a thin antialiased ray, so neighbouring
-                    // rays stay apart instead of merging into one band.
-                    self.ion_glow.stroke(
-                        (2.0 * a.0, 2.0 * a.1),
-                        (2.0 * b.0, 2.0 * b.1),
-                        &SOFT,
-                        0.25 * w,
-                    );
+                    // A thin antialiased ray (M14: no soft body under it).
                     let len = (b.0 - a.0).hypot(b.1 - a.1);
                     let n = (2.0 * len).ceil().clamp(1.0, 1024.0) as usize;
                     let per = 1.6 * w * (len / n as f64) as f32;
@@ -634,40 +638,54 @@ impl CometTails {
         let size = self.pixels.pixel_size();
         let w = usize::from(size.width());
         let (dust, ions) = (self.dust_glow.values(), self.ion_glow.values());
-        // The Sun, often just off frame: a white-gold photosphere in scattered light
-        // that falls smoothly to the sky, no coloured rim.
-        let r_sun = self.nucleus[0].hypot(self.nucleus[1]).max(0.1);
-        let glow_r = 0.3 * v.h * (0.35 / r_sun).sqrt();
-        let inv_r2 = 1.0 / (glow_r * glow_r).max(1e-9);
+        // The nucleus's pixel (the glow splats above take dot units, 2 per pixel).
+        let (cx, cy) = (nx, ny);
         for (i, px) in (0..dust.len().min(ions.len())).zip(0..) {
             let (x, y) = ((px % w) as i32, (px / w) as i32);
             let (ld, li) = (dt.level(env * dust[i]), it.level(env * ions[i]));
-            let ink = if li > 20 && u16::from(li) + 30 > u16::from(ld) {
-                ink::ramp(Ramp::Ice, f64::from(li) / 255.0)
-            } else if ld > 12 {
-                ink::ramp(Ramp::Starlight, f64::from(ld) / 255.0)
+            // The coma keeps its full level; the tail is muted (ADR-0017).
+            let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy);
+            let coma = d < COMA_PX;
+            let dust_level = if coma {
+                // The head: a compact bright coma falling off from the nucleus.
+                let head = f64::from(env) * NUCLEUS_LEVEL * (1.0 - (d / COMA_PX).powi(2));
+                f64::from(ld).max(head)
             } else {
-                let (dx, dy) = (f64::from(x) + 0.5 - v.sx, f64::from(y) + 0.5 - v.sy);
-                let q2 = (dx * dx + dy * dy) * inv_r2;
-                // A near-Gaussian core plus a broad 1/(1 + 4q²)² wing: the wing keeps the
-                // edge of the glow soft all the way to the sky. Beyond q² = 0.6 their sum is
-                // below the visible level, so the sky skips the `exp`.
-                let sun = if q2 < 0.6 {
-                    0.75 * (-6.0 * q2).exp() + 0.25 / (1.0 + 4.0 * q2).powi(2)
-                } else {
-                    0.0
-                };
-                if q2 < 0.16 * 0.16 {
-                    ink::blackbody(5800.0)
-                } else if sun * 255.0 >= ink::MIN_VISIBLE_LEVEL {
-                    ink::ramp(Ramp::Starlight, 0.97 * sun)
+                DUST_TOP * f64::from(ld) / 255.0
+            };
+            let ion_level = ION_TOP * f64::from(li) / 255.0;
+            let ink =
+                if !coma && ion_level >= ink::MIN_VISIBLE_LEVEL && ion_level + 12.0 > dust_level {
+                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(ion_level))
+                } else if dust_level >= ink::MIN_VISIBLE_LEVEL {
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(dust_level))
                 } else if hash01(0x57A ^ cell_key(x, y)) < 0.0015 {
-                    ink::ramp(Ramp::Starlight, 0.3 + 0.3 * hash01(0x57B ^ cell_key(x, y)))
+                    ink::ramp(Ramp::Starlight, 0.12 + 0.2 * hash01(0x57B ^ cell_key(x, y)))
                 } else {
                     Ink::BLANK
-                }
-            };
+                };
             self.pixels.set(x, y, ink);
+        }
+        // The nucleus: the head's brightest point, with a faint cross (fading with the
+        // loop's envelope).
+        let (x, y) = (cx.floor() as i32, cy.floor() as i32);
+        let head = f64::from(env) * NUCLEUS_LEVEL;
+        if head >= ink::MIN_VISIBLE_LEVEL {
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let l = (0.7 * head).max(f64::from(
+                    self.pixels.get(x + dx, y + dy).map_or(0, |i| i.level),
+                ));
+                self.pixels.set(
+                    x + dx,
+                    y + dy,
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l)),
+                );
+            }
+            self.pixels.set(
+                x,
+                y,
+                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(head)),
+            );
         }
     }
 }
@@ -690,7 +708,7 @@ impl Generator for CometTails {
         let (w, h) = (f64::from(px.width()), f64::from(px.height()));
         // The orbit's visible arc spans ±0.75 AU vertically; the Sun sits just off the
         // left edge so the tails stream across the frame.
-        let scale = (0.5 * w).min(1.1 * h).max(1.0);
+        let scale = (0.36 * w).min(0.8 * h).max(1.0);
         self.view = View {
             sx: 0.0,
             sy: 0.0,
@@ -699,11 +717,14 @@ impl Generator for CometTails {
             h,
         };
         if self.t == 0.0 {
-            // Arrive with grown tails, a few seconds into the approach.
+            // Arrive with grown tails, `ARRIVE` s into the approach: the grains are
+            // analytic orbits, so seeding there is the same as having flown there, and one
+            // step places them.
+            self.t = ARRIVE;
+            let (n, v) = comet_state(anomaly(ARRIVE));
+            (self.nucleus, self.velocity) = (n, v);
             self.seed_backlog(&mut ctx.rng);
-            for _ in 0..(4.0 / SIM_DT) as usize {
-                self.step(SIM_DT, &mut ctx.rng);
-            }
+            self.step(SIM_DT, &mut ctx.rng);
         }
         self.dirty = true;
     }
@@ -990,37 +1011,37 @@ mod tests {
     }
 
     #[test]
-    fn cmt_a8_sun_glow_is_white_gold_without_a_coloured_rim() {
-        // Scene time 5 s: the Sun is on frame. Every Sun-glow pixel is either the
-        // Blackbody photosphere or Starlight (never Ember), and the glow falls off
-        // monotonically outward, with no ring.
-        let g = run(5.0);
-        let px = g.pixels.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        let mut on = 0;
-        for y in 0..h {
-            for x in 0..w {
-                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                if let Role::Ramp(r) = ink.role {
-                    assert_ne!(r, Ramp::Ember, "({x}, {y})");
-                }
-                let d = (f64::from(x) + 0.5 - g.view.sx).hypot(f64::from(y) + 0.5 - g.view.sy);
-                if ink.role == Role::Blackbody && d < 0.2 * g.view.h {
-                    on += 1;
+    fn cmt_a8_no_sun_glow_and_muted_tails() {
+        // ADR-0017 (M14): no Sun glow (it sat cut off in a corner) and no Ember; the tails
+        // are muted: ion rays `Ice` ≤ `ION_TOP`, dust `Starlight` ≤ `DUST_TOP` away from
+        // the coma, which alone keeps its full level.
+        for t in [5.0, 12.0, 20.0] {
+            let g = run(t);
+            let px = g.pixels.pixel_size();
+            let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+            let (nx, ny) = g.view.px(g.nucleus);
+            let (mut ice, mut dust) = (0, 0);
+            for y in 0..h {
+                for x in 0..w {
+                    let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                    assert_ne!(ink.role, Role::Blackbody, "t {t} ({x}, {y})");
+                    let coma =
+                        (f64::from(x) + 0.5 - nx).hypot(f64::from(y) + 0.5 - ny) < COMA_PX + 0.5;
+                    match ink.role {
+                        Role::Ramp(Ramp::Ice) => {
+                            ice += 1;
+                            assert!(f64::from(ink.level) <= ION_TOP + 1.0, "{ink:?}");
+                        }
+                        Role::Ramp(Ramp::Starlight) if !coma => {
+                            dust += 1;
+                            assert!(f64::from(ink.level) <= DUST_TOP + 1.0, "{ink:?}");
+                        }
+                        Role::Ramp(Ramp::Starlight) | Role::Background => {}
+                        other => panic!("t {t}: {other:?}"),
+                    }
                 }
             }
-        }
-        assert!(on > 0, "Sun not on frame");
-        // Leftward from the Sun's centre (clear of the comet): photosphere, then a
-        // Starlight glow that only dims, then sky.
-        let (cx, cy) = (g.view.sx.floor() as i32, g.view.sy.floor() as i32);
-        let mut last = u8::MAX;
-        for x in (0..cx.min(w)).rev() {
-            let ink = g.pixels.get(x, cy).unwrap_or(Ink::BLANK);
-            if ink.role == Role::Ramp(Ramp::Starlight) {
-                assert!(ink.level <= last, "ring at x {x}: {} > {last}", ink.level);
-                last = ink.level;
-            }
+            assert!(ice > 20 && dust > 20, "t {t}: ice {ice} dust {dust}");
         }
     }
 }
