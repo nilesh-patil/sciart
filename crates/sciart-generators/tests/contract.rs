@@ -169,6 +169,36 @@ fn gen_r6_deterministic_for_same_seed() {
 }
 
 #[test]
+fn gen_r20_frames_do_not_depend_on_render_cadence() {
+    // `prepare` rasterises only the simulation state (GEN-R20): a stage drawn after every
+    // step and one drawn every third step (the runtime draws every ~2) show identical
+    // cells, inks included, whenever both draw; also right after a resize.
+    for_each_generator("render cadence", |e| {
+        let size = Size::new(90, 30);
+        let mut every = stage(e, size, GlyphMode::Unicode);
+        let mut sparse = stage(e, size, GlyphMode::Unicode);
+        let same = |a: &mut Stage, b: &mut Stage, at: &str| {
+            let (fa, fb) = (a.render().cells().to_vec(), b.render().cells().to_vec());
+            assert!(fa == fb, "{at}: frame differs with render cadence");
+        };
+        for i in 1..=75 {
+            every.step(SIM_DT);
+            every.render();
+            sparse.step(SIM_DT);
+            if i % 3 == 0 {
+                same(&mut every, &mut sparse, "step");
+            }
+            if i == 40 {
+                every.resize(Size::new(61, 23));
+                every.render();
+                sparse.resize(Size::new(61, 23));
+                same(&mut every, &mut sparse, "resize");
+            }
+        }
+    });
+}
+
+#[test]
 fn gen_r9_scene_moves_within_one_second() {
     for_each_generator("motion", |e| {
         let mut s = stage(e, Size::new(200, 50), GlyphMode::Unicode);

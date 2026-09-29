@@ -1,7 +1,8 @@
 //! Steady-state heap traffic of every registered generator, measured with a counting
 //! global allocator (ADR-0009). Own test binary: a binary has exactly one global allocator.
 //!
-//! House rule behind the GEN-R8 frame budget: after warm-up, `Generator::render` never
+//! House rule behind the GEN-R8 frame budget: after warm-up, `Generator::render` (and the
+//! `prepare` that `Stage::render` runs before it, GEN-R20) never
 //! allocates — a frame is drawn into the pre-sized, reused canvas (spec §"no per-frame
 //! heap allocation in steady state"). `update` is *reported*, and ratcheted with an
 //! explicit list: today no scene allocates in `update` either, and new ones should not.
@@ -167,12 +168,12 @@ fn check(size: Size) {
 }
 
 #[test]
-fn gen_r11_render_and_update_are_allocation_free_200x50() {
+fn gen_r11_r20_prepare_render_and_update_are_allocation_free_200x50() {
     check(Size::new(200, 50));
 }
 
 #[test]
-fn gen_r11_render_and_update_are_allocation_free_80x24() {
+fn gen_r11_r20_prepare_render_and_update_are_allocation_free_80x24() {
     check(Size::new(80, 24));
 }
 
