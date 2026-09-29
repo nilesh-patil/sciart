@@ -4,25 +4,25 @@ expression: frame
 ---
  T-00:02  ALT   0.0 km  VEL    0 m/s  q  0.0 kPa                                
                                                                                 
+                                              .                                 
                                                                                 
+                    .   .             T-2                                       
+                                                                  .             
                                                                                 
-                                      T-2                                       
+                         .                      .                               
+                                |                                               
+                                |       .                                       
+               .                |       |                                       
+                                |      ||                                       
+                                |      ||                                       
+                                |      ||                                       
+                                |      ||                                       
+                       .   .    |      ||              .        .               
+                 .              |      ||.           .                          
+                   .   .        |      ||                 .                     
+                  . ...:: . .   |.     ||        .: :  .:.::.:.  .          .   
+                  :. :::++:++:+.|+:    ||   .+:: .::.++::#:.:.: :               
+                :..:.:: :++..+:#|..    ||   .#:+++#:#::++++  .                  
+____________________________###########||############___________________________
                                                                                 
-                                                                                
-                                                                                
-                               ===                                              
-                               ===                                              
-                               = =     ||                                       
-                               ===     |||                                      
-                               ===     |||                                      
-                               ===     |||                                      
-                               ===     ===                                      
-                               = =     |||                                      
-                               ===     |||             ooooo                    
-                oooooooooooo   ===     |||          ooooooooooooo               
-               oooooooooooooooo===     |||     oooooooooooooooooo               
-                ooooo*ooooooooo=o=o    |||   ooooooooooooo*oooooo               
-               ooooooooooo**********o  |||o***********oooooooooo                
-================ooooooooooooooooooooo==|||oo*ooooooooooooooooooo================
-============================o=======================oo======o===================
- Rocket launch - stage drops away ==============================================
+ Rocket launch - stage drops away

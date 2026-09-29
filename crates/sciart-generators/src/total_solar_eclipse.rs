@@ -67,26 +67,32 @@ const SHADOW: f64 = 0.6;
 /// The one ramp for the air, its glare, the corona and the beads' halo: navy twilight at
 /// the bottom, pale steel-blue in the middle, pearl white at the top.
 const SKY: Ramp = Ramp::Ice;
-/// Sky: twilight level in totality and at full sunlight, and the glare around the
-/// uncovered Sun.
-const SKY_DARK: f64 = 10.0;
-const SKY_LIT: f64 = 34.0;
+/// Sky: twilight level near the horizon in totality and in sunlight, and the glare around
+/// the uncovered Sun (e-folding `GLARE_R` solar radii beyond the limb).
+const SKY_DARK: f64 = 0.0;
+const SKY_LIT: f64 = 0.0;
 const GLARE: f64 = 95.0;
+const GLARE_R: f64 = 1.1;
+/// GEN-R18: the air is black overhead. Its light ramps in (smoothstep) from `SKY_TOP` of
+/// the picture's height down to the horizon, so only the lower sky holds the dim blue.
+const SKY_TOP: f64 = 0.55;
+/// Below these levels the light is drawn as true black (blank): the sky's `Ice` has a navy
+/// floor, and the corona's pearl fades out into black rather than into a blue sky.
+const SKY_BLANK: f64 = 2.0;
+const SKY_DISSOLVE: u8 = 16;
+const PEARL_BLANK: f64 = 10.0;
+/// Corona rows filled per frame while the corona is hidden (GEN-R19).
+const CORONA_ROWS: usize = 2;
 /// Tone mapping of the summed light: linear to the knee, then an exponential roll-off to
 /// the ceiling, so bright cores never clip flat.
-const KNEE: f64 = 150.0;
-/// The summed light is drawn in pearl `Ramp(Starlight)` where the corona's broad shape (or a
-/// bead's halo) outshines the air and their light is at least this level, in the sky's
-/// `Ice` elsewhere: the inner corona is pearl, and its faint outer rays (a little light over
-/// a blue sky) carry on in the twilight's dark blue down to the sky's own level within one
-/// ramp, with no hue change, taper or cut-off. The test reads the broad shape (without the
-/// fine rays), so the pearl's outline is smooth, never a stepped fray.
-const PEARL_LEVEL: f64 = 40.0;
+const KNEE: f64 = 140.0;
 const CEIL: f64 = 245.0;
 /// Sky levels below this stay blank in ASCII (the daylit sky with its glare is ~100).
 const ASCII_SKY: u8 = 110;
 /// Horizon glow: peak `Ramp(Ember)` level and its height (share of the picture).
-const GLOW_PEAK: f64 = 140.0;
+const GLOW_PEAK: f64 = 0.0;
+/// The hills' top edge, the only lit land.
+const SKYLINE: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 34);
 const GLOW_H: f64 = 0.1;
 /// Prominences: count range, heights (solar radii) and `Ramp(HAlpha)` peak.
 const PROMS: (usize, usize) = (3, 6);
@@ -238,6 +244,7 @@ impl Corona {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn at(&self, r: f64, a: f64) -> f64 {
         self.shape(r, a, true)
     }
@@ -245,10 +252,19 @@ impl Corona {
     /// The corona's broad shape, with (`fine`) or without its fine rays (the plumes' and
     /// striations' angular ripple): the pearl-or-blue choice follows the broad shape, so
     /// its contour is smooth while the rays still show in the lightness.
+    #[cfg(test)]
     fn shape(&self, r: f64, a: f64, fine: bool) -> f64 {
+        let (f, b) = self.shapes(r, a);
+        if fine { f } else { b }
+    }
+
+    /// `shape` with and without the fine rays at once (GEN-R19: the streamer sum is shared).
+    fn shapes(&self, r: f64, a: f64) -> (f64, f64) {
         if r <= 1.0 {
-            return 0.0;
+            return (0.0, 0.0);
         }
+        let r09 = r.powf(0.9);
+        let wr = (1.3 / r).sqrt();
         let base = r.powf(-FALLOFF);
         let mut streams = 0.0;
         for &(at, width, strength, length) in &self.streamers {
@@ -259,28 +275,25 @@ impl Corona {
                 self.equator + PI
             };
             let centre = eq + wrap(at - eq) * (0.55 + 0.45 / r);
-            let w = width * (1.3 / r).sqrt();
+            let w = width * wr;
             let off = wrap(a - centre) / w;
-            streams +=
-                strength * (-0.5 * off * off).exp() * (-(r - 1.0) / length).exp() * r.powf(0.9);
+            streams += strength * (-0.5 * off * off).exp() * (-(r - 1.0) / length).exp() * r09;
         }
         // Polar plumes: fine short rays within 30° of the poles.
         let pole = wrap(a - self.equator - PI / 2.0)
             .abs()
             .min(wrap(a - self.equator + PI / 2.0).abs());
-        let ripple = if fine {
-            0.5 + 0.5 * (48.0 * a + self.phases[0]).cos_det()
-        } else {
-            0.5
+        let plume = |ripple: f64| {
+            0.35 * ease::smoothstep(1.0 - pole / 0.5) * ripple * (-(r - 1.0) / 0.5).exp()
         };
-        let plumes = 0.35 * ease::smoothstep(1.0 - pole / 0.5) * ripple * (-(r - 1.0) / 0.5).exp();
-        let striae = if fine {
-            1.0 + 0.12 * (37.0 * a + self.phases[1]).sin_det()
-                + 0.08 * (83.0 * a + self.phases[2]).sin_det()
-        } else {
-            1.0
-        };
-        base * (0.35 + streams + plumes) * striae
+        let ripple = 0.5 + 0.5 * (48.0 * a + self.phases[0]).cos_det();
+        let striae = 1.0
+            + 0.12 * (37.0 * a + self.phases[1]).sin_det()
+            + 0.08 * (83.0 * a + self.phases[2]).sin_det();
+        (
+            base * (0.35 + streams + plume(ripple)) * striae,
+            base * (0.35 + streams + plume(0.5)),
+        )
     }
 }
 
@@ -324,8 +337,12 @@ pub struct Eclipse {
     /// Per pixel: horizon glow shape (0..1) and land cover (0..1).
     glow: Vec<f32>,
     land: Vec<u8>,
-    /// Per pixel: the glare's falloff round the Sun, `exp(−(r − 1)/1.5)` as a byte.
+    /// Per pixel: the glare's falloff round the Sun, `exp(−(r − 1)/GLARE_R)` as a byte.
     glare: Vec<u8>,
+    /// Corona rows filled so far (`fill_corona`).
+    corona_rows: usize,
+    /// Per pixel row: the air's share of its light by height (0 overhead, GEN-R18).
+    rows: Vec<f32>,
     /// A few bright planets and stars that come out in totality (px, level).
     lights: Vec<(i32, i32, u8)>,
     beads: Glow,
@@ -416,13 +433,20 @@ impl Eclipse {
         let (corona, prom, glow, land) = (&self.corona, &self.prom, &self.glow, &self.land);
         let broad = &self.broad;
         let glare = &self.glare;
+        let rows = &self.rows;
         let beads = self.beads.values();
         let bt = &self.bead_tone;
         self.picture.shade(|x, y| {
             let i = y as usize * w + x as usize;
             let cover = f64::from(land.get(i).copied().unwrap_or(255)) / 255.0;
-            if cover >= 0.999 {
-                return Ink::BLANK;
+            // The hills: black, their top a 1-px dim skyline (ADR-0017).
+            if cover >= 0.5 {
+                let above = i
+                    .checked_sub(w)
+                    .and_then(|j| land.get(j))
+                    .copied()
+                    .unwrap_or(0);
+                return if above < 128 { SKYLINE } else { Ink::BLANK };
             }
             let open = 1.0 - cover;
             let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
@@ -465,18 +489,22 @@ impl Eclipse {
             // darkens first, the other half last, and back again after totality.
             let side = (fx / w as f64 * 2.0 - 1.0) * -approach;
             let shade = 1.0 - SHADOW * (1.0 - f).powf(0.6) * (0.5 + 0.5 * side) * f.sqrt().min(1.0);
-            let air =
-                sky * shade + GLARE * f * f64::from(glare.get(i).copied().unwrap_or(0)) / 255.0;
+            let high = f64::from(rows.get(y as usize).copied().unwrap_or(1.0));
+            // The glare round the uncovered Sun is pale (pearl), the air twilight blue.
+            let halo = GLARE * f * f64::from(glare.get(i).copied().unwrap_or(0)) / 255.0;
             // The new Moon: a black silhouette closing in, its edge anti-aliased against the
             // air (and the corona, dimmed above by `clear`).
-            let air = air * (1.0 - moon_cov);
+            let (air, halo) = (
+                sky * shade * high * (1.0 - moon_cov),
+                halo * (1.0 - moon_cov),
+            );
             // The partly covered rim pixels of the crescent add their light too.
             let rim = if lit > 0.02 { 60.0 + 190.0 * lit } else { 0.0 };
             // One ramp for the air, the glare, the corona and the beads' halo, added in
             // light and tone-mapped: the corona's power law fades into the sky with no
             // threshold and no hue edge, and the brightest core rolls off instead of
             // clipping.
-            let light = soft_clip((air + c + b + rim) * open);
+            let light = soft_clip((air + halo + c + b + rim) * open);
             let ember = glow_k * f64::from(glow.get(y as usize).copied().unwrap_or(0.0)) * open;
             if ember >= 12.0 && ember >= light {
                 return Ink::new(Role::Ramp(Ramp::Ember), ink::level(ember));
@@ -487,17 +515,60 @@ impl Eclipse {
             // Pearl where the corona (or a bead's halo) outshines the air, twilight blue
             // elsewhere. The light is summed first and the ramps share their lightness at
             // equal levels, so this changes hue only, never lightness. The crescent's partly
-            // covered rim pixels are always pale (no blue rim).
+            // covered rim pixels are always pale (no blue rim). Faint light is black (blank):
+            // the corona's outer rays thin out into black, the sky is black overhead.
             let broad = f64::from(broad.get(i).copied().unwrap_or(0)) * vis * clear;
-            let pearl = broad + b > air && soft_clip((air + broad + b) * open) >= PEARL_LEVEL;
-            let ramp = if rim > 0.0 || pearl {
-                Ramp::Starlight
+            let (ramp, floor) = if rim > 0.0 || broad + b + halo >= air {
+                (Ramp::Starlight, PEARL_BLANK)
             } else {
-                SKY
+                (SKY, SKY_BLANK)
             };
-            Ink::new(Role::Ramp(ramp), ink::level(light.max(8.0)))
+            if light < floor {
+                return Ink::BLANK;
+            }
+            Ink::new(Role::Ramp(ramp), ink::level(light))
         });
+        // The twilight's navy floor would end in a hard contour: it dissolves into black.
+        self.picture.dissolve(SKY_DISSOLVE);
         self.stars(f);
+    }
+
+    /// Fill the next `rows` pixel rows of the corona, its broad shape and the prominences
+    /// (toned once: the power law alone, with no taper or cut-off, so the outer rays thin
+    /// out as far as they reach).
+    fn fill_corona(&mut self, rows: usize) {
+        let w = usize::from(self.picture.pixel_size().width());
+        let total = if w == 0 { 0 } else { self.corona.len() / w };
+        let end = self.corona_rows.saturating_add(rows).min(total);
+        let (cx, cy, r) = (self.centre.0, self.centre.1, self.radius);
+        let tone = Tone::asinh(CORONA_TONE.0, CORONA_TONE.1);
+        for y in self.corona_rows..end {
+            for x in 0..w {
+                let i = y * w + x;
+                let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
+                let (dx, dy) = ((fx - cx) / r, (fy - cy) / r);
+                let rr = dx.hypot(dy);
+                let a = dy.atan2(dx);
+                let (fine, broad) = self.corona_model.shapes(rr, a);
+                let level = f64::from(tone.level(fine as f32));
+                self.corona[i] = level.round() as u8;
+                self.broad[i] = tone.level(broad as f32);
+                // Prominences: arches of glowing gas standing on the limb.
+                let mut p: f64 = 0.0;
+                for pr in &self.proms {
+                    let off = wrap(a - pr.angle) / pr.half;
+                    if off.abs() < 1.0 {
+                        let top = 1.0 + pr.height * (1.0 - off * off).sqrt();
+                        let thick = 0.35 * pr.height + 0.5 / r;
+                        let d = (rr - top).abs() / thick;
+                        let fill = if rr > 1.0 && rr < top { 0.55 } else { 0.0 };
+                        p = p.max((1.0 - d).max(0.0).max(fill * (1.0 - off.abs())));
+                    }
+                }
+                self.prom[i] = (p.clamp(0.0, 1.0) * 255.0).round() as u8;
+            }
+        }
+        self.corona_rows = end;
     }
 
     /// Planets and bright stars come out as the sky darkens: Venus first (brightest), then
@@ -510,10 +581,9 @@ impl Eclipse {
         for &(x, y, level) in &self.lights {
             let l = f64::from(level) * show.powf(1.0 + (255.0 - f64::from(level)) / 40.0);
             if l >= 40.0
-                && self
-                    .picture
-                    .get(x, y)
-                    .is_some_and(|p| p.role == Role::Ramp(SKY) && f64::from(p.level) < 0.5 * l)
+                && self.picture.get(x, y).is_some_and(|p| {
+                    p == Ink::BLANK || (p.role == Role::Ramp(SKY) && f64::from(p.level) < 0.5 * l)
+                })
             {
                 self.picture
                     .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l)));
@@ -549,40 +619,21 @@ impl Generator for Eclipse {
         let deg = (0.5 * px_h / 30.0).max(0.1);
         let hills = Skyline::new(&mut ctx.rng, w, deg, HILLS);
         let horizon = 0.97 * px_h;
-        let model = &self.corona_model;
-        let proms = &self.proms;
-        let tone = Tone::asinh(CORONA_TONE.0, CORONA_TONE.1);
-        self.corona.clear();
-        self.broad.clear();
-        self.prom.clear();
+        // The corona and prominences are only drawn once the Sun is nearly covered, so
+        // they are filled row by row over the partial phase's frames (`fill_corona`).
+        let n = w * 2 * h;
+        for buf in [&mut self.corona, &mut self.broad, &mut self.prom] {
+            buf.clear();
+            buf.resize(n, 0);
+        }
+        self.corona_rows = 0;
         self.glow.clear();
         self.land.clear();
         self.glare.clear();
         for y in 0..2 * h {
             for x in 0..w {
                 let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
-                let (dx, dy) = ((fx - cx) / r, (fy - cy) / r);
-                let rr = dx.hypot(dy);
-                let a = dy.atan2(dx);
-                // Toned once here: the power law alone, with no taper or cut-off, so the
-                // outer rays thin into the sky's light as far as they reach.
-                let level = f64::from(tone.level(model.at(rr, a) as f32));
-                self.corona.push(level.round() as u8);
-                self.broad
-                    .push(tone.level(model.shape(rr, a, false) as f32));
-                // Prominences: arches of glowing gas standing on the limb.
-                let mut p: f64 = 0.0;
-                for pr in proms {
-                    let off = wrap(a - pr.angle) / pr.half;
-                    if off.abs() < 1.0 {
-                        let top = 1.0 + pr.height * (1.0 - off * off).sqrt();
-                        let thick = 0.35 * pr.height + 0.5 / r;
-                        let d = (rr - top).abs() / thick;
-                        let fill = if rr > 1.0 && rr < top { 0.55 } else { 0.0 };
-                        p = p.max((1.0 - d).max(0.0).max(fill * (1.0 - off.abs())));
-                    }
-                }
-                self.prom.push((p.clamp(0.0, 1.0) * 255.0).round() as u8);
+                let rr = ((fx - cx) / r).hypot((fy - cy) / r);
                 let up = ((horizon - fy) / (GLOW_H * px_h)).max(0.0);
                 if x == 0 {
                     self.glow.push((-up * up).exp() as f32);
@@ -590,9 +641,14 @@ impl Generator for Eclipse {
                 self.land
                     .push((hills.cover(x as i32, y as i32, horizon) * 255.0).round() as u8);
                 self.glare
-                    .push(((-(rr - 1.0).max(0.0) / 1.5).exp() * 255.0).round() as u8);
+                    .push(((-(rr - 1.0).max(0.0) / GLARE_R).exp() * 255.0).round() as u8);
             }
         }
+        self.rows.clear();
+        self.rows.extend((0..2 * h).map(|y| {
+            let u = ((y as f64 + 0.5) / px_h - SKY_TOP) / (0.97 - SKY_TOP);
+            ease::smoothstep(u) as f32
+        }));
         self.bead_tone = Tone::asinh(BEAD_TONE.0, BEAD_TONE.1);
         // Venus low beside the Sun, Jupiter and a couple of bright stars.
         self.lights.clear();
@@ -628,6 +684,14 @@ impl Generator for Eclipse {
 
     fn prepare(&mut self) {
         if std::mem::take(&mut self.dirty) {
+            // GEN-R19: a few corona rows per frame while it is hidden, the rest at once
+            // if it is needed before then; the picture is the same either way.
+            let rows = if self.corona_vis() > 0.0 {
+                usize::MAX
+            } else {
+                CORONA_ROWS
+            };
+            self.fill_corona(rows);
             self.paint();
         }
     }
@@ -717,6 +781,9 @@ mod tests {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
             if g.f >= CORONA_F {
+                // The corona's light is off; the pale glare round the uncovered Sun is the
+                // only pearl light off the disc (GEN-R18 grading), so it is left out below.
+                assert_eq!(g.corona_vis(), 0.0, "f = {}", g.f);
                 let corona = g.picture.pixel_size().area();
                 let mut n = 0;
                 for y in 0..60 {
@@ -730,6 +797,8 @@ mod tests {
                                 > g.radius + 1.0
                             // Nor are the planets coming out.
                             && !g.lights.iter().any(|&(lx, ly, _)| (lx, ly) == (x, y))
+                            // Nor the glare, wherever it reaches.
+                            && g.glare[y as usize * 80 + x as usize] == 0
                         {
                             n += 1;
                         }
@@ -918,6 +987,51 @@ mod tests {
                 d += 0.5;
             }
             assert!(changes <= 3, "ray {k}: {changes} changes");
+        }
+    }
+
+    #[test]
+    fn ecl_a10_gen_r18_black_overhead_and_the_corona_fades_to_black() {
+        let (mut g, mut ctx) = built(Size::new(120, 40));
+        let (cx, cy, r) = (g.centre.0, g.centre.1, g.radius);
+        for t in [2.0, 6.0, 10.0, 19.0, 30.0, 36.0] {
+            run_to(&mut g, &mut ctx, t);
+            // The top quarter's corners, well clear of the Sun's glare, are black.
+            for y in 0..20 {
+                for x in (0..24).chain(96..120) {
+                    let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
+                    let lights = g.lights.iter().any(|&(lx, ly, _)| (lx, ly) == (x, y));
+                    assert!(
+                        lights || p == Ink::BLANK,
+                        "t = {t}: ({x},{y}) {p:?} is not black"
+                    );
+                }
+            }
+            // The land is black but for its 1-px skyline: at most one lit pixel per column
+            // below the sky's lowest open row.
+            for x in 0..120 {
+                let lit = (70..80)
+                    .filter(|&y| g.picture.get(x, y).is_some_and(|p| p == SKYLINE))
+                    .count();
+                assert!(lit <= 2, "t = {t}: column {x} has {lit} skyline pixels");
+            }
+            if t == 19.0 {
+                corona_fades_in_pearl(&g, (cx, cy, r));
+            }
+        }
+    }
+
+    /// In totality the corona thins into black in pearl above the Sun (below it, it meets
+    /// the twilight): no blue within 3 R there.
+    fn corona_fades_in_pearl(g: &Eclipse, (cx, cy, r): (f64, f64, f64)) {
+        for y in 0..80 {
+            for x in 0..120 {
+                let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy) / r;
+                let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
+                if d < 3.0 && f64::from(y) + 0.5 < cy {
+                    assert_ne!(p.role, Role::Ramp(SKY), "blue corona at ({x},{y}) {d:.2} R");
+                }
+            }
         }
     }
 
