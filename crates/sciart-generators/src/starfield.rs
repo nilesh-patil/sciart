@@ -127,6 +127,8 @@ pub struct Starfield {
     glow: Pixels,
     /// Resolved Milky Way stars in dot units, as fixed as the glow.
     band: Vec<(f64, f64, Ink)>,
+    /// Scratch for `paint_glow`: per column the band's σ, star-cloud weight and centre row.
+    cols: Vec<(f64, f64, f64)>,
     /// Band stars plus the moving faint stars, rasterised every step.
     sky: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
@@ -212,12 +214,30 @@ impl MilkyWay {
 
     /// The galaxy's light at pixel centre `(x, y)`, in units of `GALAXY_PEAK`: a Gaussian
     /// core over an exponential disc, ending smoothly at 1.6 semi-major axes.
+    #[cfg(test)]
     fn galaxy_light(&self, x: f64, y: f64, w: f64, h: f64) -> f64 {
-        let ((cx, cy), a, b) = self.galaxy(w, h);
-        let (s, c) = self.galaxy_tilt.sin_cos_det();
+        let frame = self.galaxy_frame(w, h);
+        let (re, v) = Self::galaxy_re(&frame, x, y);
+        Self::galaxy_light_re(re, v, frame.2)
+    }
+
+    /// The galaxy's geometry for `galaxy_re`: centre, semi-axes and the tilt's (sin, cos).
+    fn galaxy_frame(&self, w: f64, h: f64) -> ((f64, f64), f64, f64, (f64, f64)) {
+        let (centre, a, b) = self.galaxy(w, h);
+        (centre, a, b, self.galaxy_tilt.sin_cos_det())
+    }
+
+    /// Elliptical radius (semi-major axes) of pixel centre `(x, y)`, and its minor-axis
+    /// offset `v`.
+    fn galaxy_re(frame: &((f64, f64), f64, f64, (f64, f64)), x: f64, y: f64) -> (f64, f64) {
+        let &((cx, cy), a, b, (s, c)) = frame;
         let (dx, dy) = (x - cx, y - cy);
         let (u, v) = (dx * c + dy * s, -dx * s + dy * c);
-        let re = (u / a).hypot(v / b);
+        ((u / a).hypot(v / b), v)
+    }
+
+    /// The galaxy's light at elliptical radius `re` (minor offset `v`, semi-minor `b`).
+    fn galaxy_light_re(re: f64, v: f64, b: f64) -> f64 {
         let core = (-(re / GALAXY_CORE).powi(2)).exp();
         let disc = (-GALAXY_DISC * re).exp() * ease::smoothstep((1.6 - re) / 0.7);
         // A dust lane along the near side of the inclined disc, clear of the core.
@@ -251,6 +271,12 @@ impl MilkyWay {
     /// `BAND_EDGE` σ, clumped along it, brighter in the star cloud, cut by the dust lane.
     fn light(&self, x: f64, off: f64, w: f64, h: f64) -> f64 {
         let u = (off / self.sigma(x, w, h)).abs();
+        self.light_at(x, off, u, self.bulge_at(x, w), w, h)
+    }
+
+    /// `light` given `u = |off| / σ(x)` and `bulge_at(x)`, which callers walking a column
+    /// compute once for it. Exactly 0 from `u ≥ BAND_EDGE` (the fade is 0 there).
+    fn light_at(&self, x: f64, off: f64, u: f64, bulge: f64, w: f64, h: f64) -> f64 {
         let fade = ease::smoothstep((BAND_EDGE - u) / (BAND_FADE * BAND_EDGE));
         let band = (-0.5 * u * u).exp() * fade;
         let lane = (off - self.lane_offset(x, w, h)) / (LANE * h);
@@ -262,7 +288,7 @@ impl MilkyWay {
             .map(|(&p, l)| (TAU * x / (l * w) + p + off / h * 4.0).sin_det())
             .sum::<f64>()
             / CLUMP_WAVES.len() as f64;
-        band * lane * (1.0 + CLUMP * clump) * (1.0 + BULGE * self.bulge_at(x, w))
+        band * lane * (1.0 + CLUMP * clump) * (1.0 + BULGE * bulge)
     }
 }
 
@@ -272,10 +298,32 @@ impl Starfield {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
         let mw = self.milky_way;
         self.glow.resize(size);
+        // GEN-R19: per column the band's σ and star-cloud weight, and the galaxy's frame,
+        // once; the band's light is exactly 0 beyond `BAND_EDGE` σ and the galaxy's below
+        // half a level beyond 1.6 semi-major axes (its disc ends there, its core is
+        // `e^{−130}`), so those pixels skip the sums: the same levels as evaluating them.
+        self.cols.clear();
+        self.cols.extend((0..size.width()).map(|px| {
+            let x = f64::from(px) + 0.5;
+            (mw.sigma(x, w, h), mw.bulge_at(x, w), MilkyWay::centre(x, w, h))
+        }));
+        let (cols, frame) = (&self.cols, mw.galaxy_frame(w, h));
         self.glow.shade(|px, py| {
             let (x, y) = (f64::from(px) + 0.5, (f64::from(py) + 0.5) / 2.0);
-            let light = mw.light(x, y - MilkyWay::centre(x, w, h), w, h);
-            let galaxy = GALAXY_PEAK * mw.galaxy_light(x, 2.0 * y, w, h);
+            let (sigma, bulge, centre) = cols[px as usize];
+            let off = y - centre;
+            let u = (off / sigma).abs();
+            let light = if u >= BAND_EDGE {
+                0.0
+            } else {
+                mw.light_at(x, off, u, bulge, w, h)
+            };
+            let (re, v) = MilkyWay::galaxy_re(&frame, x, 2.0 * y);
+            let galaxy = if re >= 1.6 {
+                0.0
+            } else {
+                GALAXY_PEAK * MilkyWay::galaxy_light_re(re, v, frame.2)
+            };
             match ink::level((GLOW_PEAK * light).max(galaxy)) {
                 0 => Ink::BLANK,
                 level => Ink::new(Role::Ramp(Ramp::Starlight), level),
