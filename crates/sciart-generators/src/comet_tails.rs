@@ -3,13 +3,14 @@
 //!
 //! Dust grains leave the nucleus with small velocity spreads and then feel the Sun's
 //! gravity reduced by radiation pressure, `μ(1 − β)`, with β log-uniform in
-//! `[0.01, 0.9]`. Each grain follows its own exact two-body orbit (elliptic or, for most
-//! grains released near perihelion, hyperbolic), propagated in closed form with the
-//! universal-variable Kepler solution warm-started from the previous frame; grains of one
-//! β trace a syndyne, grains of one release time a synchrone, and together they fan into
-//! a curved tail that lags behind the orbit. The ion tail is kinematic: plasma parcels
-//! accelerated straight away from the Sun with small solar-wind kinks; every so often
-//! the tail disconnects at the coma, drifts off, and a new one regrows.
+//! `[0.04, 0.9]`. Each grain follows its own exact two-body orbit, propagated in closed
+//! form with the universal-variable Kepler solution warm-started from the previous frame.
+//! On the shown arc β > r/2a ≈ 0.015–0.03 everywhere, so every grain is on a hyperbolic
+//! orbit. Grains of one β trace a syndyne, grains of one release time a synchrone, and
+//! together they fan into a curved tail that lags behind the orbit. The ion tail is
+//! kinematic: a fan of fine plasma streamers accelerated straight away from the Sun,
+//! rippled by travelling solar-wind kinks; every so often the tail disconnects at the
+//! coma, drifts off, and a new one regrows.
 //!
 //! Units: AU and years inside the physics (`μ_☉ = 4π²`), one simulated second = 1.7 days.
 
@@ -53,24 +54,46 @@ const TAIL_EXAG: f64 = 5.0;
 pub(crate) const BETA: (f64, f64) = (0.04, 0.9);
 /// Pools (CMT-A5).
 pub(crate) const DUST: usize = 8000;
-pub(crate) const IONS: usize = 1500;
-/// Dust release per simulated second at 1 AU; the rate goes as r⁻².
+/// Room for a whole attached tail (`ION_RATE · ION_LIFE`) plus a whole disconnected one,
+/// so a cut-off tail never starves the regrowing one (CMT-A6).
+pub(crate) const IONS: usize = 3000;
+/// Dust release per simulated second at 1 AU; the rate goes as r^{−3/2}.
 const DUST_RATE: f64 = 70.0;
 /// Grains are dropped after this many simulated seconds or beyond this distance (AU).
 const DUST_LIFE: f64 = 20.0;
 const DUST_REACH: f64 = 6.0;
-/// Ion-tail acceleration (AU/s² in simulated seconds), parcel life and kink amplitude
-/// as a share of the distance down the tail.
+/// Ion-tail launch speed (AU/s) and acceleration (AU/s², simulated seconds), parcel life
+/// and release rate.
+const ION_V0: f64 = 0.25;
 const ION_ACCEL: f64 = 0.16;
 const ION_LIFE: f64 = 5.0;
 const ION_RATE: f64 = 280.0;
-const KINK: f64 = 0.035;
-/// A disconnection every `DISCONNECT` seconds, with release paused for `PAUSE` seconds.
+/// Kink amplitude as a share of the distance down the tail, its temporal frequency (Hz)
+/// and wavenumber (rad/AU): a ripple that runs down the tail.
+const KINK: f64 = 0.04;
+const KINK_HZ: f64 = 0.35;
+const KINK_K: f64 = 5.0;
+/// The ion tail is a fan of `STREAMERS` fine rays, `STREAM_SPREAD` rad apart, the middle
+/// ones brightest (CMT-A7).
+pub(crate) const STREAMERS: usize = 5;
+const STREAM_SPREAD: f64 = 0.026;
+const STREAM_W: [f32; STREAMERS] = [0.4, 0.8, 1.0, 0.65, 0.35];
+/// Stroke segments per streamer (denser near the coma).
+const STREAM_SEGS: usize = 48;
+/// Ion light falls off down the tail as `1 / (1 + s / ION_FALL)` (s in AU) (CMT-A7).
+const ION_FALL: f64 = 0.45;
+/// A disconnection every `DISCONNECT` seconds, with release paused for `PAUSE` seconds;
+/// the first comes `FIRST_CUT` seconds in (scene time 16 s after the 4 s pre-roll).
 pub(crate) const DISCONNECT: f64 = 20.0;
 pub(crate) const PAUSE: f64 = 1.6;
+const FIRST_CUT: f64 = 20.0;
+/// A disconnected tail fades out over this many seconds after the cut.
+const DETACH_FADE: f64 = 4.0;
 /// Anti-solar speed the solar wind gives a disconnected tail, AU per simulated second.
 const DETACH_KICK: f64 = 0.3;
-/// Kepler solve: Newton iterations per frame (warm start) and from scratch.
+/// Box-blur radius (pixels) of the far-dust layer, applied twice (near-Gaussian).
+const FAR_BLUR: usize = 2;
+/// Kepler solve: Newton iterations per frame (warm start).
 const NEWTON_WARM: usize = 3;
 
 /// Barker's mean-anomaly measure `D + D³/3` of true anomaly `nu` (parabolic time).
@@ -191,6 +214,57 @@ fn anomaly(t: f64) -> f64 {
     2.0 * d.atan()
 }
 
+/// Distance (AU) an attached ion parcel of `age` seconds has run down the tail.
+fn ion_run(age: f64) -> f64 {
+    ION_V0 * age + 0.5 * ION_ACCEL * age * age
+}
+
+/// A point `s` AU down streamer `k` of the ion tail of a nucleus at `nucleus` (with
+/// lateral jitter `j`, AU per AU of run) at time `t`: along the anti-solar axis `anti`,
+/// fanned by the streamer's angle and rippled by a kink that runs down the tail.
+fn tail_point(nucleus: [f64; 2], anti: [f64; 2], t: f64, s: f64, k: u8, j: f64) -> [f64; 2] {
+    let fan = STREAM_SPREAD * (f64::from(k) - 0.5 * (STREAMERS - 1) as f64);
+    let phase = 1.7 * f64::from(k);
+    let kink = KINK * s * (TAU * KINK_HZ * t - KINK_K * s + phase).sin_det();
+    let side = s * (fan + j) + kink;
+    [
+        nucleus[0] + anti[0] * s - anti[1] * side,
+        nucleus[1] + anti[1] * s + anti[0] * side,
+    ]
+}
+
+/// In-place separable box blur of radius `r` over a row-major `w × h` buffer, using
+/// `scratch` (at least `max(w, h)` long) for one line at a time; edges clamp. Mass is
+/// conserved away from the edges. Allocation-free.
+fn box_blur(buf: &mut [f32], w: usize, h: usize, r: usize, scratch: &mut [f32]) {
+    if w == 0 || h == 0 || buf.len() < w * h || scratch.len() < w.max(h) {
+        return;
+    }
+    let norm = 1.0 / (2 * r + 1) as f32;
+    // One line of `n` values at `start + i·stride`, blurred through `scratch`.
+    let mut line = |buf: &mut [f32], start: usize, stride: usize, n: usize| {
+        let at = |i: isize| start + (i.clamp(0, n as isize - 1) as usize) * stride;
+        let mut acc = 0.0f32;
+        for i in -(r as isize)..=(r as isize) {
+            acc += buf[at(i)];
+        }
+        for (i, out) in scratch.iter_mut().take(n).enumerate() {
+            *out = acc * norm;
+            let ii = i as isize;
+            acc += buf[at(ii + r as isize + 1)] - buf[at(ii - r as isize)];
+        }
+        for (i, s) in scratch.iter().take(n).enumerate() {
+            buf[start + i * stride] = *s;
+        }
+    };
+    for y in 0..h {
+        line(buf, y * w, 1, w);
+    }
+    for x in 0..w {
+        line(buf, x, w, h);
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 struct Grain {
     orbit: Orbit,
@@ -203,12 +277,30 @@ struct Grain {
 #[derive(Debug, Clone, Copy)]
 struct Ion {
     age: f64,
-    /// Kink phase.
-    phase: f64,
+    /// Lateral jitter inside its streamer, `[-1, 1]`.
+    jitter: f64,
+    /// The ray of the fan it rides, `0..STREAMERS`.
+    streamer: u8,
     /// Detached parcels fly free from `pos` with `vel` (AU, AU/s).
     attached: bool,
+    /// Seconds since its tail was cut (detached parcels only).
+    since_cut: f64,
     pos: [f64; 2],
     vel: [f64; 2],
+}
+
+impl Ion {
+    fn new(age: f64, rng: &mut impl Rng) -> Self {
+        Self {
+            age,
+            jitter: 2.0 * rng.random::<f64>() - 1.0,
+            streamer: rng.random_range(0..STREAMERS) as u8,
+            attached: true,
+            since_cut: 0.0,
+            pos: [0.0; 2],
+            vel: [0.0; 2],
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -243,6 +335,10 @@ pub struct CometTails {
     next_disconnect: f64,
     view: View,
     dust_glow: Glow,
+    /// Grains older than 6 s, blurred before they join `dust_glow`.
+    far_glow: Glow,
+    /// One row or column of the blur (sized in `resize`).
+    scratch: Vec<f32>,
     ion_glow: Glow,
     dust_tone: Tone,
     ion_tone: Tone,
@@ -262,9 +358,11 @@ impl CometTails {
             owed_dust: 0.0,
             owed_ions: 0.0,
             ion_resume: 0.0,
-            next_disconnect: 0.6 * DISCONNECT,
+            next_disconnect: FIRST_CUT,
             view: View::default(),
             dust_glow: Glow::default(),
+            far_glow: Glow::default(),
+            scratch: Vec::new(),
             ion_glow: Glow::default(),
             dust_tone: Tone::asinh(0.12, 7.0),
             ion_tone: Tone::asinh(0.3, 8.0),
@@ -331,35 +429,30 @@ impl CometTails {
             let tau = DUST_LIFE * rng.random::<f64>();
             let (n, v) = comet_state(anomaly(now - tau));
             let r = n[0].hypot(n[1]);
-            // Activity ∝ r⁻², as in `release_dust`.
+            // Activity ∝ r^{−3/2}, as in `release_dust`.
             if rng.random::<f64>() < (0.2 / (r * r.sqrt())).min(1.0) {
                 self.emit(rng, self.t - tau, n, v);
             }
         }
-        let parcels = (ION_RATE * ION_LIFE) as usize;
-        for k in 0..parcels.min(IONS) {
-            self.ions.spawn(Ion {
-                age: ION_LIFE * k as f64 / parcels as f64,
-                phase: rng.random_range(0.0..TAU),
-                attached: true,
-                pos: self.nucleus,
-                vel: [0.0; 2],
-            });
+        // A full attached tail, unless a cut is under way (then the regrowth handles it).
+        if self.t >= self.ion_resume {
+            let parcels = ((ION_RATE * ION_LIFE) as usize).min(IONS);
+            for k in 0..parcels {
+                let ion = Ion::new(ION_LIFE * k as f64 / parcels as f64, rng);
+                self.ions.spawn(ion);
+            }
         }
     }
 
     fn step(&mut self, dt: f64, rng: &mut impl Rng) {
         let before = (self.t / LOOP).floor();
         self.t += dt;
-        if (self.t / LOOP).floor() != before {
-            let (n, v) = comet_state(anomaly(self.t.rem_euclid(LOOP)));
-            self.nucleus = n;
-            self.velocity = v;
-            self.seed_backlog(rng);
-        }
         let (n, v) = comet_state(anomaly(self.t.rem_euclid(LOOP)));
         self.nucleus = n;
         self.velocity = v;
+        if (self.t / LOOP).floor() != before {
+            self.seed_backlog(rng);
+        }
         self.release_dust(dt, rng);
         let (t, yps) = (self.t, self.yps);
         self.dust.retain(|g| {
@@ -374,12 +467,13 @@ impl CometTails {
         if self.t >= self.next_disconnect {
             self.next_disconnect += DISCONNECT;
             self.ion_resume = self.t + PAUSE;
-            let (nucleus, cv) = (self.nucleus, self.velocity);
+            let (nucleus, cv, t) = (self.nucleus, self.velocity, self.t);
             for ion in self.ions.iter_mut().filter(|i| i.attached) {
-                let s = 0.5 * ION_ACCEL * ion.age * ion.age;
+                let s = ion_run(ion.age);
                 // The cut-off plasmoid is swept away by the solar wind.
-                let sp = ION_ACCEL * ion.age + DETACH_KICK;
-                ion.pos = [nucleus[0] + anti[0] * s, nucleus[1] + anti[1] * s];
+                let sp = ION_V0 + ION_ACCEL * ion.age + DETACH_KICK;
+                // Keep its ray: the cut tail drifts off as the same fan of streamers.
+                ion.pos = tail_point(nucleus, anti, t, s, ion.streamer, 0.003 * ion.jitter);
                 ion.vel = [cv[0] * yps + anti[0] * sp, cv[1] * yps + anti[1] * sp];
                 ion.attached = false;
             }
@@ -387,26 +481,25 @@ impl CometTails {
         for ion in self.ions.iter_mut() {
             ion.age += dt;
             if !ion.attached {
+                ion.since_cut += dt;
                 let r = ion.pos[0].hypot(ion.pos[1]).max(1e-6);
                 let a = [ion.pos[0] / r * ION_ACCEL, ion.pos[1] / r * ION_ACCEL];
                 ion.vel = [ion.vel[0] + a[0] * dt, ion.vel[1] + a[1] * dt];
                 ion.pos = [ion.pos[0] + ion.vel[0] * dt, ion.pos[1] + ion.vel[1] * dt];
             }
         }
-        self.ions
-            .retain(|i| i.age < if i.attached { ION_LIFE } else { 2.0 * ION_LIFE });
+        self.ions.retain(|i| {
+            if i.attached {
+                i.age < ION_LIFE
+            } else {
+                i.since_cut < DETACH_FADE
+            }
+        });
         if self.t >= self.ion_resume {
             self.owed_ions += ION_RATE * dt;
             while self.owed_ions >= 1.0 {
                 self.owed_ions -= 1.0;
-                let ion = Ion {
-                    age: 0.0,
-                    phase: rng.random_range(0.0..TAU),
-                    attached: true,
-                    pos: self.nucleus,
-                    vel: [0.0; 2],
-                };
-                if !self.ions.spawn(ion) {
+                if !self.ions.spawn(Ion::new(0.0, rng)) {
                     self.owed_ions = 0.0;
                     break;
                 }
@@ -414,18 +507,19 @@ impl CometTails {
         }
     }
 
-    /// Where an attached parcel is: down the anti-solar axis, kinked a little sideways.
+    /// A point `s` AU down streamer `k` (with lateral jitter `j`, AU per AU of run):
+    /// along the anti-solar axis, fanned by the streamer's angle and rippled by a kink
+    /// that runs down the tail.
+    fn tail_point(&self, s: f64, k: u8, j: f64) -> [f64; 2] {
+        tail_point(self.nucleus, self.anti_solar(), self.t, s, k, j)
+    }
+
+    /// Where a parcel is: attached ones ride their streamer, detached ones fly free.
     fn ion_pos(&self, ion: &Ion) -> [f64; 2] {
         if !ion.attached {
             return ion.pos;
         }
-        let anti = self.anti_solar();
-        let s = 0.5 * ION_ACCEL * ion.age * ion.age + 0.01 * ion.age;
-        let kink = KINK * s * (TAU * 0.35 * self.t + 3.0 * s + ion.phase).sin_det();
-        [
-            self.nucleus[0] + anti[0] * s - anti[1] * kink,
-            self.nucleus[1] + anti[1] * s + anti[0] * kink,
-        ]
+        self.tail_point(ion_run(ion.age), ion.streamer, 0.003 * ion.jitter)
     }
 
     /// Follow the comet: the nucleus sits off-centre towards the Sun, so the tails
@@ -446,28 +540,87 @@ impl CometTails {
         let tl = self.t.rem_euclid(LOOP);
         let env = (tl / 0.4).min((LOOP - tl) / 0.4).clamp(0.0, 1.0) as f32;
         const SOFT: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
+        const MID: [(i32, i32, f32); 25] = halo_kernel::<25>(2);
+        let sum = |k: &[(i32, i32, f32)]| k.iter().map(|e| e.2).sum::<f32>();
+        let n_mid = sum(&SOFT) / sum(&MID);
         self.dust_glow.clear();
+        self.far_glow.clear();
         self.ion_glow.clear();
+        let n = self.nucleus;
         for g in self.dust.iter() {
-            let n = self.nucleus;
             let (x, y) = v.px([
                 n[0] + TAIL_EXAG * (g.pos[0] - n[0]),
                 n[1] + TAIL_EXAG * (g.pos[1] - n[1]),
             ]);
             // Fine grains (large β) scatter more light per unit mass and fill the fan.
-            let w = (0.5 + g.beta) * (1.0 - (self.t - g.born) / DUST_LIFE).max(0.0);
-            self.dust_glow
-                .splat(2.0 * x, 2.0 * y, &SOFT, 0.45 * w as f32);
+            let age = self.t - g.born;
+            let w = 0.45 * ((0.5 + g.beta) * (1.0 - age / DUST_LIFE).max(0.0)) as f32;
+            // Older grains have spread over more of the sky: they go into a layer that
+            // is blurred below, so the sparse far tail reads as a smooth haze, not
+            // speckle, while the young fan near the coma stays crisp.
+            let (x, y) = (2.0 * x, 2.0 * y);
+            if age < 2.0 {
+                self.dust_glow.splat(x, y, &SOFT, w);
+            } else if age < 6.0 {
+                self.dust_glow.splat(x, y, &MID, w * n_mid);
+            } else {
+                self.far_glow.splat(x, y, &SOFT, w);
+            }
         }
+        let far_px = self.far_glow.pixel_size();
+        let (fw, fh) = (usize::from(far_px.width()), usize::from(far_px.height()));
+        let far = self.far_glow.values_mut();
+        for _ in 0..2 {
+            box_blur(far, fw, fh, FAR_BLUR, &mut self.scratch);
+        }
+        for (d, f) in self.dust_glow.values_mut().iter_mut().zip(far.iter()) {
+            *d += f;
+        }
+        // The attached ion tail: each streamer stroked from the coma to the oldest
+        // attached parcel's run, bright at the root and fading down the tail.
+        let mut run = 0.0f64;
+        for ion in self.ions.iter().filter(|i| i.attached) {
+            run = run.max(ion_run(ion.age));
+        }
+        if run > 0.0 {
+            for k in 0..STREAMERS as u8 {
+                let mut a = v.px(self.tail_point(0.0, k, 0.0));
+                for i in 1..=STREAM_SEGS {
+                    let u = i as f64 / STREAM_SEGS as f64;
+                    let s = run * u * u;
+                    let b = v.px(self.tail_point(s, k, 0.0));
+                    let w = STREAM_W[usize::from(k)] * (1.0 / (1.0 + s / ION_FALL)) as f32;
+                    // A faint soft body under a thin antialiased ray, so neighbouring
+                    // rays stay apart instead of merging into one band.
+                    self.ion_glow.stroke(
+                        (2.0 * a.0, 2.0 * a.1),
+                        (2.0 * b.0, 2.0 * b.1),
+                        &SOFT,
+                        0.25 * w,
+                    );
+                    let len = (b.0 - a.0).hypot(b.1 - a.1);
+                    let n = (2.0 * len).ceil().clamp(1.0, 1024.0) as usize;
+                    let per = 1.6 * w * (len / n as f64) as f32;
+                    for j in 0..n {
+                        let f = (j as f64 + 0.5) / n as f64;
+                        // Pixel `x` spans [x, x + 1); bilinear splats take centres.
+                        let (x, y) = (a.0 + f * (b.0 - a.0) - 0.5, a.1 + f * (b.1 - a.1) - 0.5);
+                        self.ion_glow.splat_bilinear(x, y, per);
+                    }
+                    a = b;
+                }
+            }
+        }
+        // Parcels on top: knots of plasma running out along the rays, and the
+        // disconnected tail drifting off and fading.
         for ion in self.ions.iter() {
             let (x, y) = v.px(self.ion_pos(ion));
-            let fade = if ion.attached {
-                1.0
+            let w = if ion.attached {
+                0.22 / (1.0 + ion_run(ion.age) / ION_FALL)
             } else {
-                (1.0 - ion.age / (2.0 * ION_LIFE)).max(0.0)
+                0.5 * (1.0 - ion.since_cut / DETACH_FADE).max(0.0)
             };
-            self.ion_glow
-                .splat(2.0 * x, 2.0 * y, &SOFT, 0.6 * fade as f32);
+            self.ion_glow.splat(2.0 * x, 2.0 * y, &SOFT, w as f32);
         }
         // Coma: a bright, compact halo round the nucleus.
         const COMA: [(i32, i32, f32); 49] = halo_kernel::<49>(3);
@@ -478,9 +631,11 @@ impl CometTails {
         let size = self.pixels.pixel_size();
         let w = usize::from(size.width());
         let (dust, ions) = (self.dust_glow.values(), self.ion_glow.values());
-        // The Sun just off the left edge: a warm glow, hotter toward the edge.
+        // The Sun, often just off frame: a white-gold photosphere in scattered light
+        // that falls smoothly to the sky, no coloured rim.
         let r_sun = self.nucleus[0].hypot(self.nucleus[1]).max(0.1);
         let glow_r = 0.3 * v.h * (0.35 / r_sun).sqrt();
+        let inv_r2 = 1.0 / (glow_r * glow_r).max(1e-9);
         for (i, px) in (0..dust.len().min(ions.len())).zip(0..) {
             let (x, y) = ((px % w) as i32, (px / w) as i32);
             let (ld, li) = (dt.level(env * dust[i]), it.level(env * ions[i]));
@@ -489,15 +644,20 @@ impl CometTails {
             } else if ld > 12 {
                 ink::ramp(Ramp::Starlight, f64::from(ld) / 255.0)
             } else {
-                let d = (f64::from(x) + 0.5 - v.sx).hypot(f64::from(y) + 0.5 - v.sy);
-                // The Sun: a white-hot core, then scattered light falling off smoothly
-                // (Ember to black) rather than ending in a hard rim.
-                let q = d / glow_r;
-                let sun = (-7.0 * q * q).exp();
-                if q < 0.18 {
-                    ink::blackbody(5800.0 - 6000.0 * q)
-                } else if sun * 255.0 * 0.9 >= ink::MIN_VISIBLE_LEVEL {
-                    ink::ramp(Ramp::Ember, 0.9 * sun)
+                let (dx, dy) = (f64::from(x) + 0.5 - v.sx, f64::from(y) + 0.5 - v.sy);
+                let q2 = (dx * dx + dy * dy) * inv_r2;
+                // A near-Gaussian core plus a broad 1/(1 + 4q²)² wing: the wing keeps the
+                // edge of the glow soft all the way to the sky. Beyond q² = 0.6 their sum is
+                // below the visible level, so the sky skips the `exp`.
+                let sun = if q2 < 0.6 {
+                    0.75 * (-6.0 * q2).exp() + 0.25 / (1.0 + 4.0 * q2).powi(2)
+                } else {
+                    0.0
+                };
+                if q2 < 0.16 * 0.16 {
+                    ink::blackbody(5800.0)
+                } else if sun * 255.0 >= ink::MIN_VISIBLE_LEVEL {
+                    ink::ramp(Ramp::Starlight, 0.97 * sun)
                 } else if hash01(0x57A ^ cell_key(x, y)) < 0.0015 {
                     ink::ramp(Ramp::Starlight, 0.3 + 0.3 * hash01(0x57B ^ cell_key(x, y)))
                 } else {
@@ -516,6 +676,11 @@ impl Generator for CometTails {
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.dust_glow.resize(size);
+        self.far_glow.resize(size);
+        let fp = self.far_glow.pixel_size();
+        self.scratch.clear();
+        self.scratch
+            .resize(usize::from(fp.width().max(fp.height())), 0.0);
         self.ion_glow.resize(size);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
@@ -575,6 +740,37 @@ mod tests {
         }
     }
 
+    #[test]
+    fn cmt_a1_every_grain_on_the_shown_arc_is_hyperbolic() {
+        // β > r/2a on the whole shown arc: even the heaviest grain (β = 0.04), released
+        // with the nucleus's own velocity, has positive energy in the reduced-μ problem.
+        let a = Q / (1.0 - ECC);
+        for i in 0..=100 {
+            let nu = NU_START + (NU_END - NU_START) * f64::from(i) / 100.0;
+            let (r, v) = comet_state(nu);
+            let rn = r[0].hypot(r[1]);
+            assert!(BETA.0 > rn / (2.0 * a), "ν {nu}: r/2a = {}", rn / (2.0 * a));
+            let orbit = Orbit::new(r, v, MU * (1.0 - BETA.0));
+            assert!(orbit.energy(r, v) > 0.0, "ν {nu}");
+        }
+    }
+
+    #[test]
+    fn cmt_a9_far_dust_blur_spreads_and_conserves_light() {
+        // The far-dust haze: one bright pixel mid-buffer spreads to a 5×5 plateau (radius
+        // 2) with its total conserved, and a degenerate buffer is left alone.
+        let (w, h) = (11, 9);
+        let mut buf = vec![0.0f32; w * h];
+        buf[4 * w + 5] = 25.0;
+        let mut scratch = vec![0.0f32; 11];
+        box_blur(&mut buf, w, h, 2, &mut scratch);
+        let total: f32 = buf.iter().sum();
+        assert!((total - 25.0).abs() < 1e-4, "{total}");
+        assert!((buf[4 * w + 5] - 1.0).abs() < 1e-5 && (buf[2 * w + 3] - 1.0).abs() < 1e-5);
+        assert_eq!(buf[w + 5], 0.0);
+        box_blur(&mut buf, 0, 0, 2, &mut scratch);
+    }
+
     fn run(seconds: f64) -> CometTails {
         let mut g = CometTails::new();
         let mut ctx = Ctx::new(42, Size::new(100, 30));
@@ -610,7 +806,7 @@ mod tests {
     }
 
     #[test]
-    fn cmt_a3_ion_tail_points_away_from_the_sun() {
+    fn cmt_a3_ion_tail_points_away_from_the_sun_within_8_degrees() {
         let g = run(5.0);
         let anti = g.anti_solar();
         let mut n = 0;
@@ -619,7 +815,7 @@ mod tests {
             let d = [p[0] - g.nucleus[0], p[1] - g.nucleus[1]];
             let cos = (d[0] * anti[0] + d[1] * anti[1]) / d[0].hypot(d[1]);
             assert!(
-                cos > (5.0f64 * PI / 180.0).cos_det(),
+                cos > (8.0f64 * PI / 180.0).cos_det(),
                 "{} deg off",
                 cos.acos().to_degrees()
             );
@@ -669,6 +865,144 @@ mod tests {
             g.step(0.25, &mut rng);
             assert!(g.dust.len() <= DUST && g.ions.len() <= IONS);
             assert!(g.dust.iter().all(|gr| gr.beta < 1.0 && gr.beta >= BETA.0));
+        }
+    }
+
+    /// Ion light (tone level) at `s` AU down the tail's axis, or `None` off frame.
+    fn ion_level_at(g: &CometTails, s: f64) -> Option<u8> {
+        let (x, y) = g.view.px(g.tail_point(s, (STREAMERS / 2) as u8, 0.0));
+        let px = g.dust_glow.pixel_size();
+        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+        let (xi, yi) = (x.floor() as i32, y.floor() as i32);
+        if !((0..w).contains(&xi) && (0..h).contains(&yi)) {
+            return None;
+        }
+        // The brightest of the 3×3 pixels round the axis point (the kink wanders).
+        let vals = g.ion_glow.values();
+        let mut best = 0.0f32;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let (a, b) = (xi + dx, yi + dy);
+                if (0..w).contains(&a) && (0..h).contains(&b) {
+                    best = best.max(vals[(b * w + a) as usize]);
+                }
+            }
+        }
+        Some(g.ion_tone.level(best))
+    }
+
+    #[test]
+    fn cmt_a6_ion_tail_stays_rooted_at_the_coma() {
+        // Regression (M13 review): a cut-off tail used to fill the parcel pool, so the new
+        // tail could not regrow for seconds and a detached stub floated alone. Outside a
+        // cut's first PAUSE + 1 s the attached tail is whole and its light runs unbroken
+        // from the coma down the axis to 0.4 AU (or the frame edge).
+        let mut g = CometTails::new();
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        g.resize(size, &mut ctx);
+        let mut cuts = vec![];
+        let mut last_cut = f64::NEG_INFINITY;
+        let mut checked = 0;
+        for k in 0..(70.0 / SIM_DT) as usize {
+            let before = g.next_disconnect;
+            g.update(SIM_DT, &mut ctx);
+            if g.next_disconnect != before {
+                last_cut = g.t;
+                cuts.push(g.t);
+            }
+            let tl = g.t.rem_euclid(LOOP);
+            let quiet = g.t - last_cut > PAUSE + 1.0 && tl > 0.5 && tl < LOOP - 0.5;
+            if k % 15 != 0 || !quiet {
+                continue;
+            }
+            let attached = g.ions.iter().filter(|i| i.attached).count();
+            assert!(
+                attached as f64 >= 0.6 * ION_RATE * ION_LIFE.min(g.t - last_cut - PAUSE),
+                "t {:.2}: {attached} attached parcels",
+                g.t
+            );
+            for i in 1..=20 {
+                let s = 0.03 + 0.37 * f64::from(i) / 20.0;
+                match ion_level_at(&g, s) {
+                    Some(l) => assert!(l > 20, "t {:.2}: gap at {s:.2} AU (level {l})", g.t),
+                    None => break,
+                }
+            }
+            checked += 1;
+        }
+        assert!(cuts.len() >= 3 && checked > 150, "{cuts:?} {checked}");
+    }
+
+    #[test]
+    fn cmt_a7_ion_tail_is_streamers_fading_with_distance() {
+        let g = run(3.0);
+        // Fading: the axis light near the root outshines the light 1 AU down.
+        let near = ion_level_at(&g, 0.1).expect("root on frame");
+        if let Some(far) = ion_level_at(&g, 0.9) {
+            assert!(near > far + 25, "root {near} vs 1 AU {far}");
+        }
+        // Streamers: across the tail at 0.6 AU, the ion light has at least two separate
+        // peaks (distinct rays, not one smooth band).
+        let anti = g.anti_solar();
+        let s = 0.6;
+        let c = g.tail_point(s, (STREAMERS / 2) as u8, 0.0);
+        let px = g.ion_glow.pixel_size();
+        let w = i32::from(px.width());
+        let vals = g.ion_glow.values();
+        let mut prof = vec![];
+        for i in -40..=40 {
+            let d = f64::from(i) * 0.002;
+            let p = [c[0] - anti[1] * d, c[1] + anti[0] * d];
+            let (x, y) = g.view.px(p);
+            let (xi, yi) = (x.floor() as i32, y.floor() as i32);
+            if xi < 0 || yi < 0 || xi >= w || yi >= i32::from(px.height()) {
+                continue;
+            }
+            prof.push(vals[(yi * w + xi) as usize]);
+        }
+        let top = prof.iter().cloned().fold(0.0f32, f32::max);
+        let mut peaks = 0;
+        for i in 1..prof.len().saturating_sub(1) {
+            if prof[i] > 0.3 * top && prof[i] > prof[i - 1] && prof[i] >= prof[i + 1] {
+                peaks += 1;
+            }
+        }
+        assert!(peaks >= 2, "one band: {prof:?}");
+    }
+
+    #[test]
+    fn cmt_a8_sun_glow_is_white_gold_without_a_coloured_rim() {
+        // Scene time 5 s: the Sun is on frame. Every Sun-glow pixel is either the
+        // Blackbody photosphere or Starlight (never Ember), and the glow falls off
+        // monotonically outward, with no ring.
+        let g = run(5.0);
+        let px = g.pixels.pixel_size();
+        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
+        let mut on = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                if let Role::Ramp(r) = ink.role {
+                    assert_ne!(r, Ramp::Ember, "({x}, {y})");
+                }
+                let d = (f64::from(x) + 0.5 - g.view.sx).hypot(f64::from(y) + 0.5 - g.view.sy);
+                if ink.role == Role::Blackbody && d < 0.2 * g.view.h {
+                    on += 1;
+                }
+            }
+        }
+        assert!(on > 0, "Sun not on frame");
+        // Leftward from the Sun's centre (clear of the comet): photosphere, then a
+        // Starlight glow that only dims, then sky.
+        let (cx, cy) = (g.view.sx.floor() as i32, g.view.sy.floor() as i32);
+        let mut last = u8::MAX;
+        for x in (0..cx.min(w)).rev() {
+            let ink = g.pixels.get(x, cy).unwrap_or(Ink::BLANK);
+            if ink.role == Role::Ramp(Ramp::Starlight) {
+                assert!(ink.level <= last, "ring at x {x}: {} > {last}", ink.level);
+                last = ink.level;
+            }
         }
     }
 }
