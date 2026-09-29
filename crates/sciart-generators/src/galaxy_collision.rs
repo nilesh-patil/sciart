@@ -62,7 +62,7 @@ const R_MIN: f64 = 0.1 * RD;
 /// beyond that the tails may push the frame.
 const CAMERA_TAU: f64 = 0.8;
 const DISK_ROOM: f64 = 1.5 * RD;
-const TAIL_ROOM: f64 = 2.5 * RD;
+const TAIL_ROOM: f64 = 4.5 * RD;
 /// Two-armed spiral pattern (GAL-A8): winding (radians of azimuth per e-fold in radius,
 /// a pitch of ≈ 20°), pattern period (s), brightness contrast `1 ± ARM_CONTRAST`, and the
 /// radii over which it fades out beyond the disk.
