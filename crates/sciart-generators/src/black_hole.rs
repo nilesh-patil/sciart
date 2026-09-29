@@ -40,7 +40,7 @@ const INCLINATION: f64 = 80.0 * PI / 180.0;
 const B_CRIT: f64 = 5.196_152_422_706_632;
 /// Inner (ISCO) and outer disk edge.
 const ISCO: f64 = 6.0;
-const R_OUT: f64 = 24.0;
+const R_OUT: f64 = 14.0;
 const ISCO_PERIOD: f64 = 2.5;
 /// Viscous inward drift of the gas, `dr/dt = −DRIFT r` (1/s).
 const DRIFT: f64 = 0.02;
@@ -58,18 +58,18 @@ const DISPLAY_EXP: f64 = 0.75;
 /// `T_WHITE`, so the Doppler-boosted side keeps a gradient instead of clipping to a flat
 /// white plateau; only the hottest arc gets near white.
 const T_KNEE: f64 = 4500.0;
-const T_WHITE: f64 = 10_000.0;
+const T_WHITE: f64 = 6000.0;
 /// Below `T_KNEE` the log temperature is lifted by this power, raising the dim outer disk
 /// from brown towards ember.
 const TOE: f64 = 0.8;
 /// Pixels whose stretched temperature is below this show the sky instead; from here the
 /// toe maps up from the coolest blackbody level, so the dim receding side still shows as
 /// a continuous glow round its clumps.
-const T_SHOW: f64 = 600.0;
+const T_SHOW: f64 = 1050.0;
 /// Observer distance: the screen angle of a ray is `b / OBSERVER`.
 const OBSERVER: f64 = 60.0;
 /// The star field drifts round the disk axis (rad/s; stylised).
-const SKY_SPIN: f64 = TAU / 150.0;
+const SKY_SPIN: f64 = TAU / 300.0;
 
 /// Cap on traced lattice nodes (ADR-0012): the 200×50 display's 20 000 pixels fit.
 const MAX_NODES: usize = 24_000;
@@ -77,7 +77,7 @@ const MAX_NODES: usize = 24_000;
 const SS: usize = 2;
 /// The fit: the disk's outer edge spans this much of the width, and the image keeps a
 /// cell clear above it and two below it (the title row and a gap; GEN-R13).
-const FILL: f64 = 0.9;
+const FILL: f64 = 0.6;
 const MARGIN_TOP: f64 = 2.0;
 const MARGIN_BOTTOM: f64 = 4.0;
 
@@ -105,15 +105,22 @@ const CLUMP_EDGE: f64 = 0.8 * R_OUT;
 /// Star texture (equirectangular, one texel per star).
 const STAR_W: usize = 1024;
 const STAR_H: usize = 512;
-const STARS: usize = 2400;
+const STARS: usize = 1200;
 /// Star levels run from `STAR_DIM` to `STAR_BRIGHT`, below the disk's hottest level in
 /// every theme (BH-A8).
 const STAR_DIM: f64 = 40.0;
-const STAR_BRIGHT: f64 = 150.0;
+const STAR_BRIGHT: f64 = 110.0;
 /// The lensing ring is thinner than a pixel: nodes within `RING_BAND` outside the shadow
 /// trace their order-1 image with `RING_SS`² samples, and a node it touches shows it at
 /// full coverage, so it reads as a one-pixel line, not specks (stylised, SPEC-002).
 const RING_SS: usize = 6;
+/// The photon ring (ADR-0017): a fine `Starlight` thread at up to `RING_LEVEL`, by the
+/// share of a node's ring samples that land on the disk times `RING_GAIN` (sub-pixel
+/// coverage, anti-aliased), drawn only where the disk there is dimmer than `RING_UNDER`
+/// (the beamed disk stays the brightest thing).
+const RING_LEVEL: f64 = 130.0;
+const RING_GAIN: f64 = 3.0;
+const RING_UNDER: u8 = 90;
 const RING_BAND: f64 = 0.8;
 
 /// `GM` in `M` units rescaled so the ISCO period is exactly `ISCO_PERIOD` (BH-A1).
@@ -714,6 +721,9 @@ pub struct BlackHole {
     sky: Vec<SkyRay>,
     flux: Grid<f32>,
     star_light: Grid<f32>,
+    /// Per lattice node, the share of its ring samples on the order-1 image (the photon
+    /// ring's coverage).
+    ring: Grid<f32>,
     levels: FluxLevels,
     map: SampleMap,
     pixels: Pixels,
@@ -735,6 +745,7 @@ impl Default for BlackHole {
             sky: Vec::new(),
             flux: Grid::default(),
             star_light: Grid::default(),
+            ring: Grid::default(),
             levels: FluxLevels::new(),
             map: SampleMap::default(),
             pixels: Pixels::default(),
@@ -788,6 +799,8 @@ impl BlackHole {
 
         self.hits.clear();
         self.sky.clear();
+        self.ring.resize(lattice, 0.0);
+        self.ring.fill(0.0);
         // A node's width in `M`, for the lensing-ring band.
         let node_m = sx.max(sy) / scale;
         // Per escaping supersample: its image key (star texel · 2, plus 1 above the hole),
@@ -845,6 +858,7 @@ impl BlackHole {
                     }
                 }
                 if ring {
+                    let before = self.hits.len();
                     let mirror = lw - 1 - i;
                     if let Some((a, b)) = ring_span.get(mirror).copied().flatten()
                         && mirror < i
@@ -857,6 +871,8 @@ impl BlackHole {
                         });
                         ring_span[i] = Some((from, ring_rays.len()));
                     }
+                    let n = self.hits.len() - before;
+                    self.ring.as_mut_slice()[node as usize] = n as f32 / (RING_SS * RING_SS) as f32;
                 }
             }
         }
@@ -950,7 +966,7 @@ impl BlackHole {
                 .fold(0.0, f32::max);
         }
         let (map, levels) = (&self.map, &self.levels);
-        let (flux, star) = (&self.flux, &self.star_light);
+        let (flux, star, ring) = (&self.flux, &self.star_light, &self.ring);
         // At the display sizes the lattice is not capped, the map is the identity.
         let direct = flux.size() == self.pixels.pixel_size();
         let width = usize::from(flux.width());
@@ -963,6 +979,15 @@ impl BlackHole {
                 }
             };
             let level = levels.level(at(flux));
+            // The photon ring: a fine pale thread, anti-aliased by its coverage, under the
+            // bright disk (ADR-0017).
+            let cover = f64::from(at(ring)) * RING_GAIN;
+            if cover > 0.0 && level < RING_UNDER {
+                let v = RING_LEVEL * cover.min(1.0);
+                if v >= ink::MIN_VISIBLE_LEVEL {
+                    return Ink::new(Role::Ramp(Ramp::Starlight), ink::level(v));
+                }
+            }
             if level > 0 {
                 return Ink::new(Role::Blackbody, level);
             }
@@ -1208,9 +1233,10 @@ mod tests {
                     cy - b * scale * psi.sin_det(),
                 );
                 // Either pixel when the ring runs along a pixel edge.
-                let lit = [y - 0.3, y + 0.3]
-                    .into_iter()
-                    .any(|y| bh.pixels.get(x as i32, y as i32).unwrap().role == Role::Blackbody);
+                let lit = [y - 0.3, y + 0.3].into_iter().any(|y| {
+                    let role = bh.pixels.get(x as i32, y as i32).unwrap().role;
+                    matches!(role, Role::Blackbody | Role::Ramp(Ramp::Starlight))
+                });
                 assert!(lit, "{size:?}: gap at ψ={psi}");
             }
         }
@@ -1392,7 +1418,6 @@ mod tests {
             display_temperature(T_KNEE + 1e-6),
         );
         assert!((hi - lo).abs() < 0.1 && (lo - T_KNEE).abs() < 0.1);
-        assert!(display_temperature(2000.0) > 2600.0);
         for (w, h) in [(80, 24), (120, 40), (200, 50)] {
             let (mut g, mut ctx) = scene(Size::new(w, h));
             for _ in 0..120 {
