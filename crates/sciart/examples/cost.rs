@@ -19,13 +19,14 @@
 //! - `cells`: changed cells per frame; `wr`: `write` calls (syscalls) per frame;
 //! - `blk@5`, `blk@20`, `blk2@20` (2×2 squares, not ratcheted), `dark@5`, `dark@20`,
 //!   `luma@20`, `cov@5`, `cov@20` (lit coverage), `cmass@5`, `cmass@20` (chroma mass),
-//!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; cap 0.20): the
+//!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; cap 0.20),
+//!   `p99L` (p99 lit-pixel luma at the worse time; floor 0.6): the
 //!   GEN-R17/R18/R21 art metrics of the exact `astro` frame at t = 5 s and 20 s
 //!   (`sciart_render::metrics`), when `--secs` reaches them.
 //!
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
 //! descending), `dark` (dark@20, ascending), `cov`, `cmass`, `edge`, `neon` (at 20 s,
-//! descending) or `name` (default: registry order).
+//! descending), `p99l` (at 20 s, ascending) or `name` (default: registry order).
 //! `--crossterm` uses ratatui's `CrosstermBackend` and `--exact` turns
 //! the RND-R14 colour hysteresis off, for before/after comparisons. `--emit-limits`
 //! prints ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs` instead.
@@ -48,7 +49,7 @@ use sciart_render::metrics::{ArtMetrics, Clean, art_metrics};
 use sciart_render::{FrameBackend, Painter, Theme, paint};
 
 const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] \
-                     [--sort bytes|cpu|blk|dark|cov|cmass|edge|neon|name] [--replays N] [--crossterm] [--exact] [--emit-limits]";
+                     [--sort bytes|cpu|blk|dark|cov|cmass|edge|neon|p99l|name] [--replays N] [--crossterm] [--exact] [--emit-limits]";
 /// The app's default 30 FPS over the fixed 60 Hz update (ADR-0003).
 const STEPS_PER_FRAME: u64 = 2;
 /// Art metrics are sampled at these simulated times (GEN-R17, GEN-R18, GEN-R21).
@@ -116,7 +117,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             "--sort" => {
                 let v = value()?;
                 if ![
-                    "bytes", "cpu", "blk", "dark", "cov", "cmass", "edge", "neon", "name",
+                    "bytes", "cpu", "blk", "dark", "cov", "cmass", "edge", "neon", "p99l", "name",
                 ]
                 .contains(&v.as_str())
                 {
@@ -288,7 +289,7 @@ fn run<B: Backend>(entry: &Entry, args: &Args, mut backend: B, sink: &Sink) -> R
 
 /// Ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs`: the measured
 /// values with the table's slack (blockiness +0.02, darkness −0.02, lit coverage +0.02,
-/// chroma mass +0.003, edge weight +10 % + 0.2), alphabetical.
+/// chroma mass +0.003, edge weight +10 % + 0.2; lit-coverage floor −0.02), alphabetical.
 fn emit_limits(rows: &[Row]) {
     let up_by = |v: f64, slack: f64, unit: f64| ((v + slack) / unit - 1e-9).ceil() * unit;
     let up = |v: f64| up_by(v, 0.02, 1e-3);
@@ -296,6 +297,7 @@ fn emit_limits(rows: &[Row]) {
     let cov = |v: f64| up_by(v, 0.02, 1e-3).min(1.0);
     let mass = |v: f64| up_by(v, 0.003, 1e-4);
     let edge = |v: f64| up_by(v * 1.1, 0.2, 0.1);
+    let cov_floor = |v: f64| dn(v);
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by_key(|r| r.name);
     for r in sorted {
@@ -305,7 +307,7 @@ fn emit_limits(rows: &[Row]) {
         };
         let (ca, cb) = (a.clean, b.clean);
         println!(
-            "    (\"{}\", [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.4}, {:.4}], [{:.1}, {:.1}]),",
+            "    (\"{}\", [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.4}, {:.4}], [{:.1}, {:.1}], [{:.3}, {:.3}]),",
             r.name,
             up(a.blockiness),
             up(b.blockiness),
@@ -317,6 +319,8 @@ fn emit_limits(rows: &[Row]) {
             mass(cb.chroma_mass),
             edge(ca.edge_weight),
             edge(cb.edge_weight),
+            cov_floor(ca.coverage),
+            cov_floor(cb.coverage),
         );
     }
 }
@@ -345,11 +349,12 @@ fn main() -> ExitCode {
         }),
         "blk" => rows.sort_by(|a, b| blk20(b).total_cmp(&blk20(a))),
         "dark" => rows.sort_by(|a, b| dark20(a).total_cmp(&dark20(b))),
-        "cov" | "cmass" | "edge" | "neon" => {
+        "cov" | "cmass" | "edge" | "neon" | "p99l" => {
             let f: fn(Clean) -> f64 = match args.sort.as_str() {
                 "cov" => |c| c.coverage,
                 "cmass" => |c| c.chroma_mass,
                 "edge" => |c| c.edge_weight,
+                "p99l" => |c| -c.lit_luma_p99,
                 _ => |c| c.chroma_p90,
             };
             rows.sort_by(|a, b| clean20(b, f).total_cmp(&clean20(a, f)));
@@ -369,7 +374,7 @@ fn main() -> ExitCode {
         if args.exact { "exact" } else { "hysteresis" },
     );
     println!(
-        "{:<28} {:>8} {:>7} {:>8} {:>8} {:>8} {:>6} {:>5} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>6}",
+        "{:<28} {:>8} {:>7} {:>8} {:>8} {:>8} {:>6} {:>5} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>6} {:>5}",
         "scene",
         "upd+rnd",
         "paint",
@@ -390,7 +395,8 @@ fn main() -> ExitCode {
         "cmass@20",
         "edge@5",
         "edge@20",
-        "neon"
+        "neon",
+        "p99L"
     );
     let fmt = |m: Option<ArtMetrics>, digits: usize, f: fn(ArtMetrics) -> f64| {
         m.map_or_else(|| "-".to_owned(), |m| format!("{:.*}", digits, f(m)))
@@ -398,7 +404,7 @@ fn main() -> ExitCode {
     let metric = |m: Option<ArtMetrics>, f: fn(ArtMetrics) -> f64| fmt(m, 3, f);
     for r in &rows {
         println!(
-            "{:<28} {:>8.1} {:>7.1} {:>8.1} {:>8.0} {:>8} {:>6.0} {:>5.1} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>6}",
+            "{:<28} {:>8.1} {:>7.1} {:>8.1} {:>8.0} {:>8} {:>6.0} {:>5.1} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>6} {:>5}",
             r.name,
             r.update_us,
             r.paint_us,
@@ -425,6 +431,12 @@ fn main() -> ExitCode {
                 .map(|m| m.clean.chroma_p90)
                 .reduce(f64::max)
                 .map_or_else(|| "-".to_owned(), |v| format!("{v:.3}")),
+            r.metrics
+                .iter()
+                .flatten()
+                .map(|m| m.clean.lit_luma_p99)
+                .reduce(f64::min)
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:.2}")),
         );
     }
     let n = rows.len().max(1) as f64;

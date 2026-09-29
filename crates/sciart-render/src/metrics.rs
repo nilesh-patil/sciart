@@ -59,10 +59,29 @@ pub struct Clean {
     /// 90th percentile of OKLCh chroma over the lit pixels (0 with 50 or fewer lit): the
     /// neon cap, at most [`NEON_CAP`] for every scene.
     pub chroma_p90: f64,
+    /// 99th percentile of the luma of the lit pixels (0 with none lit): the subject's
+    /// brightest parts, at least [`LEGIBLE_LUMA`] for every scene (GEN-R21 legible subject).
+    /// Unlike the other clean measures it is read from the half-block pixel grid's *shown*
+    /// colours (a braille dot counts at its glyph colour): on the pooled preview grid a
+    /// quarter-covered dot can never be brighter than luma ≈ 0.3.
+    pub lit_luma_p99: f64,
 }
 
 /// GEN-R21's global ceiling on [`Clean::chroma_p90`].
 pub const NEON_CAP: f64 = 0.20;
+/// GEN-R21's global floor on [`Clean::lit_luma_p99`].
+pub const LEGIBLE_LUMA: f64 = 0.6;
+
+/// numpy's default percentile of sorted `v` (linear between order statistics).
+fn percentile(v: &[f64], q: f64) -> f64 {
+    let Some(&last) = v.last() else {
+        return 0.0;
+    };
+    let pos = q * (v.len() - 1) as f64;
+    let (i, t) = (pos.floor() as usize, pos - pos.floor());
+    let hi = v.get(i + 1).copied().unwrap_or(last);
+    v[i] + (hi - v[i]) * t
+}
 
 /// Rec. 709 luma of gamma-encoded sRGB, in `[0, 1]`: cheap, and ordered like perceived
 /// brightness closely enough for these metrics.
@@ -362,6 +381,7 @@ pub fn clean_of(w: usize, grid: &[[f64; 3]]) -> Clean {
         chroma.push(c);
     }
     let lit_n = chroma.len();
+
     let mut boundary = 0usize;
     for y in 0..h {
         for x in 0..w {
@@ -386,10 +406,7 @@ pub fn clean_of(w: usize, grid: &[[f64; 3]]) -> Clean {
     let p90 = if lit_n > 50 {
         // numpy's default percentile: linear interpolation between order statistics.
         chroma.sort_unstable_by(f64::total_cmp);
-        let pos = 0.9 * (lit_n - 1) as f64;
-        let (i, t) = (pos.floor() as usize, pos - pos.floor());
-        let hi = chroma[(i + 1).min(lit_n - 1)];
-        chroma[i] + (hi - chroma[i]) * t
+        percentile(&chroma, 0.9)
     } else {
         0.0
     };
@@ -398,13 +415,32 @@ pub fn clean_of(w: usize, grid: &[[f64; 3]]) -> Clean {
         chroma_mass: mass,
         edge_weight: lit_n as f64 / boundary.max(1) as f64,
         chroma_p90: p90,
+        lit_luma_p99: 0.0,
     }
 }
 
 /// GEN-R21 measures of a painted frame.
 pub fn clean(buf: &Buffer) -> Clean {
     let (w, grid) = clean_grid(buf);
-    clean_of(w, &grid)
+    let (pw, px) = pixel_grid(buf);
+    // Without the title row (two pixel rows), like the other clean measures.
+    let art = px.len().saturating_sub(2 * pw);
+    Clean {
+        lit_luma_p99: lit_luma_p99(px[..art].iter().map(|p| p.shown)),
+        ..clean_of(w, &grid)
+    }
+}
+
+/// GEN-R21 legible subject: the 99th percentile of the luma of the shown colours that are
+/// lit (max channel > [`DARK_MAX`]); 0 with none lit.
+pub fn lit_luma_p99(shown: impl Iterator<Item = Option<Rgb>>) -> f64 {
+    let mut l: Vec<f64> = shown
+        .flatten()
+        .filter(|c| !is_black(*c))
+        .map(luma)
+        .collect();
+    l.sort_unstable_by(f64::total_cmp);
+    percentile(&l, 0.99)
 }
 
 /// All art metrics of a painted frame (RND-R13).
@@ -556,6 +592,21 @@ mod tests {
                 ..Clean::default()
             }
         );
+    }
+
+    #[test]
+    fn gen_r21_lit_luma_p99_reads_the_brightest_lit_pixels() {
+        // 99 dim lit pixels and one white one: p99 interpolates towards white.
+        let mut px = vec![Some(Rgb(60, 60, 60)); 99];
+        px.push(Some(Rgb(255, 255, 255)));
+        px.extend([None, Some(Rgb(20, 20, 20))]); // unlit: ignored
+        let dim = 60.0 / 255.0;
+        let p99 = lit_luma_p99(px.into_iter());
+        assert!((p99 - (dim + (1.0 - dim) * 0.01)).abs() < 1e-9, "{p99}");
+        assert!(p99 < LEGIBLE_LUMA, "a faint scene");
+        assert!(lit_luma_p99([Some(Rgb(230, 230, 230))].into_iter()) > LEGIBLE_LUMA);
+        assert_eq!(lit_luma_p99([None].into_iter()), 0.0, "none lit");
+        assert_eq!(percentile(&[1.0, 2.0, 3.0], 0.5), 2.0);
     }
 
     #[test]
