@@ -660,9 +660,14 @@ impl GrayScott {
     /// pattern, where the halo needs it.
     fn rasterise(&mut self) {
         let (map, u, v, levels, top) = (&self.map, &self.u, &self.v, &self.levels, self.v_top);
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut ur, mut vr) = (-1, map.row(u, 0), map.row(v, 0));
         self.pixels.shade(|x, y| {
-            let s = map.sample(v, x, y);
-            v_ink(levels, || map.sample(u, x, y), s, top).unwrap_or(Ink::BLANK)
+            if y != ry {
+                (ry, ur, vr) = (y, map.row(u, y), map.row(v, y));
+            }
+            let s = vr.at(x);
+            v_ink(levels, || ur.at(x), s, top).unwrap_or(Ink::BLANK)
         });
     }
 

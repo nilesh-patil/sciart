@@ -318,18 +318,24 @@ impl Dicty {
         }
         // Smooth the cell density, so the lawn reads as a soft field that gathers into
         // streams and mounds rather than as grains.
-        blur121(self.glow.values_mut(), usize::from(px.width()));
+        self.glow.blur121();
         let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
             .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
         let (map, u, v, glow, tone) = (&self.map, &self.u, &self.v, &self.glow, &self.tone);
         let cell_lut = &self.cell_lut;
+        // Row samplers, rebuilt when the shader moves to the next pixel row (CORE-R104).
+        let (mut row_y, mut ur, mut vr) = (-1, map.row(u, 0), map.row(v, 0));
         self.pixels.shade(|x, y| {
+            if y != row_y {
+                (row_y, ur, vr) = (y, map.row(u, y), map.row(v, y));
+            }
             // The wave: only its thin rising edge (fresh cAMP where cells are not yet
             // refractory), a cyan-white ring over the amber lawn, as in the classic
             // dark-field films.
-            let c = map.sample(u, x, y);
-            let edge = wave_edge(c, map.sample(v, x, y)) * fade;
+            let c = ur.at(x);
+            let vv = vr.at(x);
+            let edge = wave_edge(c, vv) * fade;
             let g = tone.level(glow.get(x, y).unwrap_or(0.0) * fade);
             if edge > WAVE_MIN {
                 let k = f64::from((edge - WAVE_MIN) / (1.0 - WAVE_MIN));
@@ -346,7 +352,7 @@ impl Dicty {
             }
             // Behind the edge, on bare ground, a faint wake of the wave, so the ring
             // reads as a glowing front rather than a hard line.
-            let wake = c * (1.0 - (map.sample(v, x, y) / WAKE_V).min(1.0)) * fade;
+            let wake = c * (1.0 - (vv / WAKE_V).min(1.0)) * fade;
             if wake > 0.25 {
                 Ink::new(WAVE_ROLE, ink::level(f64::from(25.0 + 55.0 * wake)))
             } else {
@@ -360,33 +366,6 @@ impl Dicty {
 /// refractory (`v < WAVE_V`), so a wave shows as a thin rising ring [DICT-A6].
 pub(crate) fn wave_edge(u: f32, v: f32) -> f32 {
     u * (1.0 - (v / WAVE_V).min(1.0))
-}
-
-/// One in-place `[1 2 1] / 4` pass along rows and then columns of a `w`-wide buffer
-/// (edges clamped).
-fn blur121(buf: &mut [f32], w: usize) {
-    if w == 0 {
-        return;
-    }
-    let h = buf.len() / w;
-    for row in buf.chunks_exact_mut(w) {
-        let mut prev = row[0];
-        for x in 0..w {
-            let cur = row[x];
-            let next = row[(x + 1).min(w - 1)];
-            row[x] = 0.25 * (prev + 2.0 * cur + next);
-            prev = cur;
-        }
-    }
-    for x in 0..w {
-        let mut prev = buf[x];
-        for y in 0..h {
-            let cur = buf[y * w + x];
-            let next = buf[(y + 1).min(h - 1) * w + x];
-            buf[y * w + x] = 0.25 * (prev + 2.0 * cur + next);
-            prev = cur;
-        }
-    }
 }
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {

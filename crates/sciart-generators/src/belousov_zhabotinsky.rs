@@ -538,8 +538,14 @@ impl Bz {
             ease::smoothstep(age / FADE_IN_S) as f32
         });
         let (map, u, v) = (&self.map, &self.u, &self.v);
-        self.pixels
-            .shade(|x, y| phase_ink(fade * phase(map.sample(u, x, y), map.sample(v, x, y))));
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut ur, mut vr) = (-1, map.row(u, 0), map.row(v, 0));
+        self.pixels.shade(|x, y| {
+            if y != ry {
+                (ry, ur, vr) = (y, map.row(u, y), map.row(v, y));
+            }
+            phase_ink(fade * phase(ur.at(x), vr.at(x)))
+        });
     }
 }
 

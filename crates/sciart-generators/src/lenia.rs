@@ -522,8 +522,13 @@ impl Lenia {
             })
         });
         let (map, a, p) = (&self.map, &self.world.a, &self.world.prev);
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut ar, mut pr) = (-1, map.row(a, 0), map.row(p, 0));
         self.pixels.shade(|x, y| {
-            let (va, vp) = (map.sample(a, x, y), map.sample(p, x, y));
+            if y != ry {
+                (ry, ar, pr) = (y, map.row(a, y), map.row(p, y));
+            }
+            let (va, vp) = (ar.at(x), pr.at(x));
             let mut v = (vp + (va - vp) * f) * k_in;
             if let Some((cx, cy, r, k)) = birth {
                 let d = (f64::from(x) + 0.5 - cx).hypot((f64::from(y) + 0.5 - cy) * sx / sy);

@@ -782,8 +782,13 @@ impl Physarum {
         let k = TAU / (STREAM_WAVE * short);
         let phase0 = TAU * self.time() / STREAM_PERIOD;
         let depth = STREAM_DEPTH * self.streaming();
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut sr) = (-1, map.row(shown, 0));
         self.pixels.shade(|x, y| {
-            let v = map.sample(shown, x, y) * scale;
+            if y != ry {
+                (ry, sr) = (y, map.row(shown, y));
+            }
+            let v = sr.at(x) * scale;
             if v < halo {
                 return Ink::BLANK;
             }
