@@ -56,6 +56,7 @@ Design: `docs/design/M11-titles-taxonomy.md` §1–§3 · ADR-0013 (taxonomy) ·
   | three_body | The shown orbit's short name is `caption()`; `meta.captions` = `figure-8`, `Lagrange`, `Broucke A1`, `Broucke R4`, `moth I`. |
 - **GEN-R14** Renamed scenes keep their old names as aliases: `ALIASES: &[(&str, &str)]` maps `chemical_reaction → gray_scott` and `crystal_growth → fractal_growth`. `find(name)` tries `meta.name` first, then an alias, so `sciart run <old name>` and `disabled = ["<old name>"]` (CFG-R7) keep working. Every alias target is registered, and no alias equals a registered name. `registry()` and `sciart list` show only current names. Acceptance IDs keep their prefixes (`CHEM-A*`, `CRY-A*`).
 - **GEN-R15** Each scene section heading in this file reads `### <name>  (<category label>, <milestones>)`. Every registered scene has exactly one such section, and its label equals `meta.category.label()` (CORE-R77), which is how each scene's category (ADR-0013) is written down. Checked by a test that parses this file.
+- **GEN-R16** No scene imports another scene: a scene module uses only `std`, `rand`, `sciart_core` and `crate::shared::…`. Code that two scenes need moves to `src/shared/` (or into core with its own CORE-R ID), and a shared model never imports a scene. (M13: `satellite_orbit`'s Earth globe, used by `moon_landing`, moved to `shared::earth_globe`.)
 
 ## Per-generator spec template
 Each scene gets a short section appended below when its batch starts:
