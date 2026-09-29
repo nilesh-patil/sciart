@@ -51,7 +51,7 @@ const MAX_NODES: usize = 12_800;
 const BUCKET: f64 = 1.25;
 /// Cells at most, and per lattice node on a fresh lawn.
 pub(crate) const CAP: usize = 3000;
-const CELLS_PER_NODE: f64 = 0.3;
+const CELLS_PER_NODE: f64 = 0.24;
 /// Chemotactic speed while a front passes, in nodes per second.
 const CHEMO_SPEED: f32 = 10.0;
 /// Pacemaker period and radius; pacemakers only fire recovered nodes.
@@ -73,6 +73,19 @@ const CELL_HALO: [(i32, i32, f32); 9] = sciart_core::raster::halo_kernel(1);
 /// One aggregation lasts this long, then the lawn is scattered afresh.
 const CYCLE_S: f64 = 55.0;
 const FADE_S: f64 = 2.0;
+
+// ---- Display ----
+
+/// Cells: dim amber (a dark-field lawn), at most this level.
+const CELL_ROLE: Role = Role::Ramp(Ramp::Ember);
+const CELL_MAX: u32 = 200;
+const CELL_GAMMA: f64 = 1.4;
+/// Wave fronts: the rising edge only (`v` below `WAVE_V`), cyan-white.
+const WAVE_ROLE: Role = Role::Ramp(Ramp::Ice);
+const WAVE_V: f32 = 0.3;
+const WAVE_MIN: f32 = 0.2;
+/// The faint wake behind the edge fades out as `v` reaches this.
+const WAKE_V: f32 = 0.55;
 
 /// One amoeba, in lattice units, with the cAMP it sensed last sub-step.
 #[derive(Debug, Clone, Copy, Default)]
@@ -130,6 +143,8 @@ struct Dicty {
     glow: Glow,
     tone: Tone,
     pixels: Pixels,
+    /// Glow level to cell level (gamma [`CELL_GAMMA`], up to [`CELL_MAX`]).
+    cell_lut: [u8; 256],
     seeded: bool,
 }
 
@@ -153,6 +168,9 @@ impl Default for Dicty {
             glow: Glow::default(),
             tone: Tone::asinh(0.3, 6.0),
             pixels: Pixels::default(),
+            cell_lut: std::array::from_fn(|g| {
+                ((g as f64 / 255.0).powf(CELL_GAMMA) * f64::from(CELL_MAX)) as u8
+            }),
             seeded: false,
         }
     }
@@ -294,28 +312,43 @@ impl Dicty {
         let (sx, sy) = (f32::from(px.width()) / lw, f32::from(px.height()) / lh);
         self.glow.clear();
         for c in &self.cells {
-            // Dots: two per pixel each way. Moving cells scatter more light.
+            // Dots: two per pixel each way. Moving cells scatter a little more light.
             let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
-            self.glow.splat(x, y, &CELL_HALO, 0.35 + 0.45 * c.moving);
+            self.glow.splat(x, y, &CELL_HALO, 0.35 + 0.25 * c.moving);
         }
+        // Smooth the cell density, so the lawn reads as a soft field that gathers into
+        // streams and mounds rather than as grains.
+        blur121(self.glow.values_mut(), usize::from(px.width()));
         let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
             .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
         let (map, u, v, glow, tone) = (&self.map, &self.u, &self.v, &self.glow, &self.tone);
+        let cell_lut = &self.cell_lut;
         self.pixels.shade(|x, y| {
+            // The wave: only its thin rising edge (fresh cAMP where cells are not yet
+            // refractory), a cyan-white ring over the amber lawn, as in the classic
+            // dark-field films.
+            let c = map.sample(u, x, y);
+            let edge = wave_edge(c, map.sample(v, x, y)) * fade;
             let g = tone.level(glow.get(x, y).unwrap_or(0.0) * fade);
-            if g >= 28 {
-                return Ink::new(Role::Ramp(Ramp::Starlight), g);
+            if edge > WAVE_MIN {
+                let k = f64::from((edge - WAVE_MIN) / (1.0 - WAVE_MIN));
+                // Brighter where it crosses cells: they relay the signal.
+                let over = f64::from(g) / 255.0;
+                return Ink::new(WAVE_ROLE, ink::level(150.0 + 75.0 * k + 30.0 * over));
             }
-            // A faint wash, brightest at the rising front (fresh cAMP, cells not yet
-            // refractory), so waves read as thin rings rather than filled discs.
-            let c = map.sample(u, x, y) * fade;
-            let front = c * (1.0 - (map.sample(v, x, y) / 0.4).min(1.0));
-            if c > 0.08 {
-                Ink::new(
-                    Role::Ramp(Ramp::Cobalt),
-                    ink::level(f64::from(18.0 + 25.0 * c + 130.0 * front)),
-                )
+            // Cells: dim amber, brightest in mounds; the quiet ground stays black.
+            // A gamma above 1 keeps the fresh, thin lawn quiet and lets streams and
+            // mounds glow.
+            let level = cell_lut[usize::from(g)];
+            if level >= 12 {
+                return Ink::new(CELL_ROLE, level);
+            }
+            // Behind the edge, on bare ground, a faint wake of the wave, so the ring
+            // reads as a glowing front rather than a hard line.
+            let wake = c * (1.0 - (map.sample(v, x, y) / WAKE_V).min(1.0)) * fade;
+            if wake > 0.25 {
+                Ink::new(WAVE_ROLE, ink::level(f64::from(25.0 + 55.0 * wake)))
             } else {
                 Ink::BLANK
             }
@@ -323,9 +356,42 @@ impl Dicty {
     }
 }
 
+/// How strongly a node draws as a wave edge: its cAMP `u`, only while it is not yet
+/// refractory (`v < WAVE_V`), so a wave shows as a thin rising ring [DICT-A6].
+pub(crate) fn wave_edge(u: f32, v: f32) -> f32 {
+    u * (1.0 - (v / WAVE_V).min(1.0))
+}
+
+/// One in-place `[1 2 1] / 4` pass along rows and then columns of a `w`-wide buffer
+/// (edges clamped).
+fn blur121(buf: &mut [f32], w: usize) {
+    if w == 0 {
+        return;
+    }
+    let h = buf.len() / w;
+    for row in buf.chunks_exact_mut(w) {
+        let mut prev = row[0];
+        for x in 0..w {
+            let cur = row[x];
+            let next = row[(x + 1).min(w - 1)];
+            row[x] = 0.25 * (prev + 2.0 * cur + next);
+            prev = cur;
+        }
+    }
+    for x in 0..w {
+        let mut prev = buf[x];
+        for y in 0..h {
+            let cur = buf[y * w + x];
+            let next = buf[(y + 1).min(h - 1) * w + x];
+            buf[y * w + x] = 0.25 * (prev + 2.0 * cur + next);
+            prev = cur;
+        }
+    }
+}
+
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let lit = |i: Ink| i.role != Role::Background;
-    let cell = |i: Ink| i.role == Role::Ramp(Ramp::Starlight);
+    let cell = |i: Ink| i.role == CELL_ROLE;
     let ink = match (lit(top), lit(bottom)) {
         (false, false) => return None,
         _ if cell(top) && (!cell(bottom) || top.level >= bottom.level) => top,
@@ -335,8 +401,8 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     };
     let ch = if cell(ink) {
         match ink.level {
-            200.. => '@',
-            120.. => 'o',
+            140.. => '@',
+            90.. => 'o',
             _ => '.',
         }
     } else {
@@ -487,6 +553,15 @@ mod tests {
         );
         let refractory = Grid::new(s, 0.5f32);
         assert!(chemotaxis(&u, &refractory, (10.5, 10.5), 0.1, 0.01).is_none());
+    }
+
+    #[test]
+    fn dict_a6_only_the_rising_edge_of_a_wave_is_drawn() {
+        assert!((wave_edge(1.0, 0.0) - 1.0).abs() < 1e-6);
+        // Behind the edge (refractory cells) the wave draws nothing, however high u is.
+        assert_eq!(wave_edge(1.0, WAVE_V), 0.0);
+        assert_eq!(wave_edge(0.9, 0.6), 0.0);
+        assert!(wave_edge(0.8, 0.5 * WAVE_V) > WAVE_MIN);
     }
 
     #[test]
