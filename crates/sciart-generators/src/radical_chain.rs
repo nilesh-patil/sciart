@@ -35,7 +35,7 @@ use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::raster::{self, STROKE_KERNEL};
 use sciart_core::title;
-use sciart_core::{Tone, draw, ease, ink};
+use sciart_core::{Tone, draw, ease};
 
 pub static META: Meta = Meta {
     name: "radical_chain",
@@ -110,20 +110,21 @@ const VENT_FAST: f64 = 3.0;
 const P_LOW: f64 = 0.6;
 const P_HIGH: f64 = 2.2;
 
-const FLAME: Ramp = Ramp::Ice;
-const WATER: Ramp = Ramp::Ice;
-const WATER_MAX: f64 = 40.0 / 255.0;
 /// Radicals in the vessel at the start, so the first frame already has sparks.
 const SEED_RADICALS: usize = 25;
-/// Ice level of the gas at the wall temperature: a faint ambient so the vessel never
-/// reads as empty.
-const AMBIENT: u8 = 10;
-/// Flame levels below this are drawn in violet (`Ramp(Plasma)`, stretched up to its
-/// lavender), the flame's cool fringe; above it `FLAME` runs from its pale blue (skipping
-/// the saturated navy-cyan middle) to a white-hot core.
-const VIOLET_TOP: u8 = 100;
-const VIOLET_GAIN: f32 = 1.35;
-const ICE_FOOT: f32 = 165.0;
+/// Inks (ADR-0017): the flash is the hot gas's own glow, black → red → orange → a
+/// briefly white-hot core (`Ramp(Ember)`); the radicals, the subject, are bright lavender
+/// dots with violet 1-px chain trails (`Ramp(Plasma)`).
+const FLASH: Ramp = Ramp::Ember;
+const FLASH_GAIN: f32 = 1.0;
+/// Steepness of the flash above its threshold: a dim edge, a white-hot core.
+const FLASH_GAMMA: f32 = 1.6;
+const CHAIN: Ramp = Ramp::Plasma;
+const CHAIN_TOP: f32 = 200.0;
+/// Toned flash levels below this are single reactions' heat, not a flame: left black.
+const FLASH_MIN: u8 = 48;
+/// Levels below this are left black.
+const FLOOR: u8 = 14;
 /// The ignition spark's temperature excess and radius (grid cells), and where in the
 /// vessel it may strike (fractions of the width and height from the centre).
 const SPARK_HEAT: f32 = 1.6;
@@ -131,14 +132,15 @@ const SPARK_R: f32 = 2.5;
 const SPARK_SPREAD: f64 = 0.3;
 /// Glow kept per frame: short fading trails behind the sparks.
 const TRAIL_KEEP: f32 = 0.72;
-/// Spark radius (dots) while the pool is sparse; single dots once it crowds.
-const DOT_R: f64 = 0.9;
+/// Radicals are drawn as dots, and their chains as strokes, while the pool is sparse.
 const SPARSE: usize = 300;
 const OUTSIDE: u8 = 0;
 const ON_WALL: u8 = 1;
 const INSIDE: u8 = 2;
-const WALL: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 150);
-const RADICAL: Ink = Ink::new(Role::Ramp(Ramp::Ice), 255);
+/// The wall: a faint dotted line, one dot in `WALL_EVERY`.
+const WALL: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 45);
+const WALL_EVERY: usize = 3;
+const RADICAL: Ink = Ink::new(Role::Ramp(CHAIN), 235);
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Pressure (units of the first limit) at a beat of the loop.
@@ -389,16 +391,49 @@ struct Frame {
     h: i32,
 }
 
-/// The flame's ink for a toned level: violet fringe, pale blue body, white-hot core.
-pub(crate) fn flame_ink(lv: u8) -> Ink {
-    if lv < VIOLET_TOP {
-        Ink::new(
-            Role::Ramp(Ramp::Plasma),
-            (f32::from(lv) * VIOLET_GAIN) as u8,
-        )
+/// One in-place `[1 2 1]/4` pass along rows and then columns of `g` (edges clamped);
+/// `row` is scratch for one row.
+fn soften(g: &mut Grid<f32>, row: &mut Vec<f32>) {
+    let w = usize::from(g.width());
+    if w == 0 {
+        return;
+    }
+    let buf = g.as_mut_slice();
+    for r in buf.chunks_exact_mut(w) {
+        let mut prev = r[0];
+        for x in 0..w {
+            let cur = r[x];
+            r[x] = 0.25 * (prev + 2.0 * cur + r[(x + 1).min(w - 1)]);
+            prev = cur;
+        }
+    }
+    row.clear();
+    row.extend_from_slice(&buf[..w]);
+    let h = buf.len() / w;
+    for y in 0..h {
+        let below = (y + 1).min(h - 1) * w;
+        for x in 0..w {
+            let cur = buf[y * w + x];
+            let next = if y + 1 < h { buf[below + x] } else { cur };
+            buf[y * w + x] = 0.25 * (row[x] + 2.0 * cur + next);
+            row[x] = cur;
+        }
+    }
+}
+
+/// A pixel's ink from its toned flash and trail levels: the flash in the warm ramp, the
+/// chain trail a faint violet; the brighter wins, and both fade to black.
+pub(crate) fn flame_ink(flash: u8, trail: u8) -> Ink {
+    // The flash ramps in from `FLASH_MIN`, so the flame's edge fades instead of stepping.
+    let above = f32::from(flash.saturating_sub(FLASH_MIN)) / f32::from(255 - FLASH_MIN);
+    let f = (255.0 * above.powf(FLASH_GAMMA) * FLASH_GAIN) as u8;
+    let c = (f32::from(trail) * CHAIN_TOP / 255.0) as u8;
+    // Inside the flame the flame wins, so its edge is not a violet-and-orange mosaic.
+    let (ramp, level) = if f >= FLOOR { (FLASH, f) } else { (CHAIN, c) };
+    if level < FLOOR {
+        Ink::BLANK
     } else {
-        let t = f32::from(lv - VIOLET_TOP) / f32::from(255 - VIOLET_TOP);
-        Ink::new(Role::Ramp(FLAME), (ICE_FOOT + (255.0 - ICE_FOOT) * t) as u8)
+        Ink::new(Role::Ramp(ramp), level)
     }
 }
 
@@ -454,6 +489,11 @@ pub struct RadicalChain {
     wall_dots: Vec<(i32, i32)>,
     /// Afterglow of the burnt gas on the temperature lattice.
     ember: Grid<f32>,
+    /// The flash per heat node (softened) and its blur scratch row.
+    heat: Grid<f32>,
+    heat_row: Vec<f32>,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for RadicalChain {
@@ -477,6 +517,9 @@ impl Default for RadicalChain {
             mask: Vec::new(),
             wall_dots: Vec::new(),
             ember: Grid::new(Size::new(1, 1), 0.0),
+            heat: Grid::new(Size::new(1, 1), 0.0),
+            heat_row: Vec::new(),
+            dirty: true,
         }
     }
 }
@@ -512,13 +555,15 @@ impl RadicalChain {
         }
     }
 
-    fn rasterise(&mut self) {
+    /// Expose the radicals' trails into the glow: one decay and one stroke per radical
+    /// per update, so the trail length is in simulated time whatever the draw cadence
+    /// (GEN-R20).
+    fn expose(&mut self) {
         let Some(chain) = &self.chain else {
             return;
         };
         let f = self.frame;
         self.glow.decay(TRAIL_KEEP);
-        self.dots.clear();
         let full = chain.pool.len() as f32 / CAPACITY as f32;
         // Many radicals means many overlapping splats: dim each so the flash stays graded.
         let scale = 1.0 / (1.0 + 3.0 * full);
@@ -527,53 +572,71 @@ impl RadicalChain {
                 f64::from(f.x0) + r.x * f.scale,
                 f64::from(f.y0) + r.y * f.scale,
             );
-            // Sparse: a stroke from the last position draws a fading trail. Crowded (the
-            // flash), the glow's own persistence (TRAIL_KEEP) is trail enough and a splat
-            // keeps the frame cheap.
+            // Sparse: a stroke from the last position draws a fading 1-px chain. Crowded
+            // (the flash), a splat keeps the frame cheap.
             if chain.pool.len() < SPARSE {
                 let (qx, qy) = (
                     f64::from(f.x0) + r.px * f.scale,
                     f64::from(f.y0) + r.py * f.scale,
                 );
-                let a = (2.0 * qx, 2.0 * qy);
-                self.glow
-                    .stroke(a, (2.0 * px, 2.0 * py), &STROKE_KERNEL, 2.0 * scale);
+                self.glow.stroke(
+                    (2.0 * qx, 2.0 * qy),
+                    (2.0 * px, 2.0 * py),
+                    &STROKE_KERNEL,
+                    2.0 * scale,
+                );
             } else {
                 self.glow.splat(2.0 * px, 2.0 * py, &STROKE_KERNEL, scale);
             }
-            // Keep the wall line clean: a radical touching it is about to die there. In
-            // the crowd of the flash single dots would only speckle the flame, so only
-            // the glow shows them.
-            if chain.pool.len() < SPARSE && chain.vessel.sdf(r.x, r.y) < -1.0 / f.scale {
-                self.dots.disc(2.0 * px, 2.0 * py, DOT_R, RADICAL);
+        }
+    }
+
+    /// The vessel on black (ADR-0017): radicals as single violet dots, their chains as
+    /// faint 1-px trails, the explosion a warm flash (the heat, toned through `Tone`)
+    /// that cools through red back to black; the wall a faint dotted line.
+    fn rasterise(&mut self) {
+        let Some(chain) = &self.chain else {
+            return;
+        };
+        let f = self.frame;
+        self.dots.clear();
+        if chain.pool.len() < SPARSE {
+            for r in chain.pool.iter() {
+                // Keep the wall line clean: a radical touching it is about to die there.
+                if chain.vessel.sdf(r.x, r.y) < -1.0 / f.scale {
+                    let (px, py) = (
+                        f64::from(f.x0) + r.x * f.scale,
+                        f64::from(f.y0) + r.y * f.scale,
+                    );
+                    self.dots.plot(2.0 * px, 2.0 * py, RADICAL);
+                }
             }
         }
         for &(x, y) in &self.wall_dots {
             self.dots.set(x, y, WALL);
         }
-        let water_top = chain
-            .water
-            .as_slice()
-            .iter()
-            .copied()
-            .fold(40.0f32, f32::max);
-        // Skip the per-pixel bilinear samples of fields that are flat this frame.
-        let (hot, wet, glowing) = (
-            chain.max_temp() > 1.002,
-            chain.water.as_slice().iter().any(|&w| w > 0.0),
-            self.ember.as_slice().iter().any(|&e| e > 1e-3),
-        );
-        let (map, glow, tone, mask, ember) =
-            (&self.map, &self.glow, &self.tone, &self.mask, &self.ember);
+        // The flash on the coarse heat lattice: live heat plus afterglow, softened by one
+        // [1 2 1] pass so single reactions' heat does not speckle the flame's edge, then
+        // Catmull-Rom sampled (CORE-R102).
+        if self.heat.size() != chain.temp.size() {
+            self.heat.resize(chain.temp.size(), 0.0);
+        }
+        for ((h, &t), &e) in self
+            .heat
+            .as_mut_slice()
+            .iter_mut()
+            .zip(chain.temp.as_slice())
+            .zip(self.ember.as_slice())
+        {
+            *h = 2.0 * (t - 1.0).max(0.0) + EMBER_W * e;
+        }
+        soften(&mut self.heat, &mut self.heat_row);
+        // In the crowd of the flash the chains are the flame: only sparse chains show.
+        let crowded = chain.pool.len() >= SPARSE;
+        let (map, glow, tone, mask, heat) =
+            (&self.map, &self.glow, &self.tone, &self.mask, &self.heat);
         let pw = i32::from(self.size.width());
-        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
-        let (temp, water) = (&chain.temp, &chain.water);
-        let (mut ry, mut tr, mut er, mut wr) = (
-            i32::MIN,
-            map.row(temp, 0),
-            map.row(ember, 0),
-            map.row(water, 0),
-        );
+        let (mut ry, mut hr) = (i32::MIN, map.row_cubic(heat, 0));
         self.pixels.shade(|x, y| {
             match mask.get((y * pw + x) as usize) {
                 Some(&INSIDE) => {}
@@ -581,19 +644,15 @@ impl RadicalChain {
             }
             let (lx, ly) = (x - f.x0, y - f.y0);
             if y != ry {
-                (ry, tr, er, wr) = (y, map.row(temp, ly), map.row(ember, ly), map.row(water, ly));
+                (ry, hr) = (y, map.row_cubic(heat, ly));
             }
-            let heat = if hot { tr.at(lx) - 1.0 } else { 0.0 };
-            let after = if glowing { EMBER_W * er.at(lx) } else { 0.0 };
-            let light = glow.get(x, y).unwrap_or(0.0) + 2.0 * heat.max(0.0) + after;
-            let lv = tone.level(light);
-            let wv = if wet { wr.at(lx) / water_top } else { 0.0 };
-            let water = if wv > 0.004 {
-                ink::ramp(WATER, WATER_MAX * f64::from(wv.sqrt()))
+            let flash = tone.level(hr.at(lx));
+            let trail = if crowded {
+                0
             } else {
-                Ink::BLANK
+                tone.level(glow.get(x, y).unwrap_or(0.0))
             };
-            raster::stronger(flame_ink(lv.max(AMBIENT)), water)
+            flame_ink(flash, trail)
         });
     }
 
@@ -698,8 +757,14 @@ impl Generator for RadicalChain {
                 }
             }
         }
+        // Every `WALL_EVERY`-th dot along the outline: a faint dotted wall.
+        let mut k = 0;
+        self.wall_dots.retain(|_| {
+            k += 1;
+            k % WALL_EVERY == 0
+        });
         self.readout_room = title::stable_readout_room(size, &META);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -764,7 +829,16 @@ impl Generator for RadicalChain {
         if chain.pool.len() > CAPACITY / 8 || chain.max_temp() > 1.5 + SPARK_HEAT {
             self.exploded = true;
         }
-        self.rasterise();
+        self.expose();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1023,11 +1097,19 @@ mod tests {
     }
 
     #[test]
-    fn chn_a7_flame_inks_run_violet_to_pale_blue_to_white() {
-        assert_eq!(flame_ink(20).role, Role::Ramp(Ramp::Plasma));
-        let body = flame_ink(VIOLET_TOP);
-        assert!(body.role == Role::Ramp(FLAME) && body.level >= ICE_FOOT as u8);
-        assert_eq!(flame_ink(255).level, 255);
+    fn chn_a7_flash_is_warm_on_black_and_chains_faint_violet() {
+        // ADR-0017: the ground is black; the flash is warm, near white only at its
+        // hottest; chain trails are violet under the bright radical dots.
+        assert_eq!(flame_ink(0, 0), Ink::BLANK);
+        assert_eq!(flame_ink(10, 10), Ink::BLANK);
+        let flash = flame_ink(255, 40);
+        assert!(flash.role == Role::Ramp(FLASH) && flash.level >= 220);
+        assert!(flame_ink(FLASH_MIN + 20, 0).level < flame_ink(FLASH_MIN + 60, 0).level);
+        let chain = flame_ink(0, 255);
+        assert!(chain.role == Role::Ramp(CHAIN) && chain.level <= 200);
+        // A single reaction's heat is not a flame.
+        assert_eq!(flame_ink(FLASH_MIN - 1, 0), Ink::BLANK);
+        assert_eq!(flame_ink(255, 200).role, Role::Ramp(FLASH));
         // Burnt gas quenches radicals: branching needs unburnt gas.
         let (mut c, mut r) = chain_with(400, 9);
         c.gas.fill(0.0);

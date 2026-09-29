@@ -25,7 +25,6 @@
   | ID | Verified by |
   |----|-------------|
   | GEN-R8 | `pixi run rs-bench` (release timing; all 41 scenes ≤ 0.55 ms @ 200×50 on M-series: the 25 unchanged scenes 2026-09-26, the 16 M10 scenes ≤ 0.47 ms (max: aurora), 2026-09-27) |
-  | GEN-R19 | `pixi run rs-worst --size 500x150` (release resize timing, M14) |
   | TEST-R2 | Process: snapshot diffs reviewed by a person |
   | TEST-R3 | Process: `pixi run rs-ci` before every commit |
 - **TEST-R2** Snapshot changes are reviewed with `cargo insta review`; never blindly accepted.
