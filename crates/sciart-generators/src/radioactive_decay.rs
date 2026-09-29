@@ -91,20 +91,23 @@ const PANEL_FRAC: f64 = 0.30;
 const PANEL_MIN_W: i32 = 24;
 const PANEL_MIN_H: i32 = 10;
 
-/// A decay flashes its nucleus at the top of the daughter's ramp and eases back to the
-/// daughter's settled ink over `FLASH` s (quadratic ease-out), so the eye can follow each
-/// event; for the first `FLASH_HOT` s it is bright (≥ `BRIGHT` levels) and ASCII shows `*`
-/// (RAD-A8).
+/// A decay flashes its nucleus's pixel at the top of its decay's ramp (`FLASH_RAMPS`: α
+/// `Aurora`, β `Ember`) and eases down to `FLASH_LOW` of it over `FLASH` s (quadratic
+/// ease-out), then shows the daughter's settled ink, so the eye can follow each event; for
+/// the first `FLASH_HOT` s it is bright and ASCII shows `*` (RAD-A8).
 const FLASH: f32 = 0.3;
-const FLASH_HOT: f32 = 0.18;
-/// Nuclei are `NUC × NUC` pixel squares on a pitch of `PITCH` pixels (RAD-A5): a one-pixel
-/// black gap keeps every nucleus a separate dot.
-const NUC: i32 = 2;
+const FLASH_HOT: f32 = 0.06;
+const FLASH_LOW: f64 = 0.25;
+/// Ordered by the daughter A, B, C: B is born of an α decay, C of a β⁻ (A never flashes).
+const FLASH_RAMPS: [Ramp; 3] = [Ramp::Aurora, Ramp::Aurora, Ramp::Ember];
+/// Nuclei are single pixels on a pitch of `PITCH` pixels (RAD-A5, ADR-0017): sparse dots
+/// on black, never a grid of squares.
+const NUC: i32 = 1;
 const PITCH: i32 = 3;
 
 /// Tracks in pixels (square: one pixel is half a row tall and one column wide), each gone
 /// within `*_LIFE` s. α: mono-energetic, so every α has the same range, and heavy, so it
-/// runs nearly straight and is drawn two dots thick.
+/// runs nearly straight. Both are 1-dot strokes (ADR-0017).
 const ALPHA_SPEED: f64 = 25.0; // px/s
 const ALPHA_RUN: f64 = 0.2; // s → range 5 px
 const ALPHA_OMEGA: f64 = 0.6; // rad/s
@@ -124,29 +127,22 @@ const KINK: f64 = 0.02;
 /// stands out.
 /// Which decays get a free slot is a uniform sample of the step's decays (RAD-A8).
 const TRACKS_PER_PIXEL: usize = 800;
-/// A tracked decay also bursts: a braille ring growing from `BURST_R` dots to
-/// `BURST_R + BURST_GROW` over `BURST` s, fading as it grows.
-const BURST: f64 = 0.12;
-const BURST_R: f64 = 2.5;
-const BURST_GROW: f64 = 2.0;
-
-/// Species palette (RAD-A5; false colour), ordered A, B, C: parent A a warm `HAlpha`
-/// crimson at 0.5, daughter B a pale teal `Ice` at 0.8 (far apart in grey, so mono parts
-/// them at a glance), and
-/// stable C near the ground, a barely-there `Plasma` at 0.07: the lattice fades out as it
-/// decays, and only the flashes carry real brightness. C's curve on the plot is the same
-/// `Plasma` at [`MEASURED`], a clear lavender. No amber: that hue is the gallery's most used.
+/// Species palette (false colour), ordered A, B, C: `HAlpha`, `Ice`, `Plasma`. The plot's
+/// curves wear it at [`MEASURED`]; on the lattice (ADR-0017) A and B are muted dots of the
+/// same hues (`LATTICE`: a dusty rose and a dim teal-blue, so each species matches its
+/// curve), and stable C is not drawn, so the lattice fades out as it decays and only the
+/// flashes are bright.
 const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
-const SETTLED: [f64; 3] = [0.5, 0.8, 0.07];
-/// Tracks in hues no species uses: α `Aurora` (green), β `Starlight` (near white), at
-/// `TRACK_TOP` of the ramp while moving, fading to `TRACK_FLOOR` of that.
+const LATTICE: [u8; 2] = [70, 70];
+/// Tracks in the flash hues: α `Aurora` (green), β `Ember`, at `TRACK_TOP` of the ramp
+/// while moving, fading to `TRACK_FLOOR` of that.
 const ALPHA_RAMP: Ramp = Ramp::Aurora;
-const BETA_RAMP: Ramp = Ramp::Starlight;
+const BETA_RAMP: Ramp = Ramp::Ember;
 const TRACK_TOP: f64 = 0.95;
-const TRACK_FLOOR: f64 = 0.7;
-/// Ramp value of the plot's measured curves (the species' hues, bright on black), and the
-/// analytic reference curves' dim `Structure` level. Measured curves are two dots thick.
-const MEASURED: f64 = 0.9;
+const TRACK_FLOOR: f64 = 0.5;
+/// Ramp value of the plot's measured curves (1 dot, dim), and the analytic reference
+/// curves' dim `Structure` level.
+const MEASURED: f64 = 0.6;
 const ANALYTIC_LEVEL: u8 = 55;
 /// The legend chip of C, which the lattice does not draw: a dim tile of its ramp.
 const C_CHIP: f64 = 0.3;
@@ -362,22 +358,22 @@ pub(crate) fn log_blend(t: f64) -> f64 {
 /// The settled ink of species `kind` (RAD-A5): stable C is not drawn at all, so the lattice
 /// fades out to the ground as it decays (its flash eases toward C's near-ground level).
 pub(crate) fn settled_ink(kind: Kind) -> Ink {
-    if kind == Kind::C {
-        return Ink::BLANK;
+    match kind {
+        Kind::C => Ink::BLANK,
+        k => Ink::new(Role::Ramp(RAMPS[k as usize]), LATTICE[k as usize]),
     }
-    ink::ramp(RAMPS[kind as usize], SETTLED[kind as usize])
 }
 
-/// The ink of nucleus `n`'s 2 × 2 pixels (RAD-A5, RAD-A8): its species' settled ink, or,
-/// within [`FLASH`] s of a decay, the daughter's ramp eased from its top back down to the
-/// settled level. A never flashes: nothing decays into it, and a restart is not a decay.
+/// The ink of nucleus `n`'s pixel (RAD-A5, RAD-A8): its species' settled ink, or, within
+/// [`FLASH`] s of a decay, the decay's flash ramp eased from its top down to
+/// [`FLASH_LOW`]. A never flashes: nothing decays into it, and a restart is not a decay.
 pub(crate) fn nucleus_ink(n: &Nucleus) -> Ink {
     let k = n.kind as usize;
     if n.kind == Kind::A || n.since >= FLASH {
         return settled_ink(n.kind);
     }
     let u = 1.0 - f64::from(n.since / FLASH);
-    ink::ramp(RAMPS[k], SETTLED[k] + (1.0 - SETTLED[k]) * u * u)
+    ink::ramp(FLASH_RAMPS[k], FLASH_LOW + (1.0 - FLASH_LOW) * u * u)
 }
 
 /// Whether a nucleus is in the hot (bright) part of its flash (RAD-A8).
@@ -459,9 +455,8 @@ fn px_dot(x: f64, y: f64) -> (f64, f64) {
     Dots::from_cells(x + 0.5, (y + 0.5) / 2.0)
 }
 
-/// Draw `tr` over the lattice's `w × h` pixels, clipped to them: while young, a burst
-/// ring around its nucleus; then its path as a braille stroke (α two dots thick), starting
-/// a pixel out so the flash stays visible.
+/// Draw `tr` over the lattice's `w × h` pixels, clipped to them: its path as a 1-dot
+/// braille stroke, starting a pixel out so the flash stays visible.
 fn draw_track(dots: &mut Dots, tr: &Track, w: i32, h: i32) {
     if tr.fade() <= 0.0 {
         return;
@@ -469,19 +464,6 @@ fn draw_track(dots: &mut Dots, tr: &Track, w: i32, h: i32) {
     let (dw, dh) = (f64::from(2 * w), f64::from(2 * h));
     let inside =
         |(x, y): (f64, f64)| (-0.5..dw - 0.5).contains(&x) && (-0.5..dh - 0.5).contains(&y);
-    let (cx, cy) = px_dot(tr.x0, tr.y0);
-    if tr.age < BURST {
-        let u = tr.age / BURST;
-        let r = BURST_R + BURST_GROW * u;
-        let ring = ink::ramp(if tr.alpha { RAMPS[1] } else { RAMPS[2] }, 1.0 - 0.3 * u);
-        for k in 0..12 {
-            let a = TAU * f64::from(k) / 12.0;
-            let p = (cx + r * a.cos_det(), cy + r * a.sin_det());
-            if inside(p) {
-                dots.plot(p.0, p.1, ring);
-            }
-        }
-    }
     let ink = tr.ink();
     let mut prev: Option<(f64, f64)> = None;
     tr.walk(|x, y| {
@@ -492,16 +474,6 @@ fn draw_track(dots: &mut Dots, tr: &Track, w: i32, h: i32) {
         }
         if let Some(q) = prev {
             dots.line(q.0, q.1, p.0, p.1, ink);
-            if tr.alpha {
-                // The second dot row, one dot across the heading.
-                let (nx, ny) = (q.1 - p.1, p.0 - q.0);
-                let n = nx.hypot(ny).max(1e-9);
-                let (ox, oy) = (nx / n, ny / n);
-                let (a, b) = ((q.0 + ox, q.1 + oy), (p.0 + ox, p.1 + oy));
-                if inside(a) && inside(b) {
-                    dots.line(a.0, a.1, b.0, b.1, ink);
-                }
-            }
         }
         prev = Some(p);
     });
@@ -817,8 +789,8 @@ impl RadioactiveDecay {
         }
     }
 
-    /// Analytic Bateman curves as dim reference lines, then the measured counts as bright
-    /// curves two dots thick in their species' inks and strokes, on the current axis blend
+    /// Analytic Bateman curves as dim reference lines, then the measured counts as dim
+    /// 1-dot curves in their species' inks and strokes, on the current axis blend
     /// (RAD-A6, RAD-A7).
     fn plot_curves(&mut self, p: &Panel) {
         let m = log_blend(self.t);
@@ -837,9 +809,6 @@ impl RadioactiveDecay {
             }
             prev = Some(ys);
         }
-        // The second dot row goes toward the plot's inside, so it never leaves the panel.
-        let mid = p.dot_y(0.5);
-        let thick = |y: f64| if y > mid { y - 1.0 } else { y + 1.0 };
         for k in [2, 1, 0] {
             let ink = ink::ramp(RAMPS[k], MEASURED);
             let mut prev: Option<f64> = None;
@@ -851,12 +820,8 @@ impl RadioactiveDecay {
                     match prev {
                         Some(py) if j > 0 && stroke_on(k, j - 1) => {
                             self.dots.line(x - 1.0, py, x, y, ink);
-                            self.dots.line(x - 1.0, thick(py), x, thick(y), ink);
                         }
-                        _ => {
-                            self.dots.plot(x, y, ink);
-                            self.dots.plot(x, thick(y), ink);
-                        }
+                        _ => self.dots.plot(x, y, ink),
                     }
                 }
                 prev = y;
@@ -1464,14 +1429,13 @@ mod tests {
             g.prepare();
         }
         g.rasterise();
-        // Every nucleus fills its 2×2 pixels with its ink; every gap pixel is empty.
+        // Every nucleus is one pixel in its ink (ADR-0017); every gap pixel is empty.
+        const { assert!(NUC == 1) };
         let mut seen = [0; 3];
         for (i, n) in g.lattice.as_slice().iter().enumerate() {
             let (x, y) = g.pixel_of(i);
             seen[n.kind as usize] += 1;
-            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-                assert_eq!(g.pixels.get(x + dx, y + dy), Some(nucleus_ink(n)));
-            }
+            assert_eq!(g.pixels.get(x, y), Some(nucleus_ink(n)));
             if n.since >= FLASH {
                 assert_eq!(nucleus_ink(n), settled_ink(n.kind));
             }
@@ -1484,14 +1448,15 @@ mod tests {
                 }
             }
         }
-        // A flash starts at the top of the daughter's ramp; fresh A (a restart) never flashes.
+        // A flash starts at the top of its decay's ramp (α Aurora, β Ember); fresh A (a
+        // restart) never flashes.
         let at = |kind, since| Nucleus { kind, since };
         assert_eq!(nucleus_ink(&Nucleus::FRESH), settled_ink(Kind::A));
         for kind in [Kind::B, Kind::C] {
             let flash = nucleus_ink(&at(kind, 0.0));
             assert_eq!(
                 (flash.role, flash.level),
-                (Role::Ramp(RAMPS[kind as usize]), 255)
+                (Role::Ramp(FLASH_RAMPS[kind as usize]), 255)
             );
         }
         // Unicode draws half blocks and braille; ASCII mode is pure ASCII (GEN-R10), a
@@ -1529,28 +1494,24 @@ mod tests {
 
     #[test]
     fn rad_a10_species_read_apart_and_the_lattice_fades_as_it_decays() {
-        // A and B are the lattice's two lit species, at 0.6–0.7 and a step apart so mono
-        // parts them; stable C sinks to the ground (≤ 0.08), so a decayed lattice is dark
-        // and only flashes and tracks carry brightness.
-        let lv = [Kind::A, Kind::B, Kind::C].map(|k| f64::from(settled_ink(k).level) / 255.0);
+        // ADR-0017: the lattice is muted dots on black in the species' curve hues, parent
+        // A a dusty `HAlpha` rose and daughter B a dim `Ice`, both at 60–90 and never
+        // brighter than A; stable C is not drawn, so a decayed lattice is dark and only
+        // flashes and tracks are bright.
+        let [a, b, c] = [Kind::A, Kind::B, Kind::C].map(settled_ink);
+        assert_eq!(a, Ink::new(Role::Ramp(Ramp::HAlpha), 70));
+        assert_eq!(b.role, Role::Ramp(Ramp::Ice));
         assert!(
-            (0.45..=0.55).contains(&lv[0]) && (0.75..=0.82).contains(&lv[1]),
-            "{lv:?}"
+            (60..=90).contains(&b.level) && b.level <= a.level,
+            "{a:?} {b:?}"
         );
-        assert!(lv[0] + 0.25 <= lv[1], "mono parts A and B: {lv:?}");
-        assert!(lv[2] <= 0.08, "C is near ground: {lv:?}");
-        // A warm, B teal, C a faint violet whose curve is lavender: no amber ramps and no
-        // grey measured curve anywhere in the scene.
+        assert_eq!(c, Ink::BLANK);
+        // Flashes and tracks: α green, β ember; the plot's species curves keep their own
+        // hues, 1 dot and dim (≤ 0.7 of their ramps).
+        assert_eq!((ALPHA_RAMP, BETA_RAMP), (Ramp::Aurora, Ramp::Ember));
+        assert_eq!(FLASH_RAMPS[1..], [ALPHA_RAMP, BETA_RAMP]);
         assert_eq!(RAMPS, [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma]);
-        assert!(
-            !RAMPS.contains(&Ramp::Starlight),
-            "only the theory curves are grey"
-        );
-        for r in RAMPS.iter().chain(&[ALPHA_RAMP, BETA_RAMP]) {
-            assert!(!matches!(r, Ramp::Ember | Ramp::Sulfur), "{r:?}");
-        }
-        // The plot's curves are bright: ≥ 0.8 of their species' ramps.
-        const { assert!(MEASURED >= 0.8) };
+        const { assert!(MEASURED >= 0.5 && MEASURED <= 0.7) };
     }
 
     /// A lattice cell at or above this level reads as an event, not as ground (RAD-A8).
@@ -1671,8 +1632,8 @@ mod tests {
             "mean {mean:.3}, worst {worst:.3}"
         );
         // Settled nuclei are never bright: only events are.
-        assert!(SETTLED.iter().all(|&v| ink::level(v) < BRIGHT_LEVEL));
-        // Tracks are in hues no species uses.
+        assert!(LATTICE.iter().all(|&v| v < BRIGHT_LEVEL));
+        // Tracks are in hues no species curve uses.
         for ramp in [ALPHA_RAMP, BETA_RAMP] {
             assert!(!RAMPS.contains(&ramp));
         }
@@ -1759,8 +1720,8 @@ mod tests {
 
     #[test]
     fn rad_a5_nuclei_are_separate_dots_on_a_quiet_ground() {
-        // At t = 0 every nucleus is an A square; neighbouring squares are one blank pixel
-        // apart in both directions and the block is centred in the lattice.
+        // At t = 0 every nucleus is an A dot; neighbouring dots are blank pixels apart in
+        // both directions and the block is centred in the lattice.
         let size = Size::new(120, 40);
         let mut ctx = seeded(4);
         let mut g = RadioactiveDecay::default();
@@ -1780,13 +1741,13 @@ mod tests {
                 assert_eq!(g.pixels.get(x, y + NUC), Some(Ink::BLANK));
             }
         }
-        // Nuclei cover about 4/9 of the lattice's pixels: most of the ground stays black.
+        // Nuclei cover about 1/9 of the lattice's pixels: the ground stays black.
         let lit = (0..g.lat_h)
             .flat_map(|y| (0..g.lat_w).map(move |x| (x, y)))
             .filter(|&(x, y)| g.pixels.get(x, y) != Some(Ink::BLANK))
             .count() as f64;
         let share = lit / f64::from(g.lat_w * g.lat_h);
-        assert!((0.35..0.5).contains(&share), "{share}");
+        assert!((0.08..0.15).contains(&share), "{share}");
     }
 
     #[test]
