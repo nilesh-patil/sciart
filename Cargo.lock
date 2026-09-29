@@ -1899,6 +1899,7 @@ dependencies = [
  "sciart-generators",
  "sciart-keepawake",
  "sciart-render",
+ "sciart-testalloc",
  "serde",
  "tempfile",
  "toml",

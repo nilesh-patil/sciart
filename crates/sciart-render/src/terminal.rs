@@ -1,39 +1,57 @@
-use std::io::stdout;
+use std::io::{self, Stdout, Write, stdout};
 
 use crossterm::event::{DisableFocusChange, EnableFocusChange};
 use crossterm::execute;
-use ratatui::DefaultTerminal;
+use crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+use ratatui::Terminal;
+
+use crate::FrameBackend;
+
+/// The app's terminal: frames go out as one write each (RT-R15).
+pub type AppTerminal = Terminal<FrameBackend<Stdout>>;
 
 /// Raw mode + alternate screen + focus reporting for the lifetime of the guard (RND-R5).
 ///
-/// `ratatui::init` installs a panic hook that restores the terminal before the default
-/// hook prints; `enter` wraps it so focus reporting is switched off too. The binary
-/// wraps the result again so *caught* generator panics (ADR-0006) don't tear anything down.
+/// Set up like `ratatui::init` (whose `restore` it uses), but with a [`FrameBackend`]:
+/// the panic hook restores the terminal before the default hook prints, and also resets
+/// the colours and shows the cursor, which the frame backend keeps across frames. The
+/// binary wraps the hook again so *caught* generator panics (ADR-0006) don't tear anything
+/// down.
 #[derive(Debug)]
 pub struct TerminalGuard {
-    terminal: DefaultTerminal,
+    terminal: AppTerminal,
 }
 
+/// SGR reset + show cursor: what the shell expects after the alternate screen.
+const RESTORE: &[u8] = b"\x1b[0m\x1b[?25h";
+
 impl TerminalGuard {
-    pub fn enter() -> Self {
-        let terminal = ratatui::init();
-        // Best effort: terminals without focus reporting simply never send the events.
-        let _ = execute!(stdout(), EnableFocusChange);
+    pub fn enter() -> io::Result<Self> {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let _ = execute!(stdout(), DisableFocusChange);
+            let mut out = stdout();
+            let _ = out.write_all(RESTORE);
+            let _ = execute!(out, DisableFocusChange);
+            ratatui::restore();
             prev(info);
         }));
-        Self { terminal }
+        enable_raw_mode()?;
+        execute!(stdout(), EnterAlternateScreen)?;
+        // Best effort: terminals without focus reporting simply never send the events.
+        let _ = execute!(stdout(), EnableFocusChange);
+        let terminal = Terminal::new(FrameBackend::new(stdout()))?;
+        Ok(Self { terminal })
     }
 
-    pub fn terminal(&mut self) -> &mut DefaultTerminal {
+    pub fn terminal(&mut self) -> &mut AppTerminal {
         &mut self.terminal
     }
 }
 
 impl Drop for TerminalGuard {
     fn drop(&mut self) {
+        let _ = self.terminal.backend_mut().finish();
+        let _ = self.terminal.show_cursor();
         let _ = execute!(stdout(), DisableFocusChange);
         ratatui::restore();
     }
