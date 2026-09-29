@@ -62,7 +62,7 @@ const MAX_STARS: usize = 2500;
 const MAG_LIMIT: f64 = 6.0;
 const THICK: f64 = 1.5;
 /// Stars fainter than this draw no braille line: their light goes into a soft exposure
-/// (`Glow`) toned onto the sky in `Ramp(Starlight)`, so the many faint trails are a dim
+/// (`Glow`) toned onto the sky in its ramp, so the many faint trails are a dim
 /// haze of rings under the few bright coloured ones (a brightness hierarchy by level).
 const FAINT: f64 = 4.4;
 /// Faint exposure: light per second for a magnitude-`MAG_LIMIT` star, its tone (knee,
@@ -87,13 +87,16 @@ const CLASSES: [(f64, f64, f64); 5] = [
 /// the 6500 K white point by this power, and clamped onto the drawable range.
 const SATURATE: f64 = 1.7;
 const KELVIN_RANGE: (f64, f64) = (2700.0, 30_000.0);
-/// Sky `Ramp(Starlight)` levels: the night sky's floor (the ramp's darkest drawable
+/// Sky levels: the night sky's floor (the ramp's darkest drawable
 /// level, a hair above black) and the extra skyglow at the horizon with its e-folding
 /// height (deg): enough light for the treeline to stand out as a silhouette. Every sky
 /// pixel is drawn, so the glow ramps smoothly down to the floor with no dithered edge.
-const SKY_FLOOR: f64 = 12.0;
-const GLOW_LEVEL: f64 = 46.0;
-const GLOW_DEG: f64 = 12.0;
+const SKY_FLOOR: f64 = 9.0;
+const GLOW_LEVEL: f64 = 44.0;
+const GLOW_DEG: f64 = 10.0;
+/// The night sky's ramp: blue-black overhead, a deep blue skyglow toward the horizon (and
+/// the faint trails' haze added in the same ramp, so it lightens without a hue edge).
+const SKY_RAMP: Ramp = Ramp::Cobalt;
 
 /// The Earth's rotation angle after `t` seconds of the time-lapse.
 pub(crate) fn rotation(t: f64) -> f64 {
@@ -155,7 +158,7 @@ pub struct StarTrails {
     /// level are gone), and the fade level now (0 while exposing).
     rank: Vec<u8>,
     fade: u16,
-    /// The sky's fixed `Ramp(Starlight)` level per pixel (0 = land).
+    /// The sky's fixed level per pixel (0 = land).
     base: Vec<u8>,
     /// The faint trails' soft exposure, and the picture toned from it over the base.
     haze: Glow,
@@ -261,7 +264,7 @@ impl StarTrails {
                 b => {
                     let t = f64::from(tone.level(haze.get(i).copied().unwrap_or(0.0)));
                     let l = f64::from(b) + FAINT_SHARE * t * keep;
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(l))
+                    Ink::new(Role::Ramp(SKY_RAMP), ink::level(l))
                 }
             }
         });
@@ -459,7 +462,12 @@ impl Generator for StarTrails {
                     let row = (4 * cy + dy) * dw + 2 * cx;
                     for dx in 0..2 {
                         let v = self.exposure.get(row + dx).copied().unwrap_or(0);
+                        // The trees hide the trails: no dot over a land pixel (the
+                        // silhouette test when painting sees one height per dot column,
+                        // which can slip between two spires).
+                        let px = (2 * cy + dy / 2) * (dw / 2) + cx;
                         if v == 0
+                            || self.base.get(px).is_none_or(|&b| b == 0)
                             || u16::from(self.rank.get(row + dx).copied().unwrap_or(0)) < self.fade
                         {
                             continue;
@@ -600,6 +608,41 @@ mod tests {
             }
         }
         assert!(n > 50, "{n}");
+    }
+
+    #[test]
+    fn trl_a6_blue_black_sky_brightening_to_the_horizon_and_no_trail_over_trees() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = built(size);
+        for _ in 0..1800 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        // The sky: one blue ramp, darkest at the top, brightest just above the land.
+        let w = usize::from(g.sky.pixel_size().width());
+        let col = w / 2;
+        let levels: Vec<u8> = g.base.iter().skip(col).step_by(w).copied().collect();
+        let top = levels[0];
+        let low = levels
+            .iter()
+            .copied()
+            .take_while(|&b| b > 0)
+            .last()
+            .unwrap_or(0);
+        assert!(top <= 16 && low >= top + 20, "{top} → {low}");
+        let top_ink = g.sky.get(col as i32, 0).unwrap_or(Ink::BLANK);
+        assert_eq!(top_ink.role, Role::Ramp(SKY_RAMP));
+        // No braille trail cell where both of its pixels are land.
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        for y in 0..40 {
+            for x in 0..120 {
+                let land = |py: usize| g.base.get(py * w + x).is_none_or(|&b| b == 0);
+                if land(2 * y) && land(2 * y + 1) {
+                    let c = canvas.get(x as i32, y as i32).map_or(' ', |c| c.ch);
+                    assert!(!('\u{2801}'..='\u{28ff}').contains(&c), "({x},{y})");
+                }
+            }
+        }
     }
 
     #[test]
