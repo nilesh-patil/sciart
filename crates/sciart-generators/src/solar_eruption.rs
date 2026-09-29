@@ -84,6 +84,30 @@ const Y_MAX: f64 = 3.5;
 const BLOBS: usize = 200;
 /// Post-flare loops cool over this many seconds.
 const COOL: f64 = 9.0;
+/// ADR-0017 (M14; AIA's green was false colour): the hot loops glow in EUV, which has no
+/// visible colour, so they are a neutral `Ramp(Starlight)` up to `LOOP_TOP`; the cool
+/// plasma that shines in H-alpha (the prominence rope and its core, coronal rain, the flare
+/// ribbons) is `Ramp(HAlpha)` up to `HA_TOP`, the scene's one accent. A toned glow `g` is
+/// drawn at `top·smoothstep(g/EDGE)·(BODY + (1 − BODY)·g)`: a thin stroke's rim fades in
+/// from black within a pixel and its core stays legible (GEN-R21).
+/// The CME front is white light (Thomson-scattered), a dim `Ramp(Starlight)` shell up to
+/// `FRONT_TOP`. The disc is black with a thin `HAlpha` chromosphere at the limb.
+const LOOP_TOP: f64 = 235.0;
+/// Exposure of the loop glow: the thin (3 × 3) strokes gather less light per pixel than
+/// the old wide ones.
+const LOOP_GAIN: f64 = 1.5;
+const HA_TOP: f64 = 230.0;
+const EDGE: f64 = 0.25;
+const BODY: f64 = 0.5;
+
+/// The level of toned glow `g` (0–1) in a ramp whose top is `top`.
+fn stroke_level(g: f64, top: f64) -> f64 {
+    top * ease::smoothstep(g / EDGE) * (BODY + (1.0 - BODY) * g)
+}
+const FRONT_TOP: f64 = 120.0;
+const RIM_LEVEL: f64 = 70.0;
+/// Rim width (pixels) of the limb's chromosphere line.
+const RIM_PX: f64 = 1.2;
 
 /// Point in the corona: `x` along the limb, `y` height, in `L`.
 type P = [f64; 2];
@@ -664,16 +688,9 @@ impl SolarEruption {
         t: f64,
         w: f64,
     ) {
-        const WIDE: [(i32, i32, f32); 25] = halo_kernel::<25>(2);
+        // 1–2 px strokes (ADR-0017): a 3 × 3 kernel at every size.
         const THIN: [(i32, i32, f32); 9] = halo_kernel::<9>(1);
-        // Large views draw with a 3 × 3 kernel (lines are several pixels apart there
-        // anyway), rescaled to the same exposure: a third of the splat cost.
-        let (kernel, gain): (&[(i32, i32, f32)], f64) = if v.scale > 60.0 {
-            let sum = |k: &[(i32, i32, f32)]| k.iter().map(|e| f64::from(e.2)).sum::<f64>();
-            (&THIN, sum(&WIDE) / sum(&THIN))
-        } else {
-            (&WIDE, 1.0)
-        };
+        let (kernel, gain): (&[(i32, i32, f32)], f64) = (&THIN, 1.0);
         let at = |p: &[f32; 2]| pose.apply(m, [flip * f64::from(p[0]), f64::from(p[1])]);
         let mut prev = at(&pts[0]);
         let mut a = v.px(prev[0], prev[1]);
@@ -779,7 +796,8 @@ impl SolarEruption {
             let q = loop_pose(b.line).apply(1.0 - 0.55 * hot, p);
             if q[1] >= 0.0 {
                 let (px, py) = v.px(q[0], q[1]);
-                self.glow.splat(2.0 * px, 2.0 * py, &RAIN_KERNEL, 0.9);
+                // Cool, dense: H-alpha, with the rope (the `cme` buffer).
+                self.cme.splat(2.0 * px, 2.0 * py, &RAIN_KERNEL, 0.9);
             }
         }
         // The flux rope: twisted strands round a sheared arch, rising and brightening; in
@@ -923,26 +941,29 @@ impl SolarEruption {
                         lit = amp * front(d) * flank * (0.25 + 1.8 * fil);
                     }
                 }
-                let top = if g > 0.0 || c > 0.0 || lit > 0.0 {
-                    let lv = tone.level((f64::from(g) * dim) as f32);
-                    let lc = cme_tone.level((f64::from(c) + 4.0 * lit) as f32);
-                    lv.max(lc)
+                // Loops (EUV, neutral), the H-alpha material and the front (white light):
+                // the brightest owns the pixel.
+                let (loops, cool, white) = if g > 0.0 || c > 0.0 || lit > 0.0 {
+                    (
+                        tone.level((LOOP_GAIN * f64::from(g) * dim) as f32),
+                        cme_tone.level(c),
+                        cme_tone.level((4.0 * lit) as f32),
+                    )
                 } else {
-                    0
+                    (0, 0, 0)
                 };
-                let ink = if top > 16 {
-                    ink::ramp(Ramp::Aurora, f64::from(top) / 255.0)
-                } else if base < 0.0 {
-                    // The disc in 131 Å: dark, mottled with faint moss.
-                    ink::ramp(Ramp::Aurora, -base)
+                let ha = stroke_level(f64::from(cool) / 255.0, HA_TOP);
+                let euv = stroke_level(f64::from(loops) / 255.0, LOOP_TOP);
+                let front = FRONT_TOP * f64::from(white) / 255.0;
+                let ink = if cool >= loops && cool >= white && ha >= ink::MIN_VISIBLE_LEVEL {
+                    Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(ha))
+                } else if loops >= white && euv >= ink::MIN_VISIBLE_LEVEL {
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(euv))
+                } else if front >= ink::MIN_VISIBLE_LEVEL {
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(front))
                 } else {
-                    // The diffuse corona, fading with height (and emptied in the cavity).
-                    let c = base * dim;
-                    if c * 255.0 >= ink::MIN_VISIBLE_LEVEL {
-                        ink::ramp(Ramp::Aurora, c)
-                    } else {
-                        Ink::BLANK
-                    }
+                    // The black disc with its chromosphere rim; the corona is not drawn.
+                    sky_ink[i]
                 };
                 self.pixels.set(x, y, ink);
             }
@@ -980,18 +1001,15 @@ impl Generator for SolarEruption {
             for x in 0..pw {
                 let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
                 let above = (fx - v.cx).hypot(fy - v.cy) - limb_r;
-                let val = if above < 0.0 {
-                    let m = value_noise(0xD15C, fx * 0.18, fy * 0.36, 1.0);
-                    let limb = (1.0 + above / (0.08 * limb_r)).clamp(0.0, 1.0);
-                    -(0.07 + 0.08 * m + 0.12 * limb)
-                } else {
-                    0.2 * (-above / (0.35 * v.scale)).exp()
-                };
+                // `sky` keeps its sign convention (< 0 on the disc) for the cavity test.
+                let val = if above < 0.0 { -1.0 } else { 0.0 };
                 self.sky.push(val as f32);
-                self.sky_ink.push(if val < 0.0 {
-                    ink::ramp(Ramp::Aurora, -val)
-                } else if val * 255.0 >= ink::MIN_VISIBLE_LEVEL {
-                    ink::ramp(Ramp::Aurora, val)
+                // The chromosphere: a line about a pixel wide just inside the limb, fading
+                // smoothly on both sides.
+                let rim = (1.0 - (above + 0.5 * RIM_PX).abs() / RIM_PX).max(0.0);
+                let level = RIM_LEVEL * rim * rim * (3.0 - 2.0 * rim);
+                self.sky_ink.push(if level >= ink::MIN_VISIBLE_LEVEL {
+                    Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(level))
                 } else {
                     Ink::BLANK
                 });
@@ -1248,7 +1266,8 @@ mod tests {
         // Off the top of the frame by the act's end (the frame spans ≤ 2.2 L of height).
         assert!(last_top > 4.0, "{last_top}");
         assert!(bubble(RAIN, 0.5).is_none() && bubble(RISE, 0.5).is_none());
-        // One teal → white palette: no other hue draws the CME, its front or the ribbons.
+        // M14 palette: neutral loops and white-light front (`Starlight`), H-alpha for the
+        // cool material and the chromosphere; nothing else, and nothing past its cap.
         let mut g = SolarEruption::new();
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(5, size);
@@ -1261,14 +1280,60 @@ mod tests {
         }
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
+        let mut pink = 0;
         for c in canvas.cells() {
             for ink in [c.ink, c.bg] {
-                assert!(
-                    matches!(ink.role, Role::Background | Role::Ramp(Ramp::Aurora)),
-                    "{ink:?}"
-                );
+                match ink.role {
+                    Role::Background => {}
+                    Role::Ramp(Ramp::Starlight) => {
+                        assert!(f64::from(ink.level) <= LOOP_TOP + 1.0, "{ink:?}");
+                    }
+                    Role::Ramp(Ramp::HAlpha) => {
+                        assert!(f64::from(ink.level) <= HA_TOP + 1.0, "{ink:?}");
+                        pink += 1;
+                    }
+                    _ => panic!("{ink:?}"),
+                }
             }
         }
+        assert!(pink > 0, "the rope's core shows in H-alpha");
+    }
+
+    #[test]
+    fn erup_a10_the_disc_is_black_under_a_thin_chromosphere() {
+        // ADR-0017: no chromosphere fill. Every pixel more than 2 px inside the limb is
+        // blank at every act; the rim just inside it is `HAlpha`, at most `RIM_LEVEL`.
+        let size = Size::new(120, 40);
+        let mut g = SolarEruption::new();
+        let mut ctx = Ctx::new(5, size);
+        g.resize(size, &mut ctx);
+        g.prepare();
+        let v = g.view;
+        let limb = LIMB_R * v.scale;
+        let px = g.pixels.pixel_size();
+        let total: f64 = ACTS.iter().map(|a| a.1).sum();
+        let mut rim = 0;
+        for k in 0..10 {
+            let until = total * f64::from(k) / 10.0;
+            while g.t < until {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            for y in 0..i32::from(px.height()) {
+                for x in 0..i32::from(px.width()) {
+                    let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
+                    let above = (fx - v.cx).hypot(fy - v.cy) - limb;
+                    let ink = g.pixels.get(x, y).unwrap();
+                    if above < -2.0 {
+                        assert_eq!(ink, Ink::BLANK, "t {:.1} ({x}, {y})", g.t);
+                    } else if above < 0.0 && ink.role == Role::Ramp(Ramp::HAlpha) {
+                        rim += usize::from(k == 0);
+                        assert!(f64::from(ink.level) <= HA_TOP + 1.0);
+                    }
+                }
+            }
+        }
+        assert!(rim > 20, "{rim} rim pixels");
     }
 
     #[test]

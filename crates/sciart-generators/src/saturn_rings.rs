@@ -100,7 +100,7 @@ const GLOBE_EDGE: f64 = 0.4;
 /// tan: Sienna's lower part is rust), and ring brightness `v` at `RING_TOP·v` of
 /// `Starlight` (at most 170, so the B ring's clumps keep the frame legible, GEN-R21); the
 /// Cassini division stays black.
-const GLOBE_TOP: f64 = 185.0 / 255.0;
+const GLOBE_TOP: f64 = 212.0 / 255.0;
 const RING_TOP: f64 = 170.0 / 255.0;
 /// The globe brightness drawn at `GLOBE_LEVEL.1`: the lit zones' (the brightest reach ~0.9).
 const GLOBE_BRIGHT: f64 = 0.9;
