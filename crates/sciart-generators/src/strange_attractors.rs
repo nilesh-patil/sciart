@@ -931,7 +931,13 @@ fn thread_ink(palette: Ramp, d: f32, ln_top: f64) -> Ink {
         Ramp::HAlpha | Ramp::Plasma | Ramp::Ferroin | Ramp::Cobalt | Ramp::Eosin => {
             PALETTE_FLOOR_DEEP
         }
-        Ramp::Ember | Ramp::Ice | Ramp::Aurora | Ramp::Starlight | Ramp::Sulfur => PALETTE_FLOOR,
+        Ramp::Ember
+        | Ramp::Ice
+        | Ramp::Aurora
+        | Ramp::Starlight
+        | Ramp::Sulfur
+        | Ramp::Sienna
+        | Ramp::Infrared => PALETTE_FLOOR,
     };
     ink::ramp(
         palette,

@@ -805,9 +805,49 @@ mod tests {
     }
 
     #[test]
+    fn rnd_r12_sienna_is_a_muted_earth_tone() {
+        // Jupiter's belts are rust and tan, not fire: at every mid level Sienna is warm (red
+        // over green over blue) but well below Ember's saturation.
+        let c = |r: Ramp, l: u8| Theme::Astro.color(Ink::new(Role::Ramp(r), l), 0, 0);
+        let sat = |Rgb(r, g, b): Rgb| {
+            let (mx, mn) = (r.max(g).max(b), r.min(g).min(b));
+            f64::from(mx - mn) / f64::from(mx.max(1))
+        };
+        for level in [96u8, 128, 170, 210] {
+            let s = c(Ramp::Sienna, level);
+            let Rgb(r, g, b) = s;
+            assert!(r > g && g > b, "sienna {level}: {r} {g} {b}");
+            let (ss, se) = (sat(s), sat(c(Ramp::Ember, level)));
+            assert!(
+                ss + 0.2 <= se,
+                "sienna {level}: sat {ss:.2} vs ember {se:.2}"
+            );
+        }
+    }
+
+    #[test]
+    fn rnd_r12_infrared_is_an_enhancement_curve() {
+        // Grey while warm (levels ≤ 76 within 3 of grey), then cyan-teal, green, yellow,
+        // orange: the hue falls as the cloud top gets colder.
+        let c = |l: u8| Theme::Astro.color(Ink::new(Role::Ramp(Ramp::Infrared), l), 0, 0);
+        for level in 0..=76u8 {
+            let Rgb(r, g, b) = c(level);
+            assert!(r.max(g).max(b) - r.min(g).min(b) <= 3, "level {level}");
+        }
+        let steps = [(112u8, 150.0, 185.0), (140, 80.0, 130.0), (200, 10.0, 40.0)];
+        for (level, lo, hi) in steps {
+            let h = hue(c(level));
+            assert!((lo..=hi).contains(&h), "level {level}: hue {h:.0}");
+        }
+    }
+
+    #[test]
     fn rnd_r12_ramps_end_on_distinct_hues() {
+        // Sienna is an earth tone in Ember's and Starlight's warm family, told apart by
+        // chroma instead (rnd_r12_sienna_is_a_muted_earth_tone).
         let tops: Vec<(Ramp, f64)> = Ramp::ALL
             .iter()
+            .filter(|&&r| r != Ramp::Sienna)
             .map(|&r| {
                 (
                     r,
