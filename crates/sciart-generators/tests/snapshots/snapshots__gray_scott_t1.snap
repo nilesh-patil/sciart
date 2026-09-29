@@ -15,7 +15,7 @@ expression: frame
               :               #+++#                      :##++#:                
              ##+++                                       :##+##:   ###:         
             :++++#                                                :###:         
-             #++++                                    :#+:         :+:          
+             ##+++                                    :##:         :+:          
                                                       :#++#        :            
                                                        +###      :###:          
                                                                  :@@@:          
@@ -24,5 +24,5 @@ expression: frame
   :#+:++:                                                                       
    #+++#                                                                        
                                             ::                                  
-                                         :#+++#:                                
- Spots and worms - spots divide          :#++++           Pearson F=.037 k=.065
+                                         :#++##:                                
+ Spots and worms - spots divide          :#++++                   F=.037 k=.065
