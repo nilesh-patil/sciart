@@ -1676,7 +1676,7 @@ Design: [`docs/design/M13-scenes.md`](../design/M13-scenes.md) (picks, palettes,
 - **Resize**: lattice regridded (ADR-0012); vortex in storm radii.
 - **Inks**: visible: clouds `Ramp(Starlight)`, the open ocean dark (blank, as the sea is from orbit), thin cloud over it `Ramp(Cobalt)` ≤ 60; IR act (25 s visible, 12 s infrared, 1.5 s dithered dissolve): cloud-top temperature `Role::Div` from 0 (warm, dark) to +1 (coldest tops, yellow), clear sea blank. ASCII by level.
 - **Title**: `Hurricane · Coriolis spirals`; captions `visible`, `infrared`.
-- **Stylisation**: kinematic vortex, not a moist-convection model; time-lapse; seen from above (the scene's subject is Earth's atmosphere, so it is Earth & Sky by the ADR-0013 reading in `docs/design/M13-scenes.md`).
+- **Stylisation**: kinematic vortex, not a moist-convection model; time-lapse; seen from above (Earth's weather seen from above is Earth & Sky: ADR-0013 addendum, M13).
 - **Acceptance**: `HUR-A1` the tangential wind profile peaks at the radius of maximum wind and turns counter-clockwise; `HUR-A2` a tracer released at 0.8 R spirals inward (radius decreasing, angle increasing CCW); `HUR-A3` the eye (r < 0.1 R) holds < 10 % of the eyewall's cloud; `HUR-A4` in the IR act inks are `Div` only; `HUR-A5` the lattice stays within its cap at 500×150.
 
 ### total_solar_eclipse  (Earth & Sky, M13)
