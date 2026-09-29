@@ -18,13 +18,15 @@
 //! - `B/frame`, `p95`: bytes written per frame, mean and 95th percentile;
 //! - `cells`: changed cells per frame; `wr`: `write` calls (syscalls) per frame;
 //! - `blk@5`, `blk@20`, `blk2@20` (2×2 squares, not ratcheted), `dark@5`, `dark@20`,
-//!   `luma@20`, `col@5`, `col@20` (colourfulness), `con@5`, `con@20` (RMS contrast): the
+//!   `luma@20`, `cov@5`, `cov@20` (lit coverage), `cmass@5`, `cmass@20` (chroma mass),
+//!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; cap 0.20): the
 //!   GEN-R17/R18/R21 art metrics of the exact `astro` frame at t = 5 s and 20 s
 //!   (`sciart_render::metrics`), when `--secs` reaches them.
 //!
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
-//! descending), `dark` (dark@20, ascending), `col` (col@20, ascending) or `name` (default:
-//! registry order). `--crossterm` uses ratatui's `CrosstermBackend` and `--exact` turns
+//! descending), `dark` (dark@20, ascending), `cov`, `cmass`, `edge`, `neon` (at 20 s,
+//! descending) or `name` (default: registry order).
+//! `--crossterm` uses ratatui's `CrosstermBackend` and `--exact` turns
 //! the RND-R14 colour hysteresis off, for before/after comparisons. `--emit-limits`
 //! prints ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs` instead.
 //! `--replays N` runs each scene N times and keeps every frame's fastest time (use 3 or
@@ -42,11 +44,11 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use sciart_core::prelude::*;
 use sciart_generators::Entry;
-use sciart_render::metrics::{ArtMetrics, art_metrics};
+use sciart_render::metrics::{ArtMetrics, Clean, art_metrics};
 use sciart_render::{FrameBackend, Painter, Theme, paint};
 
 const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] \
-                     [--sort bytes|cpu|blk|dark|col|name] [--replays N] [--crossterm] [--exact] [--emit-limits]";
+                     [--sort bytes|cpu|blk|dark|cov|cmass|edge|neon|name] [--replays N] [--crossterm] [--exact] [--emit-limits]";
 /// The app's default 30 FPS over the fixed 60 Hz update (ADR-0003).
 const STEPS_PER_FRAME: u64 = 2;
 /// Art metrics are sampled at these simulated times (GEN-R17, GEN-R18, GEN-R21).
@@ -113,7 +115,11 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
             }
             "--sort" => {
                 let v = value()?;
-                if !["bytes", "cpu", "blk", "dark", "col", "name"].contains(&v.as_str()) {
+                if ![
+                    "bytes", "cpu", "blk", "dark", "cov", "cmass", "edge", "neon", "name",
+                ]
+                .contains(&v.as_str())
+                {
                     return Err(format!("bad --sort {v}\n{USAGE}"));
                 }
                 args.sort = v;
@@ -281,13 +287,15 @@ fn run<B: Backend>(entry: &Entry, args: &Args, mut backend: B, sink: &Sink) -> R
 }
 
 /// Ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs`: the measured
-/// values with the table's slack (blockiness +0.02, darkness −0.02, colourfulness and
-/// contrast −5 %), alphabetical.
+/// values with the table's slack (blockiness +0.02, darkness −0.02, lit coverage +0.02,
+/// chroma mass +0.003, edge weight +10 % + 0.2), alphabetical.
 fn emit_limits(rows: &[Row]) {
-    let up = |v: f64| ((v + 0.02) * 1000.0 - 1e-9).ceil() / 1000.0;
+    let up_by = |v: f64, slack: f64, unit: f64| ((v + slack) / unit - 1e-9).ceil() * unit;
+    let up = |v: f64| up_by(v, 0.02, 1e-3);
     let dn = |v: f64| (((v - 0.02) * 1000.0 + 1e-9).floor() / 1000.0).max(0.0);
-    let cf = |v: f64| (v * 0.95 * 10.0).floor() / 10.0;
-    let kf = |v: f64| (v * 0.95 * 1000.0).floor() / 1000.0;
+    let cov = |v: f64| up_by(v, 0.02, 1e-3).min(1.0);
+    let mass = |v: f64| up_by(v, 0.003, 1e-4);
+    let edge = |v: f64| up_by(v * 1.1, 0.2, 0.1);
     let mut sorted: Vec<&Row> = rows.iter().collect();
     sorted.sort_by_key(|r| r.name);
     for r in sorted {
@@ -295,17 +303,20 @@ fn emit_limits(rows: &[Row]) {
             eprintln!("{}: --secs must reach {METRIC_TIMES:?}", r.name);
             continue;
         };
+        let (ca, cb) = (a.clean, b.clean);
         println!(
-            "    (\"{}\", [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.1}, {:.1}], [{:.3}, {:.3}]),",
+            "    (\"{}\", [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.3}, {:.3}], [{:.4}, {:.4}], [{:.1}, {:.1}]),",
             r.name,
             up(a.blockiness),
             up(b.blockiness),
             dn(a.darkness),
             dn(b.darkness),
-            cf(a.colourfulness),
-            cf(b.colourfulness),
-            kf(a.contrast),
-            kf(b.contrast)
+            cov(ca.coverage),
+            cov(cb.coverage),
+            mass(ca.chroma_mass),
+            mass(cb.chroma_mass),
+            edge(ca.edge_weight),
+            edge(cb.edge_weight),
         );
     }
 }
@@ -325,7 +336,7 @@ fn main() -> ExitCode {
     }
     let blk20 = |r: &Row| r.metrics[1].map_or(0.0, |m| m.blockiness);
     let dark20 = |r: &Row| r.metrics[1].map_or(1.0, |m| m.darkness);
-    let col20 = |r: &Row| r.metrics[1].map_or(0.0, |m| m.colourfulness);
+    let clean20 = |r: &Row, f: fn(Clean) -> f64| r.metrics[1].map_or(0.0, |m| f(m.clean));
     match args.sort.as_str() {
         "bytes" => rows.sort_by(|a, b| b.bytes_mean.total_cmp(&a.bytes_mean)),
         "cpu" => rows.sort_by(|a, b| {
@@ -334,7 +345,15 @@ fn main() -> ExitCode {
         }),
         "blk" => rows.sort_by(|a, b| blk20(b).total_cmp(&blk20(a))),
         "dark" => rows.sort_by(|a, b| dark20(a).total_cmp(&dark20(b))),
-        "col" => rows.sort_by(|a, b| col20(a).total_cmp(&col20(b))),
+        "cov" | "cmass" | "edge" | "neon" => {
+            let f: fn(Clean) -> f64 = match args.sort.as_str() {
+                "cov" => |c| c.coverage,
+                "cmass" => |c| c.chroma_mass,
+                "edge" => |c| c.edge_weight,
+                _ => |c| c.chroma_p90,
+            };
+            rows.sort_by(|a, b| clean20(b, f).total_cmp(&clean20(a, f)));
+        }
         _ => {}
     }
     println!(
@@ -350,7 +369,7 @@ fn main() -> ExitCode {
         if args.exact { "exact" } else { "hysteresis" },
     );
     println!(
-        "{:<28} {:>8} {:>7} {:>8} {:>8} {:>8} {:>6} {:>5} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>6} {:>6}",
+        "{:<28} {:>8} {:>7} {:>8} {:>8} {:>8} {:>6} {:>5} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>6}",
         "scene",
         "upd+rnd",
         "paint",
@@ -365,20 +384,21 @@ fn main() -> ExitCode {
         "dark@5",
         "dark@20",
         "luma@20",
-        "col@5",
-        "col@20",
-        "con@5",
-        "con@20"
+        "cov@5",
+        "cov@20",
+        "cmass@5",
+        "cmass@20",
+        "edge@5",
+        "edge@20",
+        "neon"
     );
-    let metric = |m: Option<ArtMetrics>, f: fn(ArtMetrics) -> f64| {
-        m.map_or_else(|| "-".to_owned(), |m| format!("{:.3}", f(m)))
+    let fmt = |m: Option<ArtMetrics>, digits: usize, f: fn(ArtMetrics) -> f64| {
+        m.map_or_else(|| "-".to_owned(), |m| format!("{:.*}", digits, f(m)))
     };
-    let metric1 = |m: Option<ArtMetrics>, f: fn(ArtMetrics) -> f64| {
-        m.map_or_else(|| "-".to_owned(), |m| format!("{:.1}", f(m)))
-    };
+    let metric = |m: Option<ArtMetrics>, f: fn(ArtMetrics) -> f64| fmt(m, 3, f);
     for r in &rows {
         println!(
-            "{:<28} {:>8.1} {:>7.1} {:>8.1} {:>8.0} {:>8} {:>6.0} {:>5.1} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>6} {:>6}",
+            "{:<28} {:>8.1} {:>7.1} {:>8.1} {:>8.0} {:>8} {:>6.0} {:>5.1} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>6} {:>6} {:>7} {:>7} {:>6} {:>6} {:>6}",
             r.name,
             r.update_us,
             r.paint_us,
@@ -393,10 +413,18 @@ fn main() -> ExitCode {
             metric(r.metrics[0], |m| m.darkness),
             metric(r.metrics[1], |m| m.darkness),
             metric(r.metrics[1], |m| m.mean_luma),
-            metric1(r.metrics[0], |m| m.colourfulness),
-            metric1(r.metrics[1], |m| m.colourfulness),
-            metric(r.metrics[0], |m| m.contrast),
-            metric(r.metrics[1], |m| m.contrast),
+            metric(r.metrics[0], |m| m.clean.coverage),
+            metric(r.metrics[1], |m| m.clean.coverage),
+            fmt(r.metrics[0], 4, |m| m.clean.chroma_mass),
+            fmt(r.metrics[1], 4, |m| m.clean.chroma_mass),
+            fmt(r.metrics[0], 1, |m| m.clean.edge_weight),
+            fmt(r.metrics[1], 1, |m| m.clean.edge_weight),
+            r.metrics
+                .iter()
+                .flatten()
+                .map(|m| m.clean.chroma_p90)
+                .reduce(f64::max)
+                .map_or_else(|| "-".to_owned(), |v| format!("{v:.3}")),
         );
     }
     let n = rows.len().max(1) as f64;
