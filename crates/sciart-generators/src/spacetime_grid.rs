@@ -104,20 +104,22 @@ const MAX_NY: usize = 48;
 /// adds `BURST_LIFT` per unit of `(f S Ω)²` normalised to the end of the inspiral, so
 /// the late chirp and the merger burst travel out as bands of light (SPT-A10). `CREST_FULL` is the crest height `crest · envn` that counts as full.
 /// Nearness only shades the level by up to `NEAR_SHADE`, and the foreground edge fades.
-const MESH_ROLE: Role = Role::Seq;
-const REST: f64 = 60.0;
-const WELL_GLOW: f64 = 45.0;
+/// M14 (ADR-0017): a neutral `Starlight` mesh at 75 resting, brightening only on the wave
+/// crests and the burst (not the inferno ramp).
+const MESH_ROLE: Role = Role::Ramp(Ramp::Starlight);
+const REST: f64 = 75.0;
+const WELL_GLOW: f64 = 30.0;
 const TROUGH_DIM: f64 = 0.3;
-const CREST_LIFT: f64 = 110.0;
+const CREST_LIFT: f64 = 130.0;
 const CREST_FULL: f64 = 0.5;
-const BURST_LIFT: f64 = 220.0;
+const BURST_LIFT: f64 = 170.0;
 const NEAR_SHADE: f64 = 0.3;
 const EDGE_FADE: f64 = 0.55;
 /// The mesh's brightest level, and its cap near a black hole: two-thirds of the rim's
 /// 255 within `NEAR_HOLE.0` moat radii, easing up to `MESH_MAX` by `NEAR_HOLE.1`, so the
 /// rims win in their funnels in every theme (SPT-A9).
 const MESH_MAX: f64 = 210.0;
-const NEAR_MAX: f64 = 170.0;
+const NEAR_MAX: f64 = 160.0;
 const NEAR_HOLE: (f64, f64) = (2.5, 3.5);
 
 /// The masses: horizon-like radius per cube root of mass (sheet units; at least
@@ -132,7 +134,8 @@ const TRAIL_N: usize = 16;
 /// Strain inset: seconds shown, its size in cells, and the smallest canvas that has one.
 const INSET_WINDOW: f64 = 4.0;
 const INSET_ROWS: u16 = 3;
-const INSET_MIN: (u16, u16) = (48, 16);
+/// M14 (ADR-0017): the inset is retired, so no canvas gets one.
+const INSET_MIN: (u16, u16) = (u16::MAX, u16::MAX);
 /// The strain trace's level runs from `TRACE_LEVELS.0` (quiet) to `.1` at the merger peak,
 /// so the chirp brightens as it grows.
 const TRACE_LEVELS: (f64, f64) = (110.0, 255.0);
@@ -151,12 +154,6 @@ const REMNANT_K: f64 = 30_000.0;
 const HALO_K: f64 = 0.35;
 const TRAIL_ROLE: Role = Role::Ramp(Ramp::Ice);
 const TRAIL_LEVELS: (f64, f64) = (40.0, 150.0);
-/// A black hole's disc (SPT-A12): the hot rim's and the halo's widths in pixels, and the
-/// core's fill, the darkest violet, so the hole reads as a solid dark disc against the
-/// sheet rather than an outline.
-const RIM_PX: f64 = 1.0;
-const HALO_PX: f64 = 1.0;
-const CORE_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 14);
 
 /// A circular binary, optionally on a quadrupole-driven inspiral (Peters 1964, Newtonian
 /// chirp): `a(τ) = a₀(1 − τ/τc)^¼`, hence by Kepler `Ω = Ω₀(1 − τ/τc)^-⅜` and
@@ -442,26 +439,14 @@ impl Body {
     }
 }
 
-/// A black hole as half-block pixels (SPT-A12): a filled dark core (`CORE_INK`) inside a
-/// one-pixel hot `rim`, ringed by a cooler `halo` pixel, all round at any size: the
-/// pixels whose centres lie within each radius of the body's centre (a pixel is 2 × 2
-/// dots, its centre at dot `2p + 0.5`).
-fn disc(px: &mut Pixels, b: &Body, rim: Ink, halo: Ink) {
-    let (cx, cy, r) = ((b.dx - 0.5) / 2.0, (b.dy - 0.5) / 2.0, (b.r / 2.0).max(1.5));
-    let reach = r + HALO_PX;
-    raster::disc_pixels((cx + 0.5, cy + 0.5), reach, |x, y, _| {
-        let d = (f64::from(x) - cx).hypot(f64::from(y) - cy);
-        let ink = if d < r - RIM_PX {
-            CORE_INK
-        } else if d < r {
-            rim
-        } else if d < reach {
-            halo
-        } else {
-            return;
-        };
-        px.set(x, y, ink);
-    });
+/// A black hole as a 2 × 2-pixel white-hot point (SPT-A12, M14: no dark disc or halo):
+/// the four pixels round its centre in the `rim` ink. `halo` is unused since M14.
+fn disc(px: &mut Pixels, b: &Body, rim: Ink, _halo: Ink) {
+    let (cx, cy) = ((b.dx - 0.5) / 2.0, (b.dy - 0.5) / 2.0);
+    let (x0, y0) = (cx.round() as i32 - 1, cy.round() as i32 - 1);
+    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+        px.set(x0 + dx, y0 + dy, rim);
+    }
 }
 
 /// The segment `a–b` with the parts inside the discs `holes` (`(x, y, radius)`, dots)
@@ -1268,66 +1253,15 @@ mod tests {
     }
 
     #[test]
-    fn spt_a6_the_inset_traces_the_strain_clear_of_the_title() {
-        for (w, h) in [(80, 24), (200, 50), (48, 16), (47, 40), (120, 15)] {
+    fn spt_a6_no_strain_inset() {
+        // M14 (ADR-0017): the strain inset is retired at every size.
+        for (w, h) in [(80, 24), (200, 50), (48, 16), (120, 40), (240, 30)] {
             let size = Size::new(w, h);
-            let Some(r) = Inset::for_size(size) else {
-                assert!(w < INSET_MIN.0 || h < INSET_MIN.1);
-                continue;
-            };
-            // Inside the canvas with its cleared margin, and far above the title row.
-            assert!(r.x >= 1 && r.y >= 1 && r.x + r.w < i32::from(w));
-            assert!(r.y + r.h < i32::from(h) - 1);
-        }
-        // The mesh never runs into the inset's cleared box.
-        for (w, h) in [(80, 24), (120, 40), (200, 50), (60, 30), (240, 30)] {
-            let size = Size::new(w, h);
-            let mut g = SpacetimeGrid::default();
-            let mut ctx = Ctx::new(6, size);
-            g.resize(size, &mut ctx);
-            g.prepare();
-            let Some(r) = g.inset else { continue };
-            for _ in 0..240 {
-                g.update(4.0 * SIM_DT, &mut ctx);
-                g.prepare();
-                for y in r.y - 1..r.y + r.h {
-                    for x in r.x - 1..=r.x + r.w {
-                        assert_eq!(g.mesh.cell_mask(x, y), Some(0), "{w}×{h}: mesh at {x},{y}");
-                    }
-                }
-            }
-        }
-        // From 120 columns up the inset gets its full width (the sheet narrows instead).
-        for (w, h) in [(120, 40), (200, 50), (160, 40), (240, 30)] {
-            let size = Size::new(w, h);
+            assert!(Inset::for_size(size).is_none(), "{w}x{h}");
             let mut g = SpacetimeGrid::default();
             g.resize(size, &mut Ctx::new(3, size));
             g.prepare();
-            let full = Inset::for_size(size).expect("inset").w;
-            assert!(full >= 20, "{w}×{h}");
-            assert_eq!(g.inset.map(|r| r.w), Some(full), "{w}×{h}");
-        }
-        let size = Size::new(120, 40);
-        let mut g = SpacetimeGrid::default();
-        let mut ctx = Ctx::new(2, size);
-        g.resize(size, &mut ctx);
-        g.prepare();
-        for _ in 0..200 {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-        let r = g.inset.expect("inset at 120×40");
-        let bin = g.binary();
-        let cols = r.w * Dots::CELL_W;
-        let rows = f64::from(r.h * Dots::CELL_H);
-        let mid = f64::from(r.y * Dots::CELL_H) + 0.5 * (rows - 1.0);
-        for c in [0, cols / 3, cols - 1] {
-            let t = g.t - INSET_WINDOW * (1.0 - f64::from(c) / f64::from(cols - 1));
-            let y = mid - 0.5 * (rows - 1.0) * bin.inset_strain(t, g.t);
-            assert!(
-                g.trace.is_lit(r.x * Dots::CELL_W + c, y.round() as i32),
-                "column {c}"
-            );
+            assert!(g.inset.is_none(), "{w}x{h}");
         }
     }
 
@@ -1384,7 +1318,9 @@ mod tests {
     }
 
     #[test]
-    fn spt_a12_black_holes_are_filled_dark_discs_with_a_hot_rim() {
+    fn spt_a12_black_holes_are_small_white_hot_points() {
+        // M14 (ADR-0017): each hole is exactly 2 × 2 pixels of its rim ink, whatever its
+        // radius; nothing else is drawn.
         let rim = ink::blackbody(30_000.0);
         let halo = ink::blackbody(10_000.0);
         for r in [2.0, 5.0, 9.0, 14.0] {
@@ -1396,33 +1332,13 @@ mod tests {
                 kelvin: 30_000.0,
             };
             disc(&mut px, &b, rim, halo);
-            let (cx, cy) = ((b.dx - 0.5) / 2.0, (b.dy - 0.5) / 2.0);
-            let rp = (r / 2.0).max(1.5);
-            let (mut core, mut hot) = (0, 0);
-            for y in 0..40 {
-                for x in 0..40 {
-                    let d = (f64::from(x) - cx).hypot(f64::from(y) - cy);
-                    let ink = px.get(x, y).unwrap();
-                    // Filled: every pixel well inside is the dark core, the rim is hot,
-                    // and nothing is drawn past the halo.
-                    if d < rp - RIM_PX - 0.01 {
-                        assert_eq!(ink, CORE_INK, "r={r} ({x},{y})");
-                        core += 1;
-                    } else if d < rp - 0.01 {
-                        assert_eq!(ink, rim, "r={r} ({x},{y})");
-                        hot += 1;
-                    } else if d > rp + HALO_PX + 0.01 {
-                        assert_eq!(ink, Ink::BLANK, "r={r} ({x},{y})");
-                    }
-                }
-            }
-            assert!(hot >= 4, "r={r}: {hot} rim pixels");
-            if rp >= 2.0 {
-                assert!(core >= 4, "r={r}: {core} core pixels");
-            }
+            let lit: Vec<(i32, i32)> = (0..40)
+                .flat_map(|y| (0..40).map(move |x| (x, y)))
+                .filter(|&(x, y)| px.get(x, y) != Some(Ink::BLANK))
+                .collect();
+            assert_eq!(lit.len(), 4, "r={r}");
+            assert!(lit.iter().all(|&(x, y)| px.get(x, y) == Some(rim)));
         }
-        // Dark: the core's level is at the ramp's floor, far under the mesh's.
-        const { assert!(CORE_INK.level < 20) };
     }
 
     #[test]
@@ -1545,7 +1461,7 @@ mod tests {
         assert!(late > quiet, "inspiral {quiet} → {late}");
         assert!(burst >= 1.4 * quiet, "inspiral {quiet}, burst {burst}");
         assert!(
-            burst_top >= 180 && quiet_top >= 120,
+            burst_top >= 180 && quiet_top >= 110,
             "{quiet_top} / {burst_top}"
         );
     }
@@ -1720,6 +1636,6 @@ mod tests {
         let frame = stage.render();
         let has = |r: Role| frame.cells().iter().any(|c| c.ink.role == r);
         assert!(has(MESH_ROLE) && has(Role::Blackbody));
-        assert!(has(Role::Ramp(Ramp::Aurora)), "strain inset");
+        assert!(!has(Role::Ramp(Ramp::Aurora)), "M14: no strain inset");
     }
 }

@@ -89,7 +89,8 @@ const DEPTH_EPS: f64 = 0.05;
 /// The gold of the mirror (beryllium coated in gold): the top of Ember, pale gold
 /// (level ~215 ≈ #E8C66A) to a near-white specular.
 const GOLD: Ramp = Ramp::Ember;
-const GOLD_LEVEL: f64 = 214.0;
+/// M14 (ADR-0017): a dim gold, the glint sweeping over it the bright accent.
+const GOLD_LEVEL: f64 = 200.0;
 /// Seconds between glints crossing the frame.
 const GLINT_PERIOD: f64 = 14.0;
 /// The honeycomb's dark gaps (pixels wide) and the backplane showing through them and
@@ -687,7 +688,7 @@ impl JwstUnfolding {
             [1.4, -1.0, 1.2],
         ];
         let array_poly = Poly {
-            ramp: Ramp::Cobalt,
+            ramp: Ramp::Starlight,
             level: 120.0,
             grad: (1.2, 0.0),
             ..Poly::default()
@@ -700,12 +701,13 @@ impl JwstUnfolding {
         let membrane = d.booms > 0.0;
         for k in 0..5 {
             let tension = d.layers[k];
+            // M14 (ADR-0017): a faint fill; the 1-px layer edges (below) carry the shape.
             let (ramp, base) = if !membrane {
-                (SILVER, 140.0 - 8.0 * k as f64)
+                (SILVER, 70.0 - 4.0 * k as f64)
             } else if k == 0 {
-                (SILVER, ease::lerp(172.0, 204.0, tension))
+                (SILVER, ease::lerp(48.0, 62.0, tension))
             } else {
-                (SILVER, ease::lerp(104.0, 136.0, tension) - 6.0 * k as f64)
+                (SILVER, ease::lerp(30.0, 42.0, tension) - 2.0 * k as f64)
             };
             for fore in [true, false] {
                 let q = Self::shield_half(&d, k, fore);
@@ -1155,9 +1157,10 @@ mod tests {
                     let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
                     if ink.role == Role::Ramp(GOLD) {
                         gold += 1;
-                        pale += usize::from(ink.level >= 190);
+                        // M14: a dim gold, most of it at 110 or more.
+                        pale += usize::from(ink.level >= 110);
                     }
-                    if ink.role == Role::Ramp(SILVER) && ink.level >= 90 {
+                    if ink.role == Role::Ramp(SILVER) && ink.level >= 40 {
                         (x0, x1) = (x0.min(x), x1.max(x));
                     }
                 }
@@ -1262,7 +1265,8 @@ mod tests {
                         ),
                         "{w}x{h}: pink/violet fill at {x},{y}"
                     );
-                    silver += usize::from(ink.role == Role::Ramp(SILVER) && ink.level >= 160);
+                    // M14: a faint silver fill (the edges are braille lines).
+                    silver += usize::from(ink.role == Role::Ramp(SILVER) && ink.level >= 40);
                 }
             }
             assert!(silver > 40, "{w}x{h}: silver top sheet {silver} px");
