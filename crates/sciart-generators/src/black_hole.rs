@@ -158,10 +158,20 @@ fn feather(r: f64) -> f64 {
 /// redshift `√(1 − 2/r)` times the transverse Doppler (time-dilation) shift of the
 /// orbiting gas; `1 / (1 − Ω λ)` is the line-of-sight Doppler shift, with the photon's
 /// `λ = L_z / E = −b cos ψ sin i` and the true (geometric) Kepler `Ω = r^{-3/2}`.
+#[cfg(test)]
 pub(crate) fn redshift(r: f64, b: f64, psi: f64, tilt: Tilt) -> f64 {
-    let omega = r.powf(-1.5);
-    (1.0 - 3.0 / r).max(0.0).sqrt() / (1.0 + omega * b * psi.cos_det() * tilt.sin)
+    redshift_c(r, b, psi.cos_det(), tilt)
 }
+
+/// [`redshift`] with `cos ψ` given.
+fn redshift_c(r: f64, b: f64, cos_psi: f64, tilt: Tilt) -> f64 {
+    let omega = r.powf(-1.5);
+    (1.0 - 3.0 / r).max(0.0).sqrt() / (1.0 + omega * b * cos_psi * tilt.sin)
+}
+
+/// A screen direction `(sin ψ, cos ψ)`: taken straight from a pixel's offset from the
+/// hole, so a traced ray costs no `atan2` for `ψ` and no `sin`/`cos` of it (GEN-R19).
+type Dir = (f64, f64);
 
 /// `sin i` and `cos i` of the disk's `INCLINATION`, evaluated once rather than per ray
 /// (a resize traces ~10⁵ rays).
@@ -180,16 +190,22 @@ impl Tilt {
 
 /// Sweep angle at which a ray from the observer at screen angle `psi` first reaches the
 /// disk plane: `r̂(γ) = cos γ ô + sin γ ê` meets `n̂·r̂ = 0` (SPEC-002).
-fn first_crossing(psi: f64, tilt: Tilt) -> f64 {
-    tilt.cos.atan2(-psi.sin_det() * tilt.sin)
+fn first_crossing(sin_psi: f64, tilt: Tilt) -> f64 {
+    tilt.cos.atan2(-sin_psi * tilt.sin)
 }
 
 /// Disk azimuth of the ray's position at sweep angle `gamma` (on the disk plane).
-fn disk_azimuth(psi: f64, gamma: f64, tilt: Tilt) -> f64 {
+fn disk_azimuth((sp, cp): Dir, gamma: f64, tilt: Tilt) -> f64 {
     let (sg, cg) = gamma.sin_cos_det();
-    let (sp, cp) = psi.sin_cos_det();
     let along_d = sg * sp * tilt.cos - cg * tilt.sin;
     geom::wrap(along_d.atan2(sg * cp), TAU)
+}
+
+/// The geodesic table, size- and seed-independent: built once per process (GEN-R19), so a
+/// new scene or a resize never pays for its ~10⁵ RK4 steps again.
+fn geodesics() -> &'static Geodesics {
+    static GEO: std::sync::OnceLock<Geodesics> = std::sync::OnceLock::new();
+    GEO.get_or_init(Geodesics::new)
 }
 
 /// Where a traced ray ends up.
@@ -330,9 +346,14 @@ impl Geodesics {
 
     /// Trace a camera ray with impact parameter `b` at screen angle `psi` (BH-A2, BH-A6).
     pub(crate) fn trace(&self, b: f64, psi: f64) -> Fate {
+        self.trace_dir(b, psi.sin_cos_det())
+    }
+
+    /// [`Self::trace`] along screen direction `dir`.
+    fn trace_dir(&self, b: f64, dir: Dir) -> Fate {
         let row = self.row(b);
         let end = self.end_at(row, b);
-        let gamma0 = first_crossing(psi, self.tilt);
+        let gamma0 = first_crossing(dir.0, self.tilt);
         for order in 0..2u8 {
             let gamma = gamma0 + f64::from(order) * PI;
             if gamma >= end {
@@ -342,7 +363,7 @@ impl Geodesics {
             if u > 0.0 {
                 let r = 1.0 / u;
                 if (ISCO..=R_OUT).contains(&r) {
-                    let phi = disk_azimuth(psi, gamma, self.tilt);
+                    let phi = disk_azimuth(dir, gamma, self.tilt);
                     return Fate::Disk { r, phi, order };
                 }
             }
@@ -383,10 +404,9 @@ impl Geodesics {
 
 /// Unit sky coordinates `(lon / 2π, ½ − lat / π)` of the direction an escaped ray came
 /// from: the source sits at angle `b/D − α` from the hole, on the ray's side (SPEC-002).
-fn sky_coords(b: f64, psi: f64, phi_end: f64, tilt: Tilt) -> (f64, f64) {
+fn sky_coords(b: f64, (sp, cp): Dir, phi_end: f64, tilt: Tilt) -> (f64, f64) {
     let delta = b / OBSERVER - (phi_end - PI);
     let (sd, cd) = delta.sin_cos_det();
-    let (sp, cp) = psi.sin_cos_det();
     // dir = −cos δ ô + sin δ ê, ê = (cos ψ, sin ψ, 0), ô = (0, 0, 1).
     let dir = [sd * cp, sd * sp, -cd];
     let (si, ci) = (tilt.sin, tilt.cos);
@@ -548,15 +568,15 @@ struct Hit {
 }
 
 impl Hit {
-    /// The hit of a ray `(b, psi)` on the disk at `(r, phi)`, one of `samples` per node.
+    /// The hit of a ray `(b, cos ψ)` on the disk at `(r, phi)`, one of `samples` per node.
     fn new(
         geo: &Geodesics,
         node: u32,
         (r, phi): (f64, f64),
-        (b, psi): (f64, f64),
+        (b, cos_psi): (f64, f64),
         samples: usize,
     ) -> Self {
-        let t = redshift(r, b, psi, geo.tilt) * temperature(r) / T_PEAK;
+        let t = redshift_c(r, b, cos_psi, geo.tilt) * temperature(r) / T_PEAK;
         let ia = ((phi / TAU * NA as f64) as usize).min(NA - 1);
         Self {
             node,
@@ -568,29 +588,107 @@ impl Hit {
 
 /// Trace the lensing ring (the order-1 image) through `node` with `RING_SS`² samples;
 /// `at(a, c)` gives `(b, ψ)` at fractional node offsets. The node shows the ring's mean
-/// light as if it covered the node fully.
+/// light as if it covered the node fully. Each hit's `(b, sin ψ, cos ψ, r, φ)` is kept in
+/// `rays`, so the mirror node can reuse it ([`mirror_ring`]).
 fn trace_ring(
     geo: &Geodesics,
     hits: &mut Vec<Hit>,
+    rays: &mut Vec<[f64; 5]>,
     node: u32,
-    at: impl Fn(f64, f64) -> (f64, f64),
+    at: impl Fn(f64, f64) -> (f64, Dir),
 ) {
     let start = hits.len();
     let n = RING_SS * RING_SS;
     for s in 0..n {
         let (a, c) = (s % RING_SS, s / RING_SS);
-        let (b, psi) = at(
+        let (b, dir) = at(
             (a as f64 + 0.5) / RING_SS as f64,
             (c as f64 + 0.5) / RING_SS as f64,
         );
-        if let Fate::Disk { r, phi, order: 1 } = geo.trace(b, psi) {
-            hits.push(Hit::new(geo, node, (r, phi), (b, psi), 1));
+        if let Fate::Disk { r, phi, order: 1 } = geo.trace_dir(b, dir) {
+            hits.push(Hit::new(geo, node, (r, phi), (b, dir.1), 1));
+            rays.push([b, dir.0, dir.1, r, phi]);
         }
     }
-    // The mean over the ring's own samples: full coverage, however thin it is.
-    let inv = 1.0 / (hits.len() - start).max(1) as f32;
-    for h in &mut hits[start..] {
+    normalise_ring(&mut hits[start..]);
+}
+
+/// The ring through `node` as the mirror image of another node's traced ring `rays`
+/// (`ψ → π − ψ`, so `cos ψ` changes sign, and `φ → π − φ`).
+fn mirror_ring(geo: &Geodesics, hits: &mut Vec<Hit>, rays: &[[f64; 5]], node: u32) {
+    let start = hits.len();
+    for &[b, _, cos_psi, r, phi] in rays {
+        let phi = geom::wrap(PI - phi, TAU);
+        hits.push(Hit::new(geo, node, (r, phi), (b, -cos_psi), 1));
+    }
+    normalise_ring(&mut hits[start..]);
+}
+
+/// The mean over a ring node's own samples: full coverage, however thin the ring is.
+fn normalise_ring(hits: &mut [Hit]) {
+    let inv = 1.0 / hits.len().max(1) as f32;
+    for h in hits {
         h.weight *= inv;
+    }
+}
+
+/// What a supersample ray sees: the disk at `(r, φ)` on crossing `order`, the sky at unit
+/// coordinates `(u, v)`, or nothing.
+#[derive(Debug, Clone, Copy)]
+enum Seen {
+    Disk { r: f64, phi: f64, order: u8 },
+    Sky { u: f64, v: f64 },
+    Dark,
+}
+
+/// One traced supersample ray: its impact parameter, screen direction and what it sees.
+#[derive(Debug, Clone, Copy)]
+struct Ray {
+    b: f64,
+    dir: Dir,
+    fate: Seen,
+}
+
+impl Ray {
+    const DARK: Self = Self {
+        b: 0.0,
+        dir: (0.0, 1.0),
+        fate: Seen::Dark,
+    };
+
+    fn trace(geo: &Geodesics, b: f64, dir: Dir) -> Self {
+        let fate = match geo.trace_dir(b, dir) {
+            Fate::Disk { r, phi, order } => Seen::Disk { r, phi, order },
+            Fate::Sky { phi_end } => {
+                let (u, v) = sky_coords(b, dir, phi_end, geo.tilt);
+                Seen::Sky { u, v }
+            }
+            Fate::Dark => Seen::Dark,
+        };
+        Self { b, dir, fate }
+    }
+
+    /// The ray's mirror image across the hole's vertical axis (`ψ → π − ψ`): the same
+    /// geodesic, landing at disk azimuth `π − φ` or sky longitude `π − lon`.
+    fn mirrored(self) -> Self {
+        let dir = (self.dir.0, -self.dir.1);
+        let fate = match self.fate {
+            Seen::Disk { r, phi, order } => Seen::Disk {
+                r,
+                phi: geom::wrap(PI - phi, TAU),
+                order,
+            },
+            Seen::Sky { u, v } => Seen::Sky {
+                u: geom::wrap(PI - u * TAU, TAU) / TAU,
+                v,
+            },
+            Seen::Dark => Seen::Dark,
+        };
+        Self {
+            b: self.b,
+            dir,
+            fate,
+        }
     }
 }
 
@@ -603,7 +701,7 @@ const NO_STAR: u32 = u32::MAX;
 #[derive(Debug)]
 pub struct BlackHole {
     t: f64,
-    geo: Option<Geodesics>,
+    geo: Option<&'static Geodesics>,
     /// The disk image's half-width, top and bottom in `M`.
     extent: (f64, f64, f64),
     stars: Box<[u8]>,
@@ -647,7 +745,7 @@ impl Default for BlackHole {
 
 impl BlackHole {
     fn seed(&mut self, ctx: &mut Ctx) {
-        let geo = Geodesics::new();
+        let geo = geodesics();
         self.extent = geo.extent();
         self.geo = Some(geo);
         self.stars = paint_stars(&mut ctx.rng);
@@ -670,7 +768,7 @@ impl BlackHole {
 
     /// Trace every lattice node into hit lists and sky texels.
     fn trace(&mut self) {
-        let Some(geo) = &self.geo else { return };
+        let Some(geo) = self.geo else { return };
         let px = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
         let lattice = lattice_for(px, MAX_NODES, 1.0);
@@ -679,7 +777,13 @@ impl BlackHole {
         let (sx, sy) = (pw / lw as f64, ph / lh as f64);
         let polar = |x: f64, y: f64| {
             let (bx, by) = ((x - cx) / scale, (cy - y) / scale);
-            (bx.hypot(by), by.atan2(bx))
+            let b = bx.hypot(by);
+            let dir: Dir = if b > 0.0 {
+                (by / b, bx / b)
+            } else {
+                (0.0, 1.0)
+            };
+            (b, dir)
         };
 
         self.hits.clear();
@@ -689,36 +793,70 @@ impl BlackHole {
         // Per escaping supersample: its image key (star texel · 2, plus 1 above the hole),
         // its distance from the texel's centre and its slot in `sky`.
         let mut escapes: Vec<(u32, f32, u32)> = Vec::with_capacity(lw * lh * SS * SS);
+        // One lattice row's supersample rows, traced for the left half of the columns and
+        // mirrored onto the right half (GEN-R19): the hole sits on the centre column, and
+        // `x → −x` (`ψ → π − ψ`) maps a ray onto its mirror image, the disk azimuth and the
+        // sky longitude going to `π − φ`. Only the Doppler term is odd in `x`, and
+        // `Hit::new` evaluates it from the mirrored ray's own `ψ`.
+        let q_n = lw * SS;
+        let mut rows = vec![Ray::DARK; SS * q_n];
+        // The row's traced ring nodes: their rays and each node's span of them.
+        let mut ring_rays: Vec<[f64; 5]> = Vec::new();
+        let mut ring_span: Vec<Option<(usize, usize)>> = vec![None; lw];
         for j in 0..lh {
+            ring_rays.clear();
+            ring_span.fill(None);
+            for c in 0..SS {
+                let y = (j as f64 + (c as f64 + 0.5) / SS as f64) * sy;
+                let row = &mut rows[c * q_n..(c + 1) * q_n];
+                for q in 0..q_n {
+                    let mirror = q_n - 1 - q;
+                    row[q] = if mirror < q {
+                        row[mirror].mirrored()
+                    } else {
+                        let (b, dir) = polar((q as f64 + 0.5) / SS as f64 * sx, y);
+                        Ray::trace(geo, b, dir)
+                    };
+                }
+            }
             for i in 0..lw {
                 let node = (j * lw + i) as u32;
-                let centre = polar((i as f64 + 0.5) * sx, (j as f64 + 0.5) * sy);
-                let ring = (-node_m..RING_BAND + node_m).contains(&(centre.0 - B_CRIT));
+                // Only the node centre's impact parameter is needed here (no atan2).
+                let b_centre = (((i as f64 + 0.5) * sx - cx) / scale)
+                    .hypot((cy - (j as f64 + 0.5) * sy) / scale);
+                let ring = (-node_m..RING_BAND + node_m).contains(&(b_centre - B_CRIT));
                 for s in 0..SS * SS {
                     let (a, c) = (s % SS, s / SS);
-                    let x = (i as f64 + (a as f64 + 0.5) / SS as f64) * sx;
-                    let y = (j as f64 + (c as f64 + 0.5) / SS as f64) * sy;
-                    let (b, psi) = polar(x, y);
-                    match geo.trace(b, psi) {
+                    let ray = rows[c * q_n + i * SS + a];
+                    let (b, dir) = (ray.b, ray.dir);
+                    match ray.fate {
                         // Near the shadow the order-1 image is traced more finely below.
-                        Fate::Disk { order: 1, .. } if ring => {}
-                        Fate::Disk { r, phi, .. } => {
+                        Seen::Disk { order: 1, .. } if ring => {}
+                        Seen::Disk { r, phi, .. } => {
                             self.hits
-                                .push(Hit::new(geo, node, (r, phi), (b, psi), SS * SS));
+                                .push(Hit::new(geo, node, (r, phi), (b, dir.1), SS * SS));
                         }
-                        Fate::Sky { phi_end } => {
-                            let (u, v) = sky_coords(b, psi, phi_end, geo.tilt);
+                        Seen::Sky { u, v } => {
                             let slot = node * (SS * SS) as u32 + s as u32;
-                            let key = 2 * star_texel(u, v) + u32::from(psi >= 0.0);
+                            let key = 2 * star_texel(u, v) + u32::from(dir.0 >= 0.0);
                             escapes.push((key, off_centre(u, v) as f32, slot));
                         }
-                        Fate::Dark => {}
+                        Seen::Dark => {}
                     }
                 }
                 if ring {
-                    trace_ring(geo, &mut self.hits, node, |a, c| {
-                        polar((i as f64 + a) * sx, (j as f64 + c) * sy)
-                    });
+                    let mirror = lw - 1 - i;
+                    if let Some((a, b)) = ring_span.get(mirror).copied().flatten()
+                        && mirror < i
+                    {
+                        mirror_ring(geo, &mut self.hits, &ring_rays[a..b], node);
+                    } else {
+                        let from = ring_rays.len();
+                        trace_ring(geo, &mut self.hits, &mut ring_rays, node, |a, c| {
+                            polar((i as f64 + a) * sx, (j as f64 + c) * sy)
+                        });
+                        ring_span[i] = Some((from, ring_rays.len()));
+                    }
                 }
             }
         }
@@ -926,11 +1064,9 @@ impl Generator for BlackHole {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::OnceLock;
 
     fn geo() -> &'static Geodesics {
-        static GEO: OnceLock<Geodesics> = OnceLock::new();
-        GEO.get_or_init(Geodesics::new)
+        geodesics()
     }
 
     fn scene(size: Size) -> (BlackHole, Ctx) {
