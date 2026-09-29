@@ -60,7 +60,8 @@ const FEATURES: [(f64, f64); 7] = [
 const CORE_X: f64 = 0.3;
 const JET_LEN: f64 = 0.54;
 const JET_PA: f64 = 0.12;
-const OPENING: f64 = 0.036;
+/// M14 (ADR-0017): a narrow jet, a 1–2-px core.
+const OPENING: f64 = 0.012;
 const BASE_WIDTH: f64 = 0.006;
 /// Helical ripple: wavenumber (per jet length), drift (rad/s), amplitude (of the
 /// half-width).
@@ -68,7 +69,8 @@ const HELIX_K: f64 = 38.0;
 const HELIX_W: f64 = 0.9;
 const HELIX_A: f64 = 0.55;
 /// Host galaxy: effective radius (half-heights), axis ratio and peak.
-const HOST_RE: f64 = 0.5;
+/// M14 (ADR-0017): a tighter host glow.
+const HOST_RE: f64 = 0.28;
 const HOST_Q: f64 = 0.86;
 const HOST_PEAK: f64 = 0.7;
 /// Radius (in `r_e`) inside which the host is saturated.
@@ -80,6 +82,7 @@ const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 const KNOT_HALO: [(i32, i32, f32); 25] = halo_kernel(2);
 /// Synchrotron colours: the jet violet to white at its brightest, the lobes teal.
 const JET: Ramp = Ramp::Plasma;
+const JET_MAX: u8 = 175;
 const LOBE: Ramp = Ramp::Ice;
 /// Radio plumes (jet lengths): the main lobe's half-width and how far its cocoon flows
 /// back toward the core; the counter-lobe's hotspot distance, size and relative glow; the
@@ -380,7 +383,8 @@ impl RelativisticJet {
                 && jet >= lobe
                 && f64::from(jet) >= ink::MIN_VISIBLE_LEVEL
             {
-                Ink::new(Role::Ramp(JET), jet)
+                // M14: the jet and its knots stay at Plasma ≤ `JET_MAX`.
+                Ink::new(Role::Ramp(JET), jet.min(JET_MAX))
             } else if lobe >= h && f64::from(lobe) >= ink::MIN_VISIBLE_LEVEL {
                 let edge = lobe_q.get(i).is_some_and(|&q| q > LOBE_EDGE);
                 Ink::new(Role::Ramp(if edge { LOBE_EDGE_RAMP } else { LOBE }), lobe)
@@ -396,6 +400,16 @@ impl RelativisticJet {
                 self.pixels
                     .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
             }
+        }
+        // M14: the terminal hotspot's shock as a small white point (the jet is capped at
+        // `JET_MAX`, so the core and this are the bright accents).
+        let (hx, hy) = self.at(HOTSPOT, 0.0);
+        for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+            self.pixels.set(
+                hx.floor() as i32 + dx - 1,
+                hy.floor() as i32 + dy - 1,
+                Ink::new(Role::Ramp(Ramp::Starlight), 235),
+            );
         }
         // The accretion-disc core: a hot point, flickering slightly.
         let kelvin = 10_500.0 + 1500.0 * (1.7 * self.t).sin_det();

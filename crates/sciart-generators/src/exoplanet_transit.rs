@@ -76,7 +76,8 @@ const STRIP_LO: f64 = 1.35;
 const NOISE: f64 = 0.07;
 /// The model curve in lavender, apart from the peach star and the blue planet; "now" in
 /// white.
-const MODEL_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 200);
+/// M14: a dim 1-px model curve.
+const MODEL_INK: Ink = Ink::new(Role::Ramp(Ramp::Plasma), 120);
 const NOW_INK: Ink = Ink::new(Role::Star, 255);
 const OBS_INK: Ink = Ink::new(Role::Structure, 150);
 const BASELINE_INK: Ink = Ink::new(Role::Dim, 30);
