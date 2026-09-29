@@ -57,19 +57,32 @@ const SWING: (f64, f64) = (12.0, 70.0);
 const PACKETS: usize = 6;
 const PHASE_SPEED: f64 = 3.0;
 /// Ice brightness to `Ramp(Ice)`: the faint ice's lift and the span.
-const NLC_LEVEL: (f64, f64) = (40.0, 190.0);
+const NLC_LEVEL: (f64, f64) = (60.0, 195.0);
+/// The ice's tone exponent: its light climbs fast out of the faint (saturated, blue) part
+/// of `Ramp(Ice)` into the pale top, where the ramp is a silver-white with a blue tint.
+const NLC_GAMMA: f64 = 0.45;
+/// A billow's trough keeps this share of its crest's ice.
+const BILLOW_FLOOR: f64 = 0.35;
+/// The ice fades out over these elevations (deg) above the horizon, before the warm glow.
+const ICE_LOW: (f64, f64) = (2.8, 3.6);
 /// Twilight sky: level overhead and the arch's extra, the horizon glow's peak, and the
 /// arch elevations (deg, over the Sun) where the orange, yellow and teal bands end.
-const SKY_LEVEL: (f64, f64) = (12.0, 34.0);
-const GLOW_PEAK: f64 = 85.0;
-const BANDS: (f64, f64) = (4.6, 13.0);
+const SKY_LEVEL: (f64, f64) = (12.0, 44.0);
+const GLOW_PEAK: f64 = 72.0;
+const GLOW_FOLD: f64 = 3.0;
+/// The glow's top edge: its slow wave (± deg, over this many pixels) and fine fray (deg).
+const GLOW_WAVE: (f64, f64) = (0.9, 7.0);
+const GLOW_FRAY: f64 = 0.5;
+const BANDS: (f64, f64) = (4.4, 11.0);
 /// The twilight table's step and reach in arch elevation (deg).
 const ARCH_STEP: f64 = 0.05;
 const ARCH_MAX: f64 = 200.0;
 /// Stars are drowned by sky or ice brighter than this level.
 const STAR_DROWN: u8 = 55;
+/// ASCII: ice levels from here up are spread over the glyph ramp.
+const ASCII_ICE: f64 = 140.0;
 /// How much of the glow a low-cloud wisp hides at its thickest.
-const BANK_DARK: f64 = 0.75;
+const BANK_DARK: f64 = 0.55;
 /// Low boreal hills with sparse spruce: the northern horizon's glow stays in view.
 const LAND: Terrain = Terrain {
     ridge: (0.25, 0.9),
@@ -186,6 +199,8 @@ pub struct Noctilucent {
     cols: Vec<f32>,
     /// Per arch-elevation bin this step: the arch's and the glow's shapes.
     arch: Vec<(f32, f32)>,
+    /// Per pixel column: the warm glow's uneven top (deg above or below `BANDS.0`).
+    edge: Vec<f32>,
     picture: Pixels,
     stars: Dots,
     /// Star positions (dots) and levels; replotted each step where the sky is dark enough.
@@ -283,8 +298,10 @@ impl Noctilucent {
                 let (ck, sk) = (f64::from(n.phase[k].0), f64::from(n.phase[k].1));
                 let (sw, cw) = rot[k];
                 let wave = ck * cw + sk * sw;
+                // Billows: soft crests on a sheet of ice rather than thin bright lines on
+                // dark gaps (which read as ripples on water).
                 let crest = if p.billow {
-                    (1.0 - wave.abs()).powi(2)
+                    BILLOW_FLOOR + (1.0 - BILLOW_FLOOR) * (1.0 - wave.abs()).powf(1.5)
                 } else {
                     0.5 + 0.5 * wave
                 };
@@ -320,6 +337,7 @@ impl Noctilucent {
             *t = (a as f32, g as f32);
         }
         let w = usize::from(self.picture.pixel_size().width());
+        let cols_edge = &self.edge;
         let (field, map, cover, rows, cols, arch) = (
             &self.field,
             &self.map,
@@ -342,7 +360,15 @@ impl Noctilucent {
                 .copied()
                 .unwrap_or((0.0, 0.0));
             let sky = sky_level(f64::from(a), f64::from(g), side) * open;
-            let ramp = band_ramp(ea);
+            // The warm glow's top is a soft, uneven edge (a slow wave along the horizon and
+            // a fine fray), not a ruled line where it meets the teal.
+            let wave = f64::from(cols_edge.get(x as usize).copied().unwrap_or(0.0));
+            let fray = hash01(cell_key(x, y) ^ 0x7f1a) - 0.5;
+            let ramp = if ea < BANDS.0 + 1.5 {
+                band_ramp(ea - wave - GLOW_FRAY * fray)
+            } else {
+                band_ramp(ea)
+            };
             // Against a darker sky the ice stands out more: its contrast grows as the Sun
             // sinks (stylised: keeps the thin late band as bright as the early sheet).
             // Low down the ice's light crosses so much air that it is dimmed and reddened
@@ -350,17 +376,16 @@ impl Noctilucent {
             let ice = f64::from(map.sample(field, x, y))
                 * open
                 * (1.0 + 0.8 * (1.0 - dim))
-                * ease::smoothstep((e - 1.0) / 3.0);
+                * ease::smoothstep((e - ICE_LOW.0) / ICE_LOW.1);
             let glow = if ice > 0.0 {
-                NLC_LEVEL.1 * ice.sqrt() * ice.sqrt().sqrt()
-                    + NLC_LEVEL.0 * ease::smoothstep(ice / 0.12)
+                NLC_LEVEL.1 * ice.powf(NLC_GAMMA) + NLC_LEVEL.0 * ease::smoothstep(ice / 0.12)
             } else {
                 0.0
             };
             // The ice adds its light to the sky's; where it outshines the sky it takes its
             // own silver-cyan hue (equal lightness either side of the change: no edge).
             let level = sky + glow;
-            if glow > 0.8 * sky && glow >= 4.0 && ramp != Ramp::Ember {
+            if glow > 0.8 * sky && glow >= 4.0 {
                 return Ink::new(Role::Ramp(Ramp::Ice), ink::level(level.min(250.0)));
             }
             Ink::new(Role::Ramp(ramp), ink::level(level.max(6.0)))
@@ -382,8 +407,8 @@ pub(crate) fn twilight(e: f64, side: f64, dim: f64) -> (Ramp, f64) {
 
 /// The arch's and the horizon glow's shapes at arch elevation `e` (deg).
 fn arch_glow(e: f64, dim: f64) -> (f64, f64) {
-    let arch = (-e / (7.0 + 5.0 * dim)).exp() * (0.6 + 0.4 * dim);
-    let glow = (-e / 3.4).exp() * (0.7 + 0.3 * dim);
+    let arch = (-e / (5.0 + 4.0 * dim)).exp() * (0.6 + 0.4 * dim);
+    let glow = (-e / GLOW_FOLD).exp() * (0.7 + 0.3 * dim);
     (arch, glow)
 }
 
@@ -391,12 +416,13 @@ fn sky_level(arch: f64, glow: f64, side: f64) -> f64 {
     SKY_LEVEL.0 + SKY_LEVEL.1 * arch + GLOW_PEAK * glow * (0.35 + 0.65 * side)
 }
 
-/// The twilight's hue at arch elevation `e` (deg).
+/// The twilight's hue at arch elevation `e` (deg): the warm glow, the deep teal
+/// (`Aurora`'s dark end), then indigo. `Ice` is kept for the clouds alone.
 fn band_ramp(e: f64) -> Ramp {
     if e < BANDS.0 {
         Ramp::Ember
     } else if e < BANDS.1 {
-        Ramp::Ice
+        Ramp::Aurora
     } else {
         Ramp::Plasma
     }
@@ -501,6 +527,13 @@ impl Generator for Noctilucent {
         self.rows.resize(2 * h, (0.0, 0.0));
         self.cols.clear();
         self.cols.resize(w, 0.0);
+        let edge_seed: u64 = ctx.rng.random();
+        self.edge.clear();
+        self.edge.extend((0..w).map(|x| {
+            // Value noise over ~7 px, as `value_noise`'s 90 km lattice.
+            let n = value_noise(edge_seed, x as f64 * 90.0 / GLOW_WAVE.1, 0.0);
+            (GLOW_WAVE.0 * (2.0 * n - 1.0)) as f32
+        }));
         self.arch.clear();
         self.arch
             .resize((ARCH_MAX / ARCH_STEP) as usize + 2, (0.0, 0.0));
@@ -531,11 +564,23 @@ impl Generator for Noctilucent {
 
     fn render(&self, canvas: &mut Canvas) {
         self.picture.blit(canvas, |_, _, top, bottom| {
-            // ASCII: the ice by brightness; the dim twilight sky stays dark.
+            // ASCII: the ice by brightness; the dim twilight sky stays dark. The ice sits high
+            // on its ramp, so its span (ASCII_ICE and up) is stretched over the glyph ramp,
+            // keeping the waves' texture instead of a wall of `@`.
             let pick = sciart_core::raster::stronger(top, bottom);
-            (pick.level >= 60)
-                .then(|| sciart_core::raster::ascii_ramp_cell(top, bottom))
-                .flatten()
+            if pick.level < 60 {
+                return None;
+            }
+            let (char, _) = sciart_core::raster::ascii_ramp_cell(
+                Ink::new(
+                    pick.role,
+                    ink::level(
+                        (f64::from(pick.level) - ASCII_ICE) * 255.0 / (255.0 - ASCII_ICE) + 40.0,
+                    ),
+                ),
+                Ink::BLANK,
+            )?;
+            Some((char, pick))
         });
         self.stars.blit_over(canvas, &self.picture);
     }
@@ -668,23 +713,29 @@ mod tests {
             g.update(SIM_DT, &mut ctx);
         }
         let ps = g.picture.pixel_size();
-        let mut ice = 0;
+        let (mut ice, mut sum) = (0, 0.0);
         for y in 0..i32::from(ps.height()) {
             for x in 0..i32::from(ps.width()) {
                 let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
                 assert!(
                     matches!(
                         p.role,
-                        Role::Background | Role::Ramp(Ramp::Ice | Ramp::Ember | Ramp::Plasma)
+                        Role::Background
+                            | Role::Ramp(Ramp::Ice | Ramp::Ember | Ramp::Aurora | Ramp::Plasma)
                     ),
                     "{p:?}"
                 );
                 if p.role == Role::Ramp(Ramp::Ice) {
                     ice += 1;
+                    sum += f64::from(p.level);
                 }
             }
         }
         assert!(ice > 50, "{ice}");
+        // Silver-white with a blue tint: the ice sits mostly high on `Ice`, where the ramp
+        // is pale and least saturated.
+        let mean = sum / f64::from(ice);
+        assert!(mean >= 150.0, "mean ice level {mean}");
     }
 
     #[test]
@@ -725,8 +776,21 @@ mod tests {
                     seen.push(ramp);
                 }
             }
-            assert_eq!(seen, [Ramp::Ember, Ramp::Ice, Ramp::Plasma], "{side} {dim}");
+            assert_eq!(
+                seen,
+                [Ramp::Ember, Ramp::Aurora, Ramp::Plasma],
+                "{side} {dim}"
+            );
         }
+        // The warm glow's top is uneven along the horizon, within its wave.
+        let (g, _) = built(Size::new(120, 40));
+        let (lo, hi) = g
+            .edge
+            .iter()
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), &e| {
+                (lo.min(e), hi.max(e))
+            });
+        assert!(hi - lo > 0.3 && hi <= GLOW_WAVE.0 as f32 && lo >= -GLOW_WAVE.0 as f32);
     }
 
     #[test]
