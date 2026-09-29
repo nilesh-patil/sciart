@@ -120,6 +120,8 @@ const REST_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 20);
 const RIM_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 80);
 /// ECG trace ink (a monitor's green) at its write head.
 const ECG_RAMP: Ramp = Ramp::Aurora;
+/// The ECG write head: a white-hot dot.
+const ECG_HEAD_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 255);
 const TIP_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 255);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 /// ECG sweep speed in dot columns per second.
@@ -165,6 +167,9 @@ struct Heart {
     map: SampleMap,
     /// Pixel rectangle the lattice maps onto: origin and size.
     view: (i32, i32, Size),
+    /// Per view pixel: the heart's coverage and its rim band's coverage (0..=255), 4×4
+    /// supersampled once per resize, so the outline is antialiased (HRT-A6).
+    edge: Vec<[u8; 2]>,
     ecg_rows: u16,
     cells: Size,
     readout_room: usize,
@@ -206,6 +211,7 @@ impl Default for Heart {
             dots: Dots::default(),
             map: SampleMap::default(),
             view: (0, 0, Size::new(1, 1)),
+            edge: Vec::new(),
             ecg_rows: 0,
             cells: Size::new(1, 1),
             readout_room: 0,
@@ -463,35 +469,36 @@ impl Heart {
             let age = self.step.saturating_sub(at) as f64 / SUB_PER_S as f64;
             (1.0 - age / 0.25).max(0.0)
         });
-        let (map, u, v) = (&self.map, &self.u, &self.v);
+        let (map, u, v, edge) = (&self.map, &self.u, &self.v, &self.edge);
         let (vw, vh) = (i32::from(vs.width()), i32::from(vs.height()));
-        let (hp, hx, hy) = heart_frame(vs);
         self.pixels.shade(|x, y| {
             let (lx, ly) = (x - vx, y - vy);
             if !(0..vw).contains(&lx) || !(0..vh).contains(&ly) {
                 return Ink::BLANK;
             }
-            // The outline is the analytic heart curve at pixel resolution, so its edge
-            // is as smooth as the pixels allow; a rim of one pixel outlines the organ.
-            let inside = |px: i32, py: i32| {
-                in_heart((px as f32 + 0.5 - hx) * hp, (hy - py as f32 - 0.5) * hp)
-            };
-            if !inside(lx, ly) {
+            // The outline is the analytic heart curve, antialiased: every ink is dimmed by
+            // the pixel's coverage (the ramps run to near-black, so a dimmer level reads as
+            // a partly covered pixel), and a soft rim band outlines the resting organ.
+            let [cover, rim] = edge.get((ly * vw + lx) as usize).copied().unwrap_or([0, 0]);
+            if cover == 0 {
                 return Ink::BLANK;
             }
-            let rim = !(inside(lx - 1, ly)
-                && inside(lx + 1, ly)
-                && inside(lx, ly - 1)
-                && inside(lx, ly + 1));
+            let (cover, rim) = (f64::from(cover) / 255.0, f64::from(rim) / 255.0);
             if flash > 0.0 {
                 return Ink::new(
                     Role::Ramp(Ramp::Starlight),
-                    ink::level(120.0 + 135.0 * flash),
+                    ink::level((120.0 + 135.0 * flash) * cover),
                 );
             }
             let (uu, vv) = (map.sample(u, lx, ly), map.sample(v, lx, ly));
             let ink = tissue_ink(uu, vv);
-            if rim && ink == REST_INK { RIM_INK } else { ink }
+            if ink == REST_INK {
+                let rest = f64::from(REST_INK.level) * cover;
+                let rim = f64::from(RIM_INK.level) * rim;
+                Ink::new(REST_INK.role, ink::level(rest.max(rim)))
+            } else {
+                Ink::new(ink.role, ink::level(f64::from(ink.level) * cover))
+            }
         });
         // Tips as 2×2 white dots.
         let (sx, sy) = (
@@ -508,6 +515,41 @@ impl Heart {
             }
         }
         self.draw_ecg();
+    }
+
+    /// Supersample the heart curve over the view (4×4 per pixel): its coverage, and the
+    /// coverage of a rim band ~1.3 px wide inside the curve (the heart minus a copy
+    /// shrunk about its centre by that much).
+    fn build_edge(&mut self) {
+        const SS: i32 = 4;
+        let (_, _, vs) = self.view;
+        let (vw, vh) = (i32::from(vs.width()), i32::from(vs.height()));
+        let (hp, hx, hy) = heart_frame(vs);
+        // The heart is ~1.1 units in radius, so this shrink moves its edge ~1.3 px in.
+        let shrink = (1.0 - 1.3 * hp / 1.1).max(0.0);
+        self.edge.clear();
+        self.edge.reserve(vs.area());
+        for py in 0..vh {
+            for px in 0..vw {
+                let (mut outer, mut inner) = (0u32, 0u32);
+                for sy in 0..SS {
+                    for sx in 0..SS {
+                        let fx = px as f32 + (sx as f32 + 0.5) / SS as f32;
+                        let fy = py as f32 + (sy as f32 + 0.5) / SS as f32;
+                        let (x, y) = ((fx - hx) * hp, (hy - fy) * hp);
+                        if in_heart(x, y) {
+                            outer += 1;
+                            if shrink > 0.0 && in_heart(x / shrink, y / shrink) {
+                                inner += 1;
+                            }
+                        }
+                    }
+                }
+                let n = (SS * SS) as u32;
+                let to_u8 = |k: u32| (k * 255 / n) as u8;
+                self.edge.push([to_u8(outer), to_u8(outer - inner)]);
+            }
+        }
     }
 
     fn draw_ecg(&mut self) {
@@ -529,7 +571,8 @@ impl Heart {
                 continue;
             }
             let age = (head + n - c) % n;
-            let level = 250.0 - 150.0 * age as f64 / n as f64;
+            // Dimmer than the white write head, so the head leads the trace.
+            let level = 205.0 - 115.0 * age as f64 / n as f64;
             let ink = Ink::new(Role::Ramp(ECG_RAMP), ink::level(level));
             let (y0, y1) = (y_of(self.ecg[c - 1]), y_of(self.ecg[c]));
             // Three dots thick over a dim glow in the pixels behind (the cell background
@@ -544,6 +587,18 @@ impl Heart {
                 if self.pixels.get(px, py) == Some(Ink::BLANK) {
                     self.pixels.set(px, py, glow);
                 }
+            }
+        }
+        // The monitor's write head: a bright dot leading the trace, with a halo in the
+        // pixels behind it (HRT-A7).
+        let (hx, hy) = (head as f64, y_of(self.ecg[head]));
+        self.dots.disc(hx, hy, 2.1, ECG_HEAD_INK);
+        let (px, py) = (head as i32 / 2, (hy / 2.0) as i32);
+        for (dx, dy) in [(0, 0), (-1, 0), (1, 0)] {
+            let k = if dx == 0 { 0.6 } else { 0.25 };
+            let halo = Ink::new(Role::Ramp(ECG_RAMP), ink::level(255.0 * k));
+            if self.pixels.get(px + dx, py + dy) == Some(Ink::BLANK) {
+                self.pixels.set(px + dx, py + dy, halo);
             }
         }
     }
@@ -592,6 +647,11 @@ fn tissue_ink(u: f32, v: f32) -> Ink {
     }
 }
 
+/// Resting tissue (dimmed at the antialiased edge).
+fn is_rest(ink: Ink) -> bool {
+    ink.role == REST_INK.role && ink.level <= REST_INK.level
+}
+
 /// ASCII by what a pixel shows: tips `@`, the shock flash and excitation by phase angle,
 /// rest `.`.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
@@ -601,7 +661,7 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         (true, false) => top,
         (false, true) => bottom,
         (true, true) => {
-            if top == REST_INK {
+            if is_rest(top) {
                 bottom
             } else {
                 top
@@ -622,7 +682,7 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
             }
         }
         _ if ink == TIP_INK => '@',
-        _ if ink == REST_INK => '.',
+        _ if is_rest(ink) => '.',
         _ => ASCII_RAMP[usize::from(ink.level) * (ASCII_RAMP.len() - 1) / 255],
     };
     Some((ch, ink))
@@ -663,6 +723,7 @@ impl Generator for Heart {
         } else {
             self.map.rebuild(lat, Size::new(side, px_h));
         }
+        self.build_edge();
         let cols = usize::from(size.width()) * Dots::CELL_W as usize;
         self.ecg.clear();
         self.ecg.resize(cols, 0.0);
@@ -820,6 +881,59 @@ mod tests {
             run_s(&mut g, &mut ctx, wait);
             assert_eq!(g.caption(), Some(*caption));
         }
+    }
+
+    #[test]
+    fn hrt_a6_the_outline_is_antialiased() {
+        let (g, _) = heart_at(Size::new(120, 40));
+        let partial = g.edge.iter().filter(|e| (1..255).contains(&e[0])).count();
+        let rim = g.edge.iter().filter(|e| e[1] > 0).count();
+        let full = g.edge.iter().filter(|e| e[0] == 255).count();
+        assert!(partial > 40, "{partial} partly covered edge pixels");
+        assert!(
+            rim > partial && full > 5 * rim,
+            "a thin rim band: {rim} of {full}"
+        );
+        // Partly covered pixels are dimmer than the tissue inside.
+        let (vx, vy, vs) = g.view;
+        let vw = i32::from(vs.width());
+        for (i, e) in g.edge.iter().enumerate() {
+            let (x, y) = (vx + i as i32 % vw, vy + i as i32 / vw);
+            if e[0] == 0 {
+                assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK));
+            } else if e[0] < 64 && e[1] < 64 {
+                assert!(
+                    g.pixels
+                        .get(x, y)
+                        .is_some_and(|p| p.level <= REST_INK.level)
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn hrt_a7_a_bright_dot_leads_the_ecg() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = heart_at(size);
+        run_s(&mut g, &mut ctx, 2.0);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let head = g.head as i32 % g.ecg.len() as i32;
+        let top = f64::from(size.height() - 1 - g.ecg_rows) * f64::from(Dots::CELL_H);
+        let span = f64::from(g.ecg_rows) * f64::from(Dots::CELL_H) - 1.0;
+        let s = (g.ecg[head as usize] / g.ecg_scale).clamp(-1.0, 1.0);
+        let hy = top + span * 0.55 - span * 0.45 * f64::from(s);
+        let cell = canvas.get(head / 2, (hy / 4.0) as i32).copied();
+        assert_eq!(cell.map(|c| c.ink), Some(ECG_HEAD_INK), "the write head");
+        // The rest of the trace is dimmer.
+        let trace = (0..i32::from(size.width()))
+            .filter_map(|x| {
+                (i32::from(size.height() - 1 - g.ecg_rows)..i32::from(size.height()) - 1)
+                    .filter_map(|y| canvas.get(x, y))
+                    .find(|c| c.ink.role == Role::Ramp(ECG_RAMP))
+            })
+            .count();
+        assert!(trace > 60, "{trace} trace cells");
     }
 
     #[test]

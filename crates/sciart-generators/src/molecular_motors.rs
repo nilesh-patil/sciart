@@ -16,13 +16,13 @@
 //! visible. Each 120° turn is an 80° substep after an ATP-binding dwell and a 40°
 //! substep after a catalytic dwell, both exponential; each turn releases one ATP.
 
-use std::f64::consts::{PI, TAU as TWO_PI};
+use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::particles::gaussian;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink, title};
+use sciart_core::{draw, ease, ink, raster, title};
 
 pub static META: Meta = Meta {
     name: "molecular_motors",
@@ -237,6 +237,12 @@ const KINESIN: usize = 0;
 /// `[ATP]` (µM) over the kinesin act: saturating, near `K_M`, scarce.
 const ATP_STEPS: [(f64, f64); 3] = [(0.0, 1000.0), (8.0, 60.0), (16.0, 15.0)];
 const ATP_DOTS: usize = 90;
+/// Footprints kept, and the seconds one takes to fade.
+const TRAIL: usize = 8;
+const TRAIL_S: f64 = 5.0;
+/// Cargo vesicle radius and its tether rest height (nm).
+const CARGO_R: f64 = 9.0;
+const CARGO_Y: f64 = -18.0;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -258,6 +264,10 @@ struct Motors {
     /// Camera centre (nm), easing after the motor.
     cam: f64,
     dots: Vec<Dot>,
+    /// Sites heads bound to (nm) and when, a ring buffer.
+    trail: [(f64, f64); TRAIL],
+    trail_len: usize,
+    trail_next: usize,
     time: f64,
     owed: f64,
     act: usize,
@@ -273,9 +283,12 @@ impl Default for Motors {
         Self {
             kinesin: Kinesin::new(),
             rotor: Rotor::new(),
-            cargo: [-14.0, -20.0],
+            cargo: [-14.0, CARGO_Y],
             cam: 0.0,
             dots: Vec::with_capacity(ATP_DOTS),
+            trail: [(0.0, 0.0); TRAIL],
+            trail_len: 0,
+            trail_next: 0,
             time: 0.0,
             owed: 0.0,
             act: KINESIN,
@@ -297,34 +310,78 @@ fn atp_at(t: f64) -> f64 {
         .map_or(ATP_STEPS[0].1, |s| s.1)
 }
 
-fn disc(px: &mut Pixels, (cx, cy): (f64, f64), r: f64, mut ink: impl FnMut(f64) -> Ink) {
-    let reach = r.ceil() as i32 + 1;
-    for dy in -reach..=reach {
-        for dx in -reach..=reach {
-            let (x, y) = (cx.floor() as i32 + dx, cy.floor() as i32 + dy);
-            let (ox, oy) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
-            let d = ox.hypot(oy);
-            if d <= r {
-                // Lit from the upper left: brighter towards it.
-                let shade = 0.5 + 0.5 * (-(ox + oy) / (r * 1.5 + 1.0)).clamp(-1.0, 1.0);
-                px.set(x, y, ink(shade * (1.0 - 0.35 * (d / r.max(1.0)).powi(2))));
+/// Blend `level` in `role` into pixel `(x, y)` by `cover`: over blank or same-ramp pixels
+/// the levels mix (the ramps run to near-black, so this reads as partial coverage); over
+/// another ramp the pixel is taken only when mostly covered.
+fn blend(px: &mut Pixels, x: i32, y: i32, cover: f64, role: Role, level: f64) {
+    let Some(under) = px.get(x, y) else {
+        return;
+    };
+    let base = if under.role == role {
+        f64::from(under.level)
+    } else if under.role == Role::Background || cover >= 0.5 {
+        0.0
+    } else {
+        return;
+    };
+    let cover = if under.role == role || under.role == Role::Background {
+        cover
+    } else {
+        1.0
+    };
+    px.set(
+        x,
+        y,
+        Ink::new(role, ink::level(base + (level - base) * cover)),
+    );
+}
+
+/// An antialiased, shaded disc: `level(shade, d)` with `shade` in `[0, 1]` (lit from the
+/// upper left) and `d` the distance from the centre over `r`.
+fn soft_disc(
+    px: &mut Pixels,
+    c: (f64, f64),
+    r: f64,
+    role: Role,
+    mut level: impl FnMut(f64, f64) -> f64,
+) {
+    raster::disc_pixels(c, r, |x, y, cover| {
+        let (ox, oy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
+        let shade = 0.5 + 0.5 * (-(ox + oy) / (r * 1.5 + 1.0)).clamp(-1.0, 1.0);
+        let l = level(shade, ox.hypot(oy) / r.max(0.5));
+        blend(px, x, y, cover, role, l);
+    });
+}
+
+/// An antialiased stroke of half-width `hw` pixels from `a` to `b`: coverage from the
+/// distance to the segment, so a thin rod is smooth at any angle.
+fn soft_segment(px: &mut Pixels, a: (f64, f64), b: (f64, f64), hw: f64, ink: Ink) {
+    let reach = hw + 1.0;
+    let (x0, x1) = (a.0.min(b.0) - reach, a.0.max(b.0) + reach);
+    let (y0, y1) = (a.1.min(b.1) - reach, a.1.max(b.1) + reach);
+    if !(x0.is_finite() && x1.is_finite() && y0.is_finite() && y1.is_finite()) {
+        return;
+    }
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = (dx * dx + dy * dy).max(1e-9);
+    for y in y0.floor() as i32..=y1.ceil() as i32 {
+        for x in x0.floor() as i32..=x1.ceil() as i32 {
+            let (qx, qy) = (f64::from(x) + 0.5 - a.0, f64::from(y) + 0.5 - a.1);
+            let t = ((qx * dx + qy * dy) / len2).clamp(0.0, 1.0);
+            let d = (qx - t * dx).hypot(qy - t * dy);
+            let cover = (hw + 0.5 - d).clamp(0.0, 1.0);
+            if cover > 0.0 {
+                blend(px, x, y, cover, ink.role, f64::from(ink.level));
             }
         }
     }
 }
 
-fn line(px: &mut Pixels, a: (f64, f64), b: (f64, f64), ink: Ink) {
-    let n = ((b.0 - a.0).abs().max((b.1 - a.1).abs()) * 1.5)
-        .ceil()
-        .max(1.0) as i32;
-    for k in 0..=n {
-        let t = f64::from(k) / f64::from(n);
-        px.set(
-            (a.0 + (b.0 - a.0) * t) as i32,
-            (a.1 + (b.1 - a.1) * t) as i32,
-            ink,
-        );
-    }
+/// Screen direction of γ at rotor angle `deg`, viewed from the membrane (Fo) side with
+/// y down: 0° points up and the angle grows clockwise on screen, the synthesis sense.
+pub(crate) fn gamma_dir(deg: f64) -> (f64, f64) {
+    let (s, c) = (deg.to_radians() - PI / 2.0).sin_cos_det();
+    (c, s)
 }
 
 impl Motors {
@@ -365,8 +422,9 @@ impl Motors {
             self.act = act;
             if act == KINESIN {
                 self.kinesin = Kinesin::new();
-                self.cargo = [-14.0, -20.0];
+                self.cargo = [-14.0, CARGO_Y];
                 self.cam = 0.0;
+                self.trail_len = 0;
                 self.scatter_dots(Self::dots_for(atp_at(0.0)));
             } else {
                 self.rotor = Rotor::new();
@@ -380,12 +438,20 @@ impl Motors {
                 self.dots.truncate(want);
             }
             let mut rng = self.rng.clone();
+            let before = self.kinesin.steps;
             self.kinesin.step(atp, &mut rng);
             self.rng = rng;
+            if self.kinesin.steps != before
+                && let Some(i) = self.kinesin.last_moved
+            {
+                self.trail[self.trail_next] = (self.kinesin.site[i] as f64 * SITE_NM, self.time);
+                self.trail_next = (self.trail_next + 1) % TRAIL;
+                self.trail_len = (self.trail_len + 1).min(TRAIL);
+            }
             // The cargo lags behind on its tether.
             let c = self.kinesin.centre();
             self.cargo[0] += (c - 16.0 - self.cargo[0]) * (2.0 * h).min(1.0);
-            self.cargo[1] += (-20.0 - self.cargo[1]) * (2.0 * h).min(1.0);
+            self.cargo[1] += (CARGO_Y - self.cargo[1]) * (2.0 * h).min(1.0);
             self.cargo[0] += gaussian(&mut self.rng, 0.0, 0.15);
             // A lazy camera: the motor walks across the frame, and the view pans only
             // once it strays 14 nm from the centre, so every step shows.
@@ -400,8 +466,7 @@ impl Motors {
             self.rng = rng;
             if made && self.dots.len() < ATP_DOTS {
                 // A fresh ATP leaves the catalytic site the rotor just passed.
-                let a = (self.rotor.angle - 30.0).to_radians();
-                let (s, c) = a.sin_cos_det();
+                let (c, s) = gamma_dir(self.rotor.angle - 30.0);
                 self.dots.push(Dot {
                     x: 0.55 * c,
                     y: 0.55 * s,
@@ -429,7 +494,7 @@ impl Motors {
         let ps = self.pixels.pixel_size();
         let (pw, ph) = (f64::from(ps.width()), f64::from(ps.height()) - 2.0);
         let s = self.scale();
-        let track_y = ph * 0.62;
+        let track_y = ph * 0.66;
         let to_px = |x: f64, y: f64, cam: f64| (pw / 2.0 + (x - cam) * s, track_y + y * s);
         let cam = self.cam;
         // ATP molecules drifting in solution.
@@ -440,13 +505,25 @@ impl Motors {
                     .set(x as i32, y as i32, Ink::new(Role::Ramp(Ramp::Sulfur), 150));
             }
         }
-        // Microtubule: three protofilaments of αβ-tubulin (4 nm beads, α dark, β pale),
-        // each row shifted along the axis as in the lattice's helical pitch, the far rows
-        // dimmer; value noise gives each dimer its own shade, so the track's texture
-        // moves with it rather than repeating.
+        // Microtubule: a dim tube body (lit from above) so the lattice has no black gaps,
+        // then three protofilaments of αβ-tubulin (4 nm beads, α darker, β paler), each
+        // row shifted along the axis as in the lattice's helical pitch, the far rows
+        // dimmer; value noise gives each dimer its own shade, so the texture moves with
+        // the track. Beads are antialiased and low in contrast: a soft, woven surface.
+        let tube = Role::Ramp(Ramp::Starlight);
+        let (y_top, y_bot) = (to_px(0.0, 2.4, cam).1, to_px(0.0, 14.6, cam).1);
+        for py in y_top.floor() as i32..=y_bot.ceil() as i32 {
+            let fy = f64::from(py) + 0.5;
+            let cover = ((fy - y_top).min(y_bot - fy) + 0.5).clamp(0.0, 1.0);
+            let t = ((fy - y_top) / (y_bot - y_top).max(1.0)).clamp(0.0, 1.0);
+            let lvl = cover * (26.0 + 30.0 * (1.0 - t));
+            for px in 0..i32::from(ps.width()) {
+                self.pixels.set(px, py, Ink::new(tube, ink::level(lvl)));
+            }
+        }
         let first = ((cam - pw / 2.0 / s) / 4.0).floor() as i64 - 3;
         let last = ((cam + pw / 2.0 / s) / 4.0).ceil() as i64 + 3;
-        for (row, (y, shift, depth)) in [(4.5, 0.0, 1.0), (8.5, 1.3, 0.8), (12.5, 2.6, 0.6)]
+        for (row, (y, shift, depth)) in [(12.5, 2.6, 0.62), (8.5, 1.3, 0.8), (4.5, 0.0, 1.0)]
             .into_iter()
             .enumerate()
         {
@@ -454,14 +531,25 @@ impl Motors {
                 let x = k as f64 * 4.0 + 2.0 + shift;
                 let beta = k.rem_euclid(2) == 0;
                 let grain = sciart_core::rng::value_noise(11 + row as u64, x, 0.0, 9.0);
-                let lvl = depth * (if beta { 150.0 } else { 100.0 }) * (0.85 + 0.3 * grain);
-                let (cx, cy) = to_px(x, y, cam);
-                disc(&mut self.pixels, (cx, cy), 2.0 * s, |l| {
-                    Ink::new(
-                        Role::Ramp(Ramp::Starlight),
-                        ink::level(lvl * (0.55 + 0.45 * l)),
-                    )
+                let lvl = depth * (if beta { 132.0 } else { 100.0 }) * (0.88 + 0.24 * grain);
+                soft_disc(&mut self.pixels, to_px(x, y, cam), 2.1 * s, tube, |l, d| {
+                    lvl * (0.62 + 0.38 * l) * (1.0 - 0.25 * d * d)
                 });
+            }
+        }
+        // Footprints: each site a head bound to glows faintly and fades, so the walk
+        // leaves a trail of 8 nm steps along the track.
+        for &(x, at) in &self.trail[..self.trail_len] {
+            let age = (self.time - at) / TRAIL_S;
+            if (0.0..1.0).contains(&age) {
+                let glow = 60.0 + 110.0 * (1.0 - age).powi(2);
+                soft_disc(
+                    &mut self.pixels,
+                    to_px(x, 3.4, cam),
+                    1.0 * s,
+                    Role::Ramp(Ramp::Aurora),
+                    |_, d| glow * (1.0 - 0.4 * d),
+                );
             }
         }
         // Cargo, tether (coiled coil) and heads.
@@ -472,43 +560,50 @@ impl Motors {
             0.5 * (heads[0][1] + heads[1][1]) - 6.5,
         );
         let (cx, cy) = to_px(self.cargo[0], self.cargo[1], cam);
-        // The cargo: a vesicle, its membrane a bright rim, its lumen mottled.
-        let r = 10.0 * s;
-        let reach = r.ceil() as i32 + 1;
-        for dy in -reach..=reach {
-            for dx in -reach..=reach {
-                let (x, y) = (cx.floor() as i32 + dx, cy.floor() as i32 + dy);
-                let (ox, oy) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
-                let d = ox.hypot(oy) / r;
-                if d > 1.0 {
-                    continue;
-                }
-                let light = 0.5 + 0.5 * (-(ox + oy) / (1.5 * r)).clamp(-1.0, 1.0);
-                let mottle = sciart_core::rng::value_noise(5, ox / s, oy / s, 2.5);
-                let rim = ease::smoothstep((d - 0.78) / 0.17);
-                let lvl = 35.0 + 45.0 * light + 30.0 * mottle + 90.0 * rim;
-                self.pixels
-                    .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lvl)));
+        // The cargo: a vesicle. A lipid bilayer (a bright, cool membrane), a dark lumen
+        // speckled with its cargo molecules, and a soft highlight at the upper left.
+        let r = CARGO_R * s;
+        raster::disc_pixels((cx, cy), r, |x, y, cover| {
+            let (ox, oy) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
+            let d = ox.hypot(oy) / r;
+            let light = 0.5 + 0.5 * (-(ox + oy) / (1.5 * r)).clamp(-1.0, 1.0);
+            let bump = |c: f64, w: f64| (-((d - c) / w).powi(2)).exp();
+            let leaflet = bump(0.91, 0.075);
+            if leaflet > 0.3 {
+                let lvl = (80.0 + 90.0 * light) * leaflet.min(1.0);
+                blend(&mut self.pixels, x, y, cover, Role::Ramp(Ramp::Ice), lvl);
+            } else {
+                // Two octaves of soft noise: a grainy, translucent lumen.
+                let fine = sciart_core::rng::value_noise(5, ox / s, oy / s, 0.8);
+                let coarse = sciart_core::rng::value_noise(6, ox / s, oy / s, 2.6);
+                let granule = ease::smoothstep((0.6 * fine + 0.4 * coarse - 0.35) / 0.4);
+                let sheen = (-(((ox / r + 0.4).powi(2) + (oy / r + 0.4).powi(2)) / 0.03)).exp();
+                let lvl =
+                    22.0 + 26.0 * light + 50.0 * granule * (0.6 + 0.4 * light) + 110.0 * sheen;
+                blend(&mut self.pixels, x, y, cover, tube, lvl);
             }
-        }
+        });
         let tether = Ink::new(Role::Ramp(Ramp::Aurora), 130);
-        line(
+        let hip_px = to_px(hip.0, hip.1, cam);
+        soft_segment(
             &mut self.pixels,
-            to_px(hip.0, hip.1, cam),
-            (cx + 6.0 * s, cy + 8.0 * s),
+            hip_px,
+            (cx + 0.55 * r, cy + 0.72 * r),
+            0.45,
             tether,
         );
         for (i, h) in heads.iter().enumerate() {
             let bound = k.free.is_none_or(|(f, _)| f != i);
             let (x, y) = to_px(h[0], h[1], cam);
-            line(&mut self.pixels, to_px(hip.0, hip.1, cam), (x, y), tether);
+            soft_segment(&mut self.pixels, hip_px, (x, y), 0.45, tether);
             let top = if bound { 235.0 } else { 185.0 };
-            disc(&mut self.pixels, (x, y), 4.0 * s, |l| {
-                Ink::new(
-                    Role::Ramp(Ramp::Aurora),
-                    ink::level(top * (0.55 + 0.45 * l)),
-                )
-            });
+            soft_disc(
+                &mut self.pixels,
+                (x, y),
+                4.0 * s,
+                Role::Ramp(Ramp::Aurora),
+                |l, _| top * (0.55 + 0.45 * l),
+            );
         }
     }
 
@@ -523,59 +618,46 @@ impl Motors {
             let (s, co) = a.sin_cos_det();
             let beta = j % 2 == 0;
             let lvl = if beta { 175.0 } else { 120.0 };
-            disc(
+            soft_disc(
                 &mut self.pixels,
                 (c.0 + r * co, c.1 + r * s),
                 r * 0.52,
-                |l| {
-                    Ink::new(
-                        Role::Ramp(Ramp::Starlight),
-                        ink::level(lvl * (0.5 + 0.5 * l)),
-                    )
-                },
+                Role::Ramp(Ramp::Starlight),
+                |l, _| lvl * (0.5 + 0.5 * l),
             );
         }
-        // γ and the actin filament stuck to it (Noji et al. 1997).
-        let a = self.rotor.shown().to_radians() - PI / 2.0;
-        let (s, co) = a.sin_cos_det();
-        let rotor = Ink::new(Role::Ramp(Ramp::Ferroin), 150);
-        disc(&mut self.pixels, c, r * 0.3, |l| {
-            Ink::new(Role::Ramp(Ramp::Ferroin), ink::level(90.0 + 90.0 * l))
-        });
-        let tip = (c.0 + 2.6 * r * co, c.1 + 2.6 * r * s);
+        // γ and the actin filament stuck to it (Noji et al. 1997), turning clockwise as
+        // seen from the membrane side: the synthesis sense.
+        let (gx, gy) = gamma_dir(self.rotor.shown());
+        let rotor = Ink::new(Role::Ramp(Ramp::Plasma), 150);
+        soft_disc(
+            &mut self.pixels,
+            c,
+            r * 0.3,
+            Role::Ramp(Ramp::Plasma),
+            |l, _| 90.0 + 90.0 * l,
+        );
+        let tip = (c.0 + 2.6 * r * gx, c.1 + 2.6 * r * gy);
         // While γ turns, a fading ghost of the filament sweeps behind it (motion blur).
         if let Some(t) = self.rotor.turning {
-            let back = (self.rotor.shown() - 25.0 * (1.0 - t / TURN_S)).to_radians() - PI / 2.0;
-            let (gs, gc) = back.sin_cos_det();
-            let ghost = Ink::new(Role::Ramp(Ramp::Ferroin), 70);
-            line(
+            let (bx, by) = gamma_dir(self.rotor.shown() - 25.0 * (1.0 - t / TURN_S));
+            let ghost = Ink::new(Role::Ramp(Ramp::Plasma), 70);
+            soft_segment(
                 &mut self.pixels,
                 c,
-                (c.0 + 2.6 * r * gc, c.1 + 2.6 * r * gs),
+                (c.0 + 2.6 * r * bx, c.1 + 2.6 * r * by),
+                0.8,
                 ghost,
             );
         }
-        line(&mut self.pixels, c, tip, rotor);
-        line(
-            &mut self.pixels,
-            (c.0, c.1 + 0.6),
-            (tip.0, tip.1 + 0.6),
-            rotor,
-        );
-        line(
-            &mut self.pixels,
-            (c.0 + 0.5, c.1),
-            (tip.0 + 0.5, tip.1),
-            rotor,
-        );
+        soft_segment(&mut self.pixels, c, tip, 1.0, rotor);
         // Tick marks every 40°, the substep positions.
         for k in 0..9 {
-            let a = f64::from(k) * TWO_PI / 9.0 - PI / 2.0;
-            let (s, co) = a.sin_cos_det();
+            let (dx, dy) = gamma_dir(f64::from(k) * 40.0);
             let lvl = if k % 3 == 0 { 120 } else { 60 };
             self.pixels.set(
-                (c.0 + 2.9 * r * co) as i32,
-                (c.1 + 2.9 * r * s) as i32,
+                (c.0 + 2.9 * r * dx) as i32,
+                (c.1 + 2.9 * r * dy) as i32,
                 Ink::new(Role::Ramp(Ramp::Starlight), lvl),
             );
         }
@@ -614,7 +696,7 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         Role::Ramp(Ramp::Aurora) if ink.level > 150 => '@',
         Role::Ramp(Ramp::Aurora) => '|',
         Role::Ramp(Ramp::Sulfur) => '*',
-        Role::Ramp(Ramp::Ferroin) => '#',
+        Role::Ramp(Ramp::Plasma) => '#',
         _ if ink.level > 110 => 'o',
         _ => '.',
     };
@@ -764,6 +846,41 @@ mod tests {
             "mean {}",
             sum / f64::from(n)
         );
+    }
+
+    #[test]
+    fn kin_a6_gamma_turns_clockwise_seen_from_the_membrane() {
+        // Screen y points down, so a positive cross product of successive directions is
+        // a clockwise turn on screen (viewed from the Fo side: the synthesis sense).
+        for k in 0..9 {
+            let (a, b) = (
+                gamma_dir(f64::from(k) * 40.0),
+                gamma_dir(f64::from(k + 1) * 40.0),
+            );
+            assert!(a.0 * b.1 - a.1 * b.0 > 0.5, "clockwise at {}°", k * 40);
+        }
+        assert!(gamma_dir(0.0).1 < -0.99, "0° points up");
+    }
+
+    #[test]
+    fn kin_a7_each_step_leaves_a_footprint_at_its_site() {
+        let mut ctx = Ctx::new(7, Size::new(120, 40));
+        let mut g = Motors::default();
+        g.resize(Size::new(120, 40), &mut ctx);
+        let mut seen = 0;
+        while g.time < 8.0 {
+            let before = g.kinesin.steps;
+            g.update(1.0 / 60.0, &mut ctx);
+            let new = (g.kinesin.steps - before) as usize;
+            seen += new;
+            if new > 0 {
+                let last = g.trail[(g.trail_next + TRAIL - 1) % TRAIL];
+                let i = g.kinesin.last_moved.unwrap_or(0);
+                assert_eq!(last.0, g.kinesin.site[i] as f64 * SITE_NM);
+            }
+        }
+        assert!(seen >= 3, "{seen} steps");
+        assert_eq!(g.trail_len, seen.min(TRAIL));
     }
 
     #[test]

@@ -171,9 +171,9 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
 - [x] States of Matter: spinodal_decomposition, lichtenberg_discharge, chemical_garden (moved from Life from Matter in the Life A round: the model is precipitation and osmosis, P×C)
 - [x] Physics of Life: heart_fibrillation, motility_clustering
 - [x] Molecules of Life: dicty_aggregation, seashell_pigmentation
-- [x] Life from Matter: molecular_motors
+- [x] Life from Matter: molecular_motors, hp_protein_folding (added in the Life B round)
 - [ ] Every new scene: SPEC-002 section, title, category by ADR-0013, < 2 ms worst frame at 200×50, leak guards green; review; local `--no-ff` merge into `main`
-- [ ] M13 follow-ups: lift the 1-2-1 blur duplicated in motility_clustering and dicty_aggregation (`blur121`) into core `Glow` · radical_chain: CHN-A5 (vent cool-down) passes only for K_T3 = 0.1 and on one seed; make it robust across seeds and nearby constants · catalytic_surface: CAT-A6 production stalls on some seeds (seed 4 seen while tuning the mid-window opening); make the loop robust across seeds
+- [ ] M13 follow-ups: lift the 1-2-1 blur duplicated in motility_clustering and dicty_aggregation (`blur121`) into core `Glow` · radical_chain: CHN-A5 (vent cool-down) passes only for K_T3 = 0.1 and on one seed; make it robust across seeds and nearby constants · catalytic_surface: CAT-A6 production stalls on some seeds (seed 4 seen while tuning the mid-window opening); make the loop robust across seeds · seashell_pigmentation draws its browns as false-colour Blackbody at 1.6–2.5 kK; switch to `Ramp::Sienna` (added in 7b6a9bf)
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
