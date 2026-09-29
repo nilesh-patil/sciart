@@ -8,18 +8,23 @@
 //! Radicals (a pool of [`CAPACITY`]) random-walk in a rounded vessel. Per step each one
 //!
 //! - **branches** (H + O₂ → OH + O, O + H₂ → OH + H: one radical becomes two) with rate
-//!   `k_b = K_B0 · fuel · exp(E_A (1 − 1/T))`, Arrhenius in the local temperature `T`
-//!   (units of the wall temperature);
+//!   `k_b = K_B0 · p · fuel · exp(E_A (1 − 1/T))` (H + O₂ is a collision with O₂, so ∝ p),
+//!   Arrhenius in the local temperature `T` (units of the wall temperature);
 //! - **terminates at the wall** on contact (the first explosion limit's mechanism), or
 //! - **recombines in the gas** at `K_T3 · p` (three-body) plus `K_RR · n/CAPACITY`
 //!   (radical–radical, the flame's own quench), leaving water.
 //!
 //! The diffusion coefficient falls as `1/p` (mean free path), so at low pressure the
 //! walls catch radicals faster than they branch and nothing happens; at `p = 1` (the
-//! limit) wall loss `D π² (1 + 1/A²)` of the vessel's slowest mode equals `K_B0`. Heat
+//! limit) wall loss `D π² (1 + 1/A²)` of the vessel's slowest mode equals `K_B0`. Above
+//! it the radicals both branch faster and spread slower, so the flame front is thin and
+//! slow (Fisher–KPP speed `2√(D k)`, width `√(D/k)`). Heat
 //! from each event goes into a coarse temperature grid (ADR-0012) that relaxes toward the
 //! wall and diffuses, feeding back into `k_b`: thermal runaway. Fuel is consumed per
-//! branching, so the flash burns itself out; the vessel is then vented and refilled.
+//! branching, globally and in a coarse *unburnt gas* grid: behind the flame the gas is
+//! spent, radicals there find nothing to branch on and recombine, so the explosion runs
+//! as a front from the ignition spark (a Fisher–KPP pulse) rather than flaring
+//! everywhere at once. The vessel is then vented and refilled.
 //!
 //! Pressure follows a looping [`Timeline`] in simulated seconds: slow reaction below the
 //! limit, a rise across it, the explosion, a vent. Captions follow the state.
@@ -48,8 +53,9 @@ const CAPTIONS: [&str; 3] = ["slow reaction", "chain branching", "explosion"];
 
 /// Radical pool size (the flash saturates it).
 pub(crate) const CAPACITY: usize = 4000;
-/// Branching rate at the wall temperature with full fuel (per simulated second).
-pub(crate) const K_B0: f64 = 3.0;
+/// Branching rate at the wall temperature with full fuel at the limit pressure (per
+/// simulated second; it scales with `p`).
+pub(crate) const K_B0: f64 = 1.2;
 /// Activation energy in units of the wall temperature.
 const E_A: f64 = 4.0;
 /// Three-body recombination per unit pressure and radical–radical recombination at a
@@ -68,34 +74,55 @@ const FUEL: f64 = 60_000.0;
 /// (cells²/s), and heat per branching and per recombination (grid-cell units).
 const MAX_CELLS: usize = 3000;
 const BUCKET: f64 = 1.25;
-const K_COOL: f64 = 2.0;
+const K_COOL: f64 = 2.5;
+/// The burnt gas's afterglow: a memory of the temperature excess fading with this time
+/// constant (s), drawn at `EMBER_W` of the live heat, so the trail behind the front dims
+/// fast to violet and the whole vessel fades over ≈ 3–4 s after the flash.
+const EMBER_TAU: f32 = 1.8;
+const EMBER_W: f32 = 0.9;
 const T_DIFF: f32 = 6.0;
-const HEAT_BRANCH: f32 = 0.06;
-const HEAT_RECOMB: f32 = 0.10;
+const HEAT_BRANCH: f32 = 0.5;
+const HEAT_RECOMB: f32 = 0.2;
 /// Cap on the temperature (units of the wall's): keeps the Arrhenius factor finite.
 const T_MAX: f32 = 6.0;
-/// Water haze decay while venting (per second).
-const VENT_RATE: f32 = 1.5;
+/// Water haze decay while venting (per second): it thins over the whole vent.
+const VENT_RATE: f32 = 0.6;
+/// Branchings that spend one grid cell's gas, and the extra recombination rate
+/// (per second) in fully burnt gas.
+const CELL_FUEL: f32 = 4.5;
+const K_BURNT: f64 = 6.0;
+/// Fresh gas flowing in once the vent has dropped below the limit (per second).
+const REFILL: f64 = 1.5;
+/// Pressure at which the spark strikes (just over the limit, during the rise).
+const SPARK_P: f64 = 1.2;
+/// Radicals the ignition spark releases at its hot spot.
+const SPARK_RADICALS: usize = 30;
 /// Longest internal step (the runtime's dt is 1/60 s).
 const MAX_H: f64 = 1.0 / 60.0;
 const MAX_SUBSTEPS: usize = 15;
 
 /// Timeline: (label, seconds); pressure in units of the first explosion limit.
-const PHASES: [(&str, f64); 4] = [("slow", 2.5), ("rise", 1.5), ("burn", 10.0), ("vent", 6.0)];
+const PHASES: [(&str, f64); 4] = [("slow", 2.5), ("rise", 1.5), ("burn", 6.5), ("vent", 5.5)];
+/// The vent drops the pressure over the first `1/VENT_FAST` of its beat, so fresh gas
+/// (and its slow chains) is back well before the loop ends.
+const VENT_FAST: f64 = 3.0;
 const P_LOW: f64 = 0.6;
 const P_HIGH: f64 = 2.2;
 
 const FLAME: Ramp = Ramp::Ice;
-const WATER: Ramp = Ramp::Starlight;
-const WATER_MAX: f64 = 80.0 / 255.0;
+const WATER: Ramp = Ramp::Ice;
+const WATER_MAX: f64 = 40.0 / 255.0;
 /// Radicals in the vessel at the start, so the first frame already has sparks.
 const SEED_RADICALS: usize = 25;
 /// Ice level of the gas at the wall temperature: a faint ambient so the vessel never
 /// reads as empty.
 const AMBIENT: u8 = 10;
-/// Flame levels below this are drawn in violet (`Ramp(Plasma)`), the flame's cool
-/// fringe; above it the pale blue of `FLAME` rises to a white-hot core.
-const VIOLET_TOP: u8 = 45;
+/// Flame levels below this are drawn in violet (`Ramp(Plasma)`, stretched up to its
+/// lavender), the flame's cool fringe; above it `FLAME` runs from its pale blue (skipping
+/// the saturated navy-cyan middle) to a white-hot core.
+const VIOLET_TOP: u8 = 100;
+const VIOLET_GAIN: f32 = 1.35;
+const ICE_FOOT: f32 = 165.0;
 /// The ignition spark's temperature excess and radius (grid cells), and where in the
 /// vessel it may strike (fractions of the width and height from the centre).
 const SPARK_HEAT: f32 = 1.6;
@@ -119,7 +146,11 @@ pub(crate) fn pressure(beat: &Beat) -> f64 {
         0 => P_LOW,
         1 => ease::lerp(P_LOW, P_HIGH, ease::smoothstep(beat.progress)),
         2 => P_HIGH,
-        _ => ease::lerp(P_HIGH, P_LOW, ease::smoothstep(beat.progress)),
+        _ => ease::lerp(
+            P_HIGH,
+            P_LOW,
+            ease::smoothstep((beat.progress * VENT_FAST).min(1.0)),
+        ),
     }
 }
 
@@ -186,6 +217,8 @@ pub(crate) struct Chain {
     births: Vec<Radical>,
     pub temp: Grid<f32>,
     pub water: Grid<f32>,
+    /// Unburnt share of the gas per cell (1 fresh, 0 spent).
+    pub gas: Grid<f32>,
     scratch: Grid<f32>,
     lap: Grid<f32>,
     pub fuel: f64,
@@ -202,12 +235,30 @@ impl Chain {
             births: Vec::with_capacity(CAPACITY),
             temp: Grid::new(grid, 1.0),
             water: Grid::new(grid, 0.0),
+            gas: Grid::new(grid, 1.0),
             scratch: Grid::new(grid, 0.0),
             lap: Grid::new(grid, 0.0),
             fuel: 1.0,
             refused: 0,
             init_acc: 0.0,
         }
+    }
+
+    /// Fresh gas everywhere.
+    pub(crate) fn refuel(&mut self) {
+        self.fuel = 1.0;
+        self.gas.fill(1.0);
+    }
+
+    /// Let fresh gas flow in for `h` seconds (the vent's refill).
+    fn refill(&mut self, h: f64) {
+        let k = 1.0 - (-REFILL * h).exp();
+        self.fuel += (1.0 - self.fuel) * k;
+        let k = k as f32;
+        self.gas
+            .as_mut_slice()
+            .iter_mut()
+            .for_each(|g| *g += (1.0 - *g) * k);
     }
 
     /// A uniform point inside the vessel (rejection sampling, ≤ 16 tries).
@@ -250,6 +301,7 @@ impl Chain {
         };
         let temp = self.temp.as_mut_slice();
         let water = self.water.as_mut_slice();
+        let gas = self.gas.as_mut_slice();
         let births = &mut self.births;
         births.clear();
         let mut branched = 0u64;
@@ -261,7 +313,9 @@ impl Chain {
                 return false;
             }
             let c = cell(r.x, r.y);
-            if rng.next_f64() < p_term {
+            let unburnt = gas[c];
+            let p_die = p_term + K_BURNT * f64::from(1.0 - unburnt) * h;
+            if rng.next_f64() < p_die {
                 water[c] += 1.0;
                 if rates.heat {
                     temp[c] = (temp[c] + HEAT_RECOMB).min(T_MAX);
@@ -269,9 +323,10 @@ impl Chain {
                 return false;
             }
             let t = f64::from(temp[c]).max(0.1);
-            let k_b = rates.k_b0 * fuel * (E_A * (1.0 - 1.0 / t)).exp();
+            let k_b = rates.k_b0 * fuel * f64::from(unburnt) * (E_A * (1.0 - 1.0 / t)).exp();
             if rng.next_f64() < (k_b * h).min(1.0) {
                 branched += 1;
+                gas[c] = (unburnt - 1.0 / CELL_FUEL).max(0.0);
                 water[c] += 0.5;
                 if rates.heat {
                     temp[c] = (temp[c] + HEAT_BRANCH).min(T_MAX);
@@ -316,6 +371,7 @@ impl Chain {
         if self.temp.size() != size {
             grid::regrid_bilinear(&mut self.temp, size, &mut self.scratch);
             grid::regrid_bilinear(&mut self.water, size, &mut self.scratch);
+            grid::regrid_bilinear(&mut self.gas, size, &mut self.scratch);
             self.lap.resize(size, 0.0);
         }
     }
@@ -335,13 +391,19 @@ struct Frame {
 /// The flame's ink for a toned level: violet fringe, pale blue body, white-hot core.
 pub(crate) fn flame_ink(lv: u8) -> Ink {
     if lv < VIOLET_TOP {
-        Ink::new(Role::Ramp(Ramp::Plasma), lv)
+        Ink::new(
+            Role::Ramp(Ramp::Plasma),
+            (f32::from(lv) * VIOLET_GAIN) as u8,
+        )
     } else {
-        Ink::new(Role::Ramp(FLAME), lv)
+        let t = f32::from(lv - VIOLET_TOP) / f32::from(255 - VIOLET_TOP);
+        Ink::new(Role::Ramp(FLAME), (ICE_FOOT + (255.0 - ICE_FOOT) * t) as u8)
     }
 }
 
-/// Strike the ignition spark: a Gaussian hot spot at a random point near the centre.
+/// Strike the ignition spark: a Gaussian hot spot at a random point near the centre,
+/// releasing a burst of radicals there. The gas's stray radicals are swept aside (the
+/// ignition's own chains outrun them), so the flame grows from this one seed as a front.
 fn spark(chain: &mut Chain, rng: &mut SplitMix64) {
     let (w, h) = (
         usize::from(chain.temp.width()),
@@ -354,6 +416,15 @@ fn spark(chain: &mut Chain, rng: &mut SplitMix64) {
         let (dx, dy) = ((i % w.max(1)) as f64 - cx, (i / w.max(1)) as f64 - cy);
         let g = (-(dx * dx + dy * dy) as f32 / (SPARK_R * SPARK_R)).exp();
         *t = (*t + SPARK_HEAT * g).min(T_MAX);
+    }
+    chain.pool.clear();
+    let (x, y) = (cx / w.max(1) as f64 * chain.vessel.a, cy / h.max(1) as f64);
+    let r = f64::from(SPARK_R) / h.max(1) as f64;
+    for _ in 0..SPARK_RADICALS {
+        let (dx, dy) = ((rng.next_f64() - 0.5) * r, (rng.next_f64() - 0.5) * r);
+        if chain.vessel.inside(x + dx, y + dy) {
+            chain.pool.spawn(Radical::at(x + dx, y + dy));
+        }
     }
 }
 
@@ -380,6 +451,8 @@ pub struct RadicalChain {
     mask: Vec<u8>,
     /// Dots of the vessel outline (built in `resize`).
     wall_dots: Vec<(i32, i32)>,
+    /// Afterglow of the burnt gas on the temperature lattice.
+    ember: Grid<f32>,
 }
 
 impl Default for RadicalChain {
@@ -397,11 +470,12 @@ impl Default for RadicalChain {
             pixels: Pixels::new(Size::new(1, 1)),
             dots: Dots::new(Size::new(1, 1)),
             glow: Glow::new(Size::new(1, 1)),
-            tone: Tone::asinh(0.6, 12.0),
+            tone: Tone::asinh(0.6, 8.0),
             map: SampleMap::default(),
             readout_room: 0,
             mask: Vec::new(),
             wall_dots: Vec::new(),
+            ember: Grid::new(Size::new(1, 1), 0.0),
         }
     }
 }
@@ -430,7 +504,7 @@ impl RadicalChain {
 
     fn rates(&self, p: f64) -> Rates {
         Rates {
-            k_b0: K_B0,
+            k_b0: K_B0 * p,
             k_t: K_T3 * p,
             diff: diffusion(p),
             heat: true,
@@ -483,11 +557,13 @@ impl RadicalChain {
             .copied()
             .fold(40.0f32, f32::max);
         // Skip the per-pixel bilinear samples of fields that are flat this frame.
-        let (hot, wet) = (
+        let (hot, wet, glowing) = (
             chain.max_temp() > 1.002,
             chain.water.as_slice().iter().any(|&w| w > 0.0),
+            self.ember.as_slice().iter().any(|&e| e > 1e-3),
         );
-        let (map, glow, tone, mask) = (&self.map, &self.glow, &self.tone, &self.mask);
+        let (map, glow, tone, mask, ember) =
+            (&self.map, &self.glow, &self.tone, &self.mask, &self.ember);
         let pw = i32::from(self.size.width());
         self.pixels.shade(|x, y| {
             match mask.get((y * pw + x) as usize) {
@@ -500,7 +576,12 @@ impl RadicalChain {
             } else {
                 0.0
             };
-            let light = glow.get(x, y).unwrap_or(0.0) + 3.0 * heat.max(0.0);
+            let after = if glowing {
+                EMBER_W * map.sample(ember, lx, ly)
+            } else {
+                0.0
+            };
+            let light = glow.get(x, y).unwrap_or(0.0) + 2.0 * heat.max(0.0) + after;
             let lv = tone.level(light);
             let wv = if wet {
                 map.sample(&chain.water, lx, ly) / water_top
@@ -637,25 +718,47 @@ impl Generator for RadicalChain {
             // Fresh gas: the vessel was vented and refilled.
             self.cycle = cycle;
             self.exploded = false;
-            chain.fuel = 1.0;
+            chain.refuel();
             chain.water.fill(0.0);
         }
-        if beat.index >= 1 && self.sparked != cycle {
+        if beat.index >= 1 && p > SPARK_P && self.sparked != cycle {
             // The ignition spark: one hot spot off-centre, so the runaway starts there and
             // the flame front propagates across the vessel instead of flaring everywhere.
             self.sparked = cycle;
             spark(chain, &mut self.rng);
         }
+        // Initiation is slow chemistry: it seeds the slow phase and the refilled vessel,
+        // but in the rise and the burn only the spark's chains run, so the flame is a
+        // front.
+        let venting = beat.index == 3 && p < 1.0;
+        let initiating = beat.index == 0 || venting;
         for _ in 0..steps {
-            chain.initiate(h, &mut self.rng);
+            if initiating {
+                chain.initiate(h, &mut self.rng);
+            }
+            if venting {
+                chain.refill(h);
+            }
             chain.step(h, rates, &mut self.rng);
             chain.cool(h);
+        }
+        if self.ember.size() != chain.temp.size() {
+            self.ember.resize(chain.temp.size(), 0.0);
+        }
+        let keep = (-(dt as f32) / EMBER_TAU).exp();
+        for (e, &t) in self
+            .ember
+            .as_mut_slice()
+            .iter_mut()
+            .zip(chain.temp.as_slice())
+        {
+            *e = (*e * keep).max(3.0 * (t - 1.0));
         }
         if beat.index == 3 {
             let k = (-VENT_RATE * dt as f32).exp();
             chain.water.as_mut_slice().iter_mut().for_each(|w| *w *= k);
         }
-        if chain.pool.len() > CAPACITY / 4 || chain.max_temp() > 1.5 + SPARK_HEAT {
+        if chain.pool.len() > CAPACITY / 8 || chain.max_temp() > 1.5 + SPARK_HEAT {
             self.exploded = true;
         }
         self.rasterise();
@@ -715,8 +818,8 @@ mod tests {
         let steps = (secs / SIM_DT) as usize;
         let (mut sx, mut sy, mut sxx, mut sxy, mut n) = (0.0, 0.0, 0.0, 0.0, 0.0);
         for k in 0..steps {
-            c.step(SIM_DT, cold(K_B0, p), &mut r);
-            c.fuel = 1.0;
+            c.step(SIM_DT, cold(K_B0 * p, p), &mut r);
+            c.refuel();
             let len = c.pool.len();
             if k > 30 && len > 0 && len < CAPACITY / 3 {
                 let (x, y) = (k as f64 * SIM_DT, (len as f64).ln());
@@ -781,7 +884,8 @@ mod tests {
         g.resize(size, &mut ctx);
         let mut peak = 1.0f32;
         let mut exploded_at = None;
-        for k in 0..(20.0 / SIM_DT) as usize {
+        let loop_s: f64 = PHASES.iter().map(|p| p.1).sum();
+        for k in 0..(loop_s / SIM_DT) as usize - 1 {
             g.update(SIM_DT, &mut ctx);
             let c = g.chain.as_ref().expect("chain");
             let m = c.max_temp();
@@ -812,5 +916,76 @@ mod tests {
             seen[CAPTIONS.iter().position(|&x| x == c).expect("listed")] = true;
         }
         assert_eq!(seen, [true; 3]);
+    }
+
+    #[test]
+    fn chn_a6_the_flame_runs_as_a_front_from_the_spark_and_fades_over_seconds() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = RadicalChain::default();
+        g.resize(size, &mut ctx);
+        let share = |c: &Chain, f: &dyn Fn(f32, f32) -> bool| {
+            let n = c.gas.len() as f32;
+            c.gas
+                .as_slice()
+                .iter()
+                .zip(c.temp.as_slice())
+                .filter(|&(&g, &t)| f(g, t))
+                .count() as f32
+                / n
+        };
+        let (mut at_latch, mut hot_max, mut peak_n) = (None, 0.0f32, 0usize);
+        let mut dark_since: Option<f64> = None;
+        let mut glow_after = 0.0f64;
+        for k in 0..(14.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+            let t = (k + 1) as f64 * SIM_DT;
+            let c = g.chain.as_ref().expect("chain");
+            let hot = share(c, &|_, t| t > 1.3);
+            let burnt = share(c, &|g, _| g < 0.5);
+            if g.exploded && at_latch.is_none() {
+                at_latch = Some((hot, burnt));
+            }
+            hot_max = hot_max.max(hot);
+            peak_n = peak_n.max(c.pool.len());
+            // Once the flame has gone out (pool back under 2 % of its peak), how long
+            // does the afterglow keep the vessel lit?
+            // (Only until the vent drops below the limit, where fresh slow chains start.)
+            let venting = pressure(&g.beat()) < 1.0 && g.beat().index == 3;
+            if g.exploded && !venting && peak_n > 500 && c.pool.len() * 50 < peak_n {
+                let since = *dark_since.get_or_insert(t);
+                let ember = g.ember.as_slice().iter().copied().fold(0.0f32, f32::max);
+                if ember > 0.5 {
+                    glow_after = glow_after.max(t - since);
+                }
+            }
+        }
+        let (hot, burnt) = at_latch.expect("the flash comes");
+        // A kernel at the spark, not the whole vessel at once, which the front then sweeps.
+        assert!(
+            hot < 0.25 && burnt < 0.1,
+            "at the latch: hot {hot} burnt {burnt}"
+        );
+        assert!(hot_max > 0.3, "the front sweeps the vessel ({hot_max})");
+        assert!(
+            (1.5..6.0).contains(&glow_after),
+            "afterglow {glow_after} s after the flame goes out"
+        );
+    }
+
+    #[test]
+    fn chn_a7_flame_inks_run_violet_to_pale_blue_to_white() {
+        assert_eq!(flame_ink(20).role, Role::Ramp(Ramp::Plasma));
+        let body = flame_ink(VIOLET_TOP);
+        assert!(body.role == Role::Ramp(FLAME) && body.level >= ICE_FOOT as u8);
+        assert_eq!(flame_ink(255).level, 255);
+        // Burnt gas quenches radicals: branching needs unburnt gas.
+        let (mut c, mut r) = chain_with(400, 9);
+        c.gas.fill(0.0);
+        let hot = cold(50.0, 1.0);
+        for _ in 0..60 {
+            c.step(SIM_DT, hot, &mut r);
+        }
+        assert!(c.pool.len() < 400, "{}", c.pool.len());
     }
 }
