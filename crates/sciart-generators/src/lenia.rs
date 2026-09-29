@@ -1,0 +1,571 @@
+//! Lenia: smooth, glowing creatures on a continuous cellular automaton; Orbium gliders
+//! swim, meet, and one is torn and regrows (SPEC-002 `lenia`).
+//!
+//! Lenia (Chan 2019) on a capped periodic lattice: `A ← clip(A + Δt·G(K * A), 0, 1)` with a
+//! ring kernel `K(r) = exp(−((r/R − ½)/0.15)²/2)` (normalised, radius `R = 13`, ≤ 560 taps),
+//! growth `G(u) = 2·exp(−(u − μ)²/(2σ²)) − 1` and the Orbium parameters `μ = 0.15`,
+//! `σ = 0.015`, `Δt = 0.1`. Orbium is stamped from its published `R = 13` table, so it is the canonical
+//! creature (a smaller `R` makes a cheaper but lumpier, more fragile variant).
+//!
+//! The world steps at 12 Hz from the fixed 60 Hz update; the display lerps between the
+//! last two states, so gliders move smoothly. Every [`DAMAGE_S`] seconds a disc is cut out
+//! of the heaviest creature and it regrows; a watchdog reseeds if the total mass leaves
+//! `[0.3, 3]×` the seeded mass.
+
+use rand::Rng;
+use sciart_core::grid::{self, SampleMap};
+use sciart_core::prelude::*;
+use sciart_core::raster::ASCII_RAMP;
+use sciart_core::{ease, ink};
+
+pub static META: Meta = Meta {
+    name: "lenia",
+    category: Category::Biology,
+    description: "Lenia: Orbium gliders swim across a continuous cellular automaton, torn and regrown",
+    title: "Lenia · life from smooth rules",
+    captions: &[],
+};
+
+pub fn build() -> Box<dyn Generator> {
+    Box::new(Lenia::default())
+}
+
+// ---- Model (SPEC-002 Model) ----
+
+/// Kernel radius in nodes.
+const R: f32 = 13.0;
+const MU: f32 = 0.15;
+const SIGMA: f32 = 0.015;
+const DT: f32 = 0.1;
+/// World steps per simulated second.
+const STEPS_PER_S: f64 = 12.0;
+/// Kernel taps at most (SPEC-002).
+#[cfg(test)]
+const MAX_TAPS: usize = 560;
+/// Lattice nodes at most (≤ 96×64).
+const MAX_NODES: usize = 6144;
+const BUCKET: f64 = 1.25;
+/// Seconds between damage beats.
+const DAMAGE_S: f64 = 12.0;
+/// Seconds per shoal: then the dish fades, and a new shoal on a new heading hatches.
+const SHOAL_S: f64 = 50.0;
+const FADE_S: f64 = 1.5;
+/// Radius of the damage disc in nodes, and its distance from the creature's heaviest
+/// node: a bite from the rim, which an Orbium survives (a disc through the
+/// core kills it).
+const DAMAGE_R: f32 = 4.0;
+const DAMAGE_OFFSET: f32 = 8.0;
+/// Watchdog band for the total mass, as a multiple of the seeded mass.
+const MASS_BAND: (f32, f32) = (0.3, 3.0);
+/// Lattice area per seeded glider.
+const AREA_PER_GLIDER: usize = 2000;
+const MAX_GLIDERS: usize = 3;
+
+/// Orbium unicaudatus at `R = 13` (Chan 2019, the Lenia tutorial's pattern), 20×20.
+#[rustfmt::skip]
+const ORBIUM: [[f32; 20]; 20] = [
+    [0.0,0.0,0.0,0.0,0.0,0.0,0.1,0.14,0.1,0.0,0.0,0.03,0.03,0.0,0.0,0.3,0.0,0.0,0.0,0.0],
+    [0.0,0.0,0.0,0.0,0.0,0.08,0.24,0.3,0.3,0.18,0.14,0.15,0.16,0.15,0.09,0.2,0.0,0.0,0.0,0.0],
+    [0.0,0.0,0.0,0.0,0.0,0.15,0.34,0.44,0.46,0.38,0.18,0.14,0.11,0.13,0.19,0.18,0.45,0.0,0.0,0.0],
+    [0.0,0.0,0.0,0.0,0.06,0.13,0.39,0.5,0.5,0.37,0.06,0.0,0.0,0.0,0.02,0.16,0.68,0.0,0.0,0.0],
+    [0.0,0.0,0.0,0.11,0.17,0.17,0.33,0.4,0.38,0.28,0.14,0.0,0.0,0.0,0.0,0.0,0.18,0.42,0.0,0.0],
+    [0.0,0.0,0.09,0.18,0.13,0.06,0.08,0.26,0.32,0.32,0.27,0.0,0.0,0.0,0.0,0.0,0.0,0.82,0.0,0.0],
+    [0.27,0.0,0.16,0.12,0.0,0.0,0.0,0.25,0.38,0.44,0.45,0.34,0.0,0.0,0.0,0.0,0.0,0.22,0.17,0.0],
+    [0.0,0.07,0.2,0.02,0.0,0.0,0.0,0.31,0.48,0.57,0.6,0.57,0.0,0.0,0.0,0.0,0.0,0.0,0.49,0.0],
+    [0.0,0.59,0.19,0.0,0.0,0.0,0.0,0.2,0.57,0.69,0.76,0.76,0.49,0.0,0.0,0.0,0.0,0.0,0.36,0.0],
+    [0.0,0.58,0.19,0.0,0.0,0.0,0.0,0.0,0.67,0.83,0.9,0.92,0.87,0.12,0.0,0.0,0.0,0.0,0.22,0.07],
+    [0.0,0.0,0.46,0.0,0.0,0.0,0.0,0.0,0.7,0.93,1.0,1.0,1.0,0.61,0.0,0.0,0.0,0.0,0.18,0.11],
+    [0.0,0.0,0.82,0.0,0.0,0.0,0.0,0.0,0.47,1.0,1.0,0.98,1.0,0.96,0.27,0.0,0.0,0.0,0.19,0.1],
+    [0.0,0.0,0.46,0.0,0.0,0.0,0.0,0.0,0.25,1.0,1.0,0.84,0.92,0.97,0.54,0.14,0.04,0.1,0.21,0.05],
+    [0.0,0.0,0.0,0.4,0.0,0.0,0.0,0.0,0.09,0.8,1.0,0.82,0.8,0.85,0.63,0.31,0.18,0.19,0.2,0.01],
+    [0.0,0.0,0.0,0.36,0.1,0.0,0.0,0.0,0.05,0.54,0.86,0.79,0.74,0.72,0.6,0.39,0.28,0.24,0.13,0.0],
+    [0.0,0.0,0.0,0.01,0.3,0.07,0.0,0.0,0.08,0.36,0.64,0.7,0.64,0.6,0.51,0.39,0.29,0.19,0.04,0.0],
+    [0.0,0.0,0.0,0.0,0.1,0.24,0.14,0.1,0.15,0.29,0.45,0.53,0.52,0.46,0.4,0.31,0.21,0.08,0.0,0.0],
+    [0.0,0.0,0.0,0.0,0.0,0.08,0.21,0.21,0.22,0.29,0.36,0.39,0.37,0.33,0.26,0.18,0.09,0.0,0.0,0.0],
+    [0.0,0.0,0.0,0.0,0.0,0.0,0.03,0.13,0.19,0.22,0.24,0.24,0.23,0.18,0.13,0.05,0.0,0.0,0.0,0.0],
+    [0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.0,0.02,0.06,0.08,0.09,0.07,0.05,0.01,0.0,0.0,0.0,0.0,0.0],
+];
+/// The radius the table was found at.
+const ORBIUM_R: f32 = 13.0;
+
+/// The ring kernel's taps `(dx, dy, weight)`, weights summing to 1: every offset closer
+/// than `R` whose weight is worth a multiply.
+pub(crate) fn kernel() -> Vec<(i32, i32, f32)> {
+    let reach = R as i32;
+    let mut taps = Vec::new();
+    for dy in -reach..=reach {
+        for dx in -reach..=reach {
+            let d = ((dx * dx + dy * dy) as f32).sqrt() / R;
+            if d >= 1.0 {
+                continue;
+            }
+            let z = (d - 0.5) / 0.15;
+            let w = (-0.5 * z * z).exp();
+            if w > 5e-3 {
+                taps.push((dx, dy, w));
+            }
+        }
+    }
+    let sum: f32 = taps.iter().map(|t| t.2).sum();
+    for t in &mut taps {
+        t.2 /= sum;
+    }
+    taps
+}
+
+/// Lenia's growth mapping.
+#[inline]
+pub(crate) fn growth(u: f32) -> f32 {
+    let z = (u - MU) / SIGMA;
+    2.0 * (-0.5 * z * z).exp() - 1.0
+}
+
+/// The world: field `a` on a `size` periodic lattice, plus scratch.
+#[derive(Debug, Clone)]
+pub(crate) struct World {
+    pub(crate) a: Grid<f32>,
+    /// The state one step ago, for display interpolation.
+    pub(crate) prev: Grid<f32>,
+    pot: Vec<f32>,
+    taps: Vec<(i32, i32, f32)>,
+}
+
+impl Default for World {
+    fn default() -> Self {
+        Self {
+            a: Grid::new(Size::new(1, 1), 0.0),
+            prev: Grid::new(Size::new(1, 1), 0.0),
+            pot: vec![0.0],
+            taps: kernel(),
+        }
+    }
+}
+
+impl World {
+    pub(crate) fn new(size: Size) -> Self {
+        Self {
+            a: Grid::new(size, 0.0),
+            prev: Grid::new(size, 0.0),
+            pot: vec![0.0; size.area()],
+            taps: kernel(),
+        }
+    }
+
+    pub(crate) fn mass(&self) -> f32 {
+        self.a.as_slice().iter().sum()
+    }
+
+    /// One Lenia step. The convolution runs tap by tap over whole rows, each wrapped row
+    /// split into two contiguous runs, so the inner loop is a plain vectorisable `axpy`.
+    pub(crate) fn step(&mut self) {
+        let (w, h) = (usize::from(self.a.width()), usize::from(self.a.height()));
+        self.prev.as_mut_slice().copy_from_slice(self.a.as_slice());
+        self.pot.fill(0.0);
+        let src = self.prev.as_slice();
+        for &(dx, dy, k) in &self.taps {
+            let sx = dx.rem_euclid(w as i32) as usize;
+            for y in 0..h {
+                let sy = (y as i32 + dy).rem_euclid(h as i32) as usize;
+                let row = &src[sy * w..][..w];
+                let out = &mut self.pot[y * w..][..w];
+                let (out_a, out_b) = out.split_at_mut(w - sx);
+                for (o, &s) in out_a.iter_mut().zip(&row[sx..]) {
+                    *o += k * s;
+                }
+                for (o, &s) in out_b.iter_mut().zip(&row[..sx]) {
+                    *o += k * s;
+                }
+            }
+        }
+        for (a, &u) in self.a.as_mut_slice().iter_mut().zip(&self.pot) {
+            *a = (*a + DT * growth(u)).clamp(0.0, 1.0);
+        }
+    }
+
+    /// Stamp an Orbium at `(cx, cy)`, rotated by `turns` quarter turns and mirrored if
+    /// `flip` (the table, resampled bilinearly if `R` differs from 13).
+    pub(crate) fn stamp_orbium(&mut self, (cx, cy): (i32, i32), turns: u8, flip: bool) {
+        let scale = ORBIUM_R / R;
+        let n = (20.0 / scale).round() as i32;
+        let (w, h) = (i32::from(self.a.width()), i32::from(self.a.height()));
+        let table = |x: f32, y: f32| -> f32 {
+            let (x0, y0) = (x.floor(), y.floor());
+            let (fx, fy) = (x - x0, y - y0);
+            let at = |i: f32, j: f32| {
+                if (0.0..20.0).contains(&i) && (0.0..20.0).contains(&j) {
+                    ORBIUM[j as usize][i as usize]
+                } else {
+                    0.0
+                }
+            };
+            let top = at(x0, y0) + (at(x0 + 1.0, y0) - at(x0, y0)) * fx;
+            let bot = at(x0, y0 + 1.0) + (at(x0 + 1.0, y0 + 1.0) - at(x0, y0 + 1.0)) * fx;
+            top + (bot - top) * fy
+        };
+        for j in 0..n {
+            for i in 0..n {
+                let (mut u, mut v) = (i, j);
+                if flip {
+                    u = n - 1 - u;
+                }
+                for _ in 0..turns % 4 {
+                    (u, v) = (n - 1 - v, u);
+                }
+                let val = table(i as f32 * scale, j as f32 * scale);
+                let (x, y) = (
+                    (cx + u - n / 2).rem_euclid(w),
+                    (cy + v - n / 2).rem_euclid(h),
+                );
+                if let Some(a) = self.a.get_mut(x, y) {
+                    *a = a.max(val);
+                }
+            }
+        }
+    }
+
+    /// The heaviest node (ties to the first), the centre of the damage beat.
+    fn heaviest(&self) -> (i32, i32) {
+        let w = i32::from(self.a.width());
+        let (i, _) = self
+            .a
+            .as_slice()
+            .iter()
+            .enumerate()
+            .fold((0, -1.0f32), |b, (i, &v)| if v > b.1 { (i, v) } else { b });
+        (i as i32 % w, i as i32 / w)
+    }
+
+    /// The emptiest of a coarse grid of candidate places (least mass within 12 nodes,
+    /// wrapping): where a new glider hatches without touching the others.
+    pub(crate) fn emptiest(&self) -> (i32, i32) {
+        let (w, h) = (i32::from(self.a.width()), i32::from(self.a.height()));
+        let mut best = ((0, 0), f32::INFINITY);
+        for gy in 0..4 {
+            for gx in 0..6 {
+                let (cx, cy) = (gx * w / 6 + w / 12, gy * h / 4 + h / 8);
+                let mut m = 0.0;
+                for dy in -12..=12 {
+                    for dx in -12..=12 {
+                        let (x, y) = ((cx + dx).rem_euclid(w), (cy + dy).rem_euclid(h));
+                        m += self.a.get(x, y).copied().unwrap_or(0.0);
+                    }
+                }
+                if m < best.1 {
+                    best = ((cx, cy), m);
+                }
+            }
+        }
+        best.0
+    }
+
+    /// Zero a disc of radius `r` around `(cx, cy)` (wrapping).
+    pub(crate) fn damage(&mut self, (cx, cy): (i32, i32), r: f32) {
+        let (w, h) = (i32::from(self.a.width()), i32::from(self.a.height()));
+        let reach = r.ceil() as i32;
+        for dy in -reach..=reach {
+            for dx in -reach..=reach {
+                if ((dx * dx + dy * dy) as f32) <= r * r {
+                    let (x, y) = ((cx + dx).rem_euclid(w), (cy + dy).rem_euclid(h));
+                    self.a.set(x, y, 0.0);
+                }
+            }
+        }
+    }
+
+    /// Centre of mass on the torus (circular means per axis), in nodes.
+    #[cfg(test)]
+    pub(crate) fn centre(&self) -> (f64, f64) {
+        let (w, h) = (f64::from(self.a.width()), f64::from(self.a.height()));
+        let (mut cx, mut sx, mut cy, mut sy) = (0.0, 0.0, 0.0, 0.0);
+        for ((x, y), &v) in self.a.iter() {
+            let v = f64::from(v);
+            let (s, c) = (std::f64::consts::TAU * f64::from(x) / w).sin_cos_det();
+            cx += v * c;
+            sx += v * s;
+            let (s, c) = (std::f64::consts::TAU * f64::from(y) / h).sin_cos_det();
+            cy += v * c;
+            sy += v * s;
+        }
+        let ang = |s: f64, c: f64| s.atan2(c).rem_euclid(std::f64::consts::TAU);
+        (
+            ang(sx, cx) * w / std::f64::consts::TAU,
+            ang(sy, cy) * h / std::f64::consts::TAU,
+        )
+    }
+}
+
+#[derive(Debug)]
+struct Lenia {
+    world: World,
+    /// Seeded mass, the watchdog's reference.
+    seed_mass: f32,
+    /// Fractional world steps owed; also the display interpolation weight.
+    owed: f64,
+    /// Simulated seconds, for the damage beat.
+    time: f64,
+    next_damage: f64,
+    seeded: bool,
+    /// Shared heading of the shoal (quarter turns).
+    turns: u8,
+    /// Gliders seeded.
+    gliders: usize,
+    scratch: Grid<f32>,
+    map: SampleMap,
+    pixels: Pixels,
+}
+
+impl Default for Lenia {
+    fn default() -> Self {
+        Self {
+            world: World::default(),
+            seed_mass: 1.0,
+            owed: 0.0,
+            time: 0.0,
+            next_damage: DAMAGE_S,
+            seeded: false,
+            turns: 0,
+            gliders: 1,
+            scratch: Grid::default(),
+            map: SampleMap::default(),
+            pixels: Pixels::default(),
+        }
+    }
+}
+
+impl Lenia {
+    /// Clear the world and seed gliders at random places and headings.
+    fn seed(&mut self, rng: &mut impl Rng) {
+        self.world.a.fill(0.0);
+        let size = self.world.a.size();
+        let (w, h) = (i32::from(size.width()), i32::from(size.height()));
+        let k = (size.area() / AREA_PER_GLIDER).clamp(1, MAX_GLIDERS);
+        self.gliders = k;
+        // One heading (and no mirroring, which would flip the heading) for the shoal:
+        // gliders that swim in parallel at the same
+        // speed keep their spacing and never merge into a chimera. They start on a
+        // diagonal so they are apart along both axes.
+        self.turns = rng.random_range(0..4);
+        let (x0, y0) = (rng.random_range(0..w.max(1)), rng.random_range(0..h.max(1)));
+        for i in 0..k as i32 {
+            let c = (x0 + i * w / k as i32, y0 + i * h / k as i32);
+            self.world.stamp_orbium(c, self.turns, false);
+        }
+        self.world
+            .prev
+            .as_mut_slice()
+            .copy_from_slice(self.world.a.as_slice());
+        self.seed_mass = self.world.mass().max(1e-3);
+    }
+
+    fn world_step(&mut self, rng: &mut impl Rng) {
+        self.world.step();
+        let m = self.world.mass() / self.seed_mass;
+        if !(MASS_BAND.0..=MASS_BAND.1).contains(&m) {
+            self.seed(rng);
+        } else if self.gliders > 1 && m < 1.0 - 0.7 / self.gliders as f32 {
+            // A glider died (a fatal bite): a new one hatches in the emptiest place,
+            // so the dish never thins out to a lone survivor.
+            let c = self.world.emptiest();
+            self.world.stamp_orbium(c, self.turns, false);
+        }
+    }
+
+    fn rasterise(&mut self) {
+        let f = self.owed.clamp(0.0, 1.0) as f32;
+        let local = self.time % SHOAL_S;
+        let fade = ease::smoothstep(local / FADE_S)
+            .min(ease::smoothstep((SHOAL_S - local) / FADE_S)) as f32;
+        let fade = if self.time < FADE_S { 1.0 } else { fade };
+        let (map, a, p) = (&self.map, &self.world.a, &self.world.prev);
+        self.pixels.shade(|x, y| {
+            let (va, vp) = (map.sample(a, x, y), map.sample(p, x, y));
+            let v = (vp + (va - vp) * f) * fade;
+            lenia_ink(v)
+        });
+    }
+}
+
+/// Two hues for one creature (SPEC-002 Inks, as built): the thin outer membrane and
+/// halo cold (Ice, glowing cyan), the dense core warm and pale (Aurora, lime-white),
+/// crossing at matching lightness so the body reads as one luminous animal.
+fn lenia_ink(v: f32) -> Ink {
+    let v = f64::from(v);
+    if v < 0.02 {
+        Ink::BLANK
+    } else if v < 0.3 {
+        ink::ramp(Ramp::Ice, 0.12 + 0.5 * (v / 0.3).powf(0.7))
+    } else {
+        ink::ramp(
+            Ramp::Aurora,
+            0.55 + 0.45 * ((v - 0.3) / 0.7).min(1.0).powf(0.8),
+        )
+    }
+}
+
+fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
+    let ink = raster_stronger(top, bottom)?;
+    let i = usize::from(ink.level) * (ASCII_RAMP.len() - 1) / 255;
+    Some((ASCII_RAMP[i], ink))
+}
+
+/// The brighter lit pixel of a cell, if any.
+fn raster_stronger(top: Ink, bottom: Ink) -> Option<Ink> {
+    let lit = |i: Ink| i.role != Role::Background;
+    match (lit(top), lit(bottom)) {
+        (false, false) => None,
+        (true, false) => Some(top),
+        (false, true) => Some(bottom),
+        (true, true) => Some(if top.level >= bottom.level {
+            top
+        } else {
+            bottom
+        }),
+    }
+}
+
+impl Generator for Lenia {
+    fn meta(&self) -> &'static Meta {
+        &META
+    }
+
+    fn resize(&mut self, size: Size, ctx: &mut Ctx) {
+        self.pixels.resize(size);
+        let px = self.pixels.pixel_size();
+        let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
+        if !self.seeded {
+            self.seeded = true;
+            self.world = World::new(lat);
+            self.seed(&mut ctx.rng);
+        } else if lat != self.world.a.size() {
+            // ADR-0012: carry the creatures over; a lattice too small for them reseeds.
+            grid::regrid_bilinear(&mut self.world.a, lat, &mut self.scratch);
+            grid::regrid_bilinear(&mut self.world.prev, lat, &mut self.scratch);
+            self.world.pot.clear();
+            self.world.pot.resize(lat.area(), 0.0);
+            let m = self.world.mass() / self.seed_mass;
+            if !(MASS_BAND.0..=MASS_BAND.1).contains(&m) {
+                self.seed(&mut ctx.rng);
+            }
+        }
+        self.map.rebuild(lat, px);
+        self.rasterise();
+    }
+
+    fn update(&mut self, dt: f64, ctx: &mut Ctx) {
+        if dt.is_nan() || dt <= 0.0 {
+            return;
+        }
+        let dt = dt.min(0.25);
+        let cycle = (self.time / SHOAL_S).floor();
+        self.time += dt;
+        if (self.time / SHOAL_S).floor() > cycle {
+            // A new shoal on a new heading: the dish never settles into one picture.
+            self.seed(&mut ctx.rng);
+        }
+        self.owed += dt * STEPS_PER_S;
+        while self.owed >= 1.0 {
+            self.owed -= 1.0;
+            self.world_step(&mut ctx.rng);
+        }
+        if self.time >= self.next_damage {
+            self.next_damage += DAMAGE_S;
+            let (x, y) = self.world.heaviest();
+            let (s, c) = ctx
+                .rng
+                .random_range(0.0..std::f32::consts::TAU)
+                .sin_cos_det();
+            let bite = (
+                x + (DAMAGE_OFFSET * c).round() as i32,
+                y + (DAMAGE_OFFSET * s).round() as i32,
+            );
+            self.world.damage(bite, DAMAGE_R);
+        }
+        self.rasterise();
+    }
+
+    fn render(&self, canvas: &mut Canvas) {
+        self.pixels
+            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn lone_orbium() -> World {
+        let mut w = World::new(Size::new(64, 64));
+        w.stamp_orbium((32, 32), 0, false);
+        w
+    }
+
+    fn steps(secs: f64) -> usize {
+        (secs * STEPS_PER_S).round() as usize
+    }
+
+    #[test]
+    fn lna_a1_a2_a5_orbium_survives_moves_and_stays_in_unit_interval() {
+        let mut w = lone_orbium();
+        let (m0, c0) = (w.mass(), w.centre());
+        for _ in 0..steps(30.0) {
+            w.step();
+            assert!(w.a.as_slice().iter().all(|v| (0.0..=1.0).contains(v)));
+        }
+        let m = w.mass();
+        assert!((m / m0 - 1.0).abs() <= 0.15, "mass {m0} → {m}");
+        let c = w.centre();
+        // Torus distance.
+        let d = |a: f64, b: f64| {
+            let d = (a - b).abs();
+            d.min(64.0 - d)
+        };
+        let moved = d(c.0, c0.0).hypot(d(c.1, c0.1));
+        assert!(moved >= 5.0, "centre moved {moved:.1} nodes");
+    }
+
+    #[test]
+    fn lna_a3_damaged_orbium_regrows() {
+        let mut w = lone_orbium();
+        for _ in 0..steps(5.0) {
+            w.step();
+        }
+        let m0 = w.mass();
+        let (cx, cy) = w.centre();
+        w.damage(
+            (cx.round() as i32, cy.round() as i32 + DAMAGE_OFFSET as i32),
+            DAMAGE_R,
+        );
+        assert!(w.mass() < 0.95 * m0, "the damage removed mass");
+        for _ in 0..steps(10.0) {
+            w.step();
+        }
+        assert!(w.mass() >= 0.8 * m0, "mass {m0} → {}", w.mass());
+    }
+
+    #[test]
+    fn lna_a4_stepping_cost_is_bounded() {
+        // The stepping frame is the worst frame (benched by `worst_frame`); its cost is
+        // taps × nodes, both capped.
+        assert!(kernel().len() <= MAX_TAPS, "{} taps", kernel().len());
+        let lat = grid::lattice_for(Size::new(200, 100), MAX_NODES, BUCKET);
+        assert!(lat.area() <= MAX_NODES && lat.width() <= 96 * 2);
+        let sum: f32 = kernel().iter().map(|t| t.2).sum();
+        assert!((sum - 1.0).abs() < 1e-4);
+    }
+
+    #[test]
+    fn lna_growth_peaks_at_mu() {
+        assert_eq!(growth(MU), 1.0);
+        assert!(growth(0.0) < -0.99 && growth(0.5) < -0.99);
+    }
+
+    #[test]
+    fn lna_watchdog_reseeds_an_empty_world() {
+        let mut ctx = Ctx::new(42, Size::new(80, 24));
+        let mut g = Lenia::default();
+        g.resize(Size::new(80, 24), &mut ctx);
+        g.world.a.fill(0.0);
+        g.update(0.1, &mut ctx);
+        assert!(g.world.mass() > 0.5 * g.seed_mass);
+    }
+}
