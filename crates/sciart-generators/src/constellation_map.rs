@@ -79,6 +79,8 @@ const STAR_ONE_PX: f64 = 0.75;
 /// Text (labels, name, epithet, graticule labels) shows only while the chart's fade is at
 /// least this: text colours keep a floor, so they would linger after the stars have gone.
 const TEXT_FADE: f64 = 0.25;
+/// The pen tip's level while a stroke is traced.
+const PEN_LEVEL: f64 = 150.0;
 /// Stars this bright (magnitude) scintillate: their colour temperature flickers by
 /// ±`TWINKLE` at 1–3 Hz (CON-A11).
 const BLOOM_MAG: f64 = 1.5;
@@ -272,7 +274,8 @@ const STAR_GLYPHS: [Glyph; 4] = [
 ];
 /// Background stars stay small so they never read as figure stars.
 const BG_GLYPHS: [Glyph; 2] = [Glyph::ascii('.'), Glyph::new('·', '.')];
-const PEN: Glyph = Glyph::new('•', 'o');
+/// The pen tip: a small neutral dot (M14 critic: no magenta accent).
+const PEN: Glyph = Glyph::new('·', '.');
 
 /// Rows of the chart area at `size`: all but the name block (CON-A7).
 fn chart_rows(size: Size) -> f64 {
@@ -1023,7 +1026,7 @@ impl Generator for ConstellationMap {
                 if frac > 0.0 && frac < 1.0 {
                     let (pa, pb) = (pos[a as usize], pos[b as usize]);
                     let (x, y) = (pa.0 + (pb.0 - pa.0) * frac, pa.1 + (pb.1 - pa.1) * frac);
-                    let ink = Ink::new(Role::Accent, Self::scaled(255.0, fade));
+                    let ink = Ink::new(Role::Ramp(Ramp::Starlight), Self::scaled(PEN_LEVEL, fade));
                     canvas.put(x.round() as i32, y.round() as i32, PEN, ink);
                 }
             }
