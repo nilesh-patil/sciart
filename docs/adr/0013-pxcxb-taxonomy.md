@@ -16,7 +16,8 @@ combination of the physics (P), chemistry (C) and biology (B) axes. Classify by 
 that matches:
 
 1. **Setting** (checked in this order). A human spacecraft or mission → Voyages; otherwise a
-   view from Earth's surface or atmosphere → Earth & Sky; otherwise the Sun, or any planet, moon
+   view from Earth's surface or atmosphere, or of Earth's weather or atmosphere from above
+   (M13 addendum) → Earth & Sky; otherwise the Sun, or any planet, moon
    or comet (ours or another star's) → Sun & Planets; otherwise a deep-space subject → Deep
    Cosmos. The order settles scenes that match several settings: moon_landing and mars_rover
    are missions before they are the Moon or Mars, moon_phases is a view from Earth before it is
