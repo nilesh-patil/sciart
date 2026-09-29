@@ -57,7 +57,7 @@ const E_A: f64 = 4.0;
 const K_T3: f64 = 0.15;
 const K_RR: f64 = 4.0;
 /// Initiation (H₂ + O₂ → HO₂ + H) rate at full fuel, radicals per second.
-const K_INIT: f64 = 3.0;
+const K_INIT: f64 = 6.0;
 /// Vessel aspect (width/height, vessel units) the limit is calibrated for.
 const A_REF: f64 = 1.8;
 /// Vessel corner radius, in vessel heights.
@@ -81,17 +81,35 @@ const MAX_H: f64 = 1.0 / 60.0;
 const MAX_SUBSTEPS: usize = 15;
 
 /// Timeline: (label, seconds); pressure in units of the first explosion limit.
-const PHASES: [(&str, f64); 4] = [("slow", 9.0), ("rise", 3.0), ("burn", 8.0), ("vent", 4.0)];
-const P_LOW: f64 = 0.5;
-const P_HIGH: f64 = 1.8;
+const PHASES: [(&str, f64); 4] = [("slow", 2.5), ("rise", 1.5), ("burn", 10.0), ("vent", 6.0)];
+const P_LOW: f64 = 0.6;
+const P_HIGH: f64 = 2.2;
 
 const FLAME: Ramp = Ramp::Ice;
 const WATER: Ramp = Ramp::Starlight;
 const WATER_MAX: f64 = 80.0 / 255.0;
+/// Radicals in the vessel at the start, so the first frame already has sparks.
+const SEED_RADICALS: usize = 25;
+/// Ice level of the gas at the wall temperature: a faint ambient so the vessel never
+/// reads as empty.
+const AMBIENT: u8 = 10;
+/// Flame levels below this are drawn in violet (`Ramp(Plasma)`), the flame's cool
+/// fringe; above it the pale blue of `FLAME` rises to a white-hot core.
+const VIOLET_TOP: u8 = 45;
+/// The ignition spark's temperature excess and radius (grid cells), and where in the
+/// vessel it may strike (fractions of the width and height from the centre).
+const SPARK_HEAT: f32 = 1.6;
+const SPARK_R: f32 = 2.5;
+const SPARK_SPREAD: f64 = 0.3;
+/// Glow kept per frame: short fading trails behind the sparks.
+const TRAIL_KEEP: f32 = 0.72;
+/// Spark radius (dots) while the pool is sparse; single dots once it crowds.
+const DOT_R: f64 = 0.9;
+const SPARSE: usize = 300;
 const OUTSIDE: u8 = 0;
 const ON_WALL: u8 = 1;
 const INSIDE: u8 = 2;
-const WALL: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 90);
+const WALL: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 150);
 const RADICAL: Ink = Ink::new(Role::Ramp(Ramp::Ice), 255);
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
@@ -137,6 +155,15 @@ impl Vessel {
 pub(crate) struct Radical {
     pub x: f64,
     pub y: f64,
+    /// Position before the last step, for the trail.
+    pub px: f64,
+    pub py: f64,
+}
+
+impl Radical {
+    pub(crate) fn at(x: f64, y: f64) -> Self {
+        Self { x, y, px: x, py: y }
+    }
 }
 
 /// Rates of one step, for the model and its tests.
@@ -188,7 +215,7 @@ impl Chain {
         for _ in 0..16 {
             let (x, y) = (rng.next_f64() * self.vessel.a, rng.next_f64());
             if self.vessel.inside(x, y) {
-                return Some(Radical { x, y });
+                return Some(Radical::at(x, y));
             }
         }
         None
@@ -227,6 +254,7 @@ impl Chain {
         births.clear();
         let mut branched = 0u64;
         self.pool.retain(|r| {
+            (r.px, r.py) = (r.x, r.y);
             r.x += half * (2.0 * rng.next_f64() - 1.0);
             r.y += half * (2.0 * rng.next_f64() - 1.0);
             if !vessel.inside(r.x, r.y) {
@@ -304,6 +332,31 @@ struct Frame {
     h: i32,
 }
 
+/// The flame's ink for a toned level: violet fringe, pale blue body, white-hot core.
+pub(crate) fn flame_ink(lv: u8) -> Ink {
+    if lv < VIOLET_TOP {
+        Ink::new(Role::Ramp(Ramp::Plasma), lv)
+    } else {
+        Ink::new(Role::Ramp(FLAME), lv)
+    }
+}
+
+/// Strike the ignition spark: a Gaussian hot spot at a random point near the centre.
+fn spark(chain: &mut Chain, rng: &mut SplitMix64) {
+    let (w, h) = (
+        usize::from(chain.temp.width()),
+        usize::from(chain.temp.height()),
+    );
+    let jitter = |rng: &mut SplitMix64| (rng.next_f64() - 0.5) * 2.0 * SPARK_SPREAD;
+    let cx = (0.5 + 0.5 * jitter(rng)) * w as f64;
+    let cy = (0.5 + 0.5 * jitter(rng)) * h as f64;
+    for (i, t) in chain.temp.as_mut_slice().iter_mut().enumerate() {
+        let (dx, dy) = ((i % w.max(1)) as f64 - cx, (i / w.max(1)) as f64 - cy);
+        let g = (-(dx * dx + dy * dy) as f32 / (SPARK_R * SPARK_R)).exp();
+        *t = (*t + SPARK_HEAT * g).min(T_MAX);
+    }
+}
+
 #[derive(Debug)]
 pub struct RadicalChain {
     size: Size,
@@ -314,6 +367,8 @@ pub struct RadicalChain {
     cycle: i64,
     /// Latched once the flash comes in the current loop.
     exploded: bool,
+    /// The loop whose ignition spark has been struck.
+    sparked: i64,
     frame: Frame,
     pixels: Pixels,
     dots: Dots,
@@ -323,6 +378,8 @@ pub struct RadicalChain {
     readout_room: usize,
     /// Per pixel: outside, on the wall or inside the vessel (built in `resize`).
     mask: Vec<u8>,
+    /// Dots of the vessel outline (built in `resize`).
+    wall_dots: Vec<(i32, i32)>,
 }
 
 impl Default for RadicalChain {
@@ -335,6 +392,7 @@ impl Default for RadicalChain {
             t: 0.0,
             cycle: 0,
             exploded: false,
+            sparked: -1,
             frame: Frame::default(),
             pixels: Pixels::new(Size::new(1, 1)),
             dots: Dots::new(Size::new(1, 1)),
@@ -343,6 +401,7 @@ impl Default for RadicalChain {
             map: SampleMap::default(),
             readout_room: 0,
             mask: Vec::new(),
+            wall_dots: Vec::new(),
         }
     }
 }
@@ -383,7 +442,7 @@ impl RadicalChain {
             return;
         };
         let f = self.frame;
-        self.glow.decay(0.5);
+        self.glow.decay(TRAIL_KEEP);
         self.dots.clear();
         let full = chain.pool.len() as f32 / CAPACITY as f32;
         // Many radicals means many overlapping splats: dim each so the flash stays graded.
@@ -393,11 +452,29 @@ impl RadicalChain {
                 f64::from(f.x0) + r.x * f.scale,
                 f64::from(f.y0) + r.y * f.scale,
             );
-            self.glow.splat(2.0 * px, 2.0 * py, &STROKE_KERNEL, scale);
-            // Keep the wall line clean: a radical touching it is about to die there.
-            if chain.vessel.sdf(r.x, r.y) < -1.0 / f.scale {
-                self.dots.plot(2.0 * px + 0.5, 2.0 * py + 0.5, RADICAL);
+            // Sparse: a stroke from the last position draws a fading trail. Crowded (the
+            // flash), the glow's own persistence (TRAIL_KEEP) is trail enough and a splat
+            // keeps the frame cheap.
+            if chain.pool.len() < SPARSE {
+                let (qx, qy) = (
+                    f64::from(f.x0) + r.px * f.scale,
+                    f64::from(f.y0) + r.py * f.scale,
+                );
+                let a = (2.0 * qx, 2.0 * qy);
+                self.glow
+                    .stroke(a, (2.0 * px, 2.0 * py), &STROKE_KERNEL, 2.0 * scale);
+            } else {
+                self.glow.splat(2.0 * px, 2.0 * py, &STROKE_KERNEL, scale);
             }
+            // Keep the wall line clean: a radical touching it is about to die there. In
+            // the crowd of the flash single dots would only speckle the flame, so only
+            // the glow shows them.
+            if chain.pool.len() < SPARSE && chain.vessel.sdf(r.x, r.y) < -1.0 / f.scale {
+                self.dots.disc(2.0 * px, 2.0 * py, DOT_R, RADICAL);
+            }
+        }
+        for &(x, y) in &self.wall_dots {
+            self.dots.set(x, y, WALL);
         }
         let water_top = chain
             .water
@@ -415,7 +492,6 @@ impl RadicalChain {
         self.pixels.shade(|x, y| {
             match mask.get((y * pw + x) as usize) {
                 Some(&INSIDE) => {}
-                Some(&ON_WALL) => return WALL,
                 _ => return Ink::BLANK,
             }
             let (lx, ly) = (x - f.x0, y - f.y0);
@@ -436,12 +512,7 @@ impl RadicalChain {
             } else {
                 Ink::BLANK
             };
-            let flame = if lv > 10 {
-                Ink::new(Role::Ramp(FLAME), lv)
-            } else {
-                Ink::BLANK
-            };
-            raster::stronger(flame, water)
+            raster::stronger(flame_ink(lv.max(AMBIENT)), water)
         });
     }
 
@@ -492,7 +563,7 @@ impl Generator for RadicalChain {
                 self.rng = SplitMix64::from_rng(&mut ctx.rng);
                 let mut chain = Chain::new(vessel, grid);
                 // A few radicals from the start, so the first frame is not empty.
-                for _ in 0..6 {
+                for _ in 0..SEED_RADICALS {
                     if let Some(r) = chain.random_point(&mut self.rng) {
                         chain.pool.spawn(r);
                     }
@@ -517,7 +588,9 @@ impl Generator for RadicalChain {
                         (f64::from(x - f.x0) + 0.5) / f.scale,
                         (f64::from(y - f.y0) + 0.5) / f.scale,
                     );
-                    if d < 0.0 {
+                    // The whole pixel inside (half-diagonal ≈ 0.71 px), so the gas never
+                    // pokes past the one-dot outline at the rounded corners.
+                    if d < -0.75 / f.scale {
                         INSIDE
                     } else if d < wall {
                         ON_WALL
@@ -526,6 +599,22 @@ impl Generator for RadicalChain {
                     }
                 }),
         );
+        // The wall: every dot whose centre lies within ~0.4 dot of the vessel's outline,
+        // a crisp one-dot braille line.
+        let dots = self.dots.dot_size();
+        let band = 0.3 / f.scale;
+        self.wall_dots.clear();
+        for y in 0..i32::from(dots.height()) {
+            for x in 0..i32::from(dots.width()) {
+                let d = vessel.sdf(
+                    ((f64::from(x) + 0.5) / 2.0 - f64::from(f.x0)) / f.scale,
+                    ((f64::from(y) + 0.5) / 2.0 - f64::from(f.y0)) / f.scale,
+                );
+                if d.abs() <= band {
+                    self.wall_dots.push((x, y));
+                }
+            }
+        }
         self.readout_room = title::stable_readout_room(size, &META);
         self.rasterise();
     }
@@ -551,6 +640,12 @@ impl Generator for RadicalChain {
             chain.fuel = 1.0;
             chain.water.fill(0.0);
         }
+        if beat.index >= 1 && self.sparked != cycle {
+            // The ignition spark: one hot spot off-centre, so the runaway starts there and
+            // the flame front propagates across the vessel instead of flaring everywhere.
+            self.sparked = cycle;
+            spark(chain, &mut self.rng);
+        }
         for _ in 0..steps {
             chain.initiate(h, &mut self.rng);
             chain.step(h, rates, &mut self.rng);
@@ -560,7 +655,7 @@ impl Generator for RadicalChain {
             let k = (-VENT_RATE * dt as f32).exp();
             chain.water.as_mut_slice().iter_mut().for_each(|w| *w *= k);
         }
-        if chain.pool.len() > CAPACITY / 4 || chain.max_temp() > 1.5 {
+        if chain.pool.len() > CAPACITY / 4 || chain.max_temp() > 1.5 + SPARK_HEAT {
             self.exploded = true;
         }
         self.rasterise();
@@ -647,11 +742,8 @@ mod tests {
         assert!(v.inside(0.9, 0.5) && !v.inside(-0.01, 0.5) && !v.inside(0.02, 0.02));
         assert!(v.sdf(0.9, 0.5) < 0.0 && v.sdf(0.9, 1.01) > 0.0);
         let mut c = Chain::new(v, Size::new(10, 6));
-        c.pool.spawn(Radical {
-            x: 0.9,
-            y: 0.999_999,
-        });
-        c.pool.spawn(Radical { x: 0.9, y: 0.5 });
+        c.pool.spawn(Radical::at(0.9, 0.999_999));
+        c.pool.spawn(Radical::at(0.9, 0.5));
         let mut r = rng(4);
         // Huge diffusion: every step lands far outside, so both must go at once.
         let rates = Rates {
@@ -689,7 +781,7 @@ mod tests {
         g.resize(size, &mut ctx);
         let mut peak = 1.0f32;
         let mut exploded_at = None;
-        for k in 0..(24.0 / SIM_DT) as usize {
+        for k in 0..(20.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
             let c = g.chain.as_ref().expect("chain");
             let m = c.max_temp();
@@ -714,7 +806,7 @@ mod tests {
         g.resize(size, &mut ctx);
         assert_eq!(g.caption(), Some("slow reaction"));
         let mut seen = [false; 3];
-        for _ in 0..(24.0 / SIM_DT) as usize {
+        for _ in 0..(20.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
             let c = g.caption().expect("caption");
             seen[CAPTIONS.iter().position(|&x| x == c).expect("listed")] = true;

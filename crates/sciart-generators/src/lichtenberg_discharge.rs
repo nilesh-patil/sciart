@@ -15,15 +15,18 @@
 //! same time to cross. When a branch reaches the edge the whole channel flashes, glows
 //! and fades out, and the next act starts on a fresh block.
 //!
-//! Picture: each tree link is a braille line from parent to child on the dot lattice
-//! (thin, sub-cell), over a half-block glow exposed along the same links. A link's
-//! brightness is the log of the current it carries (the size of its subtree, so the
-//! trunk is whitest), and newly broken-down tips flash as the front advances. Both are
-//! rasterised in `update`; `render` only blits.
+//! Picture: one half-block layer. Each tree link is stroked as an antialiased channel
+//! whose width and brightness follow the log of the current it carries (the size of its
+//! subtree): the trunk is wide and near-white, branches thin down through lavender to
+//! hair-fine indigo tips, each wrapped in a soft falloff halo. Strokes combine by
+//! maximum, not by sum, so a dense coral stays a tree of distinct channels instead of
+//! blooming into a blob. Newly broken-down tips flash as the front advances. In ASCII
+//! the tree is a braille-free dot raster by dot count. Everything is rasterised in
+//! `update`; `render` only blits.
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{self, Glow, Tone};
+use sciart_core::raster::{Glow, Tone};
 use sciart_core::{grid, ink};
 
 use crate::shared::laplacian_growth::{Dbm, Edge, Edges};
@@ -140,6 +143,78 @@ pub(crate) fn reach_schedule(local: f64) -> f64 {
     let x = (local / GROW_S).clamp(0.0, 1.0);
     // Fast start, gentle arrival: the first branches spread at once.
     1.0 - (1.0 - x) * (1.0 - x)
+}
+
+/// Channel radius in pixels: `CORE.0 + CORE.1·b²` (a hair-fine tip to a ≈ 1.6 pixel
+/// trunk), the fingering act's extra width, the antialiased falloff beyond the radius
+/// (pixels), the halo's level relative to the core, and the lowest drawn level.
+const CORE: (f32, f32) = (0.35, 1.25);
+const WIDE_EXTRA: f32 = 0.6;
+const FALLOFF: f32 = 1.4;
+const HALO_LEVEL: f32 = 0.35;
+const FLOOR: f32 = 0.06;
+
+/// Stroke the channel `a → b` (pixel coordinates, pixel centres at integers) into
+/// `glow`'s buffer of width `pw` by maximum: level `v·(0.25 + 0.75·v)` (dim channels
+/// darken toward the ramp's indigo foot) out to `radius`, then a halo falling linearly to
+/// zero over [`FALLOFF`] pixels. Off-buffer pixels are skipped; non-finite input draws
+/// nothing.
+pub(crate) fn channel(
+    glow: &mut Glow,
+    pw: usize,
+    a: (f64, f64),
+    b: (f64, f64),
+    radius: f32,
+    v: f32,
+) {
+    if pw == 0 || !(a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite()) {
+        return;
+    }
+    let buf = glow.values_mut();
+    let ph = buf.len() / pw;
+    let core = v * (0.25 + 0.75 * v);
+    let reach = radius + FALLOFF;
+    let (x0, x1) = (
+        a.0.min(b.0) - f64::from(reach),
+        a.0.max(b.0) + f64::from(reach),
+    );
+    let (y0, y1) = (
+        a.1.min(b.1) - f64::from(reach),
+        a.1.max(b.1) + f64::from(reach),
+    );
+    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+    let len2 = dx * dx + dy * dy;
+    // The clipped bounding box (the float → int casts saturate).
+    let (xa, xb) = (
+        (x0.floor() as i64).max(0),
+        (x1.ceil() as i64).min(pw as i64 - 1),
+    );
+    let (ya, yb) = (
+        (y0.floor() as i64).max(0),
+        (y1.ceil() as i64).min(ph as i64 - 1),
+    );
+    for y in ya..=yb {
+        let y = y as usize;
+        for x in xa..=xb {
+            let x = x as usize;
+            let (px, py) = (x as f64 - a.0, y as f64 - a.1);
+            let t = if len2 > 0.0 {
+                ((px * dx + py * dy) / len2).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let (ex, ey) = (px - t * dx, py - t * dy);
+            let d = (ex * ex + ey * ey).sqrt() as f32;
+            let level = if d <= radius {
+                // Antialiased core edge over the last half pixel.
+                core * (1.0 - ((d - radius + 0.5).max(0.0) / 0.5) * (1.0 - HALO_LEVEL))
+            } else {
+                core * HALO_LEVEL * (1.0 - (d - radius) / FALLOFF).max(0.0)
+            };
+            let cell = &mut buf[y * pw + x];
+            *cell = cell.max(level);
+        }
+    }
 }
 
 /// Brightness in [0, 1] of a link carrying `sub` of the tree's `total` sites, born at
@@ -323,8 +398,7 @@ impl Lichtenberg {
         let now = self.t as f32;
         let nodes = self.dbm.nodes();
         let total = self.sub.first().copied().unwrap_or(1);
-        const HALO: [(i32, i32, f32); 9] = raster::halo_kernel::<9>(1);
-        const WIDE: [(i32, i32, f32); 25] = raster::halo_kernel::<25>(2);
+        let pw = usize::from(self.glow.pixel_size().width());
         for (i, n) in nodes.iter().enumerate() {
             let b = link_brightness(self.sub[i], total, n.born, now);
             let b = (b + flash * (1.0 - b)) * fade;
@@ -333,22 +407,24 @@ impl Lichtenberg {
             }
             let p = nodes[n.parent as usize];
             let (a, c) = (at(p.x, p.y), at(n.x, n.y));
-            // Trunk and flash near-white, mid branches lavender, fine tips violet.
             let level = 0.5 + 0.5 * f64::from(b);
             self.dots
                 .line(a.0, a.1, c.0, c.1, ink::ramp(act.ramp, level));
-            // A soft 1–2 pixel halo, so thick branches bloom.
-            if act.wide {
-                self.glow.stroke(a, c, &WIDE, 0.14 * b * b);
-            } else {
-                self.glow.stroke(a, c, &HALO, 0.45 * b * b * b);
-            }
+            // Dots → pixels (2 × 2 dots a pixel), then a channel stroked by maximum.
+            let half = |q: (f64, f64)| (0.5 * q.0 + 0.25, 0.5 * q.1 + 0.25);
+            // Width by the current alone: a fresh tip flashes bright but stays thin.
+            let wb = link_brightness(self.sub[i], total, f32::MIN, now) * fade;
+            let width = CORE.0 + CORE.1 * wb * wb + if act.wide { WIDE_EXTRA } else { 0.0 };
+            channel(&mut self.glow, pw, half(a), half(c), width, b);
         }
         let ramp = act.ramp;
-        self.glow.to_pixels(&mut self.pixels, &self.tone, |l| {
-            Ink::new(Role::Ramp(ramp), (u16::from(l) * 7 / 8) as u8)
-        });
-        self.pixels.dissolve(16);
+        self.pixels.clear();
+        for (i, &v) in self.glow.values().iter().enumerate() {
+            if v >= FLOOR {
+                let (x, y) = ((i % pw) as i32, (i / pw) as i32);
+                self.pixels.set(x, y, ink::ramp(ramp, f64::from(v)));
+            }
+        }
     }
 }
 
@@ -404,7 +480,6 @@ impl Generator for Lichtenberg {
             return;
         }
         self.pixels.blit(canvas, |_, _, _, _| None);
-        self.dots.blit_over(canvas, &self.pixels);
     }
 }
 

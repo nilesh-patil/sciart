@@ -1,7 +1,7 @@
-//! A single electron's wave packet meets a wall with two slits: the wave spreads through
-//! both, interferes into fanned fringes, and on the screen behind single clicks appear
-//! one at a time until the fringes emerge from them; a last act shows a packet tunnelling
-//! through a thin barrier (SPEC-002 `quantum_double_slit`).
+//! Electrons from a steady source meet a wall with two slits: the wave spreads through
+//! both into a fan of bright lobes and dark nodal rays, and on the screen behind single
+//! clicks land one at a time until the fringes emerge from them; a last act aims the
+//! same beam at a thin barrier it partly tunnels through (SPEC-002 `quantum_double_slit`).
 //!
 //! ## Model
 //!
@@ -21,25 +21,36 @@
 //! (`ode::tridiag_apply_c`), two complex multiply-adds a node.
 //!
 //! The slit wall is a real potential of 10⁴ (a hard wall that keeps the step unitary),
-//! the tunnelling barrier a real step `V₀` above the packet's energy, and the edges a
+//! the tunnelling barrier a real step `V₀` above the beam's energy, and the edges a
 //! quadratic imaginary potential `−iη` that absorbs outgoing waves instead of reflecting
 //! them.
 //!
+//! The source is a soft line source a few nodes in from the left absorber: after every
+//! step `ψ(x_src, y) += S·g(y)·e^{−iφn}`, with `g` a Gaussian narrow enough to light just
+//! the two slits and `φ` the step's eigenphase for the carrier `k` (`2 atan(dt(1 − cos k))`),
+//! so it radiates a monochromatic beam of wave number `k` both ways (the left half into
+//! the absorber). The field therefore settles into a steady diffraction pattern. A new
+//! grid starts from the analytic incident beam and runs 3× fast for its first second, so
+//! the fan fills the view within a second of any start or resize.
+//!
 //! ## Detection
 //!
-//! The screen is a grid column near the right edge. The probability crossing it each step
-//! is `Σ_y |ψ(x_s, y)|² · v_g · dt`; a fixed number of clicks per unit of it are drawn at
-//! positions sampled from `|ψ(x_s, y)|²` (Born rule) through `InverseCdf` with `ctx.rng`.
+//! The screen is a grid column near the right edge. Clicks arrive at a rate proportional
+//! to the probability current crossing it (as a share of the beam the source emits) and
+//! land at positions sampled from that current (Born rule) through `InverseCdf` with
+//! `ctx.rng`.
 //! Clicks accumulate in a fixed pool and are drawn on a strip to the right, so the
 //! fringes build up from single dots.
 //!
 //! ## Picture
 //!
-//! Half-block pixels show `Re ψ` as a signed field (`Role::Div`): wave crests and troughs
-//! in the two hues, brightness following `|ψ|`, so the carrier's wavefronts, the fan of
-//! fringes and its dark nodal lines all read at once. Where a pixel spans more than a
-//! wavelength the carrier would alias, so small views show `|ψ|` on the positive hue.
-//! Walls and the screen are Starlight; clicks are braille dots over the strip.
+//! Half-block pixels show the wave as a soft single-hue glow (`Ramp(Aurora)`, a
+//! phosphor green): brightness follows `|ψ|` (the square root of the probability
+//! density, so the fan's weak outer lobes still read), and where the view resolves the
+//! carrier a light shimmer of `Re ψ/|ψ|` rides on it, so wavefronts visibly stream
+//! through the steady fan of lobes and dark nodal rays. Faint density fades smoothly to
+//! black (no hard cut). Walls and the screen are Starlight; clicks are warm-white braille
+//! dots over a glowing histogram of where they landed.
 
 use std::f64::consts::TAU;
 
@@ -63,9 +74,6 @@ pub fn build() -> Box<dyn Generator> {
 const CAPTIONS: [&str; 3] = ["interference", "one at a time", "tunnelling"];
 /// Act lengths (simulated seconds), in `CAPTIONS` order.
 const ACT_S: f64 = 20.0;
-/// A packet launches every `PACKET_S` seconds of an act, at most `PACKETS` per act.
-const PACKET_S: f64 = 6.5;
-const PACKETS: f64 = 3.0;
 
 /// Node budget of the Schrödinger grid (ADR-0012); the view's aspect is clamped.
 const MAX_NODES: usize = 11_000;
@@ -79,30 +87,42 @@ const ETA: f64 = 0.35;
 /// Carrier wave number: a wavelength of 6 nodes.
 pub(crate) const K_WAVE: f64 = TAU / 6.0;
 /// Time step (lattice units) and steps per 60 Hz frame: ≈ 18 time units a second, so a
-/// packet crosses the grid in ≈ 4 s.
+/// wavefront crosses the grid in ≈ 4 s.
 pub(crate) const DT: f64 = 0.15;
 const STEPS_PER_FRAME: f64 = 2.0;
+/// A new grid's first `FAST_S` seconds run `FAST` times as many steps, so the fan
+/// reaches the screen within about a second of a start or resize.
+const FAST: f64 = 2.0;
+const FAST_S: f64 = 2.0;
 /// Step cap per `update`, so a long `dt` slows the scene instead of the frame.
 const MAX_STEPS: usize = 6;
+/// Source column (nodes in from the left edge) and its strength; the incident amplitude
+/// it settles to is `S·SOURCE_GAIN` (QDS-A6).
+const SOURCE_X: usize = ABSORB + 3;
+const SOURCE_S: f64 = 0.1;
 /// Wall and barrier potentials. The packet's kinetic energy per axis is
 /// `2(1 − cos k) = 1` for λ = 6.
 const V_WALL: f64 = 1.0e4;
-pub(crate) const V_BARRIER: f64 = 1.3;
+pub(crate) const V_BARRIER: f64 = 1.6;
 const BARRIER_W: usize = 2;
-/// Packet widths (nodes; σ_y as a fraction of the view height).
-const SIGMA_X: f64 = 8.0;
+/// Beam width σ_y as a fraction of the view height: the two slits sit at ±0.18.
 const SIGMA_Y_FRAC: f64 = 0.15;
+/// Packet length for the norm test (QDS-A1).
+#[cfg(test)]
+const SIGMA_X: f64 = 8.0;
 
-/// Clicks per unit of probability crossing the screen, by act. The slits pass ≈ 20 % of
-/// a packet, so ≈ 30 clicks a packet in act 1 and ≈ 200 in act 2.
-const CLICK_RATE: [f64; 3] = [600.0, 4000.0, 600.0];
+/// Clicks a second for a beam that reached the screen whole, by act. About 5 % of the
+/// beam's current reaches the screen through the slits: ≈ 30 clicks a second while the
+/// fringes build, ≈ 10 a second in "one at a time", so single arrivals read; the
+/// barrier's share sets the tunnelling rate.
+const CLICK_RATE: [f64; 3] = [640.0, 210.0, 150.0];
 const CLICK_CAP: usize = 4000;
 const CLICKS_PER_FRAME: usize = 24;
 /// A click flashes at full level and settles to `CLICK_REST` over `CLICK_FADE_S`.
 const CLICK_REST: f64 = 185.0;
 const CLICK_FADE_S: f32 = 1.2;
 /// Wave visibility by act: act 2 dims the wave so the clicks carry the picture.
-const WAVE_VIS: [f32; 3] = [1.0, 0.6, 1.0];
+const WAVE_VIS: [f32; 3] = [1.0, 0.4, 1.0];
 /// Tone: `v = Re ψ/√peak` drawn as `sign(v)·√|v|`, blank below `CUTOFF`. Each side of
 /// the wall has its own peak, so the weak transmitted fan is exposed like the incident
 /// packet; the peaks decay with this half-life so a spreading wave stays visible.
@@ -113,17 +133,17 @@ const PEAK_HALF_LIFE_S: f64 = 4.0;
 /// The source side (incident + reflected standing wave) is exposed at this share of the
 /// fan's brightness, so the diffraction fan carries the picture.
 const SOURCE_EXPOSURE: f64 = 0.55;
-/// Div pixels fainter than this (|level − 128|) dissolve into the black, so the fan's
-/// small-amplitude fringe does not break up into ragged pixels (CORE-R89).
-const DISSOLVE_FLOOR: u8 = 32;
 /// Click histogram along the screen (fractions of the view height) and its glow levels.
 const HIST_BINS: usize = 160;
-const GLOW_LEVELS: (f64, f64) = (18.0, 118.0);
+const GLOW_LEVELS: (f64, f64) = (18.0, 170.0);
 /// The glow reaches full strength once this many clicks are in, so a few early clicks
 /// do not paint noise bands.
 const GLOW_FULL_CLICKS: f64 = 500.0;
 /// Binomial smoothing of the histogram: 9 taps (σ = √2 bins ≈ 1 % of the screen).
 const GLOW_TAPS: [f64; 9] = [1.0, 8.0, 28.0, 56.0, 70.0, 56.0, 28.0, 8.0, 1.0];
+/// The wave's glow ramp and the carrier shimmer's depth.
+const WAVE: Ramp = Ramp::Aurora;
+const SHIMMER: f64 = 0.25;
 const WALL_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 111);
 const BARRIER_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 71);
 const SCREEN_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 55);
@@ -143,9 +163,8 @@ pub(crate) struct Geometry {
     pub yc: f64,
     pub d: usize,
     pub slit: usize,
-    /// Screen column and packet start.
+    /// Screen column.
     pub xs: usize,
-    pub x0: f64,
 }
 
 impl Geometry {
@@ -176,12 +195,12 @@ impl Geometry {
             vy0: VIEW_MARGIN,
             view_w: vw,
             view_h: vh,
-            xw: (ABSORB as f64 + 6.5 * SIGMA_X).round() as usize,
+            // A short run from the source leaves most of the view to the fan.
+            xw: (VIEW_MARGIN + (0.28 * vw as f64).round() as usize).max(SOURCE_X + 16),
             yc: (h as f64 - 1.0) / 2.0,
             d,
             slit: 5,
             xs: w - ABSORB - 1,
-            x0: ABSORB as f64 + 2.5 * SIGMA_X,
         }
     }
 
@@ -417,8 +436,78 @@ impl Adi {
     }
 }
 
+/// The steady line source (see the module docs): `ψ(x, y) += amp·g(y)·e^{−iφn}` after
+/// step `n`, with `φ` the carrier's eigenphase per step, so the beam it radiates is
+/// monochromatic at wave number `k`.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Source {
+    x: usize,
+    profile: Vec<f64>,
+    phi: f64,
+    n: u64,
+}
+
+impl Source {
+    pub(crate) fn new(g: &Geometry, k: f64, dt: f64) -> Self {
+        let sigma = SIGMA_Y_FRAC * g.view_h as f64;
+        let profile = (0..g.h)
+            .map(|y| {
+                let dy = y as f64 - g.yc;
+                (-(dy * dy) / (2.0 * sigma * sigma)).exp()
+            })
+            .collect();
+        Self {
+            x: SOURCE_X.min(g.w.saturating_sub(1)),
+            profile,
+            phi: carrier_phase(k, dt),
+            n: 0,
+        }
+    }
+
+    /// Add this step's source term to `psi` (`w` wide) and advance the phase.
+    pub(crate) fn emit(&mut self, psi: &mut [C64], w: usize, amp: f64) {
+        let (s, c) = (self.phi * self.n as f64).sin_cos_det();
+        let e = C64::new(c, -s).scale(amp);
+        for (y, &g) in self.profile.iter().enumerate() {
+            if let Some(z) = psi.get_mut(y * w + self.x) {
+                *z = *z + e.scale(g);
+            }
+        }
+        self.n += 1;
+    }
+
+    /// The analytic beam the source settles to, `u·g(y)·e^{ik|x − x_src|}` at the current
+    /// phase, written left of column `x_end` (the rest is left alone).
+    pub(crate) fn fill_beam(&self, psi: &mut [C64], w: usize, k: f64, u: C64, x_end: usize) {
+        let (s, c) = (self.phi * self.n as f64).sin_cos_det();
+        let now = u * C64::new(c, -s);
+        for (y, &g) in self.profile.iter().enumerate() {
+            for x in 0..x_end.min(w) {
+                let (s, c) = (k * x.abs_diff(self.x) as f64).sin_cos_det();
+                psi[y * w + x] = now * C64::new(c, s).scale(g);
+            }
+        }
+    }
+
+    /// The probability current the beam carries to the right, `2 sin k·|u|²·Σ g²`.
+    pub(crate) fn flux(&self, k: f64, u: f64) -> f64 {
+        2.0 * k.sin_det() * u * u * self.profile.iter().map(|g| g * g).sum::<f64>()
+    }
+}
+
+/// The step's eigenphase for a plane wave `k` along one axis: `2 atan(dt(1 − cos k))`
+/// (the Cayley factor of `A = (dt/2)·2(1 − cos k)`; the other axis contributes nothing).
+pub(crate) fn carrier_phase(k: f64, dt: f64) -> f64 {
+    2.0 * (dt * (1.0 - k.cos_det())).atan()
+}
+
+/// The steady incident amplitude per unit source strength (QDS-A6), measured on the
+/// lattice for `K_WAVE` and `DT`: the additive source's discrete-time response.
+const SOURCE_GAIN: C64 = C64::new(4.17, 0.20);
+
 /// Fill `psi` (row-major `w`-wide) with a unit-norm Gaussian packet at `(x0, y0)` moving
 /// right with wave number `k`; nodes where `solid` holds stay zero.
+#[cfg(test)]
 pub(crate) fn launch(
     psi: &mut [C64],
     w: usize,
@@ -503,9 +592,12 @@ pub struct QuantumDoubleSlit {
     timeline: Timeline,
     t: f64,
     pending: f64,
-    /// The act whose potential is set, and the last packet launched `(cycle, act, k)`.
+    /// The act whose potential is set.
     act: Option<usize>,
-    packet: Option<(i64, usize, usize)>,
+    source: Source,
+    /// The beam's rightward current (click-rate reference), and fast-forward time left.
+    beam_flux: f64,
+    fast: f64,
     clicks: ParticlePool<Click>,
     /// Clicks per screen bin since the screen was last cleared.
     hist: [u32; HIST_BINS],
@@ -539,7 +631,9 @@ impl QuantumDoubleSlit {
             t: 0.0,
             pending: 0.0,
             act: None,
-            packet: None,
+            source: Source::default(),
+            beam_flux: 0.0,
+            fast: 0.0,
             clicks: ParticlePool::with_capacity(CLICK_CAP),
             hist: [0; HIST_BINS],
             debt: 0.0,
@@ -585,13 +679,17 @@ impl QuantumDoubleSlit {
         self.act = Some(act);
     }
 
-    fn launch(&mut self) {
+    /// Start the beam on a new grid: the analytic incident beam up to the wall, nothing
+    /// beyond it yet, and a fast first second.
+    fn start(&mut self) {
         let g = self.geo;
-        let solid = &self.solid;
-        let sigma = (SIGMA_X, SIGMA_Y_FRAC * g.view_h as f64);
-        launch(&mut self.adi.psi, g.w, (g.x0, g.yc), sigma, K_WAVE, |i| {
-            solid[i] != Solid::Free
-        });
+        self.source = Source::new(&g, K_WAVE, DT);
+        self.adi.psi.fill(C64::ZERO);
+        let u = SOURCE_GAIN.scale(SOURCE_S);
+        self.source
+            .fill_beam(&mut self.adi.psi, g.w, K_WAVE, u, g.xw);
+        self.beam_flux = self.source.flux(K_WAVE, u.norm_sqr().sqrt()).max(1e-30);
+        self.fast = FAST_S;
         self.peak = self.peaks();
     }
 
@@ -608,13 +706,13 @@ impl QuantumDoubleSlit {
         peak
     }
 
-    /// Probability crossing the screen column in one step.
-    fn screen_flux(&self) -> f64 {
+    /// The current reaching the screen as a share of the beam's.
+    fn screen_share(&self) -> f64 {
         let g = &self.geo;
         let s: f64 = (g.vy0..g.vy0 + g.view_h)
             .map(|y| screen_current(&self.adi.psi, g.w, g.xs, y))
             .sum();
-        s * DT
+        s / self.beam_flux
     }
 
     /// Draw up to [`CLICKS_PER_FRAME`] clicks from what arrives at the screen.
@@ -673,13 +771,18 @@ impl QuantumDoubleSlit {
         } else {
             self.peak
         };
+        // The tunnelling act shows both sides at the same exposure: what gets through
+        // is visibly a fraction of what arrives.
+        let source = if act == 2 { 1.0 } else { SOURCE_EXPOSURE };
         let scale = [
-            SOURCE_EXPOSURE / peak[0].max(1e-30).sqrt(),
+            source / peak[0].max(1e-30).sqrt(),
             1.0 / peak[1].max(1e-30).sqrt(),
         ];
         let gh = self.geo.h;
         let (cols, rows, psi, solid) = (&self.col_node, &self.row_node, &self.adi.psi, &self.solid);
         let (view, carrier) = (self.view_px, self.carrier);
+        let tunnel = act == 2;
+        let cutoff = if tunnel { 0.5 * CUTOFF } else { CUTOFF };
         self.pixels.shade(|x, y| {
             if x == view {
                 return if y % 2 == 0 { SCREEN_INK } else { Ink::BLANK };
@@ -702,19 +805,35 @@ impl QuantumDoubleSlit {
             let top = lerp(psi[gy * gw + gx], psi[gy * gw + gx1], fx);
             let bottom = lerp(psi[gy1 * gw + gx], psi[gy1 * gw + gx1], fx);
             let z = lerp(top, bottom, fy);
-            let v =
-                scale[usize::from(gx >= split)] * if carrier { z.re } else { z.norm_sqr().sqrt() };
+            let amp = z.norm_sqr().sqrt();
+            let v = scale[usize::from(gx >= split)] * amp;
+            // Crests a little brighter than troughs where the carrier is resolved.
+            let shimmer = if carrier && amp > 0.0 {
+                1.0 - SHIMMER * (0.5 - 0.5 * z.re / amp)
+            } else {
+                1.0
+            };
             // A hard cut before the act's dimming keeps the dimmed wave's outline as crisp
             // as the full one's.
-            let t = v.abs().min(1.0).sqrt();
-            if t < CUTOFF {
+            // √ tone for the carrier (crests stay bold as |ψ| falls off), linear for |ψ|
+            // (so the nodal rays of a coarse view keep their dark gradient); the barrier
+            // act uses `v^¾` either way, lower cut, so the weak transmitted wave shows at
+            // its true, smaller share.
+            let a = v.min(1.0);
+            let t = if tunnel {
+                a.sqrt() * a.sqrt().sqrt()
+            } else {
+                a.powf(0.8)
+            };
+            // A soft knee instead of a hard cut: faint density fades out, no speckle.
+            let knee = ((t - 0.5 * cutoff) / cutoff).clamp(0.0, 1.0);
+            let level = vis * t * knee * knee * shimmer;
+            if level * 255.0 < ink::MIN_VISIBLE_LEVEL {
                 Ink::BLANK
             } else {
-                ink::div((vis * t).copysign(v))
+                ink::ramp(WAVE, level)
             }
         });
-        self.pixels
-            .dissolve((f64::from(DISSOLVE_FLOOR) * vis).round() as u8);
         self.glow_histogram();
         self.dots.clear();
         let (strip, dh) = (self.strip_x, 4 * i32::from(self.size.height()));
@@ -779,8 +898,8 @@ impl QuantumDoubleSlit {
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let ink = sciart_core::raster::stronger(top, bottom);
     match ink.role {
-        Role::Div => {
-            let i = usize::from(ink.level.abs_diff(128)) * 2;
+        Role::Ramp(WAVE) => {
+            let i = usize::from(ink.level);
             let ramp = sciart_core::raster::ASCII_RAMP;
             Some((ramp[(i * ramp.len() / 256).min(ramp.len() - 1)], ink))
         }
@@ -812,7 +931,7 @@ impl Generator for QuantumDoubleSlit {
             self.factor();
             self.solid = vec![Solid::Free; geo.w * geo.h];
             self.set_act(self.timeline.at(self.t).index.min(2));
-            self.launch();
+            self.start();
         }
         self.layout(size);
         self.rasterise();
@@ -833,19 +952,16 @@ impl Generator for QuantumDoubleSlit {
                 self.debt = 0.0;
             }
         }
-        let k = ((beat.local / PACKET_S).floor().min(PACKETS - 1.0)) as usize;
-        let key = (self.timeline.cycle(self.t), act, k);
-        if self.packet != Some(key) {
-            if self.packet.is_some() {
-                self.launch();
-            }
-            self.packet = Some(key);
-        }
-        self.pending += dt / SIM_DT * STEPS_PER_FRAME;
-        let mut steps = 0;
+        let speed = if self.fast > 0.0 { FAST } else { 1.0 };
+        self.fast -= dt;
+        self.pending += dt / SIM_DT * STEPS_PER_FRAME * speed;
+        // Clicks per step: the act's rate per second over the steps a second holds.
+        let per_step = CLICK_RATE[act] / (STEPS_PER_FRAME / SIM_DT);
+        let (w, mut steps) = (self.geo.w, 0);
         while self.pending >= 1.0 && steps < MAX_STEPS {
             self.adi.step();
-            self.debt += self.screen_flux() * CLICK_RATE[act];
+            self.source.emit(&mut self.adi.psi, w, SOURCE_S);
+            self.debt += self.screen_share() * per_step;
             self.pending -= 1.0;
             steps += 1;
         }
@@ -882,20 +998,40 @@ mod tests {
             let eta = if absorb { absorption(g, x, y) } else { 0.0 };
             C64::new(potential(g, obstacle, x, y).0, -eta)
         });
-        let solid = |i: usize| potential(g, obstacle, i % g.w, i / g.w).1 != Solid::Free;
-        let sigma = (SIGMA_X, SIGMA_Y_FRAC * g.view_h as f64);
-        launch(&mut adi.psi, g.w, (g.x0, g.yc), sigma, K_WAVE, solid);
         adi
     }
 
-    /// The probability arriving at the screen, per row, integrated over the passage.
+    /// A unit packet left of the wall (QDS-A1).
+    fn with_packet(g: &Geometry, obstacle: Obstacle, absorb: bool) -> Adi {
+        let mut adi = propagator(g, obstacle, absorb);
+        let solid = |i: usize| potential(g, obstacle, i % g.w, i / g.w).1 != Solid::Free;
+        let sigma = (SIGMA_X, SIGMA_Y_FRAC * g.view_h as f64);
+        let x0 = (g.xw as f64 - 3.0 * SIGMA_X).max(ABSORB as f64 + 2.0 * SIGMA_X);
+        launch(&mut adi.psi, g.w, (x0, g.yc), sigma, K_WAVE, solid);
+        adi
+    }
+
+    /// Steps for the beam to reach the screen and settle.
+    fn settle(g: &Geometry) -> usize {
+        let travel = (g.xs - SOURCE_X) as f64 / group_velocity(K_WAVE) / DT;
+        (1.6 * travel) as usize
+    }
+
+    /// The steady source driven through `obstacle` (the scene's beam, from rest), and the
+    /// current arriving at the screen per row, averaged over three carrier periods.
     fn screen_profile(obstacle: Obstacle) -> (Geometry, Vec<f64>) {
         let g = geo();
         let mut adi = propagator(&g, obstacle, true);
-        let mut acc = vec![0.0; g.h];
-        let travel = (g.xs as f64 - g.x0) / group_velocity(K_WAVE) / DT;
-        for _ in 0..(2.2 * travel) as usize {
+        let mut src = Source::new(&g, K_WAVE, DT);
+        for _ in 0..settle(&g) {
             adi.step();
+            src.emit(&mut adi.psi, g.w, SOURCE_S);
+        }
+        let mut acc = vec![0.0; g.h];
+        let period = (TAU / carrier_phase(K_WAVE, DT)).round() as usize;
+        for _ in 0..3 * period {
+            adi.step();
+            src.emit(&mut adi.psi, g.w, SOURCE_S);
             for (y, a) in acc.iter_mut().enumerate() {
                 *a += screen_current(&adi.psi, g.w, g.xs, y);
             }
@@ -903,21 +1039,11 @@ mod tests {
         (g, acc)
     }
 
-    /// Rows of local maxima of a profile within `span` of the centre, above 5 % of the
-    /// profile's peak.
-    fn maxima(p: &[f64], centre: f64, span: f64) -> Vec<usize> {
-        let top = p.iter().fold(0.0f64, |m, &v| m.max(v));
-        (1..p.len() - 1)
-            .filter(|&y| (y as f64 - centre).abs() <= span)
-            .filter(|&y| p[y] > p[y - 1] && p[y] >= p[y + 1] && p[y] > 0.05 * top)
-            .collect()
-    }
-
     #[test]
     fn qds_a1_adi_step_preserves_the_norm_without_absorbers() {
         let g = geo();
         for obstacle in [Obstacle::None, Obstacle::TwoSlits, Obstacle::Barrier(2)] {
-            let mut adi = propagator(&g, obstacle, false);
+            let mut adi = with_packet(&g, obstacle, false);
             let n0 = adi.norm();
             assert!((n0 - 1.0).abs() < 1e-12);
             for _ in 0..200 {
@@ -927,7 +1053,7 @@ mod tests {
             assert!(drift < 1e-10, "{obstacle:?}: relative drift {drift:e}");
         }
         // The absorbing edge only ever removes probability.
-        let mut adi = propagator(&g, Obstacle::None, true);
+        let mut adi = with_packet(&g, Obstacle::None, true);
         let mut last = adi.norm();
         for _ in 0..600 {
             adi.step();
@@ -944,14 +1070,19 @@ mod tests {
     #[test]
     fn qds_a2_fringe_spacing_matches_lambda_l_over_d() {
         let (g, p) = screen_profile(Obstacle::TwoSlits);
-        let peaks = maxima(&p, g.yc, 0.45 * g.view_h as f64);
-        // The central fringe and its two neighbours (first order, small angle).
-        let c = peaks
-            .iter()
-            .position(|&y| (y as f64 - g.yc).abs() < 1.0)
-            .expect("a central fringe");
-        assert!(c >= 1 && c + 1 < peaks.len(), "fringes: {peaks:?}");
-        let spacing = (peaks[c + 1] - peaks[c - 1]) as f64 / 2.0;
+        // One fringe period: between the dark fringes either side of the centre (the
+        // steady central lobe is flat-topped in the near field, its zeros are sharp).
+        let top = p.iter().fold(0.0f64, |m, &v| m.max(v));
+        let dark = |y: usize| p[y] < p[y - 1] && p[y] <= p[y + 1] && p[y] < 0.2 * top;
+        let c = g.yc.round() as usize;
+        let right = (c..p.len() - 1)
+            .find(|&y| dark(y))
+            .expect("a dark fringe below");
+        let left = (1..=c)
+            .rev()
+            .find(|&y| dark(y))
+            .expect("a dark fringe above");
+        let spacing = (right - left) as f64;
         // Paraxial diffraction on the lattice: the discrete Laplacian bends rays as a
         // wave of length 2π/sin k (k/sin k = 1.21 longer than 2π/k at λ = 6 nodes).
         let lambda = lattice_wavelength(K_WAVE);
@@ -959,7 +1090,7 @@ mod tests {
         let expect = lambda * l / g.d as f64;
         assert!(
             (spacing / expect - 1.0).abs() < 0.10,
-            "spacing {spacing} vs λL/d {expect} ({peaks:?})"
+            "spacing {spacing} vs λL/d {expect} (dark rows {left}, {right})"
         );
     }
 
@@ -1039,17 +1170,14 @@ mod tests {
         assert!(chi2 < 2.5 * f64::from(dof), "χ² {chi2} over {dof} bins");
     }
 
+    /// The share of the steady beam's current that reaches the screen through a barrier.
     fn transmitted(width: usize) -> f64 {
-        let g = geo();
-        let mut adi = propagator(&g, Obstacle::Barrier(width), false);
-        let travel = (g.xw as f64 - g.x0) / group_velocity(K_WAVE) / DT;
-        for _ in 0..(2.0 * travel) as usize {
-            adi.step();
-        }
-        (0..g.w * g.h)
-            .filter(|i| i % g.w >= g.xw + width)
-            .map(|i| adi.psi[i].norm_sqr())
-            .sum()
+        let (g, p) = screen_profile(Obstacle::Barrier(width));
+        let period = (TAU / carrier_phase(K_WAVE, DT)).round();
+        let src = Source::new(&g, K_WAVE, DT);
+        p.iter().sum::<f64>()
+            / (3.0 * period)
+            / src.flux(K_WAVE, SOURCE_GAIN.norm_sqr().sqrt() * SOURCE_S)
     }
 
     #[test]
@@ -1086,5 +1214,64 @@ mod tests {
             g.clicks.len() < before_tunnel,
             "the tunnelling act starts a fresh screen"
         );
+    }
+
+    #[test]
+    fn qds_a6_the_source_settles_to_a_steady_beam_of_the_stated_amplitude() {
+        let g = geo();
+        let mut adi = propagator(&g, Obstacle::None, true);
+        let mut src = Source::new(&g, K_WAVE, DT);
+        for _ in 0..600 {
+            adi.step();
+            src.emit(&mut adi.psi, g.w, SOURCE_S);
+        }
+        // Just downstream of the source, on the axis, the field is the analytic beam.
+        let mut beam = vec![C64::ZERO; g.w * g.h];
+        let u = SOURCE_GAIN.scale(SOURCE_S);
+        src.fill_beam(&mut beam, g.w, K_WAVE, u, g.w);
+        let y = g.yc.round() as usize;
+        for dx in [3, 6, 10] {
+            let i = y * g.w + SOURCE_X + dx;
+            let err = (adi.psi[i] - beam[i]).norm_sqr().sqrt() / beam[i].norm_sqr().sqrt();
+            assert!(err < 0.1, "dx {dx}: {:?} vs {:?}", adi.psi[i], beam[i]);
+        }
+        // Steady: the field one carrier period later is the same.
+        let period = (TAU / carrier_phase(K_WAVE, DT)).round() as usize;
+        let i = y * g.w + SOURCE_X + 6;
+        let before = adi.psi[i];
+        for _ in 0..period {
+            adi.step();
+            src.emit(&mut adi.psi, g.w, SOURCE_S);
+        }
+        let drift = (adi.psi[i] - before).norm_sqr().sqrt() / before.norm_sqr().sqrt();
+        assert!(drift < 0.1, "not steady: {drift}");
+    }
+
+    #[test]
+    fn qds_a6_the_fan_fills_the_right_side_within_seconds_of_a_start() {
+        for (w, h) in [(120u16, 40u16), (80, 24), (200, 50)] {
+            let size = Size::new(w, h);
+            let mut ctx = Ctx::new(42, size);
+            let mut g = QuantumDoubleSlit::new();
+            g.resize(size, &mut ctx);
+            for _ in 0..90 {
+                g.update(SIM_DT, &mut ctx);
+            }
+            // Rows of the right quarter of the view (next to the screen) that show wave.
+            let (view, ph) = (g.view_px, 2 * i32::from(h));
+            let lit = (0..ph)
+                .filter(|&y| {
+                    (view * 3 / 4..view).any(|x| {
+                        g.pixels
+                            .get(x, y)
+                            .is_some_and(|p| p.role == Role::Ramp(WAVE))
+                    })
+                })
+                .count();
+            assert!(
+                lit as f64 >= 0.6 * f64::from(ph),
+                "{w}x{h}: fan lights {lit} of {ph} rows at t = 1.5 s"
+            );
+        }
     }
 }
