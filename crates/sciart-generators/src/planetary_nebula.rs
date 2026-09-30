@@ -99,8 +99,8 @@ const OIII_TOP: f64 = 210.0;
 const OIII_GAMMA: f64 = 3.5;
 /// The AGB rings are dust seen in reflected starlight: neutral `Ramp(Starlight)`, their
 /// emission `u` (0–1) at `RING_TOP·u^RING_GAMMA`, thin bright arcs (was `Ember` ≤ 80).
-const RING_TOP: f64 = 200.0;
-const RING_GAMMA: f64 = 1.6;
+const RING_TOP: f64 = 180.0;
+const RING_GAMMA: f64 = 1.2;
 /// Exposure before the contrast curves, so the crests reach the tops (GEN-R21).
 const RING_GAIN: f64 = 1.5;
 const OIII_GAIN: f32 = 4.0;
@@ -117,7 +117,10 @@ fn curves() -> &'static ([f32; 256], [f32; 256]) {
     })
 }
 const OIII_FLOOR: f64 = 0.0;
-const NII_TOP: f64 = 100.0;
+const NII_TOP: f64 = 70.0;
+/// [O III] keeps its colour only on the shells' crests, from this level up; below it the
+/// shells are neutral `Starlight` (critic round 2: less saturated cyan).
+const OIII_TINT: f64 = 120.0;
 
 /// The AGB wind's clumpy texture at sky offset `(x, y)` (H): a warp in `[−½, ½]` and a
 /// brightness factor in `[0.55, 1.35]`. Fixed to the gas, so it is tabulated per pixel
@@ -431,7 +434,9 @@ impl Frame {
         if (RIM_BAND.0..RIM_BAND.1).contains(&q) {
             let mid = 0.5 * (RIM_BAND.0 + RIM_BAND.1);
             let half = 0.5 * (RIM_BAND.1 - RIM_BAND.0);
-            nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * (0.5 + 0.5 * c * c);
+            // Only toward the ends of the major axis (critic round 2: no outline all
+            // round).
+            nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * c.powi(4);
         }
         for f in &self.fliers {
             let d = (x - f.at.0).hypot(y - f.at.1) / (FLIER_R + 0.6 * px);
@@ -478,7 +483,11 @@ impl PlanetaryNebula {
             if ln >= lo && ln >= ink::MIN_VISIBLE_LEVEL {
                 Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(ln))
             } else if lo >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::Ice), ink::level(lo))
+                if lo >= OIII_TINT {
+                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(lo))
+                } else {
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lo))
+                }
             } else if lr >= ink::MIN_VISIBLE_LEVEL {
                 // The faint outskirts fade smoothly to black (no dither, ADR-0017).
                 Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lr))
