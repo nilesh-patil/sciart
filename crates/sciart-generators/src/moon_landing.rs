@@ -1859,8 +1859,8 @@ mod tests {
                 lat.to_degrees()
             );
             // And that limb is the day side on screen.
-            let day = globe.shade(0.9 * nx, 0.0, 0.5).expect("disc");
-            let night = globe.shade(-0.9 * nx, 0.0, 0.5).expect("disc");
+            let day = globe.shade(0.9 * nx, 0.0).expect("disc");
+            let night = globe.shade(-0.9 * nx, 0.0).expect("disc");
             assert!(day.level > night.level, "side {side}");
         }
     }

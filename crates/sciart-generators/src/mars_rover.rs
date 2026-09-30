@@ -28,7 +28,7 @@
 //! **Sky.** A 90 s sol with a real-ish solar geometry at Jezero's latitude, on a warped
 //! clock (an easy day, a lingering sunset, a brief night). By day the sky is butterscotch
 //! on the Blackbody ramp. Martian dust forward-scatters blue light, so around the low Sun
-//! a blue aureole grows, drawn in `Ramp(Ice)` and dithered into the tan sky; sky and
+//! a blue aureole grows, drawn in `Ramp(Ice)` and easing into the tan sky; sky and
 //! aureole fade together through a shortened dusty twilight, and only then do the stars
 //! come out (MR-A4). Phobos, orbiting faster than Mars spins, rises in the west. The
 //! rover dims with the daylight (MR-A9).
@@ -562,9 +562,9 @@ const RIDGE_FAR: f64 = 0.2;
 const RIDGE_MID: f64 = 0.28;
 const GROUND: f64 = 0.32;
 const AUREOLE_DIM: f64 = 60.0;
-/// The aureole's compact core: glow values over which it dithers in, and its radius as a
-/// share of the M13 one.
-const AUREOLE_CORE: (f64, f64) = (0.45, 0.7);
+/// The aureole's compact core: glow values over which it eases in (smoothly, M14: no
+/// dither), and its radius as a share of the M13 one.
+const AUREOLE_CORE: (f64, f64) = (0.3, 0.8);
 const AUREOLE_SHRINK: f64 = 0.55;
 const AUREOLE_UP: f64 = 40.0;
 
@@ -579,14 +579,6 @@ fn crest(py: i32, top: f64, v: f64) -> Ink {
 
 /// The aureole's Gaussian radius, as a share of the Sun's height range (the horizon row).
 const GLOW_R: f64 = 0.42;
-
-/// A 4×4 Bayer threshold in (0, 1) for pixel `(x, y)`: an ordered dither reads as a
-/// blend at half-block resolution, where random noise would sparkle.
-fn bayer4(x: i32, y: i32) -> f64 {
-    const M: [u8; 16] = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
-    let i = (y.rem_euclid(4) * 4 + x.rem_euclid(4)) as usize;
-    (f64::from(M[i]) + 0.5) / 16.0
-}
 
 /// Blue forward-scattered glow around a low sun: on below ~25° elevation, fading out
 /// with the twilight by −12°.
@@ -1140,8 +1132,10 @@ impl MarsRover {
     /// angle, in `Ramp(Ice)`: Blackbody cannot hold it, since its blue end lies past its
     /// white point and would ring the Sun with white, and cannot dim without turning tan.
     /// Ice darkens as a blue. Its level tracks the tan sky's lightness (`ice_matching`)
-    /// plus a lift toward the Sun, so luminance still falls outward, and an ordered dither
-    /// blends the two hues over the aureole's edge instead of drawing a hue contour. The
+    /// plus a lift toward the Sun, so luminance still falls outward; over the aureole's
+    /// edge its level eases in (a smoothstep of the core share) and each pixel takes the
+    /// brighter of the aureole and the tan band, so the edge is continuous in luminance
+    /// (M14, ADR-0017: no ordered dither). The
     /// Sun is the white-hot top of the Ember ramp, the brightest ink of every theme.
     fn sky_pixel(&self, x: i32, py: i32, s: &SkyLight) -> Ink {
         let l = self.layout;
@@ -1159,14 +1153,12 @@ impl MarsRover {
             0.0
         };
         let share = ((g - AUREOLE_CORE.0) / (AUREOLE_CORE.1 - AUREOLE_CORE.0)).clamp(0.0, 1.0);
-        if share > bayer4(x, py) {
-            return Ink::new(
-                Role::Ramp(Ramp::Ice),
-                ink::level(AUREOLE_DIM + AUREOLE_UP * g),
-            );
-        }
+        let aureole = (AUREOLE_DIM + AUREOLE_UP * g) * smooth(0.0, 1.0, share);
         // The band fades smoothly into black: Sienna's floor is already near black.
         let band = SKY_BAND * a.powi(3) * s.day.max(s.glow);
+        if aureole >= band && aureole >= ink::MIN_VISIBLE_LEVEL {
+            return Ink::new(Role::Ramp(Ramp::Ice), ink::level(aureole));
+        }
         if band < SKY_FLOOR {
             Ink::BLANK
         } else {
