@@ -15,7 +15,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ink, title};
+use sciart_core::{draw, title};
 
 pub static META: Meta = Meta {
     name: "hp_protein_folding",
@@ -387,17 +387,18 @@ pub(crate) fn schedule(local: f64) -> (f64, usize) {
 const BEAD_EASE_S: f64 = 0.05;
 const CAM_FOLLOW_S: f64 = 0.1;
 const CAM_ZOOM_S: f64 = 0.8;
-/// M14 (ADR-0017): residues are 2 × 2-pixel dots at any zoom (the chain stops this many
-/// pixels from a bead's centre), no halos and no water shimmer; the chain is a 1-dot
-/// braille line between them.
+/// Residues are 2 × 2-pixel dots at any zoom (the chain stops this many pixels from a
+/// bead's centre), no halos; the chain is a 1-dot `Dim` braille line between them.
 const BEAD_R: f64 = 1.0;
-const BACKBONE: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 110);
-/// H residues glow a dim `Blackbody` from 1500 K, warmer with each H·H contact (buried
-/// cores read hot); P residues are neutral grey.
-const H_ROLE: Role = Role::Blackbody;
-const P_ROLE: Role = Role::Text;
-const H_KELVIN: (f64, f64, f64) = (1500.0, 450.0, 4200.0);
-const P_LEVEL: f64 = 150.0;
+const BACKBONE: Ink = Ink::new(Role::Dim, 170);
+/// M11's complementary pair (ADR-0018): H (hydrophobic) residues `Hot`, a step brighter
+/// with each H·H contact up to two (buried cores read hot); P (polar) residues `Cold`.
+const H_INKS: [Ink; 3] = [
+    Ink::new(Role::Hot, 130),
+    Ink::new(Role::Hot, 190),
+    Ink::new(Role::Hot, 255),
+];
+const P_INK: Ink = Ink::new(Role::Cold, 170);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 #[derive(Debug)]
@@ -412,9 +413,6 @@ struct Folding {
     started: bool,
     pixels: Pixels,
     dots: Dots,
-    /// Per-frame sine tables of the water shimmer: two patterns, columns and rows.
-    cols: Vec<[f32; 2]>,
-    rows: Vec<[f32; 2]>,
     cells: Size,
     readout_room: usize,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
@@ -438,8 +436,6 @@ impl Default for Folding {
             started: false,
             pixels: Pixels::default(),
             dots: Dots::default(),
-            cols: Vec::new(),
-            rows: Vec::new(),
             cells: Size::new(1, 1),
             readout_room: 0,
         }
@@ -488,15 +484,14 @@ impl Folding {
     fn rasterise(&mut self) {
         self.pixels.clear();
         self.dots.clear();
-        // Cores, lit from the upper left; buried H glows brighter.
+        // Residues; buried H a step brighter per contact.
         for i in 0..N {
             let c = self.to_px(self.disp[i]);
             let h = self.chain.is_h(i);
             let ink = if h {
-                let (k0, dk, k1) = H_KELVIN;
-                ink::blackbody((k0 + dk * self.chain.contacts_of(i) as f64).min(k1))
+                H_INKS[self.chain.contacts_of(i).min(2)]
             } else {
-                Ink::new(P_ROLE, ink::level(P_LEVEL))
+                P_INK
             };
             // A regular 2 × 2-pixel dot centred on the bead.
             let (x0, y0) = ((c.0 - 0.5).round() as i32, (c.1 - 0.5).round() as i32);
@@ -526,8 +521,8 @@ impl Folding {
 /// ASCII: H `@`, P `o`.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let pick = |i: Ink| match i.role {
-        H_ROLE => Some(('@', i)),
-        P_ROLE => Some(('o', i)),
+        Role::Hot => Some(('@', i)),
+        Role::Cold => Some(('o', i)),
         _ => None,
     };
     pick(top).or_else(|| pick(bottom))
@@ -547,11 +542,6 @@ impl Generator for Folding {
         self.readout_room = title::stable_readout_room(size, &META);
         self.pixels.resize(size);
         self.dots.resize(size);
-        let ps = self.pixels.pixel_size();
-        self.cols.clear();
-        self.cols.resize(usize::from(ps.width()), [0.0; 2]);
-        self.rows.clear();
-        self.rows.resize(usize::from(ps.height()), [0.0; 2]);
         // The chain is size-independent; the camera snaps to frame it at the new size.
         self.cam = self.cam_target();
         self.dirty = true;
@@ -774,5 +764,32 @@ mod tests {
             "the loop heats the chain again"
         );
         assert!(schedule(ACT_S[0] + ACT_S[1] - 1e-6).0 < 1.05 * T_COLD);
+    }
+
+    #[test]
+    fn hpf_a6_residues_are_hot_h_and_cold_p_dots_on_a_dim_chain() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(6, size);
+        let mut g = Folding::default();
+        g.resize(size, &mut ctx);
+        run_to(&mut g, &mut ctx, 30.0);
+        g.prepare();
+        let ps = g.pixels.pixel_size();
+        let (mut hot, mut cold) = (0, 0);
+        for y in 0..i32::from(ps.height()) {
+            for x in 0..i32::from(ps.width()) {
+                match g.pixels.get(x, y).unwrap_or(Ink::BLANK) {
+                    i if H_INKS.contains(&i) => hot += 1,
+                    i if i == P_INK => cold += 1,
+                    i => assert_eq!(i, Ink::BLANK),
+                }
+            }
+        }
+        assert!(hot > 0 && cold > 0, "{hot} H, {cold} P pixels");
+        // The folded core carries buried H at the top step.
+        assert!(
+            (0..i32::from(ps.height()))
+                .any(|y| (0..i32::from(ps.width())).any(|x| g.pixels.get(x, y) == Some(H_INKS[2])))
+        );
     }
 }

@@ -34,11 +34,12 @@
 //!
 //! A passive dye marks the middle band (1) against the outer bands (0); it rides the
 //! lattice velocity by a semi-Lagrangian step each update ([`advect_dye`]). The picture
-//! (ADR-0017) is lines only, on black: the interfaces, where the dye crosses ½, as thin
-//! pale lines (`Ramp(Starlight)`) lit by the vorticity they carry, so each rolled-up
-//! sheet reads as a fine spiral. Each pixel's level falls smoothly with its distance to
-//! the `c = ½` contour, `|c − ½| / |∇c|`, so the line is anti-aliased per pixel; the
-//! fields are sampled bilinearly (the line needs no more).
+//! (ADR-0018, M11's idiom) is lines only, on black: the interfaces, where the dye crosses
+//! ½, as thin flat lines coloured by the sign of the vorticity they carry, `Hot` where it
+//! turns one way and `Cold` the other (the two shear layers spin opposite ways), a step
+//! brighter where they spin hard, so each rolled-up sheet reads as a fine spiral. A pixel
+//! is on the line when its distance to the `c = ½` contour, `|c − ½| / |∇c|`, is under
+//! [`SHEET`]; the fields are sampled bilinearly (the line needs no more).
 
 use std::fmt::Write as _;
 
@@ -46,7 +47,7 @@ use rand::Rng;
 use sciart_core::lbm::{self, Lattice};
 use sciart_core::prelude::*;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, grid, ink};
+use sciart_core::{draw, grid};
 
 pub static META: Meta = Meta {
     name: "kelvin_helmholtz",
@@ -98,24 +99,20 @@ const LAYERED_MIN: f64 = 0.25;
 const U_MAX: f32 = 0.3;
 /// Vorticity that saturates the picture, in units of the seed layer's peak U/δ.
 const VORT_SAT: f64 = 0.7;
-/// The dye band's Starlight levels, calm to fully spinning, and the dye excess over ½ at
-/// which the band reaches them (it fades in from the interface).
-/// The interface line: half-width in pixels (anti-aliased by the pixel's distance to the
-/// `c = ½` contour, `|c − ½| / |∇c|`), and its level at full spin (calm sheets stay at
-/// `SHEET_CALM` of it).
-const SHEET: f32 = 1.1;
-const SHEET_LEVEL: f32 = 230.0;
-const SHEET_CALM: f32 = 0.45;
+/// The interface line: half-width in pixels (by the pixel's distance to the `c = ½`
+/// contour, `|c − ½| / |∇c|`), its two steps (calm, spinning) for either sign of the
+/// vorticity, and the spin (in units of the saturation value) from which it is spinning.
+const SHEET: f32 = 0.9;
+const PLUS_INKS: [Ink; 2] = [Ink::new(Role::Hot, 130), Ink::new(Role::Hot, 230)];
+const MINUS_INKS: [Ink; 2] = [Ink::new(Role::Cold, 130), Ink::new(Role::Cold, 230)];
+const SPINNING: f32 = 0.45;
 /// Nodes per pixel above which the picture is box-filtered before sampling.
 const MINIFY: f64 = 1.3;
 /// Interface sharpening of the dye per update.
 const SHARPEN: f32 = 0.015;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-/// The line's ramp: a neutral pale starlight, so its anti-aliased edge dims to grey, not
-/// to a saturated navy.
-const LINE: Ramp = Ramp::Starlight;
 /// ASCII fallback by strength.
-const ASCII: [char; 6] = ['.', ':', '-', '=', '#', '@'];
+const ASCII: [char; 2] = ['-', '#'];
 
 /// Size-dependent flow parameters, pure in the lattice size.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -207,15 +204,13 @@ pub(crate) fn vorticity(lat: &Lattice, out: &mut Grid<f32>) {
     }
 }
 
-/// ASCII cell for two Div pixels: the stronger by `|level − 128|`, as a strength char.
+/// ASCII cell: the stronger pixel, `#` spinning and `-` calm.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let p = sciart_core::raster::stronger(top, bottom);
-    if p.role != Role::Ramp(LINE) {
+    if p.role == Role::Background {
         return None;
     }
-    let m = ink::seq_value(p);
-    let i = ((m * ASCII.len() as f64) as usize).min(ASCII.len() - 1);
-    Some((ASCII[i], p))
+    Some((ASCII[usize::from(p.level >= PLUS_INKS[1].level)], p))
 }
 
 /// The dye of the laid-down layers: the middle band's share of each row, a smooth step
@@ -312,21 +307,19 @@ fn catmull_rom(t: f32) -> [f32; 4] {
     ]
 }
 
-/// The ink of a pixel with spin `s` (|ω| in units of the saturation value, clamped to 1)
-/// at distance `d` pixels from the interface: the line within [`SHEET`] pixels of it,
-/// its level falling smoothly to 0 at the edge, else black. Non-finite input is black.
+/// The ink of a pixel with signed spin `s` (ω in units of the saturation value) at
+/// distance `d` pixels from the interface: within [`SHEET`] pixels of it, the line in its
+/// spin's colour (`Hot` for ω ≥ 0, `Cold` below), a step brighter from [`SPINNING`];
+/// else black. Non-finite input is black.
 pub(crate) fn kh_ink(s: f32, d: f32) -> Ink {
     if !(s.is_finite() && d.is_finite()) || d >= SHEET {
         return Ink::BLANK;
     }
-    let s = s.clamp(0.0, 1.0);
-    let k = 1.0 - d / SHEET;
-    let level = SHEET_LEVEL * k * k * (3.0 - 2.0 * k) * (SHEET_CALM + (1.0 - SHEET_CALM) * s);
-    let level = (level + 0.5) as u8;
-    if level < 8 {
-        Ink::BLANK
+    let step = usize::from(s.abs() >= SPINNING);
+    if s >= 0.0 {
+        PLUS_INKS[step]
     } else {
-        Ink::new(Role::Ramp(LINE), level)
+        MINUS_INKS[step]
     }
 }
 
@@ -490,7 +483,7 @@ impl KelvinHelmholtz {
             .iter_mut()
             .zip(self.vort.as_slice())
         {
-            *o = (w.abs() * k).min(1.0);
+            *o = (w * k).clamp(-1.0, 1.0);
         }
         // On a small display a pixel spans more than a node: point samples of the thin
         // sheets would alias into speckle, so both fields are box-filtered first (the spin
@@ -517,10 +510,9 @@ impl KelvinHelmholtz {
             }
             kh_ink(spin(), off / slope().max(1e-4) * px)
         };
-        // Bilinear throughout: the line is anti-aliased by its distance, not by the
-        // sampling, and the dim band has no edge to crease (GEN-R17's cubic buys nothing
-        // here and would double the per-pixel cost at 500×150). Row samplers are rebuilt
-        // when the shader reaches the next pixel row (CORE-R104).
+        // Bilinear throughout: the line is drawn by its distance, not by the sampling (a
+        // cubic buys nothing here and would double the per-pixel cost at 500×150). Row
+        // samplers are rebuilt when the shader reaches the next pixel row (CORE-R104).
         let row = |y| (map.row(dye, y), map.row(spin, y), map.row(slope, y));
         let (mut ry, mut r) = (-1, row(0));
         self.pixels.shade(|x, y| {
@@ -772,21 +764,20 @@ mod tests {
     }
 
     #[test]
-    fn kh_vorticity_signs_differ_between_the_two_rows() {
+    fn kh_a6_the_two_rows_spin_apart_in_hot_and_cold_lines() {
         let (g, _) = scene(4, Size::new(200, 50));
         let f = g.flow.unwrap();
         let at = |y: f64| g.vort.as_slice()[(y.round() as usize) * f.w];
         let (upper, lower) = (at(0.25 * f.h as f64), at(0.75 * f.h as f64));
         assert!(upper * lower < 0.0, "{upper} {lower}");
-        // ADR-0017: the outer fluid is black, the dye band a dim grey that brightens
-        // where it spins, the interface a thin ice line, brightest where it spins.
-        // ADR-0017: lines only, on black: bright on the interface, brightest where it
-        // spins, fading smoothly to black a pixel away.
+        // ADR-0018: lines only, on black, flat: `Hot` where the sheet spins one way and
+        // `Cold` the other, a step brighter where it spins hard.
         let (line, calm) = (kh_ink(1.0, 0.0), kh_ink(0.0, 0.0));
-        assert_eq!(line, Ink::new(Role::Ramp(LINE), 230));
-        assert!(calm.role == Role::Ramp(LINE) && calm.level < line.level);
-        let (a, b) = (kh_ink(1.0, 0.3).level, kh_ink(1.0, 0.7).level);
-        assert!(line.level > a && a > b && b > 0, "{a} {b}");
+        assert_eq!(line, PLUS_INKS[1]);
+        assert_eq!(calm, PLUS_INKS[0]);
+        assert_eq!(kh_ink(-1.0, 0.5), MINUS_INKS[1]);
+        assert_eq!(kh_ink(-0.1, 0.5), MINUS_INKS[0]);
+        assert_eq!(kh_ink(1.0, 0.7), line, "flat across the line");
         assert_eq!(kh_ink(1.0, SHEET), Ink::BLANK, "the line is thin");
         assert_eq!(kh_ink(f32::NAN, 0.0), Ink::BLANK);
     }
