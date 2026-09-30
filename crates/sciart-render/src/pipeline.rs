@@ -58,17 +58,27 @@ impl std::fmt::Debug for Content<'_> {
 }
 
 /// The work one frame did (RND-R22), for tests and the cost probe.
+///
+/// `painted` and `encoded` are counted where each stage visits a cell, not derived from
+/// `changed`: the painter counts every canvas cell it maps ([`Painter::mapped`]), the
+/// encoder every cell it considers sending. On the changed-cell path each is at most
+/// `changed + rows`; a stage that scans the screen again breaks that bound.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Work {
     /// The frame took the full-area path.
     pub full: bool,
-    /// Canvas rows compared with the last painted canvas.
+    /// Screen rows of the frame (the per-row bookkeeping the bound allows).
     pub rows: usize,
-    /// Canvas cells that differ from the last painted canvas (outside the overlay row).
+    /// Cells that changed: the canvas cells that differ from the last painted canvas,
+    /// plus the overlay row, which is repainted under the overlay every frame. The whole
+    /// area on the full-area path.
     pub changed: usize,
-    /// Cells painted: the changed cells, plus the overlay row when one is shown.
+    /// Canvas cells the painter mapped to terminal cells this frame.
     pub painted: usize,
-    /// Cells handed to the encoder.
+    /// Cells the encoder considered sending: the whole area on the full-area path, whose
+    /// diff compares every cell.
+    pub encoded: usize,
+    /// Cells handed to the backend.
     pub sent: usize,
 }
 
@@ -167,6 +177,7 @@ impl Compositor {
                 painter,
                 mut overlay,
             } => {
+                let mapped = painter.mapped();
                 let fits =
                     canvas.size().width() == area.width && canvas.size().height() == area.height;
                 let overlay_on = overlay.is_some();
@@ -191,6 +202,7 @@ impl Compositor {
                         self.last.extend_from_slice(canvas.cells());
                     }
                 }
+                self.work.painted = (painter.mapped() - mapped) as usize;
                 self.theme = Some(theme);
                 self.painter_epoch = painter.epoch();
                 self.overlay = overlay_on;
@@ -243,12 +255,13 @@ impl Compositor {
         draw(&mut self.next);
         self.pending = Pending::Full { clears };
         let cells = area.area() as usize;
+        // `painted` is the painter's count, which `compose` fills in; `encoded` and `sent`
+        // are filled in by `emit`.
         self.work = Work {
             full: true,
             rows: usize::from(area.height),
             changed: cells,
-            painted: cells,
-            sent: 0,
+            ..Work::default()
         };
     }
 
@@ -325,7 +338,7 @@ impl Compositor {
             let i = i as usize;
             self.last[i] = cells[i];
         }
-        let mut painted = self.changed.len();
+        let mut changed = self.changed.len();
         if let Some(y) = overlay_row {
             let start = usize::from(y) * width;
             let shown = &mut self.screen.content[start..start + width];
@@ -335,15 +348,16 @@ impl Compositor {
                     self.dirty.push((start + x) as u32);
                 }
             }
-            painted += width;
+            changed += width;
         }
         self.pending = Pending::Changed;
+        // `painted` is the painter's count, which `compose` fills in; `encoded` and `sent`
+        // are filled in by `emit`.
         self.work = Work {
             full: false,
             rows: height,
-            changed: self.changed.len(),
-            painted,
-            sent: self.dirty.len(),
+            changed,
+            ..Work::default()
         };
         true
     }
@@ -359,6 +373,8 @@ impl Compositor {
                 }
                 let mut sent = 0;
                 backend.draw(self.screen.diff_iter(&self.next).inspect(|_| sent += 1))?;
+                // ratatui's diff compares every cell of the area.
+                self.work.encoded = self.next.content.len();
                 self.work.sent = sent;
                 backend.hide_cursor()?;
                 backend.flush()?;
@@ -368,11 +384,21 @@ impl Compositor {
                 let width = usize::from(self.screen.area.width.max(1));
                 let (x0, y0) = (self.screen.area.x, self.screen.area.y);
                 let screen = &self.screen;
-                backend.draw(self.dirty.iter().map(|&i| {
-                    let i = i as usize;
-                    let (x, y) = ((i % width) as u16, (i / width) as u16);
-                    (x0 + x, y0 + y, &screen.content[i])
-                }))?;
+                let (mut encoded, mut sent) = (0, 0);
+                backend.draw(
+                    self.dirty
+                        .iter()
+                        .map(|&i| {
+                            // RND-R22's encoder counter: every cell considered, sent or not.
+                            encoded += 1;
+                            let i = i as usize;
+                            let (x, y) = ((i % width) as u16, (i / width) as u16);
+                            (x0 + x, y0 + y, &screen.content[i])
+                        })
+                        .inspect(|_| sent += 1),
+                )?;
+                self.work.encoded = encoded;
+                self.work.sent = sent;
                 backend.hide_cursor()?;
                 backend.flush()?;
             }
@@ -576,7 +602,32 @@ mod tests {
         ];
         let (reference, new, work) = streams(&steps);
         assert_eq!(new, reference);
-        assert_eq!((work[1].changed, work[1].painted, work[1].sent), (0, 0, 0));
-        assert!(!work[1].full);
+        let w = work[1];
+        assert_eq!((w.changed, w.painted, w.encoded, w.sent), (0, 0, 0, 0));
+        assert!(!w.full);
+        // With an overlay, the row under it is repainted in full and nothing else.
+        let w = work[2];
+        assert!(w.full, "the overlay appears: {w:?}");
+    }
+
+    #[test]
+    fn rnd_r22_counters_bound_the_painter_and_the_encoder_with_an_overlay() {
+        let size = Size::new(20, 6);
+        let steps: Vec<Step> = (0..4)
+            .map(|i| Step {
+                canvas: canvas(size, &[(i, 2, '*'), (5, 5, '+')]),
+                message: Some("hud"),
+            })
+            .collect();
+        let (reference, new, work) = streams(&steps);
+        assert_eq!(new, reference);
+        for w in &work[1..] {
+            assert!(!w.full, "{w:?}");
+            // Two canvas cells move a column per frame; the overlay row is 20 cells.
+            assert_eq!(w.changed, 2 + 20, "{w:?}");
+            assert!(w.painted <= w.changed + w.rows, "{w:?}");
+            assert!(w.encoded <= w.changed + w.rows, "{w:?}");
+            assert!(w.sent <= w.encoded, "{w:?}");
+        }
     }
 }

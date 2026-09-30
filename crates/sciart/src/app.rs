@@ -370,6 +370,8 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
     let mut wakeups = Wakeups::from_env();
     // When the keep-awake backend was last polled: the RT-R21 block polls it too.
     let mut polled = last;
+    // The status after a blocked poll, compared with the one the HUD shows (RT-R21).
+    let mut status = String::new();
 
     loop {
         let now = wall_clock();
@@ -400,32 +402,36 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         // Handle input until the next frame is due. The rate can change here (RT-R8,
         // RT-R17), so the deadline is recomputed after every event: a key that wakes a
         // stepped-down loop is drawn at the full rate's deadline, not the slow one's.
-        // RT-R21: paused or on the help page, once the rate is down and a frame sent
-        // nothing, nothing can change before the next event: block on it instead. A
-        // visible HUD first lets its fps readout settle on the stepped-down rate, or it
-        // would freeze on a passing value.
-        let settled = !runtime.hud() || (fps.fps() - f64::from(pacer.fps())).abs() < 0.5;
-        let block = (runtime.paused() || runtime.help())
-            && pacer.at_floor()
-            && settled
-            && terminal.backend().changed_rows().is_none();
+        let block = may_block(
+            &runtime,
+            &pacer,
+            fps.fps(),
+            terminal.backend().changed_rows().is_none(),
+        );
         loop {
             let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
             let wait = if block {
-                BLOCK_POLL
+                block_timeout(None)
             } else {
                 (now + frame_time).saturating_duration_since(wall_clock())
             };
             let ready = event::poll(wait)?;
             wakeups.count();
-            if !ready && block {
-                // Only the keep-awake backend needs the time (KA-R3, KA-R4).
+            let redraw = if !ready && block {
+                // Only the keep-awake backend needs the time (KA-R3, KA-R4); a status the
+                // HUD shows that the poll changed is drawn now, not at the next key.
                 let t = wall_clock();
                 keep_awake.poll(t.duration_since(polled).as_secs_f64());
                 polled = t;
+                keep_awake.write_status(&mut status);
+                redraw_after_poll(&runtime, &screen.keep_awake, &status)
+            } else {
+                false
+            };
+            if !ready && block && !redraw {
                 continue;
             }
-            if !ready {
+            if !ready && !block {
                 break;
             }
             if block {
@@ -435,6 +441,9 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
                 pacer.record(t.duration_since(last).as_secs_f64());
                 last = t;
                 first = true;
+            }
+            if redraw {
+                break;
             }
             match event::read()? {
                 Event::Key(key) => {
@@ -463,6 +472,34 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
 /// How long a blocked loop (RT-R21) waits for an event before it polls the keep-awake
 /// backend; at least a second, which every backend's cadence allows (KA-R3, KA-R4).
 const BLOCK_POLL: Duration = Duration::from_secs(1);
+
+/// Whether the HUD is on screen, showing the keep-awake status and the fps readout.
+fn hud_shown(runtime: &Runtime) -> bool {
+    !runtime.help() && runtime.hud() && runtime.status() != Status::AllFailed
+}
+
+/// RT-R21: whether the loop may block on the next event after a drawn frame. Paused or
+/// on the help page, once the rate is down (RT-R17) and the frame sent nothing
+/// (`sent_nothing`), nothing can change before the next event. A visible HUD first lets
+/// its fps readout (`fps`) settle on the stepped-down rate, or it would freeze on a
+/// passing value.
+fn may_block(runtime: &Runtime, pacer: &Pacer, fps: f64, sent_nothing: bool) -> bool {
+    let settled = !hud_shown(runtime) || (fps - f64::from(pacer.fps())).abs() < 0.5;
+    (runtime.paused() || runtime.help()) && pacer.at_floor() && settled && sent_nothing
+}
+
+/// RT-R21: how long a blocked loop waits for an event: [`BLOCK_POLL`], or less when a
+/// deadline is `remaining` (the wait must not outlast it).
+fn block_timeout(remaining: Option<Duration>) -> Duration {
+    remaining.map_or(BLOCK_POLL, |r| r.min(BLOCK_POLL))
+}
+
+/// RT-R21: after a blocked loop polls the keep-awake backend, whether to draw again:
+/// the HUD is on screen and the status it shows (`shown`) is no longer the backend's
+/// (`status`), e.g. caffeinate exited during a pause.
+fn redraw_after_poll(runtime: &Runtime, shown: &str, status: &str) -> bool {
+    hud_shown(runtime) && shown != status
+}
 
 /// Test hook (RT-R21): with `SCIART_TRACE_WAKEUPS=<file>` the loop writes how often it
 /// has woken (each return from the event wait) to that file, so the pty test can count
@@ -981,18 +1018,26 @@ mod tests {
                     let changed = cells.iter().zip(prev).filter(|(a, b)| a != b).count();
                     assert!(!work.full, "{name} frame {frame}: full-area path");
                     assert_eq!(work.changed, changed, "{name} frame {frame}");
+                    // The counters sit where the painter maps a cell and where the encoder
+                    // considers one (RND-R22): either stage scanning the screen fails here.
+                    let bound = changed + usize::from(size.height());
                     assert!(
-                        work.painted <= changed && work.sent <= work.painted,
+                        work.painted <= bound && work.encoded <= bound,
                         "{name} frame {frame}: {work:?}, {changed} changed"
                     );
-                    assert!(work.rows <= usize::from(size.height()), "{name}: {work:?}");
+                    assert!(work.sent <= work.encoded, "{name} frame {frame}: {work:?}");
+                    assert_eq!(work.rows, usize::from(size.height()), "{name}: {work:?}");
                 }
                 last = Some(cells.to_vec());
             }
-            // The same frame again: nothing is painted or sent.
+            // The same frame again: nothing is painted, considered or sent.
             draw(&rt, &mut screen, &mut term, 30.0);
             let work = screen.compositor.work();
-            assert_eq!((work.changed, work.painted, work.sent), (0, 0, 0), "{name}");
+            assert_eq!(
+                (work.changed, work.painted, work.encoded, work.sent),
+                (0, 0, 0, 0),
+                "{name}"
+            );
         }
     }
 
@@ -1025,6 +1070,204 @@ mod tests {
         term.backend_mut().set_fixed_size(W - 4, H - 2);
         rt.resize(Size::new(W - 4, H - 2));
         assert!(full(&rt, &mut screen, &mut term), "resize");
+    }
+
+    /// A real scene that panics at its `boom_at`-th step, so the runtime quarantines it
+    /// (RT-R3) and, once every scene has, shows the RT-R4 error line.
+    struct LateBoom {
+        inner: Box<dyn sciart_core::Generator>,
+        steps: u32,
+        boom_at: u32,
+    }
+
+    impl sciart_core::Generator for LateBoom {
+        fn meta(&self) -> &'static sciart_core::Meta {
+            self.inner.meta()
+        }
+        fn resize(&mut self, size: Size, ctx: &mut sciart_core::Ctx) {
+            self.inner.resize(size, ctx);
+        }
+        fn update(&mut self, dt: f64, ctx: &mut sciart_core::Ctx) {
+            self.steps += 1;
+            assert!(self.steps < self.boom_at, "boom at step {}", self.steps);
+            self.inner.update(dt, ctx);
+        }
+        fn prepare(&mut self) {
+            self.inner.prepare();
+        }
+        fn render(&self, canvas: &mut sciart_core::Canvas) {
+            self.inner.render(canvas);
+        }
+        fn caption(&self) -> Option<&'static str> {
+            self.inner.caption()
+        }
+    }
+
+    static WAVE_BOOM: Entry = Entry {
+        meta: &sciart_generators::wave_interference::META,
+        build: || {
+            Box::new(LateBoom {
+                inner: sciart_generators::wave_interference::build(),
+                steps: 0,
+                boom_at: 120,
+            })
+        },
+    };
+    static STAR_BOOM: Entry = Entry {
+        meta: &sciart_generators::starfield::META,
+        build: || {
+            Box::new(LateBoom {
+                inner: sciart_generators::starfield::build(),
+                steps: 0,
+                boom_at: 40,
+            })
+        },
+    };
+
+    #[test]
+    fn rnd_r22_a_scene_switch_and_a_quarantined_scene_send_the_full_area_bytes() {
+        // A key switches scenes, a panic quarantines one and switches again, the last
+        // panic leaves the RT-R4 error line over the kept frame; both paths must agree.
+        let size = Size::new(80, 24);
+        let mut rt = Runtime::new(
+            vec![&WAVE_BOOM, &STAR_BOOM],
+            42,
+            size,
+            GlyphMode::Unicode,
+            Some(0),
+        );
+        let opaque = |s: Screen| s.with_background(Background::Opaque);
+        let terminal = |s: Screen| s.with_background(Background::Terminal);
+        let mut pairs = vec![
+            Pair::new("truecolor/opaque", || opaque(Screen::new()), size),
+            Pair::new("truecolor/terminal", || terminal(Screen::new()), size),
+            Pair::new("256/opaque", || opaque(Screen::indexed()), size),
+            Pair::new("256/terminal", || terminal(Screen::indexed()), size),
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        let mut error_frames = 0;
+        for frame in 1..=110u32 {
+            let action = match frame {
+                8 | 50 => Some(Action::ToggleHud),
+                15 => Some(Action::Next),
+                104 | 106 => Some(Action::ToggleHelp),
+                _ => None,
+            };
+            if let Some(action) = action {
+                rt.handle(action);
+            }
+            rt.tick(1.0 / 30.0);
+            if let Some(name) = rt.current_name()
+                && seen.last() != Some(&name)
+            {
+                seen.push(name);
+            }
+            if rt.status() == Status::AllFailed {
+                error_frames += 1;
+            }
+            let fps = 28.0 + f64::from(frame % 3);
+            for pair in &mut pairs {
+                pair.draw(&rt, fps);
+            }
+        }
+        assert_eq!(
+            seen,
+            ["wave_interference", "starfield", "wave_interference"],
+            "a key switch, then a quarantine switch"
+        );
+        assert_eq!(rt.status(), Status::AllFailed);
+        assert!(
+            error_frames >= 8,
+            "the error line is drawn: {error_frames} frames"
+        );
+        let failures: Vec<String> = pairs.iter().filter_map(Pair::mismatch).collect();
+        assert!(failures.is_empty(), "RND-R22:\n{}", failures.join("\n"));
+    }
+
+    // ----- M25: event-driven pause and help (RT-R21) -----
+
+    /// A pacer whose rate has stepped down to its floor (RT-R17): 30 fps, floor 5.
+    fn quiet_pacer() -> Pacer {
+        let mut p = Pacer::new(30, 5, 600.0);
+        p.record(2.0);
+        assert!(p.at_floor() && p.fps() == 5);
+        p
+    }
+
+    #[test]
+    fn rt_r21_a_paused_scene_blocks_once_quiet_and_settled() {
+        let pacer = quiet_pacer();
+        let mut rt = runtime(&["starfield"]);
+        assert!(!may_block(&rt, &pacer, 5.0, true), "running: never");
+        rt.handle(Action::TogglePause);
+        assert!(
+            may_block(&rt, &pacer, 5.0, true),
+            "paused, quiet, nothing sent"
+        );
+        assert!(!may_block(&rt, &pacer, 5.0, false), "the frame sent bytes");
+        assert!(
+            !may_block(&rt, &Pacer::new(30, 5, 600.0), 30.0, true),
+            "the rate has not stepped down yet"
+        );
+        // The HUD shows the fps readout: wait until it reads the floor rate.
+        let rt = rt.with_hud(true);
+        assert!(!may_block(&rt, &pacer, 12.0, true), "readout still falling");
+        assert!(may_block(&rt, &pacer, 5.2, true), "readout settled");
+    }
+
+    #[test]
+    fn rt_r21_the_help_page_blocks_once_quiet_whatever_the_hidden_hud_reads() {
+        let pacer = quiet_pacer();
+        let mut rt = runtime(&["starfield"]).with_hud(true);
+        rt.handle(Action::ToggleHelp);
+        assert!(rt.help() && !rt.paused());
+        assert!(
+            may_block(&rt, &pacer, 12.0, true),
+            "help hides the HUD and its readout"
+        );
+        assert!(!may_block(&rt, &pacer, 12.0, false), "the frame sent bytes");
+        assert!(
+            !may_block(&rt, &Pacer::new(30, 5, 600.0), 30.0, true),
+            "the rate has not stepped down yet"
+        );
+        rt.handle(Action::ToggleHelp);
+        assert!(
+            !may_block(&rt, &pacer, 5.0, true),
+            "back to a running scene"
+        );
+    }
+
+    #[test]
+    fn rt_r21_the_block_timeout_is_a_second_capped_by_a_deadline() {
+        assert_eq!(block_timeout(None), Duration::from_secs(1));
+        assert_eq!(
+            block_timeout(Some(Duration::from_millis(300))),
+            Duration::from_millis(300)
+        );
+        assert_eq!(
+            block_timeout(Some(Duration::from_secs(5))),
+            Duration::from_secs(1)
+        );
+        assert_eq!(block_timeout(Some(Duration::ZERO)), Duration::ZERO);
+    }
+
+    #[test]
+    fn rt_r21_a_keep_awake_status_change_redraws_a_visible_hud() {
+        let mut rt = runtime(&["starfield"]).with_hud(true);
+        rt.handle(Action::TogglePause);
+        assert!(redraw_after_poll(&rt, "caffeinate:on", "caffeinate:exited"));
+        assert!(!redraw_after_poll(&rt, "caffeinate:on", "caffeinate:on"));
+        rt.handle(Action::ToggleHelp);
+        assert!(
+            !redraw_after_poll(&rt, "caffeinate:on", "caffeinate:exited"),
+            "the help page does not show the status"
+        );
+        rt.handle(Action::ToggleHelp);
+        let rt = rt.with_hud(false);
+        assert!(
+            !redraw_after_poll(&rt, "caffeinate:on", "caffeinate:exited"),
+            "no HUD, nothing shows the status"
+        );
     }
 
     // ----- M23: help overlay (RT-R18) -----
