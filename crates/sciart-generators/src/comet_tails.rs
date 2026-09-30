@@ -99,7 +99,9 @@ const NEWTON_WARM: usize = 3;
 /// `COMA_PX` of the nucleus, keeps its full level), the ion tail as thin rays in `Ice`
 /// up to `ION_TOP`; no Sun glow (it sat cut off in a corner).
 const DUST_TOP: f64 = 130.0;
-const ION_TOP: f64 = 140.0;
+const ION_TOP: f64 = 150.0;
+/// One pixel: the ion rays and their knots are drawn without a spread (critic round 2).
+const POINT: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
 const COMA_PX: f64 = 6.0;
 /// The nucleus's level (its cross at 0.7 of it).
 const NUCLEUS_LEVEL: f64 = 240.0;
@@ -612,7 +614,8 @@ impl CometTails {
                         let f = (j as f64 + 0.5) / n as f64;
                         // Pixel `x` spans [x, x + 1); bilinear splats take centres.
                         let (x, y) = (a.0 + f * (b.0 - a.0) - 0.5, a.1 + f * (b.1 - a.1) - 0.5);
-                        self.ion_glow.splat_bilinear(x, y, per);
+                        self.ion_glow
+                            .splat(2.0 * (x + 0.5), 2.0 * (y + 0.5), &POINT, per);
                     }
                     a = b;
                 }
@@ -627,7 +630,7 @@ impl CometTails {
             } else {
                 0.5 * (1.0 - ion.since_cut / DETACH_FADE).max(0.0)
             };
-            self.ion_glow.splat(2.0 * x, 2.0 * y, &SOFT, w as f32);
+            self.ion_glow.splat(2.0 * x, 2.0 * y, &POINT, w as f32);
         }
         // Coma: a bright, compact halo round the nucleus.
         const COMA: [(i32, i32, f32); 49] = halo_kernel::<49>(3);

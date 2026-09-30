@@ -637,7 +637,9 @@ const CELLS_PER_STAR: usize = 40;
 /// The craft's trail: pale starlight (VOY-A10), 1 px, at `TRAIL_LEVEL` (oldest the
 /// dimmest end); planet orbits faint dotted `Starlight` at `ORBIT_LEVEL` (ADR-0017, M14).
 const TRAIL: Ramp = Ramp::Starlight;
-const TRAIL_LEVEL: (f64, f64) = (40.0, 70.0);
+const TRAIL_LEVEL: (f64, f64) = (60.0, 90.0);
+/// The newest tenth of the trail brightens to this level (critic round 2).
+const TRAIL_HEAD: f64 = 120.0;
 const ORBIT_LEVEL: u8 = 34;
 /// The giants drawn as a plus of five pixels, the rest as one (ADR-0017: 1–2 px planets).
 const PLUS: [(i32, i32); 5] = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)];
@@ -794,7 +796,11 @@ impl VoyagerJourney {
             let (x, y) = proj.screen(f.r, f.phi);
             let p = Dots::from_cells(x + 0.5, y + 0.5);
             let u = (i as f64 / n).min(1.0);
-            let level = TRAIL_LEVEL.0 + (TRAIL_LEVEL.1 - TRAIL_LEVEL.0) * u;
+            let level = if u > 0.9 {
+                TRAIL_LEVEL.1 + (TRAIL_HEAD - TRAIL_LEVEL.1) * (u - 0.9) / 0.1
+            } else {
+                TRAIL_LEVEL.0 + (TRAIL_LEVEL.1 - TRAIL_LEVEL.0) * u / 0.9
+            };
             if let Some(q) = prev {
                 let ink = Ink::new(Role::Ramp(TRAIL), ink::level(level));
                 self.dots.line(q.0, q.1, p.0, p.1, ink);
@@ -1319,14 +1325,14 @@ mod tests {
             0
         );
         assert_ne!(BODIES[SATURN].ramp, Ramp::Ember);
-        // M14: the trail's braille is at most `TRAIL_LEVEL.1`.
+        // M14: the trail's braille is at most `TRAIL_HEAD`.
         assert!(
             frame
                 .cells()
                 .iter()
                 .filter(|c| (0x2801..=0x28FF).contains(&(c.ch as u32)))
                 .filter(|c| c.ink.role == Role::Ramp(TRAIL))
-                .all(|c| f64::from(c.ink.level) <= TRAIL_LEVEL.1 + 1.0)
+                .all(|c| f64::from(c.ink.level) <= TRAIL_HEAD + 1.0)
         );
     }
 
