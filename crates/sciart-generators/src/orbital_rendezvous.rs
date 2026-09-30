@@ -599,7 +599,7 @@ impl Generator for OrbitalRendezvous {
         }
         let ps = self.pixels.pixel_size();
         self.stars.clear();
-        for k in 0..(size.area() / 50) as i32 {
+        for k in 0..(size.area() / 150) as i32 {
             let x = (hash01(cell_key(k, 51)) * f64::from(ps.width())) as i32;
             let y = (hash01(cell_key(k, 53)) * f64::from(ps.height()) * 0.8) as i32;
             let l = 18 + (hash01(cell_key(k, 57)).powi(4) * 120.0) as u8;

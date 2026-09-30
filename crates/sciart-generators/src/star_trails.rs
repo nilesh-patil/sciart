@@ -98,15 +98,14 @@ const GLOW_DEG: f64 = 2.5;
 /// The level under which a sky pixel is drawn black.
 const SKY_BLACK: f64 = 12.0;
 
-/// The skyglow and the faint trails' haze (level `l`) in two flat steps (ADR-0018): the
-/// barely lit horizon in `Dim`, the faint rings where their light adds up in `Structure`.
-fn sky_ink(l: f64) -> Ink {
-    if l >= 40.0 {
-        Ink::new(Role::Structure, 40)
-    } else {
-        Ink::new(Role::Dim, 0)
-    }
-}
+/// The barely lit horizon (one flat `Dim` step, ADR-0018): just enough for the treeline to
+/// show as a silhouette; the rest of the sky is black.
+const SKYGLOW: Ink = Ink::new(Role::Dim, 0);
+/// Faint trails are dim braille dots on the bright trails' lattice (ADR-0018: no
+/// half-block haze): a dot lights where its fixed hash falls below its pixel's toned
+/// faint light, none below `FAINT_FLOOR`.
+const FAINT_DOT: Ink = Ink::new(Role::Dim, 150);
+const FAINT_FLOOR: f64 = 12.0;
 
 /// A bright trail's colour by its star's temperature (the exposure keeps the blackbody
 /// level of the hottest trail through a dot, a model quantity): M11's stepped palette,
@@ -190,9 +189,10 @@ pub struct StarTrails {
     fade: u16,
     /// The sky's fixed level per pixel (0 = land).
     base: Vec<u8>,
-    /// The faint trails' soft exposure, and the picture toned from it over the base.
+    /// The faint trails' soft exposure, and its toned dot density per pixel.
     haze: Glow,
     haze_tone: Tone,
+    faint: Vec<u8>,
     sky: Pixels,
     /// Time since the first exposure began, and the exposure's index.
     t: f64,
@@ -284,25 +284,25 @@ impl StarTrails {
         }
     }
 
-    /// Tone the faint exposure over the fixed sky, dimmed by the fade.
+    /// Tone the faint exposure into per-pixel dot densities (drawn as dim braille dots on
+    /// the trails' lattice, dimmed by the fade), and shade the fixed sky: black but for
+    /// the barely lit horizon.
     fn tone_sky(&mut self) {
         let keep = 1.0 - f64::from(self.fade) / 256.0;
-        let (base, haze, tone) = (&self.base, self.haze.values(), &self.haze_tone);
+        let (haze, tone) = (self.haze.values(), &self.haze_tone);
+        for (d, &h) in self.faint.iter_mut().zip(haze) {
+            let t = FAINT_SHARE * f64::from(tone.level(h)) * keep;
+            *d = if t < FAINT_FLOOR {
+                0
+            } else {
+                t.min(255.0) as u8
+            };
+        }
+        let base = &self.base;
         let w = usize::from(self.sky.pixel_size().width());
         self.sky.shade(|x, y| {
-            let i = y as usize * w + x as usize;
-            match base.get(i).copied().unwrap_or(0) {
-                0 => Ink::BLANK,
-                b => {
-                    let t = f64::from(tone.level(haze.get(i).copied().unwrap_or(0.0)));
-                    let l = f64::from(b) + FAINT_SHARE * t * keep;
-                    if l < SKY_BLACK {
-                        Ink::BLANK
-                    } else {
-                        sky_ink(l)
-                    }
-                }
-            }
+            let l = f64::from(base.get(y as usize * w + x as usize).copied().unwrap_or(0));
+            if l < SKY_BLACK { Ink::BLANK } else { SKYGLOW }
         });
     }
 }
@@ -361,6 +361,8 @@ impl Generator for StarTrails {
         // Sky: skyglow rising toward the horizon, the land a black silhouette over it.
         self.sky.resize(size);
         self.haze.resize(size);
+        self.faint.clear();
+        self.faint.resize(2 * w * h, 0);
         self.haze_tone = Tone::asinh(FAINT_TONE.0, FAINT_TONE.1);
         self.base.clear();
         for y in 0..2 * h as i32 {
@@ -502,7 +504,7 @@ impl Generator for StarTrails {
         let (dw, dh) = (self.dots_w, self.dots_h);
         for cy in 0..dh / 4 {
             for cx in 0..dw / 2 {
-                let (mut mask, mut level) = (0u8, 0u8);
+                let (mut mask, mut level, mut faint) = (0u8, 0u8, 0u8);
                 for dy in 0..4 {
                     let row = (4 * cy + dy) * dw + 2 * cx;
                     for dx in 0..2 {
@@ -511,25 +513,40 @@ impl Generator for StarTrails {
                         // silhouette test when painting sees one height per dot column,
                         // which can slip between two spires).
                         let px = (2 * cy + dy / 2) * (dw / 2) + cx;
-                        if v == 0
-                            || self.base.get(px).is_none_or(|&b| b == 0)
-                            || u16::from(self.rank.get(row + dx).copied().unwrap_or(0)) < self.fade
-                        {
+                        if self.base.get(px).is_none_or(|&b| b == 0) {
                             continue;
                         }
+                        let rank = self.rank.get(row + dx).copied().unwrap_or(0);
                         let (x, y) = ((2 * cx + dx) as i32, (4 * cy + dy) as i32);
+                        if v == 0 {
+                            // A faint trail's dot: lit by its fixed hash against the
+                            // pixel's toned faint light (already faded).
+                            if rank < self.faint.get(px).copied().unwrap_or(0) {
+                                faint |= raster::dot_bit(x, y);
+                            }
+                            continue;
+                        }
+                        if u16::from(rank) < self.fade {
+                            continue;
+                        }
                         mask |= raster::dot_bit(x, y);
                         level = level.max(v);
                     }
                 }
-                if mask != 0 {
+                if mask | faint != 0 {
                     let (x, y) = (cx as i32, cy as i32);
                     let bg = if unicode {
                         self.sky.cell_bg(x, y)
                     } else {
                         Ink::BLANK
                     };
-                    canvas.put_bg(x, y, raster::braille(mask), trail_ink(level), bg);
+                    // A cell holds one colour: a bright trail's, else the faint dots'.
+                    let ink = if mask != 0 {
+                        trail_ink(level)
+                    } else {
+                        FAINT_DOT
+                    };
+                    canvas.put_bg(x, y, raster::braille(mask | faint), ink, bg);
                 }
             }
         }
@@ -643,14 +660,36 @@ mod tests {
         }
         let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Unicode);
         g.render(&mut canvas);
-        let mut n = 0;
+        let (mut n, mut faint) = (0, 0);
         for c in canvas.cells() {
             if ('\u{2801}'..='\u{28ff}').contains(&c.ch) {
+                if c.ink == FAINT_DOT {
+                    faint += 1;
+                    continue;
+                }
                 assert!(TRAIL.iter().any(|t| t.1 == c.ink), "{:?}", c.ink);
                 n += 1;
             }
         }
-        assert!(n > 50, "{n}");
+        assert!(n > 50 && faint > 0, "{n} trail cells, {faint} faint");
+    }
+
+    #[test]
+    fn trl_a7_the_sky_stays_black_between_the_arcs() {
+        // ADR-0018: faint trails are dim braille dots on the trails' lattice, not a
+        // half-block haze: at 20 s the sky's pixel layer is black above the horizon glow.
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = built(size);
+        for _ in 0..(20.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let ps = g.sky.pixel_size();
+        let lit = (0..i32::from(ps.height()) / 2)
+            .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
+            .filter(|&(x, y)| g.sky.get(x, y).is_some_and(|p| p != Ink::BLANK))
+            .count();
+        assert_eq!(lit, 0, "{lit} lit sky pixels in the upper half");
     }
 
     #[test]
