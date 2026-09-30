@@ -190,15 +190,18 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
     - lenia: re-scored 8 after the LNA-A9 cross-fade (no blank frames between acts)
   - Minor: stair-stepped outlines in heart_fibrillation (heart), seashell_pigmentation, hurricane arms, chemical_garden tubes, jupiter_storms limb · hp_protein_folding: reword the spec's C tag to "C: molecular structure as the subject"
 
-## M14 — Resource diet
+## M14 — Resource diet ✅
 Design: [docs/design/M14-resource-diet.md](design/M14-resource-diet.md) · branch `perf/m14-resource-diet`.
-- [ ] Cost probe `rs-cost` with bytes/frame, paint and diff time, blockiness and darkness metrics; baseline table (RND-R13)
-- [ ] Colour hysteresis in `paint` (RND-R14) · table-driven paint, no invisible escapes (RND-R15)
-- [ ] Allocation-free frame loop (RT-R14) · one buffered write per frame, synchronized update (RT-R15)
-- [ ] Fine texture: smooth upsampling of coarse lattices, blockiness ceilings (GEN-R17)
-- [ ] Dark ground: black backgrounds across scenes, darkness floors (GEN-R18)
-- [ ] Scene hot spots: nothing over 1 ms mean at 200×50 or 2 ms worst at 500×150 without a reason; resize ≤ 10 ms (GEN-R8, GEN-R19)
-- [ ] Art + perf review (≤ 2 rounds), before/after tables, local `--no-ff` merge
+- [x] Cost probe `rs-cost` with bytes/frame, paint and diff time, blockiness and darkness metrics; baseline table (RND-R13)
+- [x] Colour hysteresis in `paint` (RND-R14) · table-driven paint, no invisible escapes (RND-R15)
+- [x] Allocation-free frame loop (RT-R14) · one buffered write per frame, synchronized update (RT-R15)
+- [x] Fine texture: smooth upsampling of coarse lattices, blockiness ceilings (GEN-R17)
+- [x] Dark ground: black backgrounds across scenes, darkness floors (GEN-R18)
+- [x] Scene hot spots: every scene < 2 ms worst at 200×50 (max 1.63 ms) and < 5 ms at 500×150 (max 4.36 ms, was 13.8); mean 0.37 → 0.28 ms; resize ≤ 10 ms (GEN-R8, GEN-R19). Not met: 22 scenes still > 2 ms worst at 500×150 (follow-up)
+- [x] Art + perf review (≤ 2 rounds), before/after tables, local `--no-ff` merge
+- [x] Clean minimal redesign of all 76 scenes (ADR-0017; user redirect: over-design, loud colour, large blocks and thick edges were the regression, not colourfulness); legible-subject rule and art_metrics guards (GEN-R21)
+- [x] Results: −49 % CPU per frame, −68 % bytes per frame, 57 → 1 writes per frame, blockiness halved, dark ground 0.68 → 0.89 (docs/design/M14-resource-diet.md)
+- [ ] M14 follow-ups: see "Follow-ups" in docs/design/M14-resource-diet.md (22 scenes > 2 ms worst at 500×150, mars_rover sky band blocks, logged art minors, bench `worst` table)
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
