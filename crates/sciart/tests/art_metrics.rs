@@ -46,7 +46,7 @@ type Limits = (
 /// Scenes whose brightest lit pixels (p99 luma) are still below `LEGIBLE_LUMA` (GEN-R21,
 /// ADR-0017 rule 6), as measured when the rule landed. An allowlist that may only shrink:
 /// a listed scene that passes fails the test until its entry is deleted.
-const KNOWN_FAINT: &[&str] = &["firefly_sync", "liesegang_rings", "supernova_remnant"];
+const KNOWN_FAINT: &[&str] = &["firefly_sync", "liesegang_rings"];
 
 #[rustfmt::skip]
 const LIMITS: &[Limits] = &[
@@ -120,7 +120,7 @@ const LIMITS: &[Limits] = &[
     ("starfield", [0.020, 0.020], [0.980, 0.980], [0.046, 0.046], [0.0033, 0.0033], [1.4, 1.4], [0.005, 0.005]),
     ("stellar_nursery", [0.020, 0.024], [0.721, 0.753], [0.288, 0.251], [0.0138, 0.0130], [8.4, 8.9], [0.247, 0.210]),
     ("strange_attractors", [0.020, 0.020], [0.980, 0.980], [0.082, 0.062], [0.0057, 0.0046], [1.6, 1.8], [0.041, 0.021]),
-    ("supernova_remnant", [0.020, 0.020], [0.932, 0.858], [0.069, 0.144], [0.0066, 0.0149], [5.1, 8.8], [0.028, 0.103]),
+    ("supernova_remnant", [0.020, 0.020], [0.951, 0.891], [0.049, 0.110], [0.0038, 0.0061], [3.5, 7.6], [0.008, 0.069]),
     ("three_body", [0.020, 0.020], [0.980, 0.980], [0.031, 0.031], [0.0036, 0.0035], [1.4, 1.4], [0.000, 0.000]),
     ("total_solar_eclipse", [0.031, 0.020], [0.893, 0.898], [0.109, 0.103], [0.0038, 0.0041], [10.8, 8.6], [0.068, 0.062]),
     ("vortex_street", [0.024, 0.020], [0.719, 0.717], [0.287, 0.289], [0.0265, 0.0269], [21.7, 22.1], [0.246, 0.248]),
