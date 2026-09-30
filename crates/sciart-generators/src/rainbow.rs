@@ -1,7 +1,8 @@
-//! A rain shower lit by a low Sun behind the viewer (SPEC-002 `rainbow`): a bright primary
-//! bow with red outside, a fainter secondary with its colours reversed, the darker sky
-//! between them (Alexander's band), pastel supernumerary arcs inside the primary, drifting
-//! rain curtains, slanting rain and shafts of sunlight converging on the antisolar point.
+//! A rain shower lit by a low Sun behind the viewer, under a dark storm sky (SPEC-002
+//! `rainbow`, ADR-0017): a primary bow with red outside, a fainter secondary with its
+//! colours reversed, black sky between them (Alexander's band), faint supernumerary
+//! ripples inside the primary and drifting rain curtains that brighten and dim the bow
+//! along its arc.
 //!
 //! Every pixel sees the rain at an angle `θ` from the antisolar point. Light leaving the
 //! drops after one internal reflection (the primary) or two (the secondary) piles up at the
@@ -11,20 +12,17 @@
 //! violet Descartes angles, so the bands are smooth rather than a few solid hues) and the
 //! smooth scattered light of the sunlit rain.
 //!
-//! Colour: where the bow is at full strength it is drawn in the theme's isoluminant hue
-//! loop (`Role::Phase`), its hue following the wavelength continuously, so the bands blend
-//! into one another with no stepped stripes, at a pastel chroma. Phase's fixed lightness
-//! matches the named ramps near level 186, so where the bow is weaker (its soft edges, gaps
-//! between rain curtains, the Sun behind a cloud, the fainter secondary) it continues in the
-//! nearest spectral ramp at a lower level (red `HAlpha`, orange `Ember`, yellow `Sulfur`,
-//! green `Aurora`, blue `Cobalt`, violet `Plasma`). The sunlit rain inside the primary is a
-//! dim neutral grey `Starlight`, the storm cloud outside a slate `Div`.
+//! Colour: the bow is drawn in the nearest spectral ramp (red `HAlpha`, orange `Ember`,
+//! yellow `Sulfur`, green `Aurora`, blue `Cobalt`, violet `Plasma`) at a level that follows
+//! its light through a soft shoulder up to mid lightness, so its edges fade into the sky.
+//! The sky is black overhead with a faint grey `Starlight` toward the horizon and a fainter
+//! lift inside the primary (the sunlit rain).
 
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::rng::{hash01, value_noise};
+use sciart_core::rng::value_noise;
 use sciart_core::timeline::ease;
 
 use crate::shared::skyline::{Skyline, Terrain};
@@ -68,47 +66,30 @@ const FRINGES: [f64; 2] = [1.019, 3.248];
 /// Share of a band's peak light above which its hue shows (below it: the sky's). A
 /// property of the angle, not of the moment, so a fading bow dims but keeps its width.
 const HUE_SWITCH: f64 = 0.3;
-/// The bow's full level (where `Phase`'s lightness sits on the ramps), the gain from the
-/// band's light to its strength, and the level from which it is drawn in `Phase`.
-const BOW_LEVEL: f64 = 186.0;
+/// The gain from the band's light to the bow's strength.
 const BOW_GAIN: f64 = 1.35;
-const PHASE_FROM: f64 = 170.0;
+/// ADR-0017: the bow's top level (mid lightness), the level under which a bow pixel is
+/// dark, the storm sky's grey at the horizon, the sunlit rain's faint lift inside the
+/// primary, the supernumeraries' lift, and the sky level under which it is black.
+const BOW_TOP: f64 = 200.0;
+const BOW_BLACK: f64 = 10.0;
+const STORM: f64 = 16.0;
+const RAIN_GLOW: f64 = 8.0;
+const SUPER_LIFT: f64 = 18.0;
+const SKY_BLACK: f64 = 10.0;
 /// The bow's strength: its floor with the rain and Sun at their dimmest, and the share of
 /// full sunlit rain at which it is at full strength.
 const BOW_FLOOR: f64 = 0.35;
 const BOW_FULL: f64 = 0.6;
-/// The sunlit rain inside the primary in `Ramp(Starlight)`, a calm grey (not a cyan): its
-/// base, the
-/// gain with sunlit rain, the extra near the bow and the drop toward the horizon.
-const RAIN_LIT: (f64, f64, f64, f64) = (64.0, 10.0, 12.0, 14.0);
 /// Sun breaks: the Sun behind the viewer passes in and out of cloud (value noise in time,
 /// cell in s), dimming the bow and the sunlit rain to this share.
 const SUN_CELL: f64 = 6.0;
 const SUN_LOW: f64 = 0.4;
-/// Storm-cloud `Ramp(Starlight)` levels: top of the frame and at the horizon.
-const SKY_BASE: (f64, f64) = (20.0, 40.0);
-/// Slate sky as `Div` below zero: offset, per level, and the deepest (bluest) value.
-const SLATE: (f64, f64, f64) = (0.01, 0.0032, 0.1);
-/// Extra light of the sunlit rain: inside the primary, and outside the secondary.
-const LIT: (f64, f64) = (88.0, 12.0);
-/// Cloud-base mottling (± levels) and its cell (share of the width).
-const MOTTLE: (f64, f64) = (7.0, 0.09);
-/// Rain curtains: slant (px across per px down, matching the streaks), cell (share of the
+/// Rain curtains: slant (px across per px down, as the rain falls), cell (share of the
 /// width) and drift (px/s at 100 px wide).
 const CURTAIN_SLANT: f64 = 0.15;
 const CURTAIN_CELL: f64 = 0.22;
 const CURTAIN_DRIFT: f64 = 2.2;
-/// Anticrepuscular shafts: count, peak extra level, and period range (s).
-const SHAFTS: usize = 7;
-const SHAFT_GAIN: f64 = 20.0;
-const SHAFT_PERIOD: (f64, f64) = (9.0, 17.0);
-/// Rain streaks: pool capacity, per cell, `Ramp(Starlight)` level range, fall speed
-/// (cells/s) and slant (cells across per cell down).
-const RAIN_CAP: usize = 1500;
-const RAIN_DENSITY: f64 = 0.28;
-const RAIN_LEVEL: (f64, f64) = (60.0, 95.0);
-const RAIN_SPEED: (f64, f64) = (26.0, 40.0);
-const SLANT: f64 = 0.3;
 /// Sun elevation over one loop (deg): it sinks, so the bow rises.
 const SUN_ELEV: (f64, f64) = (18.0, 8.0);
 const LOOP: f64 = 50.0;
@@ -197,8 +178,8 @@ fn weight(nm: f64) -> f64 {
     (-((nm - 560.0) / 120.0).powi(2)).exp()
 }
 
-/// The ramp that carries a wavelength's colour where the bow is weak, red → violet. Cyan
-/// has no ramp of its own; `Phase` carries it at full strength.
+/// The ramp that carries a wavelength's colour, red → violet (cyan has no ramp of its
+/// own and falls to green or blue).
 pub(crate) fn spectral_ramp(nm: f64) -> Ramp {
     match nm {
         n if n >= 636.0 => Ramp::HAlpha,
@@ -208,33 +189,6 @@ pub(crate) fn spectral_ramp(nm: f64) -> Ramp {
         n if n >= 440.0 => Ramp::Cobalt,
         _ => Ramp::Plasma,
     }
-}
-
-/// The `Phase` level (a hue on the theme's isoluminant loop, which starts at OKLab hue
-/// 30°) of a wavelength: its OKLab hue, piecewise linear through the spectral colours,
-/// spaced so red, orange, yellow, green, blue and violet take similar shares of the band
-/// (as the eye sees a bow; the drawn band is linear in wavelength).
-pub(crate) fn spectral_phase(nm: f64) -> u8 {
-    // (nm, OKLab hue in degrees), red → violet.
-    const HUES: [(f64, f64); 7] = [
-        (700.0, 25.0),
-        (650.0, 55.0),
-        (600.0, 100.0),
-        (550.0, 140.0),
-        (500.0, 215.0),
-        (450.0, 262.0),
-        (400.0, 300.0),
-    ];
-    let nm = nm.clamp(400.0, 700.0);
-    let mut hue = HUES[HUES.len() - 1].1;
-    for w in HUES.windows(2) {
-        let ((n0, h0), (n1, h1)) = (w[0], w[1]);
-        if nm <= n0 && nm >= n1 {
-            hue = h0 + (h1 - h0) * (n0 - nm) / (n0 - n1);
-            break;
-        }
-    }
-    sciart_core::ink::phase((hue - 30.0).to_radians()).level
 }
 
 /// Per angle: bow light (0..1 of a full band), the wavelength seen (nm; its ramp) and the
@@ -248,8 +202,6 @@ pub(crate) struct Sample {
     pub ramp: Ramp,
     /// Whether the band's hue shows here (its light above [`HUE_SWITCH`] of its peak).
     pub hue: bool,
-    /// The wavelength's hue on the `Phase` loop ([`spectral_phase`]).
-    pub phase: u8,
     pub sky: f32,
 }
 
@@ -260,7 +212,6 @@ impl Default for Sample {
             nm: 550.0,
             ramp: Ramp::Starlight,
             hue: false,
-            phase: 0,
             sky: 0.0,
         }
     }
@@ -332,33 +283,8 @@ pub(crate) fn light_at(theta: f64) -> Sample {
         nm: nm as f32,
         ramp,
         hue: bow > HUE_SWITCH * peak,
-        phase: spectral_phase(nm),
         sky: sky as f32,
     }
-}
-
-/// The storm cloud outside the primary at a `Ramp`-equivalent level: a dark slate from
-/// the cool side of `Div` just below zero (a blue-grey no named ramp has at this
-/// lightness), lightening with the level.
-fn slate(lvl: f64) -> Ink {
-    sciart_core::ink::div(-(SLATE.0 + SLATE.1 * (lvl - 12.0).max(0.0)).min(SLATE.2))
-}
-
-#[derive(Debug, Clone, Copy)]
-struct Drop {
-    x: f64,
-    y: f64,
-    speed: f64,
-    level: u8,
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-struct Shaft {
-    /// Centre and half-width in pseudo-angle about the antisolar point (−1..1).
-    at: f64,
-    half: f64,
-    period: f64,
-    phase: f64,
 }
 
 #[derive(Debug, Default)]
@@ -368,23 +294,19 @@ pub struct Rainbow {
     /// Per pixel column: `cos(az)`; per pixel row: `cos(el)`, `sin(el)`.
     cos_az: Vec<f64>,
     el: Vec<(f64, f64)>,
-    /// Per pixel: land cover (0..1) and the cloud base's mottling (−1..1).
+    /// Per pixel: land cover (0..1).
     land: Vec<f32>,
-    mottle: Vec<f32>,
     /// Rain-curtain density along `x − slant·y` (px), refreshed each step.
     curtain: Vec<f32>,
-    /// Shaft light per pseudo-angle bin, refreshed each step.
-    shaft: Vec<f32>,
-    shafts: [Shaft; SHAFTS],
     salt: u64,
     horizon: f64,
     per_deg: f64,
     picture: Pixels,
-    rain: ParticlePool<Drop>,
-    streaks: Dots,
     /// Canvas size (cells).
     cells: (f64, f64),
     t: f64,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Rainbow {
@@ -423,24 +345,13 @@ impl Rainbow {
         ease::smoothstep((0.7 * a + 0.3 * b - 0.28) / 0.44)
     }
 
-    /// Refresh the per-step tables: curtain density and shaft light.
+    /// Refresh the per-step table: curtain density.
     fn refresh(&mut self) {
         let w = self.cos_az.len() as f64;
         let rows = self.el.len() as f64;
         let x0 = -CURTAIN_SLANT * rows;
         for (i, c) in self.curtain.iter_mut().enumerate() {
             *c = Self::curtain_at(self.salt, x0 + i as f64, w, self.t) as f32;
-        }
-        for (i, s) in self.shaft.iter_mut().enumerate() {
-            let p = (i as f64 + 0.5) / 128.0 - 1.0;
-            let mut sum = 0.0;
-            for sh in &self.shafts {
-                // Each shaft comes and goes as a gap in the clouds behind the viewer opens.
-                let on = ((TAU * self.t / sh.period + sh.phase).sin_det()).max(0.0);
-                let d = (p - sh.at) / sh.half;
-                sum += on * on * (-d * d).exp();
-            }
-            *s = sum.min(1.0) as f32;
         }
     }
 
@@ -451,18 +362,9 @@ impl Rainbow {
         let ps = self.picture.pixel_size();
         let w = usize::from(ps.width());
         let horizon = self.horizon;
-        // The antisolar point on screen: centred, `elev` below the horizon.
-        let (ax, ay) = (0.5 * w as f64, horizon + elev.to_degrees() * self.per_deg);
         let x0 = -CURTAIN_SLANT * self.el.len() as f64;
-        let (lut, cos_az, el, land, mottle, curtain, shaft) = (
-            &self.lut,
-            &self.cos_az,
-            &self.el,
-            &self.land,
-            &self.mottle,
-            &self.curtain,
-            &self.shaft,
-        );
+        let (lut, cos_az, el, land, curtain) =
+            (&self.lut, &self.cos_az, &self.el, &self.land, &self.curtain);
         let lut_at = |c: f64| {
             let i = (c.clamp(0.0, 1.0) * (LUT - 1) as f64).round() as usize;
             lut.get(i).copied().unwrap_or_default()
@@ -484,76 +386,36 @@ impl Rainbow {
             let open = 1.0 - cover;
             let ci = (px - CURTAIN_SLANT * py - x0).max(0.0) as usize;
             let veil = f64::from(curtain.get(ci).copied().unwrap_or(0.0));
-            // Pseudo-angle about the antisolar point (no trig): rays of sunlight through
-            // gaps in the clouds behind the viewer converge there.
-            let (dx, dy) = (px - ax, (ay - py).max(0.0));
-            let p = dx / (dx.abs() + dy + 1e-9);
-            let si = ((p + 1.0) * 128.0).clamp(0.0, 255.0) as usize;
-            let beam = f64::from(shaft[si]) * rain;
-            // Sky: the storm cloud's base, lighter toward the horizon and mottled, plus the
-            // sunlit rain (brightest where the curtains are dense and the shafts fall).
+            // A dark storm sky (ADR-0017, the documented lit backdrop): black overhead, a
+            // faint grey toward the horizon, faintly lifted inside the primary (the sunlit
+            // rain) and left black in Alexander's band.
             let low = (py / horizon.max(1.0)).clamp(0.0, 1.0);
-            let m = f64::from(mottle.get(i).copied().unwrap_or(0.0)) * (1.0 - low);
             let lit = rain * sun * (0.55 + 0.45 * veil);
-            let shafts = SHAFT_GAIN * beam * sun * (0.4 + f64::from(s.sky));
-            // Outside the primary: the storm cloud's slate base.
-            let base = SKY_BASE.0 + (SKY_BASE.1 - SKY_BASE.0) * low * low + MOTTLE.0 * m;
-            let cloud = base + LIT.1 * veil * rain * sun + shafts;
-            // Inside: the sunlit rain, luminous near the bow and easing down to the
-            // horizon; lightness blends continuously from the cloud across the red rim.
-            let rain_lit = RAIN_LIT.0 + RAIN_LIT.1 * lit + RAIN_LIT.2 * f64::from(s.sky) * lit
-                - RAIN_LIT.3 * low * low
-                + 0.5 * MOTTLE.0 * m
-                + shafts;
-            let inside = ease::smoothstep((f64::from(s.sky) - 0.2) / 0.4);
-            let sky = cloud + (rain_lit - cloud) * inside;
-            // The bow brightens and fades along its arc with the rain it shines in, and as a
-            // whole with the sunlight on the rain.
+            let sky = (STORM * low * low + RAIN_GLOW * f64::from(s.sky) * lit) * open;
+            // The bow: its band light, strongest where the curtains are dense and the Sun
+            // is out, drawn in its wavelength's ramp at a level that follows the light, so
+            // its edges fade over the band's soft shoulders (no stepped rim).
             let strength = BOW_FLOOR + (1.0 - BOW_FLOOR) * (lit / BOW_FULL).min(1.0);
-            let a = (f64::from(s.bow) * BOW_GAIN * strength * (1.0 + 0.25 * beam)).clamp(0.0, 1.0);
-            let target = BOW_LEVEL.max(sky + 30.0);
-            let lvl = (sky + (target - sky) * a) * open;
-            if s.hue && a > 0.04 {
-                if lvl >= PHASE_FROM {
-                    // At full strength: a continuous hue at Phase's (fixed) lightness.
-                    Ink::new(Role::Phase, s.phase)
-                } else {
-                    Ink::new(Role::Ramp(s.ramp), sciart_core::ink::level(lvl))
-                }
-            } else if inside > 0.5 {
-                // The sunlit rain inside the primary: a dim, nearly neutral grey
-                // (`Starlight` stays grey while faint), brighter than the cloud but calm.
-                Ink::new(Role::Ramp(Ramp::Starlight), sciart_core::ink::level(lvl))
+            // A soft shoulder, not a clip: the band's body keeps its gradient (no flat
+            // plateau of one level, GEN-R17).
+            let x = (f64::from(s.bow) * BOW_GAIN * strength).max(0.0);
+            let a = ((1.0 - (-1.6 * x).exp()) / (1.0 - (-1.6f64).exp())).min(1.0);
+            let bow = BOW_TOP * a * open;
+            if s.hue && bow >= sky.max(BOW_BLACK) {
+                return Ink::new(Role::Ramp(s.ramp), sciart_core::ink::level(bow));
+            }
+            // The supernumeraries: lightness only, a pale ripple in the rain inside.
+            let sky = if s.hue {
+                sky
             } else {
-                slate(lvl)
+                sky + SUPER_LIFT * a * open
+            };
+            if sky < SKY_BLACK {
+                Ink::BLANK
+            } else {
+                Ink::new(Role::Ramp(Ramp::Starlight), sciart_core::ink::level(sky))
             }
         });
-    }
-
-    fn rasterise_rain(&mut self) {
-        self.streaks.clear();
-        let (_, rain) = Self::sky_state(self.t);
-        let horizon_cells = self.horizon / 2.0;
-        let w = self.cos_az.len() as f64;
-        for (k, d) in self.rain.iter().enumerate() {
-            if d.y > horizon_cells {
-                continue;
-            }
-            // Streaks fall in the curtains: thin where the veil is, gone between.
-            let veil = Self::curtain_at(self.salt, d.x - CURTAIN_SLANT * 2.0 * d.y, w, self.t);
-            if hash01(k as u64 ^ 0x5a) > rain * (0.25 + 0.75 * veil) {
-                continue;
-            }
-            let (x, y) = Dots::from_cells(d.x, d.y);
-            let len = 3.0;
-            self.streaks.line(
-                x,
-                y,
-                x - SLANT * len,
-                y - len,
-                Ink::new(Role::Ramp(Ramp::Starlight), d.level),
-            );
-        }
     }
 }
 
@@ -583,72 +445,35 @@ impl Generator for Rainbow {
             .collect();
         let hills = Skyline::new(&mut ctx.rng, w, per_deg, HILLS);
         self.salt = ctx.rng.random();
-        let cell = (MOTTLE.1 * px_w).max(3.0);
         self.land.clear();
-        self.mottle.clear();
         for y in 0..2 * h {
             for x in 0..w {
                 self.land
                     .push(hills.cover(x as i32, y as i32, self.horizon));
-                // Flattened cells, as a cloud base seen at a slant.
-                let (fx, fy) = (x as f64, y as f64 * 2.2);
-                let m = 0.65 * value_noise(self.salt ^ 0xc1, fx, fy, cell)
-                    + 0.35 * value_noise(self.salt ^ 0xc2, fx, fy, 0.4 * cell);
-                self.mottle.push((2.0 * m - 1.0) as f32);
             }
         }
         let span = w + (CURTAIN_SLANT * px_h).ceil() as usize + 2;
         self.curtain.clear();
         self.curtain.resize(span, 0.0);
-        self.shaft.resize(256, 0.0);
-        for sh in &mut self.shafts {
-            *sh = Shaft {
-                at: ctx.rng.random_range(-0.85..0.85),
-                half: ctx.rng.random_range(0.025..0.07),
-                period: ctx.rng.random_range(SHAFT_PERIOD.0..SHAFT_PERIOD.1),
-                phase: ctx.rng.random_range(0.0..TAU),
-            };
-        }
         self.picture.resize(size);
-        self.streaks.resize(size);
-        let n = ((RAIN_DENSITY * size.area() as f64) as usize).clamp(1, RAIN_CAP);
-        self.rain = ParticlePool::with_capacity(RAIN_CAP);
-        for _ in 0..n {
-            self.rain.spawn(Drop {
-                x: ctx.rng.random_range(0.0..px_w),
-                y: ctx.rng.random_range(0.0..h as f64),
-                speed: ctx.rng.random_range(RAIN_SPEED.0..RAIN_SPEED.1),
-                level: ctx.rng.random_range(RAIN_LEVEL.0..RAIN_LEVEL.1) as u8,
-            });
-        }
-        self.refresh();
-        self.paint();
-        self.rasterise_rain();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         let dt = dt.max(0.0);
         self.t += dt;
-        let (w, h) = self.cells;
-        for d in self.rain.iter_mut() {
-            d.y += d.speed * dt;
-            d.x += SLANT * d.speed * dt / 2.0;
-            if d.y >= h {
-                d.y -= h;
-            }
-            if d.x >= w {
-                d.x -= w;
-            }
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.refresh();
+            self.paint();
         }
-        self.refresh();
-        self.paint();
-        self.rasterise_rain();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let is_bow = |ink: Ink| {
-            ink.role == Role::Phase || matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight)
-        };
+        let is_bow = |ink: Ink| matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight);
         self.picture.blit(canvas, |_, _, top, bottom| {
             match (is_bow(top), is_bow(bottom)) {
                 (true, true) => Some(('#', top)),
@@ -657,10 +482,6 @@ impl Generator for Rainbow {
                 _ => None,
             }
         });
-        // Streaks are braille-fine; as ASCII dot counts they would bury the bow.
-        if canvas.mode() == GlyphMode::Unicode {
-            self.streaks.blit_over(canvas, &self.picture);
-        }
     }
 }
 
@@ -745,16 +566,34 @@ mod tests {
     }
 
     #[test]
-    fn bow_a5_rain_pool_stays_within_capacity() {
-        for size in [Size::new(80, 24), Size::new(500, 150)] {
-            let mut ctx = Ctx::new(42, size);
-            let mut g = Rainbow::default();
-            g.resize(size, &mut ctx);
-            for _ in 0..120 {
-                g.update(SIM_DT, &mut ctx);
+    fn bow_a5_a_dark_storm_sky_under_two_bows() {
+        // ADR-0017: the sky is black overhead and at most a faint grey low down; the bows
+        // stay at mid lightness.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = Rainbow::default();
+        g.resize(size, &mut ctx);
+        g.prepare();
+        let (mut bow, mut top_lit) = (0, 0);
+        for y in 0..80 {
+            for x in 0..120 {
+                let ink = g.picture.get(x, y).unwrap_or(Ink::BLANK);
+                match ink.role {
+                    Role::Background => {}
+                    Role::Ramp(Ramp::Starlight) => {
+                        assert!(f64::from(ink.level) <= STORM + RAIN_GLOW + SUPER_LIFT + 1.0);
+                        top_lit += usize::from(y < 8);
+                    }
+                    Role::Ramp(_) => {
+                        assert!(f64::from(ink.level) <= BOW_TOP + 1.0, "{ink:?}");
+                        bow += 1;
+                    }
+                    other => panic!("{other:?}"),
+                }
             }
-            assert!(g.rain.len() <= RAIN_CAP && g.rain.capacity() == RAIN_CAP);
         }
+        assert!(bow > 300, "{bow} bow pixels");
+        assert_eq!(top_lit, 0, "grey sky overhead");
     }
 
     #[test]
@@ -781,20 +620,6 @@ mod tests {
         }
         use Ramp::*;
         assert_eq!(seen, [HAlpha, Ember, Sulfur, Aurora, Cobalt, Plasma]);
-        // At full strength the hue runs continuously red → violet on the Phase loop: small
-        // steps, always forward, and most of the way round (no stepped stripes).
-        let mut prev = at(deg(r1)).phase;
-        let mut turned = 0u32;
-        let mut d = deg(r1) - 0.02;
-        while d > deg(v1) {
-            let p = at(d).phase;
-            let step = p.wrapping_sub(prev);
-            assert!(step <= 6, "hue step {step} at {d}°");
-            turned += u32::from(step);
-            prev = p;
-            d -= 0.02;
-        }
-        assert!((170..=200).contains(&turned), "hue turned {turned}/256");
     }
 
     #[test]
@@ -803,9 +628,9 @@ mod tests {
         let mut ctx = Ctx::new(7, size);
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let bright = |g: &Rainbow| {
-            // Mean level of bow pixels in the left, middle and right thirds (a `Phase`
-            // pixel is at the bow's full level).
+            // Mean level of bow pixels in the left, middle and right thirds.
             let ps = g.picture.pixel_size();
             let (w, h) = (i32::from(ps.width()), i32::from(ps.height()));
             let mut sums = [(0.0, 0.0); 3];
@@ -813,7 +638,6 @@ mod tests {
                 for x in 0..w {
                     let ink = g.picture.get(x, y).unwrap_or(Ink::BLANK);
                     let lvl = match ink.role {
-                        Role::Phase => BOW_LEVEL,
                         Role::Ramp(r) if r != Ramp::Starlight => f64::from(ink.level),
                         _ => continue,
                     };
@@ -828,6 +652,7 @@ mod tests {
         assert!(first.iter().all(|&m| m > 0.0), "{first:?}");
         for _ in 0..(8.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let later = bright(&g);
         let change: f64 = first.iter().zip(&later).map(|(a, b)| (a - b).abs()).sum();
@@ -835,44 +660,32 @@ mod tests {
     }
 
     #[test]
-    fn bow_a8_slate_storm_cloud_outside_sunlit_rain_inside() {
+    fn bow_a8_faint_rain_inside_black_between_the_bows() {
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(3, size);
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let (elev, _) = Rainbow::sky_state(0.0);
-        let row = |d: f64| {
-            // Pixel row `d`° above the antisolar point, straight up the middle.
-            (g.horizon + (elev.to_degrees() - d) * g.per_deg) as i32
-        };
+        let row = |d: f64| (g.horizon + (elev.to_degrees() - d) * g.per_deg) as i32;
         let x = i32::from(g.picture.pixel_size().width()) / 2;
         let (inside, band) = (
             g.picture.get(x, row(36.0)).unwrap_or(Ink::BLANK),
             g.picture.get(x, row(46.5)).unwrap_or(Ink::BLANK),
         );
-        // Inside the primary: sunlit rain as a calm, dim grey `Starlight` (brighter than the
-        // cloud, far below the bow); Alexander's band: dark slate (the cool side of `Div`,
-        // just below zero), a darker sky than inside.
-        assert_eq!(inside.role, Role::Ramp(Ramp::Starlight));
-        assert!((55..=95).contains(&inside.level), "{inside:?}");
-        // It eases down toward the horizon rather than being one flat dome.
-        let low = g
-            .picture
-            .get(x, row(elev.to_degrees() + 2.0))
-            .unwrap_or(Ink::BLANK);
-        assert_eq!(low.role, Role::Ramp(Ramp::Starlight));
-        assert!(low.level + 8 <= inside.level, "{low:?} vs {inside:?}");
-        assert_eq!(band.role, Role::Div);
-        let v = sciart_core::ink::div_value(band);
-        assert!((-SLATE.2 - 0.01..0.0).contains(&v), "{band:?}");
-        // Darker: slate this close to zero is below Starlight 40 in lightness.
-        assert!(v > -0.06, "{band:?}");
+        // Inside the primary at most a faint grey (the sunlit rain); Alexander's band black.
+        assert!(
+            inside == Ink::BLANK || inside.role == Role::Ramp(Ramp::Starlight),
+            "{inside:?}"
+        );
+        assert!(inside.level <= 40, "{inside:?}");
+        assert_eq!(band, Ink::BLANK, "{band:?}");
     }
 
     #[test]
     fn bow_a9_sun_breaks_brighten_and_dim_the_whole_bow() {
         // The sunlight on the rain wanders within [SUN_LOW, 1], swinging widely within
-        // ~10 s, and a dim spell takes the bow out of full (Phase) strength.
+        // ~10 s, and a dim spell dims the whole bow.
         let mut lo: f64 = 1.0;
         let mut hi: f64 = 0.0;
         let mut widest: f64 = 0.0;
@@ -886,11 +699,12 @@ mod tests {
             widest = widest.max((later - s).abs());
         }
         assert!(hi - lo > 0.4 && widest > 0.3, "{lo}..{hi}, {widest}");
-        let phase_pixels = |sun_low: bool| {
+        let bow_light = |sun_low: bool| {
             let size = Size::new(120, 40);
             let mut ctx = Ctx::new(5, size);
             let mut g = Rainbow::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             // Find a moment of full and of dimmest sunlight within the first minute.
             let target = if sun_low { lo } else { hi };
             let t = (0..600)
@@ -904,17 +718,19 @@ mod tests {
             g.refresh();
             g.paint();
             let ps = g.picture.pixel_size();
-            let mut n = 0;
+            let mut n = 0u32;
             for y in 0..i32::from(ps.height()) {
                 for x in 0..i32::from(ps.width()) {
-                    if g.picture.get(x, y).is_some_and(|k| k.role == Role::Phase) {
-                        n += 1;
+                    if let Some(k) = g.picture.get(x, y)
+                        && matches!(k.role, Role::Ramp(r) if r != Ramp::Starlight)
+                    {
+                        n += u32::from(k.level);
                     }
                 }
             }
             n
         };
-        let (bright, dim) = (phase_pixels(false), phase_pixels(true));
+        let (bright, dim) = (bow_light(false), bow_light(true));
         assert!(bright > 0 && dim * 10 < bright * 9, "{bright} vs {dim}");
     }
 
@@ -931,6 +747,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = Rainbow::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let c = 41f64.to_radians().cos_det();
         let s = g.lut_at(c);
         assert!(s.bow > 0.5, "{s:?}");

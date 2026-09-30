@@ -58,7 +58,8 @@ const SUN_MIN_PX: f64 = 0.8;
 /// falls from `HALO_K0` at the limb to 1000 K at its edge as `(1 − u)^1.5` in log T (`u` the
 /// share of the way out), a warm corona fading into space with no outline (SOL-A12).
 /// **Stylised**: the real corona is invisible beside the disc.
-const HALO_K: f64 = 2.4;
+/// M14 (ADR-0017): a tighter glow (was 2.4).
+const HALO_K: f64 = 1.5;
 const HALO_K0: f64 = 4200.0;
 
 /// Planet radius (px) is `s·(R/R_J)^SIZE_POWER`, `s = JUPITER_PX` at an outer orbit of
@@ -91,7 +92,7 @@ const TRAIL_MAX_DOTS: f64 = 30.0;
 const TRAIL_LEVEL: (f64, f64) = (0.35, 0.8);
 /// Each orbit is a continuous braille ellipse in its planet's role at this level (0.27 of
 /// full): tinted, but well under every planet (SOL-A7).
-const ORBIT_LEVEL: u8 = 70;
+const ORBIT_LEVEL: u8 = 40;
 /// ASCII has no fine line: orbits and belt fall back to a sparse `.` in this ink.
 const ORBIT_INK: Ink = Ink::new(Role::Dim, 40);
 
@@ -220,7 +221,9 @@ pub(crate) fn halo_ink(u: f64) -> Option<Ink> {
 
 /// The tinted ink of a planet's orbit.
 fn orbit_ink(p: &Planet) -> Ink {
-    Ink::new(p.day.role, ORBIT_LEVEL)
+    // M14 (ADR-0017): every orbit a faint neutral line, `Starlight` ≤ 40.
+    let _ = p;
+    Ink::new(Role::Ramp(Ramp::Starlight), ORBIT_LEVEL)
 }
 
 /// The view elevation's sine for a frame of half-extents `half_w × half_h` px: the axis
@@ -295,6 +298,8 @@ pub struct SolarSystem {
     /// Trails and Saturn's rings.
     dots: Dots,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SolarSystem {
@@ -505,7 +510,7 @@ impl Generator for SolarSystem {
         self.orbits.resize(size);
         self.dots.resize(size);
         self.pixels.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -515,7 +520,13 @@ impl Generator for SolarSystem {
         for (frac, angle, _) in &mut self.belt {
             *angle = (*angle + angular_speed(*frac) * dt) % TAU;
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -547,6 +558,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut s = SolarSystem::default();
         s.resize(size, &mut Ctx::new(1, size));
+        s.prepare();
         s
     }
 
@@ -568,6 +580,7 @@ mod tests {
         for _ in 0..40 {
             for _ in 0..60 {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
             }
             for (i, p) in PLANETS.iter().enumerate() {
                 let (x, y) = s.planet_xy(i);
@@ -765,15 +778,11 @@ mod tests {
                 "{a:?} {b:?}"
             );
         }
-        // Orbits are tinted in their planet's role at 0.25–0.35 of full, under every planet.
+        // M14: orbits are a faint neutral `Starlight` ≤ 40, under every planet.
         for p in &PLANETS {
             let o = orbit_ink(p);
-            assert_eq!(o.role, p.day.role);
-            let share = f64::from(o.level) / 255.0;
-            assert!(
-                (0.25..=0.35).contains(&share) && o.level < p.day.level,
-                "{o:?}"
-            );
+            assert_eq!(o.role, Role::Ramp(Ramp::Starlight));
+            assert!(o.level <= 40 && o.level < p.day.level, "{o:?}");
         }
         assert!(ORBIT_INK.role == Role::Dim && ORBIT_INK.level <= 40);
         // Trails: every planet at orbit angle 1 rad, so its trail lies at smaller angles.
@@ -906,7 +915,8 @@ mod tests {
                 p.filter(|i| i.role == Role::Blackbody)
                     .map(ink::blackbody_kelvin)
             };
-            let (a, b) = (at(1.2).unwrap(), at(1.6).unwrap());
+            // M14: a tighter glow (to 1.5 radii).
+            let (a, b) = (at(1.1).unwrap(), at(1.35).unwrap());
             assert!(a > b, "{a} {b}");
         }
     }
@@ -924,6 +934,7 @@ mod tests {
         for _ in 0..20 {
             for _ in 0..30 {
                 s.update(SIM_DT, &mut ctx);
+                s.prepare();
             }
             for y in 0..100 {
                 for x in 0..200 {

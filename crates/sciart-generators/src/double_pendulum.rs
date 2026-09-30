@@ -440,11 +440,14 @@ pub struct DoublePendulum {
     tone: Tone,
     /// Readouts in decreasing length; render picks the longest that fits.
     labels: [String; 3],
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for DoublePendulum {
     fn default() -> Self {
         Self {
+            dirty: true,
             twins: [[0.0; 4]; 2],
             ghosts: [[0.0; 4]; GHOSTS],
             started: false,
@@ -662,14 +665,9 @@ impl DoublePendulum {
             let i = (y * w + x) as usize;
             let (a, b) = (va.get(i).copied(), vb.get(i).copied());
             let (a, b) = (a.unwrap_or(0.0), b.unwrap_or(0.0));
-            // Where both twins expose a pixel about equally (superposed), alternate them
-            // on a checkerboard, the glow's analogue of the dashed two-tone lines.
-            let close = (a - b).abs() <= 0.35 * a.max(b);
-            let twin = if close {
-                ((x + y) & 1) as usize
-            } else {
-                usize::from(b > a)
-            };
+            // The brighter twin's hue; no checker where they coincide (M14: no dither), the
+            // dashed two-tone rods carry the superposition.
+            let twin = usize::from(b > a);
             let v = a.max(b) + 0.5 * a.min(b);
             let level = tone.level(v);
             let value = GLOW_V * f64::from(level) / 255.0;
@@ -707,7 +705,7 @@ impl Generator for DoublePendulum {
         if !self.started {
             self.release(ctx);
         }
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -743,7 +741,15 @@ impl Generator for DoublePendulum {
         self.sep = separation(&self.twins[0], &self.twins[1]);
         self.drift = self.drift.max(self.rel_drift());
         self.refresh_labels();
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -875,8 +881,10 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(3);
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         for _ in 0..(20.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.drift < 5e-3, "{}", g.drift);
     }
@@ -957,11 +965,13 @@ mod tests {
             let mut g = DoublePendulum::default();
             let mut ctx = seeded(seed);
             g.resize(Size::new(80, 24), &mut ctx);
+            g.prepare();
             let sep0 = g.sep0;
             assert!((sep0 - TWIN_OFFSET).abs() < 1e-12, "{sep0}");
             let mut max_growth: f64 = 1.0;
             for _ in 0..(30.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 max_growth = max_growth.max(g.sep / sep0);
             }
             assert!(max_growth >= 100.0, "seed {seed}: growth {max_growth}");
@@ -973,8 +983,10 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(11);
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for i in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if i % 37 == 0 {
                 for s in g.twins {
                     let [(x1, y1), (x2, y2)] = bobs(&SCENE, s[0], s[1]);
@@ -1003,6 +1015,7 @@ mod tests {
             let size = Size::new(w, h);
             let mut g = DoublePendulum::default();
             g.resize(size, &mut seeded(0));
+            g.prepare();
             let rows = f64::from(g.label_row.unwrap_or(i32::from(h)));
             for i in 0..64 {
                 for j in 0..64 {
@@ -1029,6 +1042,7 @@ mod tests {
             let mut g = DoublePendulum::default();
             let mut ctx = seeded(3);
             g.resize(size, &mut ctx);
+            g.prepare();
             // At the start and once the energy drift is non-zero: the form must not
             // change with the width of the numbers.
             for _ in 0..2 {
@@ -1042,6 +1056,7 @@ mod tests {
                 );
                 for _ in 0..60 {
                     g.update(SIM_DT, &mut ctx);
+                    g.prepare();
                 }
             }
         }
@@ -1071,6 +1086,7 @@ mod tests {
     fn dp_gen_r13_readout_is_padded_at_the_front_only() {
         let mut g = DoublePendulum::default();
         g.resize(Size::new(200, 50), &mut seeded(3));
+        g.prepare();
         for (label, width) in g.labels.iter().zip(FORM_WIDTHS) {
             assert_eq!(label.len(), width, "{label:?}");
             let text = label.trim_start();
@@ -1099,6 +1115,7 @@ mod tests {
         }
         let mut g = DoublePendulum::default();
         g.resize(Size::new(80, 24), &mut seeded(1));
+        g.prepare();
         let [a, b] = g.twins;
         assert_eq!((a[0], a[2], a[3]), (b[0], b[2], b[3]));
         assert!((b[1] - a[1] - TWIN_OFFSET).abs() < 1e-15);
@@ -1117,12 +1134,15 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(2);
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let first = g.twins[0];
         for _ in 0..(RUN_SECONDS / SIM_DT).round() as usize - 1 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.run_t > RUN_SECONDS - 0.05);
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert!(g.run_t < 1e-9, "{}", g.run_t);
         let [a, b] = g.twins;
         assert_ne!(a[..2], first[..2]);
@@ -1136,11 +1156,14 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(4);
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for _ in 0..90 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let (a, t) = (g.twins, g.run_t);
         g.resize(Size::new(33, 11), &mut ctx);
+        g.prepare();
         assert_eq!((g.twins, g.run_t), (a, t));
     }
 
@@ -1153,6 +1176,7 @@ mod tests {
         // resize too (the glow is rebuilt from the model-space trail).
         let mut resized = run(0, Size::new(80, 24), 30.0);
         resized.resize(size, &mut seeded(0));
+        resized.prepare();
         for s in [&g, &resized] {
             for (i, (y, ramp)) in s.twins.iter().zip(RAMPS).enumerate() {
                 let (dx, dy) = s.view.dot(bobs(&SCENE, y[0], y[1])[1]);
@@ -1231,8 +1255,10 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(seed);
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(seconds / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         g
     }
@@ -1421,11 +1447,13 @@ mod tests {
         let mut g = DoublePendulum::default();
         let mut ctx = seeded(1);
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         for _ in 0..(RUN_SECONDS / SIM_DT) as usize {
             if split(g.apart * g.view.dots_per_unit()) >= 1.0 {
                 break;
             }
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         assert!(g.run_t > 0.0 && split(g.apart * g.view.dots_per_unit()) >= 1.0);
         let lower = |y: &[f64; 4]| bobs(&SCENE, y[0], y[1])[1];
@@ -1467,6 +1495,7 @@ mod tests {
         assert!((TRAIL_LEN as f64 * TICK - 3.0).abs() < 1e-12);
         let size = Size::new(120, 40);
         g.resize(size, &mut seeded(3));
+        g.prepare();
         let lit = roles(&g, size).len();
         // Two bobs, two rods and a pivot light well under 60 cells at 120×40; the rest is
         // the trail, redrawn from model space.
@@ -1480,8 +1509,10 @@ mod tests {
             let mut g = DoublePendulum::default();
             let mut ctx = seeded(5);
             g.resize(size, &mut ctx);
+            g.prepare();
             for i in 0..(45.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
                 if i % 7 == 0 {
                     let row = i32::from(h) - 1;
                     assert!(

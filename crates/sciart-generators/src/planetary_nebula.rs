@@ -9,7 +9,7 @@
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
+use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 use sciart_core::{Tone, ink};
@@ -58,7 +58,7 @@ const BUBBLE_GROW: f64 = 7.0;
 /// Slow further growth through the ionised act (share of the full radius, over s).
 const BUBBLE_CREEP: (f64, f64) = (0.25, 32.0);
 pub(crate) const PROLATE: f64 = 0.6;
-const BUBBLE_THICK: f64 = 0.2;
+const BUBBLE_THICK: f64 = 0.1;
 /// The Cat's Eye's second, tilted inner bubble: size and tilt relative to the first.
 const INNER_SCALE: f64 = 0.62;
 const INNER_TILT: f64 = 0.75;
@@ -66,9 +66,9 @@ const INNER_TILT: f64 = 0.75;
 const ION_REACH: f64 = 1.25;
 /// Low-ionisation knots (FLIERs) just outside the tips: distance (bubble radii), size.
 const FLIER_AT: f64 = 1.12;
-const FLIER_R: f64 = 0.05;
+const FLIER_R: f64 = 0.0;
 /// [N II] rim band in normalised radius.
-const RIM_BAND: (f64, f64) = (0.9, 1.04);
+const RIM_BAND: (f64, f64) = (0.96, 1.03);
 /// Symmetry axis on the sky (radians) and its precession.
 const AXIS: f64 = 1.0;
 const PRECESS: f64 = 0.12;
@@ -81,17 +81,46 @@ const FLICKER: f64 = 3.1;
 const RING_MAX: f32 = 80.0;
 /// Outer [O III] halo: reach (bubble radii) and brightness; the interior texture salt.
 const HALO_REACH: f64 = 1.7;
-const HALO_GLOW: f64 = 0.16;
+const HALO_GLOW: f64 = 0.0;
 /// AGB rings fade out from this radius (H) over this span, and wobble in radius by up
 /// to this share with the clumpy wind.
 const RING_FADE: (f64, f64) = (0.18, 0.6);
 const RING_WOBBLE: f64 = 0.04;
-/// Ring/haze levels from here up to the visibility threshold are dithered.
-const EDGE_DITHER: f64 = 8.5;
 /// Peak of the AGB wind haze (share of the ring ink cap).
-const HAZE: f64 = 0.55;
+const HAZE: f64 = 0.25;
 const TEXTURE_SALT: u64 = 0x5eed_ca75;
 const NII_MAX: u8 = 205;
+/// ADR-0017 (M14): [O III] in `Ramp(Ice)` at `OIII_TOP·u^OIII_GAMMA` of its toned value
+/// `u`, its interior floor `OIII_FLOOR` (was 0.22): a contrast curve, so the interior is
+/// dark and the shells' limbs read as thin bright shells (their crests legible, GEN-R21);
+/// [N II] a thin `HAlpha` rim up to `NII_TOP`; no ionised halo; the FLIERs 1–2 px knots;
+/// the central star one pixel.
+const OIII_TOP: f64 = 210.0;
+const OIII_GAMMA: f64 = 3.5;
+/// The AGB rings are dust seen in reflected starlight: neutral `Ramp(Starlight)`, their
+/// emission `u` (0–1) at `RING_TOP·u^RING_GAMMA`, thin bright arcs (was `Ember` ≤ 80).
+const RING_TOP: f64 = 180.0;
+const RING_GAMMA: f64 = 1.2;
+/// Exposure before the contrast curves, so the crests reach the tops (GEN-R21).
+const RING_GAIN: f64 = 1.5;
+const OIII_GAIN: f32 = 4.0;
+
+/// The two contrast curves as 256-entry tables (no `powf` per pixel): [O III] by its
+/// toned level, the rings by their exposed value in 1/255 steps.
+fn curves() -> &'static ([f32; 256], [f32; 256]) {
+    static CURVES: std::sync::OnceLock<([f32; 256], [f32; 256])> = std::sync::OnceLock::new();
+    CURVES.get_or_init(|| {
+        let at = |top: f64, gamma: f64| {
+            std::array::from_fn(|i| (top * (i as f64 / 255.0).powf(gamma)) as f32)
+        };
+        (at(OIII_TOP, OIII_GAMMA), at(RING_TOP, RING_GAMMA))
+    })
+}
+const OIII_FLOOR: f64 = 0.0;
+const NII_TOP: f64 = 70.0;
+/// [O III] keeps its colour only on the shells' crests, from this level up; below it the
+/// shells are neutral `Starlight` (critic round 2: less saturated cyan).
+const OIII_TINT: f64 = 120.0;
 
 /// The AGB wind's clumpy texture at sky offset `(x, y)` (H): a warp in `[−½, ½]` and a
 /// brightness factor in `[0.55, 1.35]`. Fixed to the gas, so it is tabulated per pixel
@@ -152,6 +181,8 @@ pub struct PlanetaryNebula {
     /// Per pixel: [`wind_texture`] quantised to bytes (warp, clumps).
     wind: Vec<(u8, u8)>,
     stars: Vec<(i32, i32, u8)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl PlanetaryNebula {
@@ -239,7 +270,7 @@ impl PlanetaryNebula {
             .map(|g| g.r * (1.0 + RING_WOBBLE))
             .fold(0.0, f64::max);
         // Haze shows while HAZE·haze_on·e^(−ρ/0.45)·RING_MAX ≥ EDGE_DITHER / 1.35.
-        let haze_peak = HAZE * haze_on * f64::from(RING_MAX) * 1.35 / EDGE_DITHER;
+        let haze_peak = HAZE * haze_on * f64::from(RING_MAX) * 1.35 / ink::MIN_VISIBLE_LEVEL;
         if haze_peak > 1.0 {
             reach = reach.max(0.45 * haze_peak.ln());
         }
@@ -342,7 +373,7 @@ impl Frame {
         let launched = || self.rings.iter().map_while(|ring| *ring);
         let near_ring =
             launched().any(|g| g.r > thick && g.r < RING_FADE.0 + RING_FADE.1 && reach(g.r));
-        if !near_ring && haze * f64::from(RING_MAX) < EDGE_DITHER / 1.35 {
+        if !near_ring && haze * f64::from(RING_MAX) < ink::MIN_VISIBLE_LEVEL / 1.35 {
             return self.nebula(x, y, rho, px, 0.0);
         }
         let (warp, clumps) = tex();
@@ -379,8 +410,14 @@ impl Frame {
         // [O III]: the ionised interior, brightest in the shells' limbs.
         let mut oiii = 0.0;
         if q < 1.0 && q < front {
-            oiii = 0.22 + 0.9 * shell_profile(q, BUBBLE_THICK).min(1.6);
-            oiii += 0.6 * shell_profile(q2, 0.25).min(1.6);
+            // Each shell less its face-on baseline (its level at the centre): only the limb
+            // brightening shows, so the shells read thin (stylised, ADR-0017; a projected
+            // shell glows faintly across its whole face).
+            let limb = |q: f64, thick: f64| {
+                (shell_profile(q, thick).min(1.6) - shell_profile(0.0, thick).min(1.6)).max(0.0)
+            };
+            oiii = OIII_FLOOR + 0.9 * limb(q, BUBBLE_THICK);
+            oiii += 0.6 * limb(q2, 0.12);
             // Soft edge on the sweeping front.
             oiii *= ease::smoothstep((front - q) / 0.12);
             // Filamentary texture fixed to the nebula (axis-aligned coordinates).
@@ -397,7 +434,9 @@ impl Frame {
         if (RIM_BAND.0..RIM_BAND.1).contains(&q) {
             let mid = 0.5 * (RIM_BAND.0 + RIM_BAND.1);
             let half = 0.5 * (RIM_BAND.1 - RIM_BAND.0);
-            nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * (0.5 + 0.5 * c * c);
+            // Only toward the ends of the major axis (critic round 2: no outline all
+            // round).
+            nii = rim_glow * (1.0 - ((q - mid) / half).powi(2)) * c.powi(4);
         }
         for f in &self.fliers {
             let d = (x - f.at.0).hypot(y - f.at.1) / (FLIER_R + 0.6 * px);
@@ -436,22 +475,22 @@ impl PlanetaryNebula {
                 )
             };
             let (o, n, r) = frame.emission(x, y, px, tex);
-            let lo = tone.level(o as f32 * env);
-            let ln = tone.level(n as f32 * env).min(NII_MAX);
-            let lr = (r as f32 * env * RING_MAX).min(RING_MAX);
-            if ln >= lo && f64::from(ln) >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::HAlpha), ln)
-            } else if f64::from(lo) >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::Aurora), lo)
-            } else if f64::from(lr) >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::Ember), lr as u8)
-            } else if f64::from(lr) >= EDGE_DITHER
-                && hash01(cell_key(ix, iy))
-                    < (f64::from(lr) - EDGE_DITHER) / (ink::MIN_VISIBLE_LEVEL - EDGE_DITHER)
-            {
-                // The faint outskirts thin out pixel by pixel (a fixed dither) instead of
-                // stopping at the visibility threshold in one hard edge.
-                Ink::new(Role::Ramp(Ramp::Ember), ink::MIN_VISIBLE_LEVEL as u8)
+            let lo = f64::from(curves().0[usize::from(tone.level(OIII_GAIN * o as f32 * env))]);
+            let ln =
+                NII_TOP * f64::from(tone.level(n as f32 * env).min(NII_MAX)) / f64::from(NII_MAX);
+            let u = (RING_GAIN * r * f64::from(env)).clamp(0.0, 1.0);
+            let lr = f64::from(curves().1[(u * 255.0).round() as usize]);
+            if ln >= lo && ln >= ink::MIN_VISIBLE_LEVEL {
+                Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(ln))
+            } else if lo >= ink::MIN_VISIBLE_LEVEL {
+                if lo >= OIII_TINT {
+                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(lo))
+                } else {
+                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lo))
+                }
+            } else if lr >= ink::MIN_VISIBLE_LEVEL {
+                // The faint outskirts fade smoothly to black (no dither, ADR-0017).
+                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lr))
             } else {
                 Ink::BLANK
             }
@@ -470,14 +509,13 @@ impl PlanetaryNebula {
         let tau = self.tau();
         let heat = ease::smoothstep((tau - T_WIND + 1.0) / 6.0);
         let kelvin = ease::lerp(3_200.0, 30_000.0, heat);
-        let radius = ease::lerp(1.6, 0.8, heat);
-        let env = self.envelope().max(0.35);
-        let (pixels, c) = (&mut self.pixels, self.centre);
-        disc_pixels(c, radius * env, |x, y, cover| {
-            if cover > 0.3 {
-                pixels.set(x, y, ink::blackbody(kelvin));
-            }
-        });
+        // One pixel (ADR-0017), at its temperature: an orange giant, then a white-hot core.
+        let c = self.centre;
+        self.pixels.set(
+            c.0.floor() as i32,
+            c.1.floor() as i32,
+            ink::blackbody(kelvin),
+        );
     }
 }
 
@@ -518,12 +556,18 @@ impl Generator for PlanetaryNebula {
             let l = 20 + (hash01(cell_key(k, 31)).powi(4) * 140.0) as u8;
             self.stars.push((x, y, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -549,6 +593,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = PlanetaryNebula::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -614,8 +659,9 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(200, 50));
         g.t = 30.0;
         g.update(0.0, &mut ctx);
+        g.prepare();
         let px = g.pixels.pixel_size();
-        let (mut nii, mut near) = (0, 0);
+        let (mut nii, mut near, mut oiii) = (0, 0, 0);
         let drift = FLIER_DRIFT * (g.tau() - T_WIND).max(0.0);
         let tip = bubble_radius(g.bubble(), 1.0) * (FLIER_AT + drift) * g.h;
         let axis = g.axis();
@@ -623,12 +669,10 @@ mod tests {
             for ix in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(ix, iy).unwrap();
                 let (q, d) = rim_distance(&g, ix, iy);
-                if ink.role == Role::Ramp(Ramp::Aurora) {
-                    let halo_cap = g.tone.level(HALO_GLOW as f32);
-                    assert!(
-                        q < 1.0 || ink.level <= halo_cap,
-                        "bright [O III] outside the bubble at q = {q}"
-                    );
+                if ink.role == Role::Ramp(Ramp::Ice) {
+                    // M14: [O III] is `Ice`, inside the bubble only (no halo).
+                    oiii += 1;
+                    assert!(q < 1.0 + 0.1, "[O III] outside the bubble at q = {q}");
                 }
                 if ink.role == Role::Ramp(Ramp::HAlpha) {
                     nii += 1;
@@ -646,7 +690,47 @@ mod tests {
             }
         }
         assert!(nii > 20, "[N II] drawn: {nii}");
+        assert!(oiii > 20, "[O III] drawn: {oiii}");
         assert!(f64::from(near) >= 0.8 * f64::from(nii), "{near} of {nii}");
+    }
+
+    #[test]
+    fn pne_a6_thin_shells_on_black_and_a_one_pixel_star() {
+        // ADR-0017 (M14): at 200×50 in the ionised act the bubble's middle is dark (thin
+        // shells, no fill), [N II] stays ≤ 100, [O III] ≤ 210, the AGB rings are neutral
+        // `Starlight` (no `Ember`, no dither), and the star is a single `Blackbody` pixel.
+        let (mut g, mut ctx) = built(Size::new(200, 50));
+        for t in [3.0, 8.0, 20.0, 30.0] {
+            g.t = t;
+            g.update(0.0, &mut ctx);
+            g.prepare();
+            let px = g.pixels.pixel_size();
+            let (mut inside, mut dark, mut star) = (0, 0, 0);
+            for iy in 0..i32::from(px.height()) {
+                for ix in 0..i32::from(px.width()) {
+                    let ink = g.pixels.get(ix, iy).unwrap();
+                    match ink.role {
+                        Role::Ramp(Ramp::HAlpha) => assert!(f64::from(ink.level) <= NII_TOP + 1.0),
+                        Role::Ramp(Ramp::Ice) => assert!(f64::from(ink.level) <= OIII_TOP + 1.0),
+                        Role::Ramp(Ramp::Ember) => panic!("t {t}: Ember at ({ix}, {iy})"),
+                        Role::Blackbody => star += 1,
+                        _ => {}
+                    }
+                    let (q, _) = rim_distance(&g, ix, iy);
+                    if t >= 20.0 && q < 0.35 {
+                        inside += 1;
+                        dark += usize::from(ink == Ink::BLANK || ink.role != Role::Ramp(Ramp::Ice));
+                    }
+                }
+            }
+            assert_eq!(star, 1, "t {t}: star pixels");
+            if t >= 20.0 {
+                assert!(
+                    inside > 10 && 10 * dark >= 9 * inside,
+                    "t {t}: {dark} of {inside}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -684,6 +768,7 @@ mod tests {
         };
         for _ in 0..(55.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let tau = g.tau();
             // Skip the instants right at a boundary.
             if [T_WIND, T_IONISED, LOOP]

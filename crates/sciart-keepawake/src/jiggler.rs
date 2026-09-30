@@ -57,10 +57,17 @@ impl<M: Mover> Jiggler<M> {
 
 impl<M: Mover> Backend for Jiggler<M> {
     fn status(&self) -> String {
+        let mut out = String::new();
+        // Writing to a `String` cannot fail.
+        let _ = self.write_status(&mut out);
+        out
+    }
+
+    fn write_status(&self, out: &mut dyn std::fmt::Write) -> std::fmt::Result {
         if self.errors == 0 {
-            "mouse:on".into()
+            out.write_str("mouse:on")
         } else {
-            format!("mouse:err({})", self.errors)
+            write!(out, "mouse:err({})", self.errors)
         }
     }
 

@@ -16,7 +16,7 @@
 //! (GEN-R11). A scene draws into one, then `blit`s it onto the canvas; a cell holds a
 //! single glyph, so one region uses one raster.
 
-use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink, rng};
+use crate::{Canvas, Glyph, GlyphMode, Ink, Role, Size, geom, ink};
 
 /// Bit of dot `(dx, dy)` within its braille cell, indexed `[dx][dy]`: standard Unicode
 /// dot numbering 1-2-3-7 down the left column and 4-5-6-8 down the right, dot `n` being
@@ -596,6 +596,8 @@ pub struct Glow {
     px: Size,
     /// Row-major, `px.w × px.h`.
     buf: Vec<f32>,
+    /// One row of scratch for [`blur121`](Self::blur121), sized in `resize`.
+    row: Vec<f32>,
 }
 
 impl Default for Glow {
@@ -614,6 +616,7 @@ impl Glow {
         let mut g = Self {
             px: Size::new(1, 1),
             buf: Vec::new(),
+            row: Vec::new(),
         };
         g.resize(cells);
         g
@@ -629,11 +632,57 @@ impl Glow {
         self.px = Size::new(cells.width(), sub_axis(cells.height(), 2));
         self.buf.clear();
         self.buf.resize(self.px.area(), 0.0);
+        self.row.clear();
+        self.row.resize(usize::from(self.px.width()), 0.0);
     }
 
     /// Zero every pixel.
     pub fn clear(&mut self) {
         self.buf.fill(0.0);
+    }
+
+    /// Blur in place with the separable 3 × 3 binomial kernel `[1 2 1]/4 ⊗ [1 2 1]/4`,
+    /// edges clamped (CORE-R103): a glow's rim ends softly instead of in pixel steps.
+    /// Both passes walk rows (cache-friendly, vectorisable) and share one scratch row
+    /// sized in `resize`, so it allocates nothing; a constant field is unchanged and
+    /// interior mass is conserved.
+    pub fn blur121(&mut self) {
+        let w = usize::from(self.px.width());
+        if w == 0 || self.row.len() < w {
+            return;
+        }
+        for row in self.buf.chunks_exact_mut(w) {
+            let mut prev = row[0];
+            for x in 0..w {
+                let cur = row[x];
+                let next = row[(x + 1).min(w - 1)];
+                row[x] = 0.25 * (prev + 2.0 * cur + next);
+                prev = cur;
+            }
+        }
+        // Vertical: `up` holds the row above as it was before this pass; each row is
+        // replaced while its old values move into `up` for the row below.
+        let up = &mut self.row[..w];
+        up.copy_from_slice(&self.buf[..w]);
+        let h = self.buf.len() / w;
+        for y in 0..h {
+            let (head, tail) = self.buf.split_at_mut((y + 1) * w);
+            let cur = &mut head[y * w..];
+            if y + 1 < h {
+                for ((c, u), &d) in cur.iter_mut().zip(up.iter_mut()).zip(&tail[..w]) {
+                    let old = *c;
+                    *c = 0.25 * (*u + 2.0 * old + d);
+                    *u = old;
+                }
+            } else {
+                // The last row's neighbour below is itself (clamped).
+                for (c, u) in cur.iter_mut().zip(up.iter_mut()) {
+                    let old = *c;
+                    *c = 0.25 * (*u + 2.0 * old + old);
+                    *u = old;
+                }
+            }
+        }
     }
 
     /// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the buffer as is):
@@ -944,29 +993,30 @@ impl Pixels {
         }
     }
 
-    /// Dissolve a glow's faint fringe into the empty sky (CORE-R89), so it ends in the
-    /// terminal's black instead of a ramp's tinted floor. A pixel of intensity `i` (as for
-    /// [`stronger`]) below `floor` is emptied when `i < floor / 2`, and in the band
-    /// `[floor / 2, floor)` kept only where `2·i / floor − 1 > hash01(cell_key(x, y))`.
-    /// The threshold is white noise, not an ordered dither, so the thinning fringe reads as
-    /// scattered light rather than a checkerboard, and the half-floor cut keeps that band
-    /// narrow. Pixels at or above `floor`, and `Phase` pixels (no intensity), are untouched;
-    /// `floor = 0` changes nothing. Deterministic and allocation-free.
+    /// Fade a glow's faint fringe smoothly into the empty sky (CORE-R89, M14), so it ends
+    /// in the terminal's black instead of a ramp's tinted floor, with no dither. A pixel of
+    /// intensity `i` (as for [`stronger`]) below `floor` is emptied when `i < floor / 2`,
+    /// and in the band `[floor / 2, floor)` its intensity becomes
+    /// `i·smoothstep((i − floor/2)/(floor/2))` (a `Div` pixel keeps its sign about 128),
+    /// emptied if that rounds to 0. The fade is a pure function of the pixel's own
+    /// intensity, continuous and non-decreasing in it, so a uniform field stays uniform: no
+    /// ordered or noise pattern. Pixels at or above `floor`, and `Phase` pixels (no
+    /// intensity), are untouched; `floor = 0` changes nothing. Allocation-free.
     pub fn dissolve(&mut self, floor: u8) {
-        let w = usize::from(self.cells.width());
         let half = f64::from(floor) / 2.0;
-        for (y, row) in self.px.chunks_exact_mut(w.max(1)).enumerate() {
-            for (x, px) in row.iter_mut().enumerate() {
-                let i = intensity(*px);
-                if is_empty(*px) || px.role == Role::Phase || i >= floor {
-                    continue;
-                }
-                // Both fit: x < w ≤ u16::MAX, y < 2·h ≤ 2·u16::MAX.
-                let keep = (f64::from(i) - half) / half;
-                if keep <= rng::hash01(rng::cell_key(x as i32, y as i32)) {
-                    *px = Ink::BLANK;
-                }
+        for px in &mut self.px {
+            let i = intensity(*px);
+            if is_empty(*px) || px.role == Role::Phase || i >= floor {
+                continue;
             }
+            let u = ((f64::from(i) - half) / half).clamp(0.0, 1.0);
+            let faded = (f64::from(i) * u * u * (3.0 - 2.0 * u)).round() as u8;
+            *px = match (faded, px.role) {
+                (0, _) => Ink::BLANK,
+                (f, Role::Div) if px.level >= 128 => Ink::new(Role::Div, 128 + f),
+                (f, Role::Div) => Ink::new(Role::Div, 128 - f),
+                (f, role) => Ink::new(role, f),
+            };
         }
     }
 

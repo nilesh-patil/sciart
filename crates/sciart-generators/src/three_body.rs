@@ -10,7 +10,7 @@ use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{Form, Title};
-use sciart_core::{Tone, geom, ode, raster};
+use sciart_core::{geom, ode};
 
 pub static META: Meta = Meta {
     name: "three_body",
@@ -51,37 +51,24 @@ const TRIANGLE_LEVEL: f64 = 80.0;
 /// and violet (M12: Hα replaces Ember's orange, which the gallery already uses a lot;
 /// `double_pendulum` pairs Hα with Aurora, a different pair).
 const RAMPS: [Ramp; 3] = [Ramp::HAlpha, Ramp::Ice, Ramp::Plasma];
-/// The glow under the lines (TB-A9): each body's trail and head expose a half-block
-/// [`Glow`] of their own, rebuilt every frame from the model-space trail (so a resize
-/// keeps it), tone-mapped by an asinh curve and drawn in the brightest-exposed body's
-/// ramp at up to `GLOW_V`. The trail exposes by its own level (so old loops glow least)
-/// with a 3×3 splat; a head adds a wide halo, so each sun visibly shines, most of all
-/// where Lagrange's three orbits cross. Unicode only: ASCII has no half blocks.
-const GLOW_V: f64 = 0.42;
-const GLOW_KNEE: f32 = 0.4;
-const GLOW_WHITE: f32 = 5.0;
-const TRAIL_GLOW: f32 = 0.5;
-const HEAD_GLOW: f32 = 3.0;
-/// Each head's radius-4 halo; strokes use the shared 3×3 `raster::STROKE_KERNEL` (CORE-R96).
-const HALO: [(i32, i32, f32); 81] = raster::halo_kernel(4);
-const _: () = assert!(GLOW_V < HEAD_V);
+// No glow under the lines (TB-A9, M14): the half-block halo each body used to expose
+// read as thick blocks on black; the lines and small heads carry the scene (ADR-0017
+// rules 1 and 3).
 
-/// ASCII heads; in Unicode a head is a disc of `HEAD_R` dots, `HEAD_R_TALL` from
-/// `TALL_ROWS` up, where a smaller disc reads as a speck (TB-A8).
+/// ASCII heads; in Unicode a head is a small disc of `HEAD_R` dots (about 2 dots across),
+/// `HEAD_R_TALL` from `TALL_ROWS` up (TB-A8; M14: smaller bodies, ADR-0017 rule 3).
 const HEAD: Glyph = Glyph::ascii('@');
-const HEAD_R: f64 = 2.3;
-const HEAD_R_TALL: f64 = 3.0;
+const HEAD_R: f64 = 1.0;
+const HEAD_R_TALL: f64 = 1.5;
 const TALL_ROWS: u16 = 40;
 /// Head ramp value: the saturated middle of each ramp, since every ramp's top is near
 /// white and three white heads cannot be told apart. The newest trail is capped at the
-/// same value, so the comet tapers from the head's hue; a one-dot core at `CORE_V` is
-/// the only near-white part and keeps the head brightest (also in mono).
+/// same value; a one-dot core at `CORE_V` is the only near-white part and keeps the head
+/// brightest (also in mono). With the small M14 heads the core usually sets the head
+/// cell's ink, so a body reads as a white-hot speck at the tip of its coloured trail
+/// (ADR-0017 rule 6: the subject stays bright).
 const HEAD_V: f64 = 0.7;
 const CORE_V: f64 = 0.95;
-/// Comet tails (TB-A8): the newest `COMET` of a period is thickened by discs tapering
-/// from `COMET_R` dots at the head to nothing.
-const COMET: f64 = 0.15;
-const COMET_R: f64 = 2.0;
 /// Index of the Lagrange orbit, the one that gets its triangle drawn.
 const LAGRANGE: usize = 1;
 /// Each orbit's short name, in gallery order; the shown one is the title's caption
@@ -347,16 +334,19 @@ pub(crate) fn trail_span(orbit: &Orbit, scale: f64) -> f64 {
 }
 
 /// Trail brightness for a sample of age fraction `f ∈ [0, 1)` (0 = newest) on a trail
-/// spanning `span` of the period. A full-period trail keeps a floor of 40, so the whole
-/// orbit stays sketched; a shorter one tapers to 0 at `f = span` and its old loops
-/// dissolve (SPEC-002 Inks).
+/// spanning `span` of the period, at most `TRAIL_TOP` (M14: trails ≤ 150, so the heads
+/// are the bright subject). A full-period trail keeps a floor of 30, so the whole orbit
+/// stays sketched; a shorter one tapers to 0 at `f = span` and its old loops dissolve
+/// (SPEC-002 Inks).
 fn trail_level(f: f64, span: f64) -> f64 {
     if span >= 1.0 {
-        return 40.0 + 160.0 * (1.0 - f).max(0.0).powf(1.5);
+        return TRAIL_FLOOR + (TRAIL_TOP - TRAIL_FLOOR) * (1.0 - f).max(0.0).powf(1.5);
     }
     let rest = (1.0 - f / span).max(0.0);
-    160.0 * rest.powf(1.5) + 40.0 * rest
+    (TRAIL_TOP - TRAIL_FLOOR) * rest.powf(1.5) + TRAIL_FLOOR * rest
 }
+const TRAIL_TOP: f64 = 150.0;
+const TRAIL_FLOOR: f64 = 30.0;
 
 /// Ink multiplier of everything an orbit draws: faded in from `FADE_IN_FLOOR` over the
 /// first `FADE_IN` seconds of a run and out with the orbit (visual only; the physics is
@@ -364,12 +354,6 @@ fn trail_level(f: f64, span: f64) -> f64 {
 fn orbit_fade(phase: &Phase) -> f64 {
     let rise = ease::smoothstep((phase.tau / FADE_IN).min(1.0));
     ease::lerp(FADE_IN_FLOOR, 1.0, rise) * phase.fade
-}
-
-/// Comet disc radius (dots) of a trail sample of age fraction `f` (0 = newest): tapering
-/// linearly from `COMET_R` to 0 at `f = COMET` (TB-A8).
-pub(crate) fn comet_radius(f: f64) -> f64 {
-    COMET_R * (1.0 - f / COMET).max(0.0)
 }
 
 /// Head brightness, `255·orbit_fade`.
@@ -419,12 +403,10 @@ pub(crate) struct ThreeBody {
     head_r: f64,
     /// Trails (and Lagrange's triangle), rasterised in `update`/`resize`.
     dots: Dots,
-    /// Each body's glow exposure and the toned half-block layer under the dots (TB-A9).
-    glow: [Glow; 3],
-    halo: Pixels,
-    tone: Tone,
     /// Each orbit's label at the current size, chosen in `resize`.
     labels: [Option<&'static str>; 5],
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl ThreeBody {
@@ -432,6 +414,7 @@ impl ThreeBody {
         let orbits = orbits();
         let size = Size::new(1, 1);
         Self {
+            dirty: true,
             timeline: timeline(&orbits),
             t: 0.0,
             phase: Phase {
@@ -446,9 +429,6 @@ impl ThreeBody {
             head_r: HEAD_R,
             size,
             dots: Dots::default(),
-            glow: std::array::from_fn(|_| Glow::default()),
-            halo: Pixels::default(),
-            tone: Tone::asinh(GLOW_KNEE, GLOW_WHITE),
             labels: [None; 5],
             orbits,
         }
@@ -506,60 +486,6 @@ impl ThreeBody {
             self.triangle();
         }
         self.heads();
-        self.expose();
-    }
-
-    /// Rebuild the glow from the trails and heads (TB-A9).
-    fn expose(&mut self) {
-        let (view, fade) = (self.view, orbit_fade(&self.phase));
-        let span = trail_span(&self.orbits[self.phase.seg], view.scale);
-        for (i, (glow, trail)) in self.glow.iter_mut().zip(&self.trails).enumerate() {
-            glow.clear();
-            let len = trail.len();
-            let head = self.bodies.body(i);
-            let pairs = trail.iter().zip(trail.iter().skip(1).chain([&head]));
-            for (k, (&a, &b)) in pairs.enumerate() {
-                let f = (len - 1 - k) as f64 / SAMPLES as f64;
-                let level = trail_level(f, span) * fade;
-                if level < MIN_VISIBLE_LEVEL {
-                    continue;
-                }
-                let w = TRAIL_GLOW * (level / 200.0).powi(2) as f32;
-                glow.stroke(
-                    view.dot(a.0, a.1),
-                    view.dot(b.0, b.1),
-                    &raster::STROKE_KERNEL,
-                    w,
-                );
-            }
-            if head_level(&self.phase) >= MIN_VISIBLE_LEVEL {
-                let (dx, dy) = view.dot(head.0, head.1);
-                glow.splat(dx, dy, &HALO, HEAD_GLOW * fade as f32);
-            }
-        }
-        let (tone, glows) = (&self.tone, &self.glow);
-        let w = i32::from(glows[0].pixel_size().width()).max(1);
-        self.halo.shade(|x, y| {
-            let i = (y * w + x) as usize;
-            let v = glows
-                .each_ref()
-                .map(|g| g.values().get(i).copied().unwrap_or(0.0));
-            let (mut body, mut sum) = (0, 0.0);
-            for (j, &e) in v.iter().enumerate() {
-                sum += e;
-                if e > v[body] {
-                    body = j;
-                }
-            }
-            // Mostly the brightest body's own light, lifted a little by the others'.
-            let e = 0.5 * (v[body] + sum);
-            let value = GLOW_V * f64::from(tone.level(e)) / 255.0;
-            if 255.0 * value < MIN_VISIBLE_LEVEL {
-                Ink::BLANK
-            } else {
-                ink::ramp(RAMPS[body], value)
-            }
-        });
     }
 
     /// Each head as a saturated disc in its body's ramp with a bright one-dot core,
@@ -579,7 +505,8 @@ impl ThreeBody {
         }
     }
 
-    /// Each body's trail as dot-lattice segments, dimming with age.
+    /// Each body's trail as 1-dot hairline segments, dimming with age (M14: no comet
+    /// thickening, ADR-0017 rule 3).
     fn trails_onto_dots(&mut self) {
         let (view, fade) = (self.view, orbit_fade(&self.phase));
         let span = trail_span(&self.orbits[self.phase.seg], view.scale);
@@ -597,10 +524,6 @@ impl ThreeBody {
                 let ink = ink::ramp(RAMPS[i], (level / 255.0).min(HEAD_V));
                 let (p, q) = (view.dot(a.0, a.1), view.dot(b.0, b.1));
                 self.dots.line(p.0, p.1, q.0, q.1, ink);
-                let r = comet_radius(f);
-                if r >= 0.5 {
-                    self.dots.disc(q.0, q.1, r, ink);
-                }
             }
         }
     }
@@ -657,12 +580,8 @@ impl Generator for ThreeBody {
             HEAD_R
         };
         self.dots.resize(size);
-        self.halo.resize(size);
-        for g in &mut self.glow {
-            g.resize(size);
-        }
         self.labels = self.orbits.map(|o| label_for(size, &o));
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -679,14 +598,20 @@ impl Generator for ThreeBody {
             self.start_run(phase.seg);
         }
         self.advance_to(target);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // The glow first (Unicode only), then the lines with the glow carried on as their
-        // cells' background (TB-A9).
-        self.halo.blit(canvas, |_, _, _, _| None);
-        self.dots.blit_over(canvas, &self.halo);
+        // Lines and heads on black; no glow layer (TB-A9, M14).
+        self.dots.blit(canvas);
         let level = head_level(&self.phase);
         // Unicode heads are discs on the lattice; ASCII gets a clear `@`.
         if level >= MIN_VISIBLE_LEVEL && canvas.mode() == GlyphMode::Ascii {
@@ -917,14 +842,18 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let (mut fine, mut coarse) = (ThreeBody::new(), ThreeBody::new());
         fine.resize(Size::new(80, 24), &mut ctx);
+        fine.prepare();
         coarse.resize(Size::new(80, 24), &mut ctx);
+        coarse.prepare();
         for _ in 0..70 {
             for _ in 0..60 {
                 fine.update(SIM_DT, &mut ctx);
+                fine.prepare();
             }
             for _ in 0..4 {
                 let (seg, before) = (coarse.phase.seg, coarse.n_done);
                 coarse.update(0.25, &mut ctx);
+                coarse.prepare();
                 let taken = if coarse.phase.seg == seg && coarse.n_done >= before {
                     coarse.n_done - before
                 } else {
@@ -945,13 +874,16 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut start = 0.0;
         for seg in 0..=5 {
             // Land just inside run `seg` (seg 5 = the figure-8 again, next loop), from
             // deep inside the previous fade.
             g.update(1.0, &mut ctx);
+            g.prepare();
             g.t = start - 0.5;
             g.update(0.5 + 1e-6, &mut ctx);
+            g.prepare();
             let o = g.orbits[seg % 5];
             assert_eq!(g.phase.seg, seg % 5);
             assert_eq!(g.n_done, 0);
@@ -966,10 +898,12 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut seen = [false; 5];
         // One whole loop of the gallery (≈ 69.4 s, TB-A5).
         for _ in 0..70 * 4 {
             g.update(0.25, &mut ctx);
+            g.prepare();
             assert_eq!(g.caption(), Some(CAPTIONS[g.phase.seg]));
             seen[g.phase.seg] = true;
         }
@@ -1054,14 +988,15 @@ mod tests {
         for o in &orbits()[..4] {
             assert_eq!(trail_span(o, 0.25), 1.0);
         }
-        // Full-period trails keep the published ramp, floor 40 at the oldest sample.
+        // Full-period trails keep the published ramp, floor 30 at the oldest sample and
+        // at most 150 (M14: dimmer trails, the heads are the subject).
         for i in 0..SAMPLES {
             let f = i as f64 / SAMPLES as f64;
-            let expect = 40.0 + 160.0 * (1.0 - f).powf(1.5);
+            let expect = 30.0 + 120.0 * (1.0 - f).powf(1.5);
             assert!((trail_level(f, 1.0) - expect).abs() < 1e-12);
         }
-        // The moth's ramp starts at 200, falls strictly and is gone by the span's end.
-        assert_eq!(trail_level(0.0, MOTH_TRAIL), 200.0);
+        // The moth's ramp starts at 150, falls strictly and is gone by the span's end.
+        assert_eq!(trail_level(0.0, MOTH_TRAIL), 150.0);
         let fs: Vec<f64> = (0..=100)
             .map(|i| f64::from(i) / 100.0 * MOTH_TRAIL)
             .collect();
@@ -1077,9 +1012,11 @@ mod tests {
         let mut ctx = Ctx::new(0, Size::new(80, 24));
         let mut g = ThreeBody::new();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let before: f64 = g.orbits[..4].iter().map(|o| o.run_secs() + FADE).sum();
         g.t = before + g.orbits[4].run_secs() - 0.05 - SIM_DT;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert_eq!(g.phase.seg, 4);
         let mut young = Vec::new();
         for trail in &g.trails {
@@ -1133,6 +1070,7 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let start = g.orbits[0].run_secs() + FADE;
         let lit = |d: &Dots| {
             let s = d.dot_size();
@@ -1143,10 +1081,12 @@ mod tests {
         };
         g.t = start;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert_eq!(g.phase.seg, LAGRANGE);
         assert!(lit(&g.dots) > 0, "blank first frame");
         g.t = start + FADE_IN - SIM_DT;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         g.dots.clear();
         g.trails_onto_dots();
         let trails = lit(&g.dots);
@@ -1177,10 +1117,12 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let start = g.orbits[0].run_secs() + FADE;
         for t in [1.0, 4.0, 9.0] {
             g.t = start + t - SIM_DT;
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert_eq!(g.phase.seg, LAGRANGE);
             g.dots.clear();
             g.trails_onto_dots();
@@ -1204,78 +1146,61 @@ mod tests {
     }
 
     #[test]
-    fn tb_a9_every_sun_shines_in_its_own_ramp_under_its_lines() {
+    fn tb_a9_no_glow_layer_every_cell_background_stays_black() {
+        // M14 (ADR-0017): the per-body half-block halo is gone; the lines and heads sit
+        // directly on black in both glyph modes.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         let lagrange = g.orbits[0].run_secs() + FADE;
-        let cap = ink::ramp(RAMPS[0], GLOW_V).level;
         for t in [5.0, lagrange + 6.0] {
             g.t = t - SIM_DT;
             g.update(SIM_DT, &mut ctx);
-            for (i, ramp) in RAMPS.iter().enumerate() {
-                let (x, y) = g.bodies.body(i);
-                let (dx, dy) = g.view.dot(x, y);
-                let (px, py) = ((dx / 2.0) as i32, (dy / 2.0) as i32);
-                let own = (-4..=4)
-                    .flat_map(|oy| (-4..=4).map(move |ox| (px + ox, py + oy)))
-                    .filter_map(|(x, y)| g.halo.get(x, y))
-                    .filter(|p| p.role == Role::Ramp(*ramp))
-                    .count();
-                assert!(own >= 20, "t {t} body {i}: {own} halo pixels");
+            g.prepare();
+            for mode in [GlyphMode::Unicode, GlyphMode::Ascii] {
+                let mut c = Canvas::new(size, mode);
+                g.render(&mut c);
+                assert!(
+                    c.cells().iter().all(|c| c.bg == Ink::BLANK),
+                    "t {t} {mode:?}"
+                );
             }
-            let mut c = Canvas::new(size, GlyphMode::Unicode);
-            g.render(&mut c);
-            for y in 0..80 {
-                for x in 0..120 {
-                    let p = g.halo.get(x, y).unwrap();
-                    assert!(p.level <= cap, "({x},{y}) {p:?}");
-                }
-            }
-            // Heads stay brighter than the glow behind them.
-            for i in 0..3 {
-                let (x, y) = g.bodies.body(i);
-                let (cx, cy) = g.view.cell(x, y);
-                let cell = c.get(cx.floor() as i32, cy.floor() as i32).unwrap();
-                assert!(cell.ink.level > cell.bg.level, "t {t} head {i}: {cell:?}");
-            }
-            // ASCII has no glow.
-            let mut a = Canvas::new(size, GlyphMode::Ascii);
-            g.render(&mut a);
-            assert!(a.cells().iter().all(|c| c.bg == Ink::BLANK));
         }
     }
 
     #[test]
-    fn tb_a8_comet_tails_taper_from_the_head() {
-        assert_eq!(comet_radius(0.0), COMET_R);
-        assert_eq!(comet_radius(COMET), 0.0);
-        assert_eq!(comet_radius(0.5), 0.0);
-        let rs: Vec<f64> = (0..=20)
-            .map(|i| comet_radius(f64::from(i) * COMET / 20.0))
-            .collect();
-        assert!(rs.windows(2).all(|w| w[1] < w[0]), "{rs:?}");
-        // Seen in dots: a head plus its tail light far more dots near the head than a
-        // one-dot trail would.
+    fn tb_a8_heads_are_small_and_trails_are_hairlines() {
+        // M14 (ADR-0017 rule 3): a head lights only a small disc of dots and the trail
+        // behind it is a 1-dot line, not a tapering comet.
         let size = Size::new(80, 24);
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         for i in 0..3 {
             let (x, y) = g.bodies.body(i);
             let (hx, hy) = g.view.dot(x, y);
-            let near = (-6..=6)
-                .flat_map(|dy| (-6..=6).map(move |dx| (dx, dy)))
-                .filter(|&(dx, dy)| {
-                    g.dots
-                        .is_lit(hx.round() as i32 + dx, hy.round() as i32 + dy)
-                })
-                .count();
-            assert!(near >= 24, "body {i}: {near} dots near the head");
+            let lit_within = |r: i32| {
+                (-r..=r)
+                    .flat_map(|dy| (-r..=r).map(move |dx| (dx, dy)))
+                    .filter(|&(dx, dy)| {
+                        g.dots
+                            .is_lit(hx.round() as i32 + dx, hy.round() as i32 + dy)
+                    })
+                    .count()
+            };
+            // The head itself: at least a few dots, never a big blob.
+            let head = lit_within(1);
+            assert!(head >= 3, "body {i}: {head} head dots");
+            // Head + hairline in a 13×13 dot box: well under the old comet's ≥ 24.
+            let near = lit_within(6);
+            assert!(near <= 24, "body {i}: {near} dots near the head");
         }
     }
 
@@ -1300,8 +1225,10 @@ mod tests {
         let mut ctx = Ctx::new(0, size);
         let mut g = ThreeBody::new();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(3.0 / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
@@ -1317,7 +1244,9 @@ mod tests {
                 .collect();
             let hued = cells.iter().filter(|c| c.ink.level <= top).count();
             assert!(
-                hued >= 2 && hued + 1 >= cells.len(),
+                // M14: heads are small now, so the core's cell (the one near-white
+                // part) may be half of just two lit cells; the rest stay hued.
+                hued >= 1 && hued + 1 >= cells.len(),
                 "body {i}: {hued} of {}",
                 cells.len()
             );

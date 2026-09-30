@@ -19,7 +19,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::{Tone, draw, ease, title};
+use sciart_core::{draw, ease, title};
 
 pub static META: Meta = Meta {
     name: "motility_clustering",
@@ -45,7 +45,7 @@ const DR: f64 = 0.18;
 /// Repulsion stiffness (per second): overlap at a head-on stall is `v₀/k ≈ 0.075σ`.
 const K: f64 = 80.0;
 /// Sub-steps per second (keeps `k·h` well below 1).
-const SUB_PER_S: f64 = 240.0;
+const SUB_PER_S: f64 = 160.0;
 /// Dispersal: speed and tumbling factors (`Pe` falls 12×).
 const DISPERSE_V: f64 = 0.5;
 const DISPERSE_DR: f64 = 6.0;
@@ -76,30 +76,25 @@ const ARRIVE_S: f64 = 3.0;
 
 /// Every swimmer is a short braille rod in one ramp (deep teal → emerald → lime-white):
 /// its heading sets the hue within a band and its crowding lifts the band, so a free
-/// swimmer is a dim teal stroke and a jammed one a bright lime one (SPEC-002 round 3).
+/// swimmer is a teal stroke (levels 60–180, ADR-0017) and a jammed one a bright lime one,
+/// so the clusters are the one bright subject on black (SPEC-002 round 3, M14).
 const ROD_ROLE: Role = Role::Ramp(Ramp::Aurora);
 /// Rod length in swimmer diameters (a rod-shaped cell; the model is still discs).
 const ROD_LEN: f64 = 1.25;
 /// Level bands `(low, span)` for a free and a fully jammed swimmer.
-const FREE_BAND: (f64, f64) = (74.0, 56.0);
+const FREE_BAND: (f64, f64) = (60.0, 120.0);
 const JAM_BAND: (f64, f64) = (186.0, 69.0);
 /// The heading that reads brightest within a band (a unit vector, down-right on screen).
 const HUE_DIR: (f64, f64) = (0.6, 0.8);
-/// The density glow under crowds: the same ramp, kept dark so the rods stay on top.
-const GLOW_ROLE: Role = Role::Ramp(Ramp::Aurora);
-const GLOW_MAX: u32 = 100;
-const GLOW_FLOOR: u8 = 24;
-/// Swimmers with at least this many contacts light the glow (a crowd, not a collision).
-const GLOW_CONTACTS: u8 = 3;
-/// The glow a crowded swimmer adds around itself.
-const CLUSTER_HALO: [(i32, i32, f32); 49] = sciart_core::raster::halo_kernel(3);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// A rod's level: its heading picks the hue inside a band that rises with crowding, from
 /// `FREE_BAND` (no contacts) to `JAM_BAND` (8 or more) [MIPS-A6].
 pub(crate) fn rod_level(ux: f64, uy: f64, contacts: u8) -> u8 {
     let hue = (0.5 + 0.5 * (ux * HUE_DIR.0 + uy * HUE_DIR.1)).clamp(0.0, 1.0);
-    let jam = ease::smoothstep(f64::from(contacts.min(8)) / 8.0);
+    // Two or fewer contacts is a collision, not a crowd: those rods stay in the dim free
+    // band, so only packed clusters light up (M14, ADR-0017 rule 6).
+    let jam = ease::smoothstep(f64::from(contacts.clamp(2, 8) - 2) / 6.0);
     let lo = ease::lerp(FREE_BAND.0, JAM_BAND.0, jam);
     let span = ease::lerp(FREE_BAND.1, JAM_BAND.1, jam);
     sciart_core::ink::level(lo + span * hue)
@@ -290,17 +285,17 @@ struct Motility {
     owed: f64,
     timeline: Timeline,
     dots: Dots,
-    pixels: Pixels,
-    glow: Glow,
-    tone: Tone,
     cells: Size,
     readout_room: usize,
     clustered: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Motility {
     fn default() -> Self {
         Self {
+            dirty: true,
             world: Box2::new((1.0, 1.0), CAP),
             full: 0,
             dilute: 0,
@@ -313,9 +308,6 @@ impl Default for Motility {
                 (CAPTIONS[2], DISPERSE_S),
             ]),
             dots: Dots::default(),
-            pixels: Pixels::default(),
-            glow: Glow::default(),
-            tone: Tone::asinh(0.8, 14.0),
             cells: Size::new(1, 1),
             readout_room: 0,
             clustered: 0,
@@ -377,7 +369,6 @@ impl Motility {
 
     fn rasterise(&mut self) {
         self.dots.clear();
-        self.glow.clear();
         // Dots per box unit: a pixel is 2 dots wide and a diameter `1 / scale` pixels.
         let dpu = 2.0 / self.scale;
         let half = 0.5 * ROD_LEN * dpu;
@@ -387,53 +378,9 @@ impl Motility {
             if s.contacts >= CLUSTER_CONTACTS {
                 self.clustered += 1;
             }
-            // Crowded swimmers warm a dark density glow under the rods, so a cluster
-            // reads as one body of packed, aligned cells rather than a flat fill.
-            if s.contacts >= GLOW_CONTACTS {
-                let w = f32::from(s.contacts.min(8) - GLOW_CONTACTS + 1) / 5.0;
-                self.glow.splat(x, y, &CLUSTER_HALO, w);
-            }
             let ink = Ink::new(ROD_ROLE, rod_level(s.ux, s.uy, s.contacts));
             let (hx, hy) = (half * s.ux, half * s.uy);
             self.dots.line(x - hx, y - hy, x + hx, y + hy, ink);
-        }
-        let pw = usize::from(self.glow.pixel_size().width());
-        blur121(self.glow.values_mut(), pw);
-        self.glow.to_pixels(&mut self.pixels, &self.tone, |l| {
-            // The faint fringe stays black (the blur already softened the rim).
-            let level = (u32::from(l) * GLOW_MAX / 255) as u8;
-            if level < GLOW_FLOOR {
-                Ink::BLANK
-            } else {
-                Ink::new(GLOW_ROLE, level)
-            }
-        });
-    }
-}
-
-/// One in-place `[1 2 1] / 4` pass along rows and then columns of a `w`-wide buffer
-/// (edges clamped), so a crowd's glow ends in a soft rim instead of pixel steps.
-fn blur121(buf: &mut [f32], w: usize) {
-    if w == 0 {
-        return;
-    }
-    let h = buf.len() / w;
-    for row in buf.chunks_exact_mut(w) {
-        let mut prev = row[0];
-        for x in 0..w {
-            let cur = row[x];
-            let next = row[(x + 1).min(w - 1)];
-            row[x] = 0.25 * (prev + 2.0 * cur + next);
-            prev = cur;
-        }
-    }
-    for x in 0..w {
-        let mut prev = buf[x];
-        for y in 0..h {
-            let cur = buf[y * w + x];
-            let next = buf[(y + 1).min(h - 1) * w + x];
-            buf[y * w + x] = 0.25 * (prev + 2.0 * cur + next);
-            prev = cur;
         }
     }
 }
@@ -451,9 +398,10 @@ impl Generator for Motility {
         self.cells = size;
         self.readout_room = title::stable_readout_room(size, &META);
         self.dots.resize(size);
-        self.pixels.resize(size);
-        self.glow.resize(size);
-        let (box_size, scale, full) = box_for(self.pixels.pixel_size());
+        // The half-block pixel lattice (one pixel per cell column, two per row) sets the
+        // box scale; the scene itself draws only braille rods on black (ADR-0017: no glow).
+        let px = Size::new(size.width(), size.height().saturating_mul(2));
+        let (box_size, scale, full) = box_for(px);
         let old = self.world.size;
         // Keep swimmers in box units, rescaled to the new box (SPEC-002 Resize).
         let (sx, sy) = (box_size.0 / old.0, box_size.1 / old.1);
@@ -483,7 +431,7 @@ impl Generator for Motility {
         self.world.forces();
         self.world.active = self.target();
         self.world.forces();
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -501,14 +449,21 @@ impl Generator for Motility {
             let (v0, dr) = self.params();
             self.world.step(v0, dr, h, &mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // The glow is a half-block backdrop (none in ASCII, where the rods' dot-count
-        // fallback carries the picture); the rods keep it behind their braille.
-        self.pixels.blit(canvas, |_, _, _, _| None);
-        self.dots.blit_over(canvas, &self.pixels);
+        // Rods only, on black: the old density glow under crowds is gone (ADR-0017 rule 1);
+        // the jammed rods' bright band is what makes a cluster read.
+        self.dots.blit(canvas);
         let h = i32::from(self.cells.height());
         if h < 4 {
             return;
@@ -613,8 +568,10 @@ mod tests {
             let mut ctx = Ctx::new(1, size);
             let mut g = Motility::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..30 {
                 g.update(0.25, &mut ctx);
+                g.prepare();
                 assert!(g.world.active <= g.world.swimmers.len() && g.world.swimmers.len() <= CAP);
             }
         }
@@ -635,9 +592,11 @@ mod tests {
         let mut ctx = Ctx::new(1, Size::new(80, 24));
         let mut g = Motility::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         let mut seen = Vec::new();
         for _ in 0..((DILUTE_S + CROWD_S + DISPERSE_S + 2.0) * 4.0) as usize {
             g.update(0.25, &mut ctx);
+            g.prepare();
             let c = g.caption().unwrap_or("");
             if seen.last() != Some(&c) {
                 seen.push(c);

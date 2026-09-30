@@ -33,13 +33,12 @@
 //! ## Picture
 //!
 //! A passive dye marks the middle band (1) against the outer bands (0); it rides the
-//! lattice velocity by a semi-Lagrangian step each update ([`advect_dye`]). Half-block
-//! pixels pick their ramp by the dye's side of ½, dusk-rose cloud (`Ramp(Eosin)`) for
-//! the middle band over indigo sky (`Ramp(Cobalt)`) for the outer bands, and their level
-//! by the vorticity `ω` (calm fluid dim, the billows bright). Toward the interface,
-//! where the dye is ½, both ramps fall smoothly to near-black, so each rolled-up sheet
-//! reads as a soft dark spiral line through bright, spinning fluid (bilinear, no
-//! stair-stepped cut).
+//! lattice velocity by a semi-Lagrangian step each update ([`advect_dye`]). The picture
+//! (ADR-0017) is lines only, on black: the interfaces, where the dye crosses ½, as thin
+//! pale lines (`Ramp(Starlight)`) lit by the vorticity they carry, so each rolled-up
+//! sheet reads as a fine spiral. Each pixel's level falls smoothly with its distance to
+//! the `c = ½` contour, `|c − ½| / |∇c|`, so the line is anti-aliased per pixel; the
+//! fields are sampled bilinearly (the line needs no more).
 
 use std::fmt::Write as _;
 
@@ -87,6 +86,9 @@ const SEED_WIDTH: f64 = 2.0;
 const STEPS_PER_UPDATE: usize = 4;
 /// Updates run inside the first `resize` of a lattice (one simulated second).
 const PREROLL_UPDATES: usize = 60;
+/// Of the pre-roll, the updates `resize` runs at once (GEN-R19: a scene switch stays
+/// under 10 ms at the node cap); the rest ride along one per `update` until paid.
+const PREROLL_NOW: usize = 15;
 /// Length of one act (simulated seconds) and the watchdog cadence and bands.
 const ACT_S: f64 = 36.0;
 const CHECK_EVERY: f64 = 1.0;
@@ -94,22 +96,24 @@ const RHO_OK: (f32, f32) = (0.8, 1.2);
 /// Share of the laid-down shear the row-mean flow must keep for the act to go on.
 const LAYERED_MIN: f64 = 0.25;
 const U_MAX: f32 = 0.3;
-/// Vorticity that saturates the colour, in units of the seed layer's peak U/δ, and the
-/// fraction of it below which a pixel stays dark.
+/// Vorticity that saturates the picture, in units of the seed layer's peak U/δ.
 const VORT_SAT: f64 = 0.7;
-const VORT_FLOOR: f64 = 0.01;
-/// Brightness of calm, unspun fluid, as a share of full.
-const CALM: f64 = 0.1;
-/// Highlight compression of the picture (see [`value_ink`]).
-const HIGHLIGHT: f64 = 0.24;
+/// The dye band's Starlight levels, calm to fully spinning, and the dye excess over ½ at
+/// which the band reaches them (it fades in from the interface).
+/// The interface line: half-width in pixels (anti-aliased by the pixel's distance to the
+/// `c = ½` contour, `|c − ½| / |∇c|`), and its level at full spin (calm sheets stay at
+/// `SHEET_CALM` of it).
+const SHEET: f32 = 1.1;
+const SHEET_LEVEL: f32 = 230.0;
+const SHEET_CALM: f32 = 0.45;
 /// Nodes per pixel above which the picture is box-filtered before sampling.
 const MINIFY: f64 = 1.3;
 /// Interface sharpening of the dye per update.
 const SHARPEN: f32 = 0.015;
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-/// The middle band's ramp (dusk-rose cloud) and the outer bands' (indigo sky).
-const CLOUD: Ramp = Ramp::Eosin;
-const SKY: Ramp = Ramp::Cobalt;
+/// The line's ramp: a neutral pale starlight, so its anti-aliased edge dims to grey, not
+/// to a saturated navy.
+const LINE: Ramp = Ramp::Starlight;
 /// ASCII fallback by strength.
 const ASCII: [char; 6] = ['.', ':', '-', '=', '#', '@'];
 
@@ -206,7 +210,7 @@ pub(crate) fn vorticity(lat: &Lattice, out: &mut Grid<f32>) {
 /// ASCII cell for two Div pixels: the stronger by `|level − 128|`, as a strength char.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let p = sciart_core::raster::stronger(top, bottom);
-    if p.role != Role::Ramp(CLOUD) && p.role != Role::Ramp(SKY) {
+    if p.role != Role::Ramp(LINE) {
         return None;
     }
     let m = ink::seq_value(p);
@@ -308,36 +312,40 @@ fn catmull_rom(t: f32) -> [f32; 4] {
     ]
 }
 
-/// The signed picture value of dye `c` and vorticity `s` (units of the saturation
-/// value): the band's side of ½ as the sign, dim in calm fluid and bright where it spins,
-/// and zero on the interface itself, so each rolled-up sheet reads as a dark spiral line.
-/// Non-finite input gives 0.
-pub(crate) fn shade_value(c: f64, s: f64) -> f64 {
-    let side = 2.0 * c - 1.0;
-    if !(side.is_finite() && s.is_finite()) {
-        return 0.0;
-    }
-    let spin = ink::soft_clip(2.0 * s.abs());
-    (CALM + (1.0 - CALM) * spin) * side.abs().sqrt().copysign(side)
-}
-
-/// The ink of a picture value, blank below the floor. The highlights are compressed
-/// (`a·(1 − HIGHLIGHT·a²)`, top at 1 − HIGHLIGHT): the vortex cores of the late, merged
-/// billows spin hard over wide areas, and at the ramps' pale tops they read as
-/// blown-out blobs; mid-tones are almost untouched.
-pub(crate) fn value_ink(v: f64) -> Ink {
-    if v.is_nan() || v.abs() < VORT_FLOOR {
+/// The ink of a pixel with spin `s` (|ω| in units of the saturation value, clamped to 1)
+/// at distance `d` pixels from the interface: the line within [`SHEET`] pixels of it,
+/// its level falling smoothly to 0 at the edge, else black. Non-finite input is black.
+pub(crate) fn kh_ink(s: f32, d: f32) -> Ink {
+    if !(s.is_finite() && d.is_finite()) || d >= SHEET {
         return Ink::BLANK;
     }
-    let ramp = if v > 0.0 { CLOUD } else { SKY };
-    let a = v.abs().min(1.0);
-    ink::ramp(ramp, a * (1.0 - HIGHLIGHT * a * a))
+    let s = s.clamp(0.0, 1.0);
+    let k = 1.0 - d / SHEET;
+    let level = SHEET_LEVEL * k * k * (3.0 - 2.0 * k) * (SHEET_CALM + (1.0 - SHEET_CALM) * s);
+    let level = (level + 0.5) as u8;
+    if level < 8 {
+        Ink::BLANK
+    } else {
+        Ink::new(Role::Ramp(LINE), level)
+    }
 }
 
-/// [`value_ink`] of [`shade_value`].
-#[cfg(test)]
-pub(crate) fn pixel_ink(c: f64, s: f64) -> Ink {
-    value_ink(shade_value(c, s))
+/// `|∇c|` per node (central differences, periodic), in dye units per node.
+fn dye_slope(dye: &Grid<f32>, out: &mut Grid<f32>) {
+    let (w, h) = (usize::from(dye.width()), usize::from(dye.height()));
+    if out.size() != dye.size() {
+        out.resize(dye.size(), 0.0);
+    }
+    if w == 0 || h == 0 {
+        return;
+    }
+    let c = dye.as_slice();
+    for (i, o) in out.as_mut_slice().iter_mut().enumerate() {
+        let (x, y) = (i % w, i / w);
+        let gx = 0.5 * (c[y * w + (x + 1) % w] - c[y * w + (x + w - 1) % w]);
+        let gy = 0.5 * (c[((y + 1) % h) * w + x] - c[((y + h - 1) % h) * w + x]);
+        *o = (gx * gx + gy * gy).sqrt();
+    }
 }
 
 /// Vortex count along a row: local maxima of `|ω|` (3-point smoothed, periodic) above
@@ -368,8 +376,12 @@ pub struct KelvinHelmholtz {
     /// Passive dye: 1 in the middle band, 0 outside, and its advection scratch.
     dye: Grid<f32>,
     dye_next: Grid<f32>,
-    /// Signed picture value per node (see [`shade_value`]).
+    /// |ω| per node in units of the saturation value, and prefiltered dye for a minified
+    /// display (scratch for `rasterise`).
     shade: Grid<f32>,
+    soft_dye: Grid<f32>,
+    /// `|∇c|` per node, for the interface line's distance.
+    slope: Grid<f32>,
     /// Whether a pixel spans more than [`MINIFY`] nodes, so the picture is prefiltered.
     minified: bool,
     pixels: Pixels,
@@ -381,11 +393,17 @@ pub struct KelvinHelmholtz {
     t: f64,
     since_check: f64,
     resets: u32,
+    /// Pre-roll updates still to run (see [`PREROLL_NOW`]).
+    preroll_owed: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for KelvinHelmholtz {
     fn default() -> Self {
         Self {
+            dirty: true,
+            preroll_owed: 0,
             size: Size::new(1, 1),
             flow: None,
             lat: Lattice::default(),
@@ -393,6 +411,8 @@ impl Default for KelvinHelmholtz {
             dye: Grid::new(Size::new(1, 1), 0.0),
             dye_next: Grid::new(Size::new(1, 1), 0.0),
             shade: Grid::new(Size::new(1, 1), 0.0),
+            soft_dye: Grid::new(Size::new(1, 1), 0.0),
+            slope: Grid::new(Size::new(1, 1), 0.0),
             minified: false,
             pixels: Pixels::default(),
             map: SampleMap::default(),
@@ -460,31 +480,55 @@ impl KelvinHelmholtz {
 
     fn rasterise(&mut self) {
         vorticity(&self.lat, &mut self.vort);
-        // The signed picture value per node (one pass over the capped lattice), then one
-        // bilinear sample per pixel: a sign flip interpolates through the dark zero, so
-        // the interface stays a dark line at any zoom.
-        let k = 1.0 / self.scale;
-        for ((v, &c), &s) in self
+        let k = (1.0 / self.scale) as f32;
+        if self.shade.size() != self.vort.size() {
+            self.shade.resize(self.vort.size(), 0.0);
+        }
+        for (o, &w) in self
             .shade
             .as_mut_slice()
             .iter_mut()
-            .zip(self.dye.as_slice())
             .zip(self.vort.as_slice())
         {
-            *v = shade_value(f64::from(c), f64::from(s) * k) as f32;
+            *o = (w.abs() * k).min(1.0);
         }
         // On a small display a pixel spans more than a node: point samples of the thin
-        // sheets would alias into speckle, so the picture is box-filtered first (into
-        // the vorticity grid, which is done with).
-        let src = if self.minified {
+        // sheets would alias into speckle, so both fields are box-filtered first (the spin
+        // into the vorticity grid, which is done with).
+        let (dye, spin) = if self.minified {
+            box3(&self.dye, &mut self.soft_dye);
             box3(&self.shade, &mut self.vort);
-            &self.vort
+            (&self.soft_dye, &self.vort)
         } else {
-            &self.shade
+            (&self.dye, &self.shade)
         };
-        let map = &self.map;
-        self.pixels
-            .shade(|x, y| value_ink(f64::from(map.sample(src, x, y))));
+        dye_slope(dye, &mut self.slope);
+        let (map, slope) = (&self.map, &self.slope);
+        // Pixels per node, so a node-space distance to the interface becomes pixels.
+        let px = map.magnification().max(1e-3);
+        // Lazy per pixel: the outer fluid (dye ≈ 0) is black at once; the spin is sampled
+        // only on the band or near the interface, and the slope only where the line can
+        // reach (|∇c| ≤ ½ per node, so |c − ½| beyond `reach` is > SHEET pixels away).
+        let reach = 0.5 * SHEET / px;
+        let shade = |c: f32, spin: &dyn Fn() -> f32, slope: &dyn Fn() -> f32| {
+            let off = (c - 0.5).abs();
+            if off >= reach {
+                return Ink::BLANK;
+            }
+            kh_ink(spin(), off / slope().max(1e-4) * px)
+        };
+        // Bilinear throughout: the line is anti-aliased by its distance, not by the
+        // sampling, and the dim band has no edge to crease (GEN-R17's cubic buys nothing
+        // here and would double the per-pixel cost at 500×150). Row samplers are rebuilt
+        // when the shader reaches the next pixel row (CORE-R104).
+        let row = |y| (map.row(dye, y), map.row(spin, y), map.row(slope, y));
+        let (mut ry, mut r) = (-1, row(0));
+        self.pixels.shade(|x, y| {
+            if y != ry {
+                (ry, r) = (y, row(y));
+            }
+            shade(r.0.at(x), &|| r.1.at(x), &|| r.2.at(x))
+        });
     }
 
     /// `Re 121` on the title row, right-aligned, when there is room (GEN-R13).
@@ -525,10 +569,11 @@ impl Generator for KelvinHelmholtz {
             self.scale = VORT_SAT * U / f.delta;
             self.restart(&mut ctx.rng);
             // A one-off pre-roll past the seed's relaxation, so a visit opens on growing
-            // ripples rather than on still, flat layers (≈ 25 ms at the node cap).
-            for _ in 0..PREROLL_UPDATES {
+            // ripples rather than on still, flat layers: a quarter now, the rest amortised.
+            for _ in 0..PREROLL_NOW {
                 self.advance();
             }
+            self.preroll_owed = PREROLL_UPDATES - PREROLL_NOW;
             self.t = PREROLL_UPDATES as f64 * SIM_DT;
         }
         self.pixels.resize(size);
@@ -536,7 +581,7 @@ impl Generator for KelvinHelmholtz {
         let px = self.pixels.pixel_size();
         self.minified = f64::from(lattice.width()) > MINIFY * f64::from(px.width())
             || f64::from(lattice.height()) > MINIFY * f64::from(px.height());
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -545,6 +590,11 @@ impl Generator for KelvinHelmholtz {
         }
         self.t += dt;
         self.since_check += dt;
+        if self.preroll_owed > 0 {
+            // The rest of the pre-roll, amortised over the first updates (GEN-R19).
+            self.preroll_owed -= 1;
+            self.advance();
+        }
         self.advance();
         if self.since_check >= CHECK_EVERY {
             self.since_check = 0.0;
@@ -558,7 +608,15 @@ impl Generator for KelvinHelmholtz {
         if self.t >= ACT_S {
             self.restart(&mut ctx.rng);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -576,6 +634,7 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = KelvinHelmholtz::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -608,8 +667,13 @@ mod tests {
         // vortex_street::tests::kh_a1_lifted_lbm_keeps_the_vortex_street_bit_identical;
         // here the scene's own step is exactly `step_periodic` on the core lattice.
         let (mut g, mut ctx) = scene(3, Size::new(80, 24));
+        // Past the amortised pre-roll (GEN-R19), an update is one plain advance.
+        while g.preroll_owed > 0 {
+            g.update(SIM_DT, &mut ctx);
+        }
         let mut twin = g.lat.clone();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         for _ in 0..STEPS_PER_UPDATE {
             twin.step_periodic(g.omegas.0, g.omegas.1);
         }
@@ -623,6 +687,7 @@ mod tests {
         // Skip the first 0.5 s (the seed relaxes onto the eigenmode), fit 0.5–2.5 s.
         for frame in 0..150u32 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             if frame >= 30 && frame % 5 == 0 {
                 ts.push(f64::from(frame) * SIM_DT);
                 ls.push(ripple(&g).ln());
@@ -646,6 +711,7 @@ mod tests {
         let at = |g: &mut KelvinHelmholtz, ctx: &mut Ctx, s: f64| {
             while g.t < s {
                 g.update(SIM_DT, ctx);
+                g.prepare();
             }
             vortices(g)
         };
@@ -662,6 +728,7 @@ mod tests {
         let m0 = g.lat.mass();
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let rel = (g.lat.mass() - m0).abs() / m0;
         assert!(rel < 1e-6, "relative mass drift {rel}");
@@ -692,12 +759,15 @@ mod tests {
         let (mut g, mut ctx) = scene(2, Size::new(200, 50));
         for _ in 0..30 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let before = g.lat.populations().to_vec();
         g.resize(Size::new(210, 52), &mut ctx);
+        g.prepare();
         assert_eq!(g.lat.populations(), &before[..]);
         g.t = ACT_S - 0.5 * SIM_DT;
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         assert!(g.t < SIM_DT && ripple(&g) < 0.05 * U);
     }
 
@@ -708,17 +778,16 @@ mod tests {
         let at = |y: f64| g.vort.as_slice()[(y.round() as usize) * f.w];
         let (upper, lower) = (at(0.25 * f.h as f64), at(0.75 * f.h as f64));
         assert!(upper * lower < 0.0, "{upper} {lower}");
-        // Calm fluid is dim, spinning fluid bright, the interface (c = ½) dark.
-        let calm = pixel_ink(1.0, 0.0);
-        assert_eq!(calm.role, Role::Ramp(CLOUD));
-        assert!(ink::seq_value(calm) > 0.0 && ink::seq_value(calm) < 0.2);
-        let (cloud, sky) = (pixel_ink(1.0, 1.0), pixel_ink(0.0, 1.0));
-        // Bright but not blown out: the highlights stop short of the ramps' pale tops.
-        for (p, role) in [(cloud, CLOUD), (sky, SKY)] {
-            assert!(p.role == Role::Ramp(role), "{p:?}");
-            assert!((0.7..0.8).contains(&ink::seq_value(p)), "{p:?}");
-        }
-        assert_eq!(pixel_ink(0.5, 1.0), Ink::BLANK);
-        assert_eq!(pixel_ink(f64::NAN, 0.0), Ink::BLANK);
+        // ADR-0017: the outer fluid is black, the dye band a dim grey that brightens
+        // where it spins, the interface a thin ice line, brightest where it spins.
+        // ADR-0017: lines only, on black: bright on the interface, brightest where it
+        // spins, fading smoothly to black a pixel away.
+        let (line, calm) = (kh_ink(1.0, 0.0), kh_ink(0.0, 0.0));
+        assert_eq!(line, Ink::new(Role::Ramp(LINE), 230));
+        assert!(calm.role == Role::Ramp(LINE) && calm.level < line.level);
+        let (a, b) = (kh_ink(1.0, 0.3).level, kh_ink(1.0, 0.7).level);
+        assert!(line.level > a && a > b && b > 0, "{a} {b}");
+        assert_eq!(kh_ink(1.0, SHEET), Ink::BLANK, "the line is thin");
+        assert_eq!(kh_ink(f32::NAN, 0.0), Ink::BLANK);
     }
 }

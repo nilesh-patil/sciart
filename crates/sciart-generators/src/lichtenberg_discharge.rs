@@ -15,18 +15,17 @@
 //! same time to cross. When a branch reaches the edge the whole channel flashes, glows
 //! and fades out, and the next act starts on a fresh block.
 //!
-//! Picture: one half-block layer. Each tree link is stroked as an antialiased channel
-//! whose width and brightness follow the log of the current it carries (the size of its
-//! subtree): the trunk is wide and near-white, branches thin down through lavender to
-//! hair-fine indigo tips, each wrapped in a soft falloff halo. Strokes combine by
-//! maximum, not by sum, so a dense coral stays a tree of distinct channels instead of
-//! blooming into a blob. Newly broken-down tips flash as the front advances. In ASCII
-//! the tree is a braille-free dot raster by dot count. Everything is rasterised in
-//! `update`; `render` only blits.
+//! Picture (M14, ADR-0017): one braille dot layer. Each tree link is a 1-dot line whose
+//! brightness follows the log of the current it carries (the size of its subtree), in a
+//! muted ramp that tops out at [`LINE_MAX`]: the trunk a pale violet, branches down to a
+//! dim indigo at the tips; only the few links carrying most of the current are doubled
+//! into a 2-dot stroke, so the trunk reads as the channel. Newly broken-down tips, and
+//! the whole tree when a branch strikes, flash white-hot and cool back. In ASCII the same
+//! dots show by dot count. Rasterised once per drawn frame in `prepare` (GEN-R20);
+//! `render` only blits. (The M12 half-block channels with soft halos are gone.)
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{Glow, Tone};
 use sciart_core::{grid, ink};
 
 use crate::shared::laplacian_growth::{Dbm, Edge, Edges};
@@ -145,86 +144,51 @@ pub(crate) fn reach_schedule(local: f64) -> f64 {
     1.0 - (1.0 - x) * (1.0 - x)
 }
 
-/// Channel radius in pixels: `CORE.0 + CORE.1·b²` (a hair-fine tip to a ≈ 1.6 pixel
-/// trunk), the fingering act's extra width, the antialiased falloff beyond the radius
-/// (pixels), the halo's level relative to the core, and the lowest drawn level.
-const CORE: (f32, f32) = (0.35, 1.25);
-const WIDE_EXTRA: f32 = 0.6;
-const FALLOFF: f32 = 1.4;
-const HALO_LEVEL: f32 = 0.35;
-const FLOOR: f32 = 0.06;
+/// Line level (0..=255) of a link at current `c ∈ [0, 1]`: from `LINE_MIN` on the
+/// finest twig to `LINE_MAX` where the trunk begins (M14: the violet branches muted to
+/// ≤ 140); the trunk itself, from [`TRUNK`] up, whitens on to `TRUNK_MAX` (the ramp's
+/// pale lavender, low chroma), so the channel carrying the current is the bright subject
+/// (ADR-0017 rule 6).
+const LINE_MIN: f64 = 30.0;
+const LINE_MAX: f64 = 140.0;
+const TRUNK_MAX: f64 = 235.0;
+/// Links whose current is at least this (of the whole tree's, on the log scale of
+/// [`link_brightness`]) are doubled into a 2-dot stroke: the trunk and main limbs; in the
+/// fingering act the air channels are wider, from `TRUNK_WIDE`.
+const TRUNK: f32 = 0.8;
+const TRUNK_WIDE: f32 = 0.6;
 
-/// Stroke the channel `a → b` (pixel coordinates, pixel centres at integers) into
-/// `glow`'s buffer of width `pw` by maximum: level `v·(0.25 + 0.75·v)` (dim channels
-/// darken toward the ramp's indigo foot) out to `radius`, then a halo falling linearly to
-/// zero over [`FALLOFF`] pixels. Off-buffer pixels are skipped; non-finite input draws
-/// nothing.
-pub(crate) fn channel(
-    glow: &mut Glow,
-    pw: usize,
-    a: (f64, f64),
-    b: (f64, f64),
-    radius: f32,
-    v: f32,
-) {
-    if pw == 0 || !(a.0.is_finite() && a.1.is_finite() && b.0.is_finite() && b.1.is_finite()) {
-        return;
-    }
-    let buf = glow.values_mut();
-    let ph = buf.len() / pw;
-    let core = v * (0.25 + 0.75 * v);
-    let reach = radius + FALLOFF;
-    let (x0, x1) = (
-        a.0.min(b.0) - f64::from(reach),
-        a.0.max(b.0) + f64::from(reach),
-    );
-    let (y0, y1) = (
-        a.1.min(b.1) - f64::from(reach),
-        a.1.max(b.1) + f64::from(reach),
-    );
-    let (dx, dy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = dx * dx + dy * dy;
-    // The clipped bounding box (the float → int casts saturate).
-    let (xa, xb) = (
-        (x0.floor() as i64).max(0),
-        (x1.ceil() as i64).min(pw as i64 - 1),
-    );
-    let (ya, yb) = (
-        (y0.floor() as i64).max(0),
-        (y1.ceil() as i64).min(ph as i64 - 1),
-    );
-    for y in ya..=yb {
-        let y = y as usize;
-        for x in xa..=xb {
-            let x = x as usize;
-            let (px, py) = (x as f64 - a.0, y as f64 - a.1);
-            let t = if len2 > 0.0 {
-                ((px * dx + py * dy) / len2).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            let (ex, ey) = (px - t * dx, py - t * dy);
-            let d = (ex * ex + ey * ey).sqrt() as f32;
-            let level = if d <= radius {
-                // Antialiased core edge over the last half pixel.
-                core * (1.0 - ((d - radius + 0.5).max(0.0) / 0.5) * (1.0 - HALO_LEVEL))
-            } else {
-                core * HALO_LEVEL * (1.0 - (d - radius) / FALLOFF).max(0.0)
-            };
-            let cell = &mut buf[y * pw + x];
-            *cell = cell.max(level);
-        }
-    }
+/// A link's level at base brightness `base` ([`link_brightness`] without the tip flash)
+/// and heat `hot ∈ [0, 1]` (a fresh tip, or the breakdown flash): the muted line level,
+/// lifted toward white (255) by the heat (LICH-A6, M14).
+pub(crate) fn line_level(base: f32, hot: f32) -> f64 {
+    let (c, knee) = (f64::from(base.clamp(0.0, 1.0)), f64::from(TRUNK));
+    let base = if c < knee {
+        LINE_MIN + (LINE_MAX - LINE_MIN) * c / knee
+    } else {
+        LINE_MAX + (TRUNK_MAX - LINE_MAX) * (c - knee) / (1.0 - knee)
+    };
+    base + (255.0 - base) * f64::from(hot.clamp(0.0, 1.0))
 }
 
 /// Brightness in [0, 1] of a link carrying `sub` of the tree's `total` sites, born at
-/// `born`, at time `now`: log current, plus a hot flash on new tips.
+/// `born`, at time `now`: log current, plus a hot flash on new tips. (`rasterise` uses
+/// the two parts separately, through [`line_level`].)
+#[cfg(test)]
 pub(crate) fn link_brightness(sub: u32, total: u32, born: f32, now: f32) -> f32 {
+    link_current(sub, total).max(tip_heat(born, now))
+}
+
+/// The log-current part of [`link_brightness`], `0.2 + 0.8·ln(1 + sub)/ln(1 + total)`.
+fn link_current(sub: u32, total: u32) -> f32 {
     let current = (1.0 + sub as f32).ln() / (1.0 + total.max(1) as f32).ln();
-    let base = 0.2 + 0.8 * current.clamp(0.0, 1.0);
-    let age = (now - born).max(0.0);
-    let tip = (1.0 - age / TIP_S).max(0.0);
-    base.max(tip * tip)
+    0.2 + 0.8 * current.clamp(0.0, 1.0)
+}
+
+/// A new tip's heat, 1 when it breaks down, gone after [`TIP_S`].
+fn tip_heat(born: f32, now: f32) -> f32 {
+    let tip = (1.0 - (now - born).max(0.0) / TIP_S).max(0.0);
+    tip * tip
 }
 
 #[derive(Debug)]
@@ -243,9 +207,8 @@ pub struct Lichtenberg {
     /// Subtree sizes (current per link), sized to the pool.
     sub: Vec<u32>,
     dots: Dots,
-    glow: Glow,
-    pixels: Pixels,
-    tone: Tone,
+    /// The dots are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Lichtenberg {
@@ -266,9 +229,7 @@ impl Default for Lichtenberg {
             depth: 0.0,
             sub: Vec::new(),
             dots: Dots::default(),
-            glow: Glow::default(),
-            pixels: Pixels::default(),
-            tone: Tone::default(),
+            dirty: true,
         }
     }
 }
@@ -379,7 +340,6 @@ impl Lichtenberg {
     fn rasterise(&mut self, local: f64) {
         self.currents();
         self.dots.clear();
-        self.glow.clear();
         let act = ACTS[self.act];
         let lat = self.dbm.size();
         let dot = self.dots.dot_size();
@@ -394,35 +354,31 @@ impl Lichtenberg {
         let flash = self
             .done_at
             .map_or(0.0, |d| (-(self.t - d) / FLASH_S).exp()) as f32;
-        let fade = (((ACT_S - local) / FADE_S).clamp(0.0, 1.0)) as f32;
+        let fade = ((ACT_S - local) / FADE_S).clamp(0.0, 1.0);
         let now = self.t as f32;
         let nodes = self.dbm.nodes();
         let total = self.sub.first().copied().unwrap_or(1);
-        let pw = usize::from(self.glow.pixel_size().width());
+        let trunk = if act.wide { TRUNK_WIDE } else { TRUNK };
         for (i, n) in nodes.iter().enumerate() {
-            let b = link_brightness(self.sub[i], total, n.born, now);
-            let b = (b + flash * (1.0 - b)) * fade;
-            if b <= 0.0 {
+            let base = link_current(self.sub[i], total);
+            let hot = tip_heat(n.born, now).max(flash);
+            let level = line_level(base, hot) * fade;
+            if level < ink::MIN_VISIBLE_LEVEL {
                 continue;
             }
             let p = nodes[n.parent as usize];
             let (a, c) = (at(p.x, p.y), at(n.x, n.y));
-            let level = 0.5 + 0.5 * f64::from(b);
-            self.dots
-                .line(a.0, a.1, c.0, c.1, ink::ramp(act.ramp, level));
-            // Dots → pixels (2 × 2 dots a pixel), then a channel stroked by maximum.
-            let half = |q: (f64, f64)| (0.5 * q.0 + 0.25, 0.5 * q.1 + 0.25);
-            // Width by the current alone: a fresh tip flashes bright but stays thin.
-            let wb = link_brightness(self.sub[i], total, f32::MIN, now) * fade;
-            let width = CORE.0 + CORE.1 * wb * wb + if act.wide { WIDE_EXTRA } else { 0.0 };
-            channel(&mut self.glow, pw, half(a), half(c), width, b);
-        }
-        let ramp = act.ramp;
-        self.pixels.clear();
-        for (i, &v) in self.glow.values().iter().enumerate() {
-            if v >= FLOOR {
-                let (x, y) = ((i % pw) as i32, (i / pw) as i32);
-                self.pixels.set(x, y, ink::ramp(ramp, f64::from(v)));
+            let ink = ink::ramp(act.ramp, level / 255.0);
+            self.dots.line(a.0, a.1, c.0, c.1, ink);
+            // The links carrying most of the current: a second line one dot across, so
+            // the trunk is a solid 2-dot channel (ADR-0017 rule 6) and the rest hairlines.
+            if base >= trunk {
+                let (ox, oy) = if (c.0 - a.0).abs() >= (c.1 - a.1).abs() {
+                    (0.0, 1.0)
+                } else {
+                    (1.0, 0.0)
+                };
+                self.dots.line(a.0 + ox, a.1 + oy, c.0 + ox, c.1 + oy, ink);
             }
         }
     }
@@ -452,11 +408,7 @@ impl Generator for Lichtenberg {
         }
         self.size = size;
         self.dots.resize(size);
-        self.glow.resize(size);
-        self.pixels.resize(size);
-        self.tone = Tone::asinh(0.25, 2.0);
-        let local = act_at(&self.timeline, self.t).0.local;
-        self.rasterise(local);
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -470,16 +422,21 @@ impl Generator for Lichtenberg {
             self.start_act(beat.index);
         }
         self.step_tree(beat.local, &mut ctx.rng);
-        self.rasterise(beat.local);
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            let local = act_at(&self.timeline, self.t).0.local;
+            self.rasterise(local);
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // ASCII: no half blocks, so only the channel, by dot count (`. : + #`, GEN-R10).
-        if canvas.mode() == GlyphMode::Ascii {
-            self.dots.blit(canvas);
-            return;
-        }
-        self.pixels.blit(canvas, |_, _, _, _| None);
+        // Braille in Unicode; by dot count (`. : + #`) in ASCII (GEN-R10).
+        self.dots.blit(canvas);
     }
 }
 
@@ -578,5 +535,43 @@ mod tests {
             "{trunk} {twig} {tip}"
         );
         assert!(reach_schedule(0.0) == 0.0 && reach_schedule(GROW_S) == 1.0);
+    }
+
+    #[test]
+    fn lich_a6_lines_are_muted_except_hot_tips_and_the_flash() {
+        // M14 (ADR-0017): a cool branch stays under LINE_MAX (140); only the trunk
+        // (current ≥ TRUNK) whitens on to TRUNK_MAX; a fresh tip or the strike flash lifts
+        // any link to white.
+        assert_eq!(line_level(0.0, 0.0), LINE_MIN);
+        assert!(line_level(TRUNK - 0.01, 0.0) < LINE_MAX);
+        assert!((line_level(TRUNK, 0.0) - LINE_MAX).abs() < 1e-9);
+        assert!((line_level(1.0, 0.0) - TRUNK_MAX).abs() < 1e-9);
+        assert_eq!(line_level(0.3, 1.0), 255.0);
+        // Seen in dots after the scene's first frames: every lit cell is in the act's
+        // ramp, and apart from the trunk and hot tips the levels stay under the cap.
+        let (mut g, mut ctx) = scene(120, 40);
+        for _ in 0..90 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut c = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut c);
+        let lit: Vec<u8> = c
+            .cells()
+            .iter()
+            .filter(|c| c.ink.role == Role::Ramp(ACTS[0].ramp))
+            .map(|c| c.ink.level)
+            .collect();
+        assert!(lit.len() > 50, "{} lit cells", lit.len());
+        let muted = lit
+            .iter()
+            .filter(|&&l| f64::from(l) <= LINE_MAX + 1.0)
+            .count();
+        assert!(
+            muted * 10 >= lit.len() * 7,
+            "{muted} of {} muted",
+            lit.len()
+        );
+        assert!(c.cells().iter().all(|c| c.bg == Ink::BLANK));
     }
 }

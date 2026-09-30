@@ -12,7 +12,7 @@ use std::f64::consts::TAU;
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, disc_pixels, halo_kernel};
+use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
 use sciart_core::rng::{cell_key, hash01, value_noise};
 use sciart_core::timeline::ease;
 use sciart_core::{Tone, ink};
@@ -48,8 +48,6 @@ const FINGER_OUT: f64 = 0.18;
 const FINGER_IN: f64 = 0.054;
 /// Reverse shock (units of `R_f`), easing inward over the expansion.
 const REVERSE: (f64, f64) = (0.62, 0.45);
-/// How far (pixels) the blast wave's outward glow reaches beyond its one-pixel line.
-const RIM_BAND: f64 = 2.5;
 /// Rayleigh–Taylor modes: count, wavenumber range, seed amplitude, growth rate and cap.
 const RT_MODES: usize = 24;
 const RT_K: (u32, u32) = (5, 22);
@@ -76,17 +74,38 @@ const STREAK: f64 = 7.0;
 const HOLLOW: f64 = 0.45;
 /// A lit knot's weight in the ejecta it sits in.
 const KNOT_WEIGHT: f32 = 0.9;
-/// A knot's soft glow.
-const KNOT_BLOB: [(i32, i32, f32); 9] = halo_kernel(1);
-/// Level caps: a thin, faint forward shock under the bright ejecta.
-const RIM_MAX: u8 = 85;
-const EJECTA_MAX: u8 = 215;
-/// Chandra-style element colours: the forward shock's synchrotron cyan, Si/S teal-green,
-/// Fe orange-red, O blue.
-const RIM: Ramp = Ramp::Ice;
-const SILICON: Ramp = Ramp::Aurora;
-const IRON: Ramp = Ramp::Ember;
-const OXYGEN: Ramp = Ramp::Cobalt;
+/// A knot: one pixel (ADR-0017: 1-px filaments).
+const KNOT_BLOB: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
+/// Level caps: a thin, dim forward shock under the ejecta (ADR-0017: 1 px, ≤ 45).
+const RIM_MAX: u8 = 45;
+/// The ejecta's contrast curve: the toned value `u` at `EJECTA_TOP·u^EJECTA_GAMMA`, so the
+/// filaments' bodies sit at ≤ 130 and only the brightest knots reach the top (GEN-R21).
+const EJECTA_TOP: f64 = 250.0;
+const EJECTA_GAMMA: f64 = 2.0;
+/// Ejecta at or below this level are neutral `Starlight` bodies; only the brighter
+/// knots and fingertips take their element's colour (critic round 2).
+const BODY_TOP: u8 = 110;
+/// The young remnant's exposure lift (×(1 + `EARLY_LIFT`) at the start), fading out over
+/// `EARLY_SPAN` model seconds.
+const EARLY_LIFT: f64 = 2.5;
+const EARLY_SPAN: f64 = 6.0;
+/// Exposure before the tone, so the brightest knots reach the top.
+const EJECTA_GAIN: f32 = 1.8;
+
+/// The ejecta's contrast curve by toned level, built once (no `powf` per pixel).
+fn ejecta_curve() -> &'static [u8; 256] {
+    static CURVE: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
+    CURVE.get_or_init(|| {
+        std::array::from_fn(|i| ink::level(EJECTA_TOP * (i as f64 / 255.0).powf(EJECTA_GAMMA)))
+    })
+}
+/// Element colours (M14, ADR-0017; were Chandra's teal Si, orange Fe, blue O): the
+/// forward shock a faint neutral `Starlight` line, sulfur/silicon `Sulfur`, iron `HAlpha`
+/// red, oxygen `Ice`.
+const RIM: Ramp = Ramp::Starlight;
+const SILICON: Ramp = Ramp::Sulfur;
+const IRON: Ramp = Ramp::HAlpha;
+const OXYGEN: Ramp = Ramp::Ice;
 
 /// Which element dominates a patch of ejecta.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -278,6 +297,8 @@ pub struct SupernovaRemnant {
     rows: Vec<f32>,
     pixels: Pixels,
     stars: Vec<(i32, i32, u8)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl SupernovaRemnant {
@@ -468,12 +489,11 @@ impl SupernovaRemnant {
             // Blast wave: a one-pixel line at R_f(θ) (antialiased inward), fading softly
             // outward over a couple of pixels.
             let d = r - rfa;
-            let rim = if !(-1.0..=RIM_BAND).contains(&d) || rf <= 0.0 {
+            // M14: the line only, antialiased inward (no outward fade band).
+            let rim = if !(-1.0..=0.0).contains(&d) || rf <= 0.0 {
                 0.0
-            } else if d < 0.0 {
-                (1.0 + d) as f32
             } else {
-                (0.45 * (-d / 0.8).exp()) as f32
+                (1.0 + d) as f32
             };
             // Shocked ejecta between the reverse shock and the contact: densest near the
             // contact (so the shell reads as a ring, not a disc), clumpy in comoving
@@ -527,20 +547,28 @@ impl SupernovaRemnant {
         let t_ej = &self.tone_ejecta;
         let (aux, ej_buf) = (&self.aux, self.knot_glow.values());
         let env32 = env as f32;
+        // The young remnant is small and faint: a lift that fades out over its first
+        // seconds keeps it legible (GEN-R21), like a camera opening up.
+        let early =
+            (1.0 + EARLY_LIFT * (1.0 - ease::smoothstep((self.tau - T0) / EARLY_SPAN))) as f32;
         self.pixels.shade(|x, y| {
             let i = y as usize * width + x as usize;
             let (Some(&packed), Some(&ej)) = (aux.get(i), ej_buf.get(i)) else {
                 return Ink::BLANK;
             };
             let (rim, element) = unpack(packed);
-            let l_rim = ink::level(f64::from(rim * env32) * f64::from(RIM_MAX));
-            let l_ej = t_ej.level(ej * env32).min(EJECTA_MAX);
+            let l_rim = ink::level((f64::from(rim * env32 * early)).min(1.0) * f64::from(RIM_MAX));
+            let l_ej = ejecta_curve()[usize::from(t_ej.level(EJECTA_GAIN * early * ej * env32))];
             if f64::from(l_rim.max(l_ej)) < ink::MIN_VISIBLE_LEVEL {
                 return Ink::BLANK;
             }
             if l_rim >= l_ej {
                 Ink::new(Role::Ramp(RIM), l_rim)
+            } else if l_ej <= BODY_TOP {
+                // The filaments' bodies: neutral, low chroma (critic round 2).
+                Ink::new(Role::Ramp(Ramp::Starlight), l_ej)
             } else {
+                // Knots and fingertips: the element's line colour.
                 let ramp = match element {
                     Element::Iron => IRON,
                     Element::Oxygen => OXYGEN,
@@ -621,7 +649,7 @@ impl Generator for SupernovaRemnant {
             let l = 20 + (hash01(cell_key(k, 11)).powi(4) * 150.0) as u8;
             self.stars.push((x, y, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -631,7 +659,13 @@ impl Generator for SupernovaRemnant {
             self.explode(ctx);
         }
         self.light_knots();
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -648,6 +682,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = SupernovaRemnant::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
@@ -688,6 +723,7 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         for _ in 0..600 {
             g.update(SIM_DT * 3.0, &mut ctx);
+            g.prepare();
             let rr = reverse_frac(g.tau.min(EXPAND));
             assert!(g.finger.iter().all(|&p| {
                 let rc = contact_frac(f64::from(p));
@@ -705,6 +741,7 @@ mod tests {
         let mut last: Vec<f64> = vec![0.0; g.knots.len()];
         for _ in 0..(EXPAND / SIM_DT) as usize - 2 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let tau = g.tau.min(EXPAND);
             let rr = reverse_frac(tau);
             for (k, prev) in g.knots.iter().zip(&mut last) {
@@ -726,14 +763,19 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(200, 50));
         for _ in 0..300 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let rf = g.rf_px();
         let px = g.pixels.pixel_size();
         let mut n = 0;
+        let w = usize::from(px.width());
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(x, y).unwrap();
-                if ink.role == Role::Ramp(RIM) {
+                // M14: the shock shares `Starlight` with the ejecta's bodies, the stars
+                // and the compact object, so its pixels are those the rim field owns.
+                let (rim, _) = unpack(g.aux[y as usize * w + x as usize]);
+                if rim > 0.0 && ink.role == Role::Ramp(RIM) && ink.level <= RIM_MAX {
                     let (dx, dy) = (
                         f64::from(x) + 0.5 - g.centre.0,
                         g.centre.1 - f64::from(y) - 0.5,
@@ -749,14 +791,56 @@ mod tests {
     }
 
     #[test]
+    fn snr_a7_neutral_bodies_coloured_crests_and_a_legible_start() {
+        // Critic round 2: the ejecta's bodies are neutral `Starlight` ≤ `BODY_TOP`; only
+        // brighter knots and fingertips take an element colour. And the young remnant
+        // reads from the first second.
+        let (mut g, mut ctx) = built(Size::new(200, 50));
+        let lit = |g: &SupernovaRemnant| {
+            let px = g.pixels.pixel_size();
+            (0..i32::from(px.height()))
+                .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| {
+                    g.pixels
+                        .get(x, y)
+                        .is_some_and(|i| i.role != Role::Background && i.level >= 60)
+                })
+                .count()
+        };
+        for _ in 0..60 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        assert!(lit(&g) > 40, "{} bright pixels at 1 s", lit(&g));
+        for _ in 0..(20.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let px = g.pixels.pixel_size();
+        let mut coloured = 0;
+        for y in 0..i32::from(px.height()) {
+            for x in 0..i32::from(px.width()) {
+                let ink = g.pixels.get(x, y).unwrap();
+                if matches!(ink.role, Role::Ramp(r) if r == SILICON || r == IRON || r == OXYGEN) {
+                    assert!(ink.level > BODY_TOP, "({x}, {y}): {ink:?}");
+                    coloured += 1;
+                }
+            }
+        }
+        assert!(coloured > 0, "no coloured knots");
+    }
+
+    #[test]
     fn snr_a6_blast_wave_is_out_of_round_at_low_order_and_reshapes_slowly() {
         for seed in [1_u64, 7, 42, 99, 1234] {
             let size = Size::new(120, 40);
             let mut ctx = Ctx::new(seed, size);
             let mut g = SupernovaRemnant::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..600 {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
             let radii = |g: &SupernovaRemnant| -> (f64, f64) {
                 let s = (0..ANGLES).map(|j| SupernovaRemnant::shape(&g.wobble, j));
@@ -774,6 +858,7 @@ mod tests {
             // Slowly: one frame later the shape moved by far less than a pixel's share.
             let before = g.wobble.clone();
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             let moved = before
                 .iter()
                 .zip(&g.wobble)
@@ -790,6 +875,7 @@ mod tests {
         let mut prev_tau = g.tau;
         for _ in 0..(2.5 * LOOP / SIM_DT) as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             assert!(g.knots.len() <= KNOTS);
             if g.tau < prev_tau {
                 // Just restarted: the centre is a flash, every knot dark again.

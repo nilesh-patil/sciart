@@ -88,8 +88,9 @@ impl Stage {
     }
 
     /// Draw a new frame, the title over the scene; on a generator panic the previous front
-    /// frame is untouched.
+    /// frame is untouched. The generator's `prepare` runs once first (CORE-R101).
     pub fn render(&mut self) -> &Canvas {
+        self.generator.prepare();
         self.back.clear();
         self.generator.render(&mut self.back);
         if self.title_visible {

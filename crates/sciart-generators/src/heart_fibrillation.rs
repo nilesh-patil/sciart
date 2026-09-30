@@ -117,7 +117,8 @@ const COUNT_EVERY: u64 = 60;
 /// Resting tissue: nearly black, so the waves carry the picture; its rim outlines the
 /// heart.
 const REST_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 20);
-const RIM_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 80);
+/// The heart's outline: a 1-px rim band (ADR-0017), dim.
+const RIM_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 40);
 /// ECG trace ink (a monitor's green) at its write head.
 const ECG_RAMP: Ramp = Ramp::Aurora;
 /// The ECG write head: a white-hot dot.
@@ -135,6 +136,8 @@ struct Heart {
     model: AlievPanfilov,
     u: Grid<f32>,
     v: Grid<f32>,
+    /// `|∇u|` per node, refreshed by `rasterise` for the front's line (M14).
+    slope: Grid<f32>,
     lap: Vec<f32>,
     /// Per-node `ε` factor for the fibrillation act.
     patchy: Vec<f32>,
@@ -173,15 +176,19 @@ struct Heart {
     ecg_rows: u16,
     cells: Size,
     readout_room: usize,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Heart {
     fn default() -> Self {
         Self {
+            dirty: true,
             medium: Medium::default(),
             model: MODEL,
             u: Grid::default(),
             v: Grid::default(),
+            slope: Grid::default(),
             lap: Vec::new(),
             patchy: Vec::new(),
             heterogeneous: false,
@@ -469,10 +476,18 @@ impl Heart {
             let age = self.step.saturating_sub(at) as f64 / SUB_PER_S as f64;
             (1.0 - age / 0.25).max(0.0)
         });
-        let (map, u, v, edge) = (&self.map, &self.u, &self.v, &self.edge);
+        slope_field(&self.u, &mut self.slope);
+        let (map, u, v, edge, slope) = (&self.map, &self.u, &self.v, &self.edge, &self.slope);
         let (vw, vh) = (i32::from(vs.width()), i32::from(vs.height()));
+        let px = f64::from(vs.width()) / f64::from(u.width().max(1));
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut ur, mut vr, mut gr) =
+            (i32::MIN, map.row(u, 0), map.row(v, 0), map.row(slope, 0));
         self.pixels.shade(|x, y| {
             let (lx, ly) = (x - vx, y - vy);
+            if y != ry {
+                (ry, ur, vr, gr) = (y, map.row(u, ly), map.row(v, ly), map.row(slope, ly));
+            }
             if !(0..vw).contains(&lx) || !(0..vh).contains(&ly) {
                 return Ink::BLANK;
             }
@@ -490,17 +505,22 @@ impl Heart {
                     ink::level((120.0 + 135.0 * flash) * cover),
                 );
             }
-            let (uu, vv) = (map.sample(u, lx, ly), map.sample(v, lx, ly));
-            let ink = tissue_ink(uu, vv);
-            if ink == REST_INK {
-                let rest = f64::from(REST_INK.level) * cover;
-                let rim = f64::from(RIM_INK.level) * rim;
-                Ink::new(REST_INK.role, ink::level(rest.max(rim)))
+            let (uu, vv) = (ur.at(lx), vr.at(lx));
+            let ink = front_ink(uu, vv, gr.at(lx), px);
+            // M14: the organ is black but for its 1-px rim and the excitation front.
+            let rim = f64::from(RIM_INK.level) * rim;
+            let front = f64::from(ink.level) * cover;
+            if ink == Ink::BLANK || front < rim {
+                if rim < ink::MIN_VISIBLE_LEVEL {
+                    Ink::BLANK
+                } else {
+                    Ink::new(RIM_INK.role, ink::level(rim))
+                }
             } else {
-                Ink::new(ink.role, ink::level(f64::from(ink.level) * cover))
+                Ink::new(ink.role, ink::level(front))
             }
         });
-        // Tips as 2×2 white dots.
+        // Tips as single white pixels (M14: no 2×2 block).
         let (sx, sy) = (
             f64::from(vs.width()) / f64::from(self.u.width()),
             f64::from(vs.height()) / f64::from(self.u.height()),
@@ -510,9 +530,7 @@ impl Heart {
                 vx + ((f64::from(tx) + 1.0) * sx) as i32,
                 vy + ((f64::from(ty) + 1.0) * sy) as i32,
             );
-            for (dx, dy) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
-                self.pixels.set(px + dx, py + dy, TIP_INK);
-            }
+            self.pixels.set(px, py, TIP_INK);
         }
         self.draw_ecg();
     }
@@ -572,35 +590,15 @@ impl Heart {
             }
             let age = (head + n - c) % n;
             // Dimmer than the white write head, so the head leads the trace.
-            let level = 205.0 - 115.0 * age as f64 / n as f64;
+            let level = 160.0 - 90.0 * age as f64 / n as f64;
             let ink = Ink::new(Role::Ramp(ECG_RAMP), ink::level(level));
             let (y0, y1) = (y_of(self.ecg[c - 1]), y_of(self.ecg[c]));
-            // Three dots thick over a dim glow in the pixels behind (the cell background
-            // under the braille): a bold, luminous trace.
-            for off in [-1.0, 0.0, 1.0] {
-                self.dots
-                    .line((c - 1) as f64, y0 + off, c as f64, y1 + off, ink);
-            }
-            let glow = Ink::new(Role::Ramp(ECG_RAMP), ink::level(level * 0.18));
-            let (px, lo, hi) = (c as i32 / 2, y0.min(y1) / 2.0, y0.max(y1) / 2.0);
-            for py in lo as i32..=hi as i32 {
-                if self.pixels.get(px, py) == Some(Ink::BLANK) {
-                    self.pixels.set(px, py, glow);
-                }
-            }
+            // A 1-dot trace on black (M14: no strip fill, no glow).
+            self.dots.line((c - 1) as f64, y0, c as f64, y1, ink);
         }
-        // The monitor's write head: a bright dot leading the trace, with a halo in the
-        // pixels behind it (HRT-A7).
+        // The monitor's write head: a small bright dot leading the trace (HRT-A7).
         let (hx, hy) = (head as f64, y_of(self.ecg[head]));
-        self.dots.disc(hx, hy, 2.1, ECG_HEAD_INK);
-        let (px, py) = (head as i32 / 2, (hy / 2.0) as i32);
-        for (dx, dy) in [(0, 0), (-1, 0), (1, 0)] {
-            let k = if dx == 0 { 0.6 } else { 0.25 };
-            let halo = Ink::new(Role::Ramp(ECG_RAMP), ink::level(255.0 * k));
-            if self.pixels.get(px + dx, py + dy) == Some(Ink::BLANK) {
-                self.pixels.set(px + dx, py + dy, halo);
-            }
-        }
+        self.dots.disc(hx, hy, 1.1, ECG_HEAD_INK);
     }
 
     /// Advance the ECG sweep by `dt` seconds, writing `sample` into the columns passed.
@@ -624,26 +622,47 @@ impl Heart {
     }
 }
 
-/// The excitation cycle in two saturated ramps (SPEC-002 Inks, as built): the excited
-/// plateau hot (Ember, white-gold at the fresh front where `v` is still low, deepening
-/// to orange as `v` rises), the refractory tail cold (Cobalt, brightest just behind the
-/// plateau and fading to the dark resting tissue as `v` decays). Hue tells excited from
-/// refractory at a glance, and lightness where in the cycle a cell is.
-fn tissue_ink(u: f32, v: f32) -> Ink {
-    if u >= 0.4 {
-        let k = f64::from((v / 1.2).min(1.0));
-        Ink::new(
-            Role::Ramp(Ramp::Ember),
-            ink::level(240.0 - 160.0 * k.powf(0.6)),
-        )
-    } else if v > 0.1 {
-        let k = f64::from(((v - 0.1) / 1.3).min(1.0));
-        Ink::new(
-            Role::Ramp(Ramp::Cobalt),
-            ink::level(28.0 + 200.0 * k.powf(0.8)),
-        )
+/// The excitation (M14, ADR-0017): only the fresh front shows, a thin anti-aliased
+/// `Ramp(Ember)` line on the `u = ½` contour: full within 0.6 px and gone at `LINE_W` px
+/// (distance `|u − ½| / |∇u|` × `px` pixels per node), at `FRONT_LEVEL` times the
+/// freshness `(1 − v/FRONT_V)²`, so a wave's back (where `v` has risen) draws nothing and
+/// the plateau, the refractory tail and resting tissue are black.
+fn front_ink(u: f32, v: f32, g: f32, px: f64) -> Ink {
+    let d = f64::from((u - 0.5).abs()) / f64::from(g.max(1e-4)) * px;
+    let k = ((LINE_W - d) / (LINE_W - 0.6)).clamp(0.0, 1.0);
+    let fresh = (1.0 - f64::from(v / FRONT_V)).clamp(0.0, 1.0);
+    let level = FRONT_LEVEL * k * fresh.sqrt();
+    if level < ink::MIN_VISIBLE_LEVEL {
+        Ink::BLANK
     } else {
-        REST_INK
+        Ink::new(Role::Ramp(Ramp::Ember), ink::level(level))
+    }
+}
+
+/// The front's peak level, its line half-width in pixels, and the `v` at which a front
+/// has gone stale.
+const FRONT_LEVEL: f64 = 255.0;
+const LINE_W: f64 = 1.3;
+const FRONT_V: f32 = 1.0;
+
+/// `|∇u|` per node by central differences (one-sided at the edges) into `out`.
+fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
+    let (w, h) = (usize::from(u.width()), usize::from(u.height()));
+    if out.size() != u.size() {
+        out.resize(u.size(), 0.0);
+    }
+    if w == 0 || h == 0 {
+        return;
+    }
+    let (p, o) = (u.as_slice(), out.as_mut_slice());
+    for y in 0..h {
+        let (yn, ys) = (y.saturating_sub(1), (y + 1).min(h - 1));
+        for x in 0..w {
+            let (xw, xe) = (x.saturating_sub(1), (x + 1).min(w - 1));
+            let gx = (p[y * w + xe] - p[y * w + xw]) / (xe - xw).max(1) as f32;
+            let gy = (p[ys * w + x] - p[yn * w + x]) / (ys - yn).max(1) as f32;
+            o[y * w + x] = (gx * gx + gy * gy).sqrt();
+        }
     }
 }
 
@@ -728,7 +747,7 @@ impl Generator for Heart {
         self.ecg.clear();
         self.ecg.resize(cols, 0.0);
         self.head = 0.0;
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -744,7 +763,15 @@ impl Generator for Heart {
         }
         let sample = self.ecg_sample();
         self.sweep(dt, sample);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -774,12 +801,14 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = Heart::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         (g, ctx)
     }
 
     fn run_s(g: &mut Heart, ctx: &mut Ctx, secs: f64) {
         for _ in 0..(secs * 60.0).round() as usize {
             g.update(SIM_DT, ctx);
+            g.prepare();
         }
     }
 
@@ -865,6 +894,7 @@ mod tests {
             let (mut g, mut ctx) = heart_at(size);
             for k in 0..(42 * 4) {
                 g.update(if k % 2 == 0 { 0.25 } else { 0.0 }, &mut ctx);
+                g.prepare();
                 for (&u, &v) in g.u.as_slice().iter().zip(g.v.as_slice()) {
                     assert!((0.0..=1.0).contains(&u) && (0.0..=excitable::AP_V_MAX).contains(&v));
                 }

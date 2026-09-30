@@ -390,11 +390,14 @@ struct Lenia {
     scratch: Grid<f32>,
     map: SampleMap,
     pixels: Pixels,
+    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for Lenia {
     fn default() -> Self {
         Self {
+            dirty: true,
             world: World::default(),
             seed_mass: 1.0,
             owed: 0.0,
@@ -522,8 +525,13 @@ impl Lenia {
             })
         });
         let (map, a, p) = (&self.map, &self.world.a, &self.world.prev);
+        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
+        let (mut ry, mut ar, mut pr) = (-1, map.row(a, 0), map.row(p, 0));
         self.pixels.shade(|x, y| {
-            let (va, vp) = (map.sample(a, x, y), map.sample(p, x, y));
+            if y != ry {
+                (ry, ar, pr) = (y, map.row(a, y), map.row(p, y));
+            }
+            let (va, vp) = (ar.at(x), pr.at(x));
             let mut v = (vp + (va - vp) * f) * k_in;
             if let Some((cx, cy, r, k)) = birth {
                 let d = (f64::from(x) + 0.5 - cx).hypot((f64::from(y) + 0.5 - cy) * sx / sy);
@@ -540,20 +548,19 @@ impl Lenia {
     }
 }
 
-/// Two warm hues for one creature (SPEC-002 Inks, Round 3): the thin outer membrane and
-/// halo rose (Eosin), the dense core amber to pale gold (Ember), crossing at matching
-/// lightness so the body reads as one luminous animal.
+/// One muted warm ramp for the creature (M14, ADR-0017; replaces Round 3's rose membrane):
+/// `Ramp(Ember)` at `0.14 + 0.81·√v` (blank below v = 0.02), so the thin membrane is a dim ember, the dense core
+/// amber to pale gold, on a black floor.
 fn lenia_ink(v: f32) -> Ink {
-    let v = f64::from(v);
+    let v = f64::from(v).clamp(0.0, 1.0);
     if v < 0.02 {
+        return Ink::BLANK;
+    }
+    let ink = ink::ramp(Ramp::Ember, 0.14 + 0.81 * v.sqrt());
+    if f64::from(ink.level) < ink::MIN_VISIBLE_LEVEL {
         Ink::BLANK
-    } else if v < 0.3 {
-        ink::ramp(Ramp::Eosin, 0.14 + 0.46 * (v / 0.3).powf(0.7))
     } else {
-        ink::ramp(
-            Ramp::Ember,
-            0.58 + 0.42 * ((v - 0.3) / 0.7).min(1.0).powf(0.8),
-        )
+        ink
     }
 }
 
@@ -609,7 +616,7 @@ impl Generator for Lenia {
             }
         }
         self.map.rebuild(lat, px);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -644,7 +651,15 @@ impl Generator for Lenia {
             );
             self.world.damage(bite, DAMAGE_R);
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -799,6 +814,7 @@ mod tests {
         let mut ctx = Ctx::new(8, Size::new(160, 50));
         let mut g = Lenia::default();
         g.resize(Size::new(160, 50), &mut ctx);
+        g.prepare();
         // Kill every creature but the heaviest.
         let (hx, hy) = g.world.heaviest();
         let (w, h) = (i32::from(g.world.a.width()), i32::from(g.world.a.height()));
@@ -815,14 +831,17 @@ mod tests {
             .copy_from_slice(g.world.a.as_slice());
         let m_one = g.world.mass();
         g.update(0.1, &mut ctx);
+        g.prepare();
         assert!(g.hatch_at.is_some(), "a birth is scheduled");
         let born = g.hatch_at.unwrap_or(0.0);
         while g.time < born - 0.2 {
             g.update(1.0 / 60.0, &mut ctx);
+            g.prepare();
         }
         assert!(g.world.mass() < 1.3 * m_one, "no birth before the delay");
         while g.time < born + 0.5 {
             g.update(1.0 / 60.0, &mut ctx);
+            g.prepare();
         }
         assert!(g.world.mass() > 1.6 * m_one, "a glider hatched");
         assert!(g.birth.is_some());
@@ -851,9 +870,11 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = Lenia::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             let mut frame = 0usize;
             while g.time < secs {
                 g.update(1.0 / 60.0, &mut ctx);
+                g.prepare();
                 frame += 1;
                 if frame % 15 == 0 {
                     let n = lit_pixels(&g);
@@ -868,8 +889,10 @@ mod tests {
         let mut ctx = Ctx::new(42, Size::new(80, 24));
         let mut g = Lenia::default();
         g.resize(Size::new(80, 24), &mut ctx);
+        g.prepare();
         g.world.a.fill(0.0);
         g.update(0.1, &mut ctx);
+        g.prepare();
         assert!(g.world.mass() > 0.5 * g.seed_mass);
     }
 }

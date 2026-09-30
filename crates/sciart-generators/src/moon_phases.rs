@@ -75,7 +75,8 @@ const RELIEF_MU: f64 = 0.6;
 /// of `LIT_FLOOR`, shown while `E(p) ≥ EARTH_MIN`, so it goes out before full Moon.
 /// `Dim` is a slate grey, bluish like real earthshine (earthlight is bluer than
 /// sunlight). Boosted: real earthshine is ≈ 10⁻⁴ of the sunlit side.
-const EARTH_DIM: f64 = 28.0;
+/// M14 (ADR-0017): at most 20.
+const EARTH_DIM: f64 = 20.0;
 const EARTH_MIN: f64 = 0.5;
 /// Quarter, new and full are instants: each of those names owns ± this share of the
 /// lunation, and the crescents and gibbous phases own the rest (MOON-A2).
@@ -498,6 +499,8 @@ pub struct MoonPhases {
     pixels: Pixels,
     /// (u, v, twinkle phase, twinkle rate) with `u, v ∈ [0, 1)`.
     stars: Vec<(f64, f64, f64, f64)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 /// What a disc pixel shows.
@@ -563,7 +566,7 @@ impl MoonPhases {
         let earthshine = if frame.earth > 0.0 {
             let level = EARTH_DIM * albedo * frame.earth;
             Shade::Earthshine(ink::level(
-                level.clamp(ink::MIN_VISIBLE_LEVEL, LIT_FLOOR / 2.0),
+                level.clamp(ink::MIN_VISIBLE_LEVEL, (LIT_FLOOR / 2.0).min(EARTH_DIM)),
             ))
         } else {
             Shade::Dark
@@ -642,7 +645,8 @@ impl MoonPhases {
         let pct = ((100.0 * illuminated_fraction(phase)).round() as u32).min(100);
         let mut buf = StackText::<24>::new();
         let _ = std::fmt::Write::write_fmt(&mut buf, format_args!("{name}  {pct}%"));
-        draw::text_centered(canvas, y, buf.as_str(), Ink::new(Role::Text, 220));
+        // M14: a dim label.
+        draw::text_centered(canvas, y, buf.as_str(), Ink::new(Role::Text, 130));
     }
 }
 
@@ -680,12 +684,18 @@ impl Generator for MoonPhases {
                 .collect();
         }
         self.pixels.resize(size);
-        self.rasterise(phase_at(self.t), libration(self.t));
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
-        self.rasterise(phase_at(self.t), libration(self.t));
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise(phase_at(self.t), libration(self.t));
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -725,6 +735,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut m = MoonPhases::default();
         m.resize(size, &mut Ctx::new(3, size));
+        m.prepare();
         m
     }
 

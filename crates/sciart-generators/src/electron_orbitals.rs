@@ -36,7 +36,7 @@ use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{Tone, draw, ink};
+use sciart_core::{draw, ink};
 
 pub static META: Meta = Meta {
     name: "electron_orbitals",
@@ -119,119 +119,21 @@ const H_EV_S: f64 = 4.135_667_696e-15;
 const RYDBERG_H: f64 = 13.598_287;
 #[cfg(test)]
 const HC: f64 = 1239.842;
-/// Glow (ORB-A9): a ~`GLOW_TAU` s screen-space exposure of the visible points, each spread
-/// over its pixel and the four next to it (`SPLAT`: no wider, so nodes stay dark; the
-/// splat and the camera's turn smooth the Monte-Carlo mottling, time alone does not, as
-/// the points are fixed). Tone-mapped by an asinh curve (knee and white in expected points
-/// per pixel per frame, so a lobe's core reaches white and its edge sits near the knee) to
-/// `g ∈ [0, 1]` and drawn at `HAZE_MAX·smoothstep(g)`: one soft ramp from the fringe to the
-/// core, no cut and no plateau; blank below `ink::MIN_VISIBLE_LEVEL`.
-///
-/// M12 (ORB-A10): the glow is the cloud's body, the dots its sparkle. A pixel is drawn in
-/// the ramp of the sign that dominates its cell's recent exposure (a per-cell balance,
-/// smoothed over the four neighbouring cells): `Ramp::Aurora` under the olive-green
-/// +π/2 dots, `Ramp::Plasma` under the lavender −π/2 dots, so each lobe glows in its own
-/// family and the nodal surfaces between them stay dark. (One exposure, not one per sign:
-/// a second pixel buffer took the scene past the TEST-R7 ceiling.) M12 round 3 (ORB-A12):
-/// the glow is bright, up to `HAZE_MAX` (two-thirds of the ramp), so the lobes read as
-/// smooth half-block bodies; only one point in [`SPARKLE`] is drawn as a phase-coloured
-/// dot, a sparse sparkle over the body rather than the speckle the full sample made.
-/// The glow shows in every phase: in a stationary state it is a
-/// ~`GLOW_TAU` s exposure (the time-mean is the instantaneous `|ψ|²`); through a transition
-/// it shortens to `GLOW_TAU_MOVING`, so it follows the slosh with a lag well under the
-/// beat period and its colour flips with the winding phase. In mono a winding phase grey
-/// passes near black (RND-R10), so there the dots near phase 0 dim below the glow.
-const GLOW_TAU: f64 = 1.0;
-const GLOW_TAU_MOVING: f64 = 0.25;
-const GLOW_KNEE: f32 = 0.5;
-const GLOW_WHITE: f32 = 8.0;
-const GLOW_FLOOR: f64 = 0.2;
-const HAZE_MAX: u8 = 170;
-/// One sample point in `SPARKLE` is drawn as a dot (ORB-A12); every point exposes the glow.
-const SPARKLE: usize = 6;
-/// The glow ramps by sign of the phase's sine: `+π/2` lobes, then `−π/2` lobes.
-const GLOW_RAMPS: [Ramp; 2] = [Ramp::Aurora, Ramp::Plasma];
-/// The display blur of the exposure before toning (ORB-A11), `(dx, dy, weight)` in pixels:
-/// a 3×3 binomial tent, `[1 2 1]ᵀ[1 2 1]/16`. It smooths the Monte-Carlo grain the splat
-/// leaves at the brighter M12 glow; it spreads a point no further than one pixel, so a
-/// nodal plane still reads as a dark seam.
-const BLUR: [(i32, i32, f32); 9] = [
-    (0, 0, 4.0),
-    (-1, 0, 2.0),
-    (1, 0, 2.0),
-    (0, -1, 2.0),
-    (0, 1, 2.0),
-    (-1, -1, 1.0),
-    (1, -1, 1.0),
-    (-1, 1, 1.0),
-    (1, 1, 1.0),
-];
-
-/// The exposure at pixel `(x, y)` through [`BLUR`], renormalised over the in-bounds taps so
-/// the edges do not darken (ORB-A11). Interior pixels read the buffer directly (nine loads,
-/// no bounds juggling): this runs for every pixel of the glow each frame.
-fn blurred(exposure: &Glow, x: i32, y: i32) -> f32 {
-    let size = exposure.pixel_size();
-    let (w, h) = (i32::from(size.width()), i32::from(size.height()));
-    if x > 0 && y > 0 && x < w - 1 && y < h - 1 {
-        let v = exposure.values();
-        let (w, i) = (w as usize, (y * w + x) as usize);
-        let (up, mid, down) = (
-            &v[i - w - 1..=i - w + 1],
-            &v[i - 1..=i + 1],
-            &v[i + w - 1..=i + w + 1],
-        );
-        let row = |r: &[f32]| r[0] + 2.0 * r[1] + r[2];
-        return (row(up) + 2.0 * row(mid) + row(down)) / 16.0;
-    }
-    let (mut sum, mut wsum) = (0.0f32, 0.0f32);
-    for &(dx, dy, k) in &BLUR {
-        if let Some(v) = exposure.get(x + dx, y + dy) {
-            sum += k * v;
-            wsum += k;
-        }
-    }
-    if wsum > 0.0 { sum / wsum } else { 0.0 }
-}
-
-/// ASCII for one glow cell from its two pixels (ORB-A12, GEN-R10): the stronger pixel's
-/// level over [`HAZE_MAX`] picks `` ` `` `'` `~` `=` in quarters, in that pixel's ink; an empty
-/// cell stays untouched. None of these is a braille dot-count fallback, so the sparkle dots
-/// still read apart from the body.
-fn glow_ascii(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    const RAMP: [char; 4] = ['`', '\'', '~', '='];
-    let ink = if top.level >= bottom.level {
-        top
-    } else {
-        bottom
-    };
-    if ink.role == Role::Background || ink.level == 0 {
-        return None;
-    }
-    let q = (usize::from(ink.level) * RAMP.len() / (usize::from(HAZE_MAX) + 1)).min(RAMP.len() - 1);
-    Some((RAMP[q], ink))
-}
-
-/// The glow's own radial window (charge quantiles): points expose it fully inside `r₇₀`
-/// and not at all beyond `r₉₅`, so the whole lobe glows and the glow feathers out with the
-/// dots' own `R_FADE` edge.
-const GLOW_FADE: (f64, f64) = (0.7, 0.95);
-/// The glow's splat, `(dx, dy, weight)` in pixels: 0.36 in the point's pixel, 0.12 in each
-/// edge neighbour and 0.04 in each corner (M12: the 3×3 smooths the mottling the 5-tap
-/// left at the brighter glow; a node through the nucleus still stays darker than the lobes).
-const SPLAT: [(i32, i32, f32); 9] = [
-    (0, 0, 0.36),
-    (-1, 0, 0.12),
-    (1, 0, 0.12),
-    (0, -1, 0.12),
-    (0, 1, 0.12),
-    (-1, -1, 0.04),
-    (1, -1, 0.04),
-    (-1, 1, 0.04),
-    (1, 1, 0.04),
-];
+/// ADR-0017 (M14): the cloud is the M11 probability dots alone, on black: every visible
+/// point is a braille dot in its phase's colour, so the density reads by dot coverage.
+/// The M12 glow body, its exposure, sign balance and blur are gone.
 const NUCLEUS: Glyph = Glyph::new('•', 'o');
 const NUCLEUS_INK: Ink = Ink::new(Role::Accent, 180);
+/// The cloud's hue is its phase turned back an eighth of a turn, so a real state's two
+/// signs (±π/2) land on a warm amber and a cool blue on astro's phase loop, M11's
+/// two-sign identity (ADR-0017), instead of olive and lavender; the winding through a
+/// superposition is unchanged. Mono greys the two signs apart (L* ≈ 24 and 65).
+const HUE_SHIFT: f64 = -FRAC_PI_4;
+
+/// The ink of a cloud point of phase `phase`.
+fn cloud_ink(phase: f64) -> Ink {
+    ink::phase(phase + HUE_SHIFT)
+}
 /// The nucleus is drawn over its cell when at most this many of the 8 dots are lit.
 const NUCLEUS_MAX_DOTS: usize = 3;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
@@ -870,8 +772,6 @@ pub(crate) struct Atom {
     r90: [f64; K],
     /// Display fade window per orbital (`r₈₈`, `r₉₅`, a₀; see `R_FADE`).
     r_fade: [Fade; K],
-    /// Glow fade window per orbital (`r₅₀`, `r₉₀`, a₀; see `GLOW_FADE`).
-    r_glow: [Fade; K],
     /// `slots[cur]` holds `GALLERY[at]`; the other holds `GALLERY[at + 1]`.
     slots: [Slot; 2],
     cur: usize,
@@ -913,7 +813,6 @@ impl Atom {
             samplers: GALLERY.iter().map(|&o| Sampler::new(o)).collect(),
             r90,
             r_fade: GALLERY.map(|orb| Fade::window(orb, R_FADE)),
-            r_glow: GALLERY.map(|orb| Fade::window(orb, GLOW_FADE)),
             slots: [Slot::with_capacity(at, next), Slot::with_capacity(next, at)],
             cur: 0,
             timeline: Timeline::new(&phases),
@@ -1016,23 +915,6 @@ impl Atom {
                 }
                 p => self.phase = p.next(),
             }
-        }
-    }
-
-    /// The glow's radial window (ORB-A9): the held state's, blended by c_b² through a
-    /// transition as the display window is.
-    pub(crate) fn glow_fade(&self) -> Fade {
-        let w = self.mix.c_b * self.mix.c_b;
-        Fade::blend(self.r_glow[self.at], self.r_glow[self.next()], w)
-    }
-
-    /// The glow's exposure time (ORB-A10): `GLOW_TAU` in a hold, `GLOW_TAU_MOVING` while
-    /// the cloud sloshes.
-    pub(crate) fn glow_tau(&self) -> f64 {
-        if self.phase == Phase::Hold {
-            GLOW_TAU
-        } else {
-            GLOW_TAU_MOVING
         }
     }
 
@@ -1164,20 +1046,10 @@ struct ElectronOrbitals {
     atom: Option<Atom>,
     size: Size,
     dots: Dots,
-    /// Long exposure of the visible points at pixel resolution (a dot-resolution `Density`
-    /// would take 8 floats a cell and push the scene past the TEST-R7 ceiling at
-    /// 500×150), and its tone-mapped glow (ORB-A9).
-    exposure: Glow,
-    glow: Pixels,
-    tone: Tone,
     /// Per cell, the nearest visible point as a [`front_key`] (0: none yet), so each cell
     /// wears the phase of the cloud's front surface (ORB-A8): the dots of a cell share one
     /// ink, and one picked in sample order mixed front and back into confetti.
     front: Grid<u32>,
-    /// Per cell, the exposure-weighted sign balance of its points (+ for sin(phase) ≥ 0),
-    /// decayed with the glow: its sign picks the glow's ramp (ORB-A10). One f32 a cell,
-    /// where a second pixel exposure took the scene past the TEST-R7 ceiling.
-    balance: Grid<f32>,
 }
 
 impl Default for ElectronOrbitals {
@@ -1186,11 +1058,7 @@ impl Default for ElectronOrbitals {
             atom: None,
             size: Size::new(1, 1),
             dots: Dots::default(),
-            exposure: Glow::default(),
-            glow: Pixels::default(),
-            tone: Tone::asinh(GLOW_KNEE, GLOW_WHITE),
             front: Grid::default(),
-            balance: Grid::default(),
         }
     }
 }
@@ -1224,18 +1092,10 @@ impl ElectronOrbitals {
     /// The far dust fades out through the blended `R_FADE` window, and row h−1 is skipped
     /// while it holds the label (the dust would otherwise speckle the text). Each cell takes
     /// the phase of its nearest point (`front`; `Dots` keeps the last ink set for
-    /// `Phase`, so every later, farther point is plotted in the front ink). The same points
-    /// expose the glow: the exposure keeps `keep` of its old value (0 starts afresh) and each
-    /// point adds `1 − keep` times its `GLOW_FADE` taper to its pixel, so it settles at the
-    /// expected (tapered) points per pixel per frame; the hold envelope then scales what
-    /// shows (ORB-A9).
-    fn rasterise(&mut self, cam: Camera, keep: f32) {
+    /// `Phase`, so every later, farther point is plotted in the front ink).
+    fn rasterise(&mut self, cam: Camera) {
         self.dots.clear();
         self.front.fill(0);
-        for b in self.balance.as_mut_slice() {
-            *b *= keep;
-        }
-        self.exposure.decay(keep);
         let Some(atom) = &self.atom else {
             return;
         };
@@ -1257,12 +1117,8 @@ impl ElectronOrbitals {
             cy + 0.5 / f64::from(Dots::CELL_H),
         );
         let proj = cam.projector();
-        let glow_fade = atom.glow_fade();
-        let (dots, exposure) = (&mut self.dots, &mut self.exposure);
-        let front = &mut self.front;
-        let balance = &mut self.balance;
-        let weight = 1.0 - keep;
-        atom.for_each_visible(atom.fade(), |_, i, [x, y, z], r, phase| {
+        let (dots, front) = (&mut self.dots, &mut self.front);
+        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], _, phase| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             let Some((sx, sy, depth)) = proj.project(world, centre, scale) else {
                 return;
@@ -1271,55 +1127,12 @@ impl ElectronOrbitals {
             if dy >= floor {
                 return;
             }
-            // Every point exposes the glow, the cloud's body; only one in `SPARKLE` is
-            // also drawn as a dot, the phase-coloured sparkle over it (ORB-A12). The
-            // choice is by the point's fixed index, so a dot never flickers in and out.
-            if i % SPARKLE == 0 {
-                let mut ink = ink::phase(phase);
-                if let Some(f) = front.get_mut(sx.floor() as i32, sy.floor() as i32) {
-                    *f = (*f).max(front_key(depth, ink.level));
-                    ink.level = *f as u8;
-                }
-                dots.plot(dx, dy, ink);
+            let mut ink = cloud_ink(phase);
+            if let Some(f) = front.get_mut(sx.floor() as i32, sy.floor() as i32) {
+                *f = (*f).max(front_key(depth, ink.level));
+                ink.level = *f as u8;
             }
-            // The pixel holding the dot and its 3×3 neighbourhood: enough to smooth the
-            // grain, too little to fill a node.
-            let w = weight * glow_fade.taper(r) as f32;
-            exposure.splat(dx, dy, &SPLAT, w);
-            if let Some(b) = balance.get_mut(sx.floor() as i32, sy.floor() as i32) {
-                *b += if phase.sin_det() < 0.0 { -w } else { w };
-            }
-        });
-        let (tone, exposure, balance) = (&self.tone, &self.exposure, &self.balance);
-        self.glow.shade(|x, y| {
-            if exposure.get(x, y).is_none() {
-                return Ink::BLANK;
-            }
-            let level = tone.level(blurred(exposure, x, y));
-            let u = (f64::from(level) / 255.0 - GLOW_FLOOR) / (1.0 - GLOW_FLOOR);
-            // The sign balance of this cell and its four neighbours (centre counted twice),
-            // so overlapping lobes split into coherent patches rather than confetti, and a
-            // pixel the splat carried past the dots takes its neighbours' sign (ORB-A10).
-            let cy = y.div_euclid(2);
-            let bal: f32 = [
-                (0, 0, 2.0),
-                (-1, 0, 1.0),
-                (1, 0, 1.0),
-                (0, -1, 1.0),
-                (0, 1, 1.0),
-            ]
-            .iter()
-            .filter_map(|&(ox, oy, k)| balance.get(x + ox, cy + oy).map(|b| k * b))
-            .sum();
-            if u <= 0.0 || bal == 0.0 {
-                return Ink::BLANK;
-            }
-            let (lo, hi) = (ink::MIN_VISIBLE_LEVEL, f64::from(HAZE_MAX));
-            let haze = lo + (hi - lo) * ease::smoothstep(u.min(1.0));
-            Ink::new(
-                Role::Ramp(GLOW_RAMPS[usize::from(bal < 0.0)]),
-                ink::level(haze),
-            )
+            dots.plot(dx, dy, ink);
         });
     }
 
@@ -1378,10 +1191,7 @@ impl Generator for ElectronOrbitals {
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.size = size;
         self.dots.resize(size);
-        self.exposure.resize(size);
-        self.glow.resize(size);
         self.front.resize(size, 0);
-        self.balance.resize(size, 0.0);
         match &mut self.atom {
             Some(atom) => atom.resize(stage(size)),
             None => {
@@ -1391,7 +1201,7 @@ impl Generator for ElectronOrbitals {
             }
         }
         if let Some(cam) = self.atom.as_ref().map(Atom::camera) {
-            self.rasterise(cam, 0.0);
+            self.rasterise(cam);
         }
     }
 
@@ -1405,8 +1215,7 @@ impl Generator for ElectronOrbitals {
         }
         atom.step(dt);
         let cam = atom.camera();
-        let tau = atom.glow_tau();
-        self.rasterise(cam, (-dt / tau).exp() as f32);
+        self.rasterise(cam);
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1415,11 +1224,9 @@ impl Generator for ElectronOrbitals {
         // The glow first, then the dots over it with the glow carried on as their cells'
         // background. ASCII has no half blocks, so there the glow's body is a light
         // character ramp (ORB-A12), and the sparse dots' braille fallbacks sit on it.
-        self.glow
-            .blit(canvas, |_, _, top, bottom| glow_ascii(top, bottom));
         let (x, y) = self.nucleus();
         canvas.put(x, y, NUCLEUS, NUCLEUS_INK);
-        self.dots.blit_over(canvas, &self.glow);
+        self.dots.blit(canvas);
         let node = self.atom.as_ref().is_some_and(Atom::has_node);
         if node && self.nucleus_dots() <= NUCLEUS_MAX_DOTS {
             canvas.put(x, y, NUCLEUS, NUCLEUS_INK);
@@ -1920,14 +1727,6 @@ mod tests {
         }
     }
 
-    /// Dots stay at least this many times the luma of the glow behind them (ORB-A8): astro,
-    /// then mono (whose ±π/2 grey is mid-grey, RND-R10, so there the dots sit just over
-    /// the glow and the lobe reads as one smooth grey body).
-    /// A lit glow ink, of either sign's ramp (ORB-A9, ORB-A10).
-    fn is_glow(ink: Ink) -> bool {
-        GLOW_RAMPS.iter().any(|&r| ink.role == Role::Ramp(r)) && ink.level > 0
-    }
-
     fn scene(first: usize, w: u16, h: u16) -> ElectronOrbitals {
         let size = Size::new(w, h);
         let mut ctx = Ctx::new(42, size);
@@ -1935,14 +1734,11 @@ mod tests {
         s.resize(size, &mut ctx);
         let rng = SplitMix64::from_rng(&mut ctx.rng);
         s.atom = Some(Atom::new(first, stage(size), rng));
-        s.rasterise(
-            Camera {
-                yaw: 0.3,
-                pitch: PITCH_LOW,
-                distance: DISTANCE,
-            },
-            0.0,
-        );
+        s.rasterise(Camera {
+            yaw: 0.3,
+            pitch: PITCH_LOW,
+            distance: DISTANCE,
+        });
         s
     }
 
@@ -2051,7 +1847,7 @@ mod tests {
     fn at_clock(s: &mut ElectronOrbitals, k: usize, t: f64) {
         s.atom.as_mut().unwrap().t = ROCK_PERIOD * k as f64 + t;
         let cam = s.atom.as_ref().unwrap().camera();
-        s.rasterise(cam, 0.0);
+        s.rasterise(cam);
     }
 
     /// `scene` redrawn with the scene's own camera `t` s into the state's visit.
@@ -2191,13 +1987,11 @@ mod tests {
         );
         for t in cycle() {
             at_clock(&mut s, p2x, t);
-            // The node is judged on the glow, the cloud's body (ORB-A12): the dots are a
-            // sparse sample, too noisy to measure a gap by.
-            let rows = 2 * i32::from(s.size.height());
+            // The node is judged on the dots, the whole cloud (ORB-A9).
+            let rows = i32::from(s.size.height());
             let column = |x: i32| -> u32 {
                 (0..rows)
-                    .filter_map(|y| s.glow.get(x, y))
-                    .map(|p| u32::from(p.level))
+                    .map(|y| s.dots.cell_mask(x, y).map_or(0, u8::count_ones))
                     .sum()
             };
             let node = column(cx);
@@ -2356,8 +2150,8 @@ mod tests {
     }
 
     /// Phase levels of the two signs of a real state: +π/2 and −π/2.
-    const POS: u8 = 64;
-    const NEG: u8 = 192;
+    const POS: u8 = 32;
+    const NEG: u8 = 160;
 
     #[test]
     fn orb_a8_phase_is_fixed_in_holds_and_winds_at_the_beat_in_superpositions() {
@@ -2378,8 +2172,8 @@ mod tests {
             let n = turn(phase_of(c, (-psi.0, -psi.1), theta));
             assert!((n - 3.0 * FRAC_PI_2).abs() < 1e-9, "{c:?} {theta:?}: {n}");
         }
-        assert_eq!(ink::phase(FRAC_PI_2).level, POS);
-        assert_eq!(ink::phase(-FRAC_PI_2).level, NEG);
+        assert_eq!(cloud_ink(FRAC_PI_2).level, POS);
+        assert_eq!(cloud_ink(-FRAC_PI_2).level, NEG);
         // Only the relative phase is physical: at every time of a transition the terms
         // differ by exactly ωt (the phase in |Ψ|² = q + 2c_a c_b ψ_a ψ_b cos ωt), and where
         // ψ_a = ψ_b at χ = π/4 the phase is the mean of the two (a half turn on while
@@ -2491,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn orb_a8_both_signs_of_a_hold_are_equally_bright_and_over_the_glow() {
+    fn orb_a8_both_signs_of_a_hold_read_warm_and_cool() {
         use sciart_render::{Rgb, Theme};
         let luma =
             |c: Rgb| 0.2126 * f64::from(c.0) + 0.7152 * f64::from(c.1) + 0.0722 * f64::from(c.2);
@@ -2499,38 +2293,17 @@ mod tests {
         // lobes by hue alone.
         for theme in [Theme::Astro, Theme::Mono] {
             let [pos, neg] = [POS, NEG].map(|l| luma(theme.color(Ink::new(Role::Phase, l), 0, 0)));
-            // Mono greys phase by its distance from 0 (RND-R10): ±π/2 are the same grey.
-            if theme == Theme::Mono {
-                assert!((pos - neg).abs() < 1.0, "{theme:?}: {pos} vs {neg}");
+            // Astro's loop is isoluminant: the signs are equally bright. Mono greys phase
+            // by its distance from 0 (RND-R10), so there the signs part by grey, both clear
+            // of black.
+            if theme == Theme::Astro {
+                assert!((pos - neg).abs() < 12.0, "{theme:?}: {pos} vs {neg}");
             }
-            // Both signs' dots show in colour (M12 round 3: the dots are sparkle over the
-            // glow's body, not brighter than it, ORB-A12).
-            assert!(pos.min(neg) > 0.0, "{theme:?}: {pos}/{neg}");
+            assert!(pos.min(neg) > 40.0, "{theme:?}: {pos}/{neg}");
         }
-    }
-
-    #[test]
-    fn orb_a12_the_glow_is_the_body_and_the_dots_a_sparse_sparkle() {
-        // The glow reaches two-thirds of the ramp (the body), and over a whole loop at
-        // 80×24 the dotted cells are a minority of the glowing ones: sparkle, not speckle.
-        const { assert!(HAZE_MAX >= 160 && SPARKLE >= 3) };
-        let mut s = scene(0, 80, 24);
-        let mut ctx = Ctx::new(1, s.size);
-        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
-        let (mut glowing, mut dotted) = (0usize, 0usize);
-        for _ in 0..(ROCK_PERIOD * K as f64 / 0.1) as usize {
-            s.update(0.1, &mut ctx);
-            c.clear();
-            s.render(&mut c);
-            for cell in c.cells() {
-                let glow = is_glow(cell.bg) || (is_glow(cell.ink) && cell.ch != ' ');
-                glowing += usize::from(glow);
-                dotted += usize::from(glow && cell.ink.role == Role::Phase);
-            }
-        }
-        assert!(glowing > 10_000, "{glowing} glowing cells");
-        let share = dotted as f64 / glowing as f64;
-        assert!(share < 0.6, "dotted share {share:.2}");
+        // ADR-0017: +π/2 warm (red over blue), −π/2 cool (blue over red), as in M11.
+        let [p, n] = [POS, NEG].map(|l| Theme::Astro.color(Ink::new(Role::Phase, l), 0, 0));
+        assert!(p.0 > p.2 + 40 && n.2 > n.0 + 40, "{p:?} {n:?}");
     }
 
     #[test]
@@ -2594,11 +2367,7 @@ mod tests {
         let centre = (cx + 0.25, cy + 0.125);
         let proj = atom.camera().projector();
         let mut best: HashMap<(i32, i32), (f64, u8)> = HashMap::new();
-        atom.for_each_visible(atom.fade(), |_, i, [x, y, z], _, phase| {
-            // Only the sparkle points are drawn as dots (ORB-A12).
-            if i % SPARKLE != 0 {
-                return;
-            }
+        atom.for_each_visible(atom.fade(), |_, _, [x, y, z], _, phase| {
             let world = [x * inv_r90, z * inv_r90, -y * inv_r90];
             let (sx, sy, d) = proj.project(world, centre, scale).unwrap();
             if Dots::from_cells(sx, sy).1 >= 4.0 * 23.0 - 0.5 {
@@ -2607,7 +2376,7 @@ mod tests {
             let key = (sx.floor() as i32, sy.floor() as i32);
             let e = best.entry(key).or_insert((f64::NEG_INFINITY, 0));
             if d > e.0 {
-                *e = (d, ink::phase(phase).level);
+                *e = (d, cloud_ink(phase).level);
             }
         });
         let mut c = Canvas::new(s.size, GlyphMode::Unicode);
@@ -2624,203 +2393,31 @@ mod tests {
     }
 
     #[test]
-    fn orb_a9_the_glow_sits_under_the_cloud_and_nowhere_else() {
-        // 4f_z3 hold at 80×24, once exposed (1 s + 30 frames).
-        let mut s = scene(3, 80, 24);
-        let mut ctx = Ctx::new(1, s.size);
-        for _ in 0..(GLOW_TAU / SIM_DT) as usize + 30 {
-            s.update(SIM_DT, &mut ctx);
-        }
-        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
-        s.render(&mut c);
-        let (w, h) = (80, 24);
-        let cloud: Vec<&Cell> = c
-            .cells()
-            .iter()
-            .filter(|c| c.ink.role == Role::Phase)
-            .collect();
-        let lit_bg = cloud.iter().filter(|c| is_glow(c.bg)).count();
-        assert!(
-            lit_bg * 3 >= cloud.len() * 2,
-            "{lit_bg} of {} dotted cells glow",
-            cloud.len()
-        );
-        for cell in c.cells() {
-            for ink in [cell.ink, cell.bg] {
-                if is_glow(ink) {
-                    assert!(ink.level <= HAZE_MAX, "haze level {}", ink.level);
-                }
-            }
-        }
-        // Corners stay black and the label row takes no glow.
-        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 2), (w - 1, h - 2)] {
-            assert_eq!(*c.get(x, y).unwrap(), Cell::BLANK, "corner ({x},{y})");
-        }
-        for x in 0..w {
-            let cell = c.get(x, h - 1).unwrap();
-            assert!(
-                !is_glow(cell.ink) && !is_glow(cell.bg),
-                "label row cell {x}"
-            );
-        }
-        // ASCII mode draws the glow as its own light character ramp, never as a
-        // background, and is pure ASCII (ORB-A12, GEN-R10).
-        let mut a = Canvas::new(s.size, GlyphMode::Ascii);
-        s.render(&mut a);
-        assert!(a.to_lines().iter().all(|l| l.is_ascii()));
-        let mut body = 0;
-        for c in a.cells() {
-            assert!(!is_glow(c.bg));
-            if is_glow(c.ink) {
-                assert!(['`', '\'', '~', '='].contains(&c.ch), "{:?}", c.ch);
-                body += 1;
-            }
-        }
-        assert!(body > 50, "{body} ASCII glow cells");
-        // The glow is the points' own density: in the 2p_z hold the nodal plane (the
-        // nucleus row) glows far less than the lobes above and below it, and the glow is
-        // feathered (it holds many levels below the cap).
-        let mut s = scene(1, 80, 24);
-        let mut ctx = Ctx::new(1, s.size);
-        for _ in 0..(GLOW_TAU / SIM_DT) as usize + 60 {
-            s.update(SIM_DT, &mut ctx);
-        }
-        let (_, ny) = s.nucleus();
-        let row_glow =
-            |y: i32| -> u32 { (0..80).map(|x| u32::from(s.glow.cell_bg(x, y).level)).sum() };
-        let (node, lobe) = (row_glow(ny), row_glow(ny - 3).max(row_glow(ny + 3)));
-        assert!(2 * node < lobe, "node row glow {node}, lobe rows {lobe}");
-        let mut levels: Vec<u8> = (0..80)
-            .flat_map(|x| (0..46).map(move |y| (x, y)))
-            .filter_map(|(x, y)| s.glow.get(x, y))
-            .filter(|&i| is_glow(i))
-            .map(|i| i.level)
-            .collect();
-        levels.sort_unstable();
-        levels.dedup();
-        assert!(levels.len() > 20, "{} glow levels", levels.len());
-    }
-
-    #[test]
-    fn orb_a9_the_glow_ramps_softly_from_edge_to_core() {
-        // 2p_z hold at 200×50, glow fully in: down the column through the nucleus, from
-        // the first glowing pixel of the upper lobe to its brightest, the glow climbs over
-        // at least 3 pixels and never jumps by more than half the cap in one pixel.
-        let mut s = scene(1, 200, 50);
-        let mut ctx = Ctx::new(1, s.size);
-        for _ in 0..(3.0 / SIM_DT) as usize {
-            s.update(SIM_DT, &mut ctx);
-        }
-        let (nx, ny) = s.nucleus();
-        let mut ramps = 0;
-        for x in nx - 4..=nx + 4 {
-            let col: Vec<u8> = (0..2 * ny)
-                .map(|y| s.glow.get(x, y).map_or(0, |i| i.level))
-                .collect();
-            let Some(start) = col.iter().position(|&l| l > 0) else {
-                continue;
-            };
-            let peak = (start..col.len()).max_by_key(|&y| col[y]).unwrap();
-            for y in start.max(1)..=peak {
-                let jump = i32::from(col[y]) - i32::from(col[y - 1]);
-                assert!(
-                    jump <= i32::from(HAZE_MAX / 2),
-                    "column {x} pixel {y}: {col:?}"
-                );
-            }
-            ramps += usize::from(peak >= start + 3);
-        }
-        assert!(ramps >= 7, "{ramps} of 9 columns ramp over ≥ 3 pixels");
-    }
-
-    #[test]
-    fn orb_a10_each_lobe_glows_in_the_ramp_of_its_sign() {
-        // 2p_z hold at 120×40: the upper lobe (ψ > 0, +π/2) glows Aurora, the lower one
-        // (ψ < 0, −π/2) Plasma, each almost entirely.
-        let mut s = scene(1, 120, 40);
-        let mut ctx = Ctx::new(1, s.size);
-        for _ in 0..(2.0 / SIM_DT) as usize {
-            s.update(SIM_DT, &mut ctx);
-        }
-        let (_, ny) = s.nucleus();
-        let count = |rows: std::ops::Range<i32>, ramp: Ramp| {
-            rows.flat_map(|y| (0..120).map(move |x| (x, y)))
-                .filter_map(|(x, y)| s.glow.get(x, y))
-                .filter(|i| i.role == Role::Ramp(ramp))
-                .count()
-        };
-        let (upper, lower) = (0..2 * ny - 2, 2 * ny + 4..78);
-        let (up_pos, up_neg) = (
-            count(upper.clone(), GLOW_RAMPS[0]),
-            count(upper, GLOW_RAMPS[1]),
-        );
-        let (lo_pos, lo_neg) = (
-            count(lower.clone(), GLOW_RAMPS[0]),
-            count(lower, GLOW_RAMPS[1]),
-        );
-        assert!(
-            up_pos > 200 && up_pos > 20 * up_neg,
-            "upper {up_pos} / {up_neg}"
-        );
-        assert!(
-            lo_neg > 200 && lo_neg > 20 * lo_pos,
-            "lower {lo_pos} / {lo_neg}"
-        );
-    }
-
-    #[test]
-    fn orb_a11_the_exposure_is_blurred_one_pixel_and_no_further() {
-        // A single exposed pixel spreads as the 3×3 binomial tent, and not a pixel beyond,
-        // so a node stays dark; a uniform exposure is unchanged, edges included.
-        let mut e = Glow::default();
-        e.resize(Size::new(10, 5));
-        e.values_mut()[4 * 10 + 5] = 16.0;
-        assert_eq!(blurred(&e, 5, 4), 4.0);
-        assert_eq!(blurred(&e, 6, 4), 2.0);
-        assert_eq!(blurred(&e, 6, 5), 1.0);
-        assert_eq!(blurred(&e, 7, 4), 0.0);
-        assert_eq!(blurred(&e, 5, 2), 0.0);
-        e.values_mut().fill(3.0);
-        for (x, y) in [(0, 0), (9, 9), (4, 5), (9, 0)] {
-            assert!((blurred(&e, x, y) - 3.0).abs() < 1e-6, "({x},{y})");
-        }
-        let total: f32 = BLUR.iter().map(|b| b.2).sum();
-        assert_eq!(total, 16.0);
-    }
-
-    #[test]
-    fn orb_a10_the_glow_follows_the_cloud_through_every_phase() {
-        // One loop at 80×24: after the first second the cloud glows in every frame, holds
-        // and transitions alike, and in a beat the glow's sign colours both show (the hue
-        // flips with the winding phase).
+    fn orb_a9_a10_a11_a12_no_glow_the_cloud_is_phase_dots_on_black() {
+        // ADR-0017: over a whole loop at 80×24 every lit cell is a braille dot in `Phase`,
+        // the nucleus or the label; nothing paints a background.
         let mut s = scene(0, 80, 24);
         let mut ctx = Ctx::new(1, s.size);
-        let lit = |s: &ElectronOrbitals, ramp: Option<Ramp>| {
-            (0..80)
-                .flat_map(|x| (0..46).map(move |y| (x, y)))
-                .filter_map(|(x, y)| s.glow.get(x, y))
-                .filter(|&i| is_glow(i) && ramp.is_none_or(|r| i.role == Role::Ramp(r)))
-                .count()
-        };
-        let (mut frames, mut beats, mut signs) = (0, 0, [0; 2]);
-        for k in 0..(ROCK_PERIOD * K as f64 / 0.05) as usize {
-            s.update(0.05, &mut ctx);
-            if k < 20 {
-                continue;
-            }
-            let phase = s.atom.as_ref().unwrap().phase;
-            assert!(lit(&s, None) > 20, "{phase:?}: {} pixels", lit(&s, None));
-            if phase == Phase::Beat {
-                beats += 1;
-                for (n, ramp) in signs.iter_mut().zip(GLOW_RAMPS) {
-                    *n += usize::from(lit(&s, Some(ramp)) > 10);
+        let mut c = Canvas::new(s.size, GlyphMode::Unicode);
+        let mut dotted = 0usize;
+        for _ in 0..(ROCK_PERIOD * K as f64 / 0.5) as usize {
+            s.update(0.5, &mut ctx);
+            c.clear();
+            s.render(&mut c);
+            let (w, h) = (i32::from(c.size().width()), i32::from(c.size().height()));
+            for y in 0..h - 1 {
+                for x in 0..w {
+                    let cell = c.get(x, y).unwrap();
+                    assert_eq!(cell.bg, Ink::BLANK, "({x}, {y}) has a background");
+                    if cell.ch == ' ' || (cell.ch, cell.ink) == (NUCLEUS.unicode, NUCLEUS_INK) {
+                        continue;
+                    }
+                    assert_eq!(cell.ink.role, Role::Phase, "({x}, {y}) {:?}", cell.ch);
+                    dotted += 1;
                 }
             }
-            frames += 1;
         }
-        assert!(frames > 2000 && beats > 400, "{frames} {beats}");
-        // Each sign colour leads a good share of the beat frames: the hue winds.
-        assert!(signs.iter().all(|&n| n * 4 > beats), "{signs:?} of {beats}");
+        assert!(dotted > 10_000, "{dotted} dotted cells");
     }
 
     #[test]

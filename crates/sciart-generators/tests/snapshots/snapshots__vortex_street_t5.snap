@@ -9,16 +9,16 @@ expression: frame
                                                                                 
                                                                                 
                                                                     ...         
-                                                      ...           .xxx.       
-                    ....xxxxxxxxxxx..              ...o..         .xxxxxx.      
-         xXxXXXXXXXXXXXXXXxxxxXXXXXXxx.           .oooo..        .xxxXXxxx      
-       .X@@@@@xXXXXXXXxX ooooo xXXXXXXxx         .oooooo.       .xxxXXXXxx.     
-       x@@@@@@@.xxxx..oOOOOOooo. xXXXXXxx       .ooOOooo.       .xxXXXXxx.      
-       o@@@@@@@xx .oOOOOOOOOoo... xXXXXxx.      .oOOOOoo.       .xxxxxxxx.      
-       .O@@@@@OoOooOOOOOOOOo..     .xxxxxx.     ooOOOOoo         .xxxxxx.       
-         oOOOOOOOOOOOOOoooo.         .xxx..     ooOOOOo.         ..xxxx..       
-                ......                 .......  .oOOoo.            .....        
-                                      .....  .oooooo..              ....        
+                                                       .            ..x..       
+                      ..x.xxxxxxxxx..              ......         ..xxxxx.      
+         xXxXXXXXXXXxxxxxxxxxxxXXXXxxx.           .oooo..        .xxxxxxx.      
+        x@@@@@xxXXXXXXxx ooooo xxXXXXxx.         .ooooo..        .xxxXxxx.      
+       x@@    @ xxxx .oOOOOOooo. xXXXXxx.        ooooooo.       .xxxxxxxx.      
+       o@@    @xx .ooOOOOOOOoo  . xxXXXxx.      .ooOOooo.        .xxxxxx..      
+        o@@@@@OoOoooOOOOOOoo.      .xxxxx.      .ooOOoo.         .xxxxx..       
+         oOoOOOOOOOOOOoooo.          .xxx.      .ooOOoo.          ..xx..        
+                .....                  ......   .ooooo.            .....        
+                                        . .  ...oooo.                ...        
                                           .........                             
                                                                                 
                                                                                 

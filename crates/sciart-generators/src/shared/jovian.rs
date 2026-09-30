@@ -21,11 +21,6 @@ const COLLAR: f64 = 0.9;
 /// How far the collar pulls the clouds towards its cream (a hint, not a ring).
 const COLLAR_W: f64 = 0.65;
 const SPOT: (f64, f64) = (0.27, 0.5);
-/// Hot spots: the level where a belt darkening towards one meets its Ice core, and how
-/// far the core itself darkens.
-const HOT_EDGE: f64 = 0.2;
-const HOT_DEEP: f64 = 0.07;
-
 /// Unshaded Sienna level of belt/zone dye `a` (0 belt … 1 zone) with an embossing
 /// `relief` (positive on sunlit cloud edges).
 pub(crate) fn cloud_level(a: f64, relief: f64) -> f64 {
@@ -69,29 +64,6 @@ pub(crate) fn sienna(level: f64, shade: f64) -> Ink {
 #[cfg(test)]
 pub(crate) fn cloud(a: f64, relief: f64, shade: f64) -> Ink {
     sienna(cloud_level(a, relief), shade)
-}
-
-/// Clearing dye `h` below `HOT_ON` leaves the clouds alone; from there to `HOT_CORE` the
-/// cloud darkens towards the hot spot's edge level; above it is the Ice core.
-const HOT_ON: f64 = 0.12;
-const HOT_CORE: f64 = 0.3;
-
-/// A cloud of unshaded level `level` under clearing dye `h` (0 … 1), shaded: untouched
-/// for faint dye, darkening smoothly to the hot spot's edge level, then the dark
-/// blue-grey core of the hot spot (a clear gap down to warmer, deeper cloud).
-pub(crate) fn hot_spot(level: f64, h: f64, shade: f64) -> Ink {
-    if h <= HOT_ON {
-        return sienna(level, shade);
-    }
-    if h < HOT_CORE {
-        let t = ease::smoothstep((h - HOT_ON) / (HOT_CORE - HOT_ON));
-        return sienna(level + (HOT_EDGE - level) * t, shade);
-    }
-    let depth = ((h - HOT_CORE) / (1.0 - HOT_CORE)).clamp(0.0, 1.0);
-    ink::ramp(
-        Ramp::Ice,
-        ((HOT_EDGE - HOT_DEEP * depth) * shade).clamp(0.02, 0.5),
-    )
 }
 
 /// Band edges in sine of planetocentric latitude (north positive), south to north: the
@@ -175,18 +147,5 @@ mod tests {
         assert_eq!(spot_weights(3.0, semi), (0.0, 0.0));
         let belt = cloud_level(0.0, 0.0);
         assert!(spot_blend(belt, 0.5, 0.0, COLLAR_W) > 0.65);
-    }
-
-    #[test]
-    fn jup_a6_hot_spots_meet_the_belt_at_equal_lightness() {
-        // Faint dye leaves the cloud; the darkened edge and the Ice core share a level,
-        // so the hue change is not a lightness step.
-        let belt = cloud_level(0.1, 0.0);
-        assert_eq!(hot_spot(belt, 0.05, 1.0), sienna(belt, 1.0));
-        let edge = hot_spot(belt, HOT_CORE - 1e-9, 1.0);
-        let core = hot_spot(belt, HOT_CORE + 1e-9, 1.0);
-        assert_eq!(edge.role, Role::Ramp(Ramp::Sienna));
-        assert_eq!(core.role, Role::Ramp(Ramp::Ice));
-        assert!(edge.level.abs_diff(core.level) <= 1, "{edge:?} vs {core:?}");
     }
 }

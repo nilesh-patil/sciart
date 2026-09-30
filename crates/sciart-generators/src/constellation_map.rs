@@ -2,11 +2,11 @@
 //!
 //! Star positions are real J2000 RA/Dec, gnomonically projected about each figure's centre
 //! and drawn as on a sky chart: north up, east to the LEFT (RA increases leftward). Stars
-//! are half-block discs sized by magnitude and coloured by their B–V index, and the
-//! brightest bloom and scintillate; the figure is traced in pale-blue braille strokes over
-//! a faint continuous RA/Dec graticule and, near the galactic plane, the Milky Way as a
-//! smooth violet glow. Now and then a meteor streaks across the chart. The glow and
-//! graticule are rasterised in `update` when the chart or its fade changes, stars and
+//! are 1–2 px points sized by magnitude and coloured by their B–V index, the brightest
+//! scintillating; the figure is traced in faint braille strokes over a faint continuous
+//! RA/Dec graticule, with a background field that thickens toward the galactic plane
+//! (ADR-0017: no Milky Way wash, no blooms). Now and then a meteor streaks across the
+//! chart. The graticule is rasterised when the chart or its fade changes, stars and
 //! strokes every step; `render` blits them and draws text.
 
 use std::f64::consts::TAU;
@@ -17,7 +17,7 @@ use sciart_core::geom::ASPECT;
 use sciart_core::ink;
 use sciart_core::prelude::*;
 use sciart_core::raster;
-use sciart_core::rng::{cell_key, hash01};
+use sciart_core::rng::hash01;
 use sciart_core::timeline::ease;
 
 pub static META: Meta = Meta {
@@ -46,70 +46,45 @@ const NAME_ROWS: u16 = 5;
 /// Background star candidates per cell. Each chart keeps a share of them that rises from
 /// `BG_KEEP.0` far from the Milky Way to `BG_KEEP.1` in its plane (galactic latitude
 /// within ~`BG_PLANE_DEG`), so Cygnus, Crux and Scorpius sit in a denser field.
-const BG_DENSITY: f64 = 0.12;
+const BG_DENSITY: f64 = 0.06;
 const BG_MAX: usize = 4000;
 const BG_KEEP: (f64, f64) = (0.25, 1.0);
 const BG_PLANE_DEG: f64 = 12.0;
-/// Milky Way glow (CON-A8): each pixel is `GLOW_ROLE` at `GLOW_LEVEL · p / DUST_PEAK · fade`,
-/// `p` the cell's [`dust`]`(l, b)` density (at most `DUST_PEAK`), and plain background
-/// below the visible floor (never dithered, so no speckle punches through the wash): a
-/// smooth unresolved-starlight band, false colour, that thins out with the density.
-const DUST_PEAK: f64 = 0.3;
-const GLOW_LEVEL: f64 = 72.0;
-/// The glow's ramp: `Starlight`, whose floor is near black, so the band's fringe meets the
-/// sky without a visible step.
-const GLOW_ROLE: Role = Role::Ramp(Ramp::Starlight);
-/// Star clouds: two octaves of value noise on `CLUMP_DEG` lattices in galactic (l, b),
-/// weighted `CLUMP_WEIGHT`, scale the density between `CLUMP_FLOOR` and 1. The finer
-/// octave gives structure to charts a few degrees across (Crux).
-const CLUMP_DEG: [f64; 2] = [6.0, 2.0];
-const CLUMP_WEIGHT: [f64; 2] = [0.6, 0.4];
-const CLUMP_FLOOR: f64 = 0.3;
-const CLUMP_SALT: u64 = 0x6D69_6C6B_7977_6179;
-/// The Great Rift (stylised): a dark lane at b ≈ `RIFT_B` from l = `RIFT_L.0` to
-/// `RIFT_L.1` (Aquila to Cygnus), `RIFT_HALF` deg half-width, taking `LANE_DEPTH` of the
-/// dust.
-const RIFT_L: (f64, f64) = (25.0, 88.0);
-const RIFT_B: f64 = 2.0;
-const RIFT_HALF: f64 = 2.2;
-/// The Coalsack beside Crux: centre (l, b) (from RA 12h50m, Dec −62.5°) and radius, deg.
-const COALSACK: (f64, f64, f64) = (302.8, 0.4, 3.0);
-const LANE_DEPTH: f64 = 0.85;
 /// North galactic pole, J2000 (deg), and the galactic longitude of the north celestial
 /// pole (IAU 1958 system, J2000 values).
 const NGP: (f64, f64) = (192.859_48, 27.128_25);
 const L_NCP: f64 = 122.931_92;
+/// Text levels: the name, its epithet and the α star's label stay dim, so the stars carry
+/// the chart (ADR-0017).
+const NAME_LEVEL: f64 = 120.0;
+const EPITHET_LEVEL: f64 = 90.0;
+const LABEL_LEVEL: f64 = 100.0;
 /// Name typewriter speed, characters per second.
 const TYPE_RATE: f64 = 18.0;
 
 /// Strokes stop this far (rows, aspect-corrected) short of the stars they join (CON-A6).
 const STROKE_GAP: f64 = 0.9;
-const STROKE_LEVEL: f64 = 170.0;
-/// Figure strokes: pale sky blue, the ink of a printed star chart's figure lines.
-const STROKE_ROLE: Role = Role::Ramp(Ramp::Ice);
-/// A figure star is a half-block disc whose radius (px) steps down with magnitude through
+const STROKE_LEVEL: f64 = 65.0;
+/// Figure strokes: a faint warm grey, one braille dot wide, so the stars carry the chart
+/// (ADR-0017).
+const STROKE_ROLE: Role = Role::Ramp(Ramp::Starlight);
+/// A figure star is a point whose radius (px) steps down with magnitude through
 /// `STAR_TIERS` (`(brightest magnitude, radius)`; fainter than all is `STAR_R_RANGE.0`)
-/// (CON-A4): 21 round pixels for 0th-magnitude stars, 3 × 3 to 2nd, a 2 × 2 blot to 3rd, one
-/// pixel below. Only these radii come out round in square pixels; others make a plus.
-const STAR_TIERS: [(f64, f64); 3] = [(0.6, 2.25), (1.6, 1.6), (3.0, 1.0)];
-const STAR_R_RANGE: (f64, f64) = (0.5, 2.25);
-const STAR_MIN_COVER: f64 = 0.35;
-/// Below this radius a star is one pixel; below `STAR_CORNER_BELOW` a 2 × 2 blot.
+/// (CON-A4): a tiny plus (a pixel and its four neighbours, like a star's diffraction
+/// cross) to 2.5th magnitude, one pixel below (ADR-0017: points).
+const STAR_TIERS: [(f64, f64); 1] = [(2.5, 1.0)];
+const STAR_R_RANGE: (f64, f64) = (0.5, 1.0);
+/// Below this radius a star is one pixel, else a plus.
 const STAR_ONE_PX: f64 = 0.75;
-const STAR_CORNER_BELOW: f64 = 1.6;
-/// Bloom peak scale for red (`Ember`) stars.
-const RED_BLOOM: f64 = 0.62;
-/// Stars this bright (magnitude) bloom: a soft Gaussian of half-block pixels round the
-/// disc, falling as `exp(−(d − r)² / 2σ²)` with `σ = BLOOM_SIGMA` px beyond its edge,
-/// peaking at `BLOOM_PEAK` (less by up to 30 % toward `BLOOM_MAG`), in `Ice` for B−V below
-/// `BLOOM_BLUE_BV` and `Ember` above (false colour close to the star's own), and cut below
-/// `BLOOM_MIN`. The peak scintillates by ±`TWINKLE` at 1–3 Hz (CON-A11).
+/// Text (labels, name, epithet, graticule labels) shows only while the chart's fade is at
+/// least this: text colours keep a floor, so they would linger after the stars have gone.
+const TEXT_FADE: f64 = 0.25;
+/// The pen tip's level while a stroke is traced.
+const PEN_LEVEL: f64 = 150.0;
+/// Stars this bright (magnitude) scintillate: their colour temperature flickers by
+/// ±`TWINKLE` at 1–3 Hz (CON-A11).
 const BLOOM_MAG: f64 = 1.5;
-const BLOOM_BLUE_BV: f64 = 0.4;
-const BLOOM_PEAK: f64 = 0.7;
-const BLOOM_SIGMA: f64 = 1.6;
-const BLOOM_MIN: f64 = 0.12;
-const TWINKLE: f64 = 0.18;
+const TWINKLE: f64 = 0.12;
 /// A meteor every `METEOR_EVERY` s of a chart's show from `METEOR_FROM` s, crossing
 /// `METEOR_LEN` rows in `METEOR_SECS` s along a hashed path, head bright, tail fading
 /// (CON-A11). Meteors are real sky events; their times and paths are decorative.
@@ -299,7 +274,8 @@ const STAR_GLYPHS: [Glyph; 4] = [
 ];
 /// Background stars stay small so they never read as figure stars.
 const BG_GLYPHS: [Glyph; 2] = [Glyph::ascii('.'), Glyph::new('·', '.')];
-const PEN: Glyph = Glyph::new('•', 'o');
+/// The pen tip: a small neutral dot (M14 critic: no magenta accent).
+const PEN: Glyph = Glyph::new('·', '.');
 
 /// Rows of the chart area at `size`: all but the name block (CON-A7).
 fn chart_rows(size: Size) -> f64 {
@@ -400,44 +376,6 @@ pub(crate) fn galactic(ra: f64, dec: f64) -> (f64, f64) {
     let x = d.sin_det() * dp.cos_det() - d.cos_det() * dp.sin_det() * cos_da;
     let l = (L_NCP - y.atan2(x).to_degrees()).rem_euclid(360.0);
     (l, sin_b.clamp(-1.0, 1.0).asin().to_degrees())
-}
-
-/// Probability that a braille dot at galactic `(l, b)` is Milky Way dust (CON-A8): a
-/// Gaussian band `exp(−(b/BG_PLANE_DEG)²)`, broken into star clouds and cut by the Great
-/// Rift and the Coalsack. A stylised picture of the band's surface brightness, not a map.
-pub(crate) fn dust(l: f64, b: f64) -> f64 {
-    let band = (-(b / BG_PLANE_DEG).powi(2)).exp();
-    let noise = CLUMP_DEG
-        .iter()
-        .zip(CLUMP_WEIGHT)
-        .enumerate()
-        .map(|(k, (&deg, w))| w * value_noise(l, b, deg, CLUMP_SALT + k as u64))
-        .sum::<f64>();
-    let clump = CLUMP_FLOOR + (1.0 - CLUMP_FLOOR) * noise;
-    // Dark lanes: soft-edged, so the dust thins into them rather than stopping.
-    let along = ease::smoothstep((l - RIFT_L.0) / 8.0) * ease::smoothstep((RIFT_L.1 - l) / 8.0);
-    let rift = along * ease::smoothstep(1.0 - (b - RIFT_B).abs() / RIFT_HALF);
-    let dl = (l - COALSACK.0 + 180.0).rem_euclid(360.0) - 180.0;
-    let sack = ease::smoothstep(1.0 - dl.hypot(b - COALSACK.1) / COALSACK.2);
-    DUST_PEAK * band * clump * (1.0 - LANE_DEPTH * rift.max(sack))
-}
-
-/// Value noise in `[0, 1]` at galactic `(l, b)` on a `deg` lattice (360/`deg` a whole
-/// number, so it wraps in l): smoothstep-blended hashes of the lattice cell's corners.
-fn value_noise(l: f64, b: f64, deg: f64, salt: u64) -> f64 {
-    let (u, v) = (l.rem_euclid(360.0) / deg, (b + 90.0) / deg);
-    let (i, j) = (u.floor(), v.floor());
-    let n = (360.0 / deg).round() as i32;
-    let corner = |di: i32, dj: i32| {
-        let key = cell_key((i as i32 + di).rem_euclid(n), j as i32 + dj);
-        hash01(salt ^ key)
-    };
-    let (fu, fv) = (ease::smoothstep(u - i), ease::smoothstep(v - j));
-    ease::lerp(
-        ease::lerp(corner(0, 0), corner(1, 0), fu),
-        ease::lerp(corner(0, 1), corner(1, 1), fu),
-        fv,
-    )
 }
 
 /// Direction of the figure's centre: normalized mean of the stars' unit vectors,
@@ -569,36 +507,22 @@ pub(crate) fn star_radius(mag: f64) -> f64 {
         .map_or(STAR_R_RANGE.0, |&(_, r)| r)
 }
 
-/// Where a star glyph cell `p` (cells) puts its disc of radius `r` (px): a pixel corner
-/// under `STAR_CORNER_BELOW` (a round 2 × 2 blot, or one pixel for the faintest), else the
-/// centre of the cell's top pixel.
-fn star_centre(p: Point, r: f64) -> Point {
-    let (x, y) = (p.0.round(), 2.0 * p.1.round());
-    if r < STAR_ONE_PX {
-        (x + 0.5, y + 0.5)
-    } else if r < STAR_CORNER_BELOW {
-        (x + 1.0, y + 1.0)
-    } else {
-        (x + 0.5, y + 0.5)
-    }
+/// Where a star glyph cell `p` (cells) puts its point: the centre of the cell's top
+/// pixel, whatever its size (`r` is kept for the call sites' symmetry).
+fn star_centre(p: Point, _r: f64) -> Point {
+    (p.0.round() + 0.5, 2.0 * p.1.round() + 0.5)
 }
 
-/// The pixels of a star disc of radius `r` at `c` (from [`star_centre`]): one pixel, a
-/// 2 × 2 blot, or an anti-aliased disc — round at every size, never a plus (CON-A4).
+/// The pixels of a star of radius `r` at `c` (from [`star_centre`]): one pixel, or a plus
+/// of five (CON-A4).
 fn star_pixels(c: Point, r: f64, mut f: impl FnMut(i32, i32)) {
+    let (x, y) = (c.0.floor() as i32, c.1.floor() as i32);
     if r < STAR_ONE_PX {
-        f(c.0.floor() as i32, c.1.floor() as i32);
-    } else if r < STAR_CORNER_BELOW {
-        let (x, y) = (c.0 as i32, c.1 as i32);
-        for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
+        f(x, y);
+    } else {
+        for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
             f(x + dx, y + dy);
         }
-    } else {
-        raster::disc_pixels(c, r, |x, y, cover| {
-            if cover >= STAR_MIN_COVER {
-                f(x, y);
-            }
-        });
     }
 }
 
@@ -695,25 +619,20 @@ pub struct ConstellationMap {
     /// Visual edge lengths per figure (rows), the tracing weights.
     lengths: Vec<Vec<f64>>,
     bg: Vec<BgStar>,
-    /// Milky Way dust density per chart and cell, chart-major: [`dust`] over `DUST_PEAK`,
-    /// as 0–255 (one byte a cell keeps six charts small at any size, TEST-R7).
-    dust: Vec<u8>,
-    /// Build progress per chart, in units: its cells' dust, then its background-star
-    /// levels (CON-A10).
+    /// Build progress per chart, in units: its background-star levels (CON-A10).
     built: [usize; FIGURES.len()],
-    /// The chart and fade (bits) that `sky`, `glow` and `ticks` were last drawn for.
+    /// The chart and fade (bits) that `sky` and `ticks` were last drawn for.
     still: Option<(usize, u64)>,
     /// The figure's strokes and the meteor.
     dots: Dots,
-    /// Figure-star discs and the blooms round the brightest (Unicode only: ASCII draws
-    /// magnitude glyphs instead).
+    /// Figure-star points (Unicode only: ASCII draws magnitude glyphs instead).
     stars: Pixels,
-    /// The Milky Way glow (Unicode only; in ASCII the denser star field alone marks it).
-    glow: Pixels,
     /// The graticule: Unicode only, since braille's ASCII fallback would turn faint dots
     /// into `:` as heavy as the figure.
     sky: Dots,
     ticks: [Tick; 2 * MAX_LABELS],
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl ConstellationMap {
@@ -842,9 +761,9 @@ impl ConstellationMap {
         }
     }
 
-    /// Figure stars as discs sized by magnitude in their blackbody colour (CON-A4), the
-    /// brightest in a scintillating bloom (CON-A9, CON-A11), so they outweigh the field at
-    /// a glance. While the chart fades each shrinks to one cell, as the glyphs did.
+    /// Figure stars as 1–2 px points sized by magnitude in their blackbody colour (CON-A4,
+    /// CON-A9), the brightest scintillating (CON-A11). While the chart fades each shrinks
+    /// to one pixel.
     fn draw_stars(&mut self, idx: usize, fade: f64) {
         let Some(pos) = self.pos.get(idx) else {
             return;
@@ -860,61 +779,16 @@ impl ConstellationMap {
                 star_radius(s.mag)
             };
             let c = star_centre(p, r);
-            if s.mag <= BLOOM_MAG && fade >= 0.5 {
-                let ramp = if s.bv < BLOOM_BLUE_BV {
-                    Ramp::Ice
-                } else {
-                    Ramp::Ember
-                };
+            // The brightest scintillate: their colour temperature flickers a little
+            // (ADR-0017: points, no bloom).
+            let k = if s.mag <= BLOOM_MAG && fade >= 0.5 {
                 let key = (idx * 64 + i) as u64;
-                let tw = 1.0 + TWINKLE * twinkle(key, self.t);
-                // A red giant's glow stays darker than its disc, or it reads as a ring.
-                let hue = if ramp == Ramp::Ember { RED_BLOOM } else { 1.0 };
-                let peak = hue * tw * BLOOM_PEAK * (1.0 - 0.3 * s.mag.max(0.0) / BLOOM_MAG);
-                let reach = r + BLOOM_SIGMA * (2.0 * (peak / BLOOM_MIN).ln()).max(0.0).sqrt();
-                raster::disc_pixels(c, reach, |x, y, _| {
-                    let d = (f64::from(x) + 0.5 - c.0).hypot(f64::from(y) + 0.5 - c.1);
-                    let v = peak * (-(d - r).max(0.0).powi(2) / (2.0 * BLOOM_SIGMA.powi(2))).exp();
-                    if v >= BLOOM_MIN {
-                        self.stars.set(x, y, ink::ramp(ramp, v.min(1.0)));
-                    }
-                });
-            }
-            let ink = ink::blackbody(teff(s.bv));
+                teff(s.bv) * (1.0 + TWINKLE * twinkle(key, self.t))
+            } else {
+                teff(s.bv)
+            };
+            let ink = ink::blackbody(k);
             star_pixels(c, r, |x, y| self.stars.set(x, y, ink));
-        }
-    }
-
-    /// Chart `idx`'s Milky Way glow (CON-A8): each pixel from its cell's [`dust`] density,
-    /// interpolated between cell rows, dimmed by `fade`, so it fades by dimming evenly.
-    fn draw_glow(&mut self, idx: usize, fade: f64) {
-        self.ensure_chart(idx);
-        let (w, h) = (self.width as usize, self.height as usize);
-        let cells = w * h;
-        let Some(chart) = self.dust.get(idx * cells..(idx + 1) * cells) else {
-            return;
-        };
-        let q = |cx: usize, cy: f64| {
-            let cy = cy.clamp(0.0, (h - 1) as f64) as usize;
-            f64::from(chart[cy * w + cx]) / 255.0
-        };
-        for py in 0..2 * h {
-            // Pixel row centre in cell units, less half a cell: between rows `r0`, `r0+1`.
-            let v = (py as f64 + 0.5) / 2.0 - 0.5;
-            let (r0, f) = (v.floor(), v - v.floor());
-            for cx in 0..w {
-                let share = q(cx, r0) * (1.0 - f) + q(cx, r0 + 1.0) * f;
-                // No glow on the title row, even interpolated.
-                let level = if py / 2 >= h - 1 {
-                    0.0
-                } else {
-                    GLOW_LEVEL * share * fade
-                };
-                if level >= ink::MIN_VISIBLE_LEVEL {
-                    let ink = Ink::new(GLOW_ROLE, ink::level(level));
-                    self.glow.set(cx as i32, py as i32, ink);
-                }
-            }
         }
     }
 
@@ -943,38 +817,23 @@ impl ConstellationMap {
         }
     }
 
-    /// Work units of one chart: a dust value per cell, then a level per background star.
+    /// Work units of one chart: a level per background star.
     fn chart_units(&self) -> usize {
-        self.dust.len() / FIGURES.len() + self.bg.len()
+        self.bg.len()
     }
 
-    /// Build up to `budget` more units of chart `k` (CON-A10); returns the units spent.
-    /// Cell dust is [`dust`] at the cell centre (none on the title row); a background
-    /// star is kept where its draw falls under the chart's galactic-latitude share.
+    /// Build up to `budget` more units of chart `k` (CON-A10); returns the units spent. A
+    /// background star is kept where its draw falls under the chart's galactic-latitude
+    /// share.
     fn build_chart(&mut self, k: usize, budget: usize) -> usize {
-        let (w, h) = (self.width.max(1) as usize, self.height);
-        let cells = self.dust.len() / FIGURES.len();
-        let total = cells + self.bg.len();
         let chart = self.charts[k];
         let from = self.built[k];
-        let to = total.min(from.saturating_add(budget));
-        for u in from..to {
-            if u < cells {
-                let (cx, cy) = ((u % w) as i32, (u / w) as i32);
-                self.dust[k * cells + u] = if cy < h - 1 {
-                    let (ra, dec) = chart.sky_of((f64::from(cx) + 0.5, f64::from(cy) + 0.5));
-                    let (l, b) = galactic(ra, dec);
-                    ink::level(255.0 * dust(l, b) / DUST_PEAK)
-                } else {
-                    0
-                };
-            } else {
-                let star = &mut self.bg[u - cells];
-                let (ra, dec) = chart.sky_of((f64::from(star.x), f64::from(star.y)));
-                let b = galactic(ra, dec).1 / BG_PLANE_DEG;
-                let share = BG_KEEP.0 + (BG_KEEP.1 - BG_KEEP.0) * (-b * b).exp();
-                star.levels[k] = if star.keep < share { star.level } else { 0 };
-            }
+        let to = self.bg.len().min(from.saturating_add(budget));
+        for star in &mut self.bg[from.min(to)..to] {
+            let (ra, dec) = chart.sky_of((f64::from(star.x), f64::from(star.y)));
+            let b = galactic(ra, dec).1 / BG_PLANE_DEG;
+            let share = BG_KEEP.0 + (BG_KEEP.1 - BG_KEEP.0) * (-b * b).exp();
+            star.levels[k] = if star.keep < share { star.level } else { 0 };
         }
         self.built[k] = to.max(from);
         to.saturating_sub(from)
@@ -1011,12 +870,10 @@ impl ConstellationMap {
         let fade = Self::fade(local);
         // The background-star levels too, which `render` reads (CON-A10).
         self.ensure_chart(idx);
-        // Glow and graticule depend on the chart and its fade only, so they are redrawn
-        // only while it fades in or out (CON-A10): the glow is most of a frame.
+        // The graticule depends on the chart and its fade only, so it is redrawn only
+        // while the chart fades in or out (CON-A10).
         if self.still != Some((idx, fade.to_bits())) {
             self.sky.clear();
-            self.glow.clear();
-            self.draw_glow(idx, fade);
             self.draw_graticule(idx, fade);
             self.still = Some((idx, fade.to_bits()));
         }
@@ -1078,10 +935,8 @@ impl Generator for ConstellationMap {
                     .collect()
             })
             .collect();
-        // Each chart's dust and star levels are built lazily (CON-A10): the showing one by
+        // Each chart's star levels are built lazily (CON-A10): the showing one by
         // `rasterise` below, the others a slice per `update`.
-        self.dust.clear();
-        self.dust.resize(FIGURES.len() * size.area(), 0);
         self.built = [0; FIGURES.len()];
         self.still = None;
         let (w, h) = (size.width(), size.height());
@@ -1107,23 +962,27 @@ impl Generator for ConstellationMap {
         self.dots.resize(size);
         self.sky.resize(size);
         self.stars.resize(size);
-        self.glow.resize(size);
-        self.rasterise();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
         self.build_ahead(dt);
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
         let (idx, local) = current(self.t);
         let fade = Self::fade(local);
         let unicode = canvas.mode() == GlyphMode::Unicode;
-        // Milky Way glow and graticule first, so the background stars sit on them.
+        // The graticule first, so the background stars sit on it.
         if unicode {
-            self.glow.blit(canvas, |_, _, _, _| None);
             self.sky.blit(canvas);
         }
         // Background sky: faint, twinkling, denser toward the galactic plane.
@@ -1138,7 +997,7 @@ impl Generator for ConstellationMap {
         }
         self.dots.blit(canvas);
         if unicode {
-            // Star cells over the glow: an empty half keeps the glow's pixel.
+            // Star cells only: the rest keep the graticule, strokes and field.
             let size = canvas.size();
             for y in 0..i32::from(size.height()) {
                 for x in 0..i32::from(size.width()) {
@@ -1147,14 +1006,7 @@ impl Generator for ConstellationMap {
                     if top == Ink::BLANK && bottom == Ink::BLANK {
                         continue;
                     }
-                    let under = |ink: Ink, py: i32| {
-                        if ink == Ink::BLANK {
-                            self.glow.get(x, py).unwrap_or(Ink::BLANK)
-                        } else {
-                            ink
-                        }
-                    };
-                    raster::half_block(canvas, x, y, under(top, 2 * y), under(bottom, 2 * y + 1));
+                    raster::half_block(canvas, x, y, top, bottom);
                 }
             }
         }
@@ -1163,7 +1015,7 @@ impl Generator for ConstellationMap {
             return;
         };
         let fig = &FIGURES[idx];
-        if unicode {
+        if unicode && fade >= TEXT_FADE {
             self.draw_ticks(canvas, fade);
         }
 
@@ -1174,7 +1026,7 @@ impl Generator for ConstellationMap {
                 if frac > 0.0 && frac < 1.0 {
                     let (pa, pb) = (pos[a as usize], pos[b as usize]);
                     let (x, y) = (pa.0 + (pb.0 - pa.0) * frac, pa.1 + (pb.1 - pa.1) * frac);
-                    let ink = Ink::new(Role::Accent, Self::scaled(255.0, fade));
+                    let ink = Ink::new(Role::Ramp(Ramp::Starlight), Self::scaled(PEN_LEVEL, fade));
                     canvas.put(x.round() as i32, y.round() as i32, PEN, ink);
                 }
             }
@@ -1196,17 +1048,14 @@ impl Generator for ConstellationMap {
             }
         }
 
-        if local < TRACE {
-            if unicode {
-                self.glow.backdrop(canvas);
-            }
+        if local < TRACE || fade < TEXT_FADE {
             return;
         }
         // After tracing: label the α star and type out the name beneath the figure.
         let since = local - TRACE;
         let label_ink = Ink::new(
             Role::Text,
-            Self::scaled(150.0 * (since / 0.5).min(1.0), fade),
+            Self::scaled(LABEL_LEVEL * (since / 0.5).min(1.0), fade),
         );
         let bottom = pos.iter().map(|p| p.1).fold(0.0, f64::max).round() as i32;
         // Name and epithet stay a blank row above the title row: an epithet beside or
@@ -1214,7 +1063,7 @@ impl Generator for ConstellationMap {
         let row = (bottom + 2).min(self.height - 4).max(0);
         let epithet_x = (self.width - fig.epithet.chars().count() as i32) / 2;
 
-        // The α star's name beside it, on whichever side fits, past its bloom; its row is
+        // The α star's name beside it, on whichever side fits; its row is
         // in the chart area, above the name block (CON-A7).
         let lead = &fig.stars[0];
         let (lx, ly) = (pos[0].0.round() as i32, pos[0].1.round() as i32);
@@ -1227,21 +1076,17 @@ impl Generator for ConstellationMap {
         }
 
         let shown = (since * TYPE_RATE) as usize;
-        let name_ink = Ink::new(Role::Text, Self::scaled(255.0, fade));
+        let name_ink = Ink::new(Role::Text, Self::scaled(NAME_LEVEL, fade));
         Self::title(canvas, row, fig.name, shown, name_ink);
         let epithet_shown = shown.saturating_sub(fig.name.chars().count() + 2);
         let len = fig.epithet.chars().count();
         // Centred under the name, and dropped when it does not fit.
         let x = epithet_x;
         if epithet_shown > 0 && row + 1 < self.height && x + len as i32 <= self.width {
-            let ink = Ink::new(Role::Text, Self::scaled(140.0, fade));
+            let ink = Ink::new(Role::Text, Self::scaled(EPITHET_LEVEL, fade));
             for (i, ch) in fig.epithet.chars().take(len.min(epithet_shown)).enumerate() {
                 canvas.put(x + i as i32, row + 1, Glyph::ascii(ch), ink);
             }
-        }
-        // Glyphs drawn over the glow keep it behind them, so none punches a black box.
-        if unicode {
-            self.glow.backdrop(canvas);
         }
     }
 }
@@ -1260,6 +1105,7 @@ mod tests {
     fn scene(size: Size) -> ConstellationMap {
         let mut g = ConstellationMap::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         g.bg.clear();
         g
     }
@@ -1425,22 +1271,26 @@ mod tests {
             assert!(t_of(blue) > 9000.0, "{blue}");
         }
         // Rendered: every figure star's cell shows its Blackbody temperature, as a glyph in
-        // ASCII and as a half-block disc pixel in Unicode.
+        // ASCII and as a half-block pixel in Unicode (the brightest within their
+        // scintillation, ±`TWINKLE`).
         let mut g = scene(Size::new(120, 40));
         for (k, fig) in FIGURES.iter().enumerate() {
             let c = at(&mut g, k as f64 * SHOW + 4.5, GlyphMode::Unicode);
             let a = at(&mut g, k as f64 * SHOW + 4.5, GlyphMode::Ascii);
             for (s, &(x, y)) in fig.stars.iter().zip(&g.pos[k]) {
                 let want = ink::blackbody(teff(s.bv));
+                let tw = if s.mag <= BLOOM_MAG { TWINKLE } else { 0.0 };
+                let lo = ink::blackbody(teff(s.bv) * (1.0 - tw)).level;
+                let hi = ink::blackbody(teff(s.bv) * (1.0 + tw)).level;
+                let ok = |i: Ink| i.role == Role::Blackbody && (lo..=hi).contains(&i.level);
                 let (x, y) = (x.round() as i32, y.round() as i32);
                 let cell = c.get(x, y).unwrap();
-                assert!(cell.ink == want || cell.bg == want, "{}: {cell:?}", s.name);
+                assert!(ok(cell.ink) || ok(cell.bg), "{}: {cell:?}", s.name);
                 assert_eq!(a.get(x, y).unwrap().ink, want, "{}", s.name);
             }
         }
-        // Discs grow with brightness, one pixel to about two in radius, and are round:
-        // never a plus, whatever the size.
-        assert!(star_radius(0.0) > star_radius(1.5) && star_radius(1.5) > star_radius(3.0));
+        // Points grow with brightness, one pixel to a plus of five, and are symmetric.
+        assert!(star_radius(0.0) >= star_radius(1.5) && star_radius(1.5) > star_radius(3.0));
         assert_eq!(star_radius(6.0), STAR_R_RANGE.0);
         for mag in [-0.5, 0.1, 0.5, 1.2, 1.8, 2.5, 3.3, 4.5] {
             let r = star_radius(mag);
@@ -1451,9 +1301,8 @@ mod tests {
             let (y0, y1) = (px.iter().map(|p| p.1).min(), px.iter().map(|p| p.1).max());
             let (w, h) = (x1.unwrap() - x0.unwrap() + 1, y1.unwrap() - y0.unwrap() + 1);
             assert_eq!(w, h, "mag {mag}: {px:?}");
-            // A plus of side s has 2s − 1 pixels; a round disc fills most of its box.
             assert!(
-                n == 1 || n as i32 * 10 >= 7 * w * h,
+                (n == 1 && w == 1) || (n == 5 && w == 3),
                 "mag {mag}: {n} of {w}×{h}"
             );
         }
@@ -1572,8 +1421,7 @@ mod tests {
 
     #[test]
     fn con_a8_graticule_needs_room_and_the_milky_way_is_denser() {
-        // Ursa Major, far from the Milky Way, at a width below `GRID_MIN_WIDTH`: no
-        // graticule, no dust.
+        // Ursa Major at a width below `GRID_MIN_WIDTH`: no graticule.
         let mut g = scene(Size::new(100, 30));
         at(&mut g, SHOW + 2.0, GlyphMode::Unicode);
         assert!(g.ticks.iter().all(|t| matches!(t, Tick::None)));
@@ -1599,6 +1447,7 @@ mod tests {
         let size = Size::new(200, 50);
         let mut g = ConstellationMap::default();
         g.resize(size, &mut Ctx::new(1, size));
+        g.prepare();
         g.build_all();
         let shown = |k: usize| g.bg.iter().filter(|s| s.levels[k] > 0).count();
         assert!(
@@ -1609,148 +1458,70 @@ mod tests {
         );
     }
 
-    /// Chart `k`'s Milky Way glow drawn at `fade`, as a level per pixel (0 = none).
-    fn dust_at(g: &mut ConstellationMap, k: usize, fade: f64) -> Vec<u8> {
-        g.still = None; // the glow is redrawn here, not by `rasterise`
-        g.glow.clear();
-        g.draw_glow(k, fade);
-        let d = g.glow.pixel_size();
-        let (w, h) = (i32::from(d.width()), i32::from(d.height()));
-        (0..h)
-            .flat_map(|y| (0..w).map(move |x| (x, y)))
-            .map(|(x, y)| {
-                let ink = g.glow.get(x, y).unwrap();
-                if ink == Ink::BLANK {
-                    0
-                } else {
-                    assert_eq!(ink.role, GLOW_ROLE);
-                    ink.level.max(1)
-                }
-            })
-            .collect()
-    }
-
     #[test]
-    fn con_a8_the_milky_way_is_dust_thinning_away_from_the_plane() {
-        let size = Size::new(200, 50);
-        let mut g = scene(size);
-        let (w, h) = (usize::from(size.width()), usize::from(size.height()));
-        // Mean glow level by |b| band, over every chart: it falls off band by band, so
-        // the Milky Way thins out instead of ending at an edge.
-        let (mut sum, mut all) = ([0u64; 4], [0usize; 4]);
-        for k in 0..FIGURES.len() {
-            let levels = dust_at(&mut g, k, 1.0);
-            for cy in 0..h - 1 {
-                for cx in 0..w {
-                    let p = (cx as f64 + 0.5, cy as f64 + 0.5);
-                    let (ra, dec) = g.charts[k].sky_of(p);
-                    let bin = (galactic(ra, dec).1.abs() / 5.0) as usize;
-                    if bin < 4 {
-                        all[bin] += 2;
-                        sum[bin] += (0..2)
-                            .map(|j| u64::from(levels[(2 * cy + j) * w + cx]))
-                            .sum::<u64>();
-                    }
-                }
-            }
-        }
-        let mean: Vec<f64> = (0..4)
-            .map(|i| sum[i] as f64 / all[i].max(1) as f64)
-            .collect();
-        assert!(all.iter().all(|&n| n > 500), "{all:?}");
-        assert!(mean.windows(2).all(|s| s[0] > s[1]), "{mean:?}");
-        assert!(mean[2] > 0.0 && mean[0] <= GLOW_LEVEL, "{mean:?}");
-        // None far from the plane (Ursa Major), none on the title row, and faint.
-        assert!(!dust_at(&mut g, 1, 1.0).iter().any(|&l| l > 0));
-        for k in 0..FIGURES.len() {
-            let levels = dust_at(&mut g, k, 1.0);
-            assert!(
-                !levels[2 * w * (h - 1)..].iter().any(|&l| l > 0),
-                "glow on the title row"
-            );
-            assert!(levels.iter().all(|&l| f64::from(l) <= GLOW_LEVEL + 1.0));
-        }
-        // Fading dims the glow: no pixel brightens as the fade falls, and some glow shows
-        // until the chart is well on its way out.
-        for k in [2, 3, 4] {
-            let mut prev = dust_at(&mut g, k, 0.4);
-            assert!(prev.iter().any(|&l| l > 0), "{}", FIGURES[k].name);
-            for f in 5..=10 {
-                let next = dust_at(&mut g, k, f64::from(f) / 10.0);
-                assert!(prev.iter().zip(&next).all(|(&a, &b)| a <= b), "{f}");
-                prev = next;
-            }
-        }
-        // Structure, not a flat wash: on the charts inside the band (Cassiopeia, Crux),
-        // the glow varies from one 10 × 5-cell block to the next.
-        for k in [2, 4] {
-            let levels = dust_at(&mut g, k, 1.0);
-            let blocks: Vec<f64> = (0..(h - 1) / 5)
-                .flat_map(|by| (0..w / 10).map(move |bx| (bx, by)))
-                .map(|(bx, by)| {
-                    (by * 10..by * 10 + 10)
-                        .flat_map(|y| (bx * 10..bx * 10 + 10).map(move |x| y * w + x))
-                        .map(|i| f64::from(levels[i]))
-                        .sum::<f64>()
-                })
-                .collect();
-            let mean = blocks.iter().sum::<f64>() / blocks.len() as f64;
-            let var = blocks.iter().map(|n| (n - mean).powi(2)).sum::<f64>() / blocks.len() as f64;
-            let cv = var.sqrt() / mean;
-            assert!(cv > 0.2, "{}: variation {cv}", FIGURES[k].name);
-        }
-        // The Coalsack and the Great Rift take most of the dust where they lie.
-        let lane_max = |b: f64| DUST_PEAK * (-(b / BG_PLANE_DEG).powi(2)).exp();
-        let sack = dust(COALSACK.0, COALSACK.1);
-        assert!(sack <= (1.0 - LANE_DEPTH) * lane_max(COALSACK.1) + 1e-12);
-        let rift = dust(60.0, RIFT_B);
-        assert!(rift <= (1.0 - LANE_DEPTH) * lane_max(RIFT_B) + 1e-12);
-        // Rendered: the glow covers much of Cygnus's chart and none of Ursa Major's.
-        let dusty = |c: &Canvas| {
-            let plasma = |i: Ink| i.role == GLOW_ROLE;
-            c.cells()
-                .iter()
-                .filter(|c| plasma(c.ink) || plasma(c.bg))
-                .count()
-        };
+    fn con_a8_there_is_no_milky_way_wash() {
+        // Cygnus lies in the Milky Way: at full show no pixel carries a glow, only points,
+        // the graticule, strokes and text (ADR-0017).
+        let mut g = scene(Size::new(200, 50));
         let c = at(&mut g, 3.0 * SHOW + 6.0, GlyphMode::Unicode);
-        assert!(dusty(&c) > c.cells().len() / 4, "Cygnus dust {}", dusty(&c));
-        assert_eq!(dusty(&at(&mut g, SHOW + 6.0, GlyphMode::Unicode)), 0);
+        let lit_bg = c.cells().iter().filter(|c| c.bg != Ink::BLANK).count();
+        let stars = FIGURES[3].stars.len();
+        assert!(lit_bg <= 4 * stars, "{lit_bg} cells with a background");
     }
 
     #[test]
-    fn con_a9_the_brightest_stars_bloom_in_their_own_hue() {
+    fn con_a9_figure_stars_are_small_points() {
+        // Every figure star is at most a plus of five: no bloom round even the brightest.
         let size = Size::new(200, 50);
         let mut g = scene(size);
         for (k, fig) in FIGURES.iter().enumerate() {
             at(&mut g, k as f64 * SHOW + 6.0, GlyphMode::Unicode);
+            let lit: usize = (0..100)
+                .flat_map(|y| (0..200).map(move |x| (x, y)))
+                .filter(|&(x, y)| g.stars.get(x, y).is_some_and(|i| i != Ink::BLANK))
+                .count();
+            assert!(lit <= 5 * fig.stars.len(), "{}: {lit} px", fig.name);
             for (s, &p) in fig.stars.iter().zip(&g.pos[k]) {
-                if s.mag > BLOOM_MAG {
-                    continue;
-                }
                 let r = star_radius(s.mag);
+                assert!(r <= 1.0, "{}", s.name);
                 let c = star_centre(p, r);
-                let want = if s.bv < BLOOM_BLUE_BV {
-                    Ramp::Ice
-                } else {
-                    Ramp::Ember
-                };
-                // Just outside the disc, left and right, the bloom glows in its hue.
                 for side in [-1.0, 1.0] {
                     let x = (c.0 + side * (r + 1.2)).floor() as i32;
-                    let ink = g.stars.get(x, c.1.floor() as i32).unwrap();
-                    assert_eq!(ink.role, Role::Ramp(want), "{}", s.name);
-                    let max = 255.0 * BLOOM_PEAK * (1.0 + TWINKLE) + 1.0;
-                    assert!(f64::from(ink.level) <= max, "{}", s.name);
+                    let y = c.1.floor() as i32;
+                    let ink = g.stars.get(x, y).unwrap_or(Ink::BLANK);
+                    assert!(
+                        ink == Ink::BLANK || ink.role == Role::Blackbody,
+                        "{}: {ink:?}",
+                        s.name
+                    );
                 }
             }
         }
-        // ASCII has no blooms (nor glow).
-        let c = at(&mut g, 6.0, GlyphMode::Ascii);
-        assert!(c.cells().iter().all(|c| {
-            let glowing = matches!(c.ink.role, Role::Ramp(Ramp::Starlight | Ramp::Ember));
-            !glowing && c.bg == Ink::BLANK
-        }));
+        // Figure lines are the faint grey of ADR-0017; labels stay dim.
+        assert_eq!(STROKE_ROLE, Role::Ramp(Ramp::Starlight));
+        const { assert!(STROKE_LEVEL <= 70.0 && NAME_LEVEL <= 150.0 && EPITHET_LEVEL <= NAME_LEVEL) };
+    }
+
+    #[test]
+    fn con_a7_text_leaves_with_the_stars() {
+        // At a hand-over (fade ≈ 0) no text lingers: every chart ends and starts dark, so
+        // no half-drawn frame shows a name without its stars (M14 critic).
+        let size = Size::new(120, 40);
+        let mut g = scene(size);
+        let (y, _) = title::span(size, &Title::new(META.title, None)).unwrap();
+        for k in 1..=FIGURES.len() {
+            let c = at(&mut g, k as f64 * SHOW - 0.01, GlyphMode::Unicode);
+            let lines = c.to_lines();
+            for (row, line) in lines.iter().enumerate() {
+                if row as i32 == y {
+                    continue;
+                }
+                assert!(
+                    !line.chars().any(char::is_alphanumeric),
+                    "chart {k} row {row}: {line:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1787,7 +1558,7 @@ mod tests {
             }
         }
         assert!(meteor(0, 1.0, 120, 40).is_none() && meteor(0, 5.0, 4, 4).is_none());
-        // Visible motion after the trace: the bright stars' blooms change between frames.
+        // Visible motion after the trace: the bright stars' colour and the field twinkle.
         let mut g = scene(Size::new(120, 40));
         let a = at(&mut g, 7.0, GlyphMode::Unicode);
         let b = at(&mut g, 7.3, GlyphMode::Unicode);
@@ -1797,7 +1568,8 @@ mod tests {
             .zip(b.cells())
             .filter(|(x, y)| x != y)
             .count();
-        assert!(changed >= 6, "{changed} cells changed");
+        // Without the field (cleared here), only the brightest stars' points move.
+        assert!(changed >= 3, "{changed} cells changed");
     }
 
     #[test]
@@ -1842,7 +1614,9 @@ mod tests {
             let (mut lazy, mut eager) = (ConstellationMap::default(), ConstellationMap::default());
             let (mut c1, mut c2) = (Ctx::new(5, size), Ctx::new(5, size));
             lazy.resize(size, &mut c1);
+            lazy.prepare();
             eager.resize(size, &mut c2);
+            eager.prepare();
             eager.build_all();
             assert!(
                 lazy.built.iter().filter(|&&b| b > 0).count() == 1,
@@ -1854,12 +1628,16 @@ mod tests {
                     let other = Size::new(90, 30);
                     for (g, c) in [(&mut lazy, &mut c1), (&mut eager, &mut c2)] {
                         g.resize(other, c);
+                        g.prepare();
                         g.resize(size, c);
+                        g.prepare();
                     }
                     eager.build_all();
                 }
                 lazy.update(dt, &mut c1);
+                lazy.prepare();
                 eager.update(dt, &mut c2);
+                eager.prepare();
                 if i % 7 == 0 {
                     let (mut a, mut b) = (
                         Canvas::new(size, GlyphMode::Unicode),
@@ -1882,9 +1660,11 @@ mod tests {
         let mut g = ConstellationMap::default();
         let mut ctx = Ctx::new(1, size);
         g.resize(size, &mut ctx);
+        g.prepare();
         let units = g.chart_units();
         let before: usize = g.built.iter().sum();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let after: usize = g.built.iter().sum();
         assert_eq!(after - before, build_slice(units, SIM_DT));
         assert!(build_slice(units, SIM_DT) * 240 >= units, "a chart in 4 s");

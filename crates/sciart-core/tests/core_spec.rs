@@ -512,6 +512,73 @@ fn core_r20_stage_step_advances_ctx_time() {
     assert_eq!(stage.render().to_lines(), vec!["   *"]);
 }
 
+/// Logs every call as a letter and rasterises in `prepare`: `render` draws the dot where
+/// the last `prepare` put it, so a missed `prepare` shows as a stale frame.
+#[derive(Debug, Default)]
+struct Lazy {
+    x: f64,
+    drawn_x: i32,
+    log: std::sync::Arc<std::sync::Mutex<String>>,
+}
+
+impl Lazy {
+    fn note(&self, c: char) {
+        self.log.lock().unwrap().push(c);
+    }
+}
+
+impl Generator for Lazy {
+    fn meta(&self) -> &'static Meta {
+        &DOT_META
+    }
+    fn resize(&mut self, _size: Size, _ctx: &mut Ctx) {
+        self.note('z');
+        self.x = 0.0;
+    }
+    fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
+        self.note('u');
+        self.x += dt;
+    }
+    fn prepare(&mut self) {
+        self.note('p');
+        self.drawn_x = self.x as i32;
+    }
+    fn render(&self, canvas: &mut Canvas) {
+        self.note('r');
+        canvas.put(self.drawn_x, 0, STAR, INK);
+    }
+}
+
+#[test]
+fn core_r101_stage_render_prepares_once_then_renders_every_call() {
+    let lazy = Lazy::default();
+    let log = lazy.log.clone();
+    let mut stage = Stage::new(Box::new(lazy), 7, Size::new(4, 1), GlyphMode::Ascii);
+    stage.step(1.0);
+    stage.step(1.0);
+    assert_eq!(stage.render().to_lines(), vec!["  * "]);
+    assert_eq!(stage.render().to_lines(), vec!["  * "]);
+    stage.resize(Size::new(5, 1));
+    assert_eq!(stage.render().to_lines(), vec!["*    "]);
+    // build resizes (z), two steps (uu), then each render is one prepare + one render.
+    assert_eq!(*log.lock().unwrap(), "zuuprprzpr");
+}
+
+#[test]
+fn core_r101_default_prepare_is_a_no_op() {
+    // `Dot` does not override `prepare`: rendering twice without a step is identical.
+    let mut stage = Stage::new(
+        Box::new(Dot::default()),
+        7,
+        Size::new(4, 1),
+        GlyphMode::Ascii,
+    );
+    stage.step(2.0);
+    let first = stage.render().to_lines();
+    assert_eq!(first, vec!["  * "]);
+    assert_eq!(stage.render().to_lines(), first);
+}
+
 #[test]
 fn core_r21_panicking_render_keeps_previous_frame() {
     let mut stage = Stage::new(

@@ -1,4 +1,4 @@
-//! Two disk galaxies in a close encounter (SPEC-002 `galaxy_collision`).
+//! Two disk galaxies in a close encounter (SPEC-002 `galaxy_collision`, ADR-0017).
 //!
 //! Restricted three-body model after Toomre & Toomre (1972): two softened point-mass
 //! cores on a bound eccentric orbit, integrated with kick-drift-kick leapfrog, carry
@@ -11,25 +11,21 @@
 //! The camera looks at the centre of mass from a seeded tilt and zooms smoothly so the
 //! cores, disks and (a bounded part of) the tidal tails stay on screen.
 //!
-//! The picture is a short long exposure: each host has its own exposure buffer at
-//! half-block pixel resolution; stars splat into it every step and it decays with
-//! `EXPOSURE_TAU`, so a few thousand test stars read as smooth glowing disks. Stars beyond
-//! the disk (tails and bridge) go to a second, longer exposure per host whose splats are
-//! pre-blurred, so the sparse streams read as continuous luminous bands. Blurring is
-//! linear and commutes with the exposures' decay, so splatting through the blur kernel
-//! equals blurring the exposure, with no working copies (TEST-R7). After the
-//! first close approach a fixed sample of "cloud" stars lights up as Hα knots where the
-//! stellar density is high (triggered star formation, stylised: the model has no gas).
+//! The picture is M11's sparse star field: every test star is one braille dot in its
+//! host's muted colour (galaxy 1 warm, galaxy 2 cool), brighter where stars crowd and on
+//! the spiral arms, and the tails and bridge as bright streams of dots; each nucleus is a
+//! bright 2 × 2-dot cluster in its host's colour.
 
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
 use sciart_core::geom::ASPECT;
 use sciart_core::geom::v3::{add, cross, dot, norm, scale, sub};
+use sciart_core::ink;
 use sciart_core::particles::{gaussian, plot};
 use sciart_core::prelude::*;
+use sciart_core::raster::Dots;
 use sciart_core::timeline::ease;
-use sciart_core::{Tone, ink, raster, rng};
 
 pub static META: Meta = Meta {
     name: "galaxy_collision",
@@ -56,51 +52,17 @@ const E: f64 = 0.63;
 const PERIOD: f64 = 24.0;
 const CYCLE: f64 = 40.0;
 const MAX_SUB_DT: f64 = 1.0 / 120.0;
-/// Test stars per cell and their bounds (the force loop is O(N), so a dense disk is cheap).
-const STAR_DENSITY: f64 = 0.3;
+/// Test stars per cell and their bounds: a sparse field, one braille dot per star.
+const STAR_DENSITY: f64 = 0.25;
 const MIN_STARS: usize = 64;
 const MAX_STARS: usize = 3000;
-/// Inner edge of the stellar disks (the bulge is the nucleus kernel).
+/// Inner edge of the stellar disks.
 const R_MIN: f64 = 0.1 * RD;
 /// Camera: easing time (s), room kept around each core for its disk, and how far
 /// beyond that the tails may push the frame.
 const CAMERA_TAU: f64 = 0.8;
 const DISK_ROOM: f64 = 1.5 * RD;
-const TAIL_ROOM: f64 = 2.5 * RD;
-
-/// e-folding time of the exposure (s): long enough to smooth a disk of test stars, short
-/// enough that the tails stay crisp while the camera zooms.
-const EXPOSURE_TAU: f64 = 0.15;
-/// Tail and bridge stars (weight `1 − inside`) expose a separate buffer with this longer
-/// e-folding time (s): a star's light is smeared continuously along its own path, not in
-/// discrete back-splats, so neighbouring stars do not print a comb.
-const TAIL_TAU: f64 = 0.6;
-/// Box-blur passes (radius 1 px each) folded into every tail splat: two passes are a 5-px
-/// triangle kernel (σ ≈ 1.15 px), wide enough to merge neighbouring streams into one band
-/// ≥ 3 px across, narrow enough that the tails stay thin.
-const TAIL_BLUR_PASSES: usize = 2;
-/// Tail light is lifted by this gain before the shared tone curve: a band a few stars
-/// deep sits on the tone's linear toe, where it would otherwise vanish.
-const TAIL_GAIN: f32 = 1.8;
-/// One blur pass over the disk light too (σ ≈ 0.8 px): at pericentre disk stars move
-/// several pixels per frame and would otherwise print parallel streaks.
-const DISK_BLUR_PASSES: usize = 1;
-/// Light of a nucleus in stars, spread by `NUCLEUS` (weights sum to 1).
-const BULGE: f32 = 3.0;
-const NUCLEUS: [(f64, f64, f32); 9] = [
-    (0.0, 0.0, 0.25),
-    (-1.0, 0.0, 0.125),
-    (1.0, 0.0, 0.125),
-    (0.0, -1.0, 0.125),
-    (0.0, 1.0, 0.125),
-    (-1.0, -1.0, 0.0625),
-    (1.0, -1.0, 0.0625),
-    (-1.0, 1.0, 0.0625),
-    (1.0, 1.0, 0.0625),
-];
-/// Tone curve: exposure (≈ stars per pixel) at the knee and at white.
-const KNEE: f32 = 0.1;
-const WHITE: f32 = 14.0;
+const TAIL_ROOM: f64 = 4.5 * RD;
 /// Two-armed spiral pattern (GAL-A8): winding (radians of azimuth per e-fold in radius,
 /// a pitch of ≈ 20°), pattern period (s), brightness contrast `1 ± ARM_CONTRAST`, and the
 /// radii over which it fades out beyond the disk.
@@ -109,35 +71,23 @@ const ARM_PERIOD: f64 = 30.0;
 const ARM_CONTRAST: f64 = 0.75;
 const ARM_R_IN: f64 = 1.0 * RD;
 const ARM_R_OUT: f64 = 1.4 * RD;
-/// Fraction of outer-disk stars that trace star-forming clouds, and where the outer
-/// disk starts.
-const CLOUD_FRACTION: f64 = 0.05;
-const CLOUD_R: f64 = 0.35 * RD;
-/// The burst starts when the cores first come this close, rises over `BURST_RISE` s and
-/// decays with e-folding `BURST_DECAY` s.
-const BURST_SEP: f64 = 2.2 * RD;
-const BURST_RISE: f64 = 1.5;
-const BURST_DECAY: f64 = 7.0;
-/// Host exposure at which a cloud glows fully (the compression proxy saturates).
-const KNOT_RHO: f32 = 1.2;
-/// Knots dimmer than this are not drawn; a full knot lifts its orthogonal neighbours by
-/// `KNOT_HALO` of white and its diagonal ones by `KNOT_DIAGONAL` of that.
-const KNOT_MIN: f64 = 0.12;
-const KNOT_HALO: f64 = 0.3;
-const KNOT_DIAGONAL: f64 = 0.55;
-/// Where the two hosts' light overlaps, the minority host's share from which its pixels
-/// start to show through (stippled), and the fraction of pixels they take at an even
-/// (½) share.
-const MIX_FROM: f64 = 0.35;
-const MIX_MAX: f64 = 0.2;
-/// Host ramps, galaxy 1 and galaxy 2: false colour telling which galaxy a star came from.
-/// Cool against warm violet; neither is the amber the gallery already leans on, and the
-/// knots' Hα pink stays distinct from both.
-const HOSTS: [Ramp; 2] = [Ramp::Ice, Ramp::Ferroin];
+/// Host colours (ADR-0017, muted): galaxy 1 a warm old population (`Sienna`, ~4500 K
+/// light), galaxy 2 a cooler, bluer one (`Cobalt`, ~9000 K light).
+const HOSTS: [Ramp; 2] = [Ramp::Sienna, Ramp::Cobalt];
+/// A star's dot level: from `STAR_LEVEL.0` for a lone star between the arms to
+/// `STAR_LEVEL.1` where `CROWD` or more stars share its cell on an arm's crest, by
+/// `DENSITY_SHARE` crowding and the rest arm; tail and bridge stars at least `TAIL_LEVEL`
+/// (the tails are the subject).
+const STAR_LEVEL: (f64, f64) = (100.0, 210.0);
+const CROWD: f64 = 5.0;
+const DENSITY_SHARE: f64 = 0.6;
+const TAIL_LEVEL: f64 = 150.0;
+/// A nucleus: a 2 × 2-dot cluster at this level in its host's colour.
+const CORE_LEVEL: f64 = 240.0;
 const SKY: Glyph = Glyph::new('·', '.');
 const SKY_STARS: usize = 70;
-/// ASCII stand-ins for a pixel pair, by the brighter pixel's level.
-const ASCII_RAMP: [char; 5] = ['.', ':', '+', '*', '@'];
+/// Background stars stay dimmer than any galaxy star.
+const SKY_LEVEL: u8 = 50;
 
 pub(crate) use sciart_core::geom::v3::V3;
 
@@ -170,10 +120,8 @@ pub(crate) struct Body {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Star {
     body: Body,
-    /// 0 = galaxy 1, 1 = galaxy 2 (index into `HOSTS`).
+    /// 0 = galaxy 1, 1 = galaxy 2.
     gal: u8,
-    /// Traces a star-forming cloud: lights up as a knot after the close approach.
-    cloud: bool,
 }
 
 /// Total energy of the softened core pair (GAL-A1).
@@ -231,8 +179,6 @@ pub(crate) struct Encounter {
     stars: ParticlePool<Star>,
     /// Real seconds since this encounter began.
     t: f64,
-    /// When the cores first came within `BURST_SEP`: starts the star-formation burst.
-    close: Option<f64>,
 }
 
 impl Encounter {
@@ -243,7 +189,6 @@ impl Encounter {
             disks: [([0.0; 3], [0.0; 3]); 2],
             stars: ParticlePool::with_capacity(n),
             t: 0.0,
-            close: None,
         };
         sim.reset(n, rng);
         sim
@@ -298,7 +243,6 @@ impl Encounter {
             let thick = scale(spins[g], gaussian(rng, 0.0, 0.02 * RD));
             let offset = add(scale(radial, r), thick);
             let vc = circular_speed(m, norm(offset));
-            let cloud = r > CLOUD_R && rng.random_bool(CLOUD_FRACTION);
             self.stars.spawn(Star {
                 body: Body {
                     pos: add(host.pos, offset),
@@ -306,13 +250,11 @@ impl Encounter {
                     acc: [0.0; 3],
                 },
                 gal: g as u8,
-                cloud,
             });
         }
         self.cores = cores;
         self.disks = disks;
         self.t = 0.0;
-        self.close = None;
         update_accels(&mut self.cores, &mut self.stars);
     }
 
@@ -322,7 +264,8 @@ impl Encounter {
     /// smoothly to 0 by `ARM_R_OUT` (tails and bridge carry no pattern) (GAL-A8).
     ///
     /// The pattern is a density wave: stars brighten while they pass through it, so the
-    /// arms persist while the stars' own initial arms wind up and blur.
+    /// arms persist while the stars' own initial arms wind up and blur (a star's dot is
+    /// brighter on a crest).
     pub(crate) fn arm(&self, s: &Star) -> (f64, f64) {
         let g = usize::from(s.gal);
         let (e1, e2) = self.disks[g];
@@ -358,22 +301,11 @@ impl Encounter {
             self.stars.iter_mut().for_each(|s| kick(&mut s.body));
         }
         self.t += dt;
-        if self.close.is_none() && self.separation() < BURST_SEP {
-            self.close = Some(self.t);
-        }
     }
 
+    #[cfg(test)]
     fn separation(&self) -> f64 {
         norm(sub(self.cores[1].pos, self.cores[0].pos))
-    }
-
-    /// Star-formation burst envelope in `[0, 1]`: 0 until the cores first close in, then
-    /// a smooth rise over `BURST_RISE` s and an exponential decay (GAL-A7).
-    pub(crate) fn burst(&self) -> f64 {
-        self.close.map_or(0.0, |t0| {
-            let s = self.t - t0;
-            ease::smoothstep(s / BURST_RISE) * (-s / BURST_DECAY).exp()
-        })
     }
 }
 
@@ -443,14 +375,14 @@ impl Frame {
 pub struct GalaxyCollision {
     sim: Option<Encounter>,
     frame: Frame,
-    /// Per-host disk exposure at pixel resolution.
-    exposure: [Glow; 2],
-    /// Per-host tail and bridge exposure (longer, splatted pre-blurred).
-    tails: [Glow; 2],
-    tone: Tone,
-    pixels: Pixels,
+    /// Every star as one braille dot (drawn in `prepare`).
+    dots: Dots,
+    /// Stars per cell, for the density brightening (sized in `resize`).
+    counts: Vec<u8>,
     /// Distant field stars, normalized `[0, 1)²` (they do not zoom).
     sky: Vec<(f64, f64)>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl Default for GalaxyCollision {
@@ -463,11 +395,10 @@ impl Default for GalaxyCollision {
                 zoom: 1.0,
                 size: Size::new(1, 1),
             },
-            exposure: [Glow::default(), Glow::default()],
-            tails: [Glow::default(), Glow::default()],
-            tone: Tone::asinh(KNEE, WHITE),
-            pixels: Pixels::default(),
+            dots: Dots::default(),
+            counts: Vec::new(),
             sky: Vec::new(),
+            dirty: false,
         }
     }
 }
@@ -476,13 +407,24 @@ fn star_count(size: Size) -> usize {
     ((size.area() as f64 * STAR_DENSITY) as usize).clamp(MIN_STARS, MAX_STARS)
 }
 
-/// ASCII stand-in for a pixel pair: a density char in the brighter pixel's ink.
-fn ascii_pixel(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let ink = raster::stronger(top, bottom);
-    (ink.role != Role::Background).then(|| {
-        let i = usize::from(ink.level) * ASCII_RAMP.len() / 256;
-        (ASCII_RAMP[i], ink)
-    })
+/// The level of a star's dot: brighter where `crowd` stars share its cell and on its
+/// host's spiral arm (`wave`, `inside` from [`Encounter::arm`]); a tail or bridge star
+/// (`inside` 0) at least `TAIL_LEVEL`; times the cycle's `fade`.
+fn star_level(crowd: f64, wave: f64, inside: f64, fade: f64) -> f64 {
+    let dense = ((crowd - 1.0) / (CROWD - 1.0)).clamp(0.0, 1.0);
+    let arm = ((1.0 + ARM_CONTRAST * wave) / (1.0 + ARM_CONTRAST)).clamp(0.0, 1.0);
+    let lit = DENSITY_SHARE * dense + (1.0 - DENSITY_SHARE) * arm;
+    let disk = STAR_LEVEL.0 + (STAR_LEVEL.1 - STAR_LEVEL.0) * lit;
+    let level = disk.max(TAIL_LEVEL * (1.0 - inside));
+    level * fade
+}
+
+/// The dot of continuous pixel position `(x, y)` (a pixel is 2 × 2 dots, integers at
+/// pixel centres), or `None` off any lattice.
+fn dot_of(x: f64, y: f64) -> Option<(i32, i32)> {
+    let (dx, dy) = ((2.0 * x + 0.5).round(), (2.0 * y + 0.5).round());
+    (dx.is_finite() && dy.is_finite() && dx.abs() < 1e6 && dy.abs() < 1e6)
+        .then_some((dx as i32, dy as i32))
 }
 
 impl GalaxyCollision {
@@ -494,10 +436,6 @@ impl GalaxyCollision {
         }
         self.frame.view = View::random(&mut ctx.rng);
         self.snap_camera();
-        // A new encounter starts from its own light, not the last one's afterglow.
-        self.exposure.iter_mut().for_each(Glow::clear);
-        self.tails.iter_mut().for_each(Glow::clear);
-        self.expose(3.0 * TAIL_TAU);
     }
 
     /// Camera target `(centre, zoom)`: frame the cores with their disks, centred on the
@@ -531,217 +469,49 @@ impl GalaxyCollision {
         (self.frame.centre, self.frame.zoom) = self.target_frame();
     }
 
-    /// Expose for `dt` seconds: decay the buffers, then add every star's and both
-    /// nuclei's light (a star holding still accumulates ≈ 1, brighter on a spiral arm).
-    /// A star's light is split between its host's disk buffer (weight `inside`) and its
-    /// tail buffer (`1 − inside`), so the weight is conserved either way (GAL-A5).
-    fn expose(&mut self, dt: f64) {
-        let Some(sim) = &self.sim else { return };
-        let frame = self.frame;
-        let dt = dt.max(0.0);
-        let keep = (-dt / EXPOSURE_TAU).exp() as f32;
-        let keep_tail = (-dt / TAIL_TAU).exp() as f32;
-        let (w, wt) = (1.0 - keep, 1.0 - keep_tail);
-        self.exposure.iter_mut().for_each(|e| e.decay(keep));
-        self.tails.iter_mut().for_each(|e| e.decay(keep_tail));
-        for s in &sim.stars {
-            let (x, y) = frame.pixel(s.body.pos);
-            let (wave, inside) = sim.arm(s);
-            let g = usize::from(s.gal);
-            let lit = (1.0 + ARM_CONTRAST * inside * wave) as f32;
-            let inside = inside as f32;
-            if inside > 0.0 {
-                splat_blurred(
-                    &mut self.exposure[g],
-                    x,
-                    y,
-                    w * lit * inside,
-                    DISK_BLUR_PASSES,
-                );
-            }
-            if inside < 1.0 {
-                splat_blurred(
-                    &mut self.tails[g],
-                    x,
-                    y,
-                    wt * (1.0 - inside),
-                    TAIL_BLUR_PASSES,
-                );
-            }
-        }
-        for (e, core) in self.exposure.iter_mut().zip(&sim.cores) {
-            let (x, y) = frame.pixel(core.pos);
-            for (dx, dy, k) in NUCLEUS {
-                splat_blurred(e, x + dx, y + dy, w * BULGE * k, DISK_BLUR_PASSES);
-            }
-        }
-    }
-
     /// Brightness envelope: fade in after a restart and out before the next one.
     fn fade(&self) -> f64 {
         let t = self.sim.as_ref().map_or(0.0, |s| s.t);
         0.3 + 0.7 * ease::smoothstep((t / 1.5).min((CYCLE - t) / 2.0))
     }
 
-    /// Tone-map the exposures onto the pixels, then light the knots (the M10 raster
-    /// convention: `render` only blits).
-    fn develop(&mut self) {
-        let fade = self.fade();
-        let pw = usize::from(self.exposure[0].pixel_size().width());
-        let (tone, [e1, e2], [t1, t2]) = (&self.tone, &self.exposure, &self.tails);
-        let (e1, e2, t1, t2) = (e1.values(), e2.values(), t1.values(), t2.values());
-        self.pixels.shade(|x, y| {
-            let i = y as usize * pw + x as usize;
-            let (a, b) = (e1[i] + TAIL_GAIN * t1[i], e2[i] + TAIL_GAIN * t2[i]);
-            match tone.level((a + b) * fade as f32) {
-                0 => Ink::BLANK,
-                level => Ink::new(Role::Ramp(HOSTS[host_of(a, b, x, y)]), level),
-            }
-        });
+    /// Every star as one braille dot at its projected position in its host's colour,
+    /// brighter where stars crowd (GAL-A5), and each nucleus a bright 2 × 2-dot cluster
+    /// (GAL-A7).
+    fn draw(&mut self) {
+        self.dots.clear();
+        self.counts.fill(0);
         let Some(sim) = &self.sim else { return };
-        let burst = sim.burst() * fade;
-        if burst < KNOT_MIN {
-            return;
-        }
-        for s in sim.stars.iter().filter(|s| s.cloud) {
+        let fade = self.fade();
+        let w = i32::from(self.frame.size.width());
+        let h = i32::from(self.frame.size.height());
+        let cell = |(dx, dy): (i32, i32)| {
+            let (cx, cy) = (dx.div_euclid(Dots::CELL_W), dy.div_euclid(Dots::CELL_H));
+            ((0..w).contains(&cx) && (0..h).contains(&cy)).then(|| (cy * w + cx) as usize)
+        };
+        for s in &sim.stars {
             let (x, y) = self.frame.pixel(s.body.pos);
-            let (px, py) = (x.round(), y.round());
-            if !(px.is_finite() && py.is_finite()) {
-                continue;
+            if let Some(i) = dot_of(x, y).and_then(cell) {
+                self.counts[i] = self.counts[i].saturating_add(1);
             }
-            // Saturating casts: anything huge is off the buffer.
-            let (px, py) = (px as i32, py as i32);
-            let Some(rho) = self.exposure[usize::from(s.gal)].get(px, py) else {
-                continue;
-            };
-            // Clouds collapse where the gas is squeezed: on an arm's crest in the disk,
-            // anywhere dense in the bridge and tails.
+        }
+        for s in &sim.stars {
+            let (x, y) = self.frame.pixel(s.body.pos);
+            let Some(d) = dot_of(x, y) else { continue };
+            let crowd = cell(d).map_or(1.0, |i| f64::from(self.counts[i]));
             let (wave, inside) = sim.arm(s);
-            let squeeze = 1.0 - inside + inside * wave.max(0.0);
-            let b = burst * squeeze * f64::from((rho / KNOT_RHO).min(1.0));
-            if b >= KNOT_MIN {
-                knot(&mut self.pixels, px, py, b);
+            let level = star_level(crowd, wave, inside, fade);
+            let ramp = HOSTS[usize::from(s.gal)];
+            self.dots.set(d.0, d.1, ink::ramp(ramp, level / 255.0));
+        }
+        for (core, ramp) in sim.cores.iter().zip(HOSTS) {
+            let (x, y) = self.frame.pixel(core.pos);
+            let (px, py) = ((x + 0.5).floor() as i32, (y + 0.5).floor() as i32);
+            let ink = ink::ramp(ramp, CORE_LEVEL * fade / 255.0);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                self.dots.set(2 * px + dx, 2 * py + dy, ink);
             }
         }
-    }
-}
-
-/// Most blur passes [`splat_blurred`] folds in.
-const MAX_BLUR_PASSES: usize = 2;
-/// Taps of 0, 1 and 2 radius-1 box-blur passes: the unit, `[1 1 1]/3`, `[1 2 3 2 1]/9`.
-const BLUR_KERNELS: [&[f32]; MAX_BLUR_PASSES + 1] = [
-    &[1.0],
-    &[1.0 / 3.0; 3],
-    &[1.0 / 9.0, 2.0 / 9.0, 3.0 / 9.0, 2.0 / 9.0, 1.0 / 9.0],
-];
-
-/// The per-axis weights of a bilinear split at fraction `f` convolved with the
-/// `passes`-pass box kernel: `2·passes + 2` taps starting at offset `−passes`.
-fn blur_taps(f: f32, passes: usize) -> ([f32; 2 * MAX_BLUR_PASSES + 2], usize) {
-    let k = BLUR_KERNELS[passes.min(MAX_BLUR_PASSES)];
-    let mut taps = [0.0; 2 * MAX_BLUR_PASSES + 2];
-    for (i, &v) in k.iter().enumerate() {
-        taps[i] += (1.0 - f) * v;
-        taps[i + 1] += f * v;
-    }
-    (taps, k.len() + 1)
-}
-
-/// Add `w` at continuous pixel position `(x, y)` (integers are pixel centres) as
-/// [`Glow::splat_bilinear`] followed by `passes` (≤ 2) radius-1 box blurs of the buffer
-/// would (GAL-A5): blur is linear and commutes with the exposure's decay, so a buffer of
-/// pre-blurred splats *is* the blurred exposure, and the scene keeps no blurred copies
-/// (TEST-R7). The in-bounds share of `w` is conserved; non-finite input is ignored.
-fn splat_blurred(glow: &mut Glow, x: f64, y: f64, w: f32, passes: usize) {
-    if !(x.is_finite() && y.is_finite() && w.is_finite()) {
-        return;
-    }
-    let size = glow.pixel_size();
-    let (pw, ph) = (i64::from(size.width()), i64::from(size.height()));
-    let (x0, y0) = (x.floor(), y.floor());
-    // Far off the buffer (or huge): nothing lands.
-    let p = passes.min(MAX_BLUR_PASSES) as i64;
-    if x0 < -(p as f64) - 2.0
-        || y0 < -(p as f64) - 2.0
-        || x0 > (pw + p) as f64
-        || y0 > (ph + p) as f64
-    {
-        return;
-    }
-    let (x0, y0) = (x0 as i64 - p, y0 as i64 - p);
-    let (hx, n) = blur_taps((x - x.floor()) as f32, passes);
-    let (hy, _) = blur_taps((y - y.floor()) as f32, passes);
-    let buf = glow.values_mut();
-    for (j, &wy) in hy[..n].iter().enumerate() {
-        let py = y0 + j as i64;
-        if !(0..ph).contains(&py) {
-            continue;
-        }
-        for (i, &wx) in hx[..n].iter().enumerate() {
-            let px = x0 + i as i64;
-            if (0..pw).contains(&px) {
-                buf[(py * pw + px) as usize] += w * wx * wy;
-            }
-        }
-    }
-}
-
-/// Which host's ramp a pixel with exposures `a` (host 1) and `b` (host 2) shows: the
-/// brighter one, except where their light overlaps, where the fainter host's share of it
-/// stipples through on a fixed per-pixel hash, so two discs crossing mix instead of
-/// cutting each other along a hard edge.
-fn host_of(a: f32, b: f32, x: i32, y: i32) -> usize {
-    let (lo, hi) = (a.min(b), a.max(b));
-    let share = f64::from(lo / (lo + hi).max(f32::MIN_POSITIVE));
-    let show = MIX_MAX * ease::smoothstep((share - MIX_FROM) / (0.5 - MIX_FROM));
-    let minority = usize::from(a > b);
-    // Hashed per 2 × 2 clump, so the minority host shows as small patches of its disk
-    // rather than single-pixel confetti.
-    if show > rng::hash01(rng::cell_key(x.div_euclid(2), y.div_euclid(2))) {
-        minority
-    } else {
-        1 - minority
-    }
-}
-
-/// A star-forming knot of strength `b ∈ (0, 1]` at pixel `(x, y)` (GAL-A7): a pink Hα
-/// core pixel, never dimming a brighter knot already there, in a round glow that
-/// brightens its eight neighbours in their own colour (orthogonal ones more), so the knot
-/// reads as an HII region lighting its disk rather than a pink `+` sprite.
-fn knot(pixels: &mut Pixels, x: i32, y: i32, b: f64) {
-    let core = ink::ramp(Ramp::HAlpha, 0.6 + 0.4 * b);
-    if pixels
-        .get(x, y)
-        .is_some_and(|i| i.role != Role::Ramp(Ramp::HAlpha) || i.level < core.level)
-    {
-        pixels.set(x, y, core);
-    }
-    for (dx, dy) in [
-        (-1, 0),
-        (1, 0),
-        (0, -1),
-        (0, 1),
-        (-1, -1),
-        (1, 1),
-        (-1, 1),
-        (1, -1),
-    ] {
-        let (px, py) = (x + dx, y + dy);
-        let Some(under) = pixels.get(px, py) else {
-            continue;
-        };
-        let k = if dx == 0 || dy == 0 {
-            1.0
-        } else {
-            KNOT_DIAGONAL
-        };
-        let lift = KNOT_HALO * k * b * 255.0;
-        let ink = if under.role == Role::Background {
-            ink::ramp(Ramp::HAlpha, lift / 255.0)
-        } else {
-            Ink::new(under.role, ink::level(f64::from(under.level) + lift))
-        };
-        pixels.set(px, py, ink);
     }
 }
 
@@ -762,10 +532,9 @@ impl Generator for GalaxyCollision {
                 })
                 .collect();
         }
-        self.pixels.resize(size);
-        for e in self.exposure.iter_mut().chain(&mut self.tails) {
-            e.resize(size);
-        }
+        self.dots.resize(size);
+        self.counts.clear();
+        self.counts.resize(size.area(), 0);
         let n = star_count(size);
         match &mut self.sim {
             // Keep the running encounter at any new size (GAL-A4). A shrink keeps a prefix
@@ -776,11 +545,10 @@ impl Generator for GalaxyCollision {
                     sim.stars.set_capacity(n);
                 }
                 self.snap_camera();
-                self.expose(3.0 * TAIL_TAU);
             }
             None => self.restart(ctx),
         }
-        self.develop();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -797,9 +565,14 @@ impl Generator for GalaxyCollision {
             f.centre.0 += (centre.0 - f.centre.0) * k;
             f.centre.1 += (centre.1 - f.centre.1) * k;
             f.zoom = (f.zoom.ln() + (zoom.ln() - f.zoom.ln()) * k).exp();
-            self.expose(dt);
         }
-        self.develop();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.draw();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -809,10 +582,9 @@ impl Generator for GalaxyCollision {
         }
         let (wf, hf) = (f64::from(size.width()), f64::from(size.height()));
         for &(u, v) in &self.sky {
-            plot(canvas, u * wf, v * hf, SKY, Ink::new(Role::Star, 60));
+            plot(canvas, u * wf, v * hf, SKY, Ink::new(Role::Star, SKY_LEVEL));
         }
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_pixel(top, bottom));
+        self.dots.blit(canvas);
     }
 }
 
@@ -830,20 +602,19 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = GalaxyCollision::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(t / SIM_DT).round() as usize {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         (g, ctx)
     }
 
-    /// The pixels' inks, row-major.
-    fn pixel_inks(g: &GalaxyCollision) -> Vec<Ink> {
-        let s = g.pixels.pixel_size();
-        let (w, h) = (i32::from(s.width()), i32::from(s.height()));
-        (0..h)
-            .flat_map(|y| (0..w).map(move |x| (x, y)))
-            .filter_map(|(x, y)| g.pixels.get(x, y))
-            .collect()
+    /// The rendered frame.
+    fn frame_of(g: &GalaxyCollision, size: Size, mode: GlyphMode) -> Canvas {
+        let mut canvas = Canvas::new(size, mode);
+        g.render(&mut canvas);
+        canvas
     }
 
     #[test]
@@ -950,20 +721,23 @@ mod tests {
         let mut ctx = Ctx::new(8, size);
         let mut g = GalaxyCollision::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let ra = A * (1.0 + E);
         let mut steps = 0;
         while g.sim.as_ref().unwrap().t + SIM_DT < CYCLE - 1e-9 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             steps += 1;
         }
         assert!((g.sim.as_ref().unwrap().separation() - ra).abs() > 0.1);
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         g.update(SIM_DT, &mut ctx);
+        g.prepare();
         let sim = g.sim.as_ref().unwrap();
         assert!(sim.t < 0.05, "t={} after {steps} steps", sim.t);
         assert!((sim.separation() - ra).abs() < 1e-3);
         assert_eq!(sim.stars.len(), star_count(size));
-        assert_eq!(sim.close, None, "the burst resets with the encounter");
     }
 
     #[test]
@@ -986,6 +760,7 @@ mod tests {
         let t = g.sim.as_ref().unwrap().t;
         for small in [Size::new(120, 40), Size::new(80, 24)] {
             g.resize(small, &mut ctx);
+            g.prepare();
             let sim = g.sim.as_ref().unwrap();
             let n = sim.stars.len();
             assert_eq!(n, star_count(small));
@@ -998,6 +773,7 @@ mod tests {
         }
         // A grow keeps it too (the next cycle starts with the new count).
         g.resize(Size::new(200, 50), &mut ctx);
+        g.prepare();
         let sim = g.sim.as_ref().unwrap();
         assert_eq!(sim.t, t, "a grow keeps the running encounter");
         let n2 = sim.stars.iter().filter(|s| s.gal == 1).count() as f64;
@@ -1016,7 +792,7 @@ mod tests {
         sim.reset(800, &mut a.rng);
         let fresh = Encounter::new(800, &mut b.rng);
         assert_eq!(sim.stars.iter().next().map(std::ptr::from_ref), buffer);
-        assert_eq!((sim.t, sim.close), (0.0, None));
+        assert_eq!(sim.t, 0.0);
         for (s, f) in sim.stars.iter().zip(fresh.stars.iter()) {
             assert_eq!(
                 (s.body.pos, s.body.vel, s.gal),
@@ -1038,7 +814,6 @@ mod tests {
                     ..Body::default()
                 },
                 gal: g,
-                cloud: false,
             };
             sim.arm(&s)
         };
@@ -1070,76 +845,15 @@ mod tests {
     }
 
     #[test]
-    fn gal_a6_overlapping_hosts_stipple_instead_of_cutting() {
-        let pixels = (0..64).flat_map(|y| (0..64).map(move |x| (x, y)));
-        let share = |a: f32, b: f32| {
-            pixels
-                .clone()
-                .filter(|&(x, y)| host_of(a, b, x, y) == 1)
-                .count() as f64
-                / 4096.0
-        };
-        // A lone host owns its pixels; an even mix shows both, ≈ MIX_MAX of the minority.
-        assert_eq!(share(1.0, 0.0), 0.0);
-        assert_eq!(share(0.0, 1.0), 1.0);
-        assert_eq!(
-            share(1.0, 0.25),
-            0.0,
-            "below MIX_FROM the brighter host keeps it all"
-        );
-        let even = share(1.0, 0.999);
-        assert!((even - MIX_MAX).abs() < 0.05, "{even}");
-        // The minority shows in clumps (2 × 2 pixels), not single-pixel confetti: a
-        // minority pixel's clump partner is a minority pixel too.
-        for (x, y) in pixels
-            .clone()
-            .filter(|&(x, y)| host_of(1.0, 0.999, x, y) == 1)
-        {
-            assert_eq!(
-                host_of(1.0, 0.999, x ^ 1, y ^ 1),
-                1,
-                "lone speck at {x},{y}"
-            );
-        }
-    }
-
-    #[test]
-    fn gal_a7_knots_are_round_pink_cores_in_a_brightened_host() {
-        let mut px = Pixels::new(Size::new(9, 5));
-        let host = Ink::new(Role::Ramp(Ramp::Ferroin), 100);
-        px.fill(host);
-        knot(&mut px, 4, 4, 1.0);
-        let core = px.get(4, 4).unwrap();
-        assert_eq!(core.role, Role::Ramp(Ramp::HAlpha));
-        // All eight neighbours stay the host's colour, brightened, orthogonal ones more:
-        // a round glow rather than a pink `+` sprite.
-        let at = |dx: i32, dy: i32| px.get(4 + dx, 4 + dy).unwrap();
-        for (dx, dy) in [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (1, 1),
-            (-1, 1),
-            (1, -1),
-        ] {
-            let ink = at(dx, dy);
-            assert_eq!(ink.role, host.role, "{dx},{dy}");
-            assert!(ink.level > host.level, "{dx},{dy} not brightened");
-        }
-        assert!(at(1, 0).level > at(1, 1).level);
-        assert_eq!(px.get(6, 4), Some(host), "the knot is local");
-    }
-
-    #[test]
     fn gal_frame_keeps_cores_on_screen() {
         let size = Size::new(200, 50);
         let mut ctx = Ctx::new(9, size);
         let mut g = GalaxyCollision::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         for _ in 0..(40 * 60) {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
             for c in &g.sim.as_ref().unwrap().cores {
                 let (x, y) = g.frame.pixel(c.pos);
                 assert!((-0.5..199.5).contains(&x) && (-0.5..99.5).contains(&y));
@@ -1148,205 +862,129 @@ mod tests {
     }
 
     #[test]
-    fn gal_a5_exposure_conserves_each_stars_light() {
-        // One exposure step from empty buffers: each host's disk + tail light is the sum
-        // of its stars' weights (arm-modulated in the disk) plus its nucleus, all in
-        // bounds at t = 0, where the camera frames both disks.
-        let (mut g, _) = scene_at(Size::new(200, 50), 0.0);
-        g.exposure
-            .iter_mut()
-            .chain(&mut g.tails)
-            .for_each(Glow::clear);
-        let dt = 0.05;
-        g.expose(dt);
-        let w = 1.0 - (-dt / EXPOSURE_TAU).exp();
-        let wt = 1.0 - (-dt / TAIL_TAU).exp();
-        let sim = g.sim.as_ref().unwrap();
-        for host in 0..2u8 {
-            let mut expect = w * f64::from(BULGE);
-            for s in sim.stars.iter().filter(|s| s.gal == host) {
-                let (wave, inside) = sim.arm(s);
-                expect += w * (1.0 + ARM_CONTRAST * inside * wave) * inside + wt * (1.0 - inside);
-            }
-            let h = usize::from(host);
-            let got: f64 = g.exposure[h]
-                .values()
-                .iter()
-                .chain(g.tails[h].values())
-                .map(|&v| f64::from(v))
-                .sum();
-            assert!(
-                (got - expect).abs() < 1e-3 * expect,
-                "host {host}: {got} vs {expect}"
-            );
-        }
-    }
-
-    #[test]
-    fn gal_a5_tail_blur_conserves_light_and_spreads_it_over_3_px() {
-        // A 9 × 7-pixel glow (cells 9 × 4, the last pixel row unused).
-        let mut g = Glow::new(Size::new(9, 4));
-        let pw = usize::from(g.pixel_size().width());
-        splat_blurred(&mut g, 4.0, 3.0, 1.0, TAIL_BLUR_PASSES);
-        let buf = g.values();
-        let total: f32 = buf.iter().sum();
-        assert!((total - 1.0).abs() < 1e-6, "{total}");
-        // A single tail star is a soft blob at least 3 px across in both directions.
-        let peak = buf[3 * pw + 4];
-        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-            let v = buf[(3 + dy) as usize * pw + (4 + dx) as usize];
-            assert!(v > 0.4 * peak, "({dx},{dy}) {v} vs {peak}");
-        }
-        // Equal to a bilinear splat blurred afterwards, at any sub-pixel position: the
-        // fold is exact (one blur pass as three-tap sums along each axis).
-        for (x, y) in [(3.3, 2.6), (4.9, 3.1)] {
-            let mut a = Glow::new(Size::new(9, 4));
-            splat_blurred(&mut a, x, y, 1.0, 1);
-            let mut b = Glow::new(Size::new(9, 4));
-            b.splat_bilinear(x, y, 1.0);
-            let src = b.values().to_vec();
-            let ph = src.len() / pw;
-            let at = |x: i64, y: i64| {
-                if (0..pw as i64).contains(&x) && (0..ph as i64).contains(&y) {
-                    src[y as usize * pw + x as usize]
-                } else {
-                    0.0
-                }
-            };
-            for py in 0..ph as i64 {
-                for px in 0..pw as i64 {
-                    let mut v = 0.0;
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
-                            v += at(px + dx, py + dy) / 9.0;
-                        }
-                    }
-                    let got = a.values()[py as usize * pw + px as usize];
-                    assert!((got - v).abs() < 1e-6, "({px},{py}) {got} vs {v}");
-                }
-            }
-        }
-        // Off the buffer or non-finite: nothing lands, nothing panics.
-        let mut g = Glow::new(Size::new(9, 4));
-        for (x, y) in [
-            (-50.0, 2.0),
-            (1e30, 1.0),
-            (f64::NAN, 1.0),
-            (2.0, f64::INFINITY),
-        ] {
-            splat_blurred(&mut g, x, y, 1.0, 2);
-        }
-        assert!(g.values().iter().all(|&v| v == 0.0));
-    }
-
-    #[test]
-    fn gal_a3_tails_render_as_connected_bands() {
-        // Well after pericentre, the tail light forms a band: the pixels it lights are
-        // mostly interior (lit on both sides across the band), not a comb of 1-px teeth.
+    fn gal_a3_tails_render_as_dot_streams() {
+        // Well after pericentre, the tail and bridge stars (beyond their disk's pattern)
+        // show as dots of their own: a stream of dots, not a smooth band.
         for seed in [42, 7] {
             let size = Size::new(200, 50);
             let mut ctx = Ctx::new(seed, size);
             let mut g = GalaxyCollision::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             for _ in 0..(20.0 / SIM_DT) as usize {
                 g.update(SIM_DT, &mut ctx);
+                g.prepare();
             }
-            let px = g.pixels.pixel_size();
-            let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-            let pw = px.width() as usize;
-            let tail_lit = |x: i32, y: i32| {
-                if !(0..w).contains(&x) || !(0..h).contains(&y) {
-                    return false;
-                }
-                let i = y as usize * pw + x as usize;
-                let tail = TAIL_GAIN * (g.tails[0].values()[i] + g.tails[1].values()[i]);
-                let disk = g.exposure[0].values()[i] + g.exposure[1].values()[i];
-                tail > disk && g.tone.level(tail + disk) > 0
-            };
-            let (mut lit, mut thick) = (0, 0);
-            for y in 0..h {
-                for x in 0..w {
-                    if tail_lit(x, y) {
-                        lit += 1;
-                        // Lit across the band in either direction: ≥ 3 px wide here.
-                        let across = (tail_lit(x - 1, y) && tail_lit(x + 1, y))
-                            || (tail_lit(x, y - 1) && tail_lit(x, y + 1));
-                        thick += usize::from(across);
-                    }
-                }
-            }
-            assert!(lit >= 150, "seed {seed}: only {lit} tail pixels");
-            assert!(
-                thick as f64 >= 0.6 * f64::from(lit),
-                "seed {seed}: {thick} of {lit} tail pixels are ≥ 3 px across"
-            );
-        }
-    }
-
-    #[test]
-    fn gal_a6_pixels_carry_the_two_host_ramps() {
-        let (g, _) = scene_at(Size::new(200, 50), 2.0);
-        let inks = pixel_inks(&g);
-        let count = |r: Ramp| inks.iter().filter(|i| i.role == Role::Ramp(r)).count();
-        for ink in &inks {
-            assert!(
-                matches!(
-                    ink.role,
-                    Role::Background | Role::Ramp(Ramp::Ice | Ramp::Ferroin | Ramp::HAlpha)
-                ),
-                "{ink:?}"
-            );
-        }
-        assert!(count(Ramp::Ice) > 200, "host 1: {}", count(Ramp::Ice));
-        assert!(
-            count(Ramp::Ferroin) > 200,
-            "host 2: {}",
-            count(Ramp::Ferroin)
-        );
-        // The nuclei are the brightest light in the frame.
-        let peak = inks.iter().map(|i| i.level).max().unwrap_or(0);
-        assert!(peak > 200, "peak level {peak}");
-    }
-
-    #[test]
-    fn gal_a7_knots_bloom_only_after_the_close_approach() {
-        let size = Size::new(200, 50);
-        let (mut g, mut ctx) = scene_at(size, 6.0);
-        let knots = |g: &GalaxyCollision| {
-            pixel_inks(g)
+            let sim = g.sim.as_ref().unwrap();
+            let tail = sim
+                .stars
                 .iter()
-                .filter(|i| i.role == Role::Ramp(Ramp::HAlpha))
-                .count()
-        };
-        assert_eq!(g.sim.as_ref().unwrap().close, None);
-        assert_eq!(knots(&g), 0, "knots before the encounter");
-        while g.sim.as_ref().unwrap().close.is_none() {
-            g.update(SIM_DT, &mut ctx);
+                .filter(|s| sim.arm(s).1 == 0.0)
+                .filter(|s| {
+                    let (x, y) = g.frame.pixel(s.body.pos);
+                    let (dx, dy) = ((2.0 * x + 0.5).round(), (2.0 * y + 0.5).round());
+                    g.dots.is_lit(dx as i32, dy as i32)
+                })
+                .count();
+            assert!(tail >= 15, "seed {seed}: only {tail} tail dots");
         }
-        let t0 = g.sim.as_ref().unwrap().t;
-        let (mut most, mut late) = (0, 0);
-        while g.sim.as_ref().unwrap().t < t0 + 10.0 {
-            g.update(SIM_DT, &mut ctx);
-            let t = g.sim.as_ref().unwrap().t;
-            if t > t0 + 3.0 {
-                most = most.max(knots(&g));
-            }
-            if t > t0 + 8.0 {
-                late = late.max(knots(&g));
+    }
+
+    #[test]
+    fn gal_a5_every_star_is_one_dot_in_its_hosts_colour() {
+        // One braille dot per star: never more lit dots than stars on screen (plus the two
+        // 2 × 2 nuclei), most stars visible (some share a dot), each in a host ramp.
+        for t in [2.0, 20.0] {
+            let (g, _) = scene_at(Size::new(200, 50), t);
+            let sim = g.sim.as_ref().unwrap();
+            let dots: u32 = (0..50)
+                .flat_map(|y| (0..200).map(move |x| (x, y)))
+                .filter_map(|(x, y)| g.dots.cell_mask(x, y))
+                .map(u8::count_ones)
+                .sum();
+            let on_screen = sim
+                .stars
+                .iter()
+                .filter(|s| {
+                    let (x, y) = g.frame.pixel(s.body.pos);
+                    (-0.5..199.5).contains(&x) && (-0.5..99.5).contains(&y)
+                })
+                .count() as u32;
+            assert!(
+                dots <= on_screen + 8,
+                "t {t}: {dots} dots for {on_screen} stars"
+            );
+            assert!(
+                dots * 10 >= on_screen * 5,
+                "t {t}: {dots} dots for {on_screen} stars"
+            );
+            let canvas = frame_of(&g, Size::new(200, 50), GlyphMode::Unicode);
+            for (i, cell) in canvas.cells().iter().enumerate() {
+                let (x, y) = ((i % 200) as i32, (i / 200) as i32);
+                if g.dots.cell_mask(x, y).unwrap_or(0) != 0 {
+                    assert!(
+                        matches!(cell.ink.role, Role::Ramp(r) if HOSTS.contains(&r)),
+                        "{:?}",
+                        cell.ink
+                    );
+                }
             }
         }
-        assert!(most >= 5, "only {most} knots after the close approach");
-        // The burst outlasts the encounter: knots still glow 8 s on.
-        assert!(
-            late >= 30,
-            "only {late} knot pixels 8 s after the close approach"
-        );
+        // The level: brighter where stars crowd and on a crest, tails never dim.
+        let lone = star_level(1.0, -1.0, 1.0, 1.0);
+        let crowded = star_level(CROWD, 1.0, 1.0, 1.0);
+        let tail = star_level(1.0, 0.0, 0.0, 1.0);
+        let trough = (1.0 - ARM_CONTRAST) / (1.0 + ARM_CONTRAST);
+        let want = STAR_LEVEL.0 + (STAR_LEVEL.1 - STAR_LEVEL.0) * (1.0 - DENSITY_SHARE) * trough;
+        assert!((lone - want).abs() < 1e-9 && (crowded - STAR_LEVEL.1).abs() < 1e-9);
+        assert!(tail >= TAIL_LEVEL);
+        assert!((star_level(CROWD, 1.0, 1.0, 0.5) - 0.5 * crowded).abs() < 1e-9);
+    }
+
+    #[test]
+    fn gal_a6_two_coloured_galaxies_on_black() {
+        // ADR-0017: every drawn cell is a host-coloured star dot (both hosts present) or a
+        // faint sky star, and the frame stays mostly black.
+        let size = Size::new(200, 50);
+        let (g, _) = scene_at(size, 2.0);
+        let canvas = frame_of(&g, size, GlyphMode::Unicode);
+        let (mut lit, mut hosts) = (0, [0; 2]);
+        for cell in canvas.cells() {
+            if cell.ch == ' ' {
+                continue;
+            }
+            lit += 1;
+            match cell.ink.role {
+                Role::Ramp(r) if r == HOSTS[0] => hosts[0] += 1,
+                Role::Ramp(r) if r == HOSTS[1] => hosts[1] += 1,
+                Role::Star => assert!(cell.ink.level <= SKY_LEVEL),
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(hosts[0] > 60 && hosts[1] > 60, "{hosts:?}");
+        assert!(lit * 100 < 200 * 50 * 12, "{lit} lit cells: not sparse");
+    }
+
+    #[test]
+    fn gal_a7_the_nuclei_are_bright_clusters_in_their_hosts_colour() {
+        let size = Size::new(200, 50);
+        let (g, _) = scene_at(size, 2.0);
         let sim = g.sim.as_ref().unwrap();
-        let clouds = sim.stars.iter().filter(|s| s.cloud).count();
-        let n = sim.stars.len() as f64;
-        assert!(
-            (0.5 * CLOUD_FRACTION * n..1.5 * CLOUD_FRACTION * n).contains(&(clouds as f64)),
-            "{clouds} clouds among {n} stars"
-        );
+        let canvas = frame_of(&g, size, GlyphMode::Unicode);
+        for (core, ramp) in sim.cores.iter().zip(HOSTS) {
+            let (x, y) = g.frame.pixel(core.pos);
+            let (px, py) = ((x + 0.5).floor() as i32, (y + 0.5).floor() as i32);
+            for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                assert!(g.dots.is_lit(2 * px + dx, 2 * py + dy));
+            }
+            let cell = canvas.get(px, py.div_euclid(2)).unwrap();
+            assert_eq!(cell.ink.role, Role::Ramp(ramp));
+            let fade = g.fade();
+            assert!(
+                f64::from(cell.ink.level) + 2.0 >= CORE_LEVEL * fade,
+                "{:?}",
+                cell.ink
+            );
+        }
     }
 }

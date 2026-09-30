@@ -14,6 +14,7 @@ use std::f64::consts::{PI, TAU};
 use rand::Rng;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
 use sciart_core::{draw, ink, raster};
 
@@ -81,19 +82,23 @@ const OMEGA: (f64, f64) = (0.08, 0.35);
 const SATURATION_SIGMA: f64 = 2.7;
 /// ASCII stand-ins for a sky pixel pair, by contrast.
 const ASCII_RAMP: [char; 4] = ['.', ':', '*', '#'];
-/// The spectrum inset: largest size in cells (its last row holds the peak's label), the
-/// smallest canvas that shows it, its multipole range, and its levels.
-const INSET_MAX: (i32, i32) = (32, 8);
-const INSET_MIN_CANVAS: (i32, i32) = (80, 20);
-const INSET_MIN_ROWS: i32 = 5;
-const INSET_ELL: (f64, f64) = (10.0, 1000.0);
-const INSET_AXIS_LEVEL: u8 = 60;
-const INSET_CURSOR_LEVEL: u8 = 110;
-const INSET_CURVE_LEVEL: u8 = 190;
-/// Seconds for the inset's cursor to sweep the ℓ axis once, reading the spectrum off
-/// scale by scale; it is what moves in the inset while the sky shimmers.
-const SWEEP_PERIOD: f64 = 8.0;
-const PEAK_LABEL: (&str, &str) = ("ℓ≈220", "l~220");
+/// The muted, dark-centred palette (ADR-0017): the field's full scale maps to `±MUTE` on
+/// `Role::Div` (a cool blue and a warm orange, low in chroma this close to zero); small
+/// strengths are eased smoothly towards zero (`smoothstep(u / ZERO_EASE)`), and a pixel
+/// within `ZERO_FLOOR` level of `Div`'s centre is black, so the map's zero fades into black
+/// through the faintest tints rather than a navy wash, with no dither.
+const MUTE: f64 = 0.14;
+const ZERO_EASE: f64 = 0.35;
+const ZERO_FLOOR: u8 = 1;
+/// The oval's outline: a 1-px dim `Starlight` rim where the field there is fainter, so the
+/// frame reads even where the map is near zero.
+const RIM_LEVEL: f64 = 20.0;
+/// Beyond `KNEE` of the full scale (≈ 2σ) the rarest hot and cold spots rise steeply to
+/// `±SPOT_PEAK` (`((u − KNEE)/(1 − KNEE))^SPOT_POW`), so the map's extremes stay legible
+/// (GEN-R21) while its bulk stays muted.
+const KNEE: f64 = 0.65;
+const SPOT_PEAK: f64 = 0.9;
+const SPOT_POW: f64 = 1.5;
 const READOUT: &str = "CMB  T=2.725K  dT~1e-5";
 
 /// Angular power spectrum `D_ℓ` (μK²) of the CMB-like model (CMB-A5).
@@ -223,19 +228,57 @@ pub struct CosmicMicrowaveBackground {
     ry: f64,
     height: u16,
     readout: bool,
-    /// The sky map, and the spectrum inset drawn with dots.
+    /// The sky map.
     pixels: Pixels,
-    dots: Dots,
-    inset: Option<Inset>,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
-/// The spectrum inset's cells: top-left corner and size.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Inset {
-    pub x: i32,
-    pub y: i32,
-    pub w: i32,
-    pub h: i32,
+/// The sky's ink for field value `v` (in units of the display's full scale, ±1) at oval
+/// coverage `cover`: `Role::Div`, muted within `±MUTE` up to the knee and rising to
+/// `±SPOT_PEAK` for the rarest spots, faded towards zero (black) at the rim.
+pub(crate) fn sky_ink(v: f64, cover: f64) -> Ink {
+    let u = v.abs().min(1.0);
+    // Only the rare spots past the knee pay for the power (GEN-R8).
+    let spot = if u > KNEE {
+        ((u - KNEE) / (1.0 - KNEE)).powf(SPOT_POW)
+    } else {
+        0.0
+    };
+    let ease = ease::smoothstep((u / ZERO_EASE).min(1.0));
+    let out = MUTE * u * ease + (SPOT_PEAK - MUTE) * spot;
+    ink::div(out.copysign(v) * cover.clamp(0.0, 1.0))
+}
+
+/// Entries of the unit-coverage ink table over `v ∈ [−1, 1]`.
+const SKY_LUT: usize = 2049;
+
+/// The sky's ink at oval coverage `cover`: from a size-independent table over `v` where
+/// the oval covers the pixel (almost all of them; built once per process, GEN-R8), and
+/// [`sky_ink`] itself on the rim.
+#[cfg(test)]
+fn sky_pixel(v: f64, cover: f64) -> Ink {
+    sky_pixel_in(sky_lut(), v, cover)
+}
+
+/// The unit-coverage ink table (built once per process).
+fn sky_lut() -> &'static [Ink] {
+    static LUT: std::sync::OnceLock<Box<[Ink]>> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        (0..SKY_LUT)
+            .map(|i| sky_ink(2.0 * i as f64 / (SKY_LUT - 1) as f64 - 1.0, 1.0))
+            .collect()
+    })
+}
+
+/// [`sky_pixel`] with the table in hand (hoisted out of the pixel loop).
+#[inline]
+fn sky_pixel_in(lut: &[Ink], v: f64, cover: f64) -> Ink {
+    if cover < 1.0 {
+        return sky_ink(v, cover);
+    }
+    let i = ((v.clamp(-1.0, 1.0) + 1.0) * 0.5 * (SKY_LUT - 1) as f64).round() as usize;
+    lut[i.min(SKY_LUT - 1)]
 }
 
 /// Row coordinate (in rows) of the centre of pixel row `py`: cell row `y` spans
@@ -248,7 +291,8 @@ fn pixel_row(py: usize) -> f64 {
 fn ascii_pixel(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let ink = raster::stronger(top, bottom);
     (ink.role != Role::Background).then(|| {
-        let i = usize::from(ink.level.abs_diff(128)) * ASCII_RAMP.len() / 129;
+        let top = (SPOT_PEAK * 128.0) as usize + 1;
+        let i = usize::from(ink.level.abs_diff(128)) * ASCII_RAMP.len() / top;
         (ASCII_RAMP[i.min(ASCII_RAMP.len() - 1)], ink)
     })
 }
@@ -291,6 +335,7 @@ impl CosmicMicrowaveBackground {
     }
 
     /// Whether cell point `(x, y)` (y in rows) lies inside the sky oval.
+    #[cfg(test)]
     fn in_oval(&self, x: f64, y: f64) -> bool {
         let (dx, dy) = ((x - self.cx) / self.rx, (y - self.cy) / self.ry);
         dx * dx + dy * dy <= 1.0
@@ -299,8 +344,8 @@ impl CosmicMicrowaveBackground {
     /// The columns of row `y` (in rows) that lie inside the oval, the same cells
     /// `in_oval` accepts (up to rounding on the rim), found once per row.
     fn oval_span(&self, y: f64, w: usize) -> std::ops::Range<usize> {
-        let dy = (y - self.cy) / self.ry;
-        let half = self.rx * (1.0 - dy * dy).sqrt();
+        let dy = (y - self.cy) / (self.ry + 0.25);
+        let half = (self.rx + 0.5) * (1.0 - dy * dy).sqrt();
         if half.is_nan() {
             return 0..0;
         }
@@ -309,101 +354,73 @@ impl CosmicMicrowaveBackground {
         lo.min(hi)..hi
     }
 
-    /// The largest inset (4 : 1 in cells, down to `INSET_MIN_ROWS` rows) that fits the
-    /// top-right corner wholly outside the oval, or `None` (CMB-A7).
-    fn fit_inset(&self, size: Size) -> Option<Inset> {
-        let (w, h) = (i32::from(size.width()), i32::from(size.height()));
-        if w < INSET_MIN_CANVAS.0 || h < INSET_MIN_CANVAS.1 {
-            return None;
-        }
-        (INSET_MIN_ROWS..=INSET_MAX.1.min(h / 5))
-            .rev()
-            .find_map(|ih| {
-                let iw = (4 * ih).min(INSET_MAX.0).min(w / 5);
-                let inset = Inset {
-                    x: w - iw - 1,
-                    y: 1,
-                    w: iw,
-                    h: ih,
-                };
-                // The corner nearest the oval, the bottom-left one, must lie outside it.
-                let corner = (
-                    f64::from(inset.x) - 0.5,
-                    f64::from(inset.y + inset.h - 1) + 0.5,
-                );
-                (!self.in_oval(corner.0, corner.1)).then_some(inset)
-            })
-    }
-
     /// Shade the sky map for the current time (the M10 raster convention: `render` only
     /// blits).
     fn shade(&mut self) {
         let w = self.cols.len() / (2 * MODES);
         let full_scale = SATURATION_SIGMA * self.sigma;
         let rot = self.rotation();
+        let lut = sky_lut();
         for py in 0..2 * usize::from(self.height) {
             let span = self.oval_span(pixel_row(py), w);
             if span.is_empty() {
                 continue;
             }
             let row = self.row_vector(py, &rot);
+            let y = pixel_row(py);
+            // Columns whose coverage is surely 1 (the rim's `cover` is computed only
+            // outside them).
+            let inner = self.inner_half(y);
             for x in span {
                 let v = self.cell_value(x, &row) / full_scale;
-                self.pixels.set(x as i32, py as i32, ink::div(v));
+                let cover = if (x as f64 - self.cx).abs() <= inner {
+                    1.0
+                } else {
+                    self.cover(x as f64, y)
+                };
+                let mut ink = sky_pixel_in(lut, v, cover);
+                if ink.level.abs_diff(128) <= ZERO_FLOOR {
+                    ink = Ink::BLANK;
+                }
+                // The rim: a dim outline where the field is fainter.
+                if cover < 1.0 && cover > 0.0 {
+                    let rim = ink::ramp(Ramp::Starlight, RIM_LEVEL * cover / 255.0);
+                    if ink.level.abs_diff(128) < 3 || ink == Ink::BLANK {
+                        ink = rim;
+                    }
+                }
+                self.pixels.set(x as i32, py as i32, ink);
             }
         }
     }
 
-    /// The model's input spectrum `D_ℓ` over `ℓ ∈ [10, 1000]` on a log axis above a dim
-    /// baseline with decade ticks, the first peak marked, and a cursor sweeping `ℓ`
-    /// (CMB-A7). The inset's last row is left to the peak's label.
-    fn draw_inset(&mut self) {
-        self.dots.clear();
-        let Some(inset) = self.inset else { return };
-        let (dw, dh) = (inset.w * Dots::CELL_W, (inset.h - 1) * Dots::CELL_H);
-        let (x0, y0) = (inset.x * Dots::CELL_W, inset.y * Dots::CELL_H);
-        let (lo, hi) = (INSET_ELL.0.ln(), INSET_ELL.1.ln());
-        let top = SPECTRUM.iter().map(|&(_, d)| d).fold(0.0, f64::max);
-        let to_x = |l: f64| f64::from(x0) + (l.ln() - lo) / (hi - lo) * f64::from(dw - 1);
-        let to_y = |d: f64| f64::from(y0 + dh - 2) - d / top * f64::from(dh - 3);
-        let axis = f64::from(y0 + dh - 1);
-        let dim = Ink::new(Role::Dim, INSET_AXIS_LEVEL);
-        self.dots
-            .line(f64::from(x0), axis, f64::from(x0 + dw - 1), axis, dim);
-        for l in [10.0, 100.0, 1000.0] {
-            self.dots.plot(to_x(l), axis - 1.0, dim);
+    /// Half-width (cells) of row `y`'s run of pixels the oval surely covers fully.
+    fn inner_half(&self, y: f64) -> f64 {
+        let span = self.rx.min(2.0 * self.ry);
+        let inner = (1.0 - 0.5 / span).max(0.0);
+        let dy = (y - self.cy) / self.ry;
+        let q = inner * inner - dy * dy;
+        if q > 0.0 {
+            self.rx * q.sqrt() - 1e-9
+        } else {
+            -1.0
         }
-        let s = (self.t / SWEEP_PERIOD).rem_euclid(1.0);
-        let cursor = (lo + (hi - lo) * s).exp();
-        let (cx, cy) = (to_x(cursor), to_y(d_ell(cursor)));
-        let dotted = Ink::new(Role::Dim, INSET_CURSOR_LEVEL);
-        for y in (y0..y0 + dh - 1).step_by(2) {
-            if f64::from(y) > cy + 1.0 {
-                self.dots.plot(cx, f64::from(y), dotted);
-            }
-        }
-        let curve = Ink::new(Role::Ramp(Ramp::Plasma), INSET_CURVE_LEVEL);
-        let mut prev = (to_x(INSET_ELL.0), to_y(d_ell(INSET_ELL.0)));
-        for i in 1..dw {
-            let l = (lo + (hi - lo) * f64::from(i) / f64::from(dw - 1)).exp();
-            let p = (to_x(l), to_y(d_ell(l)));
-            self.dots.line(prev.0, prev.1, p.0, p.1, curve);
-            prev = p;
-        }
-        let peak = Ink::new(Role::Ramp(Ramp::Plasma), 255);
-        let (px, py) = (to_x(L_PEAK), to_y(d_ell(L_PEAK)));
-        for (dx, dy) in [(0.0, -1.0), (-1.0, 0.0), (0.0, 0.0), (1.0, 0.0), (0.0, 1.0)] {
-            self.dots.plot(px + dx, py + dy, peak);
-        }
-        self.dots.plot(cx, cy - 1.0, peak);
     }
 
-    /// Column of the peak label's first char: centred under the peak, inside the inset.
-    fn peak_label_x(inset: Inset) -> i32 {
-        let t = (L_PEAK.ln() - INSET_ELL.0.ln()) / (INSET_ELL.1.ln() - INSET_ELL.0.ln());
-        let n = PEAK_LABEL.0.chars().count() as i32;
-        let centre = inset.x + (t * f64::from(inset.w)) as i32;
-        (centre - n / 2).clamp(inset.x, (inset.x + inset.w - n).max(inset.x))
+    /// How much of the pixel at `(x, y)` (y in rows) the oval covers: 1 inside, falling
+    /// linearly across the rim's last pixel (an anti-aliased edge, CMB-A7).
+    fn cover(&self, x: f64, y: f64) -> f64 {
+        let (dx, dy) = ((x - self.cx) / self.rx, (y - self.cy) / self.ry);
+        let r2 = dx * dx + dy * dy;
+        // The rim's distance in pixels (a cell is one pixel wide and two tall); well
+        // inside it the coverage is 1 without a square root.
+        let span = self.rx.min(2.0 * self.ry);
+        let inner = (1.0 - 0.5 / span).max(0.0);
+        if r2 <= inner * inner {
+            return 1.0;
+        }
+        let px = (1.0 - r2.sqrt()) * span;
+        (px + 0.5).clamp(0.0, 1.0)
     }
 }
 
@@ -447,27 +464,23 @@ impl Generator for CosmicMicrowaveBackground {
         self.rx = (OVAL * w as f64 / 2.0).max(0.5);
         self.ry = (OVAL * sky_rows / 2.0).max(0.5);
         self.pixels.resize(size);
-        self.dots.resize(size);
-        self.inset = self.fit_inset(size);
-        self.shade();
-        self.draw_inset();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
-        self.shade();
-        self.draw_inset();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.shade();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_pixel(top, bottom));
-        self.dots.blit(canvas);
-        if let Some(inset) = self.inset {
-            let ink = Ink::new(Role::Ramp(Ramp::Plasma), INSET_CURVE_LEVEL);
-            let (x, y) = (Self::peak_label_x(inset), inset.y + inset.h - 1);
-            draw::text_mode(canvas, x, y, PEAK_LABEL.0, PEAK_LABEL.1, ink);
-        }
         // Bottom-right, clear of the title (GEN-R13); dropped when the row is too narrow.
         if self.readout {
             let y = i32::from(self.height) - 1;
@@ -505,6 +518,7 @@ mod tests {
         let size = Size::new(w, h);
         let mut g = CosmicMicrowaveBackground::default();
         g.resize(size, &mut Ctx::new(seed, size));
+        g.prepare();
         g
     }
 
@@ -613,9 +627,11 @@ mod tests {
             for py in 0..100 {
                 for x in 0..200 {
                     let ink = g.pixels.get(x, py).unwrap();
+                    // Beyond 0.6 of the muted full scale either way.
                     if ink.role == Role::Div {
-                        hot += usize::from(ink.level > 160);
-                        cold += usize::from(ink.level < 96);
+                        let d = f64::from(ink.level) - 128.0;
+                        hot += usize::from(d > 0.6 * MUTE * 127.0);
+                        cold += usize::from(d < -0.6 * MUTE * 128.0);
                     }
                 }
             }
@@ -750,6 +766,7 @@ mod tests {
         let mut g = scene(9, 80, 24);
         let before = g.modes.clone();
         g.resize(Size::new(30, 10), &mut Ctx::new(123, Size::new(30, 10)));
+        g.prepare();
         assert_eq!(g.modes, before);
         assert_eq!(g.modes.len(), MODES);
         let (lo, hi) = (TAU / wavenumber(L_MAX), TAU / wavenumber(L_MIN));
@@ -766,7 +783,12 @@ mod tests {
         let frame = stage.render();
         assert_eq!(frame.get(0, 0).unwrap().ch, ' ');
         assert_eq!(frame.get(99, 28).unwrap().ch, ' ');
-        assert_ne!(frame.get(50, 14).unwrap().ch, ' ');
+        // The oval is drawn (its zero dissolves into black, so not every cell).
+        let drawn = (40..60)
+            .flat_map(|x| (10..18).map(move |y| (x, y)))
+            .filter(|&(x, y)| frame.get(x, y).unwrap().ch != ' ')
+            .count();
+        assert!(drawn > 40, "{drawn} of 160 central cells drawn");
         assert!(frame.to_lines()[29].ends_with(&format!(" {READOUT} ")));
     }
 
@@ -784,8 +806,23 @@ mod tests {
                     inside += 1;
                     let f =
                         field_value(&g.modes, f64::from(x) / ASPECT, pixel_row(py as usize), g.t);
-                    assert_eq!(ink, ink::div(f / full), "pixel {x},{py}");
-                } else {
+                    let cover = g.cover(f64::from(x), pixel_row(py as usize));
+                    let want = sky_pixel(f / full, cover);
+                    // At zero the map is black (CMB-A7); on the rim a dim outline may
+                    // stand in for a faint field; elsewhere it is the field's muted ink.
+                    if cover < 1.0 {
+                        assert!(
+                            ink == want
+                                || ink.role == Role::Ramp(Ramp::Starlight)
+                                || ink == Ink::BLANK,
+                            "pixel {x},{py}"
+                        );
+                    } else if want.level.abs_diff(128) > ZERO_FLOOR {
+                        assert_eq!(ink, want, "pixel {x},{py}");
+                    } else {
+                        assert_eq!(ink, Ink::BLANK, "pixel {x},{py}");
+                    }
+                } else if g.cover(f64::from(x), pixel_row(py as usize)) == 0.0 {
                     outside += 1;
                     assert_eq!(ink, Ink::BLANK);
                 }
@@ -795,52 +832,50 @@ mod tests {
     }
 
     #[test]
-    fn cmb_a7_spectrum_inset_sits_outside_the_oval_and_peaks_at_the_first_peak() {
-        for (w, h) in [(120, 40), (200, 50), (160, 48)] {
-            let g = scene(4, w, h);
-            let inset = g.inset.expect("room for the inset");
-            assert!(inset.x + inset.w < i32::from(w) && inset.y + inset.h < i32::from(h) - 1);
-            for y in inset.y..inset.y + inset.h {
-                for x in inset.x..inset.x + inset.w {
-                    let (px, py) = (x as usize, 2 * y as usize);
-                    for p in [py, py + 1] {
-                        assert_eq!(g.pixels.get(px as i32, p as i32), Some(Ink::BLANK));
-                    }
+    fn cmb_a7_a_muted_dark_centred_map_with_a_soft_edge() {
+        // ADR-0017: the field spans only `±MUTE` of `Div` (low chroma), its zero is black,
+        // and the oval's rim fades over its last pixel instead of stepping.
+        let g = scene(5, 200, 50);
+        let (mut drawn, mut blank_inside, mut muted) = (0, 0, 0);
+        for py in 0..100 {
+            for x in 0..200 {
+                let ink = g.pixels.get(x, py).unwrap();
+                if ink.role == Role::Ramp(Ramp::Starlight) {
+                    // The oval's dim outline.
+                    assert!(f64::from(ink.level) <= RIM_LEVEL + 1.0);
+                    assert!(g.cover(f64::from(x), pixel_row(py as usize)) < 1.0);
+                } else if ink.role == Role::Div {
+                    drawn += 1;
+                    assert!(
+                        f64::from(ink.level.abs_diff(128)) <= SPOT_PEAK * 128.0 + 1.0,
+                        "{ink:?}"
+                    );
+                    muted += usize::from(
+                        f64::from(ink.level.abs_diff(128)) <= KNEE * MUTE * 128.0 + 1.0,
+                    );
+                } else {
+                    assert_eq!(ink, Ink::BLANK);
+                    blank_inside += usize::from(g.in_oval(f64::from(x), pixel_row(py as usize)));
                 }
             }
-            // The curve's highest dot lies at ℓ within 15 % of 220.
-            let (x0, dw) = (inset.x * Dots::CELL_W, inset.w * Dots::CELL_W);
-            let top = (inset.y * Dots::CELL_H..(inset.y + inset.h) * Dots::CELL_H)
-                .find_map(|y| (x0..x0 + dw).find(|&x| g.dots.is_lit(x, y)))
-                .unwrap();
-            let t = f64::from(top - x0) / f64::from(dw - 1);
-            let ell = (INSET_ELL.0.ln() + t * (INSET_ELL.1.ln() - INSET_ELL.0.ln())).exp();
-            assert!(
-                (ell / L_PEAK - 1.0).abs() < 0.15,
-                "peak drawn at ℓ = {ell:.0}"
-            );
-            // The peak is labelled on the inset's last row, inside the inset.
-            let mut canvas = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
-            g.render(&mut canvas);
-            let x = CosmicMicrowaveBackground::peak_label_x(inset);
-            let row: String = (x..x + 5)
-                .map(|x| canvas.get(x, inset.y + inset.h - 1).unwrap().ch)
-                .collect();
-            assert_eq!(row, PEAK_LABEL.0);
-            assert!(x >= inset.x && x + 5 <= inset.x + inset.w);
         }
-        // The cursor sweeps: the inset changes within a second, and the sky's cells stay
-        // pixels throughout (GEN-R9 sees the sweep, not a hole in the map).
-        let mut g = scene(4, 200, 50);
-        let before = g.dots.clone();
-        let mut ctx = Ctx::new(4, Size::new(200, 50));
-        for _ in 0..60 {
-            g.update(SIM_DT, &mut ctx);
-        }
-        let moved = (0..400)
-            .flat_map(|x| (0..200).map(move |y| (x, y)))
-            .any(|(x, y)| before.is_lit(x, y) != g.dots.is_lit(x, y));
-        assert!(moved, "the inset cursor did not move in 1 s");
-        assert_eq!(scene(4, 60, 18).inset, None, "too small for an inset");
+        assert!(drawn > 5000, "{drawn} drawn");
+        // Most of the map is muted; only the rarest spots rise past the knee.
+        assert!(muted * 10 > drawn * 8, "{muted} of {drawn} muted");
+        assert!(
+            blank_inside * 10 > drawn,
+            "the zero is black: {blank_inside} blank inside"
+        );
+        // Coverage: 1 well inside, 0 well outside, and in between across the rim.
+        assert_eq!(g.cover(g.cx, g.cy), 1.0);
+        assert_eq!(g.cover(g.cx + 2.0 * g.rx, g.cy), 0.0);
+        let rim = g.cover(g.cx + g.rx, g.cy);
+        assert!((0.3..=0.7).contains(&rim), "rim coverage {rim}");
+        assert_eq!(sky_ink(1.0, 0.0), ink::div(0.0));
+        assert_eq!(sky_ink(0.5, 1.0), ink::div(0.5 * MUTE));
+        // Small strengths ease smoothly to zero (no dither).
+        let small = sky_ink(0.05, 1.0).level.abs_diff(128);
+        assert!(small <= ZERO_FLOOR, "{small}");
+        assert_eq!(sky_ink(-1.0, 1.0), ink::div(-SPOT_PEAK));
     }
 }

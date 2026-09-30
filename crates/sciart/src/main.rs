@@ -8,6 +8,12 @@ mod keys;
 mod pacer;
 mod runtime;
 
+/// The unit-test binary counts heap calls for the RT-R14 frame-loop test (ADR-0009). The
+/// counters are per thread, so the other tests running in parallel do not disturb it.
+#[cfg(test)]
+#[global_allocator]
+static GLOBAL: sciart_testalloc::CountingAlloc = sciart_testalloc::CountingAlloc;
+
 use std::process::ExitCode;
 
 use clap::Parser;

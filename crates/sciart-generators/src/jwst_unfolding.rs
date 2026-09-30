@@ -89,7 +89,8 @@ const DEPTH_EPS: f64 = 0.05;
 /// The gold of the mirror (beryllium coated in gold): the top of Ember, pale gold
 /// (level ~215 ≈ #E8C66A) to a near-white specular.
 const GOLD: Ramp = Ramp::Ember;
-const GOLD_LEVEL: f64 = 214.0;
+/// M14 (ADR-0017): a dim gold, the glint sweeping over it the bright accent.
+const GOLD_LEVEL: f64 = 200.0;
 /// Seconds between glints crossing the frame.
 const GLINT_PERIOD: f64 = 14.0;
 /// The honeycomb's dark gaps (pixels wide) and the backplane showing through them and
@@ -400,6 +401,8 @@ pub struct JwstUnfolding {
     scale: f64,
     /// `sin`, `cos` of the camera roll.
     roll: (f64, f64),
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl JwstUnfolding {
@@ -685,7 +688,7 @@ impl JwstUnfolding {
             [1.4, -1.0, 1.2],
         ];
         let array_poly = Poly {
-            ramp: Ramp::Cobalt,
+            ramp: Ramp::Starlight,
             level: 120.0,
             grad: (1.2, 0.0),
             ..Poly::default()
@@ -698,12 +701,13 @@ impl JwstUnfolding {
         let membrane = d.booms > 0.0;
         for k in 0..5 {
             let tension = d.layers[k];
+            // M14 (ADR-0017): a faint fill; the 1-px layer edges (below) carry the shape.
             let (ramp, base) = if !membrane {
-                (SILVER, 140.0 - 8.0 * k as f64)
+                (SILVER, 70.0 - 4.0 * k as f64)
             } else if k == 0 {
-                (SILVER, ease::lerp(172.0, 204.0, tension))
+                (SILVER, ease::lerp(48.0, 62.0, tension))
             } else {
-                (SILVER, ease::lerp(104.0, 136.0, tension) - 6.0 * k as f64)
+                (SILVER, ease::lerp(30.0, 42.0, tension) - 2.0 * k as f64)
             };
             for fore in [true, false] {
                 let q = Self::shield_half(&d, k, fore);
@@ -992,12 +996,18 @@ impl Generator for JwstUnfolding {
             let l = 18 + (hash01(cell_key(k, 47)).powi(4) * 150.0) as u8;
             self.stars.push((x, y, l));
         }
-        self.raster();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.raster();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.raster();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1067,6 +1077,7 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let wings_end: f64 = BEATS[..=B_WINGS].iter().map(|b| b.1).sum();
         let wings_len = BEATS[B_WINGS].1;
         // Folded, a wing hides behind the centre panel (the camera faces the mirror);
@@ -1078,6 +1089,7 @@ mod tests {
         ] {
             g.t = t;
             g.update(0.0, &mut ctx);
+            g.prepare();
             let d = g.state();
             let pr = g.projector();
             let ps = g.pixels.pixel_size();
@@ -1109,6 +1121,7 @@ mod tests {
         let mut ctx = Ctx::new(1, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         let tl = timeline();
         for i in 0..500 {
             g.t = f64::from(i) * 0.1;
@@ -1130,11 +1143,13 @@ mod tests {
             let mut ctx = Ctx::new(42, size);
             let mut g = JwstUnfolding::default();
             g.resize(size, &mut ctx);
+            g.prepare();
             // The end of the wings beat: fully deployed; no stars, so every bright
             // neutral pixel is the silver shield (or the bus under it).
             g.stars.clear();
             g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
             g.update(0.0, &mut ctx);
+            g.prepare();
             let ps = g.pixels.pixel_size();
             let (mut gold, mut pale, mut x0, mut x1) = (0, 0, i32::MAX, i32::MIN);
             for y in 0..i32::from(ps.height()) {
@@ -1142,9 +1157,10 @@ mod tests {
                     let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
                     if ink.role == Role::Ramp(GOLD) {
                         gold += 1;
-                        pale += usize::from(ink.level >= 190);
+                        // M14: a dim gold, most of it at 110 or more.
+                        pale += usize::from(ink.level >= 110);
                     }
-                    if ink.role == Role::Ramp(SILVER) && ink.level >= 90 {
+                    if ink.role == Role::Ramp(SILVER) && ink.level >= 40 {
                         (x0, x1) = (x0.min(x), x1.max(x));
                     }
                 }
@@ -1163,9 +1179,11 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         g.stars.clear();
         g.t = BEATS[..=B_WINGS].iter().map(|b| b.1).sum::<f64>() - 0.05;
         g.update(0.0, &mut ctx);
+        g.prepare();
         g
     }
 
@@ -1247,7 +1265,8 @@ mod tests {
                         ),
                         "{w}x{h}: pink/violet fill at {x},{y}"
                     );
-                    silver += usize::from(ink.role == Role::Ramp(SILVER) && ink.level >= 160);
+                    // M14: a faint silver fill (the edges are braille lines).
+                    silver += usize::from(ink.role == Role::Ramp(SILVER) && ink.level >= 40);
                 }
             }
             assert!(silver > 40, "{w}x{h}: silver top sheet {silver} px");
@@ -1262,9 +1281,11 @@ mod tests {
         let mut ctx = Ctx::new(42, size);
         let mut g = JwstUnfolding::default();
         g.resize(size, &mut ctx);
+        g.prepare();
         g.stars.clear();
         g.t = 5.0;
         g.update(0.0, &mut ctx);
+        g.prepare();
         let d = g.state();
         assert!(d.pallets < 0.3 && d.fairing == 1.0, "{d:?}");
         let pr = g.projector();

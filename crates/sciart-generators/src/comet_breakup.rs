@@ -192,6 +192,8 @@ pub struct CometBreakup {
     /// When the last fragment struck (s).
     last_strike: f64,
     pixels: Pixels,
+    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
+    dirty: bool,
 }
 
 impl CometBreakup {
@@ -227,6 +229,7 @@ impl CometBreakup {
             fire_tone: Tone::asinh(0.4, 3.0),
             last_strike: f64::NEG_INFINITY,
             pixels: Pixels::default(),
+            dirty: false,
         };
         g.reset();
         g
@@ -708,8 +711,21 @@ impl CometBreakup {
             };
             self.pixels.set(x, y, ink);
         }
+        // M14 (ADR-0017): the strike itself, a small white point at the limb for its
+        // first `STRIKE_WHITE` s, the frame's brightest accent.
+        if (0.0..STRIKE_WHITE).contains(&since) {
+            let (cx, cy) = v.px([site[0] * 1.03, site[1] * 1.03]);
+            let (x0, y0) = (cx.floor() as i32, cy.floor() as i32);
+            for (dx, dy) in [(0, 0), (-1, 0), (0, -1), (-1, -1)] {
+                self.pixels
+                    .set(x0 + dx, y0 + dy, Ink::new(Role::Ramp(Ramp::Starlight), 255));
+            }
+        }
     }
 }
+
+/// How long the strike's white point shows (s).
+const STRIKE_WHITE: f64 = 0.6;
 
 /// The Great Red Spot on the disc: planet longitude (rad), sine latitude, half-widths.
 const GRS_LON: f64 = 0.9;
@@ -847,14 +863,20 @@ impl Generator for CometBreakup {
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         self.frame = (f64::from(px.width()), f64::from(px.height()));
-        self.compose();
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt, &mut ctx.rng);
         }
-        self.compose();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.compose();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -879,6 +901,7 @@ mod tests {
         let mut g = CometBreakup::new();
         let mut ctx = Ctx::new(42, Size::new(100, 30));
         g.resize(Size::new(100, 30), &mut ctx);
+        g.prepare();
         (g, SplitMix64::new(9))
     }
 

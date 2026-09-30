@@ -71,6 +71,11 @@ impl FromStr for Mode {
 pub trait Backend {
     /// Short HUD string (KA-R5).
     fn status(&self) -> String;
+    /// The same text written into `out`, for the per-frame HUD (RT-R14). The default
+    /// allocates through [`Backend::status`]; the built-in backends write in place.
+    fn write_status(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        out.write_str(&self.status())
+    }
     /// Called once per frame with the elapsed wall seconds.
     fn poll(&mut self, elapsed: f64);
 }
@@ -96,6 +101,10 @@ impl Backend for Inert {
         self.0.clone()
     }
 
+    fn write_status(&self, out: &mut dyn fmt::Write) -> fmt::Result {
+        out.write_str(&self.0)
+    }
+
     fn poll(&mut self, _elapsed: f64) {}
 }
 
@@ -115,6 +124,14 @@ impl Guard {
 
     pub fn status(&self) -> String {
         self.backend.status()
+    }
+
+    /// Replace `out` with the status text, reusing its buffer (RT-R14: no allocation per
+    /// frame once `out` has grown to fit).
+    pub fn write_status(&self, out: &mut String) {
+        out.clear();
+        // Writing to a `String` cannot fail.
+        let _ = self.backend.write_status(out);
     }
 
     pub fn poll(&mut self, elapsed: f64) {
