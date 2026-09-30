@@ -22,7 +22,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::particles::gaussian;
 use sciart_core::prelude::*;
-use sciart_core::{draw, ease, ink, raster, title};
+use sciart_core::{draw, ease, raster, title};
 
 pub static META: Meta = Meta {
     name: "molecular_motors",
@@ -244,6 +244,28 @@ const TRAIL_S: f64 = 5.0;
 const CARGO_R: f64 = 9.0;
 const CARGO_Y: f64 = -18.0;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// Inks in M11's roles and flat steps (ADR-0018): kinesin `Particle` (the bound head
+/// brightest), its footprints fading in two steps; the microtubule and the cargo's
+/// membrane `Structure` lines; ATP `Sun` points; the synthase's β subunits `Hot` and α
+/// `Cold`, γ and its filament `Accent`, the substep ticks `Dim`.
+const ATP_INK: Ink = Ink::new(Role::Sun, 200);
+const TUBE_WALL: Ink = Ink::new(Role::Structure, 90);
+const TUBE_BETA: Ink = Ink::new(Role::Structure, 170);
+const TUBE_ALPHA: Ink = Ink::new(Role::Structure, 110);
+const MEMBRANE: Ink = Ink::new(Role::Structure, 150);
+const FOOTPRINTS: [Ink; 2] = [Ink::new(Role::Particle, 70), Ink::new(Role::Particle, 130)];
+const TETHER: Ink = Ink::new(Role::Particle, 110);
+/// The two heads in two colours (`Particle` and `Wave`), so hand-over-hand stepping
+/// reads: each bright while bound, a step dimmer while it swings free.
+const HEADS: [[Ink; 2]; 2] = [
+    [Ink::new(Role::Particle, 140), Ink::new(Role::Particle, 215)],
+    [Ink::new(Role::Wave, 140), Ink::new(Role::Wave, 215)],
+];
+const BETA: Ink = Ink::new(Role::Hot, 200);
+const ALPHA: Ink = Ink::new(Role::Cold, 170);
+const ROTOR: Ink = Ink::new(Role::Accent, 240);
+const GHOST: Ink = Ink::new(Role::Accent, 100);
+const TICKS: [Ink; 2] = [Ink::new(Role::Dim, 100), Ink::new(Role::Dim, 160)];
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Dot {
@@ -313,52 +335,28 @@ fn atp_at(t: f64) -> f64 {
         .map_or(ATP_STEPS[0].1, |s| s.1)
 }
 
-/// Blend `level` in `role` into pixel `(x, y)` by `cover`: over blank or same-ramp pixels
-/// the levels mix (the ramps run to near-black, so this reads as partial coverage); over
-/// another ramp the pixel is taken only when mostly covered.
-fn blend(px: &mut Pixels, x: i32, y: i32, cover: f64, role: Role, level: f64) {
-    let Some(under) = px.get(x, y) else {
-        return;
-    };
-    let base = if under.role == role {
-        f64::from(under.level)
-    } else if under.role == Role::Background || cover >= 0.5 {
-        0.0
-    } else {
-        return;
-    };
-    let cover = if under.role == role || under.role == Role::Background {
-        cover
-    } else {
-        1.0
-    };
-    px.set(
-        x,
-        y,
-        Ink::new(role, ink::level(base + (level - base) * cover)),
-    );
-}
-
-/// An antialiased, shaded disc: `level(shade, d)` with `shade` in `[0, 1]` (lit from the
-/// upper left) and `d` the distance from the centre over `r`.
-fn soft_disc(
-    px: &mut Pixels,
-    c: (f64, f64),
-    r: f64,
-    role: Role,
-    mut level: impl FnMut(f64, f64) -> f64,
-) {
+/// A flat disc: every pixel at least half inside takes `ink`.
+fn flat_disc(px: &mut Pixels, c: (f64, f64), r: f64, ink: Ink) {
     raster::disc_pixels(c, r, |x, y, cover| {
-        let (ox, oy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
-        let shade = 0.5 + 0.5 * (-(ox + oy) / (r * 1.5 + 1.0)).clamp(-1.0, 1.0);
-        let l = level(shade, ox.hypot(oy) / r.max(0.5));
-        blend(px, x, y, cover, role, l);
+        if cover >= 0.5 {
+            px.set(x, y, ink);
+        }
     });
 }
 
-/// An antialiased stroke of half-width `hw` pixels from `a` to `b`: coverage from the
-/// distance to the segment, so a thin rod is smooth at any angle.
-fn soft_segment(px: &mut Pixels, a: (f64, f64), b: (f64, f64), hw: f64, ink: Ink) {
+/// A flat 1-px ring: the disc's pixels within about a pixel of its rim.
+fn flat_ring(px: &mut Pixels, c: (f64, f64), r: f64, ink: Ink) {
+    raster::disc_pixels(c, r, |x, y, cover| {
+        let (ox, oy) = (f64::from(x) + 0.5 - c.0, f64::from(y) + 0.5 - c.1);
+        if cover >= 0.5 && ox.hypot(oy) > r - 1.2 {
+            px.set(x, y, ink);
+        }
+    });
+}
+
+/// A flat stroke of half-width `hw` pixels from `a` to `b`: every pixel whose centre lies
+/// within `hw + ¼` of the segment, so even a thin rod is an unbroken 1-px line.
+fn flat_segment(px: &mut Pixels, a: (f64, f64), b: (f64, f64), hw: f64, ink: Ink) {
     let reach = hw + 1.0;
     let (x0, x1) = (a.0.min(b.0) - reach, a.0.max(b.0) + reach);
     let (y0, y1) = (a.1.min(b.1) - reach, a.1.max(b.1) + reach);
@@ -371,10 +369,8 @@ fn soft_segment(px: &mut Pixels, a: (f64, f64), b: (f64, f64), hw: f64, ink: Ink
         for x in x0.floor() as i32..=x1.ceil() as i32 {
             let (qx, qy) = (f64::from(x) + 0.5 - a.0, f64::from(y) + 0.5 - a.1);
             let t = ((qx * dx + qy * dy) / len2).clamp(0.0, 1.0);
-            let d = (qx - t * dx).hypot(qy - t * dy);
-            let cover = (hw + 0.5 - d).clamp(0.0, 1.0);
-            if cover > 0.0 {
-                blend(px, x, y, cover, ink.role, f64::from(ink.level));
+            if (qx - t * dx).hypot(qy - t * dy) <= hw + 0.25 {
+                px.set(x, y, ink);
             }
         }
     }
@@ -506,22 +502,22 @@ impl Motors {
             // Not on or inside the tube (M14: the tube is only its walls, so its inside
             // would otherwise show molecules through it).
             if y < track_y - 7.0 * s {
-                self.pixels
-                    .set(x as i32, y as i32, Ink::new(Role::Ramp(Ramp::Sulfur), 110));
+                self.pixels.set(x as i32, y as i32, ATP_INK);
             }
         }
-        // Microtubule (M14, ADR-0017): a thin lattice, not a row of shaded balls. The tube's
-        // two walls are 1-px grey lines, and the track's surface row carries one pixel per
-        // 4 nm tubulin monomer, β paler than α, so the 8 nm dimer rhythm the heads step
-        // along still reads and moves with the track.
-        let tube = Role::Ramp(Ramp::Starlight);
-        let (y_top, y_bot) = (
-            to_px(0.0, 2.4, cam).1,
-            to_px(0.0, 14.6, cam).1.min(ph - 1.0),
-        );
+        // Microtubule: a thin lattice, not a row of shaded balls. The tube's two walls
+        // are 1-px lines, and the track's surface row carries one pixel per 4 nm tubulin
+        // monomer, β paler than α, so the 8 nm dimer rhythm the heads step along still
+        // reads and moves with the track.
+        // The far wall only when it falls inside the art rows: clamped to the bottom it
+        // read as a frame rule over the title.
+        let (y_top, y_bot) = (to_px(0.0, 2.4, cam).1, to_px(0.0, 14.6, cam).1);
+        let far_wall = y_bot < ph - 1.0;
         for px in 0..i32::from(ps.width()) {
-            self.pixels.set(px, y_top as i32, Ink::new(tube, 60));
-            self.pixels.set(px, y_bot as i32, Ink::new(tube, 40));
+            self.pixels.set(px, y_top as i32, TUBE_WALL);
+            if far_wall {
+                self.pixels.set(px, y_bot as i32, TUBE_WALL);
+            }
         }
         let first = ((cam - pw / 2.0 / s) / 4.0).floor() as i64 - 3;
         let last = ((cam + pw / 2.0 / s) / 4.0).ceil() as i64 + 3;
@@ -529,25 +525,16 @@ impl Motors {
             let x = k as f64 * 4.0 + 2.0;
             let beta = k.rem_euclid(2) == 0;
             let (px, _) = to_px(x, 0.0, cam);
-            self.pixels.set(
-                px as i32,
-                y_top as i32 + 1,
-                Ink::new(tube, if beta { 110 } else { 70 }),
-            );
+            let ink = if beta { TUBE_BETA } else { TUBE_ALPHA };
+            self.pixels.set(px as i32, y_top as i32 + 1, ink);
         }
-        // Footprints: each site a head bound to glows faintly and fades, so the walk
+        // Footprints: each site a head bound to shows and fades in two steps, so the walk
         // leaves a trail of 8 nm steps along the track.
         for &(x, at) in &self.trail[..self.trail_len] {
             let age = (self.time - at) / TRAIL_S;
             if (0.0..1.0).contains(&age) {
-                let glow = 40.0 + 60.0 * (1.0 - age).powi(2);
-                soft_disc(
-                    &mut self.pixels,
-                    to_px(x, 3.4, cam),
-                    1.0 * s,
-                    Role::Ramp(Ramp::Aurora),
-                    |_, d| glow * (1.0 - 0.4 * d),
-                );
+                let ink = FOOTPRINTS[usize::from(age < 0.4)];
+                flat_disc(&mut self.pixels, to_px(x, 3.4, cam), 1.0 * s, ink);
             }
         }
         // Cargo, tether (coiled coil) and heads.
@@ -558,44 +545,24 @@ impl Motors {
             0.5 * (heads[0][1] + heads[1][1]) - 6.5,
         );
         let (cx, cy) = to_px(self.cargo[0], self.cargo[1], cam);
-        // The cargo: a vesicle. A lipid bilayer (a bright, cool membrane), a dark lumen
-        // speckled with its cargo molecules, and a soft highlight at the upper left.
+        // The cargo: a vesicle, drawn as its membrane only, a thin ring; the lumen is
+        // left black.
         let r = CARGO_R * s;
-        raster::disc_pixels((cx, cy), r, |x, y, cover| {
-            let (ox, oy) = (f64::from(x) + 0.5 - cx, f64::from(y) + 0.5 - cy);
-            let d = ox.hypot(oy) / r;
-            let light = 0.5 + 0.5 * (-(ox + oy) / (1.5 * r)).clamp(-1.0, 1.0);
-            let bump = |c: f64, w: f64| (-((d - c) / w).powi(2)).exp();
-            let leaflet = bump(0.91, 0.075);
-            // M14: the membrane only, a thin grey ring; the lumen is left black.
-            if leaflet > 0.3 {
-                let lvl = (50.0 + 60.0 * light) * leaflet.min(1.0);
-                blend(&mut self.pixels, x, y, cover, tube, lvl);
-            }
-        });
-        let tether = Ink::new(Role::Ramp(Ramp::Aurora), 90);
+        flat_ring(&mut self.pixels, (cx, cy), r, MEMBRANE);
         let hip_px = to_px(hip.0, hip.1, cam);
-        soft_segment(
+        flat_segment(
             &mut self.pixels,
             hip_px,
             (cx + 0.55 * r, cy + 0.72 * r),
             0.45,
-            tether,
+            TETHER,
         );
         for (i, h) in heads.iter().enumerate() {
             let bound = k.free.is_none_or(|(f, _)| f != i);
             let (x, y) = to_px(h[0], h[1], cam);
-            soft_segment(&mut self.pixels, hip_px, (x, y), 0.45, tether);
-            // M14: dim Aurora heads, the bound one a little brighter.
-            let top = if bound { 170.0 } else { 130.0 };
-            soft_disc(
-                &mut self.pixels,
-                (x, y),
-                3.2 * s,
-                Role::Ramp(Ramp::Aurora),
-                // A small specular glint on the lit side carries the legibility (rule 6).
-                |l, _| top * (0.55 + 0.45 * l) + 85.0 * l.powi(4),
-            );
+            flat_segment(&mut self.pixels, hip_px, (x, y), 0.45, TETHER);
+            let ink = HEADS[i][usize::from(bound)];
+            flat_disc(&mut self.pixels, (x, y), 3.2 * s, ink);
         }
     }
 
@@ -608,55 +575,38 @@ impl Motors {
         for j in 0..6 {
             let a = f64::from(j) * PI / 3.0 + PI / 6.0;
             let (s, co) = a.sin_cos_det();
-            let beta = j % 2 == 0;
-            let lvl = if beta { 175.0 } else { 120.0 };
-            soft_disc(
-                &mut self.pixels,
-                (c.0 + r * co, c.1 + r * s),
-                r * 0.52,
-                Role::Ramp(Ramp::Starlight),
-                |l, _| lvl * (0.5 + 0.5 * l),
-            );
+            let ink = if j % 2 == 0 { BETA } else { ALPHA };
+            flat_ring(&mut self.pixels, (c.0 + r * co, c.1 + r * s), r * 0.52, ink);
         }
         // γ and the actin filament stuck to it (Noji et al. 1997), turning clockwise as
         // seen from the membrane side: the synthesis sense.
         let (gx, gy) = gamma_dir(self.rotor.shown());
-        let rotor = Ink::new(Role::Ramp(Ramp::Plasma), 150);
-        soft_disc(
-            &mut self.pixels,
-            c,
-            r * 0.3,
-            Role::Ramp(Ramp::Plasma),
-            |l, _| 90.0 + 90.0 * l,
-        );
+        flat_disc(&mut self.pixels, c, r * 0.3, ROTOR);
         let tip = (c.0 + 2.6 * r * gx, c.1 + 2.6 * r * gy);
         // While γ turns, a fading ghost of the filament sweeps behind it (motion blur).
         if let Some(t) = self.rotor.turning {
             let (bx, by) = gamma_dir(self.rotor.shown() - 25.0 * (1.0 - t / TURN_S));
-            let ghost = Ink::new(Role::Ramp(Ramp::Plasma), 70);
-            soft_segment(
+            flat_segment(
                 &mut self.pixels,
                 c,
                 (c.0 + 2.6 * r * bx, c.1 + 2.6 * r * by),
-                0.8,
-                ghost,
+                0.5,
+                GHOST,
             );
         }
-        soft_segment(&mut self.pixels, c, tip, 1.0, rotor);
+        flat_segment(&mut self.pixels, c, tip, 0.8, ROTOR);
         // Tick marks every 40°, the substep positions.
         for k in 0..9 {
             let (dx, dy) = gamma_dir(f64::from(k) * 40.0);
-            let lvl = if k % 3 == 0 { 120 } else { 60 };
             self.pixels.set(
                 (c.0 + 2.9 * r * dx) as i32,
                 (c.1 + 2.9 * r * dy) as i32,
-                Ink::new(Role::Ramp(Ramp::Starlight), lvl),
+                TICKS[usize::from(k % 3 == 0)],
             );
         }
         for d in &self.dots {
             let (x, y) = (c.0 + d.x * pw * 0.5, c.1 + d.y * ph * 0.5);
-            self.pixels
-                .set(x as i32, y as i32, Ink::new(Role::Ramp(Ramp::Sulfur), 190));
+            self.pixels.set(x as i32, y as i32, ATP_INK);
         }
     }
 
@@ -685,10 +635,10 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         }
     };
     let ch = match ink.role {
-        Role::Ramp(Ramp::Aurora) if ink.level > 150 => '@',
-        Role::Ramp(Ramp::Aurora) => '|',
-        Role::Ramp(Ramp::Sulfur) => '*',
-        Role::Ramp(Ramp::Plasma) => '#',
+        Role::Particle if ink.level > 150 => '@',
+        Role::Particle => '|',
+        Role::Sun => '*',
+        Role::Accent => '#',
         _ if ink.level > 110 => 'o',
         _ => '.',
     };
@@ -902,5 +852,46 @@ mod tests {
             g.prepare();
         }
         assert_eq!(g.caption(), Some("kinesin walks"));
+    }
+
+    #[test]
+    fn kin_a8_flat_semantic_inks_on_black() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(8, size);
+        let mut g = Motors::default();
+        g.resize(size, &mut ctx);
+        let inks = [
+            ATP_INK,
+            TUBE_WALL,
+            TUBE_BETA,
+            TUBE_ALPHA,
+            MEMBRANE,
+            FOOTPRINTS[0],
+            FOOTPRINTS[1],
+            TETHER,
+            HEADS[0][0],
+            HEADS[0][1],
+            HEADS[1][0],
+            HEADS[1][1],
+            BETA,
+            ALPHA,
+            ROTOR,
+            GHOST,
+            TICKS[0],
+            TICKS[1],
+        ];
+        for t in [5.0, 20.0, KINESIN_S + 6.0] {
+            while g.time < t {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            let ps = g.pixels.pixel_size();
+            for y in 0..i32::from(ps.height()) {
+                for x in 0..i32::from(ps.width()) {
+                    let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                    assert!(ink == Ink::BLANK || inks.contains(&ink), "t {t}: {ink:?}");
+                }
+            }
+        }
     }
 }

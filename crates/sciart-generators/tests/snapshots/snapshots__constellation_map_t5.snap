@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-         .            . .                                                       
-                  . .      .                                                    
-            .                       .:..                                        
-   .                             .::..  .:.            .                        
-        .               .       @. Betelgeuse                                   
-         ..     .                +.        .                                    
-                                  +       +.                      .             
-.                    .            .+     .+                                .    
-                                   :: .  +                                      
-             .                      +.   *                                  .   
-   .    .      .                     . * ..      . .                            
-             . .                     *    +.                                    
-                                    ::     ::                                   
-                        .           +       ::                                  
-                                    +        .+                                 
-                   .               +.          @                                
-   .             .                 *     .                                      
-                                                                                
-                                   O R I O N                                    
-                                   the Hunter                                   
-                                                                                
-                                                                                
-      .                                  .                                      
- Constellations - star patterns
+                                             .                                  
+                                                            .                   
+                                      -.                                        
+                .                  ---  \                                       
+                 .              ---      \\                                .    
+                              @-Betelgeuse \                      . .           
+                               \            *                             .     
+                         .      \          /                                    
+                                 \         /                                    
+                                  \       /                                     
+      .        .                  \       /               .                     
+                                   \     /                                   .  
+                                    \    +                                      
+                                     *-*/ \                                     
+   .                                /.     \                     .              
+  .             .          .        /       \                                   
+        .        .                 /     .   \\                                 
+                                   /           \  .                             
+                               .  /             \                               
+                                  /              @                      .       
+                                 / O R I O N                                 .  
+                                 + the Hunter                                   
+                .                                                               
+ Constellations - ancient figures

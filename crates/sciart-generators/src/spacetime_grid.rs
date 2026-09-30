@@ -1,7 +1,6 @@
-//! The rubber-sheet picture of a binary black-hole merger: a perspective braille mesh
-//! dimpled by an inspiralling pair, quadrupole gravitational waves spreading outward at a
-//! finite speed, a plunge, a single remnant ringing down, and a strain inset drawing the
-//! chirp (SPEC-002 `spacetime_grid`).
+//! The rubber-sheet picture of general relativity: a perspective mesh dimpled by an
+//! inspiralling binary, with quadrupole gravitational waves spreading outward at a finite
+//! speed (SPEC-002 `spacetime_grid`).
 //!
 //! World units: the sheet spans `y ∈ [-1, 1]` (far edge at `+1`) and `x ∈ [-Lx, Lx]`, with
 //! `Lx` widened to fill wide terminals; `z` points up, so wells are negative.
@@ -9,156 +8,71 @@
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
-use sciart_core::geom::ASPECT;
+use sciart_core::draw;
+use sciart_core::geom::{self, ASPECT};
 use sciart_core::prelude::*;
-use sciart_core::timeline::ease;
-use sciart_core::{draw, ink, raster, title};
 
 pub static META: Meta = Meta {
     name: "spacetime_grid",
     category: Category::DeepCosmos,
-    description: "A rubber-sheet spacetime rippled by a binary black hole that spirals in and merges",
-    title: "Spacetime waves · orbits shrink",
-    captions: &[MERGER, RINGDOWN],
+    description: "A rubber-sheet spacetime dimpled by an orbiting binary emitting gravitational waves",
+    title: "Gravitational waves · inspiral",
+    captions: &[],
 };
-
-const MERGER: &str = "merger";
-const RINGDOWN: &str = "ringdown";
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(SpacetimeGrid::default())
 }
 
-/// Depth scale of the softened potential `z = -K Σ m / √(d² + ε²)`: deep enough that the
-/// mesh visibly funnels into each mass (SPT-A9).
-const WELL_K: f64 = 0.16;
+/// Depth scale of the softened potential `z = -K Σ m / √(d² + ε²)`.
+const WELL_K: f64 = 0.1;
 /// Constant lift (per unit mass) that puts the sheet near `z = 0` around `r ≈ 1`, so the
 /// camera fit sees the sheet rather than the far-field bowl.
 const RIM_LIFT: f64 = WELL_K / 1.1;
 /// Plummer softening: keeps the well bottom finite (and the mesh on screen).
-const SOFTENING: f64 = 0.16;
-/// The lowest the lifted sheet gets, the remnant's well bottom, for the camera fit:
-/// `−(K/ε)·0.95 (m₁ + m₂) + RIM_LIFT (m₁ + m₂)` (the near zone carries no wave).
-const DEEPEST: f64 = {
-    let m = Binary::DEFAULT.m1 + Binary::DEFAULT.m2;
-    -(WELL_K / SOFTENING) * (1.0 - RADIATED) * m + RIM_LIFT * m
-};
-/// Gravitational-wave speed `c` in sheet units per simulated second. Artistic: a real
-/// binary radiates at wavelengths far longer than its orbit; here `λ = πc/Ω` stays above
-/// the mesh spacing from the first orbit to the ringdown.
-const WAVE_SPEED: f64 = 0.35;
-/// Wave amplitude per unit strain (sheet units).
-const WAVE_AMP: f64 = 0.08;
+const SOFTENING: f64 = 0.25;
+/// Gravitational-wave speed `c` in sheet units per simulated second. Artistic: a real binary
+/// radiates at wavelengths far larger than its orbit; here `λ = πc/Ω₀ ≈ 0.75` so the
+/// two-armed spiral fits on the sheet while spanning several mesh spacings (no aliasing).
+const WAVE_SPEED: f64 = 0.3;
+/// Wave amplitude at the start of an inspiral cycle (sheet units, times the envelope).
+const WAVE_AMP: f64 = 0.015;
 /// Near-zone taper radius: the wave term fades inside it, where the wells dominate.
 const TAPER: f64 = 0.5;
-
-/// The merger: the inspiral ends at `Q_MERGE · a₀`, the plunge takes `PLUNGE` s while the
-/// orbital speed doubles, the strain peaks at `PEAK_GAIN` times its inspiral end value,
-/// then the remnant rings down with e-folding time `TAU_RD` at `RD_SPEED` times the peak
-/// orbital speed. `RADIATED` of the mass leaves as waves (GW150914: ~5 %).
-const Q_MERGE: f64 = 0.5;
-const PLUNGE: f64 = 0.5;
-const PEAK_GAIN: f64 = 2.2;
-const TAU_RD: f64 = 0.35;
-const RD_SPEED: f64 = 1.2;
-const RADIATED: f64 = 0.05;
-/// Time after the merger before the cut (about the sheet's half-depth over `c`, so the
-/// burst band is still crossing the outer sheet at the cut), the caption's ringdown
-/// window, and the brief dip at the cut: `DIP` s each side, down to `DIP_FLOOR` of full
-/// brightness, never to black (SPT-A11).
-const QUIET: f64 = 2.5;
-const RINGDOWN_SHOWN: f64 = 2.5;
-const DIP: f64 = 0.3;
-const DIP_FLOOR: f64 = 0.5;
-/// Largest `u = 1 − τ/τc` of the backward-extrapolated chirp (SPT-A11): far beyond any
-/// retarded time on the sheet (`r/c < 10 s`, `u < 1.7`), it only bounds the cost.
-const U_MAX: f64 = 4.0;
-/// The `merger` caption opens this long before the plunge and stays this long after
-/// coalescence, so it can be read (SPT-A7).
-const MERGER_LEAD: f64 = 0.5;
-const MERGER_TAIL: f64 = 0.5;
-/// The merger flash: e-folding time after coalescence (s) and the mesh brightening at
-/// its peak (SPT-A8).
-const FLASH_TAU: f64 = 0.3;
-const FLASH_GAIN: f64 = 0.6;
 
 /// Camera pitch below the horizon and distance from the sheet centre.
 const PITCH: f64 = 55.0 * PI / 180.0;
 const CAM_DIST: f64 = 3.4;
 /// Slow yaw sway: amplitude (radians) and period (s). Small enough that the `+y` edge
-/// always stays the far edge.
+/// always stays the far edge, which the band-ordered painter relies on.
 const YAW_AMP: f64 = 0.05;
 const YAW_PERIOD: f64 = 47.0;
 
 /// Mesh line spacing targets (cells) and samples per mesh edge along each line.
-const COLS_PER_LINE: u16 = 7;
-const ROWS_PER_LINE: f64 = 2.8;
+const COLS_PER_LINE: u16 = 8;
+const ROWS_PER_LINE: f64 = 3.4;
 const SUB_X: usize = 3;
-const SUB_Y: usize = 3;
-const MAX_NX: usize = 90;
-const MAX_NY: usize = 48;
+const SUB_Y: usize = 2;
+const MAX_NX: usize = 72;
+const MAX_NY: usize = 40;
 
-/// Mesh inks, `Seq` (inferno-like in astro): a dim purple resting level, raised where
-/// the sheet dips into a well; wave crests climb towards magenta and orange by
-/// `CREST_LIFT` (troughs dim by `TROUGH_DIM`), and the wave's energy density `∝ ḣ²`
-/// adds `BURST_LIFT` per unit of `(f S Ω)²` normalised to the end of the inspiral, so
-/// the late chirp and the merger burst travel out as bands of light (SPT-A10). `CREST_FULL` is the crest height `crest · envn` that counts as full.
-/// Nearness only shades the level by up to `NEAR_SHADE`, and the foreground edge fades.
-/// M14 (ADR-0017): a neutral `Starlight` mesh at 75 resting, brightening only on the wave
-/// crests and the burst (not the inferno ramp).
-const MESH_ROLE: Role = Role::Ramp(Ramp::Starlight);
-const REST: f64 = 75.0;
-const WELL_GLOW: f64 = 30.0;
-const TROUGH_DIM: f64 = 0.3;
-const CREST_LIFT: f64 = 130.0;
-const CREST_FULL: f64 = 0.5;
-const BURST_LIFT: f64 = 170.0;
-const NEAR_SHADE: f64 = 0.3;
-const EDGE_FADE: f64 = 0.55;
-/// The mesh's brightest level, and its cap near a black hole: two-thirds of the rim's
-/// 255 within `NEAR_HOLE.0` moat radii, easing up to `MESH_MAX` by `NEAR_HOLE.1`, so the
-/// rims win in their funnels in every theme (SPT-A9).
-const MESH_MAX: f64 = 210.0;
-const NEAR_MAX: f64 = 160.0;
-const NEAR_HOLE: (f64, f64) = (2.5, 3.5);
+/// Classification thresholds for inks.
+const COLD_DEPTH: f64 = -0.34;
+const CREST: f64 = 0.6;
+const CREST_ENV: f64 = 0.3;
 
-/// The masses: horizon-like radius per cube root of mass (sheet units; at least
-/// `BODY_MIN` dots, so the dark core shows), the dark moat round the rim that the mesh
-/// and trails keep out of (in disc radii), and orbit trail length (s) and samples.
-const BODY_R: f64 = 0.12;
-const BODY_MIN: f64 = 2.5;
-const MOAT: f64 = 1.4;
-const TRAIL: f64 = 1.0;
-const TRAIL_N: usize = 16;
-
-/// Strain inset: seconds shown, its size in cells, and the smallest canvas that has one.
-const INSET_WINDOW: f64 = 4.0;
-const INSET_ROWS: u16 = 3;
-/// M14 (ADR-0017): the inset is retired, so no canvas gets one.
-const INSET_MIN: (u16, u16) = (u16::MAX, u16::MAX);
-/// The strain trace's level runs from `TRACE_LEVELS.0` (quiet) to `.1` at the merger peak,
-/// so the chirp brightens as it grows.
-const TRACE_LEVELS: (f64, f64) = (110.0, 255.0);
-const INSET_AXIS: Ink = Ink::new(Role::Ramp(Ramp::Aurora), 60);
-const INSET_LABEL: &str = "strain";
-
-/// Blackbody temperatures of the heavier and lighter mass's rim, and of the remnant's
-/// (K): a hot rim round a dark core, graded by a cooler one-pixel halo ring at `HALO_K`
-/// of the rim's temperature (≥ 8 750 K: still white-blue, so each marker reads as one cold beacon
-/// rather than a warm star), which warms and brightens with the merger flash. Trails take
-/// one cold hue, `TRAIL_ROLE`, and fade by level only (`TRAIL_LEVELS`), since a
-/// Blackbody level is a temperature. They only mark the black holes, which emit no light
-/// (stylised, SPEC-002).
-const HOT: [f64; 2] = [30_000.0, 25_000.0];
-const REMNANT_K: f64 = 30_000.0;
-const HALO_K: f64 = 0.35;
-const TRAIL_ROLE: Role = Role::Ramp(Ramp::Ice);
-const TRAIL_LEVELS: (f64, f64) = (40.0, 150.0);
+const H: Glyph = Glyph::new('─', '-');
+const V: Glyph = Glyph::new('│', '|');
+const UP: Glyph = Glyph::new('╱', '/');
+const DOWN: Glyph = Glyph::new('╲', '\\');
+const CROSS: Glyph = Glyph::new('┼', '+');
+const XCROSS: Glyph = Glyph::new('╳', 'X');
+const SPHERE: [Glyph; 3] = [Glyph::ascii('@'), Glyph::ascii('O'), Glyph::ascii('o')];
 
 /// A circular binary, optionally on a quadrupole-driven inspiral (Peters 1964, Newtonian
 /// chirp): `a(τ) = a₀(1 − τ/τc)^¼`, hence by Kepler `Ω = Ω₀(1 − τ/τc)^-⅜` and
-/// `Φ(τ) = Φ₀ + (8/5)Ω₀τc[1 − (1 − τ/τc)^⅝]`. Each cycle runs inspiral → plunge →
-/// remnant ringdown → quiet, then restarts (SPEC-002).
+/// `Φ(τ) = Φ₀ + (8/5)Ω₀τc[1 − (1 − τ/τc)^⅝]`. Each cycle stops at `a = q_end·a₀` and
+/// restarts; the phase stays continuous so the emitted wave train has no seam.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Binary {
     pub m1: f64,
@@ -166,28 +80,9 @@ pub(crate) struct Binary {
     pub a0: f64,
     pub omega0: f64,
     pub tau_c: f64,
+    pub q_end: f64,
     pub phase0: f64,
     pub inspiral: bool,
-}
-
-/// The source at one instant.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Source {
-    /// Separation (0 once merged) and orbital phase.
-    pub a: f64,
-    pub phase: f64,
-    /// Strain envelope (1 at the start of the inspiral) and pattern phase: the wave is
-    /// `S cos 2(φ − Ψ)`.
-    pub strain: f64,
-    pub pattern: f64,
-    /// `dΨ/dt`: the orbital speed, then the ringdown pattern speed.
-    pub speed: f64,
-    /// Mass still in the pair (drops by `RADIATED` through the plunge), and whether the
-    /// pair has merged into one remnant.
-    pub mass_scale: f64,
-    pub merged: bool,
-    /// Seconds into the cycle.
-    pub tau: f64,
 }
 
 impl Binary {
@@ -195,307 +90,56 @@ impl Binary {
         m1: 1.0,
         m2: 0.65,
         a0: 0.55,
-        omega0: TAU / 4.0,
-        tau_c: 15.0,
+        omega0: TAU / 5.0,
+        tau_c: 30.0,
+        q_end: 0.55,
         phase0: 0.0,
         inspiral: true,
     };
 
-    /// Inspiral duration (to `a = Q_MERGE a₀`).
-    fn inspiral_time(&self) -> f64 {
-        self.tau_c * (1.0 - Q_MERGE.powi(4))
-    }
-
-    /// Seconds from cycle start to coalescence.
-    fn merge_time(&self) -> f64 {
-        self.inspiral_time() + PLUNGE
-    }
-
     fn cycle(&self) -> f64 {
-        self.merge_time() + QUIET
+        self.tau_c * (1.0 - self.q_end.powi(4))
     }
 
-    /// Orbital speed at the end of the inspiral.
-    fn omega_merge(&self) -> f64 {
-        self.omega0 * Q_MERGE.powf(-1.5)
-    }
-
-    /// Index of the cycle holding time `t` (any sign).
-    fn cycle_of(&self, t: f64) -> f64 {
-        (t / self.cycle()).floor()
-    }
-
-    /// The source at time `t` (any sign; the cycle repeats).
-    pub(crate) fn state(&self, t: f64) -> Source {
-        let k = self.cycle_of(t);
-        let tau = (t - k * self.cycle()).clamp(0.0, self.cycle());
-        self.in_cycle(k, tau, t)
-    }
-
-    /// The source as the waves see it at retarded time `t_ret` while the scene is at
-    /// `t_now` (SPT-A11): the current cycle's binary, whose inspiral, for retarded times
-    /// before the cycle began, is the same Peters chirp extrapolated backwards (`τ < 0`,
-    /// `u = 1 − τ/τc > 1`). The new binary has always been inspiralling: the cut between
-    /// cycles is a scene cut, not a switch-on.
-    pub(crate) fn wave_state(&self, t_ret: f64, t_now: f64) -> Source {
-        let k = self.cycle_of(t_now);
-        let tau = (t_ret - k * self.cycle()).min(self.cycle());
-        self.in_cycle(k, tau, t_ret)
-    }
-
-    /// The source `tau` s into cycle `k` (`tau < 0` extrapolates the inspiral back); `t`
-    /// is the absolute time, for the non-inspiralling binary.
-    fn in_cycle(&self, k: f64, tau: f64, t: f64) -> Source {
+    /// `(separation, orbital phase)` at time `t` (any sign; the inspiral repeats).
+    pub(crate) fn state(&self, t: f64) -> (f64, f64) {
         if !self.inspiral {
-            let phase = self.phase0 + self.omega0 * t;
-            return Source {
-                a: self.a0,
-                phase,
-                strain: 1.0,
-                pattern: phase,
-                speed: self.omega0,
-                mass_scale: 1.0,
-                merged: false,
-                tau: t,
-            };
+            return (self.a0, self.phase0 + self.omega0 * t);
         }
-        // Each cycle's binary starts at a new angle.
-        let phase0 = self.phase0 + 1.3 * k;
+        let cycle = self.cycle();
+        let k = (t / cycle).floor();
+        let tau = (t - k * cycle).clamp(0.0, cycle);
+        let u = 1.0 - tau / self.tau_c;
+        let (s2, s4) = (u.sqrt(), u.sqrt().sqrt());
         let chirp = 1.6 * self.omega0 * self.tau_c;
-        let (t_i, t_m) = (self.inspiral_time(), self.merge_time());
-        let (w_m, phase_m) = (
-            self.omega_merge(),
-            phase0 + chirp * (1.0 - Q_MERGE.powf(2.5)),
-        );
-        if tau <= t_i {
-            let u = (1.0 - tau / self.tau_c).min(U_MAX);
-            let (s2, s4) = (u.sqrt(), u.sqrt().sqrt());
-            // u^⅝ = u^½ · u^⅛
-            let phase = phase0 + chirp * (1.0 - s2 * s4.sqrt());
-            return Source {
-                a: self.a0 * s4,
-                phase,
-                strain: 1.0 / s4,
-                pattern: phase,
-                speed: self.omega0 / (s4 * s4.sqrt()),
-                mass_scale: 1.0,
-                merged: false,
-                tau,
-            };
-        }
-        let strain_m = 1.0 / Q_MERGE;
-        if tau < t_m {
-            // Plunge: a = a_m (1 − s²) → 0, Ω = Ω_m (1 + s).
-            let s = (tau - t_i) / PLUNGE;
-            let phase = phase_m + w_m * PLUNGE * (s + 0.5 * s * s);
-            return Source {
-                a: self.a0 * Q_MERGE * (1.0 - s * s),
-                phase,
-                strain: strain_m * (1.0 + (PEAK_GAIN - 1.0) * s * s),
-                pattern: phase,
-                speed: w_m * (1.0 + s),
-                mass_scale: 1.0 - RADIATED * s,
-                merged: false,
-                tau,
-            };
-        }
-        let since = tau - t_m;
-        let phase = phase_m + 1.5 * w_m * PLUNGE;
-        Source {
-            a: 0.0,
-            phase,
-            strain: strain_m * PEAK_GAIN * (-since / TAU_RD).exp(),
-            pattern: phase + RD_SPEED * 2.0 * w_m * since,
-            speed: RD_SPEED * 2.0 * w_m,
-            mass_scale: 1.0 - RADIATED,
-            merged: true,
-            tau,
-        }
+        let per_cycle = chirp * (1.0 - self.q_end.powf(2.5));
+        // u^⅝ = u^½ · u^⅛
+        let within = chirp * (1.0 - s2 * s4.sqrt());
+        (self.a0 * s4, self.phase0 + k * per_cycle + within)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn separation(&self, t: f64) -> f64 {
+        self.state(t).0
+    }
+
+    #[cfg(test)]
+    pub(crate) fn phase(&self, t: f64) -> f64 {
+        self.state(t).1
     }
 
     /// Mass positions about the fixed centre of mass at the origin (SPT-A2).
     pub(crate) fn positions(&self, t: f64) -> [(f64, f64); 2] {
-        let s = self.state(t);
+        let (a, ph) = self.state(t);
         let m = self.m1 + self.m2;
-        let (r1, r2) = (s.a * self.m2 / m, s.a * self.m1 / m);
-        let (sn, c) = s.phase.sin_cos_det();
-        [(-r1 * c, -r1 * sn), (r2 * c, r2 * sn)]
+        let (r1, r2) = (a * self.m2 / m, a * self.m1 / m);
+        let (s, c) = ph.sin_cos_det();
+        [(-r1 * c, -r1 * s), (r2 * c, r2 * s)]
     }
 
-    /// Point masses `(x, y, m)` at `t`: the pair, or the remnant and a massless partner.
     fn masses(&self, t: f64) -> [(f64, f64, f64); 2] {
-        let s = self.state(t);
-        if s.merged {
-            return [
-                (0.0, 0.0, (self.m1 + self.m2) * s.mass_scale),
-                (0.0, 0.0, 0.0),
-            ];
-        }
         let [(x1, y1), (x2, y2)] = self.positions(t);
-        [
-            (x1, y1, self.m1 * s.mass_scale),
-            (x2, y2, self.m2 * s.mass_scale),
-        ]
-    }
-
-    /// The strain a distant face-on detector records at `t`, replayed at `now`: `S cos 2Ψ`
-    /// of the current cycle's source, as on the sheet (SPT-A6, SPT-A11).
-    pub(crate) fn strain(&self, t: f64, now: f64) -> f64 {
-        let s = self.wave_state(t, now);
-        s.strain * (2.0 * s.pattern).cos_det()
-    }
-
-    /// The strain envelope's largest value, the inset's full scale.
-    fn peak_strain(&self) -> f64 {
-        PEAK_GAIN / Q_MERGE
-    }
-
-    /// The inset's height for the strain at `t` in `[-1, 1]`: a signed square-root scale
-    /// of `strain / peak`, so the early chirp reads as well as the merger (SPT-A6).
-    fn inset_strain(&self, t: f64, now: f64) -> f64 {
-        let h = (self.strain(t, now) / self.peak_strain()).clamp(-1.0, 1.0);
-        h.signum() * h.abs().sqrt()
-    }
-
-    /// Brightness of the scene through the cut between cycles: `DIP_FLOOR` at the cut,
-    /// easing back to 1 by `DIP` s either side of it (SPT-A11).
-    fn dip(&self, t: f64) -> f64 {
-        let tau = self.state(t).tau;
-        let s = (tau / DIP).min((self.cycle() - tau) / DIP).clamp(0.0, 1.0);
-        DIP_FLOOR + (1.0 - DIP_FLOOR) * ease::smoothstep(s)
-    }
-
-    /// The merger flash in `[0, 1]`: rising as `s²` through the plunge, 1 at coalescence,
-    /// then fading with `FLASH_TAU` (SPT-A8).
-    fn flash(&self, t: f64) -> f64 {
-        let tau = self.state(t).tau;
-        let (t_i, t_m) = (self.inspiral_time(), self.merge_time());
-        if tau < t_i {
-            0.0
-        } else if tau < t_m {
-            ((tau - t_i) / PLUNGE).powi(2)
-        } else {
-            (-(tau - t_m) / FLASH_TAU).exp()
-        }
-    }
-
-    /// The caption at `t` (SPT-A7): `merger` from `MERGER_LEAD` before the plunge to
-    /// `MERGER_TAIL` after coalescence, then `ringdown` until `RINGDOWN_SHOWN` after it.
-    fn caption(&self, t: f64) -> Option<&'static str> {
-        let since = self.state(t).tau - self.merge_time();
-        if since < -(PLUNGE + MERGER_LEAD) {
-            None
-        } else if since < MERGER_TAIL {
-            Some(MERGER)
-        } else if since < RINGDOWN_SHOWN {
-            Some(RINGDOWN)
-        } else {
-            None
-        }
-    }
-}
-
-/// Display low-pass of the sheet: waves whose pattern turns faster than `max_speed` (so
-/// shorter than the mesh resolves) are faded as `(max_speed / speed)²` rather than
-/// aliased into moiré. The strain inset shows them unfiltered (SPEC-002).
-fn sheet_gain(speed: f64, max_speed: f64) -> f64 {
-    let r = max_speed / speed.abs().max(1e-12);
-    (r * r).min(1.0)
-}
-
-/// The source at the current step, evaluated once per `refresh`.
-#[derive(Debug, Clone, Copy)]
-struct Now {
-    state: Source,
-    masses: [(f64, f64, f64); 2],
-    flash: f64,
-    dip: f64,
-}
-
-impl Now {
-    fn at(bin: &Binary, t: f64) -> Self {
-        Self {
-            state: bin.state(t),
-            masses: bin.masses(t),
-            flash: bin.flash(t),
-            dip: bin.dip(t),
-        }
-    }
-}
-
-/// A black hole as drawn: centre and radius in dots, and its rim temperature (K).
-#[derive(Debug, Clone, Copy)]
-struct Body {
-    dx: f64,
-    dy: f64,
-    r: f64,
-    kelvin: f64,
-}
-
-impl Body {
-    /// The disc the mesh and trails keep out of: the rim and its moat.
-    fn hole(&self) -> (f64, f64, f64) {
-        (self.dx, self.dy, MOAT * self.r + 1.0)
-    }
-}
-
-/// A black hole as a 2 × 2-pixel white-hot point (SPT-A12, M14: no dark disc or halo):
-/// the four pixels round its centre in the `rim` ink. `halo` is unused since M14.
-fn disc(px: &mut Pixels, b: &Body, rim: Ink, _halo: Ink) {
-    let (cx, cy) = ((b.dx - 0.5) / 2.0, (b.dy - 0.5) / 2.0);
-    let (x0, y0) = (cx.round() as i32 - 1, cy.round() as i32 - 1);
-    for (dx, dy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
-        px.set(x0 + dx, y0 + dy, rim);
-    }
-}
-
-/// The segment `a–b` with the parts inside the discs `holes` (`(x, y, radius)`, dots)
-/// left out, so the black holes' dark cores occlude what lies behind them (SPT-A9).
-fn line_outside(
-    dots: &mut Dots,
-    a: (f64, f64),
-    b: (f64, f64),
-    holes: &[(f64, f64, f64)],
-    ink: Ink,
-) {
-    let (ux, uy) = (b.0 - a.0, b.1 - a.1);
-    let len2 = ux * ux + uy * uy;
-    // Parameter intervals of the segment inside each disc, at most one per disc.
-    let mut inside = [(1.0f64, 1.0f64); 2];
-    for (slot, &(cx, cy, r)) in inside.iter_mut().zip(holes) {
-        let (px, py) = (a.0 - cx, a.1 - cy);
-        let half_b = px * ux + py * uy;
-        let c = px * px + py * py - r * r;
-        let disc = half_b * half_b - len2 * c;
-        if len2 > 0.0 && disc > 0.0 {
-            let root = disc.sqrt();
-            let (t0, t1) = (
-                ((-half_b - root) / len2).max(0.0),
-                ((-half_b + root) / len2).min(1.0),
-            );
-            if t0 < t1 {
-                *slot = (t0, t1);
-            }
-        } else if c < 0.0 {
-            // A zero-length segment inside the disc.
-            *slot = (0.0, 1.0);
-        }
-    }
-    if inside[1].0 < inside[0].0 {
-        inside.swap(0, 1);
-    }
-    let at = |t: f64| (a.0 + ux * t, a.1 + uy * t);
-    let mut from = 0.0;
-    for (t0, t1) in inside {
-        if t0 > from {
-            let (p, q) = (at(from), at(t0));
-            dots.line(p.0, p.1, q.0, q.1, ink);
-        }
-        from = from.max(t1);
-    }
-    if from < 1.0 {
-        let p = at(from);
-        dots.line(p.0, p.1, b.0, b.1, ink);
+        [(x1, y1, self.m1), (x2, y2, self.m2)]
     }
 }
 
@@ -510,9 +154,6 @@ pub(crate) fn well_depth(x: f64, y: f64, masses: &[(f64, f64, f64)]) -> f64 {
             .sum::<f64>()
 }
 
-/// The radial wave envelope's largest value, `f(r)` near `r = 0.78`.
-const ENVELOPE_MAX: f64 = 0.73;
-
 /// Radial wave envelope: `1/√r` far away (2-D energy flux conservation on the sheet),
 /// Gaussian-tapered to zero in the near zone.
 pub(crate) fn envelope(r: f64) -> f64 {
@@ -524,68 +165,70 @@ pub(crate) fn envelope(r: f64) -> f64 {
 }
 
 /// Quadrupole wave height at polar `(r, φ)` about the centre of mass (SPT-A3):
-/// `A · f(r) · S(t_r) · cos 2(φ − Ψ(t_r))` with retarded time `t_r = t − r/c`.
+/// `A · f(r) · a₀/a(t_r) · cos 2(φ − Φ(t_r))` with retarded time `t_r = t − r/c`. The
+/// `a₀/a` factor is the `h ∝ a²Ω² ∝ 1/a` growth of the strain as the orbit shrinks.
 /// Reference form; `refresh` evaluates it separably per sample (checked by
 /// `spt_mesh_heights_match_the_field`).
 #[cfg(test)]
 pub(crate) fn wave(bin: &Binary, r: f64, phi: f64, t: f64) -> f64 {
-    let s = bin.wave_state(t - r / WAVE_SPEED, t);
-    WAVE_AMP * envelope(r) * s.strain * (2.0 * (phi - s.pattern)).cos_det()
+    let (a, ph) = bin.state(t - r / WAVE_SPEED);
+    WAVE_AMP * envelope(r) * bin.a0 / a * (2.0 * (phi - ph)).cos_det()
 }
 
-/// Fixed world data of one mesh sample, stored as `f32` (a large mesh holds ~20 000):
-/// `x, y, r`, then `cos 2φ, sin 2φ` (the quadrupole's azimuthal pattern) and the wave
-/// envelope, all precomputed per resize.
+/// Line glyph for a screen-space step `(dx, dy)` in cells (y down).
+pub(crate) fn slope_glyph(dx: f64, dy: f64) -> Glyph {
+    let (ax, ay) = (dx.abs(), dy.abs());
+    if ay <= 0.5 * ax {
+        H
+    } else if ay >= 2.0 * ax {
+        V
+    } else if (dx > 0.0) != (dy > 0.0) {
+        UP
+    } else {
+        DOWN
+    }
+}
+
+/// Two perpendicular strokes meeting in one cell read as a crossing.
+fn merge(existing: char, g: Glyph) -> Glyph {
+    let is = |c: char, a: Glyph| c == a.unicode || c == a.ascii;
+    if (g == H && is(existing, V))
+        || (g == V && is(existing, H))
+        || (is(existing, CROSS) && (g == H || g == V))
+    {
+        CROSS
+    } else if (g == UP && is(existing, DOWN)) || (g == DOWN && is(existing, UP)) {
+        XCROSS
+    } else {
+        g
+    }
+}
+
+/// Fixed world data of one mesh sample.
 #[derive(Debug, Clone, Copy, Default)]
-struct Base([f32; 6]);
-
-impl Base {
-    fn new(x: f64, y: f64) -> Self {
-        let r = x.hypot(y);
-        let (s2, c2) = (2.0 * y.atan2(x)).sin_cos_det();
-        Self([x, y, r, c2, s2, envelope(r)].map(|v| v as f32))
-    }
-
-    /// `[x, y, r, cos 2φ, sin 2φ, envelope]`.
-    fn get(&self) -> [f64; 6] {
-        self.0.map(f64::from)
-    }
+struct Base {
+    x: f64,
+    y: f64,
+    r: f64,
+    /// cos 2φ, sin 2φ — the quadrupole's azimuthal pattern, precomputed per resize.
+    c2: f64,
+    s2: f64,
+    env: f64,
 }
 
 /// Per-step state of one mesh sample.
 #[derive(Debug, Clone, Copy, Default)]
 struct Pt {
-    /// Dot-lattice position.
-    dx: f64,
-    dy: f64,
+    sx: f64,
+    sy: f64,
     depth: f64,
     well: f64,
     crest: f64,
     envn: f64,
-    /// The wave's energy density `∝ ḣ² ∝ (f(r) S(t_r) Ω(t_r))²`, unfiltered, in units of
-    /// its value at the envelope's peak with the end-of-inspiral `S` and `Ω`: the light
-    /// it shows even where the ripples are too fine for the mesh.
-    loud: f64,
-}
-
-/// `cos` and `sin` of the fixed camera `PITCH`, evaluated once per layout rather than
-/// per mesh sample.
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Pitch {
-    cos: f64,
-    sin: f64,
-}
-
-impl Pitch {
-    fn new() -> Self {
-        let (sin, cos) = PITCH.sin_cos_det();
-        Self { cos, sin }
-    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
 struct Camera {
-    pitch: Pitch,
     cos_yaw: f64,
     sin_yaw: f64,
     scale: f64,
@@ -595,17 +238,16 @@ struct Camera {
 
 impl Camera {
     /// Normalised perspective coordinates `(u, v, depth)` of a world point.
-    fn view(pitch: Pitch, cos_yaw: f64, sin_yaw: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
-        let (cp, sp) = (pitch.cos, pitch.sin);
+    fn view(cos_yaw: f64, sin_yaw: f64, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
+        let (cp, sp) = (PITCH.cos_det(), PITCH.sin_det());
         let (xr, yr) = (x * cos_yaw - y * sin_yaw, x * sin_yaw + y * cos_yaw);
         let d = (yr * cp - z * sp + CAM_DIST).max(0.1);
         let up = yr * sp + z * cp;
         (xr / d, up / d, d)
     }
 
-    /// Cell coordinates (cell `i` centred at `i`) and depth of a world point.
     fn project(&self, x: f64, y: f64, z: f64) -> (f64, f64, f64) {
-        let (u, v, d) = Self::view(self.pitch, self.cos_yaw, self.sin_yaw, x, y, z);
+        let (u, v, d) = Self::view(self.cos_yaw, self.sin_yaw, x, y, z);
         (
             self.ox + self.scale * ASPECT * u,
             self.oy - self.scale * v,
@@ -614,42 +256,9 @@ impl Camera {
     }
 }
 
-/// The strain inset's rectangle in cells, clear of the title row (SPT-A6).
-#[derive(Debug, Clone, Copy, Default, PartialEq)]
-struct Inset {
-    x: i32,
-    y: i32,
-    w: i32,
-    h: i32,
-}
-
-impl Inset {
-    /// Narrowest inset worth drawing (cells).
-    const MIN_W: i32 = 12;
-
-    /// Top-left, left of the far edge; `None` on small canvases.
-    fn for_size(size: Size) -> Option<Self> {
-        if size.width() < INSET_MIN.0 || size.height() < INSET_MIN.1 {
-            return None;
-        }
-        Some(Self {
-            x: 1,
-            y: 1,
-            w: i32::from(size.width() / 6).clamp(Self::MIN_W, 22),
-            h: i32::from(INSET_ROWS),
-        })
-    }
-
-    /// Narrowed to end two columns left of `mesh_left`, the mesh's leftmost column in
-    /// the inset's rows; `None` if too little room is left (SPT-A6).
-    fn clear_of(self, mesh_left: f64) -> Option<Self> {
-        let w = self.w.min(mesh_left.floor() as i32 - 2 - self.x);
-        (w >= Self::MIN_W).then_some(Self { w, ..self })
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct SpacetimeGrid {
+    seeded: bool,
     bin: Option<Binary>,
     t: f64,
     lx: f64,
@@ -663,16 +272,7 @@ pub struct SpacetimeGrid {
     cam: Camera,
     depth_near: f64,
     depth_far: f64,
-    max_speed: f64,
-    /// Dot layers: the sheet, the masses' trails, and the strain trace; the black holes
-    /// themselves are half-block discs.
-    mesh: Dots,
-    bodies: Dots,
-    discs: Pixels,
-    inset: Option<Inset>,
-    trace: Dots,
-    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
-    dirty: bool,
+    spheres: [(f64, f64, f64); 2],
 }
 
 impl SpacetimeGrid {
@@ -683,8 +283,6 @@ impl SpacetimeGrid {
     /// Fit the sheet into the canvas and build the mesh sample lists.
     fn layout(&mut self, size: Size) {
         let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-        let pitch = Pitch::new();
-        self.cam.pitch = pitch;
         let extent = |lx: f64| {
             let (mut u0, mut u1, mut v0, mut v1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
             for yaw in [-YAW_AMP, 0.0, YAW_AMP] {
@@ -692,12 +290,12 @@ impl SpacetimeGrid {
                 for (x, y, z) in [
                     (-lx, -1.0, 0.0),
                     (lx, -1.0, 0.0),
-                    (-lx, 1.0, 0.25),
-                    (lx, 1.0, 0.25),
+                    (-lx, 1.0, 0.0),
+                    (lx, 1.0, 0.0),
                     (0.0, -0.3, 0.15),
-                    (0.0, 0.0, DEEPEST),
+                    (0.0, 0.0, -0.8),
                 ] {
-                    let (u, v, _) = Camera::view(pitch, c, s, x, y, z);
+                    let (u, v, _) = Camera::view(c, s, x, y, z);
                     (u0, u1, v0, v1) = (u0.min(u), u1.max(u), v0.min(v), v1.max(v));
                 }
             }
@@ -710,26 +308,13 @@ impl SpacetimeGrid {
             let rho = ASPECT * (u1 - u0) / (v1 - v0);
             self.lx = (self.lx * w / h / rho).clamp(1.0, 2.6);
         }
-        // Rows 1 ..= h − 3: a clear top row, and the title row with a gap above it free.
-        // Where the strain inset would be squeezed, narrow the sheet (not its scale) until
-        // the inset gets its full width (SPT-A6).
-        let full = Inset::for_size(size);
-        for _ in 0..8 {
-            let (u0, u1, v0, v1) = extent(self.lx);
-            let rows = (h - 4.0).max(0.0);
-            let scale = ((w - 1.0) * 0.97 / (ASPECT * (u1 - u0))).min(rows / (v1 - v0));
-            self.cam.scale = scale.max(0.0);
-            self.cam.ox = (w - 1.0) / 2.0 - self.cam.scale * ASPECT * (u0 + u1) / 2.0;
-            self.cam.oy = 1.0 + 0.5 * (rows - self.cam.scale * (v1 - v0)) + self.cam.scale * v1;
-            self.inset = self.place_inset(size);
-            let squeezed = full.is_some_and(|f| self.inset.is_none_or(|r| r.w < f.w));
-            if !squeezed || self.lx <= 1.0 {
-                break;
-            }
-            self.lx = (self.lx * 0.93).max(1.0);
-        }
-        self.depth_near = Camera::view(pitch, 1.0, 0.0, 0.0, -1.0, 0.0).2;
-        self.depth_far = Camera::view(pitch, 1.0, 0.0, 0.0, 1.0, 0.0).2;
+        let (u0, u1, v0, v1) = extent(self.lx);
+        let scale = ((w - 1.0) * 0.97 / (ASPECT * (u1 - u0))).min((h - 1.0) * 0.95 / (v1 - v0));
+        self.cam.scale = scale.max(0.0);
+        self.cam.ox = (w - 1.0) / 2.0 - self.cam.scale * ASPECT * (u0 + u1) / 2.0;
+        self.cam.oy = (h - 1.0) / 2.0 + self.cam.scale * (v0 + v1) / 2.0;
+        self.depth_near = Camera::view(1.0, 0.0, 0.0, -1.0, 0.0).2;
+        self.depth_far = Camera::view(1.0, 0.0, 0.0, 1.0, 0.0).2;
 
         self.nx = (usize::from(size.width() / COLS_PER_LINE)).clamp(1, MAX_NX) + 1;
         self.ny = ((h / ROWS_PER_LINE).round() as usize).clamp(1, MAX_NY) + 1;
@@ -738,7 +323,19 @@ impl SpacetimeGrid {
         let lx = self.lx;
         let gx = |i: usize, n: usize| -lx + 2.0 * lx * i as f64 / (n - 1) as f64;
         let gy = |j: usize, n: usize| -1.0 + 2.0 * j as f64 / (n - 1) as f64;
-        let sample = Base::new;
+        let sample = |x: f64, y: f64| {
+            let r = x.hypot(y);
+            let phi = y.atan2(x);
+            let (s2, c2) = (2.0 * phi).sin_cos_det();
+            Base {
+                x,
+                y,
+                r,
+                c2,
+                s2,
+                env: envelope(r),
+            }
+        };
         self.base.clear();
         for j in 0..self.ny {
             for i in 0..self.fx {
@@ -752,58 +349,6 @@ impl SpacetimeGrid {
         }
         self.pts.clear();
         self.pts.resize(self.base.len(), Pt::default());
-        self.mesh.resize(size);
-        self.bodies.resize(size);
-        self.discs.resize(size);
-        self.trace.resize(size);
-        // The shortest wave the mesh resolves: 2.5 line spacings.
-        let spacing = (2.0 / (self.ny - 1) as f64).max(2.0 * self.lx / (self.nx - 1) as f64);
-        self.max_speed = PI * WAVE_SPEED / (2.5 * spacing);
-    }
-
-    /// The leftmost column the mesh can reach in the rows of `inset` (and the row below
-    /// it), over the yaw sway and ±0.2 of sheet height; +∞ if it never gets there.
-    /// And, second, the rightmost column the mesh reaches anywhere.
-    fn mesh_span(&self, inset: Inset) -> (f64, f64) {
-        let bottom = f64::from(inset.y + inset.h);
-        let lx = self.lx;
-        let (mut left, mut right) = (f64::INFINITY, f64::NEG_INFINITY);
-        for yaw in [-YAW_AMP, 0.0, YAW_AMP] {
-            let (s, c) = f64::sin_cos_det(yaw);
-            for k in 0..=64 {
-                let f = f64::from(k) / 64.0;
-                // The far edge, the left edge and the right edge.
-                for (x, y) in [
-                    (-lx + 2.0 * lx * f, 1.0),
-                    (-lx, 1.0 - 2.0 * f),
-                    (lx, 1.0 - 2.0 * f),
-                ] {
-                    for z in [-0.2, 0.2] {
-                        let (u, v, _) = Camera::view(self.cam.pitch, c, s, x, y, z);
-                        let (col, row) = (
-                            self.cam.ox + self.cam.scale * ASPECT * u,
-                            self.cam.oy - self.cam.scale * v,
-                        );
-                        right = right.max(col);
-                        if row <= bottom + 0.5 {
-                            left = left.min(col);
-                        }
-                    }
-                }
-            }
-        }
-        (left, right)
-    }
-
-    /// Place the strain inset, first sliding the mesh right into any free margin to
-    /// make room for it (SPT-A6).
-    fn place_inset(&mut self, size: Size) -> Option<Inset> {
-        let r = Inset::for_size(size)?;
-        let (left, right) = self.mesh_span(r);
-        let need = f64::from(r.x + r.w + 2) - left;
-        let slack = f64::from(size.width()) - 2.0 - right;
-        self.cam.ox += need.min(slack).max(0.0);
-        r.clear_of(self.mesh_span(r).0)
     }
 
     /// Evaluate the sheet height and projection of every sample at the current time.
@@ -813,221 +358,74 @@ impl SpacetimeGrid {
         let (sy, cy) = (YAW_AMP * (TAU * t / YAW_PERIOD).sin_det()).sin_cos_det();
         self.cam.cos_yaw = cy;
         self.cam.sin_yaw = sy;
-        let now = Now::at(&bin, t);
-        let masses = now.masses;
+        let masses = bin.masses(t);
         let lift = RIM_LIFT * (bin.m1 + bin.m2);
-        // ḣ ∝ S Ω: the end of the inspiral (`S = 1/Q`, `Ω_m`) at the envelope's peak is 1.
-        let inv_ref = Q_MERGE / (ENVELOPE_MAX * bin.omega_merge());
         for (p, b) in self.pts.iter_mut().zip(&self.base) {
-            let [bx, by, r, c2, s2, env] = b.get();
-            let well = well_depth(bx, by, &masses);
-            let s = bin.wave_state(t - r / WAVE_SPEED, t);
-            let (sn, c) = (2.0 * s.pattern).sin_cos_det();
-            // cos 2(φ − Ψ) = cos 2φ cos 2Ψ + sin 2φ sin 2Ψ
-            let crest = c2 * c + s2 * sn;
-            let envn = env * s.strain * sheet_gain(s.speed, self.max_speed);
-            let amp = env * s.strain * s.speed * inv_ref;
+            let well = well_depth(b.x, b.y, &masses);
+            let (a, ph) = bin.state(t - b.r / WAVE_SPEED);
+            let (s, c) = (2.0 * ph).sin_cos_det();
+            // cos 2(φ − Φ) = cos 2φ cos 2Φ + sin 2φ sin 2Φ
+            let crest = b.c2 * c + b.s2 * s;
+            let envn = b.env * bin.a0 / a;
             let z = well + WAVE_AMP * envn * crest;
-            let (x, y, depth) = self.cam.project(bx, by, z + lift);
-            let (dx, dy) = Dots::from_cells(x + 0.5, y + 0.5);
+            let (sx, sy, depth) = self.cam.project(b.x, b.y, z + lift);
             *p = Pt {
-                dx,
-                dy,
+                sx,
+                sy,
                 depth,
                 well,
                 crest,
                 envn,
-                loud: amp * amp,
             };
         }
-        self.rasterise(&now);
-    }
-
-    /// Dot position of the sheet surface under world point `(x, y)`, raised by `up`.
-    fn surface_dot(&self, x: f64, y: f64, up: f64, masses: &[(f64, f64, f64)]) -> (f64, f64, f64) {
-        let lift = RIM_LIFT * (self.binary().m1 + self.binary().m2);
-        let (sx, sy, d) = self.cam.project(x, y, well_depth(x, y, masses) + lift + up);
-        let (dx, dy) = Dots::from_cells(sx + 0.5, sy + 0.5);
-        (dx, dy, d)
-    }
-
-    /// The black holes now: at the sheet surface, their radius swelling with the merger
-    /// flash; the remnant's partner (massless) is `None`.
-    fn bodies_now(&self, now: &Now) -> [Option<Body>; 2] {
-        let (merged, masses, flash) = (now.state.merged, now.masses, now.flash);
-        std::array::from_fn(|k| {
-            let (x, y, m) = masses[k];
-            (m > 0.0).then(|| {
-                let rad = BODY_R * m.cbrt() * (1.0 + flash);
-                let (dx, dy, d) = self.surface_dot(x, y, 0.0, &masses);
-                let r = self.cam.scale * rad / d * f64::from(Dots::CELL_H);
-                let kelvin = if merged { REMNANT_K } else { HOT[k] };
-                Body {
-                    dx,
-                    dy,
-                    r: r.clamp(BODY_MIN, 64.0),
-                    kelvin,
-                }
-            })
-        })
-    }
-
-    /// Draw the black holes (a dark core inside a hot rim, in a dark moat), their
-    /// fading orbit trails and the merger flash onto `bodies`.
-    fn draw_bodies(
-        &mut self,
-        bin: Binary,
-        now: &Now,
-        bodies: &[Option<Body>; 2],
-        holes: &[(f64, f64, f64)],
-    ) {
-        self.bodies.clear();
-        self.discs.clear();
-        let (state, masses, flash, dip) = (now.state, now.masses, now.flash, now.dip);
-        if dip <= 0.0 {
-            return;
-        }
-        let t = self.t;
-        // Trails: where each mass was over the last `TRAIL` s of this cycle, in one cold
-        // hue, fading by level.
-        let (dim, bright) = TRAIL_LEVELS;
-        if !state.merged {
-            for k in 0..HOT.len() {
-                let mut prev = None;
-                for n in 0..=TRAIL_N {
-                    let back = t - TRAIL * n as f64 / TRAIL_N as f64;
-                    let then = bin.state(back);
-                    if then.merged || then.tau > state.tau {
-                        break;
-                    }
-                    let (x, y) = bin.positions(back)[k];
-                    let (dx, dy, _) = self.surface_dot(x, y, 0.0, &masses);
-                    let fade = 1.0 - n as f64 / (TRAIL_N + 1) as f64;
-                    let ink = Ink::new(TRAIL_ROLE, ink::level((dim + (bright - dim) * fade) * dip));
-                    if let Some(p) = prev {
-                        line_outside(&mut self.bodies, p, (dx, dy), holes, ink);
-                    }
-                    prev = Some((dx, dy));
-                }
-            }
-        }
-        let glow = (0.5 + 0.5 * dip) * (1.0 + 0.5 * flash);
-        for b in bodies.iter().flatten() {
-            let rim = ink::blackbody(b.kelvin * glow);
-            let halo = ink::blackbody(HALO_K * b.kelvin * glow);
-            disc(&mut self.discs, b, rim, halo);
+        for (k, &(x, y, m)) in masses.iter().enumerate() {
+            let rad = 0.06 * m.cbrt();
+            let z = well_depth(x, y, &masses) + lift + rad;
+            let (sx, sy, d) = self.cam.project(x, y, z);
+            self.spheres[k] = (sx, sy, (self.cam.scale * rad / d).max(0.4));
         }
     }
 
-    /// Draw the mesh, the masses and the strain trace into their dot layers.
-    fn rasterise(&mut self, now: &Now) {
-        let (fx, fy, nx, ny) = (self.fx, self.fy, self.nx, self.ny);
-        let bin = self.binary();
-        let dip = now.dip;
-        let gain = dip * (1.0 + FLASH_GAIN * now.flash);
-        let bodies = self.bodies_now(now);
-        let mut holes = [(0.0, 0.0, 0.0); 2];
-        let mut n_holes = 0;
-        for b in bodies.iter().flatten() {
-            holes[n_holes] = b.hole();
-            n_holes += 1;
+    fn ink(&self, a: &Pt, b: &Pt) -> Ink {
+        let well = 0.5 * (a.well + b.well);
+        let crest = 0.5 * (a.crest + b.crest);
+        let envn = 0.5 * (a.envn + b.envn);
+        let depth = 0.5 * (a.depth + b.depth);
+        let span = (self.depth_far - self.depth_near).max(1e-9);
+        let near = ((self.depth_far - depth) / span).clamp(0.0, 1.0);
+        let lvl = |v: f64| v.clamp(0.0, 255.0) as u8;
+        if well < COLD_DEPTH {
+            let f = ((COLD_DEPTH - well) / 0.3).clamp(0.0, 1.0);
+            Ink::new(Role::Cold, lvl(110.0 + 145.0 * f))
+        } else if crest > CREST && envn > CREST_ENV {
+            let f = (crest * envn / 1.2).clamp(0.0, 1.0);
+            Ink::new(Role::Wave, lvl(110.0 + 110.0 * f + 35.0 * near))
+        } else {
+            let shade = 0.8 + 0.2 * (crest * envn.min(1.0));
+            Ink::new(Role::Structure, lvl((50.0 + 170.0 * near) * shade))
         }
-        let holes = &holes[..n_holes];
-        let (pts, mesh) = (&self.pts, &mut self.mesh);
-        let depths = (self.depth_near, self.depth_far);
-        mesh.clear();
-        if pts.len() == ny * fx + nx * fy && dip > 0.0 {
-            let mut seg = |a: &Pt, b: &Pt| {
-                let ink = mesh_ink(a, b, depths, gain, near_cap(a, b, holes));
-                line_outside(mesh, (a.dx, a.dy), (b.dx, b.dy), holes, ink);
+    }
+
+    fn segment(&self, canvas: &mut Canvas, a: &Pt, b: &Pt) {
+        let ink = self.ink(a, b);
+        let g = slope_glyph(b.sx - a.sx, b.sy - a.sy);
+        let clamp = |v: f64| v.round().clamp(-10_000.0, 10_000.0) as i32;
+        let (x0, y0, x1, y1) = (clamp(a.sx), clamp(a.sy), clamp(b.sx), clamp(b.sy));
+        let mut pts = geom::line(x0, y0, x1, y1).peekable();
+        while let Some((x, y)) = pts.next() {
+            let Some(cell) = canvas.get(x, y) else {
+                continue;
             };
-            for j in 0..ny {
-                for i in 0..fx - 1 {
-                    seg(&pts[j * fx + i], &pts[j * fx + i + 1]);
+            // A diagonal Bresenham step gets a diagonal stroke, so gentle curves read as
+            // connected instead of as a staircase of offset dashes.
+            let here = match pts.peek() {
+                Some(&(nx, ny)) if nx != x && ny != y => {
+                    slope_glyph(f64::from(nx - x), f64::from(ny - y))
                 }
-            }
-            let yline = |i: usize, j: usize| &pts[ny * fx + i * fy + j];
-            for i in 0..nx {
-                for j in 0..fy - 1 {
-                    seg(yline(i, j), yline(i, j + 1));
-                }
-            }
-        }
-        self.draw_bodies(bin, now, &bodies, holes);
-        self.trace_strain(bin, dip);
-    }
-}
-
-/// The brightest level the mesh segment `a–b` may take near the moats `holes`:
-/// `NEAR_MAX` within `NEAR_HOLE.0` moat radii, easing up to `MESH_MAX` by `NEAR_HOLE.1`.
-fn near_cap(a: &Pt, b: &Pt, holes: &[(f64, f64, f64)]) -> f64 {
-    let (mx, my) = (0.5 * (a.dx + b.dx), 0.5 * (a.dy + b.dy));
-    let near = holes
-        .iter()
-        .map(|&(cx, cy, r)| (mx - cx).hypot(my - cy) / r)
-        .fold(f64::INFINITY, f64::min);
-    let s = ease::smoothstep((near - NEAR_HOLE.0) / (NEAR_HOLE.1 - NEAR_HOLE.0));
-    NEAR_MAX + (MESH_MAX - NEAR_MAX) * s
-}
-
-/// `Seq` ink of the mesh segment `a–b` (`depths` = near and far edge depths,
-/// `gain` = the cut's dip times the merger flash, `cap` = its brightest level): wells,
-/// crests and the wave's energy carry the level, nearness only shades it and the
-/// foreground edge fades.
-fn mesh_ink(a: &Pt, b: &Pt, (depth_near, depth_far): (f64, f64), gain: f64, cap: f64) -> Ink {
-    let well = 0.5 * (a.well + b.well);
-    let crest = (0.5 * (a.crest * a.envn + b.crest * b.envn) / CREST_FULL).clamp(-1.0, 1.0);
-    let loud = 0.5 * (a.loud + b.loud);
-    let depth = 0.5 * (a.depth + b.depth);
-    let span = (depth_far - depth_near).max(1e-9);
-    let near = ((depth_far - depth) / span).clamp(0.0, 1.0);
-    let pit = ((-well - 0.25) / 0.6).clamp(0.0, 1.0);
-    let edge = 1.0 - EDGE_FADE * ease::smoothstep((near - 0.7) / 0.3);
-    let shade = (1.0 - NEAR_SHADE + NEAR_SHADE * near) * edge;
-    let level = ((REST + WELL_GLOW * pit) * (1.0 + TROUGH_DIM * crest.min(0.0))
-        + CREST_LIFT * crest.max(0.0)
-        + BURST_LIFT * loud)
-        * shade
-        * gain;
-    Ink::new(MESH_ROLE, ink::level(level.min(cap)))
-}
-
-impl SpacetimeGrid {
-    /// The strain inset: the source strain over the last `INSET_WINDOW` s, one sample per
-    /// dot column, joined by segments (SPT-A6).
-    fn trace_strain(&mut self, bin: Binary, dip: f64) {
-        self.trace.clear();
-        let Some(r) = self.inset else { return };
-        let cols = r.w * Dots::CELL_W;
-        let (top, rows) = (f64::from(r.y * Dots::CELL_H), f64::from(r.h * Dots::CELL_H));
-        let mid = top + 0.5 * (rows - 1.0);
-        let half = 0.5 * (rows - 1.0);
-        let x0 = f64::from(r.x * Dots::CELL_W);
-        let axis = Ink::new(
-            INSET_AXIS.role,
-            ink::level(f64::from(INSET_AXIS.level) * dip),
-        );
-        for c in 0..cols {
-            self.trace.plot(x0 + f64::from(c), mid, axis);
-        }
-        let (quiet, peak) = TRACE_LEVELS;
-        let mut prev: Option<(f64, f64)> = None;
-        for c in 0..cols {
-            let t = self.t - INSET_WINDOW * (1.0 - f64::from(c) / f64::from(cols - 1));
-            let p = (x0 + f64::from(c), mid - half * bin.inset_strain(t, self.t));
-            if let Some(q) = prev {
-                // Brighter as the envelope grows: the chirp peak outshines the inspiral.
-                let loud = (bin.wave_state(t, self.t).strain / bin.peak_strain()).clamp(0.0, 1.0);
-                let level = ink::level((quiet + (peak - quiet) * loud) * dip);
-                self.trace.line(
-                    q.0,
-                    q.1,
-                    p.0,
-                    p.1,
-                    Ink::new(Role::Ramp(Ramp::Aurora), level),
-                );
-            }
-            prev = Some(p);
+                _ => g,
+            };
+            let g = merge(cell.ch, here);
+            canvas.put(x, y, g, ink);
         }
     }
 }
@@ -1038,52 +436,53 @@ impl Generator for SpacetimeGrid {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        if self.bin.is_none() {
+        if !self.seeded {
+            self.seeded = true;
             let mut bin = Binary::DEFAULT;
             bin.phase0 = ctx.rng.random_range(0.0..TAU);
             // Start part-way into the chirp so the first frames already have a wave train.
-            self.t = ctx.rng.random_range(0.0..0.5 * bin.inspiral_time());
+            self.t = ctx.rng.random_range(0.0..0.6 * bin.cycle());
             self.bin = Some(bin);
         }
         self.layout(size);
-        self.dirty = true;
+        self.refresh();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt.max(0.0);
-        self.dirty = true;
-    }
-
-    fn prepare(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.refresh();
-        }
+        self.refresh();
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.mesh.blit(canvas);
-        self.bodies.blit(canvas);
-        self.discs.blit(canvas, |_, _, top, bottom| {
-            let ink = raster::stronger(top, bottom);
-            match ink.role {
-                Role::Blackbody => Some(('O', ink)),
-                _ => None,
+        let (fx, fy, nx, ny) = (self.fx, self.fy, self.nx, self.ny);
+        if self.pts.len() != ny * fx + nx * fy {
+            return;
+        }
+        let xline = |j: usize, i: usize| &self.pts[j * fx + i];
+        let yline = |i: usize, j: usize| &self.pts[ny * fx + i * fy + j];
+        // Painter's order by depth bands: far (+y) to near (−y), near strokes win.
+        for j in (0..ny).rev() {
+            if j + 1 < ny {
+                for i in 0..nx {
+                    for k in j * SUB_Y..(j + 1) * SUB_Y {
+                        self.segment(canvas, yline(i, k), yline(i, k + 1));
+                    }
+                }
             }
-        });
-        let Some(r) = self.inset else { return };
-        let blank = Glyph::ascii(' ');
-        for y in r.y - 1..r.y + r.h {
-            for x in r.x - 1..=r.x + r.w {
-                canvas.put(x, y, blank, Ink::BLANK);
+            for i in 0..fx - 1 {
+                self.segment(canvas, xline(j, i), xline(j, i + 1));
             }
         }
-        self.trace.blit(canvas);
-        let label = Ink::new(Role::Text, title::READOUT_LEVEL);
-        draw::label(canvas, r.x, r.y - 1, INSET_LABEL, label);
-    }
-
-    fn caption(&self) -> Option<&'static str> {
-        self.binary().caption(self.t)
+        // The masses, drawn last so they sit visibly in their wells.
+        for (k, &(sx, sy, rad)) in self.spheres.iter().enumerate() {
+            let role = if k == 0 { Role::Sun } else { Role::Star };
+            draw::disc(canvas, sx, sy, rad, |d, _, _| {
+                Some((
+                    draw::ramp(d, &SPHERE),
+                    Ink::new(role, (255.0 * (1.0 - 0.4 * d)) as u8),
+                ))
+            });
+        }
     }
 }
 
@@ -1131,6 +530,7 @@ mod tests {
             assert!(cx.abs() < 1e-12 && cy.abs() < 1e-12, "COM moved at t={t}");
             let sep = (x2 - x1).hypot(y2 - y1);
             assert!((sep - b.a0).abs() < 1e-12, "separation {sep} at t={t}");
+            assert!((b.separation(t) - b.a0).abs() < 1e-15);
         }
         // It does orbit: a quarter period later the pair has turned by 90 degrees.
         let [(x1, y1), _] = b.positions(0.0);
@@ -1151,10 +551,11 @@ mod tests {
             },
         ] {
             for &(r, phi, t) in &[
-                (0.3, 0.2, 3.0),
+                (0.3, 0.2, 1.0),
                 (0.8, 2.5, 7.3),
-                (1.7, -1.0, 12.0),
-                (2.4, 4.0, 13.5),
+                (1.7, -1.0, 22.0),
+                (2.4, 4.0, 29.5),
+                (1.2, 0.9, 61.0),
             ] {
                 let w = wave(&b, r, phi, t);
                 // Period pi (quadrupole, m = 2) and not period pi/2.
@@ -1164,7 +565,7 @@ mod tests {
                 let tr = t - r / WAVE_SPEED;
                 let [(x1, y1), (x2, y2)] = b.positions(tr);
                 let psi = (y2 - y1).atan2(x2 - x1);
-                let amp = WAVE_AMP * envelope(r) * b.state(tr).strain;
+                let amp = WAVE_AMP * envelope(r) * b.a0 / b.separation(tr);
                 let expect = amp * (2.0 * (phi - psi)).cos_det();
                 assert!(
                     (w - expect).abs() < 1e-9,
@@ -1172,11 +573,15 @@ mod tests {
                 );
             }
         }
-        // Retardation matters: half a wave period of delay flips the sign.
+        // Retardation matters: a quarter wave period of delay flips the sign.
         let b = circular();
-        let r = WAVE_SPEED * (PI / b.omega0) / 2.0;
-        let phi = b.state(3.0).phase;
-        assert!(wave(&b, r, phi, 3.0) < 0.0, "delay must invert the crest");
+        let gw_period = PI / b.omega0;
+        let r = WAVE_SPEED * gw_period / 2.0;
+        let phi = b.phase(3.0);
+        assert!(
+            wave(&b, r, phi, 3.0) < 0.0,
+            "half-wave delay must invert the crest"
+        );
     }
 
     #[test]
@@ -1188,411 +593,24 @@ mod tests {
     }
 
     #[test]
-    fn spt_inspiral_follows_kepler_and_the_strain_grows_as_one_over_a() {
+    fn spt_inspiral_follows_kepler_and_resets_with_continuous_phase() {
         let b = Binary::DEFAULT;
-        for &t in &[3.0, 8.0, 13.0] {
+        // dPhi/dt = Kepler angular speed for the current separation.
+        for &t in &[0.5, 10.0, 25.0] {
             let h = 1e-5;
-            let omega = (b.state(t + h).phase - b.state(t - h).phase) / (2.0 * h);
-            let s = b.state(t);
-            let kepler = b.omega0 * (b.a0 / s.a).powf(1.5);
+            let omega = (b.phase(t + h) - b.phase(t - h)) / (2.0 * h);
+            let kepler = b.omega0 * (b.a0 / b.separation(t)).powf(1.5);
             assert!((omega - kepler).abs() < 1e-6 * kepler, "t={t}");
-            assert!((s.strain - b.a0 / s.a).abs() < 1e-12, "t={t}");
-            assert!(b.state(t + 0.1).a < s.a, "shrinks");
+            assert!(b.separation(t + 0.1) < b.separation(t), "shrinks");
         }
-    }
-
-    #[test]
-    fn spt_a4_the_pair_plunges_continuously_into_one_remnant() {
-        let b = Binary::DEFAULT;
-        let (t_i, t_m) = (b.inspiral_time(), b.merge_time());
-        let mut last = f64::INFINITY;
-        let n = 400;
-        for k in 0..=n {
-            let t = t_i - 1.0 + (t_m - t_i + 1.0) * f64::from(k) / f64::from(n);
-            let s = b.state(t);
-            assert!(s.a <= last + 1e-12, "separation grew at t={t}");
-            last = s.a;
-            let [(x1, y1), (x2, y2)] = b.positions(t);
-            assert!((b.m1 * x1 + b.m2 * x2).abs() < 1e-12 && (b.m1 * y1 + b.m2 * y2).abs() < 1e-12);
-        }
-        // Continuous at both joins.
-        for t in [t_i, t_m] {
-            let (lo, hi) = (b.state(t - 1e-9), b.state(t + 1e-9));
-            assert!(
-                (lo.a - hi.a).abs() < 1e-6 && (lo.phase - hi.phase).abs() < 1e-6,
-                "t={t}"
-            );
-            let depth = |s: f64| well_depth(0.3, 0.1, &b.masses(s));
-            assert!(
-                (depth(t - 1e-9) - depth(t + 1e-9)).abs() < 1e-6,
-                "well jumps at t={t}"
-            );
-        }
-        let after = b.masses(t_m + 1.0);
-        assert_eq!(after[0], (0.0, 0.0, (1.0 - RADIATED) * (b.m1 + b.m2)));
-        assert_eq!(after[1].2, 0.0);
-    }
-
-    #[test]
-    fn spt_a5_strain_peaks_at_merger_then_rings_down_faster() {
-        let b = Binary::DEFAULT;
-        let t_m = b.merge_time();
-        let peak = b.state(t_m).strain;
-        assert!((peak - b.peak_strain()).abs() < 1e-12);
-        for k in 1..200 {
-            let t = 0.1 * f64::from(k);
-            assert!(b.state(t).strain <= peak + 1e-12, "t={t}");
-        }
-        for dt in [0.1, 0.35, 1.0, 2.0] {
-            let expect = peak * (-dt / TAU_RD).exp();
-            assert!((b.state(t_m + dt).strain - expect).abs() < 1e-12);
-        }
-        let h = 1e-5;
-        let speed = |t: f64| (b.state(t + h).pattern - b.state(t - h).pattern) / (2.0 * h);
-        assert!(speed(t_m + 0.5) > speed(b.inspiral_time() - 0.01));
-    }
-
-    #[test]
-    fn spt_a6_no_strain_inset() {
-        // M14 (ADR-0017): the strain inset is retired at every size.
-        for (w, h) in [(80, 24), (200, 50), (48, 16), (120, 40), (240, 30)] {
-            let size = Size::new(w, h);
-            assert!(Inset::for_size(size).is_none(), "{w}x{h}");
-            let mut g = SpacetimeGrid::default();
-            g.resize(size, &mut Ctx::new(3, size));
-            g.prepare();
-            assert!(g.inset.is_none(), "{w}x{h}");
-        }
-    }
-
-    #[test]
-    fn spt_a7_captions_follow_the_merger() {
-        let mut g = SpacetimeGrid::default();
-        let mut ctx = Ctx::new(1, Size::new(80, 24));
-        g.resize(Size::new(80, 24), &mut ctx);
-        g.prepare();
-        let bin = g.binary();
-        let cycle = bin.cycle();
-        let (mut merger, mut last) = (0.0, None);
-        for k in 0..2000 {
-            g.t = cycle * f64::from(k) / 1000.0;
-            let tau = bin.state(g.t).tau;
-            let expect = if tau < bin.inspiral_time() - 0.5 {
-                None
-            } else if tau < bin.merge_time() + 0.5 {
-                Some(MERGER)
-            } else if tau < bin.merge_time() + RINGDOWN_SHOWN {
-                Some(RINGDOWN)
-            } else {
-                None
-            };
-            assert_eq!(g.caption(), expect, "tau={tau}");
-            if expect == Some(MERGER) && last == Some(MERGER) {
-                merger += cycle / 1000.0;
-            }
-            last = expect;
-        }
-        // Long enough to read: 1.5 s per cycle, over two cycles.
-        assert!(merger > 2.0 * 1.4, "merger shown {merger} s");
-    }
-
-    #[test]
-    fn spt_gen_r13_the_mesh_clears_the_top_row_and_the_title_row() {
-        for (w, h) in [(80, 24), (120, 40), (200, 50), (60, 30), (240, 30)] {
-            let size = Size::new(w, h);
-            let mut g = SpacetimeGrid::default();
-            let mut ctx = Ctx::new(8, size);
-            g.resize(size, &mut ctx);
-            g.prepare();
-            let cycle = g.binary().cycle();
-            for _ in 0..(cycle / (4.0 * SIM_DT)) as usize {
-                g.update(4.0 * SIM_DT, &mut ctx);
-                g.prepare();
-                for y in [0, i32::from(h) - 1] {
-                    for x in 0..i32::from(w) {
-                        assert_eq!(g.mesh.cell_mask(x, y), Some(0), "{w}×{h}: mesh at {x},{y}");
-                    }
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn spt_a12_black_holes_are_small_white_hot_points() {
-        // M14 (ADR-0017): each hole is exactly 2 × 2 pixels of its rim ink, whatever its
-        // radius; nothing else is drawn.
-        let rim = ink::blackbody(30_000.0);
-        let halo = ink::blackbody(10_000.0);
-        for r in [2.0, 5.0, 9.0, 14.0] {
-            let mut px = Pixels::new(Size::new(40, 20));
-            let b = Body {
-                dx: 40.3,
-                dy: 39.7,
-                r,
-                kelvin: 30_000.0,
-            };
-            disc(&mut px, &b, rim, halo);
-            let lit: Vec<(i32, i32)> = (0..40)
-                .flat_map(|y| (0..40).map(move |x| (x, y)))
-                .filter(|&(x, y)| px.get(x, y) != Some(Ink::BLANK))
-                .collect();
-            assert_eq!(lit.len(), 4, "r={r}");
-            assert!(lit.iter().all(|&(x, y)| px.get(x, y) == Some(rim)));
-        }
-    }
-
-    #[test]
-    fn spt_a9_the_black_holes_sit_in_deep_funnels_and_outshine_the_mesh() {
-        let size = Size::new(80, 24);
-        let mut g = SpacetimeGrid::default();
-        let mut ctx = Ctx::new(5, size);
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let bin = g.binary();
-        let lift = RIM_LIFT * (bin.m1 + bin.m2);
-        let mut frames = 0;
-        for k in 0..400 {
-            g.t = bin.cycle() * f64::from(k) / 400.0;
-            g.refresh();
-            if bin.dip(g.t) < 1.0 {
-                continue;
-            }
-            frames += 1;
-            let masses = bin.masses(g.t);
-            // The funnel: the sheet under the heavier mass lies at least two rows below
-            // the sheet's height half a unit away from it (the pair's own dip included).
-            let (x, y, _) = masses[0];
-            let rim = well_depth(x + 0.5, y, &masses).max(well_depth(x - 0.5, y, &masses));
-            let rows = g.cam.project(x, y, lift + well_depth(x, y, &masses)).1
-                - g.cam.project(x, y, lift + rim).1;
-            assert!(rows >= 2.0, "t={}: funnel {rows} rows deep", g.t);
-            // The dark cores occlude the mesh.
-            for b in g.bodies_now(&Now::at(&bin, g.t)).iter().flatten() {
-                let (cx, cy, r) = b.hole();
-                let reach = r.ceil() as i32;
-                for oy in -reach..=reach {
-                    for ox in -reach..=reach {
-                        let (px, py) = (cx.round() as i32 + ox, cy.round() as i32 + oy);
-                        let d = (f64::from(px) - cx).hypot(f64::from(py) - cy);
-                        if d < r - 1.5 {
-                            assert!(!g.mesh.is_lit(px, py), "t={}: mesh in a core", g.t);
-                        }
-                    }
-                }
-            }
-            // In its funnel (within two moat radii, about three disc radii) the rim
-            // outshines the mesh by half again (mono greys follow the level).
-            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-            g.render(&mut canvas);
-            let rim = canvas
-                .cells()
-                .iter()
-                .filter(|c| c.ink.role == Role::Blackbody)
-                .map(|c| c.ink.level)
-                .max()
-                .unwrap_or(0);
-            let holes: Vec<_> = g
-                .bodies_now(&Now::at(&bin, g.t))
-                .iter()
-                .flatten()
-                .map(Body::hole)
-                .collect();
-            for y in 0..i32::from(size.height()) {
-                for x in 0..i32::from(size.width()) {
-                    let (dx, dy) = Dots::from_cells(f64::from(x) + 0.5, f64::from(y) + 0.5);
-                    let near = holes
-                        .iter()
-                        .any(|&(cx, cy, r)| (dx - cx).hypot(dy - cy) < 2.0 * r);
-                    let cell = canvas.get(x, y).expect("on canvas");
-                    if near && cell.ink.role == MESH_ROLE {
-                        assert!(
-                            2 * u32::from(rim) >= 3 * u32::from(cell.ink.level),
-                            "t={}: rim {rim}, mesh {} at {x},{y}",
-                            g.t,
-                            cell.ink.level
-                        );
-                    }
-                }
-            }
-        }
-        assert!(frames > 300, "{frames}");
-        // The camera fit's lowest point is the remnant's lifted well bottom.
-        let bin = Binary::DEFAULT;
-        let remnant = bin.masses(bin.merge_time() + 1.0);
-        let bottom = well_depth(0.0, 0.0, &remnant) + RIM_LIFT * (bin.m1 + bin.m2);
-        assert!((DEEPEST - bottom).abs() < 1e-12, "{DEEPEST} vs {bottom}");
-    }
-
-    #[test]
-    fn spt_a10_the_chirp_and_the_burst_light_up_the_sheet() {
-        let size = Size::new(120, 40);
-        let mut g = SpacetimeGrid::default();
-        let mut ctx = Ctx::new(5, size);
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let bin = g.binary();
-        // Mean and brightest on-screen mesh level over 40 frames of cycle time `from..to`.
-        let mut over = |from: f64, to: f64| {
-            let (mut mean, mut top) = (0.0, 0u8);
-            for k in 0..40 {
-                g.t = 3.0 * bin.cycle() + from + (to - from) * f64::from(k) / 40.0;
-                g.refresh();
-                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-                g.render(&mut canvas);
-                let mesh = canvas
-                    .cells()
-                    .iter()
-                    .filter(|c| c.ink.role == MESH_ROLE)
-                    .map(|c| c.ink.level);
-                let (sum, n) = mesh.fold((0.0, 0), |(s, n), l| {
-                    top = top.max(l);
-                    (s + f64::from(l), n + 1)
-                });
-                mean += sum / f64::from(n.max(1)) / 40.0;
-            }
-            (mean, top)
-        };
-        let (t_i, t_m) = (bin.inspiral_time(), bin.merge_time());
-        let (quiet, quiet_top) = over(DIP, 0.5 * t_i);
-        let (late, _) = over(t_i - 3.0, t_i);
-        let (burst, burst_top) = over(t_m, t_m + 3.0);
-        // The chirp brightens the sheet, and the burst after coalescence outshines the
-        // inspiral by 40 % on average; its crests climb the ramp far past the rest level.
-        assert!(late > quiet, "inspiral {quiet} → {late}");
-        assert!(burst >= 1.4 * quiet, "inspiral {quiet}, burst {burst}");
-        assert!(
-            burst_top >= 180 && quiet_top >= 110,
-            "{quiet_top} / {burst_top}"
-        );
-    }
-
-    #[test]
-    fn spt_a11_the_waves_before_a_cycle_are_its_own_chirp_extrapolated_back() {
-        let b = Binary::DEFAULT;
-        let cycle = b.cycle();
-        for k in 0..4 {
-            let start = f64::from(k) * cycle;
-            for now in [start + 1e-6, start + 0.7, start + 5.0, start + cycle - 0.01] {
-                // The current step's source is the one the bodies show.
-                assert_eq!(b.wave_state(now, now), b.state(now), "now={now}");
-                // Seamless across the cycle's start: the same chirp before and after.
-                let (lo, hi) = (
-                    b.wave_state(start - 1e-9, now),
-                    b.wave_state(start + 1e-9, now),
-                );
-                assert!((lo.strain - hi.strain).abs() < 1e-6, "k={k}");
-                assert!((lo.phase - hi.phase).abs() < 1e-6, "k={k}");
-                // Before it: the Peters chirp at u = 1 − τ/τc > 1, a wider, slower, weaker orbit.
-                for tau in [-0.5, -3.0, -9.0] {
-                    let s = b.wave_state(start + tau, now);
-                    let u = 1.0 - tau / b.tau_c;
-                    assert!((s.a - b.a0 * u.powf(0.25)).abs() < 1e-9, "τ={tau}");
-                    assert!(
-                        (s.speed - b.omega0 * u.powf(-0.375)).abs() < 1e-9,
-                        "τ={tau}"
-                    );
-                    assert!((s.strain - u.powf(-0.25)).abs() < 1e-9, "τ={tau}");
-                    assert!(!s.merged && s.strain > 0.5, "τ={tau}");
-                }
-            }
-        }
-        // Bounded however far back.
-        assert!(b.wave_state(-1e6, 0.0).strain.is_finite());
-    }
-
-    #[test]
-    fn spt_a11_the_sheet_never_goes_dead_between_cycles() {
-        let size = Size::new(120, 40);
-        let mut g = SpacetimeGrid::default();
-        let mut ctx = Ctx::new(5, size);
-        g.resize(size, &mut ctx);
-        g.prepare();
-        let bin = g.binary();
-        let cycle = bin.cycle();
-        // Mean and brightest on-screen mesh level over the 1 s window from `t`.
-        let mut window = |t: f64| {
-            let (mut mean, mut top) = (0.0, 0u8);
-            for k in 0..10 {
-                g.t = t + 0.1 * f64::from(k);
-                g.refresh();
-                let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-                g.render(&mut canvas);
-                let (sum, n) = canvas
-                    .cells()
-                    .iter()
-                    .filter(|c| c.ink.role == MESH_ROLE)
-                    .fold((0.0, 0), |(s, n), c| {
-                        top = top.max(c.ink.level);
-                        (s + f64::from(c.ink.level), n + 1)
-                    });
-                mean += sum / f64::from(n.max(1)) / 10.0;
-            }
-            (mean, top)
-        };
-        let (mid, _) = window(3.0 * cycle + 0.5 * bin.inspiral_time() - 0.5);
-        let mut windows = 0;
-        let mut t = 3.0 * cycle;
-        while t + 1.0 < 6.0 * cycle {
-            // Windows touching the dip at a cut are exempt.
-            let dipped = (0..=10).any(|k| bin.dip(t + 0.1 * f64::from(k)) < 1.0);
-            if !dipped {
-                let (mean, top) = window(t);
-                let tau = t - (t / cycle).floor() * cycle;
-                assert!(
-                    mean >= 0.8 * mid,
-                    "τ={tau:.2}: mean {mean:.1} vs mid-inspiral {mid:.1}"
-                );
-                assert!(top >= 100, "τ={tau:.2}: brightest crest {top}");
-                windows += 1;
-            }
-            t += 1.0;
-        }
-        assert!(windows >= 45, "{windows} windows");
-    }
-
-    #[test]
-    fn spt_camera_pitch_trig_is_evaluated_once_bit_for_bit() {
-        let (sin, cos) = PITCH.sin_cos_det();
-        let p = Pitch::new();
-        assert_eq!(
-            (p.cos.to_bits(), p.sin.to_bits()),
-            (cos.to_bits(), sin.to_bits())
-        );
-        let mut g = SpacetimeGrid::default();
-        g.resize(Size::new(80, 24), &mut Ctx::new(1, Size::new(80, 24)));
-        g.prepare();
-        assert_eq!(g.cam.pitch, p);
-    }
-
-    #[test]
-    fn spt_a8_the_merger_is_the_brightest_moment() {
-        let b = Binary::DEFAULT;
-        let t_m = b.merge_time();
-        assert!((b.flash(t_m) - 1.0).abs() < 1e-9);
-        for k in 0..2000 {
-            let t = b.cycle() * f64::from(k) / 2000.0;
-            let f = b.flash(t);
-            assert!((0.0..=1.0).contains(&f), "t={t}");
-            if t < b.inspiral_time() || t > t_m + 3.0 {
-                assert!(f < 1e-4, "flash {f} at t={t}");
-            }
-        }
-        // The mesh is brightest at coalescence: same segment, flash on versus off.
-        let p = Pt {
-            well: -0.3,
-            crest: 0.5,
-            envn: 1.0,
-            ..Pt::default()
-        };
-        let calm = mesh_ink(&p, &p, (1.0, 2.0), 1.0, MESH_MAX);
-        let lit = mesh_ink(
-            &p,
-            &p,
-            (1.0, 2.0),
-            1.0 + FLASH_GAIN * b.flash(t_m),
-            MESH_MAX,
-        );
-        assert!(lit.level > calm.level);
+        // Separation reaches q_end then resets; phase stays continuous across the reset.
+        let cycle = b.tau_c * (1.0 - b.q_end.powi(4));
+        assert!((b.separation(cycle - 1e-9) - b.q_end * b.a0).abs() < 1e-6);
+        assert!((b.separation(cycle + 1e-9) - b.a0).abs() < 1e-6);
+        assert!((b.phase(cycle + 1e-9) - b.phase(cycle - 1e-9)).abs() < 1e-6);
+        // COM stays fixed while inspiralling too.
+        let [(x1, y1), (x2, y2)] = b.positions(17.0);
+        assert!((b.m1 * x1 + b.m2 * x2).abs() < 1e-12 && (b.m1 * y1 + b.m2 * y2).abs() < 1e-12);
     }
 
     #[test]
@@ -1600,21 +618,17 @@ mod tests {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(3, Size::new(120, 40));
         g.resize(Size::new(120, 40), &mut ctx);
-        g.prepare();
         for _ in 0..30 {
             g.update(SIM_DT, &mut ctx);
-            g.prepare();
         }
         let bin = g.binary();
         let masses = bin.masses(g.t);
         for idx in (0..g.pts.len()).step_by(37) {
             let b = g.base[idx];
-            let [x, y, r, ..] = b.get();
-            let gain = sheet_gain(bin.wave_state(g.t - r / WAVE_SPEED, g.t).speed, g.max_speed);
-            let expect = well_depth(x, y, &masses) + gain * wave(&bin, r, y.atan2(x), g.t);
+            let expect = well_depth(b.x, b.y, &masses) + wave(&bin, b.r, b.y.atan2(b.x), g.t);
             let p = g.pts[idx];
             let z = p.well + WAVE_AMP * p.envn * p.crest;
-            assert!((z - expect).abs() < 1e-6, "sample {idx}");
+            assert!((z - expect).abs() < 1e-9, "sample {idx}");
         }
     }
 
@@ -1624,18 +638,32 @@ mod tests {
             let mut g = SpacetimeGrid::default();
             let mut ctx = Ctx::new(1, Size::new(w, h));
             g.resize(Size::new(w, h), &mut ctx);
-            g.prepare();
             (g.nx, g.ny)
         };
         let (small, big) = (lines(80, 24), lines(200, 50));
         assert!(big.0 > small.0 && big.1 > small.1, "{small:?} vs {big:?}");
-        let mut stage = Stage::new(build(), 42, Size::new(120, 40), GlyphMode::Unicode);
+        // Not a solid smear: a clear majority of cells stay blank.
+        let mut stage = Stage::new(build(), 42, Size::new(100, 30), GlyphMode::Unicode);
         for _ in 0..60 {
             stage.step(SIM_DT);
         }
         let frame = stage.render();
+        let lit = frame.cells().iter().filter(|c| c.ch != ' ').count();
+        assert!(lit * 100 < frame.cells().len() * 60, "{lit} lit cells");
         let has = |r: Role| frame.cells().iter().any(|c| c.ink.role == r);
-        assert!(has(MESH_ROLE) && has(Role::Blackbody));
-        assert!(!has(Role::Ramp(Ramp::Aurora)), "M14: no strain inset");
+        assert!(has(Role::Sun) && has(Role::Star) && has(Role::Cold) && has(Role::Wave));
+        assert!(has(Role::Structure));
+    }
+
+    #[test]
+    fn spt_slope_glyphs() {
+        assert_eq!(slope_glyph(4.0, 0.5), H);
+        assert_eq!(slope_glyph(0.2, 3.0), V);
+        assert_eq!(slope_glyph(2.0, -2.0), UP);
+        assert_eq!(slope_glyph(-2.0, 2.0), UP);
+        assert_eq!(slope_glyph(2.0, 2.0), DOWN);
+        assert_eq!(merge('─', V), CROSS);
+        assert_eq!(merge('/', DOWN), XCROSS);
+        assert_eq!(merge(' ', H), H);
     }
 }

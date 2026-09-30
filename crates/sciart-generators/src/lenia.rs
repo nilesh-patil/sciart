@@ -17,10 +17,10 @@
 //! so no frame is empty.
 
 use rand::Rng;
+use sciart_core::ease;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
 use sciart_core::raster::ASCII_RAMP;
-use sciart_core::{ease, ink};
 
 pub static META: Meta = Meta {
     name: "lenia",
@@ -548,20 +548,20 @@ impl Lenia {
     }
 }
 
-/// One muted warm ramp for the creature (M14, ADR-0017; replaces Round 3's rose membrane):
-/// `Ramp(Ember)` at `0.14 + 0.81·√v` (blank below v = 0.02), so the thin membrane is a dim ember, the dense core
-/// amber to pale gold, on a black floor.
+/// The creature as a `Seq` field in four flat steps `(v from, Seq level)`, like M11's
+/// reaction fields (ADR-0018): a violet membrane, red and orange flesh, a yellow core;
+/// black below the first step.
+const LENIA_STEPS: [(f32, u8); 4] = [(0.03, 60), (0.1, 125), (0.3, 185), (0.6, 240)];
+
 fn lenia_ink(v: f32) -> Ink {
-    let v = f64::from(v).clamp(0.0, 1.0);
-    if v < 0.02 {
+    if !v.is_finite() {
         return Ink::BLANK;
     }
-    let ink = ink::ramp(Ramp::Ember, 0.14 + 0.81 * v.sqrt());
-    if f64::from(ink.level) < ink::MIN_VISIBLE_LEVEL {
-        Ink::BLANK
-    } else {
-        ink
-    }
+    LENIA_STEPS
+        .iter()
+        .rev()
+        .find(|(from, _)| v >= *from)
+        .map_or(Ink::BLANK, |&(_, l)| Ink::new(Role::Seq, l))
 }
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
@@ -894,5 +894,16 @@ mod tests {
         g.update(0.1, &mut ctx);
         g.prepare();
         assert!(g.world.mass() > 0.5 * g.seed_mass);
+    }
+
+    #[test]
+    fn lna_a10_the_creature_is_a_stepped_seq_field_on_black() {
+        assert_eq!(lenia_ink(0.0), Ink::BLANK);
+        assert_eq!(lenia_ink(1.0), Ink::new(Role::Seq, 240));
+        let mut levels: Vec<u8> = (0..=100)
+            .map(|i| lenia_ink(i as f32 / 100.0).level)
+            .collect();
+        levels.dedup();
+        assert_eq!(levels.len(), 1 + LENIA_STEPS.len(), "{levels:?}");
     }
 }

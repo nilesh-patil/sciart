@@ -12,11 +12,10 @@
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
+use sciart_core::draw;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
-use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
-use sciart_core::{draw, ink, raster};
 
 pub static META: Meta = Meta {
     name: "cosmic_microwave_background",
@@ -46,15 +45,13 @@ const LANES: usize = 16;
 const L_PEAK: f64 = 220.0;
 const PEAK_WAVELENGTH: f64 = 6.0;
 /// Multipole range that is synthesised. Below `L_MIN` the wavelength (> 60 rows) exceeds
-/// any sensible map; above `L_MAX` it (< 1.3 rows) nears the ½-row pixel grid's Nyquist
-/// scale (1 row).
+/// any sensible map; above `L_MAX` it (< 1.74 rows) would alias on the 1-row vertical grid.
 const L_MIN: f64 = 10.0;
-const L_MAX: f64 = 1000.0;
-/// Gaussian beam `B²(ℓ) = exp(−(ℓ/L_BEAM)²)`: the half-block pixel is our telescope's
-/// beam. It keeps the first peak (B² ≈ 0.84) and the second (≈ 0.34), so the spots carry
-/// sub-structure, and rolls off towards `L_MAX` (≈ 0.025), as Planck's beam rolls off its
-/// damping tail.
-const L_BEAM: f64 = 520.0;
+const L_MAX: f64 = 760.0;
+/// Gaussian beam `B²(ℓ) = exp(−(ℓ/L_BEAM)²)`: the terminal cell is our telescope's beam.
+/// It keeps the first peak (B² ≈ 0.74) and suppresses power near the vertical Nyquist
+/// scale (ℓ ≈ 660, B² ≈ 0.07), just like Planck's beam rolls off its damping tail.
+const L_BEAM: f64 = 400.0;
 /// Approximate ΛCDM temperature spectrum `D_ℓ = ℓ(ℓ+1)C_ℓ/2π` in μK², read off the
 /// Planck 2018 best fit at the plateau, the first three peaks and the troughs (±10 %).
 /// Interpolated linearly in `ln ℓ`.
@@ -80,25 +77,12 @@ const OMEGA: (f64, f64) = (0.08, 0.35);
 /// Display saturation in units of the field's σ. Planck's map colour bar spans ±300 μK
 /// for a CMB rms of ≈ 110 μK, i.e. ≈ ±2.7 σ.
 const SATURATION_SIGMA: f64 = 2.7;
-/// ASCII stand-ins for a sky pixel pair, by contrast.
-const ASCII_RAMP: [char; 4] = ['.', ':', '*', '#'];
-/// The muted, dark-centred palette (ADR-0017): the field's full scale maps to `±MUTE` on
-/// `Role::Div` (a cool blue and a warm orange, low in chroma this close to zero); small
-/// strengths are eased smoothly towards zero (`smoothstep(u / ZERO_EASE)`), and a pixel
-/// within `ZERO_FLOOR` level of `Div`'s centre is black, so the map's zero fades into black
-/// through the faintest tints rather than a navy wash, with no dither.
-const MUTE: f64 = 0.14;
-const ZERO_EASE: f64 = 0.35;
-const ZERO_FLOOR: u8 = 1;
-/// The oval's outline: a 1-px dim `Starlight` rim where the field there is fainter, so the
-/// frame reads even where the map is near zero.
-const RIM_LEVEL: f64 = 20.0;
-/// Beyond `KNEE` of the full scale (≈ 2σ) the rarest hot and cold spots rise steeply to
-/// `±SPOT_PEAK` (`((u − KNEE)/(1 − KNEE))^SPOT_POW`), so the map's extremes stay legible
-/// (GEN-R21) while its bulk stays muted.
-const KNEE: f64 = 0.65;
-const SPOT_PEAK: f64 = 0.9;
-const SPOT_POW: f64 = 1.5;
+const RAMP: [Glyph; 4] = [
+    Glyph::new('░', '.'),
+    Glyph::new('▒', ':'),
+    Glyph::new('▓', '*'),
+    Glyph::new('█', '#'),
+];
 const READOUT: &str = "CMB  T=2.725K  dT~1e-5";
 
 /// Angular power spectrum `D_ℓ` (μK²) of the CMB-like model (CMB-A5).
@@ -217,91 +201,23 @@ pub struct CosmicMicrowaveBackground {
     modes: Vec<Mode>,
     /// Per column `x`, `2·MODES` values: `sin(kxᵢ·x)` for all i, then `cos(kxᵢ·x)`.
     cols: Vec<f64>,
-    /// Per pixel row, `2·MODES` values: `cos(kyᵢ·y + φᵢ)` for all i, then `sin(…)`.
+    /// Per row `y`, `2·MODES` values: `cos(kyᵢ·y + φᵢ)` for all i, then `sin(…)`.
     rows: Vec<f64>,
     /// `σ` of the field for random phases: `1/√(2N)`.
     sigma: f64,
-    /// The oval in cell coordinates (centre and semi-axes; y in rows).
     cx: f64,
     cy: f64,
     rx: f64,
     ry: f64,
     height: u16,
     readout: bool,
-    /// The sky map.
-    pixels: Pixels,
-    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
-    dirty: bool,
-}
-
-/// The sky's ink for field value `v` (in units of the display's full scale, ±1) at oval
-/// coverage `cover`: `Role::Div`, muted within `±MUTE` up to the knee and rising to
-/// `±SPOT_PEAK` for the rarest spots, faded towards zero (black) at the rim.
-pub(crate) fn sky_ink(v: f64, cover: f64) -> Ink {
-    let u = v.abs().min(1.0);
-    // Only the rare spots past the knee pay for the power (GEN-R8).
-    let spot = if u > KNEE {
-        ((u - KNEE) / (1.0 - KNEE)).powf(SPOT_POW)
-    } else {
-        0.0
-    };
-    let ease = ease::smoothstep((u / ZERO_EASE).min(1.0));
-    let out = MUTE * u * ease + (SPOT_PEAK - MUTE) * spot;
-    ink::div(out.copysign(v) * cover.clamp(0.0, 1.0))
-}
-
-/// Entries of the unit-coverage ink table over `v ∈ [−1, 1]`.
-const SKY_LUT: usize = 2049;
-
-/// The sky's ink at oval coverage `cover`: from a size-independent table over `v` where
-/// the oval covers the pixel (almost all of them; built once per process, GEN-R8), and
-/// [`sky_ink`] itself on the rim.
-#[cfg(test)]
-fn sky_pixel(v: f64, cover: f64) -> Ink {
-    sky_pixel_in(sky_lut(), v, cover)
-}
-
-/// The unit-coverage ink table (built once per process).
-fn sky_lut() -> &'static [Ink] {
-    static LUT: std::sync::OnceLock<Box<[Ink]>> = std::sync::OnceLock::new();
-    LUT.get_or_init(|| {
-        (0..SKY_LUT)
-            .map(|i| sky_ink(2.0 * i as f64 / (SKY_LUT - 1) as f64 - 1.0, 1.0))
-            .collect()
-    })
-}
-
-/// [`sky_pixel`] with the table in hand (hoisted out of the pixel loop).
-#[inline]
-fn sky_pixel_in(lut: &[Ink], v: f64, cover: f64) -> Ink {
-    if cover < 1.0 {
-        return sky_ink(v, cover);
-    }
-    let i = ((v.clamp(-1.0, 1.0) + 1.0) * 0.5 * (SKY_LUT - 1) as f64).round() as usize;
-    lut[i.min(SKY_LUT - 1)]
-}
-
-/// Row coordinate (in rows) of the centre of pixel row `py`: cell row `y` spans
-/// `[y − ½, y + ½)` around the cell's own coordinate `y`.
-fn pixel_row(py: usize) -> f64 {
-    py as f64 / 2.0 - 0.25
-}
-
-/// ASCII stand-in for a sky pixel pair: a density char by the stronger pixel's contrast.
-fn ascii_pixel(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let ink = raster::stronger(top, bottom);
-    (ink.role != Role::Background).then(|| {
-        let top = (SPOT_PEAK * 128.0) as usize + 1;
-        let i = usize::from(ink.level.abs_diff(128)) * ASCII_RAMP.len() / top;
-        (ASCII_RAMP[i.min(ASCII_RAMP.len() - 1)], ink)
-    })
 }
 
 impl CosmicMicrowaveBackground {
-    /// `[cos B, sin B]` with `B = ky·y + φ + ωt` for every mode on pixel row `py`, by
-    /// rotating the per-resize row table by `ωt` (no trig per row).
-    fn row_vector(&self, py: usize, rot: &[(f64, f64); MODES]) -> [f64; 2 * MODES] {
-        let r = &self.rows[py * 2 * MODES..(py + 1) * 2 * MODES];
+    /// `[cos B, sin B]` with `B = ky·y + φ + ωt` for every mode on row `y`, by rotating the
+    /// per-resize row table by `ωt` (no trig per row).
+    fn row_vector(&self, y: usize, rot: &[(f64, f64); MODES]) -> [f64; 2 * MODES] {
+        let r = &self.rows[y * 2 * MODES..(y + 1) * 2 * MODES];
         let mut out = [0.0; 2 * MODES];
         for i in 0..MODES {
             let (c0, s0) = (r[i], r[MODES + i]);
@@ -322,7 +238,7 @@ impl CosmicMicrowaveBackground {
     }
 
     /// Field at column `x`: sin(A + B) = sin A cos B + cos A sin B, i.e. a dot product of
-    /// the column and row vectors (`LANES` accumulators so it vectorises).
+    /// the column and row vectors (4 accumulators so it vectorises).
     fn cell_value(&self, x: usize, row: &[f64; 2 * MODES]) -> f64 {
         let col = &self.cols[x * 2 * MODES..(x + 1) * 2 * MODES];
         let mut acc = [0.0; LANES];
@@ -332,95 +248,6 @@ impl CosmicMicrowaveBackground {
             }
         }
         acc.iter().sum::<f64>() / MODES as f64
-    }
-
-    /// Whether cell point `(x, y)` (y in rows) lies inside the sky oval.
-    #[cfg(test)]
-    fn in_oval(&self, x: f64, y: f64) -> bool {
-        let (dx, dy) = ((x - self.cx) / self.rx, (y - self.cy) / self.ry);
-        dx * dx + dy * dy <= 1.0
-    }
-
-    /// The columns of row `y` (in rows) that lie inside the oval, the same cells
-    /// `in_oval` accepts (up to rounding on the rim), found once per row.
-    fn oval_span(&self, y: f64, w: usize) -> std::ops::Range<usize> {
-        let dy = (y - self.cy) / (self.ry + 0.25);
-        let half = (self.rx + 0.5) * (1.0 - dy * dy).sqrt();
-        if half.is_nan() {
-            return 0..0;
-        }
-        let lo = (self.cx - half).ceil().max(0.0) as usize;
-        let hi = ((self.cx + half).floor() + 1.0).clamp(0.0, w as f64) as usize;
-        lo.min(hi)..hi
-    }
-
-    /// Shade the sky map for the current time (the M10 raster convention: `render` only
-    /// blits).
-    fn shade(&mut self) {
-        let w = self.cols.len() / (2 * MODES);
-        let full_scale = SATURATION_SIGMA * self.sigma;
-        let rot = self.rotation();
-        let lut = sky_lut();
-        for py in 0..2 * usize::from(self.height) {
-            let span = self.oval_span(pixel_row(py), w);
-            if span.is_empty() {
-                continue;
-            }
-            let row = self.row_vector(py, &rot);
-            let y = pixel_row(py);
-            // Columns whose coverage is surely 1 (the rim's `cover` is computed only
-            // outside them).
-            let inner = self.inner_half(y);
-            for x in span {
-                let v = self.cell_value(x, &row) / full_scale;
-                let cover = if (x as f64 - self.cx).abs() <= inner {
-                    1.0
-                } else {
-                    self.cover(x as f64, y)
-                };
-                let mut ink = sky_pixel_in(lut, v, cover);
-                if ink.level.abs_diff(128) <= ZERO_FLOOR {
-                    ink = Ink::BLANK;
-                }
-                // The rim: a dim outline where the field is fainter.
-                if cover < 1.0 && cover > 0.0 {
-                    let rim = ink::ramp(Ramp::Starlight, RIM_LEVEL * cover / 255.0);
-                    if ink.level.abs_diff(128) < 3 || ink == Ink::BLANK {
-                        ink = rim;
-                    }
-                }
-                self.pixels.set(x as i32, py as i32, ink);
-            }
-        }
-    }
-
-    /// Half-width (cells) of row `y`'s run of pixels the oval surely covers fully.
-    fn inner_half(&self, y: f64) -> f64 {
-        let span = self.rx.min(2.0 * self.ry);
-        let inner = (1.0 - 0.5 / span).max(0.0);
-        let dy = (y - self.cy) / self.ry;
-        let q = inner * inner - dy * dy;
-        if q > 0.0 {
-            self.rx * q.sqrt() - 1e-9
-        } else {
-            -1.0
-        }
-    }
-
-    /// How much of the pixel at `(x, y)` (y in rows) the oval covers: 1 inside, falling
-    /// linearly across the rim's last pixel (an anti-aliased edge, CMB-A7).
-    fn cover(&self, x: f64, y: f64) -> f64 {
-        let (dx, dy) = ((x - self.cx) / self.rx, (y - self.cy) / self.ry);
-        let r2 = dx * dx + dy * dy;
-        // The rim's distance in pixels (a cell is one pixel wide and two tall); well
-        // inside it the coverage is 1 without a square root.
-        let span = self.rx.min(2.0 * self.ry);
-        let inner = (1.0 - 0.5 / span).max(0.0);
-        if r2 <= inner * inner {
-            return 1.0;
-        }
-        let px = (1.0 - r2.sqrt()) * span;
-        (px + 0.5).clamp(0.0, 1.0)
     }
 }
 
@@ -447,45 +274,62 @@ impl Generator for CosmicMicrowaveBackground {
             }
         }
         self.rows.clear();
-        for py in 0..2 * h {
+        for y in 0..h {
             let start = self.rows.len();
             self.rows.resize(start + 2 * MODES, 0.0);
             for (i, m) in self.modes.iter().enumerate() {
-                let (s, c) = (m.ky * pixel_row(py) + m.phase).sin_cos_det();
+                let (s, c) = (m.ky * y as f64 + m.phase).sin_cos_det();
                 (self.rows[start + i], self.rows[start + MODES + i]) = (c, s);
             }
         }
         self.height = size.height();
-        let room = title::readout_room(size, &Title::of(self));
-        self.readout = size.height() > 6 && READOUT.len() <= room;
+        self.readout = size.height() > 6;
         let sky_rows = f64::from(size.height()) - if self.readout { 1.0 } else { 0.0 };
         self.cx = (w as f64 - 1.0) / 2.0;
         self.cy = (sky_rows - 1.0) / 2.0;
         self.rx = (OVAL * w as f64 / 2.0).max(0.5);
         self.ry = (OVAL * sky_rows / 2.0).max(0.5);
-        self.pixels.resize(size);
-        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
         self.t += dt;
-        self.dirty = true;
-    }
-
-    fn prepare(&mut self) {
-        if std::mem::take(&mut self.dirty) {
-            self.shade();
-        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_pixel(top, bottom));
+        let w = self.cols.len() / (2 * MODES);
+        if w == 0 {
+            return;
+        }
+        let full_scale = SATURATION_SIGMA * self.sigma;
+        let rot = self.rotation();
+        for y in 0..self.height {
+            let dy = (f64::from(y) - self.cy) / self.ry;
+            if dy.abs() > 1.0 {
+                continue;
+            }
+            // Only the cells inside the oval; the corners stay black like a Mollweide map.
+            let half = self.rx * (1.0 - dy * dy).sqrt();
+            let x0 = (self.cx - half).ceil().max(0.0) as usize;
+            let x1 = ((self.cx + half).floor().max(0.0) as usize).min(w - 1);
+            let row = self.row_vector(usize::from(y), &rot);
+            for x in x0..=x1 {
+                let f = self.cell_value(x, &row);
+                let v = (f.abs() / full_scale).min(1.0);
+                let role = if f > 0.0 { Role::Hot } else { Role::Cold };
+                let ink = Ink::new(role, (45.0 + 210.0 * v) as u8);
+                canvas.put(x as i32, i32::from(y), draw::ramp(v, &RAMP), ink);
+            }
+        }
         // Bottom-right, clear of the title (GEN-R13); dropped when the row is too narrow.
-        if self.readout {
+        let room = title::readout_room(canvas.size(), &Title::of(self));
+        if self.readout && READOUT.len() <= room {
             let y = i32::from(self.height) - 1;
-            let ink = Ink::new(Role::Text, title::READOUT_LEVEL);
-            draw::label_right(canvas, y, READOUT, ink);
+            draw::label_right(
+                canvas,
+                y,
+                READOUT,
+                Ink::new(Role::Text, title::READOUT_LEVEL),
+            );
         }
     }
 }
@@ -518,7 +362,6 @@ mod tests {
         let size = Size::new(w, h);
         let mut g = CosmicMicrowaveBackground::default();
         g.resize(size, &mut Ctx::new(seed, size));
-        g.prepare();
         g
     }
 
@@ -620,24 +463,14 @@ mod tests {
     }
 
     #[test]
-    fn cmb_a3_full_frame_has_hot_and_cold_pixels() {
+    fn cmb_a3_full_frame_has_hot_and_cold_cells() {
         for seed in 0..8 {
-            let g = scene(seed, 200, 50);
-            let (mut hot, mut cold) = (0, 0);
-            for py in 0..100 {
-                for x in 0..200 {
-                    let ink = g.pixels.get(x, py).unwrap();
-                    // Beyond 0.6 of the muted full scale either way.
-                    if ink.role == Role::Div {
-                        let d = f64::from(ink.level) - 128.0;
-                        hot += usize::from(d > 0.6 * MUTE * 127.0);
-                        cold += usize::from(d < -0.6 * MUTE * 128.0);
-                    }
-                }
-            }
+            let mut stage = Stage::new(build(), seed, Size::new(200, 50), GlyphMode::Unicode);
+            let frame = stage.render();
+            let count = |r| frame.cells().iter().filter(|c| c.ink.role == r).count();
             assert!(
-                hot > 200 && cold > 200,
-                "seed {seed}: {hot} hot, {cold} cold"
+                count(Role::Hot) > 100 && count(Role::Cold) > 100,
+                "seed {seed}"
             );
         }
     }
@@ -752,10 +585,10 @@ mod tests {
         let mut g = scene(5, 120, 40);
         g.t = 4.2;
         let rot = g.rotation();
-        for py in [0usize, 7, 79] {
-            let row = g.row_vector(py, &rot);
+        for y in [0usize, 7, 39] {
+            let row = g.row_vector(y, &rot);
             for x in [0usize, 31, 119] {
-                let direct = field_value(&g.modes, x as f64 / ASPECT, pixel_row(py), g.t);
+                let direct = field_value(&g.modes, x as f64 / ASPECT, y as f64, g.t);
                 assert!((g.cell_value(x, &row) - direct).abs() < 1e-12);
             }
         }
@@ -766,7 +599,6 @@ mod tests {
         let mut g = scene(9, 80, 24);
         let before = g.modes.clone();
         g.resize(Size::new(30, 10), &mut Ctx::new(123, Size::new(30, 10)));
-        g.prepare();
         assert_eq!(g.modes, before);
         assert_eq!(g.modes.len(), MODES);
         let (lo, hi) = (TAU / wavenumber(L_MAX), TAU / wavenumber(L_MIN));
@@ -783,99 +615,7 @@ mod tests {
         let frame = stage.render();
         assert_eq!(frame.get(0, 0).unwrap().ch, ' ');
         assert_eq!(frame.get(99, 28).unwrap().ch, ' ');
-        // The oval is drawn (its zero dissolves into black, so not every cell).
-        let drawn = (40..60)
-            .flat_map(|x| (10..18).map(move |y| (x, y)))
-            .filter(|&(x, y)| frame.get(x, y).unwrap().ch != ' ')
-            .count();
-        assert!(drawn > 40, "{drawn} of 160 central cells drawn");
+        assert_ne!(frame.get(50, 14).unwrap().ch, ' ');
         assert!(frame.to_lines()[29].ends_with(&format!(" {READOUT} ")));
-    }
-
-    #[test]
-    fn cmb_a6_sky_is_div_pixels_inside_the_oval_with_the_field_sign() {
-        let mut g = scene(2, 120, 40);
-        g.t = 7.5;
-        g.shade();
-        let full = SATURATION_SIGMA * g.sigma;
-        let (mut inside, mut outside) = (0, 0);
-        for py in 0..80 {
-            for x in 0..120 {
-                let ink = g.pixels.get(x, py).unwrap();
-                if g.in_oval(f64::from(x), pixel_row(py as usize)) {
-                    inside += 1;
-                    let f =
-                        field_value(&g.modes, f64::from(x) / ASPECT, pixel_row(py as usize), g.t);
-                    let cover = g.cover(f64::from(x), pixel_row(py as usize));
-                    let want = sky_pixel(f / full, cover);
-                    // At zero the map is black (CMB-A7); on the rim a dim outline may
-                    // stand in for a faint field; elsewhere it is the field's muted ink.
-                    if cover < 1.0 {
-                        assert!(
-                            ink == want
-                                || ink.role == Role::Ramp(Ramp::Starlight)
-                                || ink == Ink::BLANK,
-                            "pixel {x},{py}"
-                        );
-                    } else if want.level.abs_diff(128) > ZERO_FLOOR {
-                        assert_eq!(ink, want, "pixel {x},{py}");
-                    } else {
-                        assert_eq!(ink, Ink::BLANK, "pixel {x},{py}");
-                    }
-                } else if g.cover(f64::from(x), pixel_row(py as usize)) == 0.0 {
-                    outside += 1;
-                    assert_eq!(ink, Ink::BLANK);
-                }
-            }
-        }
-        assert!(inside > 5000 && outside > 500, "{inside} in, {outside} out");
-    }
-
-    #[test]
-    fn cmb_a7_a_muted_dark_centred_map_with_a_soft_edge() {
-        // ADR-0017: the field spans only `±MUTE` of `Div` (low chroma), its zero is black,
-        // and the oval's rim fades over its last pixel instead of stepping.
-        let g = scene(5, 200, 50);
-        let (mut drawn, mut blank_inside, mut muted) = (0, 0, 0);
-        for py in 0..100 {
-            for x in 0..200 {
-                let ink = g.pixels.get(x, py).unwrap();
-                if ink.role == Role::Ramp(Ramp::Starlight) {
-                    // The oval's dim outline.
-                    assert!(f64::from(ink.level) <= RIM_LEVEL + 1.0);
-                    assert!(g.cover(f64::from(x), pixel_row(py as usize)) < 1.0);
-                } else if ink.role == Role::Div {
-                    drawn += 1;
-                    assert!(
-                        f64::from(ink.level.abs_diff(128)) <= SPOT_PEAK * 128.0 + 1.0,
-                        "{ink:?}"
-                    );
-                    muted += usize::from(
-                        f64::from(ink.level.abs_diff(128)) <= KNEE * MUTE * 128.0 + 1.0,
-                    );
-                } else {
-                    assert_eq!(ink, Ink::BLANK);
-                    blank_inside += usize::from(g.in_oval(f64::from(x), pixel_row(py as usize)));
-                }
-            }
-        }
-        assert!(drawn > 5000, "{drawn} drawn");
-        // Most of the map is muted; only the rarest spots rise past the knee.
-        assert!(muted * 10 > drawn * 8, "{muted} of {drawn} muted");
-        assert!(
-            blank_inside * 10 > drawn,
-            "the zero is black: {blank_inside} blank inside"
-        );
-        // Coverage: 1 well inside, 0 well outside, and in between across the rim.
-        assert_eq!(g.cover(g.cx, g.cy), 1.0);
-        assert_eq!(g.cover(g.cx + 2.0 * g.rx, g.cy), 0.0);
-        let rim = g.cover(g.cx + g.rx, g.cy);
-        assert!((0.3..=0.7).contains(&rim), "rim coverage {rim}");
-        assert_eq!(sky_ink(1.0, 0.0), ink::div(0.0));
-        assert_eq!(sky_ink(0.5, 1.0), ink::div(0.5 * MUTE));
-        // Small strengths ease smoothly to zero (no dither).
-        let small = sky_ink(0.05, 1.0).level.abs_diff(128);
-        assert!(small <= ZERO_FLOOR, "{small}");
-        assert_eq!(sky_ink(-1.0, 1.0), ink::div(-SPOT_PEAK));
     }
 }

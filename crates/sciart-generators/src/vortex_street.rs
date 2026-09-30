@@ -38,14 +38,13 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
-use sciart_core::lbm::{self, heq, tau_minus};
 use sciart_core::prelude::*;
 use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "vortex_street",
     category: Category::Physics,
-    description: "A von Karman vortex street shed from a cylinder at laminar Re ~ 90-150",
+    description: "A von Karman vortex street shed from a cylinder at Re ~ 130",
     title: "Vortex street · eddies peel off",
     captions: &[],
 };
@@ -53,6 +52,25 @@ pub static META: Meta = Meta {
 pub fn build() -> Box<dyn Generator> {
     Box::new(VortexStreet::default())
 }
+
+/// D2Q9 velocities in the lattice (rows-down) frame: rest, E, S, W, N, SE, SW, NW, NE.
+const CX: [i32; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1];
+const CY: [i32; 9] = [0, 0, 1, 0, -1, 1, 1, -1, -1];
+/// Index of the opposite velocity, `c_ī = −c_i`.
+const OPP: [usize; 9] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
+/// The four opposite pairs that TRT splits into even and odd parts.
+const PAIRS: [(usize, usize); 4] = [(1, 3), (2, 4), (5, 7), (6, 8)];
+const W: [f32; 9] = [
+    4.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 9.0,
+    1.0 / 36.0,
+    1.0 / 36.0,
+    1.0 / 36.0,
+    1.0 / 36.0,
+];
 
 /// Relaxation time: ν = (τ − ½)/3 = 0.01 lattice units.
 const TAU: f64 = 0.53;
@@ -67,10 +85,6 @@ const BREATH_PERIOD: f64 = 47.0;
 /// the inlet's adjustment, which clear after ≈ 110–160 steps; 160 ≈ x_c/U, one flush of
 /// the run-up. ≈ 1.6 M lattice updates: a one-off ≈ 12–20 ms on a release scene switch.
 const PREROLL_STEPS: usize = 160;
-/// Pre-roll steps per `update` after a watchdog restart: ≈ 1.1 ms of kernel, so the
-/// restart stays inside the frame budget, spread over 10 updates (≈ 0.17 s at 60 Hz)
-/// while the analytic start is shown (VOR-A13).
-const PREROLL_PER_UPDATE: usize = 16;
 /// Minimum distance of the cylinder centre from the inlet, in diameters: on square
 /// displays 15 % of the width would put the front only ≈ 4 nodes past the inlet sponge,
 /// and the calm inflow would fill with the inlet's disturbances.
@@ -99,6 +113,9 @@ const VIEW_X0: usize = 1;
 /// Lattice steps per simulated second (4.5 per 60 Hz frame) and the cap per `update`.
 const STEPS_PER_S: f64 = 270.0;
 const MAX_STEPS: usize = 68;
+/// Nodes collided together in the kernel's inner loop: one 128-bit SIMD register of f32
+/// (NEON, SSE2). Measured 7 ns/node against 29 ns unbatched; 8 and 16 lanes spill.
+const LANES: usize = 4;
 /// Watchdog cadence and the density band it accepts (simulated seconds, lattice units).
 const CHECK_EVERY: f64 = 1.0;
 const RHO_OK: (f32, f32) = (0.7, 1.3);
@@ -187,6 +204,11 @@ pub(crate) struct FlowParams {
     pub re: f64,
 }
 
+/// `τ⁻` from the magic parameter `Λ = (τ − ½)(τ⁻ − ½)` (VOR-A1).
+pub(crate) fn tau_minus(tau: f64, magic: f64) -> f64 {
+    0.5 + magic / (tau - 0.5)
+}
+
 /// The simulation lattice for a display (ADR-0012, VOR-A4): the display's square-pixel
 /// aspect `w/2h`, clamped to [1, 4] and widened by the hidden sponge, is snapped to its
 /// power of [`BUCKET`], and the capped lattice of exactly that aspect is used whatever
@@ -236,6 +258,38 @@ pub(crate) fn flow_params(lattice: Size) -> FlowParams {
         omega_m: (1.0 / tau_minus(TAU, MAGIC)) as f32,
         re,
     }
+}
+
+/// Shifted equilibrium `f_i^eq − w_i = w_i (δρ + ρ(3 c·u + 4.5 (c·u)² − 1.5 u²))` with
+/// `ρ = 1 + δρ` (Lehmann et al. 2022): the O(Ma²) deviations keep full `f32` precision.
+#[inline(always)]
+pub(crate) fn heq(drho: f32, ux: f32, uy: f32) -> [f32; 9] {
+    let rho = 1.0 + drho;
+    let usq = 1.5 * (ux * ux + uy * uy);
+    std::array::from_fn(|i| {
+        let cu = CX[i] as f32 * ux + CY[i] as f32 * uy;
+        W[i] * (drho + rho * (3.0 * cu + 4.5 * cu * cu - usq))
+    })
+}
+
+/// TRT collision of one node's shifted populations in place; returns the node's
+/// `(ρ, uₓ, u_y)`, which the collision conserves (VOR-A1).
+#[inline(always)]
+pub(crate) fn collide(h: &mut [f32; 9], omega_p: f32, omega_m: f32) -> (f32, f32, f32) {
+    let drho = ((h[0] + h[1]) + (h[2] + h[3])) + ((h[4] + h[5]) + (h[6] + h[7])) + h[8];
+    let rho = 1.0 + drho;
+    let jx = (h[1] - h[3]) + (h[5] - h[7]) + (h[8] - h[6]);
+    let jy = (h[2] - h[4]) + (h[5] - h[7]) + (h[6] - h[8]);
+    let (ux, uy) = (jx / rho, jy / rho);
+    let eq = heq(drho, ux, uy);
+    h[0] -= omega_p * (h[0] - eq[0]);
+    for (i, j) in PAIRS {
+        let (ni, nj) = (h[i] - eq[i], h[j] - eq[j]);
+        let (even, odd) = (0.5 * (ni + nj), 0.5 * (ni - nj));
+        h[i] -= omega_p * even + omega_m * odd;
+        h[j] -= omega_p * even - omega_m * odd;
+    }
+    (rho, ux, uy)
 }
 
 /// Irrotational flow past a cylinder of radius `r` in a uniform stream `u` (y up):
@@ -305,12 +359,8 @@ pub(crate) fn strouhal(crossings: &Trail<u64>, d: f64, u_at: impl Fn(f64) -> f64
 /// The ink of one vorticity pixel: `ink::div` of the soft-clipped value, or `None` in the
 /// irrotational flow (|s| < 0.06), which is the terminal background.
 pub(crate) fn vort_ink(s: f64) -> Option<Ink> {
-    (s.abs() >= VORT_MIN).then(|| ink::div(VORT_MUTE * s))
+    (s.abs() >= VORT_MIN).then(|| ink::div(s))
 }
-
-/// M14 (ADR-0017): the vorticity is drawn at this share of its soft-clipped value, so the
-/// eddies are muted orange and blue that deepen to the dark zero between them.
-const VORT_MUTE: f64 = 0.85;
 
 /// Hysteresis marks of a pixel (see [`mark`]); `VISITED` is a `FAINT` pixel already
 /// grouped by [`drop_faint_islands`].
@@ -450,11 +500,23 @@ pub(crate) fn cap_columns(p: &FlowParams, view_w: u16, px_w: u16) -> (i32, i32) 
     cols
 }
 
-/// The scene's wind tunnel: a core D2Q9 lattice (CORE-R99) plus the channel's inlet and
-/// outlet data. It dereferences to the lattice, whose kernel it runs.
+/// Populations, moments and the solid mask of one lattice.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Lattice {
-    lbm: lbm::Lattice,
+    w: usize,
+    h: usize,
+    /// Nine SoA planes of `w·h` shifted post-collision populations `f_i − w_i`.
+    f: Vec<f32>,
+    /// The other half of the pull scheme's ping-pong pair.
+    next: Vec<f32>,
+    rho: Grid<f32>,
+    ux: Grid<f32>,
+    uy: Grid<f32>,
+    solid: Vec<bool>,
+    /// Rows that touch a solid node (or neighbour one) and the column range around the
+    /// solids: only there does the kernel check the mask.
+    near_solid: Vec<bool>,
+    solid_cols: (usize, usize),
     /// Per-row inlet populations for [`Bc::Channel`] (empty for other lattices), and the
     /// uniform stream the outlet sponge relaxes toward, both at the current inlet speed.
     inflow: Vec<[f32; 9]>,
@@ -467,8 +529,30 @@ pub(crate) struct Lattice {
 impl Lattice {
     /// A `size` lattice at rest (`f = w`, ρ = 1, u = 0) with `solid(x, y)` nodes.
     pub(crate) fn new(size: Size, solid: impl Fn(usize, usize) -> bool) -> Self {
+        let (w, h) = (usize::from(size.width()), usize::from(size.height()));
+        let n = w * h;
+        let mask: Vec<bool> = (0..n).map(|i| solid(i % w, i / w)).collect();
+        let mut near_solid = vec![false; h];
+        let (mut x0, mut x1) = (w, 0);
+        for (i, _) in mask.iter().enumerate().filter(|(_, s)| **s) {
+            let (x, y) = (i % w, i / w);
+            for dy in [h - 1, 0, 1] {
+                near_solid[(y + dy) % h] = true;
+            }
+            x0 = x0.min(x.saturating_sub(1));
+            x1 = x1.max((x + 2).min(w));
+        }
         Self {
-            lbm: lbm::Lattice::new(size, solid),
+            w,
+            h,
+            f: vec![0.0; 9 * n],
+            next: vec![0.0; 9 * n],
+            rho: Grid::new(size, 1.0),
+            ux: Grid::new(size, 0.0),
+            uy: Grid::new(size, 0.0),
+            solid: mask,
+            near_solid,
+            solid_cols: (x0, x1.max(x0)),
             inflow: Vec::new(),
             outflow: [0.0; 9],
             sponge: Vec::new(),
@@ -494,21 +578,6 @@ impl Lattice {
         lat
     }
 
-    /// Turn this lattice back into a fresh [`Self::channel`] for `p` in place, keeping
-    /// every buffer, and return true; false (nothing changed) when it is not `p`'s wind
-    /// tunnel. The mask, the sponge ramp and the inlet rows depend only on `p`, which is
-    /// a function of the lattice size; the moments and `f` are left for [`init_street`],
-    /// which overwrites them all, and the spare buffer is zeroed as `channel` leaves it.
-    fn reset_channel(&mut self, p: &FlowParams, scale: f64) -> bool {
-        let (w, h) = (self.width(), self.height());
-        if (w, h) != (p.w, p.h) || self.inflow.len() != p.h || self.sponge.is_empty() {
-            return false;
-        }
-        self.spare_mut().fill(0.0);
-        self.set_inlet(p, scale);
-        true
-    }
-
     /// Set the inlet and the outlet sponge's target to the stream at `scale · U₀`. The
     /// potential flow is linear in U, so the whole inlet profile scales. The inlet carries
     /// the flow's Bernoulli density `1 + 1.5 (U² − |u|²)`, as the start state does
@@ -524,39 +593,215 @@ impl Lattice {
         self.outflow = heq(0.0, (scale * p.u) as f32, 0.0);
     }
 
+    #[cfg(test)]
+    fn size(&self) -> Size {
+        Size::new(self.w as u16, self.h as u16)
+    }
+
+    /// Rebuild every population as the equilibrium of the stored moments (solid nodes
+    /// at rest). Used by the analytic start and after resampling on resize.
+    fn equilibrate(&mut self) {
+        let n = self.w * self.h;
+        for i in 0..n {
+            if self.solid[i] {
+                self.rho.as_mut_slice()[i] = 1.0;
+                self.ux.as_mut_slice()[i] = 0.0;
+                self.uy.as_mut_slice()[i] = 0.0;
+            }
+            let (r, ux, uy) = (
+                self.rho.as_slice()[i],
+                self.ux.as_slice()[i],
+                self.uy.as_slice()[i],
+            );
+            for (q, e) in heq(r - 1.0, ux, uy).into_iter().enumerate() {
+                self.f[q * n + i] = e;
+            }
+        }
+    }
+
     /// Whether every moment is finite and ρ is in the watchdog band.
     fn healthy(&self) -> bool {
-        self.lbm.healthy(RHO_OK)
+        let rho_ok = self
+            .rho
+            .as_slice()
+            .iter()
+            .all(|r| (RHO_OK.0..=RHO_OK.1).contains(r));
+        let finite = |g: &Grid<f32>| g.as_slice().iter().all(|v| v.is_finite());
+        rho_ok && finite(&self.ux) && finite(&self.uy)
+    }
+
+    /// Σρ in f64, for conservation checks.
+    #[cfg(test)]
+    fn mass(&self) -> f64 {
+        let n = self.w * self.h;
+        (0..n)
+            .map(|i| 1.0 + (0..9).map(|q| f64::from(self.f[q * n + i])).sum::<f64>())
+            .sum()
     }
 }
 
-impl std::ops::Deref for Lattice {
-    type Target = lbm::Lattice;
-    fn deref(&self) -> &lbm::Lattice {
-        &self.lbm
+/// The nine planes of a population buffer as separate slices. Both buffers are sized
+/// `9·n` by construction; a wrong size fails here rather than as a far-away index panic.
+fn planes(buf: &[f32], n: usize) -> [&[f32]; 9] {
+    debug_assert_eq!(buf.len(), 9 * n);
+    let mut it = buf.chunks_exact(n);
+    std::array::from_fn(|_| it.next().unwrap_or_default())
+}
+
+fn planes_mut(buf: &mut [f32], n: usize) -> [&mut [f32]; 9] {
+    debug_assert_eq!(buf.len(), 9 * n);
+    let mut it = buf.chunks_exact_mut(n);
+    std::array::from_fn(|_| it.next().unwrap_or_default())
+}
+
+/// Moment outputs of one row segment.
+struct Moments<'a> {
+    rho: &'a mut [f32],
+    ux: &'a mut [f32],
+    uy: &'a mut [f32],
+}
+
+/// Stream + collide the fluid run `a..b` of row `y` with no solid and no wrap in reach:
+/// every population is a plain offset slice, so the loop is branch-free.
+fn run_fast(
+    src: &[&[f32]; 9],
+    dst: &mut [&mut [f32]; 9],
+    out: Moments<'_>,
+    (w, h): (usize, usize),
+    (y, a, b): (usize, usize, usize),
+    (wp, wm): (f32, f32),
+) {
+    let m = b - a;
+    let s: [&[f32]; 9] = std::array::from_fn(|i| {
+        let sy = (y as i32 - CY[i]).rem_euclid(h as i32) as usize;
+        let start = (a as i32 - CX[i]) as usize;
+        &src[i][sy * w + start..][..m]
+    });
+    let mut d = dst.each_mut().map(|p| &mut p[y * w + a..][..m]);
+    let (rho, ux, uy) = (&mut out.rho[..m], &mut out.ux[..m], &mut out.uy[..m]);
+    // Nodes go through `collide` in groups of LANES with every population as a small
+    // array, a shape LLVM turns into SIMD; the remainder runs one node at a time.
+    let full = m - m % LANES;
+    for k in (0..full).step_by(LANES) {
+        let mut f: [[f32; LANES]; 9] =
+            std::array::from_fn(|q| std::array::from_fn(|l| s[q][k + l]));
+        let mut moments = [[0.0f32; LANES]; 3];
+        for l in 0..LANES {
+            let mut node: [f32; 9] = std::array::from_fn(|q| f[q][l]);
+            let (r, u, v) = collide(&mut node, wp, wm);
+            (moments[0][l], moments[1][l], moments[2][l]) = (r, u, v);
+            for (q, value) in node.into_iter().enumerate() {
+                f[q][l] = value;
+            }
+        }
+        for (plane, lanes) in d.iter_mut().zip(&f) {
+            plane[k..k + LANES].copy_from_slice(lanes);
+        }
+        for (field, lanes) in [&mut *rho, &mut *ux, &mut *uy].into_iter().zip(&moments) {
+            field[k..k + LANES].copy_from_slice(lanes);
+        }
+    }
+    for k in full..m {
+        let mut f: [f32; 9] = std::array::from_fn(|q| s[q][k]);
+        (rho[k], ux[k], uy[k]) = collide(&mut f, wp, wm);
+        for (plane, value) in d.iter_mut().zip(f) {
+            plane[k] = value;
+        }
     }
 }
 
-impl std::ops::DerefMut for Lattice {
-    fn deref_mut(&mut self) -> &mut lbm::Lattice {
-        &mut self.lbm
+/// Stream + collide one node with wrap-around and halfway bounce-back: a pull from a
+/// solid node returns the node's own opposite post-collision population.
+fn node_slow(
+    lat_solid: &[bool],
+    src: &[&[f32]; 9],
+    dst: &mut [&mut [f32]; 9],
+    (w, h): (usize, usize),
+    (x, y): (usize, usize),
+    (wp, wm): (f32, f32),
+) -> (f32, f32, f32) {
+    let i = y * w + x;
+    if lat_solid[i] {
+        for plane in dst.iter_mut() {
+            plane[i] = 0.0;
+        }
+        return (1.0, 0.0, 0.0);
     }
+    let mut f = [0.0f32; 9];
+    for q in 0..9 {
+        let sx = (x as i32 - CX[q]).rem_euclid(w as i32) as usize;
+        let sy = (y as i32 - CY[q]).rem_euclid(h as i32) as usize;
+        let j = sy * w + sx;
+        f[q] = if lat_solid[j] {
+            src[OPP[q]][i]
+        } else {
+            src[q][j]
+        };
+    }
+    let moments = collide(&mut f, wp, wm);
+    for (plane, v) in dst.iter_mut().zip(f) {
+        plane[i] = v;
+    }
+    moments
 }
 
-/// One lattice time step: the core's fused pull stream + TRT collide into the spare
-/// buffer (CORE-R99), then the boundary conditions of `bc`, then swap. Writes ρ, u of
-/// the step's pre-collision state into the moment grids.
+/// One lattice time step: fused pull stream + TRT collide into the spare buffer, then
+/// the boundary conditions of `bc`, then swap. Writes ρ, u of the step's pre-collision
+/// state into the moment grids.
 pub(crate) fn step(lat: &mut Lattice, p: &FlowParams, bc: Bc) {
-    let (w, h) = (lat.width(), lat.height());
-    if w * h == 0 || (bc == Bc::Channel && (w < 3 || lat.inflow.len() != h)) {
+    let (w, h) = (lat.w, lat.h);
+    let n = w * h;
+    if n == 0 || (bc == Bc::Channel && (w < 3 || lat.inflow.len() != h)) {
         return;
     }
-    lat.lbm
-        .stream_collide(p.omega_p, p.omega_m, bc == Bc::Periodic);
+    let omegas = (p.omega_p, p.omega_m);
+    {
+        let src = planes(&lat.f, n);
+        let mut dst = planes_mut(&mut lat.next, n);
+        let (rho, ux, uy) = (
+            lat.rho.as_mut_slice(),
+            lat.ux.as_mut_slice(),
+            lat.uy.as_mut_slice(),
+        );
+        let (sx0, sx1) = (lat.solid_cols.0.max(1), lat.solid_cols.1.min(w - 1));
+        for y in 0..h {
+            let mut fast = |a: usize, b: usize| {
+                if a < b {
+                    let r = y * w + a..y * w + b;
+                    let out = Moments {
+                        rho: &mut rho[r.clone()],
+                        ux: &mut ux[r.clone()],
+                        uy: &mut uy[r],
+                    };
+                    run_fast(&src, &mut dst, out, (w, h), (y, a, b), omegas);
+                }
+            };
+            if lat.near_solid[y] && sx0 < sx1 {
+                fast(1, sx0);
+                fast(sx1, w - 1);
+            } else {
+                fast(1, w.saturating_sub(1).max(1));
+            }
+            let mut slow = |x: usize| {
+                let i = y * w + x;
+                (rho[i], ux[i], uy[i]) =
+                    node_slow(&lat.solid, &src, &mut dst, (w, h), (x, y), omegas);
+            };
+            if lat.near_solid[y] {
+                (sx0..sx1).for_each(&mut slow);
+            }
+            if bc == Bc::Periodic {
+                slow(0);
+                if w > 1 {
+                    slow(w - 1);
+                }
+            }
+        }
+    }
     if bc == Bc::Channel {
         channel_boundaries(lat, p);
     }
-    lat.lbm.swap();
+    std::mem::swap(&mut lat.f, &mut lat.next);
 }
 
 /// Quadratic sponge ramp: 0 at `t = 0`, [`SPONGE_MAX`] at `t = 1`.
@@ -571,16 +816,14 @@ fn ramp(t: f32) -> f32 {
 /// non-equilibrium part (toward each node's own equilibrium): it raises the viscosity
 /// of the first columns without imposing a velocity, which would itself shed vorticity.
 fn channel_boundaries(lat: &mut Lattice, p: &FlowParams) {
-    let (w, h) = (lat.width(), lat.height());
-    let n = w * h;
-    let (uniform, sponge, inflow) = (lat.outflow, &lat.sponge, &lat.inflow);
-    let (next, rho, ux, uy) = lat.lbm.next_and_moments();
-    let mut dst = lbm::planes_mut(next, n);
+    let (w, h, n) = (lat.w, lat.h, lat.w * lat.h);
+    let uniform = lat.outflow;
+    let mut dst = planes_mut(&mut lat.next, n);
     let x0 = p.w_vis.min(w - 1);
     // Row by row, so the inner loop runs over contiguous columns.
     for (plane, e) in dst.iter_mut().zip(uniform) {
         for row in plane.chunks_exact_mut(w) {
-            for (v, s) in row[x0..w - 1].iter_mut().zip(sponge) {
+            for (v, s) in row[x0..w - 1].iter_mut().zip(&lat.sponge) {
                 *v -= s * (*v - e);
             }
         }
@@ -589,19 +832,23 @@ fn channel_boundaries(lat: &mut Lattice, p: &FlowParams) {
         let sigma = ramp((INLET_SPONGE + 1 - x) as f32 / INLET_SPONGE as f32);
         for y in 0..h {
             let i = y * w + x;
-            let local = heq(rho.as_slice()[i] - 1.0, ux.as_slice()[i], uy.as_slice()[i]);
+            let local = heq(
+                lat.rho.as_slice()[i] - 1.0,
+                lat.ux.as_slice()[i],
+                lat.uy.as_slice()[i],
+            );
             for (plane, e) in dst.iter_mut().zip(local) {
                 plane[i] -= sigma * (plane[i] - e);
             }
         }
     }
     for (q, plane) in dst.iter_mut().enumerate() {
-        for (row, inlet) in plane.chunks_exact_mut(w).zip(inflow) {
+        for (row, inlet) in plane.chunks_exact_mut(w).zip(&lat.inflow) {
             row[0] = inlet[q];
             row[w - 1] = row[w - 2];
         }
     }
-    for g in [rho, ux, uy] {
+    for g in [&mut lat.rho, &mut lat.ux, &mut lat.uy] {
         for row in g.as_mut_slice().chunks_exact_mut(w) {
             row[0] = row[1];
             row[w - 1] = row[w - 2];
@@ -653,7 +900,7 @@ pub(crate) fn init_street(lat: &mut Lattice, p: &FlowParams, rng: &mut impl Rng)
     let lead = side(lead_upper);
     let bound = -lead * START_PAIR_UD * p.u * p.d;
     let eddy = (START_EDDY_D.0 * p.d, lead * START_EDDY_D.1 * p.d);
-    let (w, h) = (lat.width(), lat.height());
+    let (w, h) = (lat.w, lat.h);
     let hf = h as f64;
     let count = ((w as f64 - p.xc - x_start) / (0.5 * a)).ceil().max(0.0) as usize;
     for y in 0..h {
@@ -693,10 +940,10 @@ pub(crate) fn init_street(lat: &mut Lattice, p: &FlowParams, rng: &mut impl Rng)
             // pulse from a uniform density. The core excess scales with Γ², so with the
             // square of each window.
             let dp = 0.5 * (p.u * p.u - (u * u + v * v)) + ws * ws * sp + wp * wp * pp;
-            lat.rho_mut().as_mut_slice()[i] = (1.0 + 3.0 * dp) as f32;
-            lat.ux_mut().as_mut_slice()[i] = u as f32;
+            lat.rho.as_mut_slice()[i] = (1.0 + 3.0 * dp) as f32;
+            lat.ux.as_mut_slice()[i] = u as f32;
             // Rows grow downward.
-            lat.uy_mut().as_mut_slice()[i] = -v as f32;
+            lat.uy.as_mut_slice()[i] = -v as f32;
         }
     }
     lat.equilibrate();
@@ -765,24 +1012,12 @@ impl Default for Probe {
 
 impl Probe {
     fn at(p: &FlowParams) -> Self {
-        Self {
-            index: Self::index(p),
-            ..Self::default()
-        }
-    }
-
-    /// The lattice index of the probe node `(x_c + PROBE_D·D, round(y_c))`.
-    fn index(p: &FlowParams) -> usize {
         let x = (p.xc + PROBE_D * p.d).round() as usize;
         let y = p.yc.round() as usize;
-        y.min(p.h - 1) * p.w + x.min(p.w - 1)
-    }
-
-    /// [`Self::at`] in place: the crossing history is cleared, its buffer kept.
-    fn reset_at(&mut self, p: &FlowParams) {
-        self.index = Self::index(p);
-        self.armed = false;
-        self.crossings.clear();
+        Self {
+            index: y.min(p.h - 1) * p.w + x.min(p.w - 1),
+            ..Self::default()
+        }
     }
 
     /// Record an upward crossing of u_y (with hysteresis) at lattice step `step`.
@@ -799,6 +1034,8 @@ impl Probe {
 
 #[derive(Debug, Default)]
 pub struct VortexStreet {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     lat: Lattice,
     params: Option<FlowParams>,
     /// Fractional lattice steps carried between updates.
@@ -807,8 +1044,6 @@ pub struct VortexStreet {
     since_check: f64,
     probe: Probe,
     reinits: u32,
-    /// Pre-roll steps still owed after a restart (see [`Self::restart`]).
-    preroll: usize,
     /// Soft-clipped vorticity over the visible columns, and its map onto the pixels.
     vort: Grid<f32>,
     map: SampleMap,
@@ -832,44 +1067,30 @@ impl VortexStreet {
     /// so the moments need no rescaling.
     fn regrid(&mut self, p: &FlowParams) {
         let mut lat = Lattice::channel(p, self.inlet_scale());
-        grid::resample_bilinear(self.lat.rho(), lat.rho_mut());
-        grid::resample_bilinear(self.lat.ux(), lat.ux_mut());
-        grid::resample_bilinear(self.lat.uy(), lat.uy_mut());
+        grid::resample_bilinear(&self.lat.rho, &mut lat.rho);
+        grid::resample_bilinear(&self.lat.ux, &mut lat.ux);
+        grid::resample_bilinear(&self.lat.uy, &mut lat.uy);
         lat.equilibrate();
         self.lat = lat;
     }
 
-    /// Start from the analytic street and owe [`PREROLL_STEPS`] of pre-roll: the potential
-    /// flow slips at the no-slip wall and starts impulsively, and the few steps it takes
-    /// the slip sheet to diffuse and the start-up pressure pulse to leave are not shown.
-    /// The old flow's dye goes with it (VOR-A10). On the lattice already in place (the
-    /// watchdog's case) every buffer is reused, so the restart does not allocate
-    /// (GEN-R11, VOR-A13); only the first resize builds the wind tunnel.
+    /// Start from the analytic street and pre-roll [`PREROLL_STEPS`]: the potential flow
+    /// slips at the no-slip wall and starts impulsively, and the few steps it takes the
+    /// slip sheet to diffuse and the start-up pressure pulse to leave are not shown.
     fn restart(&mut self, p: &FlowParams, rng: &mut impl Rng) {
-        let scale = self.inlet_scale();
-        if !self.lat.reset_channel(p, scale) {
-            self.lat = Lattice::channel(p, scale);
-        }
+        self.lat = Lattice::channel(p, self.inlet_scale());
         init_street(&mut self.lat, p, rng);
-        self.preroll = PREROLL_STEPS;
-        self.probe.reset_at(p);
-    }
-
-    /// Run up to `max` of the owed pre-roll steps. The scene's clock and the dye stand
-    /// still meanwhile: these steps are the start, not the show.
-    fn run_preroll(&mut self, p: &FlowParams, max: usize) {
-        let n = self.preroll.min(max);
-        for _ in 0..n {
+        for _ in 0..PREROLL_STEPS {
             step(&mut self.lat, p, Bc::Channel);
         }
-        self.preroll -= n;
+        self.probe = Probe::at(p);
     }
 
     /// Recompute the vorticity and rasterise it into the pixels: the fluid, then the
     /// hysteresis pass on it, then the cylinder on top.
     fn rasterise(&mut self) {
         let Some(p) = self.params else { return };
-        vorticity(self.lat.ux(), self.lat.uy(), VIEW_X0, &mut self.vort);
+        vorticity(&self.lat.ux, &self.lat.uy, VIEW_X0, &mut self.vort);
         let scale = p.d / (VORT_SCALE * p.u);
         for s in self.vort.as_mut_slice() {
             *s = ink::soft_clip(f64::from(*s) * scale) as f32;
@@ -885,9 +1106,7 @@ impl VortexStreet {
         };
         let radius = 0.5 * p.d;
         let opposite = radius + UPSTREAM_OPPOSITE_D * p.d;
-        let (map, vort) = (&self.map, &self.vort);
-        let (mut ry, mut vr) = (-1, map.row(vort, 0));
-        let fluid = |x: i32, y: i32, s: f64| {
+        let fluid = |x: i32, y: i32| {
             let (dx, dy) = offset(x, y);
             let r2 = dx * dx + dy * dy;
             // Pixels centred inside the rim are the cylinder's (drawn below), so the
@@ -895,7 +1114,7 @@ impl VortexStreet {
             if r2 <= radius * radius {
                 return Ink::BLANK;
             }
-
+            let s = f64::from(self.map.sample(&self.vort, x, y));
             // Staircase noise upstream of the round mask. Rows grow downward, so `s·dy < 0`
             // is the sign opposite to the boundary layer's.
             if dx < 0.0 && s.abs() < UPSTREAM_MIN && r2 < opposite * opposite {
@@ -910,11 +1129,7 @@ impl VortexStreet {
         // Grows only in the pass at the end of `resize`; every later pass reuses it.
         marks.resize(pw * ph, EMPTY);
         self.pixels.shade(|x, y| {
-            // One row sampler per pixel row (bit-identical to `sample`, CORE-R103).
-            if ry != y {
-                (ry, vr) = (y, map.row(vort, y));
-            }
-            let ink = fluid(x, y, f64::from(vr.at(x)));
+            let ink = fluid(x, y);
             marks[y as usize * pw + x as usize] = mark(ink);
             ink
         });
@@ -939,8 +1154,6 @@ impl VortexStreet {
                 let r = (dx * dx + dy * dy).sqrt();
                 let fluid = self.pixels.get(x, y).is_some_and(|i| i.role == Role::Div);
                 let ink = match disc_coverage(dx, dy, r, radius, (sx, sy)) {
-                    // M14: a 1-px outline; the disc's inside is left dark.
-                    c if c >= 1.0 && r < radius - sx.max(sy) => Ink::BLANK,
                     c if c >= 1.0 => CYLINDER_INK,
                     c if c >= 0.5 => rim_ink(c),
                     // A pixel partly covered from outside the rim shows the wall only
@@ -954,10 +1167,8 @@ impl VortexStreet {
         }
     }
 
-    /// `Re≈140` and, once measured and at width ≥ 40, `  St*≈0.18` (row 0, column 1); both
-    /// follow the breathing inlet. St* is St on the gap speed, St·(1 − D/H) (see
-    /// [`strouhal`]); the star tells it from the free-stream St. At 17 cells the full label
-    /// always fits where St is shown, so there is no shorter form.
+    /// `Re≈140` and, once measured and at width ≥ 40, `  St≈0.18` (row 0, column 1); both
+    /// follow the breathing inlet. St is on the gap speed, St·(1 − D/H) (see [`strouhal`]).
     fn label(&self, canvas: &mut Canvas) {
         let (Some(p), Some(size)) = (self.params, self.size) else {
             return;
@@ -976,8 +1187,8 @@ impl VortexStreet {
         let _ = write!(uni, "Re≈{re}");
         let _ = write!(asc, "Re~{re}");
         if let Some(st) = st {
-            let _ = write!(uni, "  St*≈{st:.2}");
-            let _ = write!(asc, "  St*~{st:.2}");
+            let _ = write!(uni, "  St≈{st:.2}");
+            let _ = write!(asc, "  St~{st:.2}");
         }
         draw::text_mode(canvas, 1, 0, uni.as_str(), asc.as_str(), LABEL_INK);
     }
@@ -999,12 +1210,7 @@ impl Generator for VortexStreet {
         }) {
             let p = flow_params(lat_size);
             match self.params {
-                // The first frame is already past the start-up transient: the whole
-                // pre-roll runs here, a one-off outside the frame budget.
-                None => {
-                    self.restart(&p, &mut ctx.rng);
-                    self.run_preroll(&p, PREROLL_STEPS);
-                }
+                None => self.restart(&p, &mut ctx.rng),
                 Some(_) => {
                     self.regrid(&p);
                     self.probe = Probe::at(&p);
@@ -1032,15 +1238,6 @@ impl Generator for VortexStreet {
         if !(dt.is_finite() && dt > 0.0) {
             return;
         }
-        // After a watchdog restart: pre-roll a slice per update and keep showing the
-        // analytic start until it is done, then pick up from there (VOR-A13).
-        if self.preroll > 0 {
-            self.run_preroll(&p, PREROLL_PER_UPDATE);
-            if self.preroll == 0 {
-                self.rasterise();
-            }
-            return;
-        }
         self.acc += dt * STEPS_PER_S;
         let n = (self.acc as usize).min(MAX_STEPS);
         self.acc = (self.acc - n as f64).min(1.0);
@@ -1049,7 +1246,7 @@ impl Generator for VortexStreet {
         for _ in 0..n {
             step(&mut self.lat, &p, Bc::Channel);
             self.steps += 1;
-            let uy = self.lat.uy().as_slice()[self.probe.index];
+            let uy = self.lat.uy.as_slice()[self.probe.index];
             // Rows grow downward; the crossing direction does not change the period.
             self.probe.sample(uy, p.u, self.steps);
         }
@@ -1061,7 +1258,15 @@ impl Generator for VortexStreet {
                 self.restart(&p, &mut ctx.rng);
             }
         }
-        self.rasterise();
+        self.dirty = true;
+    }
+
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
+    fn prepare(&mut self) {
+        if self.dirty {
+            self.dirty = false;
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -1072,8 +1277,6 @@ impl Generator for VortexStreet {
                 (self.cap_cols.0..=self.cap_cols.1).contains(&x),
             )
         });
-        // M14 (ADR-0017): the dye is advected and exposed (VOR-A9, A10, A12) but not
-        // drawn: its specks cluttered the eddies (VOR-A11).
         self.label(canvas);
     }
 }
@@ -1081,10 +1284,6 @@ impl Generator for VortexStreet {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sciart_core::lbm::{CX, CY, W, collide};
-
-    /// The four opposite pairs that TRT splits into even and odd parts.
-    const PAIRS: [(usize, usize); 4] = [(1, 3), (2, 4), (5, 7), (6, 8)];
 
     /// A seeded RNG from the scene context (the crate's only RNG, GEN-R7).
     fn rng(seed: u64) -> impl Rng {
@@ -1101,8 +1300,8 @@ mod tests {
 
     /// Full populations `f = w + h` of node `i`, in f64.
     fn node(lat: &Lattice, i: usize) -> [f64; 9] {
-        let n = lat.width() * lat.height();
-        std::array::from_fn(|q| f64::from(W[q]) + f64::from(lat.populations()[q * n + i]))
+        let n = lat.w * lat.h;
+        std::array::from_fn(|q| f64::from(W[q]) + f64::from(lat.f[q * n + i]))
     }
 
     fn moments(f: &[f64; 9]) -> (f64, f64, f64) {
@@ -1196,13 +1395,13 @@ mod tests {
         let size = Size::new(32, 16);
         let p = params_for(32, 16, TAU);
         let mut lat = Lattice::new(size, |_, _| false);
-        lat.ux_mut().fill(0.1);
+        lat.ux.fill(0.1);
         lat.equilibrate();
         for _ in 0..1000 {
             step(&mut lat, &p, Bc::Periodic);
         }
         let first = node(&lat, 0);
-        for i in 0..lat.width() * lat.height() {
+        for i in 0..lat.w * lat.h {
             assert_eq!(node(&lat, i), first, "node {i} differs");
         }
         let (rho, jx, jy) = moments(&first);
@@ -1213,7 +1412,7 @@ mod tests {
             dx * dx + dy * dy <= 9.0
         };
         let mut lat = Lattice::new(size, disc);
-        lat.ux_mut().fill(0.05);
+        lat.ux.fill(0.05);
         lat.equilibrate();
         let m0 = lat.mass();
         for _ in 0..300 {
@@ -1232,7 +1431,7 @@ mod tests {
         let p = params_for(w as u16, h as u16, tau);
         let mut lat = Lattice::new(Size::new(w as u16, h as u16), |_, _| false);
         let k = 2.0 * PI / h as f64;
-        for (i, u) in lat.ux_mut().as_mut_slice().iter_mut().enumerate() {
+        for (i, u) in lat.ux.as_mut_slice().iter_mut().enumerate() {
             *u = (0.01 * (k * (i / w) as f64).sin_det()) as f32;
         }
         lat.equilibrate();
@@ -1348,21 +1547,21 @@ mod tests {
             assert!(lat.healthy(), "watchdog would fire at step {t}");
             // Throughout, from the first step.
             for (i, (&r, (&u, &v))) in lat
-                .rho()
+                .rho
                 .as_slice()
                 .iter()
-                .zip(lat.ux().as_slice().iter().zip(lat.uy().as_slice()))
+                .zip(lat.ux.as_slice().iter().zip(lat.uy.as_slice()))
                 .enumerate()
             {
                 assert!((0.9..=1.1).contains(&r), "step {t}: ρ = {r} at {i}");
                 assert!(f64::from(u.hypot(v)) <= 2.5 * p.u, "step {t}: |u| at {i}");
             }
-            let uy = lat.uy().as_slice()[probe.index];
+            let uy = lat.uy.as_slice()[probe.index];
             if t > 1000 {
                 probe.sample(uy, p.u, t);
                 (lo, hi) = (lo.min(uy), hi.max(uy));
                 if t % 20 == 0 {
-                    vorticity(lat.ux(), lat.uy(), 0, &mut vort);
+                    vorticity(&lat.ux, &lat.uy, 0, &mut vort);
                     for y in 0..p.h {
                         for x in p.xc as usize..(p.xc + 2.0 * p.d) as usize {
                             let dy = y as f64 - p.yc;
@@ -1608,12 +1807,7 @@ mod tests {
                     let r = (dx * dx + dy * dy).sqrt();
                     let c = disc_coverage(dx, dy, r, 0.5 * p.d, (sx, sy));
                     let at = format!("{size:?} ({x}, {y}) {ink:?}");
-                    // M14: the inside (over a pixel in from the rim) is dark, the outline
-                    // solid.
-                    let inside = r < 0.5 * p.d - sx.max(sy);
-                    if c >= 1.0 && inside {
-                        assert_eq!(ink, Ink::BLANK, "{at}");
-                    } else if c >= 0.5 {
+                    if c >= 0.5 {
                         assert!(
                             ink.role == Role::Structure && ink.level >= RIM_SOLID,
                             "{at}"
@@ -1654,6 +1848,7 @@ mod tests {
                     for check in [0.0, 0.1, 0.2, 0.3, 1.0, 20.0, 30.0, 45.0] {
                         while t < check - 0.5 * SIM_DT {
                             g.update(SIM_DT, &mut ctx);
+                            g.prepare();
                             t += SIM_DT;
                         }
                         let id = format!("{size:?} seed {seed} t = {check}");
@@ -1676,6 +1871,7 @@ mod tests {
                 assert_eq!((p.w, p.h, p.d, p.re), (119, 85, 12.0, 150.0));
                 for _ in 0..(45.0 / SIM_DT) as usize {
                     g.update(SIM_DT, &mut ctx);
+                    g.prepare();
                 }
                 assert_eq!(g.reinits, 0, "D = 12");
                 assert!(g.lat.healthy());
@@ -1692,8 +1888,8 @@ mod tests {
 
     fn fluid_mean_ux(g: &VortexStreet) -> f64 {
         let (mut s, mut n) = (0.0, 0.0);
-        for (i, &u) in g.lat.ux().as_slice().iter().enumerate() {
-            if !g.lat.solid()[i] {
+        for (i, &u) in g.lat.ux.as_slice().iter().enumerate() {
+            if !g.lat.solid[i] {
                 s += f64::from(u);
                 n += 1.0;
             }
@@ -1701,74 +1897,45 @@ mod tests {
         s / n
     }
 
-    /// FNV-1a over the bits of every population and moment.
-    fn lattice_hash(g: &VortexStreet) -> u64 {
-        let mut h = 0xcbf2_9ce4_8422_2325_u64;
-        let mut eat = |v: f32| {
-            h ^= u64::from(v.to_bits());
-            h = h.wrapping_mul(0x0100_0000_01b3);
-        };
-        g.lat.populations().iter().copied().for_each(&mut eat);
-        for grid in [g.lat.rho(), g.lat.ux(), g.lat.uy()] {
-            grid.as_slice().iter().copied().for_each(&mut eat);
-        }
-        h
-    }
-
-    /// The flow after 2 s at 200×50, pinned bit for bit before the kernel moved into
-    /// `sciart_core::lbm` (CORE-R99): the lift must not change a single population.
-    #[test]
-    fn core_r99_lifted_lbm_keeps_the_vortex_street_bit_identical() {
-        let (mut g, mut ctx) = scene(Size::new(200, 50));
-        for _ in 0..120 {
-            g.update(SIM_DT, &mut ctx);
-        }
-        assert_eq!(lattice_hash(&g), 7_819_613_413_016_020_622);
-    }
-
     #[test]
     fn vor_a6_resize_keeps_or_resamples_the_flow() {
         let (mut g, mut ctx) = scene(Size::new(200, 50));
         for _ in 0..30 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
-        let before = g.lat.populations().to_vec();
+        let before = g.lat.f.clone();
         g.resize(Size::new(190, 48), &mut ctx);
         g.resize(Size::new(200, 50), &mut ctx);
         assert_eq!(g.lat.size(), Size::new(150, 68));
         assert!(
-            g.lat.populations() == before,
+            g.lat.f == before,
             "same-bucket resize must not touch the populations"
         );
 
         let mean = |v: &[f32]| v.iter().map(|&x| f64::from(x)).sum::<f64>() / v.len() as f64;
         let (rho0, u0) = (
-            mean(g.lat.rho().as_slice()),
+            mean(g.lat.rho.as_slice()),
             fluid_mean_ux(&g) / g.params.unwrap().u,
         );
         g.resize(Size::new(100, 50), &mut ctx);
         let p = g.params.unwrap();
         assert_eq!((g.lat.size(), p.d), (Size::new(107, 95), 11.0));
-        let (rho1, u1) = (mean(g.lat.rho().as_slice()), fluid_mean_ux(&g) / p.u);
+        let (rho1, u1) = (mean(g.lat.rho.as_slice()), fluid_mean_ux(&g) / p.u);
         assert!((rho1 - rho0).abs() < 2e-3, "mean ρ {rho0} → {rho1}");
         assert!((u1 / u0 - 1.0).abs() < 0.03, "mean uₓ/U {u0} → {u1}");
-        assert!(g.lat.populations().iter().all(|v| v.is_finite()));
+        assert!(g.lat.f.iter().all(|v| v.is_finite()));
         for _ in 0..200 {
             step(&mut g.lat, &p, Bc::Channel);
         }
-        assert!(
-            g.lat
-                .rho()
-                .as_slice()
-                .iter()
-                .all(|r| (0.9..=1.1).contains(r))
-        );
+        assert!(g.lat.rho.as_slice().iter().all(|r| (0.9..=1.1).contains(r)));
         g.update(1.0, &mut ctx);
+        g.prepare();
         assert_eq!(g.reinits, 0);
     }
 
     #[test]
-    fn vor_a7_a11_frame_shows_disc_and_two_signed_rows() {
+    fn vor_a7_frame_shows_disc_and_two_signed_rows() {
         let mut s = Stage::new(build(), 42, Size::new(80, 24), GlyphMode::Ascii);
         // The scene's own frame: the title would sit on the calm inflow's last row.
         s.set_title_visible(false);
@@ -1783,8 +1950,24 @@ mod tests {
             .filter(|&(x, y)| grid[y][x] == '@')
             .collect();
         assert!(!at.is_empty());
-        // M14: the disc is a 1-px outline, so its ASCII `@` cells form a ring rather than
-        // one filled blob.
+        // One 4-connected blob: flood fill from the first cell reaches them all.
+        let mut seen = vec![at[0]];
+        let mut i = 0;
+        while i < seen.len() {
+            let (x, y) = seen[i];
+            for n in [
+                (x + 1, y),
+                (x.wrapping_sub(1), y),
+                (x, y + 1),
+                (x, y.wrapping_sub(1)),
+            ] {
+                if at.contains(&n) && !seen.contains(&n) {
+                    seen.push(n);
+                }
+            }
+            i += 1;
+        }
+        assert_eq!(seen.len(), at.len(), "the cylinder is one blob");
         let n = at.len() as f64;
         let cx = at.iter().map(|p| p.0 as f64).sum::<f64>() / n;
         let cy = at.iter().map(|p| p.1 as f64).sum::<f64>() / n;
@@ -1802,18 +1985,9 @@ mod tests {
         let rows: Vec<usize> = (0..24).map(per_row).filter(|&n| n > 0).collect();
         let widest = rows.iter().copied().max().unwrap_or(0);
         assert!(rows.len() >= 4, "@ rows {rows:?}");
-        let _ = widest;
-        // Round, judged by each row's extent (M14: the ring's middle rows hold only its
-        // two sides): the outermost rows are narrower than the widest by ≥ 2.
-        let span = |y: usize| {
-            let xs: Vec<usize> = (0..grid[y].len()).filter(|&x| grid[y][x] == '@').collect();
-            xs.last().map_or(0, |l| l + 1 - xs[0])
-        };
-        let spans: Vec<usize> = (0..24).map(span).filter(|&n| n > 0).collect();
-        let wide = spans.iter().copied().max().unwrap_or(0);
         assert!(
-            spans[0] + 2 <= wide && spans[spans.len() - 1] + 2 <= wide,
-            "{spans:?}"
+            rows[0] + 2 <= widest && rows[rows.len() - 1] + 2 <= widest,
+            "{rows:?}"
         );
         for row in &grid[1..] {
             assert!(row[..6].iter().all(|&c| c == ' '), "calm inflow");
@@ -1976,6 +2150,7 @@ mod tests {
         }
         for _ in 0..90 {
             g.update(SIM_DT, &mut ctx);
+            g.prepare();
         }
         let t = g.steps as f64 / STEPS_PER_S;
         assert!((t - 1.5).abs() < 0.01, "t = {t}");
@@ -2038,11 +2213,11 @@ mod tests {
             s.step(SIM_DT);
         }
         let row = s.render().to_lines()[0].clone();
-        assert!(row.contains("  St*≈0."), "{row}");
+        assert!(row.contains("  St≈0."), "{row}");
         // The label shows St on the gap speed, St·(1 − D/H), comparable with
         // Williamson's unconfined St ≈ 0.18 at Re 140–150 (free-stream basis: ≈ 0.21).
         let st: f64 = row
-            .split("St*≈")
+            .split("St≈")
             .nth(1)
             .and_then(|s| s.split_whitespace().next())
             .and_then(|s| s.parse().ok())
@@ -2050,119 +2225,11 @@ mod tests {
         assert!((0.16..=0.19).contains(&st), "St {st}: {row}");
         // At t = 10 s the inlet runs at breath(10) ≈ 1.078 U₀: Re 137.5 → ≈ 148.
         assert_eq!(re_of(&row), 150, "{row}");
-        // ASCII spells the gap-speed Strouhal number St*~.
-        s.set_glyph_mode(GlyphMode::Ascii);
-        let row = s.render().to_lines()[0].clone();
-        assert!(row.starts_with(" Re~150  St*~0."), "{row}");
-        s.set_glyph_mode(GlyphMode::Unicode);
         s.resize(Size::new(15, 24));
         assert!(!s.render().to_lines()[0].contains("Re"));
         s.resize(Size::new(39, 24));
         s.set_glyph_mode(GlyphMode::Ascii);
         let row = s.render().to_lines()[0].clone();
         assert!(row.starts_with(" Re~") && !row.contains("St"), "{row}");
-    }
-
-    /// Every heap buffer of the lattice and the probe, as (address, capacity).
-    fn buffers(g: &VortexStreet) -> Vec<(usize, usize)> {
-        let l = &g.lat;
-        let v = |p: *const u8, c: usize| (p as usize, c);
-        vec![
-            v(l.populations().as_ptr().cast(), l.populations().len()),
-            v(l.spare().as_ptr().cast(), l.spare().len()),
-            v(l.rho().as_slice().as_ptr().cast(), l.rho().as_slice().len()),
-            v(l.ux().as_slice().as_ptr().cast(), l.ux().as_slice().len()),
-            v(l.uy().as_slice().as_ptr().cast(), l.uy().as_slice().len()),
-            v(l.solid().as_ptr().cast(), l.solid().len()),
-            v(l.inflow.as_ptr().cast(), l.inflow.capacity()),
-            v(l.sponge.as_ptr().cast(), l.sponge.capacity()),
-        ]
-    }
-
-    #[test]
-    fn vor_a13_watchdog_restart_reuses_the_lattice_and_spreads_the_preroll() {
-        let (mut g, mut ctx) = scene(Size::new(120, 40));
-        for _ in 0..90 {
-            g.update(SIM_DT, &mut ctx);
-        }
-        let p = g.params.unwrap();
-        let (before, crossings) = (buffers(&g), g.probe.crossings.capacity());
-        // The update's only draws are the restart's, so a clone replays them.
-        let mut rng = ctx.rng.clone();
-        // A blown-up node trips the watchdog at the end of the next update. The steps
-        // before it spread the NaN; the check reads ρ after them.
-        g.lat.rho_mut().as_mut_slice()[p.w + 3] = f32::NAN;
-        g.lat.populations_mut()[p.w + 3] = f32::NAN;
-        g.since_check = CHECK_EVERY;
-        g.update(SIM_DT, &mut ctx);
-        assert_eq!(g.reinits, 1);
-        assert_eq!(g.preroll, PREROLL_STEPS);
-        assert_eq!(
-            buffers(&g),
-            before,
-            "restart must reuse every buffer (GEN-R11)"
-        );
-        assert_eq!(g.probe.crossings.capacity(), crossings);
-        assert!(g.probe.crossings.is_empty());
-        // The pre-roll runs PREROLL_PER_UPDATE steps per update, the scene clock holds,
-        // and no dye is released until it is done.
-        let restart_steps = g.steps;
-        let mut updates = 0;
-        while g.preroll > 0 {
-            let left = g.preroll;
-            g.update(SIM_DT, &mut ctx);
-            updates += 1;
-            assert_eq!(left - g.preroll, left.min(PREROLL_PER_UPDATE));
-            assert_eq!(g.steps, restart_steps);
-        }
-        assert_eq!(updates, PREROLL_STEPS.div_ceil(PREROLL_PER_UPDATE));
-        assert_eq!(buffers(&g), before);
-        // Bit-identical to a fresh wind tunnel started from the same draw and pre-rolled
-        // in one go, as the first resize does.
-        let scale = breath(restart_steps as f64 / STEPS_PER_S);
-        let mut fresh = Lattice::channel(&p, scale);
-        init_street(&mut fresh, &p, &mut rng);
-        for _ in 0..PREROLL_STEPS {
-            step(&mut fresh, &p, Bc::Channel);
-        }
-        assert!(
-            fresh
-                .populations()
-                .iter()
-                .zip(g.lat.populations())
-                .all(|(a, b)| a.to_bits() == b.to_bits()),
-            "in-place restart differs from a fresh lattice"
-        );
-        assert!(g.lat.healthy());
-        // Then the flow runs on as usual.
-        g.update(SIM_DT, &mut ctx);
-        assert!(g.steps > restart_steps);
-    }
-
-    #[test]
-    fn vor_a9_a10_a11_a12_no_dye_is_drawn() {
-        // M14 (ADR-0017): the dye is advected but not painted, so the frame is the
-        // vorticity and the cylinder alone, in both glyph modes.
-        let (mut g, mut ctx) = scene(Size::new(120, 40));
-        for _ in 0..(8.0 / SIM_DT) as usize {
-            g.update(SIM_DT, &mut ctx);
-        }
-        g.prepare();
-        let mut uni = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
-        g.render(&mut uni);
-        // M14: Unicode frames use only the vorticity, the cylinder and text roles.
-        assert!(uni.cells().iter().all(|c| matches!(
-            c.ink.role,
-            Role::Div | Role::Structure | Role::Text | Role::Background
-        )));
-        let mut ascii = Canvas::new(Size::new(120, 40), GlyphMode::Ascii);
-        g.render(&mut ascii);
-        let mut plain = Canvas::new(Size::new(120, 40), GlyphMode::Ascii);
-        let caps = g.cap_cols;
-        g.pixels.blit(&mut plain, |x, _, top, bottom| {
-            ascii_cell(top, bottom, (caps.0..=caps.1).contains(&x))
-        });
-        g.label(&mut plain);
-        assert_eq!(ascii.to_lines(), plain.to_lines());
     }
 }

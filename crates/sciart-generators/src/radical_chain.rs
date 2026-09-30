@@ -112,19 +112,15 @@ const P_HIGH: f64 = 2.2;
 
 /// Radicals in the vessel at the start, so the first frame already has sparks.
 const SEED_RADICALS: usize = 25;
-/// Inks (ADR-0017): the flash is the hot gas's own glow, black → red → orange → a
-/// briefly white-hot core (`Ramp(Ember)`); the radicals, the subject, are bright lavender
-/// dots with violet 1-px chain trails (`Ramp(Plasma)`).
-const FLASH: Ramp = Ramp::Ember;
-const FLASH_GAIN: f32 = 1.0;
-/// Steepness of the flash above its threshold: a dim edge, a white-hot core.
-const FLASH_GAMMA: f32 = 1.6;
-const CHAIN: Ramp = Ramp::Plasma;
-const CHAIN_TOP: f32 = 200.0;
+/// Inks in M11's idiom (ADR-0018): the flash is the hot gas in flat `Seq` steps, black →
+/// violet → red → orange → yellow at the hottest core, like M11's reaction fields; the
+/// radicals, the subject, are bright pale-blue `Wave` dots over short `Cold` chain trails,
+/// the complementary pair of the warm flash.
+const FLAME_STEPS: [u8; 4] = [70, 130, 185, 235];
 /// Toned flash levels below this are single reactions' heat, not a flame: left black.
 const FLASH_MIN: u8 = 48;
-/// Levels below this are left black.
-const FLOOR: u8 = 14;
+/// Toned trail levels below this are left black.
+const TRAIL_MIN: u8 = 70;
 /// The ignition spark's temperature excess and radius (grid cells), and where in the
 /// vessel it may strike (fractions of the width and height from the centre).
 const SPARK_HEAT: f32 = 1.6;
@@ -138,9 +134,10 @@ const OUTSIDE: u8 = 0;
 const ON_WALL: u8 = 1;
 const INSIDE: u8 = 2;
 /// The wall: a faint dotted line, one dot in `WALL_EVERY`.
-const WALL: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 45);
+const WALL: Ink = Ink::new(Role::Dim, 90);
 const WALL_EVERY: usize = 3;
-const RADICAL: Ink = Ink::new(Role::Ramp(CHAIN), 235);
+const RADICAL: Ink = Ink::new(Role::Wave, 255);
+const TRAIL: Ink = Ink::new(Role::Cold, 110);
 const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// Pressure (units of the first limit) at a beat of the loop.
@@ -421,19 +418,17 @@ fn soften(g: &mut Grid<f32>, row: &mut Vec<f32>) {
     }
 }
 
-/// A pixel's ink from its toned flash and trail levels: the flash in the warm ramp, the
-/// chain trail a faint violet; the brighter wins, and both fade to black.
+/// A pixel's ink from its toned flash and trail levels: the flash in one of
+/// [`FLAME_STEPS`], else the chain trail's one flat `Cold` level, else black.
 pub(crate) fn flame_ink(flash: u8, trail: u8) -> Ink {
-    // The flash ramps in from `FLASH_MIN`, so the flame's edge fades instead of stepping.
-    let above = f32::from(flash.saturating_sub(FLASH_MIN)) / f32::from(255 - FLASH_MIN);
-    let f = (255.0 * above.powf(FLASH_GAMMA) * FLASH_GAIN) as u8;
-    let c = (f32::from(trail) * CHAIN_TOP / 255.0) as u8;
-    // Inside the flame the flame wins, so its edge is not a violet-and-orange mosaic.
-    let (ramp, level) = if f >= FLOOR { (FLASH, f) } else { (CHAIN, c) };
-    if level < FLOOR {
-        Ink::BLANK
+    if flash >= FLASH_MIN {
+        let n = FLAME_STEPS.len();
+        let k = usize::from(flash - FLASH_MIN) * n / (256 - usize::from(FLASH_MIN));
+        Ink::new(Role::Seq, FLAME_STEPS[k.min(n - 1)])
+    } else if trail >= TRAIL_MIN {
+        TRAIL
     } else {
-        Ink::new(Role::Ramp(ramp), level)
+        Ink::BLANK
     }
 }
 
@@ -591,9 +586,9 @@ impl RadicalChain {
         }
     }
 
-    /// The vessel on black (ADR-0017): radicals as single violet dots, their chains as
-    /// faint 1-px trails, the explosion a warm flash (the heat, toned through `Tone`)
-    /// that cools through red back to black; the wall a faint dotted line.
+    /// The vessel on black (ADR-0018): radicals as single pale-blue dots, their chains as
+    /// flat 1-px `Cold` trails, the explosion a warm flash in flat `Seq` steps that cools
+    /// back to black; the wall a dim dotted line.
     fn rasterise(&mut self) {
         let Some(chain) = &self.chain else {
             return;
@@ -608,7 +603,8 @@ impl RadicalChain {
                         f64::from(f.x0) + r.x * f.scale,
                         f64::from(f.y0) + r.y * f.scale,
                     );
-                    self.dots.plot(2.0 * px, 2.0 * py, RADICAL);
+                    // A small plus of dots, so a lone radical reads at a glance.
+                    self.dots.disc(2.0 * px, 2.0 * py, 1.0, RADICAL);
                 }
             }
         }
@@ -1097,19 +1093,21 @@ mod tests {
     }
 
     #[test]
-    fn chn_a7_flash_is_warm_on_black_and_chains_faint_violet() {
-        // ADR-0017: the ground is black; the flash is warm, near white only at its
-        // hottest; chain trails are violet under the bright radical dots.
+    fn chn_a7_flash_in_stepped_seq_on_black_and_chains_cold() {
+        // ADR-0018: the ground is black; the flash is a few flat `Seq` steps, yellow only
+        // at its hottest; chain trails are one flat `Cold` level under the `Wave` dots.
         assert_eq!(flame_ink(0, 0), Ink::BLANK);
         assert_eq!(flame_ink(10, 10), Ink::BLANK);
-        let flash = flame_ink(255, 40);
-        assert!(flash.role == Role::Ramp(FLASH) && flash.level >= 220);
-        assert!(flame_ink(FLASH_MIN + 20, 0).level < flame_ink(FLASH_MIN + 60, 0).level);
-        let chain = flame_ink(0, 255);
-        assert!(chain.role == Role::Ramp(CHAIN) && chain.level <= 200);
+        assert_eq!(flame_ink(255, 40), Ink::new(Role::Seq, FLAME_STEPS[3]));
+        assert!(flame_ink(FLASH_MIN + 10, 0).level < flame_ink(250, 0).level);
+        let mut levels: Vec<u8> = (0..=255).map(|f| flame_ink(f, 0).level).collect();
+        levels.dedup();
+        assert_eq!(levels.len(), 1 + FLAME_STEPS.len(), "stepped: {levels:?}");
+        assert_eq!(flame_ink(0, 255), TRAIL);
+        assert_eq!(RADICAL.role, Role::Wave);
         // A single reaction's heat is not a flame.
         assert_eq!(flame_ink(FLASH_MIN - 1, 0), Ink::BLANK);
-        assert_eq!(flame_ink(255, 200).role, Role::Ramp(FLASH));
+        assert_eq!(flame_ink(255, 200).role, Role::Seq);
         // Burnt gas quenches radicals: branching needs unburnt gas.
         let (mut c, mut r) = chain_with(400, 9);
         c.gas.fill(0.0);

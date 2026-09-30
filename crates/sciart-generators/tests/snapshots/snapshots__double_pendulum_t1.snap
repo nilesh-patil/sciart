@@ -2,27 +2,27 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-                                                                                
-                                           #                                    
-                                          #+.                                   
-                                          +.+                                   
-                                           #+                                   
-                                          .#                                    
-                                          +#                                    
-                                          #:                                    
-                                         ++                                     
-                                        :+                                      
-                                       #+.                                      
-                                    .+##:                                       
-                                  ++#+:                                         
-                                ##++                                            
-                             :##+.                                              
-                          ++#::.                                                
-                        ###+                                                    
-                     +###.                                                      
-                      ::                                                        
-                                                                                
+                 two double pendulums, released 0.001 rad apart                 
+                                          .                                     
+                                          ..                                    
+                                           :                                    
+                                           :                                    
+                                           :                                    
+                                          :                                     
+                                          :                                     
+                                         ::                                     
+                                        ::                                      
+                                       ::                                       
+                                     oo-+                                       
+                                    ---                                         
+                                ----                                            
+                             -o-o                                               
+                           --oo                                                 
+                        ---o                                                    
+                      O-oo                                                      
                                                                                 
                                                                                 
                                                                                 
- Double pendulum - twins diverge                  |dtheta| 2.4e-3 (0.9 e-folds)
+                                                                                
+                                                                                
+ Double pendulum - twins diverge                 |dtheta| 2.4e-3 ( 0.9 e-folds)

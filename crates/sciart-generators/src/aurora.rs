@@ -18,14 +18,14 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::timeline::ease;
-use sciart_core::{draw, geom, ink, rng};
+use sciart_core::{draw, geom, ink};
 
 pub static META: Meta = Meta {
     name: "aurora",
     category: Category::EarthSky,
     description: "Auroral curtains folding over a still northern lake at night",
     title: "Aurora · electrons light the air",
-    captions: &CAPTIONS,
+    captions: &[],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -78,13 +78,6 @@ const BEATS: [(&str, f64); 4] = [
     ("expansion", 15.0),
     ("recovery", 20.0),
 ];
-/// The title's caption during each beat, in `BEATS` order (AUR-A9).
-const CAPTIONS: [&str; BEATS.len()] = [
-    "growth phase",
-    "substorm onset",
-    "substorm expansion",
-    "pulsating recovery",
-];
 /// Beat boundaries, derived from `BEATS`; every keyframe knot is written relative to
 /// them, so the keyframes and the label never drift apart and the onset segments keep
 /// their `out_quad` easing (`curve` matches `ONSET` exactly).
@@ -110,39 +103,18 @@ const E_SAT: f64 = 0.9;
 /// curtains stays black.
 const GREEN_LIT: f32 = 0.14;
 const RED_LIT: f32 = 0.2;
-/// The red fringe is drawn in the `HAlpha` ramp at levels up to this, its dark crimson
-/// end, which is how the 630 nm crown reads over green in photographs. The pink hem, the
-/// same ramp's rose, runs from `HEM_LEVEL`, above it, to `HEM_LEVEL_MAX`.
-const RED_LEVEL_MAX: f64 = 52.0;
-/// The crown starts at this crimson rather than the core floor: the ramp's darkest
-/// maroon, next to the green, read as brown mud rather than red light.
-const RED_LEVEL_MIN: f64 = 40.0;
-const RED: Role = Role::Ramp(Ramp::HAlpha);
-/// Green 557.7 nm light: the `Aurora` ramp, deep teal where faint (false colour: the faint
-/// green mixed with blue N₂⁺ 427.8 nm, as photographs show it) to lime-white in the rays.
-const GREEN: Role = Role::Ramp(Ramp::Aurora);
-/// M14 (ADR-0017): the green is muted, at most this level (lime, not lime-white).
-const GREEN_TOP: f64 = 170.0;
+/// The red fringe is drawn in `Accent` (the theme's magenta) at levels up to this: dark
+/// `Hot` is a rust brown and bright `Hot` an orange, while a deep magenta-crimson is how
+/// the 630 nm crown reads over green in photographs (mixed with the blue N₂⁺ light).
+/// The pink hem, also `Accent`, starts at `HEM_LEVEL`, well above it.
+const RED_LEVEL_MAX: f64 = 110.0;
+const RED: Role = Role::Accent;
 /// Red-dominant light shows only where the green's own tone is at least this: the
 /// crown caps each ray and fold with crimson and so follows the curtains' envelope.
 /// Diffuse red far above the green would be cut flat by the top fade (a lid) and stand
 /// as a slab over the sky; at the naked eye's photopic weight it is below notice there.
 const CROWN_GREEN: f32 = 0.03;
-/// The hem: at most half the ramp (a soft rose glow, not a neon line), brighter where the
-/// curtain above it is (AUR-A10).
-/// M14 (ADR-0017): a dim crimson fringe just above the red crown's levels, not a line.
-const HEM_LEVEL: f64 = 62.0;
-const HEM_LEVEL_MAX: f64 = 70.0;
-/// Crimson level of the sky pixel just under the hem, about 0.2 of the ramp.
-const HEM_BELOW_FADE: [u8; 1] = [30];
-/// M14: the pink fringe under the curtains is not drawn.
-const SHOW_HEM: bool = false;
-/// The curtains' ripple (AUR-A10): relative amplitude, wavenumber (rad per column) and
-/// angular speed (rad/s): a slow brightness wave travelling along the arc, as the rays
-/// of a real curtain ripple sideways.
-const RIPPLE_AMP: f64 = 0.12;
-const RIPPLE_K: f64 = 0.09;
-const RIPPLE_W: f64 = 0.7;
+const HEM_LEVEL: f64 = 190.0;
 /// Emission fades in under the top edge over this share of the pixel rows (at least
 /// `TOP_FADE_MIN_PX`), as a smoothstep applied to the tone before the threshold: a crown
 /// overhead thins into dark sky over ≈ 10 cell rows (keeping the label in clear air), so
@@ -163,39 +135,18 @@ const GLOW_DEG: f64 = 8.0;
 /// than being carried into it.
 const GLOW_MAX: f64 = 0.2;
 const GLOW_MIN: f64 = 0.02;
-/// The skyglow's ramp (AUR-A10): `Starlight`, whose floor is near black, so the glow
-/// behind the hills fades into the night with no band edge, and the black ridge and
-/// spires stand against it as a silhouette.
-const GLOW_RAMP: Ramp = Ramp::Starlight;
-const SKYGLOW: Role = Role::Ramp(GLOW_RAMP);
-/// The lake mirrors the sky at this share of its level, each pixel a 3 × 2 box sum of the
-/// sky pixels round its source of the same light, over 6 (so a run's ends soften), and
-/// fading with depth to `1 − LAKE_DEPTH_FADE` of that at the lake's far edge: soft
-/// streaks of water rather than pixel noise.
-const LAKE_GAIN: f32 = 0.25;
-const LAKE_DEPTH_FADE: f32 = 0.6;
-/// Ripple crests dim a lake row by up to this share, as bands rather than gaps.
-/// M14 (ADR-0017): 0, so the reflection shows no ripple stripes.
-const CREST_DIM: f32 = 0.0;
+const LAKE_GAIN: f32 = 0.45;
 /// A sky run whose brightest pixel is below this level is not mirrored (see
 /// `View::reflect`).
 const LAKE_MIN_LEVEL: u8 = 40;
 /// Sideways ripple displacement per pixel row below the shore.
 const RIPPLE_SHIFT: f32 = 0.04;
-/// Glints on the water (AUR-A10): each lake pixel's gain is scaled by `1 − SHIMMER` to 1
-/// by a hash of its row and of `SHIMMER_RUN`-pixel runs drifting along it at
-/// `SHIMMER_DRIFT` px/s, so the mirrored bands break into moving streaks of light.
-const SHIMMER: f32 = 0.45;
-const SHIMMER_RUN: f64 = 4.0;
-const SHIMMER_DRIFT: f64 = 3.0;
-/// Mirrored skyglow pixels whose glint factor is at or below this are left dark.
-const SHIMMER_GAP: f32 = 1.0 - 0.6 * SHIMMER;
 /// Display weight of red 630 nm against green 557.7 nm: the photopic luminous efficiency
 /// ratio V(630)/V(557.7) ≈ 0.27. The emission profiles stay physical; this is how bright
 /// the red *looks*, so the diffuse fringe stays a fringe.
 const RED_WEIGHT: f32 = 0.27;
-/// Minimum pink-hem tone for a hem pixel: type-B hems mark only the brightest arc.
-const HEM_TONE: f32 = 0.5;
+/// Minimum pink-hem tone for an `Accent` pixel: type-B hems mark only the brightest arc.
+const HEM_TONE: f32 = 0.6;
 /// Layers per column: one crossing per curtain plus room for three more where folds
 /// double back; a seventh merges into the nearest (see `View::push_layer`).
 const MAX_LAYERS: usize = 6;
@@ -244,11 +195,11 @@ const ASCII_COLON: u8 = 70;
 const ASCII_RED_BRIGHT: u8 = 60;
 /// The roles of auroral light: green, and the red crown and pink hem (the skyglow is
 /// `Seq`).
-const EMISSION: [Role; 2] = [GREEN, RED];
+const EMISSION: [Role; 2] = [Role::Particle, RED];
 
-/// A pink-hem pixel: `RED` above the red crown's levels.
+/// A pink-hem pixel: `Accent` above the red crown's levels.
 fn is_hem(ink: Ink) -> bool {
-    ink.role == RED && f64::from(ink.level) > RED_LEVEL_MAX
+    ink.role == Role::Accent && f64::from(ink.level) > RED_LEVEL_MAX
 }
 
 // --- Physics (pure) -----------------------------------------------------------------
@@ -742,9 +693,6 @@ struct Patch {
 
 /// Value-noise octaves of the far-shore ridge: node spacing (deg) and weight.
 const RIDGE_OCTAVES: [(f64, f64); 3] = [(20.0, 0.6), (7.0, 0.28), (2.5, 0.12)];
-/// Ridge elevation `RIDGE_DEG.0 + RIDGE_DEG.1·n` degrees for octave noise `n ∈ [0, 1]`:
-/// low rolling hills across the lake.
-const RIDGE_DEG: (f64, f64) = (0.8, 3.2);
 
 /// A seeded forest in angle: spire heights and gaps (deg) and half-width per height.
 #[derive(Debug, Clone, Copy)]
@@ -876,7 +824,7 @@ impl Setting {
             let i = (x as usize).min(nodes.len() - 2);
             n += weight * ease::lerp(nodes[i], nodes[i + 1], ease::smoothstep(x - i as f64));
         }
-        (RIDGE_DEG.0 + RIDGE_DEG.1 * n).to_radians()
+        (0.8 + 3.2 * n).to_radians()
     }
 
     /// Highest spire top (rad) over the azimuth interval `[lo, hi]`, if any tree
@@ -1023,7 +971,7 @@ impl Glow {
     /// the level ramps from the core floor `ink::MIN_VISIBLE_LEVEL` (CORE-R66; to 255 for
     /// green, to `RED_LEVEL_MAX` for red), so every lit run starts from the theme's
     /// dimmest shade of its role and no fade ends in a bright lid. The pink hem is crisp
-    /// and bright: `HEM_LEVEL` to `HEM_LEVEL_MAX`.
+    /// and bright: `HEM_LEVEL` and up.
     fn ink(self) -> Option<Ink> {
         let red = self.red > 0.5;
         let lit = if red { RED_LIT } else { GREEN_LIT };
@@ -1032,33 +980,14 @@ impl Glow {
         }
         let v = f64::from((self.tone - lit) / (1.0 - lit));
         let (role, lo, hi) = if self.hem {
-            (RED, HEM_LEVEL, HEM_LEVEL_MAX)
+            (Role::Accent, HEM_LEVEL, 255.0)
         } else if red {
-            (RED, RED_LEVEL_MIN, RED_LEVEL_MAX)
+            (RED, ink::MIN_VISIBLE_LEVEL, RED_LEVEL_MAX)
         } else {
-            (GREEN, ink::MIN_VISIBLE_LEVEL, GREEN_TOP)
+            (Role::Particle, ink::MIN_VISIBLE_LEVEL, 255.0)
         };
         Some(Ink::new(role, ink::level(lo + (hi - lo) * v)))
     }
-}
-
-/// A lake row's gain at depth share `depth ∈ [0, 1)` below the shore and ripple phase
-/// `sin` (crests at +1): fading with depth, and dimmed on the crests (AUR-A7).
-fn lake_row_gain(depth: f32, sin: f32) -> f32 {
-    (1.0 - LAKE_DEPTH_FADE * depth) * (1.0 - CREST_DIM * sin.max(0.0).powi(2))
-}
-
-/// The glint factor in `[1 − SHIMMER, 1]` of lake pixel `(x, y)`, `k` rows below the
-/// shore, at time `t` (AUR-A10): alternate rows drift opposite ways, like wind ripples
-/// crossing.
-fn shimmer(x: usize, y: usize, k: usize, t: f64) -> f32 {
-    let drift = if k % 2 == 0 {
-        SHIMMER_DRIFT
-    } else {
-        -SHIMMER_DRIFT
-    } * t;
-    let run = ((x as f64 + drift) / SHIMMER_RUN).floor() as i32;
-    1.0 - SHIMMER * rng::hash01(rng::cell_key(run, y as i32)) as f32
 }
 
 /// Height (px) of the emission fade under the top edge for a view `rows` pixels tall.
@@ -1095,7 +1024,7 @@ fn box_pass(src: &[f32], dst: &mut [f32], k: usize) {
 /// so it needs no dither to fade.
 fn skyglow(px: f64, height: f64) -> Option<Ink> {
     let k = 1.0 - px.max(0.0) / height;
-    (k > 0.0).then(|| ink::ramp(GLOW_RAMP, GLOW_MIN + (GLOW_MAX - GLOW_MIN) * k * k))
+    (k > 0.0).then(|| ink::seq(GLOW_MIN + (GLOW_MAX - GLOW_MIN) * k * k))
 }
 
 /// A star that fits the current view, with its cell and draw attributes.
@@ -1115,6 +1044,15 @@ struct LivePatch {
     half_a: f64,
     half_e: f64,
     gain: f64,
+}
+
+/// Which parts of the label fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum Label {
+    #[default]
+    None,
+    Short,
+    Full,
 }
 
 /// Everything derived from the terminal size (rebuilt in `resize`) plus the raster.
@@ -1151,16 +1089,11 @@ struct View {
     skyglow: Vec<Option<Ink>>,
     ripple_cos: Vec<f32>,
     ripple_sin: Vec<f32>,
-    /// This frame's curtain ripple gain per column (AUR-A10).
-    ripple: Vec<f32>,
-    /// Scratch: each column's pink-border row this frame (AUR-A10).
-    fringe: Vec<i32>,
     stars: Vec<ShownStar>,
     layers: Vec<[Layer; MAX_LAYERS]>,
     nlayers: Vec<u8>,
     pixels: Pixels,
-    /// Whether the AL readout fits.
-    label: bool,
+    label: Label,
 }
 
 impl View {
@@ -1200,10 +1133,15 @@ impl View {
             ripple_cos: (0..w).map(|x| (0.13 * x as f64).cos_det() as f32).collect(),
             ripple_sin: (0..w).map(|x| (0.13 * x as f64).sin_det() as f32).collect(),
             layers: vec![[Layer::default(); MAX_LAYERS]; w],
-            fringe: Vec::with_capacity(w),
             nlayers: vec![0; w],
             pixels: Pixels::new(size),
-            label: w >= 24 && h >= 10,
+            label: if w < 24 || h < 10 {
+                Label::None
+            } else if w < 60 {
+                Label::Short
+            } else {
+                Label::Full
+            },
             ..Self::default()
         };
         view.build_silhouette(setting);
@@ -1506,9 +1444,8 @@ impl View {
                 if sum <= 0.0 {
                     continue;
                 }
-                let ripple = self.ripple.get(x).copied().unwrap_or(1.0);
                 let glow = Glow {
-                    tone: (self.top[y] * ripple * luts.tone(ext * sum)).min(0.999),
+                    tone: self.top[y] * luts.tone(ext * sum),
                     red: red / (e.green + e.patch + red).max(1e-12),
                     hem: e.pink >= 0.25 * e.green && luts.tone(ext * e.pink) >= HEM_TONE,
                     green,
@@ -1590,156 +1527,10 @@ impl View {
                     .any(|&nx| (y - 1..=y + 1).any(|ny| accent(&self.pixels, nx, ny)));
                 if !run {
                     let level = self.pixels.get(x, y).map_or(0, |i| i.level);
-                    self.pixels.set(x, y, Ink::new(GREEN, level));
+                    self.pixels.set(x, y, Ink::new(Role::Particle, level));
                 }
             }
         }
-    }
-
-    /// The pink fringe (AUR-A10): in every column where the pink-carrying curtain's lower
-    /// border is lit, a soft rose glow (≤ half the ramp, brighter under a brighter curtain)
-    /// sits just under the border and fades over one more row to about 0.2, so the green
-    /// curtain stays whole over it and the fringe follows the curtain continuously. Where
-    /// no sky is free under the border, the rose takes the border pixel only if it is
-    /// brighter than the green there (a max blend). Hem pixels the pink alone lit inside
-    /// the curtain go back to green. A display softening: the real border is sharp.
-    fn soften_hem(&mut self) {
-        let span = (HEM_LEVEL_MAX - HEM_LEVEL) as f32;
-        for x in 0..self.w as i32 {
-            for y in 0..self.y_h as i32 {
-                if let Some(i) = self.pixels.get(x, y).filter(|&i| is_hem(i)) {
-                    let green =
-                        ((f32::from(i.level) - HEM_LEVEL as f32) / span * GREEN_TOP as f32) as u8;
-                    self.pixels.set(x, y, Ink::new(GREEN, green.max(i.level)));
-                }
-            }
-        }
-        // M14 (ADR-0017): the fringe is dropped; its stepped 1-cell band along every
-        // curtain base read as a hard line. The hem pixels have gone back to green above.
-        if !SHOW_HEM {
-            return;
-        }
-        // Pass 1: the border row of each column (−1 where none), so a lone column, with no
-        // neighbour on the border within a row, takes no fringe (no confetti).
-        let mut border = std::mem::take(&mut self.fringe);
-        border.clear();
-        border.extend((0..self.w).map(|x| self.border_row(x).unwrap_or(-1)));
-        for x in 0..self.w {
-            let yb = border[x];
-            if yb < 0 {
-                continue;
-            }
-            let joined = [x.wrapping_sub(1), x + 1].iter().any(|&n| {
-                border
-                    .get(n)
-                    .is_some_and(|&b| b >= 0 && (b - yb).abs() <= 1)
-            });
-            if !joined {
-                continue;
-            }
-            let ridge = self.ridge_top[x].min(self.y_h as i32);
-            let xi = x as i32;
-            let base = self.pixels.get(xi, yb).map_or(0, |i| i.level);
-            let level = (HEM_LEVEL as f32 + span * f32::from(base) / 255.0).round() as u8;
-            let free = |p: &Pixels, y: i32| {
-                y < ridge
-                    && p.get(xi, y)
-                        .is_some_and(|i| i == Ink::BLANK || i.role == SKYGLOW)
-            };
-            // Max blend: the rose shows where it outshines what is there.
-            let dimmer = |p: &Pixels, y: i32| {
-                y < ridge
-                    && p.get(xi, y)
-                        .is_some_and(|i| i.role == GREEN && i.level < level)
-            };
-            let hem_row = if free(&self.pixels, yb + 1) || dimmer(&self.pixels, yb + 1) {
-                yb + 1
-            } else if base < level {
-                yb
-            } else {
-                // Under a bright curtain the rose rides just below it regardless: the fringe
-                // stays continuous, the curtain whole.
-                yb + 1
-            };
-            self.pixels.set(xi, hem_row, Ink::new(RED, level));
-            for (k, &fade) in (1..).zip(&HEM_BELOW_FADE) {
-                let y = hem_row + k;
-                let free = self
-                    .pixels
-                    .get(xi, y)
-                    .is_some_and(|i| i == Ink::BLANK || i.role == SKYGLOW);
-                if y >= ridge || !free {
-                    break;
-                }
-                self.pixels.set(xi, y, Ink::new(RED, fade));
-            }
-        }
-        self.fringe = border;
-        // No confetti: a fringe pixel with no fringe beside it (a row either way) goes,
-        // its fade with it.
-        let hem = |p: &Pixels, x: i32, y: i32| p.get(x, y).is_some_and(is_hem);
-        for x in 0..self.w as i32 {
-            for y in 0..self.y_h as i32 {
-                if !hem(&self.pixels, x, y) {
-                    continue;
-                }
-                let run = [x - 1, x + 1]
-                    .iter()
-                    .any(|&nx| (y - 1..=y + 1).any(|ny| hem(&self.pixels, nx, ny)));
-                if run {
-                    continue;
-                }
-                let sky = |y: i32| self.skyglow[y as usize].unwrap_or(Ink::BLANK);
-                self.pixels.set(x, y, sky(y));
-                let below = y + 1;
-                if below < self.y_h as i32
-                    && self.pixels.get(x, below) == Some(Ink::new(RED, HEM_BELOW_FADE[0]))
-                {
-                    self.pixels.set(x, below, sky(below));
-                }
-            }
-        }
-    }
-
-    /// Whether sky pixel `(x, y)`'s light is the curtains' alone (a pulsating patch adds
-    /// at most 2 %), so the fringe never marks a patch.
-    fn curtain(&self, x: usize, y: i32) -> bool {
-        let e = self.emit[y as usize * self.w + x];
-        e.patch <= 0.02 * e.green
-    }
-
-    /// The row of column `x`'s pink border (AUR-A10): the lowest lit curtain pixel within
-    /// the 5 km band of the pink-carrying layer's lowest row, if any, with a sky row under
-    /// it above the ridge for the fringe.
-    fn border_row(&self, x: usize) -> Option<i32> {
-        let layers = &self.layers[x][..usize::from(self.nlayers[x])];
-        let lowest = layers
-            .iter()
-            .filter(|l| l.pink > 0.0)
-            .map(|l| l.y_low)
-            .max()?;
-        let ridge = self.ridge_top[x].min(self.y_h as i32);
-        let xi = x as i32;
-        let lit = |y: i32| {
-            self.pixels
-                .get(xi, y)
-                .is_some_and(|i| i.role == GREEN || is_hem(i))
-        };
-        let yb = (lowest - 4..=lowest.min(ridge - 1))
-            .rev()
-            .find(|&y| y >= 0 && lit(y))?;
-        (self.curtain(x, yb) && yb + 1 < ridge).then_some(yb)
-    }
-
-    /// The curtains' travelling ripple for time `t` (AUR-A10): a brightness wave running
-    /// along the arc, `1 + RIPPLE_AMP·sin(RIPPLE_K·x − RIPPLE_W·t)` per column.
-    fn set_ripple(&mut self, t: f64) {
-        self.ripple.clear();
-        self.ripple.extend(
-            (0..self.w).map(|x| {
-                (1.0 + RIPPLE_AMP * (RIPPLE_K * x as f64 - RIPPLE_W * t).sin_det()) as f32
-            }),
-        );
     }
 
     /// For every lit sky pixel, the brightest level of its column's contiguous run of
@@ -1780,67 +1571,33 @@ impl View {
         }
     }
 
-    /// Mirror the sky into the lake at `LAKE_GAIN`× level with a ripple whose wavefronts
-    /// travel toward the viewer. The crests dim whole rows by up to `CREST_DIM`, so
-    /// mirrored rays read as vertical streaks crossed by darker ripple bands; the
-    /// x-dependent phase only shifts pixels sideways, by at most `RIPPLE_SHIFT·d` px, so
-    /// the water stays still. Deeper rows fade (`LAKE_DEPTH_FADE`). The lake
+    /// Mirror the sky into the lake at 0.45× level with a ripple whose wavefronts travel
+    /// toward the viewer. Whole rows drop out on the crests, so mirrored rays read as
+    /// vertical streaks cut by horizontal ripple gaps; the x-dependent phase only shifts
+    /// pixels sideways, by at most `RIPPLE_SHIFT·d` px, so the water stays still. The lake
     /// copies the skyglow and the sky's lit pixels with their roles, dimming only the
     /// level (never below the core floor `ink::MIN_VISIBLE_LEVEL`). Each column's lit
     /// run is reflected whole or not at all: only runs whose brightest pixel reaches
     /// `LAKE_MIN_LEVEL` (`run_peaks`), since a faint run's copy could not be dimmer than
     /// the theme's floor, while cutting the dim ends off bright runs would leave shards.
     /// The ridge and spires mirror as a black band cut out of the reflected glow.
-    /// One past the lake's last pixel row: the title's cell row and the one above it
-    /// stay dark, so no reflection crowds the title (GEN-R13).
-    fn lake_end(&self) -> usize {
-        self.rows.saturating_sub(4).max(self.y_h)
-    }
-
-    /// The lake's copy of sky pixel `(sx, src)` at `gain` (depth and ripple, ≤ 1), or
-    /// `None` where the water shows nothing (AUR-A7): the skyglow, and every pixel of a
-    /// sky run whose brightest pixel reaches `LAKE_MIN_LEVEL`, dimmed to `LAKE_GAIN·gain`
-    /// of the 3 × 2 box sum over 6 of the pixels of its light in its row and the one above
-    /// (soft ends where the box leaves the run).
-    fn lake_ink(&self, sx: usize, src: usize, gain: f32) -> Option<Ink> {
-        let sky = self.pixels.get(sx as i32, src as i32)?;
-        // Only the green is mirrored: the dim red crown's copy would sit on the water as
-        // isolated dark-red specks (AUR-A10).
-        let emission = sky.role == GREEN && self.run_peak[src * self.w + sx] >= LAKE_MIN_LEVEL;
-        if sky.role != SKYGLOW && !emission {
-            return None;
-        }
-        let xs = sx.saturating_sub(1)..=(sx + 1).min(self.w - 1);
-        let sum: f32 = (src.saturating_sub(1)..=src)
-            .flat_map(|y| xs.clone().map(move |x| (x, y)))
-            .filter_map(|(x, y)| self.pixels.get(x as i32, y as i32))
-            .filter(|i| i.role == sky.role)
-            .map(|i| f32::from(i.level))
-            .sum();
-        let level = (LAKE_GAIN * gain * sum / 6.0).round() as u8;
-        let level = if emission {
-            level.max(ink::MIN_VISIBLE_LEVEL as u8)
-        } else {
-            level
-        };
-        Some(Ink::new(sky.role, level))
-    }
-
     fn reflect(&mut self, t: f64) {
         if !self.lake {
             return;
         }
         self.run_peaks();
-        let depth = (self.lake_end() - self.y_h).max(1) as f32;
-        for y in self.y_h..self.lake_end() {
+        let floor = ink::MIN_VISIBLE_LEVEL as u8;
+        for y in self.y_h..self.rows {
             let k = y - self.y_h;
             let Some(src) = self.y_h.checked_sub(k + 1) else {
                 break;
             };
             let d = (k + 1) as f64;
             let (sp, cp) = (0.9 * d - 1.7 * t).sin_cos_det();
+            if sp > 0.9 {
+                continue;
+            }
             let (sp, cp) = (sp as f32, cp as f32);
-            let gain = lake_row_gain(k as f32 / depth, sp);
             for x in 0..self.w {
                 // sin(0.9d − 1.7t + 0.13x) by angle addition: no per-pixel trig.
                 let s = sp * self.ripple_cos[x] + cp * self.ripple_sin[x];
@@ -1848,16 +1605,21 @@ impl View {
                 let Ok(sx) = usize::try_from(sx) else {
                     continue;
                 };
-                let glint = shimmer(x, y, k, t);
-                let gain = gain * glint;
-                if sx < self.w
-                    && let Some(ink) = self.lake_ink(sx, src, gain)
-                    // The mirrored skyglow sits at the ramp's floor, where dimming cannot
-                    // show: its darker glints are gaps instead, so the band ripples.
-                    && (ink.role != SKYGLOW || glint > SHIMMER_GAP)
+                let Some(sky) = self.pixels.get(sx as i32, src as i32) else {
+                    continue;
+                };
+                let level = (LAKE_GAIN * f32::from(sky.level)).round() as u8;
+                let level = if sky.role == Role::Seq {
+                    level
+                } else if EMISSION.contains(&sky.role)
+                    && self.run_peak[src * self.w + sx] >= LAKE_MIN_LEVEL
                 {
-                    self.pixels.set(x as i32, y as i32, ink);
-                }
+                    level.max(floor)
+                } else {
+                    continue;
+                };
+                self.pixels
+                    .set(x as i32, y as i32, Ink::new(sky.role, level));
             }
         }
     }
@@ -1867,6 +1629,8 @@ impl View {
 
 #[derive(Debug)]
 pub struct Aurora {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     t: f64,
     timeline: Timeline,
     params: Params,
@@ -1878,13 +1642,12 @@ pub struct Aurora {
     patches: [LivePatch; PATCHES],
     live_patches: usize,
     view: View,
-    /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
-    dirty: bool,
 }
 
 impl Aurora {
     fn new() -> Self {
         Self {
+            dirty: false,
             t: START_T,
             timeline: Timeline::new(&BEATS),
             params: keyframes(START_T),
@@ -1896,7 +1659,6 @@ impl Aurora {
             patches: [LivePatch::default(); PATCHES],
             live_patches: 0,
             view: View::default(),
-            dirty: false,
         }
     }
 
@@ -1971,7 +1733,6 @@ impl Aurora {
             view.emit_column(x, &self.luts, patches);
         }
         view.diffuse_red();
-        view.set_ripple(self.t);
         view.shade(&self.luts);
         view.despeckle();
         for x in 0..view.w {
@@ -1979,7 +1740,6 @@ impl Aurora {
         }
         if pink > 0.0 {
             view.trim_hem();
-            view.soften_hem();
         }
         view.reflect(self.t);
     }
@@ -2064,16 +1824,19 @@ impl Aurora {
         }
     }
 
-    /// ` AL -620 nT `: AL rounded to 10 nT, with a blank gutter cell on each side
-    /// (CORE-R67) so the label never merges into the curtain. The beat is the title's
-    /// caption, so it is not repeated here (AUR-A9).
+    /// ` AL -620 nT  expansion `: AL rounded to 10 nT, then the beat's name, with a
+    /// blank gutter cell on each side (CORE-R67) so the label never merges into the
+    /// curtain.
     fn draw_label(&self, canvas: &mut Canvas) {
-        if !self.view.label {
+        if self.view.label == Label::None {
             return;
         }
         let al = (al_from(self.params.activity) / 10.0).round() as i32 * 10;
-        let mut buf = StackText::<16>::new();
+        let mut buf = StackText::<32>::new();
         let _ = write!(buf, "AL {al} nT");
+        if self.view.label == Label::Full {
+            let _ = write!(buf, "  {}", self.timeline.at(self.t).label);
+        }
         draw::label(canvas, 0, 0, buf.as_str(), LABEL_INK);
     }
 }
@@ -2089,7 +1852,7 @@ impl Generator for Aurora {
         }
         self.view = View::new(size, &self.setting);
         self.update_patches();
-        self.dirty = true;
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
@@ -2109,14 +1872,12 @@ impl Generator for Aurora {
         self.dirty = true;
     }
 
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
-        if std::mem::take(&mut self.dirty) {
+        if self.dirty {
+            self.dirty = false;
             self.rasterise();
         }
-    }
-
-    fn caption(&self) -> Option<&'static str> {
-        CAPTIONS.get(self.timeline.at(self.t).index).copied()
     }
 
     fn render(&self, canvas: &mut Canvas) {
@@ -2168,7 +1929,6 @@ mod tests {
         let mut ctx = Ctx::new(seed, Size::new(w, h));
         let mut a = Aurora::new();
         a.resize(Size::new(w, h), &mut ctx);
-        a.prepare();
         (a, ctx)
     }
 
@@ -2536,8 +2296,7 @@ mod tests {
         }
         let frac = f64::from(lit) / f64::from(sky);
         assert!((0.15..=0.70).contains(&frac), "lit fraction {frac:.3}");
-        // M14: the fringe is dropped (AUR-A10).
-        assert_eq!(hems, 0, "pink hem at the expansion peak");
+        assert!(hems > 0, "no pink hem at the expansion peak");
         for x in 0..v.w {
             for y in v.y_h..v.rows {
                 let ink = px(x, y);
@@ -2585,21 +2344,18 @@ mod tests {
         assert_eq!(glow(0.99 * GREEN_LIT, 0.2, false).ink(), None);
         assert_eq!(
             glow(GREEN_LIT, 0.2, false).ink(),
-            Some(Ink::new(GREEN, FLOOR))
+            Some(Ink::new(Role::Particle, FLOOR))
         );
         assert_eq!(
             glow(1.0, 0.2, false).ink(),
-            Some(Ink::new(GREEN, GREEN_TOP as u8))
+            Some(Ink::new(Role::Particle, 255))
         );
         // Red-dominant light has its own, higher threshold and stays a deep crimson
-        // (`RED` ≤ RED_LEVEL_MAX); the hem is bright `RED` from HEM_LEVEL.
+        // (`Accent` ≤ RED_LEVEL_MAX); the hem is bright `Accent` from HEM_LEVEL.
         const { assert!(RED_LIT > GREEN_LIT) };
         assert_eq!(glow(0.99 * RED_LIT, 0.8, false).ink(), None);
         assert!(glow(0.99 * RED_LIT, 0.4, false).ink().is_some());
-        assert_eq!(
-            glow(RED_LIT, 0.8, false).ink(),
-            Some(Ink::new(RED, RED_LEVEL_MIN as u8))
-        );
+        assert_eq!(glow(RED_LIT, 0.8, false).ink(), Some(Ink::new(RED, FLOOR)));
         // The crown needs the green's tail under it: no red slab over empty sky.
         let bare = Glow {
             green: 0.99 * CROWN_GREEN,
@@ -2617,10 +2373,10 @@ mod tests {
         );
         assert_eq!(
             glow(GREEN_LIT, 0.0, true).ink(),
-            Some(Ink::new(RED, HEM_LEVEL as u8))
+            Some(Ink::new(Role::Accent, HEM_LEVEL as u8))
         );
         // Hem and crown must not blur.
-        const { assert!(HEM_LEVEL > RED_LEVEL_MAX + 8.0) };
+        const { assert!(HEM_LEVEL > RED_LEVEL_MAX + 40.0) };
         for red in [0.1f32, 0.9] {
             let mut prev = 0;
             for i in 0..=100 {
@@ -2787,7 +2543,9 @@ mod tests {
                     if !(0..v.w as i32).contains(&cx) || !(0..v.y_h as i32).contains(&cy) {
                         continue;
                     }
-                    let lit = |x: i32, y: i32| v.pixels.get(x, y).is_some_and(|i| i.role == GREEN);
+                    let lit = |x: i32, y: i32| {
+                        v.pixels.get(x, y).is_some_and(|i| i.role == Role::Particle)
+                    };
                     let (kx, ky) = ((fa / 2.5).floor() as i32, (fe / 3.0).floor() as i32);
                     let core = (-kx..=kx).all(|dx| (-ky..=ky).all(|dy| lit(cx + dx, cy + dy)));
                     assert!(
@@ -2827,7 +2585,7 @@ mod tests {
                 let level = |x: usize, y: usize| {
                     v.pixels
                         .get(x as i32, y as i32)
-                        .filter(|i| i.role == GREEN)
+                        .filter(|i| i.role == Role::Particle)
                         .map_or(0, |i| i.level)
                 };
                 let arc = (0..v.y_h)
@@ -2892,8 +2650,7 @@ mod tests {
                 let crown = v
                     .pixels
                     .get(x as i32, y as i32)
-                    .is_some_and(|i| i.role == RED && !is_hem(i))
-                    && !is_fringe(v, x as i32, y as i32);
+                    .is_some_and(|i| i.role == RED && !is_hem(i));
                 if !crown {
                     continue;
                 }
@@ -2955,7 +2712,7 @@ mod tests {
                         let m = 2 * v.y_h as i32 - 1 - y;
                         let ink = v.pixels.get(x as i32, m).unwrap_or(Ink::BLANK);
                         assert!(
-                            ink.role != SKYGLOW,
+                            ink.role != Role::Seq,
                             "{w}x{h}: glow in the ridge's reflection at {x},{m}"
                         );
                     }
@@ -2980,38 +2737,6 @@ mod tests {
     }
 
     #[test]
-    fn aur_a10_no_hem_the_lake_mirrors_no_red_and_the_curtains_ripple() {
-        // M14 (ADR-0017): no fringe pixel anywhere, and the water mirrors no red.
-        for steps in [20, 32, 48, 56] {
-            let (a, _) = census(steps);
-            let v = &a.view;
-            let px = |x: i32, y: i32| v.pixels.get(x, y).unwrap_or(Ink::BLANK);
-            for y in 0..v.lake_end() as i32 {
-                for x in 0..v.w as i32 {
-                    assert!(!is_hem(px(x, y)), "hem at {x},{y}");
-                }
-            }
-            for y in v.y_h..v.lake_end() {
-                for x in 0..v.w {
-                    assert_ne!(
-                        px(x as i32, y as i32).role,
-                        RED,
-                        "red in the lake at {x},{y}"
-                    );
-                }
-            }
-        }
-        // The ripple is a bounded wave that travels.
-        let (mut a, _) = census(20);
-        a.view.set_ripple(1.0);
-        let r1 = a.view.ripple.clone();
-        a.view.set_ripple(3.0);
-        assert_ne!(r1, a.view.ripple);
-        let amp = RIPPLE_AMP as f32 + 1e-6;
-        assert!(r1.iter().all(|&g| (1.0 - amp..=1.0 + amp).contains(&g)));
-    }
-
-    #[test]
     fn aur_a7_lake_mirrors_the_lit_sky_as_broken_streaks() {
         // Visit t = 12, 14 (the AUR-A7 frame), 20 and 28 s.
         for steps in [48, 56, 80, 112] {
@@ -3019,65 +2744,44 @@ mod tests {
             let v = &a.view;
             let px = |x: usize, y: usize| v.pixels.get(x as i32, y as i32).unwrap_or(Ink::BLANK);
             let (mut lake_lit, mut sky_lit, mut rows) = (0usize, 0usize, 0);
-            let (mut glow_lake, mut glow_sky) = (0usize, 0usize);
             // What the water mirrors: the skyglow, and every pixel of a sky run whose
             // brightest pixel reaches LAKE_MIN_LEVEL, so a run is reflected whole or
             // not at all and the lake shows streaks rather than shards.
             let mirrored = |x: usize, y: usize| {
-                px(x, y).role == SKYGLOW
-                    || (px(x, y).role == GREEN
-                        && run_peak(v, x, y).is_some_and(|peak| peak >= LAKE_MIN_LEVEL))
+                px(x, y).role == Role::Seq
+                    || run_peak(v, x, y).is_some_and(|peak| peak >= LAKE_MIN_LEVEL)
             };
-            // The two bottom cell rows stay dark for the title (GEN-R13).
-            assert_eq!(v.lake_end(), v.rows - 4);
-            for y in v.lake_end()..v.rows {
-                assert!((0..v.w).all(|x| px(x, y) == Ink::BLANK), "row {y}");
-            }
-            let depth = (v.lake_end() - v.y_h) as f32;
-            for y in v.y_h..v.lake_end() {
+            let dimmed = |i: Ink| {
+                let level = (LAKE_GAIN * f32::from(i.level)).round() as u8;
+                if i.role == Role::Seq {
+                    level
+                } else {
+                    level.max(ink::MIN_VISIBLE_LEVEL as u8)
+                }
+            };
+            for y in v.y_h..v.rows {
                 let d = (y - v.y_h + 1) as f64;
                 let src = v.y_h - (y - v.y_h) - 1;
-                // No row drops out: a crest only dims it.
-                let gain = lake_row_gain(
-                    (y - v.y_h) as f32 / depth,
-                    (0.9 * d - 1.7 * a.t).sin_det() as f32,
-                );
+                if (0.9 * d - 1.7 * a.t).sin_det() > 0.9 {
+                    // A ripple crest: the whole row drops out.
+                    assert!((0..v.w).all(|x| px(x, y) == Ink::BLANK), "row {y}");
+                    continue;
+                }
                 rows += 1;
                 for x in 0..v.w {
-                    // Emission and mirrored skyglow are counted apart: the skyglow's
-                    // copy is broken by dark glints (AUR-A10).
-                    let skyglow = px(x, src).role == SKYGLOW;
-                    if skyglow {
-                        glow_sky += 1;
-                    } else {
-                        sky_lit += usize::from(mirrored(x, src));
-                    }
+                    sky_lit += usize::from(mirrored(x, src));
                     let ink = px(x, y);
                     if ink == Ink::BLANK {
                         continue;
                     }
-                    if ink.role == SKYGLOW {
-                        glow_lake += 1;
-                    } else {
-                        lake_lit += 1;
-                    }
-                    let gain = gain * shimmer(x, y, y - v.y_h, a.t);
-                    // Each lit lake pixel is a dimmed, box-averaged copy (never under
-                    // the core floor) of a mirrored sky pixel a ripple shift away, with
-                    // its role (so red over green reflects as red over green), and never
-                    // brighter than `LAKE_GAIN` of the sky it mirrors.
-                    let copy = (x.saturating_sub(3)..(x + 4).min(v.w))
-                        .any(|sx| mirrored(sx, src) && v.lake_ink(sx, src, gain) == Some(ink));
-                    let peak = (x.saturating_sub(4)..(x + 5).min(v.w))
-                        .flat_map(|sx| [px(sx, src).level, px(sx, src.saturating_sub(1)).level])
-                        .max()
-                        .unwrap_or(0);
-                    assert!(
-                        f32::from(ink.level)
-                            <= (LAKE_GAIN * gain * f32::from(peak))
-                                .max(ink::MIN_VISIBLE_LEVEL as f32)
-                                + 1.0
-                    );
+                    lake_lit += 1;
+                    // Each lit lake pixel is a dimmed copy (never under the core floor)
+                    // of a mirrored sky pixel a ripple shift away, with its role (so red
+                    // over green reflects as red over green).
+                    let copy = (x.saturating_sub(3)..(x + 4).min(v.w)).any(|sx| {
+                        let s = px(sx, src);
+                        mirrored(sx, src) && s.role == ink.role && ink.level == dimmed(s)
+                    });
                     assert!(
                         copy,
                         "t = {}: lake pixel {x},{y} {ink:?} mirrors nothing",
@@ -3093,59 +2797,7 @@ mod tests {
                 "t = {}: lake/sky lit {ratio:.3}",
                 a.t
             );
-            // The mirrored skyglow ripples: about 40 % of it is dark glints (AUR-A10).
-            if glow_sky > 200 {
-                let glow = glow_lake as f64 / glow_sky as f64;
-                assert!(
-                    (0.4..=0.8).contains(&glow),
-                    "t = {}: skyglow copy {glow:.3}",
-                    a.t
-                );
-            }
         }
-    }
-
-    #[test]
-    fn aur_a7_lake_pixel_is_the_dimmed_box_mean_of_its_source() {
-        // Hand-set sky: a green run three pixels wide on a sky row and the row above it,
-        // with empty sky either side. The copy of its middle pixel is
-        // round(LAKE_GAIN · gain · (sum of the six) / 6); one end loses the three pixels
-        // past the run (soft ends), and deeper rows and ripple crests dim it.
-        let (mut a, _) = census(56);
-        let v = &mut a.view;
-        // A row that `run_peaks` scans (only the emitting rows can hold emission).
-        let src = v.emit_rows.0 + 1;
-        assert!(src < v.emit_rows.1.min(v.y_h - 1));
-        let x0 = v.w / 2;
-        let levels = [[80u8, 90, 100], [100, 120, 140]];
-        for (row, y) in [src - 1, src].into_iter().enumerate() {
-            v.pixels.set(x0 as i32 - 2, y as i32, Ink::BLANK);
-            v.pixels.set(x0 as i32 + 2, y as i32, Ink::BLANK);
-            for (i, &l) in levels[row].iter().enumerate() {
-                v.pixels
-                    .set((x0 + i) as i32 - 1, y as i32, Ink::new(GREEN, l));
-            }
-        }
-        v.run_peaks();
-        let sum: f32 = levels.iter().flatten().map(|&l| f32::from(l)).sum();
-        let want = |gain: f32, sum: f32| {
-            Some(Ink::new(
-                GREEN,
-                (LAKE_GAIN * gain * sum / 6.0).round() as u8,
-            ))
-        };
-        assert_eq!(v.lake_ink(x0, src, 1.0), want(1.0, sum));
-        assert_eq!(
-            v.lake_ink(x0 + 1, src, 1.0),
-            want(1.0, 90.0 + 100.0 + 120.0 + 140.0)
-        );
-        assert_eq!(v.lake_ink(x0, src, 0.5), want(0.5, sum));
-        // The row gain: full at the shore between crests, fading with depth, dimmed on
-        // a crest, and never zero.
-        assert_eq!(lake_row_gain(0.0, -0.3), 1.0);
-        assert!(lake_row_gain(0.9, 0.0) < lake_row_gain(0.2, 0.0));
-        assert!((lake_row_gain(0.0, 1.0) - (1.0 - CREST_DIM)).abs() < 1e-6);
-        assert!(lake_row_gain(1.0, 1.0) > 0.2);
     }
 
     #[test]
@@ -3171,7 +2823,7 @@ mod tests {
                     hems += 1;
                     // Within the lowest layer's 5 km band, never inside a higher layer.
                     assert!(
-                        y >= lowest - 4 && y <= lowest + 1,
+                        y >= lowest - 4 && y <= lowest,
                         "t = {}: hem at {x},{y}, lowest border {lowest}",
                         a.t
                     );
@@ -3180,15 +2832,12 @@ mod tests {
                         .iter()
                         .any(|dx| (-1..=1).any(|dy| accent(x as i32 + dx, y + dy)));
                     assert!(run, "t = {}: isolated hem pixel at {x},{y}", a.t);
-                    // Crisp: rose pink, never the crown's deep crimson nor the ramp's
-                    // near-white top.
-                    let level = f64::from(v.pixels.get(x as i32, y).map_or(0, |i| i.level));
-                    assert!(level >= HEM_LEVEL - 0.5, "hem level {level}");
-                    assert!(level <= HEM_LEVEL_MAX + 0.5, "hem level {level}");
+                    // Crisp: bright pink, never the crown's deep crimson.
+                    let level = v.pixels.get(x as i32, y).map_or(0, |i| i.level);
+                    assert!(f64::from(level) >= HEM_LEVEL - 0.5, "hem level {level}");
                 }
             }
-            // M14: the fringe is dropped (AUR-A10).
-            assert_eq!(hems, 0, "hem at t = {}", a.t);
+            assert!(hems > 0, "no hem at t = {}", a.t);
         }
     }
 
@@ -3225,12 +2874,12 @@ mod tests {
     #[test]
     fn aur_skyglow_is_solid_and_fades_to_near_black_above_the_silhouette() {
         assert_eq!(skyglow(9.0, 9.0), None);
-        assert_eq!(skyglow(0.0, 9.0), Some(ink::ramp(GLOW_RAMP, GLOW_MAX)));
+        assert_eq!(skyglow(0.0, 9.0), Some(ink::seq(GLOW_MAX)));
         let mut prev = 1.0;
         for i in 0..90 {
             let px = 0.1 * f64::from(i);
             let ink = skyglow(px, 9.0).expect("solid up to its height");
-            let v = f64::from(ink.level) / 255.0;
+            let v = ink::seq_value(ink);
             assert!(v <= prev, "skyglow brightens with elevation at {px}");
             assert!(
                 v >= GLOW_MIN - 0.5 / 255.0,
@@ -3251,7 +2900,7 @@ mod tests {
                     // Every dark sky pixel in the glow glows: no holes, no dither.
                     let glow = v.skyglow[y as usize].unwrap_or(Ink::BLANK);
                     assert_eq!(ink, glow, "{w}x{h} sky pixel {x},{y}");
-                    glowing += usize::from(ink.role == SKYGLOW);
+                    glowing += usize::from(ink.role == Role::Seq);
                 }
             }
             assert!(glowing >= v.w / 2, "{w}x{h}: only {glowing} glow pixels");
@@ -3354,32 +3003,32 @@ mod tests {
     }
 
     #[test]
-    fn aur_a9_captions_follow_the_beat_and_the_label_is_al_only() {
-        // Loop times 1, 13, 20 and 40 s fall in growth, onset, expansion and recovery.
-        for (t, caption) in [1.0, 13.0, 20.0, 40.0].into_iter().zip(CAPTIONS) {
-            let (mut a, mut ctx) = scene(80, 24);
-            let steps = ((t + LOOP - START_T) % LOOP / 0.25).round() as usize;
-            for _ in 0..steps {
-                a.update(0.25, &mut ctx);
-                a.prepare();
-            }
-            assert_eq!(a.caption(), Some(caption), "t = {t}");
-            assert!(META.captions.contains(&caption));
-            let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
-            a.render(&mut canvas);
-            let top = &canvas.to_lines()[0];
-            assert!(top.starts_with(" AL -"), "{top}");
-            // A blank gutter cell right after the label, and no beat word.
-            let end = top.find(" nT").map(|i| i + " nT".len());
-            assert_eq!(
-                end.and_then(|e| top.as_bytes().get(e)),
-                Some(&b' '),
-                "{top}"
-            );
-            for &(beat, _) in &BEATS {
-                assert!(!top.contains(beat), "{top}");
-            }
+    fn aur_label_is_rounded_and_fits_the_width() {
+        let (a, _) = scene(80, 24);
+        let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
+        a.render(&mut canvas);
+        let top = &canvas.to_lines()[0];
+        assert!(top.starts_with(" AL -"), "{top}");
+        assert!(top.contains(" nT  growth "), "{top}");
+        // The expansion peak: a blank gutter cell right after the label.
+        let (mut a, mut ctx) = scene(80, 24);
+        for _ in 0..56 {
+            a.update(0.25, &mut ctx);
+            a.prepare();
         }
+        let mut canvas = Canvas::new(Size::new(80, 24), GlyphMode::Ascii);
+        a.render(&mut canvas);
+        let top = &canvas.to_lines()[0];
+        let end = top.find("expansion").map(|i| i + "expansion".len());
+        assert_eq!(
+            end.and_then(|e| top.as_bytes().get(e)),
+            Some(&b' '),
+            "{top}"
+        );
+        let (a, _) = scene(40, 24);
+        let mut canvas = Canvas::new(Size::new(40, 24), GlyphMode::Ascii);
+        a.render(&mut canvas);
+        assert!(!canvas.to_lines()[0].contains("growth"));
         let (a, _) = scene(20, 24);
         let mut canvas = Canvas::new(Size::new(20, 24), GlyphMode::Ascii);
         a.render(&mut canvas);
@@ -3395,16 +3044,9 @@ mod tests {
                 v.pixels
                     .get(x as i32, y as i32)
                     .filter(|i| EMISSION.contains(&i.role))
-                    .map(|i| i.role == RED && !is_hem(i) && !is_fringe(v, x as i32, y as i32))
+                    .map(|i| i.role == RED && !is_hem(i))
             })
             .collect()
-    }
-
-    /// Whether red pixel `(x, y)` belongs to the hem's fringe (AUR-A10), not the crown: a
-    /// hem pixel lies up to `HEM_BELOW_FADE.len()` rows above it.
-    fn is_fringe(v: &View, x: i32, y: i32) -> bool {
-        let hem = |y: i32| v.pixels.get(x, y).is_some_and(is_hem);
-        (1..=HEM_BELOW_FADE.len() as i32).any(|k| hem(y - k))
     }
 
     #[test]
@@ -3432,7 +3074,7 @@ mod tests {
                     capped += usize::from((y + 1..(y + 12).min(v.y_h)).any(|g| {
                         v.pixels
                             .get(x as i32, g as i32)
-                            .is_some_and(|i| i.role == GREEN)
+                            .is_some_and(|i| i.role == Role::Particle)
                     }));
                 }
                 tops.extend(top);
@@ -3468,7 +3110,7 @@ mod tests {
                 }
                 let ch = lines[cy].chars().nth(cx);
                 match c.ink.role {
-                    GREEN => {
+                    Role::Particle => {
                         assert!(matches!(ch, Some(',' | ':' | '!' | '|')), "{ch:?}");
                         commas += usize::from(ch == Some(','));
                     }
@@ -3511,12 +3153,10 @@ mod tests {
         let theta = a.curtains[0].theta;
         let red = a.curtains[1].red;
         a.resize(Size::new(61, 17), &mut ctx);
-        a.prepare();
         assert_eq!(a.curtains[0].theta, theta);
         assert_eq!(a.curtains[1].red, red);
         assert_eq!(a.view.pixels.pixel_size(), Size::new(61, 34));
         a.resize(Size::new(1, 1), &mut ctx);
-        a.prepare();
         a.update(0.25, &mut ctx);
         a.prepare();
         let mut canvas = Canvas::new(Size::new(1, 1), GlyphMode::Unicode);

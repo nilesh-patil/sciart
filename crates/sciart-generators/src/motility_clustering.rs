@@ -74,30 +74,27 @@ const DISPERSE: usize = 2;
 /// ones fade out over it at the start of a new cycle.
 const ARRIVE_S: f64 = 3.0;
 
-/// Every swimmer is a short braille rod in one ramp (deep teal → emerald → lime-white):
-/// its heading sets the hue within a band and its crowding lifts the band, so a free
-/// swimmer is a teal stroke (levels 60–180, ADR-0017) and a jammed one a bright lime one,
-/// so the clusters are the one bright subject on black (SPEC-002 round 3, M14).
-const ROD_ROLE: Role = Role::Ramp(Ramp::Aurora);
+/// Every swimmer is a short braille rod in M11's complementary pair (ADR-0018), in flat
+/// steps by crowding: a free swimmer (a collision of two or fewer contacts is not a
+/// crowd) a `Cold` stroke, one pressed by 3–4 neighbours a brighter `Cold`, and a jammed
+/// one (≥ [`CLUSTER_CONTACTS`]) a bright `Hot` stroke, so the clusters are the one warm
+/// subject on black.
+const FREE_INK: Ink = Ink::new(Role::Cold, 180);
+const PRESSED_INK: Ink = Ink::new(Role::Cold, 230);
+const JAM_INK: Ink = Ink::new(Role::Hot, 240);
+// Crowding only ever brightens a rod [MIPS-A6].
+const _: () = assert!(JAM_INK.level > PRESSED_INK.level && PRESSED_INK.level > FREE_INK.level);
 /// Rod length in swimmer diameters (a rod-shaped cell; the model is still discs).
 const ROD_LEN: f64 = 1.25;
-/// Level bands `(low, span)` for a free and a fully jammed swimmer.
-const FREE_BAND: (f64, f64) = (60.0, 120.0);
-const JAM_BAND: (f64, f64) = (186.0, 69.0);
-/// The heading that reads brightest within a band (a unit vector, down-right on screen).
-const HUE_DIR: (f64, f64) = (0.6, 0.8);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
-/// A rod's level: its heading picks the hue inside a band that rises with crowding, from
-/// `FREE_BAND` (no contacts) to `JAM_BAND` (8 or more) [MIPS-A6].
-pub(crate) fn rod_level(ux: f64, uy: f64, contacts: u8) -> u8 {
-    let hue = (0.5 + 0.5 * (ux * HUE_DIR.0 + uy * HUE_DIR.1)).clamp(0.0, 1.0);
-    // Two or fewer contacts is a collision, not a crowd: those rods stay in the dim free
-    // band, so only packed clusters light up (M14, ADR-0017 rule 6).
-    let jam = ease::smoothstep(f64::from(contacts.clamp(2, 8) - 2) / 6.0);
-    let lo = ease::lerp(FREE_BAND.0, JAM_BAND.0, jam);
-    let span = ease::lerp(FREE_BAND.1, JAM_BAND.1, jam);
-    sciart_core::ink::level(lo + span * hue)
+/// A rod's ink by its contacts [MIPS-A6].
+pub(crate) fn rod_ink(contacts: u8) -> Ink {
+    match contacts {
+        c if c >= CLUSTER_CONTACTS => JAM_INK,
+        3.. => PRESSED_INK,
+        _ => FREE_INK,
+    }
 }
 
 /// One swimmer, in box units (diameters).
@@ -378,7 +375,7 @@ impl Motility {
             if s.contacts >= CLUSTER_CONTACTS {
                 self.clustered += 1;
             }
-            let ink = Ink::new(ROD_ROLE, rod_level(s.ux, s.uy, s.contacts));
+            let ink = rod_ink(s.contacts);
             let (hx, hy) = (half * s.ux, half * s.uy);
             self.dots.line(x - hx, y - hy, x + hx, y + hy, ink);
         }
@@ -399,7 +396,7 @@ impl Generator for Motility {
         self.readout_room = title::stable_readout_room(size, &META);
         self.dots.resize(size);
         // The half-block pixel lattice (one pixel per cell column, two per row) sets the
-        // box scale; the scene itself draws only braille rods on black (ADR-0017: no glow).
+        // box scale; the scene itself draws only braille rods on black (no glow).
         let px = Size::new(size.width(), size.height().saturating_mul(2));
         let (box_size, scale, full) = box_for(px);
         let old = self.world.size;
@@ -461,8 +458,7 @@ impl Generator for Motility {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        // Rods only, on black: the old density glow under crowds is gone (ADR-0017 rule 1);
-        // the jammed rods' bright band is what makes a cluster read.
+        // Rods only, on black: the jammed rods' warm colour is what makes a cluster read.
         self.dots.blit(canvas);
         let h = i32::from(self.cells.height());
         if h < 4 {
@@ -578,13 +574,12 @@ mod tests {
     }
 
     #[test]
-    fn mips_a6_jammed_rods_are_brighter_and_heading_sets_hue() {
-        for (ux, uy) in [(1.0, 0.0), (0.0, 1.0), (-0.6, -0.8), (0.6, 0.8)] {
-            // Every jammed rod outshines every free one, whatever the heading.
-            assert!(rod_level(ux, uy, 8) > rod_level(0.6, 0.8, 0));
-        }
-        assert!(rod_level(0.6, 0.8, 0) > rod_level(-0.6, -0.8, 0) + 50);
-        assert!(rod_level(0.6, 0.8, 8) > rod_level(-0.6, -0.8, 8) + 50);
+    fn mips_a6_jammed_rods_are_hot_and_brighter_than_free_cold_ones() {
+        assert_eq!(rod_ink(0), FREE_INK);
+        assert_eq!(rod_ink(2), FREE_INK, "a collision is not a crowd");
+        assert_eq!(rod_ink(4), PRESSED_INK);
+        assert_eq!(rod_ink(CLUSTER_CONTACTS), JAM_INK);
+        assert_eq!((FREE_INK.role, JAM_INK.role), (Role::Cold, Role::Hot));
     }
 
     #[test]

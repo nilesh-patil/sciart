@@ -25,7 +25,6 @@ macro_rules! registry {
 /// registered (GEN-R3), and scanned by the GEN-R7 source rule like every scene file.
 mod shared {
     pub(crate) mod cahn_hilliard;
-    pub(crate) mod earth_globe;
     pub(crate) mod excitable;
     pub(crate) mod jovian;
     pub(crate) mod laplacian_growth;

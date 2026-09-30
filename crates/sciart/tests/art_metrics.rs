@@ -1,18 +1,17 @@
-//! Per-scene art ratchets, measured with the RND-R13 metrics (`sciart_render::metrics`) on
-//! the painted `astro` frame at 200×50, seed 42, t = 5 s and 20 s: the same numbers
-//! `pixi run rs-cost` prints.
+//! Per-scene art bands (GEN-R24, ADR-0018), measured with the RND-R13 metrics
+//! (`sciart_render::metrics`) on the painted `astro` frame at 200×50, seed 42, t = 5 s and
+//! 20 s: the same numbers `pixi run rs-cost` prints.
 //!
-//! `LIMITS` holds, per scene and time, a blockiness *ceiling* (GEN-R17), a darkness
-//! *floor* (GEN-R18), and *ceilings* on lit coverage, chroma mass and edge weight (GEN-R21,
-//! ADR-0017: clean, minimal scenes on black); the GEN-R21 neon cap (chroma p90 ≤ 0.20) is
-//! one global ceiling. GEN-R21's legible subject adds a per-scene lit-coverage *floor* and a
-//! global floor on the p99 luma of lit pixels (`LEGIBLE_LUMA`, allowlist `KNOWN_FAINT`).
-//! Seeded with slack (blockiness +0.02, darkness −0.02, coverage
-//! +0.02, chroma mass +0.003, edge weight +10 % + 0.2, coverage floor −0.02); `pixi run rs-cost -- --emit-limits`
-//! prints fresh rows. Ratchet: a ceiling may only be lowered and a floor only raised; when
-//! a scene improves, tighten its entry (the tests print loose entries). Raising a GEN-R21
-//! ceiling needs a reviewed note in the scene's SPEC-002 section.
-//! `cargo test -p sciart --test art_metrics -- --nocapture` prints the headroom.
+//! `LIMITS` holds each scene's reviewed look as a band: per scene and time, a darkness
+//! *floor* (a black ground) and *ceilings* on lit coverage, chroma mass and edge weight (a
+//! small subject with much black around it, no washes or blobs beyond the reviewed look).
+//! M14's global rules (GEN-R17 blockiness, GEN-R21 neon cap and legible-subject floor)
+//! are superseded: M11's flat, stepped fills and saturated colours are the target look.
+//! Seeded with slack (darkness −0.02, coverage +0.02, chroma mass +0.003, edge weight
+//! +10 % + 0.2); `pixi run rs-cost -- <scene> --emit-limits` prints fresh rows, and a
+//! scene's row is re-seeded only after its look is reviewed. Between reviews the band is a
+//! ratchet: a ceiling may only be lowered and a floor only raised (the tests print loose
+//! entries). `cargo test -p sciart --test art_metrics -- --nocapture` prints the headroom.
 
 // Measured table values that happen to look like 1/π are not the constant.
 #![allow(clippy::approx_constant)]
@@ -23,109 +22,95 @@ use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use sciart_core::prelude::*;
 use sciart_generators::{Entry, registry};
-use sciart_render::metrics::{ArtMetrics, LEGIBLE_LUMA, NEON_CAP, art_metrics};
+use sciart_render::metrics::{ArtMetrics, art_metrics};
 use sciart_render::{Theme, paint};
 
 const SEED: u64 = 42;
 const SIZE: (u16, u16) = (200, 50);
 const TIMES: [f64; 2] = [5.0, 20.0];
 
-/// Per scene, each at `TIMES`: blockiness ceiling, darkness floor, the GEN-R21 ceilings on
-/// lit coverage, chroma mass and edge weight, and the GEN-R21 lit-coverage floor.
-/// Alphabetical.
-type Limits = (
-    &'static str,
-    [f64; 2],
-    [f64; 2],
-    [f64; 2],
-    [f64; 2],
-    [f64; 2],
-    [f64; 2],
-);
-
-/// Scenes whose brightest lit pixels (p99 luma) are still below `LEGIBLE_LUMA` (GEN-R21,
-/// ADR-0017 rule 6), as measured when the rule landed. An allowlist that may only shrink:
-/// a listed scene that passes fails the test until its entry is deleted.
-const KNOWN_FAINT: &[&str] = &["firefly_sync", "liesegang_rings"];
+/// Per scene, each at `TIMES`: darkness floor, then ceilings on lit coverage, chroma mass
+/// and edge weight (GEN-R24). Alphabetical.
+type Limits = (&'static str, [f64; 2], [f64; 2], [f64; 2], [f64; 2]);
 
 #[rustfmt::skip]
 const LIMITS: &[Limits] = &[
-    ("action_potential", [0.020, 0.045], [0.911, 0.911], [0.105, 0.105], [0.0086, 0.0084], [5.1, 5.1], [0.064, 0.064]),
-    ("aurora", [0.037, 0.036], [0.864, 0.724], [0.142, 0.283], [0.0105, 0.0235], [5.5, 7.8], [0.101, 0.242]),
-    ("belousov_zhabotinsky", [0.020, 0.020], [0.751, 0.695], [0.254, 0.308], [0.0240, 0.0294], [14.6, 12.3], [0.213, 0.267]),
-    ("black_hole", [0.020, 0.020], [0.872, 0.876], [0.130, 0.126], [0.0104, 0.0101], [8.9, 8.9], [0.089, 0.085]),
-    ("boids_flocking", [0.020, 0.020], [0.980, 0.980], [0.046, 0.046], [0.0032, 0.0032], [1.4, 1.4], [0.005, 0.005]),
-    ("brownian_motion", [0.020, 0.020], [0.974, 0.974], [0.032, 0.034], [0.0033, 0.0034], [3.1, 2.7], [0.000, 0.000]),
-    ("catalytic_surface", [0.020, 0.020], [0.713, 0.948], [0.290, 0.053], [0.0288, 0.0045], [14.9, 2.0], [0.250, 0.012]),
-    ("chemical_garden", [0.020, 0.020], [0.926, 0.892], [0.075, 0.110], [0.0075, 0.0111], [4.4, 4.7], [0.034, 0.069]),
-    ("comet_breakup", [0.020, 0.020], [0.852, 0.964], [0.150, 0.036], [0.0128, 0.0034], [25.3, 4.4], [0.109, 0.000]),
-    ("comet_tails", [0.020, 0.020], [0.934, 0.916], [0.066, 0.084], [0.0054, 0.0049], [5.0, 9.7], [0.025, 0.043]),
-    ("constellation_map", [0.020, 0.020], [0.978, 0.978], [0.029, 0.026], [0.0033, 0.0032], [1.5, 1.5], [0.000, 0.000]),
-    ("cosmic_microwave_background", [0.032, 0.020], [0.532, 0.539], [0.477, 0.470], [0.0206, 0.0195], [8.2, 7.9], [0.436, 0.429]),
-    ("cosmic_web", [0.020, 0.020], [0.807, 0.802], [0.193, 0.198], [0.0228, 0.0237], [9.5, 8.9], [0.152, 0.157]),
-    ("dicty_aggregation", [0.020, 0.020], [0.926, 0.955], [0.109, 0.067], [0.0090, 0.0057], [1.9, 2.0], [0.068, 0.026]),
-    ("dna_helix", [0.020, 0.020], [0.980, 0.980], [0.040, 0.058], [0.0042, 0.0054], [1.4, 1.3], [0.000, 0.017]),
-    ("doppler_effect", [0.020, 0.020], [0.980, 0.980], [0.104, 0.060], [0.0063, 0.0041], [1.4, 1.8], [0.063, 0.019]),
-    ("double_pendulum", [0.020, 0.020], [0.946, 0.943], [0.064, 0.066], [0.0065, 0.0066], [3.3, 3.0], [0.023, 0.025]),
-    ("electron_orbitals", [0.020, 0.020], [0.980, 0.980], [0.070, 0.073], [0.0051, 0.0052], [1.8, 1.9], [0.029, 0.032]),
-    ("exoplanet_transit", [0.064, 0.064], [0.843, 0.843], [0.167, 0.167], [0.0114, 0.0114], [16.0, 15.9], [0.126, 0.126]),
-    ("firefly_sync", [0.020, 0.020], [0.939, 0.948], [0.062, 0.053], [0.0042, 0.0033], [2.4, 2.5], [0.021, 0.012]),
-    ("fractal_growth", [0.020, 0.020], [0.980, 0.980], [0.037, 0.074], [0.0037, 0.0033], [1.4, 1.4], [0.000, 0.033]),
-    ("galaxy_collision", [0.020, 0.020], [0.980, 0.980], [0.047, 0.042], [0.0038, 0.0036], [1.5, 1.7], [0.006, 0.001]),
-    ("globular_cluster", [0.020, 0.020], [0.958, 0.957], [0.060, 0.060], [0.0035, 0.0035], [2.9, 2.9], [0.019, 0.019]),
-    ("gravitational_lensing", [0.020, 0.020], [0.937, 0.947], [0.064, 0.053], [0.0071, 0.0059], [6.3, 5.4], [0.023, 0.012]),
-    ("gray_scott", [0.020, 0.020], [0.783, 0.335], [0.217, 0.666], [0.0068, 0.0168], [9.9, 16.6], [0.176, 0.625]),
-    ("heart_fibrillation", [0.020, 0.020], [0.950, 0.940], [0.056, 0.067], [0.0050, 0.0064], [2.4, 2.6], [0.015, 0.026]),
-    ("hp_protein_folding", [0.020, 0.020], [0.969, 0.970], [0.032, 0.036], [0.0036, 0.0036], [2.7, 2.1], [0.000, 0.000]),
-    ("hurricane", [0.020, 0.020], [0.648, 0.645], [0.359, 0.361], [0.0108, 0.0108], [56.5, 61.5], [0.318, 0.320]),
-    ("io_volcanoes", [0.024, 0.024], [0.681, 0.681], [0.338, 0.339], [0.0243, 0.0243], [13.7, 13.7], [0.297, 0.298]),
-    ("ising_model", [0.196, 0.195], [0.655, 0.860], [0.350, 0.142], [0.0031, 0.0031], [23.3, 21.3], [0.309, 0.101]),
-    ("jupiter_storms", [0.020, 0.020], [0.655, 0.655], [0.352, 0.352], [0.0321, 0.0322], [81.7, 82.1], [0.311, 0.311]),
-    ("jwst_unfolding", [0.046, 0.045], [0.913, 0.789], [0.089, 0.219], [0.0070, 0.0087], [9.7, 20.1], [0.048, 0.178]),
-    ("kelvin_helmholtz", [0.020, 0.020], [0.859, 0.908], [0.143, 0.093], [0.0056, 0.0045], [2.8, 2.9], [0.102, 0.052]),
-    ("lenia", [0.020, 0.020], [0.863, 0.862], [0.139, 0.138], [0.0179, 0.0178], [14.6, 13.8], [0.098, 0.097]),
-    ("lichtenberg_discharge", [0.020, 0.020], [0.980, 0.980], [0.069, 0.037], [0.0054, 0.0040], [1.5, 1.5], [0.028, 0.000]),
-    ("liesegang_rings", [0.020, 0.020], [0.887, 0.810], [0.128, 0.206], [0.0156, 0.0261], [4.9, 6.5], [0.087, 0.165]),
-    ("light_echo", [0.020, 0.020], [0.846, 0.929], [0.157, 0.072], [0.0050, 0.0038], [8.9, 6.4], [0.116, 0.031]),
-    ("mars_rover", [0.118, 0.123], [0.509, 0.507], [0.485, 0.486], [0.0358, 0.0359], [25.6, 25.7], [0.444, 0.445]),
-    ("meteor_shower", [0.020, 0.020], [0.978, 0.978], [0.027, 0.028], [0.0031, 0.0031], [1.5, 1.5], [0.000, 0.000]),
-    ("molecular_dynamics", [0.020, 0.020], [0.980, 0.980], [0.069, 0.068], [0.0038, 0.0039], [2.7, 2.7], [0.028, 0.027]),
-    ("molecular_motors", [0.020, 0.020], [0.896, 0.898], [0.106, 0.103], [0.0072, 0.0078], [5.3, 5.7], [0.065, 0.062]),
-    ("molecule_viewer", [0.056, 0.020], [0.934, 0.937], [0.067, 0.064], [0.0031, 0.0031], [12.0, 5.4], [0.026, 0.023]),
-    ("moon_landing", [0.020, 0.020], [0.860, 0.842], [0.145, 0.163], [0.0040, 0.0041], [13.5, 14.2], [0.104, 0.122]),
-    ("moon_phases", [0.486, 0.039], [0.687, 0.749], [0.322, 0.258], [0.0080, 0.0076], [48.5, 41.0], [0.281, 0.217]),
-    ("motility_clustering", [0.020, 0.020], [0.980, 0.980], [0.046, 0.207], [0.0039, 0.0088], [1.4, 1.4], [0.005, 0.166]),
-    ("noctilucent_clouds", [0.020, 0.020], [0.949, 0.951], [0.237, 0.280], [0.0119, 0.0128], [2.2, 2.9], [0.196, 0.239]),
-    ("orbital_rendezvous", [0.025, 0.025], [0.814, 0.814], [0.173, 0.178], [0.0167, 0.0167], [12.5, 9.5], [0.132, 0.137]),
-    ("particle_accelerator", [0.020, 0.020], [0.979, 0.979], [0.046, 0.041], [0.0041, 0.0039], [1.7, 1.6], [0.005, 0.000]),
-    ("physarum", [0.046, 0.071], [0.861, 0.841], [0.141, 0.162], [0.0159, 0.0177], [12.7, 11.3], [0.100, 0.121]),
-    ("planetary_nebula", [0.020, 0.020], [0.888, 0.937], [0.114, 0.064], [0.0042, 0.0052], [8.0, 5.4], [0.073, 0.023]),
-    ("pulsar", [0.020, 0.020], [0.947, 0.928], [0.054, 0.073], [0.0070, 0.0090], [7.8, 5.5], [0.013, 0.032]),
-    ("quantum_double_slit", [0.020, 0.020], [0.578, 0.593], [0.432, 0.424], [0.0238, 0.0224], [12.1, 10.1], [0.391, 0.383]),
-    ("radical_chain", [0.020, 0.020], [0.770, 0.958], [0.235, 0.042], [0.0286, 0.0056], [43.6, 9.4], [0.194, 0.001]),
-    ("radioactive_decay", [0.020, 0.020], [0.913, 0.957], [0.101, 0.058], [0.0128, 0.0064], [1.7, 1.6], [0.060, 0.017]),
-    ("rainbow", [0.099, 0.147], [0.680, 0.671], [0.326, 0.335], [0.0469, 0.0432], [23.4, 22.1], [0.285, 0.294]),
-    ("relativistic_jet", [0.020, 0.020], [0.873, 0.873], [0.129, 0.129], [0.0125, 0.0125], [11.9, 11.8], [0.088, 0.088]),
-    ("rocket_launch", [0.020, 0.020], [0.959, 0.968], [0.043, 0.035], [0.0034, 0.0032], [2.8, 2.2], [0.002, 0.000]),
-    ("satellite_orbit", [0.020, 0.020], [0.909, 0.904], [0.097, 0.102], [0.0097, 0.0101], [13.0, 14.2], [0.056, 0.061]),
-    ("saturn_rings", [0.020, 0.020], [0.751, 0.751], [0.253, 0.254], [0.0123, 0.0123], [28.3, 27.8], [0.212, 0.213]),
-    ("seashell_pigmentation", [0.056, 0.078], [0.848, 0.856], [0.154, 0.147], [0.0086, 0.0076], [44.1, 43.6], [0.113, 0.106]),
-    ("solar_eruption", [0.020, 0.020], [0.856, 0.818], [0.146, 0.185], [0.0067, 0.0131], [3.1, 5.5], [0.105, 0.144]),
-    ("solar_surface", [0.020, 0.020], [0.612, 0.612], [0.397, 0.396], [0.0509, 0.0506], [53.7, 54.6], [0.356, 0.355]),
-    ("solar_system", [0.094, 0.065], [0.954, 0.954], [0.052, 0.052], [0.0054, 0.0053], [4.9, 5.0], [0.011, 0.011]),
-    ("spacetime_grid", [0.020, 0.020], [0.979, 0.979], [0.088, 0.084], [0.0034, 0.0034], [1.4, 1.4], [0.047, 0.043]),
-    ("spinodal_decomposition", [0.020, 0.020], [0.743, 0.840], [0.257, 0.161], [0.0080, 0.0059], [2.7, 2.7], [0.216, 0.120]),
-    ("spiral_galaxy", [0.020, 0.020], [0.871, 0.871], [0.132, 0.132], [0.0051, 0.0051], [5.5, 5.6], [0.091, 0.091]),
-    ("star_trails", [0.020, 0.020], [0.968, 0.943], [0.062, 0.115], [0.0036, 0.0042], [1.7, 1.9], [0.021, 0.074]),
-    ("starfield", [0.020, 0.020], [0.980, 0.980], [0.046, 0.046], [0.0033, 0.0033], [1.4, 1.4], [0.005, 0.005]),
-    ("stellar_nursery", [0.020, 0.024], [0.721, 0.753], [0.288, 0.251], [0.0138, 0.0130], [8.4, 8.9], [0.247, 0.210]),
-    ("strange_attractors", [0.020, 0.020], [0.980, 0.980], [0.082, 0.062], [0.0057, 0.0046], [1.6, 1.8], [0.041, 0.021]),
-    ("supernova_remnant", [0.020, 0.020], [0.951, 0.891], [0.049, 0.110], [0.0038, 0.0061], [3.5, 7.6], [0.008, 0.069]),
-    ("three_body", [0.020, 0.020], [0.980, 0.980], [0.031, 0.031], [0.0036, 0.0035], [1.4, 1.4], [0.000, 0.000]),
-    ("total_solar_eclipse", [0.031, 0.020], [0.893, 0.898], [0.109, 0.103], [0.0038, 0.0041], [10.8, 8.6], [0.068, 0.062]),
-    ("vortex_street", [0.024, 0.020], [0.719, 0.717], [0.287, 0.289], [0.0265, 0.0269], [21.7, 22.1], [0.246, 0.248]),
-    ("voyager_journey", [0.020, 0.020], [0.977, 0.977], [0.028, 0.029], [0.0033, 0.0033], [1.7, 1.6], [0.000, 0.000]),
-    ("wave_interference", [0.020, 0.020], [0.755, 0.762], [0.249, 0.242], [0.0259, 0.0251], [6.1, 6.0], [0.208, 0.201]),
+    ("action_potential", [0.924, 0.924], [0.091, 0.090], [0.0088, 0.0091], [4.5, 4.8]),
+    ("aurora", [0.753, 0.609], [0.251, 0.398], [0.0186, 0.0302], [5.8, 7.2]),
+    ("belousov_zhabotinsky", [0.614, 0.480], [0.394, 0.524], [0.0578, 0.0756], [24.3, 19.5]),
+    ("black_hole", [0.980, 0.980], [0.045, 0.046], [0.0052, 0.0053], [1.3, 1.3]),
+    ("boids_flocking", [0.980, 0.980], [0.054, 0.054], [0.0036, 0.0036], [1.4, 1.5]),
+    ("brownian_motion", [0.980, 0.980], [0.027, 0.028], [0.0035, 0.0035], [1.3, 1.3]),
+    ("catalytic_surface", [0.187, 0.290], [0.819, 0.714], [0.0727, 0.0550], [7.8, 5.1]),
+    ("chemical_garden", [0.932, 0.902], [0.069, 0.100], [0.0090, 0.0131], [4.0, 4.1]),
+    ("comet_breakup", [0.861, 0.969], [0.141, 0.031], [0.0148, 0.0038], [23.7, 3.5]),
+    ("comet_tails", [0.975, 0.974], [0.046, 0.061], [0.0042, 0.0048], [1.9, 1.8]),
+    ("constellation_map", [0.980, 0.980], [0.027, 0.031], [0.0032, 0.0033], [1.3, 1.3]),
+    ("cosmic_microwave_background", [0.958, 0.969], [0.211, 0.202], [0.0228, 0.0208], [1.5, 1.4]),
+    ("cosmic_web", [0.815, 0.807], [0.186, 0.192], [0.0274, 0.0285], [9.3, 8.7]),
+    ("dicty_aggregation", [0.939, 0.962], [0.096, 0.062], [0.0088, 0.0061], [1.7, 1.8]),
+    ("dna_helix", [0.980, 0.980], [0.046, 0.071], [0.0040, 0.0058], [1.6, 1.6]),
+    ("doppler_effect", [0.980, 0.980], [0.088, 0.056], [0.0108, 0.0072], [1.3, 1.3]),
+    ("double_pendulum", [0.980, 0.980], [0.031, 0.032], [0.0038, 0.0041], [1.3, 1.3]),
+    ("electron_orbitals", [0.980, 0.980], [0.048, 0.061], [0.0042, 0.0048], [1.8, 1.8]),
+    ("exoplanet_transit", [0.950, 0.948], [0.114, 0.117], [0.0142, 0.0147], [1.8, 1.9]),
+    ("firefly_sync", [0.935, 0.948], [0.066, 0.053], [0.0051, 0.0038], [2.3, 2.5]),
+    ("fractal_growth", [0.980, 0.980], [0.029, 0.040], [0.0036, 0.0039], [1.4, 1.4]),
+    ("galaxy_collision", [0.980, 0.980], [0.046, 0.036], [0.0052, 0.0044], [1.3, 1.3]),
+    ("globular_cluster", [0.980, 0.980], [0.045, 0.046], [0.0031, 0.0031], [2.3, 2.3]),
+    ("gravitational_lensing", [0.980, 0.980], [0.025, 0.025], [0.0032, 0.0031], [1.3, 1.3]),
+    ("gray_scott", [0.680, 0.000], [0.322, 1.000], [0.0404, 0.1317], [12.4, 129.5]),
+    ("heart_fibrillation", [0.953, 0.947], [0.053, 0.060], [0.0061, 0.0075], [2.2, 2.2]),
+    ("hp_protein_folding", [0.969, 0.970], [0.032, 0.036], [0.0046, 0.0048], [2.7, 2.1]),
+    ("hurricane", [0.639, 0.637], [0.367, 0.369], [0.0104, 0.0104], [61.5, 63.2]),
+    ("io_volcanoes", [0.681, 0.681], [0.338, 0.339], [0.0367, 0.0368], [13.7, 13.7]),
+    ("ising_model", [0.000, 0.000], [1.000, 1.000], [0.1342, 0.1328], [138.0, 138.0]),
+    ("jupiter_storms", [0.655, 0.655], [0.352, 0.352], [0.0361, 0.0364], [81.7, 82.1]),
+    ("jwst_unfolding", [0.916, 0.787], [0.086, 0.218], [0.0076, 0.0123], [13.1, 29.1]),
+    ("kelvin_helmholtz", [0.854, 0.906], [0.148, 0.095], [0.0229, 0.0162], [2.9, 3.0]),
+    ("lenia", [0.868, 0.868], [0.134, 0.133], [0.0206, 0.0204], [13.9, 13.4]),
+    ("lichtenberg_discharge", [0.980, 0.980], [0.069, 0.037], [0.0049, 0.0037], [1.5, 1.5]),
+    ("liesegang_rings", [0.887, 0.745], [0.127, 0.273], [0.0152, 0.0369], [7.0, 9.5]),
+    ("light_echo", [0.838, 0.926], [0.165, 0.075], [0.0204, 0.0097], [9.4, 6.7]),
+    ("mars_rover", [0.000, 0.000], [1.000, 1.000], [0.0933, 0.0935], [75.4, 77.2]),
+    ("meteor_shower", [0.980, 0.980], [0.031, 0.032], [0.0031, 0.0032], [1.4, 1.4]),
+    ("molecular_dynamics", [0.980, 0.980], [0.055, 0.043], [0.0044, 0.0041], [1.3, 1.3]),
+    ("molecular_motors", [0.923, 0.925], [0.078, 0.076], [0.0071, 0.0075], [4.9, 5.4]),
+    ("molecule_viewer", [0.969, 0.972], [0.041, 0.037], [0.0032, 0.0033], [2.1, 1.8]),
+    ("moon_landing", [0.977, 0.976], [0.045, 0.051], [0.0036, 0.0038], [1.4, 1.4]),
+    ("moon_phases", [0.980, 0.951], [0.043, 0.108], [0.0034, 0.0046], [1.3, 1.8]),
+    ("motility_clustering", [0.980, 0.980], [0.046, 0.207], [0.0044, 0.0137], [1.4, 1.4]),
+    ("noctilucent_clouds", [0.949, 0.951], [0.237, 0.280], [0.0143, 0.0162], [2.2, 2.9]),
+    ("orbital_rendezvous", [0.886, 0.885], [0.117, 0.119], [0.0108, 0.0111], [5.8, 5.9]),
+    ("particle_accelerator", [0.980, 0.980], [0.027, 0.039], [0.0033, 0.0044], [1.3, 1.3]),
+    ("physarum", [0.813, 0.794], [0.190, 0.210], [0.0306, 0.0339], [14.9, 14.8]),
+    ("planetary_nebula", [0.929, 0.934], [0.072, 0.066], [0.0080, 0.0067], [5.9, 7.7]),
+    ("pulsar", [0.980, 0.980], [0.062, 0.062], [0.0055, 0.0055], [1.3, 1.3]),
+    ("quantum_double_slit", [0.704, 0.749], [0.304, 0.266], [0.0256, 0.0219], [7.2, 5.8]),
+    ("radical_chain", [0.686, 0.958], [0.328, 0.051], [0.0494, 0.0065], [20.9, 3.6]),
+    ("radioactive_decay", [0.980, 0.980], [0.125, 0.117], [0.0122, 0.0079], [1.3, 1.3]),
+    ("rainbow", [0.507, 0.401], [0.503, 0.610], [0.0451, 0.0535], [25.6, 32.8]),
+    ("relativistic_jet", [0.901, 0.901], [0.101, 0.100], [0.0125, 0.0124], [8.1, 8.2]),
+    ("rocket_launch", [0.979, 0.980], [0.032, 0.028], [0.0035, 0.0032], [1.4, 1.3]),
+    ("satellite_orbit", [0.979, 0.979], [0.051, 0.051], [0.0054, 0.0053], [1.4, 1.4]),
+    ("saturn_rings", [0.755, 0.755], [0.250, 0.249], [0.0182, 0.0182], [27.0, 26.4]),
+    ("seashell_pigmentation", [0.853, 0.860], [0.150, 0.143], [0.0123, 0.0100], [47.2, 46.0]),
+    ("solar_eruption", [0.842, 0.821], [0.160, 0.183], [0.0160, 0.0221], [3.4, 5.4]),
+    ("solar_surface", [0.627, 0.629], [0.380, 0.378], [0.0619, 0.0617], [55.1, 60.8]),
+    ("solar_system", [0.980, 0.980], [0.050, 0.050], [0.0038, 0.0038], [1.3, 1.3]),
+    ("spacetime_grid", [0.980, 0.980], [0.104, 0.103], [0.0068, 0.0068], [1.3, 1.3]),
+    ("spinodal_decomposition", [0.656, 0.787], [0.345, 0.214], [0.0582, 0.0359], [3.6, 3.6]),
+    ("spiral_galaxy", [0.907, 0.907], [0.094, 0.094], [0.0109, 0.0108], [4.9, 4.9]),
+    ("star_trails", [0.980, 0.980], [0.054, 0.091], [0.0045, 0.0058], [1.5, 1.6]),
+    ("starfield", [0.980, 0.980], [0.036, 0.037], [0.0033, 0.0032], [1.3, 1.3]),
+    ("stellar_nursery", [0.867, 0.865], [0.257, 0.267], [0.0147, 0.0154], [2.2, 2.1]),
+    ("strange_attractors", [0.980, 0.980], [0.085, 0.062], [0.0065, 0.0052], [1.6, 1.8]),
+    ("supernova_remnant", [0.949, 0.886], [0.052, 0.116], [0.0058, 0.0122], [4.4, 8.6]),
+    ("three_body", [0.980, 0.980], [0.031, 0.021], [0.0036, 0.0031], [1.4, 1.3]),
+    ("total_solar_eclipse", [0.953, 0.889], [0.048, 0.113], [0.0055, 0.0049], [4.5, 9.4]),
+    ("vortex_street", [0.713, 0.711], [0.293, 0.295], [0.0281, 0.0285], [23.2, 23.7]),
+    ("voyager_journey", [0.980, 0.980], [0.037, 0.039], [0.0033, 0.0034], [1.3, 1.3]),
+    ("wave_interference", [0.980, 0.980], [0.270, 0.270], [0.0225, 0.0225], [1.3, 1.3]),
 ];
 
 fn measure(entry: &Entry) -> [ArtMetrics; 2] {
@@ -212,12 +197,12 @@ fn check(
 }
 
 #[test]
-fn gen_r17_r18_r21_limits_table_lists_every_scene_once() {
+fn gen_r24_limits_table_lists_every_scene_once() {
     let names: Vec<&str> = registry().iter().map(|e| e.meta.name).collect();
     for name in &names {
         assert!(
             limits(name).is_some(),
-            "{name}: add a LIMITS entry (GEN-R17/R18/R21)"
+            "{name}: add a LIMITS entry (GEN-R24)"
         );
     }
     for l in LIMITS {
@@ -230,119 +215,42 @@ fn gen_r17_r18_r21_limits_table_lists_every_scene_once() {
 }
 
 #[test]
-fn gen_r17_blockiness_stays_under_each_scenes_ceiling() {
-    check(
-        "GEN-R17",
-        "blockiness",
-        true,
-        0.05,
-        |m| m.blockiness,
-        |l| l.1,
-    );
+fn gen_r24_darkness_stays_above_each_scenes_floor() {
+    check("GEN-R24", "darkness", false, 0.05, |m| m.darkness, |l| l.1);
 }
 
 #[test]
-fn gen_r18_darkness_stays_above_each_scenes_floor() {
-    check("GEN-R18", "darkness", false, 0.05, |m| m.darkness, |l| l.2);
-}
-
-#[test]
-fn gen_r21_lit_coverage_stays_under_each_scenes_ceiling() {
+fn gen_r24_lit_coverage_stays_under_each_scenes_ceiling() {
     check(
-        "GEN-R21",
+        "GEN-R24",
         "lit coverage",
         true,
         0.05,
         |m| m.clean.coverage,
+        |l| l.2,
+    );
+}
+
+#[test]
+fn gen_r24_chroma_mass_stays_under_each_scenes_ceiling() {
+    check(
+        "GEN-R24",
+        "chroma mass",
+        true,
+        0.01,
+        |m| m.clean.chroma_mass,
         |l| l.3,
     );
 }
 
 #[test]
-fn gen_r21_chroma_mass_stays_under_each_scenes_ceiling() {
+fn gen_r24_edge_weight_stays_under_each_scenes_ceiling() {
     check(
-        "GEN-R21",
-        "chroma mass",
-        true,
-        0.01,
-        |m| m.clean.chroma_mass,
-        |l| l.4,
-    );
-}
-
-#[test]
-fn gen_r21_edge_weight_stays_under_each_scenes_ceiling() {
-    check(
-        "GEN-R21",
+        "GEN-R24",
         "edge weight",
         true,
         3.0,
         |m| m.clean.edge_weight,
-        |l| l.5,
-    );
-}
-
-#[test]
-fn gen_r21_no_scene_is_neon() {
-    let mut failures = Vec::new();
-    for (name, m) in all() {
-        for (k, t) in TIMES.iter().enumerate() {
-            let p90 = m[k].clean.chroma_p90;
-            if p90 > NEON_CAP {
-                failures.push(format!("{name} t={t}: chroma p90 {p90:.3} > {NEON_CAP}"));
-            }
-        }
-    }
-    assert!(
-        failures.is_empty(),
-        "GEN-R21 neon cap:\n{}",
-        failures.join("\n")
-    );
-}
-
-#[test]
-fn gen_r21_lit_coverage_stays_above_each_scenes_floor() {
-    check(
-        "GEN-R21",
-        "lit coverage",
-        false,
-        0.05,
-        |m| m.clean.coverage,
-        |l| l.6,
-    );
-}
-
-#[test]
-fn gen_r21_subject_is_legible() {
-    let (mut failures, mut stale) = (Vec::new(), Vec::new());
-    for (name, m) in all() {
-        let worst = m
-            .iter()
-            .map(|m| m.clean.lit_luma_p99)
-            .fold(f64::INFINITY, f64::min);
-        let faint = worst < LEGIBLE_LUMA;
-        match (faint, KNOWN_FAINT.contains(name)) {
-            (true, false) => {
-                failures.push(format!("{name}: lit p99 luma {worst:.2} < {LEGIBLE_LUMA}"));
-            }
-            (false, true) => {
-                stale.push(format!(
-                    "{name}: now {worst:.2}; delete it from KNOWN_FAINT"
-                ));
-            }
-            _ => {}
-        }
-    }
-    for name in KNOWN_FAINT {
-        assert!(
-            all().iter().any(|(n, _)| n == name),
-            "{name}: KNOWN_FAINT names no scene"
-        );
-    }
-    failures.extend(stale);
-    assert!(
-        failures.is_empty(),
-        "GEN-R21 legible subject:\n{}",
-        failures.join("\n")
+        |l| l.4,
     );
 }

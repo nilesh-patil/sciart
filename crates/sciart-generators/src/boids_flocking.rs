@@ -1,24 +1,19 @@
-//! A starling murmuration rippling away from a stooping falcon
+//! A starling murmuration at dusk, rippling away from a stooping falcon
 //! (SPEC-002 `boids_flocking`).
 //!
 //! Reynolds (1987) boids on the square braille dot lattice (1 dot ≈ 0.3 m at σ = 1),
 //! each bird steering by its `K = 7` topological nearest neighbours within a metric
 //! horizon (Ballerini et al. 2008; Hemelrijk & Hildenbrandt 2011). A falcon stoops every
-//! 12 s; birds near it turn away and their neighbours copy the escape manoeuvre a couple
-//! of substeps later (Hemelrijk et al. 2015), so the agitation wave outruns the flock, as
+//! 14 s; birds near it turn away and their neighbours copy the escape manoeuvre a couple
+//! of substeps later (Hemelrijk et al. 2015), so the agitation wave outruns any bird, as
 //! Potts (1984) observed in dunlin flocks when he found manoeuvres passing between
-//! neighbours faster than a bird's startle reaction (his chorus-line hypothesis).
-//! Stylised: the front runs ≈ 2–3× the 13 m/s mean Procaccini et al. (2011) measured in
-//! starlings (range 3.7–25 m/s), so it crosses this small flock in about a second.
-//! Drawn as the M11 murmuration on black (ADR-0017): two pale grey braille dots per bird,
-//! a cell a little brighter the more birds it holds, so folds read dense and edges
-//! sparse; the escape wave shows only in the flock's motion. The falcon is a small pale 3 × 2-dot body
-//! with a faint streak.
+//! neighbours faster than a bird's startle reaction (his chorus-line hypothesis). Hemelrijk et al. also showed
+//! the dark band of such waves is orientation, not density: here an alarmed bird banks
+//! hard, which draws it as a 4-dot stroke in the bright `Star` ink.
 //!
 //! Integration is synchronous semi-implicit Euler at a fixed `h = 1/60 s`: every
 //! acceleration comes from the old state, so the result does not depend on update order.
-//! The flock and the falcon's streak are rasterised into braille `Dots` in `prepare`
-//! (GEN-R20), with one foreground ink per cell.
+//! The flock is rasterised into `Dots` at the end of `update`; `render` only blits.
 
 use std::f64::consts::{FRAC_PI_4, PI, TAU};
 use std::fmt::Write as _;
@@ -26,26 +21,17 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::particles::{gaussian, gaussian2};
 use sciart_core::prelude::*;
-use sciart_core::raster::braille;
 use sciart_core::timeline::ease;
-use sciart_core::title;
-use sciart_core::{draw, geom, ink};
+use sciart_core::title::{self, Title};
+use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
     name: "boids_flocking",
     category: Category::Biology,
-    description: "A starling murmuration rippling away from a stooping falcon",
-    title: "Murmuration · each bird tracks 7",
-    captions: &CAPTIONS,
+    description: "A starling murmuration at dusk, rippling away from a stooping falcon",
+    title: "Murmuration · match 7 neighbours",
+    captions: &[],
 };
-
-/// Captions: the stoop beat, the escape wave (while any bird is alarmed and `WAVE_HOLD`
-/// after, whatever the beat), and pursue and climb. Patrol shows the title's own
-/// mechanism.
-const CAPTIONS: [&str; 3] = ["a falcon stoops", "escape wave runs", "the flock closes"];
-/// Seconds the wave caption stays up after the last bird calms: a wave lasts ≈ 1 s, too
-/// short to read a caption that leaves with it.
-const WAVE_HOLD: f64 = 1.0;
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(Boids::new())
@@ -111,8 +97,6 @@ const BANK_TAU: f64 = 0.1;
 /// A bird this close to the falcon fires directly (and flees).
 const R_FLEE: f64 = 12.0;
 /// Contagion lag: a neighbour must have fired at least `LAG` substeps (33 ms) earlier.
-/// The front then runs ≈ 30–45 m/s, ≈ 2–3× the measured starling mean (SPEC-002
-/// Stylisation), so the wave crosses the small on-screen flock in about a second.
 const LAG: u32 = 2;
 /// Alarm duration in substeps (0.35 s).
 const T_A: u32 = 21;
@@ -121,9 +105,9 @@ const A_ALARM: f64 = 160.0;
 const A_FLEE: f64 = 200.0;
 const ALARM_SPEED: f64 = 1.3;
 
-/// The falcon's 12 s attack cycle (BOID-A6): the attack fills more than half of it.
+/// The falcon's 14 s attack cycle (BOID-A6).
 const BEATS: [(&str, f64); 4] = [
-    ("patrol", 5.0),
+    ("patrol", 7.0),
     ("stoop", 2.5),
     ("pursue", 2.0),
     ("climb", 2.5),
@@ -133,21 +117,19 @@ const STOOP: usize = 1;
 const PURSUE: usize = 2;
 /// Patrol circles take 4 s.
 const PATROL_PERIOD: f64 = 4.0;
-/// Streak length in substeps (0.3 s), and its ink levels from tail to head: it tapers.
+/// Streak length in substeps (0.3 s).
 const STREAK: usize = 18;
-const STREAK_LEVELS: (f64, f64) = (60.0, 140.0);
 
-/// Inks (SPEC-002 Inks, ADR-0017): a black sky; birds pale grey starlight, brighter only
-/// where a cell holds more of them; the falcon the one pale cold accent.
-const BIRD_ROLE: Role = Role::Ramp(Ramp::Starlight);
-const BIRD_LEVELS: (f64, f64) = (170.0, 235.0);
-const FALCON: Ramp = Ramp::Ice;
-const FALCON_INK: Ink = Ink::new(Role::Ramp(FALCON), 235);
-/// ASCII birds are grey specks.
-const BIRD_ASCII: Ink = Ink::new(Role::Structure, 150);
+/// Inks (SPEC-002 Inks): cool calm silhouettes, bright alarmed birds, the one warm falcon.
+const FALCON_INK: Ink = Ink::new(Role::Hot, 240);
+const STREAK_INK: Ink = Ink::new(Role::Hot, 90);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+/// A bird banked past this draws its wings (4 dots instead of 2).
+const WING_BANK: f64 = 35.0 * PI / 180.0;
+/// Bank angle at which a calm bird reaches its brightest level.
+const FULL_BANK: f64 = 60.0 * PI / 180.0;
 /// The falcon glyph by heading octant, 0 = east, clockwise on screen (y down).
-const FALCON_GLYPH: [Glyph; 8] = [
+const FALCON: [Glyph; 8] = [
     Glyph::new('→', '>'),
     Glyph::new('↘', '\\'),
     Glyph::new('↓', 'v'),
@@ -427,7 +409,7 @@ fn reflect(x: &mut f64, v: &mut f64, hi: f64) -> bool {
     }
 }
 
-/// The falcon: a turn-limited glider on the 12 s patrol/stoop/pursue/climb cycle. It never
+/// The falcon: a turn-limited glider on the 14 s patrol/stoop/pursue/climb cycle. It never
 /// removes birds; it only frightens them.
 #[derive(Debug, Clone)]
 struct Falcon {
@@ -532,13 +514,15 @@ impl Falcon {
 
     /// The 8-way heading glyph: `round(atan2(vy, vx) / (π/4))`.
     fn glyph(&self) -> Glyph {
-        FALCON_GLYPH[((self.angle / FRAC_PI_4).round() as i64).rem_euclid(8) as usize]
+        FALCON[((self.angle / FRAC_PI_4).round() as i64).rem_euclid(8) as usize]
     }
 }
 
 /// The murmuration scene: bird arrays of length `N_MAX`, of which the first `n` fly.
 #[derive(Debug)]
 pub(crate) struct Boids {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     n: usize,
     sigma: f64,
     /// Box in dots: `[0, w] × [0, h]`.
@@ -575,30 +559,16 @@ pub(crate) struct Boids {
     step: u64,
     clock: FixedStep,
     prev_beat: usize,
-    /// Scene time of the latest rasterisation with any bird alarmed (for the caption).
-    wave_at: f64,
-    /// Bird dots, head and tail, over the sky cells.
-    birds: Dots,
-    /// The falcon's tapering streak, and per sky cell the ink of its brightest dot.
-    streak: Dots,
-    /// The falcon's 3 × 2-dot body, drawn over birds and streak.
-    hawk: Dots,
-    streak_ink: Vec<Ink>,
-    /// Per sky cell, row-major: its birds' ink at the latest rasterisation.
-    bird_ink: Vec<Ink>,
+    dots: Dots,
     cells: Size,
     label: StackText<16>,
-    /// `title::stable_readout_room` at this size: the label never flickers with the beat.
-    readout_room: usize,
     ready: bool,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
-    dirty: bool,
 }
 
 impl Boids {
     fn new() -> Self {
         Self {
-            dirty: true,
+            dirty: false,
             n: 0,
             sigma: 1.0,
             w: 1.0,
@@ -623,15 +593,9 @@ impl Boids {
             step: 0,
             clock: FixedStep::new(H, MAX_SUBSTEPS),
             prev_beat: PATROL,
-            wave_at: f64::NEG_INFINITY,
-            birds: Dots::default(),
-            streak: Dots::default(),
-            hawk: Dots::default(),
-            streak_ink: Vec::new(),
-            bird_ink: Vec::new(),
+            dots: Dots::default(),
             cells: Size::new(1, 1),
             label: StackText::new(),
-            readout_room: 0,
             ready: false,
         }
     }
@@ -870,92 +834,45 @@ impl Boids {
         hits
     }
 
-    /// Stamp `wave_at` while any bird is alarmed (the caption's clock). Called wherever the
-    /// state changes, so the caption does not depend on how often frames are drawn.
-    fn note_alarm(&mut self) {
-        let step = self.step as u32;
-        if (0..self.n).any(|i| self.alarm.age(i, step).is_some()) {
-            self.wave_at = self.time();
-        }
-    }
-
-    /// Two braille dots per bird (head and tail), and per bird cell a pale grey that brightens a little
-    /// with the birds it holds, so a fold reads denser than a sparse edge (ADR-0017: the
-    /// M11 murmuration on black). The escape wave shows only as motion. The falcon is a
-    /// pale 3 × 2-dot body with a faint streak behind it. Everything is clipped to the sky, so
-    /// nothing reaches the label row.
+    /// Draw every bird as a heading-aware stroke (head, tail, and wings when banked) and
+    /// the falcon's streak into `dots`. Strokes are clipped to the sky, so a tail or wing
+    /// never reaches the label row.
     fn rasterise(&mut self) {
-        self.birds.clear();
-        self.streak.clear();
-        self.hawk.clear();
-        self.streak_ink.fill(Ink::BLANK);
-        let (w, rows) = (i32::from(self.cells.width()), self.sky_rows());
-        // Dots round to the nearest row, and rows from `sky` on are the label's.
+        self.dots.clear();
+        let step = self.step.wrapping_sub(1) as u32;
+        let tail = 1.5 * self.sigma;
         let sky = self.sky;
-        let on_grid = move |x: f64, y: f64| {
-            y.round() < sky && y >= 0.0 && (0.0..2.0 * f64::from(w)).contains(&x.round())
+        let dots = &mut self.dots;
+        // `Dots::plot` rounds to the nearest dot row, and rows from `sky` on are the label's.
+        let mut plot = |x: f64, y: f64, ink: Ink| {
+            if y.round() < sky {
+                dots.plot(x, y, ink);
+            }
         };
-        // Head and tail, as in M11: two dots give each bird its heading (at least 1.5 dots
-        // apart, so they stay two on small screens).
-        let tail = (1.5 * self.sigma).max(1.5);
-        for (p, v) in self.pos[..self.n].iter().zip(&self.vel) {
-            for q in [*p, sub(*p, scale(heading(*v), tail))] {
-                if on_grid(q[0], q[1]) {
-                    self.birds.plot(q[0], q[1], Ink::BLANK);
-                }
+        for i in 0..self.n {
+            let p = self.pos[i];
+            let dir = heading(self.vel[i]);
+            let bank = f64::from(self.bank[i]).abs();
+            let ink = match self.alarm.age(i, step) {
+                Some(age) => Ink::new(Role::Star, 255 - (55 * age / T_A) as u8),
+                None => Ink::new(
+                    Role::Structure,
+                    (80.0 + 105.0 * (bank / FULL_BANK).min(1.0)) as u8,
+                ),
+            };
+            let back = sub(p, scale(dir, tail));
+            plot(p[0], p[1], ink);
+            plot(back[0], back[1], ink);
+            if bank > WING_BANK {
+                let mid = sub(p, scale(dir, 0.5 * tail));
+                let wing = perp(dir);
+                plot(mid[0] + wing[0], mid[1] + wing[1], ink);
+                plot(mid[0] - wing[0], mid[1] - wing[1], ink);
             }
         }
-        for cy in 0..rows {
-            for cx in 0..w {
-                let lit = self.birds.cell_mask(cx, cy).unwrap_or(0).count_ones();
-                if lit > 0 {
-                    self.bird_ink[(cy * w + cx) as usize] = bird_ink(lit);
-                }
-            }
-        }
-        if !self.falcon_enabled {
-            return;
-        }
-        let cell = |x: i32, y: i32| {
-            let cx = x.div_euclid(Dots::CELL_W).clamp(0, w - 1);
-            let cy = y.div_euclid(Dots::CELL_H).clamp(0, rows - 1);
-            (cy * w + cx) as usize
-        };
-        let last = self.falcon.streak.len().saturating_sub(1).max(1) as f64;
-        let mut prev: Option<(i32, i32)> = None;
-        for (k, &[x, y]) in self.falcon.streak.iter().enumerate() {
-            let (lo, hi) = STREAK_LEVELS;
-            let ink = Ink::new(
-                Role::Ramp(FALCON),
-                ink::level(ease::lerp(lo, hi, k as f64 / last)),
-            );
-            let q = (f64::from(x).round() as i32, f64::from(y).round() as i32);
-            let (x0, y0) = prev.unwrap_or(q);
-            for (dx, dy) in geom::line(x0, y0, q.0, q.1) {
-                if on_grid(f64::from(dx), f64::from(dy)) {
-                    self.streak.set(dx, dy, ink);
-                    let slot = &mut self.streak_ink[cell(dx, dy)];
-                    if ink.level >= slot.level {
-                        *slot = ink;
-                    }
-                }
-            }
-            prev = Some(q);
-        }
-        let [fx, fy] = self.falcon.pos;
-        if on_grid(fx, fy) {
-            // A 3 × 2-dot body: the accent reads at a glance, still within about a cell.
-            for (dx, dy) in [
-                (-1.0, 0.0),
-                (0.0, 0.0),
-                (1.0, 0.0),
-                (-1.0, 1.0),
-                (0.0, 1.0),
-                (1.0, 1.0),
-            ] {
-                if on_grid(fx + dx, fy + dy) {
-                    self.hawk.plot(fx + dx, fy + dy, FALCON_INK);
-                }
+        if self.falcon_enabled {
+            for &[x, y] in self.falcon.streak.iter() {
+                plot(f64::from(x), f64::from(y), STREAK_INK);
             }
         }
     }
@@ -966,28 +883,9 @@ impl Boids {
     }
 }
 
-/// A bird cell's ink by its lit dots (1 to 8): dim grey, `BIRD_LEVELS` from one bird to a
-/// full cell.
-fn bird_ink(lit: u32) -> Ink {
-    let (lo, hi) = BIRD_LEVELS;
-    let k = f64::from(lit.clamp(1, 8) - 1) / 7.0;
-    Ink::new(BIRD_ROLE, ink::level(ease::lerp(lo, hi, k)))
-}
-
 impl Generator for Boids {
     fn meta(&self) -> &'static Meta {
         &META
-    }
-
-    fn caption(&self) -> Option<&'static str> {
-        if self.time() - self.wave_at < WAVE_HOLD {
-            return Some(CAPTIONS[1]);
-        }
-        match self.timeline.at(self.time()).index {
-            PATROL => None,
-            STOOP => Some(CAPTIONS[0]),
-            _ => Some(CAPTIONS[2]),
-        }
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
@@ -1032,19 +930,10 @@ impl Generator for Boids {
         // Buckets of R/4 fit the tight hinted queries of `k_nearest`.
         self.hash.resize(w, h, 0.25 * R * sigma);
         self.cells = size;
-        let sky_cells = Size::new(size.width(), self.sky_rows() as u16);
-        self.birds.resize(sky_cells);
-        self.streak.resize(sky_cells);
-        self.hawk.resize(sky_cells);
-        for layer in [&mut self.bird_ink, &mut self.streak_ink] {
-            layer.clear();
-            layer.resize(sky_cells.area(), Ink::BLANK);
-        }
+        self.dots.resize(size);
         self.label.clear();
         let _ = write!(self.label, "N {n}  k={K}");
-        self.readout_room = title::stable_readout_room(size, &META);
-        self.note_alarm();
-        self.dirty = true;
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -1059,11 +948,10 @@ impl Generator for Boids {
         for _ in 0..substeps {
             self.substep(&mut rng);
         }
-        self.note_alarm();
         self.dirty = true;
     }
 
-    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
         if self.dirty {
             self.dirty = false;
@@ -1072,52 +960,24 @@ impl Generator for Boids {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let unicode = canvas.mode() == GlyphMode::Unicode;
-        let w = i32::from(self.cells.width());
-        for cy in 0..self.sky_rows() {
-            for cx in 0..w {
-                let bird = self.birds.cell_mask(cx, cy).unwrap_or(0);
-                let streak = self.streak.cell_mask(cx, cy).unwrap_or(0);
-                let hawk = if unicode {
-                    self.hawk.cell_mask(cx, cy).unwrap_or(0)
-                } else {
-                    0
-                };
-                if bird | streak | hawk == 0 {
-                    continue;
-                }
-                let i = (cy * w + cx) as usize;
-                // One ink per cell: the falcon owns its cell, birds win over the streak (it
-                // breaks behind them).
-                let (glyph, ink, ascii) = if hawk != 0 {
-                    (braille(hawk | bird), FALCON_INK, ('.', FALCON_INK))
-                } else if bird == 0 {
-                    (
-                        braille(streak),
-                        self.streak_ink[i],
-                        ('.', self.streak_ink[i]),
-                    )
-                } else {
-                    let g = braille(bird);
-                    (g, self.bird_ink[i], (g.ascii, BIRD_ASCII))
-                };
-                if unicode {
-                    canvas.put(cx, cy, glyph, ink);
-                } else {
-                    canvas.put(cx, cy, Glyph::ascii(ascii.0), ascii.1);
-                }
-            }
-        }
-        if self.falcon_enabled && !unicode {
+        self.dots.blit(canvas);
+        if self.falcon_enabled {
             let [x, y] = self.falcon.pos;
             let (cx, cy) = (
-                ((x / f64::from(Dots::CELL_W)).floor() as i32).clamp(0, w - 1),
-                ((y / f64::from(Dots::CELL_H)).floor() as i32).clamp(0, self.sky_rows() - 1),
+                (x / f64::from(Dots::CELL_W)).floor() as i32,
+                (y / f64::from(Dots::CELL_H)).floor() as i32,
             );
-            // ASCII has no single dots: the falcon keeps its heading glyph.
-            canvas.put(cx, cy, self.falcon.glyph(), FALCON_INK);
+            canvas.put(
+                cx.min(i32::from(self.cells.width()) - 1),
+                cy.min(self.sky_rows() - 1),
+                self.falcon.glyph(),
+                FALCON_INK,
+            );
         }
-        if Self::shows_label(self.cells) && self.label.len() <= self.readout_room {
+        let title = Title::of(self);
+        if Self::shows_label(self.cells)
+            && self.label.len() <= title::readout_room(self.cells, &title)
+        {
             // Right of the title (GEN-R13), with one dark cell either side, so the label
             // never looks glued to a bird.
             let y = i32::from(self.cells.height()) - 1;
@@ -1135,7 +995,6 @@ mod tests {
         let mut b = Boids::new();
         b.falcon_enabled = falcon;
         b.resize(size, &mut ctx);
-        b.prepare();
         (b, ctx)
     }
 
@@ -1334,7 +1193,6 @@ mod tests {
         let before: Vec<V2> = b.pos[..192].to_vec();
         let (kx, ky) = (160.0 / 400.0, 96.0 / 200.0);
         b.resize(Size::new(80, 24), &mut ctx);
-        b.prepare();
         assert_eq!(b.n, 192);
         for (p, q) in b.pos[..192].iter().zip(&before) {
             assert!((p[0] - q[0] * kx).abs() < 1e-9 && (p[1] - q[1] * ky).abs() < 1e-9);
@@ -1342,7 +1200,6 @@ mod tests {
 
         let small: Vec<V2> = b.pos[..192].to_vec();
         b.resize(Size::new(200, 50), &mut ctx);
-        b.prepare();
         assert_eq!(b.n, 1000);
         let (kx, ky) = (400.0 / 160.0, 200.0 / 96.0);
         let reach = 3.0 * R_S * b.sigma;
@@ -1572,7 +1429,7 @@ mod tests {
         let mut rng = SplitMix64::new(21);
         while !b.alarm.fire_attack[..b.n].contains(&1) {
             b.substep(&mut rng);
-            assert!(b.time() < 9.5, "no alarm during the first attack");
+            assert!(b.time() < 11.5, "no alarm during the first attack");
         }
         let first = b.step;
         let origin = b.pos[(0..b.n).find(|&i| b.alarm.fire_attack[i] == 1).unwrap()];
@@ -1594,7 +1451,7 @@ mod tests {
             b.substep(&mut rng);
         }
         // The front's speed, the least-squares slope of distance on time, beats the
-        // fastest a bird can fly in the model (2 v₀): the wave outruns the flock.
+        // fastest a bird can fly (2 v₀): the wave outruns any bird.
         let n = front.len() as f64;
         let (mt, md) = front
             .iter()
@@ -1628,15 +1485,15 @@ mod tests {
         let tl = Timeline::new(&BEATS);
         for (t, beat) in [
             (0.0, 0),
-            (4.99, 0),
-            (5.0, 1),
-            (7.49, 1),
-            (7.5, 2),
-            (9.49, 2),
-            (9.5, 3),
-            (11.99, 3),
-            (12.0, 0),
-            (17.0, 1),
+            (6.99, 0),
+            (7.0, 1),
+            (9.49, 1),
+            (9.5, 2),
+            (11.49, 2),
+            (11.5, 3),
+            (13.99, 3),
+            (14.0, 0),
+            (21.0, 1),
         ] {
             assert_eq!(tl.at(t).index, beat, "t = {t}");
         }
@@ -1655,7 +1512,7 @@ mod tests {
                     fired_at[i].push(b.alarm.fire_step[i]);
                 }
             }
-            let attack = (t / 12.0) as usize;
+            let attack = (t / 14.0) as usize;
             let beat = tl.at(t).index;
             if attack < 2 && matches!(beat, STOOP | PURSUE) {
                 let d = norm(sub(b.falcon.pos, b.centroid().0));
@@ -1677,150 +1534,5 @@ mod tests {
                 start_dist[a]
             );
         }
-    }
-
-    /// The scene at `size` (seed 42) after `t` simulated seconds, rendered in `mode`.
-    fn frame(size: Size, t: f64, mode: GlyphMode) -> (Boids, Canvas) {
-        let (mut b, mut ctx) = scene(size, 42, true);
-        while b.time() < t - 1e-9 {
-            b.update(H, &mut ctx);
-            b.prepare();
-        }
-        let mut canvas = Canvas::new(size, mode);
-        b.render(&mut canvas);
-        (b, canvas)
-    }
-
-    #[test]
-    fn boid_a9_captions_follow_the_falcon() {
-        // The wave caption is up exactly while birds are alarmed and for `WAVE_HOLD` after,
-        // whichever beat that falls in, so it never promises a wave that is off screen.
-        let (mut b, mut ctx) = scene(Size::new(100, 30), 42, true);
-        let (mut seen, mut last_alarm, mut run, mut runs) = (Vec::new(), f64::MIN, 0.0, 0);
-        while b.time() < 36.0 {
-            b.update(H, &mut ctx);
-            b.prepare();
-            let step = b.step as u32;
-            if (0..b.n).any(|i| b.alarm.age(i, step).is_some()) {
-                last_alarm = b.time();
-            }
-            let want = if b.time() - last_alarm < WAVE_HOLD {
-                Some("escape wave runs")
-            } else {
-                match b.timeline.at(b.time()).index {
-                    PATROL => None,
-                    STOOP => Some("a falcon stoops"),
-                    _ => Some("the flock closes"),
-                }
-            };
-            assert_eq!(b.caption(), want, "t = {}", b.time());
-            if want == Some("escape wave runs") {
-                run += H;
-            } else if run > 0.0 {
-                // Long enough to read.
-                assert!(
-                    run >= 1.5,
-                    "wave caption for {run:.2} s at t = {}",
-                    b.time()
-                );
-                (run, runs) = (0.0, runs + 1);
-            }
-            if let Some(c) = want {
-                assert!(META.captions.contains(&c));
-                if !seen.contains(&c) {
-                    seen.push(c);
-                }
-            }
-        }
-        assert_eq!(seen.len(), 3);
-        assert!(runs >= 3, "one wave per attack, got {runs}");
-        // A folding flock has dense cells: 4 or more birds, inked brighter than a lone bird.
-        let (b, canvas) = frame(Size::new(200, 50), 6.5, GlyphMode::Unicode);
-        let w = i32::from(b.cells.width());
-        let dense = (0..b.sky_rows())
-            .flat_map(|y| (0..w).map(move |x| (x, y)))
-            .filter(|&(x, y)| {
-                let lit = b.birds.cell_mask(x, y).unwrap_or(0).count_ones();
-                let ink = canvas.get(x, y).map_or(Ink::BLANK, |c| c.ink);
-                lit >= 4 && ink.role == BIRD_ROLE && ink.level > bird_ink(1).level
-            })
-            .count();
-        assert!(dense > 0, "no dense fold at t = 6.5 s");
-    }
-
-    #[test]
-    fn boid_a8_black_sky_with_dim_grey_birds() {
-        // ADR-0017: no sky, no reeds; every bird cell is pale grey on the
-        // terminal's own black, brighter only where it holds more birds.
-        for (w, h) in [(80, 24), (200, 50)] {
-            let size = Size::new(w, h);
-            for t in [5.0, 20.0] {
-                let (_, canvas) = frame(size, t, GlyphMode::Unicode);
-                let (mut birds, mut lit) = (0, 0);
-                for cell in canvas.cells() {
-                    assert_eq!(cell.bg, Ink::BLANK, "{size:?} t {t}: a lit background");
-                    if cell.ink.role == BIRD_ROLE {
-                        birds += 1;
-                        assert!((170..=235).contains(&cell.ink.level), "{:?}", cell.ink);
-                    }
-                    lit += usize::from(cell.ch != ' ');
-                }
-                assert!(birds > 0, "{size:?} t {t}: no birds");
-                // The flock is a sparse scatter: most of the frame stays black.
-                assert!(
-                    lit * 4 < canvas.cells().len(),
-                    "{size:?} t {t}: {lit} lit cells"
-                );
-            }
-        }
-        assert_eq!(bird_ink(1).level, 170);
-        assert_eq!(bird_ink(8).level, 235);
-        assert!(bird_ink(4).level > bird_ink(2).level);
-    }
-
-    #[test]
-    fn boid_a8_two_dots_per_bird() {
-        let size = Size::new(200, 50);
-        let (b, _) = frame(size, 3.0, GlyphMode::Unicode);
-        let dots: u32 = (0..b.sky_rows())
-            .flat_map(|cy| (0..200).map(move |cx| (cx, cy)))
-            .map(|(cx, cy)| b.birds.cell_mask(cx, cy).unwrap_or(0).count_ones())
-            .sum();
-        // Head and tail; birds closer than a dot share one, so at most 2N dots.
-        let n = b.n;
-        assert!(
-            dots as usize <= 2 * n && dots as usize * 10 >= n * 14,
-            "{dots} dots, {n} birds"
-        );
-    }
-
-    #[test]
-    fn boid_a10_a11_the_wave_is_motion_and_the_falcon_a_pale_accent() {
-        // Through a whole attack, only two inks appear on the sky: dim grey birds and the
-        // falcon's pale Ice (its body at 235, its streak ≤ 140); the falcon is ≤ 6 dots.
-        let size = Size::new(120, 40);
-        let (mut b, mut ctx) = scene(size, 42, true);
-        let mut seen_falcon = false;
-        while b.time() < 14.0 {
-            b.update(H, &mut ctx);
-            b.prepare();
-            let dots: u32 = (0..b.sky_rows())
-                .flat_map(|cy| (0..120).map(move |cx| (cx, cy)))
-                .map(|(cx, cy)| b.hawk.cell_mask(cx, cy).unwrap_or(0).count_ones())
-                .sum();
-            assert!(dots <= 6, "t {}: falcon of {dots} dots", b.time());
-            seen_falcon |= dots >= 4;
-            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-            b.render(&mut canvas);
-            for cell in canvas.cells().iter().filter(|c| c.ch != ' ') {
-                let ok = cell.ink.role == BIRD_ROLE
-                    || cell.ink == FALCON_INK
-                    || (cell.ink.role == Role::Ramp(FALCON) && cell.ink.level <= 140)
-                    || cell.ink == LABEL_INK
-                    || cell.ink.role == Role::Text;
-                assert!(ok, "t {}: {:?}", b.time(), cell);
-            }
-        }
-        assert!(seen_falcon, "the falcon never showed");
     }
 }

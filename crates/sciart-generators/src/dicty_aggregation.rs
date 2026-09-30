@@ -14,10 +14,9 @@
 //! pull into lines along which later waves travel best: streams.
 
 use rand::Rng;
+use sciart_core::ease;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
-use sciart_core::raster::Tone;
-use sciart_core::{ease, ink};
 
 use crate::shared::excitable::{self, Barkley, Front, FrontStroke};
 
@@ -76,22 +75,20 @@ const FADE_S: f64 = 2.0;
 
 // ---- Display ----
 
-/// Cells (M14, ADR-0017): one braille dot per amoeba in `Ramp(Sienna)`, from
-/// `CELL_LEVELS.0` on the thin lawn up to `CELL_LEVELS.1` in the mounds by the local cell
-/// density (gamma [`CELL_GAMMA`]); the quiet ground is black.
-const CELL_ROLE: Role = Role::Ramp(Ramp::Sienna);
-const CELL_LEVELS: (f64, f64) = (120.0, 255.0);
-const CELL_GAMMA: f64 = 0.9;
-/// Wave fronts: a faint 1-px anti-aliased line on the `u = ½` contour, the rising edge
-/// only (`v` below `WAVE_V`), in `Ramp(Ice)` at `WAVE_LEVELS` by freshness: full within
-/// 0.3 px of the contour and gone at `LINE_W` px (distance `|u − ½|/|∇u|` × pixels per
-/// node), so no cell-sized steps.
-const WAVE_ROLE: Role = Role::Ramp(Ramp::Ice);
+/// Cells (ADR-0018, M11's idiom): one braille dot per amoeba in `Hot`, at two flat
+/// levels: the thin lawn, and the streams and mounds where the smoothed cell density
+/// passes [`CROWD`]; the quiet ground is black.
+const CELL_INKS: [Ink; 2] = [Ink::new(Role::Hot, 150), Ink::new(Role::Hot, 255)];
+const CROWD: f32 = 1.2;
+/// Wave fronts: a 1-px `Wave` line on the `u = ½` contour, the rising edge only (`v`
+/// below `WAVE_V`), a pixel whose centre lies within `LINE_W` px of the contour (distance
+/// `|u − ½|/|∇u|` × pixels per node); fresh edges (`v` below half `WAVE_V`) a step
+/// brighter.
+const WAVE_INKS: [Ink; 2] = [Ink::new(Role::Wave, 110), Ink::new(Role::Wave, 190)];
 const WAVE_V: f32 = 0.3;
 #[cfg(test)]
 const WAVE_MIN: f32 = 0.3;
-const WAVE_LEVELS: (f64, f64) = (70.0, 120.0);
-const LINE_W: f64 = 0.9;
+const LINE_W: f64 = 0.6;
 
 /// One amoeba, in lattice units, with the cAMP it sensed last sub-step.
 #[derive(Debug, Clone, Copy, Default)]
@@ -149,12 +146,9 @@ struct Dicty {
     scratch: Grid<f32>,
     map: SampleMap,
     glow: Glow,
-    tone: Tone,
     pixels: Pixels,
     /// The cells, one braille dot each (M14).
     dots: Dots,
-    /// Glow level to cell level (gamma [`CELL_GAMMA`] over [`CELL_LEVELS`]).
-    cell_lut: [u8; 256],
     seeded: bool,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
@@ -180,13 +174,8 @@ impl Default for Dicty {
             scratch: Grid::default(),
             map: SampleMap::default(),
             glow: Glow::default(),
-            tone: Tone::asinh(0.3, 6.0),
             pixels: Pixels::default(),
             dots: Dots::default(),
-            cell_lut: std::array::from_fn(|g| {
-                let (lo, hi) = CELL_LEVELS;
-                (lo + (hi - lo) * (g as f64 / 255.0).powf(CELL_GAMMA)) as u8
-            }),
             seeded: false,
         }
     }
@@ -338,16 +327,15 @@ impl Dicty {
         let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
             .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
-        // The cells: one dot each, brighter where they crowd.
+        // The cells: one dot each, always drawn (the scattered lawn is the subject before
+        // the first wave), a step brighter where they crowd; around a re-scatter the
+        // crowds drop to the lawn step, so the old mounds fade before the new lawn.
         self.dots.clear();
-        if fade > 0.05 {
-            for c in &self.cells {
-                let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
-                let (px, py) = ((x / 2.0) as i32, (y / 2.0) as i32);
-                let g = self.tone.level(self.glow.get(px, py).unwrap_or(0.0));
-                let level = f64::from(self.cell_lut[usize::from(g)]) * f64::from(fade);
-                self.dots.plot(x, y, Ink::new(CELL_ROLE, ink::level(level)));
-            }
+        for c in &self.cells {
+            let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
+            let (px, py) = ((x / 2.0) as i32, (y / 2.0) as i32);
+            let crowded = fade > 0.5 && self.glow.get(px, py).unwrap_or(0.0) > CROWD;
+            self.dots.plot(x, y, CELL_INKS[usize::from(crowded)]);
         }
         slope_field(&self.u, &mut self.slope);
         let (map, u, v, slope) = (&self.map, &self.u, &self.v, &self.slope);
@@ -360,20 +348,16 @@ impl Dicty {
                 (row_y, ur, vr, gr) = (y, map.row(u, y), map.row(v, y), map.row(slope, y));
             }
             // The wave: only its thin rising edge (fresh cAMP where cells are not yet
-            // refractory), a faint ice line over the lawn (M14).
+            // refractory), a 1-px line over the lawn.
             let (uu, vv) = (ur.at(x), vr.at(x));
-            let fresh = f64::from((1.0 - (vv / WAVE_V).min(1.0)) * fade);
-            if fresh <= 0.0 {
+            if vv >= WAVE_V || fade <= 0.05 {
                 return Ink::BLANK;
             }
             let d = f64::from((uu - 0.5).abs()) / f64::from(gr.at(x).max(1e-4)) * ppn;
-            let k = ((LINE_W - d) / (LINE_W - 0.3)).clamp(0.0, 1.0);
-            let (lo, hi) = WAVE_LEVELS;
-            let level = (lo + (hi - lo) * fresh) * k;
-            if level < ink::MIN_VISIBLE_LEVEL {
+            if d > LINE_W {
                 Ink::BLANK
             } else {
-                Ink::new(WAVE_ROLE, ink::level(level))
+                WAVE_INKS[usize::from(vv < 0.5 * WAVE_V)]
             }
         });
     }
@@ -409,7 +393,7 @@ pub(crate) fn wave_edge(u: f32, v: f32) -> f32 {
 
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     let lit = |i: Ink| i.role != Role::Background;
-    let cell = |i: Ink| i.role == CELL_ROLE;
+    let cell = |i: Ink| i.role == Role::Hot;
     let ink = match (lit(top), lit(bottom)) {
         (false, false) => return None,
         _ if cell(top) && (!cell(bottom) || top.level >= bottom.level) => top,
@@ -418,11 +402,7 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         (false, true) => bottom,
     };
     let ch = if cell(ink) {
-        match ink.level {
-            140.. => '@',
-            90.. => 'o',
-            _ => '.',
-        }
+        if ink == CELL_INKS[1] { '@' } else { 'o' }
     } else {
         ':'
     };
@@ -606,5 +586,48 @@ mod tests {
         }
         let v1 = variance(&g);
         assert!(v1 >= 3.0 * v0, "density variance {v0:.2} → {v1:.2}");
+    }
+
+    #[test]
+    fn dict_a7_cells_are_hot_dots_and_fronts_wave_lines_in_flat_steps() {
+        let (mut g, mut ctx) = lawn(Size::new(120, 40));
+        for _ in 0..(20 * 60) {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut canvas = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let (mut cells, mut waves) = (0, 0);
+        for c in canvas.cells() {
+            match c.ink.role {
+                Role::Hot => {
+                    assert!(CELL_INKS.contains(&c.ink), "{c:?}");
+                    cells += 1;
+                }
+                Role::Wave => {
+                    assert!(WAVE_INKS.contains(&c.ink), "{c:?}");
+                    waves += 1;
+                }
+                Role::Background => {}
+                r => panic!("unexpected role {r:?}"),
+            }
+        }
+        assert!(cells > 50 && waves > 0, "{cells} cells, {waves} wave cells");
+        // Streams and mounds exist: some cells are crowded.
+        assert!(canvas.cells().iter().any(|c| c.ink == CELL_INKS[1]));
+    }
+
+    #[test]
+    fn dict_a7_the_scattered_lawn_shows_from_the_first_frame() {
+        let size = Size::new(120, 40);
+        let (g, _) = lawn(size);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let cells = canvas
+            .cells()
+            .iter()
+            .filter(|c| c.ink == CELL_INKS[0])
+            .count();
+        assert!(cells > 100, "{cells} lawn cells at t = 0");
     }
 }

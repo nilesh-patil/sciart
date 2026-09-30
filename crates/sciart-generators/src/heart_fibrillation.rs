@@ -31,9 +31,7 @@ use std::fmt::Write as _;
 
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
-use sciart_core::ink;
 use sciart_core::prelude::*;
-use sciart_core::raster::ASCII_RAMP;
 use sciart_core::{draw, title};
 
 use crate::shared::excitable::{self, AlievPanfilov, Medium};
@@ -114,16 +112,17 @@ const BUCKET: f64 = 1.25;
 const MAX_TIPS: usize = 48;
 /// Sub-steps between singularity counts.
 const COUNT_EVERY: u64 = 60;
-/// Resting tissue: nearly black, so the waves carry the picture; its rim outlines the
-/// heart.
-const REST_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 20);
-/// The heart's outline: a 1-px rim band (ADR-0017), dim.
-const RIM_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 40);
-/// ECG trace ink (a monitor's green) at its write head.
-const ECG_RAMP: Ramp = Ramp::Aurora;
-/// The ECG write head: a white-hot dot.
-const ECG_HEAD_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 255);
-const TIP_INK: Ink = Ink::new(Role::Ramp(Ramp::Starlight), 255);
+/// Inks in M11's roles and flat steps (ADR-0018). The organ is black but for its 1-px
+/// `Dim` rim; the heart's outline pixels are those at least half covered by the rim band.
+const RIM_INK: Ink = Ink::new(Role::Dim, 110);
+/// The excitation front: a `Hot` line, a step dimmer as it goes stale.
+const FRONT_INKS: [Ink; 2] = [Ink::new(Role::Hot, 150), Ink::new(Role::Hot, 255)];
+/// The defibrillation shock: the whole organ flashes white for a moment.
+const FLASH_INK: Ink = Ink::new(Role::Star, 200);
+/// The ECG trace in a monitor's green, newer half brighter, led by a white write head.
+const ECG_INKS: [Ink; 2] = [Ink::new(Role::Particle, 90), Ink::new(Role::Particle, 160)];
+const ECG_HEAD_INK: Ink = Ink::new(Role::Star, 255);
+const TIP_INK: Ink = Ink::new(Role::Star, 255);
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 /// ECG sweep speed in dot columns per second.
 const SWEEP_DOTS_PER_S: f64 = 40.0;
@@ -491,36 +490,26 @@ impl Heart {
             if !(0..vw).contains(&lx) || !(0..vh).contains(&ly) {
                 return Ink::BLANK;
             }
-            // The outline is the analytic heart curve, antialiased: every ink is dimmed by
-            // the pixel's coverage (the ramps run to near-black, so a dimmer level reads as
-            // a partly covered pixel), and a soft rim band outlines the resting organ.
+            // The outline is the analytic heart curve: a pixel at least half inside the
+            // heart is organ, and one at least half on the rim band is outline.
             let [cover, rim] = edge.get((ly * vw + lx) as usize).copied().unwrap_or([0, 0]);
-            if cover == 0 {
+            if cover < 128 {
                 return Ink::BLANK;
             }
-            let (cover, rim) = (f64::from(cover) / 255.0, f64::from(rim) / 255.0);
-            if flash > 0.0 {
-                return Ink::new(
-                    Role::Ramp(Ramp::Starlight),
-                    ink::level((120.0 + 135.0 * flash) * cover),
-                );
+            if flash > 0.5 {
+                return FLASH_INK;
             }
             let (uu, vv) = (ur.at(lx), vr.at(lx));
             let ink = front_ink(uu, vv, gr.at(lx), px);
-            // M14: the organ is black but for its 1-px rim and the excitation front.
-            let rim = f64::from(RIM_INK.level) * rim;
-            let front = f64::from(ink.level) * cover;
-            if ink == Ink::BLANK || front < rim {
-                if rim < ink::MIN_VISIBLE_LEVEL {
-                    Ink::BLANK
-                } else {
-                    Ink::new(RIM_INK.role, ink::level(rim))
-                }
+            if ink != Ink::BLANK {
+                ink
+            } else if rim >= 128 {
+                RIM_INK
             } else {
-                Ink::new(ink.role, ink::level(front))
+                Ink::BLANK
             }
         });
-        // Tips as single white pixels (M14: no 2×2 block).
+        // Tips as single white pixels.
         let (sx, sy) = (
             f64::from(vs.width()) / f64::from(self.u.width()),
             f64::from(vs.height()) / f64::from(self.u.height()),
@@ -590,10 +579,9 @@ impl Heart {
             }
             let age = (head + n - c) % n;
             // Dimmer than the white write head, so the head leads the trace.
-            let level = 160.0 - 90.0 * age as f64 / n as f64;
-            let ink = Ink::new(Role::Ramp(ECG_RAMP), ink::level(level));
+            let ink = ECG_INKS[usize::from(2 * age < n)];
             let (y0, y1) = (y_of(self.ecg[c - 1]), y_of(self.ecg[c]));
-            // A 1-dot trace on black (M14: no strip fill, no glow).
+            // A 1-dot trace on black.
             self.dots.line((c - 1) as f64, y0, c as f64, y1, ink);
         }
         // The monitor's write head: a small bright dot leading the trace (HRT-A7).
@@ -622,27 +610,22 @@ impl Heart {
     }
 }
 
-/// The excitation (M14, ADR-0017): only the fresh front shows, a thin anti-aliased
-/// `Ramp(Ember)` line on the `u = ½` contour: full within 0.6 px and gone at `LINE_W` px
-/// (distance `|u − ½| / |∇u|` × `px` pixels per node), at `FRONT_LEVEL` times the
-/// freshness `(1 − v/FRONT_V)²`, so a wave's back (where `v` has risen) draws nothing and
-/// the plateau, the refractory tail and resting tissue are black.
+/// The excitation: only the fresh front shows, a 1-px `Hot` line on the `u = ½`
+/// contour, the pixels within `LINE_W` px of it (distance `|u − ½| / |∇u|` × `px` pixels
+/// per node): full while fresh (`v` below `FRONT_V / 3`), a step dimmer after, and gone
+/// once `v` reaches `FRONT_V`, so a wave's back, the plateau, the refractory tail and
+/// resting tissue are black.
 fn front_ink(u: f32, v: f32, g: f32, px: f64) -> Ink {
     let d = f64::from((u - 0.5).abs()) / f64::from(g.max(1e-4)) * px;
-    let k = ((LINE_W - d) / (LINE_W - 0.6)).clamp(0.0, 1.0);
-    let fresh = (1.0 - f64::from(v / FRONT_V)).clamp(0.0, 1.0);
-    let level = FRONT_LEVEL * k * fresh.sqrt();
-    if level < ink::MIN_VISIBLE_LEVEL {
+    if d > LINE_W || v >= FRONT_V {
         Ink::BLANK
     } else {
-        Ink::new(Role::Ramp(Ramp::Ember), ink::level(level))
+        FRONT_INKS[usize::from(v < FRONT_V / 3.0)]
     }
 }
 
-/// The front's peak level, its line half-width in pixels, and the `v` at which a front
-/// has gone stale.
-const FRONT_LEVEL: f64 = 255.0;
-const LINE_W: f64 = 1.3;
+/// The front line's half-width in pixels, and the `v` at which a front has gone stale.
+const LINE_W: f64 = 1.05;
 const FRONT_V: f32 = 1.0;
 
 /// `|∇u|` per node by central differences (one-sided at the edges) into `out`.
@@ -666,43 +649,15 @@ fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
     }
 }
 
-/// Resting tissue (dimmed at the antialiased edge).
-fn is_rest(ink: Ink) -> bool {
-    ink.role == REST_INK.role && ink.level <= REST_INK.level
-}
-
-/// ASCII by what a pixel shows: tips `@`, the shock flash and excitation by phase angle,
-/// rest `.`.
+/// ASCII by what a pixel shows: tips `@`, the front `#`, the shock flash `*`, the rim `.`.
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let pick = |i: Ink| i.role != Role::Background;
-    let ink = match (pick(top), pick(bottom)) {
-        (false, false) => return None,
-        (true, false) => top,
-        (false, true) => bottom,
-        (true, true) => {
-            if is_rest(top) {
-                bottom
-            } else {
-                top
-            }
-        }
-    };
+    let ink = sciart_core::raster::stronger(top, bottom);
     let ch = match ink.role {
-        Role::Ramp(Ramp::Ember) => '#',
-        Role::Ramp(Ramp::Cobalt) if ink.level > 110 => '+',
-        Role::Ramp(Ramp::Cobalt) => ':',
-        Role::Phase => {
-            // Excited (angles near 0 and rising) dense, the recovering tail lighter.
-            let a = ink::phase_value(ink);
-            match a {
-                a if (-0.6..1.2).contains(&a) => '#',
-                a if (1.2..2.4).contains(&a) => '+',
-                _ => ':',
-            }
-        }
+        Role::Background => return None,
+        Role::Hot => '#',
         _ if ink == TIP_INK => '@',
-        _ if is_rest(ink) => '.',
-        _ => ASCII_RAMP[usize::from(ink.level) * (ASCII_RAMP.len() - 1) / 255],
+        Role::Star => '*',
+        _ => '.',
     };
     Some((ch, ink))
 }
@@ -914,31 +869,31 @@ mod tests {
     }
 
     #[test]
-    fn hrt_a6_the_outline_is_antialiased() {
-        let (g, _) = heart_at(Size::new(120, 40));
-        let partial = g.edge.iter().filter(|e| (1..255).contains(&e[0])).count();
-        let rim = g.edge.iter().filter(|e| e[1] > 0).count();
-        let full = g.edge.iter().filter(|e| e[0] == 255).count();
-        assert!(partial > 40, "{partial} partly covered edge pixels");
+    fn hrt_a6_the_outline_is_a_flat_1px_rim_and_the_front_hot_steps() {
+        let (mut g, mut ctx) = heart_at(Size::new(120, 40));
+        let rim = g.edge.iter().filter(|e| e[1] >= 128).count();
+        let full = g.edge.iter().filter(|e| e[0] >= 128).count();
         assert!(
-            rim > partial && full > 5 * rim,
+            rim > 40 && full > 5 * rim,
             "a thin rim band: {rim} of {full}"
         );
-        // Partly covered pixels are dimmer than the tissue inside.
-        let (vx, vy, vs) = g.view;
-        let vw = i32::from(vs.width());
-        for (i, e) in g.edge.iter().enumerate() {
-            let (x, y) = (vx + i as i32 % vw, vy + i as i32 / vw);
-            if e[0] == 0 {
-                assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK));
-            } else if e[0] < 64 && e[1] < 64 {
-                assert!(
-                    g.pixels
-                        .get(x, y)
-                        .is_some_and(|p| p.level <= REST_INK.level)
-                );
+        run_s(&mut g, &mut ctx, act_start(REENTRY) + 3.0);
+        let (mut front, mut stale) = (0, 0);
+        let ps = g.pixels.pixel_size();
+        for y in 0..i32::from(ps.height()) {
+            for x in 0..i32::from(ps.width()) {
+                let ink = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
+                match ink {
+                    i if i == FRONT_INKS[1] => front += 1,
+                    i if i == FRONT_INKS[0] => stale += 1,
+                    i => assert!(
+                        [Ink::BLANK, RIM_INK, TIP_INK, FLASH_INK].contains(&i),
+                        "({x}, {y}): {i:?}"
+                    ),
+                }
             }
         }
+        assert!(front > 20, "{front} fresh-front pixels ({stale} stale)");
     }
 
     #[test]
@@ -960,7 +915,7 @@ mod tests {
             .filter_map(|x| {
                 (i32::from(size.height() - 1 - g.ecg_rows)..i32::from(size.height()) - 1)
                     .filter_map(|y| canvas.get(x, y))
-                    .find(|c| c.ink.role == Role::Ramp(ECG_RAMP))
+                    .find(|c| ECG_INKS.contains(&c.ink))
             })
             .count();
         assert!(trace > 60, "{trace} trace cells");

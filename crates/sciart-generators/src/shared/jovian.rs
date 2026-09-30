@@ -2,18 +2,15 @@
 //! (the close-up) and `comet_breakup` (the whole disc) so the planet reads the same in
 //! both (M13 review).
 //!
-//! Everything but the hot spots is one ramp, `Ramp::Sienna`, and features are blended in
-//! *level* space before a single lookup, so no edge is a switch between ramps: dark rust
-//! belts, cream zones, the Great Red Spot as a textured brick-to-rust oval inside a pale
-//! cream collar, feathered into the flow round it. The hot spots are the one blue
-//! (`Ramp::Ice`, low levels): named ramps share their lightness at equal level (RND-R12),
-//! so a belt darkened to the hot spot's level and the Ice beyond it meet at the same
-//! lightness and the change of hue reads as a soft edge. All false colour (enhanced, as
-//! JunoCam frames are).
+//! Features are blended in one *level* space (0 dark … 1 pale) and then drawn in M11's
+//! flat, stepped semantic colours (GEN-R23/R24, ADR-0018): dark rust belts in `Hot`, ochre
+//! in `Sun`, cream zones in `Star`, so the Great Red Spot (a brick-to-rust oval inside a
+//! pale collar) lands on the `Hot` steps. Five steps, like M11's stepped star in
+//! exoplanet_transit; few inks also churn fewer cells than a smooth ramp. False colour.
 
-use sciart_core::{Ink, Ramp, ease, ink};
+use sciart_core::{Ink, Role, ease};
 
-/// Sienna level of the darkest belt (`a = 0`) and the palest zone (`a = 1`).
+/// Cloud level of the darkest belt (`a = 0`) and the palest zone (`a = 1`).
 const BELT: f64 = 0.3;
 const ZONE: f64 = 0.92;
 /// The Great Red Spot's pale collar, and its interior's brightest and darkest levels.
@@ -21,13 +18,13 @@ const COLLAR: f64 = 0.9;
 /// How far the collar pulls the clouds towards its cream (a hint, not a ring).
 const COLLAR_W: f64 = 0.65;
 const SPOT: (f64, f64) = (0.27, 0.5);
-/// Unshaded Sienna level of belt/zone dye `a` (0 belt … 1 zone) with an embossing
+/// Unshaded cloud level of belt/zone dye `a` (0 belt … 1 zone) with an embossing
 /// `relief` (positive on sunlit cloud edges).
 pub(crate) fn cloud_level(a: f64, relief: f64) -> f64 {
     BELT + (ZONE - BELT) * a.clamp(0.0, 1.0) + relief
 }
 
-/// Unshaded Sienna level inside the Great Red Spot: brick where the wound-up chromophore
+/// Unshaded cloud level inside the Great Red Spot: brick where the wound-up chromophore
 /// `r` (0 … 1) is dense, rust between its arms, textured by the zone dye `a` and relief.
 pub(crate) fn spot_level(r: f64, a: f64, relief: f64) -> f64 {
     let r = ease::smoothstep(((r - 0.05) / 0.45).clamp(0.0, 1.0));
@@ -55,15 +52,55 @@ pub(crate) fn spot_blend(cloud: f64, spot: f64, inside: f64, collar: f64) -> f64
     v + (spot - v) * inside
 }
 
-/// The one Sienna lookup: `level` (unshaded) times `shade` (limb darkening, shadows).
-pub(crate) fn sienna(level: f64, shade: f64) -> Ink {
-    ink::ramp(Ramp::Sienna, (level * shade).clamp(0.02, 0.97))
+/// The stepped cloud palette, darkest first: `(upper bound of level·shade, ink)`.
+const STEPS: [(f64, Ink); 5] = [
+    (0.24, Ink::new(Role::Hot, 25)),
+    (0.4, Ink::new(Role::Hot, 105)),
+    (0.56, Ink::new(Role::Sun, 70)),
+    (0.72, Ink::new(Role::Sun, 150)),
+    (f64::INFINITY, Ink::new(Role::Star, 170)),
+];
+
+/// The one cloud lookup: `level` (unshaded) times `shade` (limb darkening, shadows),
+/// snapped to one of five flat steps.
+pub(crate) fn cloud_ink(level: f64, shade: f64) -> Ink {
+    let v = level * shade;
+    STEPS
+        .iter()
+        .find(|(top, _)| v < *top)
+        .map_or(STEPS[4].1, |s| s.1)
+}
+
+/// Rank of a cloud ink in [`STEPS`] (0 darkest); `None` for anything else.
+pub(crate) fn step_of(ink: Ink) -> Option<usize> {
+    STEPS.iter().position(|s| s.1 == ink)
+}
+
+/// Whether `ink` is one of the cloud steps (or a scar on them).
+pub(crate) fn is_cloud(ink: Ink) -> bool {
+    ink == SCAR || step_of(ink).is_some()
+}
+
+/// Impact scars: darker than the darkest belt.
+const SCAR: Ink = Ink::new(Role::Dim, 0);
+
+/// `ink` stepped `n` steps darker, into a dark scar below the darkest belt.
+pub(crate) fn darker(ink: Ink, n: usize) -> Ink {
+    match step_of(ink) {
+        Some(s) if s >= n => STEPS[s - n].1,
+        _ => SCAR,
+    }
+}
+
+/// `ink` one step paler (a scar lifts to the darkest belt).
+pub(crate) fn lighter(ink: Ink) -> Ink {
+    step_of(ink).map_or(STEPS[0].1, |s| STEPS[(s + 1).min(STEPS.len() - 1)].1)
 }
 
 /// Cloud colour for dye `a`, `relief` and `shade` in one call (used by the tests).
 #[cfg(test)]
 pub(crate) fn cloud(a: f64, relief: f64, shade: f64) -> Ink {
-    sienna(cloud_level(a, relief), shade)
+    cloud_ink(cloud_level(a, relief), shade)
 }
 
 /// Band edges in sine of planetocentric latitude (north positive), south to north: the
@@ -91,8 +128,6 @@ pub(crate) fn band_profile(s: f64) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sciart_core::Role;
-    use sciart_core::ink::seq_value;
 
     #[test]
     fn jup_a6_band_profile_has_belts_and_zones_in_place() {
@@ -110,15 +145,21 @@ mod tests {
     }
 
     #[test]
-    fn jup_a6_cloud_colour_is_one_continuous_sienna_map() {
-        let mut last = 0.0;
+    fn jup_a6_cloud_colour_is_a_stepped_m11_palette() {
+        // Belts in Hot, zones in Sun/Star (GEN-R23), monotone in the dye, flat steps.
+        let mut last = 0;
         for k in 0..=100 {
             let c = cloud(f64::from(k) / 100.0, 0.0, 1.0);
-            assert_eq!(c.role, Role::Ramp(Ramp::Sienna));
-            let v = seq_value(c);
-            assert!(v >= last, "not monotone at {k}");
-            last = v;
+            assert!(
+                matches!(c.role, Role::Hot | Role::Sun | Role::Star),
+                "{c:?}"
+            );
+            let s = step_of(c).expect("a palette step");
+            assert!(s >= last, "not monotone at {k}");
+            last = s;
         }
+        assert_eq!(cloud(0.0, 0.0, 1.0).role, Role::Hot, "belts are rust");
+        assert_eq!(cloud(1.0, 0.0, 1.0).role, Role::Star, "zones are cream");
     }
 
     #[test]

@@ -36,21 +36,16 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
-use sciart_core::title;
-use sciart_core::{draw, ease};
-
-use crate::shared::excitable::{self, Barkley, Front, FrontStroke, unit};
+use sciart_core::title::{self, Title};
+use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
     name: "belousov_zhabotinsky",
     category: Category::Chemistry,
     description: "Belousov-Zhabotinsky dish: spiral and target oxidation waves sweeping a dark medium",
     title: "Chemical waves · fire, then rest",
-    captions: &CAPTIONS,
+    captions: &[],
 };
-
-/// The quench's caption; the waves show the title's own mechanism (CORE-R71).
-const CAPTIONS: [&str; 1] = ["light quench"];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(Bz::default())
@@ -68,6 +63,10 @@ const EPS: f32 = 0.02;
 const H: f32 = 0.5;
 /// Sub-step in time units.
 const TAU: f32 = 0.0125;
+/// Diffusion weight of one explicit stage, `τ·D/h²` with `D = 1`.
+const DIFF: f32 = TAU / (H * H);
+/// Reaction weight `τ/ε`.
+const REACT: f32 = TAU / EPS;
 /// Sub-steps per simulated second: `RATE = 1.5` tu/s over `τ`.
 const SUB_PER_S: u64 = 120;
 /// Nagumo front speed at `v = 0`, `√(2/ε)(½ − b/a)` su/tu, the BZ-A3 reference.
@@ -75,7 +74,7 @@ const SUB_PER_S: u64 = 120;
 const C_NAGUMO: f32 = 4.2;
 
 // Every stage must be a convex combination / shrinking factor (module docs, BZ-A1).
-const _: () = assert!(MODEL.is_bounded());
+const _: () = assert!(10.0 / 3.0 * DIFF <= 1.0 && REACT <= 1.0 && TAU <= 1.0);
 
 // ---- Story (SPEC-002 Model, Motion) ----
 
@@ -130,12 +129,21 @@ const BUCKET: f64 = 1.25;
 /// `v` scale for the excitation-cycle phase: `a − b₀`, the unquenched value, so the
 /// quench fades tails instead of brightening them.
 const R_SCALE: f32 = A - B0;
-/// Phases below this show as the resting medium (the terminal background): the
-/// recovering tail fades to black within a few pixels (ADR-0017).
-const S_MIN: f32 = 0.45;
+const S_MIN: f32 = 0.06;
 /// Reseeded fronts brighten over this many seconds (display only, SPEC-002 Motion).
 const FADE_IN_S: f64 = 0.5;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+
+/// One broken front: a straight segment `a → b`, excited on the `n` side.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Front {
+    pub(crate) a: [f64; 2],
+    pub(crate) b: [f64; 2],
+    /// Unit normal: the direction the front propagates.
+    pub(crate) n: [f64; 2],
+    /// `b` was extended to the wall, leaving `a` as the only free end.
+    pub(crate) anchored: bool,
+}
 
 /// Everything one cycle's seeding draws (BZ-A7): fronts and normalised pacemakers.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -147,14 +155,12 @@ pub(crate) struct Seeds {
 
 #[derive(Debug)]
 struct Bz {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     u: Grid<f32>,
     v: Grid<f32>,
     /// Laplacian scratch for `bz_step`.
     lap: Grid<f32>,
-    /// Softened `u` and its `|∇|` per node, for the front line's distance (scratch for
-    /// `rasterise`; the Laplacian buffer is its blur scratch).
-    slope: Grid<f32>,
-    soft: Grid<f32>,
     /// Lattice → pixel sampling tables, rebuilt in `resize`.
     map: SampleMap,
     /// Shaded in `update`/`resize`; `render` only blits it.
@@ -175,22 +181,15 @@ struct Bz {
     /// Live `b`, for the label.
     b: f32,
     cells: Size,
-    /// `title::stable_readout_room` at this size: the label never changes form with
-    /// the caption (CORE-R83).
-    readout_room: usize,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
-    dirty: bool,
 }
 
 impl Default for Bz {
     fn default() -> Self {
         Self {
-            dirty: true,
+            dirty: false,
             u: Grid::default(),
             v: Grid::default(),
             lap: Grid::default(),
-            slope: Grid::default(),
-            soft: Grid::default(),
             map: SampleMap::default(),
             pixels: Pixels::default(),
             timeline: Timeline::new(&[("waves", WAVES_S as f64), ("quench", QUENCH_S as f64)]),
@@ -202,23 +201,28 @@ impl Default for Bz {
             reseeded_at: None,
             b: B0,
             cells: Size::new(1, 1),
-            readout_room: 0,
         }
     }
 }
 
-/// Barkley's model with the EZ-Spiral constants (module docs), from the shared
-/// excitable-medium kernel.
-const MODEL: Barkley = Barkley {
-    a: A,
-    eps: EPS,
-    h: H,
-    tau: TAU,
-};
-
 /// One Lie-split sub-step of Barkley's model in place (module docs). `lap` is scratch.
 pub(crate) fn bz_step(u: &mut Grid<f32>, v: &mut Grid<f32>, lap: &mut Grid<f32>, b: f32) {
-    MODEL.step(u, v, lap, |_| b);
+    grid::laplacian9(u, lap, Edges::Clip);
+    let fields = u.as_mut_slice().iter_mut().zip(v.as_mut_slice());
+    for ((u, v), &l) in fields.zip(lap.as_slice()) {
+        let ud = *u + DIFF * l;
+        let u_th = (*v + b) / A;
+        let g = REACT * (1.0 - ud) * (ud - u_th);
+        // Below threshold the decay is taken implicitly (a shrinking factor, never
+        // negative); above it the growth is explicit (bounded by 1 since τ/ε ≤ 1).
+        let ur = if ud < u_th {
+            ud / (1.0 - g)
+        } else {
+            ud + g * ud
+        };
+        *v += TAU * (ur - *v);
+        *u = ur;
+    }
 }
 
 /// `b` at cycle-local sub-step `local`: `b₀` while the waves run, then a smoothstep
@@ -240,21 +244,67 @@ pub(crate) fn pacemaker_fires(local: u64) -> bool {
 
 /// Excite every recovered node (`v < 0.1`) within 2.5 nodes of `(cx, cy)`.
 pub(crate) fn fire_pacemaker(u: &mut Grid<f32>, v: &Grid<f32>, cx: f64, cy: f64) {
-    excitable::excite_disc(u, v, (cx, cy), PM_RADIUS, PM_V_MAX);
+    let r = PM_RADIUS.ceil() as i32;
+    let (x0, y0) = (cx.round() as i32, cy.round() as i32);
+    for y in y0 - r..=y0 + r {
+        for x in x0 - r..=x0 + r {
+            let (dx, dy) = (f64::from(x) - cx, f64::from(y) - cy);
+            let recovered = v.get(x, y).is_some_and(|&v| v < PM_V_MAX);
+            if dx * dx + dy * dy <= PM_RADIUS * PM_RADIUS && recovered {
+                u.set(x, y, 1.0);
+            }
+        }
+    }
 }
 
-/// Paint `front` into the fields with BZ's strip widths (the shared
-/// [`excitable::paint_front`]).
+/// Paint `front` into the fields: a `FRONT_W`-node strip of `u = 1` on the `n` side of
+/// the segment, backed by a `TAIL_W`-node strip whose `v` ramps down away from it.
 pub(crate) fn paint_front(u: &mut Grid<f32>, v: &mut Grid<f32>, f: &Front) {
-    excitable::paint_front(u, v, f, &BZ_STROKE);
+    let (d, len) = unit(f.a, f.b);
+    let n = f.n;
+    // Bounding box of the painted band, clipped to the lattice.
+    let xs = [f.a[0], f.b[0]].map(|x| [x + n[0] * FRONT_W, x - n[0] * TAIL_W]);
+    let ys = [f.a[1], f.b[1]].map(|y| [y + n[1] * FRONT_W, y - n[1] * TAIL_W]);
+    let span = |c: [[f64; 2]; 2], hi: u16| {
+        let lo = c.iter().flatten().fold(f64::INFINITY, |m, &x| m.min(x));
+        let top = c.iter().flatten().fold(f64::NEG_INFINITY, |m, &x| m.max(x));
+        (
+            lo.floor().max(0.0) as i32,
+            top.ceil().min(f64::from(hi) - 1.0) as i32,
+        )
+    };
+    let (x0, x1) = span(xs, u.width());
+    let (y0, y1) = span(ys, u.height());
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let rel = [f64::from(x) - f.a[0], f64::from(y) - f.a[1]];
+            let along = rel[0] * d[0] + rel[1] * d[1];
+            let q = rel[0] * n[0] + rel[1] * n[1];
+            if !(0.0..=len).contains(&along) {
+                continue;
+            }
+            if (0.0..FRONT_W).contains(&q) {
+                u.set(x, y, 1.0);
+                v.set(x, y, 0.0);
+            } else if (-TAIL_W..0.0).contains(&q) {
+                let t = -q / TAIL_W;
+                u.set(x, y, 0.0);
+                v.set(x, y, ease::lerp(TAIL_V.0, TAIL_V.1, t) as f32);
+            }
+        }
+    }
 }
 
-/// BZ's painted front: `FRONT_W` excited nodes backed by a `TAIL_W`-node tail.
-const BZ_STROKE: FrontStroke = FrontStroke {
-    front_w: FRONT_W,
-    tail_w: TAIL_W,
-    tail_v: TAIL_V,
-};
+/// Unit vector from `a` to `b` and the distance (a zero-length segment points along x).
+fn unit(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let len = dx.hypot(dy);
+    if len > 0.0 {
+        ([dx / len, dy / len], len)
+    } else {
+        ([1.0, 0.0], 0.0)
+    }
+}
 
 /// Distance from `p` to the segment `a → b`.
 fn point_segment(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
@@ -414,9 +464,9 @@ pub(crate) fn plan_seeds(lat: Size, rng: &mut impl Rng) -> Seeds {
     seeds
 }
 
-/// The excitation-cycle phase `s ∈ [0, 1]` of a node (SPEC-002 Inks): 1 at the fresh
-/// front, falling over the excited plateau (`s ≥ 0.55`), then down the recovering tail
-/// to 0 at rest.
+/// The excitation-cycle phase `s ∈ [0, 1]` of a node (SPEC-002 Inks): palest at the
+/// fresh front, orange at the back of the plateau, then red → violet → black as the
+/// medium recovers.
 fn phase(u: f32, v: f32) -> f32 {
     let r = (v / R_SCALE).clamp(0.0, 1.0);
     if u >= 0.5 {
@@ -426,170 +476,27 @@ fn phase(u: f32, v: f32) -> f32 {
     }
 }
 
-/// Ferroin ramp position for a phase, piecewise linear between these knots (BZ-A9,
-/// ADR-0017): the oxidised front (`s ≥ 0.9`, the first node or two) a thin ferriin-blue
-/// line at 150–190 (the accent), the excited plateau behind it dim wine, and the
-/// recovering tail black. No lavender band, no crimson fill.
-const FERROIN_KNOTS: [(f32, f32); 5] = [
-    (S_MIN, 0.03),
-    (0.80, 0.09),
-    (0.88, 0.40),
-    (0.92, 0.66),
-    (1.00, 0.75),
-];
-
-/// The ferroin level of a phase `s ≥ S_MIN` (BZ-A9): never falling as `s` rises, ≈ 190 at 1.
-const fn phase_level(s: f32) -> u8 {
-    let mut i = 1;
-    while i < FERROIN_KNOTS.len() - 1 && s > FERROIN_KNOTS[i].0 {
-        i += 1;
-    }
-    let ((s0, t0), (s1, t1)) = (FERROIN_KNOTS[i - 1], FERROIN_KNOTS[i]);
-    let t = t0 + (t1 - t0) * (s - s0) / (s1 - s0);
-    // Round half up; the clamp keeps it in 0..=255 for s outside the knots.
-    (t.clamp(0.0, 1.0) * 255.0 + 0.5) as u8
-}
-
-/// The front line: half-width in pixels (anti-aliased by the distance to the softened
-/// `u = ½` contour), its level, and the `v/R_SCALE` past which a contour is a wave's back,
-/// not a fresh front, and draws no line.
-const LINE_W: f32 = 1.3;
-const FRONT_LEVEL: f32 = 255.0;
-const FRONT_FRESH: f32 = 0.25;
-/// The front line's ramp: ferriin blue, dimming to black without a hue shift.
-const LINE_RAMP: Ramp = Ramp::Ice;
-
-/// The ink of a pixel with sampled `u`, softened `soft` (see [`soften`]), `v`, slope
-/// `g = |∇soft|` (per node), `px` pixels per node and reseed fade `fade` (ADR-0017,
-/// BZ-A9): the fresh front as a thin ferriin-blue line whose level falls smoothly with the
-/// pixel's distance to the softened `u = ½` contour, over the phase's own dim plateau and
-/// black tail.
-/// [`phase_level`] at `s = i/1023`, built at compile time: one lookup per pixel.
-const LEVELS: [u8; 1024] = {
-    let mut t = [0; 1024];
-    let mut i = 0;
-    while i < t.len() {
-        t[i] = phase_level(i as f32 / 1023.0);
-        i += 1;
-    }
-    t
-};
-
-pub(crate) fn front_ink(u: f32, soft: f32, v: f32, g: f32, px: f32, fade: f32) -> Ink {
-    if !(u.is_finite() && soft.is_finite() && v.is_finite() && g.is_finite()) {
-        return Ink::BLANK;
-    }
-    let r = (v / R_SCALE).clamp(0.0, 1.0);
-    let fresh = (1.0 - r / FRONT_FRESH).clamp(0.0, 1.0);
-    let d = (soft - 0.5).abs() / g.max(1e-4) * px;
-    let line = if d < LINE_W && fresh > 0.0 {
-        // Full within 0.6 px of the contour, then a linear falloff to LINE_W.
-        let k = ((LINE_W - d) / (LINE_W - 0.6)).clamp(0.0, 1.0);
-        FRONT_LEVEL * k * k * (3.0 - 2.0 * k) * fresh
-    } else {
-        0.0
-    };
-    // The body is the plateau and tail only: the front's own band is the line.
-    let s = fade * phase(u, v).min(0.8);
-    let body = if s < S_MIN {
-        0.0
-    } else {
-        f32::from(LEVELS[((s * 1023.0 + 0.5) as usize).min(1023)])
-    };
-    // The line in its own blue ramp, so its anti-aliased edge dims without shifting hue
-    // (the Ferroin ramp runs through magenta below its blue top, which read as steps).
-    let line = fade * line;
-    if line >= body && line >= 8.0 {
-        return Ink::new(Role::Ramp(LINE_RAMP), (line + 0.5) as u8);
-    }
-    let level = (body + 0.5) as u8;
-    if level < 8 {
-        Ink::BLANK
-    } else {
-        Ink::new(Role::Ramp(Ramp::Ferroin), level)
-    }
-}
-
-/// `u` softened by one `[1 2 1]/4` pass along each axis (clamped edges) into `out`: the
-/// front's step spans a node, too sharp to place the `u = ½` contour between pixels, so
-/// the line follows the softened field's contour instead (display only).
-fn soften(u: &Grid<f32>, out: &mut Grid<f32>, tmp: &mut Grid<f32>) {
-    let (w, h) = (usize::from(u.width()), usize::from(u.height()));
-    for g in [&mut *out, &mut *tmp] {
-        if g.size() != u.size() {
-            g.resize(u.size(), 0.0);
-        }
-    }
-    if w == 0 || h == 0 {
-        return;
-    }
-    let (p, t) = (u.as_slice(), tmp.as_mut_slice());
-    for y in 0..h {
-        for x in 0..w {
-            let (l, r) = (x.saturating_sub(1), (x + 1).min(w - 1));
-            t[y * w + x] = 0.25 * (p[y * w + l] + 2.0 * p[y * w + x] + p[y * w + r]);
-        }
-    }
-    let o = out.as_mut_slice();
-    for y in 0..h {
-        let (n, s) = (y.saturating_sub(1), (y + 1).min(h - 1));
-        for x in 0..w {
-            o[y * w + x] = 0.25 * (t[n * w + x] + 2.0 * t[y * w + x] + t[s * w + x]);
-        }
-    }
-}
-
-/// `|∇u|` per node (central differences, clamped edges) into `out`.
-fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
-    let (w, h) = (usize::from(u.width()), usize::from(u.height()));
-    if out.size() != u.size() {
-        out.resize(u.size(), 0.0);
-    }
-    if w == 0 || h == 0 {
-        return;
-    }
-    let (p, o) = (u.as_slice(), out.as_mut_slice());
-    for y in 0..h {
-        let (yn, ys) = (y.saturating_sub(1), (y + 1).min(h - 1));
-        for x in 0..w {
-            let (xw, xe) = (x.saturating_sub(1), (x + 1).min(w - 1));
-            let gx = (p[y * w + xe] - p[y * w + xw]) / (xe - xw).max(1) as f32;
-            let gy = (p[ys * w + x] - p[yn * w + x]) / (ys - yn).max(1) as f32;
-            o[y * w + x] = (gx * gx + gy * gy).sqrt();
-        }
-    }
-}
-
-/// The phase alone as a colour (the pre-line look, kept for the tests) in the ferroin ramp (BZ-A9). The ramp borrows the indicator's
-/// colours (red ferroin, blue ferriin), so fronts read blue and the tail reddens as the
-/// medium recovers, echoing the indicator; hue and lightness together encode the phase
-/// `s`, not the ferriin concentration `v` (false colour), so the red comes earlier than
-/// ferriin actually falls. The resting medium, ferroin-red in a real dish, is left to the
-/// terminal background so the waves carry the colour.
-#[cfg(test)]
+/// The phase as a colour; the resting medium is the terminal background.
 fn phase_ink(s: f32) -> Ink {
     if s < S_MIN {
         Ink::BLANK
     } else {
-        // `s ≤ 1` (phase's range), and the `min` guards the index anyway.
-        Ink::new(
-            Role::Ramp(Ramp::Ferroin),
-            LEVELS[((s * 1023.0 + 0.5) as usize).min(1023)],
-        )
+        ink::seq(f64::from(s))
     }
 }
 
-/// ASCII for a cell from the brighter of its two pixels (SPEC-002 ASCII): thresholds
-/// `s` = 0.92, 0.88, 0.80, 0.60, read through [`phase_level`]; the resting medium and
-/// the tail are blank.
+/// The label's phase word for beat `index` in a readout of at most `room` chars.
+fn phase_word(index: usize, room: usize) -> &'static str {
+    match (index == QUENCH, room >= "light quench".len()) {
+        (false, _) => "waves",
+        (true, true) => "light quench",
+        (true, false) => "quench",
+    }
+}
+
+/// ASCII for a cell from the brighter of its two pixels (SPEC-002 ASCII).
 fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    const AT: [u8; 4] = [
-        phase_level(0.92),
-        phase_level(0.88),
-        phase_level(0.80),
-        phase_level(0.60),
-    ];
-    let lit = |i: Ink| i.role != Role::Background;
+    let lit = |i: Ink| i.role == Role::Seq;
     let ink = match (lit(top), lit(bottom)) {
         (false, false) => return None,
         (true, false) => top,
@@ -598,10 +505,10 @@ fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
         (true, true) => bottom,
     };
     let ch = match ink.level {
-        l if l >= AT[0] => '@',
-        l if l >= AT[1] => '#',
-        l if l >= AT[2] => '+',
-        l if l >= AT[3] => ':',
+        217.. => '@',
+        179.. => '#',
+        102.. => '+',
+        51.. => ':',
         _ => '.',
     };
     Some((ch, ink))
@@ -647,36 +554,9 @@ impl Bz {
             let age = self.step.saturating_sub(at) as f64 / SUB_PER_S as f64;
             ease::smoothstep(age / FADE_IN_S) as f32
         });
-        soften(&self.u, &mut self.soft, &mut self.lap);
-        slope_field(&self.soft, &mut self.slope);
-        let (map, u, v, slope, soft) = (&self.map, &self.u, &self.v, &self.slope, &self.soft);
-        let px = map.magnification().max(1e-3);
-        let reach = 0.5 * LINE_W / px;
-        // Bilinear rows, rebuilt when the shader reaches the next pixel row (CORE-R104):
-        // the front is anti-aliased by its distance, not by the sampling.
-        let row = |y| {
-            (
-                map.row(u, y),
-                map.row(v, y),
-                map.row(slope, y),
-                map.row(soft, y),
-            )
-        };
-        let (mut ry, mut r) = (-1, row(0));
-        self.pixels.shade(|x, y| {
-            if y != ry {
-                (ry, r) = (y, row(y));
-            }
-            let soft = r.3.at(x);
-            // The slope matters only near the contour (|∇soft| ≤ ½ per node, so beyond
-            // `reach` the line cannot light): skip its sample elsewhere.
-            let g = if (soft - 0.5).abs() < reach {
-                r.2.at(x)
-            } else {
-                1.0
-            };
-            front_ink(r.0.at(x), soft, r.1.at(x), g, px, fade)
-        });
+        let (map, u, v) = (&self.map, &self.u, &self.v);
+        self.pixels
+            .shade(|x, y| phase_ink(fade * phase(map.sample(u, x, y), map.sample(v, x, y))));
     }
 }
 
@@ -685,16 +565,8 @@ impl Generator for Bz {
         &META
     }
 
-    fn caption(&self) -> Option<&'static str> {
-        let beat = self
-            .timeline
-            .at((self.step % CYCLE_STEPS) as f64 / SUB_PER_S as f64);
-        (beat.index == QUENCH).then_some(CAPTIONS[0])
-    }
-
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         self.cells = size;
-        self.readout_room = title::stable_readout_room(size, &META);
         self.pixels.resize(size);
         let px = self.pixels.pixel_size();
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
@@ -712,7 +584,7 @@ impl Generator for Bz {
             }
         }
         self.map.rebuild(lat, px);
-        self.dirty = true;
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -729,7 +601,7 @@ impl Generator for Bz {
         self.dirty = true;
     }
 
-    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
         if self.dirty {
             self.dirty = false;
@@ -744,16 +616,21 @@ impl Generator for Bz {
         if h < 4 || w < 14 {
             return;
         }
-        // Numbers only: the title names the reaction and its caption the beat. The room
-        // is right of every caption's title (GEN-R13, CORE-R83) and at most half the row
-        // (CORE-R76), so the label never competes with the waves. `b` is live: it reads
-        // 0.45 in the quench, the sign that the quench is a loss of excitability.
+        let local = self.step % CYCLE_STEPS;
+        let beat = self.timeline.at(local as f64 / SUB_PER_S as f64).index;
+        // Right of the title (GEN-R13), which names the reaction, and at most half the
+        // row (CORE-R76), so the label never competes with the waves.
+        let room = title::readout_room(self.cells, &Title::of(self));
+        let word = phase_word(beat, room);
         let b = self.b;
-        let mut label = StackText::<40>::new();
-        // Each threshold is its form's length. Writing into a StackText never fails.
-        let _ = match self.readout_room {
-            31.. => write!(label, "Barkley a=0.75 b={b:.2} eps=0.02"),
-            6.. => write!(label, "b={b:.2}"),
+        let mut label = StackText::<80>::new();
+        // Each threshold is its form's length in the quench, the longest word. `b` is
+        // live: it reads 0.45 in the quench, the one on-screen sign that the quench is a
+        // loss of excitability. Writing into a StackText never fails.
+        let _ = match room {
+            44.. => write!(label, "{word}  Barkley a=0.75 b={b:.2} eps=0.02"),
+            20.. => write!(label, "{word}  b={b:.2}"),
+            6.. => write!(label, "{word}"),
             _ => return,
         };
         // label_right pads it with a blank cell each side, so it never touches the field.
@@ -1040,7 +917,6 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut bz = Bz::default();
         bz.resize(size, &mut ctx);
-        bz.prepare();
         (bz, ctx)
     }
 
@@ -1071,14 +947,12 @@ mod tests {
         }
         let (u, v) = (bz.u.clone(), bz.v.clone());
         bz.resize(Size::new(250, 62), &mut ctx);
-        bz.prepare();
         assert_eq!((&bz.u, &bz.v), (&u, &v), "same bucket must not touch state");
 
         let mut rng = SplitMix64::new(9);
         for _ in 0..12 {
             let size = Size::new(rng.random_range(1..=300), rng.random_range(1..=90));
             bz.resize(size, &mut ctx);
-            bz.prepare();
             bz.update(0.1, &mut ctx);
             bz.prepare();
             assert!(in_unit(&bz), "fields left [0, 1] after resize to {size:?}");
@@ -1098,10 +972,6 @@ mod tests {
         // v decays as e^{-t}: the 2 s (3 tu) quench leaves ≈ 0.047, far below both the
         // 0.1 a pacemaker needs and the ≈ 0.23 that still shades (SPEC-002 BZ-A7).
         assert!(max(&bz.v) < 0.06, "max v = {}", max(&bz.v));
-        assert!(
-            bz.pixels_iter().all(|i| i == Ink::BLANK),
-            "the quenched dish is at rest"
-        );
         assert!((WAVES_STEPS..CYCLE_STEPS).all(|s| !pacemaker_fires(s)));
         assert!(pacemaker_fires(PM_FIRST) && pacemaker_fires(PM_FIRST + PM_PERIOD));
 
@@ -1175,78 +1045,30 @@ mod tests {
             }
             let px: Vec<Ink> = bz.pixels_iter().collect();
             let n = px.len() as f64;
-            let share = |p: &dyn Fn(Ink) -> bool| px.iter().filter(|&&i| p(i)).count() as f64 / n;
-            let lit = share(&|i| i.role != Role::Background);
-            let pale = share(&|i| i.role != Role::Background && i.level > phase_level(0.8));
-            // The front is a thin anti-aliased line now: few, but present, bright pixels.
-            // ADR-0017: thin fronts and a dim plateau on a black medium.
-            assert!((0.05..=0.40).contains(&lit), "t={until}: lit {lit:.3}");
-            assert!((0.005..=0.12).contains(&pale), "t={until}: front {pale:.4}");
+            let lit = px.iter().filter(|i| i.role == Role::Seq).count() as f64 / n;
+            let pale = px
+                .iter()
+                .filter(|i| i.role == Role::Seq && i.level >= 217)
+                .count() as f64
+                / n;
+            assert!((0.20..=0.70).contains(&lit), "t={until}: lit {lit:.3}");
+            assert!((0.01..=0.12).contains(&pale), "t={until}: pale {pale:.3}");
         }
     }
 
-    /// Brightest level on screen (0 for a resting dish).
+    /// Brightest Seq level on screen.
     fn peak_level(bz: &Bz) -> u8 {
-        bz.pixels_iter().map(|i| i.level).max().unwrap_or(0)
-    }
-
-    #[test]
-    fn bz_a9_ferroin_inks_rise_with_phase_on_a_blank_rest() {
-        let rest = Ink::BLANK;
-        assert_eq!(phase_ink(phase(0.0, 0.0)), rest, "resting medium");
-        let mut last = 0;
-        for i in 45..=100 {
-            let ink = phase_ink(i as f32 / 100.0);
-            assert_eq!(ink.role, Role::Ramp(Ramp::Ferroin));
-            assert!(ink.level >= last, "s {i}%");
-            last = ink.level;
-        }
-        assert!((185..=200).contains(&last), "front top {last}");
-        // A bright line only at the leading edge, a dim plateau, a black tail.
-        assert!(phase_level(0.92) >= 160, "front {}", phase_level(0.92));
-        assert!(phase_level(0.80) <= 60, "plateau {}", phase_level(0.80));
-        assert!(phase_level(0.50) <= 25, "back of the plateau");
-        assert_eq!(phase_ink(0.40), Ink::BLANK, "tail");
-
-        // On a planar wave the rim (s ≥ 0.92) is at most 2 nodes deep, behind a lit body
-        // at least 5 times as deep.
-        let (mut u, mut v, mut lap) = grids(160, 3);
-        for y in 0..3 {
-            for x in 0..3 {
-                u.set(x, y, 1.0);
-            }
-        }
-        run(&mut u, &mut v, &mut lap, steps(10.0));
-        let row: Vec<f32> = (0..160)
-            .map(|x| phase(*u.get(x, 1).unwrap(), *v.get(x, 1).unwrap()))
-            .collect();
-        let rim = row.iter().filter(|&&s| s >= 0.92).count();
-        let body = row.iter().filter(|&&s| (S_MIN..0.92).contains(&s)).count();
-        assert!((1..=2).contains(&rim), "rim {rim} nodes");
-        assert!(body >= 3 * rim, "body {body} nodes");
-        // The ASCII keeps the M10 thresholds on s, and the resting dish stays blank.
-        let at = phase_ink;
-        assert_eq!(ascii_cell(rest, rest), None);
-        assert_eq!(ascii_cell(at(0.95), rest).map(|c| c.0), Some('@'));
-        assert_eq!(ascii_cell(rest, at(0.9)).map(|c| c.0), Some('#'));
-        assert_eq!(ascii_cell(at(0.85), at(0.3)).map(|c| c.0), Some('+'));
-        assert_eq!(ascii_cell(at(0.7), rest).map(|c| c.0), Some(':'));
-        assert_eq!(ascii_cell(at(0.5), rest).map(|c| c.0), Some('.'));
-        assert_eq!(ascii_cell(at(0.3), rest), None);
-        let (bz, _) = scene(Size::new(80, 24), 42);
-        let roles = [
-            Role::Ramp(Ramp::Ferroin),
-            Role::Ramp(LINE_RAMP),
-            Role::Background,
-        ];
-        assert!(bz.pixels_iter().all(|i| roles.contains(&i.role)));
+        bz.pixels_iter()
+            .filter(|i| i.role == Role::Seq)
+            .map(|i| i.level)
+            .max()
+            .unwrap_or(0)
     }
 
     #[test]
     fn bz_a7_reseeded_fronts_fade_in_without_touching_the_model() {
         let (mut bz, mut ctx) = scene(Size::new(80, 24), 42);
-        let pale = phase_level(0.85);
-        assert!(peak_level(&bz) >= pale, "the first seeding shows at once");
+        assert!(peak_level(&bz) >= 217, "the first seeding shows at once");
         for _ in 0..62 * 4 {
             bz.update(0.25, &mut ctx);
             bz.prepare();
@@ -1258,7 +1080,7 @@ mod tests {
         assert_eq!(bz.step, CYCLE_STEPS + 1);
         assert!(max(&bz.u) > 0.9, "the model reseeds at full strength");
         assert!(
-            peak_level(&bz) < phase_level(0.8),
+            peak_level(&bz) < 51,
             "reseed pops in at {}",
             peak_level(&bz)
         );
@@ -1267,15 +1089,14 @@ mod tests {
             bz.update(SIM_DT, &mut ctx);
             bz.prepare();
             let now = peak_level(&bz);
-            // The anti-aliased line's sampled peak wobbles by a level or two as it moves.
-            assert!(now + 3 >= last, "fade-in dimmed {last} -> {now}");
+            assert!(now >= last, "fade-in dimmed {last} -> {now}");
             last = now;
         }
-        assert!(last >= pale, "fronts at full brightness 0.5 s in: {last}");
+        assert!(last >= 217, "fronts at full brightness 0.5 s in: {last}");
     }
 
     #[test]
-    fn bz_a9_leading_edge_has_no_refractory_halo_on_a_stretched_lattice() {
+    fn bz_inks_leading_edge_has_no_refractory_halo_on_a_stretched_lattice() {
         let (mut bz, _) = scene(Size::new(200, 50), 1);
         assert_ne!(
             bz.u.size(),
@@ -1290,27 +1111,17 @@ mod tests {
             }
         }
         bz.rasterise();
-        // Ahead of the contour (u = ½ between nodes 89 and 90) only the front line's
-        // anti-aliased edge lights, within LINE_W pixels: no refractory band runs ahead.
-        let (pw, lw) = (
-            usize::from(bz.pixels.pixel_size().width()),
-            usize::from(bz.u.width()),
-        );
-        let reach = 89.5 + f64::from(LINE_W) / f64::from(bz.map.magnification()) + 0.5;
-        let px = bz.pixels.pixel_size();
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let ink = bz.pixels.get(x, y).unwrap();
-                let at = grid::centre_of(f64::from(x), pw, lw);
-                if ink != Ink::BLANK {
-                    assert!(at < reach, "{ink:?} at node {at:.2}, ahead of the front");
-                }
-            }
+        for ink in bz.pixels_iter().filter(|i| i.role == Role::Seq) {
+            assert!(
+                ink.level >= 217,
+                "halo level {} ahead of the front",
+                ink.level
+            );
         }
     }
 
     /// The bottom row at width `w`, `after` sub-steps into the scene (clock only: the
-    /// label reads `b`, not the fields).
+    /// label reads the beat and `b`, not the fields).
     fn label(w: u16, after: u64) -> String {
         let size = Size::new(w, 12);
         let (mut bz, _) = scene(size, 3);
@@ -1322,46 +1133,31 @@ mod tests {
     }
 
     #[test]
-    fn bz_gen_r13_label_is_numbers_only_right_aligned_and_never_clipped() {
+    fn bz_gen_r13_label_is_right_aligned_padded_short_and_never_clipped() {
         let quench = WAVES_STEPS + SUB_PER_S;
+        // The room is the smaller of half the row and the title-row room (CORE-R76):
+        // w − 38 from w = 57, where the full title fits, w − 20 from w = 27, w − 2 below.
         for (w, after, want) in [
-            (14u16, 0, "b=0.06"),
-            (40, 0, "b=0.06"),
-            (40, quench, "b=0.45"),
-            (68, 0, "b=0.06"),
-            (69, 0, "Barkley a=0.75 b=0.06 eps=0.02"),
-            (80, quench, "Barkley a=0.75 b=0.45 eps=0.02"),
+            (14u16, 0, "waves"),
+            (16, quench, "quench"),
+            (30, quench, "quench"),
+            (32, quench, "light quench"),
+            (39, quench, "light quench"),
+            (40, 0, "waves  b=0.06"),
+            (40, quench, "light quench  b=0.45"),
+            (56, 0, "waves  b=0.06"),
+            (57, 0, "waves"),
+            (80, 0, "waves  b=0.06"),
+            (87, quench, "light quench  b=0.45"),
+            (88, quench, "light quench  Barkley a=0.75 b=0.45 eps=0.02"),
         ] {
             let row = label(w, after);
             // A blank cell each side, so it never touches the field.
             assert!(row.ends_with(&format!(" {want} ")), "w={w}: {row:?}");
-            // The beat is the title's caption now, never a word in the readout.
-            assert!(
-                !row.contains("waves  ") && !row.contains("quench "),
-                "w={w}: {row:?}"
-            );
+            // At most half the row, so it never competes with the waves on a small tile.
+            assert!(2 * want.len() <= usize::from(w), "w={w}: {want:?}");
         }
-        // The form follows the stable room (CORE-R83), so it never changes with the beat.
-        for w in 14u16..=120 {
-            let (waves, quenched) = (label(w, 0), label(w, quench));
-            assert_eq!(
-                waves.replace("0.06", "0.45"),
-                quenched,
-                "w={w}: the readout flickers with the beat"
-            );
-        }
-        assert!(!label(13, 0).contains("b="), "no label below 14 columns");
-    }
-
-    #[test]
-    fn bz_core_r71_quench_is_the_caption() {
-        let (mut bz, _) = scene(Size::new(80, 24), 3);
-        assert_eq!(bz.caption(), None, "waves: the title's own mechanism");
-        bz.step = WAVES_STEPS;
-        assert_eq!(bz.caption(), Some("light quench"));
-        assert_eq!(META.captions, &["light quench"]);
-        bz.step = CYCLE_STEPS;
-        assert_eq!(bz.caption(), None, "the next cycle's waves");
+        assert!(!label(13, 0).contains("waves"), "no label below 14 columns");
     }
 
     impl Bz {
