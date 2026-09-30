@@ -151,7 +151,7 @@ const TRUNK: f32 = 0.8;
 const TRUNK_WIDE: f32 = 0.6;
 
 /// The three flat line levels (twig, limb, trunk) and the white of a hot tip or flash.
-const LEVELS: [u8; 3] = [100, 170, 240];
+const LEVELS: [u8; 3] = [110, 180, 255];
 const HOT_INK: Ink = Ink::new(Role::Star, 255);
 /// Current from which a link is a limb rather than a twig.
 const LIMB: f32 = 0.5;

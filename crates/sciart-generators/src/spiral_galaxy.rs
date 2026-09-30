@@ -90,13 +90,15 @@ const KNEE: f32 = 0.35;
 const WHITE: f32 = 9.0;
 /// The unresolved light below `HAZE` times the mean disc light at that radius is black
 /// (no inter-arm haze; the arms and the bulge stand on a dark disc). Above it the toned
-/// light (0–255) is drawn in M11's flat steps (ADR-0018): old warm starlight as `Sun` at
-/// three levels, each from a toned threshold up.
+/// light (0–255) is drawn in M11's flat steps (ADR-0018), each from a toned threshold
+/// up: the faint outer disc a dim `Hot`, the arms `Sun`, their crests and the bulge
+/// `Star` white, so the old starlight grades red → yellow → white against the `Cold`
+/// young stars.
 const HAZE: f32 = 0.8;
 const LIGHT_STEPS: [(u8, Ink); 3] = [
-    (70, Ink::new(Role::Sun, 50)),
-    (140, Ink::new(Role::Sun, 130)),
-    (205, Ink::new(Role::Sun, 225)),
+    (70, Ink::new(Role::Hot, 70)),
+    (140, Ink::new(Role::Sun, 150)),
+    (205, Ink::new(Role::Star, 210)),
 ];
 const YOUNG_INK: Ink = Ink::new(Role::Cold, 255);
 /// Foreground stars: dim and bright, two flat steps.
@@ -603,7 +605,7 @@ mod tests {
             for x in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(x, py).unwrap();
                 match ink.role {
-                    Role::Sun => assert!(LIGHT_STEPS.iter().any(|s| s.1 == ink), "{ink:?}"),
+                    _ if LIGHT_STEPS.iter().any(|s| s.1 == ink) => {}
                     Role::Accent => {
                         assert!(KNOT_INKS.contains(&ink), "{ink:?}");
                         // A point: no H-alpha neighbour left, right, above or below.
@@ -620,7 +622,7 @@ mod tests {
                 let phi = arm_phase(u, v, g.t);
                 if (0.3..0.7).contains(&r) && (phi.abs() - PI).abs() < 0.4 {
                     between += 1;
-                    dark += usize::from(ink.role != Role::Sun || ink.level < 100);
+                    dark += usize::from(!LIGHT_STEPS[1..].iter().any(|s| s.1 == ink));
                 }
             }
         }

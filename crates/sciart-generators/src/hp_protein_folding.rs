@@ -388,9 +388,9 @@ const BEAD_EASE_S: f64 = 0.05;
 const CAM_FOLLOW_S: f64 = 0.1;
 const CAM_ZOOM_S: f64 = 0.8;
 /// Residues are 2 × 2-pixel dots at any zoom (the chain stops this many pixels from a
-/// bead's centre), no halos; the chain is a 1-dot `Dim` braille line between them.
+/// bead's centre), no halos; the chain is a 1-dot `Structure` braille line between them.
 const BEAD_R: f64 = 1.0;
-const BACKBONE: Ink = Ink::new(Role::Dim, 170);
+const BACKBONE: Ink = Ink::new(Role::Structure, 150);
 /// M11's complementary pair (ADR-0018): H (hydrophobic) residues `Hot`, a step brighter
 /// with each H·H contact up to two (buried cores read hot); P (polar) residues `Cold`.
 const H_INKS: [Ink; 3] = [

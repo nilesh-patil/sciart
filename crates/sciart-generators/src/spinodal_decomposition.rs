@@ -58,7 +58,13 @@ const LINE_W: f32 = 1.3;
 const PLUS_INKS: [Ink; 2] = [Ink::new(Role::Hot, 110), Ink::new(Role::Hot, 220)];
 const MINUS_INKS: [Ink; 2] = [Ink::new(Role::Cold, 110), Ink::new(Role::Cold, 220)];
 /// Formedness below which the interfaces are not drawn, and from which they are full.
-const FORMED: (f32, f32) = (0.02, 0.6);
+const FORMED: (f32, f32) = (0.3, 0.6);
+/// The quench's composition noise, before the domains form: while the formedness is below
+/// `SPECKLE_UNTIL`, a braille dot in the lowest step of its side's colour marks every
+/// blank pixel whose `ψ − ψ̄` exceeds `SPECKLE_SHARE` of the frame's largest, so the
+/// unmixing grows out of a visible speckle rather than a black frame.
+const SPECKLE_UNTIL: f32 = FORMED.0;
+const SPECKLE_SHARE: f32 = 0.3;
 /// Box radius of the one smoothing pass over the quench noise, so the mixture unmixes
 /// from a smooth, dark field rather than from white-noise speckle.
 const QUENCH_BLUR: usize = 1;
@@ -193,6 +199,8 @@ pub struct Spinodal {
     scratch: Scratch,
     regrid_scratch: Grid<f32>,
     pixels: Pixels,
+    /// The early composition speckle, over the pixels.
+    dots: Dots,
     map: SampleMap,
     /// Display value per lattice node ([`shade_field`]) and its working grids.
     shade: Grid<f32>,
@@ -216,6 +224,7 @@ impl Default for Spinodal {
             scratch: Scratch::default(),
             regrid_scratch: Grid::default(),
             pixels: Pixels::new(Size::new(1, 1)),
+            dots: Dots::new(Size::new(1, 1)),
             map: SampleMap::default(),
             shade: Grid::default(),
             blur: Grid::default(),
@@ -263,6 +272,36 @@ impl Spinodal {
                 pixel_ink(pr.at(x), gr.at(x), px, f)
             });
         }
+        self.speckle(f);
+    }
+
+    /// The early composition noise as braille speckle (see [`SPECKLE_UNTIL`]).
+    fn speckle(&mut self, f: f32) {
+        self.dots.clear();
+        if f >= SPECKLE_UNTIL {
+            return;
+        }
+        let vals = self.psi.as_slice();
+        let n = vals.len().max(1) as f32;
+        let mean = vals.iter().sum::<f32>() / n;
+        let peak = vals.iter().fold(0.0f32, |m, &v| m.max((v - mean).abs()));
+        if !(peak.is_finite() && peak > 0.0) {
+            return;
+        }
+        let cut = SPECKLE_SHARE * peak;
+        let ps = self.pixels.pixel_size();
+        for y in 0..i32::from(ps.height()) {
+            for x in 0..i32::from(ps.width()) {
+                if self.pixels.get(x, y) != Some(Ink::BLANK) {
+                    continue;
+                }
+                let d = self.map.sample(&self.psi, x, y) - mean;
+                if d.abs() > cut {
+                    let ink = if d > 0.0 { PLUS_INKS[0] } else { MINUS_INKS[0] };
+                    self.dots.set(2 * x + (y & 1), 2 * y, ink);
+                }
+            }
+        }
     }
 }
 
@@ -285,6 +324,7 @@ impl Generator for Spinodal {
         }
         self.size = size;
         self.pixels.resize(size);
+        self.dots.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
         self.dirty = true;
     }
@@ -322,6 +362,7 @@ impl Generator for Spinodal {
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        self.dots.blit_over(canvas, &self.pixels);
     }
 }
 
@@ -501,5 +542,38 @@ mod tests {
             g.prepare();
         }
         assert!(g.psi.as_slice().iter().any(|x| x.abs() > 0.5 * PSI_STAR));
+    }
+
+    #[test]
+    fn spin_a7_the_quench_shows_as_hot_and_cold_speckle_from_the_first_frame() {
+        for act in [0, 1] {
+            let size = Size::new(120, 40);
+            let mut ctx = Ctx::new(42, size);
+            let mut g = Spinodal {
+                act: (0, act),
+                ..Spinodal::default()
+            };
+            g.resize(size, &mut ctx);
+            g.prepare();
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let (mut hot, mut cold) = (0, 0);
+            for c in canvas.cells() {
+                match c.ink {
+                    i if i == PLUS_INKS[0] => hot += 1,
+                    i if i == MINUS_INKS[0] => cold += 1,
+                    i => assert_eq!(i, Ink::BLANK, "{c:?}"),
+                }
+            }
+            assert!(
+                hot > 100 && cold > 100,
+                "act {act}: {hot} hot, {cold} cold cells"
+            );
+            assert!(
+                hot + cold < 120 * 39 / 2,
+                "a speckle, not a fill: {}",
+                hot + cold
+            );
+        }
     }
 }

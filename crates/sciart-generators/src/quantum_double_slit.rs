@@ -135,7 +135,7 @@ const PEAK_HALF_LIFE_S: f64 = 4.0;
 const SOURCE_EXPOSURE: f64 = 0.55;
 /// The wave's brightness scale, and its flat steps `(brightness from, Wave level)`.
 const WAVE_TOP: f64 = 140.0;
-const WAVE_STEPS: [(f64, u8); 3] = [(30.0, 80), (62.0, 150), (98.0, 225)];
+const WAVE_STEPS: [(f64, u8); 3] = [(30.0, 90), (62.0, 165), (98.0, 255)];
 /// The carrier shimmer's depth.
 const SHIMMER: f64 = 0.5;
 const WALL_INK: Ink = Ink::new(Role::Structure, 150);
