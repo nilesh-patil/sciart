@@ -211,7 +211,7 @@ Design: [docs/design/M15-m11-look.md](design/M15-m11-look.md) · [ADR-0018](adr/
 - [x] Colour hysteresis band 2 → 4 (RND-R14): gallery back below M14's bytes per frame, inks unchanged
 - [x] Restyle the 35 M13 scenes in M11's idiom (critic review ≤ 2 rounds)
 - [x] Budgets and results: 0.56 ms CPU, 12.5 KB and 600 changed cells per frame (M14: 0.63 ms, 18.8 KB, 806); every scene < 2 ms worst at 200×50, < 5 ms at 500×150; samples at M15 (`samples/*-m15.png`)
-- [ ] Local `--no-ff` merge of `feat/m15-m11-style` into main
+- [x] Local `--no-ff` merge of `feat/m15-m11-style` into main
 - [ ] M15 follow-ups: see "Follow-ups" in docs/design/M15-m11-look.md
 
 ## M9 — Future (unscheduled)
