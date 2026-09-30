@@ -143,6 +143,9 @@ opt-level = 2
 panic = "unwind" # ADR-0006: catch_unwind quarantine needs unwinding
 lto = "thin"
 codegen-units = 1
+# RT-R22 / ADR-0035: no symbol tables in the installed binary (-11.6 %, same frames and
+# CPU). Panic messages keep their file:line locations; only backtraces lose names.
+strip = true
 
 # TEST-R9 / ADR-0023: the optimised snapshot run and the `rs-cost`/`rs-worst` probes. Same
 # opt-level as `release`, but parallel codegen and no LTO: about half the build time.
@@ -155,6 +158,9 @@ codegen-units = 16
 lto = "off"
 panic = "unwind"
 incremental = false
+# The probes are what gets profiled: keep the symbols `release` strips (RT-R22).
+strip = "none"
 
 [profile.bench]
 debug = true
+strip = "none"
