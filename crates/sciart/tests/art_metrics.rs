@@ -46,12 +46,7 @@ type Limits = (
 /// Scenes whose brightest lit pixels (p99 luma) are still below `LEGIBLE_LUMA` (GEN-R21,
 /// ADR-0017 rule 6), as measured when the rule landed. An allowlist that may only shrink:
 /// a listed scene that passes fails the test until its entry is deleted.
-const KNOWN_FAINT: &[&str] = &[
-    "firefly_sync",
-    "liesegang_rings",
-    "planetary_nebula",
-    "supernova_remnant",
-];
+const KNOWN_FAINT: &[&str] = &["firefly_sync", "liesegang_rings", "supernova_remnant"];
 
 #[rustfmt::skip]
 const LIMITS: &[Limits] = &[
@@ -104,7 +99,7 @@ const LIMITS: &[Limits] = &[
     ("orbital_rendezvous", [0.025, 0.025], [0.814, 0.814], [0.173, 0.178], [0.0167, 0.0167], [12.5, 9.5], [0.132, 0.137]),
     ("particle_accelerator", [0.020, 0.020], [0.979, 0.979], [0.046, 0.041], [0.0041, 0.0039], [1.7, 1.6], [0.005, 0.000]),
     ("physarum", [0.046, 0.071], [0.861, 0.841], [0.141, 0.162], [0.0159, 0.0177], [12.7, 11.3], [0.100, 0.121]),
-    ("planetary_nebula", [0.020, 0.020], [0.850, 0.835], [0.153, 0.168], [0.0147, 0.0162], [9.9, 25.2], [0.112, 0.127]),
+    ("planetary_nebula", [0.020, 0.020], [0.915, 0.930], [0.086, 0.071], [0.0039, 0.0077], [5.4, 6.4], [0.045, 0.030]),
     ("pulsar", [0.020, 0.020], [0.947, 0.928], [0.054, 0.073], [0.0070, 0.0090], [7.8, 5.5], [0.013, 0.032]),
     ("quantum_double_slit", [0.020, 0.020], [0.578, 0.593], [0.432, 0.424], [0.0238, 0.0224], [12.1, 10.1], [0.391, 0.383]),
     ("radical_chain", [0.020, 0.020], [0.770, 0.958], [0.235, 0.042], [0.0286, 0.0056], [43.6, 9.4], [0.194, 0.001]),
