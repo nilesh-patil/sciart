@@ -774,7 +774,7 @@ fn dust_ink(lv: u8) -> Option<Ink> {
         170.. => Some(Ink::new(Role::Star, 255)),
         100.. => Some(Ink::new(Role::Star, 90)),
         50.. => Some(Ink::new(Role::Sun, 110)),
-        22.. => Some(Ink::new(Role::Sun, 0)),
+        22.. => Some(Ink::new(Role::Hot, 40)),
         _ => None,
     }
 }
@@ -1017,12 +1017,12 @@ mod tests {
         // none (or only its faintest step) on the sunward side.
         let tail = at(TAIL_DIR[0], TAIL_DIR[1]);
         assert!(
-            matches!(tail.role, Role::Sun | Role::Star),
+            matches!(tail.role, Role::Sun | Role::Star | Role::Hot),
             "no dust tail: {tail:?}"
         );
         let sunward = at(-TAIL_DIR[0], -TAIL_DIR[1]);
         assert!(
-            sunward == Ink::BLANK || sunward == Ink::new(Role::Sun, 0),
+            sunward == Ink::BLANK || sunward == Ink::new(Role::Hot, 40),
             "tail on the sunward side: {sunward:?}"
         );
         // A white nucleus and a blue ion tail further out along the anti-Sun line.
