@@ -1,8 +1,9 @@
 [workspace]
 authors = ["Nilesh Patil <4813079+nilesh-patil@users.noreply.github.com>"]
 channels = ["conda-forge"]
-name = "tasks-adhoc"
-platforms = ["osx-arm64"]
+name = "sciart"
+# TEST-R13: the tier-1 and tier-2 hosts plus Intel macOS (tier 3, builds only).
+platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
 version = "0.1.0"
 
 # Rust toolchain comes from rust-toolchain.toml via rustup; pixi is the task runner (ADR-0007).
@@ -31,7 +32,7 @@ rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- 
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
-rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-record", "rs-spec-check", "rs-snap-release"] }
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-record", "rs-spec-check", "rs-snap-release", "rs-showcase-check"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
@@ -52,6 +53,12 @@ rs-preview = "cargo run -q --profile ci -p sciart-generators --example preview -
 # `rs-gallery-check` verifies one current frame per registered scene and no orphans (CI).
 rs-gallery = "python3 scripts/gallery.py"
 rs-gallery-check = "python3 scripts/gallery.py --check"
+# WEB-R1: record the missing animated clips in `docs/showcase.toml` into `docs/media/` with
+# `sciart record` (`--force` re-records all), then regenerate `docs/GALLERY.md`.
+# WEB-R2: `rs-showcase-check` verifies clips, size limits, coverage and the README/gallery
+# references (rs-ci and CI).
+rs-showcase = "python3 scripts/showcase.py"
+rs-showcase-check = "python3 scripts/showcase.py --check"
 # RND-R19 art review: five scenes at 80x24/200x50 through the colorblind theme.
 rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).

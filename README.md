@@ -8,18 +8,48 @@ Real-time generative science & astronomy art for the terminal: **85 animated sce
 braille and half-block cells at 30 FPS — and it keeps your machine awake while you watch.
 
 <p align="center">
-  <img src="samples/current/aurora.png" alt="Aurora: electrons light the air — green curtains over a starry sky" width="880">
+  <img src="docs/media/strange_attractors.gif" alt="Strange attractors: the Lorenz butterfly traced by swarms of fine braille threads, turning in space" width="800">
 </p>
 
 ## Gallery
 
 <p align="center">
-  <a href="samples/current/black_hole.png"><img src="samples/current/black_hole.png" alt="Black hole: infalling gas glows" width="270"></a>
-  <a href="samples/current/solar_system.png"><img src="samples/current/solar_system.png" alt="Solar system: farther planets go slower" width="270"></a>
-  <a href="samples/current/saturn_rings.png"><img src="samples/current/saturn_rings.png" alt="Saturn rings: moons carve gaps" width="270"></a>
+  <img src="docs/media/galaxy_collision.gif" alt="Galaxy collision: two spiral galaxies swing through each other and pull out tidal tails" width="400">
+  <img src="docs/media/electron_orbitals.gif" alt="Electron orbitals: a hydrogen electron cloud, drawn as warm and cool probability stipple, sloshes from the 2p into a 3d state" width="400">
 </p>
+<p align="center"><sub>Galaxy collision · Hydrogen electron orbitals</sub></p>
 
-<p align="center"><sub>Black hole · Solar system · Saturn rings — <a href="docs/GALLERY.md">full gallery</a></sub></p>
+<p align="center">
+  <img src="docs/media/double_pendulum.gif" alt="Double pendulum: twin pendulums released a thousandth of a radian apart trace dotted trails that drift apart into chaos" width="400">
+  <img src="docs/media/binary_inspiral.gif" alt="Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple" width="400">
+</p>
+<p align="center"><sub>Double pendulum · Binary inspiral</sub></p>
+
+<p align="center">
+  <img src="docs/media/total_solar_eclipse.gif" alt="Total solar eclipse: the last crescent of Sun thins away, the diamond ring flashes and the pearly corona opens" width="400">
+  <img src="docs/media/solar_system.gif" alt="Solar system: the planets circle the Sun with short speed trails, the farther ones slower, past the asteroid belt" width="400">
+</p>
+<p align="center"><sub>Total solar eclipse · Solar system</sub></p>
+
+<p align="center">
+  <img src="docs/media/belousov_zhabotinsky.gif" alt="Belousov-Zhabotinsky reaction: oxidation waves wind into a turning spiral, drawn as thin red and blue threads" width="400">
+  <img src="docs/media/snowflake_growth.gif" alt="Snowflake growth: a stellar dendrite grows six branching arms out of the vapour" width="400">
+</p>
+<p align="center"><sub>Belousov–Zhabotinsky spiral · Snowflake growth</sub></p>
+
+<p align="center">
+  <img src="docs/media/mitosis.gif" alt="Mitosis: chromosomes align on the spindle, split to opposite poles and the cell pinches in two" width="400">
+  <img src="docs/media/vortex_street.gif" alt="Vortex street: eddies peel off a cylinder, alternating sides, as contour threads of spinning fluid" width="400">
+</p>
+<p align="center"><sub>Mitosis · Vortex street</sub></p>
+
+<p align="center">
+  <img src="docs/media/aurora.gif" alt="Aurora: a substorm breaks up and green auroral curtains surge over a still northern lake" width="400">
+  <img src="docs/media/rocket_launch.gif" alt="Rocket launch: ignition, liftoff and the climb away from the tower on an exhaust plume" width="400">
+</p>
+<p align="center"><sub>Aurora · Rocket launch</sub></p>
+
+<p align="center"><sub>Recorded with <code>sciart record</code> from <a href="docs/showcase.toml">docs/showcase.toml</a> — <a href="docs/GALLERY.md">full gallery</a>, with every scene and more clips</sub></p>
 
 ## Install
 
@@ -93,8 +123,10 @@ than red ↔ green. `t` cycles to it after `aurora`.
 
 ## Platform
 
-macOS is the primary platform: keep-awake uses `caffeinate` by default. Linux builds and
-passes the test suite (keep-awake defaults to `off` there). The optional `mouse` jiggle
+macOS and Linux are supported. Keep-awake uses `caffeinate` on macOS and, on Linux, a
+`systemd-inhibit` (or `elogind-inhibit`) lock held for as long as sciart runs; over SSH it
+defaults to `off`, since keeping the remote machine awake is rarely what you want. Choose
+explicitly with `--keep-awake caffeinate|inhibit|mouse|off`. The optional `mouse` jiggle
 backend is behind the `mouse` cargo feature and needs macOS Accessibility permission.
 
 ## How it works

@@ -46,6 +46,8 @@ rand_chacha = "0.9"
 # collection extras (calendar), layout cache or macros.
 ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }
+# RT-R20: SIGTERM/SIGHUP restore the terminal (already in the tree through crossterm).
+signal-hook = "0.3"
 # RT-R22: the config is only parsed, never written.
 toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 unicode-width = "0.2"

@@ -7,6 +7,7 @@
 
 use std::io::{Read, Write};
 use std::process::Command;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -16,12 +17,17 @@ use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 const BIN: &str = env!("CARGO_BIN_EXE_sciart");
 const ALT_ENTER: &[u8] = b"\x1b[?1049h";
 const ALT_LEAVE: &[u8] = b"\x1b[?1049l";
+/// Every non-empty frame is one synchronized update (RT-R15, DEC mode 2026).
+const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
+const END_SYNC: &[u8] = b"\x1b[?2026l";
 
 struct Session {
     screen: Arc<Mutex<vt100::Parser>>,
     raw: Arc<Mutex<Vec<u8>>>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn portable_pty::Child + Send + Sync>,
+    /// While set, nothing is read from the pty: its buffer fills and sciart's writes stall.
+    stalled: Arc<AtomicBool>,
     /// Closing the master hangs up the pty, so it lives as long as the session.
     _master: Box<dyn portable_pty::MasterPty + Send>,
     _config_home: tempfile::TempDir,
@@ -64,6 +70,11 @@ impl Session {
         // The colour environment is part of what RND-R18 tests assert, so the test's own
         // `env` list decides it; the developer's shell must not leak in (TEST-R12).
         cmd.env_remove("NO_COLOR");
+        // Likewise the terminal identity RND-R21's hint reads: a developer inside tmux or
+        // Terminal.app must not change what the tests see.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env_remove("TERM_PROGRAM");
+        cmd.env_remove("COLORTERM");
         for (key, value) in env {
             cmd.env(key, value);
         }
@@ -73,15 +84,23 @@ impl Session {
         let screen = Arc::new(Mutex::new(vt100::Parser::new(24, 80, 0)));
         let raw = Arc::new(Mutex::new(Vec::new()));
         let mut reader = pair.master.try_clone_reader().unwrap();
-        let (s, r) = (screen.clone(), raw.clone());
+        let stalled = Arc::new(AtomicBool::new(false));
+        let (s, r, hold) = (screen.clone(), raw.clone(), stalled.clone());
         thread::spawn(move || {
             let mut buf = [0u8; 8192];
-            while let Ok(n) = reader.read(&mut buf) {
+            loop {
+                while hold.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+                let Ok(n) = reader.read(&mut buf) else { break };
                 if n == 0 {
                     break;
                 }
+                // Both under one critical section (raw first, as `settled_screen` takes
+                // them), so the byte stream and the decoded screen always agree.
+                let mut raw = r.lock().unwrap();
                 s.lock().unwrap().process(&buf[..n]);
-                r.lock().unwrap().extend_from_slice(&buf[..n]);
+                raw.extend_from_slice(&buf[..n]);
             }
         });
         let writer = pair.master.take_writer().unwrap();
@@ -90,6 +109,7 @@ impl Session {
             raw,
             writer,
             child,
+            stalled,
             _master: pair.master,
             _config_home: config_home,
         }
@@ -97,6 +117,33 @@ impl Session {
 
     fn contents(&self) -> String {
         self.screen.lock().unwrap().screen().contents()
+    }
+
+    /// The decoded screen once `pred` holds *between* frames: every synchronized update
+    /// begun so far has ended, so no frame is half-applied. A pty read can split a frame,
+    /// and a check that samples mid-frame sees cells the frame has not reached yet (the
+    /// RND-R20 opaque-ground tests did, once in six runs under load).
+    fn settled_screen(&self, what: &str, pred: impl Fn(&str) -> bool) -> vt100::Screen {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            {
+                let raw = self.raw.lock().unwrap();
+                let parser = self.screen.lock().unwrap();
+                let ended = count(&raw, END_SYNC);
+                if ended > 0
+                    && ended == count(&raw, BEGIN_SYNC)
+                    && pred(&parser.screen().contents())
+                {
+                    return parser.screen().clone();
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "timed out waiting for {what} between frames; screen:\n{}",
+                self.contents()
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
     }
 
     /// Poll the decoded screen until `pred` holds or the timeout elapses.
@@ -306,6 +353,256 @@ fn cfg_r3_unknown_key_exits_2_with_location() {
         stderr.contains("line 2") && stderr.contains("warp"),
         "{stderr}"
     );
+}
+
+// ----- M25: termination signals (RT-R20) -----
+
+/// Direct children of `pid` (the keep-awake helper, when one runs).
+fn children(pid: u32) -> Vec<u32> {
+    Command::new("pgrep")
+        .args(["-P", &pid.to_string()])
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .split_whitespace()
+                .filter_map(|p| p.parse().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Alive and not a zombie (an orphan waits a moment for init or launchd to reap it).
+fn running(pid: u32) -> bool {
+    Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .is_ok_and(|o| {
+            let stat = String::from_utf8_lossy(&o.stdout);
+            let stat = stat.trim();
+            o.status.success() && !stat.is_empty() && !stat.starts_with('Z')
+        })
+}
+
+/// RT-R20: send `signal` and check that sciart exits `code` within 250 ms of delivery.
+fn assert_signal_ends_in_time(s: &mut Session, signal: &str, code: u32) {
+    let kill = Command::new("kill")
+        .args(["-s", signal, &s.pid().to_string()])
+        .status()
+        .unwrap();
+    assert!(kill.success(), "kill -s {signal}");
+    // The clock starts once `kill` has returned, i.e. the signal is delivered: starting it
+    // before would time the fork and exec of `kill` itself, which under a loaded parallel
+    // test run took longer than the requirement's whole budget.
+    let sent = Instant::now();
+    let pid = s.pid();
+    while !exiting(pid) {
+        assert!(
+            sent.elapsed() < Duration::from_secs(10),
+            "sciart ignored SIG{signal}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+    let took = sent.elapsed();
+    assert!(
+        took < Duration::from_millis(250),
+        "SIG{signal} took {took:?} to end the app"
+    );
+    // The kernel may hold an exiting process until its terminal output drains (macOS does,
+    // even after SIGKILL), so the status is read once the terminal reads again.
+    s.stalled.store(false, Ordering::Relaxed);
+    let status = loop {
+        if let Some(status) = s.child.try_wait().unwrap() {
+            break status;
+        }
+        assert!(
+            sent.elapsed() < Duration::from_secs(10),
+            "sciart never finished exiting after SIG{signal}"
+        );
+        thread::sleep(Duration::from_millis(5));
+    };
+    assert_eq!(status.exit_code(), code, "exit status after SIG{signal}");
+}
+
+/// The process has called `exit` (macOS `E`), is a zombie, or is gone.
+fn exiting(pid: u32) -> bool {
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .unwrap();
+    let stat = String::from_utf8_lossy(&out.stdout);
+    let stat = stat.trim();
+    stat.is_empty() || stat.contains('E') || stat.contains('Z')
+}
+
+/// RT-R20: send `signal` to sciart in the state `keys` puts it in, then check it left the
+/// event loop within 250 ms, restored the terminal as `q` does, exited `128 + n`, and left
+/// no keep-awake helper running.
+fn assert_signal_exit(keys: &str, state: impl Fn(&str) -> bool, signal: &str, code: u32) {
+    let mut s = Session::start(&["run", "starfield", "--hud", "--ascii", "--seed", "1"]);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    if !keys.is_empty() {
+        s.press(keys);
+        s.wait_for("the state under test", &state);
+    }
+    let helpers = children(s.pid());
+    // On macOS the default keep-awake is a child `caffeinate`, so the helper check below is
+    // not vacuous there; on Linux the inhibitor may have exited already (no logind/polkit).
+    if cfg!(target_os = "macos") {
+        assert!(!helpers.is_empty(), "caffeinate runs as sciart's child");
+    }
+    assert_signal_ends_in_time(&mut s, signal, code);
+    thread::sleep(Duration::from_millis(100)); // let the reader drain
+    let raw = s.raw.lock().unwrap().clone();
+    let leave = raw
+        .windows(ALT_LEAVE.len())
+        .rposition(|w| w == ALT_LEAVE)
+        .expect("left the alternate screen");
+    let tail = &raw[leave.saturating_sub(64)..];
+    for (seq, what) in [
+        (&b"\x1b[?25h"[..], "cursor shown"),
+        (&b"\x1b[?1004l"[..], "focus reporting off"),
+    ] {
+        assert!(count(tail, seq) >= 1, "{what} on SIG{signal}");
+    }
+    assert_eq!(count(&raw, ALT_LEAVE), 1, "left the alternate screen once");
+    for pid in helpers {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while running(pid) {
+            assert!(
+                Instant::now() < deadline,
+                "keep-awake helper {pid} outlived SIG{signal}"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+    }
+}
+
+#[test]
+fn rt_r20_sigterm_while_running_restores_and_exits_143() {
+    assert_signal_exit("", |_| true, "TERM", 143);
+}
+
+#[test]
+fn rt_r20_sighup_while_paused_restores_and_exits_129() {
+    assert_signal_exit(" ", |t| t.contains("| PAUSED"), "HUP", 129);
+}
+
+#[test]
+fn rt_r20_sigterm_on_the_help_page_restores_and_exits_143() {
+    assert_signal_exit("?", |t| t.contains("help"), "TERM", 143);
+}
+
+#[test]
+fn rt_r20_sighup_on_the_paused_help_page_restores_and_exits_129() {
+    assert_signal_exit(" ?", |t| t.contains("help"), "HUP", 129);
+}
+
+/// RT-R20: with the terminal no longer reading (a stalled link), the frame write blocks
+/// while holding stdout; the restore cannot get through, and the exit must not wait for it.
+#[test]
+fn rt_r20_sigterm_ends_the_app_even_when_its_writes_have_stalled() {
+    let args = [
+        "run",
+        "starfield",
+        "--hud",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| !c.is_whitespace()).count() > 50
+    });
+    s.stalled.store(true, Ordering::Relaxed);
+    // Long enough for the pty buffer to fill at 30 frames a second.
+    thread::sleep(Duration::from_secs(2));
+    assert_signal_ends_in_time(&mut s, "TERM", 143);
+}
+
+// ----- M25: terminal hint (RND-R21) -----
+
+const HINT: &str = "sciart: hint: ";
+
+/// RND-R21: on the Linux console the advice comes once, after the terminal is restored.
+#[test]
+fn rnd_r21_linux_console_hint_is_printed_once_after_the_restore() {
+    let args = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
+    let s = Session::start_with_env(&args, &[("TERM", "linux")]);
+    s.wait_for("a lit frame", |t| {
+        t.chars().filter(|c| !c.is_whitespace()).count() > 50
+    });
+    let (status, raw) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+    let leave = raw
+        .windows(ALT_LEAVE.len())
+        .position(|w| w == ALT_LEAVE)
+        .expect("left the alternate screen");
+    assert_eq!(count(&raw, HINT.as_bytes()), 1, "one hint");
+    let after = String::from_utf8_lossy(&raw[leave..]);
+    assert!(
+        after.contains("Linux console"),
+        "hint after the restore: {after:?}"
+    );
+    assert!(after.contains("--ascii"), "{after:?}");
+}
+
+/// Arguments, config text and extra environment for one [`Session::spawn`].
+type Launch<'a> = (&'a [&'a str], Option<&'a str>, &'a [(&'a str, &'a str)]);
+
+/// RND-R21: an explicit colour choice (flag, config or NO_COLOR) silences the hint, and a
+/// capable terminal never gets one.
+#[test]
+fn rnd_r21_explicit_colour_or_a_capable_terminal_gets_no_hint() {
+    let base = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
+    let flag = [&base[..], &["--color", "truecolor"]].concat();
+    let cases: [Launch; 4] = [
+        (&flag, None, &[("TERM", "linux")]),
+        (
+            &base,
+            Some("color = \"256\"\n"),
+            &[("TERM", "tmux-256color")],
+        ),
+        (&base, None, &[("TERM", "linux"), ("NO_COLOR", "1")]),
+        (
+            &base,
+            None,
+            &[
+                ("TERM_PROGRAM", "Apple_Terminal"),
+                ("COLORTERM", "truecolor"),
+            ],
+        ),
+    ];
+    for (args, config, env) in cases {
+        let s = Session::spawn(args, config, env);
+        s.wait_for("a lit frame", |t| {
+            t.chars().filter(|c| !c.is_whitespace()).count() > 50
+        });
+        let (status, raw) = s.quit();
+        assert!(status.success(), "{args:?} {env:?}: {status:?}");
+        assert_eq!(
+            count(&raw, HINT.as_bytes()),
+            0,
+            "{args:?} {config:?} {env:?}"
+        );
+    }
+}
+
+/// RND-R21: `list` and a usage error never print the hint.
+#[test]
+fn rnd_r21_list_and_usage_errors_never_hint() {
+    for args in [&["list"][..], &["run", "no_such_scene"][..]] {
+        let out = Command::new(BIN)
+            .args(args)
+            .env("TERM", "linux")
+            .env_remove("NO_COLOR")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains(HINT), "{args:?}: {stderr}");
+    }
 }
 
 // ----- M3: keep-awake and low power -----
@@ -818,10 +1115,9 @@ fn rnd_r19_colorblind_theme_is_selectable_and_cycles() {
 
 // ----- M24: opaque live background (RND-R20, CLI-R11) -----
 
-/// Every cell of the 80x24 screen (not just the lit ones) must have background `want`.
-fn assert_background(session: &Session, want: vt100::Color) {
-    let parser = session.screen.lock().unwrap();
-    let screen = parser.screen();
+/// Every cell of the 80x24 screen (not just the lit ones) must have background `want`. Take
+/// `screen` from [`Session::settled_screen`], never mid-frame.
+fn assert_background(screen: &vt100::Screen, want: vt100::Color) {
     for y in 0..24 {
         for x in 0..80 {
             let cell = screen.cell(y, x).expect("80x24 cell");
@@ -836,10 +1132,10 @@ fn assert_background(session: &Session, want: vt100::Color) {
 fn rnd_r20_live_background_is_opaque_black_by_default() {
     let args = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
     let s = Session::start(&args);
-    s.wait_for("a lit frame", |t| {
+    let screen = s.settled_screen("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
-    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    assert_background(&screen, vt100::Color::Rgb(0, 0, 0));
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
 }
@@ -860,10 +1156,10 @@ fn rnd_r20_background_terminal_keeps_the_terminal_default() {
         "terminal",
     ];
     let s = Session::start(&args);
-    s.wait_for("a lit frame", |t| {
+    let screen = s.settled_screen("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
-    assert_background(&s, vt100::Color::Default);
+    assert_background(&screen, vt100::Color::Default);
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
 }
@@ -882,13 +1178,13 @@ fn rnd_r20_hud_and_help_use_the_opaque_ground() {
         "--hud",
     ];
     let mut s = Session::start(&args);
-    s.wait_for("the HUD", |t| t.contains(" fps "));
-    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    let screen = s.settled_screen("the HUD", |t| t.contains(" fps "));
+    assert_background(&screen, vt100::Color::Rgb(0, 0, 0));
     s.press("?");
-    s.wait_for("the help page", |t| {
+    let screen = s.settled_screen("the help page", |t| {
         t.contains("sciart") && t.contains("help")
     });
-    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    assert_background(&screen, vt100::Color::Rgb(0, 0, 0));
     s.press("\x1b");
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
@@ -909,15 +1205,15 @@ fn rnd_r20_indexed_opaque_ground_is_xterm_black() {
         "256",
     ];
     let mut s = Session::start(&args);
-    s.wait_for("a lit frame", |t| {
+    let screen = s.settled_screen("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
-    assert_background(&s, vt100::Color::Idx(16));
+    assert_background(&screen, vt100::Color::Idx(16));
     s.press("?");
-    s.wait_for("the help page", |t| {
+    let screen = s.settled_screen("the help page", |t| {
         t.contains("sciart") && t.contains("help")
     });
-    assert_background(&s, vt100::Color::Idx(16));
+    assert_background(&screen, vt100::Color::Idx(16));
     s.press("\x1b");
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");

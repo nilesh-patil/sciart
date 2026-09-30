@@ -1484,6 +1484,7 @@ dependencies = [
  "sciart-render",
  "sciart-testalloc",
  "serde",
+ "signal-hook",
  "tempfile",
  "toml",
  "vt100",
@@ -1529,6 +1530,7 @@ dependencies = [
  "sciart-scenes-physics",
  "sciart-testalloc",
  "toml",
+ "unicode-width",
 ]
 
 [[package]]
