@@ -79,10 +79,10 @@ const KNOT_BLOB: [(i32, i32, f32); 1] = [(0, 0, 1.0)];
 /// Level caps: a thin, dim forward shock under the ejecta (ADR-0017: 1 px, ≤ 45).
 const RIM_MAX: u8 = 45;
 /// The ejecta's contrast curve: the toned value `u` at `EJECTA_TOP·u^EJECTA_GAMMA`, so the
-/// filaments' bodies sit at ≤ 130 and only the brightest knots reach the top (GEN-R21).
+/// filaments' bodies sit at ≤ 130 and only the brightest knots reach the top.
 const EJECTA_TOP: f64 = 250.0;
 const EJECTA_GAMMA: f64 = 2.0;
-/// Ejecta at or below this level are neutral `Starlight` bodies; only the brighter
+/// Ejecta at or below this level are grey `Structure` bodies; only the brighter
 /// knots and fingertips take their element's colour (critic round 2).
 const BODY_TOP: u8 = 110;
 /// The young remnant's exposure lift (×(1 + `EARLY_LIFT`) at the start), fading out over
@@ -99,13 +99,40 @@ fn ejecta_curve() -> &'static [u8; 256] {
         std::array::from_fn(|i| ink::level(EJECTA_TOP * (i as f64 / 255.0).powf(EJECTA_GAMMA)))
     })
 }
-/// Element colours (M14, ADR-0017; were Chandra's teal Si, orange Fe, blue O): the
-/// forward shock a faint neutral `Starlight` line, sulfur/silicon `Sulfur`, iron `HAlpha`
-/// red, oxygen `Ice`.
-const RIM: Ramp = Ramp::Starlight;
-const SILICON: Ramp = Ramp::Sulfur;
-const IRON: Ramp = Ramp::HAlpha;
-const OXYGEN: Ramp = Ramp::Ice;
+/// Element colours in M11's semantic roles (ADR-0018; false colour, as Chandra's
+/// composites): the forward shock a faint blue line, silicon/sulfur yellow, iron red,
+/// oxygen cyan, each one flat level on the knots and fingertips.
+const RIM: Ink = Ink::new(Role::Cold, 70);
+const SILICON: Ink = Ink::new(Role::Sun, 210);
+const IRON: Ink = Ink::new(Role::Hot, 220);
+const OXYGEN: Ink = Ink::new(Role::Wave, 200);
+/// The filaments' bodies: two flat grey steps.
+const BODY: [Ink; 2] = [
+    Ink::new(Role::Structure, 10),
+    Ink::new(Role::Structure, 110),
+];
+/// The central compact object, and the explosion's white heart.
+const COMPACT: Ink = Ink::new(Role::Star, 200);
+const FLASH: Ink = Ink::new(Role::Star, 255);
+
+/// Ink of a remnant pixel from the shock's level `l_rim` and the ejecta's curve level
+/// `l_ej` (0–255): black below the faintest step, the shock where it outshines the
+/// ejecta, grey filament bodies, and the element's colour on the knots.
+fn ejecta_ink(l_rim: u8, l_ej: u8, element: Element) -> Ink {
+    if f64::from(l_rim.max(l_ej)) < ink::MIN_VISIBLE_LEVEL {
+        Ink::BLANK
+    } else if l_rim >= l_ej {
+        RIM
+    } else if l_ej <= BODY_TOP {
+        BODY[usize::from(l_ej >= 55)]
+    } else {
+        match element {
+            Element::Iron => IRON,
+            Element::Oxygen => OXYGEN,
+            Element::Silicon => SILICON,
+        }
+    }
+}
 
 /// Which element dominates a patch of ejecta.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -548,7 +575,7 @@ impl SupernovaRemnant {
         let (aux, ej_buf) = (&self.aux, self.knot_glow.values());
         let env32 = env as f32;
         // The young remnant is small and faint: a lift that fades out over its first
-        // seconds keeps it legible (GEN-R21), like a camera opening up.
+        // seconds keeps it legible, like a camera opening up.
         let early =
             (1.0 + EARLY_LIFT * (1.0 - ease::smoothstep((self.tau - T0) / EARLY_SPAN))) as f32;
         self.pixels.shade(|x, y| {
@@ -559,34 +586,17 @@ impl SupernovaRemnant {
             let (rim, element) = unpack(packed);
             let l_rim = ink::level((f64::from(rim * env32 * early)).min(1.0) * f64::from(RIM_MAX));
             let l_ej = ejecta_curve()[usize::from(t_ej.level(EJECTA_GAIN * early * ej * env32))];
-            if f64::from(l_rim.max(l_ej)) < ink::MIN_VISIBLE_LEVEL {
-                return Ink::BLANK;
-            }
-            if l_rim >= l_ej {
-                Ink::new(Role::Ramp(RIM), l_rim)
-            } else if l_ej <= BODY_TOP {
-                // The filaments' bodies: neutral, low chroma (critic round 2).
-                Ink::new(Role::Ramp(Ramp::Starlight), l_ej)
-            } else {
-                // Knots and fingertips: the element's line colour.
-                let ramp = match element {
-                    Element::Iron => IRON,
-                    Element::Oxygen => OXYGEN,
-                    Element::Silicon => SILICON,
-                };
-                Ink::new(Role::Ramp(ramp), l_ej)
-            }
+            ejecta_ink(l_rim, l_ej, element)
         });
         // Background stars, then the central compact object and the flash.
         for &(x, y, l) in &self.stars {
             if self.pixels.get(x, y) == Some(Ink::BLANK) {
-                self.pixels
-                    .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
+                let l = if l > 120 { 120 } else { 40 };
+                self.pixels.set(x, y, Ink::new(Role::Star, l));
             }
         }
         let (cx, cy) = (self.centre.0.floor() as i32, self.centre.1.floor() as i32);
-        self.pixels
-            .set(cx, cy, Ink::new(Role::Ramp(Ramp::Starlight), 200));
+        self.pixels.set(cx, cy, COMPACT);
         let flash = 1.0 - ease::smoothstep(self.tau / 1.5);
         if flash > 0.0 {
             let radius = 1.0 + 0.07 * self.half * flash;
@@ -595,12 +605,17 @@ impl SupernovaRemnant {
                 let d =
                     (f64::from(x) + 0.5 - self_c.0).hypot(f64::from(y) + 0.5 - self_c.1) / radius;
                 let v = 255.0 * flash * cover * (1.0 - d.min(1.0)).powi(2);
-                if v >= ink::MIN_VISIBLE_LEVEL {
-                    pixels.set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), ink::level(v)));
-                }
+                // The flash in flat rings: white, yellow, orange.
+                let ink = match v {
+                    v if v >= 150.0 => Ink::new(Role::Star, 230),
+                    v if v >= 60.0 => Ink::new(Role::Sun, 220),
+                    v if v >= ink::MIN_VISIBLE_LEVEL => Ink::new(Role::Hot, 150),
+                    _ => return,
+                };
+                pixels.set(x, y, ink);
             });
             if flash > 0.3 {
-                self.pixels.set(cx, cy, ink::blackbody(25_000.0));
+                self.pixels.set(cx, cy, FLASH);
             }
         }
     }
@@ -772,10 +787,10 @@ mod tests {
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(x, y).unwrap();
-                // M14: the shock shares `Starlight` with the ejecta's bodies, the stars
-                // and the compact object, so its pixels are those the rim field owns.
+                // The shock's ink is its own flat blue; count the pixels the rim
+                // field owns.
                 let (rim, _) = unpack(g.aux[y as usize * w + x as usize]);
-                if rim > 0.0 && ink.role == Role::Ramp(RIM) && ink.level <= RIM_MAX {
+                if rim > 0.0 && ink == RIM {
                     let (dx, dy) = (
                         f64::from(x) + 0.5 - g.centre.0,
                         g.centre.1 - f64::from(y) - 0.5,
@@ -791,8 +806,8 @@ mod tests {
     }
 
     #[test]
-    fn snr_a7_neutral_bodies_coloured_crests_and_a_legible_start() {
-        // Critic round 2: the ejecta's bodies are neutral `Starlight` ≤ `BODY_TOP`; only
+    fn snr_a7_grey_bodies_coloured_knots_and_a_legible_start() {
+        // The ejecta's bodies are grey `Structure` steps (≤ `BODY_TOP`); only
         // brighter knots and fingertips take an element colour. And the young remnant
         // reads from the first second.
         let (mut g, mut ctx) = built(Size::new(200, 50));
@@ -821,9 +836,15 @@ mod tests {
         for y in 0..i32::from(px.height()) {
             for x in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(x, y).unwrap();
-                if matches!(ink.role, Role::Ramp(r) if r == SILICON || r == IRON || r == OXYGEN) {
-                    assert!(ink.level > BODY_TOP, "({x}, {y}): {ink:?}");
+                // ADR-0018: grey bodies, flat element colours on the knots, nothing else.
+                if [SILICON, IRON, OXYGEN].contains(&ink) {
                     coloured += 1;
+                } else {
+                    assert!(
+                        matches!(ink.role, Role::Background | Role::Structure | Role::Star)
+                            || ink == RIM,
+                        "({x}, {y}): {ink:?}"
+                    );
                 }
             }
         }
@@ -880,7 +901,7 @@ mod tests {
             if g.tau < prev_tau {
                 // Just restarted: the centre is a flash, every knot dark again.
                 let (cx, cy) = (g.centre.0.floor() as i32, g.centre.1.floor() as i32);
-                assert_eq!(g.pixels.get(cx, cy).unwrap().role, Role::Blackbody);
+                assert_eq!(g.pixels.get(cx, cy), Some(FLASH));
                 assert!(
                     g.knots
                         .iter()

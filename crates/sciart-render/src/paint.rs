@@ -13,10 +13,12 @@ use sciart_core::{Canvas, Ink, Role};
 use crate::Theme;
 use crate::theme::{HuePos, hue_pos, lut, per_cell, rainbow_at, role_index};
 
-/// Largest per-channel change from the emitted colour that is not re-sent (RND-R14): two
-/// 8-bit levels, below what a viewer can see on a moving field, small enough that a slow
-/// fade still steps.
-pub const HYSTERESIS: u8 = 2;
+/// Largest per-channel change from the emitted colour that is not re-sent (RND-R14): four
+/// 8-bit levels (1.6 % of the range), below what a viewer can see on a moving field, small
+/// enough that a slow fade still steps. Was 2 at M14; 4 since M15 (ADR-0018), where M11's
+/// full-screen fields made the gallery's output 12 % larger and this band makes up for it
+/// without touching any scene's inks (RT-R16).
+pub const HYSTERESIS: u8 = 4;
 
 /// Write every canvas cell that fits inside `area` into `buf` (RND-R3), with the exact
 /// theme colours.
@@ -378,6 +380,80 @@ mod tests {
         let mut exact = Painter::exact();
         paint_level(&mut exact, Theme::Astro, 200);
         assert_eq!(paint_level(&mut exact, Theme::Astro, 201), seq(201));
+    }
+
+    #[test]
+    fn rnd_r14_band_is_four_levels_per_channel() {
+        // M15 (ADR-0018): 4, not 2; the RT-R16 byte budget holds the M11 fields with it.
+        assert_eq!(HYSTERESIS, 4);
+        let c = |r, g, b| pack(crate::Rgb(r, g, b));
+        assert!(
+            near(c(100, 100, 100), c(104, 96, 104)),
+            "a move of 4 is kept"
+        );
+        assert!(
+            !near(c(100, 100, 100), c(105, 100, 100)),
+            "a move of 5 is re-emitted"
+        );
+        assert!(!near(c(100, 100, 100), c(100, 100, 95)), "in every channel");
+        assert!(
+            !near(DEFAULT, c(1, 1, 1)),
+            "default and a colour are never near"
+        );
+        assert!(near(DEFAULT, DEFAULT));
+    }
+
+    /// Paints one `*` glyph inked `ink`, through `painter`; returns its foreground.
+    fn paint_glyph(painter: &mut Painter, ink: Ink) -> Color {
+        let mut canvas = Canvas::new(Size::new(1, 1), GlyphMode::Unicode);
+        canvas.put(0, 0, Glyph::ascii('*'), ink);
+        let area = Rect::new(0, 0, 1, 1);
+        let mut buf = Buffer::empty(area);
+        painter.paint(&canvas, Theme::Astro, area, &mut buf);
+        buf[(0, 0)].fg
+    }
+
+    #[test]
+    fn rnd_r14_every_role_keeps_moves_within_the_band_and_re_emits_larger_ones() {
+        // The band is the same for every role: glyph inks (Star, Wave, Text, Hot) as
+        // well as the field roles. From level 120, each next level is kept exactly when
+        // its colour is within HYSTERESIS of the emitted one in every channel.
+        let (mut kept, mut sent) = (0, 0);
+        for role in [
+            Role::Star,
+            Role::Wave,
+            Role::Text,
+            Role::Hot,
+            Role::Seq,
+            Role::Div,
+        ] {
+            for next in 110..=140u8 {
+                let mut painter = Painter::new();
+                let base = paint_glyph(&mut painter, Ink::new(role, 120));
+                let truth = rgb(Theme::Astro, Ink::new(role, next));
+                let got = paint_glyph(&mut painter, Ink::new(role, next));
+                let d = channels(base)
+                    .iter()
+                    .zip(channels(truth))
+                    .map(|(a, b)| a.abs_diff(b))
+                    .max()
+                    .unwrap_or(0);
+                if d <= HYSTERESIS {
+                    assert_eq!(got, base, "{role:?} {next}: a move of {d} is kept");
+                    kept += 1;
+                } else {
+                    assert_eq!(got, truth, "{role:?} {next}: a move of {d} is exact");
+                    sent += 1;
+                }
+                // The epoch reset (scene switch, reset, quarantine) clears the memory.
+                painter.reset();
+                assert_eq!(paint_glyph(&mut painter, Ink::new(role, next)), truth);
+            }
+        }
+        assert!(
+            kept > 0 && sent > 0,
+            "both cases occur: {kept} kept, {sent} sent"
+        );
     }
 
     #[test]

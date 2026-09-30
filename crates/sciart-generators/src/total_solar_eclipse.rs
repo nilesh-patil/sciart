@@ -73,7 +73,7 @@ const SKY_DARK: f64 = 0.0;
 const SKY_LIT: f64 = 0.0;
 const GLARE: f64 = 95.0;
 const GLARE_R: f64 = 1.1;
-/// GEN-R18: the air is black overhead. Its light ramps in (smoothstep) from `SKY_TOP` of
+/// Dark ground: the air is black overhead. Its light ramps in (smoothstep) from `SKY_TOP` of
 /// the picture's height down to the horizon, so only the lower sky holds the dim blue.
 const SKY_TOP: f64 = 0.55;
 /// Below these levels the light is drawn as true black (blank): the sky's `Ice` has a navy
@@ -341,7 +341,7 @@ pub struct Eclipse {
     glare: Vec<u8>,
     /// Corona rows filled so far (`fill_corona`).
     corona_rows: usize,
-    /// Per pixel row: the air's share of its light by height (0 overhead, GEN-R18).
+    /// Per pixel row: the air's share of its light by height (0 overhead).
     rows: Vec<f32>,
     /// A few bright planets and stars that come out in totality (px, level).
     lights: Vec<(i32, i32, u8)>,
@@ -782,7 +782,7 @@ mod tests {
             g.prepare();
             if g.f >= CORONA_F {
                 // The corona's light is off; the pale glare round the uncovered Sun is the
-                // only pearl light off the disc (GEN-R18 grading), so it is left out below.
+                // only pearl light off the disc (dark-ground grading), so it is left out below.
                 assert_eq!(g.corona_vis(), 0.0, "f = {}", g.f);
                 let corona = g.picture.pixel_size().area();
                 let mut n = 0;
@@ -991,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn ecl_a10_gen_r18_black_overhead_and_the_corona_fades_to_black() {
+    fn ecl_a10_black_overhead_and_the_corona_fades_to_black() {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         let (cx, cy, r) = (g.centre.0, g.centre.1, g.radius);
         for t in [2.0, 6.0, 10.0, 19.0, 30.0, 36.0] {

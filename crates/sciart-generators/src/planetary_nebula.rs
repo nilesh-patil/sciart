@@ -90,18 +90,17 @@ const RING_WOBBLE: f64 = 0.04;
 const HAZE: f64 = 0.25;
 const TEXTURE_SALT: u64 = 0x5eed_ca75;
 const NII_MAX: u8 = 205;
-/// ADR-0017 (M14): [O III] in `Ramp(Ice)` at `OIII_TOP·u^OIII_GAMMA` of its toned value
-/// `u`, its interior floor `OIII_FLOOR` (was 0.22): a contrast curve, so the interior is
-/// dark and the shells' limbs read as thin bright shells (their crests legible, GEN-R21);
-/// [N II] a thin `HAlpha` rim up to `NII_TOP`; no ionised halo; the FLIERs 1–2 px knots;
-/// the central star one pixel.
+/// [O III] at `OIII_TOP·u^OIII_GAMMA` of its toned value `u`, its interior floor
+/// `OIII_FLOOR`: a contrast curve, so the interior is dark and the shells' limbs read as
+/// thin bright shells; [N II] a thin rim up to `NII_TOP`; no ionised halo; the FLIERs
+/// 1–2 px knots; the central star one pixel. [`emission_ink`] steps the levels.
 const OIII_TOP: f64 = 210.0;
 const OIII_GAMMA: f64 = 3.5;
-/// The AGB rings are dust seen in reflected starlight: neutral `Ramp(Starlight)`, their
-/// emission `u` (0–1) at `RING_TOP·u^RING_GAMMA`, thin bright arcs (was `Ember` ≤ 80).
+/// The AGB rings are dust seen in reflected starlight (neutral grey), their emission `u`
+/// (0–1) at `RING_TOP·u^RING_GAMMA`, thin bright arcs.
 const RING_TOP: f64 = 180.0;
 const RING_GAMMA: f64 = 1.2;
-/// Exposure before the contrast curves, so the crests reach the tops (GEN-R21).
+/// Exposure before the contrast curves, so the crests reach the tops.
 const RING_GAIN: f64 = 1.5;
 const OIII_GAIN: f32 = 4.0;
 
@@ -118,8 +117,7 @@ fn curves() -> &'static ([f32; 256], [f32; 256]) {
 }
 const OIII_FLOOR: f64 = 0.0;
 const NII_TOP: f64 = 70.0;
-/// [O III] keeps its colour only on the shells' crests, from this level up; below it the
-/// shells are neutral `Starlight` (critic round 2: less saturated cyan).
+/// [O III] is cyan on the shells' crests, from this level up; green below.
 const OIII_TINT: f64 = 120.0;
 
 /// The AGB wind's clumpy texture at sky offset `(x, y)` (H): a warp in `[−½, ½]` and a
@@ -480,25 +478,12 @@ impl PlanetaryNebula {
                 NII_TOP * f64::from(tone.level(n as f32 * env).min(NII_MAX)) / f64::from(NII_MAX);
             let u = (RING_GAIN * r * f64::from(env)).clamp(0.0, 1.0);
             let lr = f64::from(curves().1[(u * 255.0).round() as usize]);
-            if ln >= lo && ln >= ink::MIN_VISIBLE_LEVEL {
-                Ink::new(Role::Ramp(Ramp::HAlpha), ink::level(ln))
-            } else if lo >= ink::MIN_VISIBLE_LEVEL {
-                if lo >= OIII_TINT {
-                    Ink::new(Role::Ramp(Ramp::Ice), ink::level(lo))
-                } else {
-                    Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lo))
-                }
-            } else if lr >= ink::MIN_VISIBLE_LEVEL {
-                // The faint outskirts fade smoothly to black (no dither, ADR-0017).
-                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(lr))
-            } else {
-                Ink::BLANK
-            }
+            emission_ink(lo, ln, lr)
         });
         for &(x, y, l) in &self.stars {
             if self.pixels.get(x, y) == Some(Ink::BLANK) {
-                self.pixels
-                    .set(x, y, Ink::new(Role::Ramp(Ramp::Starlight), l));
+                let l = if l > 120 { 120 } else { 40 };
+                self.pixels.set(x, y, Ink::new(Role::Star, l));
             }
         }
         self.star();
@@ -508,14 +493,35 @@ impl PlanetaryNebula {
     fn star(&mut self) {
         let tau = self.tau();
         let heat = ease::smoothstep((tau - T_WIND + 1.0) / 6.0);
-        let kelvin = ease::lerp(3_200.0, 30_000.0, heat);
-        // One pixel (ADR-0017), at its temperature: an orange giant, then a white-hot core.
+        // One pixel: an orange giant, then a yellow and finally a white-hot core.
+        let ink = match heat {
+            h if h < 0.3 => Ink::new(Role::Hot, 255),
+            h if h < 0.7 => Ink::new(Role::Sun, 255),
+            _ => Ink::new(Role::Star, 255),
+        };
         let c = self.centre;
-        self.pixels.set(
-            c.0.floor() as i32,
-            c.1.floor() as i32,
-            ink::blackbody(kelvin),
-        );
+        self.pixels.set(c.0.floor() as i32, c.1.floor() as i32, ink);
+    }
+}
+
+/// The nebula in M11's flat, complementary steps (ADR-0018), from the curve levels of
+/// [O III] `lo`, [N II] `ln` and the dust rings `lr` (0–255): a red [N II] rim (`Hot`),
+/// green [O III] shells with cyan crests (`Particle`, `Wave`), the AGB rings as grey dust
+/// (`Structure`), black below the faintest step.
+pub(crate) fn emission_ink(lo: f64, ln: f64, lr: f64) -> Ink {
+    let min = ink::MIN_VISIBLE_LEVEL;
+    if ln >= lo && ln >= min {
+        Ink::new(Role::Hot, if ln >= 40.0 { 220 } else { 70 })
+    } else if lo >= min {
+        match lo {
+            l if l >= OIII_TINT => Ink::new(Role::Wave, 200),
+            l if l >= 50.0 => Ink::new(Role::Particle, 100),
+            _ => Ink::new(Role::Particle, 0),
+        }
+    } else if lr >= 40.0 {
+        Ink::new(Role::Structure, if lr >= 90.0 { 140 } else { 10 })
+    } else {
+        Ink::BLANK
     }
 }
 
@@ -669,12 +675,12 @@ mod tests {
             for ix in 0..i32::from(px.width()) {
                 let ink = g.pixels.get(ix, iy).unwrap();
                 let (q, d) = rim_distance(&g, ix, iy);
-                if ink.role == Role::Ramp(Ramp::Ice) {
-                    // M14: [O III] is `Ice`, inside the bubble only (no halo).
+                if matches!(ink.role, Role::Wave | Role::Particle) {
+                    // [O III] is green/cyan, inside the bubble only (no halo).
                     oiii += 1;
                     assert!(q < 1.0 + 0.1, "[O III] outside the bubble at q = {q}");
                 }
-                if ink.role == Role::Ramp(Ramp::HAlpha) {
+                if ink.role == Role::Hot && ink.level < 255 {
                     nii += 1;
                     let (x, y) = (
                         f64::from(ix) + 0.5 - g.centre.0,
@@ -696,9 +702,9 @@ mod tests {
 
     #[test]
     fn pne_a6_thin_shells_on_black_and_a_one_pixel_star() {
-        // ADR-0017 (M14): at 200×50 in the ionised act the bubble's middle is dark (thin
-        // shells, no fill), [N II] stays ≤ 100, [O III] ≤ 210, the AGB rings are neutral
-        // `Starlight` (no `Ember`, no dither), and the star is a single `Blackbody` pixel.
+        // ADR-0018: at 200×50 in the ionised act the bubble's middle is free of the cyan
+        // crests (thin shells), the nebula is drawn in M11's roles, and the star is a
+        // single full-level pixel.
         let (mut g, mut ctx) = built(Size::new(200, 50));
         for t in [3.0, 8.0, 20.0, 30.0] {
             g.t = t;
@@ -709,17 +715,24 @@ mod tests {
             for iy in 0..i32::from(px.height()) {
                 for ix in 0..i32::from(px.width()) {
                     let ink = g.pixels.get(ix, iy).unwrap();
-                    match ink.role {
-                        Role::Ramp(Ramp::HAlpha) => assert!(f64::from(ink.level) <= NII_TOP + 1.0),
-                        Role::Ramp(Ramp::Ice) => assert!(f64::from(ink.level) <= OIII_TOP + 1.0),
-                        Role::Ramp(Ramp::Ember) => panic!("t {t}: Ember at ({ix}, {iy})"),
-                        Role::Blackbody => star += 1,
-                        _ => {}
-                    }
+                    assert!(
+                        matches!(
+                            ink.role,
+                            Role::Background
+                                | Role::Hot
+                                | Role::Sun
+                                | Role::Star
+                                | Role::Wave
+                                | Role::Particle
+                                | Role::Structure
+                        ),
+                        "t {t}: {ink:?} at ({ix}, {iy})"
+                    );
+                    star += usize::from(ink.level == 255);
                     let (q, _) = rim_distance(&g, ix, iy);
                     if t >= 20.0 && q < 0.35 {
                         inside += 1;
-                        dark += usize::from(ink == Ink::BLANK || ink.role != Role::Ramp(Ramp::Ice));
+                        dark += usize::from(ink == Ink::BLANK || ink.role != Role::Wave);
                     }
                 }
             }

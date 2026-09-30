@@ -1,5 +1,8 @@
-//! Art metrics over a painted frame (RND-R13; GEN-R17 blockiness, GEN-R18 darkness,
-//! GEN-R21 clean minimal style: lit coverage, chroma mass, edge weight, neon cap).
+//! Art metrics over a painted frame (RND-R13): blockiness, darkness, and the clean-style
+//! measures lit coverage, chroma mass, edge weight, chroma p90 and lit-luma p99. The M14
+//! rules built on them (GEN-R17, GEN-R18, GEN-R21) are superseded (ADR-0018); darkness,
+//! lit coverage, chroma mass and edge weight still hold each scene's reviewed look as a
+//! per-scene band (GEN-R24), the others are reported by the probe only.
 //!
 //! All work on the half-block *pixel grid* of a painted ratatui [`Buffer`]: every cell is
 //! two pixels, top and bottom. A `▀` cell is its foreground on top and its background
@@ -42,11 +45,11 @@ pub struct ArtMetrics {
     pub darkness: f64,
     /// Mean luma of the ground pixels, default background counting as 0, in `[0, 1]`.
     pub mean_luma: f64,
-    /// GEN-R21 measures, on the preview grid (see [`clean_grid`]).
+    /// Clean-style measures, on the preview grid (see [`clean_grid`]).
     pub clean: Clean,
 }
 
-/// The GEN-R21 clean-style measures of one frame (ADR-0017).
+/// The clean-style measures of one frame (RND-R13; bands per scene, GEN-R24).
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct Clean {
     /// Share of pixels that are lit (max channel > [`DARK_MAX`]), in `[0, 1]`.
@@ -57,19 +60,21 @@ pub struct Clean {
     /// mean half-width of a filled shape in grid pixels (tens for big blobs).
     pub edge_weight: f64,
     /// 90th percentile of OKLCh chroma over the lit pixels (0 with 50 or fewer lit): the
-    /// neon cap, at most [`NEON_CAP`] for every scene.
+    /// M14 neon cap was [`NEON_CAP`].
     pub chroma_p90: f64,
     /// 99th percentile of the luma of the lit pixels (0 with none lit): the subject's
-    /// brightest parts, at least [`LEGIBLE_LUMA`] for every scene (GEN-R21 legible subject).
+    /// brightest parts (M14's legible-subject floor was [`LEGIBLE_LUMA`]).
     /// Unlike the other clean measures it is read from the half-block pixel grid's *shown*
     /// colours (a braille dot counts at its glyph colour): on the pooled preview grid a
     /// quarter-covered dot can never be brighter than luma ≈ 0.3.
     pub lit_luma_p99: f64,
 }
 
-/// GEN-R21's global ceiling on [`Clean::chroma_p90`].
+/// M14's global ceiling on [`Clean::chroma_p90`] (the superseded GEN-R21 neon cap; a
+/// reference value for the probe, no longer enforced, ADR-0018).
 pub const NEON_CAP: f64 = 0.20;
-/// GEN-R21's global floor on [`Clean::lit_luma_p99`].
+/// M14's global floor on [`Clean::lit_luma_p99`] (the superseded GEN-R21 legible subject;
+/// a reference value for the probe, no longer enforced, ADR-0018).
 pub const LEGIBLE_LUMA: f64 = 0.6;
 
 /// numpy's default percentile of sorted `v` (linear between order statistics).
@@ -475,7 +480,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r17_nearest_upsampled_plateaus_are_blocky() {
+    fn rnd_r13_nearest_upsampled_plateaus_are_blocky() {
         // A 4-pixel nearest upsample of a gentle ramp: 4×4 plateaus, stair steps between.
         let px = grid(16, 8, |x, _| {
             Px::Field(Rgb(100 + 8 * (x / 4) as u8, 90, 90))
@@ -484,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r17_smooth_gradient_is_not_blocky() {
+    fn rnd_r13_smooth_gradient_is_not_blocky() {
         let px = grid(16, 8, |x, y| {
             Px::Field(Rgb(100 + 3 * x as u8, 90 + y as u8, 90))
         });
@@ -492,7 +497,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r17_background_and_isolated_flats_do_not_count() {
+    fn rnd_r13_background_and_isolated_flats_do_not_count() {
         // Default and near-black ground never count.
         assert_eq!(blockiness(8, &grid(8, 8, |_, _| Px::Default)), 0.0);
         assert_eq!(
@@ -521,7 +526,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r17_glyph_pixels_break_flats() {
+    fn rnd_r13_glyph_pixels_break_flats() {
         let px = grid(8, 8, |x, y| {
             if (x + y) % 3 == 0 {
                 Px::Glyph
@@ -533,7 +538,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r18_darkness_counts_default_and_truly_black_ground() {
+    fn rnd_r13_darkness_counts_default_and_truly_black_ground() {
         let ground = [
             None,
             Some(Rgb(28, 20, 10)),
@@ -550,7 +555,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r21_chroma_is_zero_for_grey_and_matches_oklab_references() {
+    fn rnd_r13_chroma_is_zero_for_grey_and_matches_oklab_references() {
         assert!(oklch_chroma([120.0; 3]) < 1e-6 && oklch_chroma([255.0; 3]) < 1e-6);
         // OKLab reference values: sRGB red C ≈ 0.2577, blue ≈ 0.3132.
         assert!((oklch_chroma([255.0, 0.0, 0.0]) - 0.2577).abs() < 1e-3);
@@ -566,7 +571,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r21_thin_lines_weigh_one_and_blobs_weigh_their_half_width() {
+    fn rnd_r13_thin_lines_weigh_one_and_blobs_weigh_their_half_width() {
         let red = [200.0, 30.0, 30.0];
         let line = clean_with(40, 40, red, |x, y| y == 20 && x > 2);
         assert!((line.edge_weight - 1.0).abs() < 1e-12);
@@ -595,7 +600,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r21_lit_luma_p99_reads_the_brightest_lit_pixels() {
+    fn rnd_r13_lit_luma_p99_reads_the_brightest_lit_pixels() {
         // 99 dim lit pixels and one white one: p99 interpolates towards white.
         let mut px = vec![Some(Rgb(60, 60, 60)); 99];
         px.push(Some(Rgb(255, 255, 255)));
@@ -610,7 +615,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r21_neon_cap_needs_more_than_fifty_lit_pixels() {
+    fn rnd_r13_neon_cap_needs_more_than_fifty_lit_pixels() {
         let few = clean_with(20, 20, [255.0, 0.0, 255.0], |x, y| y == 0 && x < 50);
         assert_eq!(few.chroma_p90, 0.0, "20 lit pixels: no percentile");
         let many = clean_with(100, 2, [255.0, 0.0, 255.0], |_, y| y == 0);
@@ -622,7 +627,7 @@ mod tests {
     }
 
     #[test]
-    fn gen_r21_clean_grid_mirrors_the_preview() {
+    fn rnd_r13_clean_grid_mirrors_the_preview() {
         let mut buf = Buffer::empty(Rect::new(0, 0, 3, 2));
         buf[(0, 0)].set_char('▀').set_fg(Color::Rgb(200, 0, 0));
         buf[(1, 0)].set_char('⠁').set_fg(Color::Rgb(255, 255, 255)); // dot 1: top left

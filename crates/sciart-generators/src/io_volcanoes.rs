@@ -22,7 +22,7 @@ use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::{cell_key, hash01, value_noise};
-use sciart_core::{Grid, ease, ink};
+use sciart_core::{Grid, ease};
 
 use crate::shared::plume::{self, Plume};
 use crate::shared::vortex_advect::{XEdge, sample};
@@ -68,27 +68,33 @@ const _: () = assert!(WARM % WARM_STRIDE == 0, "the stride divides the warm-up")
 /// Dark calderas scattered over the globe, and how many of them hold glowing lava.
 const PATERAE: usize = 70;
 const LAVA: usize = 14;
-/// ADR-0017: grain dots' Ice level from the vent to the canopy top, the lava lakes' and
-/// vents' temperatures (K), cold to hot.
-const GRAIN_LEVEL: (f64, f64) = (110.0, 215.0);
-const LAVA_K: (f64, f64) = (3800.0, 6000.0);
-const VENT_K: (f64, f64) = (4500.0, 7000.0);
-/// The ground's base values (ADR-0017): pale cream-yellow plains at L ≈ 0.6, drawn as cream
-/// `Starlight` with soft patches of yellow `Sulfur` at the same lightness (no ramp has a
-/// low-chroma yellow), whiter SO₂ frost (`Starlight`) and tan highlands (`Sienna`).
-const GROUND: Ground = Ground {
-    sulfur: 0.64,
-    cream: 0.6,
-    frost: 0.74,
-    rust: 0.56,
-};
+/// The ground in M11's flat, stepped semantic colours (ADR-0018), one level per light step
+/// ([`lit_step`]): ochre plains with brighter sulfur-yellow patches (`Sun`), white SO₂
+/// frost (`Star`), rust highlands (`Hot`), black paterae with a dark rust rim.
+const PLAINS: [u8; 3] = [25, 65, 105];
+const SULFUR: [u8; 3] = [120, 165, 210];
+const FROST: [u8; 3] = [60, 120, 180];
+const RUST: [u8; 3] = [10, 50, 90];
+const PATERA: Ink = Ink::new(Role::Dim, 0);
+const RIM: Ink = Ink::new(Role::Hot, 0);
+/// The fallout rings: Pele's red (`Hot`) and Prometheus' white (`Star`), by light step.
+const RED_RING: [u8; 3] = [120, 170, 220];
+const WHITE_RING: [u8; 3] = [150, 195, 240];
+/// Background stars: small, dim white points.
+const STAR: Ink = Ink::new(Role::Star, 40);
+/// Lava lakes (orange, flickering to yellow) and the vents (pulsing to white): the hot
+/// accents (IO-A5, IO-A8).
+const LAVA_INK: Ink = Ink::new(Role::Hot, 255);
+const LAVA_HOT: Ink = Ink::new(Role::Sun, 255);
+const VENT_HOT: Ink = Ink::new(Role::Star, 255);
+/// Plume grains, cyan against space, brighter high in the canopy where they crowd (IO-A6).
+const GRAIN_LOW: Ink = Ink::new(Role::Wave, 70);
+const GRAIN_HIGH: Ink = Ink::new(Role::Wave, 200);
 
-#[derive(Debug, Clone, Copy)]
-struct Ground {
-    sulfur: f64,
-    cream: f64,
-    frost: f64,
-    rust: f64,
+/// Io's light (`io_light`, 0.52 … 1) in three flat steps: the terminator side, the
+/// day side, the sub-solar highlight.
+fn lit_step(lit: f64) -> usize {
+    usize::from(lit > 0.7) + usize::from(lit > 0.88)
 }
 /// The fallout rings are repainted one row in `BANDS` per frame.
 const BANDS: i32 = 6;
@@ -457,47 +463,32 @@ impl IoVolcanoes {
             .map(|&(c, rad)| (1.0 - dot(n, c)).max(0.0).sqrt() * SQRT_2 / rad)
             .fold(f64::INFINITY, f64::min);
         if patera < 1.0 {
-            // Black caldera floors (fresh silicate lava) with a dark brown rim.
-            return if patera < 0.75 {
-                ink::ramp(Ramp::Starlight, 0.1 + 0.05 * patera)
-            } else {
-                ink::ramp(Ramp::Sienna, 0.2 + 0.05 * lit)
-            };
+            // Black caldera floors (fresh silicate lava) with a dark rust rim.
+            return if patera < 0.75 { PATERA } else { RIM };
         }
         let mottle = fbm(0x10, 2.0 * u, 2.0 * w, 3);
         let frost = fbm(0x13, 1.1 * u + 7.0, 1.1 * w, 2);
         // Io's poles are darker and redder than its sulfur-yellow equator.
         let polar = ease::smoothstep(((lat.abs() - 0.75) / 0.5).clamp(0.0, 1.0));
-        // Boundaries between the units are soft: the sulfur pales to lemon-cream for a few
-        // pixels before a frost patch, which starts at a cream level; the highlands start
-        // pale (tan, close to the plains' lightness) and deepen inward, mottled, only as
-        // far as a capped rust, so every step across a unit edge is small (IO-A9).
+        // One step lighter or darker by the mottling, so the flat units have texture.
+        let step = (lit_step(lit) + usize::from(mottle > 0.62)).min(2);
         if frost > 0.74 {
-            // SO₂ frost: pale grey fields with a soft edge.
-            let f = ease::smoothstep(((frost - 0.74) / 0.16).clamp(0.0, 1.0));
-            return ink::ramp(
-                Ramp::Starlight,
-                ((GROUND.frost + 0.08 * f + 0.06 * (mottle - 0.5)) * lit).max(0.45),
-            );
+            // SO₂ frost: white fields.
+            return Ink::new(Role::Star, FROST[step]);
         }
         // The rust field only matters outside the frost (GEN-R19: not sampled there).
         let rust = fbm(0x17, 0.8 * u - 3.0, 1.0 * w + 1.0, 2);
         let rusty = rust + 0.25 * polar + 0.18 * (mottle - 0.5);
         if rusty > 0.74 {
             // Rust-brown highlands and the darker, redder poles.
-            let d = ease::smoothstep(((rusty - 0.74) / 0.16).clamp(0.0, 1.0));
-            ink::ramp(Ramp::Sienna, ((GROUND.rust - 0.06 * d) * lit).max(0.4))
+            Ink::new(Role::Hot, RUST[step])
         } else {
-            // Plains: cream, with soft patches of sulfur yellow at the same lightness,
-            // paling towards the frost.
-            let near_frost = ease::smoothstep(((frost - 0.62) / 0.12).clamp(0.0, 1.0));
+            // Plains: ochre, with patches of brighter sulfur yellow.
             let yellow = fbm(0x19, 1.4 * u + 2.0, 1.4 * w - 1.0, 2);
-            if yellow > 0.56 + 0.1 * near_frost {
-                let v = GROUND.sulfur + 0.05 * (mottle - 0.5) + 0.04 * near_frost;
-                ink::ramp(Ramp::Sulfur, (v * lit).clamp(0.42, 0.74))
+            if yellow > 0.56 {
+                Ink::new(Role::Sun, SULFUR[step])
             } else {
-                let v = GROUND.cream + 0.05 * (mottle - 0.5) + 0.06 * near_frost;
-                ink::ramp(Ramp::Starlight, (v * lit).max(0.42))
+                Ink::new(Role::Sun, PLAINS[step])
             }
         }
     }
@@ -512,7 +503,7 @@ impl IoVolcanoes {
                 let ink = if let Some(n) = self.io_normal(x, y) {
                     Self::ground_ink(n, &[])
                 } else if hash01(0x5E ^ cell_key(x, y)) < 0.002 {
-                    ink::ramp(Ramp::Starlight, 0.3 + 0.4 * hash01(0x5F ^ cell_key(x, y)))
+                    STAR
                 } else {
                     Ink::BLANK
                 };
@@ -604,7 +595,7 @@ impl IoVolcanoes {
                     }
                     let under = self.ground.get(x, y).unwrap_or(Ink::BLANK);
                     // Paterae stay black under the fallout.
-                    if under.role == Role::Ramp(Ramp::Starlight) && under.level < 60 {
+                    if under == PATERA {
                         continue;
                     }
                     let (a, b) = f.ground(n);
@@ -618,14 +609,12 @@ impl IoVolcanoes {
                     if a <= 0.05 {
                         continue;
                     }
-                    let lit = io_light(n);
+                    let step = lit_step(io_light(n));
                     let ink = match vent.deposit {
-                        // Pele: short-chain sulfur, a dull red-brown ring (ADR-0017).
-                        Deposit::Red => ink::ramp(Ramp::Sienna, (0.5 - 0.1 * a) * lit),
-                        // Prometheus: pale SO₂ frost.
-                        Deposit::White => {
-                            ink::ramp(Ramp::Starlight, (0.7 + 0.1 * a) * (0.85 + 0.15 * lit))
-                        }
+                        // Pele: short-chain sulfur, a red ring.
+                        Deposit::Red => Ink::new(Role::Hot, RED_RING[step]),
+                        // Prometheus: white SO₂ frost.
+                        Deposit::White => Ink::new(Role::Star, WHITE_RING[step]),
                     };
                     self.ground.set(x, y, ink);
                 }
@@ -652,23 +641,21 @@ impl IoVolcanoes {
         // (IO-A8).
         for (i, lake) in self.lakes.iter().enumerate() {
             if lake.on {
-                let k = LAVA_K.0 + (LAVA_K.1 - LAVA_K.0) * lava_flicker(i, self.t);
+                let hot = lava_flicker(i, self.t) > 0.5;
                 let (x, y) = (lake.x.floor() as i32, lake.y.floor() as i32);
-                self.pixels.set(x, y, ink::blackbody(k));
-                self.pixels.set(x + 1, y, ink::blackbody(0.8 * k));
+                let core = if hot { LAVA_HOT } else { LAVA_INK };
+                self.pixels.set(x, y, core);
+                self.pixels.set(x + 1, y, LAVA_INK);
             }
         }
         // Vent glows: the vent's pixel, pulsing with the tide (the accent, IO-A5).
         let pulse = vent_glow(self.t);
         for f in &self.frames {
             let (x, y) = v.to_px(f.place(0.0, 0.0, 0.0));
-            self.pixels.set(
-                x.floor() as i32,
-                y.floor() as i32,
-                ink::blackbody(VENT_K.0 + (VENT_K.1 - VENT_K.0) * pulse),
-            );
+            let ink = if pulse > 0.55 { VENT_HOT } else { LAVA_HOT };
+            self.pixels.set(x.floor() as i32, y.floor() as i32, ink);
         }
-        // The plumes: every live grain a braille dot on its ballistic arc, pale Ice,
+        // The plumes: every live grain a braille dot on its ballistic arc, cyan,
         // brighter high in the canopy where the grains crowd (IO-A6).
         self.dots.clear();
         for g in self.plume.iter() {
@@ -687,13 +674,10 @@ impl IoVolcanoes {
             }
             let apex = VENTS[k].v0 * VENTS[k].v0 / (2.0 * G_IO);
             let up = (h / apex).clamp(0.0, 1.0);
-            let level = GRAIN_LEVEL.0 + (GRAIN_LEVEL.1 - GRAIN_LEVEL.0) * up;
+            let ink = if up > 0.5 { GRAIN_HIGH } else { GRAIN_LOW };
             // The dot inside the grain's own pixel (two dots per pixel each way).
-            self.dots.set(
-                (2.0 * x).floor() as i32,
-                (2.0 * y).floor() as i32,
-                Ink::new(Role::Ramp(Ramp::Ice), ink::level(level)),
-            );
+            self.dots
+                .set((2.0 * x).floor() as i32, (2.0 * y).floor() as i32, ink);
         }
     }
 }
@@ -861,7 +845,7 @@ mod tests {
         assert!(vent_glow(0.0) > 0.9 && vent_glow(0.5 * TIDE_PERIOD) < 0.2);
     }
 
-    /// Braille plume cells (Ice) in the canvas rendered from `g`.
+    /// Braille plume cells (Wave) in the canvas rendered from `g`.
     fn plume_cells(g: &IoVolcanoes, size: Size) -> Vec<(i32, i32, Ink)> {
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
@@ -869,8 +853,7 @@ mod tests {
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let c = canvas.get(x, y).unwrap();
-                if ('\u{2801}'..='\u{28FF}').contains(&c.ch) && c.ink.role == Role::Ramp(Ramp::Ice)
-                {
+                if ('\u{2801}'..='\u{28FF}').contains(&c.ch) && c.ink.role == Role::Wave {
                     out.push((x, y, c.ink));
                 }
             }
@@ -880,7 +863,7 @@ mod tests {
 
     #[test]
     fn io_a6_the_plumes_are_grains_on_their_arcs_against_space() {
-        // ADR-0017: the plume is the live grains, one braille dot each, pale Ice, only
+        // ADR-0018: the plume is the live grains, one braille dot each, cyan Wave, only
         // against space, brighter high in the canopy; it moves from frame to frame.
         for (w, h) in [(120u16, 40u16), (200, 50)] {
             let size = Size::new(w, h);
@@ -892,9 +875,7 @@ mod tests {
                     (2 * y..2 * y + 2).any(|py| g.io_normal(x, py).is_none()),
                     "{w}x{h}: plume over the ground at {x},{y}"
                 );
-                assert!(
-                    (GRAIN_LEVEL.0 - 1.0..=GRAIN_LEVEL.1 + 1.0).contains(&f64::from(ink.level))
-                );
+                assert!(ink == GRAIN_LOW || ink == GRAIN_HIGH, "{ink:?}");
             }
             // The canopy's top is brighter than its foot.
             let top = cells.iter().map(|c| c.1).min().unwrap();
@@ -923,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn io_a9_io_is_shaded_as_a_sphere_with_soft_unit_edges() {
+    fn io_a9_io_is_shaded_as_a_sphere_in_flat_steps() {
         // Soft terminator and limb darkening: the light falls towards the lower-left limb.
         let n = |x: f64, y: f64| [x, y, (1.0 - x * x - y * y).sqrt()];
         assert!(io_light(n(-0.7, 0.3)) + 0.2 < io_light(n(0.2, -0.3)));
@@ -936,69 +917,61 @@ mod tests {
             assert!((l - prev).abs() < 0.02, "{k}: {prev} -> {l}");
             prev = l;
         }
-        // Unit edges: across neighbouring ground pixels of different units (sulfur, frost,
-        // highland), the ramp level jumps by more than 0.2 on < 8 % of the edges.
+        // ADR-0018: the light reaches the ground in three flat steps, so the whole bare
+        // globe is a handful of inks, and the lit side is brighter than the terminator.
+        assert_eq!(lit_step(io_light(n(-0.9, 0.3))), 0);
+        assert_eq!(lit_step(io_light(n(0.3, -0.35))), 2);
         let g = built(160, 50, 0.2);
         let size = g.base.pixel_size();
-        let unit = |i: Ink| match i.role {
-            Role::Ramp(Ramp::Sulfur) => Some(0),
-            Role::Ramp(Ramp::Starlight) if i.level >= 55 => Some(1),
-            Role::Ramp(Ramp::Sienna) if i.level >= 50 => Some(2),
-            _ => None,
-        };
-        let (mut edges, mut hard) = (0, 0);
+        let mut inks = std::collections::BTreeSet::new();
         for y in 0..i32::from(size.height()) {
-            for x in 0..i32::from(size.width()) - 1 {
-                let (a, b) = (g.base.get(x, y).unwrap(), g.base.get(x + 1, y).unwrap());
-                if let (Some(ua), Some(ub)) = (unit(a), unit(b))
-                    && ua != ub
-                {
-                    edges += 1;
-                    if (ink::seq_value(a) - ink::seq_value(b)).abs() > 0.2 {
-                        hard += 1;
-                    }
+            for x in 0..i32::from(size.width()) {
+                if g.io_normal(x, y).is_some() {
+                    let i = g.base.get(x, y).unwrap();
+                    inks.insert((format!("{:?}", i.role), i.level));
                 }
             }
         }
-        assert!(edges > 20, "{edges} unit edges");
-        assert!(hard * 100 < 8 * edges, "{hard} of {edges} edges hard");
+        assert!(inks.len() <= 14, "{} ground inks: {inks:?}", inks.len());
     }
 
     #[test]
-    fn io_a7_io_wears_muted_sulfur_frost_rust_and_black_lava() {
+    fn io_a7_io_wears_sulfur_frost_rust_and_black_lava() {
         let g = built(160, 50, 0.5);
         let size = g.pixels.pixel_size();
         let (mut disc, mut sulfur, mut frost, mut dark, mut lava, mut ring) = (0, 0, 0, 0, 0, 0);
-        let mut sulfur_level = 0u64;
         let pele = g.frames[0].up;
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let Some(n) = g.io_normal(x, y) else { continue };
                 disc += 1;
                 let ink = g.pixels.get(x, y).unwrap();
-                match ink.role {
-                    Role::Ramp(Ramp::Sulfur) => sulfur += 1,
-                    Role::Ramp(Ramp::Starlight) if ink.level >= 55 => frost += 1,
-                    Role::Ramp(Ramp::Starlight) if ink.level < 40 => dark += 1,
-                    Role::Blackbody => lava += 1,
-                    Role::Ramp(Ramp::Sienna) if dot(n, pele) > 0.75 => ring += 1,
-                    _ => {}
-                }
-                // Pale but not white (ADR-0017): nothing on the ground above the
-                // sulfur's cap but the lava and the vents.
-                if ink.role != Role::Blackbody {
-                    assert!(ink.level <= 215, "{ink:?} at {x},{y}");
-                }
-                if ink.role == Role::Ramp(Ramp::Sulfur) {
-                    sulfur_level += u64::from(ink.level);
+                // M11's semantic roles only (GEN-R23).
+                assert!(
+                    matches!(
+                        ink.role,
+                        Role::Sun | Role::Star | Role::Hot | Role::Dim | Role::Wave
+                    ),
+                    "{ink:?} at {x},{y}"
+                );
+                if [LAVA_INK, LAVA_HOT, VENT_HOT].contains(&ink) {
+                    lava += 1;
+                } else if ink == PATERA {
+                    dark += 1;
+                } else if ink.role == Role::Sun {
+                    sulfur += 1;
+                } else if ink.role == Role::Star && FROST.contains(&ink.level) {
+                    frost += 1;
+                } else if ink.role == Role::Hot
+                    && RED_RING.contains(&ink.level)
+                    && dot(n, pele) > 0.75
+                {
+                    ring += 1;
                 }
             }
         }
-        // Pale cream-yellow plains: sulfur patches cover a good share of the disc, at
-        // mid-high lightness.
+        // Yellow plains cover a good share of the disc, with white frost fields.
         assert!(sulfur * 4 > disc, "sulfur {sulfur} of {disc}");
-        let mean = sulfur_level as f64 / f64::from(sulfur.max(1));
-        assert!((130.0..=190.0).contains(&mean), "sulfur mean level {mean}");
         assert!(frost * 50 > disc, "frost {frost} of {disc}");
         assert!(dark >= 10 && lava >= 8, "dark {dark}, lava {lava}");
         assert!(ring > 20, "Pele's ring {ring}");

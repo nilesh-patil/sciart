@@ -58,7 +58,6 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::grid::{self, SampleMap};
 use sciart_core::prelude::*;
-use sciart_core::title::{self, Title};
 use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
@@ -66,17 +65,8 @@ pub static META: Meta = Meta {
     category: Category::Chemistry,
     description: "Gray-Scott reaction-diffusion growing self-replicating spots and worms",
     title: "Spots and worms · react, spread",
-    captions: &CAPTIONS,
+    captions: &[],
 };
-
-/// One caption per preset, in walk order (CHEM-A9): the live regime names the title.
-const CAPTIONS: [&str; 5] = [
-    "spots divide",
-    "coral branches",
-    "loops form",
-    "spots swarm",
-    "spots glide",
-];
 
 pub fn build() -> Box<dyn Generator> {
     Box::new(GrayScott::new(None))
@@ -118,36 +108,27 @@ const SEED_R0: (f32, f32) = (1.5, 3.0);
 const PASSAGE_KAPPA: f32 = 0.02;
 const PASSAGE_BLOCK: usize = 6;
 const PASSAGE_SHARE: f64 = 0.8;
-/// Below this v a node is substrate, not pattern: the thin tails between neighbouring
-/// spots and loops fall to the halo or to black, so dense regimes keep a near-black
-/// majority (CHEM-A8; tuning history in SPEC-002). Spots lose only their outermost ring,
-/// which the halo still grades.
-const V_EDGE: f32 = 0.12;
-/// Exposure (CHEM-A7): the body ramp runs from [`V_EDGE`] to `v_top`, the v below which
-/// [`EXPOSURE_SHARE`] of the pattern nodes lie, so worm spines reach the same bright core
-/// as spot centres whatever the regime's plateau height. `v_top` is kept inside
-/// [`V_TOP_RANGE`] (a young culture of seed bumps is not blown out) and eases towards
-/// its target with time constant [`EXPOSURE_TAU_S`], so a regime change re-exposes
-/// smoothly instead of flickering.
-const EXPOSURE_SHARE: u32 = 97;
-const V_TOP_RANGE: (f32, f32) = (0.24, 0.45);
-const EXPOSURE_TAU_S: f64 = 1.5;
-/// Histogram bins over `[V_EDGE, V_TOP_RANGE.1]` used to find `v_top`.
-const EXPOSURE_BINS: usize = 64;
-/// Body ramp: the level at the pattern edge (a dim wine rim, above the halo) and the
-/// exponent that keeps the bright top of the ramp for the spine.
-const BODY_EDGE: f64 = 0.16;
-const GAMMA: f64 = 2.0;
+/// v that maps to full brightness. Patterned v peaks at ≈ 0.3–0.45, and broad plateaus
+/// (coral, the tops of large spots) sit at ≈ 0.3–0.37: with headroom above them they read
+/// yellow-orange (level ≈ 200–225) and only spot cores reach the pale-yellow top (0.34
+/// put 36 % of the coral beat's pixels there, with no internal grading).
+const V_FULL: f32 = 0.40;
+/// Below this share of `V_FULL` (v = 0.12) a pixel is substrate, not pattern: the thin
+/// tails between neighbouring spots and loops fall to the halo or to black, so dense
+/// regimes keep a near-black majority (CHEM-A8; tuning history in SPEC-002). Spots lose
+/// only their outermost ring, which the halo still grades.
+const Q_MIN: f32 = 0.3;
 /// Substrate depletion `1 − u` where the dim halo starts to fade in, where it saturates,
-/// and its peak ramp position.
+/// and its peak Seq value.
 const HALO_MIN: f32 = 0.2;
 const HALO_FULL: f32 = 0.6;
-/// ADR-0017: the depleted substrate is not drawn (the floor is black), so the halo is off.
-const HALO_PEAK: f32 = 0.0;
-/// The culture's palette (CHEM-A7, ADR-0017): u and v have no hue, so a neutral pale
-/// starlight on black (M14; Eosin's saturated rose was loud over large areas).
-const PALETTE: Ramp = Ramp::Starlight;
-const READOUT_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+const HALO_PEAK: f32 = 0.1;
+/// The label shows the preset name only from this width on: narrower, it would take most
+/// of row 0 and cut a notch into the pattern.
+const LABEL_NAME_MIN: u16 = 56;
+/// The corner label: level 195 because it sits on the brightest backgrounds of any scene,
+/// inside a blank gutter.
+const LABEL_INK: Ink = Ink::new(Role::Text, 195);
 
 /// Feed rate F and kill rate k.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -156,7 +137,7 @@ pub(crate) struct Coeffs {
     k: f32,
 }
 
-/// One stop of the walk: name, (F, k), reaction rate, and the lengths of its hold and of
+/// One stop of the walk: label, (F, k), reaction rate, and the lengths of its hold and of
 /// the morph that follows it, in simulated seconds.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Preset {
@@ -378,12 +359,6 @@ pub(crate) fn preset_at(walk: &Timeline, t: f64) -> WalkPoint {
     }
 }
 
-/// The preset a walk point is named after (CHEM-A9): the hold's, and during a morph the
-/// source until mid-morph, then the target.
-fn regime(at: &WalkPoint) -> usize {
-    if at.m < 0.5 { at.from } else { at.to }
-}
-
 /// The passaging mask (CHEM-A8): 1 on the nodes of the active blocks, else 0. Blocks of
 /// about [`PASSAGE_BLOCK`] nodes tile the torus exactly; a block is active when a
 /// SplitMix64 draw keyed by `seed` and the block's index falls below [`PASSAGE_SHARE`],
@@ -418,80 +393,48 @@ pub(crate) fn lattice_size(display: Size) -> Size {
     Size::new(l.width().max(MIN_LATTICE.0).min(cap(h)), h)
 }
 
-/// Body level for the pattern position `p = (v − V_EDGE)/(v_top − V_EDGE)` at index
-/// `round(255 p)`: from a dim wine rim at [`BODY_EDGE`] (above the halo's peak, so edges
-/// stay graded) up to the pale-pink top, `p^GAMMA` keeping the top for the spine.
+/// Seq level of a pattern pixel for `q = v / V_FULL` at index `round(255 q)`: the ramp
+/// starts at 0.12 at the pattern edge `q = Q_MIN`, just above the halo's 0.1, so edges
+/// stay graded, and `p^0.8` (p the position between the edge and full scale) opens up
+/// the mid tones of the spot bodies.
 fn level_table() -> [u8; 256] {
+    let edge = f64::from(Q_MIN);
     std::array::from_fn(|i| {
-        let p = i as f64 / 255.0;
-        ink::ramp(PALETTE, BODY_EDGE + (1.0 - BODY_EDGE) * p.powf(GAMMA)).level
+        let p = ((i as f64 / 255.0 - edge) / (1.0 - edge)).max(0.0);
+        ink::seq(0.12 + 0.88 * p.powf(0.8)).level
     })
 }
 
-/// The ink of one pixel (CHEM-A7): pattern where `v ≥ V_EDGE`, shaded against the
-/// exposure `v_top`; else a dim wine halo that fades in with substrate depletion; else
+/// The ink of one pixel (CHEM-A7): pattern where `v` is at least [`Q_MIN`] of full scale
+/// (v = 0.12); else a dim violet halo that fades in with substrate depletion; else
 /// `None`, the terminal's own background. `u` is only read (and so only sampled) off the
 /// pattern.
-pub(crate) fn v_ink(
-    levels: &[u8; 256],
-    u: impl FnOnce() -> f32,
-    v: f32,
-    v_top: f32,
-) -> Option<Ink> {
-    if v >= V_EDGE {
-        let p = ((v - V_EDGE) / (v_top - V_EDGE)).clamp(0.0, 1.0);
-        return Some(Ink::new(
-            Role::Ramp(PALETTE),
-            levels[(p * 255.0).round() as usize],
-        ));
+pub(crate) fn v_ink(levels: &[u8; 256], u: impl FnOnce() -> f32, v: f32) -> Option<Ink> {
+    let q = (v / V_FULL).clamp(0.0, 1.0);
+    if q >= Q_MIN {
+        return Some(Ink::new(Role::Seq, levels[(q * 255.0).round() as usize]));
     }
     let fade = ((1.0 - u() - HALO_MIN) / (HALO_FULL - HALO_MIN)).clamp(0.0, 1.0);
-    let halo = ink::ramp(PALETTE, f64::from(HALO_PEAK * fade));
+    let halo = ink::seq(f64::from(HALO_PEAK * fade));
     (halo.level > 0).then_some(halo)
-}
-
-/// The exposure target (CHEM-A7): the v below which [`EXPOSURE_SHARE`] % of the pattern
-/// nodes (`v ≥ V_EDGE`) lie, clamped to [`V_TOP_RANGE`]; the range's top when there is no
-/// pattern. A stack histogram, so it never allocates.
-pub(crate) fn exposure_target(v: &[f32]) -> f32 {
-    let (lo, hi) = (V_EDGE, V_TOP_RANGE.1);
-    let bin_w = (hi - lo) / EXPOSURE_BINS as f32;
-    let mut bins = [0u32; EXPOSURE_BINS];
-    let mut n = 0u32;
-    for &x in v.iter().filter(|&&x| x >= lo) {
-        bins[(((x - lo) / bin_w) as usize).min(EXPOSURE_BINS - 1)] += 1;
-        n += 1;
-    }
-    let want = (u64::from(n) * u64::from(EXPOSURE_SHARE)).div_ceil(100);
-    let mut seen = 0u64;
-    for (i, &b) in bins.iter().enumerate() {
-        seen += u64::from(b);
-        if n > 0 && seen >= want {
-            return (lo + (i + 1) as f32 * bin_w).clamp(V_TOP_RANGE.0, V_TOP_RANGE.1);
-        }
-    }
-    V_TOP_RANGE.1
 }
 
 /// ASCII fallback for one cell (GEN-R10, CHEM-A7): the brighter half decides, so thin
 /// features survive; `.` for the stronger half of the halo (level ≥ 13), then `:` `+`
-/// `#` `@` by quartile of the body's levels (from [`BODY_EDGE`] up), in that pixel's
-/// ink. The faint halo fringe, which Unicode shows as a fade to black, and a cell with
-/// both halves empty are left untouched.
+/// `#` `@` by quartile, in that pixel's ink. The faint halo fringe, which Unicode shows
+/// as a fade to black, and a cell with both halves empty are left untouched.
 pub(crate) fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
     const HALO_DOT: u8 = 13;
-    // The body ramp's lowest level; the halo stays below it (HALO_PEAK < BODY_EDGE).
-    const BODY: u8 = (BODY_EDGE * 255.0 + 0.5) as u8;
-    let lit = |p: Ink| (p.role == Role::Ramp(PALETTE) && p.level >= HALO_DOT).then_some(p);
-    // On a tie both halves are the same ink, so which one wins does not matter.
+    let lit = |p: Ink| (p.role == Role::Seq && p.level >= HALO_DOT).then_some(p);
+    // On a tie both halves are the same Seq ink, so which one wins does not matter.
     let ink = [top, bottom]
         .into_iter()
         .filter_map(lit)
         .max_by_key(|p| p.level)?;
     const RAMP: [char; 4] = [':', '+', '#', '@'];
-    let ch = match ink.level.checked_sub(BODY) {
+    let ch = match ink.level.checked_sub(32) {
         None => '.',
-        Some(above) => RAMP[(usize::from(above) * 4 / usize::from(255 - BODY)).min(3)],
+        Some(above) => RAMP[(usize::from(above) * 4 / 224).min(3)],
     };
     Some((ch, ink))
 }
@@ -516,6 +459,8 @@ pub(crate) fn uniform_states(f: f64, k: f64) -> ([(f64, f64); 3], usize) {
 
 #[derive(Debug)]
 pub struct GrayScott {
+    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
+    dirty: bool,
     /// Simulated seconds since start, and the seeded walk offset (a whole slot).
     t: f64,
     t0: f64,
@@ -536,25 +481,20 @@ pub struct GrayScott {
     /// The passaging mask on the lattice and the seed it is keyed by (drawn once).
     mask: Grid<f32>,
     mask_seed: u64,
-    /// Lattice → pixel sampling, the pixels, and the terminal size for the readout.
+    /// Lattice → pixel sampling, the pixels, and the terminal size for the label.
     map: SampleMap,
     pixels: Pixels,
     size: Size,
-    /// The body ramp's top v, eased towards [`exposure_target`] (CHEM-A7).
-    v_top: f32,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
-    dirty: bool,
 }
 
 impl GrayScott {
     pub(crate) fn new(slot: Option<usize>) -> Self {
         Self {
-            dirty: true,
+            dirty: false,
             t: 0.0,
             t0: 0.0,
             slot,
             walk: walk(),
-            v_top: V_TOP_RANGE.1,
             levels: level_table(),
             pending: 0.0,
             since_check: 0.0,
@@ -650,65 +590,54 @@ impl GrayScott {
 
     /// Move the culture onto a new lattice, stretching the pattern to the new domain
     /// (ADR-0012); the edge-clamp seam heals by diffusion within ≈ 1 s.
-    /// The next-step buffers serve as the resampling scratch, then only take the new
-    /// shape: `gs_step` overwrites every node of them before they are read.
     fn regrid(&mut self, lattice: Size) {
-        grid::regrid_bilinear(&mut self.u, lattice, &mut self.u_next);
-        grid::regrid_bilinear(&mut self.v, lattice, &mut self.v_next);
-        self.u_next.resize(lattice, 1.0);
-        self.v_next.resize(lattice, 0.0);
+        let (mut u, mut v) = (Grid::new(lattice, 1.0), Grid::new(lattice, 0.0));
+        grid::resample_bilinear(&self.u, &mut u);
+        grid::resample_bilinear(&self.v, &mut v);
+        (self.u, self.v) = (u, v);
+        self.u_next = Grid::new(lattice, 1.0);
+        self.v_next = Grid::new(lattice, 0.0);
     }
 
     /// Rasterise u, v into the pixels (bilinear, CORE-R52); u is sampled only off the
     /// pattern, where the halo needs it.
     fn rasterise(&mut self) {
-        let (map, v, levels, top) = (&self.map, &self.v, &self.levels, self.v_top);
-        // v only (the halo is off). GEN-R17: bilinear up to 2× magnification, Catmull-Rom
-        // above (CORE-R102); row samplers are rebuilt when the shader reaches the next
-        // pixel row (CORE-R104).
-        if map.magnification() > 2.0 {
-            let (mut ry, mut vr) = (-1, map.row_cubic(v, 0));
-            self.pixels.shade(|x, y| {
-                if y != ry {
-                    (ry, vr) = (y, map.row_cubic(v, y));
-                }
-                v_ink(levels, || 1.0, vr.at(x), top).unwrap_or(Ink::BLANK)
-            });
-        } else {
-            let (mut ry, mut vr) = (-1, map.row(v, 0));
-            self.pixels.shade(|x, y| {
-                if y != ry {
-                    (ry, vr) = (y, map.row(v, y));
-                }
-                v_ink(levels, || 1.0, vr.at(x), top).unwrap_or(Ink::BLANK)
-            });
-        }
+        let (map, u, v, levels) = (&self.map, &self.u, &self.v, &self.levels);
+        self.pixels.shade(|x, y| {
+            let s = map.sample(v, x, y);
+            v_ink(levels, || map.sample(u, x, y), s).unwrap_or(Ink::BLANK)
+        });
     }
 
-    /// The title-row readout (CHEM-A9): `F=.037 k=.065` when `title::readout_room` holds
-    /// it, else nothing (ADR-0017: the numbers, no decoration); right-aligned, so it never
-    /// reaches the title. F and k are written from integer thousandths into a stack buffer.
-    fn readout(&self, canvas: &mut Canvas) {
-        let c = preset_at(&self.walk, self.t + self.t0).c;
+    /// ` mitosis  F=.037 k=.065 ` on row 0 (CHEM-A7), the name only at width ≥ 56: the
+    /// text starts at column 1 inside a one-cell blank gutter on each side, so it never
+    /// touches the pattern. The name switches at mid-morph; F and k are written from
+    /// integer thousandths into a stack buffer.
+    fn label(&self, canvas: &mut Canvas) {
+        let (w, h) = (self.size.width(), self.size.height());
+        if w < 18 || h < 6 {
+            return;
+        }
+        let WalkPoint { c, from, to, m, .. } = preset_at(&self.walk, self.t + self.t0);
         let thousandths = |x: f32| (f64::from(x) * 1000.0).round() as u32;
-        let (f, k) = (thousandths(c.f), thousandths(c.k));
-        let mut text = StackText::<24>::new();
-        let _ = match title::readout_room(self.size, &Title::of(self)) {
-            13.. => write!(text, "F=.{f:03} k=.{k:03}"),
-            _ => return,
-        };
-        let y = i32::from(self.size.height()) - 1;
-        draw::label_right(canvas, y, text.as_str(), READOUT_INK);
+        let mut text = StackText::<40>::new();
+        if w >= LABEL_NAME_MIN {
+            let name = PRESETS[if m < 0.5 { from } else { to }].name;
+            let _ = write!(text, "{name}  ");
+        }
+        let _ = write!(
+            text,
+            "F=.{:03} k=.{:03}",
+            thousandths(c.f),
+            thousandths(c.k)
+        );
+        draw::label(canvas, 0, 0, text.as_str(), LABEL_INK);
     }
 }
 
 impl Generator for GrayScott {
     fn meta(&self) -> &'static Meta {
         &META
-    }
-
-    fn caption(&self) -> Option<&'static str> {
-        Some(CAPTIONS[regime(&preset_at(&self.walk, self.t + self.t0))])
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
@@ -740,10 +669,9 @@ impl Generator for GrayScott {
             self.mask = passage_mask(lattice, self.mask_seed);
         }
         self.size = size;
-        self.v_top = exposure_target(self.v.as_slice());
         self.pixels.resize(size);
         self.map.rebuild(lattice, self.pixels.pixel_size());
-        self.dirty = true;
+        self.rasterise();
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -778,13 +706,10 @@ impl Generator for GrayScott {
                 self.reseed(&mut ctx.rng);
             }
         }
-        let ease = 1.0 - (-dt / EXPOSURE_TAU_S).exp();
-        let target = exposure_target(self.v.as_slice());
-        self.v_top += (target - self.v_top) * ease as f32;
         self.dirty = true;
     }
 
-    /// Rasterise once per drawn frame, not once per step (GEN-R20).
+    /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
         if self.dirty {
             self.dirty = false;
@@ -795,7 +720,7 @@ impl Generator for GrayScott {
     fn render(&self, canvas: &mut Canvas) {
         self.pixels
             .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-        self.readout(canvas);
+        self.label(canvas);
     }
 }
 
@@ -823,7 +748,6 @@ mod tests {
         let mut ctx = Ctx::new(seed, size);
         let mut g = GrayScott::new(slot);
         g.resize(size, &mut ctx);
-        g.prepare();
         (g, ctx)
     }
 
@@ -1004,11 +928,10 @@ mod tests {
                 assert!(per_quarter <= 0.35, "{id}: {per_quarter} change per 0.25 s");
             }
             if slot != 0 {
-                // The moving regimes never settle: still churning at the end of the hold
-                // (the cells of the pattern itself; the halo's `.` no longer counts).
+                // The moving regimes never settle: still churning at the end of the hold.
                 let f20 = frame_at(20.0).0;
                 let (.., change) = stats(&frame_at(23.9).0, Some(&f20));
-                assert!(change >= 0.25, "{id}: {change} changed in 20–24 s");
+                assert!(change >= 0.3, "{id}: {change} changed in 20–24 s");
             }
         });
     }
@@ -1219,9 +1142,7 @@ mod tests {
         }
         let (u, v) = (g.u.clone(), g.v.clone());
         g.resize(Size::new(400, 100), &mut ctx);
-        g.prepare();
         g.resize(Size::new(200, 50), &mut ctx);
-        g.prepare();
         assert!(g.u == u && g.v == v);
 
         // A new lattice resamples; the pattern survives and keeps its contrast (5 s in, so
@@ -1233,10 +1154,8 @@ mod tests {
         let (mean0, std0) = (mean(g.v.as_slice()), variance(g.v.as_slice()).sqrt());
         assert_eq!(g.reseeds, 0);
         g.resize(Size::new(120, 50), &mut ctx);
-        g.prepare();
         assert_eq!(g.u.size(), Size::new(80, 63));
         g.resize(Size::new(200, 50), &mut ctx);
-        g.prepare();
         assert_eq!(g.reseeds, 0, "the round trip must not reseed");
         let mean1 = mean(g.v.as_slice());
         assert!(
@@ -1256,7 +1175,6 @@ mod tests {
         );
         for (w, h) in [(1, 1), (3, 2), (200, 50), (5, 90), (1, 1)] {
             g.resize(Size::new(w, h), &mut ctx);
-            g.prepare();
             g.update(0.25, &mut ctx);
             g.prepare();
             g.render(&mut Canvas::new(Size::new(w, h), GlyphMode::Unicode));
@@ -1264,83 +1182,42 @@ mod tests {
     }
 
     #[test]
-    fn chem_a7_inks_exposure_and_ascii() {
+    fn chem_a7_inks_ascii_and_label() {
         let levels = level_table();
-        for top in [V_TOP_RANGE.0, 0.33, V_TOP_RANGE.1] {
-            for u in [0.0f32, 0.5, 0.79, 0.81, 1.0] {
-                let mut last = 0;
-                for i in 0..=100 {
-                    let v = i as f32 * 0.005;
-                    let ink = v_ink(&levels, || u, v, top);
-                    // ADR-0017: no halo, the substrate is black.
-                    let quiet = v < V_EDGE;
-                    assert_eq!(ink.is_none(), quiet, "u {u} v {v}");
-                    if let Some(ink) = ink {
-                        assert_eq!(ink.role, Role::Ramp(PALETTE));
-                        assert!(ink.level >= last, "level falls at u {u} v {v}");
-                        last = ink.level;
-                    }
+        for u in [0.0f32, 0.5, 0.79, 0.81, 1.0] {
+            let mut last = 0;
+            for i in 0..=100 {
+                let v = i as f32 * 0.005;
+                let ink = v_ink(&levels, || u, v);
+                // The halo level 0.1·clamp((1 − u − 0.2)/0.4) rounds to 0 below 1/255.
+                let halo = 0.1 * ((1.0 - u - 0.2) / 0.4).clamp(0.0, 1.0);
+                let quiet = v / V_FULL < Q_MIN && halo * 255.0 < 0.5;
+                assert_eq!(ink.is_none(), quiet, "u {u} v {v}");
+                if let Some(ink) = ink {
+                    assert_eq!(ink.role, Role::Seq);
+                    assert!(ink.level >= last, "level falls at u {u} v {v}");
+                    last = ink.level;
                 }
             }
-            // Exposed: a dark rim at the pattern edge, the pale-pink top at v_top.
-            let level = |v: f32| v_ink(&levels, || 1.0, v, top).map_or(0, |i| i.level);
-            assert!((35..=50).contains(&level(V_EDGE)), "edge {}", level(V_EDGE));
-            assert_eq!(level(top), 255, "top {top}");
-            assert!(
-                level(0.5 * (V_EDGE + top)) <= 140,
-                "the top is kept for the spine"
-            );
         }
-        // No halo at any depletion (the floor is black); the pattern never reads u.
+        // The halo fades in from 0 at the threshold (no hard black notch) to 0.1 at full
+        // depletion, monotonically; the pattern never reads u.
+        let mut last = 0;
         for i in 0..=100 {
             let u = 1.0 - i as f32 * 0.01;
-            assert_eq!(v_ink(&levels, || u, 0.0, 0.3), None, "halo at u {u}");
+            let level = v_ink(&levels, || u, 0.0).map_or(0, |ink| ink.level);
+            assert!(level >= last && level <= last + 1, "halo jumps at u {u}");
+            last = level;
         }
-        assert!(v_ink(&levels, || unreachable!(), 0.2, 0.3).is_some());
-
-        // Exposure: the EXPOSURE_SHARE percentile of the pattern nodes, to within a bin,
-        // clamped.
-        let bin = (V_TOP_RANGE.1 - V_EDGE) / EXPOSURE_BINS as f32;
-        let ramp: Vec<f32> = (0..1000).map(|i| 0.12 + 0.2 * i as f32 / 1000.0).collect();
-        let top = exposure_target(&ramp);
-        let want = 0.12 + 0.2 * EXPOSURE_SHARE as f32 / 100.0;
-        assert!((top - want).abs() <= bin, "{top} vs {want}");
-        let with_substrate: Vec<f32> = ramp.iter().copied().chain([0.0; 5000]).collect();
-        assert_eq!(
-            exposure_target(&with_substrate),
-            top,
-            "substrate is not pattern"
-        );
-        assert_eq!(exposure_target(&[0.0; 64]), V_TOP_RANGE.1, "no pattern");
-        assert_eq!(exposure_target(&[0.13; 64]), V_TOP_RANGE.0);
-        assert_eq!(exposure_target(&[0.9; 64]), V_TOP_RANGE.1);
-        // Live: in every regime a bright ridge (level ≥ 200) runs inside the bodies, and
-        // most of the body stays below it (rose, not washed out).
-        for (slot, t) in [(0, 4.0), (0, 16.0), (2, 10.0), (3, 10.0), (4, 10.0)] {
-            let (mut g, mut ctx) = scene(Some(slot), 7, 80, 24);
-            run_to(&mut g, &mut ctx, t);
-            let px = g.pixels.pixel_size();
-            let body: Vec<u8> = (0..i32::from(px.height()))
-                .flat_map(|y| (0..i32::from(px.width())).map(move |x| (x, y)))
-                .filter_map(|(x, y)| g.pixels.get(x, y))
-                .filter(|i| i.level >= 41)
-                .map(|i| i.level)
-                .collect();
-            let ridge = body.iter().filter(|&&l| l >= 200).count() as f64 / body.len() as f64;
-            assert!(
-                (0.03..=0.35).contains(&ridge),
-                "slot {slot} t {t}: ridge {ridge}"
-            );
-        }
+        assert_eq!(last, ink::seq(0.1).level);
+        assert!(v_ink(&levels, || unreachable!(), 0.2).is_some());
         // ASCII: the faint halo fringe stays blank, the rest of the halo is '.', and the
         // brighter half decides.
-        let eosin = |level| Ink::new(Role::Ramp(PALETTE), level);
-        assert_eq!(ascii_cell(eosin(12), Ink::BLANK), None);
-        assert_eq!(ascii_cell(Ink::BLANK, eosin(13)), Some(('.', eosin(13))));
-        assert_eq!(ascii_cell(eosin(31), eosin(20)), Some(('.', eosin(31))));
-        assert_eq!(ascii_cell(eosin(40), Ink::BLANK), Some(('.', eosin(40))));
-        assert_eq!(ascii_cell(eosin(41), eosin(20)), Some((':', eosin(41))));
-        assert_eq!(ascii_cell(eosin(66), eosin(255)), Some(('@', eosin(255))));
+        let seq = |level| Ink::new(Role::Seq, level);
+        assert_eq!(ascii_cell(seq(12), Ink::BLANK), None);
+        assert_eq!(ascii_cell(Ink::BLANK, seq(13)), Some(('.', seq(13))));
+        assert_eq!(ascii_cell(seq(31), seq(20)), Some(('.', seq(31))));
+        assert_eq!(ascii_cell(seq(32), seq(255)), Some(('@', seq(255))));
         assert_eq!(ascii_cell(Ink::BLANK, Ink::BLANK), None);
 
         let mut s = Stage::new(
@@ -1359,65 +1236,59 @@ mod tests {
             for ink in [c.ink, c.bg] {
                 assert!(matches!(
                     ink.role,
-                    Role::Ramp(PALETTE) | Role::Text | Role::Background
+                    Role::Seq | Role::Text | Role::Background
                 ));
             }
         }
+        let row: String = frame.to_lines()[0].chars().take(24).collect();
+        assert_eq!(
+            row, " mitosis  F=.037 k=.065 ",
+            "label inside a blank gutter"
+        );
+        assert_eq!(
+            frame.cells()[1].ink,
+            Ink::new(Role::Text, 195),
+            "bright label"
+        );
         s.set_glyph_mode(GlyphMode::Ascii);
         let lines = s.render().to_lines();
-        // Row 0 carries no label: every row above the readout row is field.
-        for l in &lines[..23] {
-            assert!(l.chars().all(|c| " .:+#@".contains(c)), "{l}");
-        }
-    }
+        assert!(
+            lines[1..]
+                .iter()
+                .all(|l| l.chars().all(|c| " .:+#@".contains(c)))
+        );
+        let ramp = |c: char| " .:+#@".contains(c);
+        assert!(lines[0].starts_with(" mitosis  F=.037 k=.065 "));
+        assert!(lines[0].chars().skip(24).all(ramp));
 
-    /// The live title of a scene opened in `slot`, `secs` into the visit.
-    fn caption_at(slot: usize, secs: f64) -> &'static str {
-        let (mut g, mut ctx) = scene(Some(slot), 1, 40, 12);
-        g.t = secs;
-        g.update(SIM_DT, &mut ctx);
-        g.prepare();
-        g.caption().expect("every walk point has a caption")
-    }
-
-    #[test]
-    fn chem_a9_captions_name_the_regime_and_readout_sits_right_of_the_title() {
-        for (i, p) in PRESETS.iter().enumerate() {
-            let next = (i + 1) % PRESETS.len();
-            let hold = slot_start(i) - slot_start(0);
-            assert_eq!(caption_at(0, hold + 0.5 * p.hold), CAPTIONS[i]);
-            assert_eq!(caption_at(0, hold + p.hold + 0.45 * p.morph), CAPTIONS[i]);
-            assert_eq!(
-                caption_at(0, hold + p.hold + 0.55 * p.morph),
-                CAPTIONS[next]
+        let label = |w: u16, h: u16| {
+            let mut s = Stage::new(
+                Box::new(GrayScott::new(Some(2))),
+                1,
+                Size::new(w, h),
+                GlyphMode::Ascii,
             );
-        }
-
-        // The readout: right-aligned on the title row, Text at READOUT_LEVEL, its form
-        // chosen by the room right of the (hidden or shown) title.
-        let readout = |w: u16, h: u16| {
-            let size = Size::new(w, h);
-            let (g, _) = scene(Some(2), 1, w, h);
-            let mut canvas = Canvas::new(size, GlyphMode::Ascii);
-            g.render(&mut canvas);
-            let room = title::readout_room(size, &Title::of(&g));
-            let row = canvas.to_lines()[usize::from(h) - 1].clone();
-            (room, row, canvas)
+            s.render().to_lines()[0].clone()
         };
-        for (w, h) in [(80, 24), (60, 12), (40, 12), (30, 12), (20, 8)] {
-            let (room, row, canvas) = readout(w, h);
-            let want = match room {
-                13.. => "F=.018 k=.051",
-                _ => "",
-            };
-            if want.is_empty() {
-                assert!(!row.contains("F="), "{w}x{h}: {row:?}");
-                continue;
+        assert!(label(56, 12).starts_with(" loops  F=.018 k=.051 "));
+        assert!(label(55, 12).starts_with(" F=.018 k=.051 "));
+        assert!(label(40, 12).starts_with(" F=.018 k=.051 "));
+        assert!(label(18, 12).starts_with(" F=.018 k=.051 "));
+        assert!(!label(17, 12).contains("F="));
+        assert!(!label(80, 5).contains("F="));
+        // The name switches at mid-morph: loops → swarm morphs over 24–32 s of the visit.
+        let mut s = Stage::new(
+            Box::new(GrayScott::new(Some(2))),
+            1,
+            Size::new(80, 24),
+            GlyphMode::Ascii,
+        );
+        for (secs, name) in [(27.8, "loops  "), (28.2, "swarm  ")] {
+            while s.ctx().time() < secs {
+                s.step(0.1);
             }
-            assert!(row.ends_with(&format!(" {want} ")), "{w}x{h}: {row:?}");
-            let x = i32::from(w) - 2;
-            let cell = canvas.cells()[usize::from(h - 1) * usize::from(w) + x as usize];
-            assert_eq!(cell.ink, Ink::new(Role::Text, title::READOUT_LEVEL));
+            let row: String = s.render().to_lines()[0].chars().skip(1).collect();
+            assert!(row.starts_with(name), "at {secs} s: {row}");
         }
     }
 
@@ -1444,20 +1315,22 @@ mod tests {
         }
     }
 
-    /// The ASCII field between row 0 and the readout row, so only the culture is
-    /// measured.
+    /// An ASCII frame below the label row.
     type Frame = Vec<Vec<char>>;
 
     fn ascii_frame(g: &GrayScott, size: Size) -> Frame {
         let mut canvas = Canvas::new(size, GlyphMode::Ascii);
         g.render(&mut canvas);
-        let lines = canvas.to_lines();
-        let rows = lines.len().saturating_sub(1);
-        lines[1..rows].iter().map(|l| l.chars().collect()).collect()
+        canvas
+            .to_lines()
+            .iter()
+            .skip(1)
+            .map(|l| l.chars().collect())
+            .collect()
     }
 
-    /// Share of the half-block pixels below row 0 that are near-black: the terminal
-    /// background or the halo (below level 32).
+    /// Share of the half-block pixels below the label row that are near-black: the
+    /// terminal background or `Seq` below level 32 (the dim violet halo).
     fn near_black_share(g: &GrayScott) -> f64 {
         let px = g.pixels.pixel_size();
         let (mut n, mut dark) = (0usize, 0usize);

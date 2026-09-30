@@ -2,7 +2,7 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
- Moore 1993                                                                     
+ figure-8  Moore 1993                                                           
                                                                                 
                                                                                 
                                                                                 
@@ -11,7 +11,7 @@ expression: frame
            .::+:::::::::::                            :::::::::::+::.           
         .:+:              ::::.                  .::::              :+:.        
        ::                     :@:              :::                     ::       
-      +.                         +:.        .:+                         .+.     
+      +.                         +:.        .:+                         .+      
      +.                            .+:    :+.                            .@     
      +                                +::+                                +     
      +                                +::+                                +     
