@@ -1,6 +1,6 @@
 # ADR-0017: Clean minimal style (amends ADR-0010, ADR-0011, ADR-0015)
 
-- **Status**: Accepted
+- **Status**: Superseded by ADR-0018 (M15)
 - **Date**: 2026-09-29
 
 ## Context
