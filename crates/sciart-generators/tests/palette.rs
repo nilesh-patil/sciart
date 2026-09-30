@@ -16,22 +16,13 @@ const SIZES: [(u16, u16); 2] = [(80, 24), (200, 50)];
 const PENDING: &[&str] = &[
     "catalytic_surface",
     "hp_protein_folding",
-    "jwst_unfolding",
     "kelvin_helmholtz",
     "lenia",
     "lichtenberg_discharge",
-    "meteor_shower",
     "motility_clustering",
-    "noctilucent_clouds",
-    "orbital_rendezvous",
     "quantum_double_slit",
-    "rainbow",
-    "saturn_rings",
     "seashell_pigmentation",
-    "solar_eruption",
     "spinodal_decomposition",
-    "star_trails",
-    "total_solar_eclipse",
 ];
 const TIMES: [u32; 4] = [0, 1, 5, 20];
 

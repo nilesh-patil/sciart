@@ -12,11 +12,10 @@
 //! violet Descartes angles, so the bands are smooth rather than a few solid hues) and the
 //! smooth scattered light of the sunlit rain.
 //!
-//! Colour: the bow is drawn in the nearest spectral ramp (red `HAlpha`, orange `Ember`,
-//! yellow `Sulfur`, green `Aurora`, blue `Cobalt`, violet `Plasma`) at a level that follows
-//! its light through a soft shoulder up to mid lightness, so its edges fade into the sky.
-//! The sky is black overhead with a faint grey `Starlight` toward the horizon and a fainter
-//! lift inside the primary (the sunlit rain).
+//! Colour (ADR-0018): the bow is drawn in the nearest spectral role of M11's palette
+//! (orange-red `Hot`, yellow `Sun`, green `Particle`, cyan `Wave`, blue `Cold`, violet
+//! `Accent`) in three flat steps of its light. The sky is black overhead with a dim flat
+//! `Dim` band toward the horizon and inside the primary (the sunlit rain).
 
 use std::f64::consts::{PI, TAU};
 
@@ -178,16 +177,35 @@ fn weight(nm: f64) -> f64 {
     (-((nm - 560.0) / 120.0).powi(2)).exp()
 }
 
-/// The ramp that carries a wavelength's colour, red → violet (cyan has no ramp of its
-/// own and falls to green or blue).
-pub(crate) fn spectral_ramp(nm: f64) -> Ramp {
+/// The semantic role that carries a wavelength's colour, red → violet, in M11's saturated
+/// palette (ADR-0018): orange-red, yellow, green, cyan, blue, magenta.
+pub(crate) fn spectral_role(nm: f64) -> Role {
     match nm {
-        n if n >= 636.0 => Ramp::HAlpha,
-        n if n >= 596.0 => Ramp::Ember,
-        n if n >= 566.0 => Ramp::Sulfur,
-        n if n >= 492.0 => Ramp::Aurora,
-        n if n >= 440.0 => Ramp::Cobalt,
-        _ => Ramp::Plasma,
+        n if n >= 610.0 => Role::Hot,
+        n if n >= 570.0 => Role::Sun,
+        n if n >= 505.0 => Role::Particle,
+        n if n >= 475.0 => Role::Wave,
+        n if n >= 435.0 => Role::Cold,
+        _ => Role::Accent,
+    }
+}
+
+/// The bow's light `a` (0–1 of its top) in three flat steps.
+fn bow_level(a: f64) -> u8 {
+    match a {
+        a if a >= 0.8 => 230,
+        a if a >= 0.55 => 150,
+        _ => 70,
+    }
+}
+
+/// The storm sky, the sunlit rain and the supernumeraries' ripples: one dim flat band
+/// low down and a slightly lighter step where the ripples lift it.
+fn sky_ink(sky: f64) -> Ink {
+    match sky {
+        s if s >= 24.0 => Ink::new(Role::Dim, 90),
+        s if s >= SKY_BLACK => Ink::new(Role::Dim, 0),
+        _ => Ink::BLANK,
     }
 }
 
@@ -196,10 +214,10 @@ pub(crate) fn spectral_ramp(nm: f64) -> Ramp {
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Sample {
     pub bow: f32,
-    /// Only the BOW-A2 test reads it: the drawing uses `ramp` and `level`.
+    /// Only the BOW-A2 test reads it: the drawing uses `role` and the light.
     #[cfg_attr(not(test), allow(dead_code))]
     pub nm: f32,
-    pub ramp: Ramp,
+    pub role: Role,
     /// Whether the band's hue shows here (its light above [`HUE_SWITCH`] of its peak).
     pub hue: bool,
     pub sky: f32,
@@ -210,7 +228,7 @@ impl Default for Sample {
         Self {
             bow: 0.0,
             nm: 550.0,
-            ramp: Ramp::Starlight,
+            role: Role::Star,
             hue: false,
             sky: 0.0,
         }
@@ -266,22 +284,22 @@ pub(crate) fn light_at(theta: f64) -> Sample {
     let near = 0.62 + 0.38 * (-(r1 - theta).max(0.0) / (14.0 * deg)).exp();
     let outer = ease::smoothstep((theta - r2) / deg + 0.3);
     let sky = inner * near + 0.3 * outer;
-    let (bow, nm, ramp, peak) = if b1 >= b2 && b1 >= sup {
-        (b1, nm1, spectral_ramp(nm1), 1.0)
+    let (bow, nm, role, peak) = if b1 >= b2 && b1 >= sup {
+        (b1, nm1, spectral_role(nm1), 1.0)
     } else if b2 >= sup {
-        (b2, nm2, spectral_ramp(nm2), SECONDARY)
+        (b2, nm2, spectral_role(nm2), SECONDARY)
     } else {
         let pink = s.fract() > 0.5;
         let nm = if pink { 420.0 } else { 530.0 };
-        let ramp = if pink { Ramp::Eosin } else { Ramp::Aurora };
+        let role = if pink { Role::Accent } else { Role::Particle };
         // A fringe a pixel or two wide would alias into coloured specks: the
         // supernumeraries show as pale ripples in the sunlit rain, lightness only.
-        (sup, nm, ramp, f64::INFINITY)
+        (sup, nm, role, f64::INFINITY)
     };
     Sample {
         bow: bow as f32,
         nm: nm as f32,
-        ramp,
+        role,
         hue: bow > HUE_SWITCH * peak,
         sky: sky as f32,
     }
@@ -393,16 +411,15 @@ impl Rainbow {
             let lit = rain * sun * (0.55 + 0.45 * veil);
             let sky = (STORM * low * low + RAIN_GLOW * f64::from(s.sky) * lit) * open;
             // The bow: its band light, strongest where the curtains are dense and the Sun
-            // is out, drawn in its wavelength's ramp at a level that follows the light, so
-            // its edges fade over the band's soft shoulders (no stepped rim).
+            // is out, drawn in its wavelength's role in flat steps of that light, so
+            // its edges step down over the band's soft shoulders.
             let strength = BOW_FLOOR + (1.0 - BOW_FLOOR) * (lit / BOW_FULL).min(1.0);
-            // A soft shoulder, not a clip: the band's body keeps its gradient (no flat
-            // plateau of one level, GEN-R17).
+            // A soft shoulder, not a clip, before the steps.
             let x = (f64::from(s.bow) * BOW_GAIN * strength).max(0.0);
             let a = ((1.0 - (-1.6 * x).exp()) / (1.0 - (-1.6f64).exp())).min(1.0);
             let bow = BOW_TOP * a * open;
             if s.hue && bow >= sky.max(BOW_BLACK) {
-                return Ink::new(Role::Ramp(s.ramp), sciart_core::ink::level(bow));
+                return Ink::new(s.role, bow_level(a));
             }
             // The supernumeraries: lightness only, a pale ripple in the rain inside.
             let sky = if s.hue {
@@ -410,11 +427,7 @@ impl Rainbow {
             } else {
                 sky + SUPER_LIFT * a * open
             };
-            if sky < SKY_BLACK {
-                Ink::BLANK
-            } else {
-                Ink::new(Role::Ramp(Ramp::Starlight), sciart_core::ink::level(sky))
-            }
+            sky_ink(sky)
         });
     }
 }
@@ -473,7 +486,7 @@ impl Generator for Rainbow {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let is_bow = |ink: Ink| matches!(ink.role, Role::Ramp(r) if r != Ramp::Starlight);
+        let is_bow = |ink: Ink| !matches!(ink.role, Role::Background | Role::Dim);
         self.picture.blit(canvas, |_, _, top, bottom| {
             match (is_bow(top), is_bow(bottom)) {
                 (true, true) => Some(('#', top)),
@@ -518,8 +531,8 @@ mod tests {
         assert!(at(r1 - 0.2).nm > at(0.5 * (r1 + v1)).nm);
         assert!(at(0.5 * (r1 + v1)).nm > at(v1 + 0.2).nm);
         assert!(r2 < v2 && at(r2 + 0.2).nm > at(v2 - 0.2).nm);
-        assert_eq!(at(r1 - 0.1).ramp, Ramp::HAlpha);
-        assert_eq!(at(v1 + 0.1).ramp, Ramp::Plasma);
+        assert_eq!(at(r1 - 0.1).role, Role::Hot);
+        assert_eq!(at(v1 + 0.1).role, Role::Accent);
     }
 
     #[test]
@@ -567,8 +580,8 @@ mod tests {
 
     #[test]
     fn bow_a5_a_dark_storm_sky_under_two_bows() {
-        // ADR-0017: the sky is black overhead and at most a faint grey low down; the bows
-        // stay at mid lightness.
+        // ADR-0018: the sky is black overhead and at most a dim flat band low down; the
+        // bows are the six spectral roles in flat steps.
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(42, size);
         let mut g = Rainbow::default();
@@ -580,12 +593,14 @@ mod tests {
                 let ink = g.picture.get(x, y).unwrap_or(Ink::BLANK);
                 match ink.role {
                     Role::Background => {}
-                    Role::Ramp(Ramp::Starlight) => {
-                        assert!(f64::from(ink.level) <= STORM + RAIN_GLOW + SUPER_LIFT + 1.0);
-                        top_lit += usize::from(y < 8);
-                    }
-                    Role::Ramp(_) => {
-                        assert!(f64::from(ink.level) <= BOW_TOP + 1.0, "{ink:?}");
+                    Role::Dim => top_lit += usize::from(y < 8),
+                    Role::Hot
+                    | Role::Sun
+                    | Role::Particle
+                    | Role::Wave
+                    | Role::Cold
+                    | Role::Accent => {
+                        assert!([70, 150, 230].contains(&ink.level), "{ink:?}");
                         bow += 1;
                     }
                     other => panic!("{other:?}"),
@@ -612,14 +627,14 @@ mod tests {
         let mut seen = Vec::new();
         let mut d = deg(r1);
         while d > deg(v1) {
-            let r = at(d).ramp;
+            let r = at(d).role;
             if seen.last() != Some(&r) {
                 seen.push(r);
             }
             d -= 0.02;
         }
-        use Ramp::*;
-        assert_eq!(seen, [HAlpha, Ember, Sulfur, Aurora, Cobalt, Plasma]);
+        use Role::*;
+        assert_eq!(seen, [Hot, Sun, Particle, Wave, Cold, Accent]);
     }
 
     #[test]
@@ -638,8 +653,8 @@ mod tests {
                 for x in 0..w {
                     let ink = g.picture.get(x, y).unwrap_or(Ink::BLANK);
                     let lvl = match ink.role {
-                        Role::Ramp(r) if r != Ramp::Starlight => f64::from(ink.level),
-                        _ => continue,
+                        Role::Background | Role::Dim => continue,
+                        _ => f64::from(ink.level),
                     };
                     let k = (3 * x / w) as usize;
                     sums[k].0 += lvl;
@@ -675,7 +690,7 @@ mod tests {
         );
         // Inside the primary at most a faint grey (the sunlit rain); Alexander's band black.
         assert!(
-            inside == Ink::BLANK || inside.role == Role::Ramp(Ramp::Starlight),
+            inside == Ink::BLANK || inside.role == Role::Dim,
             "{inside:?}"
         );
         assert!(inside.level <= 40, "{inside:?}");
@@ -722,7 +737,7 @@ mod tests {
             for y in 0..i32::from(ps.height()) {
                 for x in 0..i32::from(ps.width()) {
                     if let Some(k) = g.picture.get(x, y)
-                        && matches!(k.role, Role::Ramp(r) if r != Ramp::Starlight)
+                        && !matches!(k.role, Role::Background | Role::Dim)
                     {
                         n += u32::from(k.level);
                     }

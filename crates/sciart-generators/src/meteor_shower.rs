@@ -84,22 +84,27 @@ const RADIANT_OFF: (f64, f64) = (0.1, 0.25);
 /// A streak is drawn in braille: the head and a tail behind it covering this share of the
 /// path (more for bright meteors), tapering by thinning toward its end.
 const TAIL: (f64, f64) = (0.4, 0.75);
-/// Recent tracks: how many are kept, their fade time (s) and peak `Ramp(Starlight)` level,
-/// a faint composite as in a stacked photograph of a shower: at any moment several tracks
-/// show, all pointing back to the radiant.
+/// Recent tracks: how many are kept, their fade time (s) and peak level (drawn in two dim
+/// grey steps, `TRACK`): a faint composite as in a stacked photograph of a shower: at any
+/// moment several tracks show, all pointing back to the radiant.
 const MAX_TRACKS: usize = 32;
 const MEMORY_TAU: f64 = 3.5;
 const MEMORY_PEAK: f64 = 70.0;
+const TRACK: [Ink; 2] = [Ink::new(Role::Structure, 0), Ink::new(Role::Structure, 60)];
+/// The white-hot head of a streak.
+const HEAD: Ink = Ink::new(Role::Star, 255);
+/// A train's one faint green step.
+const TRAIN_LEVEL: u8 = 30;
 /// A meteor's light is `flux^LIGHT_POW` (relative to the faintest drawn).
 const LIGHT_POW: f64 = 0.55;
 /// Trains widen with this time constant (s).
 const TRAIN_SPREAD: f64 = 0.8;
 /// The head's glare: kernel, light per unit of meteor light, tone (knee, white) and the
-/// level below which it is not drawn.
+/// level from which its core is drawn (one flat white step, no halo, ADR-0018).
 const BLAZE: [(i32, i32, f32); 9] = halo_kernel(1);
 const BLAZE_GAIN: f32 = 0.2;
 const BLAZE_TONE: (f32, f32) = (0.08, 1.5);
-const BLAZE_FLOOR: u8 = 45;
+const BLAZE_CORE: u8 = 120;
 /// Train: points along the track, life range (s), fade time scale, and the wind: two
 /// layers' amplitude (km/s, time-lapsed) and vertical wavelength (km).
 const TRAIN_POINTS: usize = 24;
@@ -112,12 +117,12 @@ const DITHER: u8 = 28;
 const TRAIN_FLOOR: u8 = 22;
 /// Trains are drawn at this share of their toned level: faint, so the streaks are the hero.
 const TRAIN_DIM: (u16, u16) = (1, 3);
-/// The head's share of a streak, drawn white-hot (`Ramp(Starlight)` 255); behind it the
-/// wake is green (`Ramp(Aurora)`) down to `WAKE_SPLIT` of the tail, then yellow
-/// (`Ramp(Sulfur)`) to its end.
+/// The head's share of a streak, drawn white-hot (`Star` 255); behind it the wake is
+/// green (`Particle`) down to `WAKE_SPLIT` of the tail, then yellow (`Sun`) to its end,
+/// each in two flat steps (ADR-0018).
 const HOT: f64 = 0.88;
 const WAKE_SPLIT: f64 = 0.45;
-/// Stars: per cell, spectral mix, and the Milky Way's peak `Ramp(Starlight)` level.
+/// Stars: per cell, spectral mix, and the brightest stars' level.
 const STAR_DENSITY: f64 = 0.07;
 const CLASSES: [(f64, f64, f64); 5] = [
     (0.20, 3300.0, 4200.0),
@@ -313,7 +318,7 @@ pub struct MeteorShower {
     /// The trains' light, redrawn every step as they drift.
     train_light: Glow,
     train_tone: Tone,
-    /// Fixed sky: `Ramp(Starlight)` level per pixel (Milky Way, airglow), 0 = dark.
+    /// Fixed sky: `Star` level per pixel (empty: the sky is black), 0 = dark.
     sky: Vec<u8>,
     /// First pixel row of land per pixel column: light at or below it is hidden.
     land: Vec<u16>,
@@ -441,7 +446,7 @@ impl MeteorShower {
         for t in self.tracks.iter() {
             let level = MEMORY_PEAK * (0.4 + t.light / 3.0).min(1.0) * (-t.age / MEMORY_TAU).exp();
             let (a, b) = (dot(t.a), dot(t.b));
-            let ink = Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level));
+            let ink = TRACK[usize::from(level >= 0.5 * MEMORY_PEAK)];
             let n = ((b.0 - a.0).hypot(b.1 - a.1).ceil() as usize).clamp(1, 2048);
             for i in 0..=n {
                 let f = i as f64 / n as f64;
@@ -485,19 +490,21 @@ impl MeteorShower {
                 // White-hot at the head, then the green of magnesium and oxygen, cooling to
                 // the yellow of sodium and iron toward the tail's end.
                 let ink = if f >= HOT {
-                    Ink::new(Role::Ramp(Ramp::Starlight), 255)
+                    HEAD
                 } else {
                     // M14: a trail tapering from 200 at the head to black at its end,
                     // green (Mg, O) then the yellow of sodium toward the end.
                     let level = TRAIL_TOP * f.powf(1.2) * (0.5 + 0.5 * keep);
                     let role = if f >= WAKE_SPLIT {
-                        Ramp::Aurora
+                        Role::Particle
                     } else {
-                        Ramp::Sulfur
+                        Role::Sun
                     };
-                    Ink::new(Role::Ramp(role), ink::level(level))
+                    Ink::new(role, if level >= 100.0 { 220 } else { 110 })
                 };
-                if !above(x, y) || f64::from(ink.level) < ink::MIN_VISIBLE_LEVEL {
+                if !above(x, y)
+                    || f.powf(1.2) * (0.5 + 0.5 * keep) * TRAIL_TOP < ink::MIN_VISIBLE_LEVEL
+                {
                     continue;
                 }
                 self.streaks.plot(x, y, ink);
@@ -506,7 +513,7 @@ impl MeteorShower {
             if !above(b.0, b.1) {
                 continue;
             }
-            let head = Ink::new(Role::Ramp(Ramp::Starlight), 255);
+            let head = HEAD;
             self.streaks.plot(b.0, b.1, head);
             {
                 for (dx, dy) in [(1.0, 0.0), (0.0, 1.0), (1.0, 1.0)] {
@@ -575,7 +582,7 @@ impl MeteorShower {
             if land.get(x as usize).is_none_or(|&top| y as u16 >= top) {
                 return match sky.get(i).copied().unwrap_or(0) {
                     0 => Ink::BLANK,
-                    l => Ink::new(Role::Ramp(Ramp::Starlight), l),
+                    l => Ink::new(Role::Star, l),
                 };
             }
             let t = tt.level(trains.get(i).copied().unwrap_or(0.0));
@@ -583,19 +590,16 @@ impl MeteorShower {
             let u = (f64::from(t.saturating_sub(TRAIN_FLOOR)) / f64::from(DITHER)).min(1.0);
             let faded = (f64::from(t) * u * u * (3.0 - 2.0 * u)).round() as u16;
             let b = bt.level(blaze.get(i).copied().unwrap_or(0.0));
-            if b >= BLAZE_FLOOR && b >= t {
-                Ink::new(Role::Ramp(Ramp::Starlight), b)
+            if b >= BLAZE_CORE && b >= t {
+                Ink::new(Role::Star, 230)
             } else if SHOW_TRAINS
                 && faded * TRAIN_DIM.0 / TRAIN_DIM.1 >= ink::MIN_VISIBLE_LEVEL as u16
             {
-                Ink::new(
-                    Role::Ramp(Ramp::Aurora),
-                    (faded * TRAIN_DIM.0 / TRAIN_DIM.1) as u8,
-                )
+                Ink::new(Role::Particle, TRAIN_LEVEL)
             } else {
                 match sky.get(i).copied().unwrap_or(0) {
                     0 => Ink::BLANK,
-                    l => Ink::new(Role::Ramp(Ramp::Starlight), l),
+                    l => Ink::new(Role::Star, l),
                 }
             }
         });
@@ -652,12 +656,12 @@ impl MeteorShower {
             self.stars.plot(
                 x,
                 y,
-                Ink::new(Role::Ramp(Ramp::Starlight), ink::level(level)),
+                Ink::new(Role::Star, if level >= STAR_MAX { 200 } else { 50 }),
             );
         }
         // The radiant's mark: a faint ring of dots round the point every streak leads to.
         if let Some(r) = lens.project(self.radiant).filter(|_| SHOW_RADIANT) {
-            let ink = Ink::new(Role::Ramp(Ramp::Starlight), RING.1);
+            let ink = Ink::new(Role::Accent, RING.1);
             for k in 0..16 {
                 let (sn, cs) = (TAU * f64::from(k) / 16.0).sin_cos_det();
                 self.stars
@@ -769,7 +773,7 @@ impl Generator for MeteorShower {
         self.picture.blit(canvas, |_, _, top, bottom| {
             // ASCII: trains by brightness; the sky stays dark and streaks are drawn below.
             let pick = raster::stronger(top, bottom);
-            (pick.role == Role::Ramp(Ramp::Aurora))
+            (pick.role == Role::Particle)
                 .then(|| raster::ascii_ramp_cell(top, bottom))
                 .flatten()
         });
@@ -800,16 +804,11 @@ impl Generator for MeteorShower {
             for (x, y) in geom::line(prev.0, prev.1, b.0 as i32, b.1 as i32) {
                 let g = draw::step_glyph(x - prev.0, y - prev.1);
                 if (x, y) != prev {
-                    canvas.put(x, y, g, Ink::new(Role::Blackbody, 150));
+                    canvas.put(x, y, g, Ink::new(Role::Sun, 150));
                 }
                 prev = (x, y);
             }
-            canvas.put(
-                b.0 as i32,
-                b.1 as i32,
-                Glyph::ascii('*'),
-                Ink::new(Role::Ramp(Ramp::Starlight), 255),
-            );
+            canvas.put(b.0 as i32, b.1 as i32, Glyph::ascii('*'), HEAD);
         }
     }
 }
@@ -971,7 +970,7 @@ mod tests {
                     let Some(ink) = g.picture.get(x, y) else {
                         continue;
                     };
-                    if ink.role != Role::Ramp(Ramp::Aurora) {
+                    if ink.role != Role::Particle {
                         continue;
                     }
                     assert!(ink.level <= 128, "bright train {ink:?}");
@@ -1022,9 +1021,9 @@ mod tests {
             for c in canvas.cells() {
                 if ('\u{2801}'..='\u{28ff}').contains(&c.ch) {
                     match c.ink.role {
-                        Role::Ramp(Ramp::Aurora) => green += 1,
-                        Role::Ramp(Ramp::Sulfur) => yellow += 1,
-                        Role::Blackbody | Role::Ramp(Ramp::Starlight) => {}
+                        Role::Particle => green += 1,
+                        Role::Sun => yellow += 1,
+                        Role::Star | Role::Structure | Role::Accent => {}
                         other => panic!("{other:?}"),
                     }
                 }
