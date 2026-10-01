@@ -1,6 +1,5 @@
 //! Totality seen from the ground (SPEC-002 `total_solar_eclipse`): the Moon slides over
-//! the Sun, the sky darkens to deep twilight with a sunset glow all round the horizon,
-//! the last sunlight breaks into Baily's beads and a diamond ring, then the pearly corona
+//! the Sun, the last sunlight breaks into Baily's beads and a diamond ring, then the corona
 //! blooms with long streamers and small pink prominences at the limb; then it all runs
 //! backwards.
 //!
@@ -9,12 +8,17 @@
 //! the eclipse is symmetric in time (ECL-A1). The Moon's limb is a seeded valley profile:
 //! once its mountain-top envelope covers the Sun, sunlight shows only through valleys whose
 //! floors still dip inside the photosphere, which are the beads (ECL-A2).
+//!
+//! M16 (GEN-R25, thread style): the corona is braille streamer threads along a dipole-like
+//! field (closed helmet loops `r = L sin²θ`, open field fanning out along the separatrix and
+//! running radially past the cusp), stepping down in brightness outward; the photosphere a
+//! checkerboard of braille dots; nothing on the Moon's black disc. Screen lengths are dots.
 
-use std::f64::consts::{PI, TAU};
+use std::cell::RefCell;
+use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use rand::Rng;
 use sciart_core::prelude::*;
-use sciart_core::raster::{self, Glow, Tone, halo_kernel};
 use sciart_core::stellar;
 use sciart_core::timeline::ease;
 
@@ -51,71 +55,46 @@ const PHASES: [(&str, f64); 5] = [
     ("diamond ring", 4.0),
     ("partial", 8.0),
 ];
-/// Photosphere: centre temperature and limb darkening (quadratic, visible light).
+/// Photosphere: limb darkening (quadratic, visible light).
 const LIMB_DARK: (f64, f64) = (0.47, 0.23);
 /// The corona shows once the uncovered fraction falls below this (ECL-A3).
 const CORONA_F: f64 = 0.01;
-/// Streamers: count range, and the corona's radial falloff exponent.
-const STREAMERS: (usize, usize) = (6, 10);
-const FALLOFF: f64 = 3.3;
-/// Corona tone (knee, white).
-const CORONA_TONE: (f32, f32) = (0.35, 2.2);
-/// Corona rows filled per frame while the corona is hidden (GEN-R19).
-const CORONA_ROWS: usize = 2;
-/// Tone mapping of the summed light: linear to the knee, then an exponential roll-off to
-/// the ceiling, so bright cores never clip flat.
-const KNEE: f64 = 140.0;
-const CEIL: f64 = 245.0;
+/// The corona's field (ECL-A12): closed loops' `L` under each helmet (plus its cusp
+/// `L_max`, seeded per side), open lines per pole and side (the last `STALK` crowd the
+/// separatrix), how far out they run (R☉) and the brightness falloff along them.
+const LOOPS: [f64; 5] = [1.15, 1.3, 1.5, 1.75, 2.05];
+const CUSP: (f64, f64) = (2.2, 2.6);
+const OPEN: usize = 9;
+const STALK: [f64; 3] = [0.93, 0.96, 0.985];
+const R_OUT: f64 = 4.0;
+const FALLOFF: f64 = 2.2;
+/// Line gains: seeded range, and the boosts of the stalk and the closed loops.
+const GAIN: (f64, f64) = (0.5, 1.0);
+const STALK_GAIN: f64 = 1.6;
+const LOOP_GAIN: f64 = 1.3;
+/// Segment length along a thread (dots).
+const SEG: f64 = 2.0;
+/// The corona's steps, brightest first: `(from, ink)`, `e ≥ from`.
+pub(crate) const CORONA_STEPS: [(f64, Ink); 4] = [
+    (0.55, Ink::new(Role::Star, 230)),
+    (0.25, Ink::new(Role::Star, 110)),
+    (0.1, Ink::new(Role::Structure, 100)),
+    (0.035, Ink::new(Role::Structure, 0)),
+];
 /// The hills' top edge, the only lit land.
 const SKYLINE: Ink = Ink::new(Role::Dim, 60);
-/// Prominences (pink H-alpha, M11's `Accent`) and the beads' white cores.
+/// Prominences (pink H-alpha, M11's `Accent`), beads, the Moon's limb in totality.
 const PROMINENCE: Ink = Ink::new(Role::Accent, 200);
 const BEAD_CORE: Ink = Ink::new(Role::Star, 255);
-
-/// The corona's (and the beads' and crescent rim's) toned light in four flat steps
-/// (ADR-0018): white near the limb, then grey rays thinning out into black.
-pub(crate) fn corona_ink(light: f64) -> Option<Ink> {
-    match light {
-        l if l >= 170.0 => Some(Ink::new(Role::Star, 230)),
-        l if l >= 95.0 => Some(Ink::new(Role::Star, 110)),
-        l if l >= 45.0 => Some(Ink::new(Role::Structure, 100)),
-        l if l >= 18.0 => Some(Ink::new(Role::Structure, 0)),
-        _ => None,
-    }
-}
-
-/// One corona step darker (`None` below the faintest): the corona held back in the
-/// diamond-ring acts.
-fn dimmer(ink: Ink) -> Option<Ink> {
-    const LEVELS: [f64; 4] = [170.0, 95.0, 45.0, 18.0];
-    let k = LEVELS.iter().position(|&l| corona_ink(l) == Some(ink))?;
-    LEVELS.get(k + 1).and_then(|&l| corona_ink(l))
-}
-
-/// The diamond's bead: 2 × 2 pixels less one corner (3 lit), and its spikes' least
-/// reach in dots.
-const DIAMOND_PX: [(i32, i32); 3] = [(0, 0), (-1, 0), (0, -1)];
+const MOON_RING: Ink = Ink::new(Role::Star, 200);
+/// The diamond's spike inks and least reach in dots.
+const SPIKE_AXIS: Ink = Ink::new(Role::Star, 230);
+const SPIKE_DIAGONAL: Ink = Ink::new(Role::Sun, 200);
 const SPIKE_DOTS: f64 = 8.0;
-
-/// The photosphere by its limb-darkened brightness `i` (0–1), stepped like M11's
-/// exoplanet star: a yellow-white centre, yellow, an orange limb.
-fn photosphere_ink(i: f64) -> Ink {
-    match i {
-        i if i > 0.93 => Ink::new(Role::Sun, 255),
-        i if i > 0.8 => Ink::new(Role::Sun, 170),
-        _ => Ink::new(Role::Hot, 200),
-    }
-}
-
-/// Prominences: count range, heights (solar radii) and peak level.
+/// Prominences: count range, heights (solar radii).
 const PROMS: (usize, usize) = (3, 6);
 const PROM_H: (f64, f64) = (0.07, 0.16);
-const PROM_PEAK: f64 = 200.0;
-/// Beads' glare kernels: every bead, and the diamond (the brightest, alone).
-const BEAD: [(i32, i32, f32); 25] = halo_kernel(2);
-const DIAMOND: [(i32, i32, f32); 49] = halo_kernel(3);
-const BEAD_TONE: (f32, f32) = (0.05, 1.0);
-/// Beads are drawn this far outside the lunar limb (px).
+/// Beads are drawn this far outside the lunar limb (in half-block pixels, two dots).
 const BEAD_LIFT: f64 = 0.8;
 /// Hills on the horizon.
 const HILLS: Terrain = Terrain {
@@ -124,6 +103,31 @@ const HILLS: Terrain = Terrain {
     gap: (0.4, 1.5),
     clearing: 0.5,
 };
+
+/// The step of corona brightness `e`: 4 brightest … 1 faintest, 0 not drawn.
+pub(crate) fn corona_rank(e: f64) -> usize {
+    CORONA_STEPS
+        .iter()
+        .position(|&(from, _)| e >= from)
+        .map_or(0, |k| CORONA_STEPS.len() - k)
+}
+
+/// The ink of corona step `rank` (1–4).
+fn rank_ink(rank: usize) -> Option<Ink> {
+    (1..=CORONA_STEPS.len())
+        .contains(&rank)
+        .then(|| CORONA_STEPS[CORONA_STEPS.len() - rank].1)
+}
+
+/// The photosphere by its limb-darkened brightness `i` (0–1): a yellow-white centre,
+/// yellow, an orange limb.
+fn photosphere_ink(i: f64) -> Ink {
+    match i {
+        i if i > 0.93 => Ink::new(Role::Sun, 255),
+        i if i > 0.8 => Ink::new(Role::Sun, 170),
+        _ => Ink::new(Role::Hot, 200),
+    }
+}
 
 /// Area of the lens where discs of radius `r1`, `r2` with centres `d` apart overlap.
 pub(crate) fn overlap(r1: f64, r2: f64, d: f64) -> f64 {
@@ -222,92 +226,116 @@ pub(crate) fn moon_offset(timeline: &Timeline, t: f64) -> f64 {
     }
 }
 
-/// Corona brightness at `r` solar radii (> 1) and angle `a`, before toning: a K-corona
-/// falling as `r^{−FALLOFF}`, helmet streamers that taper and bend toward the equator,
-/// polar plumes and fine radial striations.
+/// A corona thread's kind.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Kind {
+    /// A closed loop `r = L sin²θ`.
+    Closed { l: f64 },
+    /// An open line from footpoint colatitude `s·θ_c` (north pole, or south mirrored).
+    Open { s: f64, south: bool, stalk: bool },
+}
+
+/// One corona thread: its kind, the side of the dipole axis it lies on (±1) and its gain.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Thread {
+    kind: Kind,
+    side: f64,
+    gain: f64,
+}
+
+/// The corona's field (ECL-A12): a dipole tilted to `equator`, its two helmets' cusps.
 #[derive(Debug, Clone, Default)]
 pub(crate) struct Corona {
-    /// Equator angle, and per streamer: base angle, width, strength, length.
     equator: f64,
-    streamers: Vec<(f64, f64, f64, f64)>,
-    phases: [f64; 3],
+    /// Cusp `L_max` on each side (−1, +1).
+    lmax: [f64; 2],
+    threads: Vec<Thread>,
 }
 
 impl Corona {
     fn seeded(rng: &mut impl Rng) -> Self {
         let equator = rng.random_range(-0.3..0.3);
-        let n = rng.random_range(STREAMERS.0..=STREAMERS.1);
-        let mut streamers = Vec::with_capacity(STREAMERS.1);
-        streamers.extend((0..n).map(|i| {
-            // Solar minimum: streamers crowd the equator on both sides.
-            let side = if i % 2 == 0 { 0.0 } else { PI };
-            let lat = rng.random_range(-0.55f64..0.55);
-            let near = 1.0 - (lat.abs() / 0.55);
-            (
-                equator + side + lat,
-                rng.random_range(0.08..0.16),
-                rng.random_range(0.6..1.4) * (0.5 + 0.5 * near),
-                0.8 + 3.0 * near * rng.random_range(0.5..1.0),
-            )
-        }));
+        let lmax = [
+            rng.random_range(CUSP.0..CUSP.1),
+            rng.random_range(CUSP.0..CUSP.1),
+        ];
+        let mut threads = Vec::with_capacity(2 * (LOOPS.len() + 1) + 4 * OPEN);
+        for side in [-1.0, 1.0] {
+            let lm = lmax[usize::from(side > 0.0)];
+            for l in LOOPS.iter().copied().chain([lm]) {
+                threads.push(Thread {
+                    kind: Kind::Closed { l },
+                    side,
+                    gain: LOOP_GAIN * rng.random_range(GAIN.0..GAIN.1),
+                });
+            }
+            for south in [false, true] {
+                let fan = OPEN - STALK.len();
+                for k in 0..OPEN {
+                    let (s, stalk) = if k < fan {
+                        let s = (k as f64 + 0.5) / fan as f64 * 0.88;
+                        (
+                            (s + rng.random_range(-0.025..0.025)).clamp(0.02, 0.9),
+                            false,
+                        )
+                    } else {
+                        (STALK[k - fan], true)
+                    };
+                    let boost = if stalk { STALK_GAIN } else { 1.0 };
+                    threads.push(Thread {
+                        kind: Kind::Open { s, south, stalk },
+                        side,
+                        gain: boost * rng.random_range(GAIN.0..GAIN.1),
+                    });
+                }
+            }
+        }
         Self {
             equator,
-            streamers,
-            phases: std::array::from_fn(|_| rng.random_range(0.0..TAU)),
+            lmax,
+            threads,
         }
     }
 
-    /// The corona's brightness at `r` solar radii and angle `a`: streamers, polar plumes
-    /// and fine striations on a power-law falloff.
-    pub(crate) fn at(&self, r: f64, a: f64) -> f64 {
-        if r <= 1.0 {
-            return 0.0;
-        }
-        let r09 = r.powf(0.9);
-        let wr = (1.3 / r).sqrt();
-        let base = r.powf(-FALLOFF);
-        let mut streams = 0.0;
-        for &(at, width, strength, length) in &self.streamers {
-            // Helmet streamers bend toward the equator and narrow to a point.
-            let eq = if (at - self.equator).cos_det() > 0.0 {
-                self.equator
-            } else {
-                self.equator + PI
-            };
-            let centre = eq + wrap(at - eq) * (0.55 + 0.45 / r);
-            let w = width * wr;
-            let off = wrap(a - centre) / w;
-            streams += strength * (-0.5 * off * off).exp() * (-(r - 1.0) / length).exp() * r09;
-        }
-        // Polar plumes: fine short rays within 30° of the poles.
-        let pole = wrap(a - self.equator - PI / 2.0)
-            .abs()
-            .min(wrap(a - self.equator + PI / 2.0).abs());
-        let plume = |ripple: f64| {
-            0.35 * ease::smoothstep(1.0 - pole / 0.5) * ripple * (-(r - 1.0) / 0.5).exp()
-        };
-        let ripple = 0.5 + 0.5 * (48.0 * a + self.phases[0]).cos_det();
-        let striae = 1.0
-            + 0.12 * (37.0 * a + self.phases[1]).sin_det()
-            + 0.08 * (83.0 * a + self.phases[2]).sin_det();
-        base * (0.35 + streams + plume(ripple)) * striae
+    /// The cusp on a thread's side.
+    fn cusp(&self, t: &Thread) -> f64 {
+        self.lmax[usize::from(t.side > 0.0)]
     }
-}
 
-/// Summed light (level units) → level: linear below [`KNEE`], rolling off smoothly toward
-/// [`CEIL`] above it (continuous in value and slope).
-pub(crate) fn soft_clip(v: f64) -> f64 {
-    if v <= KNEE {
-        v.max(0.0)
-    } else {
-        let room = CEIL - KNEE;
-        KNEE + room * (1.0 - (-(v - KNEE) / room).exp())
+    /// Point `k` of `n` along thread `t` as `(r, colatitude)`, from its first footpoint
+    /// outward (open) or across (closed).
+    pub(crate) fn point(&self, t: &Thread, k: usize, n: usize) -> (f64, f64) {
+        let u = k as f64 / n.max(1) as f64;
+        let lm = self.cusp(t);
+        match t.kind {
+            Kind::Closed { l } => {
+                let tf = (1.0 / l.max(1.0)).sqrt().asin();
+                let th = tf + (PI - 2.0 * tf) * u;
+                let s = th.sin_det();
+                (l * s * s, th)
+            }
+            Kind::Open { s, south, .. } => {
+                // Inside the cusp: along the separatrix's colatitude φ ∈ [θ_c, π/2] scaled
+                // by `s`; beyond it, radially out to `R_OUT`.
+                let tc = (1.0 / lm).sqrt().asin();
+                let split = (lm - 1.0) / (R_OUT - 1.0);
+                let (r, sep) = if u <= split {
+                    let phi = tc + (FRAC_PI_2 - tc) * (u / split.max(1e-9));
+                    let sp = phi.sin_det();
+                    (lm * sp * sp, phi)
+                } else {
+                    (lm + (R_OUT - lm) * (u - split) / (1.0 - split), FRAC_PI_2)
+                };
+                let th = s * sep;
+                (r.max(1.0), if south { PI - th } else { th })
+            }
+        }
     }
-}
 
-/// `a` wrapped onto `(−π, π]`.
-fn wrap(a: f64) -> f64 {
-    sciart_core::geom::wrap_angle(a)
+    /// Screen angle (rad, y down) of colatitude `th` on side `side`.
+    fn angle(&self, th: f64, side: f64) -> f64 {
+        self.equator - FRAC_PI_2 + side * th
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -317,29 +345,37 @@ struct Prominence {
     height: f64,
 }
 
+/// A precomputed corona segment: its ends (dots), radius at its middle (R☉), brightness
+/// before the visibility (`gain·r^−FALLOFF`) and its thread.
+#[derive(Debug, Clone, Copy)]
+struct Seg {
+    a: (f32, f32),
+    b: (f32, f32),
+    #[cfg(test)]
+    r: f32,
+    base: f32,
+    thread: u16,
+}
+
 #[derive(Debug, Default)]
 pub struct Eclipse {
     timeline: Option<Timeline>,
     limb: Limb,
     corona_model: Corona,
     proms: Vec<Prominence>,
-    /// Picture geometry: Sun centre (px), solar radius (px).
+    /// Picture geometry: Sun centre and solar radius, in dots.
     centre: (f64, f64),
     radius: f64,
-    /// Per pixel: toned corona brightness, and prominence light (0..1).
-    corona: Vec<u8>,
-    prom: Vec<u8>,
-    /// Per pixel: land cover (0..1).
-    land: Vec<u8>,
-    /// Corona rows filled so far (`fill_corona`).
-    corona_rows: usize,
-    /// A few bright planets and stars that come out in totality (px, level).
+    /// The corona's segments and the prominences' dots, built in `resize`.
+    segs: Vec<Seg>,
+    prom_dots: Vec<(i32, i32)>,
+    /// Per dot column: the skyline's dot row.
+    ridge: Vec<i32>,
+    /// A few bright planets and stars that come out in totality (dots, level).
     lights: Vec<(i32, i32, u8)>,
-    beads: Glow,
-    bead_tone: Tone,
-    picture: Pixels,
-    /// The diamond ring's spikes (braille, over the picture).
-    spikes: Dots,
+    /// The braille lattice; a cell so `prepare` can draw into it while reading the
+    /// rest of `self` (no placeholder lattice allocated per frame, GEN-R11).
+    dots: RefCell<Dots>,
     t: f64,
     /// Uncovered fraction and Moon offset now.
     f: f64,
@@ -353,8 +389,8 @@ impl Eclipse {
         self.timeline.as_ref()
     }
 
-    /// Solar radii → pixel position.
-    fn to_px(&self, p: (f64, f64)) -> (f64, f64) {
+    /// Solar radii → dot position.
+    fn to_dot(&self, p: (f64, f64)) -> (f64, f64) {
         (
             self.centre.0 + p.0 * self.radius,
             self.centre.1 + p.1 * self.radius,
@@ -372,223 +408,251 @@ impl Eclipse {
             .is_some_and(|tl| matches!(tl.at(self.t).index, 1 | 3))
     }
 
-    /// The diamond ring (ECL-A11): through the diamond-ring acts, the last light is a
-    /// white bead of 2–3 pixels on the limb at the contact point (the Sun's limb straight
-    /// away from the Moon's centre, where the crescent closes last), with short braille
-    /// spikes, white along the axes and yellow on the diagonals, kept off the Moon.
-    fn diamond(&mut self) {
-        self.spikes.clear();
-        if !self.diamond_act() {
-            return;
-        }
-        let m = self.moon();
-        let len = m.0.hypot(m.1).max(1e-9);
-        // 0.8 px beyond the limb, as the beads are.
-        let out = 1.0 + BEAD_LIFT / self.radius.max(1e-9);
-        let (bx, by) = self.to_px((-m.0 / len * out, -m.1 / len * out));
-        let (mx, my) = self.to_px(m);
-        let moon_r = MOON_R * self.radius;
-        let clear = |x: f64, y: f64| (x - mx).hypot(y - my) > moon_r + 0.5;
-        for (dx, dy) in DIAMOND_PX {
-            let (x, y) = (bx + f64::from(dx), by + f64::from(dy));
-            if clear(x + 0.5, y + 0.5) {
-                self.picture
-                    .set(x.floor() as i32, y.floor() as i32, BEAD_CORE);
-            }
-        }
-        // Spikes in dot units (two dots per pixel each way), from the bead's centre.
-        let (cx, cy) = (2.0 * bx + 1.0, 2.0 * by + 1.0);
-        let reach = SPIKE_DOTS.max(1.6 * self.radius);
-        for k in 0..8 {
-            let (s, c) = (f64::from(k) * TAU / 8.0).sin_cos_det();
-            let (r, ink) = if k % 2 == 0 {
-                (reach, Ink::new(Role::Star, 230))
-            } else {
-                (0.55 * reach, Ink::new(Role::Sun, 200))
-            };
-            let steps = (2.0 * r) as i32;
-            for j in 2..=steps {
-                let d = 0.5 * f64::from(j);
-                let (x, y) = (cx + d * c, cy + d * s);
-                if clear(0.5 * x, 0.5 * y) {
-                    self.spikes.plot(x, y, ink);
-                }
-            }
-        }
-    }
-
     /// Corona visibility: 0 while the photosphere's glare drowns it, 1 in totality.
     fn corona_vis(&self) -> f64 {
         ease::smoothstep((CORONA_F - self.f) / CORONA_F)
     }
 
-    fn paint(&mut self) {
-        let ps = self.picture.pixel_size();
-        let w = usize::from(ps.width());
-        let (f, vis) = (self.f, self.corona_vis());
-        let moon = self.to_px(self.moon());
-        let (sun, r) = (self.centre, self.radius);
-        let mr = MOON_R * r;
-        // Beads and the diamond ring: glare from each valley letting light through.
-        self.beads.clear();
-        let mut total = 0.0;
-        let mut brightest = (0.0, (0.0, 0.0));
-        if 1.0 - overlap(1.0, MOON_R, self.d) / PI <= 1e-12 {
-            let m = self.moon();
-            let pts: [(f64, (f64, f64)); LIMB_N] = {
-                let mut a = [(0.0, (0.0, 0.0)); LIMB_N];
-                for (slot, (_, p, gap)) in a.iter_mut().zip(self.limb.beads(m)) {
-                    *slot = (gap, p);
-                }
-                a
+    /// Whether dot `p` lies under the land (below the skyline).
+    fn under_land(&self, p: (f64, f64)) -> bool {
+        let x = p.0.round();
+        if !(x >= 0.0 && (x as usize) < self.ridge.len()) {
+            return false;
+        }
+        p.1 >= f64::from(self.ridge[x as usize])
+    }
+
+    /// Build the corona's segments and the prominences' dots for this geometry.
+    fn build_corona(&mut self) {
+        self.segs.clear();
+        let r_dots = self.radius.max(1e-9);
+        let model = &self.corona_model;
+        for (ti, t) in model.threads.iter().enumerate() {
+            let len = match t.kind {
+                Kind::Closed { l } => 2.2 * l,
+                Kind::Open { .. } => R_OUT,
+            } * r_dots;
+            let n = (len / SEG).ceil().max(8.0) as usize;
+            let at = |k: usize| {
+                let (r, th) = model.point(t, k, n);
+                let (s, c) = model.angle(th, t.side).sin_cos_det();
+                (
+                    r,
+                    (
+                        self.centre.0 + r * r_dots * c,
+                        self.centre.1 + r * r_dots * s,
+                    ),
+                )
             };
-            for &(gap, p) in pts.iter().filter(|(g, _)| *g > 0.0) {
-                // The bead sits just outside the lunar limb (its glare is masked by the
-                // Moon's disc), so its core is a pixel beyond the limb, never on the disc.
-                let (ox, oy) = (p.0 - m.0, p.1 - m.1);
-                let len = ox.hypot(oy).max(1e-9);
-                let lift = (MOON_R - len + BEAD_LIFT / self.radius.max(1e-9)) / len;
-                let px = self.to_px((p.0 + ox * lift, p.1 + oy * lift));
-                let wgt = (gap / VALLEY) as f32;
-                self.beads
-                    .splat(2.0 * px.0 + 0.5, 2.0 * px.1 + 0.5, &BEAD, wgt);
-                total += gap;
-                if gap > brightest.0 {
-                    brightest = (gap, px);
+            let mut prev = at(0);
+            for k in 1..=n {
+                let next = at(k);
+                let r = 0.5 * (prev.0 + next.0);
+                let mid = (0.5 * (prev.1.0 + next.1.0), 0.5 * (prev.1.1 + next.1.1));
+                if !self.under_land(mid) {
+                    self.segs.push(Seg {
+                        a: (prev.1.0 as f32, prev.1.1 as f32),
+                        b: (next.1.0 as f32, next.1.1 as f32),
+                        #[cfg(test)]
+                        r: r as f32,
+                        base: (t.gain * r.powf(-FALLOFF)) as f32,
+                        thread: ti as u16,
+                    });
+                }
+                prev = next;
+            }
+        }
+        // Prominences: tiny dotted arches on the limb.
+        self.prom_dots.clear();
+        for pr in &self.proms {
+            let n = (2.0 * pr.half * r_dots * 1.5).ceil().max(4.0) as i32;
+            for k in 0..=n {
+                let off = 2.0 * f64::from(k) / f64::from(n) - 1.0;
+                let rr = 1.0 + pr.height * (1.0 - off * off).max(0.0).sqrt();
+                let (s, c) = (pr.angle + off * pr.half).sin_cos_det();
+                let p = (
+                    (self.centre.0 + rr * r_dots * c).round() as i32,
+                    (self.centre.1 + rr * r_dots * s).round() as i32,
+                );
+                // Every other dot along the arch.
+                if k % 2 == 0 && self.prom_dots.last() != Some(&p) {
+                    self.prom_dots.push(p);
                 }
             }
-            if brightest.0 > 0.0 {
-                // The diamond: one bead's flare, strongest when it is almost alone.
-                let lone = (brightest.0 / total.max(1e-12)).clamp(0.0, 1.0) as f32;
-                let px = brightest.1;
-                self.beads.splat(
-                    2.0 * px.0 + 0.5,
-                    2.0 * px.1 + 0.5,
-                    &DIAMOND,
-                    0.35 + 0.65 * lone * (brightest.0 / VALLEY) as f32,
+        }
+    }
+
+    /// Every corona segment drawn now: `(a, b, rank, thread)` (ECL-A3, ECL-A6): stepped by
+    /// its brightness × the visibility, one step darker in the diamond-ring acts, hidden
+    /// behind the Moon.
+    fn corona(&self, mut f: impl FnMut((f64, f64), (f64, f64), usize, usize)) {
+        let vis = self.corona_vis();
+        if vis <= 0.0 {
+            return;
+        }
+        let hold = usize::from(self.diamond_act());
+        let m = self.to_dot(self.moon());
+        let mr = MOON_R * self.radius;
+        for s in &self.segs {
+            let rank = corona_rank(f64::from(s.base) * vis).saturating_sub(hold);
+            if rank == 0 {
+                continue;
+            }
+            let (a, b) = (
+                (f64::from(s.a.0), f64::from(s.a.1)),
+                (f64::from(s.b.0), f64::from(s.b.1)),
+            );
+            let mid = (0.5 * (a.0 + b.0), 0.5 * (a.1 + b.1));
+            if (mid.0 - m.0).hypot(mid.1 - m.1) <= mr + 0.5 {
+                continue;
+            }
+            f(a, b, rank, usize::from(s.thread));
+        }
+    }
+
+    /// The uncovered photosphere as a checkerboard of dots, by limb darkening (ECL-A9).
+    fn photosphere(&self, mut f: impl FnMut(i32, i32, Ink)) {
+        if self.f <= 0.0 {
+            return;
+        }
+        let (c, r) = (self.centre, self.radius);
+        let m = self.to_dot(self.moon());
+        let mr = MOON_R * r;
+        let (x0, x1) = ((c.0 - r).floor() as i32, (c.0 + r).ceil() as i32);
+        let (y0, y1) = ((c.1 - r).floor() as i32, (c.1 + r).ceil() as i32);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if (x + y) % 2 != 0 {
+                    continue;
+                }
+                let (fx, fy) = (f64::from(x), f64::from(y));
+                let rr = (fx - c.0).hypot(fy - c.1) / r;
+                if rr > 1.0 || (fx - m.0).hypot(fy - m.1) <= mr {
+                    continue;
+                }
+                let mu = (1.0 - rr * rr).max(0.0).sqrt();
+                f(
+                    x,
+                    y,
+                    photosphere_ink(stellar::limb_darkening(mu, LIMB_DARK).sqrt()),
                 );
             }
         }
-        let (corona, prom, land) = (&self.corona, &self.prom, &self.land);
-        // In the diamond-ring acts the corona is held back one step (it blooms in totality).
-        let hold = self.diamond_act();
-        let beads = self.beads.values();
-        let bt = &self.bead_tone;
-        self.picture.shade(|x, y| {
-            let i = y as usize * w + x as usize;
-            let cover = f64::from(land.get(i).copied().unwrap_or(255)) / 255.0;
-            // The hills: black, their top a 1-px dim skyline (ADR-0017).
-            if cover >= 0.5 {
-                let above = i
-                    .checked_sub(w)
-                    .and_then(|j| land.get(j))
-                    .copied()
-                    .unwrap_or(0);
-                return if above < 128 { SKYLINE } else { Ink::BLANK };
-            }
-            let open = 1.0 - cover;
-            let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-            // Discs are walked only inside their bounding squares.
-            let near = |c: (f64, f64), rad: f64| {
-                (fx - c.0).abs() < rad + 1.0 && (fy - c.1).abs() < rad + 1.0
-            };
-            let moon_cov = if near(moon, mr) {
-                raster::disc_cover(x, y, moon, mr)
-            } else {
-                0.0
-            };
-            let sun_cov = if near(sun, r) {
-                raster::disc_cover(x, y, sun, r)
-            } else {
-                0.0
-            };
-            // The photosphere, where the Moon leaves it.
-            let lit = sun_cov * (1.0 - moon_cov);
-            if lit > 0.9 {
-                let rr = (fx - sun.0).hypot(fy - sun.1) / r;
-                let mu = (1.0 - rr * rr).max(0.0).sqrt();
-                let i = stellar::limb_darkening(mu, LIMB_DARK).sqrt();
-                return photosphere_ink(i);
-            }
-            // The half-covered edge pixels are the limb's orange, not a pale fringe.
-            if lit > 0.45 {
-                return photosphere_ink(0.0);
-            }
-            // Light in front of the Moon's limb (it is anti-aliased by `clear`): the beads'
-            // glare, the corona and the prominences stop at the dark disc, which stays whole.
-            let clear = (1.0 - moon_cov) * open;
-            let b = f64::from(bt.level(beads.get(i).copied().unwrap_or(0.0))) * clear;
-            if b >= 200.0 {
-                return BEAD_CORE;
-            }
-            let c = f64::from(corona.get(i).copied().unwrap_or(0)) * vis * clear;
-            let p = f64::from(prom.get(i).copied().unwrap_or(0)) / 255.0 * vis * clear * PROM_PEAK;
-            if p >= 30.0 && p > c * 0.6 {
-                return PROMINENCE;
-            }
-            // The sky is black: no glare halo, no twilight wash (ADR-0018). The partly
-            // covered rim pixels of the crescent add their light to the corona and beads.
-            let rim = if lit > 0.02 { 60.0 + 190.0 * lit } else { 0.0 };
-            if open < 0.5 || (moon_cov >= 0.5 && rim == 0.0) {
-                return Ink::BLANK;
-            }
-            // Added in light and tone-mapped (the brightest core rolls off), then drawn in
-            // flat steps that thin out into black.
-            corona_ink(soft_clip((c + b + rim) * open))
-                .and_then(|i| if hold { dimmer(i) } else { Some(i) })
-                .unwrap_or(Ink::BLANK)
-        });
-        self.stars(f);
-        self.diamond();
     }
 
-    /// Fill the next `rows` pixel rows of the corona and the prominences
-    /// (toned once: the power law alone, with no taper or cut-off, so the outer rays thin
-    /// out as far as they reach).
-    fn fill_corona(&mut self, rows: usize) {
-        let w = usize::from(self.picture.pixel_size().width());
-        let total = if w == 0 { 0 } else { self.corona.len() / w };
-        let end = self.corona_rows.saturating_add(rows).min(total);
-        let (cx, cy, r) = (self.centre.0, self.centre.1, self.radius);
-        let tone = Tone::asinh(CORONA_TONE.0, CORONA_TONE.1);
-        for y in self.corona_rows..end {
-            for x in 0..w {
-                let i = y * w + x;
-                let (fx, fy) = (x as f64 + 0.5, y as f64 + 0.5);
-                let (dx, dy) = ((fx - cx) / r, (fy - cy) / r);
-                let rr = dx.hypot(dy);
-                let a = dy.atan2(dx);
-                self.corona[i] = tone.level(self.corona_model.at(rr, a) as f32);
-                // Prominences: arches of glowing gas standing on the limb.
-                let mut p: f64 = 0.0;
-                for pr in &self.proms {
-                    let off = wrap(a - pr.angle) / pr.half;
-                    if off.abs() < 1.0 {
-                        let top = 1.0 + pr.height * (1.0 - off * off).sqrt();
-                        let thick = 0.35 * pr.height + 0.5 / r;
-                        let d = (rr - top).abs() / thick;
-                        let fill = if rr > 1.0 && rr < top { 0.55 } else { 0.0 };
-                        p = p.max((1.0 - d).max(0.0).max(fill * (1.0 - off.abs())));
+    /// Baily's beads as small dot discs beyond the lunar limb, and the diamond ring
+    /// (ECL-A11): through its acts a bigger bead at the contact point with 8 braille spikes,
+    /// white along the axes and yellow on the diagonals, kept off the Moon.
+    fn beads(&self, dots: &mut Dots) {
+        let m = self.moon();
+        let (mc, mr) = (self.to_dot(m), MOON_R * self.radius);
+        let clear = |x: f64, y: f64| (x - mc.0).hypot(y - mc.1) > mr + 0.5;
+        let lift = 2.0 * BEAD_LIFT / self.radius.max(1e-9);
+        if 1.0 - overlap(1.0, MOON_R, self.d) / PI <= 1e-12 {
+            for (_, p, gap) in self.limb.beads(m) {
+                let (ox, oy) = (p.0 - m.0, p.1 - m.1);
+                let len = ox.hypot(oy).max(1e-9);
+                let k = (MOON_R - len + lift) / len;
+                let (x, y) = self.to_dot((p.0 + ox * k, p.1 + oy * k));
+                let rad = 0.6 + 1.4 * gap / VALLEY;
+                let ri = rad.ceil() as i32;
+                for dy in -ri..=ri {
+                    for dx in -ri..=ri {
+                        let (px, py) = (x.round() + f64::from(dx), y.round() + f64::from(dy));
+                        if (px - x).hypot(py - y) <= rad && clear(px, py) {
+                            dots.set(px as i32, py as i32, BEAD_CORE);
+                        }
                     }
                 }
-                self.prom[i] = (p.clamp(0.0, 1.0) * 255.0).round() as u8;
             }
         }
-        self.corona_rows = end;
+        if !self.diamond_act() {
+            return;
+        }
+        let len = m.0.hypot(m.1).max(1e-9);
+        let out = 1.0 + lift;
+        let (bx, by) = self.to_dot((-m.0 / len * out, -m.1 / len * out));
+        for dy in -2..=2 {
+            for dx in -2..=2 {
+                let (px, py) = (bx.round() + f64::from(dx), by.round() + f64::from(dy));
+                if (px - bx).hypot(py - by) <= 2.0 && clear(px, py) {
+                    dots.set(px as i32, py as i32, BEAD_CORE);
+                }
+            }
+        }
+        let reach = SPIKE_DOTS.max(1.6 * 0.5 * self.radius);
+        for k in 0..8 {
+            let (s, c) = (f64::from(k) * TAU / 8.0).sin_cos_det();
+            let (r, ink) = if k % 2 == 0 {
+                (reach, SPIKE_AXIS)
+            } else {
+                (0.55 * reach, SPIKE_DIAGONAL)
+            };
+            let steps = (2.0 * r) as i32;
+            for j in 6..=steps {
+                let d = 0.5 * f64::from(j);
+                let (x, y) = (bx + d * c, by + d * s);
+                if clear(x, y) {
+                    dots.plot(x, y, ink);
+                }
+            }
+        }
+    }
+
+    fn paint(&mut self) {
+        let mut dots = self.dots.borrow_mut();
+        dots.clear();
+        // The land's skyline: one dot per column.
+        for (x, &y) in self.ridge.iter().enumerate() {
+            dots.set(x as i32, y, SKYLINE);
+        }
+        self.stars(&mut dots);
+        self.corona(|a, b, rank, _| {
+            if let Some(ink) = rank_ink(rank) {
+                dots.line(a.0, a.1, b.0, b.1, ink);
+            }
+        });
+        let vis = self.corona_vis();
+        let m = self.to_dot(self.moon());
+        let mr = MOON_R * self.radius;
+        if vis > 0.3 {
+            for &(x, y) in &self.prom_dots {
+                if (f64::from(x) - m.0).hypot(f64::from(y) - m.1) > mr + 0.5 {
+                    dots.set(x, y, PROMINENCE);
+                }
+            }
+        }
+        if vis > 0.5 && !self.diamond_act() {
+            let r = mr + 0.6;
+            let n = (TAU * r).ceil().max(8.0) as usize;
+            for k in 0..n {
+                let (s, c) = (TAU * k as f64 / n as f64).sin_cos_det();
+                let p = (m.0 + r * c, m.1 + r * s);
+                if !self.under_land(p) {
+                    dots.plot(p.0, p.1, MOON_RING);
+                }
+            }
+        }
+        self.photosphere(|x, y, ink| dots.set(x, y, ink));
+        self.beads(&mut dots);
+        drop(dots);
     }
 
     /// Planets and bright stars come out as the sky darkens: Venus first (brightest), then
     /// the others, as the light fails.
-    fn stars(&mut self, f: f64) {
-        let show = ease::smoothstep((0.12 - f) / 0.12);
+    fn stars(&self, dots: &mut Dots) {
+        let show = ease::smoothstep((0.12 - self.f) / 0.12);
         if show <= 0.0 {
             return;
         }
         for &(x, y, level) in &self.lights {
             let l = f64::from(level) * show.powf(1.0 + (255.0 - f64::from(level)) / 40.0);
-            if l >= 40.0 && self.picture.get(x, y) == Some(Ink::BLANK) {
-                let ink = Ink::new(Role::Star, if l >= 150.0 { 255 } else { 110 });
-                self.picture.set(x, y, ink);
+            if l >= 40.0 {
+                dots.set(
+                    x,
+                    y,
+                    Ink::new(Role::Star, if l >= 150.0 { 255 } else { 110 }),
+                );
             }
         }
     }
@@ -600,8 +664,9 @@ impl Generator for Eclipse {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        let (w, h) = (usize::from(size.width()), usize::from(size.height()));
-        let (px_w, px_h) = (w as f64, 2.0 * h as f64);
+        self.dots.get_mut().resize(size);
+        let ds = self.dots.get_mut().dot_size();
+        let (dw, dh) = (f64::from(ds.width()), f64::from(ds.height()));
         if self.timeline.is_none() {
             self.timeline = Some(Timeline::new(&PHASES));
         }
@@ -615,27 +680,17 @@ impl Generator for Eclipse {
             half: ctx.rng.random_range(0.04..0.12),
             height: ctx.rng.random_range(PROM_H.0..PROM_H.1),
         }));
-        self.radius = (0.1 * px_w).min(0.14 * px_h).max(0.5);
-        self.centre = (0.5 * px_w, 0.44 * px_h);
-        let deg = (0.5 * px_h / 30.0).max(0.1);
-        let hills = Skyline::new(&mut ctx.rng, w, deg, HILLS);
-        let horizon = 0.97 * px_h;
-        // The corona and prominences are only drawn once the Sun is nearly covered, so
-        // they are filled row by row over the partial phase's frames (`fill_corona`).
-        let n = w * 2 * h;
-        for buf in [&mut self.corona, &mut self.prom] {
-            buf.clear();
-            buf.resize(n, 0);
-        }
-        self.corona_rows = 0;
-        self.land.clear();
-        for y in 0..2 * h {
-            for x in 0..w {
-                self.land
-                    .push((hills.cover(x as i32, y as i32, horizon) * 255.0).round() as u8);
-            }
-        }
-        self.bead_tone = Tone::asinh(BEAD_TONE.0, BEAD_TONE.1);
+        // The M15 geometry, in dots (two per half-block pixel each way).
+        self.radius = (0.1 * dw).min(0.14 * dh).max(1.0);
+        self.centre = (0.5 * dw, 0.44 * dh);
+        let deg = (0.5 * dh / 30.0).max(0.1);
+        let hills = Skyline::new(&mut ctx.rng, ds.width().into(), deg, HILLS);
+        let horizon = 0.97 * dh;
+        self.ridge.clear();
+        self.ridge.extend(
+            (0..usize::from(ds.width()))
+                .map(|x| (horizon - hills.height_at(x as f64 + 0.5)).round().max(0.0) as i32),
+        );
         // Venus low beside the Sun, Jupiter and a couple of bright stars.
         self.lights.clear();
         for (fx, fy, level) in [
@@ -645,11 +700,9 @@ impl Generator for Eclipse {
             (0.9, 0.7, 120),
         ] {
             self.lights
-                .push(((fx * px_w) as i32, (fy * px_h) as i32, level));
+                .push(((fx * dw) as i32, (fy * dh) as i32, level));
         }
-        self.beads.resize(size);
-        self.picture.resize(size);
-        self.spikes.resize(size);
+        self.build_corona();
         let tl = self
             .timeline
             .take()
@@ -671,23 +724,12 @@ impl Generator for Eclipse {
 
     fn prepare(&mut self) {
         if std::mem::take(&mut self.dirty) {
-            // GEN-R19: a few corona rows per frame while it is hidden, the rest at once
-            // if it is needed before then; the picture is the same either way.
-            let rows = if self.corona_vis() > 0.0 {
-                usize::MAX
-            } else {
-                CORONA_ROWS
-            };
-            self.fill_corona(rows);
             self.paint();
         }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.picture.blit(canvas, |_, _, top, bottom| {
-            raster::ascii_ramp_cell(top, bottom)
-        });
-        self.spikes.blit_over(canvas, &self.picture);
+        self.dots.borrow().blit(canvas);
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -709,6 +751,20 @@ mod tests {
         g.resize(size, &mut ctx);
         g.prepare();
         (g, ctx)
+    }
+
+    /// Advance `g` to loop time `t`.
+    fn run_to(g: &mut Eclipse, ctx: &mut Ctx, t: f64) {
+        while g.t < t {
+            g.update(SIM_DT, ctx);
+        }
+        g.prepare();
+    }
+
+    fn canvas_of(g: &Eclipse, size: Size) -> Canvas {
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        canvas
     }
 
     #[test]
@@ -761,49 +817,26 @@ mod tests {
         let (mut g, mut ctx) = built(Size::new(80, 30));
         for _ in 0..(46.0 * 60.0) as usize {
             g.update(SIM_DT, &mut ctx);
-            g.prepare();
             if g.f >= CORONA_F {
-                // The corona's light is off: no corona step lights the sky (there is no
-                // glare halo either, ADR-0018).
                 assert_eq!(g.corona_vis(), 0.0, "f = {}", g.f);
-                let corona = g.picture.pixel_size().area();
                 let mut n = 0;
-                for y in 0..60 {
-                    for x in 0..80 {
-                        if let Some(p) = g.picture.get(x, y)
-                            && rank(p) > 0
-                            && g.beads.get(x, y).unwrap_or(0.0) == 0.0
-                            // The disc's own anti-aliased rim is not corona.
-                            && (f64::from(x) + 0.5 - g.centre.0)
-                                .hypot(f64::from(y) + 0.5 - g.centre.1)
-                                > g.radius + 1.0
-                            // Nor are the planets coming out.
-                            && !g.lights.iter().any(|&(lx, ly, _)| (lx, ly) == (x, y))
-                        {
-                            n += 1;
-                        }
-                    }
-                }
-                assert_eq!(n, 0, "f = {} of {corona}", g.f);
+                g.corona(|_, _, _, _| n += 1);
+                assert_eq!(n, 0, "f = {}", g.f);
             }
         }
     }
 
     #[test]
-    fn ecl_a4_corona_fades_with_radius() {
-        let model = Corona::seeded(&mut SplitMix64::new(5));
-        let median = |r: f64| {
-            let mut v: Vec<f64> = (0..360)
-                .map(|i| model.at(r, f64::from(i).to_radians()))
-                .collect();
-            v.sort_by(f64::total_cmp);
-            v[180]
-        };
-        let mut prev = f64::INFINITY;
-        for r in [1.05, 1.2, 1.5, 2.0, 3.0, 4.0] {
-            let m = median(r);
-            assert!(m < prev, "r = {r}");
-            prev = m;
+    fn ecl_a4_corona_fades_outward_along_every_thread() {
+        let (g, _) = built(Size::new(120, 40));
+        for s in &g.segs {
+            let t = &g.corona_model.threads[usize::from(s.thread)];
+            let want = t.gain * f64::from(s.r).powf(-FALLOFF);
+            assert!((f64::from(s.base) - want).abs() < 1e-5 * want.max(1.0));
+        }
+        // So the step is a non-increasing function of r on every thread.
+        for e in [0.03, 0.1, 0.3, 0.6, 1.0] {
+            assert!(corona_rank(e) >= corona_rank(0.9 * e));
         }
     }
 
@@ -816,88 +849,50 @@ mod tests {
             assert_eq!(g.caption(), Some(want));
             assert!(META.captions.contains(&want), "{i}");
             g.update(SIM_DT, &mut ctx);
-            g.prepare();
-        }
-    }
-
-    /// Step of a corona ink (1 faintest … 4 brightest), 0 for anything else.
-    fn rank(p: Ink) -> usize {
-        [18.0, 45.0, 95.0, 170.0]
-            .iter()
-            .position(|&l| corona_ink(l) == Some(p))
-            .map_or(0, |k| k + 1)
-    }
-
-    /// Advance `g` to loop time `t`.
-    fn run_to(g: &mut Eclipse, ctx: &mut Ctx, t: f64) {
-        while g.t < t {
-            g.update(SIM_DT, ctx);
-            g.prepare();
         }
     }
 
     #[test]
-    fn ecl_a6_corona_steps_down_into_the_black_sky() {
-        // The tone curve is continuous and monotone, and never reaches its ceiling.
-        let mut prev = soft_clip(0.0);
-        for i in 1..2000 {
-            let v = soft_clip(f64::from(i) * 0.5);
-            assert!(v >= prev && v - prev <= 0.5 + 1e-9 && v < CEIL, "{i}");
-            prev = v;
-        }
-        // In totality, walking out from the limb, the corona steps down into the black
-        // sky one flat step at a time: never a jump of two steps between neighbours.
+    fn ecl_a6_threads_step_down_one_step_at_a_time() {
         let (mut g, mut ctx) = built(Size::new(120, 40));
         run_to(&mut g, &mut ctx, 19.0);
-        let (cx, cy, r) = (g.centre.0, g.centre.1, g.radius);
-        for k in 0..24 {
-            let a = TAU * f64::from(k) / 24.0;
-            let (s, c) = a.sin_cos_det();
-            let mut last: Option<usize> = None;
-            let mut d = MOON_R * r + 2.0;
-            while d < 5.0 * r {
-                let (x, y) = ((cx + d * c) as i32, (cy + d * s) as i32);
-                if let Some(p) = g.picture.get(x, y)
-                    && (p == Ink::BLANK || rank(p) > 0)
-                {
-                    let k2 = rank(p);
-                    if let Some(l) = last {
-                        assert!(l.abs_diff(k2) <= 1, "ray {k} at {d}: step {l} → {k2}");
-                    }
-                    last = Some(k2);
-                }
-                d += 1.0;
+        let vis = g.corona_vis();
+        assert!(vis > 0.99);
+        let mut last: Option<(u16, usize)> = None;
+        let mut checked = 0;
+        for s in &g.segs {
+            let rank = corona_rank(f64::from(s.base) * vis);
+            if let Some((t, l)) = last
+                && t == s.thread
+            {
+                assert!(l.abs_diff(rank) <= 1, "thread {t}: step {l} → {rank}");
+                checked += 1;
             }
+            last = Some((s.thread, rank));
         }
+        assert!(checked > 200, "{checked}");
     }
 
     #[test]
-    fn ecl_a7_sky_dims_toward_twilight_and_the_moon_stays_whole() {
-        let (mut g, mut ctx) = built(Size::new(120, 40));
-        let corner = |g: &Eclipse| g.picture.get(4, 4).map_or(0, |p| p.level);
-        let mut prev = corner(&g);
+    fn ecl_a7_black_sky_and_the_moon_stays_whole() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = built(size);
         let mut t = 0.0;
         while t < 8.0 {
             t += 0.5;
             run_to(&mut g, &mut ctx, t);
-            let l = corner(&g);
-            assert!(l <= prev, "t = {t}: {prev} → {l}");
-            prev = l;
+            assert_eq!(canvas_of(&g, size).get(2, 1).unwrap().ch, ' ', "t = {t}");
         }
-        assert!(prev <= 16, "twilight level {prev}");
-        // Through the beads and diamond ring the Moon's disc stays dark: glare never
-        // spills onto it.
+        // Through the beads and diamond ring nothing is lit on the Moon's disc.
         while g.t < 12.0 {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
-            let m = g.to_px(g.moon());
+            let m = g.to_dot(g.moon());
             let rr = MOON_R * g.radius - 1.5;
             for y in (m.1 - rr) as i32..=(m.1 + rr) as i32 {
                 for x in (m.0 - rr) as i32..=(m.0 + rr) as i32 {
-                    let (dx, dy) = (f64::from(x) + 0.5 - m.0, f64::from(y) + 0.5 - m.1);
-                    if dx.hypot(dy) < rr {
-                        let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                        assert!(p.level <= 16, "t = {} ({x},{y}) {p:?}", g.t);
+                    if (f64::from(x) - m.0).hypot(f64::from(y) - m.1) < rr {
+                        assert!(!g.dots.borrow().is_lit(x, y), "t = {} ({x},{y})", g.t);
                     }
                 }
             }
@@ -917,113 +912,105 @@ mod tests {
     }
 
     #[test]
-    fn ecl_a9_power_law_corona_without_cutoff_or_fray_and_no_blue_rim() {
+    fn ecl_a9_photosphere_dots_stalks_reach_out_and_open_field_bends_to_the_equator() {
         let (mut g, mut ctx) = built(Size::new(120, 40));
-        // Partial phase: the crescent's anti-aliased rim is pale, never the sky's blue.
         run_to(&mut g, &mut ctx, 6.0);
-        let (cx, cy, r) = (g.centre.0, g.centre.1, g.radius);
-        let m = g.to_px(g.moon());
-        let mut rim = 0;
-        for y in 0..i32::from(g.picture.pixel_size().height()) {
-            for x in 0..i32::from(g.picture.pixel_size().width()) {
-                let sun = raster::disc_cover(x, y, (cx, cy), r);
-                let moon = raster::disc_cover(x, y, m, MOON_R * r);
-                let lit = sun * (1.0 - moon);
-                if lit > 0.02 && lit <= 0.9 {
-                    let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                    assert!(
-                        matches!(
-                            p.role,
-                            Role::Background | Role::Star | Role::Structure | Role::Hot
-                        ),
-                        "coloured rim at ({x},{y}): {p:?}"
-                    );
-                    rim += 1;
-                }
-            }
-        }
-        assert!(rim > 4, "{rim}");
-        // The corona's toned light falls along every ray with no cut-off: still lit at 4 R.
-        for k in 0..24 {
-            let a = TAU * f64::from(k) / 24.0;
-            let (s, c) = a.sin_cos_det();
-            let at = |d: f64| {
-                let (x, y) = ((cx + d * r * c) as usize, (cy + d * r * s) as usize);
-                g.corona[y.min(79) * 120 + x.min(119)]
-            };
-            if (cy + 4.0 * r * s) >= 0.0 && (cy + 4.0 * r * s) < 80.0 {
-                assert!(at(4.0) > 0, "ray {k} cut off by 4 R");
-            }
-        }
-        // In totality the steps fall cleanly along each ray: a step brightens outward at
-        // most twice (a ray grazing a bending streamer), never a fray.
+        let (c, r) = (g.centre, g.radius);
+        let m = g.to_dot(g.moon());
+        let mut n = 0;
+        g.photosphere(|x, y, ink| {
+            let (fx, fy) = (f64::from(x), f64::from(y));
+            assert!((fx - c.0).hypot(fy - c.1) <= r && (fx - m.0).hypot(fy - m.1) > MOON_R * r);
+            assert!(
+                [
+                    Ink::new(Role::Sun, 255),
+                    Ink::new(Role::Sun, 170),
+                    Ink::new(Role::Hot, 200)
+                ]
+                .contains(&ink)
+            );
+            n += 1;
+        });
+        assert!(n > 20, "{n} photosphere dots");
+        // In totality the stalks run out past 3.5 R☉.
         run_to(&mut g, &mut ctx, 19.0);
-        for k in 0..48 {
-            let a = TAU * f64::from(k) / 48.0;
-            let (s, c) = a.sin_cos_det();
-            let mut rises = 0;
-            let mut last = None;
-            let mut d = MOON_R * r + 2.0;
-            while d < 5.0 * r {
-                let (x, y) = ((cx + d * c) as i32, (cy + d * s) as i32);
-                if let Some(p) = g.picture.get(x, y)
-                    && !g.lights.iter().any(|&(lx, ly, _)| (lx, ly) == (x, y))
-                {
-                    let k2 = rank(p);
-                    if last.is_some_and(|l| k2 > l) {
-                        rises += 1;
-                    }
-                    last = Some(k2);
-                }
-                d += 0.5;
+        let model = &g.corona_model;
+        let mut reach: f64 = 0.0;
+        for s in &g.segs {
+            let t = &model.threads[usize::from(s.thread)];
+            if matches!(t.kind, Kind::Open { stalk: true, .. })
+                && corona_rank(f64::from(s.base) * g.corona_vis()) > 0
+            {
+                reach = reach.max(f64::from(s.r));
             }
-            assert!(rises <= 3, "ray {k}: {rises} rises");
+        }
+        assert!(reach >= 3.5, "stalks reach {reach} R");
+        // Open field: colatitude grows outward toward the equator, outside the helmet.
+        for t in &model.threads {
+            if let Kind::Open { south, .. } = t.kind {
+                let lm = model.cusp(t);
+                let mut last = 0.0;
+                for k in 0..=100 {
+                    let (rr, th) = model.point(t, k, 100);
+                    let th = if south { PI - th } else { th };
+                    assert!(th >= last - 1e-12, "colatitude fell");
+                    if rr < lm {
+                        let sep = (rr / lm).sqrt().asin();
+                        assert!(th <= sep + 1e-9, "inside the helmet at r {rr}");
+                    }
+                    last = th;
+                }
+            }
         }
     }
 
     #[test]
-    fn ecl_a10_black_overhead_and_the_corona_fades_to_black() {
-        let (mut g, mut ctx) = built(Size::new(120, 40));
-        let (cx, cy, r) = (g.centre.0, g.centre.1, g.radius);
+    fn ecl_a10_black_overhead_land_and_a_clean_corona() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = built(size);
+        let (c, r) = (g.centre, g.radius);
+        let lights: Vec<(i32, i32)> = g
+            .lights
+            .iter()
+            .map(|&(x, y, _)| (x / Dots::CELL_W, y / Dots::CELL_H))
+            .collect();
         for t in [2.0, 6.0, 10.0, 19.0, 30.0, 36.0] {
             run_to(&mut g, &mut ctx, t);
-            // The top quarter's corners, well clear of the Sun's glare, are black.
-            for y in 0..20 {
-                for x in (0..24).chain(96..120) {
-                    let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                    let lights = g.lights.iter().any(|&(lx, ly, _)| (lx, ly) == (x, y));
+            let canvas = canvas_of(&g, size);
+            for y in 0..10 {
+                for x in (0..12).chain(108..120) {
+                    let cell = canvas.get(x, y).unwrap();
                     assert!(
-                        lights || p == Ink::BLANK,
-                        "t = {t}: ({x},{y}) {p:?} is not black"
+                        cell.ch == ' ' || lights.contains(&(x, y)),
+                        "t = {t}: ({x},{y}) not black"
                     );
                 }
             }
-            // The land is black but for its 1-px skyline: at most one lit pixel per column
-            // below the sky's lowest open row.
+            // The land: at most one lit cell per column below the skyline's top.
+            let top = (*g.ridge.iter().min().unwrap() / Dots::CELL_H).max(0);
             for x in 0..120 {
-                let lit = (70..80)
-                    .filter(|&y| g.picture.get(x, y).is_some_and(|p| p == SKYLINE))
+                let lit = (top..40)
+                    .filter(|&y| canvas.get(x, y).is_some_and(|c| c.ch != ' '))
                     .count();
-                assert!(lit <= 2, "t = {t}: column {x} has {lit} skyline pixels");
+                assert!(lit <= 2, "t = {t}: column {x} has {lit} land cells");
             }
             if t == 19.0 {
-                corona_fades_in_pearl(&g, (cx, cy, r));
-            }
-        }
-    }
-
-    /// In totality the corona is white and grey steps (M11's roles) thinning into black:
-    /// beyond the prominences no other colour within 3 R.
-    fn corona_fades_in_pearl(g: &Eclipse, (cx, cy, r): (f64, f64, f64)) {
-        for y in 0..80 {
-            for x in 0..120 {
-                let d = (f64::from(x) + 0.5 - cx).hypot(f64::from(y) + 0.5 - cy) / r;
-                let p = g.picture.get(x, y).unwrap_or(Ink::BLANK);
-                if (1.3..3.0).contains(&d) {
-                    assert!(
-                        p == Ink::BLANK || rank(p) > 0 || p.role == Role::Star,
-                        "coloured corona at ({x},{y}) {d:.2} R: {p:?}"
-                    );
+                let corona: Vec<Ink> = CORONA_STEPS.iter().map(|s| s.1).collect();
+                for y in 0..40 {
+                    for x in 0..120 {
+                        let cell = canvas.get(x, y).unwrap();
+                        let (fx, fy) = (f64::from(2 * x) + 1.0, f64::from(4 * y) + 2.0);
+                        let d = (fx - c.0).hypot(fy - c.1) / r;
+                        if cell.ch != ' ' && (1.3..3.0).contains(&d) {
+                            assert!(
+                                corona.contains(&cell.ink)
+                                    || cell.ink == PROMINENCE
+                                    || cell.ink.role == Role::Star,
+                                "({x},{y}) {d:.2} R: {:?}",
+                                cell.ink
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -1033,37 +1020,92 @@ mod tests {
     fn ecl_a11_the_diamond_ring_shows_a_bead_and_spikes_then_totality_does_not() {
         let size = Size::new(120, 40);
         let (mut g, mut ctx) = built(size);
-        let white = |g: &Eclipse| {
-            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
-            g.render(&mut canvas);
-            let ps = g.picture.pixel_size();
-            let bead = (0..i32::from(ps.height()))
-                .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| g.picture.get(x, y) == Some(BEAD_CORE))
-                .count();
-            let spikes = canvas
+        let count = |g: &Eclipse, ink: Ink| {
+            canvas_of(g, size)
                 .cells()
                 .iter()
-                .filter(|c| ('\u{2801}'..='\u{28ff}').contains(&c.ch))
-                .count();
-            (bead, spikes)
+                .filter(|c| c.ch != ' ' && c.ink == ink)
+                .count()
         };
-        // Mid diamond-ring act (8–12 s): a 2–3 pixel white bead and its braille spikes.
         run_to(&mut g, &mut ctx, 11.0);
-        let (bead, spikes) = white(&g);
-        assert!((2..=6).contains(&bead), "bead {bead} px");
+        assert!(count(&g, BEAD_CORE) >= 1, "no diamond bead");
+        let spikes = count(&g, SPIKE_AXIS) + count(&g, SPIKE_DIAGONAL);
         assert!(spikes >= 4, "{spikes} spike cells");
-        // The corona is held back a step: its brightest step does not show yet.
-        let top = corona_ink(200.0).unwrap();
-        let ps = g.picture.pixel_size();
-        let bright = (0..i32::from(ps.height()))
-            .flat_map(|y| (0..i32::from(ps.width())).map(move |x| (x, y)))
-            .filter(|&(x, y)| g.picture.get(x, y) == Some(top))
-            .count();
-        assert_eq!(bright, 0, "corona at full bloom in the diamond ring");
-        // Totality: no diamond.
+        let mut top = 0;
+        g.corona(|_, _, rank, _| top += usize::from(rank == CORONA_STEPS.len()));
+        assert_eq!(top, 0, "corona at full bloom in the diamond ring");
         run_to(&mut g, &mut ctx, 20.0);
-        assert_eq!(white(&g).1, 0, "spikes in totality");
+        assert_eq!(count(&g, SPIKE_DIAGONAL), 0, "spikes in totality");
+    }
+
+    #[test]
+    fn ecl_a12_threads_follow_the_field_thin_with_a_ringed_moon() {
+        let model = Corona::seeded(&mut SplitMix64::new(5));
+        for t in &model.threads {
+            if let Kind::Closed { l } = t.kind {
+                for k in 0..=50 {
+                    let (r, th) = model.point(t, k, 50);
+                    let s = th.sin_det();
+                    assert!((r - l * s * s).abs() < 1e-9, "L {l} θ {th}");
+                }
+            }
+        }
+        let size = Size::new(200, 50);
+        let (mut g, mut ctx) = built(size);
+        run_to(&mut g, &mut ctx, 19.0);
+        let ds = g.dots.borrow().dot_size();
+        let mut only = Dots::new(size);
+        let mut list = Vec::new();
+        g.corona(|a, b, _, _| {
+            only.line(a.0, a.1, b.0, b.1, Ink::new(Role::Star, 230));
+            let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+            let n = dx.hypot(dy).max(1e-9);
+            for (x, y) in sciart_core::geom::line(
+                a.0.round() as i32,
+                a.1.round() as i32,
+                b.0.round() as i32,
+                b.1.round() as i32,
+            ) {
+                if (0..i32::from(ds.width())).contains(&x)
+                    && (0..i32::from(ds.height())).contains(&y)
+                {
+                    list.push((x, y, dx / n, dy / n));
+                }
+            }
+        });
+        let thin = list
+            .iter()
+            .filter(|&&(x, y, ux, uy)| {
+                (-2..=2)
+                    .filter(|&k| {
+                        let k = f64::from(k);
+                        only.is_lit(
+                            (f64::from(x) - k * uy).round() as i32,
+                            (f64::from(y) + k * ux).round() as i32,
+                        )
+                    })
+                    .count()
+                    <= 3
+            })
+            .count();
+        let share = thin as f64 / list.len() as f64;
+        assert!(
+            list.len() > 300 && share >= 0.85,
+            "thin {share:.3} of {}",
+            list.len()
+        );
+        // The Moon's limb is a thin white ring in totality.
+        let m = g.to_dot(g.moon());
+        let r = MOON_R * g.radius + 0.6;
+        let ring = (0..360)
+            .filter(|&k| {
+                let (s, c) = (f64::from(k).to_radians()).sin_cos_det();
+                g.dots
+                    .borrow()
+                    .is_lit((m.0 + r * c).round() as i32, (m.1 + r * s).round() as i32)
+            })
+            .count();
+        assert!(ring > 300, "ring {ring} of 360");
     }
 
     #[test]
