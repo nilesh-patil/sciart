@@ -26,7 +26,6 @@ macro_rules! registry {
 mod shared {
     pub(crate) mod cahn_hilliard;
     pub(crate) mod excitable;
-    pub(crate) mod jovian;
     pub(crate) mod laplacian_growth;
     pub(crate) mod plume;
     pub(crate) mod skyline;
