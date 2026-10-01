@@ -101,7 +101,9 @@ const HOLE: u8 = 34;
 /// tripod's struts in `Structure`, the fairing in `Wave`; each sunshield layer's outline
 /// by its temperature, layer 5 (k = 0, facing the telescope, ≈ 40 K) `Cold` to layer 1
 /// (k = 4, facing the Sun, ≈ 380 K) `Hot`; the Sun's limb in the orbit act.
-const FRAME_INK: Ink = Ink::new(Role::Structure, 170);
+const FRAME_INK: Ink = Ink::new(Role::Structure, 200);
+/// Least on-screen segment edge (dots) at which the mirror's seams are drawn.
+const SEAM_MIN: f64 = 6.0;
 const STRUT_INK: Ink = Ink::new(Role::Structure, 130);
 const FAIRING_INK: Ink = Ink::new(Role::Wave, 150);
 pub(crate) const LAYER_INKS: [Ink; 5] = [
@@ -212,8 +214,9 @@ struct Honey {
     panel: i32,
     /// Level taken off while the wing is folded.
     dim: f64,
-    /// Edge-on (a degenerate map): drawn as a flat strip of gold.
-    flat: bool,
+    /// Whether the seams are drawn: not edge-on, and only while a segment's edge spans
+    /// ≥ `SEAM_MIN` dots on screen (smaller, the hexes would break into specks).
+    seams: bool,
 }
 
 /// The segment holding plane point `(x, y)` (m): axial `(q, r)` of the flat-top grid.
@@ -263,7 +266,7 @@ impl Honey {
         );
         let level =
             (GOLD_LEVEL + jitter - self.dim + spec(px, py)).clamp(ink::MIN_VISIBLE_LEVEL, 255.0);
-        if !self.flat {
+        if self.seams {
             // Distance to the hex's nearest edge, in pixels: the edge function's
             // gradient in pixel space is `invᵀ n`.
             let (lx, ly) = (mx - hx, my - hy);
@@ -418,10 +421,13 @@ fn gild(dots: &mut Dots, zbuf: &[f32], zsize: Size, p: &Poly, spec: &impl Fn(f64
             if ink.role != GOLD {
                 continue;
             }
-            let z = plane.map_or(p.depth, |(a, b, c)| a * cx + b * cy + c);
-            let (px, py) = (cx.floor() as usize, cy.floor() as usize);
+            // Hidden only by a nearer surface: compare at the pixel's centre, where the
+            // panel itself wrote the buffer, so a steep panel never hides its own dots
+            // (a dot's depth differs from its pixel centre's).
+            let (px, py) = (cx.floor(), cy.floor());
+            let z = plane.map_or(p.depth, |(a, b, c)| a * (px + 0.5) + b * (py + 0.5) + c);
             let hidden = zbuf
-                .get(py * zw + px)
+                .get(py as usize * zw + px as usize)
                 .is_some_and(|&d| z < f64::from(d) - DEPTH_EPS);
             if !hidden {
                 dots.set(ix, iy, ink);
@@ -576,6 +582,9 @@ impl JwstUnfolding {
         let det = fwd[0] * fwd[3] - fwd[1] * fwd[2];
         let ppm = 2.0 * self.scale;
         let flat = det.abs() < 0.3 * ppm * ppm;
+        // A segment edge (SEG m) on screen in dots, along its shorter axis.
+        let edge = 2.0 * SEG * fwd[0].hypot(fwd[2]).min(fwd[1].hypot(fwd[3]));
+        let seams = !flat && edge >= SEAM_MIN;
         let inv = if det.abs() > 1e-12 {
             [fwd[3] / det, -fwd[1] / det, -fwd[2] / det, fwd[0] / det]
         } else {
@@ -595,7 +604,7 @@ impl JwstUnfolding {
                 inv,
                 panel,
                 dim: spec_dim,
-                flat,
+                seams,
             }),
             ..Poly::default()
         };
@@ -796,14 +805,15 @@ impl JwstUnfolding {
                     }
                 }
             }
-            // The tower, and the secondary's tripod.
+            // The tower, one continuous line through the shield (it is the shield's
+            // mast, so it is not hidden by it), and the secondary's tripod.
             let my = MIRROR_Y + TOWER_LIFT * d.tower;
-            self.line(
-                &pr,
-                [0.0, -0.05, 0.2],
-                [0.0, my - 4.3 * SEG, -0.5],
-                FRAME_INK,
-            );
+            if let (Some(a), Some(b)) = (
+                self.project(&pr, [0.0, -0.05, 0.2]),
+                self.project(&pr, [0.0, my - 4.3 * SEG, -0.5]),
+            ) {
+                self.segment_px(a, b, FRAME_INK, false);
+            }
             let sm = Self::secondary(&d);
             for anchor in [
                 [0.0, my + 4.0 * SEG, 0.2],
@@ -831,6 +841,11 @@ impl JwstUnfolding {
 
     /// [`line`](Self::line) between projected points (pixel x, y and depth).
     fn line_px(&mut self, pa: (f64, f64, f64), pb: (f64, f64, f64), ink: Ink) {
+        self.segment_px(pa, pb, ink, true);
+    }
+
+    /// A projected segment in dots, depth-tested or (`depth` false) always drawn.
+    fn segment_px(&mut self, pa: (f64, f64, f64), pb: (f64, f64, f64), ink: Ink, depth: bool) {
         let (ax, ay) = Dots::from_cells(pa.0, pa.1 / 2.0);
         let (bx, by) = Dots::from_cells(pb.0, pb.1 / 2.0);
         let n = ((bx - ax).abs().max((by - ay).abs()).ceil() as usize).clamp(1, 2048);
@@ -844,10 +859,11 @@ impl JwstUnfolding {
             if px < 0.0 || py < 0.0 || px >= f64::from(self.psize.0) {
                 continue;
             }
-            let covered = self
-                .zbuf
-                .get(py as usize * width + px as usize)
-                .is_some_and(|&d| z < f64::from(d) - DEPTH_EPS);
+            let covered = depth
+                && self
+                    .zbuf
+                    .get(py as usize * width + px as usize)
+                    .is_some_and(|&d| z < f64::from(d) - DEPTH_EPS);
             if !covered {
                 self.dots.plot(x, y, ink);
             }
@@ -1327,5 +1343,56 @@ mod tests {
         let end = deploy(&tl, total - 1e-6);
         assert_eq!(end.layers, [1.0; 5]);
         assert_eq!(end.wings, [1.0; 2]);
+    }
+
+    #[test]
+    fn jwst_a9_the_gold_segments_are_solid_in_profile() {
+        // In the fairing beat the mirror is seen steeply: each visible segment is still a
+        // solid field of gold dots, not stripes.
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = JwstUnfolding::default();
+        g.resize(size, &mut ctx);
+        for t in [1.5, 2.5] {
+            g.t = t;
+            g.update(0.0, &mut ctx);
+            g.prepare();
+            let c = canvas(&g);
+            let d = g.state();
+            let pr = g.projector();
+            let (mut inside, mut lit) = (0, 0);
+            for (q, r) in segments() {
+                let side = match panel_of(q) {
+                    -1 => Some(0),
+                    1 => Some(1),
+                    _ => None,
+                };
+                let (hx, hy) = segment_centre(q, r);
+                let Some((cx, cy, _)) =
+                    g.project(&pr, JwstUnfolding::mirror_point(&d, side, hx, hy))
+                else {
+                    continue;
+                };
+                if cell_at(&c, cx, cy).role != GOLD {
+                    continue;
+                }
+                for i in -3i32..=3 {
+                    for j in -3i32..=3 {
+                        let (u, v) = (0.15 * f64::from(i), 0.15 * f64::from(j));
+                        if u.hypot(v) > 0.5 * SEG {
+                            continue;
+                        }
+                        let p = JwstUnfolding::mirror_point(&d, side, hx + u, hy + v);
+                        let Some((x, y, _)) = g.project(&pr, p) else {
+                            continue;
+                        };
+                        inside += 1;
+                        lit += usize::from(g.dots.is_lit((2.0 * x) as i32, (2.0 * y) as i32));
+                    }
+                }
+            }
+            assert!(inside > 20, "t = {t}: {inside} samples");
+            assert!(lit * 100 >= inside * 85, "t = {t}: {lit}/{inside} lit");
+        }
     }
 }

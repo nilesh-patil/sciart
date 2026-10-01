@@ -394,13 +394,13 @@ const LOOP_S: f64 = ACT_S[0] + ACT_S[1] + ACT_S[2];
 
 /// The backbone: a Catmull-Rom spline through the beads, one dot thick, below the
 /// residues' levels so a bead's cell keeps the bead's colour.
-const BACKBONE: Ink = Ink::new(Role::Structure, 110);
+const BACKBONE: Ink = Ink::new(Role::Structure, 140);
 /// Residue dots (M11's complementary pair, ADR-0018): H (hydrophobic) `Hot`, a step
 /// brighter with each H·H contact up to two (buried cores read hot); P (polar) `Cold`.
 /// A small braille disc whose radius follows the zoom (`BEAD_FRAC` of a lattice step,
 /// within `BEAD_R` dots).
 const H_INKS: [Ink; 3] = [
-    Ink::new(Role::Hot, 130),
+    Ink::new(Role::Hot, 150),
     Ink::new(Role::Hot, 190),
     Ink::new(Role::Hot, 255),
 ];
@@ -503,12 +503,13 @@ impl Folding {
         self.cells.width() >= PANEL_MIN && self.cells.height() >= 12
     }
 
-    /// Dot size of the art area (above the title row).
+    /// Dot size of the art area: above the title row, less a one-cell margin so beads
+    /// never touch it.
     fn art(&self) -> (f64, f64) {
         let ds = self.dots.dot_size();
         (
             f64::from(ds.width()),
-            (f64::from(ds.height()) - f64::from(Dots::CELL_H)).max(1.0),
+            (f64::from(ds.height()) - 2.0 * f64::from(Dots::CELL_H)).max(1.0),
         )
     }
 
