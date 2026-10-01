@@ -108,6 +108,13 @@ pub(crate) const OPEN: [(f64, Ink); 3] = [
 const FLARE_HOT: f64 = 0.3;
 const TOP_HOT: f64 = 0.8;
 const TOP_SHARE: f64 = 0.12;
+/// The share of the cool field lines (closed and open, each mirror twin on its own) drawn.
+pub(crate) const LINE_KEEP: f64 = 0.7;
+
+/// Whether cool field line `k` (an index into the lines and their mirror twins) is drawn.
+pub(crate) fn drawn(k: usize) -> bool {
+    hash01(0x7A1E ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15)) < LINE_KEEP
+}
 pub(crate) const FLARE_WHITE: Ink = Ink::new(Role::Star, 255);
 pub(crate) const FLARE_YELLOW: Ink = Ink::new(Role::Sun, 240);
 /// The flux rope: strands facing the viewer, behind, and while it is faint; its core.
@@ -771,6 +778,11 @@ impl SolarEruption {
             let m = 1.0 - 0.55 * hot;
             let closed = line.foot.1.is_finite();
             let mut draw = |pose: Pose, flip: f64, kk: usize| {
+                // Thinned (M16 polish): a fixed share of the cool lines is not drawn, so
+                // the rising arcade is not a tangle; hot post-flare loops always are.
+                if hot <= FLARE_HOT && !drawn(kk) {
+                    return;
+                }
                 let at = |p: &[f32; 2]| pose.apply(m, [flip * f64::from(p[0]), f64::from(p[1])]);
                 let mut prev = at(&pts[0]);
                 let mut a = v.px(prev[0], prev[1]);
