@@ -37,6 +37,7 @@ const T_CR: f64 = 2.0 * std::f64::consts::SQRT_2;
 /// Mass fraction cut of the AHW sampler, so `r ≤ 38.7 a`.
 const MASS_CUT: f64 = 0.999;
 /// Half-mass radius over scale radius for a Plummer sphere, `1/√(2^{2/3} − 1)`.
+#[cfg(test)]
 const RH_PER_A: f64 = 1.3048;
 /// Allowed body counts; the largest is the ADR-0012 cap.
 const BUCKETS: [usize; 7] = [64, 96, 128, 192, 256, 384, 500];
@@ -46,23 +47,29 @@ const MAX_GIANTS: usize = 10;
 const EYE: f64 = 10.0;
 /// Re-centring passes onto the inner half's mean position (GC-A2).
 const DENSITY_PASSES: usize = 4;
-/// Seconds of the `r_h` smoothing that drives the glow radius.
-const RH_TAU: f64 = 4.0;
 /// Model radius filling the frame's fit radius (≈ 93 % of the projected mass).
 const VIEW_RADIUS: f64 = 2.2;
-/// The glow ends where `p` reaches 0: `g = 0.08` at `R = √(√12.5 − 1) a_g ≈ 1.5923 a_g`.
-const GLOW_EDGE: f64 = 1.5924;
-const GIANT: Glyph = Glyph::new('✦', '*');
-/// A giant stands out only where the unresolved glow lights less than this fraction
-/// of the dots (`R > 0.83 a_g`); nearer the core it is lost in the glare.
-const GIANT_MAX_GLOW: f64 = 0.5;
 /// Giant level `GIANT_MID ± GIANT_SWING`, twinkling with a per-giant period drawn
 /// from `GIANT_PERIODS` seconds.
-const GIANT_MID: f64 = 200.0;
-const GIANT_SWING: f64 = 30.0;
+const GIANT_MID: f64 = 245.0;
+const GIANT_SWING: f64 = 10.0;
 const GIANT_PERIODS: (f64, f64) = (5.0, 9.0);
-/// The label's name part, also the label on canvases too narrow for the counts.
-const NAME: &str = "globular cluster";
+/// Main-sequence display masses (M☉): the hydrogen-burning limit to the turn-off of a
+/// 12 Gyr population.
+const MS_MASS: (f64, f64) = (0.15, 0.8);
+/// Display-mass steps: turn-off (≈ 14 % of the main sequence) and upper (≈ 29 %).
+const TURNOFF_M: f64 = 0.6;
+const UPPER_M: f64 = 0.35;
+/// Blue stragglers are picked among bodies starting inside this radius (≈ 0.65 r_h).
+const STRAGGLER_R: f64 = 0.5;
+/// Trail: one stored position every `TRAIL_EVERY` updates, `TRAIL_N` kept (≈ 0.13 s).
+const TRAIL_EVERY: u32 = 4;
+const TRAIL_N: usize = 2;
+/// Trail level as a fraction of the head's: one flat step down.
+const TRAIL_FRACTION: f64 = 0.75;
+/// Longest trail segment drawn (dots, Chebyshev); a longer jump (a fast near-eye star)
+/// is left out rather than streaked.
+const MAX_SEGMENT: i32 = 12;
 
 /// Timeline phase indices.
 const FADE: usize = 1;
@@ -230,27 +237,81 @@ pub(crate) fn density_centre(pos: &[f64], scratch: &mut Vec<f64>) -> [f64; 3] {
     if n > 0.0 { sum.map(|s| s / n) } else { sum }
 }
 
-/// `(R/a_g)²` of a point `(dx, dy)` cells from the centre, given `k2 = (scale·a_g)²`.
-fn x2_over(dx: f64, dy: f64, k2: f64) -> f64 {
-    ((dx / geom::ASPECT).powi(2) + dy * dy) / k2
+/// A body's place on the colour–magnitude diagram (SPEC-002 Look, M16): a render-only
+/// tag, the dynamics stay equal-mass. Ordered by display mass, so a heavier kind is drawn
+/// at a higher level and wins a shared braille cell.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum Kind {
+    /// Lower main sequence (`m < 0.35 M☉`): dim yellow.
+    Lower,
+    /// Upper main sequence (`0.35 ≤ m < 0.6`): yellow.
+    Upper,
+    /// Turn-off and subgiants (`m ≥ 0.6`): white.
+    Turnoff,
+    /// Blue stragglers (merged binaries, ≈ 1.2–1.5 M☉): blue, in the core.
+    Straggler,
+    /// Red giants: the most luminous, a 2 × 2 dot block.
+    Giant,
 }
 
-/// Plummer surface brightness `g = (1 + x²)^{−2}`, from `x² = (R/a_g)²`.
-fn surface(x2: f64) -> f64 {
-    let d = 1.0 + x2;
-    1.0 / (d * d)
+impl Kind {
+    /// Head role and level at full brightness; giants twinkle about theirs.
+    pub(crate) fn head(self) -> (Role, f64) {
+        match self {
+            Kind::Lower => (Role::Sun, 150.0),
+            Kind::Upper => (Role::Sun, 190.0),
+            Kind::Turnoff => (Role::Star, 230.0),
+            Kind::Straggler => (Role::Cold, 230.0),
+            Kind::Giant => (Role::Hot, GIANT_MID),
+        }
+    }
 }
 
-/// Probability that glow of surface brightness `g` lights a dot (GC-A8): 1 in the
-/// saturated core (`R ≤ 0.52 a_g`), falling to 0 at `g = 0.08` (`R = 1.59 a_g`).
-fn lit_p(g: f64) -> f64 {
-    (1.7 * (g - 0.08) / 0.92).clamp(0.0, 1.0)
+/// Display mass (M☉) of a main-sequence body from a fixed uniform `u`: the inverse CDF
+/// of `dN/dm ∝ m^{−1.3}` (Kroupa's low-mass slope) on `MS_MASS`.
+pub(crate) fn ms_mass(u: f64) -> f64 {
+    let (lo, hi) = (MS_MASS.0.powf(-0.3), MS_MASS.1.powf(-0.3));
+    (lo + u.clamp(0.0, 1.0) * (hi - lo)).powf(-1.0 / 0.3)
 }
 
-/// A fixed per-dot uniform in `[0, 1)`, a pure function of `(x, y, salt)` (GC-A8), so
-/// the glow speckle holds still from frame to frame.
-pub(crate) fn dot_hash(x: i32, y: i32, salt: u64) -> f64 {
-    rng::hash01(salt ^ rng::cell_key(x, y))
+/// Main-sequence kind of display mass `m` (brightness steps by mass).
+pub(crate) fn ms_kind(m: f64) -> Kind {
+    if m >= TURNOFF_M {
+        Kind::Turnoff
+    } else if m >= UPPER_M {
+        Kind::Upper
+    } else {
+        Kind::Lower
+    }
+}
+
+/// Blue stragglers among `n` bodies: `clamp(N/100, 2, 5)`.
+pub(crate) fn straggler_count(n: usize) -> usize {
+    (n / 100).clamp(2, 5)
+}
+
+/// Tag every body (GC-A8): the first `g_n` (sample order is random) are red giants, the
+/// first `s_n` of the rest that start inside `STRAGGLER_R` are blue stragglers (heavy
+/// merger products sink to the core), every other body a main-sequence star whose
+/// display mass is a fixed hash of `(salt, index)`.
+pub(crate) fn assign_kinds(pos: &[f64], salt: u64, kinds: &mut Vec<Kind>) {
+    let n = pos.len() / 3;
+    let (g_n, mut s_left) = (giant_count(n), straggler_count(n));
+    kinds.clear();
+    for (k, p) in pos.chunks_exact(3).enumerate() {
+        let r2 = p[0] * p[0] + p[1] * p[1] + p[2] * p[2];
+        let kind = if k < g_n {
+            Kind::Giant
+        } else if s_left > 0 && r2 < STRAGGLER_R * STRAGGLER_R {
+            s_left -= 1;
+            Kind::Straggler
+        } else {
+            ms_kind(ms_mass(rng::hash01(
+                salt ^ (k as u64).wrapping_mul(0x9E37_79B9_7F4A_7C15),
+            )))
+        };
+        kinds.push(kind);
+    }
 }
 
 /// The N-body system: interleaved `(x, y, z)` per body, plus the leapfrog carry.
@@ -282,11 +343,6 @@ impl Cluster {
         self.pos.len() / 3
     }
 
-    /// Radius holding half the bodies, about the origin.
-    pub fn half_mass_radius(&mut self) -> f64 {
-        half_mass_radius(&self.pos, &mut self.scratch)
-    }
-
     /// A fresh `n`-star Plummer sphere in Hénon units (GC-A2): at rest, density centre
     /// at the origin, unsoftened `W = −1/2`, then `2K = |W_ε|`, so `E ≈ −0.248`.
     pub fn plummer(&mut self, rng: &mut impl Rng, n: usize) {
@@ -299,7 +355,7 @@ impl Cluster {
         let len = -2.0 * potential(&self.pos, self.m, 0.0);
         scale(&mut self.pos, len);
         // The heavy halo tail puts the COM ≈ r_rms/√N (≈ 0.13 a at N = 500) off the
-        // body core; the view and the glow are centred on the origin, so move the
+        // body core; the view is centred on the origin, so move the
         // density centre there (a translation: W and the dynamics are unchanged).
         for _ in 0..DENSITY_PASSES {
             let centre = density_centre(&self.pos, &mut self.scratch);
@@ -350,6 +406,20 @@ impl Cluster {
     }
 }
 
+/// Body `k`'s trail snapshot `age` slots before the newest slot `head` (see
+/// `GlobularCluster::trail`).
+fn snapshot(trail: &[f64], head: usize, k: usize, age: usize) -> [f64; 3] {
+    let slot = (head + TRAIL_N - age % TRAIL_N) % TRAIL_N;
+    let at = 3 * N_MAX * slot + 3 * k;
+    [trail[at], trail[at + 1], trail[at + 2]]
+}
+
+/// A giant's level at time `t` before the fade: a slow, quiet twinkle `245 ± 10` with
+/// its own `(period, phase)` (visual only).
+fn giant_level((period, phase): (f64, f64), t: f64) -> f64 {
+    GIANT_MID + GIANT_SWING * (TAU * t / period + phase).sin_det()
+}
+
 pub(crate) struct GlobularCluster {
     /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
     dirty: bool,
@@ -361,17 +431,23 @@ pub(crate) struct GlobularCluster {
     epoch: i64,
     /// N-body time since the last reseed, for the label.
     age: f64,
-    /// Half-mass radius smoothed over `RH_TAU`, sizing the glow.
-    rh: f64,
-    /// Salt of the per-dot glow hash, drawn once from `ctx.rng`.
+    /// Salt of the per-body display masses and the giants' twinkle, drawn once.
     salt: u64,
     size: Size,
     /// Rows per model unit at the origin.
     scale: f64,
     dots: Dots,
-    /// Giant glyph cells and levels, rasterised with the dots.
-    giants: [(i32, i32, u8); MAX_GIANTS],
-    n_giants: usize,
+    /// Per-body colour–magnitude tag (capacity `N_MAX`).
+    kinds: Vec<Kind>,
+    /// `TRAIL_N` snapshots of every position, slot-major with stride `3·N_MAX`, a ring
+    /// whose newest slot is `trail_head`; stored in `update`, so trails do not depend on
+    /// the draw cadence (GEN-R20).
+    trail: Vec<f64>,
+    trail_head: usize,
+    /// Valid snapshots, `1..=TRAIL_N` (the first is the body's position at a reset).
+    trail_len: usize,
+    /// Updates since the last snapshot.
+    tick: u32,
     /// Per-giant twinkle `(period s, phase rad)`, drawn from the salt.
     twinkle: [(f64, f64); MAX_GIANTS],
     label: StackText<48>,
@@ -386,13 +462,15 @@ impl GlobularCluster {
             t: 0.0,
             epoch: 0,
             age: 0.0,
-            rh: 0.0,
             salt: 0,
             size: Size::new(1, 1),
             scale: 1.0,
             dots: Dots::default(),
-            giants: [(0, 0, 0); MAX_GIANTS],
-            n_giants: 0,
+            kinds: Vec::with_capacity(N_MAX),
+            trail: vec![0.0; 3 * N_MAX * TRAIL_N],
+            trail_head: 0,
+            trail_len: 1,
+            tick: 0,
             twinkle: [(GIANT_PERIODS.0, 0.0); MAX_GIANTS],
             label: StackText::new(),
         }
@@ -416,7 +494,32 @@ impl GlobularCluster {
     fn reseed(&mut self, rng: &mut impl Rng) {
         self.cluster.plummer(rng, self.cluster.n().max(BUCKETS[0]));
         self.age = 0.0;
-        self.rh = self.cluster.half_mass_radius();
+        self.retag();
+    }
+
+    /// Re-tag the bodies and restart their trails at the current positions (a reseed or
+    /// a bucket change: the trails of a new sample would jump).
+    fn retag(&mut self) {
+        assign_kinds(&self.cluster.pos, self.salt, &mut self.kinds);
+        let len = self.cluster.pos.len();
+        for slot in self.trail.chunks_exact_mut(3 * N_MAX) {
+            slot[..len].copy_from_slice(&self.cluster.pos);
+        }
+        (self.trail_head, self.trail_len, self.tick) = (0, 1, 0);
+    }
+
+    /// Store a trail snapshot every `TRAIL_EVERY` updates.
+    fn record(&mut self) {
+        self.tick += 1;
+        if self.tick < TRAIL_EVERY {
+            return;
+        }
+        self.tick = 0;
+        self.trail_head = (self.trail_head + 1) % TRAIL_N;
+        self.trail_len = (self.trail_len + 1).min(TRAIL_N);
+        let len = self.cluster.pos.len();
+        let at = 3 * N_MAX * self.trail_head;
+        self.trail[at..at + len].copy_from_slice(&self.cluster.pos);
     }
 
     /// Canvas centre in continuous cell coordinates (cell `i` spans `[i, i + 1)`).
@@ -427,32 +530,12 @@ impl GlobularCluster {
         )
     }
 
-    /// Glow radius `a_g`: the Plummer scale radius implied by the smoothed `r_h`.
-    fn a_g(&self) -> f64 {
-        (self.rh / RH_PER_A).max(1e-6)
-    }
-
-    /// `(scale·a_g)²`: `(R/a_g)² = ((dx/ASPECT)² + dy²)/k2` for cell offsets `(dx, dy)`.
-    fn glow_k2(&self) -> f64 {
-        let k = self.scale * self.a_g();
-        k * k
-    }
-
-    /// `(R/a_g)²` of a point `(dx, dy)` cells from the centre (the tests' probe; the
-    /// raster loops hoist `glow_k2`).
-    #[cfg(test)]
-    fn glow_x2(&self, dx: f64, dy: f64) -> f64 {
-        x2_over(dx, dy, self.glow_k2())
-    }
-
-    /// Draw label, glow, bodies and giants for the current state (the M10 raster
-    /// convention: `render` only blits). The label goes first, so the stars can keep
-    /// clear of it.
+    /// Draw label and stars for the current state (the M10 raster convention: `render`
+    /// only blits). The label goes first, so the stars can keep clear of it.
     fn rasterise(&mut self) {
         self.dots.clear();
         self.write_label();
         let b = self.brightness();
-        self.glow(b);
         self.bodies(b);
     }
 
@@ -466,94 +549,75 @@ impl GlobularCluster {
         }
     }
 
-    /// Unresolved light: dot `d` is lit iff `p(R_d)·b > u(d)` (GC-A8). A cell whose
-    /// centre lies in the saturated core (`p = 1`) is filled whole, as a saturated
-    /// detector pixel is, so the core reads as a solid knot (GC-A7).
-    fn glow(&mut self, b: f64) {
-        let (cx, cy) = self.centre();
-        let k2 = self.glow_k2();
-        let keep_out = self.label_cells();
-        let reach = GLOW_EDGE * self.a_g() * self.scale; // rows
-        let (w, h) = (i32::from(self.size.width()), i32::from(self.size.height()));
-        let x_range = ((cx - reach * geom::ASPECT).floor() as i32).max(0)
-            ..=((cx + reach * geom::ASPECT).ceil() as i32).min(w - 1);
-        let y_range =
-            ((cy - reach).floor() as i32).max(0)..=((cy + reach).ceil() as i32).min(h - 1);
-        let (sub_w, sub_h) = (f64::from(Dots::CELL_W), f64::from(Dots::CELL_H));
-        for row in y_range {
-            for col in x_range.clone() {
-                if row == 0 && col < keep_out {
-                    continue;
-                }
-                let (fc, fr) = (f64::from(col), f64::from(row));
-                let saturated = lit_p(surface(x2_over(fc + 0.5 - cx, fr + 0.5 - cy, k2))) >= 1.0;
-                for sy in 0..Dots::CELL_H {
-                    for sx in 0..Dots::CELL_W {
-                        let dx = fc + (f64::from(sx) + 0.5) / sub_w - cx;
-                        let dy = fr + (f64::from(sy) + 0.5) / sub_h - cy;
-                        let g = surface(x2_over(dx, dy, k2));
-                        let (px, py) = (col * Dots::CELL_W + sx, row * Dots::CELL_H + sy);
-                        // A saturated dot is lit whatever its hash (`u < 1`): skip it.
-                        let lit = if saturated && b >= 1.0 {
-                            true
-                        } else {
-                            let p = if saturated { 1.0 } else { lit_p(g) } * b;
-                            p > 0.0 && p > dot_hash(px, py, self.salt)
-                        };
-                        if lit {
-                            let level = (90.0 + 165.0 * g) * b;
-                            self.dots
-                                .set(px, py, Ink::new(Role::Star, ink::level(level)));
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Project every body through the turning camera; the first `g_n` are red giants
-    /// (a render-only tag: the dynamics stay equal-mass).
+    /// Project every body and its trail through the turning camera (SPEC-002 Look,
+    /// M16): a one-dot head in its kind's ink (giants a small cross), a one-dot thread
+    /// one step dimmer through its stored positions. No unresolved glow: the core is
+    /// dense because its stars and their trails crowd it.
     fn bodies(&mut self, b: f64) {
         let proj = self.camera().projector();
         let centre = self.centre();
-        let k2 = self.glow_k2();
         let keep_out = self.label_cells();
-        let n_giants = giant_count(self.cluster.n());
-        self.n_giants = 0;
+        let scale = self.scale;
+        let dot_of = |p: [f64; 3]| {
+            proj.project(p, centre, scale).map(|(x, y, z)| {
+                let (dx, dy) = Dots::from_cells(x, y);
+                ((dx.round() as i32, dy.round() as i32), z)
+            })
+        };
+        let put = |dots: &mut Dots, (x, y): (i32, i32), ink: Ink| {
+            if !(y < Dots::CELL_H && x < keep_out * Dots::CELL_W) {
+                dots.set(x, y, ink);
+            }
+        };
+        let (t, trail_len, head_slot) = (self.t, self.trail_len, self.trail_head);
+        let (trail, kinds, twinkle) = (&self.trail, &self.kinds, &self.twinkle);
+        let dots = &mut self.dots;
         for (k, p) in self.cluster.pos.chunks_exact(3).enumerate() {
-            let Some((x, y, z)) = proj.project([p[0], p[1], p[2]], centre, self.scale) else {
+            let Some((head, z)) = dot_of([p[0], p[1], p[2]]) else {
                 continue;
             };
-            let g = surface(x2_over(x - centre.0, y - centre.1, k2));
-            // A giant in the bright core is lost in its glare, as in a real exposure:
-            // it is drawn as an ordinary star there.
-            if k < n_giants && lit_p(g) < GIANT_MAX_GLOW {
-                let level = self.giant_level(k, self.t) * b;
-                let (col, row) = (x.floor() as i32, y.floor() as i32);
-                if level >= MIN_VISIBLE_LEVEL && !(row == 0 && col < keep_out) {
-                    self.giants[self.n_giants] = (col, row, ink::level(level));
-                    self.n_giants += 1;
-                }
+            // Near-eye halo stars (perspective ≥ 1.33×) are left out instead of streaking.
+            if eye_fade(z) < 0.5 {
                 continue;
             }
-            let level =
-                (100.0 + 140.0 * g.sqrt() + 20.0 * (z / 2.0).clamp(-1.0, 1.0)) * eye_fade(z) * b;
-            let (dx, dy) = Dots::from_cells(x, y);
-            // `Dots::plot` rounds to the nearest dot; round here to test the keep-out.
-            let (px, py) = (dx.round() as i32, dy.round() as i32);
-            let by_label = py < Dots::CELL_H && px < keep_out * Dots::CELL_W;
-            if level >= MIN_VISIBLE_LEVEL && !by_label {
-                self.dots
-                    .plot(dx, dy, Ink::new(Role::Star, ink::level(level)));
+            let kind = kinds.get(k).copied().unwrap_or(Kind::Lower);
+            let (role, mut level) = kind.head();
+            if kind == Kind::Giant {
+                level = giant_level(twinkle[k.min(MAX_GIANTS - 1)], t);
+            }
+            level *= b;
+            if level < MIN_VISIBLE_LEVEL {
+                continue;
+            }
+            let trail_ink = Ink::new(role, ink::level(level * TRAIL_FRACTION));
+            let mut from = head;
+            for age in 0..trail_len {
+                let Some((to, _)) = dot_of(snapshot(trail, head_slot, k, age)) else {
+                    break;
+                };
+                if (to.0 - from.0).abs().max((to.1 - from.1).abs()) > MAX_SEGMENT {
+                    break;
+                }
+                for q in geom::line(from.0, from.1, to.0, to.1).skip(1) {
+                    put(dots, q, trail_ink);
+                }
+                from = to;
+            }
+            let head_ink = Ink::new(role, ink::level(level));
+            put(dots, head, head_ink);
+            // A giant, the most luminous kind, is the largest mark: a 2 × 2 dot block.
+            if kind == Kind::Giant {
+                for (dx, dy) in [(1, 0), (0, 1), (1, 1)] {
+                    put(dots, (head.0 + dx, head.1 + dy), head_ink);
+                }
             }
         }
     }
 
-    /// Giant `k`'s level at time `t` before the fade: a slow, quiet twinkle
-    /// `200 ± 30` with its own period and phase (visual only).
+    /// Giant `k`'s level at time `t` before the fade (the tests' probe).
+    #[cfg(test)]
     fn giant_level(&self, k: usize, t: f64) -> f64 {
-        let (period, phase) = self.twinkle[k];
-        GIANT_MID + GIANT_SWING * (TAU * t / period + phase).sin_det()
+        giant_level(self.twinkle[k], t)
     }
 
     /// Per-giant twinkle periods and phases, a pure function of the salt (no extra
@@ -584,15 +648,19 @@ impl GlobularCluster {
         let w = usize::from(self.size.width());
         // `age ≥ 0`, and ≤ 17 crossings per evolve phase: the cast is exact.
         let crossings = (self.age / T_CR).floor() as u32;
-        let _ = write!(self.label, "{NAME}  N={}", self.cluster.n());
+        let n = self.cluster.n();
+        let _ = write!(self.label, "N={n}");
         if crossings > 0 {
             let plural = if crossings == 1 { "" } else { "s" };
             let _ = write!(self.label, "  {crossings} crossing{plural}");
         }
+        // The title already names the scene: the label is only the counts, the
+        // crossings where the label takes at most half the width.
         if 2 * self.label.len() > w {
             self.label.clear();
-            if NAME.len() + 2 <= w {
-                let _ = self.label.write_str(NAME);
+            let _ = write!(self.label, "N={n}");
+            if self.label.len() + 2 > w {
+                self.label.clear();
             }
         }
     }
@@ -609,9 +677,10 @@ impl Generator for GlobularCluster {
             self.salt = ctx.rng.random();
             self.build_twinkle();
             self.cluster.plummer(&mut ctx.rng, n);
-            self.rh = self.cluster.half_mass_radius();
+            self.retag();
         } else if n != self.cluster.n() {
             self.cluster.rebucket(&mut ctx.rng, n);
+            self.retag();
         }
         self.size = size;
         self.scale = draw::fit_radius(size, 0.92) / VIEW_RADIUS;
@@ -631,8 +700,7 @@ impl Generator for GlobularCluster {
         } else {
             self.cluster.advance(dt * RATE);
             self.age += dt * RATE;
-            let rh = self.cluster.half_mass_radius();
-            self.rh += (rh - self.rh) * (1.0 - (-dt / RH_TAU).exp());
+            self.record();
         }
         self.dirty = true;
     }
@@ -647,9 +715,6 @@ impl Generator for GlobularCluster {
 
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
-        for &(x, y, level) in &self.giants[..self.n_giants] {
-            canvas.put(x, y, GIANT, Ink::new(Role::Hot, level));
-        }
         canvas.text(1, 0, self.label.as_str(), Ink::new(Role::Text, 140));
     }
 }
@@ -915,79 +980,62 @@ mod tests {
     }
 
     #[test]
-    fn gc_a7_core_is_solid_glow_is_bounded_and_giants_are_few() {
+    fn gc_a7_stars_are_coloured_dots_with_a_dense_core_and_no_fog() {
         let size = Size::new(200, 50);
-        let mut ctx = Ctx::new(42, size);
-        let mut g = GlobularCluster::new();
-        g.resize(size, &mut ctx);
+        let (g, _) = scene_at(size, 3.0);
         let mut canvas = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut canvas);
-        let (cx, cy) = g.centre();
-        let a_g = g.a_g();
-
-        let proj = g.camera().projector();
-        let body_dots: Vec<(i32, i32)> = g
-            .cluster
-            .pos
-            .chunks_exact(3)
-            .filter_map(|p| proj.project([p[0], p[1], p[2]], (cx, cy), g.scale))
-            .map(|(x, y, _)| {
-                (
-                    (2.0 * x - 0.5).round() as i32,
-                    (4.0 * y - 0.5).round() as i32,
-                )
-            })
-            .collect();
+        // Every lit cell is a braille star cell in one of the kinds' inks: a head level
+        // or the trail step below it (giants twinkle, so their levels are a band).
+        let heads: Vec<(Role, u8)> = [Kind::Lower, Kind::Upper, Kind::Turnoff, Kind::Straggler]
+            .map(|k| (k.head().0, ink::level(k.head().1)))
+            .to_vec();
+        let mut hot = 0;
+        for row in 1..50 {
+            for col in 0..200 {
+                let cell = canvas.get(col, row).unwrap();
+                if cell.ch == ' ' {
+                    continue;
+                }
+                assert!(('⠀'..='⣿').contains(&cell.ch), "{col},{row}: {:?}", cell.ch);
+                let (role, level) = (cell.ink.role, cell.ink.level);
+                let trail = |h: u8| ink::level(f64::from(h) * TRAIL_FRACTION);
+                let ok = match role {
+                    Role::Hot => {
+                        hot += 1;
+                        let lo = (GIANT_MID - GIANT_SWING) * TRAIL_FRACTION;
+                        f64::from(level) >= lo.floor()
+                    }
+                    _ => heads
+                        .iter()
+                        .any(|&(r, h)| r == role && (level == h || level == trail(h))),
+                };
+                assert!(ok, "{col},{row}: {role:?} {level}");
+            }
+        }
+        assert!(hot > 0, "no giant drawn");
+        // Dense core, sparse halo: lit-dot density inside 0.4 model units of the
+        // centre (projected) is ≥ 6× that between 1.2 and 1.8 units; no fog means the
+        // core is not filled solid either (< 60 % of its dots).
+        let (cx, cy) = Dots::from_cells(100.0, 25.0);
+        let per_unit = 4.0 * g.scale;
+        let (mut core, mut core_n, mut ring, mut ring_n) = (0.0, 0.0, 0.0, 0.0);
         let dots = g.dots.dot_size();
         for py in 0..i32::from(dots.height()) {
             for px in 0..i32::from(dots.width()) {
-                let x2 = g.glow_x2(
-                    (f64::from(px) + 0.5) / 2.0 - cx,
-                    (f64::from(py) + 0.5) / 4.0 - cy,
-                );
-                if x2 > 1.6 * 1.6 && g.dots.is_lit(px, py) {
-                    assert!(body_dots.contains(&(px, py)), "stray glow dot at {px},{py}");
+                let r = (f64::from(px) - cx).hypot(f64::from(py) - cy) / per_unit;
+                let lit = f64::from(u8::from(g.dots.is_lit(px, py)));
+                if r < 0.4 {
+                    (core, core_n) = (core + lit, core_n + 1.0);
+                } else if (1.2..1.8).contains(&r) {
+                    (ring, ring_n) = (ring + lit, ring_n + 1.0);
                 }
             }
         }
-
-        let (mut inner, mut outer) = (Vec::new(), Vec::new());
-        let mut giants = 0;
-        for row in 0..50 {
-            for col in 0..200 {
-                let cell = canvas.get(col, row).unwrap();
-                let giant = cell.ink.role == Role::Hot;
-                giants += usize::from(giant);
-                let x2 = g.glow_x2(f64::from(col) + 0.5 - cx, f64::from(row) + 0.5 - cy);
-                if x2 <= 0.5 * 0.5 {
-                    assert!(
-                        cell.ch == '⣿' || giant,
-                        "core cell {col},{row} is {:?}",
-                        cell.ch
-                    );
-                }
-                if cell.ink.role == Role::Star {
-                    if x2 <= 1.0 {
-                        inner.push(f64::from(cell.ink.level));
-                    } else if x2 > 3.0 * 3.0 {
-                        outer.push(f64::from(cell.ink.level));
-                    }
-                }
-            }
-        }
-        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len() as f64;
-        assert!(!outer.is_empty());
-        assert!(
-            mean(&inner) >= mean(&outer) + 50.0,
-            "{} vs {}",
-            mean(&inner),
-            mean(&outer)
-        );
-        assert_eq!(
-            (giant_count(500), giant_count(384), giant_count(64)),
-            (10, 7, 3)
-        );
-        // Near-eye halo stars (perspective ≥ 1.5×) fade out instead of streaking.
+        let (core, ring) = (core / core_n, ring / ring_n);
+        assert!(core >= 6.0 * ring, "core {core:.3} vs halo {ring:.3}");
+        assert!(core < 0.6, "core filled solid: {core:.3}");
+        // Near-eye halo stars (perspective ≥ 1.33×) are left out instead of streaking.
         for z in [-20.0, 0.0, 2.5] {
             assert_eq!(eye_fade(z), 1.0);
         }
@@ -995,46 +1043,170 @@ mod tests {
             assert_eq!(eye_fade(z), 0.0);
         }
         assert!(eye_fade(2.7) > eye_fade(2.9) && eye_fade(2.9) > eye_fade(3.2));
-        let g_n = giant_count(g.cluster.n());
-        assert!(giants <= g_n, "{giants} giants");
-        assert!(a_g > 0.3, "a_g = {a_g}");
-        // A giant projected where the glow lights ≥ half the dots (R < 0.83 a_g) is lost
-        // in the core's glare: no Hot glyph at its cell.
-        let mut lost = 0;
-        for p in g.cluster.pos.chunks_exact(3).take(g_n) {
-            let (x, y, _) = proj.project([p[0], p[1], p[2]], (cx, cy), g.scale).unwrap();
-            let x2 = g.glow_x2(x - cx, y - cy);
-            if x2 < 0.83 * 0.83 {
-                lost += 1;
-                let cell = canvas.get(x.floor() as i32, y.floor() as i32).unwrap();
-                assert_ne!(cell.ink.role, Role::Hot, "giant in the core at {x},{y}");
-            }
-        }
-        assert!(
-            lost > 0,
-            "no giant in the core at seed 42 (the clause is untested)"
-        );
     }
 
     #[test]
-    fn gc_a8_glow_probability_and_dot_hash() {
-        let glow_p = |x: f64| lit_p(surface(x * x));
-        // p = 1 up to g = 0.08 + 0.92/1.7, i.e. R = 0.5185 a_g (the spec's "0.52").
-        for i in 0..=518 {
-            assert_eq!(glow_p(f64::from(i) / 1000.0), 1.0);
+    fn gc_a8_kinds_follow_mass_and_stragglers_start_in_the_core() {
+        assert_eq!(
+            (giant_count(500), giant_count(384), giant_count(64)),
+            (10, 7, 3)
+        );
+        assert_eq!(
+            (
+                straggler_count(500),
+                straggler_count(384),
+                straggler_count(64)
+            ),
+            (5, 3, 2)
+        );
+        // Display masses span MS_MASS, rising with u.
+        assert!((ms_mass(0.0) - 0.15).abs() < 1e-12 && (ms_mass(1.0) - 0.8).abs() < 1e-12);
+        let us: Vec<f64> = (0..=100).map(|i| f64::from(i) / 100.0).collect();
+        assert!(us.windows(2).all(|w| ms_mass(w[1]) > ms_mass(w[0])));
+        // Brightness steps by mass: heavier kinds are drawn brighter, and a trail is one
+        // step below its head.
+        let order = [Kind::Lower, Kind::Upper, Kind::Turnoff];
+        assert!(order.windows(2).all(|w| w[1].head().1 > w[0].head().1));
+        assert!(
+            order
+                .iter()
+                .all(|k| matches!(k.head().0, Role::Sun | Role::Star))
+        );
+        assert_eq!(Kind::Straggler.head().0, Role::Cold);
+        assert_eq!(Kind::Giant.head().0, Role::Hot);
+        for k in order {
+            assert!(k.head().1 * TRAIL_FRACTION < k.head().1 - 20.0);
         }
-        let xs: Vec<f64> = (0..=1000)
-            .map(|i| 0.519 + 1.073 * f64::from(i) / 1000.0)
-            .collect();
-        for w in xs.windows(2) {
-            assert!(glow_p(w[1]) < glow_p(w[0]), "not decreasing at {}", w[0]);
+
+        let mut c = Cluster::preallocated();
+        c.plummer(&mut rng(8), 500);
+        let mut kinds = Vec::new();
+        assign_kinds(&c.pos, 99, &mut kinds);
+        assert_eq!(kinds.len(), 500);
+        let count = |k: Kind| kinds.iter().filter(|&&x| x == k).count();
+        assert_eq!(count(Kind::Giant), 10);
+        assert!(kinds[..10].iter().all(|&k| k == Kind::Giant));
+        assert_eq!(count(Kind::Straggler), 5);
+        for (k, p) in c.pos.chunks_exact(3).enumerate() {
+            if kinds[k] == Kind::Straggler {
+                assert!(p[0].hypot(p[1]).hypot(p[2]) < STRAGGLER_R);
+            }
         }
-        for x in [GLOW_EDGE, 2.0, 10.0] {
-            assert_eq!(glow_p(x), 0.0);
+        // Main-sequence shares ≈ 14 / 29 / 57 % (the m^−1.3 law's steps).
+        let ms = 485.0;
+        for (kind, share) in [
+            (Kind::Turnoff, 0.14),
+            (Kind::Upper, 0.29),
+            (Kind::Lower, 0.57),
+        ] {
+            let got = count(kind) as f64 / ms;
+            assert!((got - share).abs() < 0.07, "{kind:?}: {got:.3}");
         }
-        assert_eq!(dot_hash(3, -7, 11), dot_hash(3, -7, 11));
-        assert_ne!(dot_hash(3, -7, 11), dot_hash(3, -7, 12));
-        assert!((0.0..1.0).contains(&dot_hash(-1, 5, 0)));
+        // Tags are a pure function of the positions and the salt.
+        let mut again = Vec::new();
+        assign_kinds(&c.pos, 99, &mut again);
+        assert_eq!(kinds, again);
+        assign_kinds(&c.pos, 100, &mut again);
+        assert_ne!(kinds, again);
+    }
+
+    #[test]
+    fn gc_a11_giants_are_the_most_luminous_and_largest_marks() {
+        // The faintest giant twinkle is at least every other kind's head level.
+        let lo = GIANT_MID - GIANT_SWING;
+        for k in [Kind::Lower, Kind::Upper, Kind::Turnoff, Kind::Straggler] {
+            assert!(lo >= k.head().1, "{k:?}");
+        }
+        // In the frame the mean level of the giants' cells is at least that of every
+        // other kind's cells (their trails included), and each giant is a 2 × 2 block.
+        let size = Size::new(200, 50);
+        let (g, _) = scene_at(size, 3.0);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut sums: [(f64, f64); 4] = [(0.0, 0.0); 4];
+        for y in 1..50 {
+            for x in 0..200 {
+                let c = canvas.get(x, y).unwrap();
+                let k = match c.ink.role {
+                    Role::Hot => 0,
+                    Role::Star => 1,
+                    Role::Sun => 2,
+                    Role::Cold => 3,
+                    _ => continue,
+                };
+                sums[k].0 += f64::from(c.ink.level);
+                sums[k].1 += 1.0;
+            }
+        }
+        let mean = |k: usize| sums[k].0 / sums[k].1.max(1.0);
+        assert!(sums[0].1 > 0.0, "no giant");
+        for k in 1..4 {
+            assert!(
+                mean(0) >= mean(k),
+                "giants {} < kind {k} {}",
+                mean(0),
+                mean(k)
+            );
+        }
+        let proj = g.camera().projector();
+        for (k, p) in g
+            .cluster
+            .pos
+            .chunks_exact(3)
+            .enumerate()
+            .take(giant_count(500))
+        {
+            let Some((x, y, z)) = proj.project([p[0], p[1], p[2]], g.centre(), g.scale) else {
+                continue;
+            };
+            let (dx, dy) = Dots::from_cells(x, y);
+            let (px, py) = (dx.round() as i32, dy.round() as i32);
+            if eye_fade(z) < 0.5 || py < 2 * Dots::CELL_H || px < 0 || py >= 49 * Dots::CELL_H {
+                continue;
+            }
+            for (ox, oy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                assert!(
+                    g.dots.is_lit(px + ox, py + oy),
+                    "giant {k} block at {px},{py}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn gc_a10_trails_are_short_and_independent_of_the_draw_cadence() {
+        let size = Size::new(120, 40);
+        let run = |every: usize| {
+            let mut ctx = Ctx::new(42, size);
+            let mut g = GlobularCluster::new();
+            g.resize(size, &mut ctx);
+            for step in 1..=120 {
+                g.update(SIM_DT, &mut ctx);
+                if step % every == 0 {
+                    g.prepare();
+                }
+            }
+            g
+        };
+        let (a, b) = (run(1), run(2));
+        let dots = a.dots.dot_size();
+        for py in 0..i32::from(dots.height()) {
+            for px in 0..i32::from(dots.width()) {
+                assert_eq!(a.dots.is_lit(px, py), b.dots.is_lit(px, py), "{px},{py}");
+            }
+        }
+        // A trail spans at most TRAIL_N snapshots, TRAIL_EVERY updates apart (≈ 0.27 s).
+        assert_eq!(a.trail_len, TRAIL_N);
+        assert!(f64::from(TRAIL_EVERY) * TRAIL_N as f64 * SIM_DT <= 0.3);
+        // Trails restart at a reseed: one snapshot, at the new positions.
+        let (mut g, mut ctx) = scene_at(size, 1.0);
+        g.t = 121.49;
+        g.update(SIM_DT, &mut ctx);
+        assert_eq!(g.trail_len, 1);
+        assert_eq!(
+            snapshot(&g.trail, g.trail_head, 3, 0).to_vec(),
+            g.cluster.pos[9..12]
+        );
     }
 
     /// A scene resized to `size` and run for `t` simulated seconds.
@@ -1054,25 +1226,24 @@ mod tests {
         let (mut g, _) = scene_at(Size::new(80, 24), 0.0);
         g.age = 4.5 * T_CR;
         g.write_label();
-        assert_eq!(g.label.as_str(), "globular cluster  N=384  4 crossings");
+        assert_eq!(g.label.as_str(), "N=384  4 crossings");
         g.age = 1.99 * T_CR;
         g.write_label();
-        assert_eq!(g.label.as_str(), "globular cluster  N=384  1 crossing");
+        assert_eq!(g.label.as_str(), "N=384  1 crossing");
         // No "0 crossings" debug counter: the clause appears after the first crossing.
         g.age = 0.99 * T_CR;
         g.write_label();
-        assert_eq!(g.label.as_str(), "globular cluster  N=384");
-        // The counts show only where the label takes at most half the width, so it
-        // never turns into a banner; then the bare name while it fits in `w − 2`.
+        assert_eq!(g.label.as_str(), "N=384");
+        // The crossings show only where the label takes at most half the width, so it
+        // never turns into a banner; then the bare count while it fits in `w − 2`.
         g.age = 4.5 * T_CR;
         g.write_label();
         let full = g.label.as_str().len() as u16;
         for (w, expect) in [
-            (2 * full, "globular cluster  N=384  4 crossings"),
-            (2 * full - 1, "globular cluster"),
-            (40, "globular cluster"),
-            (18, "globular cluster"),
-            (17, ""),
+            (2 * full, "N=384  4 crossings"),
+            (2 * full - 1, "N=384"),
+            (7, "N=384"),
+            (6, ""),
             (1, ""),
         ] {
             g.size = Size::new(w, 24);
@@ -1080,7 +1251,7 @@ mod tests {
             assert_eq!(g.label.as_str(), expect, "w = {w}");
         }
         g.age = 0.0;
-        for (w, expect) in [(46, "globular cluster  N=384"), (45, "globular cluster")] {
+        for (w, expect) in [(10, "N=384"), (7, "N=384"), (6, "")] {
             g.size = Size::new(w, 24);
             g.write_label();
             assert_eq!(g.label.as_str(), expect, "w = {w}");
@@ -1121,13 +1292,10 @@ mod tests {
                         );
                     }
                 }
-                for &(x, y, _) in &g.giants[..g.n_giants] {
-                    assert!(y != 0 || x > len + 1, "giant at {x},{y} by the label");
-                }
             }
         }
 
-        // Each giant slot twinkles slowly and independently between 170 and 230.
+        // Each giant slot twinkles slowly and independently between 235 and 255.
         let (g, _) = scene_at(Size::new(80, 24), 0.0);
         for (k, &(period, _)) in g.twinkle.iter().enumerate() {
             assert!((5.0..=9.0).contains(&period), "P = {period}");
@@ -1136,8 +1304,8 @@ mod tests {
                 .collect();
             let lo = levels.iter().copied().fold(f64::INFINITY, f64::min);
             let hi = levels.iter().copied().fold(0.0, f64::max);
-            assert!(lo >= 170.0 && hi <= 230.0, "slot {k}: {lo}..{hi}");
-            assert!(hi - lo >= 40.0, "slot {k} barely glints: {lo}..{hi}");
+            assert!(lo >= 235.0 && hi <= 255.0, "slot {k}: {lo}..{hi}");
+            assert!(hi - lo >= 15.0, "slot {k} barely glints: {lo}..{hi}");
         }
         assert_ne!(g.twinkle[0], g.twinkle[1]);
     }

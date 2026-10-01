@@ -1,25 +1,25 @@
 //! A grand-design spiral as a Kalnajs kinematic density wave (SPEC-002 `spiral_galaxy`).
 //!
 //! Every star moves on a closed oval about the centre, `r = r_g (1 − e sin ψ)` with
-//! `ψ = 2(α + ln r_g / tan p)`, where `α` is its angle in the frame turning with the
-//! pattern. The ovals are nested with an orientation that turns with `ln r_g`, so they
-//! crowd into two trailing logarithmic arms while every star keeps flowing through them.
-//! Positions are closed form in time (no integration); lengths are in units of the disc
-//! radius `R`, angles in radians.
+//! `ψ = m(α + ln r_g / tan p)`, `m = 4`, where `α` is its angle in the frame turning with
+//! the pattern. The ovals are nested with an orientation that turns with `ln r_g`, so
+//! they crowd into four trailing logarithmic arms while every star keeps flowing through
+//! them. Positions are closed form in time (no integration); lengths are in units of the
+//! disc radius `R`, angles in radians. Drawn as star streams (M16): every star a braille
+//! dot with a short thread along its orbit.
 
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
+use sciart_core::InverseCdf;
 use sciart_core::prelude::*;
-use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
-use sciart_core::{InverseCdf, Tone};
 
 pub static META: Meta = Meta {
     name: "spiral_galaxy",
     category: Category::DeepCosmos,
-    description: "Stars streaming through the two density-wave arms of a grand-design spiral",
+    description: "Stars streaming through the four density-wave arms of a grand-design spiral",
     title: "Spiral galaxy · density waves",
     captions: &[],
 };
@@ -28,8 +28,11 @@ pub fn build() -> Box<dyn Generator> {
     Box::new(SpiralGalaxy::default())
 }
 
-/// Arm pitch angle (18°) as `1 / tan p`, the winding rate of `ln r`.
-const COT_PITCH: f64 = 3.077_683_537_175_253;
+/// Number of arms (the oval's azimuthal order).
+pub(crate) const ARMS: f64 = 4.0;
+/// Arm pitch angle (22°, open arms for `m = 4`) as `1 / tan p`, the winding rate of
+/// `ln r`.
+const COT_PITCH: f64 = 2.475_086_853_416_296;
 /// Pattern speed: one turn in 120 s.
 pub(crate) const OMEGA_P: f64 = TAU / 120.0;
 /// Corotation radius, where `Ω(r) = Ω_p`.
@@ -43,65 +46,65 @@ const V_FLAT: f64 = OMEGA_P * 0.608_276_253_029_821_9; // √(0.6² + 0.1²)
 const SCALE_LENGTH: f64 = 0.3;
 const R_IN: f64 = 0.04;
 const R_OUT: f64 = 1.02;
-/// Oval eccentricities.
-const ECC: (f64, f64) = (0.08, 0.12);
+/// Oval eccentricities: the crowding `1/(1 − e·m·cot p)` stays below orbit crossing
+/// (`e·m·cot p ≈ 0.6–0.8` for `m = 4`).
+const ECC: (f64, f64) = (0.06, 0.08);
+/// Bulge: share of the stars, Gaussian σ (R).
+const BULGE_SHARE: f64 = 0.08;
+const BULGE_SIGMA: f64 = 0.07;
 /// Star cap and stars per cell (ADR-0012).
-const MAX_STARS: usize = 20_000;
-const STARS_PER_CELL: f64 = 0.8;
+const MAX_STARS: usize = 12_000;
+const STARS_PER_CELL: f64 = 0.4;
+const MIN_STARS: usize = 1400;
 /// View: inclination (25°) and the position angle of the major axis on screen.
 const COS_INC: f64 = 0.906_307_787_036_649_9;
 const PA: f64 = 0.35;
-/// Bulge σ (R) and its peak brightness, and the unresolved disc light.
-const BULGE_SIGMA: f64 = 0.08;
-const BULGE_PEAK: f64 = 4.0;
-const DISC_LIGHT: f64 = 2.6;
-const DISC_LIGHT_SCALE: f64 = 0.42;
-/// Dust lane: centre and half-width in arm phase (SPG-A4), and its opacity.
+/// Stream thread: each star's thread is the chord back along its circular motion over
+/// `STREAM_S` seconds (≈ 3 dots at 200×50).
+const STREAM_S: f64 = 0.6;
+/// Dust lane: centre and half-width in arm phase (SPG-A4); a star whose dust weight is
+/// above `DUST_GAP` is hidden, so the lanes are gaps.
 const DUST_PHI: f64 = -0.4;
-const DUST_HALF: f64 = 0.2;
-const DUST_OPACITY: f32 = 0.85;
-/// Arm contrast of the unresolved disc light, `√(1 − a²) / (1 − a cos φ)`: the same
-/// crowding the stars show, without their shot noise.
-const ARM_A: f64 = 0.85;
-/// Arm-phase table resolution (one turn of `φ`).
-const PHASES: usize = 4096;
-/// Radius table: bins over `[0, R_LUT_MAX]` R.
-const RBINS: usize = 4096;
-const R_LUT_MAX: f64 = 2.5;
+const DUST_HALF: f64 = 0.25;
+const DUST_GAP: f64 = 0.4;
 /// H II knots: pool, lifetime (s), spawn rate (per s), the arm phase they are born at
 /// (SPG-A5) and their guiding-radius range.
 pub(crate) const KNOTS: usize = 48;
 const KNOT_LIFE: f64 = 3.0;
 const KNOT_RATE: f64 = 13.0;
 const KNOT_PHI: f64 = 0.25;
-const KNOT_R: (f64, f64) = (0.25, 0.92);
-/// An H II region shows as one `Accent` pixel (ADR-0018), in two flat steps over its
-/// life, and only the larger ones (`size ≥ KNOT_SHOWN`, about a third), so a few pink
-/// points dot the arms instead of blobs.
-const KNOT_INKS: [Ink; 2] = [Ink::new(Role::Accent, 140), Ink::new(Role::Accent, 230)];
+const KNOT_R: (f64, f64) = (0.35, 0.92);
+/// An H II region shows as two `Accent` dots, in two flat steps over its life, and only
+/// the larger ones (`size ≥ KNOT_SHOWN`, about a third).
+const KNOT_INKS: [Ink; 2] = [Ink::new(Role::Accent, 150), Ink::new(Role::Accent, 235)];
 const KNOT_SHOWN: f64 = 0.87;
-/// Young blue stars: share of the population and the arm-phase band they shine in.
-const YOUNG_SHARE: f64 = 0.12;
-const YOUNG_BAND: (f64, f64) = (-0.15, 0.7);
-/// Only the brighter young stars show (the arms slightly blue, not dotted).
-const YOUNG_LUM: f32 = 0.12;
-/// Tone curve for the integrated starlight.
-const KNEE: f32 = 0.35;
-const WHITE: f32 = 9.0;
-/// The unresolved light below `HAZE` times the mean disc light at that radius is black
-/// (no inter-arm haze; the arms and the bulge stand on a dark disc). Above it the toned
-/// light (0–255) is drawn in M11's flat steps (ADR-0018), each from a toned threshold
-/// up: the faint outer disc a dim `Hot`, the arms `Sun`, their crests and the bulge
-/// `Star` white, so the old starlight grades red → yellow → white against the `Cold`
-/// young stars.
-const HAZE: f32 = 0.8;
-const LIGHT_STEPS: [(u8, Ink); 3] = [
-    (70, Ink::new(Role::Hot, 70)),
-    (140, Ink::new(Role::Sun, 150)),
-    (205, Ink::new(Role::Star, 210)),
+/// Young blue stars: share of the disc and the arm-phase band (just downstream of the
+/// crest, the leading edge) they shine in.
+const YOUNG_SHARE: f64 = 0.4;
+const YOUNG_BAND: (f64, f64) = (-0.1, 0.9);
+/// Inks (SPEC-002 Look, M16), `(head, stream)`: old disc stars yellow `Sun`, the old
+/// bulge `Hot` and `Sun`, young stars on the arms blue `Cold`. A brighter population
+/// wins a shared braille cell.
+pub(crate) const DISC_INKS: (Ink, Ink) = (Ink::new(Role::Sun, 150), Ink::new(Role::Sun, 70));
+pub(crate) const BULGE_INKS: [(Ink, Ink); 2] = [
+    (Ink::new(Role::Hot, 215), Ink::new(Role::Hot, 130)),
+    (Ink::new(Role::Sun, 235), Ink::new(Role::Sun, 140)),
 ];
-const YOUNG_INK: Ink = Ink::new(Role::Cold, 255);
-/// Foreground stars: dim and bright, two flat steps.
+pub(crate) const YOUNG_INKS: (Ink, Ink) = (Ink::new(Role::Cold, 230), Ink::new(Role::Cold, 150));
+/// Old disc stars between the arms: one step dimmer, and only `INTERARM_KEEP` of them
+/// (a fixed per-star hash).
+pub(crate) const INTERARM_INKS: (Ink, Ink) = (Ink::new(Role::Sun, 110), Ink::new(Role::Sun, 50));
+const INTERARM_KEEP: f64 = 0.35;
+const INTERARM_SALT: u64 = 0xA4A5;
+/// The arm band in arm phase: from just inside the dust lane's outer edge to the end of
+/// the young-star band.
+pub(crate) const ARM_BAND: (f64, f64) = (-0.2, 1.0);
+
+/// Whether arm phase `φ` lies on an arm (the band where the old disc is drawn in full).
+pub(crate) fn on_arm(phi: f64) -> bool {
+    (ARM_BAND.0..=ARM_BAND.1).contains(&phi)
+}
+/// Foreground stars: dim and bright, one dot each.
 const FIELD_INKS: [Ink; 2] = [Ink::new(Role::Dim, 120), Ink::new(Role::Star, 170)];
 /// Field stars of our own Galaxy in front, per cell.
 const FIELD_PER_CELL: f64 = 1.0 / 90.0;
@@ -111,22 +114,64 @@ pub(crate) fn omega(r: f64) -> f64 {
     V_FLAT / (r * r + SOFT * SOFT).sqrt()
 }
 
-/// One star: guiding radius, pattern-frame angle at `t = 0`, eccentricity, brightness
-/// and, for young stars, a colour temperature (0 for the old population).
+/// Which population a star belongs to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Pop {
+    #[default]
+    Disc,
+    /// Disc star young enough to shine blue while it crosses an arm.
+    Young,
+    /// Bulge star, `Hot` (0) or `Sun` (1).
+    Bulge(u8),
+}
+
+/// One star: guiding radius, pattern-frame angle at `t = 0`, eccentricity, population,
+/// and the per-star constants of its orbit (`Ω − Ω_p`, `Ω`, `m·ln r_g·cot p`).
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Star {
     r: f32,
     alpha0: f32,
     ecc: f32,
-    lum: f32,
-    kelvin: f32,
+    pop: Pop,
+    slip: f32,
+    omega: f32,
+    wind: f32,
 }
 
-/// Position of `star` at time `t` in the galaxy plane (units of R, inertial frame), and
-/// its pattern-frame angle. The oval is closed in the pattern frame (SPG-A1).
+impl Star {
+    fn new(r: f64, alpha0: f64, ecc: f64, pop: Pop) -> Self {
+        Self {
+            r: r as f32,
+            alpha0: alpha0 as f32,
+            ecc: ecc as f32,
+            pop,
+            slip: (omega(r) - OMEGA_P) as f32,
+            omega: omega(r) as f32,
+            wind: (ARMS * r.ln() * COT_PITCH) as f32,
+        }
+    }
+
+    /// Galaxy-plane position at `t` and the arm phase there, from the star's own orbit
+    /// phase `ψ`: `φ = m(α + ln r / tan p) ≈ ψ + m·cot p·ln(1 − e sin ψ)`, without a
+    /// per-star `atan2` or `ln` (the log's series to second order: `e ≤ 0.08`).
+    fn at(&self, t: f64) -> ((f64, f64), f64) {
+        let (r, e) = (f64::from(self.r), f64::from(self.ecc));
+        let alpha = f64::from(self.alpha0) + f64::from(self.slip) * t;
+        let psi = ARMS * alpha + f64::from(self.wind);
+        let u = e * psi.sin_det();
+        let rad = r * (1.0 - u);
+        let (s, c) = (alpha + OMEGA_P * t).sin_cos_det();
+        let phi = psi - ARMS * COT_PITCH * (u + 0.5 * u * u);
+        ((rad * c, rad * s), sciart_core::geom::wrap_angle(phi))
+    }
+}
+
+/// Position of a star at time `t` in the galaxy plane (units of R, inertial frame). The
+/// oval is closed in the pattern frame (SPG-A1). The reference for [`Star::at`].
+#[cfg(test)]
 pub(crate) fn star_pos(r: f64, alpha0: f64, ecc: f64, t: f64) -> (f64, f64) {
     let alpha = alpha0 + (omega(r) - OMEGA_P) * t;
-    let psi = 2.0 * (alpha + r.ln() * COT_PITCH);
+    let psi = ARMS * (alpha + r.ln() * COT_PITCH);
     let rad = r * (1.0 - ecc * psi.sin_det());
     let (s, c) = (alpha + OMEGA_P * t).sin_cos_det();
     (rad * c, rad * s)
@@ -141,11 +186,12 @@ pub(crate) fn pattern_pos(r: f64, alpha0: f64, ecc: f64, t: f64) -> (f64, f64) {
     (x * c - y * s, x * s + y * c)
 }
 
-/// Arm phase `φ = 2(θ + ln r / tan p − Ω_p t)` wrapped onto `(−π, π]`: 0 on an arm crest,
-/// negative on its inner (upstream) edge.
+/// Arm phase `φ = m(θ + ln r / tan p − Ω_p t)` wrapped onto `(−π, π]`: 0 on an arm crest,
+/// negative on its inner (upstream) edge. The reference for [`Star::at`]'s phase.
+#[cfg(test)]
 pub(crate) fn arm_phase(x: f64, y: f64, t: f64) -> f64 {
     let r = x.hypot(y).max(1e-9);
-    let phi = 2.0 * (y.atan2(x) + r.ln() * COT_PITCH - OMEGA_P * t);
+    let phi = ARMS * (y.atan2(x) + r.ln() * COT_PITCH - OMEGA_P * t);
     sciart_core::geom::wrap_angle(phi)
 }
 
@@ -157,6 +203,23 @@ pub(crate) fn dust(phi: f64) -> f64 {
     } else {
         0.5 + 0.5 * (PI * d).cos_det()
     }
+}
+
+/// Radial weight of the dust: none in the bulge or beyond the bright disc.
+fn dust_radial(r: f64) -> f64 {
+    ease::smoothstep((r - 0.1) / 0.15) * (1.0 - ease::smoothstep((r - 0.8) / 0.25))
+}
+
+/// Whether a star at radius `r` and arm phase `φ` is hidden in a dust lane.
+pub(crate) fn in_lane(r: f64, phi: f64) -> bool {
+    dust(phi) * dust_radial(r) > DUST_GAP
+}
+
+/// Whether young star `n` at arm phase `φ` shines blue: inside the band, thinned towards
+/// its upstream edge by a fixed per-star hash, so they scatter rather than line up.
+pub(crate) fn young_shows(n: usize, phi: f64) -> bool {
+    let band = (phi - YOUNG_BAND.0) / (YOUNG_BAND.1 - YOUNG_BAND.0);
+    (0.0..=1.0).contains(&band) && hash01(n as u64) <= 1.0 - band * 0.6
 }
 
 /// An H II region: galaxy-plane guiding radius and angle at birth, and its age.
@@ -185,27 +248,18 @@ impl Knot {
 pub struct SpiralGalaxy {
     seeded: bool,
     t: f64,
-    /// Stars in units of R (kept across resizes), and the capacity in use.
+    /// Stars in units of R (kept across resizes), and the count in use.
     all_stars: Vec<Star>,
     n_stars: usize,
     knots: ParticlePool<Knot>,
     knot_debt: f64,
+    /// Field stars, dot positions and inks (stable for a size).
     field: Vec<(i32, i32, Ink)>,
-    /// Screen: centre and R in pixels, and the view's rotation.
+    /// Screen: centre and R in dots, and the view's rotation.
     centre: (f64, f64),
     r_px: f64,
     pa: (f64, f64),
-    /// Per pixel: arm-phase index of `2(θ + ln r / tan p)` and radius bin.
-    phase: Vec<u16>,
-    rbin: Vec<u16>,
-    /// Per radius bin: bulge light, unresolved-disc light (before its arm modulation)
-    /// and dust weight.
-    radial: Vec<(f32, f32, f32)>,
-    /// `dust(φ)` and the arm factor over one turn of `φ`.
-    dust_lut: Vec<(f32, f32)>,
-    glow: Glow,
-    tone: Tone,
-    pixels: Pixels,
+    dots: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -216,51 +270,38 @@ impl SpiralGalaxy {
         let cdf = InverseCdf::<256>::build(R_IN, R_OUT, |r| {
             r * (-r / SCALE_LENGTH).exp() * (1.0 - ease::smoothstep((r - 0.85) / 0.17))
         });
+        // Interleave the populations so every prefix (the stars in use at a size) has
+        // the same mix.
         self.all_stars = (0..MAX_STARS)
             .map(|_| {
-                let r = cdf.sample(ctx.rng.random_range(0.0..1.0));
-                let young = ctx.rng.random_bool(YOUNG_SHARE);
-                let u: f64 = ctx.rng.random_range(0.0..1.0);
-                Star {
-                    r: r as f32,
-                    alpha0: ctx.rng.random_range(0.0..TAU) as f32,
-                    ecc: ctx.rng.random_range(ECC.0..ECC.1) as f32,
-                    lum: (0.05 + 1.6 * u.powi(6)) as f32,
-                    kelvin: if young {
-                        ctx.rng.random_range(12_000.0..25_000.0)
+                let alpha0 = ctx.rng.random_range(0.0..TAU);
+                if ctx.rng.random_bool(BULGE_SHARE) {
+                    // A Rayleigh radius (a 2-D Gaussian), on near-circular orbits.
+                    let u: f64 = ctx.rng.random_range(1e-9..1.0);
+                    let r = (BULGE_SIGMA * (-2.0 * u.ln()).sqrt()).clamp(0.005, 0.3);
+                    let tint = u8::from(ctx.rng.random_bool(0.5));
+                    Star::new(r, alpha0, 0.0, Pop::Bulge(tint))
+                } else {
+                    let r = cdf.sample(ctx.rng.random_range(0.0..1.0));
+                    let ecc = ctx.rng.random_range(ECC.0..ECC.1);
+                    let pop = if ctx.rng.random_bool(YOUNG_SHARE) {
+                        Pop::Young
                     } else {
-                        0.0
-                    },
+                        Pop::Disc
+                    };
+                    Star::new(r, alpha0, ecc, pop)
                 }
             })
             .collect();
         self.knots = ParticlePool::with_capacity(KNOTS);
-        self.dust_lut = (0..PHASES)
-            .map(|i| {
-                let phi = sciart_core::geom::wrap_angle(i as f64 / PHASES as f64 * TAU);
-                let arm = (1.0 - ARM_A * ARM_A).sqrt() / (1.0 - ARM_A * phi.cos_det());
-                (dust(phi) as f32, arm as f32)
-            })
-            .collect();
-        self.tone = Tone::asinh(KNEE, WHITE);
         self.t = ctx.rng.random_range(0.0..120.0);
     }
 
-    /// Galaxy plane (units of R) → pixel position.
-    fn to_screen(&self, x: f64, y: f64) -> (f64, f64) {
-        let (u, v) = (x, y * COS_INC);
-        let (s, c) = self.pa;
-        let (sx, sy) = (u * c - v * s, u * s + v * c);
-        (
-            self.centre.0 + sx * self.r_px,
-            self.centre.1 - sy * self.r_px,
-        )
-    }
-
-    /// Pixel centre → galaxy plane (units of R).
+    /// Dot centre → galaxy plane (units of R): the inverse of `raster`'s projection.
+    #[cfg(test)]
     fn to_plane(&self, px: i32, py: i32) -> (f64, f64) {
-        let sx = (f64::from(px) + 0.5 - self.centre.0) / self.r_px;
-        let sy = -(f64::from(py) + 0.5 - self.centre.1) / self.r_px;
+        let sx = (f64::from(px) - self.centre.0) / self.r_px;
+        let sy = -(f64::from(py) - self.centre.1) / self.r_px;
         let (s, c) = self.pa;
         let (u, v) = (sx * c + sy * s, -sx * s + sy * c);
         (u, v / COS_INC)
@@ -271,9 +312,9 @@ impl SpiralGalaxy {
         while self.knot_debt >= 1.0 {
             self.knot_debt -= 1.0;
             let r = ctx.rng.random_range(KNOT_R.0..KNOT_R.1);
-            let arm = if ctx.rng.random_bool(0.5) { 0.0 } else { PI };
+            let arm = f64::from(ctx.rng.random_range(0..4u8)) * TAU / ARMS;
             // θ where φ = KNOT_PHI at radius r now.
-            let theta0 = KNOT_PHI / 2.0 - r.ln() * COT_PITCH + OMEGA_P * self.t + arm;
+            let theta0 = KNOT_PHI / ARMS - r.ln() * COT_PITCH + OMEGA_P * self.t + arm;
             let size = ctx.rng.random_range(0.6..1.0);
             self.knots.spawn(Knot {
                 r,
@@ -284,91 +325,62 @@ impl SpiralGalaxy {
         }
     }
 
-    fn raster(&mut self) {
-        let glow = &mut self.glow;
-        glow.clear();
-        let t = self.t;
-        for s in &self.all_stars[..self.n_stars] {
-            let (x, y) = star_pos(f64::from(s.r), f64::from(s.alpha0), f64::from(s.ecc), t);
-            let (px, py) = {
-                let (u, v) = (x, y * COS_INC);
-                let (sn, c) = self.pa;
-                let (sx, sy) = (u * c - v * sn, u * sn + v * c);
-                (
-                    self.centre.0 + sx * self.r_px - 0.5,
-                    self.centre.1 - sy * self.r_px - 0.5,
-                )
-            };
-            // The outer disc's few stars are dimmed, so the halo reads smooth, not
-            // speckled.
-            let outer = 1.0 - 0.7 * ease::smoothstep((f64::from(s.r) - 0.55) / 0.45);
-            glow.splat_bilinear(px, py, s.lum * outer as f32);
+    /// The inks a star is drawn in now, `(head, stream)`, or `None` in a dust lane.
+    fn inks(n: usize, s: &Star, r: f64, phi: f64) -> Option<(Ink, Ink)> {
+        match s.pop {
+            Pop::Bulge(tint) => Some(BULGE_INKS[usize::from(tint)]),
+            _ if in_lane(r, phi) => None,
+            // Massive young stars live only just downstream of the arm that made them.
+            Pop::Young if young_shows(n, phi) => Some(YOUNG_INKS),
+            Pop::Young => None,
+            Pop::Disc if on_arm(phi) => Some(DISC_INKS),
+            // Between the arms the old disc is drawn sparser and dimmer, so the four arms
+            // stand out (surface brightness, not star counts).
+            Pop::Disc if hash01(n as u64 ^ INTERARM_SALT) < INTERARM_KEEP => Some(INTERARM_INKS),
+            Pop::Disc => None,
         }
-        let rot = ((2.0 * OMEGA_P * t / TAU).rem_euclid(1.0) * PHASES as f64) as usize;
-        let (tone, lut) = (&self.tone, &self.dust_lut);
-        let (phase, rbin, radial) = (&self.phase, &self.rbin, &self.radial);
-        let values = self.glow.values();
-        let width = usize::from(self.pixels.pixel_size().width());
-        self.pixels.shade(|x, y| {
-            let i = y as usize * width + x as usize;
-            let (Some(&v), Some(&p), Some(&rb)) = (values.get(i), phase.get(i), rbin.get(i)) else {
-                return Ink::BLANK;
-            };
-            let (d, arm) = lut[(usize::from(p) + PHASES - rot) % PHASES];
-            let (bulge, disc, dust_w) = radial[usize::from(rb)];
-            let d = d * dust_w;
-            let light = (v + bulge + disc * arm) * (1.0 - DUST_OPACITY * d);
-            // The haze floor: the mean disc light here (the arm factor averages 1).
-            let level = tone.level((light - HAZE * disc).max(0.0));
-            LIGHT_STEPS
-                .iter()
-                .rev()
-                .find(|(from, _)| level >= *from)
-                .map_or(Ink::BLANK, |&(_, ink)| ink)
-        });
-        // Young stars: blue-white points on the arms, just downstream of the shock; only
-        // the arm-phase band's brighter half shows, so they scatter rather than line up.
+    }
+
+    /// Every star as a dot with a short stream thread, then knots and field stars
+    /// (SPEC-002 Look, M16).
+    fn raster(&mut self) {
+        self.dots.clear();
+        let t = self.t;
+        let (sn, c) = self.pa;
+        let (cx, cy, k) = (self.centre.0, self.centre.1, self.r_px);
+        let screen = |x: f64, y: f64| {
+            let (u, v) = (x, y * COS_INC);
+            (cx + (u * c - v * sn) * k, cy - (u * sn + v * c) * k)
+        };
         for (n, s) in self.all_stars[..self.n_stars].iter().enumerate() {
-            if s.kelvin == 0.0 || s.lum < YOUNG_LUM {
+            let ((x, y), phi) = s.at(t);
+            let r = f64::from(s.r);
+            let Some((head, stream)) = Self::inks(n, s, r, phi) else {
                 continue;
-            }
-            let (x, y) = star_pos(f64::from(s.r), f64::from(s.alpha0), f64::from(s.ecc), t);
-            let phi = arm_phase(x, y, t);
-            let band = (phi - YOUNG_BAND.0) / (YOUNG_BAND.1 - YOUNG_BAND.0);
-            if !(0.0..=1.0).contains(&band) || hash01(n as u64) > 1.0 - band * 0.6 {
-                continue;
-            }
-            let (px, py) = self.to_screen(x, y);
-            self.pixels
-                .set(px.floor() as i32, py.floor() as i32, YOUNG_INK);
+            };
+            // The stream: back along the circular motion over STREAM_S (a chord).
+            let back = f64::from(s.omega) * STREAM_S;
+            let (bx, by) = (x + back * y, y - back * x);
+            let (hx, hy) = screen(x, y);
+            let (tx, ty) = screen(bx, by);
+            self.dots.line(tx, ty, hx, hy, stream);
+            self.dots.plot(hx, hy, head);
         }
         // H II regions: a pink point each, the larger ones only, fading with their life.
-        for k in self.knots.iter() {
-            let env = k.envelope();
-            if k.size < KNOT_SHOWN || env < 0.15 {
+        for kn in self.knots.iter() {
+            let env = kn.envelope();
+            if kn.size < KNOT_SHOWN || env < 0.15 {
                 continue;
             }
-            let (x, y) = k.pos();
-            let (px, py) = self.to_screen(x, y);
-            let (px, py) = (px.floor() as i32, py.floor() as i32);
-            // Two knots born side by side would make a blob: the later one waits.
-            let pink = |dx: i32, dy: i32| {
-                self.pixels
-                    .get(px + dx, py + dy)
-                    .is_some_and(|i| i.role == Role::Accent)
-            };
-            if [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]
-                .iter()
-                .any(|&(dx, dy)| pink(dx, dy))
-            {
-                continue;
-            }
+            let (x, y) = kn.pos();
+            let (px, py) = screen(x, y);
             let ink = KNOT_INKS[usize::from(env >= 0.5)];
-            self.pixels.set(px, py, ink);
+            self.dots.plot(px, py, ink);
+            self.dots.plot(px + 1.0, py, ink);
         }
         for &(x, y, ink) in &self.field {
-            if self.pixels.get(x, y) == Some(Ink::BLANK) {
-                self.pixels.set(x, y, ink);
+            if !self.dots.is_lit(x, y) {
+                self.dots.set(x, y, ink);
             }
         }
     }
@@ -383,32 +395,14 @@ impl Generator for SpiralGalaxy {
         if !self.seeded {
             self.seed(ctx);
         }
-        self.n_stars = ((size.area() as f64 * STARS_PER_CELL) as usize).clamp(1, MAX_STARS);
-        self.glow.resize(size);
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
-        let (w, h) = (f64::from(px.width()), f64::from(px.height()));
+        // A floor, so a small frame still has enough stars to trace four arms.
+        self.n_stars = ((size.area() as f64 * STARS_PER_CELL) as usize).clamp(MIN_STARS, MAX_STARS);
+        self.dots.resize(size);
+        let d = self.dots.dot_size();
+        let (w, h) = (f64::from(d.width()), f64::from(d.height()));
         self.centre = (w / 2.0, h / 2.0);
         self.r_px = 0.5 * w.min(h / COS_INC) * 0.94;
         self.pa = PA.sin_cos_det();
-        // Per pixel only two indices (TEST-R7): the arm phase and the galactocentric
-        // radius bin; the radial profiles live in a small table.
-        self.phase.clear();
-        self.rbin.clear();
-        let n = usize::from(px.width()) * usize::from(px.height());
-        self.phase.reserve_exact(n);
-        self.rbin.reserve_exact(n);
-        for py in 0..i32::from(px.height()) {
-            for pxi in 0..i32::from(px.width()) {
-                let (x, y) = self.to_plane(pxi, py);
-                let r = x.hypot(y).max(1e-6);
-                let b = 2.0 * (y.atan2(x) + r.ln() * COT_PITCH);
-                let idx = ((b / TAU).rem_euclid(1.0) * PHASES as f64) as usize % PHASES;
-                self.phase.push(idx as u16);
-                let bin = (r / R_LUT_MAX * RBINS as f64).round() as usize;
-                self.rbin.push(bin.min(RBINS - 1) as u16);
-            }
-        }
         // Field stars: hashed positions, stable for a size.
         self.field.clear();
         let count = (size.area() as f64 * FIELD_PER_CELL) as u64;
@@ -418,25 +412,6 @@ impl Generator for SpiralGalaxy {
             let bright = hash01(cell_key(k as i32, 5)) > 0.8;
             self.field.push((x, y, FIELD_INKS[usize::from(bright)]));
         }
-        // Star brightness per pixel should not depend on the canvas: normalise by the
-        // number of stars per pixel of disc.
-        let per_px = self.n_stars as f64 / (PI * self.r_px * self.r_px * COS_INC).max(1.0);
-        self.tone = Tone::asinh(
-            KNEE * (per_px as f32 / 0.6).max(0.05),
-            WHITE * (per_px as f32 / 0.6).max(0.05),
-        );
-        let k = per_px / 0.6;
-        self.radial.clear();
-        self.radial.extend((0..RBINS).map(|i| {
-            let r = i as f64 / RBINS as f64 * R_LUT_MAX;
-            let bulge = BULGE_PEAK * (-(r * r) / (2.0 * BULGE_SIGMA * BULGE_SIGMA)).exp();
-            let disc = DISC_LIGHT
-                * (-r / DISC_LIGHT_SCALE).exp()
-                * (1.0 - ease::smoothstep((r - 0.55) / 0.5));
-            let dust_w =
-                ease::smoothstep((r - 0.1) / 0.15) * (1.0 - ease::smoothstep((r - 0.8) / 0.25));
-            ((k * bulge) as f32, (k * disc) as f32, dust_w as f32)
-        }));
         self.dirty = true;
     }
 
@@ -458,8 +433,7 @@ impl Generator for SpiralGalaxy {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit(canvas);
     }
 }
 
@@ -477,7 +451,7 @@ mod tests {
 
     #[test]
     fn spg_a1_orbits_close_after_one_pattern_frame_period() {
-        for &(r, a0, e) in &[(0.2, 0.3, 0.1), (0.45, 2.0, 0.08), (0.9, 5.0, 0.12)] {
+        for &(r, a0, e) in &[(0.2, 0.3, 0.05), (0.45, 2.0, 0.04), (0.9, 5.0, 0.056)] {
             let period = TAU / (omega(r) - OMEGA_P).abs();
             let p0 = pattern_pos(r, a0, e, 1.5);
             let p1 = pattern_pos(r, a0, e, 1.5 + period);
@@ -486,13 +460,28 @@ mod tests {
                 "r={r}"
             );
         }
+        // The per-star fast path matches the closed form and the arm phase.
+        let s = Star::new(0.45, 2.0, 0.05, Pop::Disc);
+        for t in [0.0, 13.7, 88.0] {
+            let ((x, y), phi) = s.at(t);
+            let (x0, y0) = star_pos(0.45, f64::from(s.alpha0), f64::from(s.ecc), t);
+            assert!((x - x0).abs() < 1e-6 && (y - y0).abs() < 1e-6);
+            let exact = arm_phase(x, y, t);
+            assert!(
+                sciart_core::geom::wrap_angle(phi - exact).abs() < 0.02,
+                "{phi} {exact}"
+            );
+        }
     }
 
-    /// Stars binned by arm phase at time `t`, `bins` bins over `(−π, π]`, radii in
+    /// Disc stars binned by arm phase at time `t`, `bins` bins over `(−π, π]`, radii in
     /// `r_range`.
     fn phase_hist(g: &SpiralGalaxy, t: f64, bins: usize, r_range: (f64, f64)) -> Vec<f64> {
         let mut h = vec![0.0; bins];
         for s in &g.all_stars[..g.n_stars] {
+            if matches!(s.pop, Pop::Bulge(_)) {
+                continue;
+            }
             let (x, y) = star_pos(f64::from(s.r), f64::from(s.alpha0), f64::from(s.ecc), t);
             let r = x.hypot(y);
             if r < r_range.0 || r > r_range.1 {
@@ -520,18 +509,18 @@ mod tests {
         assert!(max / min >= 1.8, "contrast {}", max / min);
     }
 
-    /// Angle of the density peak in the annulus around `r`, via the m = 2 Fourier phase.
+    /// Angle of the density peak in the annulus around `r`, via the m = 4 Fourier phase.
     fn arm_angle(g: &SpiralGalaxy, t: f64, r0: f64) -> f64 {
         let (mut c, mut s) = (0.0, 0.0);
         for st in &g.all_stars[..g.n_stars] {
             let (x, y) = star_pos(f64::from(st.r), f64::from(st.alpha0), f64::from(st.ecc), t);
             if (x.hypot(y) - r0).abs() < 0.03 {
-                let th = 2.0 * y.atan2(x);
+                let th = ARMS * y.atan2(x);
                 c += th.cos_det();
                 s += th.sin_det();
             }
         }
-        s.atan2(c) / 2.0
+        s.atan2(c) / ARMS
     }
 
     #[test]
@@ -540,7 +529,7 @@ mod tests {
         let dt = 4.0;
         let a0 = arm_angle(&g, 0.0, 0.5);
         let a1 = arm_angle(&g, dt, 0.5);
-        let rate = sciart_core::geom::wrap_angle(2.0 * (a1 - a0)) / 2.0 / dt;
+        let rate = sciart_core::geom::wrap_angle(ARMS * (a1 - a0)) / ARMS / dt;
         assert!(
             (rate - OMEGA_P).abs() <= 0.05 * OMEGA_P,
             "rate {rate} vs {OMEGA_P}"
@@ -549,8 +538,25 @@ mod tests {
         assert!((omega(COROTATION) - OMEGA_P).abs() < 1e-12);
     }
 
+    /// Lit dots and dots in the disc annulus `0.3–0.7 R` whose arm phase satisfies `pick`.
+    fn annulus_lit(g: &SpiralGalaxy, pick: impl Fn(f64) -> bool) -> (usize, usize) {
+        let d = g.dots.dot_size();
+        let (mut lit, mut n) = (0, 0);
+        for py in 0..i32::from(d.height()) {
+            for px in 0..i32::from(d.width()) {
+                let (x, y) = g.to_plane(px, py);
+                if !(0.3..0.7).contains(&x.hypot(y)) || !pick(arm_phase(x, y, g.t)) {
+                    continue;
+                }
+                n += 1;
+                lit += usize::from(g.dots.is_lit(px, py));
+            }
+        }
+        (lit, n)
+    }
+
     #[test]
-    fn spg_a4_dust_lanes_sit_on_the_inner_edge_and_dim_the_light() {
+    fn spg_a4_dust_lanes_sit_on_the_inner_edge_as_gaps() {
         // The dust window lies at negative arm phase, and at fixed θ smaller radii have
         // smaller φ: the inner side of the crest.
         let mut sum = 0.0;
@@ -565,72 +571,109 @@ mod tests {
         let (x, y) = (0.5, 0.0);
         let (x2, y2) = (0.45, 0.0);
         assert!(arm_phase(x2, y2, 0.0) < arm_phase(x, y, 0.0));
-        // In the frame, dust-lane pixels are dimmer than the crest at the same radius.
+        assert!(in_lane(0.5, DUST_PHI) && !in_lane(0.5, 0.0) && !in_lane(0.02, DUST_PHI));
+        // In the frame, the lane's dots are sparser than the crest's at the same radii.
         let (g, _) = built(Size::new(200, 50), 3);
-        let px = g.pixels.pixel_size();
-        let (mut lane, mut crest) = ((0.0, 0.0), (0.0, 0.0));
-        for py in 0..i32::from(px.height()) {
-            for pxi in 0..i32::from(px.width()) {
-                let (x, y) = g.to_plane(pxi, py);
-                let r = x.hypot(y);
-                if !(0.3..0.7).contains(&r) {
-                    continue;
-                }
-                let phi = arm_phase(x, y, g.t);
-                let l = f64::from(g.pixels.get(pxi, py).unwrap().level);
-                if (phi - DUST_PHI).abs() < 0.08 {
-                    lane.0 += l;
-                    lane.1 += 1.0;
-                } else if phi.abs() < 0.08 {
-                    crest.0 += l;
-                    crest.1 += 1.0;
-                }
-            }
-        }
-        assert!(lane.0 / lane.1 < crest.0 / crest.1, "{lane:?} {crest:?}");
+        let (lane, lane_n) = annulus_lit(&g, |phi| (phi - DUST_PHI).abs() < 0.08);
+        let (crest, crest_n) = annulus_lit(&g, |phi| (phi - 0.2).abs() < 0.08);
+        let (lane, crest) = (lane as f64 / lane_n as f64, crest as f64 / crest_n as f64);
+        assert!(lane < 0.5 * crest, "lane {lane:.3} vs crest {crest:.3}");
     }
 
     #[test]
-    fn spg_a6_dark_between_the_arms_and_knots_are_single_points() {
-        // ADR-0018: no inter-arm haze, no pink blobs; the light in flat steps.
+    fn spg_a6_star_streams_on_black_with_dark_gaps_between_the_arms() {
         let size = Size::new(200, 50);
         let (mut g, mut ctx) = built(size, 3);
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
         }
         g.prepare();
-        let px = g.pixels.pixel_size();
-        let (mut between, mut dark) = (0, 0);
-        for py in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let ink = g.pixels.get(x, py).unwrap();
-                match ink.role {
-                    _ if LIGHT_STEPS.iter().any(|s| s.1 == ink) => {}
-                    Role::Accent => {
-                        assert!(KNOT_INKS.contains(&ink), "{ink:?}");
-                        // A point: no H-alpha neighbour left, right, above or below.
-                        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                            let n = g.pixels.get(x + dx, py + dy).unwrap_or(Ink::BLANK);
-                            assert_ne!(n.role, Role::Accent, "blob at ({x}, {py})");
-                        }
-                    }
-                    Role::Background => {}
-                    _ => assert!(ink == YOUNG_INK || FIELD_INKS.contains(&ink), "{ink:?}"),
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut inks = vec![DISC_INKS.0, DISC_INKS.1, YOUNG_INKS.0, YOUNG_INKS.1];
+        inks.extend([INTERARM_INKS.0, INTERARM_INKS.1]);
+        inks.extend(BULGE_INKS.iter().flat_map(|p| [p.0, p.1]));
+        inks.extend(KNOT_INKS);
+        inks.extend(FIELD_INKS);
+        let mut young = 0;
+        for y in 0..50 {
+            for x in 0..200 {
+                let cell = canvas.get(x, y).unwrap();
+                if cell.ch == ' ' {
+                    continue;
                 }
-                let (u, v) = g.to_plane(x, py);
-                let r = u.hypot(v);
-                let phi = arm_phase(u, v, g.t);
-                if (0.3..0.7).contains(&r) && (phi.abs() - PI).abs() < 0.4 {
-                    between += 1;
-                    dark += usize::from(!LIGHT_STEPS[1..].iter().any(|s| s.1 == ink));
+                assert!(('⠀'..='⣿').contains(&cell.ch), "{x},{y}: {:?}", cell.ch);
+                assert!(inks.contains(&cell.ink), "{x},{y}: {:?}", cell.ink);
+                young += usize::from(cell.ink == YOUNG_INKS.0);
+            }
+        }
+        assert!(young > 20, "{young} young-star cells");
+        // Between the arms (|φ| near π) the dots are sparse; on the crests they crowd.
+        let (between, between_n) = annulus_lit(&g, |phi| (phi.abs() - PI).abs() < 0.4);
+        let (crest, crest_n) = annulus_lit(&g, |phi| (phi - 0.2).abs() < 0.4);
+        assert!(between_n > 400, "{between_n} inter-arm dots");
+        let (between, crest) = (
+            between as f64 / between_n as f64,
+            crest as f64 / crest_n as f64,
+        );
+        assert!(between < 0.3, "inter-arm lit share {between:.3}");
+        assert!(
+            crest >= 1.5 * between,
+            "crest {crest:.3} vs between {between:.3}"
+        );
+    }
+
+    #[test]
+    fn spg_a7_young_stars_light_the_leading_edges_and_the_bulge_is_old() {
+        let (g, _) = built(Size::new(200, 50), 5);
+        let mut bulge_max: f64 = 0.0;
+        for (n, s) in g.all_stars[..g.n_stars].iter().enumerate() {
+            let ((x, y), phi) = s.at(g.t);
+            let r = f64::from(s.r);
+            match (s.pop, SpiralGalaxy::inks(n, s, r, phi)) {
+                (Pop::Bulge(_), inks) => {
+                    bulge_max = bulge_max.max(x.hypot(y));
+                    let (head, _) = inks.unwrap();
+                    assert!(matches!(head.role, Role::Hot | Role::Sun));
+                }
+                (_, Some(inks)) if inks == YOUNG_INKS => {
+                    assert!((YOUNG_BAND.0..=YOUNG_BAND.1).contains(&phi), "φ = {phi}");
+                }
+                (_, Some(inks)) if on_arm(phi) => assert_eq!(inks, DISC_INKS),
+                (_, Some(inks)) => assert_eq!(inks, INTERARM_INKS),
+                (Pop::Young, None) => assert!(in_lane(r, phi) || !young_shows(n, phi)),
+                (_, None) => assert!(in_lane(r, phi) || !on_arm(phi)),
+            }
+        }
+        assert!(bulge_max <= 0.3 + 1e-9, "bulge star at {bulge_max}");
+    }
+
+    #[test]
+    fn spg_a8_four_arms_stand_out_from_the_interarm_disc() {
+        // At 160×45 the lit-dot density on the arms (0.25–0.9 R) is ≥ 2.5× that between
+        // them, and the old disc between the arms is the dimmer step.
+        let (g, _) = built(Size::new(160, 45), 42);
+        let d = g.dots.dot_size();
+        let (mut arm, mut arm_n, mut inter, mut inter_n) = (0usize, 0usize, 0usize, 0usize);
+        for py in 0..i32::from(d.height()) {
+            for px in 0..i32::from(d.width()) {
+                let (x, y) = g.to_plane(px, py);
+                if !(0.25..0.9).contains(&x.hypot(y)) {
+                    continue;
+                }
+                let phi = arm_phase(x, y, g.t);
+                let lit = usize::from(g.dots.is_lit(px, py));
+                if on_arm(phi) {
+                    (arm, arm_n) = (arm + lit, arm_n + 1);
+                } else if phi.abs() > 1.6 {
+                    (inter, inter_n) = (inter + lit, inter_n + 1);
                 }
             }
         }
-        assert!(between > 200, "{between} inter-arm pixels");
-        assert!(
-            10 * dark >= 7 * between,
-            "{dark} of {between} inter-arm pixels dark"
-        );
+        let (arm, inter) = (arm as f64 / arm_n as f64, inter as f64 / inter_n as f64);
+        assert!(arm >= 2.5 * inter, "arm {arm:.3} vs interarm {inter:.3}");
+        assert!(INTERARM_INKS.0.level < DISC_INKS.0.level);
+        assert!(on_arm(0.0) && on_arm(0.8) && !on_arm(-0.4) && !on_arm(PI));
     }
 
     #[test]

@@ -6,17 +6,21 @@
 //! the bands in as logarithmic spirals. Convection feeds the eyewall and three spiral rain
 //! bands (pulsing, noise-modulated cells), subsidence clears the eye, and evaporation
 //! clears the ocean between the bands. A `Timeline` alternates the visible picture with an
-//! enhanced-infrared one, in which the coldest (highest) cloud tops glow.
+//! enhanced-infrared one, in which the coldest (highest) cloud tops stand out.
+//!
+//! M16 (thread style, GEN-R25): the cloud-top brightness is drawn as contour threads,
+//! spiral band edges winding into a ring round the eye, coloured by radius (visible) or
+//! by cloud-top coldness (infrared); tracer dots with short trails ride the inflow.
 //!
 //! Units: lengths in lattice heights (`H`), speeds in `H` per simulated second, so the
 //! storm keeps its shape when the lattice is regridded (ADR-0012).
 
 use std::f64::consts::TAU;
 
+use rand::Rng;
 use sciart_core::Grid;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, half_block};
 
 use crate::shared::vortex_advect::{self, Flow, XEdge};
 use sciart_core::rng::value_noise;
@@ -66,14 +70,8 @@ const CDO_RATE: f32 = 1.3;
 /// spiral.
 const OUTFLOW: f64 = 0.07;
 const OUTFLOW_PITCH: f64 = 0.45;
-/// Brightness below which the sea is clear, and above which cloud is opaque.
+/// Brightness below which the sea is clear.
 const CLEAR: f64 = 0.012;
-const THICK: f64 = 0.07;
-/// Convective texture tile: texels per side, the disc it spans (in `R_STORM`) and how
-/// fast it turns with the storm, rad/s.
-const TURRET_N: usize = 256;
-const TURRET_SPAN: f64 = 1.15;
-const TURRET_SPIN: f64 = 0.35;
 /// Radial wind table resolution over `[0, 2·R_STORM]`.
 const TABLE: usize = 512;
 /// Steps run in the first resize, so the first frame is a mature storm.
@@ -81,21 +79,15 @@ const SPIN_UP: usize = 180;
 /// Lattice cap for the spin-up (GEN-R19).
 const SPIN_UP_CAP: usize = CAP / 24;
 /// Seconds of the cross-fade between the visible and infrared pictures: a dip through
-/// black, the one fading out while the IR weight rises to ½, the other fading in after
-/// (M14, ADR-0017: no per-pixel dither).
+/// black, the one fading out while the IR weight rises to ½, the other fading in after.
 const DISSOLVE: f64 = 1.5;
 
 /// Lattices at most this tall (80×24 and smaller) are too coarse for the tight inner
-/// bands: the secondary band and fine texture drop out and the picture is box-blurred
-/// once (HUR-A8).
+/// bands: the secondary band drops out and the brightness is blurred twice (HUR-A8).
 const SMALL: u16 = 64;
 /// Steps between cirrus refreshes (0.1 s).
 const SWELL_EVERY: u32 = 6;
-/// Visible light: the open sea is black; cloud lightness is scaled by `CLOUD_TOP` before
-/// its steps ([`vis_ink`]), and black below `CLOUD_BLACK` levels.
-const CLOUD_TOP: f64 = 0.8;
-const CLOUD_BLACK: f64 = 14.0;
-/// The enhanced-infrared picture (HUR-A4): where the cloud-top curve starts from.
+/// The enhanced-infrared curve (HUR-A4): where the cloud-top curve starts from.
 const IR_LOW: f64 = 0.16;
 /// Cloud-top height factor in the IR act: 1 inside `IR_CORE` (`H`, the overcast), falling
 /// linearly to `IR_BANDS` at `IR_OUTER`.
@@ -105,6 +97,35 @@ const IR_BANDS: f64 = 0.62;
 
 const ACTS: [(&str, f64); 2] = [("visible", 25.0), ("infrared", 12.0)];
 const IR: usize = 1;
+
+/// M16 threads (GEN-R25): contour levels of the cloud-top brightness and their ink
+/// levels (visible act), the radii (in radii of maximum wind) inside which threads are
+/// `Star` (eyewall) and `Wave` (inner bands), and the sub-cell refinement.
+/// (The lowest is 0.3: below it the band cells' noise, near the lattice scale, only
+/// frays into specks.)
+pub(crate) const LEVELS: [f32; 3] = [0.3, 0.5, 0.7];
+const VIS_LEVELS: [u8; 3] = [150, 200, 245];
+const EYEWALL_RM: f64 = 1.8;
+/// Inside `EYEWALL_RM` only these contour levels are drawn (two eyewall rings, M16
+/// round 2); outside it every band is one thread along its ridge (its centre line).
+const EYE_LEVELS: [usize; 2] = [1, 2];
+/// Band ridges in cloud dimmer than this are noise between cells, not bands.
+const RIDGE_MIN: f32 = 0.4;
+const INNER_RM: f64 = 3.2;
+const REFINE: f64 = 2.2;
+const MAX_REFINE: usize = 5;
+/// Cross-fade weights below which no threads are drawn, and below which one step dimmer.
+const FADE_OFF: f64 = 0.25;
+const FADE_DIM: f64 = 0.6;
+/// Inflow tracers: how many, the trail (positions kept, steps between them), their
+/// life (s) and where they respawn (in `R_STORM`).
+const TRACERS: usize = 90;
+const TRAIL: usize = 12;
+const TRAIL_EVERY: u32 = 2;
+const TRACER_LIFE: (f64, f64) = (12.0, 20.0);
+const RESPAWN: (f64, f64) = (0.5, 1.0);
+const HEAD: Ink = Ink::new(Role::Star, 255);
+const TAIL: [Ink; 2] = [Ink::new(Role::Cold, 150), Ink::new(Role::Cold, 110)];
 
 /// Holland (1980) tangential wind at radius `r` (`H`), `H`/s: peaks at `R_MAX_WIND`
 /// (HUR-A1), decays outward and vanishes at the centre.
@@ -142,23 +163,6 @@ fn wind_from(dx: f64, dy: f64, vt: f64, vr: f64) -> (f64, f64) {
     ((vt * dy - vr * dx) / r, (-vt * dx - vr * dy) / r)
 }
 
-/// The convective texture tile, fixed and size-independent: built once per process and
-/// shared (GEN-R19; ~130 k noise lookups kept out of every build).
-fn turret_tile() -> &'static [f32] {
-    static TILE: std::sync::OnceLock<Box<[f32]>> = std::sync::OnceLock::new();
-    TILE.get_or_init(|| {
-        (0..TURRET_N * TURRET_N)
-            .map(|k| {
-                let (x, y) = ((k % TURRET_N) as f64, (k / TURRET_N) as f64);
-                // Two octaves of cauliflower-like bumps, a few pixels across.
-                let n =
-                    0.65 * value_noise(0x7EE7, x, y, 12.0) + 0.35 * value_noise(0x7EE8, x, y, 5.0);
-                (n * n * 1.6 - 0.5) as f32
-            })
-            .collect()
-    })
-}
-
 /// A 1-2-1 blur in x and then y (edges clamped), through `tmp` (same size as `g`).
 fn box_blur(g: &mut Grid<f32>, tmp: &mut Grid<f32>) {
     let (w, h) = (usize::from(g.width()), usize::from(g.height()));
@@ -181,6 +185,67 @@ fn box_blur(g: &mut Grid<f32>, tmp: &mut Grid<f32>) {
     }
 }
 
+/// A visible-act thread's ink: by radius `rm` (radii of maximum wind), stepped by its
+/// contour level `level` (index into [`LEVELS`]).
+pub(crate) fn vis_thread(rm: f64, level: usize) -> Ink {
+    let role = if rm < EYEWALL_RM {
+        Role::Star
+    } else if rm < INNER_RM {
+        Role::Wave
+    } else {
+        Role::Cold
+    };
+    Ink::new(role, VIS_LEVELS[level.min(VIS_LEVELS.len() - 1)])
+}
+
+/// An infrared thread's ink by the coldness `cold` (0 … 1) of its cloud tops (HUR-A4).
+pub(crate) fn ir_thread(cold: f64) -> Ink {
+    match cold {
+        c if c < 0.4 => Ink::new(Role::Cold, 170),
+        c if c < 0.7 => Ink::new(Role::Wave, 210),
+        _ => Ink::new(Role::Accent, 245),
+    }
+}
+
+/// The enhancement curve's position for cloud-top brightness `b` (before the height
+/// factor): thin low cloud stays low, the eyewall and convective cores reach the top.
+fn ir_curve(b: f64) -> f64 {
+    let x = ((b - CLEAR) / (0.78 - CLEAR)).clamp(0.0, 1.0);
+    (IR_LOW + (1.0 - IR_LOW) * x.powf(1.25) - IR_LOW) / (1.0 - IR_LOW)
+}
+
+/// Cloud-top height factor at radius `r` (`H`) from the storm centre (HUR-A10).
+fn height_factor(r: f64) -> f64 {
+    1.0 - (1.0 - IR_BANDS) * ((r - IR_CORE) / (IR_OUTER - IR_CORE)).clamp(0.0, 1.0)
+}
+
+/// One inflow tracer, storm-relative (`H`): its position, the trail (newest first, `n`
+/// of them valid), its age and life.
+#[derive(Debug, Clone, Copy)]
+struct Tracer {
+    x: f64,
+    y: f64,
+    trail: [(f32, f32); TRAIL],
+    n: usize,
+    age: f64,
+    life: f64,
+}
+
+impl Tracer {
+    fn spawn(rng: &mut impl Rng) -> Self {
+        let r = R_STORM * rng.random_range(RESPAWN.0..RESPAWN.1);
+        let (s, c) = rng.random_range(0.0..TAU).sin_cos_det();
+        Self {
+            x: r * c,
+            y: r * s,
+            trail: [(0.0, 0.0); TRAIL],
+            n: 0,
+            age: 0.0,
+            life: rng.random_range(TRACER_LIFE.0..TRACER_LIFE.1),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct Hurricane {
     t: f64,
@@ -197,17 +262,17 @@ pub struct Hurricane {
     dirty: bool,
     /// A coarse lattice (`height ≤ SMALL`): smoothed picture, fewer inner bands.
     small: bool,
-    /// Enhanced-IR curve value by brightness level, before the height factor.
-    ir_lut: [f32; 256],
-    /// Convective texture (cumulus towers, `[−½, ½]`) on a `TURRET_N²` tile over the
-    /// storm disc, fixed per storm, turning slowly with it.
-    turrets: &'static [f32],
     scratch: Grid<f32>,
     flow: Flow,
     /// `(tangential, inflow)` wind over `[0, 2·R_STORM]`, `H`/s.
     table: Vec<(f32, f32)>,
-    map: SampleMap,
-    pixels: Pixels,
+    /// M16: the inflow tracers, steps since their trails moved on, and the threads.
+    tracers: Vec<Tracer>,
+    trail_age: u32,
+    /// Radial derivative of the brightness per node (M16 round 2): a band's centre line
+    /// is where it crosses zero going downhill outward.
+    ridge: Vec<f32>,
+    dots: Dots,
     warmed: bool,
 }
 
@@ -223,15 +288,6 @@ impl Hurricane {
             swell_age: SWELL_EVERY,
             dirty: false,
             small: false,
-            turrets: turret_tile(),
-            ir_lut: std::array::from_fn(|k| {
-                // Brightness stands in for cloud-top height, hence coldness: thin low
-                // cloud stays in the curve's grey, the eyewall and convective cores reach
-                // its orange and pale top.
-                let b = k as f64 / 255.0;
-                let x = ((b - CLEAR) / (0.78 - CLEAR)).clamp(0.0, 1.0);
-                (IR_LOW + (1.0 - IR_LOW) * x.powf(1.25)) as f32
-            }),
             scratch: Grid::default(),
             flow: Flow::default(),
             table: (0..TABLE)
@@ -240,8 +296,10 @@ impl Hurricane {
                     (holland(r) as f32, inflow(r) as f32)
                 })
                 .collect(),
-            map: SampleMap::default(),
-            pixels: Pixels::default(),
+            tracers: Vec::with_capacity(TRACERS),
+            trail_age: 0,
+            ridge: Vec::new(),
+            dots: Dots::default(),
             warmed: false,
         }
     }
@@ -430,6 +488,8 @@ impl Hurricane {
         self.small = lattice.height() <= SMALL;
         self.scratch.resize(lattice, 0.0);
         self.bright.resize(lattice, 0.0);
+        self.ridge.clear();
+        self.ridge.resize(lattice.area(), 0.0);
         self.cirrus.resize(lattice, 0.0);
         // A regridded lattice needs its cirrus before the next picture.
         self.swell_age = SWELL_EVERY;
@@ -448,30 +508,6 @@ impl Hurricane {
         } else {
             0.0
         }
-    }
-
-    /// Convective texture at pixel `(x, y)`: the tile, turned with the storm.
-    fn turret(t: &[f32], centre: (f64, f64), x: i32, y: i32, rot: (f64, f64), ph: f64) -> f64 {
-        let (cx, cy) = centre;
-        let (dx, dy) = (
-            (f64::from(x) + 0.5) / ph - cx,
-            (f64::from(y) + 0.5) / ph - cy,
-        );
-        let (s, c) = rot;
-        let (u, v) = (c * dx - s * dy, s * dx + c * dy);
-        let k = TURRET_N as f64 / (2.0 * TURRET_SPAN * R_STORM);
-        let (tu, tv) = (u * k + 0.5 * TURRET_N as f64, v * k + 0.5 * TURRET_N as f64);
-        if !(0.0..(TURRET_N - 1) as f64).contains(&tu)
-            || !(0.0..(TURRET_N - 1) as f64).contains(&tv)
-        {
-            return 0.0;
-        }
-        let (i, j) = (tu as usize, tv as usize);
-        let (fu, fv) = ((tu - i as f64) as f32, (tv - j as f64) as f32);
-        let at = |i: usize, j: usize| t[j * TURRET_N + i];
-        let top = at(i, j) + fu * (at(i + 1, j) - at(i, j));
-        let bottom = at(i, j + 1) + fu * (at(i + 1, j + 1) - at(i, j + 1));
-        f64::from(top + fv * (bottom - top))
     }
 
     /// The cirrus outflow per node at the current time, in `H` so it keeps its scale when
@@ -502,133 +538,181 @@ impl Hurricane {
         }
     }
 
-    fn shade(&mut self) {
+    /// Carry the tracers along the low-level wind (midpoint step), keep their trails and
+    /// respawn the spent ones (HUR-A11).
+    fn move_tracers(&mut self, dt: f64, rng: &mut impl Rng) {
+        self.trail_age += 1;
+        let push = self.trail_age >= TRAIL_EVERY;
+        if push {
+            self.trail_age = 0;
+        }
+        let table = &self.table;
+        let wind = |x: f64, y: f64| {
+            let (vt, vr) = Self::wind_at(table, x.hypot(y));
+            wind_from(x, y, vt, vr)
+        };
+        for p in &mut self.tracers {
+            if push {
+                p.trail.copy_within(0..TRAIL - 1, 1);
+                p.trail[0] = (p.x as f32, p.y as f32);
+                p.n = (p.n + 1).min(TRAIL);
+            }
+            let (u, v) = wind(p.x, p.y);
+            let (u, v) = wind(p.x + 0.5 * dt * u, p.y + 0.5 * dt * v);
+            p.x += dt * u;
+            p.y += dt * v;
+            p.age += dt;
+            let r = p.x.hypot(p.y);
+            if !(EYE * R_MAX_WIND..=1.1 * R_STORM).contains(&r) || p.age >= p.life {
+                *p = Tracer::spawn(rng);
+            }
+        }
+    }
+
+    /// The radial derivative of the brightness at every node (central differences,
+    /// one-sided at the lattice's edges), for the bands' ridge lines.
+    fn fill_ridge(&mut self) {
+        let (w, h) = (
+            usize::from(self.lattice.width()),
+            usize::from(self.lattice.height()),
+        );
+        if self.ridge.len() != w * h || w < 2 || h < 2 {
+            return;
+        }
+        let scale = h as f64;
+        let (cx, cy) = self.centre(self.t);
+        let b = self.bright.as_slice();
+        for j in 0..h {
+            let (ju, jd) = (j.saturating_sub(1), (j + 1).min(h - 1));
+            for i in 0..w {
+                let (il, ir) = (i.saturating_sub(1), (i + 1).min(w - 1));
+                let gx = (b[j * w + ir] - b[j * w + il]) / (ir - il) as f32;
+                let gy = (b[jd * w + i] - b[ju * w + i]) / (jd - ju) as f32;
+                let (ex, ey) = (i as f64 / scale - cx, j as f64 / scale - cy);
+                let r = ex.hypot(ey).max(1e-9);
+                self.ridge[j * w + i] = (f64::from(gx) * ex / r + f64::from(gy) * ey / r) as f32;
+            }
+        }
+    }
+
+    /// Draw the frame: the eyewall rings and band ridge threads, then the tracers. The faint cirrus
+    /// outflow (below the lowest contour) is not drawn: as threads it only hatched the
+    /// storm's flanks.
+    fn raster(&mut self) {
+        self.dots.clear();
         let ir = self.ir_weight();
-        let size = self.pixels.pixel_size();
-        let ph = f64::from(size.height());
-        let rot = (TURRET_SPIN * self.t).sin_cos_det();
-        let centre = self.centre(self.t);
-        // Convective texture fades out on a coarse picture, where it only speckles.
-        let (texture, relief) = if self.small { (0.0, 0.8) } else { (1.0, 1.6) };
-        let (bright, map, ir_lut, turrets) = (&self.bright, &self.map, &self.ir_lut, self.turrets);
-        // Catmull-Rom from the capped lattice (CORE-R102): smooth arms, no stair steps. The
-        // taps are looked up once per pixel row (and the next, for the relief).
-        let mut rows = (-1, map.row_cubic(bright, 0), map.row_cubic(bright, 1));
-        self.pixels.shade(|x, y| {
-            if y != rows.0 {
-                rows = (y, map.row_cubic(bright, y), map.row_cubic(bright, y + 1));
-            }
-            let b = rows.1.at(x);
-            // Dip through black: the visible picture fades out over the first half of the
-            // cross-fade, the infrared one fades in over the second.
-            let use_ir = ir >= 0.5;
-            let gain = if use_ir {
-                2.0 * ir - 1.0
+        let (use_ir, gain) = if ir >= 0.5 {
+            (true, 2.0 * ir - 1.0)
+        } else {
+            (false, 1.0 - 2.0 * ir)
+        };
+        let (vw, vh) = (
+            usize::from(self.lattice.width()),
+            usize::from(self.lattice.height()),
+        );
+        let ds = self.dots.dot_size();
+        if vw < 2 || vh < 2 || self.bright.size() != self.lattice {
+            return;
+        }
+        let (sx, sy) = (
+            f64::from(ds.width()) / vw as f64,
+            f64::from(ds.height()) / vh as f64,
+        );
+        // Node (x, y) → dot coordinates, the cell-centre convention (CORE-R68).
+        let to_dot = move |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        let k = ((sx.max(sy) / REFINE).ceil() as usize).clamp(1, MAX_REFINE);
+        let scale = vh as f64;
+        let (cx, cy) = self.centre(self.t);
+        let dim = |ink: Ink| {
+            if gain < FADE_DIM {
+                Ink::new(ink.role, (f64::from(ink.level) * 0.7) as u8)
             } else {
-                1.0 - 2.0 * ir
-            };
-            if use_ir {
-                // Enhanced IR (HUR-A4): the warm sea dark grey, low cloud grey, the
-                // coldest (thickest, highest) tops through cyan, green and yellow to
-                // orange and pale rose.
-                // Tops are highest (coldest) in the central dense overcast and eyewall and
-                // lower in the outer bands, so the bands stay in the green-yellow part of
-                // the curve (HUR-A10).
-                if f64::from(b) <= CLEAR {
-                    return Ink::BLANK;
-                }
-                let r = ((f64::from(x) + 0.5) / ph - centre.0)
-                    .hypot((f64::from(y) + 0.5) / ph - centre.1);
-                let height =
-                    1.0 - (1.0 - IR_BANDS) * ((r - IR_CORE) / (IR_OUTER - IR_CORE)).clamp(0.0, 1.0);
-                let v = f64::from(ir_lut[((b * 255.0) as usize).min(255)]);
-                // Coldness 0 (warm low cloud) … 1 (the coldest tops); thin cloud fades
-                // into the black sea as in the visible picture, and the act's cross-fade
-                // steps it down through the curve.
-                let cold = (v - IR_LOW) / (1.0 - IR_LOW) * height;
-                let fade = veil(f64::from(b)) * gain;
-                if fade * 255.0 < CLOUD_BLACK {
-                    return Ink::BLANK;
-                }
-                return ir_ink(cold * fade.min(1.0));
+                ink
             }
-            let b = f64::from(b);
-            if b <= CLEAR {
-                return Ink::BLANK;
+        };
+        if gain >= FADE_OFF {
+            self.fill_ridge();
+            // The cold of each contour level before the height factor (IR act).
+            let colds = LEVELS.map(|l| ir_curve(f64::from(l)));
+            let bright = self.bright.as_slice();
+            let ridge = self.ridge.as_slice();
+            let dots = &mut self.dots;
+            for j in 0..vh - 1 {
+                for i in 0..vw - 1 {
+                    let at = |g: &[f32]| {
+                        let n = j * vw + i;
+                        [g[n], g[n + 1], g[n + vw + 1], g[n + vw]]
+                    };
+                    let c = at(bright);
+                    let hi = c[0].max(c[1]).max(c[2].max(c[3]));
+                    let lo = c[0].min(c[1]).min(c[2].min(c[3]));
+                    // Radius of the cell's centre from the storm's, `H`.
+                    let (ex, ey) = ((i as f64 + 0.5) / scale - cx, (j as f64 + 0.5) / scale - cy);
+                    let r = ex.hypot(ey);
+                    if hi < LEVELS[0] {
+                        continue;
+                    }
+                    if r / R_MAX_WIND < EYEWALL_RM {
+                        // The eyewall: two rings.
+                        for &n in &EYE_LEVELS {
+                            let level = LEVELS[n];
+                            if lo < level && level <= hi {
+                                let ink = if use_ir {
+                                    ir_thread(colds[n] * height_factor(r))
+                                } else {
+                                    vis_thread(r / R_MAX_WIND, n)
+                                };
+                                dots.contour_cell_refined(c, level, (i, j), k, to_dot, dim(ink));
+                            }
+                        }
+                        continue;
+                    }
+                    // A band: one thread on its ridge, where the radial derivative falls
+                    // through zero outward, in cloud at least as bright as the lowest level.
+                    let mean = 0.25 * (c[0] + c[1] + c[2] + c[3]);
+                    if mean < RIDGE_MIN {
+                        continue;
+                    }
+                    let d = at(ridge);
+                    let (dlo, dhi) = (
+                        d[0].min(d[1]).min(d[2].min(d[3])),
+                        d[0].max(d[1]).max(d[2].max(d[3])),
+                    );
+                    if !(dlo < 0.0 && 0.0 <= dhi) {
+                        continue;
+                    }
+                    let (ux, uy) = (ex / r.max(1e-9), ey / r.max(1e-9));
+                    let slope = 0.5 * f64::from((d[1] + d[2]) - (d[0] + d[3])) * ux
+                        + 0.5 * f64::from((d[2] + d[3]) - (d[0] + d[1])) * uy;
+                    if slope >= 0.0 {
+                        continue; // a trough between bands, not a ridge
+                    }
+                    let n = LEVELS.iter().rposition(|&l| mean >= l).unwrap_or(0);
+                    let ink = if use_ir {
+                        ir_thread(ir_curve(f64::from(mean)) * height_factor(r))
+                    } else {
+                        vis_thread(r / R_MAX_WIND, n)
+                    };
+                    dots.contour_cell_refined(d, 0.0, (i, j), k, to_dot, dim(ink));
+                }
             }
-            // Cloud (HUR-A7): a neutral grey over the black sea, thin cloud a translucent
-            // veil fading into it, never a dark rim.
-            let v = if b > THICK {
-                // Relief: tops facing the low sun in the west brighter, lee sides darker;
-                // the convective towers add bumps (and their own sunlit and shadowed
-                // sides) where the cloud is thick.
-                let lee = f64::from(rows.2.at(x + 1));
-                let bump = Self::turret(turrets, centre, x, y, rot, ph);
-                let bump_lee = Self::turret(turrets, centre, x + 1, y + 1, rot, ph);
-                let conv = texture * (b / 0.5).min(1.0);
-                // Shading needs a body of cloud: none at the thin edge, so a band's
-                // shadowed side never turns into a dark rim.
-                let body = ((b - THICK) / 0.2).min(1.0);
-                let lit = cloud_v(b) * (1.0 + 0.1 * conv * bump)
-                    + relief * body * (b - lee)
-                    + 0.15 * conv * (bump - bump_lee);
-                lit * veil(b)
-            } else {
-                cloud_v(b) * veil(b)
-            };
-            let v = CLOUD_TOP * v.clamp(0.0, 1.0) * gain;
-            vis_ink(v)
-        });
+        }
+        // The tracers: a trail of their last positions, then the head.
+        let node = |x: f64, y: f64| to_dot((cx + x) * scale, (cy + y) * scale);
+        for p in &self.tracers {
+            let mut prev = node(p.x, p.y);
+            for (m, &(tx, ty)) in p.trail[..p.n].iter().enumerate() {
+                let q = node(f64::from(tx), f64::from(ty));
+                let ink = TAIL[usize::from(2 * m >= TRAIL)];
+                self.dots.line(prev.0, prev.1, q.0, q.1, ink);
+                prev = q;
+            }
+        }
+        for p in &self.tracers {
+            let (x, y) = node(p.x, p.y);
+            self.dots.plot(x, y, HEAD);
+        }
     }
-}
-
-/// Visible cloud in flat grey-to-white steps (ADR-0018): the thin veil in `Dim`,
-/// the deck in `Structure`, sunlit tops in `Star`; below the faintest step
-/// the black sea.
-fn vis_ink(v: f64) -> Ink {
-    match v {
-        v if v < CLOUD_BLACK / 255.0 => Ink::BLANK,
-        v if v < 0.28 => Ink::new(Role::Dim, 0),
-        v if v < 0.5 => Ink::new(Role::Structure, 120),
-        v if v < 0.66 => Ink::new(Role::Star, 110),
-        _ => Ink::new(Role::Star, 220),
-    }
-}
-
-/// Enhanced infrared in flat semantic steps (HUR-A4, ADR-0018): warm low cloud dim,
-/// then colder tops through blue, cyan and green to yellow and the coldest in orange,
-/// the classic enhancement curve in M11's saturated roles. `cold` is 0 … 1.
-fn ir_ink(cold: f64) -> Ink {
-    match cold {
-        c if c < 0.18 => Ink::new(Role::Dim, 0),
-        c if c < 0.36 => Ink::new(Role::Cold, 90),
-        c if c < 0.52 => Ink::new(Role::Wave, 150),
-        c if c < 0.66 => Ink::new(Role::Particle, 130),
-        c if c < 0.8 => Ink::new(Role::Sun, 200),
-        _ => Ink::new(Role::Hot, 230),
-    }
-}
-
-/// Visible lightness (before [`vis_ink`]) of cloud with top brightness `b`: cloud
-/// reflectance saturates fast, so even a modest deck reads white-grey (a square root:
-/// one instruction per pixel, where `powf` cost a third of the frame at 500×150).
-#[inline]
-fn cloud_v(b: f64) -> f64 {
-    0.16 + 0.84 * b.max(0.0).sqrt()
-}
-
-/// Opacity of cloud with top brightness `b`: thin cloud is a translucent veil over the
-/// sea, opaque from `b = 0.14`, so the storm's edge feathers out instead of ending on a
-/// hard outline.
-fn veil(b: f64) -> f64 {
-    let s = ((b - CLEAR) / (0.14 - CLEAR)).clamp(0.0, 1.0);
-    s * s * (3.0 - 2.0 * s)
-}
-
-/// ASCII fallback: the cloud by brightness, the open sea left blank so the storm's shape
-/// stays legible in characters.
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    ascii_ramp_cell(top, bottom)
 }
 
 impl Generator for Hurricane {
@@ -636,7 +720,7 @@ impl Generator for Hurricane {
         &META
     }
 
-    fn resize(&mut self, size: Size, _ctx: &mut Ctx) {
+    fn resize(&mut self, size: Size, ctx: &mut Ctx) {
         let display = Size::new(size.width(), size.height().saturating_mul(2).max(1));
         let lattice = grid::lattice_for(display, CAP, BUCKET);
         if !self.warmed {
@@ -648,52 +732,38 @@ impl Generator for Hurricane {
                 self.step(SIM_DT);
             }
             self.t = 0.0;
+            self.tracers.clear();
+            for _ in 0..TRACERS {
+                let mut p = Tracer::spawn(&mut ctx.rng);
+                p.age = ctx.rng.random_range(0.0..p.life);
+                self.tracers.push(p);
+            }
         }
         self.rebuild_lattice(lattice);
         self.refresh_bright();
-        self.pixels.resize(size);
-        self.map.rebuild(self.lattice, self.pixels.pixel_size());
+        self.dots.resize(size);
         if self.swell_age >= SWELL_EVERY {
             self.fill_swell();
         }
         self.dirty = true;
     }
 
-    fn update(&mut self, dt: f64, _ctx: &mut Ctx) {
+    fn update(&mut self, dt: f64, ctx: &mut Ctx) {
         if dt > 0.0 {
             self.step(dt);
+            self.move_tracers(dt, &mut ctx.rng);
         }
         self.dirty = true;
     }
 
     fn prepare(&mut self) {
         if std::mem::take(&mut self.dirty) {
-            self.shade();
+            self.raster();
         }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        if canvas.mode() != GlyphMode::Unicode {
-            self.pixels
-                .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-            return;
-        }
-        // One pass, as `Pixels::blit` does, except that a cell whose two pixels match
-        // (most of the open sea) is written as a space on that background: it looks the
-        // same as a half block and sends the terminal less.
-        let cells = self.pixels.pixel_size();
-        let blank = Glyph::new(' ', ' ');
-        for y in 0..i32::from(cells.height()) / 2 {
-            for x in 0..i32::from(cells.width()) {
-                let top = self.pixels.get(x, 2 * y).unwrap_or(Ink::BLANK);
-                let bottom = self.pixels.get(x, 2 * y + 1).unwrap_or(Ink::BLANK);
-                if top == bottom && top != Ink::BLANK {
-                    canvas.put_bg(x, y, blank, top, top);
-                } else {
-                    half_block(canvas, x, y, top, bottom);
-                }
-            }
-        }
+        self.dots.blit(canvas);
     }
 
     fn caption(&self) -> Option<&'static str> {
@@ -745,16 +815,43 @@ mod tests {
         assert!(angle > PI);
     }
 
-    fn storm() -> Hurricane {
+    /// The scene at `size`, run to `t` simulated seconds, with its canvas.
+    fn run(size: Size, t: f64, dt: f64) -> (Hurricane, Canvas) {
         let mut g = Hurricane::new();
-        let mut ctx = Ctx::new(42, Size::new(120, 40));
-        g.resize(Size::new(120, 40), &mut ctx);
+        let mut ctx = Ctx::new(3, size);
+        g.resize(size, &mut ctx);
         g.prepare();
-        for _ in 0..120 {
-            g.update(SIM_DT, &mut ctx);
+        while g.t < t {
+            g.update(dt, &mut ctx);
             g.prepare();
         }
-        g
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut c);
+        (g, c)
+    }
+
+    fn storm() -> Hurricane {
+        run(Size::new(120, 40), 2.0, SIM_DT).0
+    }
+
+    /// Radius (in radii of maximum wind) and screen angle of cell `(x, y)`'s centre.
+    fn polar_of(g: &Hurricane, size: Size, x: i32, y: i32) -> (f64, f64) {
+        let ds = g.dots.dot_size();
+        let (vw, vh) = (f64::from(g.lattice.width()), f64::from(g.lattice.height()));
+        // Cell centre → dots → lattice nodes → `H`.
+        let (dx, dy) = (f64::from(x) * 2.0 + 0.5, f64::from(y) * 4.0 + 1.5);
+        let (nx, ny) = (
+            (dx + 0.5) * vw / f64::from(ds.width()) - 0.5,
+            (dy + 0.5) * vh / f64::from(ds.height()) - 0.5,
+        );
+        let _ = size;
+        let (cx, cy) = g.centre(g.t);
+        let (hx, hy) = (nx / vh - cx, ny / vh - cy);
+        (hx.hypot(hy) / R_MAX_WIND, hy.atan2(hx).rem_euclid(TAU))
+    }
+
+    fn is_braille(c: char) -> bool {
+        ('\u{2800}'..='\u{28ff}').contains(&c)
     }
 
     #[test]
@@ -785,184 +882,82 @@ mod tests {
         assert!(eye < 0.1 * wall, "eye {eye} vs eyewall {wall}");
     }
 
+    /// The scene in the middle of the IR act at `size`.
+    fn infrared(size: Size) -> (Hurricane, Canvas) {
+        run(size, ACTS[0].1 + 0.5 * ACTS[1].1, 0.25)
+    }
+
     #[test]
-    fn hur_a4_the_infrared_act_uses_the_stepped_enhancement_curve() {
-        let mut g = storm();
-        let mut ctx = Ctx::new(1, Size::new(60, 20));
-        g.resize(Size::new(60, 20), &mut ctx);
-        g.prepare();
-        let mid_ir = ACTS[0].1 + 0.5 * ACTS[1].1;
-        while g.t < mid_ir {
-            g.update(0.25, &mut ctx);
-            g.prepare();
-        }
+    fn hur_a4_the_infrared_act_uses_the_stepped_curve() {
+        let size = Size::new(60, 20);
+        let (g, c) = infrared(size);
         assert_eq!(g.caption(), Some("infrared"));
-        let mut canvas = Canvas::new(Size::new(60, 20), GlyphMode::Unicode);
-        g.render(&mut canvas);
-        let steps: Vec<Ink> = [0.0, 0.3, 0.45, 0.6, 0.75, 0.95]
-            .into_iter()
-            .map(ir_ink)
-            .collect();
-        let mut hot = false;
-        for cell in canvas.cells() {
-            for ink in [cell.ink, cell.bg] {
-                assert!(
-                    ink.role == Role::Background || steps.contains(&ink),
-                    "{ink:?}"
-                );
-                hot |= ink.role == Role::Hot;
+        let steps: Vec<Ink> = [0.0, 0.5, 0.9].into_iter().map(ir_thread).collect();
+        let mut accent = false;
+        for cell in c.cells() {
+            if cell.ch == ' ' || cell.ink == HEAD || TAIL.contains(&cell.ink) {
+                continue;
             }
+            assert!(steps.contains(&cell.ink), "{:?}", cell.ink);
+            accent |= cell.ink.role == Role::Accent;
         }
-        // The coldest tops reach the curve's orange (ADR-0018: saturated steps).
-        assert!(hot, "no coldest tops");
+        assert!(accent, "no coldest tops");
     }
 
     #[test]
-    fn hur_a4_the_curve_runs_grey_blue_cyan_green_yellow_orange() {
-        let roles: Vec<Role> = [0.0, 0.3, 0.45, 0.6, 0.75, 0.95]
+    fn hur_a4_the_curve_runs_cold_wave_accent() {
+        let roles: Vec<Role> = [0.0, 0.5, 0.9]
             .into_iter()
-            .map(|c| ir_ink(c).role)
+            .map(|c| ir_thread(c).role)
             .collect();
-        assert_eq!(
-            roles,
-            [
-                Role::Dim,
-                Role::Cold,
-                Role::Wave,
-                Role::Particle,
-                Role::Sun,
-                Role::Hot
-            ]
-        );
-    }
-
-    /// The visible picture at `size`, `t` simulated seconds into the visible act.
-    fn visible(size: Size, t: f64) -> (Hurricane, Vec<Ink>) {
-        let mut g = Hurricane::new();
-        let mut ctx = Ctx::new(3, size);
-        g.resize(size, &mut ctx);
-        g.prepare();
-        while g.t < t {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
+        assert_eq!(roles, [Role::Cold, Role::Wave, Role::Accent]);
+        // The curve rises with brightness.
+        let mut last = -1.0;
+        for k in 0..=100 {
+            let v = ir_curve(f64::from(k) / 100.0);
+            assert!(v >= last);
+            last = v;
         }
-        let p = g.pixels.pixel_size();
-        let inks = (0..i32::from(p.height()))
-            .flat_map(|y| (0..i32::from(p.width())).map(move |x| (x, y)))
-            .map(|(x, y)| g.pixels.get(x, y).unwrap_or(Ink::BLANK))
-            .collect();
-        (g, inks)
     }
 
     #[test]
-    fn hur_a6_a7_the_storm_is_grey_cloud_on_a_black_sea() {
-        // ADR-0018: the open sea and the eye are black; cloud is flat grey-to-white
-        // steps (Structure, Star), at most four inks.
+    fn hur_a6_a7_the_storm_is_threads_on_a_black_sea() {
         for size in [Size::new(120, 40), Size::new(80, 24)] {
-            let (_, inks) = visible(size, 3.0);
-            let mut black = 0;
-            let mut used = std::collections::BTreeSet::new();
-            for ink in &inks {
-                assert!(
-                    matches!(
-                        ink.role,
-                        Role::Background | Role::Dim | Role::Structure | Role::Star
-                    ),
-                    "{size:?}: {ink:?}"
-                );
-                if *ink != Ink::BLANK {
-                    used.insert(ink.level);
-                }
-                black += usize::from(*ink == Ink::BLANK);
-            }
-            assert!(used.len() <= 4, "{size:?}: {used:?}");
-            assert!(
-                black * 4 > inks.len(),
-                "{size:?}: black sea {black} of {}",
-                inks.len()
-            );
-        }
-    }
-
-    #[test]
-    fn hur_a8_small_frames_show_few_broad_arms() {
-        // At 80×24 the inner bands must not break into thin stripes: walking round the
-        // storm through annuli at 2.5, 3.5 and 4.5 radii of maximum wind (mean level in
-        // 36 angular bins) meets at most one bright arm per rain band, plus one, counting
-        // only swings of more than 20 levels.
-        let (g, inks) = visible(Size::new(80, 24), 4.0);
-        let p = g.pixels.pixel_size();
-        let w = usize::from(p.width());
-        let ph = f64::from(p.height());
-        let (cx, cy) = g.centre(g.t);
-        for rr in [2.5, 3.5, 4.5] {
-            let mut bins = [(0.0f64, 0u32); 36];
-            for (k, ink) in inks.iter().enumerate() {
-                let (dx, dy) = (
-                    ((k % w) as f64 + 0.5) / ph - cx,
-                    ((k / w) as f64 + 0.5) / ph - cy,
-                );
-                if (dx.hypot(dy) / R_MAX_WIND - rr).abs() > 0.5 {
+            let (_, c) = run(size, 3.0, SIM_DT);
+            let (mut lit, mut dots) = (0usize, 0u32);
+            for cell in c.cells() {
+                if cell.ch == ' ' {
                     continue;
                 }
-                let a = dy.atan2(dx).rem_euclid(TAU);
-                let bin = &mut bins[((a / TAU * 36.0) as usize).min(35)];
-                bin.0 += rank(*ink);
-                bin.1 += 1;
+                assert!(is_braille(cell.ch), "{size:?}: {:?}", cell.ch);
+                assert!(
+                    matches!(cell.ink.role, Role::Cold | Role::Wave | Role::Star),
+                    "{size:?}: {:?}",
+                    cell.ink
+                );
+                lit += 1;
+                dots += (cell.ch as u32 - 0x2800).count_ones();
             }
-            let seq: Vec<f64> = bins
-                .iter()
-                .filter(|b| b.1 > 0)
-                .map(|b| b.0 / f64::from(b.1))
-                .collect();
-            // Peaks with hysteresis: rise 20 above the last trough, then fall 20. The
-            // walk goes round twice so the start is settled; count the second lap.
-            let (mut peaks, mut lo, mut hi, mut rising) = (0, f64::MAX, f64::MIN, true);
-            let n = seq.len();
-            for (i, &v) in seq.iter().chain(seq.iter()).enumerate() {
-                if rising {
-                    hi = hi.max(v);
-                    if v < hi - 20.0 {
-                        peaks += usize::from(i >= n);
-                        rising = false;
-                        lo = v;
-                    }
-                } else {
-                    lo = lo.min(v);
-                    if v > lo + 20.0 {
-                        rising = true;
-                        hi = v;
-                    }
-                }
-            }
-            assert!(peaks <= BANDS + 1, "{peaks} arms at {rr} R_max");
+            let n = c.cells().len();
+            assert!(lit * 2 < n, "{size:?}: {lit} of {n} cells lit");
+            let mean = f64::from(dots) / lit.max(1) as f64;
+            assert!(mean <= 4.5, "{size:?}: {mean:.2} dots per lit cell");
         }
     }
 
-    /// Mean pixel level in 36 angular bins round the annulus `[r0, r1]` (radii of
-    /// maximum wind) about the storm centre, over `inks` of pixel size `p`.
-    /// Brightness rank of a stepped cloud ink (visible or infrared), 50 per step.
-    fn rank(ink: Ink) -> f64 {
-        let vis = [0.1, 0.4, 0.6, 0.8].map(vis_ink);
-        let ir = [0.0, 0.3, 0.45, 0.6, 0.75, 0.95].map(ir_ink);
-        let k = vis
-            .iter()
-            .position(|&i| i == ink)
-            .or_else(|| ir.iter().position(|&i| i == ink))
-            .map_or(0, |k| k + 1);
-        50.0 * k as f64
-    }
-
-    fn ring_bins(g: &Hurricane, inks: &[Ink], r0: f64, r1: f64) -> Vec<f64> {
-        let p = g.pixels.pixel_size();
-        let w = usize::from(p.width());
-        let ph = f64::from(p.height());
+    /// Mean lattice brightness in 36 angular bins round the annulus `[r0, r1]` (radii of
+    /// maximum wind) about the storm centre.
+    fn ring_bins(g: &Hurricane, r0: f64, r1: f64) -> Vec<f64> {
+        let (w, h) = (
+            usize::from(g.lattice.width()),
+            usize::from(g.lattice.height()),
+        );
         let (cx, cy) = g.centre(g.t);
         let mut bins = [(0.0f64, 0u32); 36];
-        for (k, ink) in inks.iter().enumerate() {
+        for (k, &b) in g.bright.as_slice().iter().enumerate() {
             let (dx, dy) = (
-                ((k % w) as f64 + 0.5) / ph - cx,
-                ((k / w) as f64 + 0.5) / ph - cy,
+                (k % w) as f64 / h as f64 - cx,
+                (k / w) as f64 / h as f64 - cy,
             );
             let rm = dx.hypot(dy) / R_MAX_WIND;
             if !(r0..=r1).contains(&rm) {
@@ -970,7 +965,7 @@ mod tests {
             }
             let a = dy.atan2(dx).rem_euclid(TAU);
             let bin = &mut bins[((a / TAU * 36.0) as usize).min(35)];
-            bin.0 += rank(*ink);
+            bin.0 += f64::from(b);
             bin.1 += 1;
         }
         bins.iter()
@@ -980,48 +975,131 @@ mod tests {
     }
 
     #[test]
-    fn hur_a9_a_solid_central_dense_overcast_rings_the_eye() {
-        // The eye is ringed by one unbroken bright disc (1.2–2 radii of maximum wind),
-        // not by spiral arms with sea between them (which read as a galaxy's).
+    fn hur_a8_small_frames_show_few_broad_arms() {
+        // At 80×24 the inner bands must not break into thin stripes: walking round the
+        // storm through annuli at 2.5, 3.5 and 4.5 radii of maximum wind meets at most one
+        // bright arm per rain band, plus one, counting only swings of more than 0.08.
+        let (g, _) = run(Size::new(80, 24), 4.0, SIM_DT);
+        for rr in [2.5, 3.5, 4.5] {
+            let seq = ring_bins(&g, rr - 0.5, rr + 0.5);
+            let (mut peaks, mut lo, mut hi, mut rising) = (0, f64::MAX, f64::MIN, true);
+            let n = seq.len();
+            for (i, &v) in seq.iter().chain(seq.iter()).enumerate() {
+                if rising {
+                    hi = hi.max(v);
+                    if v < hi - 0.08 {
+                        peaks += usize::from(i >= n);
+                        rising = false;
+                        lo = v;
+                    }
+                } else {
+                    lo = lo.min(v);
+                    if v > lo + 0.08 {
+                        rising = true;
+                        hi = v;
+                    }
+                }
+            }
+            assert!(peaks <= BANDS + 1, "{peaks} arms at {rr} R_max");
+        }
+    }
+
+    #[test]
+    fn hur_a9_a_solid_overcast_ringed_by_star_threads() {
+        let size = Size::new(120, 40);
         for t in [2.0, 9.0] {
-            let (g, inks) = visible(Size::new(120, 40), t);
-            let bins = ring_bins(&g, &inks, 1.2, 2.0);
+            let (g, c) = run(size, t, SIM_DT);
+            let bins = ring_bins(&g, 1.2, 2.0);
             let lo = bins.iter().copied().fold(f64::MAX, f64::min);
             let hi = bins.iter().copied().fold(f64::MIN, f64::max);
             assert!(bins.len() >= 30, "{} bins", bins.len());
             assert!(
-                lo >= 150.0 && lo >= 0.75 * hi,
-                "t {t}: overcast {lo:.0}..{hi:.0}"
+                lo >= f64::from(LEVELS[2]) && lo >= 0.75 * hi,
+                "t {t}: overcast {lo:.2}..{hi:.2}"
             );
+            let mut ring = [false; 12];
+            for y in 0..40 {
+                for x in 0..120 {
+                    let cell = c.get(x, y).unwrap();
+                    if cell.ch == ' ' || cell.ink.role != Role::Star || cell.ink == HEAD {
+                        continue;
+                    }
+                    let (rm, a) = polar_of(&g, size, x, y);
+                    if (0.5..=2.0).contains(&rm) {
+                        ring[((a / TAU * 12.0) as usize).min(11)] = true;
+                    }
+                }
+            }
+            assert!(ring.iter().all(|&s| s), "t {t}: eyewall ring {ring:?}");
         }
     }
 
     #[test]
     fn hur_a10_the_coldest_tops_are_in_the_overcast_not_the_bands() {
-        let mut g = storm();
-        let mut ctx = Ctx::new(1, Size::new(120, 40));
-        g.resize(Size::new(120, 40), &mut ctx);
-        g.prepare();
-        let mid_ir = ACTS[0].1 + 0.5 * ACTS[1].1;
-        while g.t < mid_ir {
-            g.update(0.25, &mut ctx);
-            g.prepare();
+        let size = Size::new(120, 40);
+        let (g, c) = infrared(size);
+        let (mut wall, mut wall_accent, mut bands, mut band_accent) = (0, 0, 0, 0);
+        for y in 0..40 {
+            for x in 0..120 {
+                let cell = c.get(x, y).unwrap();
+                if cell.ch == ' ' || cell.ink == HEAD || TAIL.contains(&cell.ink) {
+                    continue;
+                }
+                let accent = usize::from(cell.ink.role == Role::Accent);
+                match polar_of(&g, size, x, y).0 {
+                    rm if rm < 3.0 => {
+                        wall += 1;
+                        wall_accent += accent;
+                    }
+                    rm if (4.5..=6.0).contains(&rm) => {
+                        bands += 1;
+                        band_accent += accent;
+                    }
+                    _ => {}
+                }
+            }
         }
-        let p = g.pixels.pixel_size();
-        let inks: Vec<Ink> = (0..i32::from(p.height()))
-            .flat_map(|y| (0..i32::from(p.width())).map(move |x| (x, y)))
-            .map(|(x, y)| g.pixels.get(x, y).unwrap_or(Ink::BLANK))
-            .collect();
-        let mean = |v: &[f64]| v.iter().sum::<f64>() / v.len().max(1) as f64;
-        let core = mean(&ring_bins(&g, &inks, 1.2, 2.0));
-        // The brightest band bins in the outer storm.
-        let mut bands = ring_bins(&g, &inks, 4.5, 6.0);
-        bands.sort_by(f64::total_cmp);
-        let band_top = mean(&bands[bands.len() * 3 / 4..]);
+        // Inside the eye the low contours are thin, warm cloud; the overcast's top
+        // contour is the coldest.
+        assert!(wall > 0 && wall_accent > 0, "{wall_accent} of {wall}");
         assert!(
-            core > band_top + 25.0,
-            "overcast {core:.0} vs bands {band_top:.0}"
+            bands > 0 && band_accent * 4 < bands,
+            "{band_accent} of {bands}"
         );
+    }
+
+    #[test]
+    fn hur_a11_tracers_spiral_inward() {
+        let size = Size::new(120, 40);
+        let mut g = Hurricane::new();
+        let mut ctx = Ctx::new(5, size);
+        g.resize(size, &mut ctx);
+        let before: Vec<(f64, f64, f64)> = g.tracers.iter().map(|p| (p.x, p.y, p.age)).collect();
+        for _ in 0..60 {
+            g.update(SIM_DT, &mut ctx);
+            // Each trail point is a position the tracer held in the last 0.4 s.
+            for p in &g.tracers {
+                for &(tx, ty) in &p.trail[..p.n] {
+                    let back = (f64::from(tx)).hypot(f64::from(ty)) - p.x.hypot(p.y);
+                    assert!(back > -0.01, "a trail point inside its head's radius");
+                }
+            }
+        }
+        let (mut n, mut dr, mut dth) = (0, 0.0, 0.0);
+        for (p, &(x, y, age)) in g.tracers.iter().zip(&before) {
+            if p.age < age {
+                continue; // respawned
+            }
+            n += 1;
+            dr += p.x.hypot(p.y) - x.hypot(y);
+            let mut d = (-p.y).atan2(p.x) - (-y).atan2(x);
+            d -= TAU * (d / TAU).round();
+            dth += d;
+        }
+        assert!(n > TRACERS / 2, "{n} tracers kept");
+        assert!(dr < 0.0 && dth > 0.0, "Δr {dr:.4} Δθ {dth:.3}");
+        // Trails hold at most 0.4 s of history.
+        assert!(f64::from(TRAIL as u32 * TRAIL_EVERY) * SIM_DT <= 0.4 + 1e-9);
     }
 
     #[test]

@@ -339,6 +339,134 @@ impl Dots {
         self.plot(x, y, ink);
     }
 
+    /// Draw the iso-contour `v = level` of a row-major `w × h` node field, one dot thick,
+    /// by marching squares (CORE-R105). `to_dot(x, y)` maps continuous node coordinates
+    /// (node `(i, j)` at `(i, j)`) to dot coordinates. Too-short fields and `w` or `h`
+    /// below 2 draw nothing; nothing allocates.
+    pub fn contour(
+        &mut self,
+        values: &[f32],
+        w: usize,
+        h: usize,
+        level: f32,
+        to_dot: impl Fn(f64, f64) -> (f64, f64),
+        ink: Ink,
+    ) {
+        self.contour_by(values, w, h, level, to_dot, |_, _| Some(ink));
+    }
+
+    /// [`contour`](Self::contour) with the ink chosen per cell of four nodes: `ink(i, j)`
+    /// is asked only for cells the level crosses (`(i, j)` the top-left node) and `None`
+    /// skips the cell, so a contour can be coloured by sign, age or a sampled variable.
+    pub fn contour_by(
+        &mut self,
+        values: &[f32],
+        w: usize,
+        h: usize,
+        level: f32,
+        to_dot: impl Fn(f64, f64) -> (f64, f64),
+        mut ink: impl FnMut(usize, usize) -> Option<Ink>,
+    ) {
+        if w < 2 || h < 2 || values.len() < w.saturating_mul(h) {
+            return;
+        }
+        for j in 0..h - 1 {
+            let (top, bottom) = (
+                &values[j * w..(j + 1) * w],
+                &values[(j + 1) * w..(j + 2) * w],
+            );
+            for i in 0..w - 1 {
+                let l = [top[i], top[i + 1], bottom[i + 1], bottom[i]];
+                let below = l.map(|v| v < level);
+                if below == [true; 4] || below == [false; 4] {
+                    continue;
+                }
+                if let Some(ink) = ink(i, j) {
+                    self.contour_cell(l, level, (i, j), &to_dot, ink);
+                }
+            }
+        }
+    }
+
+    /// Draw the level set `v = level` inside one cell of four nodes (CORE-R105), for
+    /// scenes that cull cells themselves. `corners` are the values at nodes `(i, j)`,
+    /// `(i+1, j)`, `(i+1, j+1)`, `(i, j+1)` (clockwise on screen); a node is below the level
+    /// when `v < level`. Each straddling edge's crossing is linearly interpolated, and the
+    /// crossings are joined by [`line`](Self::line): two crossings make one piece, four (a
+    /// saddle) two, paired in edge order. Non-finite corners draw nothing.
+    pub fn contour_cell(
+        &mut self,
+        corners: [f32; 4],
+        level: f32,
+        (i, j): (usize, usize),
+        to_dot: impl Fn(f64, f64) -> (f64, f64),
+        ink: Ink,
+    ) {
+        const AT: [(f64, f64); 4] = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)];
+        if !corners.iter().all(|v| v.is_finite()) || !level.is_finite() {
+            return;
+        }
+        let mut pts = [(0.0f64, 0.0f64); 4];
+        let mut n = 0;
+        for a in 0..4 {
+            let b = (a + 1) % 4;
+            let (la, lb) = (corners[a], corners[b]);
+            if (la < level) != (lb < level) {
+                let f = f64::from((level - la) / (lb - la));
+                let (pa, pb) = (AT[a], AT[b]);
+                let (x, y) = (pa.0 + (pb.0 - pa.0) * f, pa.1 + (pb.1 - pa.1) * f);
+                pts[n] = to_dot(i as f64 + x, j as f64 + y);
+                n += 1;
+            }
+        }
+        for p in pts[..n].chunks_exact(2) {
+            self.line(p[0].0, p[0].1, p[1].0, p[1].1, ink);
+        }
+    }
+
+    /// [`contour_cell`](Self::contour_cell) with the cell refined into `k × k` sub-cells
+    /// whose corners are bilinear in the four node values (CORE-R106): where one node
+    /// spans many dots the level set is traced as a smooth curve (the bilinear surface's
+    /// own level set, to within `1/k` of a cell) instead of one straight chord per cell.
+    /// `k ≤ 1` is plain `contour_cell`; `k` is capped at 16. Sub-cells the level does not
+    /// cross are skipped; nothing allocates.
+    pub fn contour_cell_refined(
+        &mut self,
+        corners: [f32; 4],
+        level: f32,
+        (i, j): (usize, usize),
+        k: usize,
+        to_dot: impl Fn(f64, f64) -> (f64, f64),
+        ink: Ink,
+    ) {
+        let k = k.min(16);
+        if k <= 1 {
+            self.contour_cell(corners, level, (i, j), to_dot, ink);
+            return;
+        }
+        let c = corners;
+        let kf = k as f32;
+        // The bilinear value at sub-node (u, v) of the k × k grid.
+        let at = |u: usize, v: usize| {
+            let (a, b) = (u as f32 / kf, v as f32 / kf);
+            let top = c[0] + (c[1] - c[0]) * a;
+            let bottom = c[3] + (c[2] - c[3]) * a;
+            top + (bottom - top) * b
+        };
+        let (x0, y0, kd) = (i as f64, j as f64, k as f64);
+        let map = |x: f64, y: f64| to_dot(x0 + x / kd, y0 + y / kd);
+        for v in 0..k {
+            for u in 0..k {
+                let sub = [at(u, v), at(u + 1, v), at(u + 1, v + 1), at(u, v + 1)];
+                let below = sub.map(|x| x < level);
+                if below == [true; 4] || below == [false; 4] {
+                    continue;
+                }
+                self.contour_cell(sub, level, (u, v), map, ink);
+            }
+        }
+    }
+
     /// Whether dot `(x, y)` is lit; `false` off the lattice.
     pub fn is_lit(&self, x: i32, y: i32) -> bool {
         self.locate(x, y)

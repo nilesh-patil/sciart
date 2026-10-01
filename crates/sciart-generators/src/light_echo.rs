@@ -5,17 +5,21 @@
 //! point at sky radius `ρ` and depth `z` (towards us): the scattering surface is the
 //! paraboloid `z = ρ²/(2ct) − ct/2`. The dust is four static, rippled sheets in front of
 //! the star; each node's path lag `Δ` and geometric weight (density, Henyey–Greenstein
-//! phase function, inverse-square dilution) are fixed per resize, so a frame is a lookup
-//! of the light curve per node and sheet. Lengths are in lattice half-heights.
+//! phase function, dilution) are fixed per resize. Lengths are in lattice half-heights.
+//!
+//! M16 (strange_attractors' thread idiom): each echo is drawn only on its crest, as a
+//! braille thread one dot thick. The light curve's crests are three instants `t_p`, so
+//! the crest of (sheet, flash, peak) is the level set `Δ(x, y) = c·(t + age − t_p)` of the
+//! sheet's lag field: `prepare` traces it with marching squares over the lattice (`Dots::contour_cell`,
+//! CORE-R105, per cell so it can cull) as dot lines. Brightness (weight × `L(t_p)` × the flash's weight × the
+//! exposure) decides whether a piece is drawn and its step; colour is the flash's age.
 
 use rand::Rng;
 use sciart_core::grid::lattice_for;
 use sciart_core::prelude::*;
-use sciart_core::raster::ascii_ramp_cell;
-use sciart_core::rng::value_noise;
+use sciart_core::rng::{cell_key, hash01, value_noise};
 
 use sciart_core::timeline::ease;
-use sciart_core::{Tone, ink};
 
 pub static META: Meta = Meta {
     name: "light_echo",
@@ -31,15 +35,17 @@ pub fn build() -> Box<dyn Generator> {
 
 /// Speed of light in half-heights per second.
 pub(crate) const C: f64 = 0.034;
-/// Loop: dark before the flash, then the echo (s). Loop time 0 is the flash.
+/// Loop: dark before the flash, then the echo (s). Loop time 0 is the flash. M16: 14 s
+/// (was 21.5 s), so the previous flashes' rings are still on screen, not past its edge,
+/// and no stretch of the loop is empty (ECHO-A10).
 const PRE: f64 = 0.5;
-const ECHO: f64 = 21.0;
+const ECHO: f64 = 13.5;
 pub(crate) const LOOP: f64 = PRE + ECHO;
 /// The outburst's duration (s) and its three peaks: time, width, height.
 pub(crate) const BURST: f64 = 6.0;
-/// M14 (ADR-0017): sharp peaks, so each lit sheet is a thin shell (its width is the speed
-/// of light times the peak's), not a broad band (were 0.55–0.95 s wide).
+/// M14 (ADR-0017): sharp peaks, so each lit sheet is a thin shell.
 const PEAKS: [(f64, f64, f64); 3] = [(0.7, 0.2, 1.0), (2.4, 0.25, 0.7), (4.2, 0.3, 0.8)];
+pub(crate) const N_PEAKS: usize = PEAKS.len();
 /// Outburst colour temperature: hot at first, cooling towards a red supergiant.
 const T_HOT: f64 = 8_000.0;
 const T_COOL: f64 = 3_000.0;
@@ -53,97 +59,56 @@ const CAVITY: f64 = 0.22;
 const G: f64 = 0.6;
 /// Lattice cap (ADR-0012).
 const MAX_NODES: usize = 24_000;
-/// Unlit dust: brightest level (M14: 0, the unlit dust is not drawn; ADR-0017).
-const DUST_LEVEL: f64 = 0.0;
 /// Flashes whose echoes are drawn: age offset (s) and weight. The newest is weight 1;
-/// the one before keeps expanding, fading, while the next flash lights up.
-const GENERATIONS: [(f64, f32); 3] = [(0.0, 1.0), (LOOP, 0.55), (2.0 * LOOP, 0.25)];
-/// Light-curve tables.
+/// the ones before keep expanding, fading, while the next flash lights up.
+const GENERATIONS: [(f64, f32); 3] = [(0.0, 1.0), (LOOP, 0.45), (2.0 * LOOP, 0.35)];
+const N_TARGETS: usize = GENERATIONS.len() * N_PEAKS;
+/// Light-curve table (the star's flash).
 const LUT: usize = 512;
-/// Echo inks (ADR-0018, [`echo_ink`]): the contrast curve's level (up to `HIGHLIGHT_MAX`)
-/// in flat steps, black below the faintest; light emitted hotter than `HOT_FROM` (the
-/// first, blue-white peak) in blue steps, the cooler light of the later peaks in warm ones.
-const HIGHLIGHT_MAX: u8 = 240;
-pub(crate) const HOT_FROM: f32 = 5_500.0;
 /// Exposure of the scattered light, like a camera's auto-exposure: `update` estimates the
 /// peak scattering weight lit now, on every `EXPOSE_STRIDE`-th lattice node (a fixed
-/// subsample), with the light curve at its envelope (1 anywhere in the burst), so the
-/// exposure follows the shells' geometric dilution and not the flash's own peaks (which
-/// then brighten and fade the frame, as they should), and eases the gain toward
-/// `EXPOSE·WHITE / peak` with time constant `EXPOSE_TAU` in simulated seconds, so it is smooth in time and independent of the render cadence
-/// (GEN-R20); the gain is clamped to `ECHO_GAIN`, so the shells stay legible as the echo
-/// spreads and dims and the dark before the flash is never amplified into noise.
+/// subsample), with the light curve at its envelope, and eases the gain toward
+/// `EXPOSE·WHITE / peak` with time constant `EXPOSE_TAU` in simulated seconds, so it is
+/// smooth in time and independent of the render cadence (GEN-R20, ECHO-A8); the gain is
+/// clamped to `ECHO_GAIN`.
 const WHITE: f32 = 2.2;
 const EXPOSE: f32 = 6.0;
 const ECHO_GAIN: (f32, f32) = (1.0, 6.0);
 const EXPOSE_STRIDE: usize = 13;
 const EXPOSE_TAU: f64 = 1.5;
-/// Contrast on the toned light: a shell's soft skirts fall to black, its crest stays
-/// legible (thin shells).
-const ECHO_GAMMA: f64 = 3.0;
-/// The star: a white point (V838 Mon itself became a red supergiant, drawn so in M12).
-const STAR: Ink = Ink::new(Role::Star, 255);
-/// Unlit dust (none while `DUST_LEVEL` is 0).
-const DUST: Ink = Ink::new(Role::Dim, 0);
-
-/// Scattered light at contrast level `level` (0–255) in three flat steps: blue-white
-/// (`Wave`, `Cold`) for light that left the star hot, sun-yellow to orange (`Sun`, `Hot`)
-/// for the cooler peaks; `None` below the faintest step.
-pub(crate) fn echo_ink(level: f64, hot: bool) -> Option<Ink> {
-    let step = match level {
-        l if l >= 150.0 => 2,
-        l if l >= 70.0 => 1,
-        l if l >= 18.0 => 0,
-        _ => return None,
-    };
-    let steps = if hot {
-        [
-            Ink::new(Role::Cold, 60),
-            Ink::new(Role::Cold, 200),
-            Ink::new(Role::Wave, 230),
-        ]
-    } else {
-        [
-            Ink::new(Role::Hot, 50),
-            Ink::new(Role::Hot, 190),
-            Ink::new(Role::Sun, 230),
-        ]
-    };
-    Some(steps[step])
-}
+/// A crest piece's exposed brightness `u` (1 ≈ the brightest node lit now): below
+/// `U_MIN` it is not drawn; up to `U_FULL` a growing share of pieces is drawn (a fixed
+/// per-node dither, so dim crests are sparser threads and the pattern holds still as the
+/// ring passes); from `U_SUN` the newest flash's crest is `Sun`.
+const U_MIN: f32 = 0.012;
+const U_FULL: f32 = 0.06;
+const U_SUN: f32 = 0.3;
 /// Echo weight fades out beyond this sky radius (half-heights) over `VIGNETTE_SPAN`.
-const VIGNETTE_AT: f64 = 0.95;
-const VIGNETTE_SPAN: f64 = 0.5;
+const VIGNETTE_AT: f64 = 1.3;
+const VIGNETTE_SPAN: f64 = 0.6;
 /// Inverse-square dilution, softened (stylised): weight `∝ 1 / r^DILUTION`.
 const DILUTION: f64 = 1.0;
-/// Passes of the separable `[1 2 1]` blur over the echo before tone mapping (ECHO-A7):
-/// two passes are a 5-tap binomial, so the lit sheets read as soft dust, not blocks.
-const BLUR_PASSES: usize = 2;
+/// The star (ECHO-A9): one white dot; while the light curve exceeds `FLASH_FROM` a cross
+/// of dots whose arms (dots) grow with `L`, and a `Sun` ring of radius `FLASH_RING`.
+const STAR: Ink = Ink::new(Role::Star, 255);
+const FLASH: Ink = Ink::new(Role::Sun, 230);
+const FLASH_FROM: f32 = 0.3;
+const FLASH_ARM: (f64, f64) = (4.0, 6.0);
+const FLASH_RING: f64 = 3.0;
 
-/// In-place separable `[1 2 1] / 4` blur of a `w × h` field (edges clamped), `tmp` the
-/// same size.
-fn blur121(buf: &mut [f32], tmp: &mut [f32], w: usize, h: usize) {
-    if w == 0 || h == 0 || buf.len() < w * h || tmp.len() < w * h {
-        return;
-    }
-    for y in 0..h {
-        let row = &buf[y * w..(y + 1) * w];
-        let out = &mut tmp[y * w..(y + 1) * w];
-        for x in 0..w {
-            let (l, r) = (row[x.saturating_sub(1)], row[(x + 1).min(w - 1)]);
-            out[x] = 0.25 * (l + r) + 0.5 * row[x];
-        }
-    }
-    for y in 0..h {
-        let (up, down) = (y.saturating_sub(1), (y + 1).min(h - 1));
-        for x in 0..w {
-            buf[y * w + x] = 0.25 * (tmp[up * w + x] + tmp[down * w + x]) + 0.5 * tmp[y * w + x];
-        }
+/// The ink of a crest of age rank `rank` (0 newest) at exposed brightness `u` (M16:
+/// colour by age, warm → cool as the generations recede).
+pub(crate) fn generation_ink(rank: usize, u: f32) -> Ink {
+    match rank {
+        0 if u >= U_SUN => Ink::new(Role::Sun, 230),
+        0 => Ink::new(Role::Hot, 190),
+        1 => Ink::new(Role::Accent, 150),
+        _ => Ink::new(Role::Cold, 130),
     }
 }
 
 /// `(L, T)` at `t_e` from the table `curve` (`LUT` entries over `[0, BURST]`), linearly
-/// interpolated so band edges stay smooth; 0 outside the burst.
+/// interpolated; 0 outside the burst.
 fn lerp_curve(curve: &[(f32, f32)], te: f64) -> (f32, f32) {
     if !(0.0..=BURST).contains(&te) || curve.len() < LUT {
         return (0.0, 0.0);
@@ -169,6 +134,33 @@ pub(crate) fn light_curve(te: f64) -> f64 {
         * ease::smoothstep(te / 0.25)
 }
 
+/// The light curve's crests `(t_p, L(t_p))`: its local maxima, one per peak (the taper
+/// and the neighbouring peaks shift them slightly off the peak centres).
+pub(crate) fn crests() -> [(f64, f64); N_PEAKS] {
+    const STEP: f64 = 1e-3;
+    let mut out = PEAKS.map(|(at, _, _)| (at, light_curve(at)));
+    for (c, &(at, w, _)) in out.iter_mut().zip(&PEAKS) {
+        // Hill-climb from the centre within the peak's width.
+        let mut te = at;
+        loop {
+            let (l, lo, hi) = (
+                light_curve(te),
+                light_curve(te - STEP),
+                light_curve(te + STEP),
+            );
+            if hi > l && te + STEP <= at + w {
+                te += STEP;
+            } else if lo > l && te - STEP >= at - w {
+                te -= STEP;
+            } else {
+                *c = (te, l);
+                break;
+            }
+        }
+    }
+    out
+}
+
 /// Colour temperature of the outburst at `t_e` (K), non-increasing (ECHO-A4).
 pub(crate) fn temperature(te: f64) -> f64 {
     T_COOL + (T_HOT - T_COOL) * (-te.max(0.0) / COOL_TAU).exp()
@@ -192,17 +184,16 @@ fn henyey_greenstein(cos: f64) -> f64 {
 }
 
 /// Per node and sheet: path lag (half-heights) and scattering weight.
-#[derive(Debug, Clone, Copy, Default)]
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
 struct Sample {
     lag: f32,
     weight: f32,
 }
 
-/// One dust seed's sheets over the lattice, and its unlit-dust levels.
+/// One dust seed's sheets over the lattice.
 #[derive(Debug, Default)]
 struct Dust {
     samples: Vec<[Sample; N_SHEETS]>,
-    unlit: Vec<u8>,
 }
 
 impl Dust {
@@ -210,7 +201,6 @@ impl Dust {
         let (w, h) = (usize::from(lattice.width()), usize::from(lattice.height()));
         let half = h as f64 / 2.0;
         self.samples.clear();
-        self.unlit.clear();
         for j in 0..h {
             for i in 0..w {
                 let x = (i as f64 + 0.5 - w as f64 / 2.0) / half;
@@ -219,7 +209,6 @@ impl Dust {
                 let cavity = ease::smoothstep((rho - CAVITY * 0.5) / CAVITY);
                 let vignette = 1.0 - ease::smoothstep((rho - VIGNETTE_AT) / VIGNETTE_SPAN);
                 let mut cell = [Sample::default(); N_SHEETS];
-                let mut total = 0.0;
                 for (k, (s, &z0)) in cell.iter_mut().zip(&SHEETS).enumerate() {
                     let sk = salt ^ (k as u64).wrapping_mul(0x9e37_79b9_7f4a_7c15);
                     // Swirly density: domain-warped value noise, with lanes and voids.
@@ -234,19 +223,23 @@ impl Dust {
                     s.lag = lag(rho, z) as f32;
                     s.weight = (vignette * density * henyey_greenstein(z / r2.sqrt())
                         / r2.powf(DILUTION / 2.0)) as f32;
-                    total += density;
                 }
                 self.samples.push(cell);
-                let d = total / N_SHEETS as f64;
-                let l = DUST_LEVEL * (d / 0.35).min(1.0);
-                self.unlit.push(if l >= ink::MIN_VISIBLE_LEVEL {
-                    l as u8
-                } else {
-                    0
-                });
             }
         }
     }
+}
+
+/// One crest lit now: the lag it sits at, its brightness factor (`L(t_p)` × the flash's
+/// weight) and its age rank.
+#[derive(Debug, Clone, Copy, Default)]
+struct Target {
+    lag: f32,
+    bright: f32,
+    /// Its age rank among the flashes that have happened (0 newest), which picks its ink:
+    /// before loop time 0 the previous flash is still the newest, so the rings change
+    /// colour at the flash, not in the dark before it.
+    rank: usize,
 }
 
 #[derive(Debug, Default)]
@@ -256,25 +249,14 @@ pub struct LightEcho {
     t: f64,
     salt: u64,
     dust: Dust,
+    /// Lattice nodes across and down.
+    lattice: (usize, usize),
     /// `L` and `T` tabulated over `[0, BURST]`.
     curve: Vec<(f32, f32)>,
-    /// Echo brightness and colour temperature per node this frame.
-    light: Grid<f32>,
-    kelvin: Grid<f32>,
-    /// The blurred echo (brightness, and brightness × temperature) and blur scratch.
-    soft: Grid<f32>,
-    soft_t: Vec<f32>,
-    scratch: Vec<f32>,
-    map: SampleMap,
-    tone: Tone,
-    /// Toned level → drawn level (contrast gamma, scaled to `HIGHLIGHT_MAX`): built once,
-    /// so no `powf` per pixel.
-    contrast: Vec<f32>,
+    crests: [(f64, f64); N_PEAKS],
     /// The smoothed exposure gain (see `EXPOSE`).
     gain: f32,
-    pixels: Pixels,
-    centre: (f64, f64),
-    half_px: f64,
+    dots: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -289,10 +271,7 @@ impl LightEcho {
                 (light_curve(te) as f32, temperature(te) as f32)
             })
             .collect();
-        self.tone = Tone::asinh(0.15, WHITE);
-        self.contrast = (0..=255)
-            .map(|l| ((f64::from(l) / 255.0).powf(ECHO_GAMMA) * f64::from(HIGHLIGHT_MAX)) as f32)
-            .collect();
+        self.crests = crests();
         self.t = ctx.rng.random_range(4.0..8.0);
     }
 
@@ -302,8 +281,7 @@ impl LightEcho {
     }
 
     /// The exposure gain the echo at time `t` asks for: from the peak scattering weight
-    /// lit now over a fixed subsample of nodes, at the light curve's envelope (see
-    /// `EXPOSE`).
+    /// lit now over a fixed subsample of nodes, at the light curve's envelope.
     fn target_gain(&self) -> f32 {
         let t = self.t;
         let mut peak = 0.0f32;
@@ -326,99 +304,123 @@ impl LightEcho {
         }
     }
 
-    /// Echo brightness and temperature at every node for the current time: the newest
-    /// flash's echo plus the fading echoes of the flashes before it (`GENERATIONS`).
-    fn illuminate(&mut self) {
-        let t = self.t;
-        let (light, kelvin) = (self.light.as_mut_slice(), self.kelvin.as_mut_slice());
-        for ((cell, l), k) in self.dust.samples.iter().zip(light).zip(kelvin) {
-            let (mut sum, mut tsum) = (0.0f32, 0.0f32);
-            for &(age, weight) in &GENERATIONS {
-                for s in cell {
-                    let te = t + age - f64::from(s.lag) / C;
-                    if (0.0..=BURST).contains(&te) && s.weight > 0.0 {
-                        let (lc, tc) = lerp_curve(&self.curve, te);
-                        let v = s.weight * lc * weight;
-                        sum += v;
-                        tsum += v * tc;
+    /// The crests lit now, every (flash, peak) pair whose crest has left the star.
+    fn targets(&self) -> ([Target; N_TARGETS], usize) {
+        let mut out = [Target::default(); N_TARGETS];
+        let mut n = 0;
+        let shift = usize::from(self.t < 0.0);
+        for (gen_, &(age, weight)) in GENERATIONS.iter().enumerate() {
+            for &(tp, lp) in &self.crests {
+                let lag = C * (self.t + age - tp);
+                if lag > 0.0 {
+                    out[n] = Target {
+                        lag: lag as f32,
+                        bright: lp as f32 * weight,
+                        rank: gen_.saturating_sub(shift),
+                    };
+                    n += 1;
+                }
+            }
+        }
+        (out, n)
+    }
+
+    /// Trace every lit crest over every sheet with marching squares and draw it as dot
+    /// lines: a ring one dot thick (ECHO-A7).
+    fn rings(&mut self) {
+        let (lw, lh) = self.lattice;
+        if lw < 2 || lh < 2 || self.dust.samples.len() < lw * lh {
+            return;
+        }
+        let ds = self.dots.dot_size();
+        let sx = f64::from(ds.width()) / lw as f64;
+        let sy = f64::from(ds.height()) / lh as f64;
+        let (targets, n) = self.targets();
+        let targets = &targets[..n];
+        if targets.is_empty() {
+            return;
+        }
+        let max_bright = targets.iter().fold(0.0f32, |m, t| m.max(t.bright));
+        // u = gain · brightness / (EXPOSE · WHITE): 1 at the exposure's white point.
+        let expose = self.gain / (EXPOSE * WHITE);
+        let samples = &self.dust.samples;
+        let dots = &mut self.dots;
+        let salt = self.salt;
+        // Node centres in dot units (`Dots::from_cells`' convention, node = cell).
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        for j in 0..lh - 1 {
+            for i in 0..lw - 1 {
+                let i0 = j * lw + i;
+                let quad = [
+                    &samples[i0],
+                    &samples[i0 + 1],
+                    &samples[i0 + lw + 1],
+                    &samples[i0 + lw],
+                ];
+                for k in 0..N_SHEETS {
+                    let l = quad.map(|c| c[k].lag);
+                    let w = 0.25 * quad.iter().map(|c| c[k].weight).sum::<f32>();
+                    let base = w * expose;
+                    if base * max_bright < U_MIN {
+                        continue;
+                    }
+                    let (lo, hi) = (
+                        l[0].min(l[1]).min(l[2].min(l[3])),
+                        l[0].max(l[1]).max(l[2].max(l[3])),
+                    );
+                    // A fixed dither per node and sheet: dim crests are drawn on a
+                    // share of the nodes that does not change as the ring moves on.
+                    let dither = hash01(
+                        salt ^ cell_key(i as i32, j as i32)
+                            ^ (k as u64 + 1).wrapping_mul(0xd1b5_4a32_d192_ed03),
+                    ) as f32;
+                    for tg in targets {
+                        if tg.lag < lo || tg.lag >= hi {
+                            continue;
+                        }
+                        let u = base * tg.bright;
+                        if u < U_MIN || (u < U_FULL && dither > (u - U_MIN) / (U_FULL - U_MIN)) {
+                            continue;
+                        }
+                        let ink = generation_ink(tg.rank, u);
+                        dots.contour_cell(l, tg.lag, (i, j), to_dot, ink);
                     }
                 }
             }
-            *l = sum;
-            *k = if sum > 0.0 { tsum / sum } else { 0.0 };
-        }
-    }
-
-    /// Low-pass the echo (ECHO-A7): brightness and brightness-weighted temperature are
-    /// blurred together, so the colour of a softened edge is its light's mean temperature.
-    fn soften(&mut self) {
-        let (w, h) = (
-            usize::from(self.light.width()),
-            usize::from(self.light.height()),
-        );
-        let soft = self.soft.as_mut_slice();
-        soft.copy_from_slice(self.light.as_slice());
-        for ((st, &l), &k) in self
-            .soft_t
-            .iter_mut()
-            .zip(self.light.as_slice())
-            .zip(self.kelvin.as_slice())
-        {
-            *st = l * k;
-        }
-        for _ in 0..BLUR_PASSES {
-            blur121(soft, &mut self.scratch, w, h);
-            blur121(&mut self.soft_t, &mut self.scratch, w, h);
         }
     }
 
     fn raster(&mut self) {
-        self.illuminate();
-        self.soften();
-        let (map, soft, soft_t, tone) = (&self.map, &self.soft, &self.soft_t, &self.tone);
-        let contrast = &self.contrast;
-        let gain = self.gain;
-        let unlit = &self.dust.unlit;
-        let direct = soft.size() == self.pixels.pixel_size();
-        let w = usize::from(soft.width());
-        let kelvin_at = |i: usize| {
-            let l = soft.as_slice()[i];
-            if l > 1e-9 { soft_t[i] / l } else { 0.0 }
-        };
-        self.pixels.shade(|x, y| {
-            let (v, kv, dust) = if direct {
-                let i = y as usize * w + x as usize;
-                (soft.as_slice()[i], kelvin_at(i), unlit[i])
-            } else {
-                let (nx, ny) = map.nearest(x, y);
-                let i = ny as usize * w + nx as usize;
-                (map.sample(soft, x, y), kelvin_at(i), unlit[i])
-            };
-            // Highlights roll off on the asinh curve, scaled into the muted range, so the
-            // shells keep their gradation and fade smoothly into the dark.
-            let level = f64::from(contrast[usize::from(tone.level(gain * v))]);
-            if kv > 0.0 {
-                if let Some(ink) = echo_ink(level, kv >= HOT_FROM) {
-                    return ink;
-                }
-            }
-            if dust > 0 { DUST } else { Ink::BLANK }
-        });
+        self.dots.clear();
+        self.rings();
         self.star();
     }
 
-    /// The star: a white point, and during the outburst's peaks a small plus.
+    /// The star (ECHO-A9): a white dot, and while the flash is bright a starburst.
     fn star(&mut self) {
         let (l, _) = self.curve_at(self.t);
-        // No glow disc: a point, the frame's brightest accent.
-        let (x, y) = (self.centre.0.floor() as i32, self.centre.1.floor() as i32);
-        let ink = STAR;
-        self.pixels.set(x, y, ink);
-        if l > 0.3 {
-            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                self.pixels.set(x + dx, y + dy, ink);
+        let ds = self.dots.dot_size();
+        let (cx, cy) = (i32::from(ds.width()) / 2, i32::from(ds.height()) / 2);
+        if l > FLASH_FROM {
+            let k = f64::from(((l - FLASH_FROM) / (1.0 - FLASH_FROM)).clamp(0.0, 1.0));
+            let arm = (FLASH_ARM.0 + (FLASH_ARM.1 - FLASH_ARM.0) * k).round() as i32;
+            // Inner ring off the axes, so its cells are not the spikes' (one ink per cell).
+            let r = FLASH_RING.ceil() as i32 + 1;
+            for dy in -r..=r {
+                for dx in -r..=r {
+                    let d = f64::from(dx).hypot(f64::from(dy));
+                    if dx != 0 && dy != 0 && (d - FLASH_RING).abs() <= 0.5 {
+                        self.dots.set(cx + dx, cy + dy, FLASH);
+                    }
+                }
+            }
+            for a in 1..=arm {
+                for (dx, dy) in [(a, 0), (-a, 0), (0, a), (0, -a)] {
+                    self.dots.set(cx + dx, cy + dy, STAR);
+                }
             }
         }
+        self.dots.set(cx, cy, STAR);
     }
 }
 
@@ -431,24 +433,16 @@ impl Generator for LightEcho {
         if !self.seeded {
             self.seed(ctx);
         }
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
+        self.dots.resize(size);
+        // Square nodes: one per half-block pixel (2 dots), capped (ADR-0012).
+        let ds = self.dots.dot_size();
+        let px = Size::new(
+            ds.width().div_ceil(2).max(1),
+            ds.height().div_ceil(2).max(1),
+        );
         let lattice = lattice_for(px, MAX_NODES, 1.0);
-        {
-            let (d, salt) = (&mut self.dust, self.salt);
-            d.build(salt, lattice);
-        }
-        self.light.resize(lattice, 0.0);
-        self.kelvin.resize(lattice, 0.0);
-        self.soft.resize(lattice, 0.0);
-        let n = usize::from(lattice.width()) * usize::from(lattice.height());
-        self.soft_t.clear();
-        self.soft_t.resize(n, 0.0);
-        self.scratch.clear();
-        self.scratch.resize(n, 0.0);
-        self.map.rebuild(lattice, px);
-        self.centre = (f64::from(px.width()) / 2.0, f64::from(px.height()) / 2.0);
-        self.half_px = f64::from(px.height()) / 2.0;
+        self.lattice = (usize::from(lattice.width()), usize::from(lattice.height()));
+        self.dust.build(self.salt, lattice);
         // The exposure starts where the light is, with no ramp after a resize.
         self.gain = self.target_gain();
         self.dirty = true;
@@ -472,8 +466,7 @@ impl Generator for LightEcho {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit(canvas);
     }
 }
 
@@ -487,6 +480,34 @@ mod tests {
         g.resize(size, &mut ctx);
         g.prepare();
         (g, ctx)
+    }
+
+    /// Jump to loop time `t` with the exposure settled there (`update` eases it).
+    fn jump(g: &mut LightEcho, t: f64) {
+        g.t = t;
+        g.gain = g.target_gain();
+    }
+
+    /// Loop times every 0.5 s over one loop.
+    fn loop_times() -> impl Iterator<Item = f64> {
+        (0..(LOOP / 0.5) as usize).map(|i| -PRE + 0.5 * i as f64)
+    }
+
+    /// Lit echo dots (the star not drawn).
+    fn echo_dots(g: &mut LightEcho, t: f64) -> Vec<(i32, i32)> {
+        jump(g, t);
+        g.dots.clear();
+        g.rings();
+        let ds = g.dots.dot_size();
+        let mut out = Vec::new();
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                if g.dots.is_lit(x, y) {
+                    out.push((x, y));
+                }
+            }
+        }
+        out
     }
 
     #[test]
@@ -523,121 +544,131 @@ mod tests {
     #[test]
     fn echo_a3_the_dust_never_moves() {
         let (mut g, mut ctx) = built(Size::new(120, 40));
-        let dust = g.dust.unlit.clone();
-        let samples: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
+        let samples = g.dust.samples.clone();
         for _ in 0..600 {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
         }
-        assert_eq!(g.dust.unlit, dust);
-        let again: Vec<f32> = g.dust.samples.iter().map(|c| c[1].lag).collect();
-        assert_eq!(again, samples);
+        assert_eq!(g.dust.samples, samples);
     }
 
     #[test]
-    fn echo_a6_highlights_roll_off_and_hot_light_is_blue_white() {
-        let (mut g, _) = built(Size::new(120, 40));
-        // ADR-0018: hot light in blue steps (Cold, Wave), the rest warm (Hot, Sun).
-        let (mut ice, mut ember) = (0, 0);
-        for t in [1.0, 3.0, 6.0, 12.0] {
-            g.t = t;
-            // A jump in time: the exposure settles where the light is (`update` eases it).
-            g.gain = g.target_gain();
+    fn echo_a4_colour_is_the_outburst_temperature_at_emission() {
+        let mut last = f64::INFINITY;
+        for i in 0..=300 {
+            let te = BURST * f64::from(i) / 300.0;
+            let t = temperature(te);
+            assert!(t <= last);
+            last = t;
+        }
+        // The crests sit at the light curve's local maxima, one per peak, so a ring's
+        // leading crest is the hottest light.
+        let c = crests();
+        for (k, &(tp, lp)) in c.iter().enumerate() {
+            assert!((tp - PEAKS[k].0).abs() < PEAKS[k].1, "crest {k} at {tp}");
+            assert!(light_curve(tp - 0.01) <= lp && light_curve(tp + 0.01) <= lp);
+            if k > 0 {
+                assert!(temperature(tp) < temperature(c[k - 1].0));
+            }
+        }
+    }
+
+    #[test]
+    fn echo_a5_nothing_is_lit_by_a_flash_before_it_happens() {
+        // Before loop time 0 the newest flash has not happened: every node's emission
+        // time for it is negative, so it adds nothing; only older echoes can show.
+        let (mut g, mut ctx) = built(Size::new(80, 24));
+        while g.t > -PRE + 0.1 {
+            g.update(SIM_DT, &mut ctx);
+            g.prepare();
+        }
+        while g.t < 0.0 {
+            for cell in &g.dust.samples {
+                for s in cell {
+                    assert_eq!(g.curve_at(g.t - f64::from(s.lag) / C).0, 0.0);
+                }
+            }
+            // Only the two older flashes' crests are lit.
+            assert!(g.targets().1 <= 2 * N_PEAKS);
+            g.update(SIM_DT, &mut ctx);
+            g.prepare();
+        }
+        assert_eq!(lerp_curve(&g.curve, -1e-9), (0.0, 0.0));
+    }
+
+    #[test]
+    fn echo_a6_inks_by_age_newest_dominating() {
+        let size = Size::new(120, 40);
+        let (mut g, _) = built(size);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let (cx, cy) = (60, 20);
+        let mut by_gen = [0usize; 3];
+        for t in loop_times() {
+            jump(&mut g, t);
             g.raster();
-            let px = g.pixels.pixel_size();
-            for y in 0..i32::from(px.height()) {
-                for x in 0..i32::from(px.width()) {
-                    let ink = g.pixels.get(x, y).unwrap();
-                    match rank(ink) {
-                        Some((_, true)) => ice += 1,
-                        Some((_, false)) => ember += 1,
-                        None => assert!(
-                            matches!(ink.role, Role::Background | Role::Star),
-                            "{ink:?} at {x},{y} t={t}"
-                        ),
+            canvas.clear();
+            g.render(&mut canvas);
+            for y in 0..40 {
+                for x in 0..120 {
+                    let cell = canvas.get(x, y).unwrap();
+                    if cell.ink == Ink::BLANK || cell.ch == ' ' {
+                        continue;
+                    }
+                    let near = (x - cx).abs() <= 4 && (y - cy).abs() <= 4;
+                    let (r, l) = (cell.ink.role, cell.ink.level);
+                    match (r, l) {
+                        (Role::Star, 255) => {}
+                        (Role::Sun, 230) | (Role::Hot, 190) => by_gen[0] += 1,
+                        (Role::Accent, 150) => by_gen[1] += 1,
+                        (Role::Cold, 130) => by_gen[2] += 1,
+                        _ => panic!("{:?} at {x},{y} t={t} (near star: {near})", cell.ink),
                     }
                 }
             }
         }
-        // Both the hot (early) and the cool (late) light show, the cool light dominating.
-        assert!(ice > 10 && ember > ice, "ice {ice}, ember {ember}");
+        assert!(by_gen.iter().all(|&n| n > 20), "{by_gen:?}");
+        assert!(by_gen[0] > by_gen[1] && by_gen[0] > by_gen[2], "{by_gen:?}");
     }
 
-    /// Step (1–3) and hotness of an echo ink, `None` for anything else.
-    fn rank(ink: Ink) -> Option<(u8, bool)> {
-        [false, true].into_iter().find_map(|hot| {
-            (1u8..=3)
-                .find(|&k| echo_ink([20.0, 100.0, 200.0][usize::from(k - 1)], hot) == Some(ink))
-                .map(|k| (k, hot))
-        })
-    }
-
-    /// Mean level step between 4-neighbouring echo pixels, and the share of echo pixels
-    /// with fewer than two echo 8-neighbours (ragged specks; M14: 8-neighbours, since a
-    /// thin shell running diagonally touches its neighbours only at corners).
-    fn roughness(g: &LightEcho) -> (f64, f64) {
-        let px = g.pixels.pixel_size();
-        let echo = |x: i32, y: i32| {
-            // One flat step is 40 levels' worth of change.
-            g.pixels
-                .get(x, y)
-                .and_then(rank)
-                .map(|(k, _)| 40.0 * f64::from(k))
-        };
-        let (mut step, mut pairs, mut lit, mut specks) = (0.0, 0, 0, 0);
-        for y in 0..i32::from(px.height()) {
-            for x in 0..i32::from(px.width()) {
-                let Some(l) = echo(x, y) else { continue };
+    #[test]
+    fn echo_a7_rings_are_thin_threads() {
+        let (mut g, _) = built(Size::new(120, 40));
+        let ds = g.dots.dot_size();
+        let (cx, cy) = (f64::from(ds.width()) / 2.0, f64::from(ds.height()) / 2.0);
+        let (mut lit, mut thin, mut specks) = (0usize, 0usize, 0usize);
+        for t in loop_times() {
+            for (x, y) in echo_dots(&mut g, t) {
                 lit += 1;
-                let mut nb = 0;
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-                    if let Some(m) = echo(x + dx, y + dy) {
-                        nb += 1;
-                        if dx + dy > 0 {
-                            step += (l - m).abs();
-                            pairs += 1;
-                        }
-                    }
-                }
-                for (dx, dy) in [(1, 1), (-1, 1), (1, -1), (-1, -1)] {
-                    nb += usize::from(echo(x + dx, y + dy).is_some());
-                }
-                if nb < 2 {
-                    specks += 1;
-                }
+                let (dx, dy) = (f64::from(x) - cx, f64::from(y) - cy);
+                let r = dx.hypot(dy).max(1e-9);
+                let (ux, uy) = (dx / r, dy / r);
+                let across = (-2..=2)
+                    .filter(|&k| {
+                        let k = f64::from(k);
+                        g.dots.is_lit(
+                            (f64::from(x) + k * ux).round() as i32,
+                            (f64::from(y) + k * uy).round() as i32,
+                        )
+                    })
+                    .count();
+                thin += usize::from(across <= 3);
+                let alone = (-1..=1)
+                    .flat_map(|a| (-1..=1).map(move |b| (a, b)))
+                    .filter(|&(a, b)| (a, b) != (0, 0))
+                    .all(|(a, b)| !g.dots.is_lit(x + a, y + b));
+                specks += usize::from(alone);
             }
         }
-        (
-            step / f64::from(pairs.max(1)),
-            f64::from(specks) / f64::from(lit.max(1)),
-        )
-    }
-
-    #[test]
-    fn echo_a7_lit_dust_is_smooth_not_blocky_or_ragged() {
-        let (mut g, _) = built(Size::new(120, 40));
-        for t in [3.0, 8.0, 14.0, 20.0] {
-            g.t = t;
-            // A jump in time: the exposure settles where the light is (`update` eases it).
-            g.gain = g.target_gain();
-            g.raster();
-            let (step, specks) = roughness(&g);
-            // M14: thin shells (1–3 px) rise and fall within a few pixels, so the bound
-            // is looser than for the old broad bands; ragged specks stay rare.
-            assert!(step <= 40.0, "t={t}: mean neighbour step {step:.1}");
-            assert!(
-                specks <= 0.025,
-                "t={t}: {:.1} % ragged specks",
-                100.0 * specks
-            );
-        }
+        let (thin, specks) = (thin as f64 / lit as f64, specks as f64 / lit as f64);
+        assert!(thin >= 0.85, "thin share {thin:.3}");
+        assert!(specks <= 0.025, "specks {specks:.3}");
     }
 
     #[test]
     fn echo_a8_exposure_is_smooth_in_time_and_cadence_free() {
         // M14: the gain eases with time constant `EXPOSE_TAU` in simulated time: one step
         // moves it by at most `1 − e^{−dt/τ}` of the way, and stepping 1/60 s or 1/30 s
-        // lands on the same gain within a few per cent after a second.
+        // lands on the same gain within a few per cent.
         let size = Size::new(120, 40);
         let (mut a, mut ca) = built(size);
         let (mut b, mut cb) = built(size);
@@ -658,59 +689,86 @@ mod tests {
     }
 
     #[test]
-    fn echo_a4_colour_is_the_outburst_temperature_at_emission() {
-        let mut last = f64::INFINITY;
-        for i in 0..=300 {
-            let te = BURST * f64::from(i) / 300.0;
-            let t = temperature(te);
-            assert!(t <= last);
-            last = t;
-        }
-        // A node lit by a single sheet carries that sheet's T(t_e).
-        let (mut g, _) = built(Size::new(80, 24));
-        g.t = 12.0;
-        g.illuminate();
-        let dust = &g.dust;
-        let mut checked = 0;
-        for (i, cell) in dust.samples.iter().enumerate() {
-            // Every lit (sheet, flash) pair; a node with exactly one shows its colour.
-            let mut lit = Vec::new();
-            for &(age, _) in &GENERATIONS {
-                for s in cell {
-                    let te = g.t + age - f64::from(s.lag) / C;
-                    if (0.0..=BURST).contains(&te) && s.weight > 0.0 && g.curve_at(te).0 > 0.0 {
-                        lit.push(te);
+    fn echo_a9_the_flash_is_a_visible_starburst() {
+        let (mut g, _) = built(Size::new(120, 40));
+        let ds = g.dots.dot_size();
+        let (cx, cy) = (i32::from(ds.width()) / 2, i32::from(ds.height()) / 2);
+        let burst = |g: &LightEcho| {
+            let (mut n, mut x0, mut x1, mut y0, mut y1) = (0, cx, cx, cy, cy);
+            for y in cy - 20..=cy + 20 {
+                for x in cx - 20..=cx + 20 {
+                    if g.dots.is_lit(x, y) {
+                        n += 1;
+                        (x0, x1, y0, y1) = (x0.min(x), x1.max(x), y0.min(y), y1.max(y));
                     }
                 }
             }
-            if let [te] = lit[..] {
-                let want = f64::from(g.curve_at(te).1);
-                let got = f64::from(g.kelvin.as_slice()[i]);
-                assert!((got - want).abs() <= 1e-3 * want, "{got} vs {want}");
-                checked += 1;
+            (n, x1 - x0 + 1, y1 - y0 + 1)
+        };
+        for (tp, _) in crests() {
+            for dt in [-0.1, 0.0, 0.1] {
+                g.t = tp + dt;
+                g.dots.clear();
+                g.star();
+                let (n, w, h) = burst(&g);
+                assert!(n >= 9, "t={}: {n} dots", g.t);
+                // ≥ 2 cells each way: 4 dots across, 8 down.
+                assert!(w >= 4 && h >= 8, "t={}: {w}×{h} dots", g.t);
             }
         }
-        assert!(checked > 20);
+        for t in [-0.4, 1.4, 3.3, 8.0, 12.0] {
+            g.t = t;
+            assert!(g.curve_at(t).0 < FLASH_FROM);
+            g.dots.clear();
+            g.star();
+            assert_eq!(burst(&g).0, 1, "t={t}");
+        }
     }
 
     #[test]
-    fn echo_a5_nothing_is_lit_by_a_flash_before_it_happens() {
-        // Before loop time 0 the newest flash has not happened: every node's emission
-        // time for it is negative, so it adds nothing; only older echoes can show.
-        let (mut g, mut ctx) = built(Size::new(80, 24));
-        while g.t > -PRE + 0.1 {
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
+    fn echo_a10_no_dead_stretch() {
+        let (mut g, _) = built(Size::new(120, 40));
+        let counts: Vec<usize> = loop_times().map(|t| echo_dots(&mut g, t).len()).collect();
+        let mean = counts.iter().sum::<usize>() as f64 / counts.len() as f64;
+        for (t, &n) in loop_times().zip(&counts) {
+            assert!(n as f64 >= 0.35 * mean, "t={t}: {n} dots vs mean {mean:.0}");
         }
-        while g.t < 0.0 {
-            for cell in &g.dust.samples {
-                for s in cell {
-                    assert_eq!(g.curve_at(g.t - f64::from(s.lag) / C).0, 0.0);
+    }
+
+    #[test]
+    fn echo_a11_no_horizontal_stripes() {
+        let (mut g, _) = built(Size::new(120, 40));
+        let ds = g.dots.dot_size();
+        let (w, h) = (i32::from(ds.width()), i32::from(ds.height()));
+        let (mut lit, mut hrun, mut vrun) = (0usize, 0usize, 0usize);
+        // Dots in runs of ≥ 6 along one axis.
+        let runs = |g: &LightEcho, outer: i32, inner: i32, at: &dyn Fn(i32, i32) -> (i32, i32)| {
+            let mut total = 0;
+            for o in 0..outer {
+                let mut run = 0;
+                for i in 0..=inner {
+                    let (x, y) = at(o, i);
+                    if i < inner && g.dots.is_lit(x, y) {
+                        run += 1;
+                    } else {
+                        if run >= 6 {
+                            total += run;
+                        }
+                        run = 0;
+                    }
                 }
             }
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
+            total
+        };
+        for t in loop_times() {
+            lit += echo_dots(&mut g, t).len();
+            hrun += runs(&g, h, w, &|o, i| (i, o));
+            vrun += runs(&g, w, h, &|o, i| (o, i));
         }
-        assert_eq!(lerp_curve(&g.curve, -1e-9), (0.0, 0.0));
+        let (hs, vs) = (hrun as f64 / lit as f64, vrun as f64 / lit as f64);
+        assert!(
+            hs <= 1.5 * vs,
+            "horizontal runs {hs:.3} vs vertical {vs:.3}"
+        );
     }
 }

@@ -20,7 +20,7 @@ use std::f64::consts::{PI, TAU};
 use rand::Rng;
 use sciart_core::geom::wrap_angle;
 use sciart_core::prelude::*;
-use sciart_core::raster::{ascii_ramp_cell, disc_pixels};
+
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
 
@@ -87,50 +87,74 @@ const SPOKE_BAND: (f64, f64) = (1.58, 1.92);
 const SPOKE_LIFE: (f64, f64) = (6.0, 10.0);
 /// Deepest spoke darkening (exaggerated so they read).
 const SPOKE_DIM: f64 = 0.5;
-/// The globe coverage below which a limb pixel stays space.
-const GLOBE_EDGE: f64 = 0.4;
 /// Share of the frame the ring system spans (dark ground around it).
 const FILL: f64 = 0.74;
 
-/// The globe's flat steps `(from brightness, ink)`, brightest first (ADR-0018): pale
-/// butterscotch zones and ochre belts in `Sun`, a dark rust terminator in `Hot`.
-pub(crate) const GLOBE_STEPS: [(f64, Ink); 4] = [
-    (0.78, Ink::new(Role::Sun, 190)),
-    (0.68, Ink::new(Role::Sun, 110)),
-    (0.5, Ink::new(Role::Sun, 40)),
-    (0.2, Ink::new(Role::Hot, 10)),
-];
-/// The rings' flat steps, brightest first: the B ring's bright white, grey A and C
-/// rings; below the last the ring is black (the Cassini division stays black).
+/// Ringlets (SPEC-002 Look, M16): one braille thread every `RINGLET_GAP` dots of ring
+/// radius at the ansae; where the tilt crowds them on screen (near the minor axis) only
+/// every m-th is kept, so neighbouring threads stay at least `MIN_GAP` dots apart. A
+/// ringlet within `GAP_CLEAR` dots of a gap (Cassini, Encke, Keeler) is left out, so
+/// every gap is a black lane at least a dot wider than itself.
+const RINGLET_GAP: f64 = 4.0;
+/// On a small frame (fewer than `SMALL_SCALE` dots per Saturn radius) the ringlets are
+/// `RINGLET_GAP_SMALL` dots apart, so the rings keep a few threads each.
+const RINGLET_GAP_SMALL: f64 = 3.0;
+const SMALL_SCALE: f64 = 45.0;
+
+/// Ringlet spacing (dots of ring radius at the ansae) for `scale` dots per Saturn radius.
+fn ringlet_gap(scale: f64) -> f64 {
+    if scale < SMALL_SCALE {
+        RINGLET_GAP_SMALL
+    } else {
+        RINGLET_GAP
+    }
+}
+const MIN_GAP: f64 = 2.5;
+const GAP_CLEAR: f64 = 0.75;
+
+/// Whether a ringlet at radius `r` lies within `clear` (R_S) of a gap.
+pub(crate) fn near_gap(r: f64, clear: f64) -> bool {
+    [CASSINI, ENCKE, KEELER]
+        .iter()
+        .any(|&(a, b)| (r - r.clamp(a, b)).abs() < clear)
+}
+
+/// The rings' flat steps by brightness, brightest first: the B ring's bright white, the
+/// grey A and C rings; below the last a ringlet dot is dark (the Cassini Division and
+/// the gaps stay black).
 pub(crate) const RING_STEPS: [(f64, Ink); 4] = [
-    (0.72, Ink::new(Role::Star, 170)),
-    (0.5, Ink::new(Role::Structure, 170)),
-    (0.3, Ink::new(Role::Structure, 70)),
-    (0.14, Ink::new(Role::Structure, 0)),
+    (0.72, Ink::new(Role::Star, 230)),
+    (0.5, Ink::new(Role::Structure, 200)),
+    (0.3, Ink::new(Role::Structure, 120)),
+    (0.14, Ink::new(Role::Structure, 50)),
 ];
+/// A ringlet dot inside a spoke: a faint grey streak.
+pub(crate) const SPOKE_INK: Ink = Ink::new(Role::Dim, 150);
+/// The globe's threads: the lit limb, zones and belts (sine-latitude lines), each one
+/// step dimmer towards the terminator.
+pub(crate) const LIMB_INKS: [Ink; 2] = [Ink::new(Role::Sun, 230), Ink::new(Role::Sun, 120)];
+pub(crate) const NIGHT_LIMB: Ink = Ink::new(Role::Dim, 90);
+pub(crate) const ZONE_INKS: [Ink; 2] = [Ink::new(Role::Sun, 200), Ink::new(Role::Sun, 100)];
+pub(crate) const BELT_INKS: [Ink; 2] = [Ink::new(Role::Hot, 170), Ink::new(Role::Hot, 80)];
+/// Planetographic latitudes (rad) of the globe's band lines.
+const BAND_LATS: [f64; 10] = [
+    -0.96, -0.68, -0.52, -0.33, -0.17, 0.17, 0.33, 0.52, 0.68, 0.96,
+];
+/// Moons: Pan a white dot, Mimas a small white disc (dots).
+const MOON_INK: Ink = Ink::new(Role::Star, 245);
 
 /// The first step of `steps` that brightness `v` reaches.
 fn step(v: f64, steps: &[(f64, Ink)]) -> Option<Ink> {
     steps.iter().find(|(from, _)| v >= *from).map(|s| s.1)
 }
 
-/// The globe's ink at lit brightness `v`, or `None` (black) below its last step.
-pub(crate) fn globe_ink(v: f64) -> Option<Ink> {
-    step(v, &GLOBE_STEPS)
-}
-
-/// A ring pixel's ink at brightness `v`, or `None` (black) below its last step.
+/// A ringlet dot's ink at brightness `v`, or `None` (dark) below the last step.
 pub(crate) fn ring_ink(v: f64) -> Option<Ink> {
     step(v, &RING_STEPS)
 }
 
-/// The brightness a globe step stands for (its floor), 0 for anything else.
-fn globe_brightness(ink: Ink) -> f64 {
-    GLOBE_STEPS.iter().find(|s| s.1 == ink).map_or(0.0, |s| s.0)
-}
-
-/// Background stars per 1000 pixels.
-const STAR_DENSITY: f64 = 2.5;
+/// Background stars: a share of the cells, one dot each.
+const STAR_SHARE: f64 = 0.004;
 
 /// Keplerian angular rate at `r`, rad/s (time-lapsed): `Ω ∝ r^{−3/2}` (RING-A2).
 pub(crate) fn kepler_rate(r: f64) -> f64 {
@@ -365,31 +389,58 @@ impl Spoke {
     }
 }
 
-/// A ring pixel: where it is on the ring plane and what does not change per frame.
+/// One ringlet: its ring-plane radius and the shadow × lighting factor near Pan's gap.
 #[derive(Debug, Clone, Copy)]
-struct RingPx {
-    /// Row-major pixel index.
-    idx: u32,
+struct Ringlet {
     r: f32,
-    lambda: f32,
-    /// Brightness before texture and spokes.
-    b0: f32,
-    /// Shadow × lighting factor, kept (non-zero) only near the Keeler gap, whose
-    /// brightness is recomputed each frame for Pan's waves and wake.
-    k: f32,
-    /// Globe coverage under the pixel, negated on the far side of the rings (behind
-    /// the globe's centre plane). 24 bytes a pixel: this table is the scene's largest
-    /// buffer at 500×150 (TEST-R7).
-    cover: f32,
 }
 
-/// Screen geometry, in pixels.
+/// One dot of a ringlet, with what does not change per frame (built per resize).
+#[derive(Debug, Clone, Copy)]
+struct RingDot {
+    x: u16,
+    y: u16,
+    ringlet: u16,
+    lambda: f32,
+    /// Brightness before texture, waves and spokes (footprint-averaged profile, lit).
+    b0: f32,
+    /// The lighting factor, kept (non-zero) only near the Encke gap, whose brightness is
+    /// recomputed each frame for Pan's waves and wake.
+    k: f32,
+}
+
+/// Screen geometry, in dots.
 #[derive(Debug, Clone, Copy, Default)]
 struct View {
     cx: f64,
     cy: f64,
-    /// Pixels per Saturn radius.
+    /// Dots per Saturn radius.
     scale: f64,
+}
+
+impl View {
+    /// Dot of screen point `(sx, up)` (Saturn radii, `up` positive).
+    fn dot(&self, sx: f64, up: f64) -> (f64, f64) {
+        (self.cx + self.scale * sx, self.cy - self.scale * up)
+    }
+}
+
+/// The globe's visible surface point under screen point `(sx, up)`, if any.
+fn globe_point(sx: f64, up: f64) -> Option<[f64; 3]> {
+    let (st, ct) = TILT.sin_cos_det();
+    // Ray p0 + t·d towards the viewer, p0 on the plane through the centre.
+    let p0 = [sx, up * st, up * ct];
+    let d = [0.0, -ct, st];
+    let q2 = POLAR * POLAR;
+    let a = d[1] * d[1] + d[2] * d[2] / q2;
+    let b = 2.0 * (p0[1] * d[1] + p0[2] * d[2] / q2);
+    let c = p0[0] * p0[0] + p0[1] * p0[1] + p0[2] * p0[2] / q2 - 1.0;
+    let disc = b * b - 4.0 * a * c;
+    if disc < 0.0 {
+        return None;
+    }
+    let t = (-b + disc.sqrt()) / (2.0 * a);
+    Some([p0[0], p0[1] + t * d[1], p0[2] + t * d[2]])
 }
 
 #[derive(Debug)]
@@ -400,11 +451,12 @@ pub struct SaturnRings {
     profile: Box<[f32]>,
     /// Running sum of `profile` (`LUT + 1` entries) for footprint-averaged lookups.
     cumulative: Box<[f64]>,
-    /// The globe and stars, shaded once per resize; the rings go over it each frame.
-    globe: Pixels,
-    /// Every ring pixel's static data, built per resize.
-    ring_px: Vec<RingPx>,
-    pixels: Pixels,
+    ringlets: Vec<Ringlet>,
+    /// Every visible ringlet dot, built per resize.
+    ring_dots: Vec<RingDot>,
+    /// The globe's threads and the background stars, built per resize.
+    still: Vec<(i32, i32, Ink)>,
+    dots: Dots,
     spokes: Vec<Spoke>,
     /// The two live clump generations (RING-A9).
     clumps: [ClumpLayer; 2],
@@ -433,9 +485,10 @@ impl SaturnRings {
             view: View::default(),
             profile,
             cumulative,
-            globe: Pixels::default(),
-            ring_px: Vec::new(),
-            pixels: Pixels::default(),
+            ringlets: Vec::new(),
+            ring_dots: Vec::new(),
+            still: Vec::new(),
+            dots: Dots::default(),
             spokes: Vec::with_capacity(SPOKES),
             clumps: [ClumpLayer::default(); 2],
             size: Size::new(1, 1),
@@ -443,8 +496,8 @@ impl SaturnRings {
         }
     }
 
-    /// Mean ring brightness over radii `r ± width/2`: the pixel's footprint, so gaps
-    /// narrower than a pixel darken it instead of flickering in and out.
+    /// Mean ring brightness over radii `r ± width/2`, so a gap narrower than a ringlet's
+    /// spacing darkens it instead of flickering.
     fn brightness_over(&self, r: f64, width: f64) -> f64 {
         let bins = LUT as f64 / (R_OUT - R_IN);
         let half = (0.5 * width * bins).max(0.5);
@@ -457,201 +510,173 @@ impl SaturnRings {
         (at(c + half) - at(c - half)) / (2.0 * half)
     }
 
-    /// Screen offsets of pixel `(x, y)` from the centre in Saturn radii (`up` positive).
-    fn screen(&self, x: i32, y: i32) -> (f64, f64) {
-        let v = self.view;
-        (
-            (f64::from(x) + 0.5 - v.cx) / v.scale,
-            (v.cy - f64::from(y) - 0.5) / v.scale,
-        )
+    /// The near-side ring hides the globe at screen point `(sx, up)`: the view ray meets
+    /// the ring plane in front of the globe where the ring is fairly opaque.
+    fn ring_in_front(&self, sx: f64, up: f64) -> bool {
+        let ry = up / TILT.sin_det();
+        ry < 0.0 && self.brightness_over(sx.hypot(ry), 0.01) > 0.25
     }
 
-    /// The globe's visible surface point under screen point `(sx, up)`, if any.
-    fn globe_point(sx: f64, up: f64) -> Option<[f64; 3]> {
-        let (st, ct) = TILT.sin_cos_det();
-        // Ray p0 + t·d towards the viewer, p0 on the plane through the centre.
-        let p0 = [sx, up * st, up * ct];
-        let d = [0.0, -ct, st];
-        let q2 = POLAR * POLAR;
-        let a = d[1] * d[1] + d[2] * d[2] / q2;
-        let b = 2.0 * (p0[1] * d[1] + p0[2] * d[2] / q2);
-        let c = p0[0] * p0[0] + p0[1] * p0[1] + p0[2] * p0[2] / q2 - 1.0;
-        let disc = b * b - 4.0 * a * c;
-        if disc < 0.0 {
-            return None;
-        }
-        let t = (-b + disc.sqrt()) / (2.0 * a);
-        Some([p0[0], p0[1] + t * d[1], p0[2] + t * d[2]])
-    }
-
-    /// Whether screen point `(sx, up)` is so far outside the globe that no ray within a
-    /// pixel of it can hit, nor can it be "near" the limb in `globe_cover` (GEN-R19: most
-    /// of the frame skips the ray casts). The globe's outline lies inside the unit circle
-    /// (equatorial radius 1, the polar axis shorter), and the refinement grid reaches
-    /// ≤ 0.53 px from the centre; `near` needs the normalised radius within 1.5 px of 1.
-    fn far_from_globe(&self, sx: f64, up: f64) -> bool {
-        sx.hypot(up) > 1.0 + 1.5 / self.view.scale
-    }
-
-    /// Share of the pixel `(x, y)` the globe covers: four sub-pixel rays, refined to a
-    /// 4×4 grid where they disagree or the limb is within a pixel, so the limb steps in
-    /// sixteenths rather than quarters.
-    fn globe_cover(&self, x: i32, y: i32) -> f64 {
-        let (sx, up) = self.screen(x, y);
-        if self.far_from_globe(sx, up) {
-            return 0.0;
-        }
-        let q = 0.25 / self.view.scale;
-        let hits = [(-q, -q), (q, -q), (-q, q), (q, q)]
-            .iter()
-            .filter(|&&(dx, dy)| Self::globe_point(sx + dx, up + dy).is_some())
-            .count();
-        // The screen outline is an ellipse with semi-axes 1 and ≈ 0.91: within a pixel of
-        // it only when the normalised radius is near 1.
-        let e = sx.hypot(up / 0.91);
-        let near = (e - 1.0).abs() < 1.5 / self.view.scale;
-        if !near && (hits == 0 || hits == 4) {
-            return hits as f64 / 4.0;
-        }
-        let step = 1.0 / (4.0 * self.view.scale);
-        let mut n = 0;
-        for j in 0..4 {
-            for i in 0..4 {
-                let dx = (f64::from(i) - 1.5) * step;
-                let dy = (f64::from(j) - 1.5) * step;
-                n += usize::from(Self::globe_point(sx + dx, up + dy).is_some());
-            }
-        }
-        n as f64 / 16.0
-    }
-
-    fn shade_globe(&mut self) {
+    /// The globe as threads (SPEC-002 Look, M16): its lit limb and band lines in flat
+    /// steps, hidden on the night side, behind the near ring and in the rings' shadow,
+    /// plus the background stars. Static, so built once per resize.
+    fn build_still(&mut self) {
+        self.still.clear();
         let l = sun();
         let (st, ct) = TILT.sin_cos_det();
-        let view = [0.0, -ct, st];
-        let size = self.globe.pixel_size();
-        self.globe.clear();
-        for y in 0..i32::from(size.height()) {
-            for x in 0..i32::from(size.width()) {
-                let (sx, up) = self.screen(x, y);
-                let far = self.far_from_globe(sx, up);
-                let cover = if far { 0.0 } else { self.globe_cover(x, y) };
-                let hit = if far { None } else { Self::globe_point(sx, up) };
-                let Some(p) = hit.or_else(|| {
-                    // A limb pixel whose centre misses: shade it at the nearest hit.
-                    (cover > 0.0).then(|| {
-                        let q = 0.25 / self.view.scale;
-                        [(-q, -q), (q, -q), (-q, q), (q, q)]
-                            .iter()
-                            .find_map(|&(dx, dy)| Self::globe_point(sx + dx, up + dy))
-                    })?
-                }) else {
-                    let h = hash01(0x5A7 ^ cell_key(x, y));
-                    if h < STAR_DENSITY / 1000.0 {
-                        let bright = hash01(0x5A8 ^ cell_key(x, y)) > 0.7;
-                        self.globe
-                            .set(x, y, Ink::new(Role::Star, if bright { 120 } else { 40 }));
-                    }
-                    continue;
-                };
-                let n = [p[0], p[1], p[2] / (POLAR * POLAR)];
-                let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
-                let lit = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / nn;
-                // A soft terminator: the day side fades out over a few degrees instead of
-                // stepping to black.
-                let day = ease::smoothstep((lit + 0.06) / 0.28);
-                if day <= 0.0 {
-                    continue; // night side: black against black space
-                }
-                // Limb darkening by the cosine to the viewer (RING-A6).
-                let mu = ((n[1] * view[1] + n[2] * view[2]) / nn).max(0.0);
-                // Floored so the limb stays a muted tan: Sienna's low levels are
-                // rust-orange and would ring the globe.
-                let limb = 0.64 + 0.36 * mu.sqrt();
-                // Soft zonal bands by planetographic latitude: cream zones, butterscotch
-                // and tan belts, a duskier polar hood; faint streaks within them.
-                let lat = (p[2] / POLAR).clamp(-1.0, 1.0).asin();
-                let lon = p[0].atan2(-p[1]);
-                let bands = saturn_bands(lat);
-                let streak = value_noise(0x5A70, 3.0 * lon, 40.0 * lat, 1.0) - 0.5;
-                let polar = (lat.abs() / 1.2).min(1.0);
-                let tone = 1.06 + 0.2 * bands * (1.0 - polar) + 0.05 * streak - 0.2 * polar * polar;
-                // The rings' shadow on the southern globe (the Sun is north of them),
-                // averaged over the pixel so the band's edges are soft.
-                let mut shadow = 1.0;
-                if p[2] < 0.0 {
-                    let s = -p[2] / l[2];
-                    let r = (p[0] + s * l[0]).hypot(p[1] + s * l[1]);
-                    shadow = 1.0 - 0.7 * self.brightness_over(r, 2.5 / self.view.scale);
-                }
-                let light = day * (0.6 + 0.4 * lit.max(0.0).sqrt());
-                // The limb fades into space within one pixel: pixels the globe covers
-                // less than `GLOBE_EDGE` of stay space, the rest dim only slightly with
-                // coverage, so the edge never passes through Sienna's orange low end.
-                if cover < GLOBE_EDGE {
+        let v = self.view;
+        let lit_of = |p: [f64; 3]| {
+            let n = [p[0], p[1], p[2] / (POLAR * POLAR)];
+            let nn = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+            (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]) / nn
+        };
+        // The rings' shadow on the southern globe (the Sun is north of the rings).
+        let shadowed = |s: &Self, p: [f64; 3]| {
+            p[2] < 0.0 && {
+                let k = -p[2] / l[2];
+                let r = (p[0] + k * l[0]).hypot(p[1] + k * l[1]);
+                s.brightness_over(r, 0.01) > 0.2
+            }
+        };
+        let push = |s: &mut Self, (x, y): (f64, f64), ink: Ink| {
+            s.still.push((x.round() as i32, y.round() as i32, ink));
+        };
+        // The limb: the outline ellipse (semi-axes 1 and b), lit side only.
+        let b = (POLAR * POLAR * ct * ct + st * st).sqrt();
+        let n = ((TAU * v.scale) as usize).clamp(16, 8192);
+        for k in 0..n {
+            let (s, c) = (TAU * k as f64 / n as f64).sin_cos_det();
+            let (sx, up) = (0.999 * c, 0.999 * b * s);
+            let Some(p) = globe_point(sx, up) else {
+                continue;
+            };
+            if self.ring_in_front(sx, up) {
+                continue;
+            }
+            // The night limb faint, so the globe's outline closes.
+            let lit = lit_of(p);
+            let ink = if lit < -0.02 {
+                NIGHT_LIMB
+            } else {
+                LIMB_INKS[usize::from(lit < 0.3)]
+            };
+            push(self, v.dot(c, b * s), ink);
+        }
+        // Band lines: circles of planetographic latitude on the visible hemisphere.
+        for lat in BAND_LATS {
+            // Reduced latitude of the spheroid point.
+            let beta = (POLAR * lat.sin_det()).atan2(lat.cos_det());
+            let (sb, cb) = beta.sin_cos_det();
+            let belt = saturn_bands(lat) < -0.3;
+            let inks = if belt { BELT_INKS } else { ZONE_INKS };
+            let m = ((TAU * cb * v.scale) as usize).clamp(8, 8192);
+            for k in 0..m {
+                let (sp, cp) = (TAU * k as f64 / m as f64).sin_cos_det();
+                let p = [cb * sp, -cb * cp, POLAR * sb];
+                // Facing the viewer.
+                let nv = -ct * p[1] + st * p[2] / (POLAR * POLAR);
+                if nv <= 0.02 {
                     continue;
                 }
-                let v = tone * limb * light * shadow * (0.8 + 0.2 * cover);
-                // Dim globe (terminator, the rings' shadow) goes to a low neutral
-                // Starlight rather than down Sienna's rust-orange ramp (RING-A6).
-                if let Some(ink) = globe_ink(v) {
-                    self.globe.set(x, y, ink);
+                let (sx, up) = (p[0], p[1] * st + p[2] * ct);
+                let lit = lit_of(p);
+                if lit < 0.05 || shadowed(self, p) || self.ring_in_front(sx, up) {
+                    continue;
                 }
+                push(self, v.dot(sx, up), inks[usize::from(lit < 0.3)]);
+            }
+        }
+        // Background stars, clear of the globe and the rings.
+        let d = self.dots.dot_size();
+        let (cw, ch) = (
+            i32::from(d.width()) / Dots::CELL_W,
+            i32::from(d.height()) / Dots::CELL_H,
+        );
+        for cy in 0..ch {
+            for cx in 0..cw {
+                if hash01(0x5A7 ^ cell_key(cx, cy)) >= STAR_SHARE {
+                    continue;
+                }
+                let (x, y) = (
+                    f64::from(cx * Dots::CELL_W),
+                    f64::from(cy * Dots::CELL_H + 1),
+                );
+                let (sx, up) = ((x - v.cx) / v.scale, (v.cy - y) / v.scale);
+                if sx.hypot(up / st) < R_OUT || sx.hypot(up) < 1.05 {
+                    continue;
+                }
+                let bright = hash01(0x5A8 ^ cell_key(cx, cy)) > 0.7;
+                let ink = Ink::new(Role::Star, if bright { 120 } else { 50 });
+                push(self, (x, y), ink);
             }
         }
     }
 
-    /// Precompute every ring pixel's ring-plane position and static brightness (the
-    /// profile over its footprint, the globe's shadow, the lighting), and how much of it
-    /// the globe covers. Far-side pixels wholly behind the globe are left out (RING-A4).
+    /// Every ringlet's visible dots with their static brightness (the profile over the
+    /// ringlet's band, the globe's shadow, the lighting). Far-side dots behind the globe
+    /// and dots of dark ring are left out (RING-A1, RING-A4).
     fn build_rings(&mut self) {
         let l = sun();
-        let size = self.pixels.pixel_size();
-        let sin_t = TILT.sin_det();
+        let st = TILT.sin_det();
         let light = 0.85 + 0.15 * l[2] / SUN_ELEV.sin_det();
-        self.ring_px.clear();
-        for y in 0..i32::from(size.height()) {
-            for x in 0..i32::from(size.width()) {
-                let (sx, up) = self.screen(x, y);
-                let (rx, ry) = (sx, up / sin_t);
-                let r = rx.hypot(ry);
-                if !(R_IN..R_OUT).contains(&r) {
-                    continue;
-                }
-                let cover = self.globe_cover(x, y);
-                if cover >= 1.0 && ry > 0.0 {
-                    continue;
-                }
-                let foot = (rx.abs() + ry.abs() / sin_t) / (r * self.view.scale);
-                // The globe's shadow, averaged over four sub-pixel points so its edge is
-                // soft rather than stepped.
-                let q = 0.25 / self.view.scale;
-                let shadowed = [(-q, -q), (q, -q), (-q, q), (q, q)]
-                    .iter()
-                    .filter(|&&(dx, dy)| in_planet_shadow([rx + dx, ry + dy / sin_t, 0.0]))
-                    .count() as f64
-                    / 4.0;
-                let k = light * (1.0 - 0.94 * shadowed);
-                let b0 = self.brightness_over(r, foot) * k;
-                // Near Pan's gap the brightness is recomputed each frame for its edge
-                // waves and wake.
-                let keeler = (r - PAN_R).abs() < WAKE_REACH + 0.02;
-                if b0 <= 0.0 && !keeler {
-                    continue;
-                }
-                self.ring_px.push(RingPx {
-                    idx: (y as u32) * u32::from(size.width()) + x as u32,
-                    r: r as f32,
-                    lambda: ry.atan2(rx) as f32,
-                    b0: b0 as f32,
-                    k: if keeler { k as f32 } else { 0.0 },
-                    cover: if ry > 0.0 {
-                        -cover as f32
+        let v = self.view;
+        let spacing = ringlet_gap(v.scale);
+        let dr = spacing / v.scale;
+        let d = self.dots.dot_size();
+        let (dw, dh) = (i32::from(d.width()), i32::from(d.height()));
+        self.ringlets.clear();
+        self.ring_dots.clear();
+        let mut r = R_IN + 0.5 * dr;
+        while r < A_OUTER + 0.5 * dr {
+            let k = self.ringlets.len();
+            self.ringlets.push(Ringlet { r: r as f32 });
+            let keeler = (r - PAN_R).abs() < WAKE_REACH + 0.02;
+            let b_static = self.brightness_over(r, 0.5 * dr);
+            if !near_gap(r, GAP_CLEAR / v.scale) && (b_static > 0.02 || keeler) {
+                let n = ((TAU * r * v.scale * 1.2) as usize).clamp(16, 1 << 15);
+                let mut last = (i32::MIN, i32::MIN);
+                for j in 0..n {
+                    let lambda = TAU * j as f64 / n as f64;
+                    let (s, c) = lambda.sin_cos_det();
+                    // Screen distance to the next ringlet, across the ellipse (normal
+                    // to it): `gap·sin i / |(sin λ, cos λ·sin i)|`; thin where it crowds.
+                    let gap = spacing * st / s.hypot(c * st);
+                    let every = (MIN_GAP / gap.max(1e-3)).ceil().max(1.0) as usize;
+                    if k % every != 0 {
+                        continue;
+                    }
+                    let (sx, up) = (r * c, r * s * st);
+                    let (x, y) = v.dot(sx, up);
+                    let (xi, yi) = (x.round() as i32, y.round() as i32);
+                    if (xi, yi) == last || !(0..dw).contains(&xi) || !(0..dh).contains(&yi) {
+                        continue;
+                    }
+                    last = (xi, yi);
+                    // Behind the globe (far side), or in its shadow.
+                    if s > 0.0 && globe_point(sx, up).is_some() {
+                        continue;
+                    }
+                    let shade = if in_planet_shadow([r * c, r * s, 0.0]) {
+                        0.06
                     } else {
-                        cover as f32
-                    },
-                });
+                        1.0
+                    };
+                    let kf = light * shade;
+                    let b0 = b_static * kf;
+                    if b0 <= 0.02 && !keeler {
+                        continue;
+                    }
+                    self.ring_dots.push(RingDot {
+                        x: xi as u16,
+                        y: yi as u16,
+                        ringlet: k as u16,
+                        lambda: lambda as f32,
+                        b0: b0 as f32,
+                        k: if keeler { kf as f32 } else { 0.0 },
+                    });
+                }
             }
+            r += dr;
         }
     }
 
@@ -672,7 +697,7 @@ impl SaturnRings {
         });
     }
 
-    /// Spoke darkening at `(r, λ)`: 0 none, up to `SPOKE_DIM`.
+    /// Spoke strength at `(r, λ)`: 0 none, up to `SPOKE_DIM`.
     fn spoke_dim(&self, r: f64, lambda: f64) -> f64 {
         let mut dim: f64 = 0.0;
         for s in &self.spokes {
@@ -684,30 +709,30 @@ impl SaturnRings {
             let d = wrap_angle(lambda - s.angle(self.t)).abs();
             if d < half {
                 let edge = 1.0 - d / half;
-                // A soft-edged, fuzzy wedge.
                 dim = dim.max(SPOKE_DIM * s.strength() * ease::smoothstep(edge));
             }
         }
         dim
     }
 
+    /// Draw the frame: the globe's threads, then every ringlet dot at its brightness now
+    /// (clumps, Pan's waves and wake, spokes), then the moons.
     fn shade_rings(&mut self) {
         for (k, layer) in self.clumps.iter_mut().enumerate() {
             layer.refresh(self.t, k);
         }
-        let globe = &self.globe;
-        self.pixels
-            .shade(|x, y| globe.get(x, y).unwrap_or(Ink::BLANK));
+        self.dots.clear();
+        for &(x, y, ink) in &self.still {
+            self.dots.set(x, y, ink);
+        }
         let t = self.t;
         let pan = pan_angle(t);
-        // Half the Encke gap, the waves' reach and a footprint of up to 3 pixels
-        // (foreshortened by 1/sin tilt on the near and far sides).
-        let edge_reach =
-            0.5 * (ENCKE.1 - ENCKE.0) + WAVE_AMP + 1.5 / (TILT.sin_det() * self.view.scale);
-        let w = usize::from(self.pixels.pixel_size().width()).max(1);
-        for k in 0..self.ring_px.len() {
-            let p = self.ring_px[k];
-            let (r, lambda) = (f64::from(p.r), f64::from(p.lambda));
+        let dr = ringlet_gap(self.view.scale) / self.view.scale;
+        let edge_reach = 0.5 * (ENCKE.1 - ENCKE.0) + WAVE_AMP + dr;
+        for i in 0..self.ring_dots.len() {
+            let p = self.ring_dots[i];
+            let r = f64::from(self.ringlets[usize::from(p.ringlet)].r);
+            let lambda = f64::from(p.lambda);
             let mut b = f64::from(p.b0);
             if p.k > 0.0 {
                 // Pan's waves displace the Encke gap's edges and its wake ripples the
@@ -718,12 +743,8 @@ impl SaturnRings {
                 } else {
                     pan - lambda
                 };
-                // Only pixels whose footprint can reach a displaced edge need the
-                // profile re-averaged; the rest keep their static brightness.
                 if (r - PAN_R).abs() < edge_reach {
-                    let (s, c) = lambda.sin_cos_det();
-                    let foot = (c.abs() + s.abs() / TILT.sin_det()) / self.view.scale;
-                    b = self.brightness_over(r - edge_wave(lag), foot) * f64::from(p.k);
+                    b = self.brightness_over(r - edge_wave(lag), dr) * f64::from(p.k);
                 }
                 b *= wake(r, lag);
             }
@@ -732,70 +753,42 @@ impl SaturnRings {
             }
             // Clumps sheared at the Keplerian rate (RING-A2, RING-A9).
             b *= clump_at(&self.clumps, r, lambda);
-            b *= 1.0 - self.spoke_dim(r, lambda);
             // A soft shoulder instead of a clip, so the opaque B ring keeps its clumps.
-            let ring_lum = (0.05 + 0.84 * b / (1.0 + 0.12 * b)).min(1.0);
-            let (x, y) = ((p.idx as usize % w) as i32, (p.idx as usize / w) as i32);
-            let under = self.globe.get(x, y).unwrap_or(Ink::BLANK);
-            let (cover, far) = (f64::from(p.cover.abs()), p.cover < 0.0);
-            // How much of the pixel the ring owns: on the far side, what the globe
-            // leaves uncovered; on the near side, its opacity over the globe (the thin
-            // C ring lets the globe show through), and all of it off the globe.
-            let alpha = if far {
-                1.0 - cover
+            let lum = (0.05 + 0.84 * b / (1.0 + 0.12 * b)).min(1.0);
+            let ink = if self.spoke_dim(r, lambda) > 0.15 {
+                Some(SPOKE_INK)
             } else {
-                // From the static brightness, so clumps never flip who owns the pixel.
-                let opaque = ((f64::from(p.b0) - 0.08) / 0.3).clamp(0.0, 1.0);
-                opaque + (1.0 - opaque) * (1.0 - cover)
-            };
-            // The globe's brightness back from its step.
-            let under_lum = globe_brightness(under);
-            let lum = alpha * ring_lum + (1.0 - alpha) * under_lum;
-            // One ink per pixel: the steps of whichever owns more of it, at the blended
-            // brightness.
-            let ink = if alpha >= 0.5 || under_lum <= 0.0 {
                 ring_ink(lum)
-            } else {
-                globe_ink(lum)
             };
             if let Some(ink) = ink {
-                self.pixels.set(x, y, ink);
+                self.dots.set(i32::from(p.x), i32::from(p.y), ink);
             }
         }
-        // Pan, a bright point in its gap, and Mimas, a small lit disc outside the rings
-        // (both enlarged so they show).
-        self.draw_moon(PAN_R, pan, 0.45);
+        // Pan, a white dot in its gap, and Mimas, a small white disc outside the rings
+        // (both enlarged so they show), hidden behind the globe.
+        self.draw_moon(PAN_R, pan, 0.0);
         let size = (MIMAS_SIZE * self.view.scale).max(0.8);
         self.draw_moon(MIMAS_R, mimas_angle(t), size);
     }
 
-    /// A moon at ring-plane radius `r`, angle `lambda`, drawn as an anti-aliased disc of
-    /// `size` pixels lit from the Sun's side, hidden where the globe is in front of it.
+    /// A moon at ring-plane radius `r`, angle `lambda`, as a white dot disc of radius
+    /// `size` dots, hidden where the globe is in front of it.
     fn draw_moon(&mut self, r: f64, lambda: f64, size: f64) {
-        let (st, ct) = TILT.sin_cos_det();
+        let st = TILT.sin_det();
         let (s, c) = lambda.sin_cos_det();
         let (sx, up) = (r * c, r * s * st);
-        if s > 0.0 && Self::globe_point(sx, up).is_some() {
+        if s > 0.0 && globe_point(sx, up).is_some() {
             return; // behind the globe
         }
-        let v = self.view;
-        let centre = (v.cx + v.scale * sx, v.cy - v.scale * up);
-        let l = sun();
-        let pixels = &mut self.pixels;
-        disc_pixels(centre, size, |x, y, cover| {
-            // The disc's outward normal from its screen offset: right, up, towards us.
-            let nx = ((f64::from(x) + 0.5 - centre.0) / size).clamp(-1.0, 1.0);
-            let ny = ((centre.1 - f64::from(y) - 0.5) / size).clamp(-1.0, 1.0);
-            let nz = (1.0 - nx * nx - ny * ny).max(0.0).sqrt();
-            let n = [nx, ny * st - nz * ct, ny * ct + nz * st];
-            let lit = (n[0] * l[0] + n[1] * l[1] + n[2] * l[2]).max(0.0);
-            // A white moon, its lit side brighter (two flat steps).
-            let lum = cover * (0.45 + 0.55 * lit);
-            if cover >= 0.3 {
-                let ink = Ink::new(Role::Star, if lum >= 0.6 { 240 } else { 130 });
-                pixels.set(x, y, ink);
-            }
-        });
+        let (x, y) = self.view.dot(sx, up);
+        self.dots.disc(x, y, size, MOON_INK);
+    }
+
+    /// Screen position (dots) of a moon at `(r, λ)`, for the tests.
+    #[cfg(test)]
+    fn moon_dot(&self, r: f64, lambda: f64) -> (f64, f64) {
+        let (s, c) = lambda.sin_cos_det();
+        self.view.dot(r * c, r * s * TILT.sin_det())
     }
 }
 
@@ -817,17 +810,16 @@ impl Generator for SaturnRings {
 
     fn resize(&mut self, size: Size, _ctx: &mut Ctx) {
         self.size = size;
-        self.globe.resize(size);
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
-        let (w, h) = (f64::from(px.width()), f64::from(px.height()));
+        self.dots.resize(size);
+        let d = self.dots.dot_size();
+        let (w, h) = (f64::from(d.width()), f64::from(d.height()));
         let scale = FILL * (0.485 * w / R_OUT).min(0.44 * h / POLAR.max(R_OUT * TILT.sin_det()));
         self.view = View {
             cx: 0.5 * w,
             cy: 0.5 * h,
             scale: scale.max(0.5),
         };
-        self.shade_globe();
+        self.build_still();
         self.build_rings();
         self.dirty = true;
     }
@@ -860,8 +852,7 @@ impl Generator for SaturnRings {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit(canvas);
     }
 }
 
@@ -907,29 +898,6 @@ mod tests {
     }
 
     #[test]
-    fn ring_a4_the_globe_hides_and_shadows_the_far_rings() {
-        let mut g = SaturnRings::new();
-        let mut ctx = Ctx::new(42, Size::new(100, 40));
-        g.resize(Size::new(100, 40), &mut ctx);
-        g.prepare();
-        // The far ring straight behind the globe's centre shows the globe, not ring.
-        let (st, v) = (TILT.sin_det(), g.view);
-        let far = |r: f64| (v.cx as i32, (v.cy - v.scale * r * st).floor() as i32);
-        let (x, y) = far(1.8);
-        let px = g.pixels.get(x, y).expect("on screen");
-        assert!(globe_brightness(px) > 0.0, "{px:?}");
-        // Anti-sunward far-side ring is in the shadow, its mirror image is lit.
-        let l = sun();
-        let anti = [-l[0], -l[1]];
-        let n = anti[0].hypot(anti[1]);
-        let p = [1.8 * anti[0] / n, 1.8 * anti[1] / n, 0.0];
-        assert!(p[1] > 0.0, "the shadow falls on the far side");
-        assert!(in_planet_shadow(p));
-        assert!(!in_planet_shadow([-p[0], -p[1], 0.0]));
-        assert!(!in_planet_shadow([2.2, -0.3, 0.0]));
-    }
-
-    #[test]
     fn ring_a5_edge_waves_decay_downstream() {
         let envelope = |lag: f64| {
             (0..64)
@@ -939,6 +907,37 @@ mod tests {
         let (near, mid, far) = (envelope(0.05), envelope(1.0), envelope(3.0));
         assert!(near > mid && mid > far, "{near} {mid} {far}");
         assert!(near > 0.5 * WAVE_AMP);
+    }
+
+    #[test]
+    fn ring_a4_the_globe_hides_and_shadows_the_far_rings() {
+        let g = scene(100, 40, 0.0);
+        // No ringlet dot lies on the far ring straight behind the globe's centre.
+        let st = TILT.sin_det();
+        for p in &g.ring_dots {
+            let r = f64::from(g.ringlets[usize::from(p.ringlet)].r);
+            let (s, c) = f64::from(p.lambda).sin_cos_det();
+            assert!(
+                !(s > 0.0 && globe_point(r * c, r * s * st).is_some()),
+                "ring dot behind the globe at r {r}, λ {}",
+                p.lambda
+            );
+        }
+        // Anti-sunward far-side ring is in the shadow, its mirror image is lit.
+        let l = sun();
+        let anti = [-l[0], -l[1]];
+        let n = anti[0].hypot(anti[1]);
+        let p = [1.8 * anti[0] / n, 1.8 * anti[1] / n, 0.0];
+        assert!(p[1] > 0.0, "the shadow falls on the far side");
+        assert!(in_planet_shadow(p));
+        assert!(!in_planet_shadow([-p[0], -p[1], 0.0]));
+        assert!(!in_planet_shadow([2.2, -0.3, 0.0]));
+        // In the frame, the shadowed far ring is dark where its mirror is lit.
+        let lit_at = |q: [f64; 3]| {
+            let (x, y) = g.view.dot(q[0], q[1] * st);
+            (-2..=2).any(|d| g.dots.is_lit(x.round() as i32 + d, y.round() as i32))
+        };
+        assert!(!lit_at(p) && lit_at([-p[0], p[1], 0.0]));
     }
 
     fn scene(w: u16, h: u16, t: f64) -> SaturnRings {
@@ -955,56 +954,75 @@ mod tests {
     }
 
     #[test]
-    fn ring_a6_globe_is_pale_butterscotch_limb_darkened_in_flat_steps() {
+    fn ring_a6_globe_is_a_lit_limb_and_band_threads_in_flat_steps() {
         let g = scene(120, 40, 0.0);
-        let v = g.view;
-        // The globe's bright middle (above the rings) is its palest butterscotch step.
-        let row = (v.cy - 0.55 * v.scale) as i32;
-        let mid = (-4..=4)
-            .filter_map(|dx| g.globe.get(v.cx as i32 + dx, row))
-            .max_by(|a, b| globe_brightness(*a).total_cmp(&globe_brightness(*b)))
-            .expect("on screen");
-        assert_eq!(mid, GLOBE_STEPS[0].1, "{mid:?}");
-        // Limb darkening: walking out to the lit right limb the steps only darken, and
-        // the limb is a darker step than the middle.
-        let w = i32::from(g.globe.pixel_size().width());
-        let mut last = globe_brightness(mid);
-        let mut limb = last;
-        for x in v.cx as i32..w {
-            let Some(p) = g.globe.get(x, row) else { break };
-            let b = globe_brightness(p);
-            if b <= 0.0 {
-                break;
+        let mut globe = [0usize; 3];
+        for &(_, _, ink) in &g.still {
+            if LIMB_INKS.contains(&ink) || ink == NIGHT_LIMB {
+                globe[0] += 1;
+            } else if ZONE_INKS.contains(&ink) {
+                globe[1] += 1;
+            } else if BELT_INKS.contains(&ink) {
+                globe[2] += 1;
+            } else {
+                assert_eq!(ink.role, Role::Star, "{ink:?}");
             }
-            assert!(
-                b <= last + 0.17,
-                "({x}, {row}): brighter step toward the limb"
+        }
+        assert!(
+            globe.iter().all(|&n| n > 20),
+            "limb, zones, belts: {globe:?}"
+        );
+        // No band line lies in the rings' shadow on the southern globe, nor on the
+        // night side, nor behind the near ring.
+        // (Checked at the rounded dot, so a dot or two on an edge may straddle it.)
+        let l = sun();
+        let st = TILT.sin_det();
+        let (mut bad, mut bands) = (0, 0);
+        for &(x, y, ink) in &g.still {
+            if !(ZONE_INKS.contains(&ink) || BELT_INKS.contains(&ink)) {
+                continue;
+            }
+            bands += 1;
+            let (sx, up) = (
+                (f64::from(x) - g.view.cx) / g.view.scale,
+                (g.view.cy - f64::from(y)) / g.view.scale,
             );
-            last = b;
-            limb = b;
-        }
-        assert!(limb < globe_brightness(mid), "limb {limb}");
-        // The globe is only its flat steps (M11's roles, no ramp).
-        let size = g.globe.pixel_size();
-        for y in 0..i32::from(size.height()) {
-            for x in 0..i32::from(size.width()) {
-                let px = g.globe.get(x, y).unwrap();
-                assert!(
-                    px.role == Role::Background
-                        || px.role == Role::Star
-                        || globe_brightness(px) > 0.0,
-                    "({x}, {y}): {px:?}"
-                );
+            let ry = up / st;
+            if ry < 0.0 && g.brightness_over(sx.hypot(ry), 0.01) > 0.3 {
+                bad += 1;
+            }
+            if let Some(p) = globe_point(sx, up) {
+                if p[2] < -0.05 {
+                    let k = -p[2] / l[2];
+                    let r = (p[0] + k * l[0]).hypot(p[1] + k * l[1]);
+                    bad += usize::from(g.brightness_over(r, 0.01) >= 0.5);
+                }
             }
         }
-    }
-
-    /// Step of a ring ink, 1 faintest … 4 brightest; 0 for anything else.
-    fn ring_rank(p: Ink) -> usize {
-        RING_STEPS
+        // Half a dot is ≈ 0.025 R_S of ring radius through the tilt: edge dots straddle.
+        assert!(
+            bad * 16 <= bands,
+            "{bad} of {bands} band dots behind or under the rings"
+        );
+        // The band lines stop at the terminator: none on the far left (night) limb.
+        let left = g
+            .still
             .iter()
-            .position(|s| s.1 == p)
-            .map_or(0, |k| RING_STEPS.len() - k)
+            .filter(|&&(x, _, ink)| {
+                (ZONE_INKS.contains(&ink) || BELT_INKS.contains(&ink))
+                    && f64::from(x) < g.view.cx - 0.9 * g.view.scale
+            })
+            .count();
+        assert_eq!(left, 0);
+        // Every lit cell is braille: the globe is threads, not a half-block disc.
+        let mut canvas = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+        g.render(&mut canvas);
+        for y in 0..40 {
+            for x in 0..120 {
+                let ch = canvas.get(x, y).unwrap().ch;
+                assert!(ch == ' ' || ('⠀'..='⣿').contains(&ch), "{x},{y}: {ch:?}");
+            }
+        }
     }
 
     #[test]
@@ -1021,24 +1039,21 @@ mod tests {
             "{res} vs {}",
             CASSINI.0
         );
-        // It is on screen, and moves, between t = 1 and t = 30.
-        let lit = |g: &SaturnRings| -> Vec<(i32, i32)> {
-            let (st, v) = (TILT.sin_det(), g.view);
-            let a = mimas_angle(g.t);
-            let (s, c) = a.sin_cos_det();
-            vec![(
-                (v.cx + v.scale * MIMAS_R * c) as i32,
-                (v.cy - v.scale * MIMAS_R * s * st) as i32,
-            )]
-        };
+        // It is on screen as a white dot disc, and moves, between t = 1 and t = 30.
         let (a, b) = (scene(120, 40, 1.0), scene(120, 40, 30.0));
+        let at = |g: &SaturnRings| {
+            let (x, y) = g.moon_dot(MIMAS_R, mimas_angle(g.t));
+            (x.round() as i32, y.round() as i32)
+        };
         for g in [&a, &b] {
-            let (x, y) = lit(g)[0];
-            let px = g.pixels.get(x, y).expect("Mimas on screen");
-            assert_eq!(px.role, Role::Star);
-            assert!(px.level >= 130, "Mimas level {}", px.level);
+            let (x, y) = at(g);
+            assert!(g.dots.is_lit(x, y), "Mimas not drawn at ({x}, {y})");
+            let mut canvas = Canvas::new(Size::new(120, 40), GlyphMode::Unicode);
+            g.render(&mut canvas);
+            let cell = canvas.get(x / 2, y / 4).expect("Mimas on screen");
+            assert_eq!(cell.ink, MOON_INK);
         }
-        assert_ne!(lit(&a), lit(&b));
+        assert_ne!(at(&a), at(&b));
     }
 
     #[test]
@@ -1065,6 +1080,14 @@ mod tests {
         assert!(zeros(PAN_R - 0.02) > zeros(PAN_R - 0.06));
     }
 
+    /// The lit ringlet dots of a scene.
+    fn ring_lit(g: &SaturnRings) -> Vec<bool> {
+        g.ring_dots
+            .iter()
+            .map(|p| g.dots.is_lit(i32::from(p.x), i32::from(p.y)))
+            .collect()
+    }
+
     #[test]
     fn ring_a9_clumps_are_smooth_in_radius_and_drift_by_t30() {
         // Low-pass in radius: one 200×50 pixel on the ansa is ≈ 0.02 R_S.
@@ -1074,22 +1097,125 @@ mod tests {
             let d = (clump(r + 0.02, lambda, 3.0) - clump(r, lambda, 3.0)).abs();
             assert!(d < 0.3 * CLUMP_AMP, "r {r}: {d}");
         }
-        // The rings visibly change between t = 1 and t = 30 (clumps, spokes, moons).
+        // The ringlets visibly change between t = 1 and t = 30 (clumps, spokes, moons):
+        // at least a fifth of their dots switch on or off, or change ink.
         let (a, b) = (scene(120, 40, 1.0), scene(120, 40, 30.0));
-        let size = a.pixels.pixel_size();
-        let (mut ring, mut changed) = (0, 0);
-        for y in 0..i32::from(size.height()) {
-            for x in 0..i32::from(size.width()) {
-                let (p, q) = (a.pixels.get(x, y).unwrap(), b.pixels.get(x, y).unwrap());
-                if ring_rank(p) > 0 {
-                    ring += 1;
-                    changed += usize::from(p != q);
+        let (mut ca, mut cb) = (
+            Canvas::new(Size::new(120, 40), GlyphMode::Unicode),
+            Canvas::new(Size::new(120, 40), GlyphMode::Unicode),
+        );
+        a.render(&mut ca);
+        b.render(&mut cb);
+        let (la, lb) = (ring_lit(&a), ring_lit(&b));
+        let changed = a
+            .ring_dots
+            .iter()
+            .zip(la.iter().zip(&lb))
+            .filter(|(p, (x, y))| {
+                let (cx, cy) = (i32::from(p.x) / 2, i32::from(p.y) / 4);
+                x != y || ca.get(cx, cy).map(|c| c.ink) != cb.get(cx, cy).map(|c| c.ink)
+            })
+            .count();
+        assert!(
+            changed * 5 >= a.ring_dots.len(),
+            "{changed} of {} ring dots changed",
+            a.ring_dots.len()
+        );
+    }
+
+    #[test]
+    fn ring_a11_ringlets_never_hatch_into_a_fill() {
+        // At 80×24, 160×45 and 200×50, under 10 % of the lit ringlet dots have all four
+        // neighbours (left, right, above, below) lit; every gap clears its ringlets.
+        for (w, h) in [(80, 24), (160, 45), (200, 50)] {
+            let g = scene(w, h, 3.0);
+            let (mut lit, mut packed) = (0, 0);
+            for p in &g.ring_dots {
+                let (x, y) = (i32::from(p.x), i32::from(p.y));
+                if !g.dots.is_lit(x, y) {
+                    continue;
+                }
+                lit += 1;
+                packed += usize::from(
+                    [(1, 0), (-1, 0), (0, 1), (0, -1)]
+                        .iter()
+                        .all(|&(dx, dy)| g.dots.is_lit(x + dx, y + dy)),
+                );
+            }
+            assert!(lit > 200, "{w}×{h}: {lit} ring dots");
+            assert!(packed * 10 < lit, "{w}×{h}: {packed} of {lit} packed");
+            let clear = GAP_CLEAR / g.view.scale;
+            for rl in &g.ringlets {
+                let r = f64::from(rl.r);
+                let drawn = g
+                    .ring_dots
+                    .iter()
+                    .any(|p| g.ringlets[usize::from(p.ringlet)].r == rl.r);
+                assert!(
+                    !(drawn && near_gap(r, clear)),
+                    "{w}×{h}: ringlet at {r} in a gap"
+                );
+            }
+        }
+        // The Cassini Division is at least 3 dots of black at 160×45 on the ansae.
+        let g = scene(160, 45, 0.0);
+        let drawn: Vec<f64> = g
+            .ring_dots
+            .iter()
+            .map(|p| f64::from(g.ringlets[usize::from(p.ringlet)].r))
+            .collect();
+        let below = drawn
+            .iter()
+            .copied()
+            .filter(|&r| r < CASSINI.0)
+            .fold(0.0, f64::max);
+        let above = drawn
+            .iter()
+            .copied()
+            .filter(|&r| r > CASSINI.1)
+            .fold(9.0, f64::min);
+        assert!((above - below) * g.view.scale >= 4.0, "{below}..{above}");
+    }
+
+    #[test]
+    fn ring_a10_ringlets_are_threads_with_black_gaps() {
+        let g = scene(200, 50, 2.0);
+        // The Cassini Division stays black: no ringlet dot in its core (the Encke and
+        // Keeler gaps are narrower than the ringlet spacing: they darken their ringlet).
+        let core = (CASSINI.0 + 0.02)..(CASSINI.1 - 0.02);
+        assert!(g.ringlets.iter().any(|rl| core.contains(&f64::from(rl.r))));
+        // On the ansae, where the ringlets do not overlap on screen.
+        for p in &g.ring_dots {
+            if f64::from(p.lambda).cos_det().abs() < 0.8 {
+                continue;
+            }
+            let r = f64::from(g.ringlets[usize::from(p.ringlet)].r);
+            let lit = g.dots.is_lit(i32::from(p.x), i32::from(p.y));
+            assert!(
+                !(lit && core.contains(&r)),
+                "lit dot in the Cassini Division at r {r}"
+            );
+        }
+        // Threads, not a fill: on the ansae (|cos λ| > 0.8) neighbouring ringlets are
+        // `ringlet_gap` dots apart, so under half of the dots in the ring band are lit.
+        let st = TILT.sin_det();
+        let d = g.dots.dot_size();
+        let (mut lit, mut n) = (0, 0);
+        for y in 0..i32::from(d.height()) {
+            for x in 0..i32::from(d.width()) {
+                let (sx, up) = (
+                    (f64::from(x) - g.view.cx) / g.view.scale,
+                    (g.view.cy - f64::from(y)) / g.view.scale,
+                );
+                let (rx, ry) = (sx, up / st);
+                let r = rx.hypot(ry);
+                if (1.55..1.9).contains(&r) && rx.abs() > 0.8 * r {
+                    n += 1;
+                    lit += usize::from(g.dots.is_lit(x, y));
                 }
             }
         }
-        assert!(
-            changed * 3 >= ring,
-            "{changed} of {ring} ring pixels changed"
-        );
+        assert!(n > 200 && lit * 2 < n, "{lit} of {n} ring-band dots lit");
+        assert!(lit * 5 > n, "B ring too sparse: {lit} of {n}");
     }
 }

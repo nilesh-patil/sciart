@@ -18,10 +18,19 @@
 //! M11), so a reference cell on the title row, outside the title's own span, inked
 //! `Text` 110 is expected at `READOUT_LEVEL` (`m11_readout_to_today`).
 
+//!
+//! The scenes GEN-R25 restyles to the thread idiom (M16, ADR-0019) are no longer pinned:
+//! their frames are skipped (`gen_r25::is_thread_scene`, the list `thread_style.rs`
+//! checks against SPEC-002).
+
 #[path = "../examples/inkframes.rs"]
 #[allow(dead_code)]
 mod inkframes;
 
+#[path = "common/gen_r25.rs"]
+mod gen_r25;
+
+use gen_r25::is_thread_scene;
 use inkframes::{CellKey, HEIGHT, MODES, WIDTH, decode, frame_keys, header, render_frames};
 use sciart_core::prelude::*;
 use sciart_core::title;
@@ -92,6 +101,10 @@ fn gen_r22_m11_scenes_match_the_m11_ink_frames() {
     let mut results: Vec<(f64, String, String, usize)> = Vec::new();
     let mut missing = Vec::new();
     for scene in &scenes {
+        // GEN-R25 (ADR-0019): restyled to threads, no longer pinned to M11.
+        if is_thread_scene(scene) {
+            continue;
+        }
         let Some(entry) = sciart_generators::find(scene) else {
             missing.push(*scene);
             continue;

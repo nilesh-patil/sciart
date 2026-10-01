@@ -37,7 +37,7 @@ use std::f64::consts::PI;
 use std::fmt::Write as _;
 
 use rand::Rng;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
 use sciart_core::{draw, ease, ink};
 
@@ -135,24 +135,20 @@ const START_EDDY_D: (f64, f64) = (0.9, 0.3);
 /// fades toward the inlet ahead of it (see [`pair_window`]).
 const PAIR_FADE_D: f64 = 1.0;
 
-/// Vorticity display: `x = ω·D/(VORT_SCALE·U)` is soft-clipped, and |s| below `VORT_MIN`
-/// is left to the terminal background (the irrotational flow).
+/// Vorticity display: `x = ω·D/(VORT_SCALE·U)` is soft-clipped to `s`.
 const VORT_SCALE: f64 = 2.5;
-const VORT_MIN: f64 = 0.06;
-/// Hysteresis on the drawn vorticity: a 4-connected group of `Div` pixels is drawn only
-/// if one of them reaches this |s|. Threshold-level pixels with nothing behind them are
-/// start-up and staircase noise, specks on the calm background; the faint fringes of real
-/// eddies and shear layers hang on to their cores. It equals the ASCII blank band, so a
-/// faint structure shows in both glyph modes or in neither.
-const VORT_SEED: f64 = 0.12;
-const CYLINDER_INK: Ink = Ink::new(Role::Structure, 200);
-/// Rim pixels at or above this level have their centre inside the disc; dimmer ones are
-/// the anti-aliased outside edge, which ASCII leaves out.
-const RIM_SOLID: u8 = 160;
-/// Half-width, in diameters, of the columns where a single cylinder half makes an ASCII
-/// `@`: the disc's top and bottom caps. Without them the ASCII disc is only the rows
-/// with both halves inside (a 2:1 bar at 80×24, a 2×2 block at 40×12).
-const ASCII_CAP_D: f64 = 0.35;
+/// M16 (GEN-R25): contour levels of |s|, outermost first, and their ink levels (brighter
+/// inward); positive (counter-clockwise) `Hot`, negative (clockwise) `Cold`.
+pub(crate) const LEVELS: [f32; 3] = [0.15, 0.4, 0.75];
+pub(crate) const LEVEL_INKS: [u8; 3] = [170, 215, 255];
+/// Sub-cell refinement: a crossed lattice cell is split into `k × k` bilinear sub-cells,
+/// `k = ⌈max(sx, sy)/REFINE⌉` (dots per node), at most `MAX_REFINE`.
+const REFINE: f64 = 2.2;
+const MAX_REFINE: usize = 5;
+/// The cylinder: a one-dot ring (M16 round 2), drawn last at the top level so its cells
+/// stay grey, as `CYLINDER_PTS` chords.
+const CYLINDER_INK: Ink = Ink::new(Role::Structure, 255);
+const CYLINDER_PTS: usize = 48;
 /// Upstream of the cylinder (the half facing the inlet), weak vorticity (|s| below
 /// `UPSTREAM_MIN`) is staircase noise, not flow: within `UPSTREAM_ANNULUS` nodes of the
 /// rim, where the steps' corners stick out of the round mask, and, when its sign is
@@ -162,7 +158,9 @@ const ASCII_CAP_D: f64 = 0.35;
 /// secondary, opposite-signed vorticity only forms behind separation, on the lee side.
 const UPSTREAM_ANNULUS: f64 = 1.0;
 const UPSTREAM_OPPOSITE_D: f64 = 0.6;
-const UPSTREAM_MIN: f64 = 0.2;
+/// M16: 0.3 (was 0.2 for the bilinear pixels): the contours are drawn from the nodes
+/// themselves, where start-up transients on the shoulders reach |s| ≈ 0.24.
+const UPSTREAM_MIN: f64 = 0.3;
 const LABEL_INK: Ink = Ink::new(Role::Text, 150);
 
 /// Strouhal probe: `PROBE_D` diameters behind the centre, crossings with ±`HYST`·U
@@ -171,11 +169,6 @@ const PROBE_D: f64 = 2.5;
 const HYST: f64 = 0.02;
 const ST_INTERVALS: usize = 4;
 const ST_MIN_CROSSINGS: usize = 3;
-/// ASCII vorticity bands: blank below `ASCII_DOT`, `.` below `ASCII_EDDY`, then x/o, and
-/// X/O from `ASCII_STRONG`.
-const ASCII_DOT: f64 = VORT_SEED;
-const ASCII_EDDY: f64 = 0.25;
-const ASCII_STRONG: f64 = 0.6;
 
 /// Boundary handling of [`step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -354,150 +347,6 @@ pub(crate) fn strouhal(crossings: &Trail<u64>, d: f64, u_at: impl Fn(f64) -> f64
     let period = (last - first) as f64 / (crossings.len() - 1) as f64;
     let mid = 0.5 * (first + last) as f64;
     (period > 0.0).then(|| d / (u_at(mid) * period))
-}
-
-/// The ink of one vorticity pixel: `ink::div` of the soft-clipped value, or `None` in the
-/// irrotational flow (|s| < 0.06), which is the terminal background.
-pub(crate) fn vort_ink(s: f64) -> Option<Ink> {
-    (s.abs() >= VORT_MIN).then(|| ink::div(s))
-}
-
-/// Hysteresis marks of a pixel (see [`mark`]); `VISITED` is a `FAINT` pixel already
-/// grouped by [`drop_faint_islands`].
-const EMPTY: u8 = 0;
-const FAINT: u8 = 1;
-const SEED: u8 = 2;
-const VISITED: u8 = 3;
-
-/// The hysteresis mark of a drawn pixel: [`SEED`] for `Div` at |s| ≥ [`VORT_SEED`],
-/// [`FAINT`] for weaker `Div`, [`EMPTY`] for anything else. Other roles are never seeds and
-/// never dropped.
-pub(crate) fn mark(p: Ink) -> u8 {
-    match p.role {
-        Role::Div if ink::div_value(p).abs() >= VORT_SEED => SEED,
-        Role::Div => FAINT,
-        _ => EMPTY,
-    }
-}
-
-/// Hysteresis on the drawn vorticity (as in Canny's edge detector, 1986): every
-/// 4-connected group of `Div` pixels without a seed is blanked, so the faint fringes of
-/// eddies stay while isolated threshold-level specks go. `marks` holds the [`mark`] of
-/// every pixel of `px`, row-major, written while shading, so no pixel is read back. Each
-/// group of `FAINT` pixels is grown on its own and blanked unless it touches a `SEED`:
-/// only ≈ ¼ of the drawn pixels are faint, so this visits far fewer pixels than a fill
-/// from the seeds. `stack` is scratch (one group at a time, at most one entry per pixel).
-pub(crate) fn drop_faint_islands(px: &mut Pixels, marks: &mut [u8], stack: &mut Vec<(i32, i32)>) {
-    let size = px.pixel_size();
-    let (w, h) = (usize::from(size.width()), usize::from(size.height()));
-    if w == 0 || marks.len() != w * h {
-        return;
-    }
-    let (wi, hi) = (w as i32, h as i32);
-    for start in 0..w * h {
-        if marks[start] != FAINT {
-            continue;
-        }
-        marks[start] = VISITED;
-        stack.clear();
-        stack.push(((start % w) as i32, (start / w) as i32));
-        let (mut next, mut seeded) = (0, false);
-        while let Some(&(x, y)) = stack.get(next) {
-            next += 1;
-            for (nx, ny) in [(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)] {
-                if !((0..wi).contains(&nx) && (0..hi).contains(&ny)) {
-                    continue;
-                }
-                let m = &mut marks[ny as usize * w + nx as usize];
-                match *m {
-                    SEED => seeded = true,
-                    FAINT => {
-                        *m = VISITED;
-                        stack.push((nx, ny));
-                    }
-                    _ => {}
-                }
-            }
-        }
-        if !seeded {
-            for &(x, y) in stack.iter() {
-                px.set(x, y, Ink::BLANK);
-            }
-        }
-    }
-}
-
-/// Share of a pixel covered by the cylinder disc of radius `radius`, for a pixel of
-/// `(sx, sy)` lattice units whose centre is at `(dx, dy)` from the disc centre, `r` away:
-/// `½ − d`, clamped to [0, 1], with `d` the signed distance of the centre outside the rim
-/// in pixel widths measured along the radius.
-pub(crate) fn disc_coverage(dx: f64, dy: f64, r: f64, radius: f64, (sx, sy): (f64, f64)) -> f64 {
-    if r <= 0.0 {
-        return 1.0;
-    }
-    // `sqrt` rather than libm's `hypot`: correctly rounded, so bit-identical everywhere.
-    let (ax, ay) = (dx * sx, dy * sy);
-    let along = (ax * ax + ay * ay).sqrt() / r;
-    (0.5 - (r - radius) / along).clamp(0.0, 1.0)
-}
-
-/// Ink of a partly covered rim pixel: `Structure` at `120 + 80·coverage`, from 120 for a
-/// sliver through [`RIM_SOLID`] at half coverage to the solid disc's 200.
-pub(crate) fn rim_ink(coverage: f64) -> Ink {
-    let level = 120.0 + 80.0 * coverage.clamp(0.0, 1.0);
-    Ink::new(Role::Structure, level.round() as u8)
-}
-
-/// ASCII fallback for one cell from its two pixels (GEN-R10): `@` when both halves are
-/// cylinder (centre inside the rim, level ≥ [`RIM_SOLID`]), or when one is and the cell
-/// lies in the disc's `core` columns (within [`ASCII_CAP_D`] of x_c), which rounds the
-/// top and bottom of the disc; elsewhere a single cylinder half gives way to the other
-/// half, so the shoulders show the boundary layer instead of a one-pixel sliver, and the
-/// anti-aliased outside edge counts as empty. The vorticity is the mean of the `Div`
-/// halves, blank when |s| < 0.12, `.` when faint, `x`/`X` clockwise and `o`/`O`
-/// counter-clockwise; an empty cell is left untouched.
-pub(crate) fn ascii_cell(top: Ink, bottom: Ink, core: bool) -> Option<(char, Ink)> {
-    let solid = |p: Ink| p.role == Role::Structure && p.level >= RIM_SOLID;
-    let cap = core && (solid(top) || solid(bottom));
-    if cap || (solid(top) && solid(bottom)) {
-        return Some(('@', CYLINDER_INK));
-    }
-    let (mut sum, mut n) = (0.0, 0.0);
-    for p in [top, bottom] {
-        if p.role == Role::Div {
-            sum += ink::div_value(p);
-            n += 1.0;
-        }
-    }
-    if n == 0.0 {
-        return None;
-    }
-    let s: f64 = sum / n;
-    let ch = match (s.abs(), s < 0.0) {
-        (a, _) if a < ASCII_DOT => return None,
-        (a, _) if a < ASCII_EDDY => '.',
-        (a, true) if a < ASCII_STRONG => 'x',
-        (_, true) => 'X',
-        (a, false) if a < ASCII_STRONG => 'o',
-        (_, false) => 'O',
-    };
-    Some((ch, ink::div(s)))
-}
-
-/// The display columns (inclusive; empty as `(1, 0)`) whose centre lies within
-/// [`ASCII_CAP_D`] diameters of x_c, for a view of `view_w` lattice columns drawn
-/// `px_w` pixels wide (the pixel-centre convention of the view).
-pub(crate) fn cap_columns(p: &FlowParams, view_w: u16, px_w: u16) -> (i32, i32) {
-    let sx = f64::from(view_w) / f64::from(px_w.max(1));
-    let half = ASCII_CAP_D * p.d;
-    let mut cols = (1, 0);
-    for x in 0..i32::from(px_w) {
-        let dx = VIEW_X0 as f64 + (f64::from(x) + 0.5) * sx - 0.5 - p.xc;
-        if dx.abs() <= half {
-            cols = if cols.0 > cols.1 { (x, x) } else { (cols.0, x) };
-        }
-    }
-    cols
 }
 
 /// Populations, moments and the solid mask of one lattice.
@@ -1044,16 +893,11 @@ pub struct VortexStreet {
     since_check: f64,
     probe: Probe,
     reinits: u32,
-    /// Soft-clipped vorticity over the visible columns, and its map onto the pixels.
+    /// Soft-clipped vorticity over the visible columns (the upstream noise zeroed).
     vort: Grid<f32>,
-    map: SampleMap,
-    pixels: Pixels,
-    /// Scratch buffers of [`drop_faint_islands`], sized in `resize`.
-    marks: Vec<u8>,
-    stack: Vec<(i32, i32)>,
+    /// M16: the contours and the cylinder (GEN-R25).
+    dots: Dots,
     size: Option<Size>,
-    /// Display columns of the disc's ASCII caps (see [`ASCII_CAP_D`]), inclusive.
-    cap_cols: (i32, i32),
 }
 
 impl VortexStreet {
@@ -1086,84 +930,93 @@ impl VortexStreet {
         self.probe = Probe::at(p);
     }
 
-    /// Recompute the vorticity and rasterise it into the pixels: the fluid, then the
-    /// hysteresis pass on it, then the cylinder on top.
-    fn rasterise(&mut self) {
-        let Some(p) = self.params else { return };
+    /// The soft-clipped vorticity on the visible nodes, with the staircase noise upstream
+    /// of the round mask set to 0 (see [`UPSTREAM_MIN`]).
+    fn field(&mut self, p: &FlowParams) {
         vorticity(&self.lat.ux, &self.lat.uy, VIEW_X0, &mut self.vort);
         let scale = p.d / (VORT_SCALE * p.u);
-        for s in self.vort.as_mut_slice() {
-            *s = ink::soft_clip(f64::from(*s) * scale) as f32;
-        }
-        let px = self.pixels.pixel_size();
-        let (pw, ph) = (usize::from(px.width()), usize::from(px.height()));
         let vw = usize::from(self.vort.width());
-        // Pixel centre → offset from the cylinder centre in lattice units, the same
-        // cell-centre convention as the map (CORE-R68).
-        let offset = |x: i32, y: i32| {
-            let dx = VIEW_X0 as f64 + grid::centre_of(f64::from(x), pw, vw) - p.xc;
-            (dx, grid::centre_of(f64::from(y), ph, p.h) - p.yc)
-        };
         let radius = 0.5 * p.d;
         let opposite = radius + UPSTREAM_OPPOSITE_D * p.d;
-        let fluid = |x: i32, y: i32| {
-            let (dx, dy) = offset(x, y);
+        for (i, v) in self.vort.as_mut_slice().iter_mut().enumerate() {
+            let s = ink::soft_clip(f64::from(*v) * scale);
+            let (dx, dy) = ((VIEW_X0 + i % vw) as f64 - p.xc, (i / vw) as f64 - p.yc);
             let r2 = dx * dx + dy * dy;
-            // Pixels centred inside the rim are the cylinder's (drawn below), so the
-            // wall's own shear never seeds the hysteresis pass.
-            if r2 <= radius * radius {
-                return Ink::BLANK;
-            }
-            let s = f64::from(self.map.sample(&self.vort, x, y));
-            // Staircase noise upstream of the round mask. Rows grow downward, so `s·dy < 0`
-            // is the sign opposite to the boundary layer's.
-            if dx < 0.0 && s.abs() < UPSTREAM_MIN && r2 < opposite * opposite {
-                let r = r2.sqrt();
-                if r < radius + UPSTREAM_ANNULUS || s * dy < 0.0 {
-                    return Ink::BLANK;
+            // Rows grow downward, so `s·dy < 0` is the sign opposite to the boundary
+            // layer's.
+            let noise = dx < 0.0
+                && s.abs() < UPSTREAM_MIN
+                && r2 < opposite * opposite
+                && (r2.sqrt() < radius + UPSTREAM_ANNULUS || s * dy < 0.0);
+            *v = if noise { 0.0 } else { s as f32 };
+        }
+    }
+
+    /// Recompute the vorticity and draw it as contours (VOR-A9), then the cylinder on top.
+    fn rasterise(&mut self) {
+        let Some(p) = self.params else { return };
+        self.field(&p);
+        self.dots.clear();
+        let (vw, vh) = (
+            usize::from(self.vort.width()),
+            usize::from(self.vort.height()),
+        );
+        let ds = self.dots.dot_size();
+        if vw < 2 || vh < 2 {
+            return;
+        }
+        // Node (x, y) → dot coordinates, the cell-centre convention (CORE-R68).
+        let (sx, sy) = (
+            f64::from(ds.width()) / vw as f64,
+            f64::from(ds.height()) / vh as f64,
+        );
+        let to_dot = move |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        let k = ((sx.max(sy) / REFINE).ceil() as usize).clamp(1, MAX_REFINE);
+        let values = self.vort.as_slice();
+        let dots = &mut self.dots;
+        for j in 0..vh - 1 {
+            let (top, bottom) = (
+                &values[j * vw..(j + 1) * vw],
+                &values[(j + 1) * vw..(j + 2) * vw],
+            );
+            for i in 0..vw - 1 {
+                let c = [top[i], top[i + 1], bottom[i + 1], bottom[i]];
+                let (lo, hi) = (
+                    c[0].min(c[1]).min(c[2].min(c[3])),
+                    c[0].max(c[1]).max(c[2].max(c[3])),
+                );
+                if hi < LEVELS[0] && -lo < LEVELS[0] {
+                    continue;
+                }
+                for (sign, role) in [(1.0f32, Role::Hot), (-1.0, Role::Cold)] {
+                    let (slo, shi) = if sign > 0.0 { (lo, hi) } else { (-hi, -lo) };
+                    for (&level, &ink_level) in LEVELS.iter().zip(&LEVEL_INKS) {
+                        if !(slo < level && level <= shi) {
+                            continue;
+                        }
+                        let ink = Ink::new(role, ink_level);
+                        dots.contour_cell_refined(
+                            c.map(|v| sign * v),
+                            level,
+                            (i, j),
+                            k,
+                            to_dot,
+                            ink,
+                        );
+                    }
                 }
             }
-            vort_ink(s).unwrap_or(Ink::BLANK)
+        }
+        // The cylinder: a one-dot ring of radius D/2 in square dots.
+        let (cx, cy) = to_dot(p.xc - VIEW_X0 as f64, p.yc);
+        let r = 0.5 * p.d * 0.5 * (sx + sy);
+        let point = |k: usize| {
+            let (s, c) = (std::f64::consts::TAU * k as f64 / CYLINDER_PTS as f64).sin_cos_det();
+            (cx + r * c, cy + r * s)
         };
-        let marks = &mut self.marks;
-        // Grows only in the pass at the end of `resize`; every later pass reuses it.
-        marks.resize(pw * ph, EMPTY);
-        self.pixels.shade(|x, y| {
-            let ink = fluid(x, y);
-            marks[y as usize * pw + x as usize] = mark(ink);
-            ink
-        });
-        drop_faint_islands(&mut self.pixels, &mut self.marks, &mut self.stack);
-
-        // The cylinder, over the pixels that can touch it (centres within half a pixel of
-        // the rim).
-        let (sx, sy) = (vw as f64 / pw as f64, p.h as f64 / ph as f64);
-        let reach = radius + 0.5 * sx.max(sy);
-        // Pixel range whose centres lie within `reach` of lattice coordinate `c`.
-        let span = |c: f64, lattice: usize, pixels: usize| {
-            let lo = grid::centre_of(c - reach, lattice, pixels).floor().max(0.0);
-            let hi = grid::centre_of(c + reach, lattice, pixels).ceil();
-            (lo as i32, hi.min(pixels as f64 - 1.0) as i32)
-        };
-        let (x0, x1) = span(p.xc - VIEW_X0 as f64, vw, pw);
-        let (y0, y1) = span(p.yc, p.h, ph);
-        for y in y0..=y1 {
-            for x in x0..=x1 {
-                let (dx, dy) = offset(x, y);
-                // `sqrt` rather than libm's `hypot`: correctly rounded, so bit-identical.
-                let r = (dx * dx + dy * dy).sqrt();
-                let fluid = self.pixels.get(x, y).is_some_and(|i| i.role == Role::Div);
-                let ink = match disc_coverage(dx, dy, r, radius, (sx, sy)) {
-                    c if c >= 1.0 => CYLINDER_INK,
-                    c if c >= 0.5 => rim_ink(c),
-                    // A pixel partly covered from outside the rim shows the wall only
-                    // where the fluid is undrawn, so it never hides the boundary layer,
-                    // and the ASCII rule ignores it (see `ascii_cell`).
-                    c if c > 0.0 && !fluid => rim_ink(c),
-                    _ => continue,
-                };
-                self.pixels.set(x, y, ink);
-            }
+        for k in 0..CYLINDER_PTS {
+            let (a, b) = (point(k), point(k + 1));
+            self.dots.line(a.0, a.1, b.0, b.1, CYLINDER_INK);
         }
     }
 
@@ -1219,17 +1072,8 @@ impl Generator for VortexStreet {
             self.params = Some(p);
             self.vort = Grid::new(Size::new((p.w_vis - VIEW_X0) as u16, p.h as u16), 0.0);
         }
-        self.pixels.resize(size);
-        // The hysteresis stack holds at most one entry per pixel (`drop_faint_islands`).
-        // Cleared first: `reserve` counts from the length, and the last island is left
-        // in it, so the capacity would creep with each resize (TEST-R6).
-        self.stack.clear();
-        self.stack.reserve(self.pixels.pixel_size().area());
-        self.map.rebuild(self.vort.size(), self.pixels.pixel_size());
+        self.dots.resize(size);
         self.size = Some(size);
-        self.cap_cols = self.params.map_or((1, 0), |p| {
-            cap_columns(&p, self.vort.width(), self.pixels.pixel_size().width())
-        });
         self.rasterise();
     }
 
@@ -1270,13 +1114,7 @@ impl Generator for VortexStreet {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels.blit(canvas, |x, _, top, bottom| {
-            ascii_cell(
-                top,
-                bottom,
-                (self.cap_cols.0..=self.cap_cols.1).contains(&x),
-            )
-        });
+        self.dots.blit(canvas);
         self.label(canvas);
     }
 }
@@ -1612,217 +1450,44 @@ mod tests {
         assert_eq!(scully_core_dp(3.0, 4.0, gamma, 0.0), 0.0);
     }
 
-    /// Visible `Div` pixels (|s| ≥ 0.06) upstream of `x_c − 0.6 D` outside the band
-    /// `|y − y_c| ≤ 0.6 D` around the centre row: the calm inflow must hold none.
-    fn upstream_div_pixels(g: &VortexStreet) -> usize {
+    /// Contoured nodes (|s| ≥ the outermost level, after the upstream rule) upstream of
+    /// `x_c − 0.6 D` outside the band `|y − y_c| ≤ 0.6 D`: the calm inflow must hold none.
+    fn upstream_nodes(g: &VortexStreet) -> usize {
         let p = g.params.unwrap();
-        let px = g.pixels.pixel_size();
-        let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
-        let sx = f64::from(g.vort.width()) / f64::from(pw);
-        let sy = p.h as f64 / f64::from(ph);
-        let mut n = 0;
-        for y in 0..ph {
-            let ly = (f64::from(y) + 0.5) * sy - 0.5;
-            for x in 0..pw {
-                let lx = VIEW_X0 as f64 + (f64::from(x) + 0.5) * sx - 0.5;
-                // Every drawn Div pixel has |s| ≥ 0.06 (`vort_ink`).
-                let div = g.pixels.get(x, y).is_some_and(|i| i.role == Role::Div);
-                if div && lx < p.xc - 0.6 * p.d && (ly - p.yc).abs() > 0.6 * p.d {
-                    n += 1;
-                }
-            }
-        }
-        n
+        let vw = usize::from(g.vort.width());
+        g.vort
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter(|&(i, s)| {
+                let (x, y) = ((VIEW_X0 + i % vw) as f64, (i / vw) as f64);
+                s.abs() >= LEVELS[0] && x < p.xc - 0.6 * p.d && (y - p.yc).abs() > 0.6 * p.d
+            })
+            .count()
     }
 
-    /// Drawn pixels on the upstream shoulders (dx < 0, |dy| > D/4, within 0.6 D of the
-    /// rim) whose vorticity has the sign opposite to the boundary layer's: none belong
-    /// to the flow.
-    fn upstream_opposite_pixels(g: &VortexStreet) -> usize {
+    /// Contoured fluid nodes on the upstream shoulders (dx < 0, |dy| > D/4, within 1.1 D
+    /// of the centre) whose vorticity has the sign opposite to the boundary layer's.
+    fn upstream_opposite_nodes(g: &VortexStreet) -> usize {
         let p = g.params.unwrap();
-        let px = g.pixels.pixel_size();
-        let (pw, ph) = (i32::from(px.width()), i32::from(px.height()));
-        let sx = f64::from(g.vort.width()) / f64::from(pw);
-        let sy = p.h as f64 / f64::from(ph);
-        let mut n = 0;
-        for y in 0..ph {
-            let dy = (f64::from(y) + 0.5) * sy - 0.5 - p.yc;
-            for x in 0..pw {
-                let dx = VIEW_X0 as f64 + (f64::from(x) + 0.5) * sx - 0.5 - p.xc;
+        let vw = usize::from(g.vort.width());
+        g.vort
+            .as_slice()
+            .iter()
+            .enumerate()
+            .filter(|&(i, &s)| {
+                let (dx, dy) = ((VIEW_X0 + i % vw) as f64 - p.xc, (i / vw) as f64 - p.yc);
                 let r = (dx * dx + dy * dy).sqrt();
-                let Some(ink) = g.pixels.get(x, y).filter(|i| i.role == Role::Div) else {
-                    continue;
-                };
                 // Rows grow downward: the layer is CW (s < 0) above, CCW below.
-                let opposite = ink::div_value(ink) * dy < 0.0;
-                if dx < 0.0 && dy.abs() > 0.25 * p.d && r < 1.1 * p.d && opposite {
-                    n += 1;
-                }
-            }
-        }
-        n
-    }
-
-    /// 4-connected groups of drawn `Div` pixels none of which reaches [`VORT_SEED`]:
-    /// threshold-level specks with no structure behind them.
-    fn faint_islands(g: &VortexStreet) -> usize {
-        let px = g.pixels.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        let div = |x: i32, y: i32| g.pixels.get(x, y).filter(|i| i.role == Role::Div);
-        let mut seen = vec![false; (w * h) as usize];
-        let mut islands = 0;
-        for start in 0..w * h {
-            let (x0, y0) = (start % w, start / w);
-            if seen[start as usize] || div(x0, y0).is_none() {
-                continue;
-            }
-            seen[start as usize] = true;
-            let (mut stack, mut seeded) = (vec![(x0, y0)], false);
-            while let Some((x, y)) = stack.pop() {
-                seeded |= div(x, y).is_some_and(|i| mark(i) == SEED);
-                for (nx, ny) in [(x + 1, y), (x - 1, y), (x, y + 1), (x, y - 1)] {
-                    let next = (0..w).contains(&nx) && (0..h).contains(&ny);
-                    if next && !seen[(ny * w + nx) as usize] && div(nx, ny).is_some() {
-                        seen[(ny * w + nx) as usize] = true;
-                        stack.push((nx, ny));
-                    }
-                }
-            }
-            islands += usize::from(!seeded);
-        }
-        islands
-    }
-
-    #[test]
-    fn vor_a7_faint_islands_are_dropped_and_fringes_kept() {
-        let faint = ink::div(-0.08);
-        let mut px = Pixels::new(Size::new(8, 2)); // 8×4 pixels, the last row empty
-        // F S F F . F F .     S strong, F / f faint, C cylinder
-        // . . C . F . . .
-        // S . . F . . . f
-        // The strong eddy keeps its faint fringe (0, 0) and (2, 0)–(3, 0). The faint pair
-        // (5, 0)–(6, 0) has nothing behind it, (4, 1) touches the fringe only diagonally,
-        // (3, 2) touches only the cylinder, which is never a seed nor touched, and (7, 2)
-        // is a lone speck: all four go.
-        for (x, y, ink) in [
-            (0, 0, faint),
-            (1, 0, ink::div(0.5)),
-            (2, 0, faint),
-            (3, 0, faint),
-            (5, 0, faint),
-            (6, 0, faint),
-            (2, 1, CYLINDER_INK),
-            (4, 1, faint),
-            (0, 2, ink::div(0.2)),
-            (3, 2, faint),
-            (7, 2, ink::div(0.07)),
-        ] {
-            px.set(x, y, ink);
-        }
-        let before = px.clone();
-        // The marks the scene writes while shading.
-        let marks_of = |px: &Pixels| -> Vec<u8> {
-            (0..4)
-                .flat_map(|y| (0..8).map(move |x| (x, y)))
-                .map(|(x, y)| mark(px.get(x, y).unwrap_or(Ink::BLANK)))
-                .collect()
-        };
-        assert_eq!(mark(CYLINDER_INK), EMPTY);
-        assert_eq!((mark(faint), mark(ink::div(0.2))), (FAINT, SEED));
-        let mut marks = marks_of(&px);
-        let mut stack = Vec::with_capacity(32);
-        drop_faint_islands(&mut px, &mut marks, &mut stack);
-        for (x, y) in [(0, 0), (1, 0), (2, 0), (3, 0), (2, 1), (0, 2)] {
-            assert_eq!(px.get(x, y), before.get(x, y), "({x}, {y}) kept");
-        }
-        for (x, y) in [(5, 0), (6, 0), (4, 1), (3, 2), (7, 2)] {
-            assert_eq!(px.get(x, y), Some(Ink::BLANK), "({x}, {y}) dropped");
-        }
-        // Idempotent, and the stack never outgrows one entry per pixel.
-        let once = px.clone();
-        let mut marks = marks_of(&px);
-        drop_faint_islands(&mut px, &mut marks, &mut stack);
-        assert_eq!(format!("{px:?}"), format!("{once:?}"));
-        assert_eq!(stack.capacity(), 32);
-        // Marks that do not match the buffer are ignored rather than misread.
-        drop_faint_islands(&mut px, &mut [FAINT; 5], &mut stack);
-        assert_eq!(format!("{px:?}"), format!("{once:?}"));
-    }
-
-    #[test]
-    fn vor_a7_disc_rim_is_graded_and_keeps_its_footprint() {
-        let (sx, sy) = (1.5, 1.6);
-        assert_eq!(disc_coverage(0.0, 0.0, 0.0, 5.5, (sx, sy)), 1.0);
-        // On the rim: half covered; over half a pixel (1.5 nodes along x, 1.6 along y)
-        // in or out: full or none; a quarter pixel out: a quarter.
-        assert!((disc_coverage(5.5, 0.0, 5.5, 5.5, (sx, sy)) - 0.5).abs() < 1e-12);
-        assert_eq!(disc_coverage(4.7, 0.0, 4.7, 5.5, (sx, sy)), 1.0);
-        assert_eq!(disc_coverage(0.0, 6.4, 6.4, 5.5, (sx, sy)), 0.0);
-        assert!((disc_coverage(0.0, 5.9, 5.9, 5.5, (sx, sy)) - 0.25).abs() < 1e-12);
-        assert_eq!(rim_ink(0.5), Ink::new(Role::Structure, 160));
-        assert_eq!(rim_ink(1.0), CYLINDER_INK);
-
-        // ASCII: only halves with their centre inside the rim make `@`; a dim outside
-        // edge half counts as empty.
-        let (edge, solid) = (rim_ink(0.3), rim_ink(0.5));
-        for core in [false, true] {
-            assert_eq!(
-                ascii_cell(solid, CYLINDER_INK, core),
-                Some(('@', CYLINDER_INK))
-            );
-            assert_eq!(
-                ascii_cell(edge, ink::div(-0.5), core),
-                Some(('x', ink::div(-0.5)))
-            );
-        }
-        // One half inside the rim: `@` only in the cap columns near x_c, so the disc's
-        // top and bottom round off while its shoulders show the boundary layer.
-        assert_eq!(ascii_cell(edge, CYLINDER_INK, false), None);
-        assert_eq!(
-            ascii_cell(edge, CYLINDER_INK, true),
-            Some(('@', CYLINDER_INK))
-        );
-        assert_eq!(
-            ascii_cell(Ink::BLANK, solid, true),
-            Some(('@', CYLINDER_INK))
-        );
-        assert_eq!(ascii_cell(Ink::BLANK, edge, true), None);
-
-        // In a scene the pixels whose centre lies within D/2 are the cylinder at 160–200
-        // (so the ASCII disc keeps its footprint), with graded rim pixels; pixels partly
-        // covered from outside get 120–159 unless the fluid there is drawn (the boundary
-        // layer usually is).
-        for size in [Size::new(80, 24), Size::new(200, 50)] {
-            let (g, _) = scene(size);
-            let p = g.params.unwrap();
-            let px = g.pixels.pixel_size();
-            let sx = f64::from(g.vort.width()) / f64::from(px.width());
-            let sy = p.h as f64 / f64::from(px.height());
-            let mut inner = 0;
-            for y in 0..i32::from(px.height()) {
-                let dy = (f64::from(y) + 0.5) * sy - 0.5 - p.yc;
-                for x in 0..i32::from(px.width()) {
-                    let dx = VIEW_X0 as f64 + (f64::from(x) + 0.5) * sx - 0.5 - p.xc;
-                    let ink = g.pixels.get(x, y).unwrap();
-                    let r = (dx * dx + dy * dy).sqrt();
-                    let c = disc_coverage(dx, dy, r, 0.5 * p.d, (sx, sy));
-                    let at = format!("{size:?} ({x}, {y}) {ink:?}");
-                    if c >= 0.5 {
-                        assert!(
-                            ink.role == Role::Structure && ink.level >= RIM_SOLID,
-                            "{at}"
-                        );
-                        inner += usize::from(ink.level < 200);
-                    } else if c > 0.0 {
-                        let rim = ink.role == Role::Structure && ink.level < RIM_SOLID;
-                        assert!(rim || ink.role == Role::Div, "{at}");
-                    } else {
-                        assert!(ink.role != Role::Structure, "{at}");
-                    }
-                }
-            }
-            assert!(inner >= 4, "{size:?}: {inner} graded rim pixels");
-        }
+                let opposite = f64::from(s) * dy < 0.0;
+                s.abs() >= LEVELS[0]
+                    && dx < 0.0
+                    && dy.abs() > 0.25 * p.d
+                    && r > 0.5 * p.d
+                    && r < 1.1 * p.d
+                    && opposite
+            })
+            .count()
     }
 
     #[test]
@@ -1852,16 +1517,15 @@ mod tests {
                             t += SIM_DT;
                         }
                         let id = format!("{size:?} seed {seed} t = {check}");
-                        assert_eq!(upstream_div_pixels(&g), 0, "{id}: upstream pixels");
-                        assert_eq!(upstream_opposite_pixels(&g), 0, "{id}: shoulder specks");
-                        assert_eq!(faint_islands(&g), 0, "{id}: faint islands");
+                        assert_eq!(upstream_nodes(&g), 0, "{id}: upstream contours");
+                        assert_eq!(upstream_opposite_nodes(&g), 0, "{id}: shoulder specks");
                     }
                     // The watchdog never fires in normal operation.
                     assert_eq!(g.reinits, 0, "{size:?} seed {seed}");
                 });
             }
             // And at the highest Re: a D = 12 lattice (119×85, Re₀ = 150, 162 at the
-            // breath's peak), where the pixels are too coarse for the checks above.
+            // breath's peak).
             scope.spawn(|| {
                 let size = Size::new(13, 5);
                 let mut ctx = Ctx::new(42, size);
@@ -1934,24 +1598,43 @@ mod tests {
         assert_eq!(g.reinits, 0);
     }
 
+    fn is_braille(c: char) -> bool {
+        ('\u{2800}'..='\u{28ff}').contains(&c)
+    }
+
     #[test]
     fn vor_a7_frame_shows_disc_and_two_signed_rows() {
-        let mut s = Stage::new(build(), 42, Size::new(80, 24), GlyphMode::Ascii);
+        let (w, h) = (80usize, 24usize);
+        let mut s = Stage::new(build(), 42, Size::new(80, 24), GlyphMode::Unicode);
         // The scene's own frame: the title would sit on the calm inflow's last row.
         s.set_title_visible(false);
         for _ in 0..30 {
             s.step(SIM_DT);
         }
-        let lines = s.render().to_lines();
-        assert!(lines.iter().all(|l| l.is_ascii()));
-        let grid: Vec<Vec<char>> = lines.iter().map(|l| l.chars().collect()).collect();
-        let at: Vec<(usize, usize)> = (0..24)
-            .flat_map(|y| (0..80).map(move |x| (x, y)))
-            .filter(|&(x, y)| grid[y][x] == '@')
+        let frame = s.render();
+        let cells = frame.cells();
+        let at = |x: usize, y: usize| &cells[y * w + x];
+        for y in 0..h {
+            for x in 0..w {
+                let c = at(x, y);
+                if c.ch == ' ' || (y == 0 && c.ink.role == Role::Text) {
+                    continue;
+                }
+                assert!(is_braille(c.ch), "({x}, {y}) {:?}", c.ch);
+                assert!(
+                    matches!(c.ink.role, Role::Hot | Role::Cold | Role::Structure),
+                    "({x}, {y}) {:?}",
+                    c.ink
+                );
+            }
+        }
+        let disc: Vec<(usize, usize)> = (0..h)
+            .flat_map(|y| (0..w).map(move |x| (x, y)))
+            .filter(|&(x, y)| at(x, y).ink.role == Role::Structure && at(x, y).ch != ' ')
             .collect();
-        assert!(!at.is_empty());
-        // One 4-connected blob: flood fill from the first cell reaches them all.
-        let mut seen = vec![at[0]];
+        assert!(!disc.is_empty());
+        // One 8-connected blob (a ring of cells): flood fill reaches them all.
+        let mut seen = vec![disc[0]];
         let mut i = 0;
         while i < seen.len() {
             let (x, y) = seen[i];
@@ -1960,109 +1643,95 @@ mod tests {
                 (x.wrapping_sub(1), y),
                 (x, y + 1),
                 (x, y.wrapping_sub(1)),
+                (x + 1, y + 1),
+                (x + 1, y.wrapping_sub(1)),
+                (x.wrapping_sub(1), y + 1),
+                (x.wrapping_sub(1), y.wrapping_sub(1)),
             ] {
-                if at.contains(&n) && !seen.contains(&n) {
+                if disc.contains(&n) && !seen.contains(&n) {
                     seen.push(n);
                 }
             }
             i += 1;
         }
-        assert_eq!(seen.len(), at.len(), "the cylinder is one blob");
-        let n = at.len() as f64;
-        let cx = at.iter().map(|p| p.0 as f64).sum::<f64>() / n;
-        let cy = at.iter().map(|p| p.1 as f64).sum::<f64>() / n;
+        assert_eq!(seen.len(), disc.len(), "the cylinder is one blob");
+        let n = disc.len() as f64;
+        let cx = disc.iter().map(|p| p.0 as f64).sum::<f64>() / n;
+        let cy = disc.iter().map(|p| p.1 as f64).sum::<f64>() / n;
         assert!(
             (cx - 11.3).abs() <= 1.5 && (cy - 11.5).abs() <= 0.5,
             "centroid {cx}, {cy}"
         );
-        // Symmetric about the centre row: mirrored rows hold the same number of '@'.
-        let per_row = |y: usize| grid[y].iter().filter(|&&c| c == '@').count();
+        let per_row = |y: usize| disc.iter().filter(|p| p.1 == y).count();
         for y in 0..12 {
             assert_eq!(per_row(y), per_row(23 - y), "rows {y} and {}", 23 - y);
         }
-        // Round at 2:1 cells, not a bar: ≥ 4 rows of `@`, the outermost two shorter than
-        // the widest by ≥ 2 (measured 5, 7, 7, 5).
-        let rows: Vec<usize> = (0..24).map(per_row).filter(|&n| n > 0).collect();
-        let widest = rows.iter().copied().max().unwrap_or(0);
-        assert!(rows.len() >= 4, "@ rows {rows:?}");
-        assert!(
-            rows[0] + 2 <= widest && rows[rows.len() - 1] + 2 <= widest,
-            "{rows:?}"
-        );
-        for row in &grid[1..] {
-            assert!(row[..6].iter().all(|&c| c == ' '), "calm inflow");
+        assert!((0..24).filter(|&y| per_row(y) > 0).count() >= 4);
+        for y in 1..h {
+            assert!((0..6).all(|x| at(x, y).ch == ' '), "calm inflow, row {y}");
         }
-        let right = |pred: fn(char) -> bool, rows: std::ops::Range<usize>| {
-            rows.flat_map(|y| (cx.ceil() as usize + 5..80).map(move |x| (x, y)))
-                .filter(|&(x, y)| pred(grid[y][x]))
+        let right = |role: Role, rows: std::ops::Range<usize>| {
+            rows.flat_map(|y| (cx.ceil() as usize + 5..w).map(move |x| (x, y)))
+                .filter(|&(x, y)| at(x, y).ch != ' ' && at(x, y).ink.role == role)
                 .count()
         };
-        let cw = |c: char| c == 'x' || c == 'X';
-        let ccw = |c: char| c == 'o' || c == 'O';
-        assert!(right(cw, 0..24) > 0 && right(ccw, 0..24) > 0);
+        assert!(right(Role::Cold, 0..24) > 0 && right(Role::Hot, 0..24) > 0);
         assert!(
-            right(cw, 0..12) > right(ccw, 0..12),
+            right(Role::Cold, 0..12) > right(Role::Hot, 0..12),
             "upper row is clockwise"
         );
         assert!(
-            right(ccw, 12..24) > right(cw, 12..24),
+            right(Role::Hot, 12..24) > right(Role::Cold, 12..24),
             "lower row is counter-clockwise"
         );
-
-        s.set_glyph_mode(GlyphMode::Unicode);
-        let frame = s.render();
-        for c in frame.cells() {
-            for ink in [c.ink, c.bg] {
-                assert!(
-                    matches!(
-                        ink.role,
-                        Role::Div | Role::Structure | Role::Text | Role::Background
-                    ),
-                    "{ink:?}"
-                );
-            }
-        }
+        s.set_glyph_mode(GlyphMode::Ascii);
+        assert!(s.render().to_lines().iter().all(|l| l.is_ascii()));
     }
 
-    /// Same-sign eddies (`x|X` or `o|O` cells, 4-connected, at least 4 cells) whose
-    /// centroid lies right of column `x0`.
-    fn eddies_right_of(grid: &[Vec<char>], x0: f64) -> (usize, usize) {
-        let (h, w) = (grid.len(), grid[0].len());
+    /// Same-sign eddies (`Hot` or `Cold` cells, 8-connected, at least 4 cells) whose
+    /// centroid lies right of column `x0`: `(clockwise, counter-clockwise)`.
+    fn eddies_right_of(frame: &Canvas, x0: f64) -> (usize, usize) {
+        let (w, h) = (
+            usize::from(frame.size().width()),
+            usize::from(frame.size().height()),
+        );
+        let cells = frame.cells();
+        let sign = |x: usize, y: usize| {
+            let c = &cells[y * w + x];
+            match c.ink.role {
+                _ if c.ch == ' ' => None,
+                Role::Cold => Some(false),
+                Role::Hot => Some(true),
+                _ => None,
+            }
+        };
         let mut seen = vec![vec![false; w]; h];
         let (mut cw, mut ccw) = (0, 0);
         for y0 in 1..h {
             for x in 0..w {
-                let sign = |c: char| match c {
-                    'x' | 'X' => Some(false),
-                    'o' | 'O' => Some(true),
-                    _ => None,
-                };
-                let Some(s) = sign(grid[y0][x]).filter(|_| !seen[y0][x]) else {
+                let Some(s) = sign(x, y0).filter(|_| !seen[y0][x]) else {
                     continue;
                 };
-                let (mut stack, mut cells) = (vec![(x, y0)], Vec::new());
+                let (mut stack, mut xs) = (vec![(x, y0)], Vec::new());
                 seen[y0][x] = true;
                 while let Some((cx, cy)) = stack.pop() {
-                    cells.push(cx);
-                    let next = [
-                        (cx + 1, cy),
-                        (cx.wrapping_sub(1), cy),
-                        (cx, cy + 1),
-                        (cx, cy.wrapping_sub(1)),
-                    ];
-                    for (nx, ny) in next {
-                        if (1..h).contains(&ny)
-                            && nx < w
-                            && !seen[ny][nx]
-                            && sign(grid[ny][nx]) == Some(s)
-                        {
-                            seen[ny][nx] = true;
-                            stack.push((nx, ny));
+                    xs.push(cx);
+                    for dy in [-1i32, 0, 1] {
+                        for dx in [-1i32, 0, 1] {
+                            let (nx, ny) = (cx as i32 + dx, cy as i32 + dy);
+                            if !((0..w as i32).contains(&nx) && (1..h as i32).contains(&ny)) {
+                                continue;
+                            }
+                            let (nx, ny) = (nx as usize, ny as usize);
+                            if !seen[ny][nx] && sign(nx, ny) == Some(s) {
+                                seen[ny][nx] = true;
+                                stack.push((nx, ny));
+                            }
                         }
                     }
                 }
-                let mean = cells.iter().sum::<usize>() as f64 / cells.len() as f64;
-                if cells.len() >= 4 && mean > x0 {
+                let mean = xs.iter().sum::<usize>() as f64 / xs.len() as f64;
+                if xs.len() >= 4 && mean > x0 {
                     *(if s { &mut ccw } else { &mut cw }) += 1;
                 }
             }
@@ -2079,25 +1748,20 @@ mod tests {
         // Two independent runs, one thread each. Right of x_c + 3D the view holds ≈ 1.5
         // wavelengths, and the newest eddy stays joined to the shear layer for part of
         // each period, so the count depends on the phase: five frames span one shedding
-        // period (≈ 1.6 s) from t = 20 s, each with ≥ 2 separate eddies of both signs,
-        // and ≥ 3 in at least one.
+        // period (≈ 1.6 s) from t = 20 s, each with separate eddies of both signs, and
+        // ≥ 3 in at least one.
         std::thread::scope(|scope| {
             for seed in [42, 7] {
                 scope.spawn(move || {
-                    let mut s = Stage::new(build(), seed, Size::new(80, 24), GlyphMode::Ascii);
+                    let mut s = Stage::new(build(), seed, Size::new(80, 24), GlyphMode::Unicode);
+                    s.set_title_visible(false);
                     let mut three = 0;
                     for frame in 0..5 {
                         let steps = if frame == 0 { 1200 } else { 24 };
                         for _ in 0..steps {
                             s.step(SIM_DT);
                         }
-                        let grid: Vec<Vec<char>> = s
-                            .render()
-                            .to_lines()
-                            .iter()
-                            .map(|l| l.chars().collect())
-                            .collect();
-                        let (cw, ccw) = eddies_right_of(&grid, x0);
+                        let (cw, ccw) = eddies_right_of(s.render(), x0);
                         assert!(cw >= 1 && ccw >= 1, "seed {seed} frame {frame}: {cw}/{ccw}");
                         three += usize::from(cw + ccw >= 3);
                     }
@@ -2105,6 +1769,31 @@ mod tests {
                 });
             }
         });
+    }
+
+    #[test]
+    fn vor_a9_vorticity_is_threads_not_fills() {
+        let mut s = Stage::new(build(), 42, Size::new(200, 50), GlyphMode::Unicode);
+        s.set_title_visible(false);
+        for _ in 0..1200 {
+            s.step(SIM_DT);
+        }
+        let (mut cells, mut dots, mut full) = (0usize, 0u32, 0usize);
+        let mut levels = std::collections::BTreeSet::new();
+        for c in s.render().cells() {
+            if is_braille(c.ch) && matches!(c.ink.role, Role::Hot | Role::Cold) {
+                let mask = c.ch as u32 - 0x2800;
+                cells += 1;
+                dots += mask.count_ones();
+                full += usize::from(mask == 0xff);
+                levels.insert(c.ink.level);
+            }
+        }
+        assert!(cells > 100, "{cells} vorticity cells");
+        let mean = f64::from(dots) / cells as f64;
+        assert!(mean <= 4.5, "{mean:.2} dots per cell");
+        assert!(full as f64 <= 0.15 * cells as f64, "{full} of {cells} full");
+        assert_eq!(levels.into_iter().collect::<Vec<_>>(), LEVEL_INKS.to_vec());
     }
 
     #[test]
