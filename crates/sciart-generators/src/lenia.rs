@@ -15,12 +15,19 @@
 //! replaced by a birth a few seconds later. Every reseed (act change or watchdog)
 //! cross-fades: the old creatures keep swimming as a ghost while the new ones condense,
 //! so no frame is empty.
+//!
+//! ## Picture (M16, GEN-R25)
+//!
+//! No fills: each creature is drawn as nested iso-level threads of the displayed field,
+//! traced on the lattice by marching squares (`Dots::contour`, CORE-R105): a `Wave`
+//! membrane, a brighter `Wave` body line and a `Particle` core. A faint wake follows each
+//! glider: a trail field that keeps the running maximum of `A` decaying with time
+//! constant [`TRAIL_TAU`] (per update, so it is cadence-free), contoured once, dim.
 
 use rand::Rng;
 use sciart_core::ease;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::raster::ASCII_RAMP;
 
 pub static META: Meta = Meta {
     name: "lenia",
@@ -388,8 +395,10 @@ struct Lenia {
     ghost: World,
     ghost_at: Option<f64>,
     scratch: Grid<f32>,
-    map: SampleMap,
-    pixels: Pixels,
+    /// The displayed field and the decaying trail, per lattice node (sized in `resize`).
+    disp: Vec<f32>,
+    trail: Vec<f32>,
+    dots: Dots,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
 }
@@ -412,8 +421,9 @@ impl Default for Lenia {
             ghost: World::default(),
             ghost_at: None,
             scratch: Grid::default(),
-            map: SampleMap::default(),
-            pixels: Pixels::default(),
+            disp: Vec::new(),
+            trail: Vec::new(),
+            dots: Dots::default(),
         }
     }
 }
@@ -511,77 +521,73 @@ impl Lenia {
             }
             None => (1.0, None),
         };
-        // A newborn fades in (display only): pixels near its hatching place are dimmed
-        // by its age, so it condenses out of the dark instead of popping in.
-        let px = self.pixels.pixel_size();
+        // A newborn fades in (display only): nodes near its hatching place are dimmed by
+        // its age, so it condenses out of the dark instead of popping in.
         let lat = self.world.a.size();
-        let sx = f64::from(px.width()) / f64::from(lat.width());
-        let sy = f64::from(px.height()) / f64::from(lat.height());
+        let (w, h) = (usize::from(lat.width()), usize::from(lat.height()));
         let birth = self.birth.and_then(|((bx, by), t0)| {
             let age = (self.time - t0) / BIRTH_FADE;
-            (age < 1.0).then(|| {
-                let (cx, cy) = ((f64::from(bx) + 0.5) * sx, (f64::from(by) + 0.5) * sy);
-                (cx, cy, BIRTH_R * sx, ease::smoothstep(age.max(0.0)) as f32)
-            })
+            (age < 1.0).then(|| (bx, by, ease::smoothstep(age.max(0.0)) as f32))
         });
-        let (map, a, p) = (&self.map, &self.world.a, &self.world.prev);
-        // Row samplers, rebuilt when the shader reaches the next pixel row (CORE-R104).
-        let (mut ry, mut ar, mut pr) = (-1, map.row(a, 0), map.row(p, 0));
-        self.pixels.shade(|x, y| {
-            if y != ry {
-                (ry, ar, pr) = (y, map.row(a, y), map.row(p, y));
-            }
-            let (va, vp) = (ar.at(x), pr.at(x));
-            let mut v = (vp + (va - vp) * f) * k_in;
-            if let Some((cx, cy, r, k)) = birth {
-                let d = (f64::from(x) + 0.5 - cx).hypot((f64::from(y) + 0.5 - cy) * sx / sy);
-                if d < r {
+        self.dots.clear();
+        if w < 2 || h < 2 || self.disp.len() != w * h || self.trail.len() != w * h {
+            return;
+        }
+        let (a, p) = (self.world.a.as_slice(), self.world.prev.as_slice());
+        for (i, d) in self.disp.iter_mut().enumerate() {
+            let mut v = (p[i] + (a[i] - p[i]) * f) * k_in;
+            if let Some((bx, by, k)) = birth {
+                let (x, y) = ((i % w) as i32, (i / w) as i32);
+                let r = f64::from(x - bx).hypot(f64::from(y - by));
+                if r < BIRTH_R {
                     v *= k;
                 }
             }
             if let Some((g, k)) = ghost {
-                let (ga, gp) = (map.sample(&g.a, x, y), map.sample(&g.prev, x, y));
+                let (ga, gp) = (g.a.as_slice()[i], g.prev.as_slice()[i]);
                 v = v.max((gp + (ga - gp) * f) * k);
             }
-            lenia_ink(v)
-        });
+            *d = v;
+        }
+        let ds = self.dots.dot_size();
+        let sx = f64::from(ds.width()) / w as f64;
+        let sy = f64::from(ds.height()) / h as f64;
+        let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
+        // The wake only outside the creatures (every corner below the membrane), so it
+        // trails behind them instead of crossing their bodies.
+        let disp = &self.disp;
+        self.dots
+            .contour_by(&self.trail, w, h, TRAIL_LEVEL, to_dot, |i, j| {
+                let k = j * w + i;
+                [disp[k], disp[k + 1], disp[k + w], disp[k + w + 1]]
+                    .iter()
+                    .all(|&v| v < LEVELS[0].0)
+                    .then_some(TRAIL_INK)
+            });
+        for &(level, ink) in &LEVELS {
+            self.dots.contour(&self.disp, w, h, level, to_dot, ink);
+        }
     }
 }
 
-/// The creature as a `Seq` field in four flat steps `(v from, Seq level)`, like M11's
-/// reaction fields (ADR-0018): a violet membrane, red and orange flesh, a yellow core;
-/// black below the first step.
-const LENIA_STEPS: [(f32, u8); 4] = [(0.03, 60), (0.1, 125), (0.3, 185), (0.6, 240)];
+/// M16 (GEN-R25): the creature's threads `(level of the displayed field, ink)`, outer to
+/// inner: a cyan membrane, a brighter body line, a mint core. A cell shows its brightest.
+pub(crate) const LEVELS: [(f32, Ink); 3] = [
+    (0.12, Ink::new(Role::Wave, 170)),
+    (0.4, Ink::new(Role::Wave, 235)),
+    (0.75, Ink::new(Role::Particle, 250)),
+];
+/// The wake: the trail field's level and its faint ink, and the trail's decay time (s).
+pub(crate) const TRAIL_LEVEL: f32 = 0.12;
+pub(crate) const TRAIL_INK: Ink = Ink::new(Role::Wave, 70);
+pub(crate) const TRAIL_TAU: f64 = 0.8;
 
-fn lenia_ink(v: f32) -> Ink {
-    if !v.is_finite() {
-        return Ink::BLANK;
-    }
-    LENIA_STEPS
-        .iter()
-        .rev()
-        .find(|(from, _)| v >= *from)
-        .map_or(Ink::BLANK, |&(_, l)| Ink::new(Role::Seq, l))
-}
-
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let ink = raster_stronger(top, bottom)?;
-    let i = usize::from(ink.level) * (ASCII_RAMP.len() - 1) / 255;
-    Some((ASCII_RAMP[i], ink))
-}
-
-/// The brighter lit pixel of a cell, if any.
-fn raster_stronger(top: Ink, bottom: Ink) -> Option<Ink> {
-    let lit = |i: Ink| i.role != Role::Background;
-    match (lit(top), lit(bottom)) {
-        (false, false) => None,
-        (true, false) => Some(top),
-        (false, true) => Some(bottom),
-        (true, true) => Some(if top.level >= bottom.level {
-            top
-        } else {
-            bottom
-        }),
+/// The wake after `dt` seconds: the running maximum of the field `a`, decaying with time
+/// constant [`TRAIL_TAU`].
+pub(crate) fn decay_trail(trail: &mut [f32], a: &[f32], dt: f64) {
+    let keep = (-dt / TRAIL_TAU).exp() as f32;
+    for (t, &v) in trail.iter_mut().zip(a) {
+        *t = (*t * keep).max(v);
     }
 }
 
@@ -591,8 +597,9 @@ impl Generator for Lenia {
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        self.pixels.resize(size);
-        let px = self.pixels.pixel_size();
+        self.dots.resize(size);
+        // Square nodes: the lattice is fitted to the half-block-sized squares (2×2 dots).
+        let px = Size::new(size.width().max(1), size.height().saturating_mul(2).max(1));
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
         if self.ghost.a.size() != lat {
             // A cross-fade in flight is dropped on a lattice change (the ghost is only
@@ -615,7 +622,12 @@ impl Generator for Lenia {
                 self.seed(&mut ctx.rng);
             }
         }
-        self.map.rebuild(lat, px);
+        // Display buffers sized here, so `prepare` never allocates (GEN-R11); the wake
+        // restarts.
+        self.disp.clear();
+        self.disp.resize(lat.area(), 0.0);
+        self.trail.clear();
+        self.trail.resize(lat.area(), 0.0);
         self.dirty = true;
     }
 
@@ -651,6 +663,8 @@ impl Generator for Lenia {
             );
             self.world.damage(bite, DAMAGE_R);
         }
+        // The wake decays per simulated second, not per frame (GEN-R20).
+        decay_trail(&mut self.trail, self.world.a.as_slice(), dt);
         self.dirty = true;
     }
 
@@ -663,8 +677,8 @@ impl Generator for Lenia {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
+        // ASCII falls back by dot count (`Dots::blit`).
+        self.dots.blit(canvas);
     }
 }
 
@@ -847,16 +861,17 @@ mod tests {
         assert!(g.birth.is_some());
     }
 
-    /// Lit creature pixels: shaded at least mid-level (a body, not a faint halo).
+    /// Lit creature cells: a creature thread (the faint wake excluded).
     fn lit_pixels(g: &Lenia) -> usize {
-        let px = g.pixels.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        (0..h)
-            .flat_map(|y| (0..w).map(move |x| (x, y)))
+        let size = g.dots.dot_size();
+        let cells = Size::new(size.width() / 2, size.height() / 4);
+        let mut canvas = Canvas::new(cells, GlyphMode::Unicode);
+        g.dots.blit(&mut canvas);
+        (0..i32::from(cells.height()))
+            .flat_map(|y| (0..i32::from(cells.width())).map(move |x| (x, y)))
             .filter(|&(x, y)| {
-                g.pixels
-                    .get(x, y)
-                    .is_some_and(|i| i.role != Role::Background && i.level >= 110)
+                let c = canvas.get(x, y).unwrap();
+                c.ch != ' ' && c.ink.level >= LEVELS[0].1.level
             })
             .count()
     }
@@ -878,7 +893,7 @@ mod tests {
                 frame += 1;
                 if frame % 15 == 0 {
                     let n = lit_pixels(&g);
-                    assert!(n >= 20, "{size:?} t = {:.2} s: {n} lit pixels", g.time);
+                    assert!(n >= 8, "{size:?} t = {:.2} s: {n} lit cells", g.time);
                 }
             }
         }
@@ -897,13 +912,74 @@ mod tests {
     }
 
     #[test]
-    fn lna_a10_the_creature_is_a_stepped_seq_field_on_black() {
-        assert_eq!(lenia_ink(0.0), Ink::BLANK);
-        assert_eq!(lenia_ink(1.0), Ink::new(Role::Seq, 240));
-        let mut levels: Vec<u8> = (0..=100)
-            .map(|i| lenia_ink(i as f32 / 100.0).level)
-            .collect();
-        levels.dedup();
-        assert_eq!(levels.len(), 1 + LENIA_STEPS.len(), "{levels:?}");
+    fn lna_a10_a11_creatures_are_nested_contour_threads_with_a_faint_wake() {
+        // Inks: Wave membrane and body, Particle core, a dim Wave wake; levels rising.
+        assert!(
+            LEVELS
+                .windows(2)
+                .all(|w| w[0].0 < w[1].0 && w[0].1.level < w[1].1.level)
+        );
+        assert_eq!(
+            LEVELS.map(|l| l.1.role),
+            [Role::Wave, Role::Wave, Role::Particle]
+        );
+        assert!(TRAIL_INK.role == Role::Wave && TRAIL_INK.level < LEVELS[0].1.level);
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = Lenia::default();
+        g.resize(size, &mut ctx);
+        for _ in 0..180 {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut seen = [0usize; 4];
+        let mut interior = 0;
+        for y in 0..40 {
+            for x in 0..120 {
+                let c = canvas.get(x, y).unwrap();
+                assert_eq!(c.bg, Ink::BLANK);
+                assert!(!matches!(c.ch, '▀' | '▄' | '█'));
+                if c.ch == ' ' {
+                    continue;
+                }
+                let k = LEVELS.iter().position(|l| l.1 == c.ink).unwrap_or_else(|| {
+                    assert_eq!(c.ink, TRAIL_INK, "{x},{y}");
+                    3
+                });
+                seen[k] += 1;
+            }
+        }
+        assert!(
+            seen.iter().all(|&n| n > 0),
+            "every thread and the wake: {seen:?}"
+        );
+        // No fills: a dot inside a lit patch (all four dot neighbours lit) is rare.
+        let ds = g.dots.dot_size();
+        let mut total = 0;
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                let lit = |x, y| g.dots.is_lit(x, y);
+                if lit(x, y) {
+                    total += 1;
+                    if lit(x - 1, y) && lit(x + 1, y) && lit(x, y - 1) && lit(x, y + 1) {
+                        interior += 1;
+                    }
+                }
+            }
+        }
+        assert!(interior * 10 < total, "{interior} filled of {total}");
+        // The wake keeps where the creature has been and fades with τ, the same in one
+        // step or many (cadence-free).
+        let mut one = [1.0f32, 0.0, 0.5];
+        decay_trail(&mut one, &[0.0, 0.7, 0.1], TRAIL_TAU);
+        let e = (-1.0f32).exp();
+        assert!((one[0] - e).abs() < 1e-6 && one[1] == 0.7 && (one[2] - 0.5 * e).abs() < 1e-6);
+        let mut many = [1.0f32];
+        for _ in 0..48 {
+            decay_trail(&mut many, &[0.0], TRAIL_TAU / 48.0);
+        }
+        assert!((many[0] - e).abs() < 1e-5);
     }
 }

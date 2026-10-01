@@ -14,19 +14,14 @@ const SPEC: &str = include_str!("../../../docs/specs/SPEC-002-generators.md");
 /// An allowlist that may only shrink: a listed scene that already passes fails
 /// `gen_r25_pending_only_shrinks` until its entry is deleted. Alphabetical.
 const PENDING_GEN_R25: &[&str] = &[
-    "belousov_zhabotinsky",
-    "catalytic_surface",
     "comet_breakup",
     "cosmic_web",
     "dicty_aggregation",
     "hp_protein_folding",
     "hurricane",
-    "ising_model",
     "jupiter_storms",
     "jwst_unfolding",
-    "lenia",
     "planetary_nebula",
-    "quantum_double_slit",
     "radical_chain",
     "rainbow",
     "relativistic_jet",
