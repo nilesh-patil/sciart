@@ -673,3 +673,117 @@ fn core_r89_dissolve_has_no_pattern() {
         dissolved_uniform(Ink::new(Role::Ramp(Ramp::Aurora), l), 40);
     }
 }
+
+// ---------------------------------------------------------------- CORE-R105
+
+/// A `w × h` field of distances from `(cx, cy)` (node units).
+fn cone(w: usize, h: usize, cx: f64, cy: f64) -> Vec<f32> {
+    (0..w * h)
+        .map(|k| ((k % w) as f64 - cx).hypot((k / w) as f64 - cy) as f32)
+        .collect()
+}
+
+fn lit_dots(d: &Dots) -> Vec<(i32, i32)> {
+    let s = d.dot_size();
+    let mut out = Vec::new();
+    for y in 0..i32::from(s.height()) {
+        for x in 0..i32::from(s.width()) {
+            if d.is_lit(x, y) {
+                out.push((x, y));
+            }
+        }
+    }
+    out
+}
+
+#[test]
+fn core_r105_circle_contour_is_closed_and_on_its_radius() {
+    // 32×16 cells = 64×64 dots; one node per dot.
+    let mut d = Dots::new(Size::new(32, 16));
+    let (w, h, c, r) = (64, 64, 31.5, 20.0);
+    let field = cone(w, h, c, c);
+    d.contour(&field, w, h, r as f32, |x, y| (x, y), A);
+    let lit = lit_dots(&d);
+    assert!(lit.len() > 100, "{} dots", lit.len());
+    for &(x, y) in &lit {
+        let rho = (f64::from(x) - c).hypot(f64::from(y) - c);
+        assert!((rho - r).abs() <= 1.0, "dot {x},{y} at radius {rho}");
+        // Closed: every dot continues the curve on both sides.
+        let nb = (-1..=1)
+            .flat_map(|a| (-1..=1).map(move |b| (a, b)))
+            .filter(|&(a, b)| (a, b) != (0, 0) && d.is_lit(x + a, y + b))
+            .count();
+        assert!(nb >= 2, "open end at {x},{y}");
+    }
+    // Every direction meets the ring: a lit dot within one dot of the circle's point.
+    for k in 0..360 {
+        let (s, co) = f64::from(k).to_radians().sin_cos_det();
+        let (px, py) = ((c + r * co).round() as i32, (c + r * s).round() as i32);
+        let hit = (-1..=1).any(|a| (-1..=1).any(|b| d.is_lit(px + a, py + b)));
+        assert!(hit, "gap at {k}°");
+    }
+}
+
+#[test]
+fn core_r105_to_dot_maps_nodes_and_contour_by_picks_ink_per_cell() {
+    // Nodes every 2 dots: the circle of radius 6 nodes lands at radius 12 dots.
+    let (w, h) = (20, 20);
+    let field = cone(w, h, 9.5, 9.5);
+    let mut d = Dots::new(Size::new(20, 10));
+    d.contour_by(
+        &field,
+        w,
+        h,
+        6.0,
+        |x, y| (2.0 * x, 2.0 * y),
+        |i, _| (i >= 10).then_some(B),
+    );
+    let lit = lit_dots(&d);
+    assert!(!lit.is_empty());
+    for &(x, y) in &lit {
+        let rho = (f64::from(x) - 19.0).hypot(f64::from(y) - 19.0);
+        assert!((rho - 12.0).abs() <= 1.5, "{x},{y}: {rho}");
+        // Only the right half's cells were drawn.
+        assert!(x >= 20, "{x},{y}");
+    }
+    let mut c = Canvas::new(Size::new(20, 10), GlyphMode::Unicode);
+    d.blit(&mut c);
+    assert!(c.cells().iter().all(|cell| cell.ch == ' ' || cell.ink == B));
+}
+
+#[test]
+fn core_r105_saddles_and_single_cells() {
+    // A saddle: two diagonal corners above the level, two below: two pieces.
+    let mut d = Dots::new(Size::new(8, 4));
+    let wide = |x: f64, y: f64| (8.0 * x + 2.0, 8.0 * y + 2.0);
+    d.contour_cell([1.0, 0.0, 1.0, 0.0], 0.5, (0, 0), wide, A);
+    assert!(lit_dots(&d).len() >= 8, "{:?}", lit_dots(&d));
+    // No crossing, no dots.
+    let mut e = Dots::new(Size::new(8, 4));
+    e.contour_cell([1.0, 2.0, 3.0, 4.0], 0.5, (0, 0), |x, y| (x, y), A);
+    assert!(lit_dots(&e).is_empty());
+    // A straight level in one cell: one piece through its middle.
+    e.contour_cell(
+        [0.0, 1.0, 1.0, 0.0],
+        0.5,
+        (0, 0),
+        |x, y| (8.0 * x, 8.0 * y),
+        A,
+    );
+    let lit = lit_dots(&e);
+    assert!(lit.iter().all(|&(x, _)| x == 4), "{lit:?}");
+    assert_eq!(lit.len(), 9);
+}
+
+#[test]
+fn core_r105_degenerate_fields_draw_nothing() {
+    let mut d = Dots::new(Size::new(8, 4));
+    let field = cone(8, 8, 3.5, 3.5);
+    let id = |x: f64, y: f64| (x, y);
+    d.contour(&field, 8, 9, 2.0, id, A); // shorter than w·h
+    d.contour(&field[..8], 8, 1, 2.0, id, A); // one row
+    d.contour(&field, 1, 8, 2.0, id, A); // one column
+    d.contour(&[f32::NAN; 16], 4, 4, 2.0, id, A);
+    d.contour_cell([0.0, f32::INFINITY, 1.0, 0.0], 0.5, (0, 0), id, A);
+    assert!(lit_dots(&d).is_empty());
+}

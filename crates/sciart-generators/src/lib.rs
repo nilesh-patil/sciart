@@ -93,7 +93,6 @@ registry![
     rocket_launch,
     satellite_orbit,
     saturn_rings,
-    seashell_pigmentation,
     solar_eruption,
     solar_surface,
     solar_system,
