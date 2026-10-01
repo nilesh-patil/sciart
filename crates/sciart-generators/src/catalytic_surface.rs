@@ -67,7 +67,9 @@ const Y_REACTIVE: f64 = 0.46;
 const Y_JET: f64 = 0.545;
 const Y_CO: f64 = 0.65;
 const Y_ADVANCE: f64 = 0.53;
-const Y_OXYGEN: f64 = 0.43;
+/// M16 round 2: 0.46 (was 0.43, held 0.5 s): the O layer covers ≈ 80–88 % of the
+/// surface at the low point, so the caption still fires but the fronts never all close.
+const Y_OXYGEN: f64 = 0.48;
 /// The gas is fed as a jet onto the centre and CO is used up on its way out, so `y`
 /// falls with distance from the centre: `y = y_jet − GRADE·r`, `r` the distance over the
 /// half-diagonal (0 at the centre, 1 in the corners). Each phase transition then sits on
@@ -92,31 +94,33 @@ pub(crate) const MAX_ATTEMPTS: u32 = 12_000;
 /// Sweeps run in the first resize, so the first frame already shows islands.
 const PREROLL_SWEEPS: usize = 12;
 
-/// The 36.5 s sweep of the jet's `y`: (label, seconds, y at the start, y at the end),
+/// The 36 s sweep of the jet's `y`: (label, seconds, y at the start, y at the end),
 /// smoothstep between. CO islands nucleate at the jet and the CO disc grows out to the
 /// corners; `y` then falls, O eats the disc back along a bright ring front, and the O
 /// layer closes in from the corners to a brief poisoned beat before the jet recovers.
 /// The local `y` stays inside the reactive window somewhere except in the two short
 /// holds, so fronts are always moving.
-const SWEEP: [(&str, f64, f64, f64); 8] = [
+const SWEEP: [(&str, f64, f64, f64); 7] = [
     ("CO nucleates", 5.0, Y_JET, Y_JET),
     ("CO grows", 7.0, Y_JET, Y_CO),
     ("CO", 2.5, Y_CO, Y_CO),
     ("O returns", 9.0, Y_CO, Y_ADVANCE),
     ("reactive", 5.0, Y_ADVANCE, Y_ADVANCE),
     ("O advances", 4.5, Y_ADVANCE, Y_OXYGEN),
-    ("O-poisoned", 0.5, Y_OXYGEN, Y_OXYGEN),
     ("recover", 3.0, Y_OXYGEN, Y_JET),
 ];
 
 /// M16 (GEN-R25): only the CO/O island boundaries are drawn, as two braille threads on
 /// either side of each front: `Hot` on the CO side, `Cold` on the O side. The species field
 /// (CO +1, O −1, empty 0) is box-blurred over `BLUR` sites each way, so lone sites and
-/// vacancies draw nothing and the threads follow the islands, and contoured at `±EDGE`.
+/// vacancies draw nothing and the threads follow the islands, and contoured at `CO_EDGE`
+/// and `−O_EDGE`. The CO level is the lower one, so small CO islands in the reactive
+/// window still show warm.
 pub(crate) const CO_THREAD: Ink = Ink::new(Role::Hot, 210);
-pub(crate) const O_THREAD: Ink = Ink::new(Role::Cold, 200);
+pub(crate) const O_THREAD: Ink = Ink::new(Role::Cold, 235);
 pub(crate) const BLUR: usize = 2;
-pub(crate) const EDGE: f32 = 0.45;
+pub(crate) const CO_EDGE: f32 = 0.3;
+pub(crate) const O_EDGE: f32 = 0.45;
 /// A blink: full while its brightness is above half, then a step dimmer.
 const FLASH_INKS: [Ink; 2] = [Ink::new(Role::Star, 170), Ink::new(Role::Star, 255)];
 /// The loop opens part-way through "O returns", where the jet's `y` is ≈ 0.59, on a
@@ -458,9 +462,9 @@ impl CatalyticSurface {
         let sy = f64::from(ds.height()) / h.max(1) as f64;
         let to_dot = |x: f64, y: f64| ((x + 0.5) * sx - 0.5, (y + 0.5) * sy - 0.5);
         self.dots
-            .contour(&self.field, w, h, -EDGE, to_dot, O_THREAD);
+            .contour(&self.field, w, h, -O_EDGE, to_dot, O_THREAD);
         self.dots
-            .contour(&self.field, w, h, EDGE, to_dot, CO_THREAD);
+            .contour(&self.field, w, h, CO_EDGE, to_dot, CO_THREAD);
         for (i, &s) in self.sparks.as_slice().iter().enumerate() {
             if let Some(ink) = spark_ink(s) {
                 let (x, y) = to_dot((i % w) as f64, (i / w) as f64);
@@ -897,5 +901,35 @@ mod tests {
             }
             assert!(lit_by_role(&mut g).is_empty(), "cover {cover}");
         }
+    }
+
+    #[test]
+    fn cat_a10_no_dead_frame_over_the_loop() {
+        // At 160×45, sampled every 0.25 s over a whole loop, ≥ 2 % of the field's cells
+        // are lit, the O-poisoned beat included.
+        let size = Size::new(160, 45);
+        let mut ctx = Ctx::new(42, size);
+        let mut g = CatalyticSurface::default();
+        g.resize(size, &mut ctx);
+        let loop_s: f64 = SWEEP.iter().map(|p| p.1).sum();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        let mut worst = (1.0f64, 0.0f64);
+        for k in 0..(loop_s / 0.25) as usize {
+            for _ in 0..15 {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            canvas.clear();
+            g.dots.blit(&mut canvas);
+            let lit = (0..44)
+                .flat_map(|y| (0..160).map(move |x| (x, y)))
+                .filter(|&(x, y)| canvas.get(x, y).unwrap().ch != ' ')
+                .count() as f64
+                / (160.0 * 44.0);
+            if lit < worst.0 {
+                worst = (lit, 0.25 * (k + 1) as f64);
+            }
+        }
+        assert!(worst.0 >= 0.02, "lit {:.3} at t = {} s", worst.0, worst.1);
     }
 }

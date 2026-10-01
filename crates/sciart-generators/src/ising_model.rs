@@ -15,8 +15,8 @@
 //!
 //! Black ground; only the domain walls are drawn, as braille threads one dot thick. The
 //! block magnetisation `b` (the mean of each spin's periodic 3×3 block, in steps of 2/9)
-//! is traced by marching squares (`Dots::contour`, CORE-R105) at `+4/9` (`Hot`, the up
-//! side of each wall) and `−4/9` (`Cold`, the down side), so every wall is a warm and a
+//! is traced by marching squares (`Dots::contour`, CORE-R105) at `+0.56` (`Hot`, the up
+//! side of each wall) and `−0.56` (`Cold`, the down side), so every wall is a warm and a
 //! cool thread side by side and a lone thermal spin, whose block stays at ±7/9, draws
 //! nothing. Walls coarsen and straighten after the quench and roughen into a fractal
 //! froth near T_c. Spins flipped since the last frame inside ordered regions
@@ -128,13 +128,14 @@ pub(crate) fn label(t_rel: f64, m_abs: f64, size: Size) -> Option<StackText<24>>
     Some(s)
 }
 
-/// M16 (GEN-R25): the wall threads, at the block-magnetisation levels `±WALL` (between
-/// the discrete block values 3/9 and 5/9), and the flip blinks.
-pub(crate) const WALL: f32 = 4.0 / 9.0;
+/// M16 (GEN-R25): the wall threads, at the block-magnetisation levels `±WALL` (just above
+/// the block value 5/9, so the two threads of a wall sit apart and never pass through a
+/// node), and the flip blinks.
+pub(crate) const WALL: f32 = 0.56;
 pub(crate) const UP_INK: Ink = Ink::new(Role::Hot, 220);
 pub(crate) const DOWN_INK: Ink = Ink::new(Role::Cold, 210);
-pub(crate) const FLIP_UP: Ink = Ink::new(Role::Hot, 140);
-pub(crate) const FLIP_DOWN: Ink = Ink::new(Role::Cold, 140);
+pub(crate) const FLIP_UP: Ink = Ink::new(Role::Hot, 110);
+pub(crate) const FLIP_DOWN: Ink = Ink::new(Role::Cold, 110);
 /// A flip blinks only where the block after it is this ordered (thermal flips inside
 /// domains, not the boil).
 const FLIP_ORDER: f32 = 5.0 / 9.0;

@@ -18,10 +18,8 @@ use std::f64::consts::{PI, TAU};
 use rand::Rng;
 use sciart_core::grid;
 use sciart_core::prelude::*;
-use sciart_core::raster::ascii_ramp_cell;
 use sciart_core::{Grid, ease};
 
-use crate::shared::jovian;
 use crate::shared::vortex_advect::{self, Flow, XEdge, value_noise_wrap_x};
 
 pub static META: Meta = Meta {
@@ -81,11 +79,29 @@ const OBLATE: f64 = 0.935;
 const SWAY: (f64, f64) = (0.5, 0.05);
 /// Io's shadow crosses the disc in `1 / SHADOW_SPEED` seconds.
 const SHADOW_SPEED: f64 = 1.0 / 20.0;
-/// Latitude (and longitude) one lattice height spans (rad), and the polar hood's level.
+/// Latitude (and longitude) one lattice height spans (rad).
 const LAT_SPAN: f64 = 65.0 * PI / 180.0;
-const POLAR_LEVEL: f64 = 0.33;
-const DIM: f64 = 0.82;
-const SPOT_DIM: f64 = 0.8;
+/// M16 thread look (GEN-R25): at most this many contour nodes across the disc (spacing
+/// ≥ 2 dots).
+const MAX_ACROSS: f64 = 150.0;
+/// Band threads: dye level, role, ink level on the disc and near the limb.
+pub(crate) const BAND_LEVELS: [(f32, Role, [u8; 2]); 3] = [
+    (0.2, Role::Hot, [200, 150]),
+    (0.45, Role::Hot, [235, 175]),
+    (0.75, Role::Sun, [235, 175]),
+];
+/// The Great Red Spot's chromophore threads, and band threads inside its ellipse.
+const RED_LEVELS: [(f32, u8); 3] = [(0.2, 190), (0.45, 225), (0.7, 255)];
+const SPOT_INK: Ink = Ink::new(Role::Hot, 210);
+/// Band threads within `OVAL_REACH` of a white oval's half-axes.
+const OVAL_INK: Ink = Ink::new(Role::Star, 230);
+const OVAL_REACH: f64 = 1.5;
+/// The clearing dye's festoon thread.
+const FESTOON: (f32, Ink) = (0.3, Ink::new(Role::Hot, 130));
+/// The limb ellipse, and the `μ` below which threads are one step dimmer.
+const LIMB_INK: Ink = Ink::new(Role::Sun, 170);
+const LIMB_PTS: usize = 240;
+const LIMB_MU: f32 = 0.35;
 /// Largest vortex box half-width in lattice cells (stack tables in `fill_flow`).
 const MAX_BOX: i64 = 96;
 
@@ -188,9 +204,17 @@ pub struct JupiterStorms {
     /// Jet speed per lattice row, cells per second.
     jets: Vec<f32>,
     vortices: Vec<Vortex>,
-    pixels: Pixels,
-    /// Two rows of dye samples (previous, current) for the relief in `shade`.
-    rows: Vec<f32>,
+    /// M16: the threads, over a node grid laid on the disc (geometry per resize, dye
+    /// samples per frame).
+    dots: Dots,
+    geo: Vec<Geo>,
+    nodes: (usize, usize),
+    /// Node (0, 0) in dots, and the node spacing in dots.
+    origin: (f64, f64),
+    spacing: f64,
+    band_v: Vec<f32>,
+    red_v: Vec<f32>,
+    hot_v: Vec<f32>,
     warmed: bool,
     /// Simulated seconds shown (drives Io's shadow).
     t: f64,
@@ -212,8 +236,14 @@ impl JupiterStorms {
             flow: Flow::default(),
             jets: Vec::new(),
             vortices: Vec::with_capacity(8 + EDDIES),
-            pixels: Pixels::default(),
-            rows: Vec::new(),
+            dots: Dots::default(),
+            geo: Vec::new(),
+            nodes: (0, 0),
+            origin: (0.0, 0.0),
+            spacing: 2.0,
+            band_v: Vec::new(),
+            red_v: Vec::new(),
+            hot_v: Vec::new(),
             warmed: false,
             t: 0.0,
             dirty: false,
@@ -480,105 +510,226 @@ impl JupiterStorms {
         }
     }
 
-    fn shade(&mut self) {
-        let px = self.pixels.pixel_size();
-        let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
-        let w = usize::from(px.width());
-        // The whole disc on black space (ADR-0017), slightly oblate, turning slowly.
-        let r = DISC * pw.min(ph);
-        let (cx, cy) = (0.5 * pw, 0.5 * ph);
-        let period = self.period();
-        // The view follows the Great Red Spot's longitude, swaying slowly about it, so the
-        // spot (the accent) stays on the visible hemisphere as the flow carries it.
-        let spin = self.vortices.first().map_or(0.0, |v| v.x * LAT_SPAN)
-            + SWAY.0 * (SWAY.1 * self.t).sin_det();
-        let lat_h = f64::from(self.lattice.height());
-        let grs = self.vortices.first().copied();
-        // The spot's smaller drawn semi-axis in pixels (a lattice height spans
-        // `LAT_SPAN·r` px at the centre).
-        let semi = grs.map_or(1.0, |v| 0.8 * v.a.min(v.b) * LAT_SPAN * r);
-        // Io's shadow crossing the disc (as in Juno and Hubble frames): a small black
-        // umbra with a 1-pixel penumbra, drifting across every `1 / SHADOW_SPEED` s.
+    /// The disc in dots: centre, horizontal and vertical radius (oblate).
+    fn disc(&self) -> (f64, f64, f64, f64) {
+        let ds = self.dots.dot_size();
+        let (w, h) = (f64::from(ds.width()), f64::from(ds.height()));
+        // A pixel is 2 × 2 dots; the radius is DISC of the smaller side in pixels.
+        let r = 2.0 * DISC * (0.5 * w).min(0.5 * h);
+        (0.5 * w - 0.5, 0.5 * h - 0.5, r, r * OBLATE)
+    }
+
+    /// Lay the node grid over the disc and fix each node's geometry (M16).
+    fn layout(&mut self) {
+        let (cx, cy, rx, ry) = self.disc();
+        let s = (2.0 * rx / MAX_ACROSS).max(2.0);
+        let nw = (2.0 * (rx + 2.0 * s) / s).ceil() as usize + 1;
+        let nh = (2.0 * (ry + 2.0 * s) / s).ceil() as usize + 1;
+        self.spacing = s;
+        self.nodes = (nw, nh);
+        self.origin = (
+            cx - 0.5 * (nw - 1) as f64 * s,
+            cy - 0.5 * (nh - 1) as f64 * s,
+        );
+        self.geo.clear();
+        for j in 0..nh {
+            for i in 0..nw {
+                let (x, y) = (self.origin.0 + i as f64 * s, self.origin.1 + j as f64 * s);
+                let (nx, ny) = ((x - cx) / rx.max(1e-9), (y - cy) / ry.max(1e-9));
+                let rho2 = nx * nx + ny * ny;
+                if rho2 >= 1.0 {
+                    self.geo.push(Geo::OUTSIDE);
+                    continue;
+                }
+                let nz = (1.0 - rho2).sqrt();
+                // Planetographic latitude and the longitude off the centre meridian.
+                let lat = (-ny).clamp(-1.0, 1.0).asin();
+                let ly = 0.5 - lat / LAT_SPAN;
+                let polar = ease::smoothstep((ly.abs().max((1.0 - ly).abs()) - 1.0) / 0.25);
+                self.geo.push(Geo {
+                    lon: nx.atan2(nz),
+                    ly,
+                    polar: polar as f32,
+                    mu: nz as f32,
+                });
+            }
+        }
+        let n = nw * nh;
+        for v in [&mut self.band_v, &mut self.red_v, &mut self.hot_v] {
+            v.clear();
+            v.resize(n, f32::NAN);
+        }
+    }
+
+    /// The longitude shift of the view: it follows the Great Red Spot, swaying about it.
+    fn spin(&self) -> f64 {
+        self.vortices.first().map_or(0.0, |v| v.x * LAT_SPAN) + SWAY.0 * (SWAY.1 * self.t).sin_det()
+    }
+
+    /// Lattice coordinates `(lx, ly)` (in `H`) under node geometry `g` for view `spin`.
+    fn lattice_of(&self, g: &Geo, spin: f64) -> (f64, f64) {
+        (
+            ((g.lon + spin) / LAT_SPAN).rem_euclid(self.period()),
+            g.ly.clamp(0.0, 1.0),
+        )
+    }
+
+    /// `q = (dx/a)² + (dy/b)²` of the point `(lx, ly)` in vortex `v`'s ellipse.
+    fn ellipse_q(&self, v: &Vortex, lx: f64, ly: f64) -> f64 {
+        let dx = v.dx(lx, self.period()) / v.a;
+        let dy = (ly - v.y) / v.b;
+        dx * dx + dy * dy
+    }
+
+    /// Io's shadow in dots: centre and radius.
+    fn shadow(&self) -> (f64, f64, f64) {
+        let (cx, cy, rx, _) = self.disc();
+        // In pixels, as before M16: it crosses every `1 / SHADOW_SPEED` s.
+        let (pcx, pcy, r) = (0.5 * (cx + 0.5), 0.5 * (cy + 0.5), 0.5 * rx);
         let r_sh = (0.05 * r).max(1.0);
         let span = 2.0 * r + 4.0 * r_sh;
-        let sx = cx - r - 2.0 * r_sh + ((0.35 + SHADOW_SPEED * self.t) * span).rem_euclid(span);
-        let sy = cy - 0.35 * r;
-        let (dye, red, hot) = (&self.dye, &self.red, &self.hot);
-        // The previous row's dye samples (the relief's upper-left neighbour).
-        let rows = &mut self.rows;
-        let (prev, cur) = rows.split_at_mut(w);
-        self.pixels.shade(|x, y| {
-            let (fx, fy) = (f64::from(x) + 0.5, f64::from(y) + 0.5);
-            let xi = x as usize;
-            if xi == 0 {
-                prev.copy_from_slice(cur);
-                cur.fill(f32::NAN);
+        let sx = pcx - r - 2.0 * r_sh + ((0.35 + SHADOW_SPEED * self.t) * span).rem_euclid(span);
+        let sy = pcy - 0.35 * r;
+        (2.0 * sx - 0.5, 2.0 * sy - 0.5, 2.0 * r_sh)
+    }
+
+    /// Sample the dyes at every node (NaN off the disc and under Io's shadow).
+    fn sample_nodes(&mut self) {
+        let spin = self.spin();
+        let lat_h = f64::from(self.lattice.height());
+        let (sx, sy, sr) = self.shadow();
+        let grs = self.vortices.first().copied();
+        let (nw, _) = self.nodes;
+        for k in 0..self.geo.len() {
+            let g = self.geo[k];
+            let (x, y) = (
+                self.origin.0 + (k % nw) as f64 * self.spacing,
+                self.origin.1 + (k / nw) as f64 * self.spacing,
+            );
+            if g.mu < 0.0 || (x - sx).hypot(y - sy) < sr {
+                self.band_v[k] = f32::NAN;
+                self.red_v[k] = f32::NAN;
+                self.hot_v[k] = f32::NAN;
+                continue;
             }
-            let (nx, ny) = ((fx - cx) / r, (fy - cy) / (r * OBLATE));
-            let rho2 = nx * nx + ny * ny;
-            if rho2 >= 1.0 {
-                return Ink::BLANK;
-            }
-            let nz = (1.0 - rho2).sqrt();
-            let ds = (fx - sx).hypot(fy - sy);
-            let pen = ease::smoothstep((ds - r_sh + 0.5).clamp(0.0, 1.0));
-            if pen <= 0.0 {
-                return Ink::BLANK;
-            }
-            // Planetographic latitude and longitude on the cylinder the flow lives on.
-            let lat = (-ny).clamp(-1.0, 1.0).asin();
-            let lon = nx.atan2(nz) + spin;
-            // One lattice height spans `LAT_SPAN` of latitude about the equator (and as much
-            // longitude); beyond it the polar regions fade to a dim, featureless hood.
-            let lx = (lon / LAT_SPAN).rem_euclid(period);
-            let ly_raw = 0.5 - lat / LAT_SPAN;
-            let polar = ease::smoothstep((ly_raw.abs().max((1.0 - ly_raw).abs()) - 1.0) / 0.25);
-            let ly = ly_raw.clamp(0.0, 1.0);
+            let (lx, ly) = self.lattice_of(&g, spin);
             let (gx, gy) = ((lx * lat_h) as f32, (ly * lat_h) as f32);
-            // Limb darkening, and the outermost 1.5 pixels feathered to black.
-            let edge = (1.0 - rho2.sqrt()) * r;
-            let aa = ease::smoothstep((edge / 1.5).min(1.0));
-            let shade = DIM * (0.35 + 0.65 * nz.sqrt()) * aa * pen;
-            let a = vortex_advect::sample(dye, gx, gy, XEdge::Wrap);
-            cur[xi] = a;
-            let up = if xi > 0 { prev[xi - 1] } else { f32::NAN };
-            let relief = if up.is_nan() {
-                0.0
-            } else {
-                f64::from(a - up) * 1.2
+            let a = vortex_advect::sample(&self.dye, gx, gy, XEdge::Wrap);
+            // Toward the poles the bands fade into a featureless hood: no threads there.
+            self.band_v[k] = a + (0.5 - a) * g.polar;
+            self.red_v[k] = match grs {
+                Some(v) if self.ellipse_q(&v, lx, ly) < 2.5 => {
+                    vortex_advect::sample(&self.red, gx, gy, XEdge::Wrap)
+                }
+                _ => 0.0,
             };
-            let a = f64::from(a);
-            let level = jovian::cloud_level(a, relief);
-            let level = level + (POLAR_LEVEL - level) * polar;
-            // The Great Red Spot, the one warm accent: its outline from the vortex,
-            // textured by the wound-up chromophore, in a pale collar.
-            if let Some(v) = grs {
-                let dx = v.dx(lx, period) / (0.8 * v.a);
-                let dy = (ly - v.y) / (0.8 * v.b);
-                let rho = (dx * dx + dy * dy).sqrt();
-                if rho < 2.0 {
-                    let (inside, collar) = jovian::spot_weights(rho, semi);
-                    if inside > 0.0 || collar > 0.0 {
-                        let rr = if inside > 0.0 {
-                            f64::from(vortex_advect::sample(red, gx, gy, XEdge::Wrap))
-                        } else {
-                            0.0
-                        };
-                        let spot = jovian::spot_level(rr, a, relief);
-                        let level = jovian::spot_blend(level, spot, inside, collar);
-                        return jovian::cloud_ink(level, shade / DIM * SPOT_DIM);
+            self.hot_v[k] = if (ly - HOT_Y).abs() < HOT_LANE {
+                vortex_advect::sample(&self.hot, gx, gy, XEdge::Wrap)
+            } else {
+                0.0
+            };
+        }
+    }
+
+    /// The ink of a band thread at band level `level` (index into `BAND_LEVELS`) where
+    /// the lattice point is `(lx, ly)` and the limb factor `mu` (JUP-A9..A11).
+    fn band_ink(&self, level: usize, lx: f64, ly: f64, mu: f32) -> Ink {
+        let mut storms = self.vortices.iter().take_while(|v| v.kind != Kind::Eddy);
+        if let Some(grs) = storms.next() {
+            if self.ellipse_q(grs, lx, ly) < 1.0 {
+                return SPOT_INK;
+            }
+        }
+        if storms
+            .any(|v| v.kind == Kind::Oval && self.ellipse_q(v, lx, ly) < OVAL_REACH * OVAL_REACH)
+        {
+            return OVAL_INK;
+        }
+        band_level_ink(level, mu)
+    }
+
+    /// Draw the frame: band, spot and festoon threads, then the limb.
+    fn raster(&mut self) {
+        self.dots.clear();
+        self.sample_nodes();
+        let (nw, nh) = self.nodes;
+        let (ox, oy, s) = (self.origin.0, self.origin.1, self.spacing);
+        let to_dot = move |x: f64, y: f64| (ox + x * s, oy + y * s);
+        let spin = self.spin();
+        let corners = |v: &[f32], i: usize, j: usize| {
+            let k = j * nw + i;
+            [v[k], v[k + 1], v[k + nw + 1], v[k + nw]]
+        };
+        let crosses = |c: &[f32; 4], level: f32| {
+            let below = c.map(|v| v < level);
+            c.iter().all(|v| v.is_finite()) && below != [true; 4] && below != [false; 4]
+        };
+        for j in 0..nh.saturating_sub(1) {
+            for i in 0..nw.saturating_sub(1) {
+                let g = self.geo[j * nw + i];
+                if g.mu < 0.0 {
+                    continue;
+                }
+                let band = corners(&self.band_v, i, j);
+                for (n, &(level, _, _)) in BAND_LEVELS.iter().enumerate() {
+                    if crosses(&band, level) {
+                        let (lx, ly) = self.lattice_of(&g, spin);
+                        let ink = self.band_ink(n, lx, ly, g.mu);
+                        self.dots.contour_cell(band, level, (i, j), to_dot, ink);
                     }
                 }
+                let red = corners(&self.red_v, i, j);
+                for &(level, l) in &RED_LEVELS {
+                    if crosses(&red, level) {
+                        let ink = Ink::new(Role::Hot, l);
+                        self.dots.contour_cell(red, level, (i, j), to_dot, ink);
+                    }
+                }
+                let hot = corners(&self.hot_v, i, j);
+                if crosses(&hot, FESTOON.0) {
+                    self.dots
+                        .contour_cell(hot, FESTOON.0, (i, j), to_dot, FESTOON.1);
+                }
             }
-            // The clearing dye darkens the belt edge (no blue: the spot is the one accent).
-            if (ly - HOT_Y).abs() < HOT_LANE {
-                let h = f64::from(vortex_advect::sample(hot, gx, gy, XEdge::Wrap));
-                let dark = ((h - 0.12) / 0.5).clamp(0.0, 0.6);
-                return jovian::cloud_ink(level * (1.0 - dark), shade);
-            }
-            jovian::cloud_ink(level, shade)
-        });
+        }
+        // The limb: a thin dot ellipse.
+        let (cx, cy, rx, ry) = self.disc();
+        let point = |k: usize| {
+            let (sn, c) = (TAU * k as f64 / LIMB_PTS as f64).sin_cos_det();
+            (cx + rx * c, cy + ry * sn)
+        };
+        for k in 0..LIMB_PTS {
+            let (a, b) = (point(k), point(k + 1));
+            self.dots.line(a.0, a.1, b.0, b.1, LIMB_INK);
+        }
     }
+}
+
+/// A band thread's ink away from the storms: belt side `Hot`, zone side `Sun`, one step
+/// dimmer near the limb (`μ < LIMB_MU`, limb darkening).
+pub(crate) fn band_level_ink(level: usize, mu: f32) -> Ink {
+    let (_, role, steps) = BAND_LEVELS[level.min(BAND_LEVELS.len() - 1)];
+    Ink::new(role, steps[usize::from(mu < LIMB_MU)])
+}
+
+/// Per-node geometry of the disc (fixed per resize): longitude off the centre meridian,
+/// lattice row (in `H`, unclamped), polar-hood weight and `μ = cos` of the view angle
+/// (negative off the disc).
+#[derive(Debug, Clone, Copy)]
+struct Geo {
+    lon: f64,
+    ly: f64,
+    polar: f32,
+    mu: f32,
+}
+
+impl Geo {
+    const OUTSIDE: Geo = Geo {
+        lon: 0.0,
+        ly: 0.0,
+        polar: 0.0,
+        mu: -1.0,
+    };
 }
 
 impl Generator for JupiterStorms {
@@ -603,10 +754,8 @@ impl Generator for JupiterStorms {
             }
         }
         self.rebuild_lattice(lattice);
-        self.pixels.resize(size);
-        self.rows.clear();
-        self.rows
-            .resize(2 * usize::from(self.pixels.pixel_size().width()), f32::NAN);
+        self.dots.resize(size);
+        self.layout();
         self.dirty = true;
     }
 
@@ -620,20 +769,19 @@ impl Generator for JupiterStorms {
 
     fn prepare(&mut self) {
         if std::mem::take(&mut self.dirty) {
-            self.shade();
+            self.raster();
         }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_ramp_cell(top, bottom));
+        self.dots.blit(canvas);
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sciart_core::Stage;
+    use sciart_core::{Stage, geom};
 
     fn scene() -> (JupiterStorms, Ctx) {
         let mut g = JupiterStorms::new();
@@ -742,85 +890,190 @@ mod tests {
         assert!(jet(grs.y - grs.b) < 0.0 && jet(grs.y + grs.b) > 0.0);
     }
 
+    fn canvas_of(g: &JupiterStorms, size: Size) -> Canvas {
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut c);
+        c
+    }
+
+    fn is_braille(c: char) -> bool {
+        ('\u{2800}'..='\u{28ff}').contains(&c)
+    }
+
+    /// Normalised disc coordinates `(nx, ny)` of dot `(x, y)`.
+    fn disc_xy(g: &JupiterStorms, x: f64, y: f64) -> (f64, f64) {
+        let (cx, cy, rx, ry) = g.disc();
+        ((x - cx) / rx, (y - cy) / ry)
+    }
+
     #[test]
-    fn jup_a6_a_stepped_m11_disc_on_black_space() {
-        // ADR-0018: the whole disc on black in the stepped cloud palette, corners black.
+    fn jup_a6_a_thread_planet_on_black_space() {
+        let size = Size::new(100, 40);
         let (mut g, mut ctx) = scene();
         for _ in 0..120 {
             g.update(SIM_DT, &mut ctx);
             g.prepare();
         }
-        let px = g.pixels.pixel_size();
-        let (w, h) = (i32::from(px.width()), i32::from(px.height()));
-        let mut disc = 0usize;
-        for y in 0..h {
-            for x in 0..w {
-                let i = g.pixels.get(x, y).unwrap_or(Ink::BLANK);
-                match i.role {
-                    Role::Background => {}
-                    _ if jovian::step_of(i).is_some() => disc += 1,
-                    other => panic!("unexpected ink {other:?} at ({x}, {y})"),
+        let c = canvas_of(&g, size);
+        let (mut inside, mut lit_inside, mut dots, mut full) = (0usize, 0usize, 0u32, 0usize);
+        for y in 0..40 {
+            for x in 0..100 {
+                let cell = c.get(x, y).unwrap();
+                let lit = cell.ch != ' ';
+                if lit {
+                    assert!(is_braille(cell.ch), "({x}, {y}) {:?}", cell.ch);
+                    assert!(
+                        matches!(cell.ink.role, Role::Hot | Role::Sun | Role::Star),
+                        "({x}, {y}) {:?}",
+                        cell.ink
+                    );
+                }
+                let (nx, ny) = disc_xy(&g, f64::from(2 * x) + 0.5, f64::from(4 * y) + 1.5);
+                if nx * nx + ny * ny < 0.9 {
+                    inside += 1;
+                    if lit {
+                        let mask = cell.ch as u32 - 0x2800;
+                        lit_inside += 1;
+                        dots += mask.count_ones();
+                        full += usize::from(mask == 0xff);
+                    }
                 }
             }
         }
-        for (x, y) in [(0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)] {
-            assert_eq!(g.pixels.get(x, y), Some(Ink::BLANK), "corner {x},{y}");
+        for (x, y) in [(0, 0), (99, 0), (0, 39), (99, 39)] {
+            assert_eq!(c.get(x, y).unwrap().ch, ' ', "corner {x},{y}");
         }
-        assert!(disc * 4 > (w * h) as usize / 2, "disc {disc} of {}", w * h);
+        assert!(
+            lit_inside * 10 > inside,
+            "{lit_inside} of {inside}: too empty"
+        );
+        let mean = f64::from(dots) / lit_inside as f64;
+        assert!(mean <= 4.0, "{mean:.2} dots per lit cell");
+        assert!(full * 10 <= lit_inside, "{full} of {lit_inside} cells full");
     }
 
     #[test]
-    fn jup_a8_red_spot_is_a_darker_oval_in_a_paler_collar() {
+    fn jup_a8_red_spot_is_a_spiral_of_hot_threads() {
         // The view follows the spot: at the sway's zero (t = 0) it sits on the disc's
         // centre meridian, at its latitude.
+        let size = Size::new(100, 40);
         let (mut g, mut ctx) = scene();
         g.update(SIM_DT, &mut ctx);
         g.t = 0.0;
         g.dirty = true;
         g.prepare();
-        let px = g.pixels.pixel_size();
-        let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
-        let r = DISC * pw.min(ph);
         let grs = g.vortices[0];
-        let lat = (0.5 - grs.y) * LAT_SPAN;
-        let (cx, cy) = (0.5 * pw, 0.5 * ph - r * OBLATE * lat.sin_det());
-        let level = |fx: f64, fy: f64| {
-            let i = g.pixels.get(fx as i32, fy as i32).expect("on screen");
-            jovian::step_of(i).expect("a cloud step")
-        };
-        let centre = level(cx, cy);
-        assert_eq!(
-            g.pixels.get(cx as i32, cy as i32).map(|i| i.role),
-            Some(Role::Hot),
-            "the spot is rust"
+        let spin = g.spin();
+        assert!(
+            (spin - grs.x * LAT_SPAN).abs() < 1e-12,
+            "the view centres the spot"
         );
-        let rim = 0.8 * grs.b * LAT_SPAN * r;
-        let collar = level(cx, cy - rim - 2.0).max(level(cx, cy + rim + 2.0));
-        assert!(centre < collar, "centre {centre}, collar {collar}");
+        let c = canvas_of(&g, size);
+        let (mut lit, mut hot) = (0, 0);
+        for y in 0..40 {
+            for x in 0..100 {
+                let (nx, ny) = disc_xy(&g, f64::from(2 * x) + 0.5, f64::from(4 * y) + 1.5);
+                let rho2 = nx * nx + ny * ny;
+                if rho2 >= 1.0 {
+                    continue;
+                }
+                let geo = Geo {
+                    lon: nx.atan2((1.0 - rho2).sqrt()),
+                    ly: 0.5 - (-ny).asin() / LAT_SPAN,
+                    polar: 0.0,
+                    mu: 1.0,
+                };
+                let (lx, ly) = g.lattice_of(&geo, spin);
+                let cell = c.get(x, y).unwrap();
+                if g.ellipse_q(&grs, lx, ly) < 0.8 && cell.ch != ' ' {
+                    lit += 1;
+                    hot += usize::from(cell.ink.role == Role::Hot);
+                }
+            }
+        }
+        assert!(lit >= 6, "{lit} lit cells in the spot");
+        assert!(hot * 10 >= lit * 8, "{hot} of {lit} Hot");
     }
 
     #[test]
-    fn jup_a9_the_limb_is_darkened() {
-        // Across the disc's edge the clouds step down into black: limb darkening.
-        let (mut g, mut ctx) = scene();
-        g.update(SIM_DT, &mut ctx);
-        g.prepare();
-        let px = g.pixels.pixel_size();
-        let (pw, ph) = (f64::from(px.width()), f64::from(px.height()));
-        let r = DISC * pw.min(ph);
-        let y = (0.5 * ph) as i32;
-        let x0 = (0.5 * pw + r) as i32;
-        let edge: Vec<_> = (x0 - 3..=x0 + 1)
-            .filter_map(|x| g.pixels.get(x, y))
-            .collect();
-        assert!(edge.iter().any(|i| i.role == Role::Background));
-        let rank = |i: Ink| jovian::step_of(i).unwrap_or(0);
-        let centre = g.pixels.get((0.5 * pw) as i32, y).map_or(0, rank);
-        assert!(
-            edge.iter()
-                .any(|&i| i.role != Role::Background && rank(i) < centre),
-            "{edge:?}"
-        );
+    fn jup_a9_the_limb_is_a_thin_ellipse_and_darkened() {
+        let (g, _) = scene();
+        let (cx, cy, rx, ry) = g.disc();
+        for k in 0..36 {
+            let (s, c) = (TAU * f64::from(k) / 36.0).sin_cos_det();
+            let (px, py) = (cx + rx * c, cy + ry * s);
+            let near = (-2..=2).any(|dy| {
+                (-2..=2).any(|dx| {
+                    let (x, y) = (px.round() as i32 + dx, py.round() as i32 + dy);
+                    g.dots.is_lit(x, y) && (f64::from(x) - px).hypot(f64::from(y) - py) <= 1.5
+                })
+            });
+            assert!(near, "no limb dot at direction {k}");
+        }
+        let ds = g.dots.dot_size();
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                if g.dots.is_lit(x, y) {
+                    let (nx, ny) = disc_xy(&g, f64::from(x), f64::from(y));
+                    let out = (nx.hypot(ny) - 1.0) * rx;
+                    assert!(out <= 2.0, "dot ({x}, {y}) {out:.1} dots outside the limb");
+                }
+            }
+        }
+        for level in 0..BAND_LEVELS.len() {
+            let (disc, limb) = (band_level_ink(level, 0.9), band_level_ink(level, 0.2));
+            assert_eq!(disc.role, limb.role);
+            assert!(limb.level < disc.level, "{disc:?} vs {limb:?}");
+        }
+    }
+
+    #[test]
+    fn jup_a10_belts_and_zones_are_threads() {
+        let (g, _) = scene();
+        for (level, role, _) in BAND_LEVELS {
+            assert_eq!(role, if level < 0.5 { Role::Hot } else { Role::Sun });
+        }
+        let (cx, cy, _, ry) = g.disc();
+        // Separate runs of lit dots down the centre column, inside the limb.
+        let x = cx.round() as i32;
+        let (mut runs, mut was) = (0, false);
+        for y in (cy - 0.9 * ry) as i32..=(cy + 0.9 * ry) as i32 {
+            let lit = (x - 1..=x + 1).any(|x| g.dots.is_lit(x, y));
+            runs += usize::from(lit && !was);
+            was = lit;
+        }
+        assert!(runs >= 8, "{runs} threads cross the centre column");
+    }
+
+    #[test]
+    fn jup_a11_white_ovals_are_star_threads() {
+        let size = Size::new(100, 40);
+        let (g, _) = scene();
+        let c = canvas_of(&g, size);
+        let spin = g.spin();
+        let (cx, cy, rx, ry) = g.disc();
+        let mut seen = 0;
+        for v in g.vortices.iter().filter(|v| v.kind == Kind::Oval) {
+            let lon = geom::wrap_angle(v.x * LAT_SPAN - spin);
+            if lon.abs() > 1.0 {
+                continue;
+            }
+            let lat = (0.5 - v.y) * LAT_SPAN;
+            let (x, y) = (
+                cx + rx * lat.cos_det() * lon.sin_det(),
+                cy - ry * lat.sin_det(),
+            );
+            let (col, row) = ((x / 2.0) as i32, (y / 4.0) as i32);
+            let star = (row - 2..=row + 2).any(|yy| {
+                (col - 4..=col + 4).any(|xx| {
+                    c.get(xx, yy)
+                        .is_some_and(|cell| cell.ch != ' ' && cell.ink.role == Role::Star)
+                })
+            });
+            assert!(star, "no Star thread at the oval near ({col}, {row})");
+            seen += 1;
+        }
+        assert!(seen >= 1, "no white oval in view");
     }
 
     #[test]

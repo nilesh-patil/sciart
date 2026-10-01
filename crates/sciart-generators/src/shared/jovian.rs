@@ -1,6 +1,6 @@
-//! Jupiter's cloud colours and its belt/zone latitude profile, shared by `jupiter_storms`
-//! (the close-up) and `comet_breakup` (the whole disc) so the planet reads the same in
-//! both (M13 review).
+//! Jupiter's cloud colours and its belt/zone latitude profile, used by `comet_breakup`
+//! (the whole disc). Until M16 `jupiter_storms` shared them, so the planet read the same
+//! in both (M13 review); it now draws its clouds as threads (GEN-R25).
 //!
 //! Features are blended in one *level* space (0 dark … 1 pale) and then drawn in M11's
 //! flat, stepped semantic colours (GEN-R23/R24, ADR-0018): dark rust belts in `Hot`, ochre
@@ -15,8 +15,6 @@ const BELT: f64 = 0.3;
 const ZONE: f64 = 0.92;
 /// The Great Red Spot's pale collar, and its interior's brightest and darkest levels.
 const COLLAR: f64 = 0.9;
-/// How far the collar pulls the clouds towards its cream (a hint, not a ring).
-const COLLAR_W: f64 = 0.65;
 const SPOT: (f64, f64) = (0.27, 0.5);
 /// Unshaded cloud level of belt/zone dye `a` (0 belt … 1 zone) with an embossing
 /// `relief` (positive on sunlit cloud edges).
@@ -30,19 +28,6 @@ pub(crate) fn spot_level(r: f64, a: f64, relief: f64) -> f64 {
     let r = ease::smoothstep(((r - 0.05) / 0.45).clamp(0.0, 1.0));
     let v = SPOT.1 - (SPOT.1 - SPOT.0) * r + 0.22 * (a - 0.5) + 0.8 * relief;
     v.clamp(SPOT.0 - 0.04, SPOT.1 + 0.04)
-}
-
-/// Weights `(inside, collar)` of the Great Red Spot at normalised elliptical radius `rho`
-/// (1 on its rim) for a spot whose smaller semi-axis spans `semi_px` pixels: the rim is
-/// feathered over 2.5 pixels, and the collar is a ring out to 0.45 semi-axes beyond it,
-/// feathered on both sides.
-pub(crate) fn spot_weights(rho: f64, semi_px: f64) -> (f64, f64) {
-    const FEATHER: f64 = 2.5;
-    let d = (rho - 1.0) * semi_px.max(1.0);
-    let inside = ease::smoothstep((0.5 - d / FEATHER).clamp(0.0, 1.0));
-    let width = (0.3 * semi_px).max(FEATHER);
-    let outer = ease::smoothstep(((width - d) / FEATHER + 0.5).clamp(0.0, 1.0));
-    (inside, COLLAR_W * (1.0 - inside) * outer)
 }
 
 /// Blend a cloud level with the Great Red Spot's: towards the collar's cream by `collar`,
@@ -163,30 +148,15 @@ mod tests {
     }
 
     #[test]
-    fn jup_a8_red_spot_is_sienna_feathered_into_a_cream_collar() {
+    fn jup_a8_red_spot_is_sienna_in_a_cream_collar() {
         // Inside: rust to brick, never as pale as a zone.
         for r in [0.0, 0.5, 1.0] {
             let v = spot_level(r, 0.5, 0.0);
             assert!((0.22..=0.55).contains(&v), "spot level {v} at r = {r}");
         }
         assert!(spot_level(1.0, 0.5, 0.0) < spot_level(0.0, 0.5, 0.0));
-        // The rim is feathered over pixels, not a step: neighbouring pixels (1 px apart
-        // at a 10 px semi-axis) differ by at most 0.6 of the full blend (a smoothstep
-        // over 2.5 px), never a full step.
-        let semi = 10.0;
-        let mut last = spot_weights(0.0, semi);
-        assert_eq!(last, (1.0, 0.0));
-        for k in 1..=30 {
-            let w = spot_weights(f64::from(k) / semi, semi);
-            assert!((w.0 - last.0).abs() <= 0.61, "inside step at {k}");
-            assert!((w.1 - last.1).abs() <= 0.61, "collar step at {k}");
-            last = w;
-        }
-        // A pale collar just outside the rim, gone further out.
-        let (_, collar) = spot_weights(1.15, semi);
-        assert!(collar > 0.6, "collar {collar}");
-        assert_eq!(spot_weights(3.0, semi), (0.0, 0.0));
         let belt = cloud_level(0.0, 0.0);
-        assert!(spot_blend(belt, 0.5, 0.0, COLLAR_W) > 0.65);
+        // The collar pulls a dark belt towards its cream.
+        assert!(spot_blend(belt, 0.5, 0.0, 0.65) > 0.65);
     }
 }
