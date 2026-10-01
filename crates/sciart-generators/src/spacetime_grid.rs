@@ -66,18 +66,19 @@ const SUB_Y: usize = 5;
 const MAX_NX: usize = 72;
 const MAX_NY: usize = 40;
 
-/// Wave colouring (M16 round 2): every piece of about `PIECE` dots along a mesh line takes
-/// the strain `f(r)·s(a)·cos 2(φ − Φ)` at its middle (the phase interpolated between
-/// samples); where `|strain| ≥ TINT · peak` (`peak` the largest amplitude on the sheet now)
-/// it is a crest (`Wave`) or trough (`Cold`), so crests read as continuous bands; the
-/// rest of the sheet is a low, quiet `Structure`. No tint while the peak is below
-/// `MIN_PEAK` (after the merger).
+/// Wave colouring (M16 round 3): every piece of about `PIECE` dots along a mesh line takes
+/// the wave phase `cos 2(φ − Φ(t − r/c))` at its middle (interpolated between samples);
+/// only crests are tinted, `Wave`, where the phase is within `CREST_COS` of its top and
+/// the amplitude `f(r)·s(a)` is at least `MIN_AMP` of the peak on the sheet now. Troughs
+/// and the rest are the quiet `Structure`, so each crest reads as one thin ring. The phase
+/// rather than the strain is thresholded: with the strain, the `1/√r` fall-off would keep
+/// crests within `r ≈ 1.3` of the binary. No tint while the peak is below `MIN_PEAK`.
 const PIECE: f64 = 2.0;
 const MAX_PIECES: usize = 32;
-const TINT: f64 = 0.7;
+const CREST_COS: f64 = 0.8;
+const MIN_AMP: f64 = 0.35;
 const MIN_PEAK: f64 = 0.05;
 const CREST_INK: Ink = Ink::new(Role::Wave, 230);
-const TROUGH_INK: Ink = Ink::new(Role::Cold, 200);
 const GRID_LEVELS: [u8; 3] = [70, 90, 110];
 
 /// The masses: dot-disc radii (dots) and inks; the merged remnant is `Sun`.
@@ -449,14 +450,11 @@ impl SpacetimeGrid {
         self.peak = peak;
     }
 
-    /// The ink of a piece with wave strain `strain` on a segment whose plain-sheet ink is
-    /// `sheet` (SPT-A7).
-    pub(crate) fn tint(&self, strain: f64, sheet: Ink) -> Ink {
-        let cut = TINT * self.peak;
-        if self.peak >= MIN_PEAK && strain >= cut {
+    /// The ink of a piece with wave phase cosine `crest` and amplitude `envn` on a segment
+    /// whose plain-sheet ink is `sheet` (SPT-A7, SPT-A9).
+    pub(crate) fn tint(&self, crest: f64, envn: f64, sheet: Ink) -> Ink {
+        if self.peak >= MIN_PEAK && envn >= MIN_AMP * self.peak && crest >= CREST_COS {
             CREST_INK
-        } else if self.peak >= MIN_PEAK && strain <= -cut {
-            TROUGH_INK
         } else {
             sheet
         }
@@ -481,7 +479,7 @@ impl SpacetimeGrid {
         let mut dpsi = bp - ap;
         dpsi -= TAU * (dpsi / TAU).round();
         // No piece can be tinted: one plain line.
-        if self.peak < MIN_PEAK || ae.max(be) < TINT * self.peak {
+        if self.peak < MIN_PEAK || ae.max(be) < MIN_AMP * self.peak {
             self.dots.line(ax, ay, bx, by, sheet);
             return;
         }
@@ -490,7 +488,7 @@ impl SpacetimeGrid {
         for m in 0..n {
             let fm = (m as f64 + 0.5) / n as f64;
             let envn = ae + (be - ae) * fm;
-            let ink = self.tint(envn * (ap + dpsi * fm).cos_det(), sheet);
+            let ink = self.tint((ap + dpsi * fm).cos_det(), envn, sheet);
             match run {
                 Some(r) if r != ink => {
                     let f = m as f64 / n as f64;
@@ -956,6 +954,64 @@ mod tests {
     }
 
     #[test]
+    fn spt_a9_only_thin_crests_are_tinted() {
+        let size = Size::new(200, 50);
+        let mut g = SpacetimeGrid::default();
+        let mut ctx = Ctx::new(42, size);
+        g.resize(size, &mut ctx);
+        for _ in 0..(5.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let ds = g.dots.dot_size();
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut c);
+        // Grid cells (the masses' Sun/Hot cells aside): crest share overall, and per
+        // sector of 30° the share in radial bins 0.08 wide from r = 0.4 to 1.8.
+        let (mut grid, mut tinted) = (0usize, 0usize);
+        let mut bins = [[(0u32, 0u32); 18]; 12];
+        for y in 0..i32::from(size.height()) {
+            for x in 0..i32::from(size.width()) {
+                let cell = c.get(x, y).unwrap();
+                if cell.ch == ' ' || matches!(cell.ink.role, Role::Sun | Role::Hot) {
+                    continue;
+                }
+                let crest = cell.ink == CREST_INK;
+                grid += 1;
+                tinted += usize::from(crest);
+                let (sx, sy) = sheet_of(&g, f64::from(2 * x) + 0.5, f64::from(4 * y) + 1.5);
+                let (r, a) = (sx.hypot(sy), sy.atan2(sx).rem_euclid(TAU));
+                let k = ((r - 0.4) / 0.08).floor();
+                if (0.0..18.0).contains(&k) {
+                    let bin = &mut bins[((a / TAU * 12.0) as usize).min(11)][k as usize];
+                    bin.0 += 1;
+                    bin.1 += u32::from(crest);
+                }
+            }
+        }
+        let _ = ds;
+        let share = tinted as f64 / grid as f64;
+        assert!(share < 0.25, "{:.1} % of grid cells tinted", 100.0 * share);
+        let swinging = bins
+            .iter()
+            .filter(|sector| {
+                let shares: Vec<f64> = sector
+                    .iter()
+                    .filter(|b| b.0 >= 3)
+                    .map(|b| f64::from(b.1) / f64::from(b.0))
+                    .collect();
+                let lo = shares.iter().copied().fold(f64::MAX, f64::min);
+                let hi = shares.iter().copied().fold(f64::MIN, f64::max);
+                lo < 0.1 && hi > 0.6
+            })
+            .count();
+        assert!(
+            swinging >= 8,
+            "{swinging} of 12 sectors swing from < 0.1 to > 0.6"
+        );
+    }
+
+    #[test]
     fn spt_a8_captions_follow_the_act() {
         let mut g = SpacetimeGrid::default();
         let mut ctx = Ctx::new(1, Size::new(80, 24));
@@ -997,14 +1053,10 @@ mod tests {
         let lit = art.iter().filter(|c| c.ch != ' ').count();
         assert!(lit * 100 < art.len() * 60, "{lit} lit cells");
         let has = |r: Role| art.iter().any(|c| c.ink.role == r && c.ch != ' ');
-        for r in [
-            Role::Sun,
-            Role::Hot,
-            Role::Wave,
-            Role::Cold,
-            Role::Structure,
-        ] {
+        for r in [Role::Sun, Role::Hot, Role::Wave, Role::Structure] {
             assert!(has(r), "{r:?} missing");
         }
+        // Crests only (M16 round 3): troughs are not tinted.
+        assert!(!has(Role::Cold), "troughs are not tinted");
     }
 }
