@@ -74,6 +74,12 @@ pub(crate) const SHEET: Ink = Ink::new(Role::Accent, 110);
 pub(crate) const FILAMENT: Ink = Ink::new(Role::Accent, 200);
 pub(crate) const KNOT: Ink = Ink::new(Role::Sun, 245);
 
+/// Share of the sheet particles drawn at growth `d` (in `D_max`): half while the web is
+/// diffuse (`d ≤ 0.35`), all of them once it has collapsed (`d ≥ 0.7`).
+pub(crate) fn sheet_share(d: f64) -> f64 {
+    0.5 + 0.5 * ease::smoothstep((d - 0.35) / 0.35)
+}
+
 /// The ink of a particle where the smoothed density is `v`, given the frame's knot and
 /// filament thresholds (`None`: an undrawn fog particle).
 pub(crate) fn particle_ink(v: f32, knot: f32, filament: f32, keep: bool) -> Option<Ink> {
@@ -405,6 +411,7 @@ impl CosmicWeb {
     /// density where it sits (SPEC-002 Look, M16).
     fn raster(&mut self) {
         let d = growth(self.t);
+        let sheet_keep = sheet_share(d);
         self.deposit(d);
         self.smooth();
         let [knot, filament] = quantiles(self.density.as_slice(), [KNOT_SHARE, FILAMENT_SHARE]);
@@ -427,8 +434,16 @@ impl CosmicWeb {
             let (x, y) = ((x + pan).rem_euclid(wf), y.rem_euclid(hf));
             let node = (y as usize).min(h - 1) * w + (x as usize).min(w - 1);
             let key = idx as u64 ^ FOG_SALT;
-            let keep = rng::hash01(key) < FOG_KEEP;
-            if let Some(ink) = particle_ink(density[node], knot, filament, keep) {
+            let u = rng::hash01(key);
+            let Some(ink) = particle_ink(density[node], knot, filament, u < FOG_KEEP) else {
+                continue;
+            };
+            // While the web is still diffuse, the sheets are thinned too (a fixed share
+            // of their particles), so the early fog reads as stipple, not a blanket.
+            if ink == SHEET && u >= sheet_keep {
+                continue;
+            }
+            {
                 // A fixed sub-cell jitter (drawing only) breaks the start lattice's rows,
                 // like a glass start: no moiré in the fog and sheets.
                 let jx = (rng::hash01(key.rotate_left(21)) - 0.5) * JITTER;
@@ -723,5 +738,9 @@ mod tests {
             .filter(|&i| rng::hash01(i ^ FOG_SALT) < FOG_KEEP)
             .count();
         assert!((kept as f64 / 1e4 - FOG_KEEP).abs() < 0.02, "{kept}");
+        // While diffuse only half the sheet particles are drawn, all once collapsed.
+        assert_eq!(sheet_share(0.0), 0.5);
+        assert_eq!(sheet_share(0.3), 0.5);
+        assert_eq!(sheet_share(0.8), 1.0);
     }
 }

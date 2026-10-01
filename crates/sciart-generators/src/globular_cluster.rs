@@ -51,8 +51,8 @@ const DENSITY_PASSES: usize = 4;
 const VIEW_RADIUS: f64 = 2.2;
 /// Giant level `GIANT_MID ± GIANT_SWING`, twinkling with a per-giant period drawn
 /// from `GIANT_PERIODS` seconds.
-const GIANT_MID: f64 = 225.0;
-const GIANT_SWING: f64 = 30.0;
+const GIANT_MID: f64 = 245.0;
+const GIANT_SWING: f64 = 10.0;
 const GIANT_PERIODS: (f64, f64) = (5.0, 9.0);
 /// Main-sequence display masses (M☉): the hydrogen-burning limit to the turn-off of a
 /// 12 Gyr population.
@@ -62,16 +62,14 @@ const TURNOFF_M: f64 = 0.6;
 const UPPER_M: f64 = 0.35;
 /// Blue stragglers are picked among bodies starting inside this radius (≈ 0.65 r_h).
 const STRAGGLER_R: f64 = 0.5;
-/// Trail: one stored position every `TRAIL_EVERY` updates, `TRAIL_N` kept (≈ 0.27 s).
+/// Trail: one stored position every `TRAIL_EVERY` updates, `TRAIL_N` kept (≈ 0.13 s).
 const TRAIL_EVERY: u32 = 4;
-const TRAIL_N: usize = 4;
+const TRAIL_N: usize = 2;
 /// Trail level as a fraction of the head's: one flat step down.
 const TRAIL_FRACTION: f64 = 0.75;
 /// Longest trail segment drawn (dots, Chebyshev); a longer jump (a fast near-eye star)
 /// is left out rather than streaked.
 const MAX_SEGMENT: i32 = 12;
-/// The label's name part, also the label on canvases too narrow for the counts.
-const NAME: &str = "globular cluster";
 
 /// Timeline phase indices.
 const FADE: usize = 1;
@@ -252,7 +250,7 @@ pub(crate) enum Kind {
     Turnoff,
     /// Blue stragglers (merged binaries, ≈ 1.2–1.5 M☉): blue, in the core.
     Straggler,
-    /// Red giants: the brightest, a small cross.
+    /// Red giants: the most luminous, a 2 × 2 dot block.
     Giant,
 }
 
@@ -260,10 +258,10 @@ impl Kind {
     /// Head role and level at full brightness; giants twinkle about theirs.
     pub(crate) fn head(self) -> (Role, f64) {
         match self {
-            Kind::Lower => (Role::Sun, 190.0),
-            Kind::Upper => (Role::Sun, 240.0),
-            Kind::Turnoff => (Role::Star, 245.0),
-            Kind::Straggler => (Role::Cold, 255.0),
+            Kind::Lower => (Role::Sun, 150.0),
+            Kind::Upper => (Role::Sun, 190.0),
+            Kind::Turnoff => (Role::Star, 230.0),
+            Kind::Straggler => (Role::Cold, 230.0),
             Kind::Giant => (Role::Hot, GIANT_MID),
         }
     }
@@ -416,7 +414,7 @@ fn snapshot(trail: &[f64], head: usize, k: usize, age: usize) -> [f64; 3] {
     [trail[at], trail[at + 1], trail[at + 2]]
 }
 
-/// A giant's level at time `t` before the fade: a slow, quiet twinkle `225 ± 30` with
+/// A giant's level at time `t` before the fade: a slow, quiet twinkle `245 ± 10` with
 /// its own `(period, phase)` (visual only).
 fn giant_level((period, phase): (f64, f64), t: f64) -> f64 {
     GIANT_MID + GIANT_SWING * (TAU * t / period + phase).sin_det()
@@ -607,8 +605,9 @@ impl GlobularCluster {
             }
             let head_ink = Ink::new(role, ink::level(level));
             put(dots, head, head_ink);
+            // A giant, the most luminous kind, is the largest mark: a 2 × 2 dot block.
             if kind == Kind::Giant {
-                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                for (dx, dy) in [(1, 0), (0, 1), (1, 1)] {
                     put(dots, (head.0 + dx, head.1 + dy), head_ink);
                 }
             }
@@ -649,15 +648,19 @@ impl GlobularCluster {
         let w = usize::from(self.size.width());
         // `age ≥ 0`, and ≤ 17 crossings per evolve phase: the cast is exact.
         let crossings = (self.age / T_CR).floor() as u32;
-        let _ = write!(self.label, "{NAME}  N={}", self.cluster.n());
+        let n = self.cluster.n();
+        let _ = write!(self.label, "N={n}");
         if crossings > 0 {
             let plural = if crossings == 1 { "" } else { "s" };
             let _ = write!(self.label, "  {crossings} crossing{plural}");
         }
+        // The title already names the scene: the label is only the counts, the
+        // crossings where the label takes at most half the width.
         if 2 * self.label.len() > w {
             self.label.clear();
-            if NAME.len() + 2 <= w {
-                let _ = self.label.write_str(NAME);
+            let _ = write!(self.label, "N={n}");
+            if self.label.len() + 2 > w {
+                self.label.clear();
             }
         }
     }
@@ -1108,6 +1111,69 @@ mod tests {
     }
 
     #[test]
+    fn gc_a11_giants_are_the_most_luminous_and_largest_marks() {
+        // The faintest giant twinkle is at least every other kind's head level.
+        let lo = GIANT_MID - GIANT_SWING;
+        for k in [Kind::Lower, Kind::Upper, Kind::Turnoff, Kind::Straggler] {
+            assert!(lo >= k.head().1, "{k:?}");
+        }
+        // In the frame the mean level of the giants' cells is at least that of every
+        // other kind's cells (their trails included), and each giant is a 2 × 2 block.
+        let size = Size::new(200, 50);
+        let (g, _) = scene_at(size, 3.0);
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let mut sums: [(f64, f64); 4] = [(0.0, 0.0); 4];
+        for y in 1..50 {
+            for x in 0..200 {
+                let c = canvas.get(x, y).unwrap();
+                let k = match c.ink.role {
+                    Role::Hot => 0,
+                    Role::Star => 1,
+                    Role::Sun => 2,
+                    Role::Cold => 3,
+                    _ => continue,
+                };
+                sums[k].0 += f64::from(c.ink.level);
+                sums[k].1 += 1.0;
+            }
+        }
+        let mean = |k: usize| sums[k].0 / sums[k].1.max(1.0);
+        assert!(sums[0].1 > 0.0, "no giant");
+        for k in 1..4 {
+            assert!(
+                mean(0) >= mean(k),
+                "giants {} < kind {k} {}",
+                mean(0),
+                mean(k)
+            );
+        }
+        let proj = g.camera().projector();
+        for (k, p) in g
+            .cluster
+            .pos
+            .chunks_exact(3)
+            .enumerate()
+            .take(giant_count(500))
+        {
+            let Some((x, y, z)) = proj.project([p[0], p[1], p[2]], g.centre(), g.scale) else {
+                continue;
+            };
+            let (dx, dy) = Dots::from_cells(x, y);
+            let (px, py) = (dx.round() as i32, dy.round() as i32);
+            if eye_fade(z) < 0.5 || py < 2 * Dots::CELL_H || px < 0 || py >= 49 * Dots::CELL_H {
+                continue;
+            }
+            for (ox, oy) in [(0, 0), (1, 0), (0, 1), (1, 1)] {
+                assert!(
+                    g.dots.is_lit(px + ox, py + oy),
+                    "giant {k} block at {px},{py}"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn gc_a10_trails_are_short_and_independent_of_the_draw_cadence() {
         let size = Size::new(120, 40);
         let run = |every: usize| {
@@ -1160,25 +1226,24 @@ mod tests {
         let (mut g, _) = scene_at(Size::new(80, 24), 0.0);
         g.age = 4.5 * T_CR;
         g.write_label();
-        assert_eq!(g.label.as_str(), "globular cluster  N=384  4 crossings");
+        assert_eq!(g.label.as_str(), "N=384  4 crossings");
         g.age = 1.99 * T_CR;
         g.write_label();
-        assert_eq!(g.label.as_str(), "globular cluster  N=384  1 crossing");
+        assert_eq!(g.label.as_str(), "N=384  1 crossing");
         // No "0 crossings" debug counter: the clause appears after the first crossing.
         g.age = 0.99 * T_CR;
         g.write_label();
-        assert_eq!(g.label.as_str(), "globular cluster  N=384");
-        // The counts show only where the label takes at most half the width, so it
-        // never turns into a banner; then the bare name while it fits in `w − 2`.
+        assert_eq!(g.label.as_str(), "N=384");
+        // The crossings show only where the label takes at most half the width, so it
+        // never turns into a banner; then the bare count while it fits in `w − 2`.
         g.age = 4.5 * T_CR;
         g.write_label();
         let full = g.label.as_str().len() as u16;
         for (w, expect) in [
-            (2 * full, "globular cluster  N=384  4 crossings"),
-            (2 * full - 1, "globular cluster"),
-            (40, "globular cluster"),
-            (18, "globular cluster"),
-            (17, ""),
+            (2 * full, "N=384  4 crossings"),
+            (2 * full - 1, "N=384"),
+            (7, "N=384"),
+            (6, ""),
             (1, ""),
         ] {
             g.size = Size::new(w, 24);
@@ -1186,7 +1251,7 @@ mod tests {
             assert_eq!(g.label.as_str(), expect, "w = {w}");
         }
         g.age = 0.0;
-        for (w, expect) in [(46, "globular cluster  N=384"), (45, "globular cluster")] {
+        for (w, expect) in [(10, "N=384"), (7, "N=384"), (6, "")] {
             g.size = Size::new(w, 24);
             g.write_label();
             assert_eq!(g.label.as_str(), expect, "w = {w}");
@@ -1230,7 +1295,7 @@ mod tests {
             }
         }
 
-        // Each giant slot twinkles slowly and independently between 195 and 255.
+        // Each giant slot twinkles slowly and independently between 235 and 255.
         let (g, _) = scene_at(Size::new(80, 24), 0.0);
         for (k, &(period, _)) in g.twinkle.iter().enumerate() {
             assert!((5.0..=9.0).contains(&period), "P = {period}");
@@ -1239,8 +1304,8 @@ mod tests {
                 .collect();
             let lo = levels.iter().copied().fold(f64::INFINITY, f64::min);
             let hi = levels.iter().copied().fold(0.0, f64::max);
-            assert!(lo >= 195.0 && hi <= 255.0, "slot {k}: {lo}..{hi}");
-            assert!(hi - lo >= 40.0, "slot {k} barely glints: {lo}..{hi}");
+            assert!(lo >= 235.0 && hi <= 255.0, "slot {k}: {lo}..{hi}");
+            assert!(hi - lo >= 15.0, "slot {k} barely glints: {lo}..{hi}");
         }
         assert_ne!(g.twinkle[0], g.twinkle[1]);
     }
