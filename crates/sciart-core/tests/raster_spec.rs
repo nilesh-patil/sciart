@@ -752,6 +752,53 @@ fn core_r105_to_dot_maps_nodes_and_contour_by_picks_ink_per_cell() {
 }
 
 #[test]
+fn core_r106_refined_cells_trace_the_bilinear_level_set() {
+    // One cell 40 dots wide with corners 0, 1, 0, 1 (clockwise from top-left): the
+    // bilinear surface v = a + b − 2ab has a curved (hyperbolic) level set; refined,
+    // every dot lies on it.
+    let corners = [0.0f32, 1.0, 0.0, 1.0];
+    let level = 0.3f32;
+    let wide = |x: f64, y: f64| (40.0 * x + 2.0, 40.0 * y + 2.0);
+    let mut d = Dots::new(Size::new(24, 12));
+    d.contour_cell_refined(corners, level, (0, 0), 8, wide, A);
+    let lit = lit_dots(&d);
+    assert!(lit.len() > 20, "{} dots", lit.len());
+    // Bilinear value at a dot.
+    let bil = |x: i32, y: i32| {
+        let (a, b) = ((f64::from(x) - 2.0) / 40.0, (f64::from(y) - 2.0) / 40.0);
+        let top = 0.0 + a;
+        let bottom = 1.0 - a;
+        top + (bottom - top) * b
+    };
+    for &(x, y) in &lit {
+        // Within a dot of the level set: some neighbour straddles it.
+        let around: Vec<f64> = (-1..=1)
+            .flat_map(|p| (-1..=1).map(move |q| (p, q)))
+            .map(|(p, q)| bil(x + p, y + q))
+            .collect();
+        let (lo, hi) = around
+            .iter()
+            .fold((f64::MAX, f64::MIN), |m, &v| (m.0.min(v), m.1.max(v)));
+        assert!(
+            lo <= 0.3 + 1e-9 && hi >= 0.3 - 1e-9,
+            "dot {x},{y} off the curve"
+        );
+    }
+    // Plain contour_cell draws straight chords instead: the refined curve differs.
+    let mut plain = Dots::new(Size::new(24, 12));
+    plain.contour_cell(corners, level, (0, 0), wide, A);
+    assert_ne!(lit_dots(&plain), lit);
+    // k ≤ 1 is exactly contour_cell.
+    let mut one = Dots::new(Size::new(24, 12));
+    one.contour_cell_refined(corners, level, (0, 0), 1, wide, A);
+    assert_eq!(lit_dots(&one), lit_dots(&plain));
+    // A level outside the corners draws nothing.
+    let mut none = Dots::new(Size::new(24, 12));
+    none.contour_cell_refined(corners, 2.0, (0, 0), 8, wide, A);
+    assert!(lit_dots(&none).is_empty());
+}
+
+#[test]
 fn core_r105_saddles_and_single_cells() {
     // A saddle: two diagonal corners above the level, two below: two pieces.
     let mut d = Dots::new(Size::new(8, 4));

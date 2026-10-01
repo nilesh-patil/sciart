@@ -424,6 +424,49 @@ impl Dots {
         }
     }
 
+    /// [`contour_cell`](Self::contour_cell) with the cell refined into `k × k` sub-cells
+    /// whose corners are bilinear in the four node values (CORE-R106): where one node
+    /// spans many dots the level set is traced as a smooth curve (the bilinear surface's
+    /// own level set, to within `1/k` of a cell) instead of one straight chord per cell.
+    /// `k ≤ 1` is plain `contour_cell`; `k` is capped at 16. Sub-cells the level does not
+    /// cross are skipped; nothing allocates.
+    pub fn contour_cell_refined(
+        &mut self,
+        corners: [f32; 4],
+        level: f32,
+        (i, j): (usize, usize),
+        k: usize,
+        to_dot: impl Fn(f64, f64) -> (f64, f64),
+        ink: Ink,
+    ) {
+        let k = k.min(16);
+        if k <= 1 {
+            self.contour_cell(corners, level, (i, j), to_dot, ink);
+            return;
+        }
+        let c = corners;
+        let kf = k as f32;
+        // The bilinear value at sub-node (u, v) of the k × k grid.
+        let at = |u: usize, v: usize| {
+            let (a, b) = (u as f32 / kf, v as f32 / kf);
+            let top = c[0] + (c[1] - c[0]) * a;
+            let bottom = c[3] + (c[2] - c[3]) * a;
+            top + (bottom - top) * b
+        };
+        let (x0, y0, kd) = (i as f64, j as f64, k as f64);
+        let map = |x: f64, y: f64| to_dot(x0 + x / kd, y0 + y / kd);
+        for v in 0..k {
+            for u in 0..k {
+                let sub = [at(u, v), at(u + 1, v), at(u + 1, v + 1), at(u, v + 1)];
+                let below = sub.map(|x| x < level);
+                if below == [true; 4] || below == [false; 4] {
+                    continue;
+                }
+                self.contour_cell(sub, level, (u, v), map, ink);
+            }
+        }
+    }
+
     /// Whether dot `(x, y)` is lit; `false` off the lattice.
     pub fn is_lit(&self, x: i32, y: i32) -> bool {
         self.locate(x, y)

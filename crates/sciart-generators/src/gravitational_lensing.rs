@@ -34,7 +34,7 @@ const STARS: usize = 160;
 /// Background drift speed in rows per second.
 const DRIFT: f64 = 0.6;
 /// Galaxy radius in rows and the time between its passes.
-const GALAXY_R: f64 = 2.4;
+const GALAXY_R: f64 = 3.6;
 const PASS: f64 = 12.0;
 /// The galaxy crosses `x ∈ [−SWEEP θE, SWEEP θE]` in the source plane.
 const SWEEP: f64 = 2.2;
@@ -48,7 +48,7 @@ const MIN_MU: f64 = 0.05;
 /// Galaxy threads, in units of its radius: the bulge ring's radius; arms
 /// `r = BULGE·e^{ARM_K φ}` out to 1; the disc's spin (rad/s) and its inclination
 /// (`cos i`, the projected flattening).
-const BULGE: f64 = 0.22;
+const BULGE: f64 = 0.12;
 const ARM_K: f64 = 0.3;
 const SPIN: f64 = 0.35;
 const COS_I: f64 = 0.75;
@@ -58,7 +58,7 @@ const ARM_PTS: usize = 44;
 const MIN_ENVELOPE: f64 = 0.12;
 /// Star trails: the last `TRAIL` s of drift, in `TRAIL_LEVELS.len()` steps, oldest first.
 const TRAIL: f64 = 2.5;
-const TRAIL_LEVELS: [u8; 3] = [60, 90, 125];
+const TRAIL_LEVELS: [u8; 2] = [70, 120];
 /// Trails are drawn where lensing bends them: full length within `TRAIL_NEAR θE` of the
 /// lens (source plane), shrinking to nothing at `TRAIL_FAR θE`, so the far field stays
 /// single dots instead of a uniform rain of streaks.
@@ -142,8 +142,7 @@ fn galaxy_level(mu: f64, envelope: f64) -> Option<u8> {
         return None;
     }
     let base = match abs_mu(mu) {
-        m if m < 1.5 => 165.0,
-        m if m < 4.0 => 210.0,
+        m if m < 4.0 => 230.0,
         _ => 255.0,
     };
     Some((base * (0.45 + 0.55 * envelope.min(1.0))) as u8)
@@ -553,6 +552,11 @@ mod tests {
     fn lens_a4_aligned_galaxy_forms_a_thin_full_einstein_ring() {
         let g = aligned();
         let te = g.view.te;
+        // Thin: aligned, the bulge ring's major and minor images straddle θE at most
+        // 2 dots apart (1 row = 4 dots, square).
+        let [p, m] = images((BULGE * GALAXY_R, 0.0), te);
+        let apart = (p.0.hypot(p.1) - m.0.hypot(m.1)) * f64::from(Dots::CELL_H);
+        assert!(apart <= 2.0, "ring {apart:.2} dots thick");
         let dots = lit_thetas(&g);
         assert!(!dots.is_empty());
         for &(x, y) in &dots {

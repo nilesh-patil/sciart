@@ -235,8 +235,12 @@ fn core_r105_contours_do_not_allocate() {
             });
         }
         dots.contour_cell([1.0, 0.0, 1.0, 0.0], 0.5, (3, 3), to_dot, ink);
+        dots.contour_cell_refined([1.0, 0.0, 1.0, 0.0], 0.5, (5, 5), 6, to_dot, ink);
     });
-    assert_free("Dots::contour/contour_by/contour_cell", stats);
+    assert_free(
+        "Dots::contour/contour_by/contour_cell(_refined) (CORE-R106)",
+        stats,
+    );
     black_box(dots.is_lit(3, 3));
 }
 

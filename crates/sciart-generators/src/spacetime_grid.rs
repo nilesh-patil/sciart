@@ -21,7 +21,7 @@ pub static META: Meta = Meta {
     category: Category::DeepCosmos,
     description: "A rubber-sheet spacetime dimpled by an orbiting binary emitting gravitational waves",
     title: "Gravitational waves · inspiral",
-    captions: &[],
+    captions: &["inspiral", "merger", "merged"],
 };
 
 pub fn build() -> Box<dyn Generator> {
@@ -62,20 +62,23 @@ const YAW_PERIOD: f64 = 47.0;
 const COLS_PER_LINE: u16 = 8;
 const ROWS_PER_LINE: f64 = 3.4;
 const SUB_X: usize = 4;
-const SUB_Y: usize = 3;
+const SUB_Y: usize = 5;
 const MAX_NX: usize = 72;
 const MAX_NY: usize = 40;
 
-/// Wave colouring: where the amplitude `f(r) · s(a)` is at least `WAVE_FLOOR`, a segment
-/// whose phase `cos 2(φ − Φ)` is beyond `±CREST` is a crest (`Wave`) or a trough
-/// (`Cold`), the brighter step from amplitude `STRONG`.
-const CREST: f64 = 0.8;
-const WAVE_FLOOR: f64 = 0.3;
-const STRONG: f64 = 0.75;
-const WAVE_LEVELS: [u8; 2] = [190, 245];
-const TROUGH_LEVELS: [u8; 2] = [170, 225];
-/// `Structure` steps by nearness: far, middle, near.
-const GRID_LEVELS: [u8; 3] = [80, 115, 150];
+/// Wave colouring (M16 round 2): every piece of about `PIECE` dots along a mesh line takes
+/// the strain `f(r)·s(a)·cos 2(φ − Φ)` at its middle (the phase interpolated between
+/// samples); where `|strain| ≥ TINT · peak` (`peak` the largest amplitude on the sheet now)
+/// it is a crest (`Wave`) or trough (`Cold`), so crests read as continuous bands; the
+/// rest of the sheet is a low, quiet `Structure`. No tint while the peak is below
+/// `MIN_PEAK` (after the merger).
+const PIECE: f64 = 2.0;
+const MAX_PIECES: usize = 32;
+const TINT: f64 = 0.7;
+const MIN_PEAK: f64 = 0.05;
+const CREST_INK: Ink = Ink::new(Role::Wave, 230);
+const TROUGH_INK: Ink = Ink::new(Role::Cold, 200);
+const GRID_LEVELS: [u8; 3] = [70, 90, 110];
 
 /// The masses: dot-disc radii (dots) and inks; the merged remnant is `Sun`.
 const MASS_R: [f64; 2] = [2.2, 1.8];
@@ -213,6 +216,8 @@ pub(crate) fn well_depth(x: f64, y: f64, masses: &[(f64, f64, f64)]) -> f64 {
     -WELL_K
         * masses
             .iter()
+            // A mass of 0 (the remnant outside the fade-in) costs no square root.
+            .filter(|m| m.2 != 0.0)
             .map(|&(mx, my, m)| {
                 m / ((x - mx).powi(2) + (y - my).powi(2) + SOFTENING * SOFTENING).sqrt()
             })
@@ -242,24 +247,39 @@ pub(crate) fn wave(bin: &Binary, r: f64, phi: f64, t: f64) -> f64 {
 /// Fixed world data of one mesh sample.
 #[derive(Debug, Clone, Copy, Default)]
 struct Base {
-    x: f64,
-    y: f64,
-    r: f64,
-    /// cos 2φ, sin 2φ — the quadrupole's azimuthal pattern, precomputed per resize.
-    c2: f64,
-    s2: f64,
-    env: f64,
+    x: f32,
+    y: f32,
+    r: f32,
+    /// 2φ, the quadrupole's azimuthal phase, precomputed per resize.
+    phi2: f32,
+    env: f32,
 }
 
-/// Per-frame state of one mesh sample.
+/// Per-frame state of one mesh sample, stored as `f32` (≈ 40 k samples at 500×150, so
+/// the live heap stays under TEST-R7's ceiling); the maths runs in `f64`.
 #[derive(Debug, Clone, Copy, Default)]
 struct Pt {
     /// Dot coordinates.
-    dx: f64,
-    dy: f64,
-    depth: f64,
-    crest: f64,
-    envn: f64,
+    dx: f32,
+    dy: f32,
+    depth: f32,
+    /// The phase `2(φ − Φ(t − r/c))`, wrapped to `[−π, π)` (the crest pattern is its
+    /// cosine), and the amplitude.
+    psi: f32,
+    envn: f32,
+}
+
+impl Pt {
+    /// `(dx, dy, depth, psi, envn)` in `f64`.
+    fn get(self) -> (f64, f64, f64, f64, f64) {
+        (
+            f64::from(self.dx),
+            f64::from(self.dy),
+            f64::from(self.depth),
+            f64::from(self.psi),
+            f64::from(self.envn),
+        )
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -306,6 +326,8 @@ pub struct SpacetimeGrid {
     cam: Camera,
     depth_near: f64,
     depth_far: f64,
+    /// The largest wave amplitude on the sheet now.
+    peak: f64,
     dots: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
@@ -362,17 +384,19 @@ impl SpacetimeGrid {
         let sample = |x: f64, y: f64| {
             let r = x.hypot(y);
             let phi = y.atan2(x);
-            let (s2, c2) = (2.0 * phi).sin_cos_det();
             Base {
-                x,
-                y,
-                r,
-                c2,
-                s2,
-                env: envelope(r),
+                x: x as f32,
+                y: y as f32,
+                r: r as f32,
+                phi2: (2.0 * phi) as f32,
+                env: envelope(r) as f32,
             }
         };
         self.base.clear();
+        // Exactly the samples needed: the per-sample lists dominate the live heap
+        // (TEST-R7).
+        let n = self.ny * self.fx + self.nx * self.fy;
+        self.base.reserve_exact(n);
         for j in 0..self.ny {
             for i in 0..self.fx {
                 self.base.push(sample(gx(i, self.fx), gy(j, self.ny)));
@@ -384,6 +408,7 @@ impl SpacetimeGrid {
             }
         }
         self.pts.clear();
+        self.pts.reserve_exact(n);
         self.pts.resize(self.base.len(), Pt::default());
     }
 
@@ -396,39 +421,90 @@ impl SpacetimeGrid {
         self.cam.sin_yaw = sy;
         let masses = bin.masses(t);
         let lift = RIM_LIFT * (bin.m1 + bin.m2);
+        let mut peak = 0.0f64;
         for (p, b) in self.pts.iter_mut().zip(&self.base) {
-            let well = well_depth(b.x, b.y, &masses);
-            let (a, ph) = bin.state(t - b.r / WAVE_SPEED);
-            let (s, c) = (2.0 * ph).sin_cos_det();
-            // cos 2(φ − Φ) = cos 2φ cos 2Φ + sin 2φ sin 2Φ
-            let crest = b.c2 * c + b.s2 * s;
-            let envn = b.env * bin.strain(a);
-            let z = well + WAVE_AMP * envn * crest;
-            let (dx, dy, depth) = self.cam.project(b.x, b.y, z + lift);
+            let (bx, by, br, bphi2, benv) = (
+                f64::from(b.x),
+                f64::from(b.y),
+                f64::from(b.r),
+                f64::from(b.phi2),
+                f64::from(b.env),
+            );
+            let well = well_depth(bx, by, &masses);
+            let (a, ph) = bin.state(t - br / WAVE_SPEED);
+            // 2(φ − Φ), wrapped so it keeps its precision in `f32`.
+            let psi = (bphi2 - 2.0 * ph + PI).rem_euclid(TAU) - PI;
+            let envn = benv * bin.strain(a);
+            peak = peak.max(envn);
+            let z = well + WAVE_AMP * envn * psi.cos_det();
+            let (dx, dy, depth) = self.cam.project(bx, by, z + lift);
             *p = Pt {
-                dx,
-                dy,
-                depth,
-                crest,
-                envn,
+                dx: dx as f32,
+                dy: dy as f32,
+                depth: depth as f32,
+                psi: psi as f32,
+                envn: envn as f32,
             };
+        }
+        self.peak = peak;
+    }
+
+    /// The ink of a piece with wave strain `strain` on a segment whose plain-sheet ink is
+    /// `sheet` (SPT-A7).
+    pub(crate) fn tint(&self, strain: f64, sheet: Ink) -> Ink {
+        let cut = TINT * self.peak;
+        if self.peak >= MIN_PEAK && strain >= cut {
+            CREST_INK
+        } else if self.peak >= MIN_PEAK && strain <= -cut {
+            TROUGH_INK
+        } else {
+            sheet
         }
     }
 
-    /// A mesh segment's ink: the wave strain picks crest / trough / plain sheet.
-    fn ink(&self, a: &Pt, b: &Pt) -> Ink {
-        let crest = 0.5 * (a.crest + b.crest);
-        let envn = 0.5 * (a.envn + b.envn);
-        let step = usize::from(envn >= STRONG);
-        if envn >= WAVE_FLOOR && crest >= CREST {
-            Ink::new(Role::Wave, WAVE_LEVELS[step])
-        } else if envn >= WAVE_FLOOR && crest <= -CREST {
-            Ink::new(Role::Cold, TROUGH_LEVELS[step])
-        } else {
-            let depth = 0.5 * (a.depth + b.depth);
-            let span = (self.depth_far - self.depth_near).max(1e-9);
-            let near = ((self.depth_far - depth) / span).clamp(0.0, 1.0);
-            Ink::new(Role::Structure, GRID_LEVELS[((near * 3.0) as usize).min(2)])
+    /// The plain sheet's ink at depth `depth`: a quiet `Structure`, stepped by nearness.
+    fn sheet_ink(&self, depth: f64) -> Ink {
+        let span = (self.depth_far - self.depth_near).max(1e-9);
+        let near = ((self.depth_far - depth) / span).clamp(0.0, 1.0);
+        Ink::new(Role::Structure, GRID_LEVELS[((near * 3.0) as usize).min(2)])
+    }
+
+    /// Draw the mesh segment `a → b` in pieces of about `PIECE` dots, each inked by the
+    /// strain at its middle: the amplitude interpolated linearly, the phase along the
+    /// shorter way round (samples are well under half a wavelength apart). Runs of
+    /// pieces with one ink are drawn as one line.
+    fn segment(&mut self, a: Pt, b: Pt) {
+        let ((ax, ay, ad, ap, ae), (bx, by, bd, bp, be)) = (a.get(), b.get());
+        let sheet = self.sheet_ink(0.5 * (ad + bd));
+        let len = (bx - ax).hypot(by - ay);
+        let n = ((len / PIECE).ceil() as usize).clamp(1, MAX_PIECES);
+        let mut dpsi = bp - ap;
+        dpsi -= TAU * (dpsi / TAU).round();
+        // No piece can be tinted: one plain line.
+        if self.peak < MIN_PEAK || ae.max(be) < TINT * self.peak {
+            self.dots.line(ax, ay, bx, by, sheet);
+            return;
+        }
+        let mut start = (ax, ay);
+        let mut run: Option<Ink> = None;
+        for m in 0..n {
+            let fm = (m as f64 + 0.5) / n as f64;
+            let envn = ae + (be - ae) * fm;
+            let ink = self.tint(envn * (ap + dpsi * fm).cos_det(), sheet);
+            match run {
+                Some(r) if r != ink => {
+                    let f = m as f64 / n as f64;
+                    let at = (ax + (bx - ax) * f, ay + (by - ay) * f);
+                    self.dots.line(start.0, start.1, at.0, at.1, r);
+                    start = at;
+                    run = Some(ink);
+                }
+                None => run = Some(ink),
+                _ => {}
+            }
+        }
+        if let Some(r) = run {
+            self.dots.line(start.0, start.1, bx, by, r);
         }
     }
 
@@ -458,8 +534,7 @@ impl SpacetimeGrid {
         }
         let seg = |g: &mut Self, i0: usize, i1: usize| {
             let (a, b) = (g.pts[i0], g.pts[i1]);
-            let ink = g.ink(&a, &b);
-            g.dots.line(a.dx, a.dy, b.dx, b.dy, ink);
+            g.segment(a, b);
         };
         for j in 0..ny {
             for i in 0..fx - 1 {
@@ -544,6 +619,20 @@ impl Generator for SpacetimeGrid {
 
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
+    }
+
+    /// The act: the inspiral, the merger (from `0.45 a₀`, where the strain tapers, to
+    /// `a = 0`) and the merged remnant (SPT-A8).
+    fn caption(&self) -> Option<&'static str> {
+        let bin = self.binary();
+        let a = bin.separation(self.t);
+        Some(if a <= 0.0 {
+            "merged"
+        } else if bin.inspiral && a < STRAIN_TAPER.1 * bin.a0 {
+            "merger"
+        } else {
+            "inspiral"
+        })
     }
 }
 
@@ -743,10 +832,12 @@ mod tests {
         let bin = g.binary();
         for idx in (0..g.pts.len()).step_by(37) {
             let b = g.base[idx];
-            let expect = wave(&bin, b.r, b.y.atan2(b.x), g.t);
+            let (bx, by) = (f64::from(b.x), f64::from(b.y));
+            let expect = wave(&bin, f64::from(b.r), by.atan2(bx), g.t);
             let p = g.pts[idx];
-            let z = WAVE_AMP * p.envn * p.crest;
-            assert!((z - expect).abs() < 1e-9, "sample {idx}");
+            let z = WAVE_AMP * f64::from(p.envn) * f64::from(p.psi).cos_det();
+            // Samples are stored in f32.
+            assert!((z - expect).abs() < 1e-6, "sample {idx}");
         }
     }
 
@@ -760,6 +851,129 @@ mod tests {
         };
         let (small, big) = (lines(80, 24), lines(200, 50));
         assert!(big.0 > small.0 && big.1 > small.1, "{small:?} vs {big:?}");
+    }
+
+    /// Sheet coordinates of the point at dot `(px, py)` on the plane `z = 0` (before the
+    /// lift), the inverse of the camera's projection there.
+    fn sheet_of(g: &SpacetimeGrid, px: f64, py: f64) -> (f64, f64) {
+        let lift = RIM_LIFT * (g.binary().m1 + g.binary().m2);
+        let (sx, sy) = (
+            (px + 0.5) / f64::from(Dots::CELL_W) - 0.5,
+            (py + 0.5) / f64::from(Dots::CELL_H) - 0.5,
+        );
+        let (u, v) = (
+            (sx - g.cam.ox) / (g.cam.scale * ASPECT),
+            (g.cam.oy - sy) / g.cam.scale,
+        );
+        let (cp, sp) = (PITCH.cos_det(), PITCH.sin_det());
+        let z = lift;
+        let yr = (z * cp - v * (CAM_DIST - z * sp)) / (v * cp - sp);
+        let d = yr * cp - z * sp + CAM_DIST;
+        let xr = u * d;
+        let (c, s) = (g.cam.cos_yaw, g.cam.sin_yaw);
+        (xr * c + yr * s, -xr * s + yr * c)
+    }
+
+    #[test]
+    fn spt_a7_crests_read_as_bands_round_the_binary() {
+        let size = Size::new(200, 50);
+        let mut g = SpacetimeGrid::default();
+        let mut ctx = Ctx::new(42, size);
+        g.resize(size, &mut ctx);
+        for _ in 0..(5.0 / SIM_DT) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        assert!(g.peak >= MIN_PEAK, "no wave at t = 5");
+        let mut c = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut c);
+        let (w, h) = (200usize, 50usize);
+        let crest = |x: usize, y: usize| {
+            let cell = c.get(x as i32, y as i32).unwrap();
+            cell.ch != ' ' && cell.ink == CREST_INK
+        };
+        let mut seen = vec![false; w * h];
+        let (mut checked, mut tinted) = (0, 0);
+        for y0 in 0..h {
+            for x0 in 0..w {
+                if seen[y0 * w + x0] || !crest(x0, y0) {
+                    continue;
+                }
+                let (mut stack, mut cells) = (vec![(x0, y0)], Vec::new());
+                seen[y0 * w + x0] = true;
+                while let Some((x, y)) = stack.pop() {
+                    cells.push((x, y));
+                    for (dx, dy) in [
+                        (-1i32, -1i32),
+                        (0, -1),
+                        (1, -1),
+                        (-1, 0),
+                        (1, 0),
+                        (-1, 1),
+                        (0, 1),
+                        (1, 1),
+                    ] {
+                        let (nx, ny) = (x as i32 + dx, y as i32 + dy);
+                        if nx < 0 || ny < 0 || nx >= w as i32 || ny >= h as i32 {
+                            continue;
+                        }
+                        let (nx, ny) = (nx as usize, ny as usize);
+                        if !seen[ny * w + nx] && crest(nx, ny) {
+                            seen[ny * w + nx] = true;
+                            stack.push((nx, ny));
+                        }
+                    }
+                }
+                tinted += cells.len();
+                if cells.len() < 6 {
+                    continue;
+                }
+                let rs: Vec<f64> = cells
+                    .iter()
+                    .map(|&(x, y)| {
+                        let (sx, sy) = sheet_of(&g, 2.0 * x as f64 + 0.5, 4.0 * y as f64 + 1.5);
+                        sx.hypot(sy)
+                    })
+                    .collect();
+                let mean = rs.iter().sum::<f64>() / rs.len() as f64;
+                if mean < 0.5 {
+                    continue; // the near zone, where the wells bend the sheet
+                }
+                let sd =
+                    (rs.iter().map(|r| (r - mean).powi(2)).sum::<f64>() / rs.len() as f64).sqrt();
+                assert!(
+                    sd / mean < 0.15,
+                    "crest at r = {mean:.2}: spread {:.3}",
+                    sd / mean
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 3,
+            "{checked} crest bands checked ({tinted} cells)"
+        );
+    }
+
+    #[test]
+    fn spt_a8_captions_follow_the_act() {
+        let mut g = SpacetimeGrid::default();
+        let mut ctx = Ctx::new(1, Size::new(80, 24));
+        g.resize(Size::new(80, 24), &mut ctx);
+        let bin = g.binary();
+        let cycle = bin.tau_c + bin.post;
+        let base = (g.t / cycle).floor() * cycle + cycle;
+        for (tau, want) in [
+            (0.5, "inspiral"),
+            (20.0, "inspiral"),
+            (bin.tau_c - 0.3, "merger"),
+            (bin.tau_c + 1.0, "merged"),
+            (cycle + 0.2, "inspiral"),
+        ] {
+            g.t = base + tau;
+            assert_eq!(g.caption(), Some(want), "τ = {tau}");
+            assert!(META.captions.contains(&want));
+        }
     }
 
     #[test]
