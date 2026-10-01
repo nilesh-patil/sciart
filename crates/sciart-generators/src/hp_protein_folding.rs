@@ -387,35 +387,84 @@ pub(crate) fn schedule(local: f64) -> (f64, usize) {
 const BEAD_EASE_S: f64 = 0.05;
 const CAM_FOLLOW_S: f64 = 0.1;
 const CAM_ZOOM_S: f64 = 0.8;
-/// Residues are 2 × 2-pixel dots at any zoom (the chain stops this many pixels from a
-/// bead's centre), no halos; the chain is a 1-dot `Structure` braille line between them.
-const BEAD_R: f64 = 1.0;
-const BACKBONE: Ink = Ink::new(Role::Structure, 150);
-/// M11's complementary pair (ADR-0018): H (hydrophobic) residues `Hot`, a step brighter
-/// with each H·H contact up to two (buried cores read hot); P (polar) residues `Cold`.
+/// The loop: the three acts.
+const LOOP_S: f64 = ACT_S[0] + ACT_S[1] + ACT_S[2];
+
+// M16 (GEN-R25, strange_attractors' thread idiom): all braille dots on black.
+
+/// The backbone: a Catmull-Rom spline through the beads, one dot thick, below the
+/// residues' levels so a bead's cell keeps the bead's colour.
+const BACKBONE: Ink = Ink::new(Role::Structure, 110);
+/// Residue dots (M11's complementary pair, ADR-0018): H (hydrophobic) `Hot`, a step
+/// brighter with each H·H contact up to two (buried cores read hot); P (polar) `Cold`.
+/// A small braille disc whose radius follows the zoom (`BEAD_FRAC` of a lattice step,
+/// within `BEAD_R` dots).
 const H_INKS: [Ink; 3] = [
     Ink::new(Role::Hot, 130),
     Ink::new(Role::Hot, 190),
     Ink::new(Role::Hot, 255),
 ];
 const P_INK: Ink = Ink::new(Role::Cold, 170);
+const BEAD_FRAC: f64 = 0.16;
+const BEAD_R: (f64, f64) = (0.5, 2.5);
+/// An H–H contact: a faint dotted `Accent` link (every other dot) between the two
+/// residues, stopping short of their dots.
+const CONTACT_INK: Ink = Ink::new(Role::Accent, 90);
+/// The energy panel (right): `E(t)` over one loop, sampled `TRACE_N` times, as a dot
+/// line coloured by the temperature it was sampled at (`Sun` hot coil, `Accent` while
+/// cooling above `T_WARM`, `Wave` cold), descending from 0 (top) towards the best
+/// known fold `E_BEST` (a dashed `Dim` floor) on an axis down to `E_AXIS`; its head a
+/// `Star` dot. Shown when the scene is at least `PANEL_MIN` cells wide and 12 high.
+const TRACE_N: usize = 80;
+const E_AXIS: f64 = -24.0;
+const E_BEST: f64 = -23.0;
+const T_WARM: f64 = 0.5;
+const TRACE_INKS: [Ink; 3] = [
+    Ink::new(Role::Sun, 200),
+    Ink::new(Role::Accent, 200),
+    Ink::new(Role::Wave, 230),
+];
+const HEAD_INK: Ink = Ink::new(Role::Star, 255);
+const AXIS_INK: Ink = Ink::new(Role::Dim, 90);
+const PANEL_MIN: u16 = 60;
+/// The panel's box in fractions of the width and of the art height (above the title).
+const PANEL_X: (f64, f64) = (0.66, 0.96);
+const PANEL_Y: (f64, f64) = (0.16, 0.84);
+/// The chain's share of the width when the panel shows.
+const CHAIN_FRAC: f64 = 0.62;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
+
+/// The trace ink of a sample taken at loop time `local`.
+pub(crate) fn trace_ink(local: f64) -> Ink {
+    match schedule(local) {
+        (_, 0) => TRACE_INKS[0],
+        (t, _) if t > T_WARM => TRACE_INKS[1],
+        _ => TRACE_INKS[2],
+    }
+}
 
 #[derive(Debug)]
 struct Folding {
     chain: Chain,
     /// Bead positions on screen (lattice units), easing towards `chain.pos`.
     disp: [(f64, f64); N],
-    /// Camera centre (lattice units) and pixels per lattice step.
+    /// Camera centre (lattice units) and dots per lattice step.
     cam: (f64, f64, f64),
     time: f64,
     owed: f64,
     started: bool,
-    pixels: Pixels,
+    /// The energy over `TRACE_N` equal slices of the loop (each its mean over the
+    /// updates in the slice), the first `n_trace` of them taken so far this loop.
+    trace: [f32; TRACE_N],
+    /// Sum and count of the energies since the last sample.
+    acc: (f64, u32),
+    n_trace: usize,
+    /// The loop the trace belongs to.
+    trace_loop: u64,
     dots: Dots,
     cells: Size,
     readout_room: usize,
-    /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
+    /// The dots are stale: the state moved since the last `rasterise` (GEN-R20).
     dirty: bool,
 }
 
@@ -434,7 +483,10 @@ impl Default for Folding {
             time: 0.0,
             owed: 0.0,
             started: false,
-            pixels: Pixels::default(),
+            trace: [0.0; TRACE_N],
+            acc: (0.0, 0),
+            n_trace: 0,
+            trace_loop: 0,
             dots: Dots::default(),
             cells: Size::new(1, 1),
             readout_room: 0,
@@ -444,88 +496,216 @@ impl Default for Folding {
 
 impl Folding {
     fn local(&self) -> f64 {
-        self.time % ACT_S.iter().sum::<f64>()
+        self.time % LOOP_S
     }
 
-    /// Pixel size of the art area (above the title row).
+    fn panel(&self) -> bool {
+        self.cells.width() >= PANEL_MIN && self.cells.height() >= 12
+    }
+
+    /// Dot size of the art area (above the title row).
     fn art(&self) -> (f64, f64) {
-        let ps = self.pixels.pixel_size();
+        let ds = self.dots.dot_size();
         (
-            f64::from(ps.width()),
-            (f64::from(ps.height()) - 2.0).max(1.0),
+            f64::from(ds.width()),
+            (f64::from(ds.height()) - f64::from(Dots::CELL_H)).max(1.0),
         )
     }
 
+    /// The chain's region: its width in dots (the left part when the panel shows).
+    fn chain_w(&self) -> f64 {
+        let w = self.art().0;
+        if self.panel() { w * CHAIN_FRAC } else { w }
+    }
+
     /// Where the camera wants to be: the chain's bounding box, framed with a margin,
-    /// capped so a compact fold fills most of the height.
-    /// The camera frames the chain's bounding box; it follows closely (so a hot chain that
-    /// reptates across the lattice writhes in place instead of leaving the frame) and
-    /// zooms slowly.
+    /// capped so a compact fold fills most of the height. It follows closely (so a hot
+    /// chain that reptates across the lattice writhes in place instead of leaving the
+    /// frame) and zooms slowly.
     fn cam_target(&self) -> (f64, f64, f64) {
         let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
         for d in &self.disp {
             lo = (lo.0.min(d.0), lo.1.min(d.1));
             hi = (hi.0.max(d.0), hi.1.max(d.1));
         }
-        let (pw, ph) = self.art();
-        let sp = (pw * 0.92 / (hi.0 - lo.0 + 1.4))
-            .min(ph * 0.9 / (hi.1 - lo.1 + 1.4))
-            .min(ph / 8.0)
-            .max(0.5);
+        let (dw, dh) = (self.chain_w(), self.art().1);
+        let sp = (dw * 0.92 / (hi.0 - lo.0 + 1.4))
+            .min(dh * 0.9 / (hi.1 - lo.1 + 1.4))
+            .min(dh / 8.0)
+            .max(1.0);
         ((lo.0 + hi.0) / 2.0, (lo.1 + hi.1) / 2.0, sp)
     }
 
-    fn to_px(&self, (x, y): (f64, f64)) -> (f64, f64) {
-        let (pw, ph) = self.art();
+    fn to_dot(&self, (x, y): (f64, f64)) -> (f64, f64) {
+        let (dw, dh) = (self.chain_w(), self.art().1);
         let (cx, cy, sp) = self.cam;
-        (pw / 2.0 + (x - cx) * sp, ph / 2.0 + (y - cy) * sp)
+        (dw / 2.0 + (x - cx) * sp, dh / 2.0 + (y - cy) * sp)
+    }
+
+    /// Record the energy at every trace time passed this loop.
+    fn sample(&mut self) {
+        let lp = (self.time / LOOP_S).floor() as u64;
+        if lp != self.trace_loop {
+            self.trace_loop = lp;
+            self.n_trace = 0;
+        }
+        let due = ((self.local() / LOOP_S * TRACE_N as f64) as usize + 1).min(TRACE_N);
+        self.acc.0 += f64::from(self.chain.energy);
+        self.acc.1 += 1;
+        if self.n_trace < due {
+            // The slice's mean energy: a smooth thread, not Metropolis flicker.
+            let e = (self.acc.0 / f64::from(self.acc.1)) as f32;
+            self.acc = (0.0, 0);
+            while self.n_trace < due {
+                self.trace[self.n_trace] = e;
+                self.n_trace += 1;
+            }
+        }
     }
 
     fn rasterise(&mut self) {
-        self.pixels.clear();
         self.dots.clear();
-        // Residues; buried H a step brighter per contact.
-        for i in 0..N {
-            let c = self.to_px(self.disp[i]);
-            let h = self.chain.is_h(i);
-            let ink = if h {
-                H_INKS[self.chain.contacts_of(i).min(2)]
-            } else {
-                P_INK
-            };
-            // A regular 2 × 2-pixel dot centred on the bead.
-            let (x0, y0) = ((c.0 - 0.5).round() as i32, (c.1 - 0.5).round() as i32);
-            for (dx, dy) in [(-1, -1), (0, -1), (-1, 0), (0, 0)] {
-                self.pixels.set(x0 + dx + 1, y0 + dy + 1, ink);
+        self.backbone();
+        self.contacts();
+        self.residues();
+        if self.panel() {
+            self.energy_panel();
+        }
+    }
+
+    /// The backbone: a centripetal-free (uniform) Catmull-Rom spline through the beads.
+    fn backbone(&mut self) {
+        let mut prev = self.to_dot(self.disp[0]);
+        for i in 0..N - 1 {
+            let p = |k: usize| self.to_dot(self.disp[k.min(N - 1)]);
+            let (p0, p1, p2, p3) = (p(i.saturating_sub(1)), p(i), p(i + 1), p(i + 2));
+            let len = (p2.0 - p1.0).hypot(p2.1 - p1.1);
+            let n = (len / 2.0).ceil().clamp(1.0, 64.0) as usize;
+            for k in 1..=n {
+                let t = k as f64 / n as f64;
+                let q = catmull_rom(p0, p1, p2, p3, t);
+                self.dots.line(prev.0, prev.1, q.0, q.1, BACKBONE);
+                prev = q;
             }
         }
-        // Backbone: a braille line between beads, stopping at their rims.
-        for i in 0..N - 1 {
-            let (a, b) = (self.to_px(self.disp[i]), self.to_px(self.disp[i + 1]));
-            let (ra, rb) = (BEAD_R, BEAD_R);
-            // Dots are half a pixel in both axes.
-            let (a, b) = ((2.0 * a.0, 2.0 * a.1), (2.0 * b.0, 2.0 * b.1));
-            let len = (b.0 - a.0).hypot(b.1 - a.1);
-            let n = (len * 1.2).ceil().clamp(1.0, 4096.0) as usize;
-            for k in 0..=n {
-                let t = k as f64 / n as f64;
-                let (x, y) = (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t);
-                if t * len > 2.0 * ra + 0.6 && (1.0 - t) * len > 2.0 * rb + 0.6 {
-                    self.dots.plot(x, y, BACKBONE);
+    }
+
+    fn bead_r(&self) -> f64 {
+        (self.cam.2 * BEAD_FRAC).clamp(BEAD_R.0, BEAD_R.1)
+    }
+
+    /// Faint dotted links between H residues in contact.
+    fn contacts(&mut self) {
+        let skip = self.bead_r() + 1.5;
+        for i in 0..N {
+            if !self.chain.is_h(i) {
+                continue;
+            }
+            for &d in &DIRS {
+                let Some(j) = self.chain.at(add(self.chain.pos[i], d)) else {
+                    continue;
+                };
+                if j <= i + 1 || !self.chain.is_h(j) {
+                    continue;
+                }
+                let (a, b) = (self.to_dot(self.disp[i]), self.to_dot(self.disp[j]));
+                let len = (b.0 - a.0).hypot(b.1 - a.1);
+                // Only settled pairs: beads still easing after a move draw no link
+                // (it would cut across the chain).
+                let settled = |k: usize| {
+                    let (d, p) = (self.disp[k], self.chain.pos[k]);
+                    (d.0 - f64::from(p.0)).hypot(d.1 - f64::from(p.1)) < 0.35
+                };
+                if len > 1.35 * self.cam.2 || !settled(i) || !settled(j) {
+                    continue;
+                }
+                let n = len.floor() as i32;
+                for k in (0..=n).step_by(2) {
+                    let s = f64::from(k);
+                    if s > skip && len - s > skip {
+                        let t = s / len;
+                        self.dots
+                            .plot(a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, CONTACT_INK);
+                    }
                 }
             }
         }
     }
+
+    fn residues(&mut self) {
+        let r = self.bead_r();
+        for i in 0..N {
+            let c = self.to_dot(self.disp[i]);
+            let ink = if self.chain.is_h(i) {
+                H_INKS[self.chain.contacts_of(i).min(2)]
+            } else {
+                P_INK
+            };
+            self.dots.disc(c.0, c.1, r, ink);
+        }
+    }
+
+    /// Dot coordinates of the panel point at trace sample `k` and energy `e`.
+    fn panel_at(&self, k: f64, e: f64) -> (f64, f64) {
+        let (w, h) = self.art();
+        let (x0, x1) = (PANEL_X.0 * w, PANEL_X.1 * w);
+        let (y0, y1) = (PANEL_Y.0 * h, PANEL_Y.1 * h);
+        (
+            x0 + (x1 - x0) * k / (TRACE_N - 1) as f64,
+            y0 + (y1 - y0) * (e / E_AXIS).clamp(0.0, 1.0),
+        )
+    }
+
+    /// The energy trace descending the folding funnel.
+    fn energy_panel(&mut self) {
+        // Axis: a dotted vertical at the left; the best known fold a dashed floor.
+        let (top, bottom) = (self.panel_at(0.0, 0.0), self.panel_at(0.0, E_AXIS));
+        let mut y = top.1;
+        while y <= bottom.1 {
+            self.dots.plot(top.0 - 3.0, y, AXIS_INK);
+            y += 2.0;
+        }
+        let (a, b) = (
+            self.panel_at(0.0, E_BEST),
+            self.panel_at((TRACE_N - 1) as f64, E_BEST),
+        );
+        let mut x = a.0;
+        while x <= b.0 {
+            self.dots.plot(x, a.1, AXIS_INK);
+            x += 3.0;
+        }
+        let Some(&first) = self.trace.first() else {
+            return;
+        };
+        let mut prev = self.panel_at(0.0, f64::from(first));
+        for k in 1..self.n_trace {
+            let q = self.panel_at(k as f64, f64::from(self.trace[k]));
+            let ink = trace_ink(LOOP_S * k as f64 / TRACE_N as f64);
+            self.dots.line(prev.0, prev.1, q.0, q.1, ink);
+            prev = q;
+        }
+        if self.n_trace > 0 {
+            self.dots.disc(prev.0, prev.1, 0.8, HEAD_INK);
+        }
+    }
 }
 
-/// ASCII: H `@`, P `o`.
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let pick = |i: Ink| match i.role {
-        Role::Hot => Some(('@', i)),
-        Role::Cold => Some(('o', i)),
-        _ => None,
+/// Uniform Catmull-Rom between `p1` and `p2` at `t ∈ [0, 1]`.
+fn catmull_rom(
+    p0: (f64, f64),
+    p1: (f64, f64),
+    p2: (f64, f64),
+    p3: (f64, f64),
+    t: f64,
+) -> (f64, f64) {
+    let (t2, t3) = (t * t, t * t * t);
+    let f = |a: f64, b: f64, c: f64, d: f64| {
+        0.5 * (2.0 * b
+            + (c - a) * t
+            + (2.0 * a - 5.0 * b + 4.0 * c - d) * t2
+            + (3.0 * b - a - 3.0 * c + d) * t3)
     };
-    pick(top).or_else(|| pick(bottom))
+    (f(p0.0, p1.0, p2.0, p3.0), f(p0.1, p1.1, p2.1, p3.1))
 }
 
 impl Generator for Folding {
@@ -540,7 +720,6 @@ impl Generator for Folding {
     fn resize(&mut self, size: Size, _ctx: &mut Ctx) {
         self.cells = size;
         self.readout_room = title::stable_readout_room(size, &META);
-        self.pixels.resize(size);
         self.dots.resize(size);
         // The chain is size-independent; the camera snaps to frame it at the new size.
         self.cam = self.cam_target();
@@ -571,6 +750,7 @@ impl Generator for Folding {
         for _ in 0..n as u32 {
             self.chain.attempt(t, &mut ctx.rng);
         }
+        self.sample();
         if let Some((sx, sy)) = self.chain.recentre() {
             // Keep the picture still across the grid shift.
             let (sx, sy) = (f64::from(sx), f64::from(sy));
@@ -612,12 +792,19 @@ impl Generator for Folding {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-        self.dots.blit_over(canvas, &self.pixels);
+        self.dots.blit(canvas);
         let h = i32::from(self.cells.height());
         if h < 4 {
             return;
+        }
+        if self.panel() {
+            // "energy" above the axis.
+            let (x, y) = self.panel_at(0.0, 0.0);
+            let (cx, cy) = (
+                ((x - 3.0) / f64::from(Dots::CELL_W)) as i32,
+                (y / f64::from(Dots::CELL_H)) as i32 - 1,
+            );
+            draw::label(canvas, cx, cy.max(0), "energy", LABEL_INK);
         }
         let contacts = -self.chain.energy;
         let mut label = StackText::<24>::new();
@@ -767,29 +954,101 @@ mod tests {
     }
 
     #[test]
-    fn hpf_a6_residues_are_hot_h_and_cold_p_dots_on_a_dim_chain() {
+    fn hpf_a6_residues_are_hot_h_and_cold_p_dots_on_a_braille_chain() {
         let size = Size::new(120, 40);
         let mut ctx = Ctx::new(6, size);
         let mut g = Folding::default();
         g.resize(size, &mut ctx);
         run_to(&mut g, &mut ctx, 30.0);
         g.prepare();
-        let ps = g.pixels.pixel_size();
-        let (mut hot, mut cold) = (0, 0);
-        for y in 0..i32::from(ps.height()) {
-            for x in 0..i32::from(ps.width()) {
-                match g.pixels.get(x, y).unwrap_or(Ink::BLANK) {
-                    i if H_INKS.contains(&i) => hot += 1,
-                    i if i == P_INK => cold += 1,
-                    i => assert_eq!(i, Ink::BLANK),
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let (mut hot, mut cold, mut top) = (0, 0, 0);
+        let w = usize::from(size.width());
+        for (k, c) in canvas.cells().iter().enumerate() {
+            if c.ch == ' ' || c.ink.role == Role::Text {
+                continue;
+            }
+            assert!(
+                c.bg == Ink::BLANK && ('\u{2800}'..='\u{28ff}').contains(&c.ch),
+                "not a braille cell: {c:?}"
+            );
+            let in_chain = ((k % w) as f64) < CHAIN_FRAC * w as f64;
+            match c.ink {
+                i if H_INKS.contains(&i) => {
+                    hot += 1;
+                    top += usize::from(i == H_INKS[2]);
                 }
+                i if i == P_INK => cold += 1,
+                i if i == BACKBONE || i == CONTACT_INK => assert!(in_chain, "{c:?}"),
+                i if TRACE_INKS.contains(&i) || i == HEAD_INK || i == AXIS_INK => {
+                    assert!(!in_chain, "trace in the chain's region: {c:?}");
+                }
+                i => panic!("unexpected ink {i:?}"),
             }
         }
-        assert!(hot > 0 && cold > 0, "{hot} H, {cold} P pixels");
+        assert!(hot > 0 && cold > 0, "{hot} H, {cold} P cells");
         // The folded core carries buried H at the top step.
+        assert!(top > 0);
+    }
+
+    #[test]
+    fn hpf_a7_the_energy_trace_records_the_chain_and_descends_the_funnel() {
+        let size = Size::new(120, 40);
+        let mut ctx = Ctx::new(7, size);
+        let mut g = Folding::default();
+        g.resize(size, &mut ctx);
+        let mut checked = 0;
+        let mut seen = (f64::MAX, f64::MIN);
+        while g.time < LOOP_S - 0.5 {
+            let before = g.n_trace;
+            g.update(1.0 / 60.0, &mut ctx);
+            let e = f64::from(g.chain.energy);
+            seen = (seen.0.min(e), seen.1.max(e));
+            // A sample just taken is the mean energy over its slice of the loop.
+            if g.n_trace > before {
+                let s = f64::from(g.trace[g.n_trace - 1]);
+                assert!(
+                    seen.0 - 1e-6 <= s && s <= seen.1 + 1e-6,
+                    "{s} outside {seen:?}"
+                );
+                seen = (f64::MAX, f64::MIN);
+                checked += 1;
+            }
+        }
+        assert!(checked > 0 && g.n_trace > TRACE_N - 5, "{}", g.n_trace);
+        let mean = |a: f64, b: f64| {
+            let (i, j) = (
+                (a / LOOP_S * TRACE_N as f64) as usize,
+                (b / LOOP_S * TRACE_N as f64) as usize,
+            );
+            g.trace[i..j].iter().map(|&e| f64::from(e)).sum::<f64>() / (j - i) as f64
+        };
+        let (coil, fold) = (mean(1.0, ACT_S[0]), mean(LOOP_S - 8.0, LOOP_S - 1.0));
         assert!(
-            (0..i32::from(ps.height()))
-                .any(|y| (0..i32::from(ps.width())).any(|x| g.pixels.get(x, y) == Some(H_INKS[2])))
+            coil > -6.0 && fold <= -14.0,
+            "E: coil {coil:.1}, fold {fold:.1}"
+        );
+        // The trace is coloured by temperature: hot, cooling, cold.
+        assert_eq!(trace_ink(1.0), TRACE_INKS[0]);
+        assert_eq!(trace_ink(ACT_S[0] + 0.5), TRACE_INKS[1]);
+        assert_eq!(trace_ink(LOOP_S - 1.0), TRACE_INKS[2]);
+        // The next loop starts a fresh trace.
+        while g.time < LOOP_S + 1.0 {
+            g.update(1.0 / 60.0, &mut ctx);
+        }
+        assert!(g.n_trace < 10, "{}", g.n_trace);
+        // Drawn: the head dot in the panel, right of the chain.
+        g.prepare();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        let w = usize::from(size.width());
+        assert!(
+            canvas
+                .cells()
+                .iter()
+                .enumerate()
+                .any(|(k, c)| c.ink == HEAD_INK && (k % w) as f64 > CHAIN_FRAC * w as f64)
         );
     }
 }

@@ -15,7 +15,7 @@
 
 use rand::Rng;
 use sciart_core::ease;
-use sciart_core::grid::{self, SampleMap};
+use sciart_core::grid;
 use sciart_core::prelude::*;
 
 use crate::shared::excitable::{self, Barkley, Front, FrontStroke};
@@ -67,37 +67,54 @@ const STROKE: FrontStroke = FrontStroke {
     tail_w: 6.0,
     tail_v: (0.69, 0.36),
 };
-/// The glow a cell exposes around its pixel.
-const CELL_HALO: [(i32, i32, f32); 9] = sciart_core::raster::halo_kernel(1);
 /// One aggregation lasts this long, then the lawn is scattered afresh.
 const CYCLE_S: f64 = 55.0;
 const FADE_S: f64 = 2.0;
 
-// ---- Display ----
+// ---- Display (M16, GEN-R25: strange_attractors' thread idiom) ----
 
-/// Cells (ADR-0018, M11's idiom): one braille dot per amoeba in `Hot`, at two flat
-/// levels: the thin lawn, and the streams and mounds where the smoothed cell density
-/// passes [`CROWD`]; the quiet ground is black.
+/// Cells: one braille dot per amoeba in `Hot`, at two flat levels: the thin lawn, and
+/// the streams and mounds, where the 3×3-node neighbourhood holds at least
+/// [`CROWD_N`] cells (≈ 4× a fresh lawn's); the ground is black.
 const CELL_INKS: [Ink; 2] = [Ink::new(Role::Hot, 150), Ink::new(Role::Hot, 255)];
-const CROWD: f32 = 1.2;
-/// Wave fronts: a 1-px `Wave` line on the `u = ½` contour, the rising edge only (`v`
-/// below `WAVE_V`), a pixel whose centre lies within `LINE_W` px of the contour (distance
-/// `|u − ½|/|∇u|` × pixels per node); fresh edges (`v` below half `WAVE_V`) a step
-/// brighter.
-const WAVE_INKS: [Ink; 2] = [Ink::new(Role::Wave, 110), Ink::new(Role::Wave, 190)];
+const CROWD_N: f32 = 9.0;
+/// A moving amoeba's trail: a dim `Hot` dot line through its last [`TRAIL_N`]
+/// positions, sampled every [`TRAIL_DT`] simulated seconds (so it is ≈ 0.5 s long and
+/// fades by vanishing as the cell stops); resting cells draw none.
+const TRAIL_INK: Ink = Ink::new(Role::Hot, 90);
+const TRAIL_N: usize = 4;
+const TRAIL_DT: f64 = 0.12;
+/// A trail is drawn when the cell moved more than this many nodes over it.
+const TRAIL_MIN: f32 = 0.35;
+/// Wave fronts: the `u = ½` contour of the cAMP relay, one braille dot thick, traced by
+/// marching squares (CORE-R105), on the rising edge only (`v < WAVE_V`), in `Cold`,
+/// fresh edges (`v < ½ WAVE_V`) a step brighter: thin spiral threads.
+const WAVE_INKS: [Ink; 2] = [Ink::new(Role::Cold, 190), Ink::new(Role::Cold, 255)];
 const WAVE_V: f32 = 0.3;
 #[cfg(test)]
 const WAVE_MIN: f32 = 0.3;
-const LINE_W: f64 = 0.6;
 
-/// One amoeba, in lattice units, with the cAMP it sensed last sub-step.
+/// One amoeba, in lattice units, with the cAMP it sensed last sub-step and its recent
+/// positions (newest first) for the trail.
 #[derive(Debug, Clone, Copy, Default)]
 pub(crate) struct Cell {
     pub(crate) x: f32,
     pub(crate) y: f32,
     last_u: f32,
-    /// Recent speed, for the dark-field brightness.
+    /// Recent speed (1 just after a chemotactic step, decaying).
     pub(crate) moving: f32,
+    trail: [(f32, f32); TRAIL_N],
+}
+
+impl Cell {
+    fn at(x: f32, y: f32) -> Self {
+        Self {
+            x,
+            y,
+            trail: [(x, y); TRAIL_N],
+            ..Self::default()
+        }
+    }
 }
 
 /// Up-gradient step of a cell at `(x, y)` over `h` seconds, or `None` when it should
@@ -129,8 +146,6 @@ pub(crate) fn chemotaxis(
 struct Dicty {
     u: Grid<f32>,
     v: Grid<f32>,
-    /// `|∇u|` per node for the wave's line, refreshed by `rasterise` (M14).
-    slope: Grid<f32>,
     lap: Grid<f32>,
     /// Excitability per node from the cell density.
     b: Vec<f32>,
@@ -144,10 +159,9 @@ struct Dicty {
     owed: f64,
     time: f64,
     scratch: Grid<f32>,
-    map: SampleMap,
-    glow: Glow,
-    pixels: Pixels,
-    /// The cells, one braille dot each (M14).
+    /// Seconds since the trails were last sampled.
+    trail_clock: f64,
+    /// Cells, trails and wave fronts (M16: all braille).
     dots: Dots,
     seeded: bool,
     /// The pixels are stale: the state moved since the last `rasterise` (GEN-R20).
@@ -160,7 +174,6 @@ impl Default for Dicty {
             dirty: true,
             u: Grid::default(),
             v: Grid::default(),
-            slope: Grid::default(),
             lap: Grid::default(),
             b: Vec::new(),
             rho: Vec::new(),
@@ -172,9 +185,7 @@ impl Default for Dicty {
             owed: 0.0,
             time: 0.0,
             scratch: Grid::default(),
-            map: SampleMap::default(),
-            glow: Glow::default(),
-            pixels: Pixels::default(),
+            trail_clock: 0.0,
             dots: Dots::default(),
             seeded: false,
         }
@@ -192,11 +203,8 @@ impl Dicty {
         let n = ((f64::from(w) * f64::from(h) * CELLS_PER_NODE) as usize).clamp(1, CAP);
         self.cells.clear();
         for _ in 0..n {
-            self.cells.push(Cell {
-                x: rng.random_range(0.0..w),
-                y: rng.random_range(0.0..h),
-                ..Cell::default()
-            });
+            self.cells
+                .push(Cell::at(rng.random_range(0.0..w), rng.random_range(0.0..h)));
         }
         self.n_pacers = if w * h > 4000.0 { 3 } else { 1 };
         for p in &mut self.pacers {
@@ -311,75 +319,81 @@ impl Dicty {
         self.step += 1;
     }
 
-    fn rasterise(&mut self) {
-        let px = self.pixels.pixel_size();
-        let (lw, lh) = self.lattice();
-        let (sx, sy) = (f32::from(px.width()) / lw, f32::from(px.height()) / lh);
-        self.glow.clear();
-        for c in &self.cells {
-            // Dots: two per pixel each way. Moving cells scatter a little more light.
-            let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
-            self.glow.splat(x, y, &CELL_HALO, 0.35 + 0.25 * c.moving);
+    /// Sample every cell's position into its trail (newest first).
+    fn sample_trails(&mut self) {
+        for c in &mut self.cells {
+            c.trail.copy_within(0..TRAIL_N - 1, 1);
+            c.trail[0] = (c.x, c.y);
         }
-        // Smooth the cell density, so the lawn reads as a soft field that gathers into
-        // streams and mounds rather than as grains.
-        self.glow.blur121();
+    }
+
+    /// Whether the 3×3-node neighbourhood of `(x, y)` holds a crowd (a stream or mound).
+    fn crowded(&self, x: f32, y: f32) -> bool {
+        let (w, h) = (usize::from(self.u.width()), usize::from(self.u.height()));
+        let (ix, iy) = ((x as usize).min(w - 1), (y as usize).min(h - 1));
+        let mut n = 0.0;
+        for yy in iy.saturating_sub(1)..=(iy + 1).min(h - 1) {
+            for xx in ix.saturating_sub(1)..=(ix + 1).min(w - 1) {
+                n += self.rho[yy * w + xx];
+            }
+        }
+        n >= CROWD_N
+    }
+
+    fn rasterise(&mut self) {
+        let ds = self.dots.dot_size();
+        let (lw, lh) = self.lattice();
+        let (sx, sy) = (
+            f64::from(ds.width()) / f64::from(lw),
+            f64::from(ds.height()) / f64::from(lh),
+        );
+        // Lattice point → dot (a node spans `[i, i + 1)`, `Dots::from_cells`' convention).
+        let to_dot = move |x: f64, y: f64| (x * sx - 0.5, y * sy - 0.5);
         let local = self.time % CYCLE_S;
         let fade = ease::smoothstep(local / FADE_S)
             .min(ease::smoothstep((CYCLE_S - local) / FADE_S)) as f32;
+        self.dots.clear();
+        // Trails first: a cell's dot outranks its own trail (one ink per braille cell).
+        for c in &self.cells {
+            let (ox, oy) = c.trail[TRAIL_N - 1];
+            if (c.x - ox).hypot(c.y - oy) < TRAIL_MIN {
+                continue;
+            }
+            let mut from = (f64::from(c.x), f64::from(c.y));
+            for &(px, py) in &c.trail {
+                let to = (f64::from(px), f64::from(py));
+                let (a, b) = (to_dot(from.0, from.1), to_dot(to.0, to.1));
+                self.dots.line(a.0, a.1, b.0, b.1, TRAIL_INK);
+                from = to;
+            }
+        }
+        // The cAMP fronts: node centres sit at `i + ½`.
+        if fade > 0.05 {
+            let (u, v) = (&self.u, &self.v);
+            let w = usize::from(u.width());
+            let vs = v.as_slice();
+            let node = move |x: f64, y: f64| to_dot(x + 0.5, y + 0.5);
+            self.dots.contour_by(
+                u.as_slice(),
+                w,
+                usize::from(u.height()),
+                0.5,
+                node,
+                |i, j| {
+                    let k = j * w + i;
+                    // All four nodes fresh: the rising edge only, never the back.
+                    let vv = vs[k].max(vs[k + 1]).max(vs[k + w].max(vs[k + w + 1]));
+                    (vv < WAVE_V).then(|| WAVE_INKS[usize::from(vv < 0.5 * WAVE_V)])
+                },
+            );
+        }
         // The cells: one dot each, always drawn (the scattered lawn is the subject before
         // the first wave), a step brighter where they crowd; around a re-scatter the
         // crowds drop to the lawn step, so the old mounds fade before the new lawn.
-        self.dots.clear();
         for c in &self.cells {
-            let (x, y) = (f64::from(c.x * sx) * 2.0, f64::from(c.y * sy) * 2.0);
-            let (px, py) = ((x / 2.0) as i32, (y / 2.0) as i32);
-            let crowded = fade > 0.5 && self.glow.get(px, py).unwrap_or(0.0) > CROWD;
+            let crowded = fade > 0.5 && self.crowded(c.x, c.y);
+            let (x, y) = to_dot(f64::from(c.x), f64::from(c.y));
             self.dots.plot(x, y, CELL_INKS[usize::from(crowded)]);
-        }
-        slope_field(&self.u, &mut self.slope);
-        let (map, u, v, slope) = (&self.map, &self.u, &self.v, &self.slope);
-        let ppn = f64::from(sx);
-        // Row samplers, rebuilt when the shader moves to the next pixel row (CORE-R104).
-        let (mut row_y, mut ur, mut vr, mut gr) =
-            (-1, map.row(u, 0), map.row(v, 0), map.row(slope, 0));
-        self.pixels.shade(|x, y| {
-            if y != row_y {
-                (row_y, ur, vr, gr) = (y, map.row(u, y), map.row(v, y), map.row(slope, y));
-            }
-            // The wave: only its thin rising edge (fresh cAMP where cells are not yet
-            // refractory), a 1-px line over the lawn.
-            let (uu, vv) = (ur.at(x), vr.at(x));
-            if vv >= WAVE_V || fade <= 0.05 {
-                return Ink::BLANK;
-            }
-            let d = f64::from((uu - 0.5).abs()) / f64::from(gr.at(x).max(1e-4)) * ppn;
-            if d > LINE_W {
-                Ink::BLANK
-            } else {
-                WAVE_INKS[usize::from(vv < 0.5 * WAVE_V)]
-            }
-        });
-    }
-}
-
-/// `|∇u|` per node by central differences (one-sided at the edges) into `out`.
-fn slope_field(u: &Grid<f32>, out: &mut Grid<f32>) {
-    let (w, h) = (usize::from(u.width()), usize::from(u.height()));
-    if out.size() != u.size() {
-        out.resize(u.size(), 0.0);
-    }
-    if w == 0 || h == 0 {
-        return;
-    }
-    let (p, o) = (u.as_slice(), out.as_mut_slice());
-    for y in 0..h {
-        let (yn, ys) = (y.saturating_sub(1), (y + 1).min(h - 1));
-        for x in 0..w {
-            let (xw, xe) = (x.saturating_sub(1), (x + 1).min(w - 1));
-            let gx = (p[y * w + xe] - p[y * w + xw]) / (xe - xw).max(1) as f32;
-            let gy = (p[ys * w + x] - p[yn * w + x]) / (ys - yn).max(1) as f32;
-            o[y * w + x] = (gx * gx + gy * gy).sqrt();
         }
     }
 }
@@ -391,34 +405,15 @@ pub(crate) fn wave_edge(u: f32, v: f32) -> f32 {
     u * (1.0 - (v / WAVE_V).min(1.0))
 }
 
-fn ascii_cell(top: Ink, bottom: Ink) -> Option<(char, Ink)> {
-    let lit = |i: Ink| i.role != Role::Background;
-    let cell = |i: Ink| i.role == Role::Hot;
-    let ink = match (lit(top), lit(bottom)) {
-        (false, false) => return None,
-        _ if cell(top) && (!cell(bottom) || top.level >= bottom.level) => top,
-        _ if cell(bottom) => bottom,
-        (true, _) => top,
-        (false, true) => bottom,
-    };
-    let ch = if cell(ink) {
-        if ink == CELL_INKS[1] { '@' } else { 'o' }
-    } else {
-        ':'
-    };
-    Some((ch, ink))
-}
-
 impl Generator for Dicty {
     fn meta(&self) -> &'static Meta {
         &META
     }
 
     fn resize(&mut self, size: Size, ctx: &mut Ctx) {
-        self.pixels.resize(size);
         self.dots.resize(size);
-        self.glow.resize(size);
-        let px = self.pixels.pixel_size();
+        // One node per half-block pixel at most (ADR-0012), as before M16.
+        let px = Size::new(size.width(), size.height().saturating_mul(2));
         let lat = grid::lattice_for(px, MAX_NODES, BUCKET);
         let old = self.lattice();
         if !self.seeded {
@@ -439,13 +434,20 @@ impl Generator for Dicty {
             self.scatter(&mut ctx.rng);
         } else {
             let (nw, nh) = self.lattice();
+            let scale = |(x, y): (f32, f32)| {
+                (
+                    (x / old.0 * nw).clamp(0.0, nw - 0.01),
+                    (y / old.1 * nh).clamp(0.0, nh - 0.01),
+                )
+            };
             for c in &mut self.cells {
-                c.x = (c.x / old.0 * nw).clamp(0.0, nw - 0.01);
-                c.y = (c.y / old.1 * nh).clamp(0.0, nh - 0.01);
+                (c.x, c.y) = scale((c.x, c.y));
+                for p in &mut c.trail {
+                    *p = scale(*p);
+                }
             }
         }
         self.density();
-        self.map.rebuild(lat, px);
         self.dirty = true;
     }
 
@@ -465,6 +467,11 @@ impl Generator for Dicty {
         for _ in 0..n as u32 {
             self.substep(&mut ctx.rng);
         }
+        self.trail_clock += dt;
+        if self.trail_clock >= TRAIL_DT {
+            self.trail_clock %= TRAIL_DT;
+            self.sample_trails();
+        }
         self.dirty = true;
     }
 
@@ -477,9 +484,7 @@ impl Generator for Dicty {
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        self.pixels
-            .blit(canvas, |_, _, top, bottom| ascii_cell(top, bottom));
-        self.dots.blit_over(canvas, &self.pixels);
+        self.dots.blit(canvas);
     }
 }
 
@@ -589,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn dict_a7_cells_are_hot_dots_and_fronts_wave_lines_in_flat_steps() {
+    fn dict_a7_cells_are_hot_dots_and_fronts_cold_threads_in_flat_steps() {
         let (mut g, mut ctx) = lawn(Size::new(120, 40));
         for _ in 0..(20 * 60) {
             g.update(SIM_DT, &mut ctx);
@@ -601,10 +606,10 @@ mod tests {
         for c in canvas.cells() {
             match c.ink.role {
                 Role::Hot => {
-                    assert!(CELL_INKS.contains(&c.ink), "{c:?}");
+                    assert!(CELL_INKS.contains(&c.ink) || c.ink == TRAIL_INK, "{c:?}");
                     cells += 1;
                 }
-                Role::Wave => {
+                Role::Cold => {
                     assert!(WAVE_INKS.contains(&c.ink), "{c:?}");
                     waves += 1;
                 }
@@ -629,5 +634,42 @@ mod tests {
             .filter(|c| c.ink == CELL_INKS[0])
             .count();
         assert!(cells > 100, "{cells} lawn cells at t = 0");
+    }
+
+    #[test]
+    fn dict_a8_threads_only_amoebae_leave_trails_and_fronts_are_thin() {
+        let size = Size::new(120, 40);
+        let (mut g, mut ctx) = lawn(size);
+        let (mut trails, mut front_cells, mut front_dots) = (0, 0, 0);
+        for t in [12, 20, 30] {
+            while g.time < f64::from(t) {
+                g.update(SIM_DT, &mut ctx);
+            }
+            g.prepare();
+            let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+            g.render(&mut canvas);
+            for c in canvas.cells() {
+                if c.ch == ' ' {
+                    continue;
+                }
+                // Every lit cell is a braille dot cell on black: no half blocks.
+                assert!(
+                    c.bg == Ink::BLANK && ('\u{2800}'..='\u{28ff}').contains(&c.ch),
+                    "{c:?}"
+                );
+                trails += usize::from(c.ink == TRAIL_INK);
+                if c.ink.role == Role::Cold {
+                    front_cells += 1;
+                    front_dots += (c.ch as u32 - 0x2800).count_ones();
+                }
+            }
+        }
+        assert!(trails > 20, "{trails} trail cells");
+        assert!(front_cells > 0, "no fronts");
+        let mean = f64::from(front_dots) / f64::from(front_cells);
+        assert!(
+            mean < 4.0,
+            "fronts {mean:.2} dots per cell: not a thin thread"
+        );
     }
 }
