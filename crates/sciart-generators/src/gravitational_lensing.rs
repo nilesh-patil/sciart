@@ -3,17 +3,22 @@
 //! Angles are measured in rows on the sky, centred on the lens; screen x is stretched by
 //! `ASPECT`. A point source at `β` has two images `θ±` on the line through the lens.
 //!
-//! M16 (thread style, GEN-R25): everything is a braille thread. The background galaxy is
-//! a small spiral of threads in the source plane; each thread is mapped through both
-//! image branches, a source segment being split until its image is at most `CHORD` dots
-//! long, so the spiral smears into arcs and, aligned, into a thin Einstein ring. Stars
-//! are one dot per image with a trail that is the image of their recent drift.
+//! M17 (orbital-thread style, GEN-R26): ray-traced stipple. The background galaxy is a
+//! fixed cloud of source-plane samples (a compact bulge and two logarithmic arms, drawn
+//! once from `ctx.rng`, each with its own fixed uniform). Every sample is mapped in closed
+//! form to both of its images, so the arcs, the Einstein ring and the faint counter-images
+//! *emerge* from the lens equation instead of being drawn. Major images are `Wave`, the
+//! parity-flipped minor ones `Cold` (thinned by their magnification). The lens galaxy is a
+//! small `Sun` stipple cloud with fixed per-dot thresholds, the critical circle a faint
+//! dotted `Dim` thread, and the background stars stay image pairs with bent trails (M16).
 
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 
 use rand::Rng;
 use sciart_core::geom::ASPECT;
+use sciart_core::particles::gaussian2;
 use sciart_core::prelude::*;
+use sciart_core::timeline::ease::smoothstep;
 use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
@@ -33,29 +38,43 @@ const EINSTEIN_FRAC: f64 = 0.35;
 const STARS: usize = 160;
 /// Background drift speed in rows per second.
 const DRIFT: f64 = 0.6;
-/// Galaxy radius in rows and the time between its passes.
-const GALAXY_R: f64 = 3.6;
+/// Galaxy radius in units of `θE` (3.6 rows at 200×50) and the time between its passes.
+const GALAXY_R: f64 = 0.41;
 const PASS: f64 = 12.0;
 /// The galaxy crosses `x ∈ [−SWEEP θE, SWEEP θE]` in the source plane.
 const SWEEP: f64 = 2.2;
-/// Largest |impact parameter| of a pass, in rows: within the bulge ring's half-width
-/// (0.4 rows) the pass makes a full ring, otherwise arcs.
-const MAX_IMPACT: f64 = 0.9;
+/// Largest |impact parameter| of a pass, in `θE`: within the bulge's core the pass makes a
+/// full ring, otherwise arcs.
+const MAX_IMPACT: f64 = 0.1;
 /// Display floor: images demagnified below this are too faint to draw. Without it the
 /// minor images of all 160 stars pile up inside the Einstein radius
 /// (`|μ−| = (μ_tot − 1)/2 ≈ u⁻⁴` for a star at `u = |β|/θE`).
 const MIN_MU: f64 = 0.05;
-/// Galaxy threads, in units of its radius: the bulge ring's radius; arms
-/// `r = BULGE·e^{ARM_K φ}` out to 1; the disc's spin (rad/s) and its inclination
-/// (`cos i`, the projected flattening).
-const BULGE: f64 = 0.12;
+
+/// Galaxy samples (fixed for the scene's life) and their make-up, in units of the galaxy
+/// radius: a share `BULGE_SHARE` in a Gaussian bulge of width `BULGE_SD` (cut at
+/// `BULGE_MAX`), the rest along two arms `r = ARM_R0·e^{ARM_K φ}` out to 1, scattered
+/// across the arm by `ARM_SD0 + ARM_SD1·r`.
+const SAMPLES: usize = 1800;
+const BULGE_SHARE: f64 = 0.26;
+const BULGE_SD: f64 = 0.07;
+const BULGE_MAX: f64 = 0.2;
+const ARM_R0: f64 = 0.14;
 const ARM_K: f64 = 0.3;
-const SPIN: f64 = 0.35;
+const ARM_SD0: f64 = 0.012;
+const ARM_SD1: f64 = 0.05;
+/// The disc's spin (rad/s) and inclination (`cos i`, the projected flattening).
+const SPIN: f64 = 0.2;
 const COS_I: f64 = 0.75;
-const RING_PTS: usize = 28;
-const ARM_PTS: usize = 44;
-/// Below this pass envelope the galaxy is not drawn.
-const MIN_ENVELOPE: f64 = 0.12;
+/// The pass fades in and out by thinning: a sample shows while its uniform is below
+/// `smoothstep((envelope − FADE_LO)/(FADE_HI − FADE_LO))`, so the cloud fills in and
+/// empties without shimmer.
+const FADE_LO: f64 = 0.1;
+const FADE_HI: f64 = 0.6;
+/// A minor image is kept with probability `min(1, MINOR_K·|μ−|)`: faint counter-images
+/// are sparse, the inner arc of a near-aligned pass is solid.
+const MINOR_K: f64 = 1.5;
+
 /// Star trails: the last `TRAIL` s of drift, in `TRAIL_LEVELS.len()` steps, oldest first.
 const TRAIL: f64 = 2.5;
 const TRAIL_LEVELS: [u8; 2] = [70, 120];
@@ -64,19 +83,27 @@ const TRAIL_LEVELS: [u8; 2] = [70, 120];
 /// single dots instead of a uniform rain of streaks.
 const TRAIL_NEAR: f64 = 1.2;
 const TRAIL_FAR: f64 = 2.4;
-
-/// Share of the full trail drawn for a star at source radius `b` (θE units).
-fn trail_share(b: f64) -> f64 {
-    1.0 - sciart_core::timeline::ease::smoothstep((b - TRAIL_NEAR) / (TRAIL_FAR - TRAIL_NEAR))
-}
 /// Image chord (dots) above which a source segment is split, the split depth, and the
 /// longest chord still drawn at full depth (longer ones jump across the lens).
 const CHORD: f64 = 2.0;
 const MAX_DEPTH: u32 = 8;
 const MAX_CHORD: f64 = 6.0;
-/// The lens: a tiny `Sun` core (radius in dots).
-const LENS: Ink = Ink::new(Role::Sun, 255);
-const LENS_R: f64 = 1.2;
+
+/// The lens galaxy: a `Sun` stipple out to `LENS_R θE`, keep probability
+/// `LENS_P0·exp(−LENS_B·(r/R)^LENS_N)` (a Sérsic-like profile, densest at the centre).
+const LENS_R: f64 = 0.3;
+const LENS_P0: f64 = 1.0;
+const LENS_B: f64 = 2.6;
+const LENS_N: f64 = 0.8;
+const LENS_SALT: u64 = 0x1e45_c0de_5a17_0001;
+/// The critical circle: one `Dim` dot every `RING_GAP` dots of arc.
+const RING_GAP: f64 = 4.0;
+const RING_INK: Ink = Ink::new(Role::Dim, 90);
+
+/// Share of the full trail drawn for a star at source radius `b` (θE units).
+fn trail_share(b: f64) -> f64 {
+    1.0 - smoothstep((b - TRAIL_NEAR) / (TRAIL_FAR - TRAIL_NEAR))
+}
 
 type V2 = (f64, f64);
 
@@ -135,33 +162,72 @@ fn star_level(mu: f64) -> u8 {
     }
 }
 
-/// A galaxy image piece's level: stepped by magnification (arcs and the ring are the
-/// brightest), scaled by the pass envelope; `None` while the pass is faded out.
-fn galaxy_level(mu: f64, envelope: f64) -> Option<u8> {
-    if envelope < MIN_ENVELOPE {
-        return None;
-    }
-    let base = match abs_mu(mu) {
-        m if m < 4.0 => 230.0,
-        _ => 255.0,
-    };
-    Some((base * (0.45 + 0.55 * envelope.min(1.0))) as u8)
+/// A galaxy image dot's level, stepped by magnification: arcs and the ring (`|μ| ≥ 4`) are
+/// the brightest. Brightness no longer fades with the pass; the stipple thins instead.
+fn galaxy_level(mu: f64) -> u8 {
+    if abs_mu(mu) < 4.0 { 215 } else { 255 }
 }
 
-/// Galaxy thread `k` (0 the bulge ring, 1 and 2 the arms) at index `i`, in units of the
-/// galaxy radius, before spin and projection; and the number of points of the thread.
-fn thread_len(k: usize) -> usize {
-    if k == 0 { RING_PTS + 1 } else { ARM_PTS + 1 }
+/// Keep share of the galaxy samples at pass envelope `envelope` (0 while faded out).
+fn pass_keep(envelope: f64) -> f64 {
+    smoothstep((envelope - FADE_LO) / (FADE_HI - FADE_LO))
 }
 
-fn thread_point(k: usize, i: usize) -> (f64, f64) {
-    if k == 0 {
-        (BULGE, TAU * i as f64 / RING_PTS as f64)
-    } else {
-        let span = (1.0 / BULGE).ln() / ARM_K;
-        let phi = span * i as f64 / ARM_PTS as f64;
-        (BULGE * (ARM_K * phi).exp(), phi + PI * (k - 1) as f64)
+/// Keep probability of the lens cloud at `q = r/(LENS_R θE)`: falls monotonically from
+/// `LENS_P0` at the centre, 0 outside (LENS-A9).
+fn lens_density(q: f64) -> f64 {
+    if !(0.0..1.0).contains(&q) {
+        return 0.0;
     }
+    LENS_P0 * (-LENS_B * q.powf(LENS_N)).exp()
+}
+
+/// The lens cloud's ink at `q = r/(LENS_R θE)`: a white-hot core, a `Sun` body.
+fn lens_ink(q: f64) -> Ink {
+    Ink::new(Role::Sun, if q < 0.35 { 255 } else { 200 })
+}
+
+/// One fixed background-galaxy sample: its position in units of the galaxy radius (face
+/// on, before spin and tilt) and its fixed uniform (CORE-R107's per-sample threshold).
+#[derive(Debug, Clone, Copy)]
+struct Sample {
+    x: f64,
+    y: f64,
+    u: f64,
+}
+
+/// The fixed galaxy cloud: a Gaussian bulge and two scattered logarithmic arms.
+fn galaxy_samples(rng: &mut impl Rng) -> Vec<Sample> {
+    let span = (1.0 / ARM_R0).ln() / ARM_K;
+    (0..SAMPLES)
+        .map(|i| {
+            let (x, y) = if (i as f64) < BULGE_SHARE * SAMPLES as f64 {
+                let (mut x, mut y) = gaussian2(rng, BULGE_SD);
+                let r = x.hypot(y);
+                if r > BULGE_MAX {
+                    // Fold the rare far tail back inside rather than redraw (bounded).
+                    let k = (BULGE_MAX * rng.random_range(0.2..1.0)) / r;
+                    (x, y) = (x * k, y * k);
+                }
+                (x, y)
+            } else {
+                let phi = span * rng.random_range(0.0_f64..1.0);
+                let r = ARM_R0 * (ARM_K * phi).exp();
+                let a = phi + if i % 2 == 0 { 0.0 } else { std::f64::consts::PI };
+                let (s, c) = a.sin_cos_det();
+                let (dr, dt) = gaussian2(rng, ARM_SD0 + ARM_SD1 * r);
+                // Scatter across and along the arm; clamp to the galaxy radius.
+                let (x, y) = ((r + dr) * c - dt * s, (r + dr) * s + dt * c);
+                let rr = x.hypot(y);
+                if rr > 1.0 { (x / rr, y / rr) } else { (x, y) }
+            };
+            Sample {
+                x,
+                y,
+                u: rng.random_range(0.0..1.0),
+            }
+        })
+        .collect()
 }
 
 /// Screen geometry: the lens's cell and the Einstein radius (rows).
@@ -187,6 +253,9 @@ impl View {
         );
         ((cx - self.cx - 0.5) / ASPECT, cy - self.cy - 0.5)
     }
+
+    /// Dots per row (the lattice is square: 4 dots per row, 4 per `ASPECT` columns).
+    const DOTS_PER_ROW: f64 = Dots::CELL_H as f64;
 }
 
 /// Draw the image, on branch `branch` (0 major, 1 minor), of the source segment `a → b`
@@ -231,6 +300,55 @@ fn image_thread(
     }
 }
 
+/// One frame of the galaxy's pass: its source-plane centre, the keep share of its
+/// samples and the galaxy-frame → source-plane matrix.
+#[derive(Debug, Clone, Copy)]
+struct GalaxyFrame {
+    centre: V2,
+    keep: f64,
+    m: [f64; 4],
+}
+
+impl GalaxyFrame {
+    /// Source-plane position of a sample.
+    fn beta(&self, s: &Sample) -> V2 {
+        let m = self.m;
+        (
+            self.centre.0 + m[0] * s.x + m[1] * s.y,
+            self.centre.1 + m[2] * s.x + m[3] * s.y,
+        )
+    }
+}
+
+/// Every drawn galaxy image dot: `f(dot, ink, sample index, image θ)`. A sample shows
+/// while its uniform is below the pass's keep share; its major image is `Wave`, its minor
+/// image `Cold` and kept only while `u < MINOR_K·|μ−|` (LENS-A5, LENS-A7).
+fn galaxy_dots(
+    samples: &[Sample],
+    view: View,
+    frame: &GalaxyFrame,
+    mut f: impl FnMut((i32, i32), Ink, usize, V2),
+) {
+    let te = view.te;
+    for (i, s) in samples.iter().enumerate() {
+        if s.u >= frame.keep {
+            continue;
+        }
+        let [p, q] = images(frame.beta(s), te);
+        for (theta, role) in [(p, Role::Wave), (q, Role::Cold)] {
+            let mu = magnification(theta, te);
+            let a = abs_mu(mu);
+            if a < MIN_MU || (role == Role::Cold && s.u >= MINOR_K * a) {
+                continue;
+            }
+            let (x, y) = view.to_dot(theta);
+            if x.is_finite() && y.is_finite() {
+                f((x.round() as i32, y.round() as i32), Ink::new(role, galaxy_level(mu)), i, theta);
+            }
+        }
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct GravitationalLensing {
     view: View,
@@ -240,7 +358,9 @@ pub struct GravitationalLensing {
     /// Normalized source positions `u, v ∈ [0, 1)`.
     stars: Vec<V2>,
     drift_dir: f64,
-    /// Time into the current galaxy pass, its impact parameter and direction.
+    /// The background galaxy's fixed sample cloud (LENS-A8).
+    samples: Vec<Sample>,
+    /// Time into the current galaxy pass, its impact parameter (θE) and direction.
     pass_t: f64,
     impact: f64,
     pass_dir: f64,
@@ -269,10 +389,12 @@ impl GravitationalLensing {
     fn galaxy(&self) -> (V2, f64) {
         let s = (self.pass_t / PASS).clamp(0.0, 1.0);
         let u = 2.0 * s - 1.0;
-        let along = self.view.te * SWEEP * (0.25 * u + 0.75 * u * u * u);
+        let te = self.view.te;
+        let along = te * SWEEP * (0.25 * u + 0.75 * u * u * u);
         let (sn, c) = self.pass_dir.sin_cos_det();
-        let beta = (along * c - self.impact * sn, along * sn + self.impact * c);
-        (beta, (PI * s).sin_det().max(0.0).powf(0.6))
+        let b = self.impact * te;
+        let beta = (along * c - b * sn, along * sn + b * c);
+        (beta, (std::f64::consts::PI * s).sin_det().max(0.0).powf(0.6))
     }
 
     fn new_pass(&mut self, ctx: &mut Ctx) {
@@ -280,34 +402,71 @@ impl GravitationalLensing {
         self.pass_dir = ctx.rng.random_range(-0.5..0.5);
     }
 
-    /// Source-plane position of galaxy thread `k`'s point `i`: spun, inclined, turned to
-    /// the pass's position angle and placed at the galaxy centre `g`.
-    fn galaxy_point(&self, g: V2, k: usize, i: usize) -> V2 {
-        let (r, phi) = thread_point(k, i);
-        let (s, c) = (phi + self.spin).sin_cos_det();
-        let (x, y) = (r * c * GALAXY_R, r * s * GALAXY_R * COS_I);
+    /// The map from a sample's galaxy-frame position to its source-plane offset (rows):
+    /// spin, then the inclination's flattening, then the pass's position angle, scaled to
+    /// the galaxy radius. One 2×2 matrix per frame, so a sample costs four multiplies.
+    fn galaxy_matrix(&self) -> [f64; 4] {
+        let (ss, sc) = self.spin.sin_cos_det();
         let (ps, pc) = self.pass_dir.sin_cos_det();
-        (g.0 + x * pc - y * ps, g.1 + x * ps + y * pc)
+        let k = GALAXY_R * self.view.te;
+        // R(pass) · diag(1, cos i) · R(spin)
+        let (a, b, c, d) = (sc, -ss, COS_I * ss, COS_I * sc);
+        [
+            k * (pc * a - ps * c),
+            k * (pc * b - ps * d),
+            k * (ps * a + pc * c),
+            k * (ps * b + pc * d),
+        ]
+    }
+
+    /// This frame's galaxy: its centre, the keep share of its samples and the
+    /// galaxy-frame → source-plane matrix; `None` while it is faded out.
+    fn galaxy_frame(&self) -> Option<GalaxyFrame> {
+        let (centre, envelope) = self.galaxy();
+        let keep = pass_keep(envelope);
+        (keep > 0.0 && self.view.te > 0.0).then(|| GalaxyFrame {
+            centre,
+            keep,
+            m: self.galaxy_matrix(),
+        })
     }
 
     fn draw_galaxy(&mut self) {
-        let (g, envelope) = self.galaxy();
-        if envelope < MIN_ENVELOPE || self.view.te <= 0.0 {
-            return;
+        if let Some(frame) = self.galaxy_frame() {
+            let dots = &mut self.dots;
+            galaxy_dots(&self.samples, self.view, &frame, |(x, y), ink, _, _| {
+                dots.set(x, y, ink);
+            });
         }
+    }
+
+    /// The lens galaxy: fixed-threshold stipple within `LENS_R θE` (CORE-R107, LENS-A9).
+    fn draw_lens(&mut self) {
         let view = self.view;
-        for k in 0..3 {
-            for i in 0..thread_len(k) - 1 {
-                let (a, b) = (self.galaxy_point(g, k, i), self.galaxy_point(g, k, i + 1));
-                for (branch, role) in [(1, Role::Cold), (0, Role::Wave)] {
-                    image_thread(&mut self.dots, view, a, b, branch, |mu| {
-                        if abs_mu(mu) < MIN_MU {
-                            return None;
-                        }
-                        galaxy_level(mu, envelope).map(|l| Ink::new(role, l))
-                    });
-                }
+        let r = LENS_R * view.te * View::DOTS_PER_ROW;
+        let (cx, cy) = view.to_dot((0.0, 0.0));
+        let (x0, x1) = ((cx - r).floor() as i32, (cx + r).ceil() as i32);
+        let (y0, y1) = ((cy - r).floor() as i32, (cy + r).ceil() as i32);
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                let q = (f64::from(x) - cx).hypot(f64::from(y) - cy) / r.max(1e-9);
+                self.dots
+                    .stipple(x, y, lens_density(q), LENS_SALT, lens_ink(q));
             }
+        }
+        // The nucleus is always lit.
+        self.dots.plot(cx, cy, lens_ink(0.0));
+    }
+
+    /// The critical curve `|θ| = θE`: a faint dotted thread.
+    fn draw_critical_circle(&mut self) {
+        let view = self.view;
+        let r = view.te * View::DOTS_PER_ROW;
+        let n = ((TAU * r / RING_GAP).round() as usize).clamp(8, 4096);
+        let (cx, cy) = view.to_dot((0.0, 0.0));
+        for k in 0..n {
+            let (s, c) = (TAU * k as f64 / n as f64).sin_cos_det();
+            self.dots.plot(cx + r * c, cy + r * s, RING_INK);
         }
     }
 
@@ -357,10 +516,10 @@ impl GravitationalLensing {
 
     fn raster(&mut self) {
         self.dots.clear();
+        self.draw_critical_circle();
+        self.draw_lens();
         self.draw_stars();
         self.draw_galaxy();
-        let (x, y) = self.view.to_dot((0.0, 0.0));
-        self.dots.disc(x, y, LENS_R, LENS);
     }
 }
 
@@ -378,7 +537,8 @@ impl Generator for GravitationalLensing {
         self.hx = f64::from(size.width()) / (2.0 * ASPECT);
         self.hy = f64::from(size.height()) / 2.0;
         if self.stars.is_empty() {
-            // Normalized positions survive resizes; only the sky's scale changes.
+            // Normalized positions and the galaxy's samples (in units of its radius)
+            // survive resizes; only the sky's scale changes.
             self.stars = (0..STARS)
                 .map(|_| {
                     (
@@ -391,6 +551,7 @@ impl Generator for GravitationalLensing {
             self.pass_t = ctx.rng.random_range(0.0..PASS);
             self.spin = ctx.rng.random_range(0.0..TAU);
             self.new_pass(ctx);
+            self.samples = galaxy_samples(&mut ctx.rng);
         }
         self.dots.resize(size);
         self.dirty = true;
@@ -510,8 +671,10 @@ mod tests {
         assert_eq!(magnification((0.0, 0.0), TE), 0.0);
         assert_eq!(star_level(f64::NAN), star_level(0.0));
         assert_eq!(star_level(f64::INFINITY), 255);
-        assert_eq!(galaxy_level(f64::NAN, 1.0), galaxy_level(0.0, 1.0));
-        assert_eq!(galaxy_level(1.0, 0.0), None);
+        assert_eq!(galaxy_level(f64::NAN), galaxy_level(0.0));
+        assert_eq!(pass_keep(0.0), 0.0);
+        assert_eq!(pass_keep(1.0), 1.0);
+        assert_eq!(lens_density(f64::NAN), 0.0);
     }
 
     fn scene(size: Size) -> GravitationalLensing {
@@ -520,28 +683,30 @@ mod tests {
         g
     }
 
-    /// The galaxy centred behind the lens, no stars, rasterised.
+    /// The galaxy centred behind the lens at mid-pass.
     fn aligned() -> GravitationalLensing {
         let mut g = scene(Size::new(200, 50));
         g.pass_t = PASS / 2.0;
         g.impact = 0.0;
         g.pass_dir = 0.0;
         g.stars.clear();
-        g.raster();
         g
     }
 
-    /// Every lit dot as its sky angle, the lens core left out.
-    fn lit_thetas(g: &GravitationalLensing) -> Vec<V2> {
+    /// The lattice with only the galaxy's images drawn.
+    fn galaxy_only(g: &mut GravitationalLensing) {
+        g.dots.clear();
+        g.draw_galaxy();
+    }
+
+    /// Every lit dot as `(dot, sky angle)`.
+    fn lit(g: &GravitationalLensing) -> Vec<((i32, i32), V2)> {
         let ds = g.dots.dot_size();
         let mut out = Vec::new();
         for y in 0..i32::from(ds.height()) {
             for x in 0..i32::from(ds.width()) {
                 if g.dots.is_lit(x, y) {
-                    let th = g.view.sky_of_dot(x, y);
-                    if th.0.hypot(th.1) > 0.6 {
-                        out.push(th);
-                    }
+                    out.push(((x, y), g.view.sky_of_dot(x, y)));
                 }
             }
         }
@@ -550,22 +715,22 @@ mod tests {
 
     #[test]
     fn lens_a4_aligned_galaxy_forms_a_thin_full_einstein_ring() {
-        let g = aligned();
+        let mut g = aligned();
+        galaxy_only(&mut g);
         let te = g.view.te;
-        // Thin: aligned, the bulge ring's major and minor images straddle θE at most
-        // 2 dots apart (1 row = 4 dots, square).
-        let [p, m] = images((BULGE * GALAXY_R, 0.0), te);
-        let apart = (p.0.hypot(p.1) - m.0.hypot(m.1)) * f64::from(Dots::CELL_H);
-        assert!(apart <= 2.0, "ring {apart:.2} dots thick");
-        let dots = lit_thetas(&g);
-        assert!(!dots.is_empty());
-        for &(x, y) in &dots {
+        let dots = lit(&g);
+        assert!(dots.len() > 400, "{} galaxy dots", dots.len());
+        for &(_, (x, y)) in &dots {
             let r = x.hypot(y) / te;
             assert!((0.6..=1.4).contains(&r), "galaxy dot at {r:.2} θE");
         }
-        // Every one of 32 directions has a dot on the ring.
+        // Thin: the bulge's images hug θE (its 1σ core maps to within ±0.2 rows), and
+        // every one of 32 directions has a dot on the ring.
+        let [p, m] = images((BULGE_SD * GALAXY_R * te, 0.0), te);
+        let apart = (p.0.hypot(p.1) - m.0.hypot(m.1)) * View::DOTS_PER_ROW;
+        assert!(apart <= 2.0, "bulge core ring {apart:.2} dots thick");
         let mut sectors = [false; 32];
-        for &(x, y) in &dots {
+        for &(_, (x, y)) in &dots {
             if (x.hypot(y) - te).abs() < 0.15 * te {
                 let a = geom::wrap(y.atan2(x), TAU);
                 sectors[((a / TAU * 32.0) as usize).min(31)] = true;
@@ -576,7 +741,8 @@ mod tests {
 
     #[test]
     fn lens_a5_galaxy_images_are_coloured_by_parity() {
-        let g = aligned();
+        let mut g = aligned();
+        g.raster();
         let size = Size::new(200, 50);
         let mut c = Canvas::new(size, GlyphMode::Unicode);
         g.render(&mut c);
@@ -585,7 +751,7 @@ mod tests {
         for y in 0..50 {
             for x in 0..200 {
                 let cell = c.get(x, y).unwrap();
-                if cell.ch == ' ' || cell.ink.role == Role::Sun {
+                if cell.ch == ' ' || matches!(cell.ink.role, Role::Sun | Role::Dim) {
                     continue;
                 }
                 // Cell centre's sky angle; a cell spans ±0.5 rows down and ±0.25 across.
@@ -617,10 +783,11 @@ mod tests {
         g.stars = vec![star];
         for dir in [0.3, 2.0, 4.4] {
             g.drift_dir = dir;
-            g.raster();
+            g.dots.clear();
+            g.draw_stars();
             let v = g.drift();
             let tail = (beta.0 - v.0 * TRAIL, beta.1 - v.1 * TRAIL);
-            let dots = lit_thetas(&g);
+            let dots: Vec<V2> = lit(&g).into_iter().map(|(_, th)| th).collect();
             for &th in &dots {
                 let b = source_plane(th, te);
                 // Distance from b to the segment tail → beta.
@@ -640,5 +807,100 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn lens_a7_galaxy_dots_are_lens_images_of_their_samples() {
+        // Several moments of a pass, off-axis: every drawn dot is within one dot of the
+        // lens-equation image of its own sample, and every lit dot is such an image.
+        let mut g = scene(Size::new(200, 50));
+        g.stars.clear();
+        g.impact = 0.06;
+        for t in [3.0, 5.0, 6.0, 7.5] {
+            g.pass_t = t;
+            galaxy_only(&mut g);
+            let te = g.view.te;
+            let frame = g.galaxy_frame().expect("galaxy in view");
+            let mut drawn = Vec::new();
+            galaxy_dots(&g.samples, g.view, &frame, |dot, ink, i, theta| {
+                let beta = frame.beta(&g.samples[i]);
+                let img = images(beta, te)[usize::from(ink.role == Role::Cold)];
+                assert!(dist(img, theta) < 1e-12);
+                let (x, y) = g.view.to_dot(img);
+                let off = (f64::from(dot.0) - x).hypot(f64::from(dot.1) - y);
+                assert!(off <= 1.0, "t {t}: sample {i} drawn {off:.2} dots off");
+                // Its source maps back through the lens equation.
+                assert!(dist(source_plane(theta, te), beta) < 1e-9);
+                drawn.push(dot);
+            });
+            assert!(drawn.len() > 300, "t {t}: {} dots", drawn.len());
+            for (dot, _) in lit(&g) {
+                assert!(drawn.contains(&dot), "t {t}: stray dot {dot:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn lens_a8_the_sample_set_is_fixed() {
+        let mut g = scene(Size::new(200, 50));
+        let n = g.samples.len();
+        assert_eq!(n, SAMPLES);
+        let first = (g.samples[0].x, g.samples[0].y, g.samples[0].u);
+        g.raster();
+        let a = lit(&g);
+        g.raster();
+        assert_eq!(a, lit(&g), "a still scene re-renders identically");
+        let mut ctx = Ctx::new(9, Size::new(200, 50));
+        for _ in 0..(3.0 * PASS * 60.0) as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.resize(Size::new(120, 40), &mut ctx);
+        assert_eq!(g.samples.len(), n, "samples never added or dropped");
+        assert_eq!((g.samples[0].x, g.samples[0].y, g.samples[0].u), first);
+    }
+
+    #[test]
+    fn lens_a9_lens_cloud_is_a_central_sun_stipple() {
+        let mut g = scene(Size::new(200, 50));
+        g.dots.clear();
+        g.draw_lens();
+        let te = g.view.te;
+        let mut c = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
+        g.dots.blit(&mut c);
+        for y in 0..50 {
+            for x in 0..200 {
+                let cell = c.get(x, y).unwrap();
+                if cell.ch != ' ' {
+                    assert_eq!(cell.ink.role, Role::Sun);
+                }
+            }
+        }
+        // Density in three rings (dots lit / dots in ring) falls with radius, and nothing
+        // lies beyond 0.35 θE.
+        let (mut lit_n, mut all_n) = ([0_u32; 3], [0_u32; 3]);
+        let r_max = LENS_R * te * View::DOTS_PER_ROW;
+        let (cx, cy) = g.view.to_dot((0.0, 0.0));
+        let ds = g.dots.dot_size();
+        for y in 0..i32::from(ds.height()) {
+            for x in 0..i32::from(ds.width()) {
+                let r = (f64::from(x) - cx).hypot(f64::from(y) - cy);
+                let on = g.dots.is_lit(x, y);
+                if on {
+                    assert!(r / View::DOTS_PER_ROW <= 0.35 * te, "lens dot at {r:.1} dots");
+                }
+                let k = (3.0 * r / r_max) as usize;
+                if k < 3 {
+                    all_n[k] += 1;
+                    lit_n[k] += u32::from(on);
+                }
+            }
+        }
+        let d: Vec<f64> = (0..3).map(|k| f64::from(lit_n[k]) / f64::from(all_n[k])).collect();
+        assert!(d[0] > d[1] && d[1] > d[2] && d[2] > 0.0, "{d:?}");
+        // Fixed thresholds: the cloud holds still between frames.
+        let before = lit(&g);
+        g.dots.clear();
+        g.draw_lens();
+        assert_eq!(before, lit(&g));
     }
 }
