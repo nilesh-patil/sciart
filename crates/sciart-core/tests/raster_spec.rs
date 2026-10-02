@@ -914,3 +914,71 @@ fn core_r107_dots_stipple_lights_exactly_the_kept_dots() {
     }
     dots.stipple(-1, 3, 1.0, 7, ink); // off-lattice: ignored, no panic
 }
+
+fn puff_dots(cx: f64, cy: f64, sigma: f64, peak: f64) -> Dots {
+    let mut dots = Dots::new(Size::new(20, 10));
+    dots.stipple_puff(cx, cy, sigma, peak, 11, Ink::new(Role::Sun, 255));
+    dots
+}
+
+fn lit_count(dots: &Dots) -> usize {
+    (0..40)
+        .flat_map(|x| (0..40).map(move |y| (x, y)))
+        .filter(|&(x, y)| dots.is_lit(x, y))
+        .count()
+}
+
+#[test]
+fn core_r108_stipple_puff_lights_the_kept_dots_within_three_sigma() {
+    let (cx, cy, sigma, peak) = (20.3, 19.6, 2.0, 0.9);
+    let dots = puff_dots(cx, cy, sigma, peak);
+    for x in 0..40 {
+        for y in 0..40 {
+            let r2 = (f64::from(x) - cx).powi(2) + (f64::from(y) - cy).powi(2);
+            let p = peak * (-r2 / (2.0 * sigma * sigma)).exp();
+            let want = (x, y) == (20, 20)
+                || (r2 <= (3.0 * sigma).powi(2) && raster::stipple_keep(11, x, y, p));
+            assert_eq!(dots.is_lit(x, y), want, "dot {x},{y}");
+        }
+    }
+    assert!(lit_count(&dots) >= 8, "a σ = 2 atom is a cloud, not a dot");
+}
+
+#[test]
+fn core_r108_stipple_puff_never_vanishes_and_rejects_bad_input() {
+    // A tiny or degenerate atom is still its centre dot.
+    for sigma in [1e-6, 0.0, -1.0, f64::NAN] {
+        let dots = puff_dots(5.4, 6.6, sigma, 0.9);
+        assert_eq!(lit_count(&dots), 1, "sigma {sigma}");
+        assert!(dots.is_lit(5, 7));
+    }
+    for (cx, peak) in [(f64::NAN, 0.9), (5.0, 0.0), (5.0, -1.0)] {
+        assert_eq!(
+            lit_count(&puff_dots(cx, 5.0, 2.0, peak)),
+            0,
+            "cx {cx} peak {peak}"
+        );
+    }
+    // Off-lattice and huge atoms are clipped, not a panic or a hang.
+    let _ = puff_dots(-50.0, 900.0, 3.0, 1.0);
+    let _ = puff_dots(10.0, 10.0, 1e9, 1.0);
+}
+
+proptest! {
+    /// A swelling atom only gains dots: monotone in σ and peak.
+    #[test]
+    fn core_r108_stipple_puff_is_monotone(
+        cx in 0.0f64..40.0, cy in 0.0f64..40.0,
+        sigma in 0.3f64..4.0, ds in 0.0f64..2.0, peak in 0.05f64..1.0, dp in 0.0f64..0.5,
+    ) {
+        let small = puff_dots(cx, cy, sigma, peak);
+        let big = puff_dots(cx, cy, sigma + ds, (peak + dp).min(1.0));
+        for x in 0..40 {
+            for y in 0..40 {
+                if small.is_lit(x, y) {
+                    prop_assert!(big.is_lit(x, y), "dot {},{} lost", x, y);
+                }
+            }
+        }
+    }
+}

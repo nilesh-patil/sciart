@@ -323,6 +323,43 @@ impl Dots {
         }
     }
 
+    /// Light a small Gaussian stipple atom about `(cx, cy)` (dot units, CORE-R108): each dot
+    /// within `3σ` is kept by [`stipple_keep`] at `peak·e^(−r²/2σ²)`, and the dot nearest
+    /// the centre is always lit, so an atom never vanishes. The density only grows with
+    /// `sigma` and `peak`, so a swelling atom only gains dots. A non-finite or non-positive
+    /// `sigma` leaves just the centre dot; `peak ≤ 0` or a non-finite centre lights nothing.
+    pub fn stipple_puff(&mut self, cx: f64, cy: f64, sigma: f64, peak: f64, salt: u64, ink: Ink) {
+        if !(cx.is_finite() && cy.is_finite() && peak > 0.0) {
+            return;
+        }
+        self.plot(cx, cy, ink);
+        if !(sigma.is_finite() && sigma > 0.0) {
+            return;
+        }
+        let size = self.dot_size();
+        let (w, h) = (f64::from(size.width()), f64::from(size.height()));
+        let reach = 3.0 * sigma;
+        // Only the part of the bounding box on the lattice, so a huge σ stays bounded.
+        let x0 = (cx - reach).ceil().max(0.0);
+        let x1 = (cx + reach).floor().min(w - 1.0);
+        let y0 = (cy - reach).ceil().max(0.0);
+        let y1 = (cy + reach).floor().min(h - 1.0);
+        if x0 > x1 || y0 > y1 {
+            return;
+        }
+        let (reach2, k) = (reach * reach, -0.5 / (sigma * sigma));
+        for y in y0 as i32..=y1 as i32 {
+            let dy = f64::from(y) - cy;
+            for x in x0 as i32..=x1 as i32 {
+                let dx = f64::from(x) - cx;
+                let r2 = dx * dx + dy * dy;
+                if r2 <= reach2 {
+                    self.stipple(x, y, peak * (k * r2).exp(), salt, ink);
+                }
+            }
+        }
+    }
+
     /// Light the Bresenham segment from `(x0, y0)` to `(x1, y1)` (dot units, rounded),
     /// both endpoints inclusive, clipped to the lattice (CORE-R51). Non-finite endpoints
     /// draw nothing, and the walk is capped at `4·(dot width + dot height)` steps, so
