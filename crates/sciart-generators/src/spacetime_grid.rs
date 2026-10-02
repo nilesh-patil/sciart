@@ -710,9 +710,17 @@ impl SpacetimeGrid {
             let (bin, t, ds) = (self.binary(), self.t, self.dots.dot_size());
             let dots = &mut self.cloud;
             // The cloud is the upper layer: inside its envelope it owns its cells.
-            cloud_dots(&self.cam, &bin, t, ds, holes, |_, _| false, |x, y, p, ink, salt, _| {
-                dots.stipple(x, y, p, salt, ink);
-            });
+            cloud_dots(
+                &self.cam,
+                &bin,
+                t,
+                ds,
+                holes,
+                |_, _| false,
+                |x, y, p, ink, salt, _| {
+                    dots.stipple(x, y, p, salt, ink);
+                },
+            );
         }
         self.holes();
     }
@@ -729,7 +737,9 @@ impl SpacetimeGrid {
             return [far; 2];
         }
         bin.positions(t).map(|(x, y)| {
-            let (px, py, _) = self.cam.project(x, y, well_depth(x, y, &masses) + lift + 0.04);
+            let (px, py, _) = self
+                .cam
+                .project(x, y, well_depth(x, y, &masses) + lift + 0.04);
             (px, py)
         })
     }
@@ -1373,7 +1383,11 @@ mod tests {
             let g = at(t);
             let mut c = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
             g.dots.blit(&mut c);
-            assert!(c.cells().iter().all(|c| c.ch == ' ' || c.ink.role != Role::Cold));
+            assert!(
+                c.cells()
+                    .iter()
+                    .all(|c| c.ch == ' ' || c.ink.role != Role::Cold)
+            );
         }
     }
 
@@ -1390,20 +1404,31 @@ mod tests {
             let bin = g.binary();
             let (_, ph) = bin.state(t);
             let (mut hot, mut cold) = (0, 0);
-            cloud_dots(&g.cam, &bin, t, g.dots.dot_size(), g.hole_dots(), |_, _| false, |x, y, p, ink, salt, (sx, sy)| {
-                if !raster::stipple_keep(salt, x, y, p) {
-                    return;
-                }
-                let h = (2.0 * (sy.atan2(sx) - ph)).cos_det();
-                if h.abs() < 1e-9 {
-                    return;
-                }
-                let want = if h > 0.0 { Role::Hot } else { Role::Cold };
-                assert_eq!(ink.role, want, "t {t}: dot ({x},{y}) h₊ {h:.3}");
-                hot += usize::from(h > 0.0);
-                cold += usize::from(h < 0.0);
-            });
-            assert!(hot > 100 && cold > 100, "t {t}: {hot} hot / {cold} cold dots");
+            cloud_dots(
+                &g.cam,
+                &bin,
+                t,
+                g.dots.dot_size(),
+                g.hole_dots(),
+                |_, _| false,
+                |x, y, p, ink, salt, (sx, sy)| {
+                    if !raster::stipple_keep(salt, x, y, p) {
+                        return;
+                    }
+                    let h = (2.0 * (sy.atan2(sx) - ph)).cos_det();
+                    if h.abs() < 1e-9 {
+                        return;
+                    }
+                    let want = if h > 0.0 { Role::Hot } else { Role::Cold };
+                    assert_eq!(ink.role, want, "t {t}: dot ({x},{y}) h₊ {h:.3}");
+                    hot += usize::from(h > 0.0);
+                    cold += usize::from(h < 0.0);
+                },
+            );
+            assert!(
+                hot > 100 && cold > 100,
+                "t {t}: {hot} hot / {cold} cold dots"
+            );
         }
     }
 
@@ -1447,9 +1472,17 @@ mod tests {
             let cloud = Cloud::at(&g.binary(), t);
             let bin = g.binary();
             // Every candidate cloud dot lies inside the cut on the sheet.
-            cloud_dots(&g.cam, &bin, t, g.dots.dot_size(), g.hole_dots(), |_, _| false, |_, _, _, _, _, (sx, sy)| {
-                assert!(sx.hypot(sy) <= cloud.cut + 1e-9);
-            });
+            cloud_dots(
+                &g.cam,
+                &bin,
+                t,
+                g.dots.dot_size(),
+                g.hole_dots(),
+                |_, _| false,
+                |_, _, _, _, _, (sx, sy)| {
+                    assert!(sx.hypot(sy) <= cloud.cut + 1e-9);
+                },
+            );
             // Cells that differ (cloud dots, the yielding sheet) map back onto the sheet
             // within the cut, plus half a mesh sample for segments straddling it.
             let mut differ = 0;
@@ -1458,9 +1491,13 @@ mod tests {
                     if plain.get(x, y) != full.get(x, y) {
                         let (px, py) = Dots::from_cells(f64::from(x) + 0.5, f64::from(y) + 0.5);
                         let (sx, sy) = g.cam.unproject(px, py, cloud_height(&bin, cloud.r0));
- let (sx, sy) = g.cam.unproject(px, py, cloud_height(&bin, sx.hypot(sy)));
+                        let (sx, sy) = g.cam.unproject(px, py, cloud_height(&bin, sx.hypot(sy)));
                         let r = sx.hypot(sy);
-                        assert!(r <= cloud.cut + 0.12, "t {t}: cell ({x},{y}) at r {r:.2}, cut {:.2}", cloud.cut);
+                        assert!(
+                            r <= cloud.cut + 0.12,
+                            "t {t}: cell ({x},{y}) at r {r:.2}, cut {:.2}",
+                            cloud.cut
+                        );
                         differ += 1;
                     }
                 }
@@ -1478,12 +1515,20 @@ mod tests {
             let g = at(t);
             let mut roles = std::collections::HashSet::new();
             let mut n = 0;
-            cloud_dots(&g.cam, &b, t, g.dots.dot_size(), g.hole_dots(), |_, _| false, |x, y, p, ink, salt, _| {
-                if raster::stipple_keep(salt, x, y, p) {
-                    roles.insert(ink.role);
-                    n += 1;
-                }
-            });
+            cloud_dots(
+                &g.cam,
+                &b,
+                t,
+                g.dots.dot_size(),
+                g.hole_dots(),
+                |_, _| false,
+                |x, y, p, ink, salt, _| {
+                    if raster::stipple_keep(salt, x, y, p) {
+                        roles.insert(ink.role);
+                        n += 1;
+                    }
+                },
+            );
             (n, roles)
         };
         let (n0, r0) = count(base + b.tau_c + 0.05);

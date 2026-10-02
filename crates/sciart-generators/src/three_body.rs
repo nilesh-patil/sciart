@@ -20,11 +20,11 @@
 
 use std::sync::OnceLock;
 
+use sciart_core::geom;
 use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
 use sciart_core::rng::SplitMix64;
 use sciart_core::timeline::ease;
-use sciart_core::geom;
 
 pub static META: Meta = Meta {
     name: "three_body",
@@ -574,7 +574,8 @@ impl ThreeBody {
         self.target = target;
         let period = self.orbits[self.phase.seg].period;
         let (trails, last) = (&mut self.trails, &mut self.last_sample);
-        self.main.advance(target, |s| sample(trails, last, period, s, 0.0));
+        self.main
+            .advance(target, |s| sample(trails, last, period, s, 0.0));
         for g in &mut self.ghosts {
             g.advance(target, |_| {});
         }
@@ -603,8 +604,13 @@ impl ThreeBody {
                 let v = f64::from(p.v);
                 if level >= MIN_VISIBLE_LEVEL {
                     let role = speed_role(0.5 * (v + prev.1), v_ref);
-                    self.dots
-                        .line(prev.0.0, prev.0.1, d.0, d.1, Ink::new(role, ink::level(level)));
+                    self.dots.line(
+                        prev.0.0,
+                        prev.0.1,
+                        d.0,
+                        d.1,
+                        Ink::new(role, ink::level(level)),
+                    );
                 }
                 prev = (d, v);
             }
@@ -620,7 +626,8 @@ impl ThreeBody {
                     continue;
                 }
                 let (px, py) = view.dot(x, y);
-                self.dots.plot(px, py, if d < GHOST_NEAR { near } else { far });
+                self.dots
+                    .plot(px, py, if d < GHOST_NEAR { near } else { far });
             }
         }
         let body = Ink::new(Role::Star, ink::level(BODY_LEVEL * fade));
@@ -710,7 +717,10 @@ mod tests {
     }
 
     fn max_diff(a: &[f64; 6], b: &[f64; 6]) -> f64 {
-        a.iter().zip(b).map(|(x, y)| (x - y).abs()).fold(0.0, f64::max)
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0, f64::max)
     }
 
     #[test]
@@ -724,8 +734,15 @@ mod tests {
             assert!(err < 1e-4, "{}: return error {err:.2e}", o.caption);
             // The published period, rounded to 4–5 digits, is within 2e-3 of a return
             // (the dragonfly's within 1.6e-3: its T is 1.3e-3 short).
-            let pub_err = max_diff(&at_time(Sys::new(o.pos, o.vel), H_MAIN, o.published).pos, &o.pos);
-            assert!(pub_err < 2e-3, "{}: published-T return {pub_err:.2e}", o.caption);
+            let pub_err = max_diff(
+                &at_time(Sys::new(o.pos, o.vel), H_MAIN, o.published).pos,
+                &o.pos,
+            );
+            assert!(
+                pub_err < 2e-3,
+                "{}: published-T return {pub_err:.2e}",
+                o.caption
+            );
             assert!((o.period - o.published).abs() < 2e-3);
         }
         // The figure-8 and Lagrange close too.
@@ -757,7 +774,11 @@ mod tests {
                 l_err = l_err.max((l - l0).abs());
             });
             assert!(worst < 1e-6, "{}: max |ΔE/E| {worst:.2e}", o.caption);
-            assert!(p_err < 1e-12 && l_err < 1e-11, "{}: P {p_err:.1e} L {l_err:.1e}", o.caption);
+            assert!(
+                p_err < 1e-12 && l_err < 1e-11,
+                "{}: P {p_err:.1e} L {l_err:.1e}",
+                o.caption
+            );
         }
     }
 
@@ -784,9 +805,15 @@ mod tests {
         }
         // Goggles (the most unstable in the cycle) against the KAM-stable figure-8.
         let (fig8, goggles) = (spread(4, 1.0), spread(2, 1.0));
-        assert!(goggles > fig8, "1 T: goggles {goggles:.2e} vs figure-8 {fig8:.2e}");
+        assert!(
+            goggles > fig8,
+            "1 T: goggles {goggles:.2e} vs figure-8 {fig8:.2e}"
+        );
         let (fig8, goggles) = (spread(4, 2.0), spread(2, 2.0));
-        assert!(goggles > 10.0 * fig8, "2 T: goggles {goggles:.2e} vs figure-8 {fig8:.2e}");
+        assert!(
+            goggles > 10.0 * fig8,
+            "2 T: goggles {goggles:.2e} vs figure-8 {fig8:.2e}"
+        );
         assert!(fig8 < 0.01, "the figure-8 cloud stays a dot ({fig8:.2e})");
     }
 
@@ -819,7 +846,10 @@ mod tests {
             .filter(|c| c.ch != ' ')
             .map(|c| c.ink.role)
             .collect();
-        assert!(roles.iter().all(|r| matches!(r, Role::Accent | Role::Hot | Role::Sun | Role::Cold | Role::Star)));
+        assert!(roles.iter().all(|r| matches!(
+            r,
+            Role::Accent | Role::Hot | Role::Sun | Role::Cold | Role::Star
+        )));
         assert!(roles.contains(&Role::Sun) && roles.contains(&Role::Hot));
     }
 
@@ -858,7 +888,10 @@ mod tests {
                 (s.pos[2 * i] - s.pos[2 * j]).hypot(s.pos[2 * i + 1] - s.pos[2 * j + 1])
             };
             let sides = [d(0, 1), d(1, 2), d(2, 0)];
-            let (lo, hi) = (sides.iter().copied().fold(f64::MAX, f64::min), sides.iter().copied().fold(0.0, f64::max));
+            let (lo, hi) = (
+                sides.iter().copied().fold(f64::MAX, f64::min),
+                sides.iter().copied().fold(0.0, f64::max),
+            );
             worst = worst.max(hi / lo - 1.0);
         });
         assert!(worst < 1e-5, "side deviation {worst:.2e}");
@@ -905,8 +938,14 @@ mod tests {
                 let v = view_for(size, b);
                 for (x, y) in [(b[0], b[2]), (b[1], b[3])] {
                     let (cx, cy) = v.cell(x, y);
-                    assert!(cx >= 1.0 && cx <= f64::from(size.width()) - 1.0, "orbit {k}");
-                    assert!(cy >= 1.0 && cy <= f64::from(size.height()) - 1.0, "orbit {k}");
+                    assert!(
+                        cx >= 1.0 && cx <= f64::from(size.width()) - 1.0,
+                        "orbit {k}"
+                    );
+                    assert!(
+                        cy >= 1.0 && cy <= f64::from(size.height()) - 1.0,
+                        "orbit {k}"
+                    );
                 }
             }
         }
@@ -914,7 +953,11 @@ mod tests {
 
     #[test]
     fn tb_a7_every_run_fades_in() {
-        let p = |tau| Phase { seg: 0, tau, fade: 1.0 };
+        let p = |tau| Phase {
+            seg: 0,
+            tau,
+            fade: 1.0,
+        };
         assert_eq!(orbit_fade(&p(0.0)), 0.0);
         assert!(orbit_fade(&p(0.1)) < orbit_fade(&p(0.2)));
         assert_eq!(orbit_fade(&p(FADE_IN)), 1.0);

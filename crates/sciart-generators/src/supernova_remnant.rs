@@ -20,8 +20,8 @@ use std::cell::RefCell;
 use std::f64::consts::TAU;
 
 use rand::Rng;
-use sciart_core::raster::stipple_keep;
 use sciart_core::prelude::*;
+use sciart_core::raster::stipple_keep;
 use sciart_core::rng::{cell_key, hash01};
 use sciart_core::timeline::ease;
 
@@ -270,8 +270,8 @@ pub struct SupernovaRemnant {
     /// Screen centre and half-height, in dots.
     centre: (f64, f64),
     half: f64,
- /// Knots drawn at this size (a prefix of the pool).
- drawn: usize,
+    /// Knots drawn at this size (a prefix of the pool).
+    drawn: usize,
     stars: Vec<(i32, i32, Ink)>,
     /// The braille lattice; a cell so `prepare` can draw into it while reading the
     /// rest of `self` (no placeholder lattice allocated per frame, GEN-R11).
@@ -425,7 +425,7 @@ impl SupernovaRemnant {
     fn knot_views(&self, mut f: impl FnMut(&KnotView)) {
         let scale = R_END * self.half;
         let (tau, r_end) = (self.tau.min(EXPAND), self.r_end());
- for k in self.knots.iter().take(self.drawn) {
+        for k in self.knots.iter().take(self.drawn) {
             let b = k.brightness(self.tau);
             if b <= 0.0 {
                 continue;
@@ -495,7 +495,13 @@ impl SupernovaRemnant {
                 let start = (v.pos.0 - 2.0 * rx, v.pos.1 - 2.0 * ry);
                 let mid = (start.0 - 0.5 * len * rx, start.1 - 0.5 * len * ry);
                 let root = (start.0 - len * rx, start.1 - len * ry);
-                dots.line(start.0, start.1, mid.0, mid.1, Ink::new(role, LEVEL_FINGER.0));
+                dots.line(
+                    start.0,
+                    start.1,
+                    mid.0,
+                    mid.1,
+                    Ink::new(role, LEVEL_FINGER.0),
+                );
                 dots.line(mid.0, mid.1, root.0, root.1, Ink::new(role, LEVEL_FINGER.1));
             }
             if let Some((tail, head)) = self.trail(v) {
@@ -522,7 +528,8 @@ impl SupernovaRemnant {
             let salt = 0x5_0FF0_0000 ^ u64::from(v.knot.salt).wrapping_mul(0x9E37_79B9_7F4A_7C15);
             for dy in -PUFF_R..=PUFF_R {
                 for dx in -PUFF_R..=PUFF_R {
-                    let p = peak * self.puff_kernel[((dy + PUFF_R) * PUFF_W + dx + PUFF_R) as usize];
+                    let p =
+                        peak * self.puff_kernel[((dy + PUFF_R) * PUFF_W + dx + PUFF_R) as usize];
                     if stipple_keep(salt, dx, dy, p) {
                         dots.set(x + dx, y + dy, ink);
                     }
@@ -621,9 +628,9 @@ impl Generator for SupernovaRemnant {
         let (w, h) = (f64::from(ds.width()), f64::from(ds.height()));
         self.centre = (w / 2.0, h / 2.0);
         self.half = (h / 2.0).min(w / 2.0 / R_END * 0.95);
- // Small screens show a prefix of the (randomly ordered) knots, so the shell keeps
- // its black gaps instead of crowding into a blot.
- self.drawn = (KNOTS as f64 * (self.half / FULL_HALF).clamp(0.4, 1.0)).round() as usize;
+        // Small screens show a prefix of the (randomly ordered) knots, so the shell keeps
+        // its black gaps instead of crowding into a blot.
+        self.drawn = (KNOTS as f64 * (self.half / FULL_HALF).clamp(0.4, 1.0)).round() as usize;
         self.stars.clear();
         let n = size.area() / 200;
         for k in 0..n as i32 {
@@ -1007,7 +1014,12 @@ mod tests {
         let b = g.neutron_star();
         let off = |p: (f64, f64)| (p.0 - g.centre.0).hypot(p.1 - g.centre.1);
         assert!(off(a) > 1.0, "off-centre by {:.2}", off(a));
-        assert!(off(b) > off(a) + 1.0, "drifts {:.2} → {:.2}", off(a), off(b));
+        assert!(
+            off(b) > off(a) + 1.0,
+            "drifts {:.2} → {:.2}",
+            off(a),
+            off(b)
+        );
         // It is drawn there, a single white dot.
         let dots = g.dots.borrow();
         assert!(dots.is_lit(b.0.round() as i32, b.1.round() as i32));

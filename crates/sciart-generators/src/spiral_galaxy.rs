@@ -289,8 +289,8 @@ impl SpiralGalaxy {
                 // The segment i → i + 1, inked at its middle.
                 let mid = sample_angle(j, i, n) + 0.5 * TAU / n as f64;
                 let (sp, cp) = (2.0 * (mid - orbit_turn(j))).sin_cos_det();
-                let ink = (!in_lane(cp, sp))
-                    .then(|| THREAD_INKS[usize::from(crowding(cp, sp) >= RIDGE)]);
+                let ink =
+                    (!in_lane(cp, sp)).then(|| THREAD_INKS[usize::from(crowding(cp, sp) >= RIDGE)]);
                 self.thread_ink.push(ink);
             }
         }
@@ -309,14 +309,18 @@ impl SpiralGalaxy {
         let x1 = (cx + r).ceil().min(f64::from(d.width()) - 1.0) as i32;
         for y in y0..=y1 {
             for x in x0..=x1 {
-                let (sx, sy) = ((f64::from(x) - cx) / self.r_px, -(f64::from(y) - cy) / self.r_px);
+                let (sx, sy) = (
+                    (f64::from(x) - cx) / self.r_px,
+                    -(f64::from(y) - cy) / self.r_px,
+                );
                 let (u, v) = (sx * pc + sy * ps, (-sx * ps + sy * pc) / COS_INC);
                 let rr = u.hypot(v);
                 if rr > BULGE_R {
                     continue;
                 }
                 if stipple_keep(BULGE_SALT, x, y, bulge_density(rr)) {
-                    self.bulge.push((x, y, BULGE_INKS[usize::from(rr > BULGE_CORE)]));
+                    self.bulge
+                        .push((x, y, BULGE_INKS[usize::from(rr > BULGE_CORE)]));
                 }
             }
         }
@@ -449,18 +453,29 @@ mod tests {
             let psi = 2.0 * (a - COT_PITCH * rg.ln());
             rg = r / (1.0 - ECC * psi.cos_det());
         }
-        (sciart_core::geom::wrap_angle(2.0 * (a - COT_PITCH * rg.ln())), rg)
+        (
+            sciart_core::geom::wrap_angle(2.0 * (a - COT_PITCH * rg.ln())),
+            rg,
+        )
     }
 
     #[test]
     fn spg_a1_orbits_are_closed_ellipses_in_the_pattern_frame() {
         // A star returns to the same pattern-frame point after one relative period.
         for (k, &(j, a0)) in [(5usize, 0.3f64), (20, 2.0), (39, 5.0)].iter().enumerate() {
-            let s = Star { orbit: j as u8, alpha0: a0 as f32, u: 0.9, keep: 0.0 };
+            let s = Star {
+                orbit: j as u8,
+                alpha0: a0 as f32,
+                u: 0.9,
+                keep: 0.0,
+            };
             let period = TAU / (omega(orbit_radius(j)) - OMEGA_P);
             let (p0, _) = s.state(1.5 + k as f64);
             let (p1, _) = s.state(1.5 + k as f64 + period);
-            assert!((p0.0 - p1.0).abs() < 1e-5 && (p0.1 - p1.1).abs() < 1e-5, "orbit {j}");
+            assert!(
+                (p0.0 - p1.0).abs() < 1e-5 && (p0.1 - p1.1).abs() < 1e-5,
+                "orbit {j}"
+            );
             // and lies on its ellipse.
             let alpha = s.alpha(1.5);
             let (q, _) = s.state(1.5);
@@ -478,7 +493,10 @@ mod tests {
         // the same angle are closer than unperturbed exactly where the crowding is > 1.
         let psi = ridge_phase();
         assert!(crowding(psi.cos_det(), psi.sin_det()) > 3.0);
-        assert!(ECC * (1.0 + 4.0 * COT_PITCH * COT_PITCH).sqrt() < 1.0, "no orbit crossing");
+        assert!(
+            ECC * (1.0 + 4.0 * COT_PITCH * COT_PITCH).sqrt() < 1.0,
+            "no orbit crossing"
+        );
     }
 
     /// Lit-dot share on the ridge and between the arms (pattern frame), 0.35–0.75 R.
@@ -511,7 +529,10 @@ mod tests {
             let (g, _) = built(Size::new(200, 50), seed);
             let (ridge, inter) = ridge_vs_interarm(&g);
             // SPG-A8: the arms stand out by at least 2.5×.
-            assert!(ridge >= 2.5 * inter, "ridge {ridge:.3} vs inter-arm {inter:.3}");
+            assert!(
+                ridge >= 2.5 * inter,
+                "ridge {ridge:.3} vs inter-arm {inter:.3}"
+            );
         }
         // The stars alone: their density on the ridge is ≥ 2× that between the arms.
         let (g, _) = built(Size::new(200, 50), 42);
@@ -552,7 +573,12 @@ mod tests {
         }
         assert!((omega(COROTATION) - OMEGA_P).abs() < 1e-9);
         // A star's inertial angle advances faster than the pattern's.
-        let s = Star { orbit: 20, alpha0: 0.0, u: 0.9, keep: 0.0 };
+        let s = Star {
+            orbit: 20,
+            alpha0: 0.0,
+            u: 0.9,
+            keep: 0.0,
+        };
         let dt = 2.0;
         let turned = s.alpha(dt) + OMEGA_P * dt - s.alpha(0.0);
         assert!(turned > OMEGA_P * dt);
@@ -577,7 +603,9 @@ mod tests {
                 continue;
             }
             assert!(
-                all.contains(&cell.ink) || BULGE_INKS.contains(&cell.ink) || FIELD_INKS.contains(&cell.ink),
+                all.contains(&cell.ink)
+                    || BULGE_INKS.contains(&cell.ink)
+                    || FIELD_INKS.contains(&cell.ink),
                 "{:?}",
                 cell.ink
             );
@@ -623,7 +651,12 @@ mod tests {
         let psi = |rg: f64| 2.0 * (a - COT_PITCH * rg.ln());
         assert!(psi(orbit_radius(j) * 0.98) > psi(orbit_radius(j)));
         // Stars there are hidden, threads too.
-        let s = Star { orbit: 20, alpha0: 0.0, u: 0.9, keep: 0.0 };
+        let s = Star {
+            orbit: 20,
+            alpha0: 0.0,
+            u: 0.9,
+            keep: 0.0,
+        };
         assert_eq!(s.ink(psi_l.cos_det(), psi_l.sin_det(), 1.0), None);
         let (g, _) = built(Size::new(200, 50), 42);
         let n = g.thread_n;
@@ -631,7 +664,10 @@ mod tests {
             for i in 0..n {
                 let mid = sample_angle(jj, i, n) + 0.5 * TAU / n as f64;
                 let p = 2.0 * (mid - orbit_turn(jj));
-                assert_eq!(g.thread_ink[jj * n + i].is_none(), in_lane(p.cos_det(), p.sin_det()));
+                assert_eq!(
+                    g.thread_ink[jj * n + i].is_none(),
+                    in_lane(p.cos_det(), p.sin_det())
+                );
             }
         }
     }
@@ -640,21 +676,40 @@ mod tests {
     fn spg_a5_knots_flare_only_on_the_ridge() {
         // A knot star is drawn as a knot only where the orbits crowd most, and is never
         // in the dust lane; elsewhere it is an ordinary young star or hidden.
-        let s = Star { orbit: 20, alpha0: 0.0, u: 0.01, keep: 0.0 };
+        let s = Star {
+            orbit: 20,
+            alpha0: 0.0,
+            u: 0.01,
+            keep: 0.0,
+        };
         for k in 0..720 {
             let psi = TAU * f64::from(k) / 720.0;
             let (cp, sp) = (psi.cos_det(), psi.sin_det());
             if s.ink(cp, sp, 1.0) == Some(KNOT_INK) {
-                assert!(crowding(cp, sp) >= KNOT_CROWD && !in_lane(cp, sp), "ψ {psi:.3}");
+                assert!(
+                    crowding(cp, sp) >= KNOT_CROWD && !in_lane(cp, sp),
+                    "ψ {psi:.3}"
+                );
             }
         }
         let p = ridge_phase();
         assert_eq!(s.ink(p.cos_det(), p.sin_det(), 1.0), Some(KNOT_INK));
         // About a tenth of the young stars are knot stars.
         let (g, _) = built(Size::new(200, 50), 42);
-        let young = g.stars.iter().filter(|s| f64::from(s.u) < YOUNG_SHARE).count();
-        let knots = g.stars.iter().filter(|s| f64::from(s.u) < KNOT_SHARE * YOUNG_SHARE).count();
-        assert!(knots * 20 > young && knots * 5 < young, "{knots} of {young}");
+        let young = g
+            .stars
+            .iter()
+            .filter(|s| f64::from(s.u) < YOUNG_SHARE)
+            .count();
+        let knots = g
+            .stars
+            .iter()
+            .filter(|s| f64::from(s.u) < KNOT_SHARE * YOUNG_SHARE)
+            .count();
+        assert!(
+            knots * 20 > young && knots * 5 < young,
+            "{knots} of {young}"
+        );
     }
 
     #[test]

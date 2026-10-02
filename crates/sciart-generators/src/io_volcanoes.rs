@@ -233,7 +233,6 @@ fn kept(key: u32, keep: f64) -> bool {
     keep >= 1.0 || hash01(u64::from(key) ^ 0x6A11) < keep
 }
 
-
 fn normalize(v: [f64; 3]) -> [f64; 3] {
     let n = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
     [v[0] / n, v[1] / n, v[2] / n]
@@ -450,8 +449,7 @@ impl IoVolcanoes {
             let k = usize::from(p.src).min(VENTS.len() - 1);
             // A fixed uniform per landing from its exact point: the ring fades as
             // e^{−age/τ} without any per-frame randomness.
-            let u = hash01(cell_key((p.pos[0] * 64.0) as i32, (p.pos[1] * 64.0) as i32))
-                .max(1e-6);
+            let u = hash01(cell_key((p.pos[0] * 64.0) as i32, (p.pos[1] * 64.0) as i32)).max(1e-6);
             falls[k].push(Fall {
                 a: p.pos[0],
                 b: p.pos[1],
@@ -542,7 +540,11 @@ impl IoVolcanoes {
                 continue;
             }
             let (x, y) = v.to_dot(c);
-            self.paterae[k] = (x, y, (0.0..f64::from(w)).contains(&x) && (0.0..f64::from(h)).contains(&y));
+            self.paterae[k] = (
+                x,
+                y,
+                (0.0..f64::from(w)).contains(&x) && (0.0..f64::from(h)).contains(&y),
+            );
             k += 1;
         }
         for p in &mut self.paterae[k..] {
@@ -573,7 +575,13 @@ impl IoVolcanoes {
     /// Dot, height (km) and vertical speed of a grain of vent `k` launched with speeds
     /// `(vh, vz)` (km/s) along azimuth `(cos, sin)`, `u` real seconds into its flight: the
     /// exact parabola (IO-A11). `None` behind Io.
-    fn arc_at(&self, k: usize, (vh, vz): (f64, f64), (ca, sa): (f64, f64), u: f64) -> Option<((f64, f64), f64, f64)> {
+    fn arc_at(
+        &self,
+        k: usize,
+        (vh, vz): (f64, f64),
+        (ca, sa): (f64, f64),
+        u: f64,
+    ) -> Option<((f64, f64), f64, f64)> {
         let z = height(vz, u);
         let d = vh * u;
         let p = self.frames[k].place(d * ca, d * sa, z.max(0.0));
@@ -648,7 +656,9 @@ impl IoVolcanoes {
             let f = self.frames[k];
             let (fall, inv_range) = (VENTS[k].fall, 1.0 / range_45(VENTS[k].v0));
             for l in falls.iter() {
-                if now - l.at >= l.life || !kept(l.a.to_bits() ^ l.b.to_bits().rotate_left(16), self.keep) {
+                if now - l.at >= l.life
+                    || !kept(l.a.to_bits() ^ l.b.to_bits().rotate_left(16), self.keep)
+                {
                     continue;
                 }
                 let p = f.place(f64::from(l.a), f64::from(l.b), 0.0);
@@ -730,7 +740,8 @@ impl IoVolcanoes {
             }
             let (x, y) = v.to_dot(p);
             if k == 0 {
-                self.dots.plot(x, y, if glow { VENT_HOT } else { VENT_WARM });
+                self.dots
+                    .plot(x, y, if glow { VENT_HOT } else { VENT_WARM });
             } else {
                 let (x, y) = (x.round() as i32, y.round() as i32);
                 let core = if glow { VENT_WARM } else { LAVA };
@@ -888,8 +899,12 @@ mod tests {
         }
         assert_eq!(g.plume.capacity(), POOL);
         // Over a hundred grains in flight at steady state (each a long thread), with room
- // to spare.
-        assert!(g.plume.len() > 100 && g.plume.len() < POOL, "{}", g.plume.len());
+        // to spare.
+        assert!(
+            g.plume.len() > 100 && g.plume.len() < POOL,
+            "{}",
+            g.plume.len()
+        );
     }
 
     #[test]
@@ -961,7 +976,10 @@ mod tests {
                 }
             }
             assert!(lit > 200, "{w}x{h}: {lit} lit cells");
-            assert!(block * 100 <= 3 * lit, "{w}x{h}: {block} of {lit} half blocks");
+            assert!(
+                block * 100 <= 3 * lit,
+                "{w}x{h}: {block} of {lit} half blocks"
+            );
         }
     }
 
@@ -1019,7 +1037,11 @@ mod tests {
             for p in g.plume.iter().filter(|p| p.src == 0) {
                 let z = f64::from(p.pos[2]);
                 let vz = f64::from(p.vel[2]);
-                let v2 = p.vel.iter().map(|&c| f64::from(c) * f64::from(c)).sum::<f64>()
+                let v2 = p
+                    .vel
+                    .iter()
+                    .map(|&c| f64::from(c) * f64::from(c))
+                    .sum::<f64>()
                     + 2.0 * G_IO * z;
                 let full = v2 / (2.0 * G_IO);
                 // No grain rises above the apex its launch speed allows.
@@ -1036,7 +1058,10 @@ mod tests {
             short * per_km
         );
         let ring = ring_radius(&g, 0);
-        assert!((ring / range_45(VENTS[0].v0) - 1.0).abs() < 0.15, "ring {ring}");
+        assert!(
+            (ring / range_45(VENTS[0].v0) - 1.0).abs() < 0.15,
+            "ring {ring}"
+        );
     }
 
     #[test]
@@ -1052,11 +1077,7 @@ mod tests {
                     disc += usize::from(g.io_normal(f64::from(x), f64::from(y)).is_some());
                 }
             }
-            let ground = g
-                .specks
-                .iter()
-                .filter(|s| s.ink != STAR)
-                .count();
+            let ground = g.specks.iter().filter(|s| s.ink != STAR).count();
             assert!(
                 ground as f64 <= P_MAX * disc as f64 && ground * 50 > disc,
                 "{w}x{h}: {ground} of {disc} disc dots"
