@@ -2,7 +2,6 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
- figure-8  Moore 1993                                                           
                                                                                 
                                                                                 
                                                                                 
@@ -25,4 +24,5 @@ expression: frame
                                                                                 
                                                                                 
                                                                                 
- Three bodies - figure-8
+                                                                                
+ Three bodies - moth I 2013
