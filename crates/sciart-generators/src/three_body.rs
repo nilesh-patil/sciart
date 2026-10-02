@@ -1,19 +1,35 @@
-//! Three equal suns dancing periodic three-body orbits: figure-8, Lagrange, Broucke, moth (SPEC-002 `three_body`).
+//! Three equal suns dancing periodic three-body orbits, each body a cloud of shadow copies
+//! that shows the chaos (SPEC-002 `three_body`).
 //!
-//! A gallery of five published periodic solutions of the planar equal-mass problem,
-//! each replayed from its initial conditions for a few periods on a fixed leapfrog
-//! lattice, so the state is a pure function of the substep count (TB-A5) and the
-//! unstable orbits never get the time to show their instability.
+//! M17 (orbital-thread style, GEN-R26): a gallery of seven periodic solutions of the planar
+//! equal-mass problem (`G = m = 1`): the figure-8, Šuvakov & Dmitrašinović's (2013)
+//! butterfly I, moth I, goggles, dragonfly and yin-yang Ia, and Lagrange's (1772)
+//! triangle. Every trail is a strange-attractor thread with an afterglow, coloured by
+//! speed (`Accent` slow → `Hot` → `Sun` fast), so each knot draws itself. Each body is a
+//! tiny hydrogen-style cloud of 48 shadow copies started 10⁻⁵ apart on the same energy
+//! shell: on stable orbits the cloud stays a dot, on unstable ones (goggles, Lagrange) it
+//! smears along the orbit before the scene moves on.
+//!
+//! Integrator: the logarithmic-Hamiltonian leapfrog (Mikkola & Tanikawa 1999; Preto &
+//! Tremaine 1999) composed to fourth order (Yoshida 1990). Time is transformed by
+//! `dt = ds/|U|`, so a fixed step `ds` takes small physical steps through the close
+//! encounters (the dragonfly passes within 0.007) and large ones elsewhere, and the
+//! two-body part of an encounter is followed without the usual energy kick. The state is
+//! a pure function of the step count; a frame shows each system at the frame's model time
+//! by a drift of less than one step from its last step.
 
+use std::sync::OnceLock;
+
+use sciart_core::geom;
 use sciart_core::ink::{self, MIN_VISIBLE_LEVEL};
 use sciart_core::prelude::*;
+use sciart_core::rng::SplitMix64;
 use sciart_core::timeline::ease;
-use sciart_core::{geom, ode};
 
 pub static META: Meta = Meta {
     name: "three_body",
     category: Category::Physics,
-    description: "Three equal suns dancing periodic three-body orbits: figure-8, Lagrange, Broucke, moth",
+    description: "Three equal suns on periodic three-body orbits, their shadow clouds showing chaos",
     title: "Three bodies · periodic orbits",
     captions: &CAPTIONS,
 };
@@ -22,82 +38,77 @@ pub fn build() -> Box<dyn Generator> {
     Box::new(ThreeBody::new())
 }
 
-/// Trail samples per body: exactly one period, so each orbit closes on itself.
-const SAMPLES: usize = 480;
-/// Leapfrog substeps per model time unit, at least; `qᵢ = ⌈RES·Tᵢ/SAMPLES⌉` (SPEC-002).
-const RES: f64 = 4096.0;
-/// Seconds each orbit fades out while its physics keeps running.
+/// The gallery's captions (orbit and discovery year, GEN-R12), in cycle order.
+const CAPTIONS: [&str; ORBITS] = [
+    "moth I 2013",
+    "butterfly I 2013",
+    "goggles 2013",
+    "dragonfly 2013",
+    "figure-8 1993",
+    "yin-yang 2013",
+    "Lagrange 1772",
+];
+const ORBITS: usize = 7;
+/// Fictitious-time step of the main bodies and of the shadow copies.
+pub(crate) const H_MAIN: f64 = 0.004;
+const H_GHOST: f64 = 0.008;
+/// Shadow copies per body and their initial scatter (each coordinate, model units).
+pub(crate) const GHOSTS: usize = 48;
+pub(crate) const GHOST_EPS: f64 = 1e-5;
+/// Seconds each orbit fades out while its physics keeps running, and fades in.
 const FADE: f64 = 1.2;
-/// Seconds an orbit (heads, trails, triangle) takes to fade in at each run start, so no
-/// orbit starts hard-on.
 const FADE_IN: f64 = 0.3;
-/// Fraction of its period the moth's trail spans at `MOTH_FULL_SCALE` and above: its
-/// single period folds into a knot, so only the newest loops are shown and the older
-/// ones dissolve.
-const MOTH_TRAIL: f64 = 0.45;
-/// Rows per model unit from which the moth shows its full `MOTH_TRAIL` (its 80×24 view
-/// is 8.6); smaller views shorten the span in proportion, down to `MOTH_MIN_TRAIL`.
-const MOTH_FULL_SCALE: f64 = 8.0;
-const MOTH_MIN_TRAIL: f64 = 0.25;
-/// Level of Lagrange's triangle once its bodies are in (SPEC-002 Inks).
-const TRIANGLE_LEVEL: f64 = 80.0;
-/// Body `i` is drawn in `ROLES[i]` (SPEC-002 Inks).
-const ROLES: [Role; 3] = [Role::Hot, Role::Cold, Role::Accent];
-const HEAD: Glyph = Glyph::new('●', '@');
-/// Index of the Lagrange orbit, the one that gets its triangle drawn.
-const LAGRANGE: usize = 1;
-/// Each orbit's short name, in gallery order; the shown one is the title's caption
-/// (GEN-R12), `Three bodies · figure-8`.
-const CAPTIONS: [&str; 5] = ["figure-8", "Lagrange", "Broucke A1", "Broucke R4", "moth I"];
+/// Trail: a sample whenever a body has moved `TRAIL_GAP` (model units) or `1/TRAIL_MIN`
+/// of a period has passed; one period long, and pre-rolled: every run starts with the
+/// trail of the period that ends at its ICs (the orbit is periodic), so each knot is
+/// drawn whole from the first frame. The ring holds one period plus `TRAIL_SLACK`.
+const TRAIL_GAP: f64 = 0.02;
+const TRAIL_MIN: f64 = 300.0;
+const TRAIL_SLACK: usize = 600;
+/// Shadow copies are drawn only within `GHOST_CAP` (model units) of their body, so an
+/// unstable orbit shows a comet-like smear along the orbit rather than copies flung
+/// across the screen; within `GHOST_NEAR` they are at the brighter level.
+const GHOST_CAP: f64 = 0.35;
+const GHOST_NEAR: f64 = 0.04;
+/// Speed bands in units of the orbit's rms speed `√(−2E/3)` (virial): below `SLOW`
+/// `Accent`, above `FAST` `Sun`, `Hot` between (TB-A11).
+const SLOW: f64 = 0.7;
+const FAST: f64 = 1.25;
+/// Inks: the shadow cloud `Cold`, the body itself a small white `Star` disc.
+const GHOST_LEVEL: f64 = 225.0;
+const GHOST_FAR_LEVEL: f64 = 150.0;
+const BODY_LEVEL: f64 = 255.0;
+const BODY_R: f64 = 1.2;
+/// Yoshida's fourth-order weights.
+const W1: f64 = 1.351_207_191_959_657_8;
+const W0: f64 = -1.702_414_383_919_315_5;
 
-/// One periodic solution: published initial conditions plus how to show it.
+/// One periodic solution: initial conditions plus how to show it.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Orbit {
-    pub label: &'static str,
-    pub short: &'static str,
-    /// Interleaved `(x, y)` of bodies 1..3, COM-centred.
+    pub caption: &'static str,
+    /// Interleaved `(x, y)` of bodies 1..3, and their velocities.
     pub pos: [f64; 6],
     pub vel: [f64; 6],
-    /// Period `T` in model time units.
+    /// Period in model time units: the published one, and the one the scene uses.
+    pub published: f64,
     pub period: f64,
-    /// Fraction of the period the trail spans (`1` = the whole period, SPEC-002 Inks);
-    /// below 1 it is the span at full size, see [`trail_span`].
-    pub trail: f64,
-    /// Periods shown per run (`n`).
-    pub periods: u32,
-    /// Model time units per simulated second (`k`).
+    /// Periods shown per run (`n`) and model time units per simulated second (`k`).
+    pub periods: f64,
     pub rate: f64,
-    /// `[x_min, x_max, y_min, y_max]` over run plus fade, padded (TB-A6).
-    pub bbox: [f64; 4],
 }
 
 impl Orbit {
-    /// Substeps per trail sample, `q = ⌈RES·T/480⌉`, so `h = T/(480 q) ≤ 1/RES`.
-    pub fn q(&self) -> u64 {
-        (RES * self.period / SAMPLES as f64).ceil() as u64
-    }
-
-    /// The leapfrog step `h = T/(480 q)`: a whole number of steps per period.
-    pub fn h(&self) -> f64 {
-        self.period / (SAMPLES as u64 * self.q()) as f64
-    }
-
     /// Seconds of the `run` phase, `n·T/k`.
     pub fn run_secs(&self) -> f64 {
-        f64::from(self.periods) * self.period / self.rate
-    }
-
-    /// Substeps due `tau` seconds after the run started: `⌊τ·k/h⌋` (TB-A5).
-    pub fn substeps_at(&self, tau: f64) -> u64 {
-        // Saturating cast: negative or NaN gives 0.
-        (tau * self.rate / self.h()).floor() as u64
+        self.periods * self.period / self.rate
     }
 }
 
-/// Lagrange's homographic solution with eccentricity `e` (SPEC-002): bodies at
-/// apocentre on the unit circle at `90° + 120°·i`, moving perpendicular to the radius
-/// at `v_a = √(μ(1 − e))`, `μ = 1/√3` being the net central pull `μ/r²` on each body.
-/// Returns `(pos, vel, period)` with `T = 2π√(a³/μ)`, `a = 1/(1 + e)`.
+/// Lagrange's homographic solution with eccentricity `e`: bodies at apocentre on the unit
+/// circle at `90° + 120°·i`, moving perpendicular to the radius at `v_a = √(μ(1 − e))`,
+/// `μ = 1/√3` the net central pull `μ/r²` on each. Returns `(pos, vel, period)` with
+/// `T = 2π√(a³/μ)`, `a = 1/(1 + e)`.
 pub(crate) fn lagrange_ics(e: f64) -> ([f64; 6], [f64; 6], f64) {
     let mu = 1.0 / 3f64.sqrt();
     let v = (mu * (1.0 - e)).sqrt();
@@ -113,124 +124,294 @@ pub(crate) fn lagrange_ics(e: f64) -> ([f64; 6], [f64; 6], f64) {
     (pos, vel, std::f64::consts::TAU * (a * a * a / mu).sqrt())
 }
 
-/// The gallery in timeline order (SPEC-002 table; ICs quoted as published).
-///
-/// The periods of A1, R4 and moth I are refined from the published values (6.283213,
-/// 5.396, 14.8939) to the period that minimises the return error of these ICs on the
-/// orbit's own leapfrog lattice (TB-A3), so every trail closes on itself.
-// Keeps one IC array per line, as the table is published.
+/// A Šuvakov–Dmitrašinović zero-angular-momentum orbit: bodies at `(−1, 0)`, `(1, 0)`,
+/// `(0, 0)` with velocities `(p₁, p₂)`, `(p₁, p₂)`, `(−2p₁, −2p₂)`.
+fn suvakov(p1: f64, p2: f64) -> ([f64; 6], [f64; 6]) {
+    (
+        [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
+        [p1, p2, p1, p2, -2.0 * p1, -2.0 * p2],
+    )
+}
+
+/// The gallery in cycle order. Periods: the published `T` (Šuvakov & Dmitrašinović 2013,
+/// PRL 110 114301, 4–5 digits) and the one used, refined to the return minimum of these
+/// six-digit ICs (TB-A8); the figure-8 uses Simó's ICs and period.
+// One IC set per line, as the tables are published.
 #[rustfmt::skip]
-pub(crate) fn orbits() -> [Orbit; 5] {
+pub(crate) fn orbits() -> [Orbit; ORBITS] {
     let (lx, lv, lt) = lagrange_ics(0.3);
-    // Figure-8 (Simó's ICs): r₁ = −r₂, r₃ = 0, v₁ = v₂ = −v₃/2.
     let (x1, y1) = (0.970_004_36, -0.243_087_53);
     let (vx3, vy3) = (-0.932_407_37, -0.864_731_46);
-    // Moth I: r₁ = (−1, 0), r₂ = (1, 0), r₃ = 0, v₁ = v₂, v₃ = −2 v₁.
-    let (mvx, mvy) = (0.464_445, 0.396_060);
+    let o = |caption, (pos, vel): ([f64; 6], [f64; 6]), published, period, periods, rate| Orbit {
+        caption, pos, vel, published, period, periods, rate,
+    };
+    // Each run holds 15–20 s; goggles and Lagrange show 3 periods, so their shadow
+    // clouds (×30–100 per period) smear in the last one.
     [
-        Orbit {
-            label: "figure-8  Moore 1993",
-            short: CAPTIONS[0],
-            pos: [x1, y1, -x1, -y1, 0.0, 0.0],
-            vel: [-vx3 / 2.0, -vy3 / 2.0, -vx3 / 2.0, -vy3 / 2.0, vx3, vy3],
-            period: 6.325_913_98,
-            trail: 1.0,
-            periods: 3,
-            rate: 1.0,
-            bbox: [-1.09, 1.09, -0.36, 0.36],
-        },
-        Orbit {
-            label: "Lagrange triangle  1772",
-            short: CAPTIONS[1],
-            pos: lx,
-            vel: lv,
-            period: lt,
-            trail: 1.0,
-            periods: 2,
-            rate: 1.0,
-            bbox: [-0.97, 0.97, -0.87, 1.01],
-        },
-        Orbit {
-            label: "Broucke A1  1975",
-            short: CAPTIONS[2],
-            pos: [-0.989_262_004_3, 0.0, 2.209_617_724_1, 0.0, -1.220_355_719_7, 0.0],
-            vel: [0.0, 1.916_924_418_5, 0.0, 0.191_026_873_8, 0.0, -2.107_951_292_4],
-            period: 6.283_247,
-            trail: 1.0,
-            periods: 2,
-            rate: 1.0,
-            bbox: [-2.22, 2.22, -0.57, 0.57],
-        },
-        Orbit {
-            label: "Broucke R4  1975",
-            short: CAPTIONS[3],
-            pos: [0.873_304_709_1, 0.0, -0.625_403_028_8, 0.0, -0.247_901_680_3, 0.0],
-            vel: [0.0, 1.010_776_443_6, 0.0, -1.683_353_345_8, 0.0, 0.672_576_902_2],
-            period: 5.396_075,
-            trail: 1.0,
-            periods: 2,
-            rate: 1.0,
-            bbox: [-0.88, 0.88, -0.88, 0.88],
-        },
-        Orbit {
-            label: "moth I  Suvakov 2013",
-            short: CAPTIONS[4],
-            pos: [-1.0, 0.0, 1.0, 0.0, 0.0, 0.0],
-            vel: [mvx, mvy, mvx, mvy, -2.0 * mvx, -2.0 * mvy],
-            period: 14.894_089,
-            trail: MOTH_TRAIL,
-            periods: 1,
-            rate: 1.5,
-            bbox: [-1.13, 1.13, -1.15, 1.15],
-        },
+        o(CAPTIONS[0], suvakov(0.464_445, 0.396_060), 14.8939, 14.894_293, 1.5, 1.4),
+        o(CAPTIONS[1], suvakov(0.306_893, 0.125_507), 6.2356, 6.234_674, 2.0, 0.8),
+        o(CAPTIONS[2], suvakov(0.083_300, 0.127_889), 10.4668, 10.464_854, 3.0, 1.7),
+        o(CAPTIONS[3], suvakov(0.080_584, 0.588_836), 21.2710, 21.272_330, 1.5, 2.0),
+        o(CAPTIONS[4], ([x1, y1, -x1, -y1, 0.0, 0.0],
+                        [-vx3 / 2.0, -vy3 / 2.0, -vx3 / 2.0, -vy3 / 2.0, vx3, vy3]),
+          6.325_913_98, 6.325_913_98, 2.0, 0.8),
+        o(CAPTIONS[5], suvakov(0.513_938, 0.304_736), 17.3284, 17.328_807, 1.5, 1.6),
+        o(CAPTIONS[6], (lx, lv), lt, lt, 3.0, 1.0),
     ]
 }
 
-/// Newtonian accelerations of three unit masses (`G = 1`, unsoftened) at interleaved
-/// `pos`, into `acc`. The symmetric pair loop applies each pair force with opposite
-/// signs, so momentum and angular momentum are conserved to rounding (TB-A2).
-pub(crate) fn accel3(pos: &[f64], acc: &mut [f64]) {
-    acc.fill(0.0);
+/// Accelerations and potential `U = −Σ 1/rᵢⱼ` of three unit masses at `pos` (unsoftened).
+/// The symmetric pair loop conserves momentum and angular momentum to rounding.
+pub(crate) fn accel3(pos: &[f64; 6], acc: &mut [f64; 6]) -> f64 {
+    *acc = [0.0; 6];
+    let mut u = 0.0;
     for (i, j) in [(0, 1), (0, 2), (1, 2)] {
         let dx = pos[2 * j] - pos[2 * i];
         let dy = pos[2 * j + 1] - pos[2 * i + 1];
         let r2 = dx * dx + dy * dy;
-        let inv3 = 1.0 / (r2 * r2.sqrt());
+        let r = r2.sqrt();
+        u -= 1.0 / r;
+        let inv3 = 1.0 / (r2 * r);
         acc[2 * i] += dx * inv3;
         acc[2 * i + 1] += dy * inv3;
         acc[2 * j] -= dx * inv3;
         acc[2 * j + 1] -= dy * inv3;
     }
+    u
 }
 
-/// Positions, velocities and the accelerations at `pos` (the leapfrog carry).
+fn kinetic(vel: &[f64; 6]) -> f64 {
+    0.5 * vel.iter().map(|v| v * v).sum::<f64>()
+}
+
+/// Total energy `Σ v²/2 − Σ 1/rᵢⱼ`.
+pub(crate) fn energy(pos: &[f64; 6], vel: &[f64; 6]) -> f64 {
+    let mut acc = [0.0; 6];
+    kinetic(vel) + accel3(pos, &mut acc)
+}
+
+/// One three-body system on the log-Hamiltonian integrator: positions, velocities, model
+/// time, and its binding `B = −E₀` (the time transform `T + B = −U` on shell).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Bodies {
+pub(crate) struct Sys {
     pub pos: [f64; 6],
     pub vel: [f64; 6],
-    acc: [f64; 6],
+    pub t: f64,
+    b: f64,
 }
 
-impl Bodies {
-    /// Exactly the orbit's published state (TB-A5 compares bitwise).
-    pub fn at_ics(orbit: &Orbit) -> Self {
-        let mut acc = [0.0; 6];
-        accel3(&orbit.pos, &mut acc);
+impl Sys {
+    pub fn new(pos: [f64; 6], vel: [f64; 6]) -> Self {
         Self {
-            pos: orbit.pos,
-            vel: orbit.vel,
-            acc,
+            pos,
+            vel,
+            t: 0.0,
+            b: -energy(&pos, &vel),
         }
     }
 
-    /// One KDK leapfrog step of size `h` (CORE-R44).
-    pub fn step(&mut self, h: f64) {
-        ode::verlet_step(&mut self.pos, &mut self.vel, &mut self.acc, h, accel3);
+    /// Drift for fictitious time `s`: `dt = s/(T + B)`.
+    fn drift(&mut self, s: f64) {
+        let dt = s / (kinetic(&self.vel) + self.b);
+        for (p, v) in self.pos.iter_mut().zip(&self.vel) {
+            *p += dt * v;
+        }
+        self.t += dt;
     }
 
-    /// Body `i`'s position.
-    pub fn body(&self, i: usize) -> (f64, f64) {
-        (self.pos[2 * i], self.pos[2 * i + 1])
+    /// One log-H leapfrog of fictitious step `s`: half drift, kick `s/(−U)`, half drift.
+    fn leap(&mut self, s: f64) {
+        self.drift(0.5 * s);
+        let mut acc = [0.0; 6];
+        let u = accel3(&self.pos, &mut acc);
+        let k = s / (-u);
+        for (v, a) in self.vel.iter_mut().zip(&acc) {
+            *v += k * a;
+        }
+        self.drift(0.5 * s);
+    }
+
+    /// One fourth-order step (Yoshida's triple composition).
+    pub fn step(&mut self, s: f64) {
+        self.leap(W1 * s);
+        self.leap(W0 * s);
+        self.leap(W1 * s);
+    }
+
+    /// Body `i`'s position drifted to model time `t` (within one step of `self.t`).
+    pub fn body_at(&self, i: usize, t: f64) -> (f64, f64) {
+        let dt = t - self.t;
+        (
+            self.pos[2 * i] + dt * self.vel[2 * i],
+            self.pos[2 * i + 1] + dt * self.vel[2 * i + 1],
+        )
+    }
+
+    pub fn speed(&self, i: usize) -> f64 {
+        self.vel[2 * i].hypot(self.vel[2 * i + 1])
+    }
+
+    fn is_finite(&self) -> bool {
+        self.t.is_finite() && self.pos.iter().chain(&self.vel).all(|v| v.is_finite())
+    }
+}
+
+/// A system and its next step, so a frame can stop at the last step before its time
+/// without computing a step twice.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Runner {
+    pub cur: Sys,
+    next: Sys,
+    h: f64,
+}
+
+impl Runner {
+    pub fn new(sys: Sys, h: f64) -> Self {
+        let mut next = sys;
+        next.step(h);
+        Self { cur: sys, next, h }
+    }
+
+    /// Step while the next step ends at or before model time `target`, calling
+    /// `on_step` after each. A system that blew up (an escape to non-finite values) stops.
+    pub fn advance(&mut self, target: f64, mut on_step: impl FnMut(&Sys)) {
+        while self.next.t <= target && self.next.is_finite() {
+            self.cur = self.next;
+            on_step(&self.cur);
+            self.next.step(self.h);
+        }
+    }
+}
+
+/// The 48 shadow copies of an orbit: positions scattered by up to `GHOST_EPS` with the
+/// centre of mass kept, velocities rescaled onto the orbit's energy shell, from a fixed
+/// per-orbit seed (the same cloud every loop).
+pub(crate) fn ghost_ics(orbit: &Orbit, seg: usize) -> [Sys; GHOSTS] {
+    let mut rng = SplitMix64::new(0x3B0D_5EED ^ (seg as u64).wrapping_mul(0x9E37_79B9));
+    let e0 = energy(&orbit.pos, &orbit.vel);
+    std::array::from_fn(|_| {
+        let mut d = [0.0; 6];
+        for v in &mut d {
+            *v = GHOST_EPS * (2.0 * rng.next_f64() - 1.0);
+        }
+        let (mx, my) = ((d[0] + d[2] + d[4]) / 3.0, (d[1] + d[3] + d[5]) / 3.0);
+        let mut pos = orbit.pos;
+        for i in 0..3 {
+            pos[2 * i] += d[2 * i] - mx;
+            pos[2 * i + 1] += d[2 * i + 1] - my;
+        }
+        let mut acc = [0.0; 6];
+        let u = accel3(&pos, &mut acc);
+        let k = ((e0 - u) / kinetic(&orbit.vel)).max(0.0).sqrt();
+        let vel = orbit.vel.map(|v| v * k);
+        Sys::new(pos, vel)
+    })
+}
+
+/// Speed band ink of a trail segment at speed `v` of an orbit with rms speed `v_ref`:
+/// `Accent` slow, `Hot`, `Sun` fast (TB-A11).
+pub(crate) fn speed_role(v: f64, v_ref: f64) -> Role {
+    let q = v / v_ref.max(1e-9);
+    if q < SLOW {
+        Role::Accent
+    } else if q < FAST {
+        Role::Hot
+    } else {
+        Role::Sun
+    }
+}
+
+/// Afterglow level of a trail point of age fraction `f ∈ [0, 1)` (0 newest).
+fn trail_level(f: f64) -> f64 {
+    40.0 + 200.0 * (1.0 - f).max(0.0).powf(1.5)
+}
+
+/// Per-orbit tables measured once by integrating the orbits: the bodies' bounding box
+/// `[x_min, x_max, y_min, y_max]` over run plus fade, padded by 0.5 % (TB-A6), and the
+/// pre-rolled trail: the samples of the first period, with times shifted back by `T`.
+struct Table {
+    bbox: [f64; 4],
+    pre: [Vec<TrailPt>; 3],
+}
+
+fn tables() -> &'static [Table; ORBITS] {
+    static TABLES: OnceLock<[Table; ORBITS]> = OnceLock::new();
+    TABLES.get_or_init(|| {
+        let all = orbits();
+        std::array::from_fn(|k| {
+            let o = &all[k];
+            let mut b = [f64::MAX, f64::MIN, f64::MAX, f64::MIN];
+            let mut pre: [Vec<TrailPt>; 3] = Default::default();
+            let mut last = f64::NEG_INFINITY;
+            let mut on_step = |s: &Sys| {
+                for i in 0..3 {
+                    let (x, y) = (s.pos[2 * i], s.pos[2 * i + 1]);
+                    b = [b[0].min(x), b[1].max(x), b[2].min(y), b[3].max(y)];
+                }
+                if s.t <= o.period {
+                    sample(&mut pre, &mut last, o.period, s, -o.period);
+                }
+            };
+            let sys = Sys::new(o.pos, o.vel);
+            on_step(&sys);
+            let mut r = Runner::new(sys, H_MAIN);
+            r.advance(o.run_secs() * o.rate + FADE * o.rate, &mut on_step);
+            let pad = 0.005 * (b[1] - b[0]).max(b[3] - b[2]);
+            Table {
+                bbox: [b[0] - pad, b[1] + pad, b[2] - pad, b[3] + pad],
+                pre,
+            }
+        })
+    })
+}
+
+/// The bounding box of orbit `k`.
+fn bbox(k: usize) -> &'static [f64; 4] {
+    &tables()[k].bbox
+}
+
+/// Push a trail sample of all three bodies of `s` (time shifted by `shift`) when one of
+/// them has moved `TRAIL_GAP` since the last sample or `1/TRAIL_MIN` of a period passed.
+fn sample<T: TrailSink>(trails: &mut [T; 3], last: &mut f64, period: f64, s: &Sys, shift: f64) {
+    let moved = trails.iter().enumerate().any(|(i, tr)| {
+        tr.newest().is_none_or(|p| {
+            (s.pos[2 * i] - f64::from(p.x)).hypot(s.pos[2 * i + 1] - f64::from(p.y)) >= TRAIL_GAP
+        })
+    });
+    if moved || s.t - *last >= period / TRAIL_MIN {
+        *last = s.t;
+        for (i, tr) in trails.iter_mut().enumerate() {
+            tr.put(TrailPt {
+                x: s.pos[2 * i] as f32,
+                y: s.pos[2 * i + 1] as f32,
+                t: (s.t + shift) as f32,
+                v: s.speed(i) as f32,
+            });
+        }
+    }
+}
+
+/// Where trail samples go: the pre-roll tables (`Vec`) or the scene's rings (`Trail`).
+trait TrailSink {
+    fn newest(&self) -> Option<&TrailPt>;
+    fn put(&mut self, p: TrailPt);
+}
+
+impl TrailSink for Vec<TrailPt> {
+    fn newest(&self) -> Option<&TrailPt> {
+        self.last()
+    }
+    fn put(&mut self, p: TrailPt) {
+        self.push(p);
+    }
+}
+
+impl TrailSink for Trail<TrailPt> {
+    fn newest(&self) -> Option<&TrailPt> {
+        self.iter().next_back()
+    }
+    fn put(&mut self, p: TrailPt) {
+        self.push(p);
     }
 }
 
@@ -239,14 +420,12 @@ impl Bodies {
 pub(crate) struct View {
     /// Rows per model unit (x is stretched by `ASPECT`).
     scale: f64,
-    /// Canvas centre, in continuous cell coordinates.
     centre: (f64, f64),
-    /// Model point drawn at the canvas centre: the bounding box centre.
     origin: (f64, f64),
 }
 
 impl View {
-    /// Continuous cell coordinates of model point `(x, y)` (cell `i` spans `[i, i+1)`).
+    /// Continuous cell coordinates of model point `(x, y)`.
     pub fn cell(&self, x: f64, y: f64) -> (f64, f64) {
         (
             self.centre.0 + (x - self.origin.0) * self.scale * geom::ASPECT,
@@ -254,18 +433,15 @@ impl View {
         )
     }
 
-    /// Braille dot coordinates of `(x, y)` (CORE-R64), so the dot a point rounds to
-    /// lies in its cell.
     fn dot(&self, x: f64, y: f64) -> (f64, f64) {
         let (cx, cy) = self.cell(x, y);
         Dots::from_cells(cx, cy)
     }
 }
 
-/// The largest view fitting `orbit`'s bounding box in 90 % of the canvas inside a
-/// one-cell margin, centred on the box (SPEC-002 Resize).
-pub(crate) fn view_for(size: Size, orbit: &Orbit) -> View {
-    let [x0, x1, y0, y1] = orbit.bbox;
+/// The largest view fitting `bbox` in 90 % of the canvas inside a one-cell margin.
+pub(crate) fn view_for(size: Size, bbox: &[f64; 4]) -> View {
+    let [x0, x1, y0, y1] = *bbox;
     let (w, h) = (f64::from(size.width()), f64::from(size.height()));
     let fit_x = (w / 2.0 - 1.0) / (geom::ASPECT * (x1 - x0) / 2.0);
     let fit_y = (h / 2.0 - 1.0) / ((y1 - y0) / 2.0);
@@ -276,59 +452,9 @@ pub(crate) fn view_for(size: Size, orbit: &Orbit) -> View {
     }
 }
 
-/// The orbit's label for a `w`-column canvas: the full form if it fits in `w − 2`
-/// columns, else the short form, else none (SPEC-002 Label).
-pub(crate) fn label_for(w: u16, orbit: &Orbit) -> Option<&'static str> {
-    let room = usize::from(w.saturating_sub(2));
-    [orbit.label, orbit.short]
-        .into_iter()
-        .find(|s| s.len() <= room)
-}
-
-/// The fraction of its period `orbit`'s trail spans in a view of `scale` rows per unit.
-/// Full-period trails always span 1. A partial one (the moth) keeps its span from
-/// `MOTH_FULL_SCALE` up and shortens in proportion below, to no less than
-/// `MOTH_MIN_TRAIL`, so a small view shows one clean stroke rather than a knot (TB-A7).
-pub(crate) fn trail_span(orbit: &Orbit, scale: f64) -> f64 {
-    if orbit.trail >= 1.0 {
-        return 1.0;
-    }
-    (orbit.trail * scale / MOTH_FULL_SCALE).clamp(MOTH_MIN_TRAIL.min(orbit.trail), orbit.trail)
-}
-
-/// Trail brightness for a sample of age fraction `f ∈ [0, 1)` (0 = newest) on a trail
-/// spanning `span` of the period. A full-period trail keeps a floor of 40, so the whole
-/// orbit stays sketched; a shorter one tapers to 0 at `f = span` and its old loops
-/// dissolve (SPEC-002 Inks).
-fn trail_level(f: f64, span: f64) -> f64 {
-    if span >= 1.0 {
-        return 40.0 + 160.0 * (1.0 - f).max(0.0).powf(1.5);
-    }
-    let rest = (1.0 - f / span).max(0.0);
-    160.0 * rest.powf(1.5) + 40.0 * rest
-}
-
-/// Ink multiplier of everything an orbit draws: faded in over the first `FADE_IN`
-/// seconds of a run and out with the orbit (visual only; the physics is untouched).
-fn orbit_fade(phase: &Phase) -> f64 {
-    ease::smoothstep((phase.tau / FADE_IN).min(1.0)) * phase.fade
-}
-
-/// Head brightness, `255·orbit_fade`.
-fn head_level(phase: &Phase) -> f64 {
-    255.0 * orbit_fade(phase)
-}
-
-/// Lagrange's triangle level, `80·orbit_fade`: it rises with the heads, so it never
-/// shows before the bodies at its corners (TB-A7).
-fn triangle_level(phase: &Phase) -> f64 {
-    TRIANGLE_LEVEL * orbit_fade(phase)
-}
-
-/// Where the looping gallery stands at sim time `t` (SPEC-002 Motion).
+/// Where the looping gallery stands at sim time `t`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Phase {
-    /// Orbit index.
     pub seg: usize,
     /// Seconds since this orbit's run started (the physics keeps going in the fade).
     pub tau: f64,
@@ -336,59 +462,80 @@ pub(crate) struct Phase {
     pub fade: f64,
 }
 
-/// Five `run` phases of `nᵢTᵢ/kᵢ` seconds, each followed by a `FADE` (SPEC-002).
-fn timeline(orbits: &[Orbit; 5]) -> Timeline {
-    let phases: Vec<(&'static str, f64)> = orbits
-        .iter()
-        .flat_map(|o| [("run", o.run_secs()), ("fade", FADE)])
-        .collect();
-    Timeline::new(&phases)
+/// Ink multiplier of everything an orbit draws: faded in over `FADE_IN` s and out with
+/// the orbit (visual only).
+fn orbit_fade(phase: &Phase) -> f64 {
+    ease::smoothstep((phase.tau / FADE_IN).min(1.0)) * phase.fade
+}
+
+/// One trail sample: position, model time and speed (`f32`: the trail is only drawn).
+#[derive(Debug, Clone, Copy, Default)]
+struct TrailPt {
+    x: f32,
+    y: f32,
+    t: f32,
+    v: f32,
 }
 
 pub(crate) struct ThreeBody {
-    /// The state changed since the last raster (GEN-R20: rasterised in `prepare`).
     dirty: bool,
-    orbits: [Orbit; 5],
+    orbits: [Orbit; ORBITS],
     timeline: Timeline,
     /// Own accumulated simulated time (GEN-R7).
     t: f64,
     phase: Phase,
-    /// Substeps taken since the current run started.
-    n_done: u64,
-    bodies: Bodies,
-    trails: [Trail<(f64, f64)>; 3],
+    /// The model time shown now (`τ·k`).
+    target: f64,
+    main: Runner,
+    ghosts: [Runner; GHOSTS],
+    trails: [Trail<TrailPt>; 3],
+    /// Time of the last trail sample.
+    last_sample: f64,
     size: Size,
     view: View,
-    /// Trails (and Lagrange's triangle), rasterised in `update`/`resize`.
     dots: Dots,
 }
 
 impl ThreeBody {
     fn new() -> Self {
         let orbits = orbits();
+        let phases: Vec<(&'static str, f64)> = orbits
+            .iter()
+            .flat_map(|o| [("run", o.run_secs()), ("fade", FADE)])
+            .collect();
         let size = Size::new(1, 1);
-        Self {
+        let main = Runner::new(Sys::new(orbits[0].pos, orbits[0].vel), H_MAIN);
+        let ghosts = ghost_ics(&orbits[0], 0).map(|s| Runner::new(s, H_GHOST));
+        let mut g = Self {
             dirty: false,
-            timeline: timeline(&orbits),
+            timeline: Timeline::new(&phases),
             t: 0.0,
             phase: Phase {
                 seg: 0,
                 tau: 0.0,
                 fade: 1.0,
             },
-            n_done: 0,
-            bodies: Bodies::at_ics(&orbits[0]),
-            trails: std::array::from_fn(|_| Trail::new(SAMPLES)),
-            view: view_for(size, &orbits[0]),
+            target: 0.0,
+            main,
+            ghosts,
+            trails: std::array::from_fn(|_| {
+                let longest = tables().iter().map(|t| t.pre[0].len()).max().unwrap_or(0);
+                Trail::new(longest + TRAIL_SLACK)
+            }),
+            last_sample: f64::NEG_INFINITY,
+            view: view_for(size, bbox(0)),
             size,
             dots: Dots::default(),
             orbits,
-        }
+        };
+        // The first run starts like every other: from its ICs with its pre-rolled trail.
+        g.start_run(0);
+        g
     }
 
     pub fn phase_at(&self, t: f64) -> Phase {
         let beat = self.timeline.at(t);
-        let seg = (beat.index / 2).min(self.orbits.len() - 1);
+        let seg = (beat.index / 2).min(ORBITS - 1);
         if beat.index % 2 == 0 {
             Phase {
                 seg,
@@ -404,96 +551,91 @@ impl ThreeBody {
         }
     }
 
-    /// Restart orbit `seg` bitwise from its ICs with empty trails (TB-A5), and frame it.
+    /// Restart orbit `seg` from its ICs (and its fixed shadow cloud) with empty trails.
     fn start_run(&mut self, seg: usize) {
-        self.bodies = Bodies::at_ics(&self.orbits[seg]);
-        self.n_done = 0;
-        for trail in &mut self.trails {
+        let o = &self.orbits[seg];
+        self.main = Runner::new(Sys::new(o.pos, o.vel), H_MAIN);
+        self.ghosts = ghost_ics(o, seg).map(|s| Runner::new(s, H_GHOST));
+        // The pre-rolled period ending at the ICs: the knot is whole from the first frame.
+        let pre = &tables()[seg].pre;
+        for (trail, pre) in self.trails.iter_mut().zip(pre) {
             trail.clear();
-        }
-        self.view = view_for(self.size, &self.orbits[seg]);
-    }
-
-    /// Step the current orbit until `target` substeps have been taken since its run
-    /// started, pushing one trail sample every `q` substeps.
-    fn advance_to(&mut self, target: u64) {
-        let orbit = self.orbits[self.phase.seg];
-        let (h, q) = (orbit.h(), orbit.q());
-        while self.n_done < target {
-            self.bodies.step(h);
-            self.n_done += 1;
-            if self.n_done % q == 0 {
-                for (i, trail) in self.trails.iter_mut().enumerate() {
-                    trail.push(self.bodies.body(i));
-                }
+            for &p in pre {
+                trail.push(p);
             }
         }
+        self.last_sample = pre[0].last().map_or(f64::NEG_INFINITY, |p| f64::from(p.t));
+        self.target = 0.0;
+        self.view = view_for(self.size, bbox(seg));
     }
 
-    /// Draw the trails (and Lagrange's triangle) onto `dots` (the M10 raster convention).
+    /// Advance every system to model time `target`, sampling the main bodies' trails.
+    fn advance_to(&mut self, target: f64) {
+        self.target = target;
+        let period = self.orbits[self.phase.seg].period;
+        let (trails, last) = (&mut self.trails, &mut self.last_sample);
+        self.main
+            .advance(target, |s| sample(trails, last, period, s, 0.0));
+        for g in &mut self.ghosts {
+            g.advance(target, |_| {});
+        }
+    }
+
+    /// Trails, shadow clouds and bodies onto the dot lattice.
     fn rasterise(&mut self) {
         self.dots.clear();
-        self.trails_onto_dots();
-        if self.phase.seg == LAGRANGE {
-            self.triangle();
-        }
-    }
-
-    /// Each body's trail as dot-lattice segments, dimming with age.
-    fn trails_onto_dots(&mut self) {
         let (view, fade) = (self.view, orbit_fade(&self.phase));
-        let span = trail_span(&self.orbits[self.phase.seg], view.scale);
-        for (i, trail) in self.trails.iter().enumerate() {
-            let len = trail.len();
-            let head = self.bodies.body(i);
-            // Consecutive samples, then newest sample → the head itself.
-            let pairs = trail.iter().zip(trail.iter().skip(1).chain([&head]));
-            for (k, (&a, &b)) in pairs.enumerate() {
-                let level = trail_level((len - 1 - k) as f64 / SAMPLES as f64, span) * fade;
-                if level < MIN_VISIBLE_LEVEL {
-                    continue;
-                }
-                let (p, q) = (view.dot(a.0, a.1), view.dot(b.0, b.1));
-                self.dots
-                    .line(p.0, p.1, q.0, q.1, Ink::new(ROLES[i], ink::level(level)));
-            }
-        }
-    }
-
-    /// Lagrange's faint equilateral triangle joining the bodies: one dot per cell, and
-    /// only in cells no trail has lit, so it reads as a clean dotted line (a `.` per
-    /// cell in ASCII) and never thickens a trail.
-    fn triangle(&mut self) {
-        let level = triangle_level(&self.phase);
-        if level < MIN_VISIBLE_LEVEL {
+        if fade * GHOST_LEVEL < MIN_VISIBLE_LEVEL {
             return;
         }
-        let ink = Ink::new(Role::Dim, ink::level(level));
-        for (i, j) in [(0, 1), (1, 2), (2, 0)] {
-            let (a, b) = (self.bodies.body(i), self.bodies.body(j));
-            let (p, q) = (self.view.dot(a.0, a.1), self.view.dot(b.0, b.1));
-            // Positions stay inside the orbit's bbox (TB-A6) and the scale is bounded by
-            // the canvas, so the rounded ends are small; off-lattice dots are ignored by
-            // `Dots::set` (and read as lit here, so they are skipped).
-            let side = geom::line(
-                p.0.round() as i32,
-                p.1.round() as i32,
-                q.0.round() as i32,
-                q.1.round() as i32,
-            );
-            for (x, y) in side {
-                // Once this side lights a dot in a cell, the cell counts as taken.
-                if !self.cell_lit(x, y) {
-                    self.dots.set(x, y, ink);
+        let orbit = self.orbits[self.phase.seg];
+        let v_ref = (-2.0 * energy(&orbit.pos, &orbit.vel) / 3.0).sqrt();
+        let now = self.target;
+        for (i, trail) in self.trails.iter().enumerate() {
+            let (hx, hy) = self.main.cur.body_at(i, now);
+            let mut prev = (view.dot(hx, hy), self.main.cur.speed(i));
+            for p in trail.iter().rev() {
+                let f = (now - f64::from(p.t)) / orbit.period;
+                if f >= 1.0 {
+                    break;
                 }
+                let level = trail_level(f) * fade;
+                let d = view.dot(f64::from(p.x), f64::from(p.y));
+                let v = f64::from(p.v);
+                if level >= MIN_VISIBLE_LEVEL {
+                    let role = speed_role(0.5 * (v + prev.1), v_ref);
+                    self.dots.line(
+                        prev.0.0,
+                        prev.0.1,
+                        d.0,
+                        d.1,
+                        Ink::new(role, ink::level(level)),
+                    );
+                }
+                prev = (d, v);
             }
         }
-    }
-
-    /// Whether any dot of the cell holding dot `(x, y)` is lit (off-lattice: `true`).
-    fn cell_lit(&self, x: i32, y: i32) -> bool {
-        let (cx, cy) = (x.div_euclid(Dots::CELL_W), y.div_euclid(Dots::CELL_H));
-        self.dots.cell_mask(cx, cy).is_none_or(|m| m != 0)
+        let near = Ink::new(Role::Cold, ink::level(GHOST_LEVEL * fade));
+        let far = Ink::new(Role::Cold, ink::level(GHOST_FAR_LEVEL * fade));
+        let bodies = [0, 1, 2].map(|i| self.main.cur.body_at(i, now));
+        for g in &self.ghosts {
+            for (i, b) in bodies.iter().enumerate() {
+                let (x, y) = g.cur.body_at(i, now);
+                let d = (x - b.0).hypot(y - b.1);
+                if d > GHOST_CAP {
+                    continue;
+                }
+                let (px, py) = view.dot(x, y);
+                self.dots
+                    .plot(px, py, if d < GHOST_NEAR { near } else { far });
+            }
+        }
+        let body = Ink::new(Role::Star, ink::level(BODY_LEVEL * fade));
+        for i in 0..3 {
+            let (x, y) = self.main.cur.body_at(i, now);
+            let (px, py) = view.dot(x, y);
+            self.dots.disc(px, py, BODY_R, body);
+        }
     }
 }
 
@@ -503,9 +645,9 @@ impl Generator for ThreeBody {
     }
 
     fn resize(&mut self, size: Size, _ctx: &mut Ctx) {
-        // Physics and trails live in model units: only the view changes (SPEC-002).
+        // Physics and trails live in model units: only the view changes.
         self.size = size;
-        self.view = view_for(size, &self.orbits[self.phase.seg]);
+        self.view = view_for(size, bbox(self.phase.seg));
         self.dots.resize(size);
         self.rasterise();
     }
@@ -516,48 +658,28 @@ impl Generator for ThreeBody {
         }
         self.t += dt;
         let phase = self.phase_at(self.t);
-        let target = self.orbits[phase.seg].substeps_at(phase.tau);
-        // A new orbit, or the same one again after a full loop.
-        let restart = phase.seg != self.phase.seg || target < self.n_done;
+        let restart = phase.seg != self.phase.seg || phase.tau < self.phase.tau;
         self.phase = phase;
         if restart {
             self.start_run(phase.seg);
         }
-        self.advance_to(target);
+        self.advance_to(phase.tau * self.orbits[phase.seg].rate);
         self.dirty = true;
     }
 
     /// GEN-R20: rasterise once per drawn frame, only after the state changed.
     fn prepare(&mut self) {
-        if self.dirty {
-            self.dirty = false;
+        if std::mem::take(&mut self.dirty) {
             self.rasterise();
         }
     }
 
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
-        let level = head_level(&self.phase);
-        if level >= MIN_VISIBLE_LEVEL {
-            for (i, role) in ROLES.iter().enumerate() {
-                let (x, y) = self.bodies.body(i);
-                let (cx, cy) = self.view.cell(x, y);
-                canvas.put(
-                    cx.floor() as i32,
-                    cy.floor() as i32,
-                    HEAD,
-                    Ink::new(*role, ink::level(level)),
-                );
-            }
-        }
-        let orbit = &self.orbits[self.phase.seg];
-        if let Some(label) = label_for(canvas.size().width(), orbit) {
-            canvas.text(1, 0, label, Ink::new(Role::Text, 150));
-        }
     }
 
     fn caption(&self) -> Option<&'static str> {
-        Some(self.orbits[self.phase.seg].short)
+        Some(self.orbits[self.phase.seg].caption)
     }
 }
 
@@ -565,470 +687,279 @@ impl Generator for ThreeBody {
 mod tests {
     use super::*;
 
-    /// The conserved quantities the acceptance tests track.
-    impl Bodies {
-        /// Total energy `Σ v²/2 − Σ 1/rᵢⱼ`.
-        fn energy(&self) -> f64 {
-            let kinetic: f64 = self.vel.iter().map(|v| 0.5 * v * v).sum();
-            let potential: f64 = [(0, 1), (0, 2), (1, 2)]
-                .iter()
-                .map(|&(i, j)| -1.0 / self.dist(i, j))
-                .sum();
-            kinetic + potential
+    /// The system integrated to exactly model time `t`: log-H steps to the last one
+    /// before `t`, then RK4 over the remainder (less than one step).
+    fn at_time(sys: Sys, h: f64, t: f64) -> Sys {
+        let mut r = Runner::new(sys, h);
+        r.advance(t, |_| {});
+        let mut y = [0.0; 12];
+        y[..6].copy_from_slice(&r.cur.pos);
+        y[6..].copy_from_slice(&r.cur.vel);
+        let rem = t - r.cur.t;
+        let n = 40;
+        for _ in 0..n {
+            sciart_core::ode::rk4_step(&mut y, 0.0, rem / f64::from(n), |_, y| {
+                let mut p = [0.0; 6];
+                p.copy_from_slice(&y[..6]);
+                let mut a = [0.0; 6];
+                accel3(&p, &mut a);
+                let mut d = [0.0; 12];
+                d[..6].copy_from_slice(&y[6..]);
+                d[6..].copy_from_slice(&a);
+                d
+            });
         }
-
-        /// Total momentum `Σ vᵢ` (unit masses).
-        fn momentum(&self) -> (f64, f64) {
-            (0..3).fold((0.0, 0.0), |(px, py), i| {
-                (px + self.vel[2 * i], py + self.vel[2 * i + 1])
-            })
-        }
-
-        /// Total angular momentum `Σ xᵢ v_yᵢ − yᵢ v_xᵢ` about the origin.
-        fn ang_mom(&self) -> f64 {
-            (0..3)
-                .map(|i| {
-                    self.pos[2 * i] * self.vel[2 * i + 1] - self.pos[2 * i + 1] * self.vel[2 * i]
-                })
-                .sum()
-        }
-
-        /// Distance between bodies `i` and `j`.
-        fn dist(&self, i: usize, j: usize) -> f64 {
-            let (a, b) = (self.body(i), self.body(j));
-            (b.0 - a.0).hypot(b.1 - a.1)
-        }
+        let mut out = r.cur;
+        out.pos.copy_from_slice(&y[..6]);
+        out.vel.copy_from_slice(&y[6..]);
+        out.t = t;
+        out
     }
 
-    /// Substeps covering an orbit's run plus fade.
-    fn run_and_fade_steps(o: &Orbit) -> u64 {
-        o.substeps_at(o.run_secs() + FADE)
-    }
-
-    /// Max position distance from the ICs.
-    fn ic_error(b: &Bodies, o: &Orbit) -> f64 {
-        (0..3)
-            .map(|i| (b.pos[2 * i] - o.pos[2 * i]).hypot(b.pos[2 * i + 1] - o.pos[2 * i + 1]))
+    fn max_diff(a: &[f64; 6], b: &[f64; 6]) -> f64 {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
             .fold(0.0, f64::max)
     }
 
     #[test]
-    fn tb_a1_figure_eight_closes_after_one_period_and_conserves_energy() {
-        let o = orbits()[0];
-        assert_eq!(o.q(), 54);
-        let mut b = Bodies::at_ics(&o);
-        let e0 = b.energy();
-        assert!((e0 + 1.287_142).abs() < 1e-6, "E0 = {e0}");
-        assert!(b.ang_mom().abs() < 1e-12);
-        let per_period = SAMPLES as u64 * o.q();
-        assert_eq!(per_period, 25_920);
-        let mut max_de = 0.0f64;
-        for n in 1..=3 * per_period {
-            b.step(o.h());
-            max_de = max_de.max(((b.energy() - e0) / e0).abs());
-            if n == per_period {
-                assert!(ic_error(&b, &o) < 1e-5, "return {}", ic_error(&b, &o));
+    fn tb_a1_a3_a8_orbits_return_after_their_period() {
+        for (k, o) in orbits().iter().enumerate() {
+            if !matches!(k, 0 | 1 | 2 | 3 | 5) {
+                continue;
             }
+            let end = at_time(Sys::new(o.pos, o.vel), H_MAIN, o.period);
+            let err = max_diff(&end.pos, &o.pos);
+            assert!(err < 1e-4, "{}: return error {err:.2e}", o.caption);
+            // The published period, rounded to 4–5 digits, is within 2e-3 of a return
+            // (the dragonfly's within 1.6e-3: its T is 1.3e-3 short).
+            let pub_err = max_diff(
+                &at_time(Sys::new(o.pos, o.vel), H_MAIN, o.published).pos,
+                &o.pos,
+            );
+            assert!(
+                pub_err < 2e-3,
+                "{}: published-T return {pub_err:.2e}",
+                o.caption
+            );
+            assert!((o.period - o.published).abs() < 2e-3);
         }
-        assert!(max_de < 1e-6, "max dE/E = {max_de}");
+        // The figure-8 and Lagrange close too.
+        for k in [4, 6] {
+            let o = orbits()[k];
+            let end = at_time(Sys::new(o.pos, o.vel), H_MAIN, o.period);
+            assert!(max_diff(&end.pos, &o.pos) < 1e-5, "{}", o.caption);
+        }
     }
 
     #[test]
-    fn tb_a2_every_orbit_conserves_momentum_angular_momentum_and_energy() {
-        let table = [
-            (-1.287_142, 0.0, 1e-5),
-            (-1.125_833, 1.907_172, 1e-5),
-            (-0.854_131, 1.098_206, 1e-5),
-            (-2.054_282, 1.768_757, 1e-5),
-            (-1.382_282, 0.0, 1e-3),
-        ];
-        for (o, (e_ref, l_ref, de_tol)) in orbits().iter().zip(table) {
-            let mut b = Bodies::at_ics(o);
-            let (px, py) = b.momentum();
-            assert!(px.hypot(py) < 1e-9, "{}: P0 = ({px}, {py})", o.short);
-            let (e0, l0) = (b.energy(), b.ang_mom());
-            assert!((e0 - e_ref).abs() < 1e-6, "{}: E0 = {e0}", o.short);
-            assert!((l0 - l_ref).abs() < 1e-6, "{}: L0 = {l0}", o.short);
-            let (mut max_dp, mut max_dl, mut max_de) = (0.0f64, 0.0f64, 0.0f64);
-            for _ in 0..run_and_fade_steps(o) {
-                b.step(o.h());
-                let (qx, qy) = b.momentum();
-                max_dp = max_dp.max((qx - px).hypot(qy - py));
-                max_dl = max_dl.max((b.ang_mom() - l0).abs());
-                max_de = max_de.max(((b.energy() - e0) / e0).abs());
-            }
-            assert!(max_dp < 1e-12, "{}: dP = {max_dp}", o.short);
-            assert!(max_dl < 1e-12, "{}: dL = {max_dl}", o.short);
-            assert!(max_de < de_tol, "{}: dE/E = {max_de}", o.short);
+    fn tb_a2_a9_energy_momentum_and_angular_momentum_are_conserved() {
+        for o in orbits() {
+            let sys = Sys::new(o.pos, o.vel);
+            let e0 = energy(&o.pos, &o.vel);
+            let mut worst: f64 = 0.0;
+            let (mut p_err, mut l_err): (f64, f64) = (0.0, 0.0);
+            Runner::new(sys, H_MAIN).advance(o.period, |s| {
+                worst = worst.max(((energy(&s.pos, &s.vel) - e0) / e0).abs());
+                let px: f64 = (0..3).map(|i| s.vel[2 * i]).sum();
+                let py: f64 = (0..3).map(|i| s.vel[2 * i + 1]).sum();
+                let l: f64 = (0..3)
+                    .map(|i| s.pos[2 * i] * s.vel[2 * i + 1] - s.pos[2 * i + 1] * s.vel[2 * i])
+                    .sum();
+                let l0: f64 = (0..3)
+                    .map(|i| o.pos[2 * i] * o.vel[2 * i + 1] - o.pos[2 * i + 1] * o.vel[2 * i])
+                    .sum();
+                p_err = p_err.max(px.hypot(py));
+                l_err = l_err.max((l - l0).abs());
+            });
+            assert!(worst < 1e-6, "{}: max |ΔE/E| {worst:.2e}", o.caption);
+            assert!(
+                p_err < 1e-12 && l_err < 1e-11,
+                "{}: P {p_err:.1e} L {l_err:.1e}",
+                o.caption
+            );
         }
     }
 
-    /// Max return error over the orbit's shown periods on its own lattice.
-    fn return_error(o: &Orbit) -> f64 {
-        let mut b = Bodies::at_ics(o);
-        let per_period = SAMPLES as u64 * o.q();
-        let mut worst = 0.0f64;
-        for n in 1..=u64::from(o.periods) * per_period {
-            b.step(o.h());
-            if n % per_period == 0 {
-                worst = worst.max(ic_error(&b, o));
-            }
-        }
-        worst
+    /// The shadow cloud's spread (largest distance of a copy's body from the main body)
+    /// after `periods` periods of orbit `k`.
+    fn spread(k: usize, periods: f64) -> f64 {
+        let o = orbits()[k];
+        let t = periods * o.period;
+        let main = at_time(Sys::new(o.pos, o.vel), H_MAIN, t);
+        ghost_ics(&o, k)
+            .iter()
+            .map(|g| max_diff(&at_time(*g, H_MAIN, t).pos, &main.pos))
+            .fold(0.0, f64::max)
     }
 
     #[test]
-    fn tb_a3_orbits_return_each_period_and_never_collide() {
-        let qs: Vec<u64> = orbits().iter().map(Orbit::q).collect();
-        assert_eq!(qs, [54, 48, 54, 47, 128]);
-        // Per-orbit return tolerances, ≈ 1.2–3× the measured error.
-        let tol = [2e-6, 1e-6, 8e-5, 2e-5, 3e-4];
-        for (o, tol) in orbits().iter().zip(tol) {
-            let err = return_error(o);
-            assert!(err < tol, "{}: return error {err}", o.short);
-            let mut b = Bodies::at_ics(o);
-            let mut dmin = f64::INFINITY;
-            for _ in 1..=run_and_fade_steps(o) {
-                b.step(o.h());
-                dmin = dmin.min(b.dist(0, 1).min(b.dist(0, 2)).min(b.dist(1, 2)));
-            }
-            assert!(dmin >= 0.07, "{}: closest approach {dmin}", o.short);
+    fn tb_a10_shadow_clouds_smear_on_unstable_orbits_only() {
+        // The copies start within 1e-5, on the orbit's energy shell, with its COM.
+        let o = orbits()[2];
+        let e0 = energy(&o.pos, &o.vel);
+        for g in ghost_ics(&o, 2) {
+            assert!(max_diff(&g.pos, &o.pos) <= 2.0 * GHOST_EPS);
+            assert!(((energy(&g.pos, &g.vel) - e0) / e0).abs() < 1e-12);
         }
-        // The refined periods of A1, R4 and moth minimise the return error on their
-        // lattice: nudging T either way by 2e-5 does not close the orbit better.
-        for seg in [2, 3, 4] {
-            let o = orbits()[seg];
-            let err = return_error(&o);
-            for dt in [-2e-5, 2e-5] {
-                let nudged = Orbit {
-                    period: o.period + dt,
-                    ..o
-                };
-                let e = return_error(&nudged);
-                assert!(e > err, "{}: T{dt:+} gives {e} ≤ {err}", o.short);
+        // Goggles (the most unstable in the cycle) against the KAM-stable figure-8.
+        let (fig8, goggles) = (spread(4, 1.0), spread(2, 1.0));
+        assert!(
+            goggles > fig8,
+            "1 T: goggles {goggles:.2e} vs figure-8 {fig8:.2e}"
+        );
+        let (fig8, goggles) = (spread(4, 2.0), spread(2, 2.0));
+        assert!(
+            goggles > 10.0 * fig8,
+            "2 T: goggles {goggles:.2e} vs figure-8 {fig8:.2e}"
+        );
+        assert!(fig8 < 0.01, "the figure-8 cloud stays a dot ({fig8:.2e})");
+    }
+
+    #[test]
+    fn tb_a11_trails_are_inked_by_speed() {
+        let rank = |r: Role| match r {
+            Role::Accent => 0,
+            Role::Hot => 1,
+            Role::Sun => 2,
+            _ => panic!("{r:?}"),
+        };
+        let mut last = 0;
+        for k in 0..400 {
+            let v = 0.01 * f64::from(k);
+            let r = rank(speed_role(v, 1.0));
+            assert!(r >= last, "v {v}: slower segments never get a hotter role");
+            last = r;
+        }
+        assert_eq!(speed_role(0.1, 1.0), Role::Accent);
+        assert_eq!(speed_role(3.0, 1.0), Role::Sun);
+        // In a frame, trail cells use only the three speed roles, and there is a fast part.
+        let size = Size::new(200, 50);
+        let mut stage = Stage::new(build(), 42, size, GlyphMode::Unicode);
+        for _ in 0..(8.0 / SIM_DT) as usize {
+            stage.step(SIM_DT);
+        }
+        let frame = stage.render();
+        let roles: Vec<Role> = frame.cells()[..200 * 49]
+            .iter()
+            .filter(|c| c.ch != ' ')
+            .map(|c| c.ink.role)
+            .collect();
+        assert!(roles.iter().all(|r| matches!(
+            r,
+            Role::Accent | Role::Hot | Role::Sun | Role::Cold | Role::Star
+        )));
+        assert!(roles.contains(&Role::Sun) && roles.contains(&Role::Hot));
+    }
+
+    #[test]
+    fn tb_a12_the_cycle_holds_seven_distinct_orbits() {
+        let all = orbits();
+        assert!(all.len() >= 6);
+        for (i, a) in all.iter().enumerate() {
+            for b in &all[i + 1..] {
+                assert_ne!(a.caption, b.caption);
+                assert!(max_diff(&a.vel, &b.vel) > 1e-3);
+            }
+            assert!(META.captions.contains(&a.caption));
+        }
+        // The scene visits each in turn, and its caption names it.
+        let mut g = ThreeBody::new();
+        let mut ctx = Ctx::new(1, Size::new(80, 24));
+        g.resize(Size::new(80, 24), &mut ctx);
+        let mut seen = Vec::new();
+        for _ in 0..(130.0 / 0.25) as usize {
+            g.update(0.25, &mut ctx);
+            let c = g.caption().unwrap();
+            if !seen.contains(&c) {
+                seen.push(c);
             }
         }
-        // The published (rounded) periods fail those tolerances: measured 1.1e-4 (A1),
-        // 2.5e-4 (R4) and 3.6e-4 (moth, a small margin: its lattice error is mostly
-        // leapfrog truncation at the 0.079 close approach, not the period).
-        for (seg, published) in [(2, 6.283_213), (3, 5.396), (4, 14.893_9)] {
-            let o = Orbit {
-                period: published,
-                ..orbits()[seg]
+        assert_eq!(seen, CAPTIONS.to_vec());
+    }
+
+    #[test]
+    fn tb_a4_lagrange_stays_equilateral_while_shown() {
+        let o = orbits()[6];
+        let mut worst: f64 = 0.0;
+        Runner::new(Sys::new(o.pos, o.vel), H_MAIN).advance(o.periods * o.period, |s| {
+            let d = |i: usize, j: usize| {
+                (s.pos[2 * i] - s.pos[2 * j]).hypot(s.pos[2 * i + 1] - s.pos[2 * j + 1])
             };
-            let e = return_error(&o);
-            assert!(e > tol[seg], "{} at T = {published}: {e}", o.short);
-        }
+            let sides = [d(0, 1), d(1, 2), d(2, 0)];
+            let (lo, hi) = (
+                sides.iter().copied().fold(f64::MAX, f64::min),
+                sides.iter().copied().fold(0.0, f64::max),
+            );
+            worst = worst.max(hi / lo - 1.0);
+        });
+        assert!(worst < 1e-5, "side deviation {worst:.2e}");
         let (_, _, t) = lagrange_ics(0.3);
-        let a = 1.0 / 1.3f64;
+        let a: f64 = 1.0 / 1.3;
         assert!((t - std::f64::consts::TAU * (a.powi(3) * 3f64.sqrt()).sqrt()).abs() < 1e-12);
     }
 
-    /// `max side / min side − 1` of the triangle.
-    fn side_deviation(b: &Bodies) -> f64 {
-        let s = [b.dist(0, 1), b.dist(1, 2), b.dist(2, 0)];
-        s.iter().copied().fold(0.0, f64::max) / s.iter().copied().fold(f64::INFINITY, f64::min)
-            - 1.0
-    }
-
     #[test]
-    fn tb_a4_lagrange_stays_equilateral_while_shown_then_diverges() {
-        let o = orbits()[LAGRANGE];
-        let mut b = Bodies::at_ics(&o);
-        let per_period = SAMPLES as u64 * o.q();
-        let mut dev = [0.0f64; 7]; // max side deviation within each period (1-based)
-        for n in 0..6 * per_period {
-            b.step(o.h());
-            let p = (n / per_period + 1) as usize;
-            dev[p] = dev[p].max(side_deviation(&b));
-            if p <= 2 {
-                let r = b.body(0).0.hypot(b.body(0).1);
-                assert!((0.538_462 - 1e-6..=1.0 + 1e-6).contains(&r), "r = {r}");
+    fn tb_a5_timeline_loops_and_frames_do_not_depend_on_the_frame_rate() {
+        let size = Size::new(80, 24);
+        let run = |dt: f64, secs: usize| {
+            let mut g = ThreeBody::new();
+            let mut ctx = Ctx::new(1, size);
+            g.resize(size, &mut ctx);
+            let mut out = Vec::new();
+            let per = (1.0 / dt).round() as usize;
+            for _ in 0..secs {
+                for _ in 0..per {
+                    g.update(dt, &mut ctx);
+                }
+                out.push([0, 1, 2].map(|i| g.main.cur.body_at(i, g.target)));
+            }
+            out
+        };
+        let (a, b) = (run(SIM_DT, 40), run(0.25, 40));
+        for (s, (pa, pb)) in a.iter().zip(&b).enumerate() {
+            for i in 0..3 {
+                let d = (pa[i].0 - pb[i].0).hypot(pa[i].1 - pb[i].1);
+                assert!(d < 1e-6, "second {s}, body {i}: {d:.2e}");
             }
         }
-        assert!(dev[1].max(dev[2]) < 1e-8, "shown periods: {dev:?}");
-        let growth = (dev[6] / dev[3]).powf(1.0 / 3.0);
-        assert!((30.0..=300.0).contains(&growth), "growth {growth}, {dev:?}");
-    }
-
-    #[test]
-    fn tb_a5_timeline_loops_and_substeps_are_frame_rate_independent() {
+        // The loop: the total is Σ nT/k + 7·FADE, and a run restarts from its ICs.
         let g = ThreeBody::new();
-        let expected: f64 = g.orbits.iter().map(Orbit::run_secs).sum::<f64>() + 5.0 * FADE;
-        assert!((g.timeline.total() - expected).abs() < 1e-9);
-        assert!(
-            (g.timeline.total() - 69.42).abs() < 0.01,
-            "{}",
-            g.timeline.total()
-        );
-        assert_eq!(g.phase_at(3.0), g.phase_at(3.0 + g.timeline.total()));
-
-        let mut ctx = Ctx::new(0, Size::new(80, 24));
-        let (mut fine, mut coarse) = (ThreeBody::new(), ThreeBody::new());
-        fine.resize(Size::new(80, 24), &mut ctx);
-        coarse.resize(Size::new(80, 24), &mut ctx);
-        for _ in 0..70 {
-            for _ in 0..60 {
-                fine.update(SIM_DT, &mut ctx);
-                fine.prepare();
-            }
-            for _ in 0..4 {
-                let (seg, before) = (coarse.phase.seg, coarse.n_done);
-                coarse.update(0.25, &mut ctx);
-                coarse.prepare();
-                let taken = if coarse.phase.seg == seg && coarse.n_done >= before {
-                    coarse.n_done - before
-                } else {
-                    coarse.n_done
-                };
-                assert!(taken <= 1548, "one update(0.25) took {taken} substeps");
-            }
-            assert_eq!(
-                (fine.phase.seg, fine.n_done),
-                (coarse.phase.seg, coarse.n_done)
-            );
-            assert_eq!(fine.bodies.pos, coarse.bodies.pos);
-        }
+        let total: f64 = g.orbits.iter().map(|o| o.run_secs() + FADE).sum();
+        assert!((g.timeline.total() - total).abs() < 1e-9);
+        assert_eq!(g.phase_at(total + 0.01).seg, 0);
     }
 
     #[test]
-    fn tb_a5_every_run_start_restores_the_ics_bitwise_with_empty_trails() {
-        let mut ctx = Ctx::new(0, Size::new(80, 24));
-        let mut g = ThreeBody::new();
-        g.resize(Size::new(80, 24), &mut ctx);
-        let mut start = 0.0;
-        for seg in 0..=5 {
-            // Land just inside run `seg` (seg 5 = the figure-8 again, next loop), from
-            // deep inside the previous fade.
-            g.update(1.0, &mut ctx);
-            g.prepare();
-            g.t = start - 0.5;
-            g.update(0.5 + 1e-6, &mut ctx);
-            g.prepare();
-            let o = g.orbits[seg % 5];
-            assert_eq!(g.phase.seg, seg % 5);
-            assert_eq!(g.n_done, 0);
-            assert_eq!(g.bodies, Bodies::at_ics(&o));
-            assert!(g.trails.iter().all(Trail::is_empty));
-            start += o.run_secs() + FADE;
-        }
-    }
-
-    #[test]
-    fn gen_r12_caption_names_the_shown_orbit() {
-        let mut ctx = Ctx::new(0, Size::new(80, 24));
-        let mut g = ThreeBody::new();
-        g.resize(Size::new(80, 24), &mut ctx);
-        let mut seen = [false; 5];
-        // One whole loop of the gallery (≈ 69.4 s, TB-A5).
-        for _ in 0..70 * 4 {
-            g.update(0.25, &mut ctx);
-            g.prepare();
-            assert_eq!(g.caption(), Some(CAPTIONS[g.phase.seg]));
-            seen[g.phase.seg] = true;
-        }
-        assert_eq!(seen, [true; 5]);
-    }
-
-    #[test]
-    fn tb_a6_orbits_stay_in_their_boxes_and_on_canvas_with_labels_that_fit() {
-        for o in &orbits() {
-            let [x0, x1, y0, y1] = o.bbox;
-            let views = [Size::new(80, 24), Size::new(200, 50)].map(|s| (s, view_for(s, o)));
-            let mut b = Bodies::at_ics(o);
-            for _ in 0..run_and_fade_steps(o) {
-                b.step(o.h());
-                for i in 0..3 {
-                    let (x, y) = b.body(i);
+    fn tb_a6_orbits_stay_on_canvas() {
+        for size in [Size::new(80, 24), Size::new(200, 50)] {
+            for (k, b) in tables().iter().map(|t| &t.bbox).enumerate() {
+                let v = view_for(size, b);
+                for (x, y) in [(b[0], b[2]), (b[1], b[3])] {
+                    let (cx, cy) = v.cell(x, y);
                     assert!(
-                        (x0..=x1).contains(&x) && (y0..=y1).contains(&y),
-                        "{}",
-                        o.short
+                        cx >= 1.0 && cx <= f64::from(size.width()) - 1.0,
+                        "orbit {k}"
                     );
-                    for (size, view) in views {
-                        let (cx, cy) = view.cell(x, y);
-                        let (w, h) = (f64::from(size.width()), f64::from(size.height()));
-                        assert!(cx >= 1.0 && cx < w - 1.0, "{}: x {cx} at {size:?}", o.short);
-                        assert!(cy >= 1.0 && cy < h - 1.0, "{}: y {cy} at {size:?}", o.short);
-                    }
+                    assert!(
+                        cy >= 1.0 && cy <= f64::from(size.height()) - 1.0,
+                        "orbit {k}"
+                    );
                 }
             }
-            assert!(o.label.is_ascii() && o.short.is_ascii());
-            assert_eq!(label_for(80, o), Some(o.label));
-            let full = o.label.len() as u16 + 2;
-            assert_eq!(label_for(full, o), Some(o.label));
-            assert_eq!(label_for(full - 1, o), Some(o.short));
-            assert_eq!(label_for(o.short.len() as u16 + 1, o), None);
         }
-        let mut stage = Stage::new(build(), 1, Size::new(80, 24), GlyphMode::Unicode);
-        let row: String = stage.render().to_lines()[0].chars().take(22).collect();
-        assert_eq!(row, " figure-8  Moore 1993 ");
     }
 
     #[test]
-    fn tb_a7_moth_shows_only_its_newest_loops_and_the_others_a_full_period() {
-        let spans: Vec<f64> = orbits().iter().map(|o| o.trail).collect();
-        assert_eq!(spans, [1.0, 1.0, 1.0, 1.0, MOTH_TRAIL]);
-        // The moth keeps its full span from 80×24 up; smaller views shorten it (never
-        // below 0.25) so it stays one stroke, not a knot. Other orbits always span 1.
-        let moth = orbits()[4];
-        let span_at = |w, h| trail_span(&moth, view_for(Size::new(w, h), &moth).scale);
-        assert_eq!(span_at(80, 24), MOTH_TRAIL);
-        assert_eq!(span_at(200, 50), MOTH_TRAIL);
-        assert_eq!(span_at(40, 12), MOTH_MIN_TRAIL);
-        let mid = span_at(60, 18);
-        assert!(MOTH_MIN_TRAIL < mid && mid < MOTH_TRAIL, "60×18 span {mid}");
-        assert!(span_at(40, 12) <= span_at(50, 15) && span_at(50, 15) <= mid);
-        for o in &orbits()[..4] {
-            assert_eq!(trail_span(o, 0.25), 1.0);
-        }
-        // Full-period trails keep the published ramp, floor 40 at the oldest sample.
-        for i in 0..SAMPLES {
-            let f = i as f64 / SAMPLES as f64;
-            let expect = 40.0 + 160.0 * (1.0 - f).powf(1.5);
-            assert!((trail_level(f, 1.0) - expect).abs() < 1e-12);
-        }
-        // The moth's ramp starts at 200, falls strictly and is gone by the span's end.
-        assert_eq!(trail_level(0.0, MOTH_TRAIL), 200.0);
-        let fs: Vec<f64> = (0..=100)
-            .map(|i| f64::from(i) / 100.0 * MOTH_TRAIL)
-            .collect();
-        for w in fs.windows(2) {
-            assert!(trail_level(w[1], MOTH_TRAIL) < trail_level(w[0], MOTH_TRAIL));
-        }
-        for f in [MOTH_TRAIL, 0.8, 0.999] {
-            assert!(trail_level(f, MOTH_TRAIL) < MIN_VISIBLE_LEVEL, "f = {f}");
-        }
-
-        // At the end of the moth's run every lit dot lies near a sample younger than
-        // the span: the old loops are gone, not just dim.
-        let mut ctx = Ctx::new(0, Size::new(80, 24));
-        let mut g = ThreeBody::new();
-        g.resize(Size::new(80, 24), &mut ctx);
-        let before: f64 = g.orbits[..4].iter().map(|o| o.run_secs() + FADE).sum();
-        g.t = before + g.orbits[4].run_secs() - 0.05 - SIM_DT;
-        g.update(SIM_DT, &mut ctx);
-        g.prepare();
-        assert_eq!(g.phase.seg, 4);
-        let mut young = Vec::new();
-        for trail in &g.trails {
-            let len = trail.len();
-            for (k, &(x, y)) in trail.iter().enumerate() {
-                if ((len - 1 - k) as f64) < MOTH_TRAIL * SAMPLES as f64 {
-                    young.push(g.view.dot(x, y));
-                }
-            }
-        }
-        let dots = g.dots.dot_size();
-        let mut lit = 0;
-        for py in 0..i32::from(dots.height()) {
-            for px in 0..i32::from(dots.width()) {
-                if g.dots.is_lit(px, py) {
-                    lit += 1;
-                    let (x, y) = (f64::from(px), f64::from(py));
-                    let near = young.iter().any(|&(u, v)| (u - x).hypot(v - y) < 6.0);
-                    assert!(near, "old moth dot at {px},{py}");
-                }
-            }
-        }
-        assert!(lit > 100, "{lit} lit dots");
-    }
-
-    #[test]
-    fn tb_a7_heads_and_lagrange_triangle_fade_in_at_every_run_start() {
-        let run = |tau: f64, fade: f64| head_level(&Phase { seg: 0, tau, fade });
-        assert_eq!(run(0.0, 1.0), 0.0);
-        assert!(run(0.1, 1.0) > 0.0 && run(0.1, 1.0) < run(0.2, 1.0));
-        assert_eq!(run(FADE_IN, 1.0), 255.0);
-        assert_eq!(run(5.0, 1.0), 255.0);
-        assert_eq!(run(5.0, 0.5), 127.5);
-        // The triangle rises with the heads, to 80, and fades with the orbit.
-        let tri = |tau: f64, fade: f64| {
-            triangle_level(&Phase {
-                seg: LAGRANGE,
-                tau,
-                fade,
-            })
+    fn tb_a7_every_run_fades_in() {
+        let p = |tau| Phase {
+            seg: 0,
+            tau,
+            fade: 1.0,
         };
-        assert_eq!(tri(0.0, 1.0), 0.0);
-        assert!(tri(0.1, 1.0) > 0.0 && tri(0.1, 1.0) < tri(0.2, 1.0));
-        assert!((tri(FADE_IN, 1.0) - 80.0).abs() < 1e-12);
-        assert!((tri(5.0, 0.5) - 40.0).abs() < 1e-12);
-        // Seen in dots: nothing is lit on the Lagrange run's first frame (empty trails,
-        // triangle still dark); by 0.3 s the triangle is there.
-        let size = Size::new(80, 24);
-        let mut ctx = Ctx::new(0, size);
-        let mut g = ThreeBody::new();
-        g.resize(size, &mut ctx);
-        let start = g.orbits[0].run_secs() + FADE;
-        let lit = |d: &Dots| {
-            let s = d.dot_size();
-            (0..i32::from(s.height()))
-                .flat_map(|y| (0..i32::from(s.width())).map(move |x| (x, y)))
-                .filter(|&(x, y)| d.is_lit(x, y))
-                .count()
-        };
-        g.t = start;
-        g.update(SIM_DT, &mut ctx);
-        g.prepare();
-        assert_eq!((g.phase.seg, lit(&g.dots)), (LAGRANGE, 0));
-        g.t = start + FADE_IN - SIM_DT;
-        g.update(SIM_DT, &mut ctx);
-        g.prepare();
-        g.dots.clear();
-        g.trails_onto_dots();
-        let trails = lit(&g.dots);
-        g.triangle();
-        assert!(lit(&g.dots) >= trails + 20, "no triangle at τ = 0.3 s");
-
-        // Seen in frames: no head on the scene's first frame, all three by 0.3 s.
-        let mut stage = Stage::new(build(), 1, Size::new(80, 24), GlyphMode::Ascii);
-        let heads =
-            |lines: Vec<String>| -> usize { lines.iter().map(|l| l.matches('@').count()).sum() };
-        assert_eq!(heads(stage.render().to_lines()), 0);
-        for _ in 0..18 {
-            stage.step(SIM_DT);
-        }
-        assert_eq!(heads(stage.render().to_lines()), 3);
-    }
-
-    /// Lit dots in cell `(cx, cy)`.
-    fn cell_dots(d: &Dots, cx: i32, cy: i32) -> usize {
-        (0..8)
-            .filter(|k| d.is_lit(2 * cx + k % 2, 4 * cy + k / 2))
-            .count()
-    }
-
-    #[test]
-    fn tb_a7_lagrange_triangle_is_one_dot_per_empty_cell() {
-        let size = Size::new(80, 24);
-        let mut ctx = Ctx::new(0, size);
-        let mut g = ThreeBody::new();
-        g.resize(size, &mut ctx);
-        let start = g.orbits[0].run_secs() + FADE;
-        for t in [1.0, 4.0, 9.0] {
-            g.t = start + t - SIM_DT;
-            g.update(SIM_DT, &mut ctx);
-            g.prepare();
-            assert_eq!(g.phase.seg, LAGRANGE);
-            g.dots.clear();
-            g.trails_onto_dots();
-            let trails = g.dots.clone();
-            g.triangle();
-            let mut added = 0;
-            for cy in 0..24 {
-                for cx in 0..80 {
-                    let before = cell_dots(&trails, cx, cy);
-                    let after = cell_dots(&g.dots, cx, cy);
-                    if before > 0 {
-                        assert_eq!(after, before, "triangle merged into trail cell {cx},{cy}");
-                    } else {
-                        assert!(after <= 1, "{after} triangle dots in cell {cx},{cy}");
-                        added += after;
-                    }
-                }
-            }
-            assert!(added >= 20, "only {added} triangle dots at t = {t}");
-        }
+        assert_eq!(orbit_fade(&p(0.0)), 0.0);
+        assert!(orbit_fade(&p(0.1)) < orbit_fade(&p(0.2)));
+        assert_eq!(orbit_fade(&p(FADE_IN)), 1.0);
     }
 }

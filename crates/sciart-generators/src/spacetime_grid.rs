@@ -6,14 +6,21 @@
 //! `Lx` widened to fill wide terminals; `z` points up, so wells are negative.
 //!
 //! M16 (thread style, GEN-R25): every mesh line is a continuous braille polyline through
-//! its projected samples, coloured by the wave strain (crests `Wave`, troughs `Cold`); the
-//! binary is two small dot discs with orbit trails, chirping to a merger.
+//! its projected samples, its wave crests tinted `Wave`.
+//!
+//! M17 (orbital-thread style, GEN-R26; the sheet is unchanged): round the binary a
+//! d-orbital-shaped stipple cloud of the near-zone `h₊` quadrupole, lobes `Hot`/`Cold` by
+//! the strain's sign, turning with the pair and tightening and brightening as it chirps;
+//! the black holes are tiny dark-cored rings with spiralling afterglow trails, `Hot` →
+//! `Sun` by speed; at the merger an `Accent` remnant cloud fades.
 
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
 use sciart_core::geom::ASPECT;
 use sciart_core::prelude::*;
+#[cfg(test)]
+use sciart_core::raster;
 use sciart_core::timeline::ease;
 
 pub static META: Meta = Meta {
@@ -52,6 +59,10 @@ const FADE_IN: f64 = 1.0;
 /// Camera pitch below the horizon and distance from the sheet centre.
 const PITCH: f64 = 55.0 * PI / 180.0;
 const CAM_DIST: f64 = 3.4;
+/// `cos` and `sin` of the pitch, for the per-cell inverse projection of the cloud
+/// (checked against `Trig` in the tests).
+const COS_PITCH: f64 = 0.573_576_436_351_046;
+const SIN_PITCH: f64 = 0.819_152_044_288_991_8;
 /// Slow yaw sway: amplitude (radians) and period (s). Small enough that the `+y` edge
 /// always stays the far edge.
 const YAW_AMP: f64 = 0.05;
@@ -81,16 +92,53 @@ const MIN_PEAK: f64 = 0.05;
 const CREST_INK: Ink = Ink::new(Role::Wave, 230);
 const GRID_LEVELS: [u8; 3] = [70, 90, 110];
 
-/// The masses: dot-disc radii (dots) and inks; the merged remnant is `Sun`.
-const MASS_R: [f64; 2] = [2.2, 1.8];
-const MERGED_R: f64 = 2.6;
-const MASS_INK: [Ink; 2] = [Ink::new(Role::Sun, 255), Ink::new(Role::Hot, 235)];
-/// Below this weight (fade-in share) a mass disc is not drawn.
+/// M17: the black holes are tiny dark-cored rings with a white `Star` rim (dot radius;
+/// the heavier brighter), so they stand out from their `Hot` trails; the merged remnant
+/// is a larger ring.
+const HOLE_R: [f64; 2] = [2.0, 1.5];
+const MERGED_R: f64 = 2.5;
+const HOLE_INK: [Ink; 2] = [Ink::new(Role::Star, 255), Ink::new(Role::Star, 230)];
+/// The cloud leaves a dark gap of this many dots round each hole, so its core stays black.
+const HOLE_GAP: f64 = 3.2;
+/// Below this weight (fade-in share) a hole is not drawn.
 const SHOW: f64 = 0.3;
-/// Orbit trails: the last `TRAIL_ORBITS` of an orbit, `TRAIL_PTS` samples, three steps.
-const TRAIL_ORBITS: f64 = 0.7;
-const TRAIL_PTS: usize = 18;
-const TRAIL_LEVELS: [u8; 3] = [200, 160, 120];
+/// Orbit trails (M17): the last `TRAIL_ORBITS` of an orbit in `TRAIL_PTS` samples, a
+/// decaying afterglow from `TRAIL_TOP` to `TRAIL_LOW`, `Hot` while the hole is slow and
+/// `Sun` once its speed exceeds `FAST` times its speed at `a₀` (`v ∝ a^-½`).
+const TRAIL_ORBITS: f64 = 0.8;
+const TRAIL_PTS: usize = 28;
+const TRAIL_TOP: f64 = 225.0;
+const TRAIL_LOW: f64 = 60.0;
+const FAST: f64 = 1.3;
+
+/// M17 quadrupole cloud (GEN-R26): round the binary a compact stipple of the near-zone
+/// `h₊` pattern shaped like a d orbital: keep probability `amp·cos²2(φ − Φ)·E(r)` with
+/// `E = x⁴e^{4(1−x)}·(1 − (r/cut)²)²`, `x = r/r₀`, peaking at `r₀ = CLOUD_R0 + CLOUD_RA·a`
+/// (≈ 1.4× the lighter hole's orbit, so it tightens with the chirp) and gone at
+/// `cut = CLOUD_CUT·r₀` (≈ 0.15 of the sheet width at the start of a cycle); each lobe is
+/// a teardrop, densest on its axis. `amp = min(CLOUD_AMP·(a₀/a)^0.4, CLOUD_MAX)`
+/// brightens with the chirp; lobes `Hot` where `h₊ > 0`, `Cold` where it is negative.
+const CLOUD_R0: f64 = 0.04;
+const CLOUD_RA: f64 = 0.7;
+const CLOUD_AMP: f64 = 0.8;
+const CLOUD_MAX: f64 = 0.95;
+const CLOUD_CUT: f64 = 1.7;
+/// Lobe dots at `cos²·E` above this are drawn at the brighter level.
+const CLOUD_BRIGHT: f64 = 0.4;
+const CLOUD_LEVELS: [u8; 2] = [190, 255];
+/// Inside the cloud's cut the sheet yields: its lines are a faint `Structure`, untinted,
+/// so the cloud is the brightest thing at the centre (outside, the sheet is M16's).
+const YIELD_INK: Ink = Ink::new(Role::Structure, 45);
+const CLOUD_SALT: u64 = 0x5917_c10d_0000_0002;
+/// The remnant: an isotropic `Accent` stipple `REMNANT_P·w·exp(−(r/REMNANT_R)²)`, cut at
+/// `REMNANT_CUT`, whose weight `w` falls from 1 at the merger to 0 at `REMNANT_FADE` s
+/// after it (before the post-merger hold ends, SPT-A13).
+const REMNANT_P: f64 = 0.8;
+const REMNANT_R: f64 = 0.12;
+const REMNANT_CUT: f64 = 0.36;
+const REMNANT_FADE: f64 = 3.0;
+const REMNANT_INK: Ink = Ink::new(Role::Accent, 235);
+const REMNANT_SALT: u64 = 0x5917_c10d_0000_0003;
 
 /// A circular binary, optionally on a quadrupole-driven inspiral (Peters 1964, Newtonian
 /// chirp): `a(τ) = a₀(1 − τ/τc)^¼`, hence by Kepler `Ω = Ω₀(1 − τ/τc)^-⅜` and
@@ -309,6 +357,103 @@ impl Camera {
         let (px, py) = Dots::from_cells(sx + 0.5, sy + 0.5);
         (px, py, d)
     }
+
+    /// The world point `(x, y)` at height `z` seen at dot `(px, py)`: the inverse of
+    /// [`project`](Self::project) on the plane of height `z` (closed form).
+    fn unproject(&self, px: f64, py: f64, z: f64) -> (f64, f64) {
+        let (sx, sy) = (
+            (px + 0.5) / f64::from(Dots::CELL_W) - 0.5,
+            (py + 0.5) / f64::from(Dots::CELL_H) - 0.5,
+        );
+        let scale = self.scale.max(1e-9);
+        let (u, v) = ((sx - self.ox) / (scale * ASPECT), (self.oy - sy) / scale);
+        let (cp, sp) = (COS_PITCH, SIN_PITCH);
+        let yr = (z * cp - v * (CAM_DIST - z * sp)) / (v * cp - sp);
+        let xr = u * (yr * cp - z * sp + CAM_DIST);
+        let (c, s) = (self.cos_yaw, self.sin_yaw);
+        (xr * c + yr * s, -xr * s + yr * c)
+    }
+}
+
+/// The sheet's height (lift included) at radius `r` under the binary's whole mass at the
+/// centre: the plane the quadrupole cloud is laid on. Outside the orbit, where the cloud
+/// is dense, it is within a few per cent of the true sheet; using it keeps the cloud from
+/// wobbling with every turn of the pair.
+fn cloud_height(bin: &Binary, r: f64) -> f64 {
+    let m = bin.m1 + bin.m2;
+    RIM_LIFT * m - WELL_K * m / (r * r + SOFTENING * SOFTENING).sqrt()
+}
+
+/// One frame of the near-zone cloud: lobe radius `r0`, peak keep share `amp`, the
+/// quadrupole's phase as `(cos 2Φ, sin 2Φ)`, the remnant's weight and the cut radius.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Cloud {
+    pub r0: f64,
+    pub amp: f64,
+    pub c2: f64,
+    pub s2: f64,
+    pub remnant: f64,
+    pub cut: f64,
+}
+
+impl Cloud {
+    /// The cloud at time `t` (SPT-A10..A13).
+    pub(crate) fn at(bin: &Binary, t: f64) -> Cloud {
+        let (a, ph) = bin.state(t);
+        let (s2, c2) = (2.0 * ph).sin_cos_det();
+        if a <= 0.0 {
+            let since = bin.tau(t) - bin.tau_c;
+            let w = 1.0 - ease::smoothstep(since / REMNANT_FADE);
+            return Cloud {
+                r0: 0.0,
+                amp: 0.0,
+                c2,
+                s2,
+                remnant: w,
+                cut: if w > 0.0 { REMNANT_CUT } else { 0.0 },
+            };
+        }
+        let r0 = CLOUD_R0 + CLOUD_RA * a;
+        let amp = (CLOUD_AMP * (bin.a0 / a).powf(0.4)).min(CLOUD_MAX) * bin.fade(t);
+        Cloud {
+            r0,
+            amp,
+            c2,
+            s2,
+            remnant: 0.0,
+            cut: CLOUD_CUT * r0,
+        }
+    }
+
+    /// `h₊`'s angular factor `cos 2(φ − Φ)` at sheet point `(x, y)` (no trigonometry:
+    /// `cos 2φ = (x² − y²)/r²`, `sin 2φ = 2xy/r²`).
+    pub(crate) fn h_plus(&self, x: f64, y: f64) -> f64 {
+        let r2 = x * x + y * y;
+        if r2 <= 0.0 {
+            return 0.0;
+        }
+        ((x * x - y * y) * self.c2 + 2.0 * x * y * self.s2) / r2
+    }
+
+    /// Keep probability and ink of a cloud dot at sheet point `(x, y)`; `None` outside.
+    pub(crate) fn dot(&self, x: f64, y: f64) -> Option<(f64, Ink, u64)> {
+        let r2 = x * x + y * y;
+        if r2 > self.cut * self.cut {
+            return None;
+        }
+        if self.remnant > 0.0 {
+            let p = REMNANT_P * self.remnant * (-r2 / (REMNANT_R * REMNANT_R)).exp();
+            return Some((p, REMNANT_INK, REMNANT_SALT));
+        }
+        let q = r2.sqrt() / self.r0;
+        let window = 1.0 - r2 / (self.cut * self.cut);
+        let e = q * q * q * q * (4.0 * (1.0 - q)).exp() * window * window;
+        let h = self.h_plus(x, y);
+        let w = h * h * e;
+        let role = if h > 0.0 { Role::Hot } else { Role::Cold };
+        let level = CLOUD_LEVELS[usize::from(w > CLOUD_BRIGHT)];
+        Some((self.amp * w, Ink::new(role, level), CLOUD_SALT))
+    }
 }
 
 #[derive(Debug, Default)]
@@ -329,7 +474,11 @@ pub struct SpacetimeGrid {
     depth_far: f64,
     /// The largest wave amplitude on the sheet now.
     peak: f64,
+    /// The sheet.
     dots: Dots,
+    /// The quadrupole cloud, the holes and their trails: the upper layer, so inside the
+    /// cloud's envelope (where the sheet yields) it owns its cells.
+    cloud: Dots,
     /// The raster is behind the simulation: `prepare` redraws it (GEN-R20).
     dirty: bool,
 }
@@ -471,8 +620,12 @@ impl SpacetimeGrid {
     /// strain at its middle: the amplitude interpolated linearly, the phase along the
     /// shorter way round (samples are well under half a wavelength apart). Runs of
     /// pieces with one ink are drawn as one line.
-    fn segment(&mut self, a: Pt, b: Pt) {
+    fn segment(&mut self, a: Pt, b: Pt, yields: bool) {
         let ((ax, ay, ad, ap, ae), (bx, by, bd, bp, be)) = (a.get(), b.get());
+        if yields {
+            self.dots.line(ax, ay, bx, by, YIELD_INK);
+            return;
+        }
         let sheet = self.sheet_ink(0.5 * (ad + bd));
         let len = (bx - ax).hypot(by - ay);
         let n = ((len / PIECE).ceil() as usize).clamp(1, MAX_PIECES);
@@ -509,13 +662,7 @@ impl SpacetimeGrid {
     /// World positions of mass `k`'s orbit trail at time `t`, newest first: its positions
     /// over the last `TRAIL_ORBITS` of an orbit, within the current cycle (SPT-A6).
     fn trail(bin: &Binary, k: usize, t: f64) -> impl Iterator<Item = (f64, f64)> {
-        let (a, _) = bin.state(t);
-        let omega = bin.omega(a);
-        let step = if omega > 0.0 {
-            TRAIL_ORBITS * TAU / omega / TRAIL_PTS as f64
-        } else {
-            0.0
-        };
+        let step = Self::trail_step(bin, t);
         let tau = bin.tau(t);
         (1..=TRAIL_PTS)
             .map(move |s| s as f64 * step)
@@ -524,15 +671,28 @@ impl SpacetimeGrid {
     }
 
     fn raster(&mut self) {
+        self.raster_with(true);
+    }
+
+    /// Redraw the frame; `cloud` false leaves the quadrupole cloud out (SPT-A12).
+    fn raster_with(&mut self, cloud: bool) {
         self.refresh();
         self.dots.clear();
+        self.cloud.clear();
         let (fx, fy, nx, ny) = (self.fx, self.fy, self.nx, self.ny);
         if self.pts.len() != ny * fx + nx * fy {
             return;
         }
+        // Inside the cloud's cut the sheet yields to it (M17); outside it is M16's.
+        let cut = if cloud {
+            Cloud::at(&self.binary(), self.t).cut
+        } else {
+            0.0
+        };
         let seg = |g: &mut Self, i0: usize, i1: usize| {
             let (a, b) = (g.pts[i0], g.pts[i1]);
-            g.segment(a, b);
+            let r = 0.5 * (f64::from(g.base[i0].r) + f64::from(g.base[i1].r));
+            g.segment(a, b, r < cut);
         };
         for j in 0..ny {
             for i in 0..fx - 1 {
@@ -545,11 +705,48 @@ impl SpacetimeGrid {
                 seg(self, k, k + 1);
             }
         }
-        self.masses();
+        if cloud {
+            let holes = self.hole_dots();
+            let (bin, t, ds) = (self.binary(), self.t, self.dots.dot_size());
+            let dots = &mut self.cloud;
+            // The cloud is the upper layer: inside its envelope it owns its cells.
+            cloud_dots(
+                &self.cam,
+                &bin,
+                t,
+                ds,
+                holes,
+                |_, _| false,
+                |x, y, p, ink, salt, _| {
+                    dots.stipple(x, y, p, salt, ink);
+                },
+            );
+        }
+        self.holes();
     }
 
-    /// The binary (or its merged remnant) as small dot discs on the sheet, with trails.
-    fn masses(&mut self) {
+    /// Dot positions of the two holes now (off-screen when not drawn), for the cloud's
+    /// dark gaps.
+    fn hole_dots(&self) -> [(f64, f64); 2] {
+        let bin = self.binary();
+        let t = self.t;
+        let masses = bin.masses(t);
+        let lift = RIM_LIFT * (bin.m1 + bin.m2);
+        let far = (-1e9, -1e9);
+        if bin.separation(t) <= 0.0 {
+            return [far; 2];
+        }
+        bin.positions(t).map(|(x, y)| {
+            let (px, py, _) = self
+                .cam
+                .project(x, y, well_depth(x, y, &masses) + lift + 0.04);
+            (px, py)
+        })
+    }
+
+    /// The binary (or its merged remnant) as tiny dark-cored rings on the sheet, with
+    /// spiralling afterglow trails coloured by speed.
+    fn holes(&mut self) {
         let bin = self.binary();
         let t = self.t;
         let masses = bin.masses(t);
@@ -562,26 +759,126 @@ impl SpacetimeGrid {
         let f = bin.fade(t);
         let merged = bin.separation(t) <= 0.0;
         if !merged && f >= SHOW {
-            for (k, mass) in MASS_INK.iter().enumerate() {
+            let step = Self::trail_step(&bin, t);
+            for k in 0..2 {
                 let mut prev = on_sheet(&self.cam, bin.positions(t)[k]);
                 for (s, p) in Self::trail(&bin, k, t).enumerate() {
+                    let ink = Self::trail_ink(&bin, t - (s as f64 + 0.5) * step, s);
                     let p = on_sheet(&self.cam, p);
-                    let level = TRAIL_LEVELS[s * TRAIL_LEVELS.len() / TRAIL_PTS];
-                    let ink = Ink::new(mass.role, level);
-                    self.dots.line(prev.0, prev.1, p.0, p.1, ink);
+                    self.cloud.line(prev.0, prev.1, p.0, p.1, ink);
                     prev = p;
                 }
             }
             let at = bin.positions(t);
-            for ((&p, &r), &ink) in at.iter().zip(&MASS_R).zip(&MASS_INK) {
+            for ((&p, &r), &ink) in at.iter().zip(&HOLE_R).zip(&HOLE_INK) {
                 let (px, py) = on_sheet(&self.cam, p);
-                self.dots.disc(px, py, r, ink);
+                ring(&mut self.cloud, px, py, r, ink);
             }
         }
         if merged || 1.0 - f >= SHOW {
             let (px, py) = on_sheet(&self.cam, (0.0, 0.0));
-            self.dots.disc(px, py, MERGED_R, MASS_INK[0]);
+            ring(&mut self.cloud, px, py, MERGED_R, HOLE_INK[0]);
         }
+    }
+
+    /// Time between trail samples at `t` (0 once merged).
+    fn trail_step(bin: &Binary, t: f64) -> f64 {
+        let omega = bin.omega(bin.separation(t));
+        if omega > 0.0 {
+            TRAIL_ORBITS * TAU / omega / TRAIL_PTS as f64
+        } else {
+            0.0
+        }
+    }
+
+    /// The ink of trail segment `s` (0 newest), laid down at time `t`: `Hot` while the
+    /// holes are slow, `Sun` once fast (speed `∝ a^-½`), fading with age.
+    pub(crate) fn trail_ink(bin: &Binary, t: f64, s: usize) -> Ink {
+        let a = bin.separation(t).max(1e-9);
+        let fast = (bin.a0 / a).sqrt() >= FAST;
+        let age = s as f64 / TRAIL_PTS as f64;
+        let level = TRAIL_TOP - (TRAIL_TOP - TRAIL_LOW) * age;
+        Ink::new(if fast { Role::Sun } else { Role::Hot }, level as u8)
+    }
+}
+
+/// Every candidate dot of the quadrupole (or remnant) cloud now:
+/// `f(x, y, keep probability, ink, salt, sheet point)`. Dots are visited over the
+/// cloud's screen bounding box, mapped back onto the sheet (two fixed-point passes of
+/// the inverse projection onto [`cloud_height`]), and skipped within `HOLE_GAP` of a
+/// hole so its core stays dark. The threshold of each dot is fixed (CORE-R107).
+fn cloud_dots(
+    cam: &Camera,
+    bin: &Binary,
+    t: f64,
+    ds: Size,
+    holes: [(f64, f64); 2],
+    mut skip_cell: impl FnMut(i32, i32) -> bool,
+    mut f: impl FnMut(i32, i32, f64, Ink, u64, (f64, f64)),
+) {
+    let cloud = Cloud::at(bin, t);
+    if cloud.cut <= 0.0 || (cloud.amp <= 0.0 && cloud.remnant <= 0.0) {
+        return;
+    }
+    // Screen bounding box of the cut circle on the cloud's plane.
+    let (mut x0, mut x1, mut y0, mut y1) = (f64::MAX, f64::MIN, f64::MAX, f64::MIN);
+    let z_cut = cloud_height(bin, cloud.cut);
+    for k in 0..16 {
+        let (s, c) = (TAU * f64::from(k) / 16.0).sin_cos_det();
+        let (px, py, _) = cam.project(cloud.cut * c, cloud.cut * s, z_cut);
+        (x0, x1, y0, y1) = (x0.min(px), x1.max(px), y0.min(py), y1.max(py));
+    }
+    let clamp_x = |v: f64| v.clamp(0.0, f64::from(ds.width()) - 1.0) as i32;
+    let clamp_y = |v: f64| v.clamp(0.0, f64::from(ds.height()) - 1.0) as i32;
+    let (x0, x1) = (clamp_x(x0.floor() - 1.0), clamp_x(x1.ceil() + 1.0));
+    let (y0, y1) = (clamp_y(y0.floor() - 1.0), clamp_y(y1.ceil() + 1.0));
+    let z_mid = cloud_height(bin, cloud.r0.max(REMNANT_R));
+    let gap2 = HOLE_GAP * HOLE_GAP;
+    // The density is smooth on the scale of a cell, so it is evaluated once per cell (at
+    // the cell's centre) and each of the cell's 2×4 dots keeps its own fixed threshold.
+    let (cw, ch) = (Dots::CELL_W, Dots::CELL_H);
+    for cy in y0.div_euclid(ch)..=y1.div_euclid(ch) {
+        for cx in x0.div_euclid(cw)..=x1.div_euclid(cw) {
+            if skip_cell(cx, cy) {
+                continue;
+            }
+            let (fx, fy) = Dots::from_cells(f64::from(cx) + 0.5, f64::from(cy) + 0.5);
+            let near_hole = holes
+                .iter()
+                .any(|h| (fx - h.0).powi(2) + (fy - h.1).powi(2) < (HOLE_GAP + 4.0).powi(2));
+            let (sx, sy) = cam.unproject(fx, fy, z_mid);
+            let (sx, sy) = cam.unproject(fx, fy, cloud_height(bin, sx.hypot(sy)));
+            let Some((p, ink, salt)) = cloud.dot(sx, sy) else {
+                continue;
+            };
+            if p <= 0.0 {
+                continue;
+            }
+            for dy in 0..ch {
+                for dx in 0..cw {
+                    let (x, y) = (cx * cw + dx, cy * ch + dy);
+                    let (px, py) = (f64::from(x), f64::from(y));
+                    if near_hole
+                        && holes
+                            .iter()
+                            .any(|h| (px - h.0).powi(2) + (py - h.1).powi(2) < gap2)
+                    {
+                        continue;
+                    }
+                    f(x, y, p, ink, salt, (sx, sy));
+                }
+            }
+        }
+    }
+}
+
+/// A tiny ring of radius `r` dots about `(x, y)` with its centre left dark: a black hole's
+/// bright rim round its unlit core.
+fn ring(dots: &mut Dots, x: f64, y: f64, r: f64, ink: Ink) {
+    let n = ((TAU * r).round() as i32).max(4);
+    for k in 0..n {
+        let (s, c) = (TAU * f64::from(k) / f64::from(n)).sin_cos_det();
+        dots.plot(x + r * c, y + r * s, ink);
     }
 }
 
@@ -600,6 +897,7 @@ impl Generator for SpacetimeGrid {
             self.bin = Some(bin);
         }
         self.dots.resize(size);
+        self.cloud.resize(size);
         self.layout(size);
         self.dirty = true;
     }
@@ -617,6 +915,7 @@ impl Generator for SpacetimeGrid {
 
     fn render(&self, canvas: &mut Canvas) {
         self.dots.blit(canvas);
+        self.cloud.blit(canvas);
     }
 
     /// The act: the inspiral, the merger (from `0.45 a₀`, where the strain tapers, to
@@ -973,7 +1272,13 @@ mod tests {
         for y in 0..i32::from(size.height()) {
             for x in 0..i32::from(size.width()) {
                 let cell = c.get(x, y).unwrap();
-                if cell.ch == ' ' || matches!(cell.ink.role, Role::Sun | Role::Hot) {
+                // M17: the cloud's Hot/Cold/Accent cells are not the grid either.
+                if cell.ch == ' '
+                    || matches!(
+                        cell.ink.role,
+                        Role::Sun | Role::Hot | Role::Cold | Role::Accent | Role::Star
+                    )
+                {
                     continue;
                 }
                 let crest = cell.ink == CREST_INK;
@@ -1053,10 +1358,187 @@ mod tests {
         let lit = art.iter().filter(|c| c.ch != ' ').count();
         assert!(lit * 100 < art.len() * 60, "{lit} lit cells");
         let has = |r: Role| art.iter().any(|c| c.ink.role == r && c.ch != ' ');
-        for r in [Role::Sun, Role::Hot, Role::Wave, Role::Structure] {
+        for r in [Role::Star, Role::Hot, Role::Wave, Role::Structure] {
             assert!(has(r), "{r:?} missing");
         }
-        // Crests only (M16 round 3): troughs are not tinted.
-        assert!(!has(Role::Cold), "troughs are not tinted");
+        // Crests only (M16 round 3): troughs are not tinted. M17: `Cold` is the cloud's
+        // negative lobe, so the check moves to the sheet's own layer.
+        assert!(has(Role::Cold), "the cloud's negative lobes");
+    }
+
+    /// A scene at 200×50, `secs` into the run, rasterised.
+    fn at(secs: f64) -> SpacetimeGrid {
+        let size = Size::new(200, 50);
+        let mut g = SpacetimeGrid::default();
+        let mut ctx = Ctx::new(42, size);
+        g.resize(size, &mut ctx);
+        g.t = secs;
+        g.prepare();
+        g
+    }
+
+    #[test]
+    fn spt_a4_sheet_layer_never_tints_troughs() {
+        for t in [5.0, 12.0, 20.0] {
+            let g = at(t);
+            let mut c = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
+            g.dots.blit(&mut c);
+            assert!(
+                c.cells()
+                    .iter()
+                    .all(|c| c.ch == ' ' || c.ink.role != Role::Cold)
+            );
+        }
+    }
+
+    #[test]
+    fn spt_pitch_constants_match_trig() {
+        assert!((COS_PITCH - PITCH.cos_det()).abs() < 1e-15);
+        assert!((SIN_PITCH - PITCH.sin_det()).abs() < 1e-15);
+    }
+
+    #[test]
+    fn spt_a10_cloud_lobes_are_coloured_by_the_sign_of_h_plus() {
+        for t in [3.0, 9.0, 17.0, 26.0] {
+            let g = at(t);
+            let bin = g.binary();
+            let (_, ph) = bin.state(t);
+            let (mut hot, mut cold) = (0, 0);
+            cloud_dots(
+                &g.cam,
+                &bin,
+                t,
+                g.dots.dot_size(),
+                g.hole_dots(),
+                |_, _| false,
+                |x, y, p, ink, salt, (sx, sy)| {
+                    if !raster::stipple_keep(salt, x, y, p) {
+                        return;
+                    }
+                    let h = (2.0 * (sy.atan2(sx) - ph)).cos_det();
+                    if h.abs() < 1e-9 {
+                        return;
+                    }
+                    let want = if h > 0.0 { Role::Hot } else { Role::Cold };
+                    assert_eq!(ink.role, want, "t {t}: dot ({x},{y}) h₊ {h:.3}");
+                    hot += usize::from(h > 0.0);
+                    cold += usize::from(h < 0.0);
+                },
+            );
+            assert!(
+                hot > 100 && cold > 100,
+                "t {t}: {hot} hot / {cold} cold dots"
+            );
+        }
+    }
+
+    #[test]
+    fn spt_a11_lobes_turn_with_twice_the_orbital_phase() {
+        let bin = circular();
+        for (t, dt) in [(1.0, 0.1), (4.0, 0.37), (9.5, 1.3)] {
+            let (a, b) = (Cloud::at(&bin, t), Cloud::at(&bin, t + dt));
+            // The pattern phase 2Φ advances by 2ΩΔt …
+            let adv = b.s2.atan2(b.c2) - a.s2.atan2(a.c2);
+            let want = 2.0 * bin.omega0 * dt;
+            let err = (adv - want + PI).rem_euclid(TAU) - PI;
+            assert!(err.abs() < 1e-9, "t {t}: advanced {adv:.4}, want {want:.4}");
+            // … so the lobes turn with the pair: the field at a point turned by ΩΔt is
+            // the field before.
+            let (s, c) = (bin.omega0 * dt).sin_cos_det();
+            for k in 0..24 {
+                let (ps, pc) = (TAU * f64::from(k) / 24.0 + 0.1).sin_cos_det();
+                let (x, y) = (0.4 * pc, 0.4 * ps);
+                let (xr, yr) = (x * c - y * s, x * s + y * c);
+                assert!((a.h_plus(x, y) - b.h_plus(xr, yr)).abs() < 1e-9);
+                assert_eq!(a.dot(x, y).map(|d| d.1), b.dot(xr, yr).map(|d| d.1));
+            }
+        }
+        // The inspiral tightens and brightens the cloud.
+        let b = Binary::DEFAULT;
+        let (early, late) = (Cloud::at(&b, 3.0), Cloud::at(&b, 26.0));
+        assert!(late.r0 < early.r0 && late.amp > early.amp);
+    }
+
+    #[test]
+    fn spt_a12_cloud_leaves_the_grid_alone_outside_its_envelope() {
+        for t in [3.0, 15.0, 27.0] {
+            let mut g = at(t);
+            g.raster_with(false);
+            let mut plain = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
+            g.render(&mut plain);
+            g.raster_with(true);
+            let mut full = Canvas::new(Size::new(200, 50), GlyphMode::Unicode);
+            g.render(&mut full);
+            let cloud = Cloud::at(&g.binary(), t);
+            let bin = g.binary();
+            // Every candidate cloud dot lies inside the cut on the sheet.
+            cloud_dots(
+                &g.cam,
+                &bin,
+                t,
+                g.dots.dot_size(),
+                g.hole_dots(),
+                |_, _| false,
+                |_, _, _, _, _, (sx, sy)| {
+                    assert!(sx.hypot(sy) <= cloud.cut + 1e-9);
+                },
+            );
+            // Cells that differ (cloud dots, the yielding sheet) map back onto the sheet
+            // within the cut, plus half a mesh sample for segments straddling it.
+            let mut differ = 0;
+            for y in 0..50 {
+                for x in 0..200 {
+                    if plain.get(x, y) != full.get(x, y) {
+                        let (px, py) = Dots::from_cells(f64::from(x) + 0.5, f64::from(y) + 0.5);
+                        let (sx, sy) = g.cam.unproject(px, py, cloud_height(&bin, cloud.r0));
+                        let (sx, sy) = g.cam.unproject(px, py, cloud_height(&bin, sx.hypot(sy)));
+                        let r = sx.hypot(sy);
+                        assert!(
+                            r <= cloud.cut + 0.12,
+                            "t {t}: cell ({x},{y}) at r {r:.2}, cut {:.2}",
+                            cloud.cut
+                        );
+                        differ += 1;
+                    }
+                }
+            }
+            assert!(differ > 50, "t {t}: the cloud shows ({differ} cells)");
+        }
+    }
+
+    #[test]
+    fn spt_a13_merger_leaves_a_fading_accent_remnant() {
+        let b = Binary::DEFAULT;
+        let cycle = b.tau_c + b.post;
+        let base = 2.0 * cycle;
+        let count = |t: f64| {
+            let g = at(t);
+            let mut roles = std::collections::HashSet::new();
+            let mut n = 0;
+            cloud_dots(
+                &g.cam,
+                &b,
+                t,
+                g.dots.dot_size(),
+                g.hole_dots(),
+                |_, _| false,
+                |x, y, p, ink, salt, _| {
+                    if raster::stipple_keep(salt, x, y, p) {
+                        roles.insert(ink.role);
+                        n += 1;
+                    }
+                },
+            );
+            (n, roles)
+        };
+        let (n0, r0) = count(base + b.tau_c + 0.05);
+        assert!(n0 > 20, "a remnant just after the merger ({n0} dots)");
+        assert_eq!(r0.into_iter().collect::<Vec<_>>(), vec![Role::Accent]);
+        let (n1, _) = count(base + b.tau_c + 1.5);
+        assert!(n1 < n0, "it fades ({n0} → {n1})");
+        for after in [REMNANT_FADE, 0.5 * (REMNANT_FADE + b.post), b.post - 1e-6] {
+            assert_eq!(count(base + b.tau_c + after).0, 0, "gone {after} s after");
+            assert!(after < b.post);
+        }
     }
 }
