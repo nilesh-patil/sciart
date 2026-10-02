@@ -76,6 +76,16 @@ pub fn stronger(a: Ink, b: Ink) -> Ink {
     }
 }
 
+/// Whether stipple dot `(x, y)` of layer `salt` is kept at density `p` (CORE-R107): the
+/// dot's fixed uniform `hash01(salt ^ cell_key(x, y))` is below `p`. Each dot's threshold
+/// never changes, so a cloud drawn this way holds still, and a density that changes
+/// smoothly only adds or removes dots where it crosses their thresholds (no shimmer, few
+/// changed cells per frame). `p ≤ 0` or NaN keeps nothing; `p ≥ 1` keeps every dot.
+#[inline]
+pub fn stipple_keep(salt: u64, x: i32, y: i32, p: f64) -> bool {
+    p > 0.0 && crate::rng::hash01(salt ^ crate::rng::cell_key(x, y)) < p
+}
+
 /// The ASCII brightness ramp of [`ascii_ramp_cell`], dimmest first.
 pub const ASCII_RAMP: [char; 9] = ['.', ':', '-', '=', '+', '*', '#', '%', '@'];
 
@@ -300,6 +310,16 @@ impl Dots {
         if x.is_finite() && y.is_finite() {
             // Saturating casts: anything huge lands off the lattice.
             self.set(x.round() as i32, y.round() as i32, ink);
+        }
+    }
+
+    /// Light dot `(x, y)` with `ink` when [`stipple_keep`]`(salt, x, y, p)` (CORE-R107): a
+    /// probability cloud sampled with fixed per-dot thresholds, as electron_orbitals'
+    /// clouds are. Off-lattice dots are ignored.
+    #[inline]
+    pub fn stipple(&mut self, x: i32, y: i32, p: f64, salt: u64, ink: Ink) {
+        if stipple_keep(salt, x, y, p) {
+            self.set(x, y, ink);
         }
     }
 
