@@ -46,6 +46,7 @@ gif.workspace = true
 png.workspace = true
 portable-pty.workspace = true
 proptest.workspace = true
+serde_json.workspace = true
 tempfile.workspace = true
 vt100.workspace = true
 sciart-testalloc.workspace = true
