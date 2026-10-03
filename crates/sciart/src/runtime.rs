@@ -2,6 +2,7 @@
 
 use std::cell::Cell;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::time::Duration;
 
 use rand::seq::SliceRandom;
 use rand::{Rng, SeedableRng};
@@ -42,6 +43,8 @@ pub enum Action {
     /// The `Esc` key: close help when open, otherwise quit (RT-R18).
     Escape,
     Quit,
+    /// `Ctrl-C`: quits like `Quit`; `while` also stops its command (CLI-R14).
+    Interrupt,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -118,6 +121,10 @@ pub struct Runtime {
     /// The `title` setting (CFG-R6, CLI-R7).
     title: bool,
     theme: Theme,
+    /// Wall seconds passed to `tick`/`pass_wall` so far (RT-R23).
+    wall: f64,
+    /// End of the run in the same wall seconds (RT-R23, CLI-R12); `None` = no deadline.
+    deadline: Option<f64>,
 }
 
 const HISTORY_LEN: usize = 64;
@@ -160,6 +167,8 @@ impl Runtime {
             favourites_only: false,
             title: true,
             theme: Theme::default(),
+            wall: 0.0,
+            deadline: None,
         };
         match start {
             Some(i) if i < rt.entries.len() => rt.activate(i, true),
@@ -169,8 +178,57 @@ impl Runtime {
     }
 
     /// Advance by `elapsed` wall seconds, auto-cycling if due, and render a new frame
-    /// (RT-R2, RT-R5). Does nothing while paused.
-    pub fn tick(&mut self, elapsed: f64) {
+    /// (RT-R2, RT-R5). The scene does not move while paused, but the deadline clock always
+    /// does: `Flow::Quit` once the deadline is reached, as the `Quit` action reports
+    /// (RT-R23).
+    pub fn tick(&mut self, elapsed: f64) -> Flow {
+        self.pass_wall(elapsed);
+        self.advance(elapsed);
+        self.flow()
+    }
+
+    /// Count `elapsed` wall seconds towards the deadline without touching the scene
+    /// (RT-R23): for a span the loop keeps out of the simulation clock, such as a wait
+    /// that blocks while paused (RT-R21). `tick` already counts its own `elapsed`.
+    pub fn pass_wall(&mut self, elapsed: f64) -> Flow {
+        if elapsed.is_finite() && elapsed > 0.0 {
+            self.wall += elapsed;
+        }
+        self.flow()
+    }
+
+    /// End the run once `secs` wall seconds have passed (RT-R23, CLI-R12).
+    pub fn with_deadline(mut self, secs: f64) -> Self {
+        self.deadline = Some(secs);
+        self
+    }
+
+    /// `Quit` once the deadline is reached, otherwise `Continue` (RT-R23).
+    pub fn flow(&self) -> Flow {
+        match self.deadline {
+            Some(deadline) if self.wall >= deadline => Flow::Quit,
+            _ => Flow::Continue,
+        }
+    }
+
+    /// Wall seconds left before the deadline, never negative; `None` without one (RT-R23).
+    pub fn time_left(&self) -> Option<f64> {
+        self.deadline
+            .map(|deadline| (deadline - self.wall).max(0.0))
+    }
+
+    /// `wait` shortened to the time left, so a loop that waits for input wakes when the
+    /// deadline arrives even when nothing else would wake it (RT-R23, RT-R21).
+    pub fn cap_wait(&self, wait: Duration) -> Duration {
+        // `try_`: a deadline too far away for a `Duration` caps nothing.
+        match self.time_left().map(Duration::try_from_secs_f64) {
+            Some(Ok(left)) => wait.min(left),
+            _ => wait,
+        }
+    }
+
+    /// The scene's share of `tick` (RT-R2, RT-R5).
+    fn advance(&mut self, elapsed: f64) {
         // The help overlay is a static page: the scene keeps its last frame (RT-R18).
         if self.paused || self.help || self.stage.is_none() {
             return;
@@ -316,8 +374,8 @@ impl Runtime {
                 Flow::Quit
             };
         }
-        // `Quit` still quits while help is open (RT-R18).
-        if action == Action::Quit {
+        // `Quit` still quits while help is open (RT-R18); so does `Ctrl-C`.
+        if matches!(action, Action::Quit | Action::Interrupt) {
             return Flow::Quit;
         }
         if action == Action::ToggleHelp {
@@ -361,7 +419,7 @@ impl Runtime {
             Action::PrevCategory => self.switch_to_category(-1),
             Action::NextCategory => self.switch_to_category(1),
             Action::Shuffle => self.shuffle(),
-            Action::ToggleHelp | Action::Escape | Action::Quit => {}
+            Action::ToggleHelp | Action::Escape | Action::Quit | Action::Interrupt => {}
         }
         Flow::Continue
     }
@@ -752,6 +810,111 @@ mod tests {
         r.tick(100.0); // clamped to MAX_STEPS = 15 (CORE-R10, RT-R11)
         assert_eq!(first_line(&r), "18");
         assert_eq!(r.status(), Status::Running);
+    }
+
+    // ----- M25: run deadline (RT-R23) -----
+
+    #[test]
+    fn rt_r23_without_a_deadline_the_runtime_never_quits_by_itself() {
+        let mut r = rt(&[&OK], 0);
+        for _ in 0..100 {
+            assert_eq!(r.tick(3600.0), Flow::Continue);
+        }
+        assert_eq!(r.time_left(), None);
+        let wait = Duration::from_secs(5);
+        assert_eq!(r.cap_wait(wait), wait);
+    }
+
+    #[test]
+    fn rt_r23_the_deadline_quits_once_its_wall_time_has_passed() {
+        let mut r = rt(&[&OK], 0).with_deadline(1.0);
+        assert_eq!(r.flow(), Flow::Continue);
+        for _ in 0..3 {
+            assert_eq!(r.tick(0.25), Flow::Continue);
+        }
+        assert_eq!(r.tick(0.25), Flow::Quit, "reported like the Quit action");
+        assert_eq!(r.flow(), Flow::Quit, "and it stays reached");
+        assert_eq!(r.tick(0.25), Flow::Quit);
+        assert_eq!(r.time_left(), Some(0.0));
+
+        // A 30 fps loop ends on the frame that crosses the deadline, not a frame later.
+        let mut r = rt(&[&OK], 0).with_deadline(2.0);
+        let frames = (1..).find(|_| r.tick(1.0 / 30.0) == Flow::Quit).unwrap();
+        assert!((60..=61).contains(&frames), "{frames} frames");
+    }
+
+    #[test]
+    fn rt_r23_pause_help_low_rate_and_speed_do_not_stop_the_clock() {
+        let paused = rt(&[&OK], 0).with_deadline(1.0);
+        let help = rt(&[&OK], 0).with_deadline(1.0);
+        let fast = rt(&[&OK], 0).with_deadline(1.0).with_speed(4.0);
+        for (what, mut r, action) in [
+            ("paused", paused, Some(Action::TogglePause)),
+            ("help", help, Some(Action::ToggleHelp)),
+            ("speed 4", fast, None),
+        ] {
+            if let Some(action) = action {
+                r.handle(action);
+            }
+            let shown = first_line(&r);
+            for _ in 0..3 {
+                assert_eq!(r.tick(0.25), Flow::Continue, "{what}");
+            }
+            assert_eq!(r.tick(0.25), Flow::Quit, "{what}");
+            if action.is_some() {
+                assert_eq!(first_line(&r), shown, "{what}: the scene did not move");
+            }
+        }
+        // A stepped-down rate (RT-R17) ticks less often, with longer spans.
+        let mut r = rt(&[&OK], 0).with_deadline(1.0);
+        assert_eq!(r.tick(0.5), Flow::Continue);
+        assert_eq!(r.tick(0.5), Flow::Quit);
+    }
+
+    #[test]
+    fn rt_r23_pass_wall_counts_a_span_the_scene_never_sees() {
+        let mut r = rt(&[&OK], 0).with_deadline(2.0);
+        r.tick(3.0 * SIM_DT);
+        let shown = first_line(&r);
+        assert_eq!(r.pass_wall(1.0), Flow::Continue);
+        assert_eq!(first_line(&r), shown, "no simulation step");
+        assert_eq!(r.pass_wall(1.0), Flow::Quit);
+    }
+
+    #[test]
+    fn rt_r23_time_left_counts_down_and_caps_the_wait() {
+        let mut r = rt(&[&OK], 0).with_deadline(10.0);
+        assert_eq!(r.time_left(), Some(10.0));
+        r.tick(2.5);
+        assert_eq!(r.time_left(), Some(7.5));
+        let second = Duration::from_secs(1);
+        assert_eq!(r.cap_wait(second), second, "far from the deadline");
+        r.pass_wall(7.0);
+        assert_eq!(r.cap_wait(second), Duration::from_millis(500));
+        r.pass_wall(5.0);
+        assert_eq!(r.time_left(), Some(0.0), "never negative");
+        assert_eq!(r.cap_wait(second), Duration::ZERO);
+        // A deadline beyond what a `Duration` holds caps nothing.
+        let r = rt(&[&OK], 0).with_deadline(f64::MAX);
+        assert_eq!(r.cap_wait(second), second);
+    }
+
+    #[test]
+    fn rt_r23_spans_that_are_not_time_are_ignored() {
+        let mut r = rt(&[&OK], 0).with_deadline(1.0);
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -5.0, 0.0] {
+            assert_eq!(r.pass_wall(bad), Flow::Continue, "{bad}");
+        }
+        assert_eq!(r.time_left(), Some(1.0));
+    }
+
+    #[test]
+    fn cli_r14_ctrl_c_quits_like_q_even_with_help_open() {
+        let mut r = rt(&[&OK], 0);
+        assert_eq!(r.handle(Action::Interrupt), Flow::Quit);
+        r.handle(Action::ToggleHelp);
+        assert_eq!(r.handle(Action::Interrupt), Flow::Quit);
+        assert!(r.help(), "Ctrl-C quits without closing help first");
     }
 
     #[test]
