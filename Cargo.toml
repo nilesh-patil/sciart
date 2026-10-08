@@ -29,6 +29,9 @@ sciart-testalloc = { path = "crates/sciart-testalloc" } # dev-only (ADR-0009)
 
 anyhow = "1"
 clap = { version = "4.5", features = ["derive"] }
+# CLI-R17: `sciart completions` and `sciart man`, generated from the clap definition.
+clap_complete = "4.5"
+clap_mangen = "0.2"
 crossterm = "0.29"
 enigo = "0.6"
 rand = "0.9"

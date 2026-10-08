@@ -30,6 +30,8 @@ sciart-keepawake.workspace = true
 sciart-capture = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
+clap_complete.workspace = true
+clap_mangen.workspace = true
 crossterm.workspace = true
 rand.workspace = true
 rand_chacha.workspace = true

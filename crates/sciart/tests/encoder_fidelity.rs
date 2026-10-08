@@ -220,6 +220,7 @@ fn check(entry: &Entry, run: &Run) {
                 low_power: false,
                 paused: frame % 2 == 0,
                 quarantined: 0,
+                ends: None,
             };
             hud.render_into(area, &mut cur, &mut hud_text);
         }
