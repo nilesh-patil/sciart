@@ -249,5 +249,11 @@ Design: [docs/design/M18-orbital-molecules.md](design/M18-orbital-molecules.md) 
 - [x] Local `--no-ff` merge into main
 - [ ] M18 follow-ups: see "Follow-ups" in docs/design/M18-orbital-molecules.md
 
+## M19 — galaxy_collision star dust ✅
+GEN-R25 (list + `Look (M19)` in galaxy_collision), GAL-A5..A8. User picked: star dust + afterglow tails, two-arm grand-design disks.
+- [x] Spec first: GEN-R25 list, `Look (M19)` + GAL-A5..A8
+- [x] Failing tests GAL-A5..A8, then the redesign (4× stars as braille dust; afterglow threads only for tidal material beyond 1.15 Rd, after a first all-star version filled the disks); snapshots re-recorded and reviewed; art_metrics row re-seeded after review
+- [x] Budgets: worst frame 0.26 ms at 200×50 and 0.88 ms at 500×150 (`rs-worst`); 8.1 KB and 829 changed cells per frame at 200×50 (`rs-cost`)
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).

@@ -25,6 +25,7 @@ pub const GEN_R25: &[&str] = &[
     "planetary_nebula",
     "cosmic_web",
     "hp_protein_folding",
+    "galaxy_collision",
 ];
 
 /// Whether GEN-R25 lists `scene`.

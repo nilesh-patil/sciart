@@ -14,11 +14,12 @@
 use std::f64::consts::{PI, TAU};
 
 use rand::Rng;
-use sciart_core::draw;
+
 use sciart_core::geom::ASPECT;
 use sciart_core::geom::v3::{add, cross, dot, norm, scale, sub};
 use sciart_core::particles::{gaussian, plot};
 use sciart_core::prelude::*;
+use sciart_core::raster::Dots;
 
 pub static META: Meta = Meta {
     name: "galaxy_collision",
@@ -45,9 +46,13 @@ const E: f64 = 0.63;
 const PERIOD: f64 = 24.0;
 const CYCLE: f64 = 40.0;
 const MAX_SUB_DT: f64 = 1.0 / 120.0;
-/// Test stars per cell and their cap.
-const STAR_DENSITY: f64 = 0.04;
-const MAX_STARS: usize = 900;
+/// Test stars per cell and their cap: 4× M11's, so the arms and tails read as dust
+/// (GAL-A6).
+const STAR_DENSITY: f64 = 0.16;
+const MAX_STARS: usize = 3600;
+/// Arm winding (`φ = arm − ARM_WIND·ln(r/R_MIN)`, pitch ≈ 20°) and angular scatter.
+const ARM_WIND: f64 = 2.7;
+const ARM_SCATTER: f64 = 0.25;
 /// Inner edge of the stellar disks (the bulge is represented by the core glyph).
 const R_MIN: f64 = 0.1 * RD;
 /// Camera: easing time (s), room kept around each core for its disk, and how far
@@ -56,19 +61,26 @@ const CAMERA_TAU: f64 = 0.8;
 const DISK_ROOM: f64 = 1.5 * RD;
 const TAIL_ROOM: f64 = 2.5 * RD;
 
-/// Splat weight of a star in its own cell (neighbours get 1).
-const STAR_W: u16 = 4;
-const DENSITY: [Glyph; 5] = [
-    Glyph::new('∙', '.'),
-    Glyph::ascii(':'),
-    Glyph::new('∗', '+'),
-    Glyph::new('✶', '*'),
-    Glyph::new('●', '@'),
-];
-const HALO: Glyph = Glyph::new('·', '.');
+/// Afterglow (GAL-A7): positions kept per star, sampled every `TRAIL_DT` s of simulated
+/// time, so a trail spans ≤ `TRAIL_K · TRAIL_DT` = 0.32 s of path.
+const TRAIL_K: usize = 8;
+const TRAIL_DT: f64 = 0.04;
+/// Stars farther than this from their host core are tidal material and draw threads.
+const TIDAL_R: f64 = 1.15 * RD;
+/// Longest thread segment drawn (dots); longer ones are a restart, not motion.
+const MAX_SEG_DOTS: f64 = 24.0;
+/// Level of a star's own dot; its trail stays below it.
+const STAR_LEVEL: u8 = 255;
 const CORE: Glyph = Glyph::new('◉', '@');
-const SKY: Glyph = Glyph::new('·', '.');
+const SKY_LEVEL: u8 = 60;
 const SKY_STARS: usize = 70;
+
+/// Level of the trail segment ending at the sample `age` steps back (0 = newest):
+/// falls linearly from 170 to ≈ 56, below `STAR_LEVEL`.
+pub(crate) fn trail_level(age: usize) -> u8 {
+    let left = TRAIL_K.saturating_sub(age) as f64 / TRAIL_K as f64;
+    (40.0 + 130.0 * left) as u8
+}
 
 pub(crate) use sciart_core::geom::v3::V3;
 
@@ -103,6 +115,9 @@ pub(crate) struct Star {
     body: Body,
     /// 0 = galaxy 1 (`Cold`), 1 = galaxy 2 (`Hot`).
     gal: u8,
+    /// Recent positions (model space, ring indexed by `Encounter::head`), so the
+    /// afterglow follows the camera instead of smearing with it.
+    hist: [[f32; 3]; TRAIL_K],
 }
 
 /// Total energy of the softened core pair (GAL-A1).
@@ -158,6 +173,14 @@ pub(crate) struct Encounter {
     stars: ParticlePool<Star>,
     /// Real seconds since this encounter began.
     t: f64,
+    /// Disk spin axes (GAL-A5 reads the arms in their planes).
+    #[cfg_attr(not(test), allow(dead_code))]
+    spins: [V3; 2],
+    /// Trail ring: newest sample index, samples recorded (≤ `TRAIL_K`), and seconds
+    /// since the newest one.
+    head: usize,
+    samples: usize,
+    since: f64,
 }
 
 impl Encounter {
@@ -199,7 +222,7 @@ impl Encounter {
             // under differential rotation, as real material arms would.
             let r = R_MIN + (RD - R_MIN) * rng.random_range(0.0f64..1.0).sqrt();
             let arm = if rng.random_bool(0.5) { 0.0 } else { PI };
-            let phi = arm - 2.7 * (r / R_MIN).ln() + gaussian(rng, 0.0, 0.35);
+            let phi = arm - ARM_WIND * (r / R_MIN).ln() + gaussian(rng, 0.0, ARM_SCATTER);
             let (c, s) = (phi.cos_det(), phi.sin_det());
             let radial = add(scale(e1, c), scale(e2, s));
             let tangent = add(scale(e1, -s), scale(e2, c));
@@ -213,6 +236,7 @@ impl Encounter {
                     acc: [0.0; 3],
                 },
                 gal: g as u8,
+                hist: [[0.0; 3]; TRAIL_K],
             });
         }
         update_accels(&mut cores, &mut stars);
@@ -220,6 +244,30 @@ impl Encounter {
             cores,
             stars,
             t: 0.0,
+            spins,
+            head: 0,
+            samples: 0,
+            since: 0.0,
+        }
+    }
+
+    /// Push every star's position onto its trail ring.
+    fn record(&mut self) {
+        self.head = (self.head + 1) % TRAIL_K;
+        self.samples = (self.samples + 1).min(TRAIL_K);
+        let head = self.head;
+        for s in self.stars.iter_mut() {
+            s.hist[head] = s.body.pos.map(|c| c as f32);
+        }
+    }
+
+    /// Simulated seconds back to the oldest trail sample (GAL-A7).
+    #[cfg(test)]
+    fn trail_span(&self) -> f64 {
+        if self.samples == 0 {
+            0.0
+        } else {
+            self.since + (self.samples - 1) as f64 * TRAIL_DT
         }
     }
 
@@ -247,6 +295,12 @@ impl Encounter {
             self.stars.iter_mut().for_each(|s| kick(&mut s.body));
         }
         self.t += dt;
+        // Trail samples follow simulated time, not draw cadence (GEN-R20).
+        self.since += dt;
+        while self.since >= TRAIL_DT {
+            self.since -= TRAIL_DT;
+            self.record();
+        }
     }
 
     #[cfg(test)]
@@ -297,8 +351,9 @@ pub struct GalaxyCollision {
     /// unit, both eased towards `target_frame`.
     centre: (f64, f64),
     zoom: f64,
-    /// Per-cell star counts of each galaxy, refreshed after every update.
-    counts: [Vec<u16>; 2],
+    /// Star dust and afterglow threads, rasterised in `prepare` when `dirty` (GEN-R20).
+    dots: Dots,
+    dirty: bool,
     /// Distant field stars, normalized `[0, 1)²` (they do not zoom).
     sky: Vec<(f64, f64)>,
 }
@@ -311,7 +366,8 @@ impl Default for GalaxyCollision {
             size: Size::new(1, 1),
             centre: (0.0, 0.0),
             zoom: 1.0,
-            counts: [Vec::new(), Vec::new()],
+            dots: Dots::default(),
+            dirty: true,
             sky: Vec::new(),
         }
     }
@@ -365,37 +421,60 @@ impl GalaxyCollision {
         )
     }
 
-    /// Bin every star into its screen cell (render then only reads the counts).
-    fn splat(&mut self) {
-        let (w, h) = (
-            usize::from(self.size.width()),
-            usize::from(self.size.height()),
-        );
-        for c in &mut self.counts {
-            c.clear();
-            c.resize(w * h, 0);
+    /// Rasterise the sky, the afterglow threads and the stars into `dots` through the
+    /// current camera (GAL-A7, GAL-A8).
+    fn rasterise(&mut self) {
+        self.dots.clear();
+        let ds = self.dots.dot_size();
+        let (dw, dh) = (f64::from(ds.width()), f64::from(ds.height()));
+        for &(u, v) in &self.sky {
+            self.dots
+                .plot(u * dw, v * dh, Ink::new(Role::Star, SKY_LEVEL));
         }
         let Some(sim) = &self.sim else { return };
-        let (wf, hf) = (w as f64, h as f64);
+        let fade = self.fade();
+        let (view, centre, zoom) = (self.view, self.centre, self.zoom);
+        let (hw, hh) = (
+            f64::from(self.size.width()) / 2.0,
+            f64::from(self.size.height()) / 2.0,
+        );
+        // `to_cell` then `Dots::from_cells`, with the camera copied out of `self`.
+        let to_dot = |p: V3| {
+            let (x, y) = view.project(p);
+            Dots::from_cells(
+                hw + (x - centre.0) * zoom * ASPECT,
+                hh - (y - centre.1) * zoom,
+            )
+        };
+        let levels: [u8; TRAIL_K] =
+            std::array::from_fn(|age| (f64::from(trail_level(age)) * fade) as u8);
+        let star_level = (f64::from(STAR_LEVEL) * fade) as u8;
         for s in &sim.stars {
-            let (x, y) = self.to_cell(s.body.pos);
-            let (x, y) = (x.round(), y.round());
-            let counts = &mut self.counts[usize::from(s.gal)];
-            // A star lights its own cell (weight 4) and haloes its 4 neighbours
-            // (weight 1): sparse star budgets then still read as glowing disks and streams.
-            for (dx, dy, wgt) in [
-                (0.0, 0.0, STAR_W),
-                (-1.0, 0.0, 1),
-                (1.0, 0.0, 1),
-                (0.0, -1.0, 1),
-                (0.0, 1.0, 1),
-            ] {
-                let (x, y) = (x + dx, y + dy);
-                if (0.0..wf).contains(&x) && (0.0..hf).contains(&y) {
-                    let c = &mut counts[y as usize * w + x as usize];
-                    *c = c.saturating_add(wgt);
-                }
+            // Only tidal material trails; disk stars stay dust, keeping arms and gaps.
+            let host = sim.cores[usize::from(s.gal)].pos;
+            let d = sub(s.body.pos, host);
+            if dot(d, d) <= TIDAL_R * TIDAL_R {
+                continue;
             }
+            let role = if s.gal == 0 { Role::Cold } else { Role::Hot };
+            let mut a = to_dot(s.body.pos);
+            // Newest sample first; each segment dims with the age of its far end.
+            for (age, &level) in levels.iter().enumerate().take(sim.samples) {
+                let h = s.hist[(sim.head + TRAIL_K - age) % TRAIL_K];
+                let b = to_dot(h.map(f64::from));
+                let (dx, dy) = (b.0 - a.0, b.1 - a.1);
+                if dx * dx + dy * dy > MAX_SEG_DOTS * MAX_SEG_DOTS {
+                    break;
+                }
+                self.dots.line(a.0, a.1, b.0, b.1, Ink::new(role, level));
+                a = b;
+            }
+        }
+        // Stars last: `Dots` keeps the strongest ink per cell, so a star outshines trails.
+        for s in &sim.stars {
+            let role = if s.gal == 0 { Role::Cold } else { Role::Hot };
+            let (x, y) = to_dot(s.body.pos);
+            self.dots.plot(x, y, Ink::new(role, star_level));
         }
     }
 
@@ -431,7 +510,8 @@ impl Generator for GalaxyCollision {
             _ => self.restart(ctx),
         }
         self.snap_camera();
-        self.splat();
+        self.dots.resize(size);
+        self.dirty = true;
     }
 
     fn update(&mut self, dt: f64, ctx: &mut Ctx) {
@@ -448,43 +528,20 @@ impl Generator for GalaxyCollision {
             self.centre.1 += (centre.1 - self.centre.1) * k;
             self.zoom = (self.zoom.ln() + (zoom.ln() - self.zoom.ln()) * k).exp();
         }
-        self.splat();
+        self.dirty = true;
+    }
+
+    fn prepare(&mut self) {
+        if std::mem::take(&mut self.dirty) {
+            self.rasterise();
+        }
     }
 
     fn render(&self, canvas: &mut Canvas) {
-        let w = usize::from(self.size.width());
         if canvas.size() != self.size {
             return;
         }
-        let (wf, hf) = (f64::from(self.size.width()), f64::from(self.size.height()));
-        for &(u, v) in &self.sky {
-            plot(canvas, u * wf, v * hf, SKY, Ink::new(Role::Star, 60));
-        }
-        let fade = self.fade();
-        // Weight at which the brightest glyph is reached (≈ 6 stars in one cell).
-        let full = f64::from(6 * STAR_W).ln();
-        for (i, (&a, &b)) in self.counts[0].iter().zip(&self.counts[1]).enumerate() {
-            let n = a.saturating_add(b);
-            if n == 0 {
-                continue;
-            }
-            let role = if a >= b { Role::Cold } else { Role::Hot };
-            let (glyph, level) = if n < STAR_W {
-                // Halo only.
-                (HALO, 40.0 + 12.0 * f64::from(n))
-            } else {
-                let v =
-                    (f64::from(n).ln() - f64::from(STAR_W).ln()) / (full - f64::from(STAR_W).ln());
-                let v = v.clamp(0.0, 1.0);
-                (draw::ramp(v, &DENSITY), 110.0 + 145.0 * v)
-            };
-            canvas.put(
-                (i % w) as i32,
-                (i / w) as i32,
-                glyph,
-                Ink::new(role, (level * fade) as u8),
-            );
-        }
+        self.dots.blit(canvas);
         if let Some(sim) = &self.sim {
             for c in &sim.cores {
                 let (x, y) = self.to_cell(c.pos);
@@ -618,6 +675,107 @@ mod tests {
         assert!(sim.t < 0.05, "t={} after {steps} steps", sim.t);
         assert!((sim.separation() - ra).abs() < 1e-3);
         assert_eq!(sim.stars.len(), star_count(size));
+    }
+
+    #[test]
+    fn gal_a5_disks_start_as_two_arm_spirals() {
+        let sim = encounter(1200, 11);
+        for g in 0..2u8 {
+            let (e1, e2) = disk_basis(sim.spins[usize::from(g)]);
+            let host = sim.cores[usize::from(g)].pos;
+            let (mut re, mut im, mut n) = (0.0, 0.0, 0.0);
+            for s in sim.stars.iter().filter(|s| s.gal == g) {
+                let d = sub(s.body.pos, host);
+                let (x, y) = (dot(d, e1), dot(d, e2));
+                let r = (x * x + y * y).sqrt();
+                // De-rotate by the arm phase: two arms collapse onto θ' ∈ {0, π}.
+                let th = y.atan2(x) + ARM_WIND * (r / R_MIN).ln();
+                let (s2, c2) = (2.0 * th).sin_cos_det();
+                (re, im, n) = (re + c2, im + s2, n + 1.0);
+            }
+            let amp = (re * re + im * im).sqrt() / n;
+            assert!(amp >= 0.5, "galaxy {g}: m=2 amplitude {amp:.2}");
+        }
+    }
+
+    #[test]
+    fn gal_a6_star_budget_is_four_times_m11() {
+        assert_eq!(star_count(Size::new(200, 50)), 1600);
+        assert_eq!(star_count(Size::new(500, 150)), 3600);
+        assert_eq!(star_count(Size::new(10, 10)), 16);
+    }
+
+    fn run(size: Size, secs: f64, seed: u64) -> (GalaxyCollision, Canvas) {
+        let mut ctx = Ctx::new(seed, size);
+        let mut g = GalaxyCollision::default();
+        g.resize(size, &mut ctx);
+        for _ in 0..(secs * 60.0).round() as usize {
+            g.update(SIM_DT, &mut ctx);
+        }
+        g.prepare();
+        let mut canvas = Canvas::new(size, GlyphMode::Unicode);
+        g.render(&mut canvas);
+        (g, canvas)
+    }
+
+    #[test]
+    fn gal_a7_moving_stars_leave_fading_trails() {
+        for k in 1..TRAIL_K {
+            assert!(trail_level(k) < trail_level(k - 1), "age {k}");
+        }
+        assert!(trail_level(0) < STAR_LEVEL);
+        assert!(TRAIL_DT * TRAIL_K as f64 <= 0.32 + 1e-12);
+        // (lit dots, the stars' and sky's own dots) of a frame after `secs`.
+        let counts = |secs: f64| {
+            let (g, _) = run(Size::new(200, 50), secs, 12);
+            let span = g.sim.as_ref().unwrap().trail_span();
+            assert!(span <= 0.32 + 1e-9, "span {span}");
+            let ds = g.dots.dot_size();
+            let (dw, dh) = (f64::from(ds.width()), f64::from(ds.height()));
+            let mut own = std::collections::HashSet::new();
+            for &(u, v) in &g.sky {
+                own.insert(((u * dw).round() as i32, (v * dh).round() as i32));
+            }
+            for s in &g.sim.as_ref().unwrap().stars {
+                let (x, y) = g.to_cell(s.body.pos);
+                let (dx, dy) = Dots::from_cells(x, y);
+                own.insert((dx.round() as i32, dy.round() as i32));
+            }
+            let lit = (0..i32::from(ds.height()))
+                .flat_map(|y| (0..i32::from(ds.width())).map(move |x| (x, y)))
+                .filter(|&(x, y)| g.dots.is_lit(x, y))
+                .count();
+            (lit as f64, own.len() as f64)
+        };
+        // Before the encounter only tidal material would trail: there is none yet.
+        let (lit, own) = counts(3.0);
+        assert!(lit <= 1.05 * own, "t=3: {lit} lit vs {own} own dots");
+        // After pericentre the tails and bridges stream.
+        let (lit, own) = counts(16.0);
+        assert!(lit >= 1.3 * own, "t=16: {lit} lit vs {own} own dots");
+    }
+
+    #[test]
+    fn gal_a8_stars_draw_as_braille_dust() {
+        let size = Size::new(200, 50);
+        for t in [5.0, 20.0] {
+            let (_, canvas) = run(size, t, 13);
+            let (mut lit, mut braille, mut blocks) = (0u32, 0u32, 0u32);
+            for y in 0..49 {
+                for x in 0..200 {
+                    let ch = canvas.get(x, y).unwrap().ch;
+                    if ch == ' ' || ch == '\u{2800}' {
+                        continue;
+                    }
+                    lit += 1;
+                    braille += u32::from(('\u{2801}'..='\u{28FF}').contains(&ch));
+                    blocks += u32::from(matches!(ch, '▀' | '▄' | '█'));
+                }
+            }
+            assert_eq!(blocks, 0, "t={t}");
+            let share = f64::from(braille) / f64::from(lit.max(1));
+            assert!(share >= 0.9, "t={t}: braille share {share:.3} of {lit}");
+        }
     }
 
     #[test]
