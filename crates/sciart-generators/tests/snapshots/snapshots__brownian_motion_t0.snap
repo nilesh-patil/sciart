@@ -2,25 +2,25 @@
 source: crates/sciart-generators/tests/snapshots.rs
 expression: frame
 ---
-                                                              o                 
-                                  o                                             
-                                                     o                          
-                       .                                                    o   
-                                    o        o                                  
-                .                     .                      .                  
-   o                                                                            
-            .                                           o                       
+                                                              .                 
+                                  .                                             
+                                                     .                          
+                       .                                                    .   
+                                    .        .                                  
+                :                     .                      .                  
+   .                                                                            
+            .                                           .                       
  .                                                                              
-                              o                                                 
-     o                       .        OOOO                                 .    
-   o                                 O@@@@O                      .              
-                                  o   OOOO                                      
+                              .                                                 
+     .                       .         :..                                 .    
+   .                                 .+##:                       .              
+                                  .    .++                                      
                                                                             .   
-  o                                             .                               
-                                                     o   o                      
+  .                                             .                               
+                                                     .   .                      
                                                                     .     .     
                       .                         .     .                         
-                                               .             o    .             
+                                               .             .    .             
                                                     .                           
                                                                                 
                                               .  .                              
