@@ -249,17 +249,29 @@ Design: [docs/design/M18-orbital-molecules.md](design/M18-orbital-molecules.md) 
 - [x] Local `--no-ff` merge into main
 - [ ] M18 follow-ups: see "Follow-ups" in docs/design/M18-orbital-molecules.md
 
+## Aurora theme (post-M18) ✅
+Design: [docs/design/M19-M20.md](design/M19-M20.md) · [ADR-0022](adr/0022-aurora-theme.md) · RND-R16.
+- [x] Theme options (user picked: 4th theme, astro stays default; oxygen green/red pair, N₂⁺ violet accent; curtain Seq)
+- [x] Spec first (RND-R16, SPEC-005, config example), failing tests, `Theme::Aurora`, `--theme aurora` / `theme = "aurora"`
+- [x] Verified scenes unchanged in astro; local `--no-ff` merge into main
+- [ ] Follow-up: a colour-blind-safe variant (see docs/design/M19-M20.md)
+
 ## M19 — galaxy_collision star dust ✅
+Design: [docs/design/M19-M20.md](design/M19-M20.md).
 GEN-R25 (list + `Look (M19)` in galaxy_collision), GAL-A5..A8. User picked: star dust + afterglow tails, two-arm grand-design disks.
 - [x] Spec first: GEN-R25 list, `Look (M19)` + GAL-A5..A8
 - [x] Failing tests GAL-A5..A8, then the redesign (4× stars as braille dust; afterglow threads only for tidal material beyond 1.15 Rd, after a first all-star version filled the disks); snapshots re-recorded and reviewed; art_metrics row re-seeded after review
 - [x] Budgets: worst frame 0.26 ms at 200×50 and 0.88 ms at 500×150 (`rs-worst`); 8.1 KB and 829 changed cells per frame at 200×50 (`rs-cost`)
 
 ## M20 — Planets, Brownian motion and Nerve spike in the new style ✅
+Design: [docs/design/M19-M20.md](design/M19-M20.md).
 GEN-R25 list + `Look (M20)` in solar_system, brownian_motion, action_potential; SOL-A4..A6, BRO-A4..A6, AP-A10..A13. User picked: speed trails (planets), grain + rainbow walk thread with speed-coloured molecules ("colourful"), membrane threads + ion dust with a better-looking neuron.
 - [x] Visual options per scene; spec first
 - [x] solar_system, brownian_motion, action_potential redesigns (TDD, one implementer each; one review round each: bigger planet beads and a dimmer belt, a compact grain, lower ion-dust density so the soma never reads as a solid disc)
 - [x] Lead review, snapshots re-recorded and reviewed, art_metrics rows re-seeded (action_potential edge weight 4.5 → 1.5, darkness 0.92 → 0.98); worst frames ≤ 0.15 ms at 200×50 and ≤ 0.48 ms at 500×150
+- [x] Results (gallery 0.544 ms, 7.4 KB, 484 changed cells per frame), samples at M19/M20, the contributor guide
+- [x] Local `--no-ff` merges of M19 and M20 into main
+- [ ] M19/M20 follow-ups: see "Follow-ups" in docs/design/M19-M20.md
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
