@@ -106,7 +106,7 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
 - `Ink { role: Role, level: u8 }` — semantic role (Star, Planet, Particle, Wave, Accent,
   Text, Hot, Cold, Dim, …) and intensity 0..=255.
 - `Theme` — `fn color(&self, ink: Ink, x: u16, y: u16) -> Rgb`; built-ins `astro`
-  (default), `rainbow` (stable per-cell hue), `mono`.
+  (default), `rainbow` (stable per-cell hue), `mono`, `aurora` (RND-R16).
 - Config file `~/.config/sciart/config.toml` — see SPEC-005.
 
 ## Feature Specifications
