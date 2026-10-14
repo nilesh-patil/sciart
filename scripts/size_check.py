@@ -30,9 +30,10 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# RT-R22 budgets (M25, ADR-0035: measured 3 213 264 bytes and 93 crates).
-BINARY_BUDGET = 3_407_872  # bytes (3.25 MiB), aarch64-apple-darwin, release profile
-CRATE_BUDGET = 93  # crates in `cargo tree -p sciart -e normal`
+# RT-R22 budgets (M25, ADR-0035: measured 3 213 264 bytes and 93 crates; with the CLI-R17
+# completion and manual generators, 3 600 256 bytes and 96 crates).
+BINARY_BUDGET = 3_604_480  # bytes (55 x 64 KiB), aarch64-apple-darwin, release profile
+CRATE_BUDGET = 96  # crates in `cargo tree -p sciart -e normal`
 
 TRIMMED = ("clap", "ratatui", "toml")
 
