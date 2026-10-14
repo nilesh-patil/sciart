@@ -1512,3 +1512,29 @@ fn cli_r14_rt_r20_sighup_after_q_kills_the_command_and_leaves_the_terminal_alone
     assert_no_spool_left(spool_dir.path());
 }
 
+/// RT-R9: Ctrl-C in plain `sim` and `run` quits like `q` (it travels as its own action so
+/// `while` can tell it apart, CLI-R14): status 0 and the terminal restored.
+#[test]
+fn rt_r9_cli_r14_ctrl_c_in_sim_and_run_exits_0_with_the_terminal_restored() {
+    let run = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
+    let sim = [
+        "sim",
+        "--only",
+        "starfield",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    for args in [&run[..], &sim[..]] {
+        let mut s = Session::start(args);
+        s.wait_for("the art", lit);
+        s.press("\x03");
+        let (status, raw) = s.wait_exit();
+        assert!(status.success(), "{args:?}: {status:?}");
+        assert_eq!(count(&raw, ALT_ENTER), 1, "{args:?}");
+        assert_eq!(count(&raw, ALT_LEAVE), 1, "{args:?}");
+        let tail = &raw[restored_at(&raw).saturating_sub(64)..];
+        assert!(count(tail, b"\x1b[?25h") >= 1, "{args:?}: cursor shown");
+    }
+}
