@@ -97,11 +97,21 @@ Scripting:
   sciart while -- make -j8          show the art while `make` runs, then print its
                                     output and exit with its status
 
-`while` gives the command no terminal: its stdin is empty, and its stdout and stderr are
-held in temporary files and printed, in that order, once the art has closed. Programs that
-need a terminal (editors, pagers, password prompts) are not supported. `q` closes the art
-early and keeps waiting for the command; Ctrl-C stops it and exits 130; a deadline set with
---for stops it and exits 124; a command that cannot be started exits 127.";
+How `while` runs its command: `sciart while --help` or `sciart man while`.";
+
+/// The `while` page (CLI-R14): `sciart while --help` and `sciart man while`.
+const WHILE_LONG_HELP: &str = "\
+The command gets no terminal: its stdin is empty, and its stdout and stderr are held in
+temporary files and printed, in that order, once the art has closed, however sciart ends.
+Programs that need a terminal (editors, pagers, password prompts) are not supported. The
+held output is not capped: it takes as much temporary disk space as the command writes
+until it is printed.
+
+`q` closes the art early and keeps waiting for the command, printing its output as it
+comes. Ctrl-C in the art stops the command and exits 130; a deadline set with --for stops
+it and exits 124; SIGTERM or SIGHUP stop it and exit 143 or 129; a command that cannot be
+started exits 127. Otherwise sciart exits with the command's status (128 + n when signal n
+ended it). A process the command started itself is not stopped with it.";
 
 #[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum Command {
@@ -124,6 +134,7 @@ pub enum Command {
     /// Render a scene to GIF, PNG frames or an asciicast (CLI-R8; needs the `record` feature)
     Record(RecordArgs),
     /// Show the art while a command runs, then print its output and exit with its status
+    #[command(after_long_help = WHILE_LONG_HELP)]
     While(WhileArgs),
     /// Print a shell completion script
     Completions {
@@ -131,9 +142,25 @@ pub enum Command {
         #[arg(value_enum)]
         shell: clap_complete::Shell,
     },
-    /// Print the manual page (roff)
-    Man,
+    /// Print the manual page (roff) of sciart or of one subcommand
+    Man {
+        /// Subcommand whose page to print [default: sciart's own]
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(MAN_PAGES))]
+        subcommand: Option<String>,
+    },
 }
+
+/// CLI-R17: the subcommands `sciart man` prints a page for: every one the manual's
+/// SUBCOMMANDS section refers to, checked against the parser by a test.
+const MAN_PAGES: [&str; 7] = [
+    "sim",
+    "run",
+    "list",
+    "record",
+    "while",
+    "completions",
+    "man",
+];
 
 /// CLI-R14: `while`'s command line, everything after `--`.
 #[derive(Debug, Clone, PartialEq, Args)]
@@ -534,7 +561,7 @@ pub fn select(
             }
         }
         // They show no scene (CLI-R17).
-        Command::Completions { .. } | Command::Man => Ok(Vec::new()),
+        Command::Completions { .. } | Command::Man { .. } => Ok(Vec::new()),
         Command::List { .. } => {
             // `disabled` only filters `sim` (CFG-R4); list honours `--category` only.
             let entries: Vec<_> = registry().iter().filter(|e| filters.matches(e)).collect();
@@ -728,10 +755,27 @@ pub fn completions(shell: clap_complete::Shell) -> Vec<u8> {
     out
 }
 
-/// CLI-R17: the roff manual page, generated from the parser's own definition.
-pub fn man_page() -> io::Result<Vec<u8>> {
+/// The parser's definition as the manual describes it: built, so subcommands carry the
+/// global flags and their `sciart-<name>` page names, and without clap's implicit `help`
+/// subcommand, which has no page (as `clap_mangen::generate_to` does).
+fn manual_command() -> clap::Command {
+    let mut command = <Cli as clap::CommandFactory>::command().disable_help_subcommand(true);
+    command.build();
+    command
+}
+
+/// CLI-R17: the roff manual page of sciart, or of `subcommand`, generated from the parser's
+/// own definition. The parser admits only [`MAN_PAGES`]; anything else is `InvalidInput`.
+pub fn man_page(subcommand: Option<&str>) -> io::Result<Vec<u8>> {
+    let root = manual_command();
+    let command = match subcommand {
+        None => root,
+        Some(name) => root.find_subcommand(name).cloned().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("no page for '{name}'"))
+        })?,
+    };
     let mut out = Vec::new();
-    clap_mangen::Man::new(<Cli as clap::CommandFactory>::command()).render(&mut out)?;
+    clap_mangen::Man::new(command).render(&mut out)?;
     Ok(out)
 }
 
@@ -1190,20 +1234,74 @@ mod tests {
         assert!(!names.contains(&"starfield"), "config `disabled` applies");
     }
 
+    /// The parser's own subcommands and global long flags, which CLI-R17's structure checks
+    /// hold every completion script and manual page to.
+    fn declared() -> (Vec<String>, Vec<String>) {
+        let command = <Cli as clap::CommandFactory>::command();
+        let subcommands: Vec<String> = command
+            .get_subcommands()
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        let globals: Vec<String> = command
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .filter_map(|a| a.get_long())
+            .map(str::to_owned)
+            .collect();
+        assert!(subcommands.iter().any(|s| s == "while"), "{subcommands:?}");
+        assert!(globals.iter().any(|g| g == "for"), "{globals:?}");
+        (subcommands, globals)
+    }
+
+    /// Whether `script` offers subcommand `name` and flag `--long`, in each shell's own
+    /// syntax, so a word in a description or a shell keyword (`while`) never counts.
+    fn offers(shell: clap_complete::Shell, script: &str, name: &str, long: &str) -> (bool, bool) {
+        use clap_complete::Shell;
+        let tokens: Vec<&str> = script
+            .split(|c: char| c.is_whitespace() || c == '"')
+            .collect();
+        match shell {
+            Shell::Bash => (
+                script.contains(&format!("sciart,{name})")),
+                tokens.contains(&format!("--{long}").as_str()),
+            ),
+            // A repeatable flag is spelt `'*--only=[…]'`.
+            Shell::Zsh => (
+                script.contains(&format!("'{name}:")),
+                ["'", "'*"].iter().any(|lead| {
+                    script.contains(&format!("{lead}--{long}=["))
+                        || script.contains(&format!("{lead}--{long}["))
+                }),
+            ),
+            Shell::Fish => (
+                script.contains(&format!("-a \"{name}\"")),
+                tokens.windows(2).any(|w| w == ["-l", long]),
+            ),
+            Shell::Elvish => (
+                script.contains(&format!("cand {name} '")),
+                script.contains(&format!("cand --{long} '")),
+            ),
+            Shell::PowerShell => (
+                script.contains(&format!("::new('{name}', '{name}'")),
+                script.contains(&format!("::new('--{long}', '--{long}'")),
+            ),
+            _ => panic!("no structure check for {shell}"),
+        }
+    }
+
     #[test]
-    fn cli_r17_completions_cover_every_shell_and_subcommand() {
+    fn cli_r17_every_completion_script_offers_every_subcommand_and_global_flag() {
+        let (subcommands, globals) = declared();
         for shell in clap_complete::Shell::value_variants() {
             let script = String::from_utf8(completions(*shell)).expect("UTF-8");
-            for word in [
-                "sciart",
-                "while",
-                "record",
-                "completions",
-                "man",
-                "keep-awake",
-            ] {
-                assert!(script.contains(word), "{shell}: {word}");
+            for name in &subcommands {
+                assert!(offers(*shell, &script, name, "-").0, "{shell}: {name}");
             }
+            for long in &globals {
+                assert!(offers(*shell, &script, "-", long).1, "{shell}: --{long}");
+            }
+            // The checks are not vacuous: an absent name or flag is not found.
+            assert_eq!(offers(*shell, &script, "nosuch", "nosuch"), (false, false));
         }
         for name in ["bash", "zsh", "fish", "elvish", "powershell"] {
             assert!(parse(&["completions", name]).is_ok(), "completions {name}");
@@ -1212,21 +1310,138 @@ mod tests {
         assert_eq!(parse(&["completions"]).unwrap_err().exit_code(), 2);
     }
 
+    /// Every page `sciart man` prints, unescaped (`\-` is roff's hyphen), with its `.TH` title.
+    fn manual() -> Vec<(String, String)> {
+        std::iter::once(None)
+            .chain(MAN_PAGES.iter().copied().map(Some))
+            .map(|page| {
+                let roff = String::from_utf8(man_page(page).expect("render")).expect("UTF-8");
+                let text = roff.replace("\\-", "-");
+                let title = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix(".TH "))
+                    .and_then(|l| l.split_whitespace().next())
+                    .unwrap_or_else(|| panic!("{page:?}: no .TH"))
+                    .to_owned();
+                (title, text)
+            })
+            .collect()
+    }
+
+    /// The manual pages a page refers to: every `name(1)`.
+    fn references(text: &str) -> Vec<&str> {
+        text.match_indices("(1)")
+            .map(|(at, _)| {
+                let before = &text[..at];
+                let start = before
+                    .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .map_or(0, |i| i + 1);
+                &before[start..]
+            })
+            .collect()
+    }
+
     #[test]
-    fn cli_r17_man_page_is_roff_from_the_same_definition() {
-        let page = String::from_utf8(man_page().expect("render")).expect("UTF-8");
-        assert!(page.contains(".TH sciart"), "{page}");
-        for word in [
-            "while",
-            "completions",
-            "record",
-            "list",
-            "DURATION",
-            "no terminal",
-        ] {
-            assert!(page.contains(word), "man page mentions {word}");
+    fn cli_r17_the_manual_has_a_page_per_subcommand_and_every_global_flag() {
+        let (subcommands, globals) = declared();
+        let mut pages: Vec<&str> = MAN_PAGES.to_vec();
+        pages.sort_unstable();
+        let mut want: Vec<&str> = subcommands.iter().map(String::as_str).collect();
+        want.sort_unstable();
+        assert_eq!(pages, want, "`sciart man` covers exactly the subcommands");
+
+        let manual = manual();
+        let (title, root) = &manual[0];
+        assert_eq!(title, "sciart");
+        for name in &subcommands {
+            assert!(
+                root.contains(&format!("sciart-{name}(1)")),
+                "refers to {name}"
+            );
         }
-        assert!(matches!(parse(&["man"]).unwrap().command(), Command::Man));
+        for (page, (title, text)) in std::iter::once("").chain(MAN_PAGES).zip(&manual) {
+            if !page.is_empty() {
+                assert_eq!(*title, format!("sciart-{page}"));
+            }
+            for long in &globals {
+                assert!(text.contains(&format!("--{long}")), "{title}: --{long}");
+            }
+        }
+    }
+
+    #[test]
+    fn cli_r17_the_manual_refers_to_no_page_sciart_man_cannot_print() {
+        let manual = manual();
+        let printable: Vec<&str> = manual.iter().map(|(title, _)| title.as_str()).collect();
+        let mut seen = 0;
+        for (title, text) in &manual {
+            for reference in references(text) {
+                assert!(
+                    printable.contains(&reference),
+                    "{title} refers to {reference}(1)"
+                );
+                seen += 1;
+            }
+        }
+        assert!(
+            seen >= MAN_PAGES.len(),
+            "the SUBCOMMANDS section was checked"
+        );
+        assert!(
+            !printable.contains(&"sciart-help"),
+            "clap's `help` has no page"
+        );
+    }
+
+    #[test]
+    fn cli_r17_man_takes_one_known_subcommand() {
+        let page = |argv: &[&str]| match parse(argv).unwrap().command() {
+            Command::Man { subcommand } => subcommand,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(page(&["man"]), None);
+        assert_eq!(page(&["man", "while"]).as_deref(), Some("while"));
+        for bad in [
+            &["man", "help"][..],
+            &["man", "nosuch"],
+            &["man", "while", "run"],
+        ] {
+            assert_eq!(parse(bad).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+        assert!(man_page(Some("nosuch")).is_err());
+    }
+
+    /// CLI-R14: the `while` page, in `--help` and the manual, says how the command runs,
+    /// including that its held output is not capped.
+    #[test]
+    fn cli_r14_cli_r17_the_while_page_explains_the_spool() {
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let help = command
+            .find_subcommand_mut("while")
+            .expect("while")
+            .render_long_help()
+            .to_string();
+        let manual = manual();
+        let page = &manual.iter().find(|(t, _)| t == "sciart-while").unwrap().1;
+        // The manual fills its paragraphs itself, so compare word sequences.
+        let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        for text in [words(&help), words(page)] {
+            for phrase in [
+                "gets no terminal",
+                "not capped",
+                "exits 130",
+                "exits 124",
+                "exit 143 or 129",
+                "exits 127",
+            ] {
+                assert!(text.contains(phrase), "{phrase:?} in {text}");
+            }
+        }
+        let root = &manual[0].1;
+        assert!(
+            root.contains("sciart man while"),
+            "the top page points at it"
+        );
     }
 
     #[test]

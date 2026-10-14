@@ -47,8 +47,8 @@ fn main() -> ExitCode {
         Command::Record(_) => return run_record(&cli, &command),
         // CLI-R17: generated from the parser; no config, nothing started.
         Command::Completions { shell } => return print(&cli::completions(*shell)),
-        Command::Man => {
-            return match cli::man_page() {
+        Command::Man { subcommand } => {
+            return match cli::man_page(subcommand.as_deref()) {
                 Ok(page) => print(&page),
                 Err(e) => {
                     eprintln!("sciart: {e}");
