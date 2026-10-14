@@ -273,5 +273,17 @@ GEN-R25 list + `Look (M20)` in solar_system, brownian_motion, action_potential; 
 - [x] Local `--no-ff` merges of M19 and M20 into main
 - [ ] M19/M20 follow-ups: see "Follow-ups" in docs/design/M19-M20.md
 
+## M21 — Ten new scenes
+Design: [docs/design/M21-ten-scenes.md](design/M21-ten-scenes.md).
+SPEC-002 "Batch M21"; GEN-R25 list (+ magnetosphere, gravity_assist, snowflake_growth, cloud_chamber) and GEN-R26 list (+ binary_inspiral, chladni_plate, rayleigh_benard, mitosis, ribosome_translation, protocell_assembly); BBH-, MAG-, ASST-, SNOW-, CLD-, CHL-, RB-, MIT-, RIB-, PROTO-A*. User picked all ten proposals and the recommended look for each.
+- [x] Proposals and looks picked from previews; spec first; stubs registered (85 scenes)
+- [ ] binary_inspiral, magnetosphere, gravity_assist (TDD)
+- [ ] cloud_chamber, chladni_plate (TDD)
+- [ ] rayleigh_benard, snowflake_growth (TDD)
+- [ ] mitosis, ribosome_translation, protocell_assembly (TDD)
+- [ ] Art, science and Rust/perf review; fixes
+- [ ] Snapshots recorded and reviewed, art_metrics rows seeded after review, budgets (`rs-worst`, `rs-cost`), `rs-ci` green
+- [ ] Results, samples, the contributor guide
+
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
