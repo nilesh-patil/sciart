@@ -12,11 +12,15 @@ cells (the same framing as the archived milestone frames, so current and history
 directly), astro theme, seed 42, t = 20 s, through `examples/preview`, which writes
 `<out>-t<t>.png` and is renamed to `<scene>.png` here. This is the only script that writes
 `samples/`; `compare/` is history and stays untouched.
+
+The gallery also opens with an animated section (WEB-R2): every clip in docs/showcase.toml,
+which scripts/showcase.py records into docs/media/ (WEB-R1) and checks.
 """
 
 from __future__ import annotations
 
 import argparse
+import html
 import os
 import subprocess
 import sys
@@ -242,6 +246,45 @@ def category_label(category: str) -> str:
     return CATEGORIES.get(category, category.replace("-", " ").title())
 
 
+def motion_section(scenes: list[Scene]) -> list[str]:
+    """WEB-R2: the animated section, one entry per docs/showcase.toml clip (WEB-R1).
+
+    The clips themselves are recorded by scripts/showcase.py; this only lays them out, in
+    manifest order, with the parameters they were recorded with.
+    """
+    # Imported here: showcase imports this module for the scene list.
+    import showcase
+
+    clips = showcase.load_manifest()
+    categories = {scene.name: scene.category for scene in scenes}
+    lines = [
+        "## In motion",
+        "",
+        (
+            f"{len(clips)} clips recorded by `sciart record` from "
+            "[`docs/showcase.toml`](showcase.toml) (`pixi run rs-showcase`); each runs "
+            "from the simulated time shown, at the size, seed and frame rate shown."
+        ),
+        "",
+    ]
+    for clip in clips:
+        out = Path(clip.out)
+        source = out.relative_to("docs") if out.parts[0] == "docs" else Path("..") / out
+        start = f"{clip.start:g}"
+        end = f"{clip.start + clip.seconds:g}"
+        category = category_label(categories.get(clip.scene, "unknown"))
+        lines.append(f"### `{clip.scene}` in motion")
+        lines.append("")
+        lines.append(f'<img src="{source.as_posix()}" alt="{html.escape(clip.alt)}">')
+        lines.append("")
+        lines.append(
+            f"{category} · {clip.size} cells · t = {start}–{end} s · {clip.fps} fps · "
+            f"seed {clip.seed} · {clip.theme}"
+        )
+        lines.append("")
+    return lines
+
+
 def write_gallery(scenes: list[Scene]) -> None:
     """docs/GALLERY.md: title, one-line legend, category sections, one image per scene."""
     sections: dict[str, list[Scene]] = {category: [] for category in CATEGORIES}
@@ -256,6 +299,7 @@ def write_gallery(scenes: list[Scene]) -> None:
             "where present, shows the scene's historical looks side by side."
         ),
         "",
+        *motion_section(scenes),
     ]
     for category, items in sections.items():
         if not items:

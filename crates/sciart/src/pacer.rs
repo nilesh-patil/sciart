@@ -70,6 +70,12 @@ impl Pacer {
         !self.focused || self.idle >= self.idle_after
     }
 
+    /// The rate has stepped all the way down to `min(low_fps, fps)` (RT-R17), so a frame
+    /// with nothing new will not be followed by a lower rate's readout (RT-R21).
+    pub fn at_floor(&self) -> bool {
+        self.fps() == self.low_fps.min(self.fps)
+    }
+
     /// The draw rate: `fps`, or `min(low_fps, fps)` in low power (RT-R8), halved for every
     /// `QUIET_STEP_SECS` without a change down to that same floor (RT-R17).
     pub fn fps(&self) -> u16 {
@@ -197,6 +203,23 @@ mod tests {
         assert!(quiet_for(&mut q, 5.0).iter().all(|&r| r == 3));
         let mut r = Pacer::new(5, 5, 120.0);
         assert!(quiet_for(&mut r, 5.0).iter().all(|&r| r == 5));
+    }
+
+    #[test]
+    fn rt_r21_at_floor_once_quiet_frames_have_stepped_the_rate_down() {
+        let mut p = Pacer::new(30, 5, 120.0);
+        assert!(!p.at_floor(), "full rate");
+        quiet_for(&mut p, 3.0);
+        assert!(p.at_floor(), "stepped down to low_power.fps");
+        p.input();
+        assert!(!p.at_floor(), "a key restores the full rate");
+        let mut idle = Pacer::new(30, 5, 1.0);
+        idle.record(2.0);
+        assert!(idle.at_floor(), "low power is the floor");
+        assert!(
+            Pacer::new(4, 5, 120.0).at_floor(),
+            "a rate below the floor is the floor"
+        );
     }
 
     #[test]

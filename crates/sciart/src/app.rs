@@ -7,13 +7,16 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event};
 use ratatui::Terminal;
+use ratatui::backend::Backend as _;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use sciart_core::title::{Form, ascii_of};
 use sciart_core::{GlyphMode, Size};
 use sciart_generators::{Entry, registry};
 use sciart_keepawake::{Guard, Mode};
-use sciart_render::{Background, FrameBackend, Hud, Painter, TerminalGuard, Theme};
+use sciart_render::{
+    Background, Compositor, Content, Draw, FrameBackend, Hud, Painter, TerminalGuard, Theme,
+};
 
 use crate::config::ColorMode;
 use crate::fps::FpsMeter;
@@ -100,6 +103,8 @@ pub(crate) struct HudExtras<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct Screen {
     painter: Painter,
+    /// What the terminal shows, so a frame sends only the cells that changed (RND-R22).
+    compositor: Compositor,
     /// `Runtime::epoch` the painter's memory belongs to.
     epoch: u64,
     /// The keep-awake status, rewritten in place each frame (`Guard::write_status`).
@@ -152,6 +157,7 @@ impl Screen {
         let help = runtime.help();
         let Self {
             painter,
+            compositor,
             keep_awake,
             hud_text,
             help_text,
@@ -163,46 +169,53 @@ impl Screen {
         let background = painter.background();
         let blank = painter.blank_color();
         let overlay = !help && (runtime.status() == Status::AllFailed || runtime.hud());
-        let mut overlay_row = None;
-        terminal.draw(|f| {
-            let area = f.area();
-            if help {
-                // RT-R18: a static page instead of the scene and the HUD.
-                draw_help(area, f.buffer_mut(), help_text, background, blank);
-                return;
-            }
-            if overlay {
-                overlay_row = area.bottom().checked_sub(1);
-            }
-            let buf = f.buffer_mut();
-            painter.paint(runtime.frame(), runtime.theme(), area, buf);
-            if runtime.status() == Status::AllFailed {
-                // RT-R4: keep the last frame, explain on the bottom row, reversed like the
-                // HUD (what `Line::from(msg).reversed()` drew, without building a `Line`).
-                let msg = runtime.notices().last().map_or("", String::as_str);
+        // RND-R22: the compositor paints and sends only the cells that changed; it takes the
+        // full-area path by itself on a resize, theme, painter reset or overlay toggle.
+        let backend = terminal.backend_mut();
+        let size = backend.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
+        let overlay_row = overlay.then(|| area.bottom().checked_sub(1)).flatten();
+        if help {
+            // RT-R18: a static page instead of the scene and the HUD.
+            let mut page = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
+                draw_help(area, buf, help_text, background, blank);
+            };
+            compositor.compose(area, Content::Full(&mut page));
+        } else if runtime.status() == Status::AllFailed {
+            // RT-R4: keep the last frame, explain on the bottom row, reversed like the
+            // HUD (what `Line::from(msg).reversed()` drew, without building a `Line`).
+            let msg = runtime.notices().last().map_or("", String::as_str);
+            let mut error_line = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
                 let row = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1)
                     .intersection(buf.area);
                 if !msg.is_empty() && !row.is_empty() {
                     buf.set_style(row, Style::new().reversed());
                     buf.set_stringn(row.x, row.y, msg, usize::from(row.width), Style::new());
                 }
-            } else if runtime.hud() {
-                let hud = Hud {
-                    generator: runtime.current_name().unwrap_or("-"),
-                    title: runtime.title(),
-                    fps: extras.fps,
-                    theme: runtime.theme(),
-                    seed: extras.seed,
-                    keep_awake: keep_awake.as_str(),
-                    low_power: extras.low_power,
-                    paused: runtime.paused(),
-                    quarantined: runtime.quarantined(),
-                    // Rounded up, so `00:00` is never shown while the run goes on (CLI-R12).
-                    ends: runtime.time_left().map(|left| left.ceil() as u64),
-                };
+            };
+            compositor.compose(area, canvas(runtime, painter, Some(&mut error_line)));
+        } else if runtime.hud() {
+            let hud = Hud {
+                generator: runtime.current_name().unwrap_or("-"),
+                title: runtime.title(),
+                fps: extras.fps,
+                theme: runtime.theme(),
+                seed: extras.seed,
+                keep_awake: keep_awake.as_str(),
+                low_power: extras.low_power,
+                paused: runtime.paused(),
+                quarantined: runtime.quarantined(),
+                // Rounded up, so `00:00` is never shown while the run goes on (CLI-R12).
+                ends: runtime.time_left().map(|left| left.ceil() as u64),
+            };
+            let mut line = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
                 hud.render_into(area, buf, hud_text);
-            }
-        })?;
+            };
+            compositor.compose(area, canvas(runtime, painter, Some(&mut line)));
+        } else {
+            compositor.compose(area, canvas(runtime, painter, None));
+        }
+        compositor.emit(backend)?;
         Ok(match terminal.backend().changed_rows() {
             None => false,
             Some((top, _)) => overlay_row.is_none_or(|row| top < row),
@@ -265,6 +278,20 @@ impl Screen {
         out.push('\n');
         let _ = writeln!(out, "  project         {PROJECT_URL}");
         out.push_str(" press ? or Esc to return to the art");
+    }
+}
+
+/// The runtime's frame through `painter`, with `overlay` on the last row (RND-R22).
+fn canvas<'a>(
+    runtime: &'a Runtime,
+    painter: &'a mut Painter,
+    overlay: Option<Draw<'a>>,
+) -> Content<'a> {
+    Content::Canvas {
+        canvas: runtime.frame(),
+        theme: runtime.theme(),
+        painter,
+        overlay,
     }
 }
 
@@ -375,6 +402,11 @@ pub fn run(
     let mut last = wall_clock();
     let mut epoch = runtime.epoch();
     let mut first = true;
+    let mut wakeups = Wakeups::from_env();
+    // When the keep-awake backend was last polled: the RT-R21 block polls it too.
+    let mut polled = last;
+    // The status after a blocked poll, compared with the one the HUD shows (RT-R21).
+    let mut status = String::new();
 
     loop {
         let now = wall_clock();
@@ -386,13 +418,17 @@ pub fn run(
             fps.record(elapsed);
         }
         pacer.record(elapsed);
-        keep_awake.poll(elapsed);
+        keep_awake.poll(now.duration_since(polled).as_secs_f64());
+        polled = now;
         if runtime.tick(elapsed) == Flow::Quit {
             return Ok(End::Deadline);
         }
         if done() {
             return Ok(End::Done);
         }
+        // Wall time is counted towards the deadline up to here (RT-R23); a blocked wait
+        // below counts its own span from this mark, so every span is counted once.
+        let mut counted = now;
 
         keep_awake.write_status(&mut screen.keep_awake);
         let extras = HudExtras {
@@ -409,11 +445,62 @@ pub fn run(
         // Handle input until the next frame is due. The rate can change here (RT-R8,
         // RT-R17), so the deadline is recomputed after every event: a key that wakes a
         // stepped-down loop is drawn at the full rate's deadline, not the slow one's.
+        let block = may_block(
+            &runtime,
+            &pacer,
+            fps.fps(),
+            terminal.backend().changed_rows().is_none(),
+        );
         loop {
             let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
             // The deadline wakes the loop even if no frame is due (RT-R23).
-            let wait = runtime.cap_wait((now + frame_time).saturating_duration_since(wall_clock()));
-            if !event::poll(wait)? {
+            let wait = if block {
+                block_timeout(runtime.remaining())
+            } else {
+                runtime.cap_wait((now + frame_time).saturating_duration_since(wall_clock()))
+            };
+            let ready = event::poll(wait)?;
+            wakeups.count();
+            if block {
+                // The blocked span reaches neither the fps readout nor the simulation, but
+                // it is wall time: it counts towards the deadline (RT-R23), and `while`'s
+                // command may have exited meanwhile (CLI-R14).
+                let t = wall_clock();
+                let flow = runtime.pass_wall(t.duration_since(counted).as_secs_f64());
+                counted = t;
+                if flow == Flow::Quit {
+                    return Ok(End::Deadline);
+                }
+                if done() {
+                    return Ok(End::Done);
+                }
+            }
+            let redraw = if !ready && block {
+                // Only the keep-awake backend needs the time (KA-R3, KA-R4); a status the
+                // HUD shows that the poll changed is drawn now, not at the next key.
+                let t = wall_clock();
+                keep_awake.poll(t.duration_since(polled).as_secs_f64());
+                polled = t;
+                keep_awake.write_status(&mut status);
+                redraw_after_poll(&runtime, &screen.keep_awake, &status)
+            } else {
+                false
+            };
+            if !ready && block && !redraw {
+                continue;
+            }
+            if !ready && !block {
+                break;
+            }
+            if block {
+                // The blocked span is not a frame interval: keep it out of the fps
+                // readout and the simulation clock (paused or help: nothing to step).
+                let t = wall_clock();
+                pacer.record(t.duration_since(last).as_secs_f64());
+                last = t;
+                first = true;
+            }
+            if redraw {
                 break;
             }
             match event::read()? {
@@ -437,6 +524,65 @@ pub fn run(
                 }
                 _ => {}
             }
+            if block {
+                break; // draw what the event changed now (RT-R21)
+            }
+        }
+    }
+}
+
+/// How long a blocked loop (RT-R21) waits for an event before it polls the keep-awake
+/// backend; at least a second, which every backend's cadence allows (KA-R3, KA-R4).
+const BLOCK_POLL: Duration = Duration::from_secs(1);
+
+/// Whether the HUD is on screen, showing the keep-awake status and the fps readout.
+fn hud_shown(runtime: &Runtime) -> bool {
+    !runtime.help() && runtime.hud() && runtime.status() != Status::AllFailed
+}
+
+/// RT-R21: whether the loop may block on the next event after a drawn frame. Paused or
+/// on the help page, once the rate is down (RT-R17) and the frame sent nothing
+/// (`sent_nothing`), nothing can change before the next event. A visible HUD first lets
+/// its fps readout (`fps`) settle on the stepped-down rate, or it would freeze on a
+/// passing value.
+fn may_block(runtime: &Runtime, pacer: &Pacer, fps: f64, sent_nothing: bool) -> bool {
+    let settled = !hud_shown(runtime) || (fps - f64::from(pacer.fps())).abs() < 0.5;
+    (runtime.paused() || runtime.help()) && pacer.at_floor() && settled && sent_nothing
+}
+
+/// RT-R21: how long a blocked loop waits for an event: [`BLOCK_POLL`], or less when a
+/// deadline is `remaining` (the wait must not outlast it).
+fn block_timeout(remaining: Option<Duration>) -> Duration {
+    remaining.map_or(BLOCK_POLL, |r| r.min(BLOCK_POLL))
+}
+
+/// RT-R21: after a blocked loop polls the keep-awake backend, whether to draw again:
+/// the HUD is on screen and the status it shows (`shown`) is no longer the backend's
+/// (`status`), e.g. caffeinate exited during a pause.
+fn redraw_after_poll(runtime: &Runtime, shown: &str, status: &str) -> bool {
+    hud_shown(runtime) && shown != status
+}
+
+/// Test hook (RT-R21): with `SCIART_TRACE_WAKEUPS=<file>` the loop writes how often it
+/// has woken (each return from the event wait) to that file, so the pty test can count
+/// wake-ups from outside. Off, and free, without the variable.
+struct Wakeups {
+    path: Option<PathBuf>,
+    count: u64,
+}
+
+impl Wakeups {
+    fn from_env() -> Self {
+        Self {
+            path: std::env::var_os("SCIART_TRACE_WAKEUPS").map(PathBuf::from),
+            count: 0,
+        }
+    }
+
+    fn count(&mut self) {
+        if let Some(path) = &self.path {
+            self.count += 1;
+            let _ = std::fs::write(path, self.count.to_string());
         }
     }
 }
@@ -712,6 +858,540 @@ mod tests {
         rt.handle(Action::ToggleHud);
         rt.tick(0.1);
         assert_eq!(rt.epoch(), e2, "theme/HUD/tick keep the scene");
+    }
+
+    // ----- M25: changed-cell pipeline (RND-R22) -----
+
+    impl Screen {
+        /// The full-area reference (RND-R22): what `Screen::draw` did before M25, a whole
+        /// frame painted into ratatui's buffer and diffed in full by `Terminal::draw`.
+        fn draw_reference<W: Write>(
+            &mut self,
+            terminal: &mut Terminal<FrameBackend<W>>,
+            runtime: &Runtime,
+            extras: HudExtras<'_>,
+        ) -> io::Result<()> {
+            if runtime.epoch() != self.epoch {
+                self.epoch = runtime.epoch();
+                self.painter.reset();
+            }
+            let help = runtime.help();
+            let Self {
+                painter,
+                keep_awake,
+                hud_text,
+                help_text,
+                ..
+            } = self;
+            if help {
+                Self::build_help(help_text, runtime, extras.config_path);
+            }
+            let background = painter.background();
+            let blank = painter.blank_color();
+            terminal.draw(|f| {
+                let area = f.area();
+                if help {
+                    draw_help(area, f.buffer_mut(), help_text, background, blank);
+                    return;
+                }
+                let buf = f.buffer_mut();
+                painter.paint(runtime.frame(), runtime.theme(), area, buf);
+                if runtime.status() == Status::AllFailed {
+                    let msg = runtime.notices().last().map_or("", String::as_str);
+                    let row = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1)
+                        .intersection(buf.area);
+                    if !msg.is_empty() && !row.is_empty() {
+                        buf.set_style(row, Style::new().reversed());
+                        buf.set_stringn(row.x, row.y, msg, usize::from(row.width), Style::new());
+                    }
+                } else if runtime.hud() {
+                    let hud = Hud {
+                        generator: runtime.current_name().unwrap_or("-"),
+                        title: runtime.title(),
+                        fps: extras.fps,
+                        theme: runtime.theme(),
+                        seed: extras.seed,
+                        keep_awake: keep_awake.as_str(),
+                        low_power: extras.low_power,
+                        paused: runtime.paused(),
+                        quarantined: runtime.quarantined(),
+                        ends: runtime.time_left().map(|left| left.ceil() as u64),
+                    };
+                    hud.render_into(area, buf, hud_text);
+                }
+            })?;
+            Ok(())
+        }
+    }
+
+    type Recorded = Terminal<FrameBackend<Vec<u8>>>;
+
+    /// A screen on the changed-cell path and one on the full-area reference, with the same
+    /// painter settings, each writing to its own byte stream.
+    struct Pair {
+        label: &'static str,
+        new: (Screen, Recorded),
+        reference: (Screen, Recorded),
+        /// Stream lengths after each frame, to name the first frame that differs.
+        marks: Vec<(usize, usize)>,
+    }
+
+    impl Pair {
+        fn new(label: &'static str, screen: impl Fn() -> Screen, size: Size) -> Self {
+            let term = || {
+                Terminal::new(FrameBackend::with_size(
+                    Vec::new(),
+                    size.width(),
+                    size.height(),
+                ))
+                .expect("terminal")
+            };
+            Self {
+                label,
+                new: (screen(), term()),
+                reference: (screen(), term()),
+                marks: Vec::new(),
+            }
+        }
+
+        fn draw(&mut self, rt: &Runtime, fps: f64) {
+            let extras = HudExtras {
+                fps,
+                seed: 42,
+                low_power: false,
+                config_path: None,
+            };
+            self.new.0.draw(&mut self.new.1, rt, extras).expect("draw");
+            self.reference
+                .0
+                .draw_reference(&mut self.reference.1, rt, extras)
+                .expect("draw");
+            self.marks.push((
+                self.new.1.backend().writer().len(),
+                self.reference.1.backend().writer().len(),
+            ));
+        }
+
+        fn resize(&mut self, size: Size) {
+            for term in [&mut self.new.1, &mut self.reference.1] {
+                term.backend_mut()
+                    .set_fixed_size(size.width(), size.height());
+            }
+        }
+
+        /// `None` when both streams are identical, else where they part.
+        fn mismatch(&self) -> Option<String> {
+            let (a, b) = (
+                self.new.1.backend().writer(),
+                self.reference.1.backend().writer(),
+            );
+            if a == b {
+                return None;
+            }
+            let frame = self
+                .marks
+                .iter()
+                .position(|&(x, y)| x != y || a[..x] != b[..y]);
+            Some(format!(
+                "{}: streams differ ({} vs {} bytes), first at frame {frame:?}",
+                self.label,
+                a.len(),
+                b.len()
+            ))
+        }
+    }
+
+    const DRAWN_FRAMES: u32 = 72;
+
+    /// Every registered scene through both paths, in each colour mode (RND-R18: truecolor,
+    /// 256 colours, mono) and both backgrounds (RND-R20), with the HUD, theme, pause,
+    /// resize, reset and help toggled along the way (RND-R22).
+    fn every_scene_matches_the_full_area_stream(size: Size) {
+        let shrunk = Size::new(size.width() - 7, size.height() - 3);
+        let failures: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = registry()
+                .iter()
+                .map(|entry| {
+                    s.spawn(move || {
+                        let mut failures = Vec::new();
+                        for mono in [false, true] {
+                            let mut rt =
+                                Runtime::new(vec![entry], 42, size, GlyphMode::Unicode, Some(0));
+                            if mono {
+                                rt = rt.with_theme(Theme::Mono);
+                            }
+                            let opaque = |s: Screen| s.with_background(Background::Opaque);
+                            let terminal = |s: Screen| s.with_background(Background::Terminal);
+                            let mut pairs = if mono {
+                                vec![
+                                    Pair::new("mono/opaque", || opaque(Screen::new()), size),
+                                    Pair::new("mono/terminal", || terminal(Screen::new()), size),
+                                ]
+                            } else {
+                                vec![
+                                    Pair::new("truecolor/opaque", || opaque(Screen::new()), size),
+                                    Pair::new(
+                                        "truecolor/terminal",
+                                        || terminal(Screen::new()),
+                                        size,
+                                    ),
+                                    Pair::new("256/opaque", || opaque(Screen::indexed()), size),
+                                    Pair::new("256/terminal", || terminal(Screen::indexed()), size),
+                                ]
+                            };
+                            for frame in 1..=DRAWN_FRAMES {
+                                let action = match frame {
+                                    10 | 34 | 58 => Some(Action::ToggleHud),
+                                    18 | 64 if !mono => Some(Action::CycleTheme),
+                                    24 | 30 => Some(Action::TogglePause),
+                                    48 => Some(Action::Reset),
+                                    52 | 55 => Some(Action::ToggleHelp),
+                                    _ => None,
+                                };
+                                if let Some(action) = action {
+                                    rt.handle(action);
+                                }
+                                let resize = match frame {
+                                    38 => Some(shrunk),
+                                    44 => Some(size),
+                                    _ => None,
+                                };
+                                if let Some(to) = resize {
+                                    rt.resize(to);
+                                    for pair in &mut pairs {
+                                        pair.resize(to);
+                                    }
+                                }
+                                rt.tick(1.0 / 30.0);
+                                // The HUD's fps readout changes from frame to frame.
+                                let fps = 28.0 + f64::from(frame % 3);
+                                for pair in &mut pairs {
+                                    pair.draw(&rt, fps);
+                                }
+                            }
+                            failures.extend(
+                                pairs
+                                    .iter()
+                                    .filter_map(Pair::mismatch)
+                                    .map(|m| format!("{}: {m}", entry.meta.name)),
+                            );
+                        }
+                        failures
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("scene thread"))
+                .collect()
+        });
+        assert!(
+            failures.is_empty(),
+            "RND-R22 at {}x{}:\n{}",
+            size.width(),
+            size.height(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn rnd_r22_changed_cells_send_the_full_area_bytes_for_every_scene_at_80x24() {
+        every_scene_matches_the_full_area_stream(Size::new(80, 24));
+    }
+
+    #[test]
+    fn rnd_r22_changed_cells_send_the_full_area_bytes_for_every_scene_at_200x50() {
+        every_scene_matches_the_full_area_stream(Size::new(200, 50));
+    }
+
+    #[test]
+    fn rnd_r22_a_frame_visits_only_changed_cells_plus_row_bookkeeping() {
+        let size = Size::new(200, 50);
+        for entry in registry() {
+            let name = entry.meta.name;
+            let mut rt = Runtime::new(vec![entry], 42, size, GlyphMode::Unicode, Some(0));
+            let mut screen = Screen::new().with_background(Background::Opaque);
+            let mut term = Terminal::new(FrameBackend::with_size(
+                io::sink(),
+                size.width(),
+                size.height(),
+            ))
+            .expect("terminal");
+            let mut last: Option<Vec<sciart_core::Cell>> = None;
+            for frame in 0..40 {
+                rt.tick(1.0 / 30.0);
+                draw(&rt, &mut screen, &mut term, 30.0);
+                let work = screen.compositor.work();
+                let cells = rt.frame().cells();
+                if let Some(prev) = &last {
+                    let changed = cells.iter().zip(prev).filter(|(a, b)| a != b).count();
+                    assert!(!work.full, "{name} frame {frame}: full-area path");
+                    assert_eq!(work.changed, changed, "{name} frame {frame}");
+                    // The counters sit where the painter maps a cell and where the encoder
+                    // considers one (RND-R22): either stage scanning the screen fails here.
+                    let bound = changed + usize::from(size.height());
+                    assert!(
+                        work.painted <= bound && work.encoded <= bound,
+                        "{name} frame {frame}: {work:?}, {changed} changed"
+                    );
+                    assert!(work.sent <= work.encoded, "{name} frame {frame}: {work:?}");
+                    assert_eq!(work.rows, usize::from(size.height()), "{name}: {work:?}");
+                }
+                last = Some(cells.to_vec());
+            }
+            // The same frame again: nothing is painted, considered or sent.
+            draw(&rt, &mut screen, &mut term, 30.0);
+            let work = screen.compositor.work();
+            assert_eq!(
+                (work.changed, work.painted, work.encoded, work.sent),
+                (0, 0, 0, 0),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn rnd_r22_resize_theme_reset_and_overlay_take_the_full_area_path() {
+        let mut rt = runtime(&["wave_interference"]);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        let full = |rt: &Runtime, screen: &mut Screen, term: &mut _| {
+            draw(rt, screen, term, 30.0);
+            screen.compositor.work().full
+        };
+        assert!(full(&rt, &mut screen, &mut term), "first frame");
+        rt.tick(1.0 / 30.0);
+        assert!(!full(&rt, &mut screen, &mut term), "steady frame");
+        rt.handle(Action::CycleTheme);
+        assert!(full(&rt, &mut screen, &mut term), "theme");
+        rt.handle(Action::ToggleHud);
+        assert!(full(&rt, &mut screen, &mut term), "HUD on");
+        rt.tick(1.0 / 30.0);
+        assert!(!full(&rt, &mut screen, &mut term), "steady with HUD");
+        rt.handle(Action::Reset);
+        assert!(
+            full(&rt, &mut screen, &mut term),
+            "reset clears the painter memory"
+        );
+        rt.handle(Action::ToggleHelp);
+        assert!(full(&rt, &mut screen, &mut term), "help");
+        rt.handle(Action::ToggleHelp);
+        assert!(full(&rt, &mut screen, &mut term), "back from help");
+        term.backend_mut().set_fixed_size(W - 4, H - 2);
+        rt.resize(Size::new(W - 4, H - 2));
+        assert!(full(&rt, &mut screen, &mut term), "resize");
+    }
+
+    /// A real scene that panics at its `boom_at`-th step, so the runtime quarantines it
+    /// (RT-R3) and, once every scene has, shows the RT-R4 error line.
+    struct LateBoom {
+        inner: Box<dyn sciart_core::Generator>,
+        steps: u32,
+        boom_at: u32,
+    }
+
+    impl sciart_core::Generator for LateBoom {
+        fn meta(&self) -> &'static sciart_core::Meta {
+            self.inner.meta()
+        }
+        fn resize(&mut self, size: Size, ctx: &mut sciart_core::Ctx) {
+            self.inner.resize(size, ctx);
+        }
+        fn update(&mut self, dt: f64, ctx: &mut sciart_core::Ctx) {
+            self.steps += 1;
+            assert!(self.steps < self.boom_at, "boom at step {}", self.steps);
+            self.inner.update(dt, ctx);
+        }
+        fn prepare(&mut self) {
+            self.inner.prepare();
+        }
+        fn render(&self, canvas: &mut sciart_core::Canvas) {
+            self.inner.render(canvas);
+        }
+        fn caption(&self) -> Option<&'static str> {
+            self.inner.caption()
+        }
+    }
+
+    static WAVE_BOOM: Entry = Entry {
+        meta: &sciart_generators::wave_interference::META,
+        build: || {
+            Box::new(LateBoom {
+                inner: sciart_generators::wave_interference::build(),
+                steps: 0,
+                boom_at: 120,
+            })
+        },
+    };
+    static STAR_BOOM: Entry = Entry {
+        meta: &sciart_generators::starfield::META,
+        build: || {
+            Box::new(LateBoom {
+                inner: sciart_generators::starfield::build(),
+                steps: 0,
+                boom_at: 40,
+            })
+        },
+    };
+
+    #[test]
+    fn rnd_r22_a_scene_switch_and_a_quarantined_scene_send_the_full_area_bytes() {
+        // A key switches scenes, a panic quarantines one and switches again, the last
+        // panic leaves the RT-R4 error line over the kept frame; both paths must agree.
+        let size = Size::new(80, 24);
+        let mut rt = Runtime::new(
+            vec![&WAVE_BOOM, &STAR_BOOM],
+            42,
+            size,
+            GlyphMode::Unicode,
+            Some(0),
+        );
+        let opaque = |s: Screen| s.with_background(Background::Opaque);
+        let terminal = |s: Screen| s.with_background(Background::Terminal);
+        let mut pairs = vec![
+            Pair::new("truecolor/opaque", || opaque(Screen::new()), size),
+            Pair::new("truecolor/terminal", || terminal(Screen::new()), size),
+            Pair::new("256/opaque", || opaque(Screen::indexed()), size),
+            Pair::new("256/terminal", || terminal(Screen::indexed()), size),
+        ];
+        let mut seen: Vec<&str> = Vec::new();
+        let mut error_frames = 0;
+        for frame in 1..=110u32 {
+            let action = match frame {
+                8 | 50 => Some(Action::ToggleHud),
+                15 => Some(Action::Next),
+                104 | 106 => Some(Action::ToggleHelp),
+                _ => None,
+            };
+            if let Some(action) = action {
+                rt.handle(action);
+            }
+            rt.tick(1.0 / 30.0);
+            if let Some(name) = rt.current_name()
+                && seen.last() != Some(&name)
+            {
+                seen.push(name);
+            }
+            if rt.status() == Status::AllFailed {
+                error_frames += 1;
+            }
+            let fps = 28.0 + f64::from(frame % 3);
+            for pair in &mut pairs {
+                pair.draw(&rt, fps);
+            }
+        }
+        assert_eq!(
+            seen,
+            ["wave_interference", "starfield", "wave_interference"],
+            "a key switch, then a quarantine switch"
+        );
+        assert_eq!(rt.status(), Status::AllFailed);
+        assert!(
+            error_frames >= 8,
+            "the error line is drawn: {error_frames} frames"
+        );
+        let failures: Vec<String> = pairs.iter().filter_map(Pair::mismatch).collect();
+        assert!(failures.is_empty(), "RND-R22:\n{}", failures.join("\n"));
+    }
+
+    // ----- M25: event-driven pause and help (RT-R21) -----
+
+    /// A pacer whose rate has stepped down to its floor (RT-R17): 30 fps, floor 5.
+    fn quiet_pacer() -> Pacer {
+        let mut p = Pacer::new(30, 5, 600.0);
+        p.record(2.0);
+        assert!(p.at_floor() && p.fps() == 5);
+        p
+    }
+
+    #[test]
+    fn rt_r21_a_paused_scene_blocks_once_quiet_and_settled() {
+        let pacer = quiet_pacer();
+        let mut rt = runtime(&["starfield"]);
+        assert!(!may_block(&rt, &pacer, 5.0, true), "running: never");
+        rt.handle(Action::TogglePause);
+        assert!(
+            may_block(&rt, &pacer, 5.0, true),
+            "paused, quiet, nothing sent"
+        );
+        assert!(!may_block(&rt, &pacer, 5.0, false), "the frame sent bytes");
+        assert!(
+            !may_block(&rt, &Pacer::new(30, 5, 600.0), 30.0, true),
+            "the rate has not stepped down yet"
+        );
+        // The HUD shows the fps readout: wait until it reads the floor rate.
+        let rt = rt.with_hud(true);
+        assert!(!may_block(&rt, &pacer, 12.0, true), "readout still falling");
+        assert!(may_block(&rt, &pacer, 5.2, true), "readout settled");
+    }
+
+    #[test]
+    fn rt_r21_the_help_page_blocks_once_quiet_whatever_the_hidden_hud_reads() {
+        let pacer = quiet_pacer();
+        let mut rt = runtime(&["starfield"]).with_hud(true);
+        rt.handle(Action::ToggleHelp);
+        assert!(rt.help() && !rt.paused());
+        assert!(
+            may_block(&rt, &pacer, 12.0, true),
+            "help hides the HUD and its readout"
+        );
+        assert!(!may_block(&rt, &pacer, 12.0, false), "the frame sent bytes");
+        assert!(
+            !may_block(&rt, &Pacer::new(30, 5, 600.0), 30.0, true),
+            "the rate has not stepped down yet"
+        );
+        rt.handle(Action::ToggleHelp);
+        assert!(
+            !may_block(&rt, &pacer, 5.0, true),
+            "back to a running scene"
+        );
+    }
+
+    #[test]
+    fn rt_r21_the_block_timeout_is_a_second_capped_by_a_deadline() {
+        assert_eq!(block_timeout(None), Duration::from_secs(1));
+        assert_eq!(
+            block_timeout(Some(Duration::from_millis(300))),
+            Duration::from_millis(300)
+        );
+        assert_eq!(
+            block_timeout(Some(Duration::from_secs(5))),
+            Duration::from_secs(1)
+        );
+        assert_eq!(block_timeout(Some(Duration::ZERO)), Duration::ZERO);
+    }
+
+    /// RT-R21 / RT-R23: a paused run's blocked wait ends at the `--for` deadline.
+    #[test]
+    fn rt_r21_rt_r23_a_paused_runs_blocked_wait_is_capped_by_its_deadline() {
+        let mut rt = runtime(&["starfield"]).with_deadline(0.3);
+        rt.handle(Action::TogglePause);
+        assert_eq!(block_timeout(rt.remaining()), Duration::from_millis(300));
+        assert_eq!(
+            rt.pass_wall(0.3),
+            Flow::Quit,
+            "the wake-up then ends the run"
+        );
+        let rt = runtime(&["starfield"]);
+        assert_eq!(block_timeout(rt.remaining()), BLOCK_POLL, "no deadline");
+    }
+
+    #[test]
+    fn rt_r21_a_keep_awake_status_change_redraws_a_visible_hud() {
+        let mut rt = runtime(&["starfield"]).with_hud(true);
+        rt.handle(Action::TogglePause);
+        assert!(redraw_after_poll(&rt, "caffeinate:on", "caffeinate:exited"));
+        assert!(!redraw_after_poll(&rt, "caffeinate:on", "caffeinate:on"));
+        rt.handle(Action::ToggleHelp);
+        assert!(
+            !redraw_after_poll(&rt, "caffeinate:on", "caffeinate:exited"),
+            "the help page does not show the status"
+        );
+        rt.handle(Action::ToggleHelp);
+        let rt = rt.with_hud(false);
+        assert!(
+            !redraw_after_poll(&rt, "caffeinate:on", "caffeinate:exited"),
+            "no HUD, nothing shows the status"
+        );
     }
 
     // ----- M23: help overlay (RT-R18) -----
