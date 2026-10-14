@@ -22,7 +22,7 @@ use crate::config::ColorMode;
 use crate::fps::FpsMeter;
 use crate::keys::action_for;
 use crate::pacer::Pacer;
-use crate::runtime::{Flow, Runtime, Status, install_panic_filter};
+use crate::runtime::{Action, Flow, Runtime, Status, install_panic_filter};
 
 /// The project URL shown on the help page (RT-R18).
 const PROJECT_URL: &str = "https://github.com/nilesh-patil/sciart";
@@ -71,6 +71,21 @@ pub struct Options {
     pub config_path: Option<PathBuf>,
     /// Config `favorites`, seeded into the session (CFG-R9, RT-R19).
     pub favorites: Vec<String>,
+    /// `--for`: end the run after this many wall seconds (CLI-R12, RT-R23).
+    pub run_for: Option<f64>,
+}
+
+/// Why [`run`] returned. The terminal is restored by then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum End {
+    /// `q`, or `Esc` with help closed.
+    Quit,
+    /// `Ctrl-C` (CLI-R14 tells it from a quit).
+    Interrupt,
+    /// The `--for` deadline was reached (RT-R23).
+    Deadline,
+    /// The caller's `done` said so: the `while` command exited (CLI-R14).
+    Done,
 }
 
 /// What the HUD and help page need besides the runtime and the keep-awake text.
@@ -190,6 +205,8 @@ impl Screen {
                 low_power: extras.low_power,
                 paused: runtime.paused(),
                 quarantined: runtime.quarantined(),
+                // Rounded up, so `00:00` is never shown while the run goes on (CLI-R12).
+                ends: runtime.time_left().map(|left| left.ceil() as u64),
             };
             let mut line = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
                 hud.render_into(area, buf, hud_text);
@@ -339,13 +356,22 @@ fn draw_help(
     }
 }
 
-pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
+/// Show the art until a key, the deadline or `done` ends it. `done` is asked once per frame;
+/// `keep_awake` is borrowed so it can outlive the art (CLI-R14).
+pub fn run(
+    opts: Options,
+    keep_awake: &mut Guard,
+    mut done: impl FnMut() -> bool,
+) -> anyhow::Result<End> {
     // RT-R20: SIGTERM/SIGHUP restore the terminal from a watcher thread, whatever the loop
     // is doing. Started first, so no signal finds the terminal set up and unwatched; a
     // signal during the set-up waits for it, as `TerminalGuard::enter` holds the stdout
     // lock the restore takes (see `signals`).
     #[cfg(unix)]
     crate::signals::watch()?;
+    // Before the guard, so it is dropped after the guard has restored the terminal.
+    #[cfg(unix)]
+    let _set_up = crate::signals::SetUp::mark();
     let mut guard = TerminalGuard::enter()?;
     install_panic_filter();
     let terminal = guard.terminal();
@@ -360,6 +386,9 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         .with_favourites(&opts.favorites);
     if let Some(interval) = opts.interval {
         runtime = runtime.with_interval(interval);
+    }
+    if let Some(secs) = opts.run_for {
+        runtime = runtime.with_deadline(secs);
     }
 
     let mut pacer = Pacer::new(opts.fps, opts.low_power_fps, opts.idle_after);
@@ -391,7 +420,15 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         pacer.record(elapsed);
         keep_awake.poll(now.duration_since(polled).as_secs_f64());
         polled = now;
-        runtime.tick(elapsed);
+        if runtime.tick(elapsed) == Flow::Quit {
+            return Ok(End::Deadline);
+        }
+        if done() {
+            return Ok(End::Done);
+        }
+        // Wall time is counted towards the deadline up to here (RT-R23); a blocked wait
+        // below counts its own span from this mark, so every span is counted once.
+        let mut counted = now;
 
         keep_awake.write_status(&mut screen.keep_awake);
         let extras = HudExtras {
@@ -416,13 +453,28 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         );
         loop {
             let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
+            // The deadline wakes the loop even if no frame is due (RT-R23).
             let wait = if block {
-                block_timeout(None)
+                block_timeout(runtime.remaining())
             } else {
-                (now + frame_time).saturating_duration_since(wall_clock())
+                runtime.cap_wait((now + frame_time).saturating_duration_since(wall_clock()))
             };
             let ready = event::poll(wait)?;
             wakeups.count();
+            if block {
+                // The blocked span reaches neither the fps readout nor the simulation, but
+                // it is wall time: it counts towards the deadline (RT-R23), and `while`'s
+                // command may have exited meanwhile (CLI-R14).
+                let t = wall_clock();
+                let flow = runtime.pass_wall(t.duration_since(counted).as_secs_f64());
+                counted = t;
+                if flow == Flow::Quit {
+                    return Ok(End::Deadline);
+                }
+                if done() {
+                    return Ok(End::Done);
+                }
+            }
             let redraw = if !ready && block {
                 // Only the keep-awake backend needs the time (KA-R3, KA-R4); a status the
                 // HUD shows that the poll changed is drawn now, not at the next key.
@@ -457,7 +509,11 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
                     if let Some(action) = action_for(key)
                         && runtime.handle(action) == Flow::Quit
                     {
-                        return Ok(());
+                        return Ok(if action == Action::Interrupt {
+                            End::Interrupt
+                        } else {
+                            End::Quit
+                        });
                     }
                 }
                 Event::FocusLost => pacer.focus(false),
@@ -531,10 +587,11 @@ impl Wakeups {
     }
 }
 
-/// The event loop's only clock. The allow is scoped to this call, so the rest of the file
-/// stays under the GEN-R7 clock ban and the TEST-R8 leak bans.
+/// The binary's only clock: the event loop's, and the `while` deadline's once the art has
+/// closed (CLI-R14). The allow is scoped to this call, so the rest of the binary stays
+/// under the GEN-R7 clock ban and the TEST-R8 leak bans.
 #[allow(clippy::disallowed_methods)] // wall clock is the binary's job (ADR-0008)
-fn wall_clock() -> Instant {
+pub(crate) fn wall_clock() -> Instant {
     Instant::now()
 }
 
@@ -618,6 +675,51 @@ mod tests {
                 Modifier::all()
             };
         }
+    }
+
+    #[test]
+    fn rt_r14_cli_r12_a_deadline_on_the_hud_does_not_allocate() {
+        let mut rt = runtime(&["starfield"]).with_hud(true).with_deadline(7200.0);
+        let (mut screen, mut term, ka) = (Screen::new(), terminal(), Guard::off());
+        for _ in 0..30 {
+            frame(&mut rt, &mut screen, &mut term, &ka);
+        }
+        let ((), stats) = measure(|| {
+            for _ in 0..60 {
+                frame(&mut rt, &mut screen, &mut term, &ka);
+            }
+        });
+        assert_eq!(stats.total(), 0, "{stats:?}");
+    }
+
+    #[test]
+    fn cli_r12_the_hud_shows_the_time_left_rounded_up() {
+        let mut rt = runtime(&["starfield"]).with_hud(true).with_deadline(3600.0);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        draw(&rt, &mut screen, &mut term, 30.0);
+        assert!(
+            screen.hud_text.contains("| ends 1:00:00"),
+            "{}",
+            screen.hud_text
+        );
+        rt.tick(0.25);
+        draw(&rt, &mut screen, &mut term, 30.0);
+        assert!(
+            screen.hud_text.contains("| ends 1:00:00"),
+            "{}",
+            screen.hud_text
+        );
+        rt.tick(0.75);
+        draw(&rt, &mut screen, &mut term, 30.0);
+        assert!(
+            screen.hud_text.contains("| ends 59:59"),
+            "{}",
+            screen.hud_text
+        );
+        // Without a deadline there is no such field.
+        let rt = runtime(&["starfield"]).with_hud(true);
+        draw(&rt, &mut screen, &mut term, 30.0);
+        assert!(!screen.hud_text.contains("ends"), "{}", screen.hud_text);
     }
 
     #[test]
@@ -813,6 +915,7 @@ mod tests {
                         low_power: extras.low_power,
                         paused: runtime.paused(),
                         quarantined: runtime.quarantined(),
+                        ends: runtime.time_left().map(|left| left.ceil() as u64),
                     };
                     hud.render_into(area, buf, hud_text);
                 }
@@ -1255,6 +1358,21 @@ mod tests {
             Duration::from_secs(1)
         );
         assert_eq!(block_timeout(Some(Duration::ZERO)), Duration::ZERO);
+    }
+
+    /// RT-R21 / RT-R23: a paused run's blocked wait ends at the `--for` deadline.
+    #[test]
+    fn rt_r21_rt_r23_a_paused_runs_blocked_wait_is_capped_by_its_deadline() {
+        let mut rt = runtime(&["starfield"]).with_deadline(0.3);
+        rt.handle(Action::TogglePause);
+        assert_eq!(block_timeout(rt.remaining()), Duration::from_millis(300));
+        assert_eq!(
+            rt.pass_wall(0.3),
+            Flow::Quit,
+            "the wake-up then ends the run"
+        );
+        let rt = runtime(&["starfield"]);
+        assert_eq!(block_timeout(rt.remaining()), BLOCK_POLL, "no deadline");
     }
 
     #[test]

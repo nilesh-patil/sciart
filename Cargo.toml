@@ -38,6 +38,9 @@ clap = { version = "4.5", default-features = false, features = [
     "suggestions",
     "usage",
 ] }
+# CLI-R17: `sciart completions` and `sciart man`, generated from the clap definition.
+clap_complete = "4.5"
+clap_mangen = "0.2"
 crossterm = "0.29"
 enigo = "0.6"
 rand = "0.9"
@@ -56,6 +59,8 @@ criterion = "0.8"
 insta = "1"
 portable-pty = "0.9"
 proptest = "1"
+# Parses `list --json` in tests (CLI-R16); already in the tree through criterion.
+serde_json = "1"
 tempfile = "3"
 vt100 = "0.16"
 
