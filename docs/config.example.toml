@@ -19,8 +19,10 @@ keep_awake = "caffeinate"
 
 # Drop to a lower frame rate when nobody is watching: after `idle_after` seconds
 # without a key press, or while the terminal window is unfocused.
-# Animations keep their real speed; only fewer frames are drawn.
+# Animations keep their real speed; only fewer frames are drawn. A picture that stops
+# changing (paused, or a scene holding still) also steps down toward `fps` within
+# 1.5 s and returns to full speed on the next change or key press.
 [low_power]
-idle_after = 600    # seconds
+idle_after = 120    # seconds (2 min)
 fps = 5             # 1..=120
 

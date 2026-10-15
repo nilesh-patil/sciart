@@ -1,6 +1,6 @@
 //! End-to-end: the real binary in an 80x24 pseudo-terminal, screen decoded by a vt100
 //! emulator (SPEC-006 end-to-end layer; RND-R4, RND-R5, RND-R9, RT-R6, RT-R9, RT-R12, CLI-R7,
-//! CFG-R2, CFG-R3).
+//! CFG-R2, CFG-R3, RT-R17).
 //! Unix only (portable-pty's native backend).
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // real-time timeouts against a real process (ADR-0008 applies to generators)
@@ -341,6 +341,54 @@ fn rt_r8_idle_time_enters_low_power_and_a_key_restores() {
     s.wait_for("idle low power", |t| t.contains("| LOW-POWER"));
     s.press("x"); // unbound key still counts as activity
     s.wait_for("activity restores", |t| !t.contains("LOW-POWER"));
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
+/// The measured fps on the HUD row (`… | 30 fps | …`).
+fn hud_fps(screen: &str) -> Option<u32> {
+    let row = last_row(screen);
+    let end = row.find(" fps")?;
+    row[..end].rsplit(' ').next()?.parse().ok()
+}
+
+/// RT-R17: a paused picture steps the draw rate down to `low_power.fps` (the HUD's measured
+/// fps falls) without entering low power, and the next change brings the full rate back.
+#[test]
+fn rt_r17_a_paused_picture_steps_the_rate_down_and_a_change_restores_it() {
+    let config = "keep_awake = \"off\"\n";
+    let args = ["run", "starfield", "--hud", "--ascii", "--seed", "3"];
+    let mut s = Session::start_with_config(&args, Some(config));
+    s.wait_for("full rate", |t| {
+        hud_fps(t).is_some_and(|f| (20..=40).contains(&f))
+    });
+    s.press(" ");
+    let screen = s.wait_for("stepped down", |t| {
+        t.contains("| PAUSED") && hud_fps(t).is_some_and(|f| f <= 8)
+    });
+    assert!(!screen.contains("LOW-POWER"), "quiet is not idle: {screen}");
+    s.press(" ");
+    s.wait_for("full rate again", |t| {
+        !t.contains("PAUSED") && hud_fps(t).is_some_and(|f| (20..=40).contains(&f))
+    });
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
+/// RT-R17: with nothing changing on screen (paused, HUD off), no bytes reach the terminal.
+#[test]
+fn rt_r17_a_paused_picture_writes_nothing() {
+    let config = "keep_awake = \"off\"\n";
+    let mut s = Session::start_with_config(&["run", "starfield", "--ascii"], Some(config));
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    s.press(" ");
+    thread::sleep(Duration::from_millis(500)); // the pause's own frame goes out
+    let before = s.raw.lock().unwrap().len();
+    thread::sleep(Duration::from_millis(1500));
+    let after = s.raw.lock().unwrap().len();
+    assert_eq!(after, before, "paused: {} bytes written", after - before);
     let (status, _) = s.quit();
     assert!(status.success());
 }

@@ -6,6 +6,10 @@
 //! scenes, stay within budget. The first frame (a full-screen draw) is excluded, as in
 //! `rs-cost`. Output is deterministic, so this is a test; CPU time stays a release-mode
 //! check (GEN-R8, `rs-cost`, `rs-worst`).
+//!
+//! RND-R17 (M22, ADR-0023): the same pipeline's mean bytes per frame is at least 25 %
+//! below M21's, from tighter encoding of the same painted frames (`encoder_fidelity.rs`
+//! proves the screens are unchanged).
 
 use std::io::{self, Write};
 
@@ -23,10 +27,16 @@ const FPS: u64 = 30;
 /// The runtime takes two fixed steps per drawn frame at 30 FPS (ADR-0003).
 const STEPS_PER_FRAME: u64 = 2;
 
-/// Mean bytes per frame over all scenes (M14: 18 812).
-const BYTES_BUDGET: f64 = 20_480.0;
-/// Mean changed cells per frame over all scenes (M14: 806).
-const CELLS_BUDGET: f64 = 880.0;
+/// Mean bytes per frame over all scenes: M22's measured 3 841 plus ≈ 12 % (M14: 18 812, budget
+/// 20 480 until M22 tightened RT-R16).
+const BYTES_BUDGET: f64 = 4_300.0;
+/// Mean changed cells per frame over all scenes: M22's measured 438 plus ≈ 10 % (M14: 806,
+/// budget 880 until M22).
+const CELLS_BUDGET: f64 = 480.0;
+/// M21's gallery mean bytes per frame through this pipeline (85 scenes, before RND-R17).
+const M21_BYTES: f64 = 6_658.0;
+/// RND-R17: at least 25 % fewer bytes per frame than M21 (M22: 3 841).
+const RND_R17_BYTES: f64 = M21_BYTES * 0.75;
 
 /// Counts the bytes that reach it.
 #[derive(Default)]
@@ -110,7 +120,7 @@ fn all() -> Vec<Cost> {
 }
 
 #[test]
-fn rt_r16_gallery_mean_bytes_and_changed_cells_stay_within_budget() {
+fn rt_r16_rnd_r17_gallery_mean_bytes_and_changed_cells_stay_within_budget() {
     let costs = all();
     assert_eq!(costs.len(), registry().len());
     let n = costs.len() as f64;
@@ -134,5 +144,11 @@ fn rt_r16_gallery_mean_bytes_and_changed_cells_stay_within_budget() {
          Top 10 by changed cells:\n{}",
         top(|c| c.1, "B"),
         top(|c| c.2, "cells"),
+    );
+    assert!(
+        bytes <= RND_R17_BYTES,
+        "RND-R17: mean {bytes:.0} B/frame over {n} scenes, more than 75 % of M21's \
+         {M21_BYTES} ({RND_R17_BYTES:.0}).\nTop 10 by bytes:\n{}",
+        top(|c| c.1, "B"),
     );
 }

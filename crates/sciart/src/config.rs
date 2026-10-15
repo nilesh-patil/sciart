@@ -12,7 +12,8 @@ use crate::cli::{Cli, KeepAwakeArg, ThemeArg, UsageError};
 pub const DEFAULT_FPS: u16 = 30;
 pub const DEFAULT_INTERVAL: f64 = 15.0;
 pub const DEFAULT_LOW_POWER_FPS: u16 = 5;
-pub const DEFAULT_IDLE_AFTER: f64 = 600.0;
+/// Two minutes without a key press (CFG-R8; 600 s before M22).
+pub const DEFAULT_IDLE_AFTER: f64 = 120.0;
 
 /// On-disk config; every key optional, unknown keys rejected (CFG-R3).
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -273,7 +274,7 @@ mod tests {
         let (s, _) = resolve(&cli(&[]).unwrap(), FileConfig::default());
         assert_eq!(s.keep_awake, Mode::platform_default());
         assert_eq!(s.low_power_fps, 5);
-        assert_eq!(s.idle_after, 600.0);
+        assert_eq!(s.idle_after, 120.0); // CFG-R8
     }
 
     #[test]
@@ -310,6 +311,22 @@ mod tests {
         assert_eq!(f.fps, Some(DEFAULT_FPS));
         assert_eq!(f.interval, Some(DEFAULT_INTERVAL));
         assert_eq!(f.title, Some(true), "CFG-R6 key documented");
+    }
+
+    #[test]
+    fn cfg_r8_low_power_starts_after_two_minutes_idle_and_fps_stays_30() {
+        let (s, _) = resolve(&cli(&[]).unwrap(), FileConfig::default());
+        assert_eq!(s.idle_after, 120.0);
+        assert_eq!(s.fps, 30);
+        assert_eq!(s.low_power_fps, 5);
+        let text = include_str!("../../../docs/config.example.toml");
+        let f = parse(text, Path::new("docs/config.example.toml")).unwrap();
+        assert_eq!(
+            f.low_power.idle_after,
+            Some(120.0),
+            "the example shows the default"
+        );
+        assert_eq!(f.low_power.fps, Some(5));
     }
 
     #[test]
