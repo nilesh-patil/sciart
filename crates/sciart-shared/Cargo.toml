@@ -1,0 +1,21 @@
+[package]
+name = "sciart-shared"
+description = "Scene models shared by several sciart scenes (never registered)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[features]
+# Measurement helpers the scenes' unit tests use (correlation lengths, box dimensions,
+# capacities, reference terrain). Only the scene crates' dev-dependencies enable it, so
+# normal builds never compile them.
+test-support = []
+
+[dependencies]
+sciart-core.workspace = true
+rand.workspace = true
+
+[lints]
+workspace = true

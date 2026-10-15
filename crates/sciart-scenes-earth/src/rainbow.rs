@@ -24,7 +24,7 @@ use sciart_core::prelude::*;
 use sciart_core::rng::{hash01, value_noise};
 use sciart_core::timeline::ease;
 
-use crate::shared::skyline::{Skyline, Terrain};
+use sciart_shared::skyline::{Skyline, Terrain};
 
 pub static META: Meta = Meta {
     name: "rainbow",

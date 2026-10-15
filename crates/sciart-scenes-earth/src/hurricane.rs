@@ -22,8 +22,8 @@ use sciart_core::Grid;
 use sciart_core::grid;
 use sciart_core::prelude::*;
 
-use crate::shared::vortex_advect::{self, Flow, XEdge};
 use sciart_core::rng::value_noise;
+use sciart_shared::vortex_advect::{self, Flow, XEdge};
 
 pub static META: Meta = Meta {
     name: "hurricane",

@@ -44,7 +44,7 @@ use sciart_core::prelude::*;
 use sciart_core::rng;
 use sciart_core::{draw, title};
 
-use crate::shared::excitable::{self, AlievPanfilov, Medium};
+use sciart_shared::excitable::{self, AlievPanfilov, Medium};
 
 pub static META: Meta = Meta {
     name: "heart_fibrillation",

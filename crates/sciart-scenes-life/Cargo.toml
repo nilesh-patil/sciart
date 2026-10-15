@@ -1,0 +1,20 @@
+[package]
+name = "sciart-scenes-life"
+description = "sciart scenes: Living Systems, Physics of Life, Molecules of Life and Life from Matter"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+sciart-core.workspace = true
+sciart-shared.workspace = true
+rand.workspace = true
+
+[dev-dependencies]
+# The shared models' test helpers (`test-support`) for this crate's unit tests.
+sciart-shared = { workspace = true, features = ["test-support"] }
+
+[lints]
+workspace = true

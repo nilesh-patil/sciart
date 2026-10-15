@@ -22,7 +22,7 @@ use sciart_core::Size;
 
 /// Boundary condition of one lattice edge.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Edge {
+pub enum Edge {
     /// Held at φ = 1: the charge (or the far, high-pressure fluid).
     Source,
     /// Insulating: zero normal gradient.
@@ -30,12 +30,12 @@ pub(crate) enum Edge {
 }
 
 /// Edge order in [`Dbm::reset`]: top, right, bottom, left.
-pub(crate) type Edges = [Edge; 4];
+pub type Edges = [Edge; 4];
 
 /// One tree site: lattice position, parent index (the root is its own parent) and the
 /// growth time stamp the caller passed to [`Dbm::grow`].
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Node {
+pub struct Node {
     pub x: u16,
     pub y: u16,
     pub parent: u32,
@@ -48,7 +48,7 @@ const NO_NODE: u32 = u32::MAX;
 
 /// SOR relaxation factor: near the optimum `2/(1 + π/N)` for the capped lattices (N ≈ 80),
 /// kept a little lower so a warm start never overshoots visibly.
-pub(crate) const OMEGA: f32 = 1.9;
+pub const OMEGA: f32 = 1.9;
 
 /// The 8-neighbourhood, orthogonal steps first.
 const HOOD: [(i32, i32); 8] = [
@@ -64,7 +64,7 @@ const HOOD: [(i32, i32); 8] = [
 
 /// A dielectric-breakdown lattice and its tree.
 #[derive(Debug, Clone, Default)]
-pub(crate) struct Dbm {
+pub struct Dbm {
     w: usize,
     h: usize,
     phi: Vec<f32>,
@@ -88,7 +88,7 @@ pub(crate) struct Dbm {
 
 impl Dbm {
     /// A `size` lattice with room for `cap` tree nodes; empty until [`Self::reset`].
-    pub(crate) fn new(size: Size, cap: usize) -> Self {
+    pub fn new(size: Size, cap: usize) -> Self {
         let (w, h) = (usize::from(size.width()), usize::from(size.height()));
         let n = w * h;
         Self {
@@ -111,41 +111,40 @@ impl Dbm {
         }
     }
 
-    pub(crate) fn size(&self) -> Size {
+    pub fn size(&self) -> Size {
         Size::new(self.w as u16, self.h as u16)
     }
 
-    pub(crate) fn nodes(&self) -> &[Node] {
+    pub fn nodes(&self) -> &[Node] {
         &self.nodes
     }
 
-    #[cfg(test)]
-    pub(crate) fn capacity(&self) -> usize {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn capacity(&self) -> usize {
         self.cap
     }
 
-    pub(crate) fn is_full(&self) -> bool {
+    pub fn is_full(&self) -> bool {
         self.nodes.len() >= self.cap
     }
 
     /// Largest distance of a tree site from the seed, in lattice spacings.
-    pub(crate) fn reach(&self) -> f64 {
+    pub fn reach(&self) -> f64 {
         self.reach
     }
 
     /// Whether the tree has reached a source edge (breakdown complete).
-    pub(crate) fn touched_source(&self) -> bool {
+    pub fn touched_source(&self) -> bool {
         self.touched
     }
 
-    #[cfg(test)]
-    #[cfg(test)]
-    pub(crate) fn phi(&self, x: usize, y: usize) -> f32 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn phi(&self, x: usize, y: usize) -> f32 {
         self.phi[y * self.w + x]
     }
 
     /// Distance from the seed to the nearest source edge (the reach at breakdown).
-    pub(crate) fn span(&self) -> f64 {
+    pub fn span(&self) -> f64 {
         let (sx, sy) = (self.seed.0 as f64, self.seed.1 as f64);
         let d = [sy, self.w as f64 - 1.0 - sx, self.h as f64 - 1.0 - sy, sx];
         let edges = self.edges.unwrap_or([Edge::Mirror; 4]);
@@ -159,7 +158,7 @@ impl Dbm {
     /// Clear the tree, plant the root at `seed` (clamped onto the lattice) and set the
     /// boundary, with a warm-start guess `φ = ln(1 + d)/ln(1 + span)` (d from the seed,
     /// the potential of a point charge), so a few sweeps per frame suffice.
-    pub(crate) fn reset(&mut self, seed: (usize, usize), edges: Edges) {
+    pub fn reset(&mut self, seed: (usize, usize), edges: Edges) {
         if self.w * self.h == 0 {
             return;
         }
@@ -238,7 +237,7 @@ impl Dbm {
     /// that sweep's largest update (LICH-A1). Red–black ordering has no dependency between
     /// the sites of one colour, so the interior loop pipelines (lexicographic
     /// Gauss–Seidel chains every site on its left neighbour's fresh value).
-    pub(crate) fn relax(&mut self, max_sweeps: usize, tol: f32) -> (usize, f32) {
+    pub fn relax(&mut self, max_sweeps: usize, tol: f32) -> (usize, f32) {
         let Some(edges) = self.edges else {
             return (0, 0.0);
         };
@@ -294,8 +293,8 @@ impl Dbm {
     }
 
     /// Largest Laplace residual `|mean(neighbours) − φ|` over the free sites.
-    #[cfg(test)]
-    pub(crate) fn residual(&self) -> f32 {
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn residual(&self) -> f32 {
         let Some(edges) = self.edges else {
             return 0.0;
         };
@@ -316,7 +315,7 @@ impl Dbm {
     /// the perimeter as it stood at the call, and linked to its oldest tree neighbour
     /// (so branches hang off the trunk rather than their siblings). Stops when the pool
     /// is full; returns the sites added.
-    pub(crate) fn grow(
+    pub fn grow(
         &mut self,
         eta: f64,
         max_sites: usize,
@@ -420,8 +419,8 @@ impl Dbm {
 
 /// Box-counting dimension of a node set: the log-log slope of occupied boxes against
 /// 1/box size over sizes 1, 2, 4, 8 (least squares) (LICH-A3).
-#[cfg(test)]
-pub(crate) fn box_dimension(nodes: &[Node]) -> f64 {
+#[cfg(any(test, feature = "test-support"))]
+pub fn box_dimension(nodes: &[Node]) -> f64 {
     use std::collections::HashSet;
     let pts: Vec<(f64, f64)> = [1u16, 2, 4, 8]
         .iter()

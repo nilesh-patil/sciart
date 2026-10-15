@@ -22,30 +22,30 @@ use sciart_core::prelude::*;
 /// Barkley's model `∂u/∂t = ∇²u + ε⁻¹u(1 − u)(u − u_th)`, `u_th = (v + b)/a`,
 /// `∂v/∂t = u − v`, discretised with node spacing `h` and sub-step `tau` (time units).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Barkley {
-    pub(crate) a: f32,
-    pub(crate) eps: f32,
+pub struct Barkley {
+    pub a: f32,
+    pub eps: f32,
     /// Node spacing in space units.
-    pub(crate) h: f32,
+    pub h: f32,
     /// Sub-step in time units.
-    pub(crate) tau: f32,
+    pub tau: f32,
 }
 
 impl Barkley {
     /// Diffusion weight of one explicit stage, `τ/h²` (`D = 1`).
-    pub(crate) const fn diff(&self) -> f32 {
+    pub const fn diff(&self) -> f32 {
         self.tau / (self.h * self.h)
     }
 
     /// Reaction weight `τ/ε`.
-    pub(crate) const fn react(&self) -> f32 {
+    pub const fn react(&self) -> f32 {
         self.tau / self.eps
     }
 
     /// Whether every stage of [`step`](Self::step) is a convex combination or a shrinking
     /// factor, which keeps `u, v ∈ [0, 1]` for any `b ≥ 0` without clamps: `(10/3)·τ/h² ≤ 1`
     /// (the 9-point stencil's centre weight), `τ/ε ≤ 1` and `τ ≤ 1`.
-    pub(crate) const fn is_bounded(&self) -> bool {
+    pub const fn is_bounded(&self) -> bool {
         10.0 / 3.0 * self.diff() <= 1.0 && self.react() <= 1.0 && self.tau <= 1.0
     }
 
@@ -55,7 +55,7 @@ impl Barkley {
     /// `v ← v + τ(u − v)`. `b(i)` is the excitability of node `i` (row-major); `lap` is
     /// scratch.
     #[inline]
-    pub(crate) fn step(
+    pub fn step(
         &self,
         u: &mut Grid<f32>,
         v: &mut Grid<f32>,
@@ -83,13 +83,7 @@ impl Barkley {
 
 /// Excite (`u = 1`) every node within `r` nodes of `(cx, cy)` that has recovered to
 /// `v < v_max`: a pacemaker firing into a medium, which leaves refractory nodes alone.
-pub(crate) fn excite_disc(
-    u: &mut Grid<f32>,
-    v: &Grid<f32>,
-    (cx, cy): (f64, f64),
-    r: f64,
-    v_max: f32,
-) {
+pub fn excite_disc(u: &mut Grid<f32>, v: &Grid<f32>, (cx, cy): (f64, f64), r: f64, v_max: f32) {
     let reach = r.ceil() as i32;
     let (x0, y0) = (cx.round() as i32, cy.round() as i32);
     for y in y0 - reach..=y0 + reach {
@@ -107,27 +101,27 @@ pub(crate) fn excite_disc(
 
 /// One broken front: a straight segment `a → b`, excited on the `n` side.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct Front {
-    pub(crate) a: [f64; 2],
-    pub(crate) b: [f64; 2],
+pub struct Front {
+    pub a: [f64; 2],
+    pub b: [f64; 2],
     /// Unit normal: the direction the front propagates.
-    pub(crate) n: [f64; 2],
+    pub n: [f64; 2],
     /// `b` was extended to the wall, leaving `a` as the only free end.
-    pub(crate) anchored: bool,
+    pub anchored: bool,
 }
 
 /// How a [`Front`] is painted: the excited strip's width, the refractory tail's width
 /// (nodes), and `v` along the tail from the front to its end.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct FrontStroke {
-    pub(crate) front_w: f64,
-    pub(crate) tail_w: f64,
-    pub(crate) tail_v: (f64, f64),
+pub struct FrontStroke {
+    pub front_w: f64,
+    pub tail_w: f64,
+    pub tail_v: (f64, f64),
 }
 
 /// Paint `front` into the fields: a `front_w`-node strip of `u = 1` on the `n` side of
 /// the segment, backed by a `tail_w`-node strip whose `v` ramps down away from it.
-pub(crate) fn paint_front(u: &mut Grid<f32>, v: &mut Grid<f32>, f: &Front, s: &FrontStroke) {
+pub fn paint_front(u: &mut Grid<f32>, v: &mut Grid<f32>, f: &Front, s: &FrontStroke) {
     let (front_w, tail_w, tail_v) = (s.front_w, s.tail_w, s.tail_v);
     let (d, len) = unit(f.a, f.b);
     let n = f.n;
@@ -165,7 +159,7 @@ pub(crate) fn paint_front(u: &mut Grid<f32>, v: &mut Grid<f32>, f: &Front, s: &F
 }
 
 /// Unit vector from `a` to `b` and the distance (a zero-length segment points along x).
-pub(crate) fn unit(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
+pub fn unit(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let len = dx.hypot(dy);
     if len > 0.0 {
@@ -181,7 +175,7 @@ pub(crate) fn unit(a: [f64; 2], b: [f64; 2]) -> ([f64; 2], f64) {
 /// neighbours, a neighbour outside the mask (or the lattice) replaced by the node itself,
 /// so the 5-point Laplacian sees a zero gradient there (no-flux wall).
 #[derive(Debug, Clone)]
-pub(crate) struct Medium {
+pub struct Medium {
     size: Size,
     /// Row-major indices of the nodes inside, ascending.
     inside: Vec<u32>,
@@ -205,7 +199,7 @@ impl Default for Medium {
 
 impl Medium {
     /// Rebuild for a `size` lattice with `inside(x, y)` as the mask (reusing buffers).
-    pub(crate) fn rebuild(&mut self, size: Size, inside: impl Fn(i32, i32) -> bool) {
+    pub fn rebuild(&mut self, size: Size, inside: impl Fn(i32, i32) -> bool) {
         let (w, h) = (i32::from(size.width()), i32::from(size.height()));
         self.size = size;
         self.mask.clear();
@@ -238,28 +232,28 @@ impl Medium {
         }
     }
 
-    pub(crate) fn size(&self) -> Size {
+    pub fn size(&self) -> Size {
         self.size
     }
 
     /// Row-major indices of the nodes inside the mask.
-    pub(crate) fn inside(&self) -> &[u32] {
+    pub fn inside(&self) -> &[u32] {
         &self.inside
     }
 
     /// Whether lattice node `i` is inside the mask (false off the lattice).
-    pub(crate) fn contains(&self, i: usize) -> bool {
+    pub fn contains(&self, i: usize) -> bool {
         self.mask.get(i).copied().unwrap_or(false)
     }
 
     /// Whether `(x, y)` is inside the mask (false off the lattice).
-    pub(crate) fn contains_xy(&self, x: i32, y: i32) -> bool {
+    pub fn contains_xy(&self, x: i32, y: i32) -> bool {
         let (w, h) = (i32::from(self.size.width()), i32::from(self.size.height()));
         (0..w).contains(&x) && (0..h).contains(&y) && self.mask[(y * w + x) as usize]
     }
 
     /// The four neighbours of node `i` (walls folded back onto `i`).
-    pub(crate) fn neighbours(&self, i: usize) -> [u32; 4] {
+    pub fn neighbours(&self, i: usize) -> [u32; 4] {
         self.nb[i]
     }
 
@@ -279,32 +273,32 @@ impl Medium {
 /// `∂v/∂t = ε(u, v)(−v − ku(u − a − 1))`, `ε = ε₀ + μ₁v/(u + μ₂)`, explicit Euler with
 /// node spacing `h` and step `dt` (time units).
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub(crate) struct AlievPanfilov {
-    pub(crate) k: f32,
-    pub(crate) a: f32,
-    pub(crate) eps0: f32,
-    pub(crate) mu1: f32,
-    pub(crate) mu2: f32,
-    pub(crate) d: f32,
-    pub(crate) h: f32,
-    pub(crate) dt: f32,
+pub struct AlievPanfilov {
+    pub k: f32,
+    pub a: f32,
+    pub eps0: f32,
+    pub mu1: f32,
+    pub mu2: f32,
+    pub d: f32,
+    pub h: f32,
+    pub dt: f32,
 }
 
 /// `v` never exceeds this in the model's own dynamics (its nullcline tops out near
 /// `k(1 + a)²/4 ≈ 2.6` for `k = 8`); the clamp only guards the display and tests.
-pub(crate) const AP_V_MAX: f32 = 4.0;
+pub const AP_V_MAX: f32 = 4.0;
 
 impl AlievPanfilov {
     /// Explicit diffusion is stable for `4·D·dt/h² ≤ 1` (5-point stencil); the reaction
     /// is resolved when `k·dt` is small.
-    pub(crate) const fn is_stable(&self) -> bool {
+    pub const fn is_stable(&self) -> bool {
         4.0 * self.d * self.dt / (self.h * self.h) <= 1.0 && self.k * self.dt <= 0.5
     }
 
     /// One Euler step on every inside node; `u` is clamped to `[0, 1]` and `v` to
     /// `[0, AP_V_MAX]` (HRT-A5), and `eps_scale(i)` multiplies `ε` per node (tissue
     /// heterogeneity; `|_| 1.0` for none). `lap` is scratch of the lattice's size.
-    pub(crate) fn step(
+    pub fn step(
         &self,
         m: &Medium,
         u: &mut [f32],
@@ -332,7 +326,7 @@ impl AlievPanfilov {
 
 /// Excitation phase `atan2(v − v*, u − u*)` of a node (radians, `(−π, π]`).
 #[inline]
-pub(crate) fn phase(u: f32, v: f32, (us, vs): (f32, f32)) -> f32 {
+pub fn phase(u: f32, v: f32, (us, vs): (f32, f32)) -> f32 {
     (v - vs).atan2(u - us)
 }
 
@@ -355,7 +349,7 @@ fn wrap(d: f32) -> f32 {
 /// the plaquette's top-left node), row by row. `theta` and `taken` are scratch of the
 /// lattice's size.
 #[allow(clippy::too_many_arguments)] // two fields, two scratch buffers, one output
-pub(crate) fn count_singularities(
+pub fn count_singularities(
     m: &Medium,
     u: &[f32],
     v: &[f32],

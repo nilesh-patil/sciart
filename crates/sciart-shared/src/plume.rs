@@ -16,7 +16,7 @@ use sciart_core::Trig;
 
 /// One plume grain.
 #[derive(Debug, Clone, Copy, Default)]
-pub(crate) struct Grain {
+pub struct Grain {
     /// Position relative to the vent (`z` up), in the scene's length unit.
     pub pos: [f32; 3],
     pub vel: [f32; 3],
@@ -26,20 +26,20 @@ pub(crate) struct Grain {
     pub src: u8,
 }
 
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 /// Apex height of a grain launched at `v0` at zenith angle `zenith` (radians).
-pub(crate) fn apex(v0: f64, g: f64, zenith: f64) -> f64 {
+pub fn apex(v0: f64, g: f64, zenith: f64) -> f64 {
     let vz = v0 * zenith.cos_det();
     vz * vz / (2.0 * g)
 }
 
 /// Flat-ground range of a grain launched at `v0` at zenith angle `zenith`.
-pub(crate) fn range(v0: f64, g: f64, zenith: f64) -> f64 {
+pub fn range(v0: f64, g: f64, zenith: f64) -> f64 {
     v0 * v0 * (2.0 * zenith).sin_det() / g
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct Plume {
+pub struct Plume {
     pool: ParticlePool<Grain>,
 }
 
@@ -130,12 +130,19 @@ impl Plume {
         self.pool.iter()
     }
 
-    #[cfg(test)]
+    #[cfg(any(test, feature = "test-support"))]
     pub fn len(&self) -> usize {
         self.pool.len()
     }
 
-    #[cfg(test)]
+    // `len` became public API when the shared models got their own crate (ADR-0023);
+    // clippy's `len_without_is_empty` asks for its pair.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn is_empty(&self) -> bool {
+        self.pool.is_empty()
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
     pub fn capacity(&self) -> usize {
         self.pool.capacity()
     }

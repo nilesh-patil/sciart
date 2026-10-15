@@ -22,7 +22,7 @@ use sciart_core::ease;
 use sciart_core::prelude::*;
 use sciart_core::rng::{cell_key, hash01};
 
-use crate::shared::plume::Plume;
+use sciart_shared::plume::Plume;
 
 pub static META: Meta = Meta {
     name: "comet_breakup",

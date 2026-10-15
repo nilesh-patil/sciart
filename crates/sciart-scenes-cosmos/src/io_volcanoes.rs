@@ -27,7 +27,7 @@ use sciart_core::prelude::*;
 use sciart_core::raster::stipple_keep;
 use sciart_core::rng::{cell_key, hash01, value_noise};
 
-use crate::shared::plume::{self, Plume};
+use sciart_shared::plume::{self, Plume};
 
 pub static META: Meta = Meta {
     name: "io_volcanoes",
