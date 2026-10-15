@@ -6,25 +6,42 @@ platforms = ["osx-arm64"]
 version = "0.1.0"
 
 # Rust toolchain comes from rust-toolchain.toml via rustup; pixi is the task runner (ADR-0007).
+# TEST-R11: every task runs with sccache as the rustc wrapper when it is installed.
+[activation]
+scripts = ["scripts/pixi-activate.sh"]
+
 [tasks]
 rs-build = "cargo build --workspace"
-rs-test = "cargo test --workspace"
+# TEST-R10: every test under nextest (parallel binaries, optimised `test` profile with debug
+# assertions and overflow checks); doctests first, since nextest cannot run them. Extra
+# arguments go to nextest: `pixi run rs-test <filter>`.
+rs-test = "cargo test --workspace --doc && cargo nextest run --workspace"
+# TEST-R10 evidence: rs-test runs exactly the tests `cargo test --workspace` lists.
+rs-test-parity = "python3 scripts/test_set_parity.py"
 # Scene modules are declared inside the `registry!` macro, which `cargo fmt` cannot follow,
 # so they are also formatted/checked file by file.
 rs-fmt = "cargo fmt --all && rustfmt --config-path rustfmt.toml crates/sciart-generators/src/*.rs"
 rs-lint = "cargo fmt --all --check && rustfmt --check --config-path rustfmt.toml crates/sciart-generators/src/*.rs && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
-# TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run in release.
-rs-snap-release = "cargo test --release -p sciart-generators --test snapshots"
+# TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
+# opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
+rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
 rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-snap-release"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
-rs-worst = "cargo run -q --release -p sciart-generators --example worst_frame --"
+rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
 # RND-R13 per-scene CPU, terminal bytes and art metrics: `pixi run rs-cost [scene ...] [--size WxH] [--secs N] [--sort bytes]`.
-rs-cost = "cargo run -q --release -p sciart --example cost --"
+rs-cost = "cargo run -q --profile ci -p sciart --example cost --"
 rs-list = "cargo run -q -p sciart -- list"
-rs-sim = "cargo run --release -p sciart -- sim"
-rs-run = "cargo run --release -p sciart -- run"
+# Interactive review runs share the `ci` build with the probes above; frames are the same as
+# an installed (`release`) binary's (GEN-R6), which only links slower.
+rs-sim = "cargo run --profile ci -p sciart -- sim"
+rs-run = "cargo run --profile ci -p sciart -- run"
 # Truecolor PNG frames for art review: `pixi run rs-preview <scene> --size 120x40 --t 0,5,20 --theme astro --out /tmp/p/<scene>`.
-rs-preview = "cargo run -q --release -p sciart-generators --example preview --"
+rs-preview = "cargo run -q --profile ci -p sciart-generators --example preview --"
+# Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).
 rs-install = "cargo install --path crates/sciart"
 rs-install-mouse = "cargo install --path crates/sciart --features mouse"
+
+[dependencies]
+cargo-nextest = ">=0.9.148,<0.10"
+sccache = ">=0.18.0,<0.19"

@@ -1930,6 +1930,7 @@ dependencies = [
  "sciart-core",
  "sciart-render",
  "sciart-testalloc",
+ "toml",
 ]
 
 [[package]]
