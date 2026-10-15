@@ -2,9 +2,8 @@
 //!
 //! A frame's changed cells are independent once every one of them is a single-width
 //! symbol, so the order in which they reach the terminal is free (a frame with a wide
-//! symbol keeps the diff's order). Of two orders the shorter is sent: row-major is written,
-//! the grouped order is costed with a dry run that only counts bytes and replaces it when
-//! strictly shorter ([`encode_best`]):
+//! symbol keeps the diff's order). Of two orders the shorter is sent; both are written,
+//! into two reused buffers, only on probe frames ([`Choice`]):
 //!
 //! - **row-major** (the diff's own order): adjacent cells need no cursor move at all,
 //!   which wins on full-screen fields whose neighbouring cells differ in colour anyway;
@@ -13,13 +12,15 @@
 //!   levels, so a frame of scattered braille dots has a few dozen distinct colours over
 //!   hundreds of cells; a 24-bit SGR costs 15–19 bytes, a short cursor move 1–5.
 //!
-//! Cursor moves pick the shortest of an absolute `CUP` and the relative forms (LF, `CUD`,
-//! `CUU`, `CUF`, `CUB`, backspace, CR, `CHA`). The encoder tracks the pending-wrap state
-//! after the last column (a print there leaves the cursor *on* the last column with a wrap
-//! pending), from which only CR and `CUP` are used, since terminals disagree on what the
-//! relative moves do there. LF moves straight down because raw mode clears `OPOST`, and the
-//! backend resets the newline mode (`LNM`) once; LF is only used to move to a row below the
-//! cursor, so it never scrolls.
+//! Cursor moves pick the shortest of an absolute `CUP` and the relative forms (`CUD`,
+//! `CUU`, `CUF`, `CUB`, VT, backspace, CR, `CHA`). Never LF: stdout's `LineWriter` would
+//! split the frame at the last '\n' into two writes (RT-R15); VT moves down exactly as LF
+//! does (xterm documents it so; the backend resets the newline mode `LNM` once, which VT
+//! follows like LF). The encoder tracks the pending-wrap
+//! state after the last column (a print there leaves the cursor *on* the last column with
+//! a wrap pending), from which only CR and `CUP` are used, since terminals disagree on what
+//! the relative moves do there; and after a symbol of ambiguous width it sets the column
+//! absolutely (`CHA`, CR or `CUP`, [`Cursor::Loose`]).
 
 use ratatui::style::{Color, Modifier};
 
@@ -28,6 +29,10 @@ use ratatui::style::{Color, Modifier};
 pub(crate) enum Cursor {
     Unknown,
     At(u16, u16),
+    /// After a symbol whose width terminals may disagree on (neither ASCII nor braille):
+    /// probably at `(x, y)`, so printing on there is as safe as it ever was, but a relative
+    /// move from here could land off by a column; any other target gets a `CUP`.
+    Loose(u16, u16),
     /// On the last column of row `y` with a wrap pending (after printing there).
     Wrap(u16),
 }
@@ -57,20 +62,24 @@ pub(crate) struct State {
     pub width: u16,
 }
 
-/// A changed cell, copied out of the diff so it can be reordered. Its symbol lives in the
-/// frame's symbol arena at `sym`.
+/// A changed cell, copied out of the diff so it can be reordered (28 bytes). Its symbol
+/// is inline when it fits in 4 bytes (any one `char`: every canvas and HUD cell), else in
+/// the frame's symbol arena ([`Pending::new`]).
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Pending {
-    /// Sort key of the style: fg, bg and modifiers packed (see [`style_key`]).
-    pub key: u64,
     pub y: u16,
     pub x: u16,
     pub width: u16,
-    pub sym: (u32, u32),
+    /// 1..=4: the symbol is `sym[..len]`; 0: it is in the arena at `long`.
+    len: u8,
+    sym: [u8; 4],
+    long: u32,
     pub pen: Pen,
+    /// The style's slot in [`worth_grouping`]'s set, which groups the cells.
+    pub slot: u16,
 }
 
-/// Byte sink: a real buffer, or a counter for the dry runs.
+/// Byte sink of the encoder (the frame buffers).
 pub(crate) trait Out {
     fn bytes(&mut self, b: &[u8]);
     fn byte(&mut self, b: u8) {
@@ -89,18 +98,46 @@ impl Out for Vec<u8> {
     }
 }
 
-/// Counts bytes without writing them.
-#[derive(Debug, Default)]
-pub(crate) struct Count(pub usize);
-
-impl Out for Count {
-    #[inline]
-    fn bytes(&mut self, b: &[u8]) {
-        self.0 += b.len();
+impl Pending {
+    /// A cell printing `symbol`; a symbol longer than 4 bytes is appended to `arena`
+    /// (length as two bytes, then the bytes).
+    pub(crate) fn new(
+        (x, y, width): (u16, u16, u16),
+        pen: Pen,
+        symbol: &[u8],
+        arena: &mut Vec<u8>,
+    ) -> Self {
+        let mut p = Self {
+            y,
+            x,
+            width,
+            len: 0,
+            sym: [0; 4],
+            long: 0,
+            pen,
+            slot: 0,
+        };
+        if let Some(inline) = p.sym.get_mut(..symbol.len()).filter(|_| !symbol.is_empty()) {
+            inline.copy_from_slice(symbol);
+            p.len = symbol.len() as u8; // 1..=4
+        } else {
+            let len = u16::try_from(symbol.len()).unwrap_or(u16::MAX);
+            p.long = u32::try_from(arena.len()).unwrap_or(u32::MAX);
+            arena.extend_from_slice(&len.to_le_bytes());
+            arena.extend_from_slice(&symbol[..usize::from(len)]);
+        }
+        p
     }
-    #[inline]
-    fn byte(&mut self, _: u8) {
-        self.0 += 1;
+
+    /// The symbol's bytes.
+    pub(crate) fn symbol<'a>(&'a self, arena: &'a [u8]) -> &'a [u8] {
+        if self.len > 0 {
+            &self.sym[..usize::from(self.len)]
+        } else {
+            let at = self.long as usize;
+            let len = usize::from(u16::from_le_bytes([arena[at], arena[at + 1]]));
+            &arena[at + 2..at + 2 + len]
+        }
     }
 }
 
@@ -119,6 +156,31 @@ pub(crate) fn style_key(pen: Pen) -> u64 {
     (color(pen.fg) << 38) | (color(pen.bg) << 12) | u64::from(pen.modifier.bits() & 0x0fff)
 }
 
+/// Print one cell at `(x, y)`: the move there, the SGR delta, the symbol; then track where
+/// the cursor is.
+#[inline]
+pub(crate) fn put<O: Out>(
+    out: &mut O,
+    state: &mut State,
+    (x, y, width): (u16, u16, u16),
+    pen: Pen,
+    sym: &[u8],
+) {
+    move_to(out, state, x, y);
+    sgr(out, &mut state.pen, pen);
+    out.bytes(sym);
+    let nx = x.saturating_add(width);
+    state.cursor = if state.width == 0 {
+        Cursor::Unknown
+    } else if nx >= state.width {
+        Cursor::Wrap(y)
+    } else if unambiguous(sym) {
+        Cursor::At(nx, y)
+    } else {
+        Cursor::Loose(nx, y)
+    };
+}
+
 /// Encode `cells` (all single-width, in any order) from `state` into `out`.
 pub(crate) fn encode<'a, O: Out>(
     out: &mut O,
@@ -127,103 +189,240 @@ pub(crate) fn encode<'a, O: Out>(
     syms: &[u8],
 ) {
     for p in cells {
-        move_to(out, state, p.x, p.y);
-        sgr(out, &mut state.pen, p.pen);
-        let (off, len) = p.sym;
-        let sym = &syms[off as usize..off as usize + len as usize];
-        out.bytes(sym);
-        let nx = p.x.saturating_add(p.width);
-        state.cursor = if state.width == 0 {
-            Cursor::Unknown
-        } else if nx >= state.width {
-            Cursor::Wrap(p.y)
+        put(out, state, (p.x, p.y, p.width), p.pen, p.symbol(syms));
+    }
+}
+
+/// How the next frame is encoded (RND-R17).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Plan {
+    /// Straight from the diff, as it comes: no copy, no sort.
+    RowMajor,
+    /// Collect the cells, write them grouped by style (row-major if they can't gain).
+    Grouped,
+    /// Write row-major and collect; also write grouped, keep the shorter, remember which.
+    Probe,
+}
+
+/// Which cell order recent frames found shorter (RND-R17). A scene's consecutive frames
+/// are alike, so both orders are written only on a probe frame, every [`PROBE_EVERY`]
+/// frames or right after the frame size jumps; the frames in between write just the
+/// order the last probe chose, once. Either order reproduces the screen exactly, so a
+/// stale choice costs bytes, never fidelity.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct Choice {
+    grouped: bool,
+    /// Frames until the next probe.
+    countdown: u8,
+    /// Cells in the last probe frame.
+    probed_cells: usize,
+}
+
+/// Frames per probe: one a second at 30 FPS.
+pub(crate) const PROBE_EVERY: u8 = 30;
+
+impl Choice {
+    pub(crate) fn plan(&self) -> Plan {
+        if self.countdown == 0 {
+            Plan::Probe
+        } else if self.grouped {
+            Plan::Grouped
         } else {
-            Cursor::At(nx, p.y)
+            Plan::RowMajor
+        }
+    }
+
+    /// After a frame of `cells` cells that was not a probe. A frame more than twice or
+    /// less than half the size of the last probe (a scene switch, a burst) makes the next
+    /// frame a probe.
+    pub(crate) fn tick(&mut self, cells: usize) {
+        self.countdown = self.countdown.saturating_sub(1);
+        if cells > 2 * self.probed_cells || 2 * cells < self.probed_cells {
+            self.countdown = 0;
+        }
+    }
+
+    /// After a probe frame of `cells` cells that found `grouped` shorter.
+    pub(crate) fn probed(&mut self, grouped: bool, cells: usize) {
+        *self = Self {
+            grouped,
+            countdown: PROBE_EVERY - 1,
+            probed_cells: cells,
         };
     }
 }
 
-/// Encode `cells` (in row-major order, as the diff yields them) in whichever of row-major
-/// and style-grouped order is shorter. `order` is scratch space (its capacity is kept).
-///
-/// Row-major is written first; the grouped order is costed with a dry run and replaces it
-/// only when strictly shorter. Grouping sorts `(style key, row-major index)` pairs, so
-/// within a style the cells stay in row-major order and `cells` itself never moves.
-///
-/// Frames of more than `max_grouped` cells try grouping only when they use at most
-/// [`FEW_STYLES`] distinct styles: a big frame in many colours (a full-screen field, the
-/// repaint after a theme change or resize) is cheapest in row-major order, and the sort
-/// and second pass would cost the most exactly there, while a big frame of dots in a few
-/// colours gains the most from grouping.
-pub(crate) fn encode_best(
+/// A [`Plan::Grouped`] frame: `cells` grouped by style into `out`, or row-major when they
+/// can't gain from it ([`worth_grouping`]).
+pub(crate) fn encode_grouped(
     out: &mut Vec<u8>,
     state: &mut State,
-    cells: &[Pending],
-    order: &mut Vec<(u64, u32)>,
+    cells: &mut [Pending],
+    order: &mut Vec<u32>,
     syms: &[u8],
-    max_grouped: usize,
 ) {
-    let start = (out.len(), *state);
-    encode(out, state, cells.iter(), syms);
-    let row_major = out.len() - start.0;
-    if cells.len() < 2
-        || cells.len() > u32::MAX as usize
-        || (cells.len() > max_grouped && !few_styles(cells))
-        || cells.iter().any(|p| p.width != 1)
-    {
-        return;
-    }
-    order.clear();
-    order.extend(cells.iter().zip(0u32..).map(|(p, i)| (p.key, i)));
-    order.sort_unstable();
-    let grouped_cells = || order.iter().map(|&(_, i)| &cells[i as usize]);
-    let mut n = Count(0);
-    let mut dry = start.1;
-    encode(&mut n, &mut dry, grouped_cells(), syms);
-    if n.0 < row_major {
-        out.truncate(start.0);
-        *state = start.1;
-        encode(out, state, grouped_cells(), syms);
+    if worth_grouping(cells) {
+        group(cells, order);
+        encode(out, state, order.iter().map(|&i| &cells[i as usize]), syms);
+    } else {
+        encode(out, state, cells.iter(), syms);
     }
 }
 
-/// Distinct styles up to which a big frame still tries the grouped order.
-pub(crate) const FEW_STYLES: usize = 64;
+/// A [`Plan::Probe`] frame: `out` holds the frame row-major (its first `prefix` bytes
+/// lead either order) and `state` is where that left the terminal; `start` is the state
+/// before the cells. Writes the grouped order into `alt` and, when shorter, swaps it in.
+/// Returns whether the grouped order won. `alt` and `order` keep their capacity.
+#[allow(clippy::too_many_arguments)] // the frame's reused buffers, passed apart to borrow apart
+pub(crate) fn probe(
+    out: &mut Vec<u8>,
+    alt: &mut Vec<u8>,
+    prefix: usize,
+    start: State,
+    state: &mut State,
+    cells: &mut [Pending],
+    order: &mut Vec<u32>,
+    syms: &[u8],
+) -> bool {
+    if !worth_grouping(cells) {
+        return false;
+    }
+    group(cells, order);
+    alt.clear();
+    alt.extend_from_slice(&out[..prefix]);
+    let mut grouped = start;
+    encode(
+        alt,
+        &mut grouped,
+        order.iter().map(|&i| &cells[i as usize]),
+        syms,
+    );
+    let won = alt.len() < out.len();
+    if won {
+        std::mem::swap(out, alt);
+        *state = grouped;
+    }
+    won
+}
 
-/// Whether `cells` use at most [`FEW_STYLES`] distinct styles: an open-addressing set on
-/// the stack, given up as soon as it holds more.
-fn few_styles(cells: &[Pending]) -> bool {
-    // Twice the limit keeps probes short; `style_key` is never `u64::MAX` (its modifier
-    // bits stop at 0x1ff), so that marks a free slot.
-    const SLOTS: usize = 2 * FEW_STYLES;
+/// Frames up to this many cells try grouping whenever their styles repeat.
+pub(crate) const GROUP_ANY_CELLS: usize = 4096;
+/// Bigger frames try it only with at most this many distinct styles.
+pub(crate) const FEW_STYLES: usize = 64;
+/// Distinct styles counted at most (the set below is twice this size).
+const STYLE_CAP: usize = 256;
+
+/// Whether the grouped order can be the shorter one, cheaply: every cell single-width
+/// (reordering is only free then), and styles that repeat: on average at least twice per
+/// style, and for a frame of more than [`GROUP_ANY_CELLS`] cells at most [`FEW_STYLES`] of
+/// them. A frame in many colours (a full-screen field, the repaint after a theme change or
+/// resize) is cheapest row-major, and the sort and second pass would cost the most there.
+///
+/// When it returns `true`, every cell's `slot` holds its style's slot in the set.
+pub(crate) fn worth_grouping(cells: &mut [Pending]) -> bool {
+    // Open addressing on the stack; `style_key` is never `u64::MAX` (its modifier bits stop
+    // at 0x1ff), so that marks a free slot.
+    const SLOTS: usize = 2 * STYLE_CAP;
+    if cells.len() < 2 || cells.len() > u32::MAX as usize {
+        return false;
+    }
+    let limit = if cells.len() > GROUP_ANY_CELLS {
+        FEW_STYLES
+    } else {
+        STYLE_CAP
+    };
+    let limit = limit.min(cells.len() / 2);
     let mut set = [u64::MAX; SLOTS];
     let mut n = 0;
-    for p in cells {
-        // Fibonacci hashing onto the 7 top bits (SLOTS = 128).
-        let mut i = (p.key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 57) as usize;
+    for p in cells.iter_mut() {
+        if p.width != 1 {
+            return false;
+        }
+        let key = style_key(p.pen);
+        // Fibonacci hashing onto the 9 top bits (SLOTS = 512).
+        let mut i = (key.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 55) as usize;
         loop {
-            if set[i] == p.key {
+            if set[i] == key {
                 break;
             }
             if set[i] == u64::MAX {
-                set[i] = p.key;
+                set[i] = key;
                 n += 1;
-                if n > FEW_STYLES {
+                if n > limit {
                     return false;
                 }
                 break;
             }
             i = (i + 1) % SLOTS;
         }
+        // `i < SLOTS = 512`.
+        p.slot = i as u16;
     }
     true
+}
+
+/// `order` = the indices of `cells` grouped by style slot (set by [`worth_grouping`]),
+/// row-major within each group: a stable counting sort, no allocation once `order` has
+/// the capacity.
+fn group(cells: &[Pending], order: &mut Vec<u32>) {
+    const SLOTS: usize = 2 * STYLE_CAP;
+    let mut start = [0u32; SLOTS];
+    for p in cells {
+        start[usize::from(p.slot)] += 1;
+    }
+    let mut sum = 0;
+    for s in &mut start {
+        let n = *s;
+        *s = sum;
+        sum += n;
+    }
+    order.clear();
+    order.resize(cells.len(), 0);
+    for (p, i) in cells.iter().zip(0u32..) {
+        let s = &mut start[usize::from(p.slot)];
+        order[*s as usize] = i;
+        *s += 1;
+    }
+}
+
+/// One column wide on every terminal: ASCII, or braille (U+2800..=U+28FF, UTF-8
+/// `E2 A0..=A3 xx`), which is never ambiguous-width. Half blocks, stars and arrows are
+/// East Asian "ambiguous" and double on terminals set to treat them so.
+fn unambiguous(sym: &[u8]) -> bool {
+    match sym {
+        [b] => b.is_ascii(),
+        [0xE2, b, _] => (0xA0..=0xA3).contains(b),
+        _ => false,
+    }
 }
 
 /// Cursor movement to `(x, y)`: the shortest of `CUP` and the relative forms.
 pub(crate) fn move_to<O: Out>(out: &mut O, state: &mut State, x: u16, y: u16) {
     let (from, prefix_cr) = match state.cursor {
         Cursor::At(cx, cy) if cx == x && cy == y => return,
+        // The common case in grouped order, decided without costing: on the same row to
+        // the right, `CUF n` is the shortest (`CHA` needs at least as many digits, `CUP`
+        // more).
+        Cursor::At(cx, cy) if cy == y && cx < x => {
+            csi_n(out, x - cx, b'C');
+            state.cursor = Cursor::At(x, y);
+            return;
+        }
         Cursor::At(cx, cy) => (Some((cx, cy)), false),
+        Cursor::Loose(cx, cy) if cx == x && cy == y => return,
+        // The row is certain, the column is not: a vertical move keeps whatever column the
+        // terminal has, then CR or `CHA` sets it absolutely.
+        Cursor::Loose(_, cy) => {
+            let h = if x == 0 { Horiz::Cr(0) } else { Horiz::Cha(x) };
+            if vert_cost(cy, y) + h.cost() < cup_cost(x, y) {
+                vert(out, cy, y);
+                h.emit(out);
+            } else {
+                cup(out, x, y);
+            }
+            state.cursor = Cursor::At(x, y);
+            return;
+        }
         // Only CR is trusted from the pending-wrap state; then move from column 0.
         Cursor::Wrap(cy) => (Some((0, cy)), true),
         Cursor::Unknown => (None, false),
@@ -272,7 +471,11 @@ fn csi_n<O: Out>(out: &mut O, n: u16, c: u8) {
 fn cup_cost(x: u16, y: u16) -> usize {
     if x == 0 {
         // `CSI row H` (the column defaults to 1); `CSI H` for the origin.
-        if y == 0 { 3 } else { 3 + digits(y + 1) }
+        if y == 0 {
+            3
+        } else {
+            3 + digits(y.saturating_add(1))
+        }
     } else {
         4 + digits(y.saturating_add(1)) + digits(x.saturating_add(1))
     }
@@ -282,7 +485,7 @@ fn cup<O: Out>(out: &mut O, x: u16, y: u16) {
     out.bytes(b"\x1b[");
     if x == 0 {
         if y != 0 {
-            push_u16(out, y + 1);
+            push_u16(out, y.saturating_add(1));
         }
     } else {
         push_u16(out, y.saturating_add(1));
@@ -292,13 +495,13 @@ fn cup<O: Out>(out: &mut O, x: u16, y: u16) {
     out.byte(b'H');
 }
 
-/// Up to this many rows down, repeated LFs are no longer than `CUD`.
-const MAX_LF: u16 = 3;
+/// Up to this many rows down, repeated VTs are no longer than `CUD`.
+const MAX_VT: u16 = 3;
 
 fn vert_cost(cy: u16, y: u16) -> usize {
     match y.cmp(&cy) {
         std::cmp::Ordering::Equal => 0,
-        std::cmp::Ordering::Greater if y - cy <= MAX_LF => usize::from(y - cy),
+        std::cmp::Ordering::Greater if y - cy <= MAX_VT => usize::from(y - cy),
         std::cmp::Ordering::Greater => csi_n_cost(y - cy),
         std::cmp::Ordering::Less => csi_n_cost(cy - y),
     }
@@ -307,9 +510,13 @@ fn vert_cost(cy: u16, y: u16) -> usize {
 fn vert<O: Out>(out: &mut O, cy: u16, y: u16) {
     match y.cmp(&cy) {
         std::cmp::Ordering::Equal => {}
-        std::cmp::Ordering::Greater if y - cy <= MAX_LF => {
+        // VT (0x0B), never LF: xterm, iTerm2, tmux and the vt100 crate treat VT exactly as
+        // LF (one row down, column kept, with LNM reset), but a '\n' in the frame would make
+        // stdout's `LineWriter` split it into two writes (RT-R15). Only used to move to a row
+        // below the cursor, so it never scrolls.
+        std::cmp::Ordering::Greater if y - cy <= MAX_VT => {
             for _ in cy..y {
-                out.byte(b'\n');
+                out.byte(0x0B);
             }
         }
         std::cmp::Ordering::Greater => csi_n(out, y - cy, b'B'),
@@ -582,26 +789,119 @@ mod tests {
     fn cells(styles: usize, n: usize) -> Vec<Pending> {
         (0..n)
             .map(|i| {
-                let s = u8::try_from(i % styles).expect("< 256 styles");
-                let p = pen(Color::Rgb(s, 0, 0), Color::Reset, Modifier::empty());
-                Pending {
-                    key: style_key(p),
-                    y: 0,
-                    x: 0,
-                    width: 1,
-                    sym: (0, 1),
-                    pen: p,
-                }
+                let s = i % styles;
+                let (r, g) = (
+                    u8::try_from(s % 256).expect("byte"),
+                    u8::try_from(s / 256).expect("byte"),
+                );
+                let p = pen(Color::Rgb(r, g, 0), Color::Reset, Modifier::empty());
+                Pending::new((0, 0, 1), p, b"x", &mut Vec::new())
             })
             .collect()
     }
 
     #[test]
-    fn rnd_r17_few_styles_counts_distinct_styles_up_to_the_limit() {
-        assert!(few_styles(&[]));
-        assert!(few_styles(&cells(1, 5000)));
-        assert!(few_styles(&cells(FEW_STYLES, 5000)));
-        assert!(!few_styles(&cells(FEW_STYLES + 1, 5000)));
-        assert!(!few_styles(&cells(255, 5000)));
+    fn rnd_r17_grouping_is_tried_only_when_styles_repeat() {
+        assert!(!worth_grouping(&mut []), "nothing to reorder");
+        assert!(!worth_grouping(&mut cells(1, 1)));
+        assert!(worth_grouping(&mut cells(1, 2)));
+        // Small frames: up to half as many styles as cells, at most STYLE_CAP.
+        assert!(worth_grouping(&mut cells(50, 100)));
+        assert!(!worth_grouping(&mut cells(51, 100)));
+        assert!(worth_grouping(&mut cells(STYLE_CAP, GROUP_ANY_CELLS)));
+        assert!(!worth_grouping(&mut cells(STYLE_CAP + 1, GROUP_ANY_CELLS)));
+        // Big frames: only in a few styles.
+        assert!(worth_grouping(&mut cells(FEW_STYLES, 20_000)));
+        assert!(!worth_grouping(&mut cells(FEW_STYLES + 1, 20_000)));
+        // Any wide symbol keeps row-major order.
+        let mut wide = cells(1, 10);
+        wide[3].width = 2;
+        assert!(!worth_grouping(&mut wide));
+    }
+
+    #[test]
+    fn rnd_r17_grouping_keeps_row_major_order_within_each_style() {
+        let mut c = cells(7, 300);
+        assert!(worth_grouping(&mut c));
+        let mut order = Vec::new();
+        group(&c, &mut order);
+        let mut seen = order.clone();
+        seen.sort_unstable();
+        assert_eq!(seen, (0..300).collect::<Vec<u32>>(), "a permutation");
+        for w in order.windows(2) {
+            let (a, b) = (&c[w[0] as usize], &c[w[1] as usize]);
+            if a.pen == b.pen {
+                assert!(w[0] < w[1], "row-major within a style");
+            }
+        }
+        let runs = order
+            .windows(2)
+            .filter(|w| c[w[0] as usize].pen != c[w[1] as usize].pen)
+            .count();
+        assert_eq!(runs, 6, "each style is one contiguous group");
+    }
+
+    #[test]
+    fn rnd_r17_ambiguous_width_symbols_make_the_next_far_move_absolute() {
+        assert!(unambiguous(b"x") && unambiguous(" ".as_bytes()));
+        assert!(unambiguous("⠀".as_bytes()) && unambiguous("⣿".as_bytes()));
+        for s in ["▀", "▄", "★", "·", "→", "∞", "█"] {
+            assert!(!unambiguous(s.as_bytes()), "{s}");
+        }
+        // After '▀' at (0,0): the adjacent cell needs no move, a gap needs a CUP.
+        let syms = "▀▀▀".as_bytes();
+        let at = |x: u16, i: usize| {
+            Pending::new(
+                (x, 0, 1),
+                Pen::DEFAULT,
+                &syms[i * 3..i * 3 + 3],
+                &mut Vec::new(),
+            )
+        };
+        let mut out = Vec::new();
+        let mut state = State {
+            pen: Pen::DEFAULT,
+            cursor: Cursor::Unknown,
+            width: 40,
+        };
+        encode(
+            &mut out,
+            &mut state,
+            [at(0, 0), at(1, 1), at(5, 2)].iter(),
+            syms,
+        );
+        assert_eq!(
+            out,
+            "\x1b[H▀▀\x1b[6G▀".as_bytes(),
+            "{:?}",
+            String::from_utf8_lossy(&out)
+        );
+        assert_eq!(state.cursor, Cursor::Loose(6, 0));
+    }
+
+    #[test]
+    fn rnd_r17_symbols_up_to_four_bytes_are_inline_and_longer_ones_go_to_the_arena() {
+        let mut arena = Vec::new();
+        for s in ["x", "⣿", "▀", "\u{1F600}"] {
+            let p = Pending::new((0, 0, 1), Pen::DEFAULT, s.as_bytes(), &mut arena);
+            assert_eq!(p.symbol(&arena), s.as_bytes());
+        }
+        assert!(arena.is_empty(), "one char each: inline");
+        let long = ["e\u{301}\u{302}", "\u{1F469}\u{200D}\u{1F52C}"];
+        let ps: Vec<Pending> = long
+            .iter()
+            .map(|s| Pending::new((0, 0, 2), Pen::DEFAULT, s.as_bytes(), &mut arena))
+            .collect();
+        for (p, s) in ps.iter().zip(long) {
+            assert_eq!(p.symbol(&arena), s.as_bytes());
+        }
+    }
+
+    #[test]
+    fn rnd_r17_rows_beyond_u16_saturate_instead_of_overflowing() {
+        let mut out = Vec::new();
+        cup(&mut out, 0, u16::MAX);
+        assert_eq!(out, b"\x1b[65535H");
+        assert_eq!(cup_cost(0, u16::MAX), out.len());
     }
 }

@@ -1,3 +1,5 @@
+//! RT-R15: behind a `LineWriter` like `stdout()`'s, every frame is a single `write`.
+//!
 //! RT-R16 (M15, ADR-0018): restoring the M11 look keeps M14's resource gains. Every
 //! registered scene at 200×50, seed 42, 10 s of simulated time drawn at 30 FPS through the
 //! real frame pipeline (`Stage`, the app's `Painter` with its colour hysteresis, the
@@ -27,24 +29,30 @@ const FPS: u64 = 30;
 /// The runtime takes two fixed steps per drawn frame at 30 FPS (ADR-0003).
 const STEPS_PER_FRAME: u64 = 2;
 
-/// Mean bytes per frame over all scenes: M22's measured 3 841 plus ≈ 12 % (M14: 18 812, budget
-/// 20 480 until M22 tightened RT-R16).
-const BYTES_BUDGET: f64 = 4_300.0;
+/// Mean bytes per frame over all scenes: M22's measured 4 251 (RND-R17 encoder, no LF, absolute
+/// columns after ambiguous-width glyphs) plus ≈ 10 % (M14: 18 812; budget 20 480 until M22).
+const BYTES_BUDGET: f64 = 4_700.0;
 /// Mean changed cells per frame over all scenes: M22's measured 438 plus ≈ 10 % (M14: 806,
 /// budget 880 until M22).
 const CELLS_BUDGET: f64 = 480.0;
 /// M21's gallery mean bytes per frame through this pipeline (85 scenes, before RND-R17).
 const M21_BYTES: f64 = 6_658.0;
-/// RND-R17: at least 25 % fewer bytes per frame than M21 (M22: 3 841).
+/// RND-R17: at least 25 % fewer bytes per frame than M21 (M22: 4 251; 3 841 before frames
+/// were kept to one write and ambiguous-width glyphs got absolute column moves).
 const RND_R17_BYTES: f64 = M21_BYTES * 0.75;
 
-/// Counts the bytes that reach it.
+/// Counts the bytes and the `write` calls that reach it. Behind a `LineWriter` like
+/// `stdout()`'s, the calls are the frame's `write` syscalls (RT-R15).
 #[derive(Default)]
-struct Count(u64);
+struct Count {
+    bytes: u64,
+    writes: u64,
+}
 
 impl Write for Count {
     fn write(&mut self, b: &[u8]) -> io::Result<usize> {
-        self.0 += b.len() as u64;
+        self.bytes += b.len() as u64;
+        self.writes += 1;
         Ok(b.len())
     }
 
@@ -53,24 +61,29 @@ impl Write for Count {
     }
 }
 
-/// Per scene: (name, mean bytes per frame, mean changed cells per frame).
-type Cost = (&'static str, f64, f64);
+/// Per scene: (name, mean bytes per frame, mean changed cells per frame, frames that
+/// reached the terminal in more than one `write`).
+type Cost = (&'static str, f64, f64, u64);
 
 fn cost(entry: &Entry) -> Cost {
     let (w, h) = SIZE;
     let area = Rect::new(0, 0, w, h);
     let mut stage = Stage::new((entry.build)(), SEED, Size::new(w, h), GlyphMode::Unicode);
     let mut painter = Painter::new();
-    let mut backend = FrameBackend::with_size(Count::default(), w, h);
+    let mut backend =
+        FrameBackend::with_size(io::LineWriter::with_capacity(1024, Count::default()), w, h);
     let (mut prev, mut cur) = (Buffer::empty(area), Buffer::empty(area));
-    let (mut bytes, mut cells, mut counted) = (0u64, 0u64, 0u64);
+    let (mut bytes, mut cells, mut counted, mut split) = (0u64, 0u64, 0u64, 0u64);
     for frame in 1..=SECS * FPS {
         for _ in 0..STEPS_PER_FRAME {
             stage.step(SIM_DT);
         }
         stage.render();
         painter.paint(stage.frame(), Theme::Astro, area, &mut cur);
-        let before = backend.writer().0;
+        let before = (
+            backend.writer().get_ref().bytes,
+            backend.writer().get_ref().writes,
+        );
         let mut changed = 0u64;
         {
             // `ratatui::Terminal::draw`'s protocol: diff, draw, hide the cursor, flush.
@@ -81,14 +94,21 @@ fn cost(entry: &Entry) -> Cost {
         }
         std::mem::swap(&mut prev, &mut cur);
         cur.reset();
+        let after = (
+            backend.writer().get_ref().bytes,
+            backend.writer().get_ref().writes,
+        );
+        if after.1 - before.1 > 1 {
+            split += 1;
+        }
         if frame > 1 {
-            bytes += backend.writer().0 - before;
+            bytes += after.0 - before.0;
             cells += changed;
             counted += 1;
         }
     }
     let n = counted.max(1) as f64;
-    (entry.meta.name, bytes as f64 / n, cells as f64 / n)
+    (entry.meta.name, bytes as f64 / n, cells as f64 / n, split)
 }
 
 /// Every scene's cost, on parallel threads (scenes are independent).
@@ -120,9 +140,18 @@ fn all() -> Vec<Cost> {
 }
 
 #[test]
-fn rt_r16_rnd_r17_gallery_mean_bytes_and_changed_cells_stay_within_budget() {
+fn rt_r15_rt_r16_rnd_r17_gallery_mean_bytes_and_changed_cells_stay_within_budget() {
     let costs = all();
     assert_eq!(costs.len(), registry().len());
+    let split: Vec<String> = costs
+        .iter()
+        .filter(|c| c.3 > 0)
+        .map(|c| format!("{} ({} frames)", c.0, c.3))
+        .collect();
+    assert!(
+        split.is_empty(),
+        "RT-R15: frames reached a stdout-like LineWriter in more than one write: {split:?}"
+    );
     let n = costs.len() as f64;
     let bytes = costs.iter().map(|c| c.1).sum::<f64>() / n;
     let cells = costs.iter().map(|c| c.2).sum::<f64>() / n;

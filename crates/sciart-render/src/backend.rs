@@ -22,13 +22,13 @@ use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
 use unicode_width::UnicodeWidthStr;
 
-use crate::encode::{self, Cursor, Pen, Pending, State};
+use crate::encode::{self, Cursor, Pen, Pending, Plan, State};
 
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";
 const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
-/// Reset the newline mode (LNM), so LF moves straight down (RND-R17); sent once.
+/// Reset the newline mode (LNM), so VT moves straight down (RND-R17); sent once.
 const RESET_LNM: &[u8] = b"\x1b[20l";
 
 /// A ratatui [`Backend`] that buffers a whole frame and writes it once (RT-R15).
@@ -37,13 +37,19 @@ pub struct FrameBackend<W: Write> {
     out: W,
     /// The pending frame; its capacity is kept, so steady-state frames never allocate.
     buf: Vec<u8>,
+    /// The frame in the other cell order (RND-R17), swapped with `buf` when shorter; the
+    /// same capacity as `buf`.
+    alt: Vec<u8>,
     /// The diff's cells in row-major order, copied so they can be sent in another order
     /// (RND-R17); capacity kept.
     cells: Vec<Pending>,
-    /// The symbols of `cells`, back to back; capacity kept.
+    /// Symbols of `cells` longer than 4 bytes (only in free text; canvas and HUD cells are
+    /// one `char`, kept inline). Not reserved: a frame with such a grapheme may grow it once.
     syms: Vec<u8>,
-    /// Scratch for the style-grouped order: (style key, index into `cells`); capacity kept.
-    order: Vec<(u64, u32)>,
+    /// Scratch for the style-grouped order: indices into `cells`; capacity kept.
+    order: Vec<u32>,
+    /// Which cell order the last probe frame found shorter (RND-R17).
+    choice: encode::Choice,
     /// Fixed size for tests and the cost probe; `None` asks the terminal.
     size: Option<Size>,
     /// Wrap frames in a synchronized update (DEC mode 2026).
@@ -73,11 +79,6 @@ pub const MAX_CELL_BYTES: usize = 14 + 56 + 4;
 /// Per-frame bytes outside the cells: sync begin/end (16), cursor hide/show (12), a clear
 /// (4), a rendition reset (4) and the one-off LNM reset (5), rounded up.
 pub const FRAME_OVERHEAD_BYTES: usize = 64;
-/// Symbol bytes reserved per cell: any one `char`.
-const SYM_BYTES: usize = 4;
-/// Style-grouped order is always tried for frames that change at most half of the screen
-/// (RND-R17), and for bigger ones only in a few colours (`encode::FEW_STYLES`).
-const GROUP_MAX_DIVISOR: usize = 2;
 
 /// The most bytes a frame of `cells` cells can take ([`MAX_CELL_BYTES`] per cell).
 pub const fn frame_bound(cells: usize) -> usize {
@@ -90,9 +91,11 @@ impl<W: Write> FrameBackend<W> {
         Self {
             out,
             buf: Vec::new(),
+            alt: Vec::new(),
             cells: Vec::new(),
             syms: Vec::new(),
             order: Vec::new(),
+            choice: encode::Choice::default(),
             size: None,
             sync: true,
             in_sync: false,
@@ -113,6 +116,12 @@ impl<W: Write> FrameBackend<W> {
             size: Some(Size { width, height }),
             ..Self::new(out)
         }
+    }
+
+    /// Change a fixed-size backend's size, as a terminal resize would (tests, the RND-R13
+    /// probe); like `ratatui::Terminal::resize`, follow it with a clear and a full redraw.
+    pub fn set_fixed_size(&mut self, width: u16, height: u16) {
+        self.size = Some(Size { width, height });
     }
 
     /// Switch the DEC 2026 synchronized-update wrapper on or off.
@@ -150,17 +159,16 @@ impl<W: Write> FrameBackend<W> {
         let s = self.current_size();
         let cells = usize::from(s.width) * usize::from(s.height);
         let bound = frame_bound(cells);
-        if self.buf.capacity() < bound {
-            self.buf.reserve_exact(bound - self.buf.len());
+        for buf in [&mut self.buf, &mut self.alt] {
+            if buf.capacity() < bound {
+                buf.reserve_exact(bound - buf.len());
+            }
         }
         if self.cells.capacity() < cells {
             self.cells.reserve_exact(cells - self.cells.len());
         }
         if self.order.capacity() < cells {
             self.order.reserve_exact(cells - self.order.len());
-        }
-        if self.syms.capacity() < cells * SYM_BYTES {
-            self.syms.reserve_exact(cells * SYM_BYTES - self.syms.len());
         }
     }
 
@@ -212,58 +220,91 @@ impl<W: Write> Backend for FrameBackend<W> {
         self.reserve_frame();
         self.cells.clear();
         self.syms.clear();
+        // RND-R17: the order is chosen before the diff is read (see `encode::Choice`), so a
+        // row-major frame is encoded straight from the diff, and only grouped and probe
+        // frames copy the cells out.
+        let plan = self.choice.plan();
+        let (inline, collect) = match plan {
+            Plan::RowMajor => (true, false),
+            Plan::Grouped => (false, true),
+            Plan::Probe => (true, true),
+        };
+        let start = State {
+            pen: self.pen,
+            // Not carried across frames: something else may have moved it in between.
+            cursor: Cursor::Unknown,
+            width: self.current_size().width,
+        };
+        let mut state = start;
+        // Everything queued before the first cell (a clear, the sync opener) leads either
+        // cell order; `None` while the diff is empty.
+        let mut prefix = None;
+        let mut rows: Option<(u16, u16)> = None;
+        let mut n = 0;
         for (x, y, cell) in content {
+            if prefix.is_none() {
+                self.begin_frame();
+                prefix = Some(self.buf.len());
+            }
             let symbol = match cell.symbol() {
                 // An empty symbol would print nothing and leave the cursor behind.
                 "" => " ",
                 s => s,
             };
-            let off = self.syms.len();
-            self.syms.extend_from_slice(symbol.as_bytes());
+            // A width-0 symbol still occupies its cell once printed as a space would.
+            let width = u16::try_from(symbol.width().max(1)).unwrap_or(1);
             let pen = Pen {
                 fg: cell.fg,
                 bg: cell.bg,
                 modifier: cell.modifier,
             };
-            self.cells.push(Pending {
-                key: encode::style_key(pen),
-                y,
-                x,
-                // A width-0 symbol still occupies its cell once printed as a space would.
-                width: u16::try_from(symbol.width().max(1)).unwrap_or(1),
-                sym: (
-                    u32::try_from(off).unwrap_or(u32::MAX),
-                    u32::try_from(symbol.len()).unwrap_or(0),
-                ),
-                pen,
-            });
+            if inline {
+                encode::put(
+                    &mut self.buf,
+                    &mut state,
+                    (x, y, width),
+                    pen,
+                    symbol.as_bytes(),
+                );
+            }
+            if collect {
+                let p = Pending::new((x, y, width), pen, symbol.as_bytes(), &mut self.syms);
+                self.cells.push(p);
+            }
+            // The diff is row-major: the first cell has the first row, the last the last.
+            rows = Some((rows.map_or(y, |r| r.0), y));
+            n += 1;
         }
-        // The diff is row-major, so its first and last cells bound the rows.
-        self.rows = self
-            .cells
-            .first()
-            .zip(self.cells.last())
-            .map(|(a, b)| (a.y, b.y));
-        if self.cells.is_empty() {
+        self.rows = rows;
+        let Some(prefix) = prefix else {
             return Ok(());
-        }
-        self.begin_frame();
-        let size = self.current_size();
-        let mut state = State {
-            pen: self.pen,
-            // Not carried across frames: something else may have moved it in between.
-            cursor: Cursor::Unknown,
-            width: size.width,
         };
-        let screen = usize::from(size.width) * usize::from(size.height);
-        encode::encode_best(
-            &mut self.buf,
-            &mut state,
-            &self.cells,
-            &mut self.order,
-            &self.syms,
-            screen / GROUP_MAX_DIVISOR,
-        );
+        match plan {
+            Plan::RowMajor => self.choice.tick(n),
+            Plan::Grouped => {
+                encode::encode_grouped(
+                    &mut self.buf,
+                    &mut state,
+                    &mut self.cells,
+                    &mut self.order,
+                    &self.syms,
+                );
+                self.choice.tick(n);
+            }
+            Plan::Probe => {
+                let grouped = encode::probe(
+                    &mut self.buf,
+                    &mut self.alt,
+                    prefix,
+                    start,
+                    &mut state,
+                    &mut self.cells,
+                    &mut self.order,
+                    &self.syms,
+                );
+                self.choice.probed(grouped, n);
+            }
+        }
         self.pen = state.pen;
         Ok(())
     }
@@ -423,16 +464,37 @@ mod tests {
         p
     }
 
+    /// Scattered dots in a few colours on rows far apart: the frame needs downward moves.
+    fn dots(buf: &mut Buffer, t: u8) {
+        for i in 0..60u16 {
+            let (x, y) = ((i * 7 + u16::from(t)) % 40, (i * 5) % 12);
+            buf[(x, y)]
+                .set_char('⣿')
+                .set_fg(Color::Rgb(200, 10 * (i % 3) as u8, 9));
+        }
+    }
+
     #[test]
     fn rt_r15_each_frame_is_one_write_and_one_flush() {
-        let mut term = terminal(40, 12);
-        for t in 0..5 {
+        // Behind a `LineWriter` like `stdout()`'s: a '\n' anywhere in the frame would make
+        // it write up to the last newline and then the rest separately (RT-R15).
+        let backend = FrameBackend::with_size(
+            io::LineWriter::with_capacity(1024, Counting::default()),
+            40,
+            12,
+        );
+        let mut term = Terminal::new(backend).expect("terminal");
+        for t in 0..6 {
             let before = {
-                let c = term.backend().writer();
+                let c = term.backend().writer().get_ref();
                 (c.writes, c.flushes)
             };
-            term.draw(|f| fill(f.buffer_mut(), t)).expect("draw");
-            let c = term.backend().writer();
+            if t % 2 == 0 {
+                term.draw(|f| fill(f.buffer_mut(), t)).expect("draw");
+            } else {
+                term.draw(|f| dots(f.buffer_mut(), t)).expect("draw");
+            }
+            let c = term.backend().writer().get_ref();
             assert_eq!(c.writes - before.0, 1, "frame {t}: one write");
             assert_eq!(c.flushes - before.1, 1, "frame {t}: one flush");
         }
@@ -638,7 +700,9 @@ mod tests {
     fn enter(p: &mut vt100::Parser, from: Cursor, w: u16) {
         match from {
             Cursor::Unknown => p.process(b"\x1b[3;3H"),
-            Cursor::At(x, y) => p.process(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes()),
+            Cursor::At(x, y) | Cursor::Loose(x, y) => {
+                p.process(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
+            }
             Cursor::Wrap(y) => {
                 p.process(format!("\x1b[{};{}Hw", y + 1, w).as_bytes());
             }
@@ -653,6 +717,7 @@ mod tests {
             starts.push(Cursor::Wrap(y));
             for x in 0..w {
                 starts.push(Cursor::At(x, y));
+                starts.push(Cursor::Loose(x, y));
             }
         }
         let mut seq = Vec::new();
@@ -683,7 +748,18 @@ mod tests {
                     p.process(b"X");
                     let got = p.screen().cell(y, x).expect("cell").contents();
                     assert_eq!(got, "X", "{from:?} -> ({x},{y}) via {seq:?}");
-                    assert_eq!(state.cursor, Cursor::At(x, y));
+                    assert!(
+                        matches!(state.cursor, Cursor::At(a, b) | Cursor::Loose(a, b) if (a, b) == (x, y)),
+                        "{from:?} -> ({x},{y}): {:?}",
+                        state.cursor
+                    );
+                    if matches!(from, Cursor::Loose(lx, ly) if (lx, ly) != (x, y)) {
+                        // The column is set absolutely (CUP, CHA or CR), never relatively.
+                        assert!(
+                            matches!(seq.last(), Some(b'H' | b'G' | b'\r')),
+                            "from {from:?}: {seq:?}"
+                        );
+                    }
                 }
             }
         }
