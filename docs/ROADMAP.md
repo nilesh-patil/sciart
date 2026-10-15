@@ -284,7 +284,8 @@ SPEC-002 "Batch M21"; GEN-R25 list (+ magnetosphere, gravity_assist, snowflake_g
 - [x] Art, science and Rust/perf review; fixes
 - [x] Snapshots recorded and reviewed, art_metrics rows seeded after review, budgets (`rs-worst`, `rs-cost`), `rs-ci` green
 - [x] Results (design doc), the contributor guide
-- [ ] Samples at M21 and the follow-ups in docs/design/M21-ten-scenes.md
+- [x] Samples at M21 (`samples/<scene>-m21.png`); cloud_chamber sparseness fixed
+- [ ] Remaining follow-ups in docs/design/M21-ten-scenes.md
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
