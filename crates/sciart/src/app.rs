@@ -1,16 +1,16 @@
 //! Terminal event loop: the only place that touches the wall clock and the terminal.
 
+use std::io::{self, Write};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event};
 use ratatui::Terminal;
-use ratatui::backend::Backend;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
 use sciart_core::{GlyphMode, Size};
 use sciart_generators::Entry;
 use sciart_keepawake::{Guard, Mode};
-use sciart_render::{Hud, Painter, TerminalGuard, Theme};
+use sciart_render::{FrameBackend, Hud, Painter, TerminalGuard, Theme};
 
 use crate::fps::FpsMeter;
 use crate::keys::action_for;
@@ -63,12 +63,14 @@ impl Screen {
     }
 
     /// Draw one frame: the canvas, then the RT-R4 error line or the HUD on the last row.
-    pub fn draw<B: Backend>(
+    /// Returns whether the picture changed (RT-R17): a frame whose only changes are on
+    /// the HUD or error row (the fps readout follows the draw rate) counts as unchanged.
+    pub fn draw<W: Write>(
         &mut self,
-        terminal: &mut Terminal<B>,
+        terminal: &mut Terminal<FrameBackend<W>>,
         runtime: &Runtime,
         extras: HudExtras,
-    ) -> Result<(), B::Error> {
+    ) -> io::Result<bool> {
         // A new or reset scene must not inherit the old one's emitted colours (RND-R14);
         // theme and size changes the painter notices by itself.
         if runtime.epoch() != self.epoch {
@@ -81,8 +83,13 @@ impl Screen {
             hud_text,
             ..
         } = self;
+        let overlay = runtime.status() == Status::AllFailed || runtime.hud();
+        let mut overlay_row = None;
         terminal.draw(|f| {
             let area = f.area();
+            if overlay {
+                overlay_row = area.bottom().checked_sub(1);
+            }
             let buf = f.buffer_mut();
             painter.paint(runtime.frame(), runtime.theme(), area, buf);
             if runtime.status() == Status::AllFailed {
@@ -110,7 +117,10 @@ impl Screen {
                 hud.render_into(area, buf, hud_text);
             }
         })?;
-        Ok(())
+        Ok(match terminal.backend().changed_rows() {
+            None => false,
+            Some((top, _)) => overlay_row.is_none_or(|row| top < row),
+        })
     }
 }
 
@@ -133,12 +143,18 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
     let mut fps = FpsMeter::default();
     let mut screen = Screen::new();
     let mut last = wall_clock();
+    let mut epoch = runtime.epoch();
+    let mut first = true;
 
     loop {
         let now = wall_clock();
         let elapsed = now.duration_since(last).as_secs_f64();
         last = now;
-        fps.record(elapsed);
+        // The first span is set-up time, microseconds: as the meter's seed (RT-R10) it read
+        // as thousands of fps, which a stepped-down rate (RT-R17) took long to average out.
+        if !std::mem::take(&mut first) {
+            fps.record(elapsed);
+        }
         pacer.record(elapsed);
         keep_awake.poll(elapsed);
         runtime.tick(elapsed);
@@ -149,12 +165,20 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
             seed: opts.seed,
             low_power: pacer.low_power(),
         };
-        screen.draw(terminal, &runtime, extras)?;
+        let changed = screen.draw(terminal, &runtime, extras)?;
+        // A scene switch (auto-cycle) wakes the rate as a key would (RT-R17).
+        pacer.drawn(changed || runtime.epoch() != epoch);
+        epoch = runtime.epoch();
 
-        // Handle input until the next frame is due (RT-R8: the rate can change here).
-        let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
-        let next = now + frame_time;
-        while event::poll(next.saturating_duration_since(wall_clock()))? {
+        // Handle input until the next frame is due. The rate can change here (RT-R8,
+        // RT-R17), so the deadline is recomputed after every event: a key that wakes a
+        // stepped-down loop is drawn at the full rate's deadline, not the slow one's.
+        loop {
+            let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
+            let wait = (now + frame_time).saturating_duration_since(wall_clock());
+            if !event::poll(wait)? {
+                break;
+            }
             match event::read()? {
                 Event::Key(key) => {
                     pacer.input();
@@ -166,7 +190,10 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
                 }
                 Event::FocusLost => pacer.focus(false),
                 Event::FocusGained => pacer.focus(true),
-                Event::Resize(w, h) => runtime.resize(Size::new(w, h)),
+                Event::Resize(w, h) => {
+                    pacer.wake();
+                    runtime.resize(Size::new(w, h));
+                }
                 _ => {}
             }
         }
@@ -296,6 +323,90 @@ mod tests {
             }
         });
         assert_eq!(stats.total(), 0, "{stats:?}");
+    }
+
+    fn draw(
+        rt: &Runtime,
+        screen: &mut Screen,
+        term: &mut Terminal<FrameBackend<io::Sink>>,
+        fps: f64,
+    ) -> bool {
+        let extras = HudExtras {
+            fps,
+            seed: 42,
+            low_power: false,
+        };
+        screen.draw(term, rt, extras).expect("draw")
+    }
+
+    #[test]
+    fn rt_r17_draw_reports_whether_the_picture_changed() {
+        let mut rt = runtime(&["starfield"]);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        assert!(draw(&rt, &mut screen, &mut term, 30.0), "first frame");
+        rt.tick(1.0 / 30.0);
+        assert!(draw(&rt, &mut screen, &mut term, 30.0), "stars move");
+        rt.handle(Action::TogglePause);
+        draw(&rt, &mut screen, &mut term, 30.0);
+        for _ in 0..5 {
+            rt.tick(1.0 / 30.0);
+            assert!(
+                !draw(&rt, &mut screen, &mut term, 30.0),
+                "paused: nothing new"
+            );
+        }
+        // A key that changes the picture while paused.
+        rt.handle(Action::CycleTheme);
+        assert!(draw(&rt, &mut screen, &mut term, 30.0), "theme change");
+    }
+
+    #[test]
+    fn rt_r17_a_change_on_the_hud_row_alone_is_quiet() {
+        // The HUD's fps readout follows the stepped-down rate; if that counted as a
+        // change, stepping down would undo itself.
+        let mut rt = runtime(&["starfield"]).with_hud(true);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        rt.handle(Action::TogglePause);
+        draw(&rt, &mut screen, &mut term, 30.0);
+        for fps in [15.0, 7.0, 5.0] {
+            assert!(!draw(&rt, &mut screen, &mut term, fps), "fps {fps}");
+        }
+        rt.handle(Action::TogglePause);
+        rt.tick(1.0 / 30.0);
+        assert!(
+            draw(&rt, &mut screen, &mut term, 5.0),
+            "the stars above the HUD move"
+        );
+    }
+
+    #[test]
+    fn rt_r17_rt_r11_a_stepped_down_rate_keeps_simulation_speed() {
+        // A paused scene steps the draw rate down; the frames' wall time still drives the
+        // fixed step, so after unpausing, a 5 FPS frame advances 12 steps (RT-R11) and
+        // the pacer's frame times add up to wall time.
+        let mut pacer = Pacer::new(30, 5, 120.0);
+        let (mut wall, mut frames) = (0.0, 0u32);
+        while wall < 3.0 {
+            let dt = 1.0 / f64::from(pacer.fps());
+            pacer.record(dt);
+            pacer.drawn(false);
+            wall += dt;
+            frames += 1;
+        }
+        assert_eq!(pacer.fps(), 5);
+        assert!(frames < 90 / 2, "{frames} frames in 3 s: stepped down");
+        let mut rt = runtime(&["starfield"]);
+        let mut fast = runtime(&["starfield"]);
+        for _ in 0..30 {
+            fast.tick(1.0 / 30.0);
+        }
+        for _ in 0..5 {
+            rt.tick(1.0 / f64::from(pacer.fps()));
+        }
+        assert!(
+            rt.frame().cells() == fast.frame().cells(),
+            "1 s at 5 FPS = 1 s at 30 FPS"
+        );
     }
 
     #[test]

@@ -1,0 +1,22 @@
+# TEST-R10 / ADR-0023: `pixi run rs-test` runs the workspace under cargo-nextest, one process
+# per test, test binaries in parallel. Nothing here filters, skips or retries a test: the
+# run must cover exactly the tests `cargo test --workspace` lists.
+
+[profile.default]
+# Report every failure in one gate run instead of stopping at the first.
+fail-fast = false
+# A wedged test (a pty session waiting on a frame that never comes) is killed after
+# 3 x 60 s instead of hanging the gate; the slowest test takes ≈ 15 s on 14 cores, and
+# under heavy load (load average 60+) still well under a minute.
+slow-timeout = { period = "60s", terminate-after = 3 }
+
+# The few tests that each walk every scene for simulated minutes are the long poles;
+# starting them first keeps them off the tail of the run (scheduling only).
+[[profile.default.overrides]]
+filter = "binary(contract) | binary(art_metrics) | binary(resource_budget) | binary(palette) | test(/whole_walk/)"
+priority = 50
+
+# M22 tried giving the internally parallel suites (contract, art_metrics, resource_budget,
+# encoder_fidelity) threads-required = "num-cpus" so they never share the machine: it cost
+# ≈ 32 s per run (rs-test 42 s -> 74 s) while the pty tests passed without it in repeated
+# runs at load averages up to 100+, so it was dropped. Reconsider if a pty wait flakes.

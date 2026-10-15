@@ -1926,10 +1926,15 @@ dependencies = [
  "insta",
  "png",
  "proptest",
- "rand 0.9.5",
  "sciart-core",
  "sciart-render",
+ "sciart-scenes-cosmos",
+ "sciart-scenes-earth",
+ "sciart-scenes-life",
+ "sciart-scenes-matter",
+ "sciart-scenes-physics",
  "sciart-testalloc",
+ "toml",
 ]
 
 [[package]]
@@ -1950,6 +1955,59 @@ dependencies = [
  "sciart-core",
  "unicode-width",
  "vt100",
+]
+
+[[package]]
+name = "sciart-scenes-cosmos"
+version = "0.1.0"
+dependencies = [
+ "rand 0.9.5",
+ "sciart-core",
+ "sciart-shared",
+]
+
+[[package]]
+name = "sciart-scenes-earth"
+version = "0.1.0"
+dependencies = [
+ "rand 0.9.5",
+ "sciart-core",
+ "sciart-shared",
+]
+
+[[package]]
+name = "sciart-scenes-life"
+version = "0.1.0"
+dependencies = [
+ "rand 0.9.5",
+ "sciart-core",
+ "sciart-shared",
+]
+
+[[package]]
+name = "sciart-scenes-matter"
+version = "0.1.0"
+dependencies = [
+ "proptest",
+ "rand 0.9.5",
+ "sciart-core",
+ "sciart-shared",
+]
+
+[[package]]
+name = "sciart-scenes-physics"
+version = "0.1.0"
+dependencies = [
+ "rand 0.9.5",
+ "sciart-core",
+]
+
+[[package]]
+name = "sciart-shared"
+version = "0.1.0"
+dependencies = [
+ "rand 0.9.5",
+ "sciart-core",
 ]
 
 [[package]]

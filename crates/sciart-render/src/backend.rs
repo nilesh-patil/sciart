@@ -1,5 +1,5 @@
 //! A ratatui backend that sends each frame as one write (RT-R15) in as few bytes as the
-//! diff allows (RND-R15).
+//! diff allows (RND-R15, RND-R17).
 //!
 //! `ratatui`'s `CrosstermBackend` over `stdout()` goes through std's `LineWriter`, which
 //! hands the kernel 1 KiB at a time: a 100 KB field frame became ~100 `write` calls, and a
@@ -9,23 +9,27 @@
 //!
 //! [`FrameBackend`] appends everything to one reused `Vec<u8>` and hands it to the writer
 //! in a single `write_all` + `flush` from [`Backend::flush`], which `Terminal::draw` calls
-//! once per frame. Inside, it sends only the SGR parameters that changed, moves right on
-//! the same row with a relative `CUF`, sends nothing at all for an empty diff, and wraps a
-//! non-empty frame in a synchronized update (DEC private mode 2026) so terminals that
-//! support it swap the whole frame at once; others ignore the unknown mode.
+//! once per frame. An empty diff writes nothing and does not flush (RT-R17). A non-empty
+//! frame is wrapped in a synchronized update (DEC private mode 2026) so terminals that
+//! support it swap the whole frame at once; others ignore the unknown mode. The cells
+//! themselves go through [`crate::encode`]: only the SGR parameters that changed, the
+//! shortest cursor move, and the cheaper of row-major and style-grouped order (RND-R17).
 
 use std::io::{self, Write};
 
 use ratatui::backend::{Backend, ClearType, WindowSize};
 use ratatui::buffer::Cell;
 use ratatui::layout::{Position, Size};
-use ratatui::style::{Color, Modifier};
 use unicode_width::UnicodeWidthStr;
+
+use crate::encode::{self, Cursor, Pen, Pending, Plan, State};
 
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";
 const HIDE_CURSOR: &[u8] = b"\x1b[?25l";
 const SHOW_CURSOR: &[u8] = b"\x1b[?25h";
+/// Reset the newline mode (LNM), so VT moves straight down (RND-R17); sent once.
+const RESET_LNM: &[u8] = b"\x1b[20l";
 
 /// A ratatui [`Backend`] that buffers a whole frame and writes it once (RT-R15).
 #[derive(Debug)]
@@ -33,29 +37,47 @@ pub struct FrameBackend<W: Write> {
     out: W,
     /// The pending frame; its capacity is kept, so steady-state frames never allocate.
     buf: Vec<u8>,
+    /// The frame in the other cell order (RND-R17), swapped with `buf` when shorter; the
+    /// same capacity as `buf`.
+    alt: Vec<u8>,
+    /// The diff's cells in row-major order, copied so they can be sent in another order
+    /// (RND-R17); capacity kept.
+    cells: Vec<Pending>,
+    /// Symbols of `cells` longer than 4 bytes (only in free text; canvas and HUD cells are
+    /// one `char`, kept inline). Not reserved: a frame with such a grapheme may grow it once.
+    syms: Vec<u8>,
+    /// Scratch for the style-grouped order: indices into `cells`; capacity kept.
+    order: Vec<u32>,
+    /// Which cell order the last probe frame found shorter (RND-R17).
+    choice: encode::Choice,
     /// Fixed size for tests and the cost probe; `None` asks the terminal.
     size: Option<Size>,
     /// Wrap frames in a synchronized update (DEC mode 2026).
     sync: bool,
     /// A `BEGIN_SYNC` was written and its `END_SYNC` is still due.
     in_sync: bool,
+    /// `RESET_LNM` was sent.
+    lnm_reset: bool,
     cursor_hidden: bool,
-    /// The terminal's current rendition (fg, bg, modifiers). It carries over from frame
-    /// to frame, so a frame that starts in the colour the last one ended in sends no SGR.
-    pen: (Color, Color, Modifier),
-    /// Cells of the terminal as last seen by `size()` (which `Terminal::draw` calls first
-    /// every frame): what [`FrameBackend::reserve_frame`] sizes the buffer for.
-    seen_cells: std::cell::Cell<usize>,
+    /// The terminal's current rendition. It carries over from frame to frame, so a frame
+    /// that starts in the colour the last one ended in sends no SGR.
+    pen: Pen,
+    /// The terminal size as last seen by `size()` (which `Terminal::draw` calls first
+    /// every frame): what [`FrameBackend::reserve_frame`] sizes the buffers for.
+    seen: std::cell::Cell<Size>,
+    /// First and last row the last `draw` changed; `None` for an empty diff (RT-R17).
+    rows: Option<(u16, u16)>,
 }
 
 /// Upper bound on the bytes one changed cell can add to a frame (RT-R14, RT-R15):
-/// cursor move `CSI 65535;65535H` (14) + one SGR with a modifier reset, all nine modifier
-/// codes and both 24-bit colours `CSI 0;1;…;9;38;2;255;255;255;48;2;255;255;255m` (56) +
-/// the symbol, 4 bytes for any one `char` (canvas cells and the ASCII HUD). A longer
-/// grapheme (only possible in free text) may still grow the buffer once.
+/// cursor move `CSI 65535;65535H` (14; a relative move is only chosen when shorter) +
+/// one SGR with a modifier reset, all nine modifier codes and both 24-bit colours
+/// `CSI 0;1;…;9;38;2;255;255;255;48;2;255;255;255m` (56) + the symbol, 4 bytes for any
+/// one `char` (canvas cells and the ASCII HUD). A longer grapheme (only possible in free
+/// text) may still grow the buffer once.
 pub const MAX_CELL_BYTES: usize = 14 + 56 + 4;
 /// Per-frame bytes outside the cells: sync begin/end (16), cursor hide/show (12), a clear
-/// (4) and a rendition reset (4), rounded up.
+/// (4), a rendition reset (4) and the one-off LNM reset (5), rounded up.
 pub const FRAME_OVERHEAD_BYTES: usize = 64;
 
 /// The most bytes a frame of `cells` cells can take ([`MAX_CELL_BYTES`] per cell).
@@ -69,12 +91,22 @@ impl<W: Write> FrameBackend<W> {
         Self {
             out,
             buf: Vec::new(),
+            alt: Vec::new(),
+            cells: Vec::new(),
+            syms: Vec::new(),
+            order: Vec::new(),
+            choice: encode::Choice::default(),
             size: None,
             sync: true,
             in_sync: false,
+            lnm_reset: false,
             cursor_hidden: false,
-            pen: (Color::Reset, Color::Reset, Modifier::empty()),
-            seen_cells: std::cell::Cell::new(0),
+            pen: Pen::DEFAULT,
+            seen: std::cell::Cell::new(Size {
+                width: 0,
+                height: 0,
+            }),
+            rows: None,
         }
     }
 
@@ -84,6 +116,12 @@ impl<W: Write> FrameBackend<W> {
             size: Some(Size { width, height }),
             ..Self::new(out)
         }
+    }
+
+    /// Change a fixed-size backend's size, as a terminal resize would (tests, the RND-R13
+    /// probe); like `ratatui::Terminal::resize`, follow it with a clear and a full redraw.
+    pub fn set_fixed_size(&mut self, width: u16, height: u16) {
+        self.size = Some(Size { width, height });
     }
 
     /// Switch the DEC 2026 synchronized-update wrapper on or off.
@@ -100,21 +138,37 @@ impl<W: Write> FrameBackend<W> {
         &mut self.out
     }
 
+    /// The first and last row the last frame changed, or `None` when its diff was empty
+    /// (RT-R17: the app steps its draw rate down on a run of those).
+    pub fn changed_rows(&self) -> Option<(u16, u16)> {
+        self.rows
+    }
+
     /// Bytes queued for the next flush.
     pub fn pending(&self) -> &[u8] {
         &self.buf
     }
 
-    /// Grow the buffer, once per terminal size, to hold the worst-case frame, so no draw
+    fn current_size(&self) -> Size {
+        self.size.unwrap_or_else(|| self.seen.get())
+    }
+
+    /// Grow the buffers, once per terminal size, to hold the worst-case frame, so no draw
     /// can reallocate mid-run however much of the screen changes (RT-R14).
     fn reserve_frame(&mut self) {
-        let cells = match self.size {
-            Some(s) => usize::from(s.width) * usize::from(s.height),
-            None => self.seen_cells.get(),
-        };
+        let s = self.current_size();
+        let cells = usize::from(s.width) * usize::from(s.height);
         let bound = frame_bound(cells);
-        if self.buf.capacity() < bound {
-            self.buf.reserve_exact(bound - self.buf.len());
+        for buf in [&mut self.buf, &mut self.alt] {
+            if buf.capacity() < bound {
+                buf.reserve_exact(bound - buf.len());
+            }
+        }
+        if self.cells.capacity() < cells {
+            self.cells.reserve_exact(cells - self.cells.len());
+        }
+        if self.order.capacity() < cells {
+            self.order.reserve_exact(cells - self.order.len());
         }
     }
 
@@ -128,22 +182,18 @@ impl<W: Write> FrameBackend<W> {
             self.buf.extend_from_slice(BEGIN_SYNC);
             self.in_sync = true;
         }
-    }
-
-    fn move_to(&mut self, x: u16, y: u16) {
-        self.buf.extend_from_slice(b"\x1b[");
-        push_u16(&mut self.buf, y.saturating_add(1));
-        self.buf.push(b';');
-        push_u16(&mut self.buf, x.saturating_add(1));
-        self.buf.push(b'H');
+        if !self.lnm_reset {
+            self.buf.extend_from_slice(RESET_LNM);
+            self.lnm_reset = true;
+        }
     }
 
     /// Queue an SGR reset when the rendition is not the default; `ED`/`EL` erase with the
     /// current background, and the shell after exit expects the default.
     fn reset_pen(&mut self) {
-        if self.pen != (Color::Reset, Color::Reset, Modifier::empty()) {
+        if self.pen != Pen::DEFAULT {
             self.buf.extend_from_slice(b"\x1b[0m");
-            self.pen = (Color::Reset, Color::Reset, Modifier::empty());
+            self.pen = Pen::DEFAULT;
         }
     }
 
@@ -168,60 +218,94 @@ impl<W: Write> Backend for FrameBackend<W> {
         I: Iterator<Item = (u16, u16, &'a Cell)>,
     {
         self.reserve_frame();
-        let (mut fg, mut bg, mut modifier) = self.pen;
-        // Where the terminal cursor is after the last print, when known.
-        let mut cursor: Option<(u16, u16)> = None;
-        let mut drew = false;
+        self.cells.clear();
+        self.syms.clear();
+        // RND-R17: the order is chosen before the diff is read (see `encode::Choice`), so a
+        // row-major frame is encoded straight from the diff, and only grouped and probe
+        // frames copy the cells out.
+        let plan = self.choice.plan();
+        let (inline, collect) = match plan {
+            Plan::RowMajor => (true, false),
+            Plan::Grouped => (false, true),
+            Plan::Probe => (true, true),
+        };
+        let start = State {
+            pen: self.pen,
+            // Not carried across frames: something else may have moved it in between.
+            cursor: Cursor::Unknown,
+            width: self.current_size().width,
+        };
+        let mut state = start;
+        // Everything queued before the first cell (a clear, the sync opener) leads either
+        // cell order; `None` while the diff is empty.
+        let mut prefix = None;
+        let mut rows: Option<(u16, u16)> = None;
+        let mut n = 0;
         for (x, y, cell) in content {
-            if !drew {
+            if prefix.is_none() {
                 self.begin_frame();
-                drew = true;
+                prefix = Some(self.buf.len());
             }
-            match cursor {
-                Some((cx, cy)) if cy == y && cx == x => {}
-                // Same row, further right: `CUF n` is shorter than `CUP y;x`.
-                Some((cx, cy)) if cy == y && cx < x => {
-                    self.buf.extend_from_slice(b"\x1b[");
-                    let n = x - cx;
-                    if n > 1 {
-                        push_u16(&mut self.buf, n);
-                    }
-                    self.buf.push(b'C');
-                }
-                _ => self.move_to(x, y),
-            }
-
-            // One SGR for everything that changed. A modifier change resets first (`0`),
-            // which also resets both colours, so they are re-sent if set.
-            let mut sgr = Sgr::new(&mut self.buf);
-            if cell.modifier != modifier {
-                sgr.param(0);
-                for (flag, code) in MODIFIER_CODES {
-                    if cell.modifier.contains(flag) {
-                        sgr.param(code);
-                    }
-                }
-                modifier = cell.modifier;
-                (fg, bg) = (Color::Reset, Color::Reset);
-            }
-            if cell.fg != fg {
-                sgr.color(cell.fg, false);
-                fg = cell.fg;
-            }
-            if cell.bg != bg {
-                sgr.color(cell.bg, true);
-                bg = cell.bg;
-            }
-            sgr.end();
-
-            let symbol = cell.symbol();
-            self.buf.extend_from_slice(symbol.as_bytes());
-            // A width-0 symbol still occupies its cell once printed as a space would; use
-            // at least 1 so the next relative move stays conservative-correct.
+            let symbol = match cell.symbol() {
+                // An empty symbol would print nothing and leave the cursor behind.
+                "" => " ",
+                s => s,
+            };
+            // A width-0 symbol still occupies its cell once printed as a space would.
             let width = u16::try_from(symbol.width().max(1)).unwrap_or(1);
-            cursor = Some((x.saturating_add(width), y));
+            let pen = Pen {
+                fg: cell.fg,
+                bg: cell.bg,
+                modifier: cell.modifier,
+            };
+            if inline {
+                encode::put(
+                    &mut self.buf,
+                    &mut state,
+                    (x, y, width),
+                    pen,
+                    symbol.as_bytes(),
+                );
+            }
+            if collect {
+                let p = Pending::new((x, y, width), pen, symbol.as_bytes(), &mut self.syms);
+                self.cells.push(p);
+            }
+            // The diff is row-major: the first cell has the first row, the last the last.
+            rows = Some((rows.map_or(y, |r| r.0), y));
+            n += 1;
         }
-        self.pen = (fg, bg, modifier);
+        self.rows = rows;
+        let Some(prefix) = prefix else {
+            return Ok(());
+        };
+        match plan {
+            Plan::RowMajor => self.choice.tick(n),
+            Plan::Grouped => {
+                encode::encode_grouped(
+                    &mut self.buf,
+                    &mut state,
+                    &mut self.cells,
+                    &mut self.order,
+                    &self.syms,
+                );
+                self.choice.tick(n);
+            }
+            Plan::Probe => {
+                let grouped = encode::probe(
+                    &mut self.buf,
+                    &mut self.alt,
+                    prefix,
+                    start,
+                    &mut state,
+                    &mut self.cells,
+                    &mut self.order,
+                    &self.syms,
+                );
+                self.choice.probed(grouped, n);
+            }
+        }
+        self.pen = state.pen;
         Ok(())
     }
 
@@ -247,7 +331,12 @@ impl<W: Write> Backend for FrameBackend<W> {
 
     fn set_cursor_position<P: Into<Position>>(&mut self, position: P) -> io::Result<()> {
         let Position { x, y } = position.into();
-        self.move_to(x, y);
+        let mut state = State {
+            pen: self.pen,
+            cursor: Cursor::Unknown,
+            width: 0,
+        };
+        encode::move_to(&mut self.buf, &mut state, x, y);
         Ok(())
     }
 
@@ -280,8 +369,7 @@ impl<W: Write> Backend for FrameBackend<W> {
             Some(size) => Ok(size),
             None => {
                 let (width, height) = crossterm::terminal::size()?;
-                self.seen_cells
-                    .set(usize::from(width) * usize::from(height));
+                self.seen.set(Size { width, height });
                 Ok(Size { width, height })
             }
         }
@@ -325,117 +413,16 @@ impl<W: Write> Backend for FrameBackend<W> {
     }
 }
 
-/// SGR codes of the modifiers ratatui can set.
-const MODIFIER_CODES: [(Modifier, u16); 9] = [
-    (Modifier::BOLD, 1),
-    (Modifier::DIM, 2),
-    (Modifier::ITALIC, 3),
-    (Modifier::UNDERLINED, 4),
-    (Modifier::SLOW_BLINK, 5),
-    (Modifier::RAPID_BLINK, 6),
-    (Modifier::REVERSED, 7),
-    (Modifier::HIDDEN, 8),
-    (Modifier::CROSSED_OUT, 9),
-];
-
-/// Builds one `CSI … m` from parameters; writes nothing when no parameter was added.
-struct Sgr<'a> {
-    buf: &'a mut Vec<u8>,
-    any: bool,
-}
-
-impl<'a> Sgr<'a> {
-    fn new(buf: &'a mut Vec<u8>) -> Self {
-        Self { buf, any: false }
-    }
-
-    fn sep(&mut self) {
-        if self.any {
-            self.buf.push(b';');
-        } else {
-            self.buf.extend_from_slice(b"\x1b[");
-            self.any = true;
-        }
-    }
-
-    fn param(&mut self, n: u16) {
-        self.sep();
-        push_u16(self.buf, n);
-    }
-
-    /// The same parameters crossterm sends for each colour (`38;2;r;g;b`, `39`, …).
-    fn color(&mut self, color: Color, background: bool) {
-        let base = if background { 10 } else { 0 };
-        match color {
-            Color::Reset => self.param(39 + base),
-            Color::Rgb(r, g, b) => {
-                self.param(38 + base);
-                for n in [2, u16::from(r), u16::from(g), u16::from(b)] {
-                    self.param(n);
-                }
-            }
-            Color::Indexed(i) => {
-                self.param(38 + base);
-                self.param(5);
-                self.param(u16::from(i));
-            }
-            named => self.param(named_code(named) + base),
-        }
-    }
-
-    fn end(self) {
-        if self.any {
-            self.buf.push(b'm');
-        }
-    }
-}
-
-/// SGR foreground code of a named colour (crossterm's mapping: `Gray` is 37, `DarkGray` 90).
-fn named_code(color: Color) -> u16 {
-    match color {
-        Color::Black => 30,
-        Color::Red => 31,
-        Color::Green => 32,
-        Color::Yellow => 33,
-        Color::Blue => 34,
-        Color::Magenta => 35,
-        Color::Cyan => 36,
-        Color::Gray => 37,
-        Color::DarkGray => 90,
-        Color::LightRed => 91,
-        Color::LightGreen => 92,
-        Color::LightYellow => 93,
-        Color::LightBlue => 94,
-        Color::LightMagenta => 95,
-        Color::LightCyan => 96,
-        Color::White => 97,
-        _ => 39,
-    }
-}
-
-/// Decimal digits of `n`, without `fmt` machinery.
-fn push_u16(buf: &mut Vec<u8>, n: u16) {
-    let mut digits = [0u8; 5];
-    let mut i = digits.len();
-    let mut n = n;
-    loop {
-        i -= 1;
-        digits[i] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    buf.extend_from_slice(&digits[i..]);
-}
-
 #[cfg(test)]
 mod tests {
     use ratatui::Terminal;
     use ratatui::buffer::Buffer;
     use ratatui::layout::Rect;
 
+    use ratatui::style::{Color, Modifier};
+
     use super::*;
+    use crate::encode::push_u16;
 
     /// Counts `write` and `flush` calls and keeps the bytes.
     #[derive(Debug, Default)]
@@ -477,16 +464,37 @@ mod tests {
         p
     }
 
+    /// Scattered dots in a few colours on rows far apart: the frame needs downward moves.
+    fn dots(buf: &mut Buffer, t: u8) {
+        for i in 0..60u16 {
+            let (x, y) = ((i * 7 + u16::from(t)) % 40, (i * 5) % 12);
+            buf[(x, y)]
+                .set_char('⣿')
+                .set_fg(Color::Rgb(200, 10 * (i % 3) as u8, 9));
+        }
+    }
+
     #[test]
     fn rt_r15_each_frame_is_one_write_and_one_flush() {
-        let mut term = terminal(40, 12);
-        for t in 0..5 {
+        // Behind a `LineWriter` like `stdout()`'s: a '\n' anywhere in the frame would make
+        // it write up to the last newline and then the rest separately (RT-R15).
+        let backend = FrameBackend::with_size(
+            io::LineWriter::with_capacity(1024, Counting::default()),
+            40,
+            12,
+        );
+        let mut term = Terminal::new(backend).expect("terminal");
+        for t in 0..6 {
             let before = {
-                let c = term.backend().writer();
+                let c = term.backend().writer().get_ref();
                 (c.writes, c.flushes)
             };
-            term.draw(|f| fill(f.buffer_mut(), t)).expect("draw");
-            let c = term.backend().writer();
+            if t % 2 == 0 {
+                term.draw(|f| fill(f.buffer_mut(), t)).expect("draw");
+            } else {
+                term.draw(|f| dots(f.buffer_mut(), t)).expect("draw");
+            }
+            let c = term.backend().writer().get_ref();
             assert_eq!(c.writes - before.0, 1, "frame {t}: one write");
             assert_eq!(c.flushes - before.1, 1, "frame {t}: one flush");
         }
@@ -536,7 +544,7 @@ mod tests {
 
     /// Whatever the encoding, the terminal must end up showing exactly the buffer.
     #[test]
-    fn rnd_r15_rt_r15_screen_matches_the_buffer_through_vt100() {
+    fn rnd_r15_rnd_r17_rt_r15_screen_matches_the_buffer_through_vt100() {
         let (w, h) = (23u16, 7u16);
         let mut term = terminal(w, h);
         let mut expected = Buffer::empty(Rect::new(0, 0, w, h));
@@ -654,6 +662,247 @@ mod tests {
             v.clear();
             push_u16(&mut v, n);
             assert_eq!(v, n.to_string().as_bytes());
+        }
+    }
+
+    #[test]
+    fn rt_r17_an_empty_diff_writes_nothing_and_does_not_flush() {
+        let mut term = terminal(10, 3);
+        term.draw(|f| fill(f.buffer_mut(), 1)).expect("draw");
+        assert_eq!(term.backend().changed_rows(), Some((0, 2)));
+        let c = term.backend().writer();
+        let (bytes, writes, flushes) = (c.bytes.len(), c.writes, c.flushes);
+        for _ in 0..3 {
+            term.draw(|f| fill(f.buffer_mut(), 1)).expect("draw");
+            assert_eq!(term.backend().changed_rows(), None);
+        }
+        let c = term.backend().writer();
+        assert_eq!(
+            c.bytes.len(),
+            bytes,
+            "no bytes: no cursor, colour or sync sequences"
+        );
+        assert_eq!(
+            (c.writes, c.flushes),
+            (writes, flushes),
+            "no write and no flush"
+        );
+        term.draw(|f| {
+            fill(f.buffer_mut(), 1);
+            f.buffer_mut()[(4, 1)].set_char('x');
+        })
+        .expect("draw");
+        assert_eq!(term.backend().changed_rows(), Some((1, 1)));
+    }
+
+    /// Puts a vt100 screen's cursor into `from`: `At` by an absolute move, `Wrap` by
+    /// printing on the last column.
+    fn enter(p: &mut vt100::Parser, from: Cursor, w: u16) {
+        match from {
+            Cursor::Unknown => p.process(b"\x1b[3;3H"),
+            Cursor::At(x, y) | Cursor::Loose(x, y) => {
+                p.process(format!("\x1b[{};{}H", y + 1, x + 1).as_bytes());
+            }
+            Cursor::Wrap(y) => {
+                p.process(format!("\x1b[{};{}Hw", y + 1, w).as_bytes());
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r17_every_cursor_move_lands_on_its_target_and_is_never_longer_than_cup() {
+        let (w, h) = (23u16, 7u16);
+        let mut starts = vec![Cursor::Unknown];
+        for y in 0..h {
+            starts.push(Cursor::Wrap(y));
+            for x in 0..w {
+                starts.push(Cursor::At(x, y));
+                starts.push(Cursor::Loose(x, y));
+            }
+        }
+        let mut seq = Vec::new();
+        for &from in &starts {
+            for y in 0..h {
+                for x in 0..w {
+                    let mut p = vt100::Parser::new(h, w, 0);
+                    p.process(b"\x1b[20l");
+                    enter(&mut p, from, w);
+                    seq.clear();
+                    let mut state = State {
+                        pen: Pen::DEFAULT,
+                        cursor: from,
+                        width: w,
+                    };
+                    encode::move_to(&mut seq, &mut state, x, y);
+                    let mut cup = Vec::new();
+                    let mut abs = State {
+                        cursor: Cursor::Unknown,
+                        ..state
+                    };
+                    encode::move_to(&mut cup, &mut abs, x, y);
+                    assert!(
+                        seq.len() <= cup.len(),
+                        "{from:?} -> ({x},{y}): {seq:?} longer than {cup:?}"
+                    );
+                    p.process(&seq);
+                    p.process(b"X");
+                    let got = p.screen().cell(y, x).expect("cell").contents();
+                    assert_eq!(got, "X", "{from:?} -> ({x},{y}) via {seq:?}");
+                    assert!(
+                        matches!(state.cursor, Cursor::At(a, b) | Cursor::Loose(a, b) if (a, b) == (x, y)),
+                        "{from:?} -> ({x},{y}): {:?}",
+                        state.cursor
+                    );
+                    if matches!(from, Cursor::Loose(lx, ly) if (lx, ly) != (x, y)) {
+                        // The column is set absolutely (CUP, CHA or CR), never relatively.
+                        assert!(
+                            matches!(seq.last(), Some(b'H' | b'G' | b'\r')),
+                            "from {from:?}: {seq:?}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r17_scattered_cells_of_one_colour_share_one_sgr() {
+        // Braille dots in three ink colours scattered over the screen, interleaved in
+        // row-major order: grouped by colour, each colour is set once.
+        let mut term = terminal(40, 12);
+        term.draw(|_| {}).expect("draw");
+        let n = term.backend().writer().bytes.len();
+        let inks = [
+            Color::Rgb(255, 80, 40),
+            Color::Rgb(40, 120, 255),
+            Color::Rgb(250, 250, 250),
+        ];
+        term.draw(|f| {
+            let buf = f.buffer_mut();
+            for i in 0..36u16 {
+                let (x, y) = ((i * 7) % 40, (i * 5) % 12);
+                buf[(x, y)].set_char('⣿').set_fg(inks[usize::from(i) % 3]);
+            }
+        })
+        .expect("draw");
+        let text = String::from_utf8_lossy(&term.backend().writer().bytes[n..]).into_owned();
+        assert_eq!(text.matches("38;2;").count(), 3, "{text:?}");
+    }
+
+    #[test]
+    fn rnd_r17_a_row_of_distinct_colours_needs_no_cursor_moves_between_cells() {
+        // A field row: every cell a different colour, adjacent. Row-major order is the
+        // cheaper one, so there is one move for the whole row.
+        let mut term = terminal(40, 3);
+        term.draw(|_| {}).expect("draw");
+        let n = term.backend().writer().bytes.len();
+        term.draw(|f| {
+            let buf = f.buffer_mut();
+            for x in 0..40u16 {
+                let v = u8::try_from(x * 6).expect("small");
+                buf[(x, 1)]
+                    .set_char('▀')
+                    .set_fg(Color::Rgb(v, 0, 0))
+                    .set_bg(Color::Rgb(0, v, 0));
+            }
+        })
+        .expect("draw");
+        let frame = &term.backend().writer().bytes[n..];
+        let moves = frame
+            .windows(3)
+            .filter(|w| w[0] == 0x1b && w[1] == b'[' && w[2].is_ascii_digit())
+            .count();
+        let cup_or_cuf = String::from_utf8_lossy(frame)
+            .split("\x1b[")
+            .filter(|s| {
+                let end = s.find(|c: char| !(c.is_ascii_digit() || c == ';'));
+                end.is_some_and(|e| matches!(&s[e..=e], "H" | "C" | "G"))
+            })
+            .count();
+        assert!(moves >= 40, "one SGR per cell");
+        assert_eq!(cup_or_cuf, 1, "{:?}", String::from_utf8_lossy(frame));
+    }
+
+    /// What ratatui's own `CrosstermBackend` (the path before M14) leaves on the screen.
+    fn reference(frames: &[Buffer], w: u16, h: u16) -> vt100::Parser {
+        #[derive(Clone, Default)]
+        struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
+        impl Write for Shared {
+            fn write(&mut self, b: &[u8]) -> io::Result<usize> {
+                self.0.borrow_mut().extend_from_slice(b);
+                Ok(b.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let sink = Shared::default();
+        let mut backend = ratatui::backend::CrosstermBackend::new(sink.clone());
+        let mut prev = Buffer::empty(Rect::new(0, 0, w, h));
+        for frame in frames {
+            backend.draw(prev.diff_iter(frame)).expect("draw");
+            Backend::flush(&mut backend).expect("flush");
+            prev.clone_from(frame);
+        }
+        let mut p = vt100::Parser::new(h, w, 0);
+        p.process(&sink.0.borrow());
+        p
+    }
+
+    fn same_screen(a: &vt100::Screen, b: &vt100::Screen, w: u16, h: u16, what: &str) {
+        for y in 0..h {
+            for x in 0..w {
+                let (ca, cb) = (a.cell(y, x).expect("cell"), b.cell(y, x).expect("cell"));
+                assert_eq!(
+                    (
+                        ca.contents(),
+                        ca.fgcolor(),
+                        ca.bgcolor(),
+                        ca.inverse(),
+                        ca.bold()
+                    ),
+                    (
+                        cb.contents(),
+                        cb.fgcolor(),
+                        cb.bgcolor(),
+                        cb.inverse(),
+                        cb.bold()
+                    ),
+                    "{what} ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn rnd_r17_wide_symbols_keep_row_major_order_and_the_reference_screen() {
+        // Wide symbols (never on the canvas, GEN-R10, but possible in free text) disable
+        // reordering; the screen still matches ratatui's own backend frame by frame.
+        let (w, h) = (16u16, 4u16);
+        let area = Rect::new(0, 0, w, h);
+        let mut frames = Vec::new();
+        for t in 0..4u8 {
+            let mut buf = Buffer::empty(area);
+            let s = if t % 2 == 0 { "日本ab語" } else { "xyz日" };
+            buf.set_string(
+                t.into(),
+                1,
+                s,
+                ratatui::style::Style::new().fg(Color::Rgb(t, 9, 9)),
+            );
+            buf[(15, 3)].set_char('⣿').set_fg(Color::Rgb(1, 2, 3));
+            buf[(0, 0)].set_char('⣿').set_fg(Color::Rgb(1, 2, 3));
+            frames.push(buf);
+        }
+        let mut term = terminal(w, h);
+        let mut p = vt100::Parser::new(h, w, 0);
+        for (i, frame) in frames.iter().enumerate() {
+            let n = term.backend().writer().bytes.len();
+            term.draw(|f| f.buffer_mut().clone_from(frame))
+                .expect("draw");
+            p.process(&term.backend().writer().bytes[n..]);
+            let r = reference(&frames[..=i], w, h);
+            same_screen(p.screen(), r.screen(), w, h, &format!("frame {i}"));
         }
     }
 }
