@@ -29,6 +29,10 @@ pub const GEN_R25: &[&str] = &[
     "solar_system",
     "brownian_motion",
     "action_potential",
+    "magnetosphere",
+    "gravity_assist",
+    "snowflake_growth",
+    "cloud_chamber",
 ];
 
 /// Whether GEN-R25 lists `scene`.
@@ -55,6 +59,12 @@ pub const GEN_R26: &[&str] = &[
     "physarum",
     "firefly_sync",
     "heart_fibrillation",
+    "binary_inspiral",
+    "chladni_plate",
+    "rayleigh_benard",
+    "mitosis",
+    "ribosome_translation",
+    "protocell_assembly",
 ];
 
 /// Whether GEN-R25 or GEN-R26 restyled `scene` (so GEN-R22 no longer pins it).
