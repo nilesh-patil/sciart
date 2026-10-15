@@ -287,14 +287,15 @@ SPEC-002 "Batch M21"; GEN-R25 list (+ magnetosphere, gravity_assist, snowflake_g
 - [x] Samples at M21 (`samples/<scene>-m21.png`); cloud_chamber sparseness fixed
 - [ ] Remaining follow-ups in docs/design/M21-ten-scenes.md
 
-## M22 — Lean build and runtime
+## M22 — Lean build and runtime ✅
 Design: [docs/design/M22-lean-build-runtime.md](design/M22-lean-build-runtime.md) · ADR-0023. TEST-R9 (amended), TEST-R10, TEST-R11, TEST-R7 (amended), RT-R17, RND-R17, RT-R16 (tightened), CFG-R8, GEN-R3/R16 (amended). User picked all eight options (2 min idle with 30 FPS kept; category split; ceilings at measured + margin).
 - [x] Measurements and options (AskUserQuestion); spec first
-- [ ] Phase A: nextest + optimised test profile, `ci` profile, sccache (TDD via source rules)
-- [ ] Phase A: idle-aware frame loop, tighter encoder, 2 min idle default (TDD)
-- [ ] Phase B: split sciart-generators into sciart-shared + five scene crates
-- [ ] Phase C: memory ceilings at measured + margin; reviewed churn cuts
-- [ ] Review (Rust/perf, art); before/after numbers; rs-ci green; local merge
+- [x] Phase A: nextest + optimised test profile, `ci` profile, sccache (TDD via source rules)
+- [x] Phase A: idle-aware frame loop, tighter encoder, 2 min idle default (TDD)
+- [x] Phase B: split sciart-generators into sciart-shared + five scene crates
+- [x] Phase C: memory ceilings at measured + margin; reviewed churn cuts
+- [x] Review (Rust/perf: 1 blocking + 2 major fixed in round 2); before/after numbers; rs-ci green; local merge (churn cuts skipped: none invisible)
+- [ ] Manual encoder check in iTerm2, Terminal.app and tmux; follow-ups in the design doc
 
 ## M9 — Future (unscheduled)
 - `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
