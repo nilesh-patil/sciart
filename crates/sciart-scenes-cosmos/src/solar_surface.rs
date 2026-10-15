@@ -705,6 +705,9 @@ impl View {
                 }
             }
         }
+        // TEST-R7 (M22): built by `push` once per resize, so drop the doubling slack (up to half the buffer at 500x150); frames are unchanged.
+        disc.shrink_to_fit();
+        rim.shrink_to_fit();
         // Inner pixels first, so a spicule pixel can check the one below it.
         rim.sort_by(|a, b| a.above.total_cmp(&b.above));
         let s_g = granule_spacing(r);

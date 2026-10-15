@@ -36,14 +36,33 @@ const CHURN_STEPS: usize = 30;
 const BIG: Size = Size::new(500, 150);
 /// One simulated second at `BIG` (TEST-R7).
 const BIG_STEPS: usize = 60;
-/// TEST-R7: live bytes at `BIG` stay under this for every scene not in `EXCEPTIONS`; all of
-/// them held < 4 MiB in the M11 measurement. May only be lowered; raising it needs a spec
-/// change.
-const LIVE_CEILING: i64 = 4 << 20;
+/// TEST-R7 (M22, ADR-0023): live bytes at `BIG` stay under this for every scene not in
+/// `EXCEPTIONS`. Every scene pays ≈ 1.43 MB before its own state (the `Stage`'s two
+/// 500×150 canvases at 8 B a cell, plus a braille `Dots`), and the scenes under it hold
+/// ≤ 2.51 MiB (wave_interference), so 2.75 MiB leaves ≥ 9 % margin. May only be lowered;
+/// raising it needs a spec change.
+const LIVE_CEILING: i64 = 2_883_584; // 2.75 MiB
 /// Scenes with their own, higher ceiling, each named with its reason in TEST-R7, so one
-/// outlier does not loosen the guard for every other scene. None at present:
-/// galaxy_collision (7 MiB in M12) now folds its blur into its splats.
-const EXCEPTIONS: &[(&str, i64)] = &[];
+/// outlier does not loosen the guard for every other scene. Each is its M22 measurement
+/// plus ≈ 8 %, rounded up to 1/8 MiB and capped at the old 4 MiB ceiling (M22 measurement
+/// in the comment).
+const EXCEPTIONS: &[(&str, i64)] = &[
+    ("fractal_growth", 4 << 20), // 3.87 MiB: DLA lattice + pre-reserved site queues
+    ("strange_attractors", 4 << 20), // 3.81 MiB: per-dot f32 afterglow density
+    ("solar_surface", 4 << 20),  // 3.79 MiB: per-pixel disc and rim tables
+    ("rayleigh_benard", 4 << 20), // 3.76 MiB: per-dot f32 stipple thresholds
+    ("snowflake_growth", 4 << 20), // 3.74 MiB: hexagonal lattice fields (f64)
+    ("aurora", 4 << 20),         // 3.68 MiB: per-pixel curtain layers and glow
+    ("star_trails", 4 << 20),    // 3.59 MiB: per-dot exposure and rank
+    ("cloud_chamber", 4_063_232), // 3.56 MiB: pre-reserved droplet slots
+    ("heart_fibrillation", 4_063_232), // 3.52 MiB: excitable lattice (u, v, slope, age)
+    ("quantum_double_slit", 3_801_088), // 3.32 MiB: complex wavefunction and ADI factors
+    ("binary_inspiral", 3_801_088), // 3.32 MiB: precomputed field-dot table
+    ("kelvin_helmholtz", 3_538_944), // 3.09 MiB: vorticity and dye lattices
+    ("noctilucent_clouds", 3_407_872), // 2.93 MiB: wave lattice nodes with packet phases
+    ("ising_model", 3_276_800),  // 2.89 MiB: spin lattice and display ages
+    ("gray_scott", 3_145_728),   // 2.73 MiB: double-buffered u/v lattices
+];
 
 fn ceiling(name: &str) -> i64 {
     EXCEPTIONS

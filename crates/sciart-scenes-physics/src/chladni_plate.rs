@@ -261,6 +261,8 @@ impl ChladniPlate {
                 }
             }
         }
+        // TEST-R7 (M22): built by `push` once per resize; drop the doubling slack.
+        self.candidates.shrink_to_fit();
         self.stipple = Vec::with_capacity(self.candidates.len());
     }
 

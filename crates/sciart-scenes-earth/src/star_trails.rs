@@ -365,6 +365,8 @@ impl Generator for StarTrails {
         self.faint.resize(2 * w * h, 0);
         self.haze_tone = Tone::asinh(FAINT_TONE.0, FAINT_TONE.1);
         self.base.clear();
+        // TEST-R7 (M22): one level per pixel; reserve it instead of doubling past it.
+        self.base.reserve_exact(2 * w * h);
         for y in 0..2 * h as i32 {
             for x in 0..w as i32 {
                 let elev = ((horizon - (f64::from(y) + 0.5)) / deg).max(0.0);

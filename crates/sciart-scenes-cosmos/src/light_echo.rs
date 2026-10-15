@@ -201,6 +201,9 @@ impl Dust {
         let (w, h) = (usize::from(lattice.width()), usize::from(lattice.height()));
         let half = h as f64 / 2.0;
         self.samples.clear();
+        // TEST-R7 (M22): exactly one sample per lattice cell; reserve it instead of
+        // letting `push` double past it (frames unchanged).
+        self.samples.reserve_exact(w * h);
         for j in 0..h {
             for i in 0..w {
                 let x = (i as f64 + 0.5 - w as f64 / 2.0) / half;
