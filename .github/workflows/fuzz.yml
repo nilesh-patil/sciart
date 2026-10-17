@@ -1,0 +1,60 @@
+name: Fuzz
+
+# IMP-14: scheduled, long-running fuzzing for the paths that accept arbitrary text.
+# Deliberately not part of `rs-ci` (TEST-R3): cargo-fuzz needs nightly, a sanitizer and
+# minutes per target, so this runs weekly and on demand instead. Crashes land in
+# `fuzz/artifacts/<target>/` and the corpus is kept between runs; a crash becomes a
+# regression test in the owning crate.
+#
+# Action versions are pinned by commit SHA; the tag/branch is in the trailing comment.
+
+on:
+  schedule:
+    # Mondays 04:17 UTC (offset from the hour so it does not pile onto other cron jobs).
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [title_fit, hud_fit, theme_name]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          workspaces: fuzz
+      - uses: taiki-e/install-action@82fc405565b9cf90abfe700ba43b4751ce2fe422 # cargo-fuzz
+      - name: Restore the corpus
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: fuzz/corpus
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: |
+            fuzz-corpus-${{ matrix.target }}-
+      # 90 s per target: three short runs weekly, not a continuous fuzzing service.
+      - name: Fuzz ${{ matrix.target }} for 90 s
+        working-directory: fuzz
+        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=90 -rss_limit_mb=4096
+      # Keep the corpus on success; keep artifacts even on a crash so the reproducer uploads.
+      - name: Upload corpus and crashes
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: |
+            fuzz/corpus/${{ matrix.target }}
+            fuzz/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+          retention-days: 30
