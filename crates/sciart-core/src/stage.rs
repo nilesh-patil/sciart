@@ -77,6 +77,12 @@ impl Stage {
         self.back.set_mode(mode);
     }
 
+    /// The glyph mode the stage renders in; `sciart-capture` keeps and restores it around
+    /// its ASCII fallback pass (ADR-0025).
+    pub fn glyph_mode(&self) -> GlyphMode {
+        self.front.mode()
+    }
+
     pub fn step(&mut self, dt: f64) {
         self.generator.update(dt, &mut self.ctx);
         self.ctx.advance(dt);

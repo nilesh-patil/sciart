@@ -24,6 +24,7 @@ sciart-scenes-matter = { path = "crates/sciart-scenes-matter" }
 sciart-scenes-life = { path = "crates/sciart-scenes-life" }
 sciart-render = { path = "crates/sciart-render" }
 sciart-keepawake = { path = "crates/sciart-keepawake" }
+sciart-capture = { path = "crates/sciart-capture" }
 sciart-testalloc = { path = "crates/sciart-testalloc" } # dev-only (ADR-0009)
 
 anyhow = "1"
@@ -44,8 +45,9 @@ proptest = "1"
 tempfile = "3"
 vt100 = "0.16"
 
-# Dev-only: the `preview` example (PNG frames for art review).
+# Headless capture (ADR-0025): the `font8x8` glyph atlas and the PNG/GIF encoders.
 font8x8 = "0.3"
+gif = "0.13"
 png = "0.17"
 
 [workspace.lints.rust]
