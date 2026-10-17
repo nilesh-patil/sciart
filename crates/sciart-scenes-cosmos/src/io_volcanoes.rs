@@ -54,7 +54,7 @@ pub(crate) const POOL: usize = 900;
 pub(crate) const TIDE_PERIOD: f64 = 20.0;
 /// Plume filaments: grains leave in this many azimuthal rays (Pele's canopy shows
 /// radial streaks in Voyager and Galileo images).
-const RAYS: u32 = 18;
+const RAYS: u32 = 30;
 /// Simulated steps of eruption run in the first resize, so the plumes and rings already
 /// show; in strides (the flight is exact and each grain lands at its exact point, so the
 /// rings do not depend on the stride).
@@ -66,33 +66,17 @@ const _: () = assert!(WARM % WARM_STRIDE == 0, "the stride divides the warm-up")
 const FAN: [f64; 6] = [0.07, 0.3, 0.48, 0.62, 0.73, 0.8];
 const FAN_JITTER: f64 = 0.025;
 /// Landings drawn: only beyond this share of the 45° range (the ring's caustic).
-const RING_INNER: f64 = 0.9;
-/// The drawn plume threads, `(zenith rad, azimuth °)`: Pele's nested dome (a thin
-/// near-vertical column, then two shells of arcs, evenly spaced round the vent).
-const PELE_ARCS: [(f64, f64); 14] = [
-    (0.1, 0.0),
-    (0.1, 180.0),
-    (0.48, 0.0),
-    (0.48, 180.0),
-    (0.48, 35.0),
-    (0.48, 145.0),
-    (0.48, 215.0),
-    (0.48, 325.0),
-    (0.76, 0.0),
-    (0.76, 180.0),
-    (0.76, 35.0),
-    (0.76, 145.0),
-    (0.76, 215.0),
-    (0.76, 325.0),
-];
+const RING_INNER: f64 = 0.84;
+/// The eruption cycle (scene seconds): each vent puffs, its canopy drifts outward and
+/// falls, then the vent rests before the next burst. The envelope is normalised to mean 1
+/// so the steady-state grain population (and IO-A4) is unchanged.
+const BURST_PERIOD: f64 = 8.0;
+/// Trail behind a live grain, in simulated (time-lapsed) seconds: a short thread, so the
+/// canopy is made of the grains in flight now rather than a fixed set of parabolas.
+const TRAIL: f64 = 150.0;
+const TRAIL_STEPS: usize = 10;
 /// Share of the Prometheus types' frost-ring dots drawn.
 const FROST_KEEP: f64 = 0.55;
-/// Thread sampling (dots between samples, at most), its level, the grains riding each
-/// thread and their trail (share of the flight).
-const ARC_STEP: f64 = 1.0;
-const ARC_LEVEL: u8 = 170;
-const ARC_HEADS: usize = 2;
-const HEAD_TRAIL: f64 = 0.07;
 /// Flight states (IO-A11 colours): `Hot` below this share of the grain's apex while
 /// rising, `Cold` above `CONDENSE` of it or falling, `Sun` between.
 const VENT_SHARE: f64 = 0.22;
@@ -143,7 +127,7 @@ const VENTS: [Vent; 3] = [
     Vent {
         v0: 1.0,
         zenith: (0.05, 0.9),
-        rate: 10.0,
+        rate: 15.0,
         normal: [-0.16, -0.96, 0.22],
         fall: RED_FALL,
         phase: 0.0,
@@ -152,7 +136,7 @@ const VENTS: [Vent; 3] = [
     Vent {
         v0: 0.5,
         zenith: (0.05, 0.9),
-        rate: 5.0,
+        rate: 8.0,
         normal: [0.4, -0.62, 0.68],
         fall: WHITE_FALL,
         phase: 2.1,
@@ -161,7 +145,7 @@ const VENTS: [Vent; 3] = [
     Vent {
         v0: 0.42,
         zenith: (0.05, 0.9),
-        rate: 4.0,
+        rate: 6.5,
         normal: [-0.52, -0.58, 0.63],
         fall: WHITE_FALL,
         phase: 4.0,
@@ -188,7 +172,9 @@ pub(crate) fn range_45(v0: f64) -> f64 {
 }
 
 /// Height (km) of a grain launched with vertical speed `vz` (km/s) after flight time `t`
-/// (s): the exact parabola (IO-A11).
+/// (s): the exact parabola (IO-A11). Only the unit tests need it now that the drawing
+/// walks each live grain's own recent trail.
+#[cfg(test)]
 pub(crate) fn height(vz: f64, t: f64) -> f64 {
     vz * t - 0.5 * G_IO * t * t
 }
@@ -206,6 +192,17 @@ pub(crate) fn plume_scale(t: f64, phase: f64) -> f64 {
     s * s
 }
 
+/// The eruption pulse in `[0, ~2.9]`, mean 1 over a cycle: a sharp burst, a long decay
+/// while the canopy drifts out and falls, then a quiet rest. `phase` is the vent's
+/// offset in radians (as before), converted to a share of the cycle.
+pub(crate) fn eruption(t: f64, phase: f64) -> f64 {
+    let u = (t / BURST_PERIOD + phase / TAU).rem_euclid(1.0);
+    // Rising fast (0.12 of the cycle) and decaying over the rest; area 0.15 + 0.2 = 0.35,
+    // so dividing by 0.35 keeps the mean launch rate at the vent's nominal rate.
+    let envelope = 0.15 + (1.0 - u).powi(4);
+    envelope / 0.35
+}
+
 /// Patera output in `[0, 1]` for patera `k` at time `t`: smooth flicker (IO-A8).
 fn lava_flicker(k: usize, t: f64) -> f64 {
     let n = value_noise(0x1A7A ^ k as u64, 2.3 * t, 7.1 * k as f64, 1.0);
@@ -221,6 +218,47 @@ pub(crate) fn flight_role(z: f64, vz: f64, apex: f64) -> Role {
         Role::Hot
     } else {
         Role::Sun
+    }
+}
+
+/// Draw one live grain's last [`TRAIL`] simulated seconds as a short thread along its own
+/// parabola, coloured by its state in flight (IO-A11, IO-A12). The head is brighter, so
+/// the canopy is a spray of moving grains rather than a fixed set of painted arcs.
+fn draw_grain(dots: &mut Dots, view: View, frames: &[Frame; 3], g: &plume::Grain) {
+    let k = usize::from(g.src).min(VENTS.len() - 1);
+    let frame = frames[k];
+    let (x0, y0, z0) = (
+        f64::from(g.pos[0]),
+        f64::from(g.pos[1]),
+        f64::from(g.pos[2]),
+    );
+    let (vx, vy, vz) = (
+        f64::from(g.vel[0]),
+        f64::from(g.vel[1]),
+        f64::from(g.vel[2]),
+    );
+    let apex = z0 + vz * vz / (2.0 * G_IO);
+    let mut prev: Option<(f64, f64)> = None;
+    for s in 0..=TRAIL_STEPS {
+        let tau = TRAIL * (TRAIL_STEPS - s) as f64 / TRAIL_STEPS as f64;
+        let (z, vzt) = (z0 - vz * tau - 0.5 * G_IO * tau * tau, vz + G_IO * tau);
+        let p = frame.place(x0 - vx * tau, y0 - vy * tau, z.max(0.0));
+        if View::hidden(p) {
+            prev = None;
+            continue;
+        }
+        let pt = view.to_dot(p);
+        if let Some(q) = prev {
+            let level = if s == TRAIL_STEPS { 240 } else { 150 };
+            dots.line(
+                q.0,
+                q.1,
+                pt.0,
+                pt.1,
+                Ink::new(flight_role(z, vzt, apex), level),
+            );
+        }
+        prev = Some(pt);
     }
 }
 
@@ -427,7 +465,7 @@ impl IoVolcanoes {
     fn step(&mut self, dt: f64, rng: &mut impl Rng) {
         self.t += dt;
         for (k, vent) in VENTS.iter().enumerate() {
-            self.owed[k] += vent.rate * dt;
+            self.owed[k] += vent.rate * eruption(self.t, vent.phase) * dt;
             while self.owed[k] >= 1.0 {
                 self.owed[k] -= 1.0;
                 let breathe = plume_scale(self.t, vent.phase).sqrt();
@@ -572,78 +610,6 @@ impl IoVolcanoes {
         Some((self.view.to_dot(p), zt, vzt, apex))
     }
 
-    /// Dot, height (km) and vertical speed of a grain of vent `k` launched with speeds
-    /// `(vh, vz)` (km/s) along azimuth `(cos, sin)`, `u` real seconds into its flight: the
-    /// exact parabola (IO-A11). `None` behind Io.
-    fn arc_at(
-        &self,
-        k: usize,
-        (vh, vz): (f64, f64),
-        (ca, sa): (f64, f64),
-        u: f64,
-    ) -> Option<((f64, f64), f64, f64)> {
-        let z = height(vz, u);
-        let d = vh * u;
-        let p = self.frames[k].place(d * ca, d * sa, z.max(0.0));
-        (!View::hidden(p)).then(|| (self.view.to_dot(p), z, vz - G_IO * u))
-    }
-
-    /// One plume thread (IO-A11, IO-A12): the whole parabola of a grain launched at `v0`,
-    /// zenith `zen`, azimuth `az_deg`, sampled at most `ARC_STEP` dots apart and joined by
-    /// lines (a smooth curve), coloured `Hot` → `Sun` → `Cold` by the state in flight;
-    /// `ARC_HEADS` bright grains ride it, each with a short trail.
-    fn draw_arc(&mut self, k: usize, v0: f64, zen: f64, az_deg: f64, i: usize) {
-        let (sz, cz) = zen.sin_cos_det();
-        let speeds = (v0 * sz, v0 * cz);
-        let (sa, ca) = az_deg.to_radians().sin_cos_det();
-        let dir = (ca, sa);
-        let flight = 2.0 * speeds.1 / G_IO;
-        let apex = speeds.1 * speeds.1 / (2.0 * G_IO);
-        let reach = self.view.dots_per_km() * (speeds.0 * flight + 2.0 * apex);
-        let n = ((reach / ARC_STEP).ceil() as usize).clamp(8, 4000);
-        let ink_at = |z: f64, vz: f64, level: u8| {
-            let role = flight_role(z, vz, apex);
-            // The falling limbs fade, so the dome's top reads above the curtains.
-            let level = if vz < 0.0 && z < 0.6 * apex {
-                (f64::from(level) * 0.6) as u8
-            } else {
-                level
-            };
-            Ink::new(role, level)
-        };
-        let mut prev: Option<(f64, f64)> = None;
-        for j in 0..=n {
-            let u = flight * j as f64 / n as f64;
-            match self.arc_at(k, speeds, dir, u) {
-                Some((pt, z, vz)) => {
-                    if let Some(q) = prev {
-                        let ink = ink_at(z, vz, ARC_LEVEL);
-                        self.dots.line(q.0, q.1, pt.0, pt.1, ink);
-                    }
-                    prev = Some(pt);
-                }
-                None => prev = None,
-            }
-        }
-        // Grains riding the thread, evenly spaced in flight time.
-        let offset = hash01(0xA2C ^ ((k as u64) << 8) ^ i as u64);
-        for h in 0..ARC_HEADS {
-            let phase = (self.t * LAPSE / flight + h as f64 / ARC_HEADS as f64 + offset).fract();
-            let u1 = phase * flight;
-            let u0 = (u1 - HEAD_TRAIL * flight).max(0.0);
-            let mut prev: Option<(f64, f64)> = None;
-            for s in 0..=4 {
-                let u = u0 + (u1 - u0) * f64::from(s) / 4.0;
-                if let Some((pt, z, vz)) = self.arc_at(k, speeds, dir, u) {
-                    if let Some(q) = prev {
-                        self.dots.line(q.0, q.1, pt.0, pt.1, ink_at(z, vz, 255));
-                    }
-                    prev = Some(pt);
-                }
-            }
-        }
-    }
-
     fn compose(&mut self) {
         self.dots.clear();
         for s in &self.specks {
@@ -666,11 +632,14 @@ impl IoVolcanoes {
                     continue;
                 }
                 let (x, y) = v.to_dot(p);
-                // Only the caustic at the maximum range (Galileo's sharp-edged Pele ring):
-                // a thin, crisp arc of stipple.
+                // The caustic ring, softened: the band starts a little inside the 45°
+                // range and each landing fades with its own lifetime, so the ring is a
+                // graded stipple rather than a crisp one-level arc.
                 let rho = f64::from(l.a).hypot(f64::from(l.b)) * inv_range;
                 if rho > RING_INNER {
-                    self.dots.plot(x, y, fall);
+                    let fade = (-(now - l.at) / l.life.max(1e-3)).exp();
+                    let level = (90.0 + 130.0 * fade) as u8;
+                    self.dots.plot(x, y, Ink::new(fall.role, level.max(60)));
                 }
             }
         }
@@ -704,12 +673,11 @@ impl IoVolcanoes {
                 self.dots.set(x + dx, y + dy, ink);
             }
         }
-        // The plumes: a fixed fan of exact parabolas per vent (the umbrella's nested
-        // dome), each sampled at dot resolution and coloured by the state in flight, with
-        // bright grains riding them.
-        let pele = VENTS[0].v0 * plume_scale(self.t, VENTS[0].phase).sqrt();
-        for (i, &(zen, az)) in PELE_ARCS.iter().enumerate() {
-            self.draw_arc(0, pele, zen, az, i);
+        // The plumes: the live ballistic grains, each with a short decaying thread along
+        // its own parabola. The eruption pulse changes how many are in flight, so the
+        // canopy visibly puffs, drifts outward and falls between bursts.
+        for g in self.plume.iter() {
+            draw_grain(&mut self.dots, v, &self.frames, g);
         }
         // The Prometheus types, seen from above: their thin SO₂ frost ring (a sparse
         // stipple ellipse at the 45° range, foreshortened by the globe) round a bright
@@ -727,7 +695,13 @@ impl IoVolcanoes {
                 let p = f.place(r * c, r * s, 0.0);
                 if p[2] >= 0.0 {
                     let (x, y) = v.to_dot(p);
-                    self.dots.plot(x, y, vent.fall);
+                    // Two fixed levels, so the frost ring is a soft stipple, not a line.
+                    let level = if hash01(0xF00D ^ ((k as u64) << 20) ^ i as u64) < 0.5 {
+                        125
+                    } else {
+                        175
+                    };
+                    self.dots.plot(x, y, Ink::new(vent.fall.role, level));
                 }
             }
         }
@@ -904,6 +878,25 @@ mod tests {
             g.plume.len() > 100 && g.plume.len() < POOL,
             "{}",
             g.plume.len()
+        );
+    }
+
+    #[test]
+    fn io_a8_the_eruption_pulses_around_a_mean_launch_rate() {
+        // The eruption envelope is normalised to mean 1, so the steady-state population
+        // (IO-A4) is unchanged, but it swings from a burst to a quiet rest > 3× lower.
+        let n = 400;
+        let samples: Vec<f64> = (0..n)
+            .map(|i| eruption(f64::from(i) * BURST_PERIOD / f64::from(n), 0.0))
+            .collect();
+        let mean = samples.iter().sum::<f64>() / f64::from(n);
+        assert!((mean - 1.0).abs() < 0.02, "mean {mean}");
+        let peak = samples.iter().copied().fold(0.0, f64::max);
+        let rest = samples.iter().copied().fold(f64::MAX, f64::min);
+        assert!(peak / rest > 3.0, "{peak} vs {rest}");
+        assert!(
+            (eruption(1.3, 0.0) - eruption(1.3 + BURST_PERIOD, 0.0)).abs() < 1e-12,
+            "periodic"
         );
     }
 
