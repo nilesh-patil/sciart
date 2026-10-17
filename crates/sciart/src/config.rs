@@ -14,6 +14,8 @@ pub const DEFAULT_INTERVAL: f64 = 15.0;
 pub const DEFAULT_LOW_POWER_FPS: u16 = 5;
 /// Two minutes without a key press (CFG-R8; 600 s before M22).
 pub const DEFAULT_IDLE_AFTER: f64 = 120.0;
+/// Simulated seconds per wall second (CFG-R9).
+pub const DEFAULT_SPEED: f64 = 1.0;
 
 /// On-disk config; every key optional, unknown keys rejected (CFG-R3).
 #[derive(Debug, Default, PartialEq, Deserialize)]
@@ -27,6 +29,8 @@ pub struct FileConfig {
     pub title: Option<bool>,
     #[serde(default)]
     pub disabled: Vec<String>,
+    /// Simulated seconds per wall second (CFG-R9).
+    pub speed: Option<f64>,
     pub keep_awake: Option<KeepAwakeArg>,
     #[serde(default)]
     pub low_power: LowPowerConfig,
@@ -52,6 +56,8 @@ pub struct Settings {
     pub title: bool,
     pub seed: Option<u64>,
     pub disabled: Vec<String>,
+    /// Simulated seconds per wall second (CFG-R9).
+    pub speed: f64,
     pub keep_awake: Mode,
     pub low_power_fps: u16,
     pub idle_after: f64,
@@ -80,6 +86,15 @@ pub fn parse(text: &str, origin: &Path) -> Result<FileConfig, UsageError> {
         return Err(invalid(format!(
             "interval = {:?} must be > 0",
             config.interval
+        )));
+    }
+    if !config
+        .speed
+        .is_none_or(|v| v.is_finite() && (0.1..=4.0).contains(&v))
+    {
+        return Err(invalid(format!(
+            "speed = {:?} is outside 0.1..=4",
+            config.speed
         )));
     }
     if !fps_ok(config.low_power.fps) {
@@ -133,6 +148,7 @@ pub fn resolve(cli: &Cli, file: FileConfig) -> (Settings, Vec<String>) {
         title: !cli.no_title && file.title.unwrap_or(true),
         seed: cli.seed,
         disabled: file.disabled,
+        speed: cli.speed.or(file.speed).unwrap_or(DEFAULT_SPEED),
         keep_awake: cli
             .keep_awake
             .or(file.keep_awake)
@@ -168,6 +184,7 @@ mod tests {
                 title: true,
                 seed: None,
                 disabled: vec![],
+                speed: DEFAULT_SPEED,
                 keep_awake: Mode::platform_default(),
                 low_power_fps: DEFAULT_LOW_POWER_FPS,
                 idle_after: DEFAULT_IDLE_AFTER,
@@ -270,6 +287,31 @@ mod tests {
     }
 
     #[test]
+    fn cfg_r9_speed_defaults_to_1_and_cli_overrides_file() {
+        let (s, _) = resolve(&cli(&[]).unwrap(), FileConfig::default());
+        assert_eq!(s.speed, 1.0);
+        let (s, _) = resolve(&cli(&[]).unwrap(), file("speed = 2.0"));
+        assert_eq!(s.speed, 2.0, "file wins over the default");
+        let (s, _) = resolve(&cli(&["--speed", "0.5"]).unwrap(), file("speed = 2.0"));
+        assert_eq!(s.speed, 0.5, "flag wins over the file");
+    }
+
+    #[test]
+    fn cfg_r9_speed_values_are_validated_like_the_cli() {
+        for bad in [
+            "speed = 0",
+            "speed = 0.05",
+            "speed = 4.1",
+            "speed = nan",
+            "speed = inf",
+            "speed = \"fast\"",
+        ] {
+            assert!(parse(bad, Path::new("c.toml")).is_err(), "{bad}");
+        }
+        assert_eq!(file("speed = 4").speed, Some(4.0));
+    }
+
+    #[test]
     fn cfg_r5_keep_awake_and_low_power_defaults() {
         let (s, _) = resolve(&cli(&[]).unwrap(), FileConfig::default());
         assert_eq!(s.keep_awake, Mode::platform_default());
@@ -343,11 +385,11 @@ mod tests {
 
     #[test]
     fn cfg_r7_retired_name_in_disabled_disables_the_renamed_scene_silently() {
-        use crate::cli::{Command, select};
+        use crate::cli::{Command, Filters, select};
         let f = file("disabled = [\"chemical_reaction\", \"crystal_growth\"]");
         let (s, warnings) = resolve(&cli(&[]).unwrap(), f);
         assert!(warnings.is_empty(), "{warnings:?}");
-        let names: Vec<_> = select(&Command::Sim, &s.disabled)
+        let names: Vec<_> = select(&Command::Sim, &s.disabled, &Filters::default())
             .unwrap()
             .iter()
             .map(|e| e.meta.name)
