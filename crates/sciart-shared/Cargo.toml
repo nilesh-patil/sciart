@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["simulation", "generative-art", "terminal", "ascii-art", "math"]
+categories = ["science", "simulation", "graphics", "visualization"]
+publish = false
 
 [features]
 # Measurement helpers the scenes' unit tests use (correlation lengths, box dimensions,

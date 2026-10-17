@@ -1,0 +1,93 @@
+name: CI
+
+# Hosted mirror of the local gate, `pixi run rs-ci` (TEST-R3), which stays the single
+# definition of "green". The commands below mirror the pixi tasks and must be kept in step
+# with `pixi.toml` (ADR-0024):
+#   lint      = `cargo fmt --all --check` + clippy with and without `--all-features` (TEST-R3)
+#   test      = doctests + every test under nextest (TEST-R10), on macOS and Linux
+#   snapshots = the snapshot suite in the optimised `ci` profile (TEST-R9)
+#   deny      = cargo-deny (advisories, licences, bans, sources; `deny.toml`)
+# Linux is a supported build/test platform; macOS also runs lint and the
+# optimiser-sensitive snapshots. The second `test` step runs the same suite with NO_COLOR=1
+# (TEST-R12), so the ambient environment can never decide whether the gate is green.
+# pixi is deliberately not used here: Linux needs no conda platform for this workflow.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Pin to the MSRV the workspace declares (`rust-version = 1.88`): CI must not pass on a
+  # newer compiler and never verify it. `rust-toolchain.toml` floats on `stable`, which
+  # would otherwise win over the action's default toolchain, so force the rustup proxy.
+  RUSTUP_TOOLCHAIN: "1.88.0"
+
+jobs:
+  lint:
+    name: lint (macOS)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Format
+        run: cargo fmt --all --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Clippy (all features)
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-14, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@nextest
+      - name: Doctests
+        run: cargo test --workspace --doc
+      - name: Tests (nextest)
+        run: cargo nextest run --workspace
+      # TEST-R12: the suite must also pass when the ambient environment disables colour.
+      - name: Tests (nextest, NO_COLOR=1)
+        env:
+          NO_COLOR: "1"
+        run: cargo nextest run --workspace
+      # IMP-06: exactly one current frame per registered scene, no orphans.
+      - name: Gallery coverage
+        run: python3 scripts/gallery.py --check
+
+  snapshots:
+    name: snapshots (macOS, ci profile)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: Swatinem/rust-cache@v2
+      # TEST-R9: frames must not depend on the optimiser.
+      - name: Snapshot suite (optimised)
+        run: cargo test --profile ci -p sciart-generators --test snapshots
+
+  deny:
+    name: cargo-deny
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
