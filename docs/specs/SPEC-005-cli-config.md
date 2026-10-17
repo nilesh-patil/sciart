@@ -1,6 +1,6 @@
 # SPEC-005: CLI & configuration
 
-**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file), M23 (record, filters, list formats) · **Status**: Implemented through M22 (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22); CLI-R8..R10 and CFG-R9 in M23.
+**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file), M23 (record, filters, list formats, colour capability) · **Status**: Implemented through M22 (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22); CLI-R8..R10 and CFG-R9 in M23; CFG-R10 in M23.
 
 ## CLI (clap derive)
 ```
@@ -12,7 +12,8 @@ sciart [OPTIONS] [COMMAND]
 Options:
   --fps <1..=120>          default 30
   --interval <SECS>        default 15 (sim only)
-  --theme <astro|rainbow|mono|aurora>
+  --theme <astro|rainbow|mono|aurora|colorblind>
+  --color <auto|truecolor|256|mono>  colour output (M23)
   --keep-awake <caffeinate|mouse|off>
   --seed <u64>             default: random
   --ascii                  pure-ASCII glyphs
@@ -34,6 +35,7 @@ Options:
 fps = 30
 interval = 15
 theme = "astro"
+color = "auto"                         # auto | truecolor | 256 | mono (M23)
 keep_awake = "caffeinate"
 ascii = false
 hud = false
@@ -46,7 +48,7 @@ favorites = []                       # scene names, seeded into the session set 
 idle_after = 120   # seconds (2 min; CFG-R8, M22)
 fps = 5
 ```
-- **CFG-R1** Precedence: CLI flag > config file > built-in default (`fps 30`, `interval 15`, `theme astro`, `ascii false`, `hud false`, `title true`, `disabled []`, `speed 1.0`, `favorites []`). Boolean flags (`--ascii`, `--hud`) can only turn a setting on; `--no-title` (M11, CLI-R7) is the one that can only turn its setting off.
+- **CFG-R1** Precedence: CLI flag > config file > built-in default (`fps 30`, `interval 15`, `theme astro`, `color auto`, `ascii false`, `hud false`, `title true`, `disabled []`, `speed 1.0`, `favorites []`). Boolean flags (`--ascii`, `--hud`) can only turn a setting on; `--no-title` (M11, CLI-R7) is the one that can only turn its setting off.
 - **CFG-R2** Default path: `$XDG_CONFIG_HOME/sciart/config.toml`, else `$HOME/.config/sciart/config.toml`. A missing default file is not an error; a missing file given via `--config` is (code 2).
 - **CFG-R3** Unknown keys are rejected (`deny_unknown_fields`) with the file path and TOML error location (code 2). Values are validated like the CLI: `fps ∈ 1..=120`, `interval > 0`.
 - **CFG-R4** `disabled` names that are not registered produce a warning (printed to stderr before the TUI starts), not an error. `disabled` only filters `sim`; `run <name>` always works. If `disabled` removes every generator, `sim` exits with code 2.
@@ -61,3 +63,4 @@ fps = 5
 - **CLI-R9** (M23) Scene filters and speed: `--category <ID>` (repeatable), `--only <NAME>` (repeatable) and `--exclude <NAME>` (repeatable) filter `sim`; `list` applies only `--category` and ignores `--only`/`--exclude`; `run` ignores every filter flag, including unknown names. `--speed <0.1..=4>` scales simulated time per wall second for `sim` and `run`: the fixed step stays 1/60 s, frames stay deterministic, and the auto-cycle interval remains wall time. Filters compose with `disabled` (CFG-R4). An unknown category or name (where the command uses it), an empty selection, or a non-finite/out-of-range speed exits 2.
 - **CLI-R10** (M23) `list` formats, in precedence order: `--json` (a JSON array of `{name, category, description}` sorted by name), `--categories` (`id<TAB>label<TAB>count` for each non-empty category, sorted by label), TSV (with `--plain` or when stdout is not a terminal; the CLI-R4 form), otherwise the aligned `NAME CATEGORY DESCRIPTION` table with a header row. Filters narrow every format, including the `--categories` counts, and every format lists the same scene set.
 - **CFG-R9** (M23) Config keys `speed` (finite, 0.1..=4, default 1.0; `--speed` overrides) and `favorites` (array of registered names or retired aliases, default empty; unknown names warn like `disabled`, CFG-R4). Favourites seed the session set (RT-R19); `f` does not write the file.
+- **CFG-R10** (M23, ADR-0026) Config key `color = "auto"|"truecolor"|"256"|"mono"` (default `auto`); `--color` overrides. `auto` honours `NO_COLOR` as RND-R18 describes; an explicit value in the file or flag wins over the environment.
