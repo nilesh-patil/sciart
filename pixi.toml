@@ -46,6 +46,8 @@ rs-preview = "cargo run -q --profile ci -p sciart-generators --example preview -
 # `rs-gallery-check` verifies one current frame per registered scene and no orphans (CI).
 rs-gallery = "python3 scripts/gallery.py"
 rs-gallery-check = "python3 scripts/gallery.py --check"
+# RND-R19 art review: five scenes at 80x24/200x50 through the colorblind theme.
+rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).
 rs-install = "cargo install --path crates/sciart"
 rs-install-mouse = "cargo install --path crates/sciart --features mouse"

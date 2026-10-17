@@ -6,6 +6,18 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-18
+
+### Added
+
+- Colour capability: `--color auto|truecolor|256|mono` and the `color` config key. `256`
+  quantizes to the xterm-256 palette deterministically; `mono` uses the greyscale theme.
+- `NO_COLOR` support: a non-empty `NO_COLOR` selects mono automatically with one warning;
+  an explicit `--color truecolor|256|mono` overrides it.
+- The colour-blind-safe `colorblind` theme (Okabe–Ito palette, viridis-like fields and a
+  blue ↔ vermillion diverging ramp), selectable with `--theme colorblind` and cycled by `t`
+  after `aurora` (ADR-0026).
+
 ## [0.2.0] - 2026-10-18
 
 ### Added

@@ -52,8 +52,9 @@ sciart list --json      # the same catalogue for scripts
 sciart record aurora --seconds 5 --out aurora.gif   # needs --features record
 ```
 
-85 scenes across **11 categories**. Four themes — `astro` (default), `rainbow`, `mono` and
-`aurora` — cycle with `t`. The default frame rate is 30 FPS (`--fps 1..=120`).
+85 scenes across **11 categories**. Five themes — `astro` (default), `rainbow`, `mono`,
+`aurora` and the colour-blind-safe `colorblind` — cycle with `t`. The default frame rate is
+30 FPS (`--fps 1..=120`).
 
 ## Keys
 
@@ -64,7 +65,7 @@ sciart record aurora --seconds 5 --out aurora.gif   # needs --features record
 | `space` | pause / resume |
 | `r` | reset the current scene |
 | `h` | toggle the HUD |
-| `t` | cycle theme: astro → rainbow → mono → aurora |
+| `t` | cycle theme: astro → rainbow → mono → aurora → colorblind |
 | `?` | help overlay (`Esc` closes it) |
 | `f` | favourite the current scene |
 | `v` | show only favourites |
@@ -77,7 +78,18 @@ sciart record aurora --seconds 5 --out aurora.gif   # needs --features record
 The config file is `~/.config/sciart/config.toml` (or
 `$XDG_CONFIG_HOME/sciart/config.toml`). Every key is optional; command-line flags override
 the file. See [`docs/config.example.toml`](docs/config.example.toml) for every key, including
-`favorites`, `speed` and the low-power `[low_power]` table.
+`favorites`, `speed`, `color` and the low-power `[low_power]` table.
+
+## Colour
+
+Truecolor is the default. `--color 256` quantizes every cell to the xterm-256 palette
+(deterministic, for tmux and older terminals), and `--color mono` uses the greyscale theme.
+`NO_COLOR=1` selects mono automatically (with one warning); an explicit
+`--color truecolor|256|mono` overrides it.
+
+For colour-blind viewers, `--theme colorblind` uses the Okabe–Ito palette: vermillion and
+sky blue stand in for the red/green pair, and the field ramps run blue ↔ vermillion rather
+than red ↔ green. `t` cycles to it after `aurora`.
 
 ## Platform
 
