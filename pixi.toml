@@ -1,5 +1,5 @@
 [workspace]
-authors = ["Nilesh <4813079+nilesh-patil@users.noreply.github.com>"]
+authors = ["Nilesh Patil <4813079+nilesh-patil@users.noreply.github.com>"]
 channels = ["conda-forge"]
 name = "tasks-adhoc"
 platforms = ["osx-arm64"]
