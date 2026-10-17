@@ -18,7 +18,7 @@ use sciart_core::title::{Form, Title, ascii_of};
 use crate::Theme;
 
 const SEP: &str = " | ";
-const KEY_HINTS: &str = "n p space r h t q";
+const KEY_HINTS: &str = "n p space r h t ? q";
 /// Elision marker. The HUD is ASCII-only (RND-R4) and does not know the glyph mode, so `…`
 /// is not an option; `~` costs a single column where `...` would cost three.
 const ELIDE: char = '~';
@@ -380,7 +380,7 @@ mod tests {
         assert_eq!(
             h.line(),
             "Oldest light - early sound waves | 30 fps | astro | seed 16376649230169585180 \
-             | caffeinate:on | PAUSED | n p space r h t q"
+             | caffeinate:on | PAUSED | n p space r h t ? q"
         );
         let h = Hud {
             title: Some(Title::new("Strange attractor · chaos", Some("Rössler"))),
@@ -445,7 +445,7 @@ mod tests {
     fn rnd_r4_line_format() {
         assert_eq!(
             hud().line(),
-            "starfield | 30 fps | astro | seed 42 | caffeinate:on | n p space r h t q"
+            "starfield | 30 fps | astro | seed 42 | caffeinate:on | n p space r h t ? q"
         );
         let h = Hud {
             low_power: true,
@@ -456,7 +456,7 @@ mod tests {
         assert_eq!(
             h.line(),
             "starfield | 30 fps | astro | seed 42 | caffeinate:on | LOW-POWER | PAUSED \
-             | 2 quarantined | n p space r h t q"
+             | 2 quarantined | n p space r h t ? q"
         );
         assert!(h.line().is_ascii());
     }
@@ -465,7 +465,7 @@ mod tests {
     fn rnd_r4_fit_degrades_in_priority_order() {
         let h = cmb();
         let full = "cosmic_microwave_background | 30 fps | astro | seed 16376649230169585180 \
-                    | caffeinate:on | PAUSED | n p space r h t q";
+                    | caffeinate:on | PAUSED | n p space r h t ? q";
         let no_hints = "cosmic_microwave_background | 30 fps | astro | seed 16376649230169585180 \
                         | caffeinate:on | PAUSED";
         let no_seed = "cosmic_microwave_background | 30 fps | astro | caffeinate:on | PAUSED";
@@ -473,12 +473,12 @@ mod tests {
         let ka_short = "cosmic_microwave_background | 30 fps | ka:on | PAUSED";
         let no_fps = "cosmic_microwave_background | ka:on | PAUSED";
         let no_ka = "cosmic_microwave_background | PAUSED";
-        assert_eq!(full.len(), 117);
+        assert_eq!(full.len(), 119);
         let expected: &[(usize, &str)] = &[
             (200, full),
-            (117, full),
+            (119, full),
             // 1. key hints go first
-            (116, no_hints),
+            (118, no_hints),
             (97, no_hints),
             // 2. then the seed (at 80 columns this is where PAUSED used to fall off)
             (96, no_seed),

@@ -13,6 +13,13 @@ title = true        # science title at the bottom-left, or in the HUD while it i
 # Excluded from `sim` cycling; `sciart run <name>` still works.
 disabled = []
 
+# Simulated seconds per wall second (`--speed` overrides). 0.1..=4.
+speed = 1.0
+
+# Scenes marked as favourites on start; `f` toggles the current scene in the session,
+# `v` shows only favourites. This file is not rewritten by the app.
+favorites = []
+
 # caffeinate (macOS default) | mouse (needs `pixi run rs-install-mouse` + Accessibility
 # permission) | off. A backend that can't start is a warning; the art keeps running.
 keep_awake = "caffeinate"

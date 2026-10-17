@@ -15,7 +15,7 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
     Some(match key.code {
         KeyCode::Right => Action::Next,
         KeyCode::Left => Action::Prev,
-        KeyCode::Esc => Action::Quit,
+        KeyCode::Esc => Action::Escape,
         KeyCode::Char(c) => match c.to_ascii_lowercase() {
             'n' => Action::Next,
             'p' => Action::Prev,
@@ -23,6 +23,12 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
             'r' => Action::Reset,
             'h' => Action::ToggleHud,
             't' => Action::CycleTheme,
+            '?' => Action::ToggleHelp,
+            'f' => Action::ToggleFavourite,
+            'v' => Action::ToggleFavouritesOnly,
+            '[' => Action::PrevCategory,
+            ']' => Action::NextCategory,
+            's' => Action::Shuffle,
             'q' => Action::Quit,
             _ => return None,
         },
@@ -49,8 +55,14 @@ mod tests {
             (KeyCode::Char('r'), Action::Reset),
             (KeyCode::Char('h'), Action::ToggleHud),
             (KeyCode::Char('t'), Action::CycleTheme),
+            (KeyCode::Char('?'), Action::ToggleHelp),
+            (KeyCode::Char('f'), Action::ToggleFavourite),
+            (KeyCode::Char('v'), Action::ToggleFavouritesOnly),
+            (KeyCode::Char('['), Action::PrevCategory),
+            (KeyCode::Char(']'), Action::NextCategory),
+            (KeyCode::Char('s'), Action::Shuffle),
             (KeyCode::Char('q'), Action::Quit),
-            (KeyCode::Esc, Action::Quit),
+            (KeyCode::Esc, Action::Escape),
         ];
         for (code, action) in cases {
             assert_eq!(action_for(press(code)), Some(action), "{code:?}");
@@ -61,6 +73,15 @@ mod tests {
     fn rt_r9_letters_are_case_insensitive_and_ctrl_c_quits() {
         let shifted = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
         assert_eq!(action_for(shifted), Some(Action::Next));
+        for (c, action) in [
+            ('F', Action::ToggleFavourite),
+            ('V', Action::ToggleFavouritesOnly),
+            ('S', Action::Shuffle),
+            ('?', Action::ToggleHelp),
+        ] {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::SHIFT);
+            assert_eq!(action_for(key), Some(action), "{c}");
+        }
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(action_for(ctrl_c), Some(Action::Quit));
     }
