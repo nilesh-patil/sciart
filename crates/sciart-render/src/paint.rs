@@ -11,6 +11,7 @@ use ratatui::style::{Color, Modifier};
 use sciart_core::{Canvas, Ink, Role};
 
 use crate::Theme;
+use crate::color::quantize;
 use crate::theme::{HuePos, hue_pos, lut, per_cell, rainbow_at, role_index};
 
 /// Largest per-channel change from the emitted colour that is not re-sent (RND-R14): four
@@ -28,22 +29,30 @@ pub const HYSTERESIS: u8 = 4;
 /// cell looks like are left at the default (RND-R15): a blank has no foreground, and a
 /// half block whose two halves are one colour is drawn as a blank in that background.
 pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
-    paint_with(canvas, theme, area, buf, &[], &mut []);
+    paint_with(canvas, theme, area, buf, &[], &mut [], false);
 }
 
-/// A packed cell colour: 0 is the terminal default, `RGB | 1 << 24` a colour. One
-/// compare per colour in the hot loop instead of matching `Color`.
+/// A packed cell colour: 0 is the terminal default, `RGB | 1 << 24` a 24-bit colour,
+/// `1 << 25 | i` a quantized xterm-256 index (RND-R18). One compare per colour in the hot
+/// loop instead of matching `Color`.
 type Packed = u32;
 const DEFAULT: Packed = 0;
 const SET: Packed = 1 << 24;
+const INDEXED: Packed = 1 << 25;
 
 fn pack(c: crate::Rgb) -> Packed {
     SET | u32::from(c.0) << 16 | u32::from(c.1) << 8 | u32::from(c.2)
 }
 
+fn pack_indexed(i: u8) -> Packed {
+    INDEXED | u32::from(i)
+}
+
 fn unpack(c: Packed) -> Color {
     if c == DEFAULT {
         Color::Reset
+    } else if c & INDEXED != 0 {
+        Color::Indexed((c & 0xFF) as u8)
     } else {
         Color::Rgb((c >> 16) as u8, (c >> 8) as u8, c as u8)
     }
@@ -81,6 +90,8 @@ pub struct Painter {
     /// Rainbow's per-position hue parts (RND-R15), rebuilt on resize.
     hues: Vec<HuePos>,
     hysteresis: bool,
+    /// Emit xterm-256 indices instead of 24-bit RGB (RND-R18, `--color 256`).
+    indexed: bool,
 }
 
 impl Painter {
@@ -88,6 +99,16 @@ impl Painter {
     pub fn new() -> Self {
         Self {
             hysteresis: true,
+            ..Self::default()
+        }
+    }
+
+    /// A painter that emits xterm-256 indices (RND-R18); hysteresis then stores the
+    /// emitted index, so an unchanged cell is byte-identical frame to frame.
+    pub fn indexed() -> Self {
+        Self {
+            hysteresis: true,
+            indexed: true,
             ..Self::default()
         }
     }
@@ -123,12 +144,13 @@ impl Painter {
         } else {
             &mut []
         };
-        paint_with(canvas, theme, area, buf, &self.hues, memory);
+        paint_with(canvas, theme, area, buf, &self.hues, memory, self.indexed);
     }
 }
 
 /// Within [`HYSTERESIS`] in every channel of the emitted colour `a`: both set and close,
-/// or equal.
+/// or equal. A pair of xterm-256 indices is "near" only when it is the same index
+/// (RND-R18): comparing index numbers across cube steps would be meaningless.
 #[inline]
 fn near(a: Packed, b: Packed) -> bool {
     // Branch-free: on a moving field "near" is a coin flip per cell, so `&&` chains
@@ -151,6 +173,7 @@ fn paint_with(
     buf: &mut Buffer,
     hues: &[HuePos],
     memory: &mut [Emitted],
+    indexed: bool,
 ) {
     let width = usize::from(canvas.size().width());
     let table = lut(theme);
@@ -165,7 +188,11 @@ fn paint_with(
                 .filter(|_| per_cell(theme, ink.role))
                 .map_or_else(|| theme.color(ink, x, y), |&p| rainbow_at(p, ink.level)),
         };
-        pack(c)
+        if indexed {
+            pack_indexed(quantize(c))
+        } else {
+            pack(c)
+        }
     };
     // `paint` is only ever given an area inside its buffer; clip to both anyway.
     if area.x < buf.area.x || area.y < buf.area.y {
@@ -478,5 +505,67 @@ mod tests {
             Painter::exact().paint(&canvas, theme, area, &mut b);
             assert_eq!(a, b, "{theme:?}");
         }
+    }
+
+    #[test]
+    fn rnd_r18_indexed_painter_emits_xterm_indices() {
+        let mut indexed = Painter::indexed();
+        let got = paint_level(&mut indexed, Theme::Astro, 100);
+        let want = crate::color::quantize(Theme::Astro.color(Ink::new(Role::Seq, 100), 0, 0));
+        assert_eq!(got, Color::Indexed(want));
+        assert!(
+            matches!(
+                paint_level(&mut Painter::new(), Theme::Astro, 100),
+                Color::Rgb(..)
+            ),
+            "the default painter stays truecolor"
+        );
+    }
+
+    #[test]
+    fn rnd_r18_indexed_hysteresis_stores_the_emitted_index() {
+        let mut painter = Painter::indexed();
+        let first = paint_level(&mut painter, Theme::Astro, 100);
+        let Color::Indexed(i) = first else {
+            panic!("not indexed: {first:?}")
+        };
+        assert_eq!(
+            painter.emitted[0].bg,
+            pack_indexed(i),
+            "memory holds the emitted index, not the RGB behind it"
+        );
+        assert_eq!(
+            paint_level(&mut painter, Theme::Astro, 100),
+            first,
+            "a static cell is byte-identical frame to frame"
+        );
+        assert_eq!(painter.emitted[0].bg, pack_indexed(i));
+        // The emitted index is always the current quantization; a near RGB is never
+        // substituted for it (that would make the 256-colour output drift).
+        for level in 0..=255u8 {
+            let want = crate::color::quantize(Theme::Astro.color(Ink::new(Role::Seq, level), 0, 0));
+            assert_eq!(
+                paint_level(&mut painter, Theme::Astro, level),
+                Color::Indexed(want),
+                "level {level}"
+            );
+            assert_eq!(painter.emitted[0].bg, pack_indexed(want), "level {level}");
+        }
+    }
+
+    #[test]
+    fn rnd_r18_paint_is_truecolor_and_indexed_is_opt_in() {
+        let mut canvas = Canvas::new(Size::new(2, 1), GlyphMode::Unicode);
+        canvas.put(1, 0, Glyph::ascii('*'), Ink::new(Role::Star, 200));
+        let area = Rect::new(0, 0, 2, 1);
+        let (mut a, mut b) = (Buffer::empty(area), Buffer::empty(area));
+        paint(&canvas, Theme::Astro, area, &mut a);
+        Painter::indexed().paint(&canvas, Theme::Astro, area, &mut b);
+        assert!(
+            matches!(a[(1, 0)].fg, Color::Rgb(..)),
+            "paint() is the metric/probe path and stays truecolor"
+        );
+        assert!(matches!(b[(1, 0)].fg, Color::Indexed(_)));
+        assert_ne!(a[(1, 0)].fg, b[(1, 0)].fg);
     }
 }
