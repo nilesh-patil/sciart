@@ -178,7 +178,7 @@ mod tests {
         Image::new(width, height, fill)
     }
 
-    fn decode(bytes: Vec<u8>) -> (u16, u16, Vec<Vec<u8>>) {
+    fn decode(bytes: Vec<u8>) -> (u16, u16, Repeat, Vec<Vec<u8>>) {
         let mut options = gif::DecodeOptions::new();
         options.set_color_output(gif::ColorOutput::RGBA);
         let mut decoder = options.read_info(Cursor::new(bytes)).unwrap();
@@ -187,7 +187,7 @@ mod tests {
         while let Some(frame) = decoder.read_next_frame().unwrap() {
             frames.push(frame.buffer.to_vec());
         }
-        (width, height, frames)
+        (width, height, decoder.repeat(), frames)
     }
 
     #[test]
@@ -200,8 +200,9 @@ mod tests {
             image(4, 3, Rgb(0, 0, 255)),
         ];
         write_gif(frames, &path, 30).unwrap();
-        let (width, height, decoded) = decode(std::fs::read(path).unwrap());
+        let (width, height, repeat, decoded) = decode(std::fs::read(path).unwrap());
         assert_eq!((width, height), (4, 3));
+        assert_eq!(repeat, Repeat::Infinite, "the animation loops");
         assert_eq!(decoded.len(), 3);
         // Every pixel is one fill, so each frame's exact palette preserves it.
         assert!(decoded[1].chunks_exact(4).all(|px| px == [255, 0, 0, 255]));
@@ -221,7 +222,7 @@ mod tests {
             }
         }
         write_gif([img], &path, 60).unwrap();
-        let (w, h, decoded) = decode(std::fs::read(path).unwrap());
+        let (w, h, _, decoded) = decode(std::fs::read(path).unwrap());
         assert_eq!((w, h), (32, 16));
         assert_eq!(decoded.len(), 1);
         assert_eq!(
