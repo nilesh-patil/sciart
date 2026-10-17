@@ -1,0 +1,52 @@
+# cargo-deny (v2 schema), run by the `deny` job in .github/workflows/ci.yml (IMP-04).
+#
+# Deliberately permissive for the first hosted gate: it should report drift, not block on
+# the tree as it stands. The allowlist is the licence set the current dependency graph
+# actually uses (`cargo metadata --locked`), so a newly added crate with an unreviewed
+# licence fails here instead of slipping in. Harden in Phase 4 (IMP-04 follow-up).
+
+[advisories]
+version = 2
+# The lockfile is committed; a yanked crate is worth reporting but not a gate failure on a
+# tree that was green when it was locked.
+yanked = "warn"
+ignore = []
+
+[licenses]
+version = 2
+# SPDX expression semantics: an `OR` passes on one allowed branch, an `AND` on all of them.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-3.0",
+    # Dev-only, through vt100's terminal decoder: `finl_unicode` and `wezterm-bidi` need
+    # Unicode-DFS-2016 (AND), and `terminfo` is WTFPL-only.
+    "Unicode-DFS-2016",
+    "WTFPL",
+    "Zlib",
+    "MPL-2.0",
+    "CC0-1.0",
+]
+confidence-threshold = 0.8
+
+[bans]
+# Duplicate versions are common in a deep dev-dependency graph; keep them visible without
+# blocking. `*` requirements hide updates and are never acceptable — except for the
+# workspace's own path dependencies, which carry no version by design (their versions
+# move together). cargo-deny honours `allow-wildcard-paths` only for crates that are not
+# publishable, so every workspace crate carries `publish = false` (crate metadata is owned
+# by another branch; merge it before this gate can be green).
+multiple-versions = "warn"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+# crates.io only: a git or alternate-registry dependency is a supply-chain decision that
+# must be made in an ADR, not silently.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
