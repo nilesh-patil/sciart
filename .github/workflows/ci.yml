@@ -70,6 +70,9 @@ jobs:
         env:
           NO_COLOR: "1"
         run: cargo nextest run --workspace
+      # IMP-06: exactly one current frame per registered scene, no orphans.
+      - name: Gallery coverage
+        run: python3 scripts/gallery.py --check
 
   snapshots:
     name: snapshots (macOS, ci profile)
