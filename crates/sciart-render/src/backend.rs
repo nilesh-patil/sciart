@@ -824,7 +824,14 @@ mod tests {
     }
 
     /// What ratatui's own `CrosstermBackend` (the path before M14) leaves on the screen.
+    ///
+    /// TEST-R12: crossterm disables colour when `NO_COLOR` is set to a non-empty value
+    /// (memoised in `Colored`), which would make the reference emit no SGR while our encoder
+    /// always does. Force it, so the reference never depends on ambient colour configuration;
+    /// the application's own encoder is unchanged. Every test that builds the reference goes
+    /// through here, so none of them can regress.
     fn reference(frames: &[Buffer], w: u16, h: u16) -> vt100::Parser {
+        crossterm::style::force_color_output(true);
         #[derive(Clone, Default)]
         struct Shared(std::rc::Rc<std::cell::RefCell<Vec<u8>>>);
         impl Write for Shared {
@@ -872,6 +879,27 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_r12_the_reference_emits_truecolour_sgr_even_with_no_color() {
+        // TEST-R12: the reference must not follow ambient colour configuration. crossterm
+        // honours a non-empty `NO_COLOR` (memoised in `Colored`), so with `NO_COLOR=1` this
+        // decodes to `Color::Default` unless `reference()` forces colour output. That is
+        // how this test fails before the fix and passes after it; the unset/empty case
+        // passes either way, which is why CI runs the suite both ways.
+        let (w, h) = (4u16, 2u16);
+        let area = Rect::new(0, 0, w, h);
+        let mut frame = Buffer::empty(area);
+        frame[(1, 0)]
+            .set_char('⣿')
+            .set_fg(Color::Rgb(1, 2, 3))
+            .set_bg(Color::Rgb(4, 5, 6));
+        let p = reference(&[frame], w, h);
+        let cell = p.screen().cell(0, 1).expect("cell");
+        assert_eq!(cell.contents(), "⣿");
+        assert_eq!(cell.fgcolor(), vt100::Color::Rgb(1, 2, 3));
+        assert_eq!(cell.bgcolor(), vt100::Color::Rgb(4, 5, 6));
     }
 
     #[test]
