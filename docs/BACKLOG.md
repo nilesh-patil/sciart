@@ -25,8 +25,8 @@ below split it so each can close on its own.
 
 | Status | Count |
 | --- | ---: |
-| open | 63 |
-| done | 13 |
+| open | 60 |
+| done | 16 |
 | superseded | 12 |
 | won't fix | 3 |
 | **total** | **91** |
@@ -37,7 +37,7 @@ Counted from the tables below on 2026-10-18; re-count after edits.
 
 | ID | Area | Issue | Source | Status | Priority | Note |
 | --- | --- | --- | --- | --- | --- | --- |
-| B-01 | docs / SPEC-002 | GEN-R15 and the contributor guide point at `docs/specs/SPEC-002-scenes-{cosmos,earth,physics,matter,life}.md` and `scripts/spec_index.py`, but only `SPEC-002-generators.md` exists and there is no `spec_index.py`. | [SPEC-002](specs/SPEC-002-generators.md), [CONTRIBUTING](../CONTRIBUTING.md) | open | P1 | Phase 4 IMP-12 is in progress; do not link the category files from the docs index until they land. |
+| B-01 | docs / SPEC-002 | GEN-R15 and the contributor guide point at `docs/specs/SPEC-002-scenes-{cosmos,earth,physics,matter,life}.md` and `scripts/spec_index.py`, but only `SPEC-002-generators.md` exists and there is no `spec_index.py`. | [SPEC-002](specs/SPEC-002-generators.md), [CONTRIBUTING](../CONTRIBUTING.md) | done | P1 | M23 Phase 4: the split is applied, the index is generated, and `spec_index.py --check` plus GEN-R15/GEN-R15-index pass. |
 | B-02 | ROADMAP / M12 | "Local `--no-ff` merge of `feat/m12-upgrades` into `main`" is still an open box; the merge is long done. | [ROADMAP](ROADMAP.md) | done | P1 | Close the box (merged; M12 is marked done). |
 | B-03 | ROADMAP / M12 | "snapshots pass only in the debug profile (`molecular_dynamics_t5` differs in release)" is stale. | [ROADMAP](ROADMAP.md) | superseded | P1 | ADR-0016 removed the `sincos` fusion; M22 runs snapshots in the `ci` profile; `rs-snap-release` is green. |
 | B-04 | ROADMAP / M12 | The "near-ceiling live bytes at 500×150 (TEST-R7 4 MiB)" list is stale. | [ROADMAP](ROADMAP.md) | superseded | P1 | M22 set the default ceiling to 2.75 MiB with measured per-scene exceptions; the 4 MiB figures are historical. |
@@ -184,9 +184,9 @@ Counted from the tables below on 2026-10-18; re-count after edits.
 
 | ID | Area | Issue | Source | Status | Priority | Note |
 | --- | --- | --- | --- | --- | --- | --- |
-| B-83 | SPEC-002 split | Split the scene sections into five category files with a generated index and a `scripts/spec_index.py`. | [ROADMAP](ROADMAP.md) | open | P1 | Phase 4 IMP-12; see B-01 (the spec/the guide text is ahead of the files). |
+| B-83 | SPEC-002 split | Split the scene sections into five category files with a generated index and a `scripts/spec_index.py`. | [ROADMAP](ROADMAP.md) | done | P1 | M23 Phase 4: 25/18/14/14/14 sections moved; the monolith keeps the rules and an 85-row index. |
 | B-84 | backlog triage | Triage the open roadmap boxes and M12–M22 follow-ups into this file; close/annotate stale boxes. | [ROADMAP](ROADMAP.md), [IMPROVEMENTS IMP-13](IMPROVEMENTS.md) | done | P1 | This file is the triage; ROADMAP edits are proposed in the Phase 4 report. |
-| B-85 | fuzzing | `cargo-fuzz` targets for `config::parse`, `title::fit`/`title::split`, `Hud::fit` and `Theme::from_name`; weekly job, crashes become regression tests. | [IMPROVEMENTS IMP-14](IMPROVEMENTS.md) | open | P2 | `deny.toml` and the CI deny job exist; no `fuzz/` tree yet. |
+| B-85 | fuzzing | `cargo-fuzz` targets for `config::parse`, `title::fit`/`title::split`, `Hud::fit` and `Theme::from_name`; weekly job, crashes become regression tests. | [IMPROVEMENTS IMP-14](IMPROVEMENTS.md) | done | P2 | M23 Phase 4: `fuzz/` with `title_fit`, `hud_fit`, `theme_name` + weekly workflow; config has a 64-case proptest (binary-only module). The first hosted run is pending. |
 | B-86 | Phase 5 art | Re-score and polish the below-8 scenes. | [ROADMAP](ROADMAP.md) | open | P2 | IMP-15; the M13 art list (B-38) is the input. |
 | B-87 | Phase 5 ritual | Gallery-review ritual at each milestone close. | [ROADMAP](ROADMAP.md) | open | P2 | IMP-16; needs a checklist and a named reviewer. |
 | B-88 | Phase 5 science | Science-claims audit table for every scene. | [ROADMAP](ROADMAP.md) | open | P2 | IMP-17; every scene gets a row and a review sign-off. |
@@ -201,8 +201,8 @@ Counted from the tables below on 2026-10-18; re-count after edits.
 
 ## Notes
 
-- **B-01/B-83 first.** The docs index must not link files that do not exist; land the SPEC-002
-  split (or revert the GEN-R15/the guide wording) before the next release.
+- **B-01/B-83 closed in Phase 4.** The SPEC-002 split landed with a generated index; the docs
+  index can link the category files, and `scripts/spec_index.py --check` guards the table.
 - **B-35/B-36 next.** Seed-dependent acceptance tests are a gate risk; they are cheap to make
   robust and expensive to rediscover at a release.
 - **B-14/B-80** are the only items that require a real desktop/terminal; everything else can be

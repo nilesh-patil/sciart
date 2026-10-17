@@ -5,6 +5,8 @@ Spec: [docs/specs/sciart-specification.md](specs/sciart-specification.md) · ADR
 Each milestone ends green on `pixi run rs-ci` and is one or more commits on `feat/rust-rewrite`.
 Tick items as they land. Requirement IDs in brackets link each item to its spec.
 
+Detailed follow-ups live in [docs/BACKLOG.md](BACKLOG.md); the milestone boxes below point at their entries.
+
 ## M0 — Scaffold ✅
 - [x] Spec interview → master spec, SPEC-001..006, ADR-0001..0008
 - [x] Cargo workspace (5 crates), `rust-toolchain.toml`, workspace lints, `clippy.toml` disallowed methods [GEN-R7]
@@ -36,7 +38,7 @@ Tick items as they land. Requirement IDs in brackets link each item to its spec.
 - [x] Low-power FPS on idle / focus loss via `Pacer`; `[low_power]` config; focus reporting in `TerminalGuard` [F5, RT-R8, RND-R5]
 - [x] `MAX_STEPS` 5 → 15 so low-power frames keep real-time motion (ADR-0003 amended) [RT-R11]
 - [x] HUD shows keep-awake status and LOW-POWER [RND-R4]; e2e pty tests for all of the above
-- [ ] Manual check (can't be automated without moving the real cursor): `pixi run rs-install-mouse`, then `sciart --keep-awake mouse --hud`, grant Accessibility, confirm the HUD shows `mouse:on` and the cursor moves every 15 s
+- [ ] Manual mouse keep-awake check — [B-14](BACKLOG.md).
 
 ## M4 — Batch A: analytic / time-driven scenes (10)
 Shared helpers first: orbit/ellipse drawing, disc/ring fill, sine fields.
@@ -89,8 +91,8 @@ Shared helpers first: layered raster, colormap roles, capped lattices, leapfrog,
 - [x] Snapshots recorded and reviewed for all 16; benches < 1 ms at 200×50 (max 0.47 ms, aurora; hard limit 5 ms) [GEN-R8, GEN-R11]; every new ID cited by a test [TEST-R1]; taste, physics and performance review per scene; SPEC-002 brought in line with the delivered code
 - [x] `rs-fmt`/`rs-lint` also run `rustfmt` on each scene file (modules declared inside `registry!` are invisible to `cargo fmt`)
 - [x] Review follow-ups: solar_surface spot granulation gated out of the penumbra + umbra pixel floor, aurora patch floor and ridge glow, physarum later-bloom exposure, vortex_street start-up specks, mono-theme `Seq`/`Div` floors (ADR-0011, RND-R6), liesegang ASCII haze class, three_body orbit fade-in (triangle included), pinning tests (ATT rates, ORB dipole table, GC reseed buffers); all 16 scenes polished over a second art/science/Rust review round, snapshots re-recorded and reviewed, max bench unchanged (aurora 0.47 ms) [AUR-A8, LIES-A8, AP-A9]
-- [ ] Second-round review follow-ups (minor, non-blocking): aurora red-crown ramp, thinner spruce ridge, gentler lake ripple, `Glow::red` doc and `ASCII_LAKE_BRIGHT` const, top-fade spec wording · solar_surface 2 px polar margin at small sizes, ASCII loop glyphs by pixel pair, interlaced-granulation spec note, `SpatialHash::reserve` (CORE-R54 amendment) to replace the dummy rebuild · gray_scott ASCII `HALO_DOT` 13→20 · electron_orbitals fade window on the framing weight, shorter label outside the beat · ising_model ASCII polarity follows the majority · liesegang_rings legend leaves with the first ratio · three_body `MOTH_FULL_SCALE`, triangle clear of adjacent trail cells · dna_helix zoom-aware rung stride · molecule_viewer rear-bond dotting threshold, tilted planar molecules · physarum third inoculum blur pass · action_potential dendrite spacing and deterministic third primary · belousov_zhabotinsky free-end spacing in `plan_seeds`
-- [ ] Follow-up proposals (unscheduled): `sciart record` (GIF/asciicast export for taste review); GitHub Actions CI (+ cargo-deny); `Role::Spectrum` for true spectral line colour
+- [ ] M10 second-round follow-ups — [B-15..B-17](BACKLOG.md).
+- [x] Follow-up proposals: record (Phase 2), GitHub Actions + cargo-deny (Phase 1), Role::Spectrum won't fix — [B-06, B-07, B-18](BACKLOG.md).
 
 ## M11 — Science titles, P×C×B taxonomy, leak guards
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §1–§4 · ADR-0013, ADR-0014 · branch `feat/m11-sciart-titles`.
@@ -129,19 +131,19 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [x] Waves group: wave_interference (`Ramp(Ice)` ripple tank, sweeping separation, detector screen), vortex_street (age-graded `Ramp(Plasma)` dye streaklines via `raster::half_block`); `ParticlePool::default()` allocation-free [WAVE-A1..A7, VOR-A9..A12, CORE-R28, CORE-R42]
 - [x] Sun & Sky group: solar_system (Wien limb, night floor, ring occlusion), solar_surface (slit jaws, thin S filament, Doppler hysteresis), exoplanet_transit (anti-aliased limb), aurora (box-filtered lake, crimson crown), constellation_map (braille Milky Way with star clouds, Great Rift, Coalsack), moon_phases (lit floor 60, earthshine ≤ 30); mono maps `Blackbody` to its astro lightness [SOL-A1..A10, SUN-A4, SUN-A8, SUN-A9, TRAN-A1..A9, AUR-A7, AUR-A9, CON-A1..A9, MOON-A1..A9, RND-R11, RND-R12]
 - [x] States of Matter group: molecular_dynamics (blackbody balls, ice streaks, MB inset), fractal_growth (frost + cathode forest, no halo), ising_model (Kawasaki spinodal act, chamfer-lit domains, thermometer), molecule_viewer (per-pixel z-buffered ball-and-stick with bond orders) [MD-A5..A9, CRY-A1..A8, ISING-A6..A9, MOL-A3..A7]
-- [ ] Matter review follow-ups (minor): ising_model one chamfer-depth curve for both spins with a darker, calmer crimson interior · molecular_dynamics streak cap scaled by the atom's pixel radius at 80×24 · fractal_growth pre-grown opening seed and a frost tip age gradient · shared `geom::LIGHT` + `geom::lambert` for molecular_dynamics and molecule_viewer (new CORE-R ID)
+- [ ] Matter review follow-ups — [B-19](BACKLOG.md).
 - [x] Dynamics group: double_pendulum (white merge that splits into Aurora/Hα twins, 96-ghost material line), strange_attractors (Chen added, one palette per attractor, wings-open yaw at 268° with no camera whip), three_body (per-body ramps, comet tails, fade-in from 0.35), brownian_motion (dark-field grain sphere, OU rms ring, 22 s ember trail, `D 1-path` readout); `Dots::disc`; worst frames 0.10 / 0.39 / 0.12 / 0.11 ms at 200×50 [DP-A5..A8, ATT-A9, ATT-A10, TB-A7, TB-A8, BRO-A4..A7, CORE-R82]
-- [ ] Dynamics review follow-ups (minor): lift the Lambert sphere shading into core when a fourth scene needs it · snapshots pass only in the debug profile (`molecular_dynamics_t5` differs in release)
+- [ ] Dynamics review follow-ups — [B-20](BACKLOG.md); the debug-only snapshot note is closed ([B-03](BACKLOG.md)).
 - [x] Life group: action_potential (voltage on the `Div` map, gold spike with a quiet blue wake, Na⁺/K⁺ ion streaks, amber scope, beat captions), dna_helix (Ice/Hα backbones as the hero, Aurora/Plasma rungs with near `▐` slabs, `Hot` DnaB-style helicase, view-driven captions), boids_flocking (dusk `Seq` sky, dark birds shaded by density, reed-bank silhouette, pale-front/dark-band escape wave, pale `Ice` falcon, 12 s attack cycle, wave-following captions), physarum (`Ramp(Ember)` tubes with an oxblood halo, stylised streaming, oat `Blackbody` flakes, captions); `title::stable_readout_room` and `Title::full_fits_from`; worst frames 0.10 / 0.14 / 0.87 / 0.35 ms at 200×50 [AP-A10..A12, DNA-A7, DNA-A8, BOID-A8..A10, PHY-A8..A10, CORE-R73, CORE-R83]
-- [ ] Life review follow-ups (minor): physarum thinner channels (needs a raised lattice cap or braille raster) and a pulse when food is reached · action_potential longer/wider ion streaks at ≥ 120 columns · dna_helix helicase rotation tick · boids_flocking braille reed stems, the Vicsek travelling-band act, and a dot→cell helper in core once a second scene needs it
+- [ ] Life review follow-ups — [B-21](BACKLOG.md).
 - [x] Quanta group: electron_orbitals (bounded colour gauge where only the beat phase ωt is physical, hold-only `Ramp(Ice)` exposure glow from r₅₀ to r₉₀ under the phase dots), particle_accelerator (collider event display and bubble chamber acts, asinh-toned collider glow, muon wheels), radioactive_decay (half-block Ember/Aurora lattice, uniformly sampled α/β tracks, two-dot measured curves over Bateman); `Pixels::cell_bg`, `Dots::blit_over` and `raster::Glow`; worst frames 0.63 / 0.24 / 0.30 ms at 200×50 [ORB-A8, ORB-A9, ACC-A4..A12, RAD-A5..A8, CORE-R84, CORE-R85]
-- [ ] Quanta review follow-ups (minor): mono `Role::Phase` floor near L* 40 so phase-0 dots stay visible (electron_orbitals transitions, solar_surface) [RND-R10] · radioactive_decay busy mono lattice at t ≈ 5 s · electron_orbitals glow outline steps per cell under dots · merge `Pixels::cell_bg` with the proposed `Pixels::backdrop` when that lands
+- [ ] Quanta review follow-ups — [B-22](BACKLOG.md).
 - [x] Cosmos A group: black_hole (Binet-traced Luminet disk with order-1 lensing ring and lower arc, sheared log-normal clumps tapered at the rim, continuous ember envelope, one-pixel point stars that never drop out between texels, no haze), gravitational_lensing (compact gold-cored lens with a dark gap to the critical curve, Bayer halftone edge), spacetime_grid (`Seq` mesh whose crests and burst energy density light up the sheet, local rim cap, halo rings, merger and ringdown captions); worst frames 0.31 / 0.43 / 0.34 ms at 200×50 [BH-A1..A9, LENS-A1..A8, SPT-A1..A10]
-- [ ] Cosmos A review follow-ups: spacetime_grid is still a mostly quiet purple lattice between bursts, and the reviewer's "merger + 1 s ≥ 1.4 × inspiral" became a 3 s window in SPT-A10 because the burst shell covers only ~5 % of the sheet at +1 s (art, major) · black_hole mid-disk stays bronze below 6 500 K in the `Blackbody` palette (theme or ink decision, RND-R11) · core `raster::ascii_ramp` (black_hole, gravitational_lensing, gray_scott) and `Tone::value_at` (inverse of level, replaces lensing's `faintest_visible`) with new CORE-R IDs and a round-trip test
+- [ ] Cosmos A review follow-ups — [B-23](BACKLOG.md).
 - [x] Voyages group: satellite_orbit (shared `Globe`: outward limb glow, day-side-only sand, mid-Ember city lights, label chips), voyager_journey (log-compressed map stated as stylisation, symmetric planet stamps, two-dot recent trail), rocket_launch (pad flame splash, lozenge shock diamonds, stippled top of the air, fading smoke trail, vacuum plume as a short core plus braille gas), moon_landing (seasonal Earth, footpads on the regolith at touchdown), mars_rover (one-ramp `Blackbody` sky with a pale aureole brightest at the Sun, dust devils capped below the white knee, ridges dim at night); `Pixels::backdrop` behind glyphs drawn over half-block pictures (supersedes cosmos-b's proposed `backdrop(cx, cy)`, which is `cell_bg`); worst frames 0.18 / 0.11 / 0.36 / 0.09 / 0.22 ms at 200×50 [SAT-A9, SAT-A12, VOY-A4, VOY-A5, ROC-A5, ROC-A6, ML-A6, ML-A8, MR-A4, MR-A8, MR-A10, CORE-R86]
-- [ ] Voyages review follow-ups: draw mars_rover's rover, lander, dust and devils and the other Voyages sprites as pixels instead of glyphs · move `Globe` out of `satellite_orbit` into a shared module (needs a GEN-R3 rule for non-scene files) · a fourth review pass to confirm the round-3 art fixes (touchdown, vacuum plume, planet stamps, aureole, devil veil)
+- [ ] Voyages review follow-ups — [B-24](BACKLOG.md).
 - [x] Cosmos B group: galaxy_collision (per-host long exposure with a turning density-wave spiral, per-star tail exposures, clumped overlap stipple, Hα knots that outlast the encounter), globular_cluster (glow from the bodies' own light blended with a round Plummer profile and a soft knee, three companion dots riding with each body, coloured RGB/BHB stars), pulsar (CP 1919 oblique rotator, `Glow` beams that fade to zero at the cone edge and dim when aimed at us, feathered veil under the *Unknown Pleasures* pulse stack), stellar_nursery (HOO narrowband nebula, lobed pillars with broad heads, knobs, textured and limb-brightened dust, soft `Ember` embedded protostars), starfield (1/d parallax with exposure streaks, narrow soft Milky Way with a star cloud and a dust lane), cosmic_microwave_background (`Div` pixel sky with a sweeping `D_ℓ` inset); core `raster::stronger`, `ink::class_kelvin`, `Pixels::dissolve` and a seventh ramp, `Starlight`, grey while faint; worst frames at 200×50 ≤ 0.63 ms [GAL-A5..A8, GC-A7..A9, PUL-A1..A6, NUR-A4..A7, STAR-A2..A6, CMB-A3, CMB-A6, CMB-A7, CORE-R80, CORE-R84, CORE-R87..R89, RND-R12]
-- [ ] Cosmos B review follow-ups: stellar_nursery pillar heads are geometric semicircles (art) · pulsar shows faint radial spokes briefly as the beam turns away from us · galaxy_collision's t = 60 s tails still read as strokes at 200×50 · lift the 2-D value noise now in stellar_nursery, moon_phases and constellation_map into core (new CORE-R ID; the latter two wrap in x) · one bilinear four-tap deposit helper (e.g. `Glow::splat_bilinear`) for galaxy_collision and globular_cluster
+- [ ] Cosmos B review follow-ups — [B-25](BACKLOG.md).
 - [x] Gallery review: rocket_launch's two countdown clocks agree, action_potential readout uses the house two-space separator [ROC-A8, GEN-R13]
 - [x] Gallery review follow-ups (art; resolved in the M12 closing rounds — each scene re-scored ≥ 8 or listed under the closing follow-ups below): too much amber (molecular_dynamics has no physical reason for it; recolour first) · weaker frames: solar_system tiny planets in mostly empty orbits, electron_orbitals small muddy cloud at t = 5 s, molecule_viewer all-grey methane, radioactive_decay flat maroon opening, brownian_motion sparse with `D 1-path …` until it has a fit, double_pendulum twins overlap as one early · pulsar pulse stack busy at 120×40 · ising_model low spin contrast in mono · belousov_zhabotinsky readout leads with the phase name · aurora flat purple lake stripes, no 630 nm red tops
 - [x] Perf follow-ups: doppler_effect walks only the on-screen parts of each front (DOP-A11; 500×150 worst 6.5 → 4.6 ms, 400×100 3.7 → 2.5 ms, 200×50 0.97 → 0.72 ms); constellation_map builds its six charts lazily and redraws its static sky only while fading (CON-A10; resize 72.6 → 12.6 ms at 500×150, 10.6 → 1.9 ms at 200×50; mean 1.2 → 0.36 ms); radioactive_decay draws from a per-step SplitMix64 (RAD-A9; 2.3 → 1.9 ms at 500×150); black_hole looks each geodesic row up once (resize 17.7 → 13.6 ms at 200×50, one-off); rocket_launch 1.9–2.5 ms and mars_rover 1.9 ms at 500×150 are steady per-pixel cost, not spikes. Every scene < 1 ms worst frame at 200×50 (max 0.96 ms, ising_model) and < 5 ms at 500×150 (max 4.6 ms, doppler_effect); `pixi run rs-worst` probe and criterion `worst`/`resize` bench groups [GEN-R8, DOP-A11, CON-A10, RAD-A9]
@@ -154,8 +156,8 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §5,
 - [x] Core lifts from the closing review: `raster::ascii_ramp_cell` (black_hole, gravitational_lensing), `Glow::splat_bilinear` (galaxy_collision, pulsar), `stellar::limb_darkening` / `brightness_temperature` and `raster::disc_cover` / `disc_pixels` (exoplanet_transit), `Glow::stroke` + `STROKE_KERNEL` + `halo_kernel` (double_pendulum, three_body); ramps `Sulfur`, `Cobalt`, `Eosin` [CORE-R80, CORE-R91..R96, RND-R12]
 - [x] galaxy_collision back under the TEST-R7 ceiling (6.24 → 3.95 MiB at 500×150, pre-blurred splats); no TEST-R7 exceptions remain [GAL-A5, TEST-R7]
 - [x] Closing bench (`rs-worst`, release, all 41 scenes): worst frame at 200×50 ≤ 0.98 ms (ising_model 0.98, electron_orbitals 0.97, boids_flocking 0.89); at 500×150 max 4.7 ms (doppler_effect); criterion `frame` mean max 0.56 ms at 200×50 (electron_orbitals), `worst` group max 0.89 ms [GEN-R8]
-- [ ] Local `--no-ff` merge of `feat/m12-upgrades` into `main`
-- [ ] M12 closing follow-ups (minor): aurora's crimson fringe is continuous but stair-steps along the curtain base at t ≈ 5 s (review 7.5–8/10; smooth it sub-cell) · globular_cluster motion (review 7.5/10) · exoplanet_transit star reads flat (7.5) · pulsar spikes at t = 5 s (7.5) · satellite_orbit label crowding · constellation_map Cassiopeia wash · double_pendulum: round 2 intended twin B's bob to stop being a half-disc while merged, but the code (and SPEC-002, which follows it) still clips it to its right half (decide and align) · dna_helix zoom transition at t ≈ 6–8 s · 500×150 worst frames over 2 ms: doppler_effect 4.7, aurora 4.1, stellar_nursery 4.0, moon_phases 3.9, cosmic_microwave_background 3.7, solar_surface 3.2, strange_attractors 2.7, molecule_viewer 2.6, rocket_launch 2.4, wave_interference 2.3, liesegang_rings 2.2, electron_orbitals 2.1, spacetime_grid 2.2, mars_rover 2.1 ms · near-ceiling live bytes at 500×150 (TEST-R7 4 MiB): galaxy_collision 3.95, solar_surface 3.93, electron_orbitals 3.86 MiB · stale test names `dp_a5_…half_green_half_crimson_bobs`, `orb_a8_…over_the_glow`, and MD-A9 covering both caption and relative colour (MD-A10 is now the atom bodies and halo; split the caption out to MD-A11 with a test rename)
+- [x] Local --no-ff merge of feat/m12-upgrades into main (merged).
+- [ ] M12 closing art follow-ups — [B-26..B-29](BACKLOG.md); stale perf/memory/test-name sub-items closed ([B-30..B-32](BACKLOG.md)).
 
 ## M13 — New scenes ✅
 Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6, §7 · branch `feat/m13-new-scenes` (may split per category group).
@@ -174,7 +176,7 @@ Design: [docs/design/M11-titles-taxonomy.md](design/M11-titles-taxonomy.md) §6,
 - [x] Life from Matter: molecular_motors, hp_protein_folding (added in the Life B round)
 - [x] Every new scene: SPEC-002 section, title, category by ADR-0013, < 2 ms worst frame at 200×50, leak guards green; review (final art pass: scores and follow-ups below; see [docs/design/M13-scenes.md](design/M13-scenes.md))
 - [x] Local `--no-ff` merge of `feat/m13-new-scenes` into `main`
-- [ ] M13 follow-ups: lift the 1-2-1 blur duplicated in motility_clustering and dicty_aggregation (`blur121`) into core `Glow` (done in M14, CORE-R103; supernova_remnant and light_echo keep their float-different blur) · radical_chain: CHN-A5 (vent cool-down) passes only for K_T3 = 0.1 and on one seed; make it robust across seeds and nearby constants · catalytic_surface: CAT-A6 production stalls on some seeds (seed 4 seen while tuning the mid-window opening); make the loop robust across seeds · seashell_pigmentation draws its browns as false-colour Blackbody at 1.6–2.5 kK; switch to `Ramp::Sienna` (added in 7b6a9bf)
+- [ ] M13 follow-ups — [B-34..B-38](BACKLOG.md) (blur121 done; seashell_pigmentation deleted).
   - Art follow-ups from the final art pass (scenes below 8/10; scene, score, weakness):
     - orbital_rendezvous 7: the hero craft is small in an empty frame
     - comet_tails 7.5: the ion tail and the Sun clip at the frame edge
@@ -201,7 +203,7 @@ Design: [docs/design/M14-resource-diet.md](design/M14-resource-diet.md) · branc
 - [x] Art + perf review (≤ 2 rounds), before/after tables, local `--no-ff` merge
 - [x] Clean minimal redesign of all 76 scenes (ADR-0017; user redirect: over-design, loud colour, large blocks and thick edges were the regression, not colourfulness); legible-subject rule and art_metrics guards (GEN-R21)
 - [x] Results: −49 % CPU per frame, −68 % bytes per frame, 57 → 1 writes per frame, blockiness halved, dark ground 0.68 → 0.89 (docs/design/M14-resource-diet.md)
-- [ ] M14 follow-ups: see "Follow-ups" in docs/design/M14-resource-diet.md (22 scenes > 2 ms worst at 500×150, mars_rover sky band blocks, logged art minors, bench `worst` table)
+- [ ] M14 follow-ups — [B-39..B-43](BACKLOG.md) (the 22-scene >2 ms claim is superseded).
 
 ## M15 — M11 look restored ✅
 Design: [docs/design/M15-m11-look.md](design/M15-m11-look.md) · [ADR-0018](adr/0018-m11-look-restored.md) · branch `feat/m15-m11-style`. Evidence: `samples/` (every scene at every milestone).
@@ -212,7 +214,7 @@ Design: [docs/design/M15-m11-look.md](design/M15-m11-look.md) · [ADR-0018](adr/
 - [x] Restyle the 35 M13 scenes in M11's idiom (critic review ≤ 2 rounds)
 - [x] Budgets and results: 0.56 ms CPU, 12.5 KB and 600 changed cells per frame (M14: 0.63 ms, 18.8 KB, 806); every scene < 2 ms worst at 200×50, < 5 ms at 500×150; samples at M15 (`samples/*-m15.png`)
 - [x] Local `--no-ff` merge of `feat/m15-m11-style` into main
-- [ ] M15 follow-ups: see "Follow-ups" in docs/design/M15-m11-look.md
+- [ ] M15 follow-ups — [B-44..B-46](BACKLOG.md).
 
 ## M16 — Thread style
 Design: [docs/design/M16-thread-style.md](design/M16-thread-style.md) · [ADR-0019](adr/0019-thread-style.md) · GEN-R25.
@@ -223,7 +225,7 @@ Design: [docs/design/M16-thread-style.md](design/M16-thread-style.md) · [ADR-00
 - [x] Results: gallery 0.535 ms CPU, 9.9 KB and 576 changed cells per frame (M15: 0.56 ms, 12.5 KB, 600); the 26 thread scenes 13.7 → 5.8 KB per frame
 - [x] Samples at M16 (`samples/*-m16.png`, M16 column in `samples/README.md` and `samples/compare/`)
 - [x] Local `--no-ff` merge of `feat/m16-thread-style` into main
-- [ ] M16 follow-ups: see "Follow-ups" in docs/design/M16-thread-style.md
+- [ ] M16 follow-ups — [B-47..B-63](BACKLOG.md).
 
 ## M17 — Orbital-thread style ✅
 Design: [docs/design/M17-orbital-thread.md](design/M17-orbital-thread.md) · [ADR-0020](adr/0020-orbital-thread-style.md) · GEN-R26, CORE-R107.
@@ -235,7 +237,7 @@ Design: [docs/design/M17-orbital-thread.md](design/M17-orbital-thread.md) · [AD
 - [x] Lead review (art + science, ≤ 2 rounds per team); budgets: worst frame ≤ 1.27 ms at 200×50 and ≤ 3.05 ms at 500×150; the 10 scenes 9.2 → 4.2 KB and 517 → 320 changed cells per frame
 - [x] Results (gallery 0.544 ms, 9.2 KB, 549 changed cells per frame), samples at M17, the contributor guide
 - [x] Local `--no-ff` merge into main
-- [ ] M17 follow-ups: see "Follow-ups" in docs/design/M17-orbital-thread.md
+- [ ] M17 follow-ups — [B-64..B-69](BACKLOG.md).
 
 ## M18 — Orbital molecules ✅
 Design: [docs/design/M18-orbital-molecules.md](design/M18-orbital-molecules.md) · [ADR-0021](adr/0021-orbital-molecules.md) · GEN-R26 (molecules rule), CORE-R108.
@@ -247,14 +249,14 @@ Design: [docs/design/M18-orbital-molecules.md](design/M18-orbital-molecules.md) 
 - [x] Lead review (art + science, ≤ 2 rounds per team); budgets: worst frame ≤ 0.72 ms at 200×50 and ≤ 3.38 ms at 500×150; the 6 scenes 25.9 → 3.7 KB and 1121 → 257 changed cells per frame
 - [x] Results (gallery 0.539 ms, 7.4 KB, 480 changed cells per frame), samples at M18, the contributor guide
 - [x] Local `--no-ff` merge into main
-- [ ] M18 follow-ups: see "Follow-ups" in docs/design/M18-orbital-molecules.md
+- [ ] M18 follow-ups — [B-70..B-73](BACKLOG.md).
 
 ## Aurora theme (post-M18) ✅
 Design: [docs/design/M19-M20.md](design/M19-M20.md) · [ADR-0022](adr/0022-aurora-theme.md) · RND-R16.
 - [x] Theme options (user picked: 4th theme, astro stays default; oxygen green/red pair, N₂⁺ violet accent; curtain Seq)
 - [x] Spec first (RND-R16, SPEC-005, config example), failing tests, `Theme::Aurora`, `--theme aurora` / `theme = "aurora"`
 - [x] Verified scenes unchanged in astro; local `--no-ff` merge into main
-- [ ] Follow-up: a colour-blind-safe variant (see docs/design/M19-M20.md)
+- [x] Colour-blind-safe variant: Theme::Colorblind [RND-R19] (Phase 3; [B-08](BACKLOG.md)).
 
 ## M19 — galaxy_collision star dust ✅
 Design: [docs/design/M19-M20.md](design/M19-M20.md).
@@ -271,7 +273,7 @@ GEN-R25 list + `Look (M20)` in solar_system, brownian_motion, action_potential; 
 - [x] Lead review, snapshots re-recorded and reviewed, art_metrics rows re-seeded (action_potential edge weight 4.5 → 1.5, darkness 0.92 → 0.98); worst frames ≤ 0.15 ms at 200×50 and ≤ 0.48 ms at 500×150
 - [x] Results (gallery 0.544 ms, 7.4 KB, 484 changed cells per frame), samples at M19/M20, the contributor guide
 - [x] Local `--no-ff` merges of M19 and M20 into main
-- [ ] M19/M20 follow-ups: see "Follow-ups" in docs/design/M19-M20.md
+- [ ] M19/M20 follow-ups — samples [B-69](BACKLOG.md), galaxy_collision budget [B-74](BACKLOG.md).
 
 ## M21 — Ten new scenes ✅
 Design: [docs/design/M21-ten-scenes.md](design/M21-ten-scenes.md).
@@ -285,7 +287,7 @@ SPEC-002 "Batch M21"; GEN-R25 list (+ magnetosphere, gravity_assist, snowflake_g
 - [x] Snapshots recorded and reviewed, art_metrics rows seeded after review, budgets (`rs-worst`, `rs-cost`), `rs-ci` green
 - [x] Results (design doc), the contributor guide
 - [x] Samples at M21 (`samples/<scene>-m21.png`); cloud_chamber sparseness fixed
-- [ ] Remaining follow-ups in docs/design/M21-ten-scenes.md
+- [ ] M21 follow-ups — [B-75..B-79](BACKLOG.md).
 
 ## M22 — Lean build and runtime ✅
 Design: [docs/design/M22-lean-build-runtime.md](design/M22-lean-build-runtime.md) · ADR-0023. TEST-R9 (amended), TEST-R10, TEST-R11, TEST-R7 (amended), RT-R17, RND-R17, RT-R16 (tightened), CFG-R8, GEN-R3/R16 (amended). User picked all eight options (2 min idle with 30 FPS kept; category split; ceilings at measured + margin).
@@ -295,15 +297,15 @@ Design: [docs/design/M22-lean-build-runtime.md](design/M22-lean-build-runtime.md
 - [x] Phase B: split sciart-generators into sciart-shared + five scene crates
 - [x] Phase C: memory ceilings at measured + margin; reviewed churn cuts
 - [x] Review (Rust/perf: 1 blocking + 2 major fixed in round 2); before/after numbers; rs-ci green; local merge (churn cuts skipped: none invisible)
-- [ ] Manual encoder check in iTerm2, Terminal.app and tmux; follow-ups in the design doc
+- [ ] Manual encoder check + M22 follow-ups — [B-80..B-82](BACKLOG.md).
 
 ## M23 — Improvement programme (in progress)
 Design: [docs/IMPROVEMENTS.md](IMPROVEMENTS.md) · [docs/design/M23-programme.md](design/M23-programme.md) · ADR-0024. User chose all 17 items, three contributors, phase branches merged `--no-ff`, local-only git, repository renamed to `sciart`, and a local `v0.1.0` tag.
 - [x] Phase 1 — trust + front door: TEST-R12 hermetic suite, master-spec truth pass, README/LICENSE/metadata, GitHub Actions + `cargo-deny`, tagged-release workflow, generated gallery (1,553 tests green; `v0.1.0` tagged)
 - [x] Phase 2 — share loop: `sciart record`, in-app help/favourites, category filters, speed, `list --json` (1,610 default tests + 152 record-feature tests green; `v0.2.0` tagged)
 - [x] Phase 3 — compatibility: colour capability (`NO_COLOR`/256/mono), colour-blind-safe theme (1,637 default + 165 record-feature tests; 10 review sheets signed off; `v0.3.0` tagged)
-- [ ] Phase 4 — longevity: SPEC-002 split with a generated index, backlog triage, fuzz targets
-- [ ] Phase 5 — art/science: re-score and polish the below-8 scenes, gallery-review ritual, science-claims audit
+- [ ] Phase 4 — longevity: SPEC-002 split + generated index [B-01/B-83](BACKLOG.md); backlog triage done [B-84](BACKLOG.md); fuzz targets [B-85](BACKLOG.md).
+- [ ] Phase 5 — art/science — [B-86..B-88](BACKLOG.md).
 
 ## M9 — Future (unscheduled)
-- Windows/Linux keep-awake backends (deferred by the macOS-first decision), light-background theme, per-OS release packaging beyond tarballs.
+- Windows/Linux keep-awake backends, light-background theme, per-OS packaging — [B-89..B-91](BACKLOG.md).

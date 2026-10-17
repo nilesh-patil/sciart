@@ -24,7 +24,8 @@ are records of decisions, including historical ones — they are not amended ret
 | --- | --- |
 | [Master specification](specs/sciart-specification.md) | Goals, architecture, F1–F9 scope, performance/testing constraints |
 | [SPEC-001 core](specs/SPEC-001-core.md) | Core types and helpers: canvas, generator contract, fixed step, geometry, raster, RNG, ODE |
-| [SPEC-002 generators](specs/SPEC-002-generators.md) | Generator/registry rules, titles and taxonomy, and the per-scene requirements; the scene sections are being split into category files ([backlog B-01](BACKLOG.md)) |
+| [SPEC-002 generators](specs/SPEC-002-generators.md) | Registry/stability rules, titles, taxonomy, the template and the generated scene index |
+| [SPEC-002 scenes](specs/SPEC-002-scenes-cosmos.md) | Per-scene sections by category: [cosmos](specs/SPEC-002-scenes-cosmos.md) · [earth](specs/SPEC-002-scenes-earth.md) · [physics](specs/SPEC-002-scenes-physics.md) · [matter](specs/SPEC-002-scenes-matter.md) · [life](specs/SPEC-002-scenes-life.md) |
 | [SPEC-003 runtime & render](specs/SPEC-003-runtime-render.md) | Runtime state machine, keys, help/favourites, HUD, themes, encoder |
 | [SPEC-004 keep-awake](specs/SPEC-004-keepawake.md) | `caffeinate`/mouse/off backends and the jiggler |
 | [SPEC-005 CLI & config](specs/SPEC-005-cli-config.md) | Commands, flags, TOML precedence, colour/speed/filter settings |
