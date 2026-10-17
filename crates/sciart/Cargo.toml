@@ -6,6 +6,11 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["terminal", "generative-art", "astronomy", "ascii-art", "screensaver"]
+categories = ["command-line-utilities", "graphics", "science", "science::astronomy", "visualization"]
 
 [features]
 # Real mouse-jiggle keep-awake backend (KA-R4); needs Accessibility permission on macOS.

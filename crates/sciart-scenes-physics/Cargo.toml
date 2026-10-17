@@ -6,6 +6,12 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["physics", "simulation", "generative-art", "terminal", "ascii-art"]
+categories = ["science", "science::physics", "simulation", "graphics", "visualization"]
+publish = false
 
 [dependencies]
 sciart-core.workspace = true
