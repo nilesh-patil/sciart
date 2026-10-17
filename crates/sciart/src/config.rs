@@ -236,6 +236,8 @@ pub fn resolve(cli: &Cli, file: FileConfig, env: Env) -> (Settings, Vec<String>)
 mod tests {
     use std::fs;
 
+    use proptest::prelude::*;
+
     use super::*;
     use crate::cli::parse as cli;
 
@@ -365,6 +367,18 @@ mod tests {
             assert!(parse(bad, Path::new("c.toml")).is_err(), "{bad}");
         }
         assert_eq!(file("interval = 0.5").interval, Some(0.5));
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(64))]
+
+        /// CFG-R3/TEST-R4: arbitrary text is rejected, never a panic. The config module is
+        /// binary-only, so this proptest (not the cargo-fuzz crate) is its regression net
+        /// (IMP-14).
+        #[test]
+        fn cfg_r3_parse_never_panics_on_arbitrary_text(text in any::<String>()) {
+            let _ = parse(&text, Path::new("fuzz.toml"));
+        }
     }
 
     #[test]
