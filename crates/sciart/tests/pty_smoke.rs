@@ -491,3 +491,64 @@ fn cli_r9_list_category_and_usage_errors_exit_2() {
         assert!(!out.stderr.is_empty(), "{args:?}");
     }
 }
+
+// ----- M23: help overlay and favourites (RT-R18, RT-R19) -----
+
+/// `?` opens the static help page, whose footer and project URL must fit an 80x24 screen;
+/// `Esc` closes it instead of quitting (RT-R18).
+#[test]
+fn rt_r18_question_mark_opens_help_and_esc_closes_it() {
+    let mut s = Session::start(&[
+        "run",
+        "starfield",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ]);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    s.press("?");
+    let screen = s.wait_for("help page", |t| {
+        t.contains("toggle this help")
+            && t.contains("github.com/nilesh-patil/sciart")
+            && t.contains("press ? or Esc to return to the art")
+    });
+    assert!(screen.contains("Esc closes help"), "{screen}");
+    s.press("\x1b"); // Esc closes the page, it does not quit
+    s.wait_for("the art again", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
+/// `f` toggles the current scene's favourite, and `v` flips the filter; removing the last
+/// favourite turns the filter back off (RT-R19).
+#[test]
+fn rt_r19_f_and_v_toggle_favourites_and_the_filter() {
+    let config = "keep_awake = \"off\"\nfavorites = [\"starfield\"]\n";
+    let args = ["run", "starfield", "--ascii", "--seed", "1"];
+    let mut s = Session::start_with_config(&args, Some(config));
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    s.press("?");
+    s.wait_for("seeded favourite", |t| {
+        t.contains("favourite       yes") && t.contains("filter  all scenes")
+    });
+    s.press("?"); // close
+    s.press("v"); // filter on; the current scene is already a favourite
+    s.press("?");
+    s.wait_for("filter on", |t| t.contains("filter  favourites only"));
+    s.press("?"); // close
+    s.press("f"); // remove the last favourite: the filter turns itself off
+    s.press("?");
+    s.wait_for("filter off", |t| {
+        t.contains("favourite       no") && t.contains("filter  all scenes")
+    });
+    let (status, _) = s.quit();
+    assert!(status.success());
+}

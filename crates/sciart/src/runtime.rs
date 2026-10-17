@@ -29,6 +29,18 @@ pub enum Action {
     Reset,
     ToggleHud,
     CycleTheme,
+    /// Open or close the help overlay (RT-R18).
+    ToggleHelp,
+    /// Add or remove the current scene from the session's favourites (RT-R19).
+    ToggleFavourite,
+    /// Navigate only among healthy favourites (RT-R19).
+    ToggleFavouritesOnly,
+    PrevCategory,
+    NextCategory,
+    /// Rebuild the cycle order from the runtime RNG and start at its head (RT-R19).
+    Shuffle,
+    /// The `Esc` key: close help when open, otherwise quit (RT-R18).
+    Escape,
     Quit,
 }
 
@@ -97,6 +109,12 @@ pub struct Runtime {
     history: Vec<usize>,
     paused: bool,
     hud: bool,
+    /// The help overlay is open (RT-R18).
+    help: bool,
+    /// Per-entry favourite flags, seeded from config `favorites` (RT-R19).
+    favourites: Vec<bool>,
+    /// Navigate only among healthy favourites (RT-R19).
+    favourites_only: bool,
     /// The `title` setting (CFG-R6, CLI-R7).
     title: bool,
     theme: Theme,
@@ -118,6 +136,7 @@ impl Runtime {
         let order = cycle_order(&categories, &mut rng);
         let mut rt = Self {
             quarantined: vec![false; entries.len()],
+            favourites: vec![false; entries.len()],
             entries,
             order,
             at: None,
@@ -137,6 +156,8 @@ impl Runtime {
             history: Vec::new(),
             paused: false,
             hud: false,
+            help: false,
+            favourites_only: false,
             title: true,
             theme: Theme::default(),
         };
@@ -150,7 +171,8 @@ impl Runtime {
     /// Advance by `elapsed` wall seconds, auto-cycling if due, and render a new frame
     /// (RT-R2, RT-R5). Does nothing while paused.
     pub fn tick(&mut self, elapsed: f64) {
-        if self.paused || self.stage.is_none() {
+        // The help overlay is a static page: the scene keeps its last frame (RT-R18).
+        if self.paused || self.help || self.stage.is_none() {
             return;
         }
         if elapsed.is_finite() && elapsed > 0.0 {
@@ -158,7 +180,7 @@ impl Runtime {
         }
         if let Some(interval) = self.interval
             && self.since_switch >= interval
-            && self.healthy_count() > 1
+            && self.eligible_count() > 1
         {
             self.switch_to_next();
         }
@@ -262,17 +284,65 @@ impl Runtime {
         self
     }
 
-    /// Apply a user action (RT-R6).
+    /// Seed the session's favourites from config names (CFG-R9, RT-R19). Names match the
+    /// active set directly; retired aliases resolve through `find`; names outside the
+    /// active set are ignored.
+    pub fn with_favourites<S: AsRef<str>>(mut self, names: &[S]) -> Self {
+        for name in names {
+            let name = name.as_ref();
+            let direct = self.entries.iter().position(|e| e.meta.name == name);
+            let index = direct.or_else(|| {
+                let entry = sciart_generators::find(name)?;
+                self.entries
+                    .iter()
+                    .position(|e| e.meta.name == entry.meta.name)
+            });
+            if let Some(i) = index {
+                self.favourites[i] = true;
+            }
+        }
+        self
+    }
+
+    /// Apply a user action (RT-R6, RT-R18, RT-R19).
     pub fn handle(&mut self, action: Action) -> Flow {
+        // Esc is the only key that closes help instead of acting (RT-R18). `q` and Ctrl-C
+        // keep their unconditional quit mapping.
+        if action == Action::Escape {
+            return if self.help {
+                self.help = false;
+                Flow::Continue
+            } else {
+                Flow::Quit
+            };
+        }
+        // `Quit` still quits while help is open (RT-R18).
+        if action == Action::Quit {
+            return Flow::Quit;
+        }
+        if action == Action::ToggleHelp {
+            self.help = !self.help;
+            return Flow::Continue;
+        }
+        // Any other action closes the overlay before acting (RT-R18).
+        self.help = false;
+
         let generator_action = matches!(
             action,
-            Action::Next | Action::Prev | Action::Reset | Action::TogglePause
+            Action::Next
+                | Action::Prev
+                | Action::Reset
+                | Action::TogglePause
+                | Action::ToggleFavourite
+                | Action::ToggleFavouritesOnly
+                | Action::PrevCategory
+                | Action::NextCategory
+                | Action::Shuffle
         );
         if generator_action && self.status == Status::AllFailed {
             return Flow::Continue;
         }
         match action {
-            Action::Quit => return Flow::Quit,
             Action::Next => self.switch_to_next(),
             Action::Prev => self.prev(),
             Action::Reset => {
@@ -286,6 +356,12 @@ impl Runtime {
                 self.show_title();
             }
             Action::CycleTheme => self.theme = self.theme.next(),
+            Action::ToggleFavourite => self.toggle_favourite(),
+            Action::ToggleFavouritesOnly => self.toggle_favourites_only(),
+            Action::PrevCategory => self.switch_to_category(-1),
+            Action::NextCategory => self.switch_to_category(1),
+            Action::Shuffle => self.shuffle(),
+            Action::ToggleHelp | Action::Escape | Action::Quit => {}
         }
         Flow::Continue
     }
@@ -296,6 +372,36 @@ impl Runtime {
 
     pub fn hud(&self) -> bool {
         self.hud
+    }
+
+    /// Whether the help overlay is open (RT-R18).
+    pub fn help(&self) -> bool {
+        self.help
+    }
+
+    /// Whether navigation is restricted to healthy favourites (RT-R19).
+    pub fn favourites_only(&self) -> bool {
+        self.favourites_only
+    }
+
+    /// Whether the current scene is a favourite; `false` with no stage (RT-R19).
+    pub fn is_favourite(&self) -> bool {
+        self.current.is_some_and(|i| self.favourites[i])
+    }
+
+    /// Number of favourite entries this session (healthy or not).
+    pub fn favourite_count(&self) -> usize {
+        self.favourites.iter().filter(|f| **f).count()
+    }
+
+    /// The current scene's category, for the help page (RT-R18).
+    pub fn current_category(&self) -> Option<Category> {
+        self.current.map(|i| self.entries[i].meta.category)
+    }
+
+    /// The live title regardless of the `title` setting, for the help page (RT-R18).
+    pub fn scene_title(&self) -> Option<Title> {
+        self.stage.as_ref().map(Stage::title)
     }
 
     pub fn theme(&self) -> Theme {
@@ -328,23 +434,99 @@ impl Runtime {
         }
     }
 
-    fn healthy_count(&self) -> usize {
-        self.quarantined.iter().filter(|q| !**q).count()
+    /// Entries navigation may select: never quarantined, and only favourites while the
+    /// filter is on (RT-R19).
+    fn eligible(&self, i: usize) -> bool {
+        !self.quarantined[i] && (!self.favourites_only || self.favourites[i])
     }
 
-    /// Go back to the most recent earlier non-quarantined generator (RT-R5a).
+    fn eligible_count(&self) -> usize {
+        (0..self.entries.len())
+            .filter(|&i| self.eligible(i))
+            .count()
+    }
+
+    fn any_healthy_favourite(&self) -> bool {
+        (0..self.entries.len()).any(|i| self.favourites[i] && !self.quarantined[i])
+    }
+
+    /// `f`: toggle the current scene's favourite flag; drop the filter when the last
+    /// favourite goes (RT-R19).
+    fn toggle_favourite(&mut self) {
+        let Some(i) = self.current else {
+            return;
+        };
+        self.favourites[i] = !self.favourites[i];
+        if self.favourites_only && !self.favourites[i] && self.favourite_count() == 0 {
+            self.favourites_only = false;
+        }
+    }
+
+    /// `v`: flip the filter; turning it on moves to a favourite unless the current scene is
+    /// one. With no healthy favourite there is nothing to show, so it is a no-op (RT-R19).
+    fn toggle_favourites_only(&mut self) {
+        if self.favourites_only {
+            self.favourites_only = false;
+            return;
+        }
+        if !self.is_favourite() && !self.any_healthy_favourite() {
+            return;
+        }
+        self.favourites_only = true;
+        if !self.is_favourite()
+            && let Some(first) = self.order.iter().copied().find(|&i| self.eligible(i))
+        {
+            self.activate(first, true);
+        }
+    }
+
+    /// Go back to the most recent earlier eligible generator (RT-R5a, RT-R19).
     fn prev(&mut self) {
         let mut history = self.history.clone();
         if history.last().copied() == self.current {
             history.pop();
         }
-        while history.last().is_some_and(|&j| self.quarantined[j]) {
+        while let Some(&j) = history.last() {
+            if self.eligible(j) {
+                self.history = history;
+                self.activate(j, false);
+                return;
+            }
             history.pop();
         }
-        if let Some(&j) = history.last() {
-            self.history = history;
-            self.activate(j, false);
+    }
+
+    /// `[`/`]`: first eligible scene of the previous/next non-empty category in
+    /// `Category::ALL` order, wrapping (RT-R19).
+    fn switch_to_category(&mut self, direction: i32) {
+        let Some(current) = self.current else {
+            return;
+        };
+        let category = self.entries[current].meta.category;
+        let start = Category::ALL
+            .iter()
+            .position(|&c| c == category)
+            .unwrap_or(0);
+        let count = Category::ALL.len();
+        for step in 1..=count {
+            let index = (start as i32 + direction * step as i32).rem_euclid(count as i32) as usize;
+            let wanted = Category::ALL[index];
+            if let Some(next) = (0..self.entries.len())
+                .find(|&i| self.entries[i].meta.category == wanted && self.eligible(i))
+            {
+                self.activate(next, true);
+                return;
+            }
         }
+    }
+
+    /// `s`: rebuild the cycle order from the runtime RNG and activate its first eligible
+    /// entry (RT-R19).
+    fn shuffle(&mut self) {
+        let categories: Vec<Category> = self.entries.iter().map(|e| e.meta.category).collect();
+        self.order = cycle_order(&categories, &mut self.rng);
+        self.at = None;
+        self.switch_to_next();
     }
 
     /// Build a fresh instance of entry `i` and draw its first frame (RT-R7);
@@ -398,16 +580,22 @@ impl Runtime {
         self.switch_to_next();
     }
 
-    /// Activate the next healthy entry after the last one in the cycle order, wrapping
-    /// (RT-R13). The current entry comes last in that walk, so it is rebuilt only when it
-    /// is the sole healthy one.
+    /// Activate the next eligible entry after the last one in the cycle order, wrapping
+    /// (RT-R13, RT-R19). The current entry comes last in that walk, so it is rebuilt only
+    /// when it is the sole eligible one.
     fn switch_to_next(&mut self) {
         let n = self.order.len();
         let from = self.at.map_or(0, |p| p + 1);
         let next = (0..n)
             .map(|k| self.order[(from + k) % n])
-            .find(|&i| !self.quarantined[i]);
+            .find(|&i| self.eligible(i));
         let Some(next) = next else {
+            // A favourites-only filter with no healthy favourite must not strand the
+            // runtime: drop it and fall back to every healthy scene (RT-R19).
+            if self.favourites_only && !self.any_healthy_favourite() {
+                self.favourites_only = false;
+                return self.switch_to_next();
+            }
             self.current = None;
             self.stage = None;
             self.status = Status::AllFailed;
@@ -803,6 +991,11 @@ mod tests {
             Action::Prev,
             Action::Reset,
             Action::TogglePause,
+            Action::ToggleFavourite,
+            Action::ToggleFavouritesOnly,
+            Action::PrevCategory,
+            Action::NextCategory,
+            Action::Shuffle,
         ] {
             assert_eq!(r.handle(a), Flow::Continue);
         }
@@ -1013,6 +1206,230 @@ mod tests {
             .find(|e| e.meta.name == name)
             .map(|e| e.meta.category)
             .unwrap()
+    }
+
+    // ----- M23: help overlay (RT-R18) -----
+
+    #[test]
+    fn rt_r18_help_toggles_and_other_actions_close_it_before_acting() {
+        let mut r = rt(&[&OK, &OK2], 0);
+        assert!(!r.help());
+        assert_eq!(r.handle(Action::ToggleHelp), Flow::Continue);
+        assert!(r.help());
+        r.handle(Action::ToggleHud);
+        assert!(!r.help(), "another action closes help");
+        assert!(r.hud(), "and still acts");
+        r.handle(Action::ToggleHelp);
+        assert!(r.help());
+        r.handle(Action::Next);
+        assert!(!r.help());
+        assert_eq!(r.current_name(), Some("ok2"), "the action still ran");
+    }
+
+    #[test]
+    fn rt_r18_esc_closes_help_and_quits_only_when_it_is_closed() {
+        let mut r = rt(&[&OK], 0);
+        assert_eq!(r.handle(Action::Escape), Flow::Quit);
+        r.handle(Action::ToggleHelp);
+        assert_eq!(r.handle(Action::Escape), Flow::Continue);
+        assert!(!r.help());
+        r.handle(Action::ToggleHelp);
+        assert_eq!(r.handle(Action::ToggleHud), Flow::Continue);
+        r.handle(Action::ToggleHelp);
+        assert_eq!(r.handle(Action::Quit), Flow::Quit, "q quits with help open");
+    }
+
+    #[test]
+    fn rt_r18_help_does_not_step_the_simulation() {
+        let mut r = rt(&[&OK], 0);
+        r.tick(SIM_DT);
+        assert_eq!(first_line(&r), "1");
+        r.handle(Action::ToggleHelp);
+        r.tick(1.0);
+        assert_eq!(first_line(&r), "1", "no step while help is open");
+        r.handle(Action::ToggleHelp);
+        r.tick(SIM_DT);
+        assert_eq!(first_line(&r), "2");
+    }
+
+    // ----- M23: favourites and filters (RT-R19) -----
+
+    #[test]
+    fn rt_r19_toggle_favourite_marks_the_current_scene() {
+        let mut r = rt(&[&OK, &OK2], 0);
+        assert!(!r.is_favourite());
+        r.handle(Action::ToggleFavourite);
+        assert!(r.is_favourite());
+        assert_eq!(r.favourite_count(), 1);
+        r.handle(Action::Next);
+        assert_eq!(r.current_name(), Some("ok2"));
+        assert!(!r.is_favourite(), "a different scene is not a favourite");
+        r.handle(Action::Prev);
+        assert!(
+            r.is_favourite(),
+            "the flag follows the scene, not the session"
+        );
+        r.handle(Action::ToggleFavourite);
+        assert!(!r.is_favourite());
+        assert_eq!(r.favourite_count(), 0);
+    }
+
+    #[test]
+    fn rt_r19_favourites_only_switches_to_a_favourite_and_is_a_noop_without_one() {
+        let mut r = rt(&[&OK, &OK2], 0);
+        r.handle(Action::ToggleFavouritesOnly);
+        assert!(!r.favourites_only(), "no favourites: no-op");
+        assert_eq!(r.current_name(), Some("ok"));
+
+        let mut r = rt(&[&OK, &OK2], 0).with_favourites(&["ok2"]);
+        r.handle(Action::ToggleFavouritesOnly);
+        assert!(r.favourites_only());
+        assert_eq!(r.current_name(), Some("ok2"));
+        assert!(r.is_favourite());
+        r.handle(Action::ToggleFavouritesOnly);
+        assert!(!r.favourites_only());
+        assert_eq!(
+            r.current_name(),
+            Some("ok2"),
+            "turning it off keeps the scene"
+        );
+    }
+
+    #[test]
+    fn rt_r19_removing_the_last_favourite_turns_the_filter_off() {
+        let mut r = rt(&[&OK, &OK2], 0).with_favourites(&["ok"]);
+        r.handle(Action::ToggleFavouritesOnly);
+        assert!(r.favourites_only());
+        r.handle(Action::ToggleFavourite);
+        assert!(!r.is_favourite());
+        assert!(
+            !r.favourites_only(),
+            "no favourite remains: filter turns off"
+        );
+    }
+
+    #[test]
+    fn rt_r19_navigation_considers_only_healthy_favourites() {
+        let mut r = rt(&[&OK, &OK2, &OK3], 0).with_favourites(&["ok2", "ok3"]);
+        r.handle(Action::ToggleFavouritesOnly);
+        let first = r.current_name().expect("a favourite");
+        assert!(matches!(first, "ok2" | "ok3"), "{first}");
+        assert!(r.is_favourite());
+        r.handle(Action::Next);
+        let second = r.current_name().expect("a favourite");
+        assert!(matches!(second, "ok2" | "ok3"), "{second}");
+        assert_ne!(second, first);
+        r.handle(Action::Prev);
+        assert_eq!(r.current_name(), Some(first));
+        for _ in 0..6 {
+            r.handle(Action::Next);
+            assert!(
+                matches!(r.current_name(), Some("ok2" | "ok3")),
+                "{:?}",
+                r.current_name()
+            );
+        }
+    }
+
+    #[test]
+    fn rt_r19_quarantined_favourites_are_skipped() {
+        let mut r = rt(&[&OK, &BOOM], 0).with_favourites(&["ok", "boom"]);
+        r.handle(Action::ToggleFavouritesOnly); // current ok is a favourite: stays
+        assert_eq!(r.current_name(), Some("ok"));
+        r.handle(Action::Next); // the other favourite, which panics on its first step
+        assert_eq!(r.current_name(), Some("boom"));
+        r.tick(SIM_DT);
+        assert_eq!(r.quarantined(), 1);
+        assert_eq!(r.current_name(), Some("ok"));
+        r.handle(Action::Next);
+        assert_eq!(
+            r.current_name(),
+            Some("ok"),
+            "quarantined entry is not selected"
+        );
+    }
+
+    #[test]
+    fn rt_r19_the_filter_turns_off_when_the_last_healthy_favourite_is_quarantined() {
+        let mut r = rt(&[&BOOM, &OK], 0).with_favourites(&["boom"]);
+        r.handle(Action::ToggleFavouritesOnly); // current boom is the favourite
+        assert!(r.favourites_only());
+        r.tick(SIM_DT); // boom panics
+        assert_eq!(r.quarantined(), 1);
+        assert!(!r.favourites_only(), "no healthy favourite remains");
+        assert_eq!(r.current_name(), Some("ok"));
+    }
+
+    #[test]
+    fn rt_r19_favourites_are_seeded_from_names_and_retired_aliases() {
+        let star = sciart_generators::find("starfield").expect("scene");
+        let gray = sciart_generators::find("gray_scott").expect("scene");
+        let r = Runtime::new(
+            vec![star, gray],
+            1,
+            Size::new(8, 2),
+            GlyphMode::Ascii,
+            Some(0),
+        )
+        .with_favourites(&["chemical_reaction", "starfield"]);
+        assert_eq!(r.favourite_count(), 2);
+        assert!(r.is_favourite(), "starfield is current and favourited");
+    }
+
+    #[test]
+    fn rt_r19_category_keys_walk_category_all_order_and_wrap() {
+        // Physics (ok), DeepCosmos (star), SunPlanets (moon), Biology (cell).
+        let mut r = rt(&[&OK, &STAR, &MOON, &CELL], 0);
+        r.handle(Action::NextCategory); // Physics -> Chemistry (empty) -> Biology
+        assert_eq!(r.current_name(), Some("cell"));
+        r.handle(Action::PrevCategory); // Biology -> Chemistry (empty) -> Physics
+        assert_eq!(r.current_name(), Some("ok"));
+        r.handle(Action::NextCategory);
+        assert_eq!(r.current_name(), Some("cell"));
+        r.handle(Action::NextCategory); // Biology -> ... -> wraps to DeepCosmos
+        assert_eq!(r.current_name(), Some("star"));
+        r.handle(Action::PrevCategory); // DeepCosmos -> ... -> wraps to Biology
+        assert_eq!(r.current_name(), Some("cell"));
+    }
+
+    #[test]
+    fn rt_r19_category_keys_respect_the_favourites_filter() {
+        let mut r = rt(&[&OK, &STAR, &CELL], 0).with_favourites(&["star"]);
+        r.handle(Action::ToggleFavouritesOnly); // ok is not a favourite -> star
+        assert_eq!(r.current_name(), Some("star"));
+        r.handle(Action::NextCategory);
+        assert_eq!(r.current_name(), Some("star"), "only DeepCosmos has one");
+        r.handle(Action::Next);
+        assert_eq!(r.current_name(), Some("star"));
+    }
+
+    #[test]
+    fn rt_r19_shuffle_rebuilds_the_order_and_activates_its_head() {
+        let mut a = sim(&MIXED, 7);
+        let before = order_names(&a);
+        a.handle(Action::Shuffle);
+        let after = order_names(&a);
+        assert_eq!(
+            after.iter().collect::<std::collections::HashSet<_>>(),
+            before.iter().collect::<std::collections::HashSet<_>>(),
+            "still a permutation"
+        );
+        assert_eq!(a.current_name(), Some(after[0]), "the new order's head");
+        let mut b = sim(&MIXED, 7);
+        b.handle(Action::Shuffle);
+        assert_eq!(order_names(&b), after, "same seed, same shuffle");
+    }
+
+    #[test]
+    fn rt_r19_shuffle_with_the_filter_lands_on_a_healthy_favourite() {
+        let mut r = sim(&MIXED, 7).with_favourites(&["star", "cell"]);
+        r.handle(Action::ToggleFavouritesOnly);
+        r.handle(Action::Shuffle);
+        assert!(
+            matches!(r.current_name(), Some("star" | "cell")),
+            "{:?}",
+            r.current_name()
+        );
     }
 
     mod props {

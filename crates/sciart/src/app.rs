@@ -1,14 +1,17 @@
 //! Terminal event loop: the only place that touches the wall clock and the terminal.
 
+use std::fmt::Write as _;
 use std::io::{self, Write};
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event};
 use ratatui::Terminal;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
+use sciart_core::title::{Form, ascii_of};
 use sciart_core::{GlyphMode, Size};
-use sciart_generators::Entry;
+use sciart_generators::{Entry, registry};
 use sciart_keepawake::{Guard, Mode};
 use sciart_render::{FrameBackend, Hud, Painter, TerminalGuard, Theme};
 
@@ -16,6 +19,26 @@ use crate::fps::FpsMeter;
 use crate::keys::action_for;
 use crate::pacer::Pacer;
 use crate::runtime::{Flow, Runtime, Status, install_panic_filter};
+
+/// The project URL shown on the help page (RT-R18).
+const PROJECT_URL: &str = "https://github.com/nilesh-patil/sciart";
+
+/// The static key list of the help page (RT-R18). ASCII only; with the header, the `now`
+/// block and the footer the page is 23 lines, inside 80x24.
+const HELP_KEYS: &str = "\
+  n / right       next scene
+  p / left        previous scene
+  space           pause / resume
+  r               reset scene
+  h               toggle HUD
+  t               next theme
+  ?               toggle this help
+  f               toggle favourite
+  v               favourites only
+  [ / ]           previous / next category
+  s               shuffle
+  q / Esc / Ctrl-C  quit (Esc closes help)
+";
 
 #[derive(Debug, Clone)]
 pub struct Options {
@@ -34,18 +57,24 @@ pub struct Options {
     pub keep_awake: Mode,
     pub low_power_fps: u16,
     pub idle_after: f64,
+    /// The config file in use, or where it would be: shown on the help page (RT-R18).
+    pub config_path: Option<PathBuf>,
+    /// Config `favorites`, seeded into the session (CFG-R9, RT-R19).
+    pub favorites: Vec<String>,
 }
 
-/// What the HUD needs besides the runtime and the keep-awake text.
+/// What the HUD and help page need besides the runtime and the keep-awake text.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct HudExtras {
+pub(crate) struct HudExtras<'a> {
     pub fps: f64,
     pub seed: u64,
     pub low_power: bool,
+    pub config_path: Option<&'a Path>,
 }
 
 /// Drawing state kept across frames, so a steady-state frame allocates nothing (RT-R14):
-/// the painter's colour memory (RND-R14) and reused text buffers for the HUD.
+/// the painter's colour memory (RND-R14), reused text buffers for the HUD, and the help
+/// page text (RT-R18).
 #[derive(Debug, Default)]
 pub(crate) struct Screen {
     painter: Painter,
@@ -54,6 +83,8 @@ pub(crate) struct Screen {
     /// The keep-awake status, rewritten in place each frame (`Guard::write_status`).
     pub keep_awake: String,
     hud_text: String,
+    /// The help page, rebuilt in place each frame it is open (RT-R18).
+    help_text: String,
 }
 
 impl Screen {
@@ -64,14 +95,15 @@ impl Screen {
         }
     }
 
-    /// Draw one frame: the canvas, then the RT-R4 error line or the HUD on the last row.
-    /// Returns whether the picture changed (RT-R17): a frame whose only changes are on
-    /// the HUD or error row (the fps readout follows the draw rate) counts as unchanged.
+    /// Draw one frame: the help page, or the canvas and the RT-R4 error line / HUD on the
+    /// last row. Returns whether the picture changed (RT-R17): a frame whose only changes
+    /// are on the HUD or error row (the fps readout follows the draw rate) counts as
+    /// unchanged.
     pub fn draw<W: Write>(
         &mut self,
         terminal: &mut Terminal<FrameBackend<W>>,
         runtime: &Runtime,
-        extras: HudExtras,
+        extras: HudExtras<'_>,
     ) -> io::Result<bool> {
         // A new or reset scene must not inherit the old one's emitted colours (RND-R14);
         // theme and size changes the painter notices by itself.
@@ -79,16 +111,26 @@ impl Screen {
             self.epoch = runtime.epoch();
             self.painter.reset();
         }
+        let help = runtime.help();
         let Self {
             painter,
             keep_awake,
             hud_text,
+            help_text,
             ..
         } = self;
-        let overlay = runtime.status() == Status::AllFailed || runtime.hud();
+        if help {
+            Self::build_help(help_text, runtime, extras.config_path);
+        }
+        let overlay = !help && (runtime.status() == Status::AllFailed || runtime.hud());
         let mut overlay_row = None;
         terminal.draw(|f| {
             let area = f.area();
+            if help {
+                // RT-R18: a static page instead of the scene and the HUD.
+                draw_help(area, f.buffer_mut(), help_text);
+                return;
+            }
             if overlay {
                 overlay_row = area.bottom().checked_sub(1);
             }
@@ -124,6 +166,112 @@ impl Screen {
             Some((top, _)) => overlay_row.is_none_or(|row| top < row),
         })
     }
+
+    /// Rebuild the help page in `out`, reusing its capacity (RT-R14, RT-R18). The page is
+    /// 23 lines of at most 80 columns, so it fits an 80x24 terminal without scrolling.
+    fn build_help(out: &mut String, runtime: &Runtime, config_path: Option<&Path>) {
+        out.clear();
+        out.push_str("sciart ");
+        out.push_str(env!("CARGO_PKG_VERSION"));
+        out.push_str(" - help\n");
+        out.push_str(HELP_KEYS);
+        out.push_str("\n now\n");
+        let _ = writeln!(
+            out,
+            "  scene           {}",
+            runtime.current_name().unwrap_or("-")
+        );
+        out.push_str("  title           ");
+        match runtime.scene_title() {
+            Some(title) => {
+                for c in title.chars(Form::Full) {
+                    out.push(ascii_of(c).unwrap_or('?'));
+                }
+            }
+            None => out.push('-'),
+        }
+        out.push('\n');
+        let _ = writeln!(
+            out,
+            "  category        {}",
+            runtime
+                .current_category()
+                .map_or("-", sciart_core::Category::label)
+        );
+        let _ = writeln!(
+            out,
+            "  favourite       {}   filter  {}",
+            if runtime.is_favourite() { "yes" } else { "no" },
+            if runtime.favourites_only() {
+                "favourites only"
+            } else {
+                "all scenes"
+            }
+        );
+        let _ = writeln!(
+            out,
+            "  favourites      {}     scenes  {} registered",
+            runtime.favourite_count(),
+            registry().len()
+        );
+        const CONFIG_PREFIX: &str = "  config          ";
+        out.push_str(CONFIG_PREFIX);
+        match config_path {
+            Some(path) => push_path(out, path, 80 - CONFIG_PREFIX.len() - 1),
+            None => out.push('-'),
+        }
+        out.push('\n');
+        let _ = writeln!(out, "  project         {PROJECT_URL}");
+        out.push_str(" press ? or Esc to return to the art");
+    }
+}
+
+/// Write `path` into `out`, eliding its tail with `~` if it would exceed `budget` columns.
+fn push_path(out: &mut String, path: &Path, budget: usize) {
+    struct Take<'a> {
+        out: &'a mut String,
+        left: usize,
+        cut: bool,
+    }
+    impl std::fmt::Write for Take<'_> {
+        fn write_str(&mut self, s: &str) -> std::fmt::Result {
+            for c in s.chars() {
+                if self.left == 0 {
+                    self.cut = true;
+                    return Err(std::fmt::Error);
+                }
+                self.out.push(c);
+                self.left -= 1;
+            }
+            Ok(())
+        }
+    }
+    let mut take = Take {
+        out,
+        left: budget,
+        cut: false,
+    };
+    let _ = write!(take, "{}", path.display());
+    if take.cut {
+        take.out.push('~');
+    }
+}
+
+/// Draw the help page over the whole area, ASCII and clipped to the terminal (RT-R18).
+fn draw_help(area: Rect, buf: &mut ratatui::buffer::Buffer, text: &str) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    buf.reset();
+    let width = usize::from(area.width);
+    for (i, line) in text.split('\n').enumerate() {
+        let Ok(row) = u16::try_from(i) else { break };
+        let y = area.y.saturating_add(row);
+        if y >= area.bottom() {
+            break;
+        }
+        buf.set_stringn(area.x, y, line, width, Style::new());
+    }
 }
 
 pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
@@ -137,7 +285,8 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         .with_hud(opts.hud)
         .with_title(opts.title)
         .with_speed(opts.speed)
-        .with_theme(opts.theme);
+        .with_theme(opts.theme)
+        .with_favourites(&opts.favorites);
     if let Some(interval) = opts.interval {
         runtime = runtime.with_interval(interval);
     }
@@ -167,6 +316,7 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
             fps: fps.fps(),
             seed: opts.seed,
             low_power: pacer.low_power(),
+            config_path: opts.config_path.as_deref(),
         };
         let changed = screen.draw(terminal, &runtime, extras)?;
         // A scene switch (auto-cycle) wakes the rate as a key would (RT-R17).
@@ -248,6 +398,7 @@ mod tests {
             fps: 29.7,
             seed: 16_376_649_230_169_585_180,
             low_power: false,
+            config_path: None,
         };
         screen.draw(term, rt, extras).expect("draw");
     }
@@ -338,6 +489,7 @@ mod tests {
             fps,
             seed: 42,
             low_power: false,
+            config_path: None,
         };
         screen.draw(term, rt, extras).expect("draw")
     }
@@ -426,5 +578,140 @@ mod tests {
         rt.handle(Action::ToggleHud);
         rt.tick(0.1);
         assert_eq!(rt.epoch(), e2, "theme/HUD/tick keep the scene");
+    }
+
+    // ----- M23: help overlay (RT-R18) -----
+
+    fn help_extras(config_path: Option<&Path>) -> HudExtras<'_> {
+        HudExtras {
+            fps: 30.0,
+            seed: 42,
+            low_power: false,
+            config_path,
+        }
+    }
+
+    #[test]
+    fn rt_r18_help_draws_at_one_by_one_without_panicking() {
+        let mut rt = runtime(&["starfield"]);
+        rt.handle(Action::ToggleHelp);
+        let mut term = Terminal::new(FrameBackend::with_size(io::sink(), 1, 1)).expect("terminal");
+        let mut screen = Screen::new();
+        screen
+            .draw(
+                &mut term,
+                &rt,
+                help_extras(Some(Path::new("/tmp/sciart/config.toml"))),
+            )
+            .expect("draw");
+        assert!(screen.help_text.starts_with("sciart "), "page built");
+    }
+
+    #[test]
+    fn rt_r18_help_page_lists_the_bindings_and_the_current_state() {
+        let mut rt = runtime(&["starfield"]).with_favourites(&["starfield"]);
+        rt.handle(Action::ToggleHud); // help replaces the HUD too
+        rt.handle(Action::ToggleHelp);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        screen
+            .draw(
+                &mut term,
+                &rt,
+                help_extras(Some(Path::new("/tmp/sciart/config.toml"))),
+            )
+            .expect("draw");
+        let page = &screen.help_text;
+        for needle in [
+            "next scene",
+            "previous scene",
+            "pause / resume",
+            "reset scene",
+            "toggle HUD",
+            "next theme",
+            "toggle this help",
+            "toggle favourite",
+            "favourites only",
+            "previous / next category",
+            "shuffle",
+            "Esc closes help",
+            "starfield",
+            "Parallax - near stars rush by",
+            "Deep Cosmos",
+            "yes   filter",
+            "all scenes",
+            "0.1.0",
+            "/tmp/sciart/config.toml",
+            PROJECT_URL,
+        ] {
+            assert!(page.contains(needle), "missing {needle:?} in:\n{page}");
+        }
+        assert!(
+            page.lines().count() <= 24,
+            "the page fits 80x24 without scrolling:\n{page}"
+        );
+        for line in page.lines() {
+            assert!(
+                line.chars().count() <= 80,
+                "line is wider than 80 columns: {line:?}"
+            );
+        }
+        assert!(
+            page.contains("press ? or Esc to return to the art"),
+            "footer visible in:\n{page}"
+        );
+        assert!(
+            page.contains(&format!("{} registered", registry().len())),
+            "scene count in:\n{page}"
+        );
+    }
+
+    #[test]
+    fn rt_r18_help_elides_a_long_config_path_and_stays_80_columns() {
+        let mut rt = runtime(&["starfield"]);
+        rt.handle(Action::ToggleHelp);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        let long = "/very/long/path/that/keeps/going/and/going/for/a/while/sciart/config.toml";
+        screen
+            .draw(&mut term, &rt, help_extras(Some(Path::new(long))))
+            .expect("draw");
+        let page = &screen.help_text;
+        for line in page.lines() {
+            assert!(
+                line.chars().count() <= 80,
+                "line is wider than 80 columns: {line:?}"
+            );
+        }
+        assert!(page.contains('~'), "the path is elided in:\n{page}");
+    }
+
+    #[test]
+    fn rt_r18_opening_and_closing_help_repaints_the_screen() {
+        let mut rt = runtime(&["starfield"]);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        assert!(draw(&rt, &mut screen, &mut term, 30.0), "scene");
+        rt.handle(Action::ToggleHelp);
+        assert!(draw(&rt, &mut screen, &mut term, 30.0), "help opens");
+        assert!(
+            !draw(&rt, &mut screen, &mut term, 30.0),
+            "a static help page is unchanged"
+        );
+        rt.handle(Action::ToggleHelp);
+        assert!(draw(&rt, &mut screen, &mut term, 30.0), "help closes");
+    }
+
+    #[test]
+    fn rt_r14_help_frames_do_not_allocate() {
+        let mut rt = runtime(&["starfield"]);
+        rt.handle(Action::ToggleHelp);
+        let (mut screen, mut term, ka) = (Screen::new(), terminal(), Guard::off());
+        for _ in 0..30 {
+            frame(&mut rt, &mut screen, &mut term, &ka);
+        }
+        let ((), stats) = measure(|| {
+            for _ in 0..60 {
+                frame(&mut rt, &mut screen, &mut term, &ka);
+            }
+        });
+        assert_eq!(stats.total(), 0, "{stats:?}");
     }
 }
