@@ -4,6 +4,9 @@ Thanks for helping. sciart is a Rust workspace of 85 terminal scenes; the rules 
 deterministic, fast and honest about what it models. They apply to all contributors
 alike.
 
+The docs map is [docs/README.md](docs/README.md): specs, ADRs, design notes, the gallery and
+the roadmap. Open follow-ups live in [docs/BACKLOG.md](docs/BACKLOG.md), not in the roadmap.
+
 ## Setup
 
 The project uses [pixi](https://pixi.sh) for every task (ADR-0007); the Rust toolchain itself
@@ -54,6 +57,23 @@ suite again in the optimised `ci` profile (TEST-R9). CI mirrors the same command
 `crates/sciart/tests/spec_traceability.rs` fails if a requirement ID has no citing test and is
 not listed in SPEC-006's manual table; it also fails on citations of undefined IDs. Keep it
 green rather than bending it.
+
+## Backlog review
+
+The [roadmap](docs/ROADMAP.md) is milestone-level; the detail for anything not done lives in
+the [backlog](docs/BACKLOG.md). At every milestone close:
+
+1. Walk every `open` row that belongs to the milestone and decide: fix it, narrow it, mark it
+   `superseded`, or mark it `won't fix` with the reason.
+2. No item survives **two milestones** without a decision. A row that is still open after two
+   closes is either scheduled or closed — not silently carried.
+3. Keep the statuses truthful: `done` rows stay for the roadmap box they let close;
+   `superseded` rows name the later work that replaced them.
+4. Replace the milestone's long follow-up sentence in `docs/ROADMAP.md` with a one-line link
+   to the backlog, and tick or annotate the boxes the backlog has resolved.
+
+The `samples/compare/` sheets and the historical samples table are part of this review: if a
+milestone changes a scene's look, regenerate them before closing it.
 
 ## Adding a scene
 
@@ -115,6 +135,8 @@ update.
 - Small commits, conventional style, with requirement IDs:
   `fix(render): clamp the HUD to the last row [RND-R4]`.
 - Keep `docs/ROADMAP.md` checkboxes truthful and update the changelog for user-visible changes.
+- Open work goes in the [backlog](docs/BACKLOG.md), not into a longer roadmap sentence.
 - In a pull request, say what changed, which requirement IDs it serves and which checks ran.
-- New to the codebase? Start from `docs/specs/SPEC-001-core.md` (the generator contract) and
-  the contributor guide (the full engineering guide).
+- New to the codebase? Start from [docs/README.md](docs/README.md), then
+  `docs/specs/SPEC-001-core.md` (the generator contract) and the contributor guide (the full engineering
+  guide).
