@@ -22,7 +22,7 @@ use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier};
 use sciart_core::prelude::*;
 use sciart_generators::{Entry, registry};
-use sciart_render::{FrameBackend, Hud, Painter, Theme};
+use sciart_render::{FrameBackend, Hud, Painter, Theme, paint};
 
 const SEED: u64 = 42;
 
@@ -277,4 +277,81 @@ fn rnd_r17_rt_r15_every_scene_decodes_to_the_painted_frame_and_the_reference_scr
             });
         }
     });
+}
+
+/// RND-R18: `--color 256` paints xterm-256 indices and the encoder writes `38;5;n`/`48;5;n`.
+#[test]
+fn rnd_r18_indexed_painter_encodes_256_colour_sgr() {
+    let (w, h) = (8u16, 2u16);
+    let area = Rect::new(0, 0, w, h);
+    let mut canvas = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
+    canvas.put_bg(
+        0,
+        0,
+        Glyph::new('▀', '#'),
+        Ink::new(Role::Seq, 10),
+        Ink::new(Role::Div, 200),
+    );
+    canvas.put(1, 1, Glyph::new('★', '*'), Ink::new(Role::Star, 255));
+    let mut indexed = Buffer::empty(area);
+    Painter::indexed().paint(&canvas, Theme::Astro, area, &mut indexed);
+    assert!(matches!(indexed[(0, 0)].bg, Color::Indexed(_)));
+    assert!(matches!(indexed[(1, 1)].fg, Color::Indexed(_)));
+
+    let out = Shared::default();
+    let mut backend = FrameBackend::with_size(out.clone(), w, h);
+    backend
+        .draw(Buffer::empty(area).diff_iter(&indexed))
+        .expect("in-memory sink");
+    backend.flush().expect("in-memory sink");
+    let bytes = out.take().0;
+    let text = String::from_utf8_lossy(&bytes);
+    assert!(text.contains("38;5;"), "{text:?}");
+    assert!(text.contains("48;5;"), "{text:?}");
+    assert!(!text.contains("38;2;"), "{text:?}");
+}
+
+/// RND-R18: `--color truecolor` (and `auto` without `NO_COLOR`) is the default painter, so
+/// it must encode exactly the same bytes as the M22 path for the same theme.
+#[test]
+fn rnd_r18_truecolor_painter_encodes_like_the_default_painter() {
+    let (w, h) = (12u16, 3u16);
+    let area = Rect::new(0, 0, w, h);
+    let mut canvas = Canvas::new(Size::new(w, h), GlyphMode::Unicode);
+    canvas.put_bg(
+        0,
+        0,
+        Glyph::new('▀', '#'),
+        Ink::new(Role::Seq, 10),
+        Ink::new(Role::Div, 200),
+    );
+    for x in 1..12u16 {
+        canvas.put(
+            i32::from(x),
+            1,
+            Glyph::new('★', '*'),
+            Ink::new(Role::Star, u8::try_from(x * 20).expect("level")),
+        );
+    }
+
+    // `paint()` is the stateless reference (metrics, probes) and stays truecolor; the
+    // default `Painter` must agree with it.
+    let mut reference = Buffer::empty(area);
+    paint(&canvas, Theme::Astro, area, &mut reference);
+    let mut truecolor = Buffer::empty(area);
+    Painter::new().paint(&canvas, Theme::Astro, area, &mut truecolor);
+    assert_eq!(reference, truecolor, "truecolor is the default path");
+
+    let encoded = |frame: &Buffer| {
+        let out = Shared::default();
+        let mut backend = FrameBackend::with_size(out.clone(), w, h);
+        backend
+            .draw(Buffer::empty(area).diff_iter(frame))
+            .expect("in-memory sink");
+        backend.flush().expect("in-memory sink");
+        out.take().0
+    };
+    let (a, b) = (encoded(&reference), encoded(&truecolor));
+    assert!(!a.is_empty());
+    assert_eq!(a, b, "38;2;r;g;b stream is byte-identical");
 }

@@ -123,7 +123,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         std::env::var_os("HOME"),
     );
     let file = config::load(cli.config.as_deref(), default.as_deref())?;
-    let (settings, warnings) = config::resolve(cli, file);
+    let (settings, warnings) = config::resolve(cli, file, config::Env::from_process());
     for warning in warnings {
         eprintln!("sciart: warning: {warning}");
     }
@@ -139,6 +139,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         fps: settings.fps,
         seed,
         theme: settings.theme,
+        color: settings.color,
         glyphs: if settings.ascii {
             GlyphMode::Ascii
         } else {

@@ -507,6 +507,45 @@ fn cli_r9_list_category_and_usage_errors_exit_2() {
     }
 }
 
+/// RND-R18/CFG-R10: `NO_COLOR` is read by the binary (not by `resolve`), prints exactly one
+/// warning for the automatic downgrade, and an explicit colour mode silences it.
+#[test]
+fn cfg_r10_no_color_warns_once_and_an_explicit_color_silences_it() {
+    let home = tempfile::tempdir().unwrap();
+    let run = |args: &[&str], no_color: &str| {
+        Command::new(BIN)
+            .args(args)
+            // The category error exits before the TUI, after settings are resolved.
+            .args(["sim", "--category", "definitely-not-a-category"])
+            .env("XDG_CONFIG_HOME", home.path())
+            .env("NO_COLOR", no_color)
+            .output()
+            .unwrap()
+    };
+    let warning = "sciart: warning: NO_COLOR is set; using the mono theme";
+
+    for args in [&[][..], &["--color", "auto"][..]] {
+        let out = run(args, "1");
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert_eq!(stderr.matches(warning).count(), 1, "{args:?}: {stderr}");
+    }
+    for args in [
+        &["--color", "truecolor"][..],
+        &["--color", "256"][..],
+        &["--color", "mono"][..],
+    ] {
+        let out = run(args, "1");
+        assert_eq!(out.status.code(), Some(2));
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains("NO_COLOR is set"), "{args:?}: {stderr}");
+    }
+    // An empty NO_COLOR is not set (the no-color.org convention).
+    let out = run(&[], "");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stderr.contains("NO_COLOR is set"), "{stderr}");
+}
+
 // ----- M23: help overlay and favourites (RT-R18, RT-R19) -----
 
 /// `?` opens the static help page, whose footer and project URL must fit an 80x24 screen;
