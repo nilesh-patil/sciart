@@ -18,12 +18,16 @@ publish = false
 [features]
 # Real mouse-jiggle keep-awake backend (KA-R4); needs Accessibility permission on macOS.
 mouse = ["sciart-keepawake/mouse"]
+# CLI-R8 / ADR-0025: `sciart record` and its headless capture pipeline (GIF, PNG, asciicast).
+# Off by default so the normal binary carries no image dependencies.
+record = ["dep:sciart-capture"]
 
 [dependencies]
 sciart-core.workspace = true
 sciart-generators.workspace = true
 sciart-render.workspace = true
 sciart-keepawake.workspace = true
+sciart-capture = { workspace = true, optional = true }
 anyhow.workspace = true
 clap.workspace = true
 crossterm.workspace = true
@@ -34,6 +38,8 @@ serde.workspace = true
 toml.workspace = true
 
 [dev-dependencies]
+gif.workspace = true
+png.workspace = true
 portable-pty.workspace = true
 proptest.workspace = true
 tempfile.workspace = true
