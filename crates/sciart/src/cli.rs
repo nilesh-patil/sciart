@@ -36,6 +36,10 @@ pub struct Cli {
     #[arg(long, global = true, value_enum)]
     pub theme: Option<ThemeArg>,
 
+    /// Colour capability: auto, truecolor, 256 or mono [default: auto]
+    #[arg(long, global = true, value_enum)]
+    pub color: Option<ColorArg>,
+
     /// Use pure-ASCII glyphs
     #[arg(long, global = true)]
     pub ascii: bool,
@@ -211,6 +215,7 @@ pub enum ThemeArg {
     Rainbow,
     Mono,
     Aurora,
+    Colorblind,
 }
 
 impl From<ThemeArg> for Theme {
@@ -220,8 +225,26 @@ impl From<ThemeArg> for Theme {
             ThemeArg::Rainbow => Theme::Rainbow,
             ThemeArg::Mono => Theme::Mono,
             ThemeArg::Aurora => Theme::Aurora,
+            ThemeArg::Colorblind => Theme::Colorblind,
         }
     }
+}
+
+/// CLI-R10/RND-R18: the requested colour capability, before `NO_COLOR` and the config
+/// precedence are applied (`sciart::config::ColorMode` is the resolved mode).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ColorArg {
+    /// Truecolor unless `NO_COLOR` selects mono (RND-R18).
+    Auto,
+    /// Always 24-bit RGB; the M22 stream, byte for byte.
+    Truecolor,
+    /// Nearest xterm-256 index (`38;5;n`/`48;5;n`).
+    #[value(name = "256")]
+    #[serde(rename = "256")]
+    Indexed256,
+    /// The mono theme (grey), whatever `--theme` says.
+    Mono,
 }
 
 /// CLI-R6 / CFG-R5 spelling of `sciart_keepawake::Mode`.
@@ -991,6 +1014,38 @@ mod tests {
             parse(&[]).unwrap().speed,
             None,
             "default applied in Settings"
+        );
+    }
+
+    #[test]
+    fn cfg_r10_color_flag_values_and_bad_value_exits_2() {
+        for (arg, want) in [
+            ("auto", ColorArg::Auto),
+            ("truecolor", ColorArg::Truecolor),
+            ("256", ColorArg::Indexed256),
+            ("mono", ColorArg::Mono),
+        ] {
+            assert_eq!(
+                parse(&["--color", arg]).unwrap().color,
+                Some(want),
+                "--color {arg}"
+            );
+        }
+        for bad in ["neon", "16", "true-color", "indexed"] {
+            let err = parse(&["--color", bad]).unwrap_err();
+            assert_eq!(err.exit_code(), 2, "--color {bad}");
+        }
+        assert_eq!(
+            parse(&[]).unwrap().color,
+            None,
+            "default (auto) applied in Settings"
+        );
+        // The global flag also works after a subcommand.
+        assert_eq!(
+            parse(&["run", "starfield", "--color", "256"])
+                .unwrap()
+                .color,
+            Some(ColorArg::Indexed256)
         );
     }
 
