@@ -215,6 +215,7 @@ pub enum ThemeArg {
     Rainbow,
     Mono,
     Aurora,
+    Colorblind,
 }
 
 impl From<ThemeArg> for Theme {
@@ -224,6 +225,7 @@ impl From<ThemeArg> for Theme {
             ThemeArg::Rainbow => Theme::Rainbow,
             ThemeArg::Mono => Theme::Mono,
             ThemeArg::Aurora => Theme::Aurora,
+            ThemeArg::Colorblind => Theme::Colorblind,
         }
     }
 }
