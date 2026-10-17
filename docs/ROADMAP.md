@@ -297,5 +297,13 @@ Design: [docs/design/M22-lean-build-runtime.md](design/M22-lean-build-runtime.md
 - [x] Review (Rust/perf: 1 blocking + 2 major fixed in round 2); before/after numbers; rs-ci green; local merge (churn cuts skipped: none invisible)
 - [ ] Manual encoder check in iTerm2, Terminal.app and tmux; follow-ups in the design doc
 
+## M23 — Improvement programme (in progress)
+Design: [docs/IMPROVEMENTS.md](IMPROVEMENTS.md) · [docs/design/M23-programme.md](design/M23-programme.md) · ADR-0024. User chose all 17 items, three contributors, phase branches merged `--no-ff`, local-only git, repository renamed to `sciart`, and a local `v0.1.0` tag.
+- [ ] Phase 1 — trust + front door: TEST-R12 hermetic suite, master-spec truth pass, README/LICENSE/metadata, GitHub Actions + `cargo-deny`, tagged-release workflow, generated gallery
+- [ ] Phase 2 — share loop: `sciart record`, in-app help/favourites, category filters, speed, `list --json`
+- [ ] Phase 3 — compatibility: colour capability (`NO_COLOR`/256/mono), colour-blind-safe theme
+- [ ] Phase 4 — longevity: SPEC-002 split with a generated index, backlog triage, fuzz targets
+- [ ] Phase 5 — art/science: re-score and polish the below-8 scenes, gallery-review ritual, science-claims audit
+
 ## M9 — Future (unscheduled)
-- `sciart record`, GitHub Actions + cargo-deny, Windows/Linux keep-awake backends, per-generator config (the braille hi-res canvas landed in M10 as `raster::Dots`).
+- Windows/Linux keep-awake backends (deferred by the macOS-first decision), light-background theme, per-OS release packaging beyond tarballs.
