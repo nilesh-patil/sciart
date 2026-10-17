@@ -6,6 +6,8 @@ mod config;
 mod fps;
 mod keys;
 mod pacer;
+#[cfg(feature = "record")]
+mod record;
 mod runtime;
 
 /// The unit-test binary counts heap calls for the RT-R14 frame-loop test (ADR-0009). The
@@ -32,6 +34,11 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
 
+    // CLI-R8: recording is headless (no config file, terminal or keep-awake).
+    if matches!(command, Command::Record(_)) {
+        return run_record(&cli, &command);
+    }
+
     let opts = match prepare(&cli, &command) {
         Ok(opts) => opts,
         Err(e) => {
@@ -53,6 +60,40 @@ fn main() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// CLI-R8: validate the recording request (exit 2) and write it (I/O errors exit 1).
+#[cfg(feature = "record")]
+fn run_record(cli: &Cli, command: &Command) -> ExitCode {
+    let spec = match cli::RecordSpec::resolve(cli, command) {
+        Ok(spec) => spec,
+        Err(e) => {
+            eprintln!("sciart: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match record::run(&spec) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("sciart: {e}");
+            ExitCode::from(e.code())
+        }
+    }
+}
+
+/// CLI-R8: a build without the feature keeps the subcommand parsing, validates the request
+/// the same way (so a typo is reported identically), then says the feature is missing (exit 2).
+#[cfg(not(feature = "record"))]
+fn run_record(cli: &Cli, command: &Command) -> ExitCode {
+    if let Err(e) = cli::RecordSpec::resolve(cli, command) {
+        eprintln!("sciart: {e}");
+        return ExitCode::from(2);
+    }
+    eprintln!(
+        "sciart: the `record` command is not compiled into this build; \
+         reinstall with `cargo install --path crates/sciart --features record`"
+    );
+    ExitCode::from(2)
 }
 
 /// Load config, resolve settings (CFG-R1..R4) and pick the generators to run.
