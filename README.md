@@ -27,6 +27,9 @@ Requires [Rust](https://rustup.rs) 1.88 or newer.
 
 ```sh
 cargo install --git https://github.com/nilesh-patil/sciart sciart --locked
+
+# with the headless recorder (`sciart record`):
+cargo install --git https://github.com/nilesh-patil/sciart sciart --features record --locked
 ```
 
 Working on the project? Clone it and install through the pixi task instead:
@@ -45,6 +48,8 @@ Release tarballs and Homebrew formulae are planned but **not available yet**.
 sciart                  # cycle all 85 scenes (the default `sim` mode)
 sciart run aurora       # one scene, full-screen
 sciart list             # every scene: name, category, description
+sciart list --json      # the same catalogue for scripts
+sciart record aurora --seconds 5 --out aurora.gif   # needs --features record
 ```
 
 85 scenes across **11 categories**. Four themes — `astro` (default), `rainbow`, `mono` and
@@ -60,6 +65,11 @@ sciart list             # every scene: name, category, description
 | `r` | reset the current scene |
 | `h` | toggle the HUD |
 | `t` | cycle theme: astro → rainbow → mono → aurora |
+| `?` | help overlay (`Esc` closes it) |
+| `f` | favourite the current scene |
+| `v` | show only favourites |
+| `[` / `]` | previous / next category |
+| `s` | shuffle the cycle order |
 | `q` / `Esc` / `Ctrl-C` | quit |
 
 ## Configure
@@ -67,7 +77,7 @@ sciart list             # every scene: name, category, description
 The config file is `~/.config/sciart/config.toml` (or
 `$XDG_CONFIG_HOME/sciart/config.toml`). Every key is optional; command-line flags override
 the file. See [`docs/config.example.toml`](docs/config.example.toml) for every key, including
-the low-power `[low_power]` table.
+`favorites`, `speed` and the low-power `[low_power]` table.
 
 ## Platform
 
