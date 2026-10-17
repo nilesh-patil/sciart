@@ -88,6 +88,7 @@ historical context; the spec is still the contract.
 | [M21 ten scenes](design/M21-ten-scenes.md) | Proposals, looks and follow-ups for the last ten scenes |
 | [M22 lean build](design/M22-lean-build-runtime.md) | Build/runtime measurements, decisions and follow-ups |
 | [M23 programme](design/M23-programme.md) | The 17 improvement items and the phase plan |
+| [M23 Phase 5](design/M23-wave5.md) | Art re-scores (10/11 at 8+), science claims, review ritual and the remaining art follow-ups |
 
 ## Reference and process
 
