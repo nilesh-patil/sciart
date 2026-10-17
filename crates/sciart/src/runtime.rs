@@ -91,6 +91,8 @@ pub struct Runtime {
     /// Auto-cycle period in wall seconds (RT-R5); `None` = never.
     interval: Option<f64>,
     since_switch: f64,
+    /// Simulated seconds per wall second (CFG-R9); 1.0 = real time.
+    speed: f64,
     /// Indices shown, oldest first; the last one is normally `current` (RT-R5a).
     history: Vec<usize>,
     paused: bool,
@@ -131,6 +133,7 @@ impl Runtime {
             notices: Vec::new(),
             interval: None,
             since_switch: 0.0,
+            speed: 1.0,
             history: Vec::new(),
             paused: false,
             hud: false,
@@ -162,7 +165,7 @@ impl Runtime {
         let Some(stage) = self.stage.as_mut() else {
             return;
         };
-        let steps = self.clock.advance(elapsed);
+        let steps = self.clock.advance(elapsed * self.speed);
         // The stage keeps its last complete frame (CORE-R21), which `frame()` shows, so
         // no per-tick copy is needed (RT-R14).
         let outcome = guarded(|| {
@@ -231,6 +234,13 @@ impl Runtime {
 
     pub fn with_interval(mut self, secs: f64) -> Self {
         self.interval = Some(secs);
+        self
+    }
+
+    /// Simulated seconds per wall second (CFG-R9): scales only what reaches `FixedStep`,
+    /// so the step stays 1/60 s and the auto-cycle interval stays wall time (RT-R19).
+    pub fn with_speed(mut self, speed: f64) -> Self {
+        self.speed = speed;
         self
     }
 
@@ -651,6 +661,25 @@ mod tests {
         let mut r = rt(&[&OK], 0);
         r.tick(0.2); // one 5 FPS frame = 12 simulation steps
         assert_eq!(first_line(&r), "12");
+    }
+
+    #[test]
+    fn cfg_r9_speed_scales_simulation_time_but_not_the_switch_timer() {
+        // 0.1 wall seconds is 6 fixed steps at 1x and 12 at 2x (CFG-R9): speed multiplies
+        // only what reaches `FixedStep`, so `dt` stays 1/60 and frames stay deterministic.
+        let mut slow = rt(&[&OK], 0);
+        slow.tick(0.1);
+        assert_eq!(first_line(&slow), "6");
+        let mut fast = rt(&[&OK], 0).with_speed(2.0);
+        fast.tick(0.1);
+        assert_eq!(first_line(&fast), "12");
+
+        // The auto-cycle interval is wall time (RT-R5), so 2x speed does not halve it.
+        let mut r = rt(&[&OK, &OK2], 0).with_interval(1.0).with_speed(2.0);
+        r.tick(0.6);
+        assert_eq!(r.current_name(), Some("ok"), "0.6 wall s < 1 s");
+        r.tick(0.41);
+        assert_eq!(r.current_name(), Some("ok2"), "1.01 wall s cycled");
     }
 
     #[test]
