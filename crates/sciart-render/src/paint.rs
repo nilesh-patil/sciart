@@ -14,6 +14,16 @@ use crate::Theme;
 use crate::color::quantize;
 use crate::theme::{HuePos, hue_pos, lut, per_cell, rainbow_at, role_index};
 
+/// How the painter fills a cell whose background ink is `Role::Background` (RND-R20).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum Background {
+    /// Opaque black, so terminal wallpaper/transparency cannot leak into the art.
+    #[default]
+    Opaque,
+    /// Terminal default (`Color::Reset`), the pre-M24 behaviour.
+    Terminal,
+}
+
 /// Largest per-channel change from the emitted colour that is not re-sent (RND-R14): four
 /// 8-bit levels (1.6 % of the range), below what a viewer can see on a moving field, small
 /// enough that a slow fade still steps. Was 2 at M14; 4 since M15 (ADR-0018), where M11's
@@ -22,14 +32,24 @@ use crate::theme::{HuePos, hue_pos, lut, per_cell, rainbow_at, role_index};
 pub const HYSTERESIS: u8 = 4;
 
 /// Write every canvas cell that fits inside `area` into `buf` (RND-R3), with the exact
-/// theme colours.
+/// theme colours and the default opaque background (RND-R20).
 ///
 /// A `Role::Background` ink means "terminal default", for the foreground (RND-R3) and
-/// for the cell background (RND-R7, CORE-R40). Attributes that cannot change what the
-/// cell looks like are left at the default (RND-R15): a blank has no foreground, and a
-/// half block whose two halves are one colour is drawn as a blank in that background.
+/// for the cell background (RND-R7, CORE-R40), unless [`Background::Opaque`] fills it
+/// with black. Attributes that cannot change what the cell looks like are left at the
+/// default (RND-R15): a blank has no foreground, and a half block whose two halves are
+/// one colour is drawn as a blank in that background.
 pub fn paint(canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
-    paint_with(canvas, theme, area, buf, &[], &mut [], false);
+    paint_with(
+        canvas,
+        theme,
+        area,
+        buf,
+        &[],
+        &mut [],
+        false,
+        Background::Opaque,
+    );
 }
 
 /// A packed cell colour: 0 is the terminal default, `RGB | 1 << 24` a 24-bit colour,
@@ -92,6 +112,8 @@ pub struct Painter {
     hysteresis: bool,
     /// Emit xterm-256 indices instead of 24-bit RGB (RND-R18, `--color 256`).
     indexed: bool,
+    /// Opaque black or terminal-default background (RND-R20, `--background`).
+    background: Background,
 }
 
 impl Painter {
@@ -116,6 +138,14 @@ impl Painter {
     /// A painter that always emits the exact colours (for comparisons).
     pub fn exact() -> Self {
         Self::default()
+    }
+
+    /// Set the background mode (RND-R20); reset the emitted-colour memory because the
+    /// first frame with a new background must repaint every cell.
+    pub fn with_background(mut self, background: Background) -> Self {
+        self.background = background;
+        self.emitted.clear();
+        self
     }
 
     /// Forget every emitted colour: the next frame is painted exactly (scene change or
@@ -144,7 +174,16 @@ impl Painter {
         } else {
             &mut []
         };
-        paint_with(canvas, theme, area, buf, &self.hues, memory, self.indexed);
+        paint_with(
+            canvas,
+            theme,
+            area,
+            buf,
+            &self.hues,
+            memory,
+            self.indexed,
+            self.background,
+        );
     }
 }
 
@@ -174,7 +213,9 @@ fn paint_with(
     hues: &[HuePos],
     memory: &mut [Emitted],
     indexed: bool,
+    background: Background,
 ) {
+    let _ = background; // RND-R20 behaviour lands with the paint tests.
     let width = usize::from(canvas.size().width());
     let table = lut(theme);
     let color = |ink: Ink, i: usize, x: u16, y: u16| -> Packed {

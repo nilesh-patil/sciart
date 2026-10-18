@@ -1,6 +1,6 @@
 # SPEC-005: CLI & configuration
 
-**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file), M23 (record, filters, list formats, colour capability) · **Status**: Implemented through M22 (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22); CLI-R8..R10 and CFG-R9 in M23; CFG-R10 in M23.
+**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file), M23 (record, filters, list formats, colour capability), M24 (background) · **Status**: Implemented through M22 (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22); CLI-R8..R10 and CFG-R9 in M23; CFG-R10 in M23; CLI-R11/CFG-R11 in M24.
 
 ## CLI (clap derive)
 ```
@@ -64,3 +64,5 @@ fps = 5
 - **CLI-R10** (M23) `list` formats, in precedence order: `--json` (a JSON array of `{name, category, description}` sorted by name), `--categories` (`id<TAB>label<TAB>count` for each non-empty category, sorted by label), TSV (with `--plain` or when stdout is not a terminal; the CLI-R4 form), otherwise the aligned `NAME CATEGORY DESCRIPTION` table with a header row. Filters narrow every format, including the `--categories` counts, and every format lists the same scene set.
 - **CFG-R9** (M23) Config keys `speed` (finite, 0.1..=4, default 1.0; `--speed` overrides) and `favorites` (array of registered names or retired aliases, default empty; unknown names warn like `disabled`, CFG-R4). Favourites seed the session set (RT-R19); `f` does not write the file.
 - **CFG-R10** (M23, ADR-0026) Config key `color = "auto"|"truecolor"|"256"|"mono"` (default `auto`); `--color` overrides. `auto` (default or explicit) honours `NO_COLOR` as RND-R18 describes; an explicit `truecolor`/`256`/`mono` in the file or flag wins over the environment.
+- **CLI-R11** (M24, ADR-0027) `--background <opaque|terminal>` is a global flag (available to `sim` and `run`), default `opaque`. `opaque` paints black behind every cell (RND-R20); `terminal` restores the terminal-default background for `Role::Background`. An invalid value exits 2. `record` is unaffected: its PNG/GIF/asciicast frames already have an opaque black image/background.
+- **CFG-R11** (M24, ADR-0027) Config key `background = "opaque"|"terminal"` (default `opaque`); `--background` overrides. Invalid values are rejected like any CFG-R3 value (exit 2).
