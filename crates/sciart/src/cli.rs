@@ -1,4 +1,4 @@
-//! Command-line interface (SPEC-005 CLI-R1..R10).
+//! Command-line interface (SPEC-005 CLI-R1..R11).
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use sciart_core::{Category, Size};
 use sciart_generators::{Entry, find, registry};
 use sciart_keepawake::Mode;
-use sciart_render::Theme;
+use sciart_render::{Background, Theme};
 use serde::Deserialize;
 
 #[derive(Debug, Parser)]
@@ -39,6 +39,11 @@ pub struct Cli {
     /// Colour capability: auto, truecolor, 256 or mono [default: auto]
     #[arg(long, global = true, value_enum)]
     pub color: Option<ColorArg>,
+
+    /// Background behind every cell: opaque black or the terminal default; terminal output only
+    /// [default: opaque]
+    #[arg(long, global = true, value_enum)]
+    pub background: Option<BackgroundArg>,
 
     /// Use pure-ASCII glyphs
     #[arg(long, global = true)]
@@ -245,6 +250,25 @@ pub enum ColorArg {
     Indexed256,
     /// The mono theme (grey), whatever `--theme` says.
     Mono,
+}
+
+/// CLI-R11 / CFG-R11 spelling of `sciart_render::Background`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BackgroundArg {
+    /// Opaque black behind every cell (RND-R20).
+    Opaque,
+    /// The terminal's own background for `Role::Background`.
+    Terminal,
+}
+
+impl From<BackgroundArg> for Background {
+    fn from(b: BackgroundArg) -> Background {
+        match b {
+            BackgroundArg::Opaque => Background::Opaque,
+            BackgroundArg::Terminal => Background::Terminal,
+        }
+    }
 }
 
 /// CLI-R6 / CFG-R5 spelling of `sciart_keepawake::Mode`.
@@ -1205,6 +1229,52 @@ mod tests {
             ["record", "starfield", "--out", "x.gif", "--format", "mp4"],
         ] {
             assert_eq!(parse(&argv).unwrap_err().exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn cli_r11_background_flag_is_global_and_defaults_to_none() {
+        assert_eq!(
+            parse(&[]).unwrap().background,
+            None,
+            "the opaque default is applied in Settings"
+        );
+        for (arg, want) in [
+            ("opaque", BackgroundArg::Opaque),
+            ("terminal", BackgroundArg::Terminal),
+        ] {
+            assert_eq!(
+                parse(&["--background", arg]).unwrap().background,
+                Some(want),
+                "{arg}"
+            );
+            // Global: it is accepted after a subcommand too.
+            assert_eq!(
+                parse(&["run", "starfield", "--background", arg])
+                    .unwrap()
+                    .background,
+                Some(want),
+                "run {arg}"
+            );
+            // `record` accepts it as a global flag (the recording path ignores it).
+            assert_eq!(
+                parse(&["record", "starfield", "--out", "x.gif", "--background", arg])
+                    .unwrap()
+                    .background,
+                Some(want),
+                "record {arg}"
+            );
+        }
+    }
+
+    #[test]
+    fn cli_r11_invalid_background_exits_2() {
+        for bad in ["neon", "windows", "opaqueish", ""] {
+            assert_eq!(
+                parse(&["--background", bad]).unwrap_err().exit_code(),
+                2,
+                "--background {bad:?}"
+            );
         }
     }
 

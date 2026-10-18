@@ -6,6 +6,20 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-18
+
+### Added
+
+- `--background <opaque|terminal>` and the `background` config key. `opaque` is the default:
+  the live painter fills every cell with black, so a terminal wallpaper, transparency or
+  selection band cannot show through the art ([ADR-0027](docs/adr/0027-opaque-background.md),
+  RND-R20, CLI-R11, CFG-R11).
+
+### Changed
+
+- The help page also paints the opaque background; `--background terminal` keeps the previous
+  terminal-default behaviour for users who want transparency.
+
 ## [0.5.0] - 2026-10-18
 
 ### Changed
