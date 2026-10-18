@@ -17,12 +17,18 @@ should be deterministic: the same frame should look the same in every terminal.
 
 ## Decision
 
-The live painter defaults to an **opaque black** background (`#000000`) for every cell,
-including cells whose ink is `Role::Background`. A new public `Background` enum selects
-`Opaque` (default) or `Terminal`; `--background opaque|terminal` (CLI-R11) and
+The **app's** live painter defaults to an **opaque black** background (`#000000`) for every
+cell, including cells whose ink is `Role::Background`. A new public `Background` enum selects
+`Opaque` or `Terminal`; `--background opaque|terminal` (CLI-R11) and
 `background = "opaque"|"terminal"` (CFG-R11) expose it. `Terminal` restores the old
 `Color::Reset` behaviour for users who want terminal transparency or their own
 background.
+
+The **library** default stays `Background::Terminal`: `paint()`, `Painter::new()` and
+`Painter::indexed()` callers (previews, capture/record, cost probes, encoder tests) keep the
+RND-R3/RND-R7 stream byte-for-byte. Only `Screen` opts into `Opaque` from `Settings`, which
+defaults to `opaque`. This keeps the visual fix in the live app without silently changing
+headless output or the art-metric bands.
 
 Explicit per-cell background inks (half blocks, `Canvas::put_bg`) are preserved. The
 indexed painter emits the nearest xterm-256 black. Recordings and previews already render
@@ -35,7 +41,8 @@ an opaque black image, so they need no new flag.
   frames.
 - **Theme background colour**: more cohesive per theme, but still an explicit colour and
   would change every theme's ground; the reported band is not a theme colour. Pure black
-  matches the art's existing black ground and the previews.
+  matches the art's existing terminal-black ground and the PNG capture pipeline's opaque
+  image.
 - **Clear the screen every frame / force a full repaint**: more bytes, does not hide a
   terminal selection overlay, and does not address transparency; only useful if a stale
   diff row were the cause, which the pty capture ruled out.
@@ -44,13 +51,14 @@ an opaque black image, so they need no new flag.
 
 ## Consequences
 
-- The live frame is deterministic and matches the PNG previews; terminal wallpaper,
-  transparency and selection highlights cannot leak into the art by default.
+- The live frame is deterministic and does not let terminal wallpaper, transparency or
+  selection highlights leak into the art by default; the PNG capture pipeline was already
+  opaque.
 - Users who want transparency set `background = "terminal"`.
-- The first frame emits one extra SGR (black background) and each cell's background is
-  explicit; the encoder already groups equal pens, so the per-frame cost is one SGR, not
-  one per cell. Hysteresis and the RT-R15 byte budget are unchanged in practice.
-- RND-R3/RND-R7 are amended for the default mode; `Background::Terminal` keeps their
-  original wording. New tests: RND-R20 (paint), CLI-R11/CFG-R11 (CLI/config), and the
-  pty smoke test in `crates/sciart/tests/pty_smoke.rs`.
+- The app's first frame emits one extra background SGR; the encoder groups equal pens, so
+  the cost is not one SGR per cell. Headless callers are unchanged.
+- RND-R3/RND-R7 keep their library wording; the app's `Background::Opaque` mode overrides
+  `Role::Background` at the `Screen`, and `Background::Terminal` is the library default.
+  RND-R15 is unchanged: a blank still has no foreground. New tests: RND-R20 (paint),
+  CLI-R11/CFG-R11 (CLI/config), and the pty smoke test.
 - `record` remains opaque black in every mode; the flag is terminal-only.

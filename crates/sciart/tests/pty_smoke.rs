@@ -816,3 +816,58 @@ fn rnd_r20_background_terminal_keeps_the_terminal_default() {
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
 }
+
+/// RND-R20: the HUD and the help page are full-screen visuals too; both keep the opaque
+/// ground (a `Reset` HUD row would be the same horizontal band the fix removes).
+#[test]
+fn rnd_r20_hud_and_help_use_the_opaque_ground() {
+    let args = [
+        "run",
+        "starfield",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+        "--hud",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("the HUD", |t| t.contains(" fps "));
+    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    s.press("?");
+    s.wait_for("the help page", |t| {
+        t.contains("sciart") && t.contains("help")
+    });
+    assert_background(&s, vt100::Color::Rgb(0, 0, 0));
+    s.press("\x1b");
+    let (status, _) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+}
+
+/// RND-R20/RND-R18: under `--color 256` the opaque ground is the xterm black index, not a
+/// truecolor escape (the help page included).
+#[test]
+fn rnd_r20_indexed_opaque_ground_is_xterm_black() {
+    let args = [
+        "run",
+        "starfield",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+        "--color",
+        "256",
+    ];
+    let mut s = Session::start(&args);
+    s.wait_for("a lit frame", |t| {
+        t.chars().filter(|c| !c.is_whitespace()).count() > 50
+    });
+    assert_background(&s, vt100::Color::Idx(16));
+    s.press("?");
+    s.wait_for("the help page", |t| {
+        t.contains("sciart") && t.contains("help")
+    });
+    assert_background(&s, vt100::Color::Idx(16));
+    s.press("\x1b");
+    let (status, _) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+}

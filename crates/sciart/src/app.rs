@@ -146,13 +146,14 @@ impl Screen {
             Self::build_help(help_text, runtime, extras.config_path);
         }
         let background = painter.background();
+        let blank = painter.blank_color();
         let overlay = !help && (runtime.status() == Status::AllFailed || runtime.hud());
         let mut overlay_row = None;
         terminal.draw(|f| {
             let area = f.area();
             if help {
                 // RT-R18: a static page instead of the scene and the HUD.
-                draw_help(area, f.buffer_mut(), help_text, background);
+                draw_help(area, f.buffer_mut(), help_text, background, blank);
                 return;
             }
             if overlay {
@@ -282,14 +283,21 @@ fn push_path(out: &mut String, path: &Path, budget: usize) {
 }
 
 /// Draw the help page over the whole area, ASCII and clipped to the terminal (RT-R18).
-fn draw_help(area: Rect, buf: &mut ratatui::buffer::Buffer, text: &str, background: Background) {
+fn draw_help(
+    area: Rect,
+    buf: &mut ratatui::buffer::Buffer,
+    text: &str,
+    background: Background,
+    blank: Color,
+) {
     if area.width == 0 || area.height == 0 {
         return;
     }
     buf.reset();
-    // RND-R20: the help page is a full-screen visual too; keep terminal wallpaper out.
+    // RND-R20: the help page is a full-screen visual too; keep terminal wallpaper out and
+    // use the same black the painter would emit (indexed black under `--color 256`).
     let style = match background {
-        Background::Opaque => Style::new().bg(Color::Rgb(0, 0, 0)),
+        Background::Opaque => Style::new().bg(blank),
         Background::Terminal => Style::new(),
     };
     if background == Background::Opaque {
