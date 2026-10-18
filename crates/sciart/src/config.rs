@@ -1,13 +1,13 @@
-//! Config file loading and settings resolution (SPEC-005 CFG-R1..R10).
+//! Config file loading and settings resolution (SPEC-005 CFG-R1..R11).
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
 use sciart_keepawake::Mode;
-use sciart_render::Theme;
+use sciart_render::{Background, Theme};
 use serde::Deserialize;
 
-use crate::cli::{Cli, ColorArg, KeepAwakeArg, ThemeArg, UsageError};
+use crate::cli::{BackgroundArg, Cli, ColorArg, KeepAwakeArg, ThemeArg, UsageError};
 
 pub const DEFAULT_FPS: u16 = 30;
 pub const DEFAULT_INTERVAL: f64 = 15.0;
@@ -62,6 +62,8 @@ pub struct FileConfig {
     pub theme: Option<ThemeArg>,
     /// Colour capability (CFG-R10); `auto` follows `NO_COLOR` (RND-R18).
     pub color: Option<ColorArg>,
+    /// Background behind every cell (CFG-R11); default `opaque`.
+    pub background: Option<BackgroundArg>,
     pub ascii: Option<bool>,
     pub hud: Option<bool>,
     pub title: Option<bool>,
@@ -94,6 +96,8 @@ pub struct Settings {
     pub theme: Theme,
     /// Resolved colour capability (RND-R18, CFG-R10).
     pub color: ColorMode,
+    /// Resolved background (RND-R20, CFG-R11); default [`Background::Opaque`].
+    pub background: Background,
     pub ascii: bool,
     pub hud: bool,
     /// Show the science title (CFG-R6, CLI-R7).
@@ -215,6 +219,10 @@ pub fn resolve(cli: &Cli, file: FileConfig, env: Env) -> (Settings, Vec<String>)
         interval: cli.interval.or(file.interval).unwrap_or(DEFAULT_INTERVAL),
         theme,
         color,
+        background: cli
+            .background
+            .or(file.background)
+            .map_or(Background::Opaque, Background::from),
         ascii: cli.ascii || file.ascii.unwrap_or(false),
         hud: cli.hud || file.hud.unwrap_or(false),
         title: !cli.no_title && file.title.unwrap_or(true),
@@ -261,6 +269,7 @@ mod tests {
                 interval: 15.0,
                 theme: Theme::Astro,
                 color: ColorMode::Truecolor,
+                background: Background::Opaque,
                 ascii: false,
                 hud: false,
                 title: true,
@@ -617,5 +626,40 @@ mod tests {
         assert_eq!(s.favorites, vec!["starfield"]);
         assert_eq!(s.disabled, vec!["aurora"]);
         assert!(warnings.is_empty());
+    }
+    #[test]
+    fn cfg_r11_background_defaults_to_opaque() {
+        let (s, warnings) = resolve(&cli(&[]).unwrap(), FileConfig::default());
+        assert_eq!(s.background, Background::Opaque);
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    fn cfg_r11_background_file_value_and_cli_precedence() {
+        let (s, _) = resolve(&cli(&[]).unwrap(), file("background = \"terminal\""));
+        assert_eq!(s.background, Background::Terminal, "file");
+        let (s, _) = resolve(&cli(&[]).unwrap(), file("background = \"opaque\""));
+        assert_eq!(s.background, Background::Opaque);
+        let (s, _) = resolve(
+            &cli(&["--background", "opaque"]).unwrap(),
+            file("background = \"terminal\""),
+        );
+        assert_eq!(s.background, Background::Opaque, "flag beats file");
+        let (s, _) = resolve(
+            &cli(&["--background", "terminal"]).unwrap(),
+            FileConfig::default(),
+        );
+        assert_eq!(s.background, Background::Terminal, "flag beats default");
+    }
+
+    #[test]
+    fn cfg_r11_invalid_background_is_rejected_with_path_and_location() {
+        let err = parse("background = \"windows\"\n", Path::new("/etc/sciart.toml")).unwrap_err();
+        let UsageError::Config(msg) = err else {
+            panic!("wrong error kind")
+        };
+        assert!(msg.contains("/etc/sciart.toml"), "{msg}");
+        assert!(msg.contains("line 1"), "{msg}");
+        assert!(msg.contains("windows"), "{msg}");
     }
 }
