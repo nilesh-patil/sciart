@@ -300,9 +300,7 @@ fn draw_help(
         Background::Opaque => Style::new().bg(blank),
         Background::Terminal => Style::new(),
     };
-    if background == Background::Opaque {
-        buf.set_style(area, style);
-    }
+    buf.set_style(area, style);
     let width = usize::from(area.width);
     for (i, line) in text.split('\n').enumerate() {
         let Ok(row) = u16::try_from(i) else { break };
