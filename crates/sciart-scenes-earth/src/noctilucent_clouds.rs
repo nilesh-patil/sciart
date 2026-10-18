@@ -57,35 +57,38 @@ const SWING: (f64, f64) = (12.0, 70.0);
 const PACKETS: usize = 6;
 const PHASE_SPEED: f64 = 3.0;
 /// The ice is braille dots whose density follows it (full from `u ≥ CREST`), in two flat
-/// electric-blue steps (M11's `Wave`, ADR-0018): dim where the sheet is thin, bright on
-/// the dense crests (dot density from `ICE_CREST` of 255), so the sheet thins into black
-/// and the crests read as bright streaks. Below `ICE_FLOOR` the sky stays black.
-const ICE: [Ink; 2] = [Ink::new(Role::Wave, 90), Ink::new(Role::Wave, 220)];
+/// ice-blue steps (M11's `Cold`, ADR-0018): dim where the sheet is thin, brighter on the
+/// dense crests (dot density from `ICE_CREST` of 255), so the sheet thins into black and
+/// the crests read as cloud structure rather than water ripples. Below `ICE_FLOOR` the
+/// sky stays black.
+const ICE: [Ink; 2] = [Ink::new(Role::Cold, 70), Ink::new(Role::Cold, 185)];
 const ICE_CREST: u8 = 110;
-const ICE_FLOOR: f64 = 0.08;
-const CREST: f64 = 0.45;
+const ICE_FLOOR: f64 = 0.06;
+const CREST: f64 = 0.38;
 /// The field is stretched so its brightest node reaches this (at most ×`GAIN_MAX`): the
 /// clouds keep an area in every act, however low the lit band sinks.
 const PEAK: f64 = 0.6;
 const GAIN_MAX: f64 = 2.5;
-/// A billow's trough keeps this share of its crest's ice.
-const BILLOW_FLOOR: f64 = 0.35;
+/// A billow's trough keeps this share of its crest's ice: shallow troughs read as the
+/// cloud's own structure, not as water ripples under it.
+const BILLOW_FLOOR: f64 = 0.55;
 /// The ice fades out over these elevations (deg) above the horizon, before the warm glow.
 const ICE_LOW: (f64, f64) = (2.8, 3.6);
 /// The glow's top edge: its slow wave (± deg, over this many pixels) and fine fray (deg).
-const GLOW_WAVE: (f64, f64) = (0.9, 7.0);
+const GLOW_WAVE: (f64, f64) = (1.4, 9.0);
 /// The warm horizon glow: a few pixels of light over the northern horizon, e-folding over
 /// `GLOW_PX` pixels, strongest under the Sun, cut to black below `GLOW_CUT` of its peak,
-/// in three flat `Hot` steps ([`glow_ink`]).
-const GLOW_PX: f64 = 1.6;
-const GLOW_CUT: f64 = 0.12;
+/// in three flat `Hot` steps ([`glow_ink`]). Wider and dimmer than M15, so the horizon is
+/// a soft band rather than a hard orange line.
+const GLOW_PX: f64 = 3.0;
+const GLOW_CUT: f64 = 0.10;
 
 /// The twilight glow's strength `g` (0–1) in flat orange steps (ADR-0018).
 fn glow_ink(g: f64) -> Ink {
     match g {
-        g if g >= 0.55 => Ink::new(Role::Hot, 200),
-        g if g >= 0.28 => Ink::new(Role::Hot, 90),
-        g if g >= GLOW_CUT => Ink::new(Role::Hot, 15),
+        g if g >= 0.55 => Ink::new(Role::Hot, 70),
+        g if g >= 0.28 => Ink::new(Role::Hot, 30),
+        g if g >= GLOW_CUT => Ink::new(Role::Hot, 8),
         _ => Ink::BLANK,
     }
 }
@@ -314,10 +317,10 @@ impl Noctilucent {
                 let (ck, sk) = (f64::from(n.phase[k].0), f64::from(n.phase[k].1));
                 let (sw, cw) = rot[k];
                 let wave = ck * cw + sk * sw;
-                // Billows: soft crests on a sheet of ice rather than thin bright lines on
-                // dark gaps (which read as ripples on water).
+                // Billows: broad, soft crests on a sheet of ice rather than thin bright
+                // lines on dark gaps (which read as ripples on water).
                 let crest = if p.billow {
-                    BILLOW_FLOOR + (1.0 - BILLOW_FLOOR) * (1.0 - wave.abs()).powf(1.5)
+                    BILLOW_FLOOR + (1.0 - BILLOW_FLOOR) * (1.0 - wave.abs())
                 } else {
                     0.5 + 0.5 * wave
                 };
@@ -738,7 +741,7 @@ mod tests {
         let ice: Vec<Ink> = canvas
             .cells()
             .iter()
-            .filter(|c| c.ink.role == Role::Wave)
+            .filter(|c| c.ink.role == Role::Cold)
             .map(|c| c.ink)
             .collect();
         assert!(ice.len() > 50, "{}", ice.len());
@@ -762,7 +765,7 @@ mod tests {
                 for x in 0..i32::from(ps.width()) {
                     if g.picture
                         .get(x, y)
-                        .is_some_and(|p| matches!(p.role, Role::Wave | Role::Star))
+                        .is_some_and(|p| matches!(p.role, Role::Cold | Role::Star))
                     {
                         ice += 1;
                     }
@@ -793,7 +796,7 @@ mod tests {
                     continue;
                 }
                 seen = true;
-                assert!(horizon - y <= 8, "glow {} px up at {x},{y}", horizon - y);
+                assert!(horizon - y <= 12, "glow {} px up at {x},{y}", horizon - y);
             }
             glow_cols += usize::from(seen);
         }

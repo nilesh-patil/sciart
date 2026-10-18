@@ -90,9 +90,16 @@ const WAKE: Ink = Ink::new(Role::Hot, 90);
 /// Look (M18): a flash puff (σ in dots, peak density), its afterglow's peak, and the
 /// fewest dots a fresh puff shows (each firefly's stipple salt is picked in `resize` so
 /// its puff has at least this many: a flash never reads as a lone dot).
-const FLASH_SIGMA: f64 = 1.0;
+const FLASH_SIGMA: f64 = 1.25;
 const FLASH_PEAK: f64 = 0.95;
 const GLOW_PEAK: f64 = 0.55;
+/// A soft halo around a flash: a wider, lower-density puff in the afterglow ink. Its
+/// strength rises over `HALO_RISE_S` and falls with `HALO_TAU`, so a flash blooms and
+/// fades instead of appearing as one-frame speckle.
+const HALO_SIGMA: f64 = 2.4;
+const HALO_PEAK: f64 = 0.3;
+const HALO_RISE_S: f32 = 0.045;
+const HALO_TAU: f32 = 0.22;
 const MIN_PUFF: usize = 3;
 /// Candidate salts per firefly for its roundest puff (chosen once per resize).
 const SALT_TRIES: u64 = 32;
@@ -803,9 +810,12 @@ impl Fireflies {
             }
         }
         // Each drawn firefly is a puff: between flashes the crown is dark, so a
-        // synchronised flash lights the whole tree at once.
+        // synchronised flash lights the whole tree at once. A wider, fainter halo blooms
+        // under the core and fades over the afterglow, so a flash reads as a glowing point
+        // rather than a four-dot speckle.
         for i in (0..sw.pos.len()).step_by(self.stride) {
-            let Some(ink) = flash_ink(sw.since[i]) else {
+            let age = sw.since[i];
+            let Some(ink) = flash_ink(age) else {
                 continue;
             };
             let peak = if ink == FLASH_INK {
@@ -814,6 +824,17 @@ impl Fireflies {
                 GLOW_PEAK
             };
             let (x, y) = self.spots[i];
+            let bloom = (age / HALO_RISE_S).min(1.0) * (-age / HALO_TAU).exp();
+            if bloom > 0.02 {
+                self.lights.stipple_puff(
+                    x,
+                    y,
+                    HALO_SIGMA,
+                    HALO_PEAK * f64::from(bloom),
+                    self.salts[i] ^ 0x5DEE_CE66_D1A4_8B2F,
+                    AFTERGLOW_INK,
+                );
+            }
             self.lights
                 .stipple_puff(x, y, FLASH_SIGMA, peak, self.salts[i], ink);
         }
@@ -1309,7 +1330,8 @@ mod tests {
             }
             for i in 0..N {
                 let (x, y) = g.spots[i];
-                allowed.disc(x, y, 3.0 * FLASH_SIGMA, FLASH_INK);
+                // A flash is its core puff plus the wider halo that blooms around it.
+                allowed.disc(x, y, 3.0 * HALO_SIGMA.max(FLASH_SIGMA), FLASH_INK);
             }
             for b in g.bonds.live(g.time) {
                 let (p, q) = (g.spots[usize::from(b.a)], g.spots[usize::from(b.b)]);

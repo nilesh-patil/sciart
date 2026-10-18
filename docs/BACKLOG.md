@@ -25,11 +25,11 @@ below split it so each can close on its own.
 
 | Status | Count |
 | --- | ---: |
-| open | 60 |
+| open | 64 |
 | done | 16 |
 | superseded | 12 |
 | won't fix | 3 |
-| **total** | **91** |
+| **total** | **95** |
 
 Counted from the tables below on 2026-10-18; re-count after edits.
 
@@ -198,6 +198,10 @@ Counted from the tables below on 2026-10-18; re-count after edits.
 | B-89 | keep-awake | Windows/Linux keep-awake backends. | [ROADMAP](ROADMAP.md) | open | P3 | Deferred by the macOS-first decision. |
 | B-90 | themes | Light-background theme. | [ROADMAP](ROADMAP.md) | open | P3 | Not scheduled. |
 | B-91 | release | Per-OS release packaging beyond tarballs. | [ROADMAP](ROADMAP.md) | open | P3 | Homebrew/apt/etc.; release workflow already ships tarballs. |
+| B-92 | art / spec | `catalytic_surface`'s late uniform-CO beat is a rust ring around a black interior; a dim interior stipple would read better but CAT-A9 forbids it. | [M23 Phase 5](design/M23-wave5.md) | open | P1 | Needs a spec decision (allow a dim interior after the opening, or accept the ring), not a parameter tweak. |
+| B-93 | science / GEN-R12 | `solar_surface` title says "boiling granules"; granulation is convection. | [claims](science/claims.md) | open | P2 | Proposed "Solar surface · convection cells"; the scene is M11-pinned, so a title change needs a GEN-R22 exception. |
+| B-94 | science / GEN-R12 | `molecular_dynamics` title says "cool atoms"; the model is Lennard-Jones sites. | [claims](science/claims.md) | open | P2 | Proposed "Condensation · cool particles cling"; M11-pinned, same fixture decision as B-93. |
+| B-95 | art | `io_volcanoes`' faint fixed Pele guide dome is a static element under the live grains. | [M23 Phase 5](design/M23-wave5.md) | open | P3 | Deliberate silhouette aid; remove if a future review prefers pure live grains. |
 
 ## Notes
 

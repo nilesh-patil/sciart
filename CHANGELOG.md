@@ -6,6 +6,36 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-18
+
+### Changed
+
+- Art polish pass over the eleven scenes that were below 8/10: `io_volcanoes` now has a
+  living eruption cycle, `rainbow` a continuous dithered bow, `motility_clustering` a
+  populated opening, `firefly_sync` soft glowing points, `meteor_shower` a structured
+  Milky Way, `orbital_rendezvous` larger craft, `comet_breakup` visible impacts,
+  `comet_tails` a contained composition, `total_solar_eclipse` a stippled corona,
+  `noctilucent_clouds` ice-blue clouds, and `catalytic_surface` graded reaction fronts.
+  Ten of eleven now score ≥ 8/10; `catalytic_surface`'s late uniform-CO beat is tracked as
+  a spec decision ([B-92](docs/BACKLOG.md)).
+- Re-recorded the seed-42 snapshots and re-seeded the art bands for the reviewed looks.
+
+### Added
+
+- A 85-row science-claims audit ([docs/science/claims.md](docs/science/claims.md), 20
+  audited) and the standing 15-minute milestone review
+  ([docs/REVIEW.md](docs/REVIEW.md)).
+
+## [0.4.0] - 2026-10-18
+
+### Changed
+
+- Split `SPEC-002` into the rules/index plus five category scene files, with a generated
+  scene index checked by `scripts/spec_index.py` (GEN-R15).
+- Added `docs/BACKLOG.md` (91 triaged follow-ups) and `docs/README.md`; the roadmap now
+  points at the backlog.
+- Added scheduled `cargo-fuzz` targets and made the `cargo-deny` advisory policy explicit.
+
 ## [0.3.0] - 2026-10-18
 
 ### Added

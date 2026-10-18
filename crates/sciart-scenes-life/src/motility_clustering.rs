@@ -10,7 +10,7 @@
 //! (motility-induced phase separation, Cates & Tailleur 2015). It needs a high Péclet
 //! number `Pe = 3v₀/(σD_r)` and a crowded box.
 //!
-//! Acts: **dilute** (area fraction 0.12, no clusters) → **clusters** (more swimmers
+//! Acts: **dilute** (area fraction 0.18, no clusters) → **clusters** (more swimmers
 //! arrive, area fraction 0.6, `Pe ≈ 100`) → **dispersal** (the swimmers slow and tumble
 //! more often, `Pe ≈ 8`, and the clusters evaporate) → back to dilute.
 
@@ -50,7 +50,7 @@ const SUB_PER_S: f64 = 160.0;
 const DISPERSE_V: f64 = 0.5;
 const DISPERSE_DR: f64 = 6.0;
 /// Area fractions of the dilute and crowded acts.
-const PHI_DILUTE: f64 = 0.08;
+const PHI_DILUTE: f64 = 0.18;
 const PHI_CROWD: f64 = 0.6;
 /// Smallest swimmer on screen, in pixels (sets the box scale at small sizes).
 const MIN_SIGMA_PX: f64 = 2.6;
@@ -79,13 +79,13 @@ const ARRIVE_S: f64 = 3.0;
 /// crowd) a `Cold` stroke, one pressed by 3–4 neighbours a brighter `Cold`, and a jammed
 /// one (≥ [`CLUSTER_CONTACTS`]) a bright `Hot` stroke, so the clusters are the one warm
 /// subject on black.
-const FREE_INK: Ink = Ink::new(Role::Cold, 180);
+const FREE_INK: Ink = Ink::new(Role::Cold, 205);
 const PRESSED_INK: Ink = Ink::new(Role::Cold, 230);
 const JAM_INK: Ink = Ink::new(Role::Hot, 240);
 // Crowding only ever brightens a rod [MIPS-A6].
 const _: () = assert!(JAM_INK.level > PRESSED_INK.level && PRESSED_INK.level > FREE_INK.level);
 /// Rod length in swimmer diameters (a rod-shaped cell; the model is still discs).
-const ROD_LEN: f64 = 1.25;
+const ROD_LEN: f64 = 1.45;
 const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 /// A rod's ink by its contacts [MIPS-A6].
