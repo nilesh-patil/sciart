@@ -98,6 +98,10 @@ const SPIKE_CORE: Ink = Ink::new(Role::Star, 255);
 const CORE_SHARE: f64 = 0.4;
 /// Prominences: count range, heights (solar radii).
 const PROMS: (usize, usize) = (3, 6);
+/// Stable capacities for the per-resize corona/prominence buffers (TEST-R6): they are
+/// sized for the largest reviewed terminal, so a later resize cannot reallocate them.
+const SEG_CAP: usize = 8_192;
+const PROM_DOT_CAP: usize = 512;
 const PROM_H: (f64, f64) = (0.07, 0.16);
 /// Beads are drawn this far outside the lunar limb (in half-block pixels, two dots).
 const BEAD_LIFT: f64 = 0.8;
@@ -297,8 +301,9 @@ impl Corona {
                     };
                     let boost = if stalk { STALK_GAIN } else { 1.0 };
                     // Fan lines stop at varied radii; the stalk lines carry the helmet
-                    // out to R_OUT. A hash, not the RNG: the skyline and the planets must
-                    // keep the values they had before IMP-15.
+                    // out to R_OUT. The reach is a hash, not the RNG, so resizes keep it;
+                    // removing the old loops did shift the skyline/prominence stream, and
+                    // the M23 review re-recorded those frames.
                     let reach = if stalk {
                         1.0
                     } else {
@@ -735,6 +740,12 @@ impl Generator for Eclipse {
         // The M15 geometry, in dots (two per half-block pixel each way).
         self.radius = (0.1 * dw).min(0.14 * dh).max(1.0);
         self.centre = (0.5 * dw, 0.44 * dh);
+        // Keep these capacities independent of the seeded counts and reaches: the live
+        // bytes must return to the same value after every resize (TEST-R6).
+        self.segs.clear();
+        self.segs.reserve_exact(SEG_CAP);
+        self.prom_dots.clear();
+        self.prom_dots.reserve_exact(PROM_DOT_CAP);
         let deg = (0.5 * dh / 30.0).max(0.1);
         let hills = Skyline::new(&mut ctx.rng, ds.width().into(), deg, HILLS);
         let horizon = 0.97 * dh;

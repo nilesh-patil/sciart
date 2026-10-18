@@ -513,9 +513,6 @@ impl OrbitalRendezvous {
         let sprites = &mut self.sprites;
         // Rows of cell row `cy + dy`'s 2× block, centred on the cell's middle.
         let mut block = |x: i32, cy: i32, dy: i32, cols: &[i32], thin: bool, ink: Ink| {
-            // At 1× a table cell is one pixel column: the half-cell glyphs fill it.
-            let one = [0];
-            let cols = if k == 1 { &one[..] } else { cols };
             let mid = 2 * cy + 1 + 2 * k * dy;
             let rows = if thin {
                 mid - 1..mid + 1
@@ -523,8 +520,20 @@ impl OrbitalRendezvous {
                 mid - k..mid + k
             };
             for &c in cols {
-                for y in rows.clone() {
-                    sprites.set(x + c, y, ink);
+                // A table cell is `k` pixel columns wide: the left half is the first
+                // ceil(k/2), the right half the last floor(k/2) (they overlap on odd k,
+                // so a full cell has no empty column at any scale).
+                let (lo, hi) = if k == 1 {
+                    (0, 1)
+                } else if c == 0 {
+                    (0, (k + 1) / 2)
+                } else {
+                    (k / 2, k)
+                };
+                for xoff in lo..hi {
+                    for y in rows.clone() {
+                        sprites.set(x + xoff, y, ink);
+                    }
                 }
             }
         };
@@ -854,6 +863,29 @@ mod tests {
                     g.dots.is_lit(x.round() as i32, y.round() as i32),
                     "{w}x{h}: gap at {x},{y}"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn rdv_a8_three_x_sprites_fill_every_pixel_column() {
+        // At 3× each table cell is three pixel columns: a half-cell glyph must fill its
+        // half, not just one column (the striped-sprite regression the 160×48 review found).
+        let size = Size::new(160, 48);
+        let mut ctx = Ctx::new(3, size);
+        let mut g = OrbitalRendezvous::default();
+        g.resize(size, &mut ctx);
+        g.prepare();
+        assert_eq!(g.sprite, 3);
+        let (sx, sy) = g.to_cells(0.0, 0.0);
+        let (sx, sy) = (sx.floor() as i32, sy.floor() as i32);
+        let mid = 2 * sy + 1;
+        for dx in [-2, 0, 2] {
+            let x0 = sx + g.sprite * dx;
+            for col in 0..g.sprite {
+                let lit = (mid - g.sprite..mid + g.sprite)
+                    .any(|y| g.sprites.get(x0 + col, y).is_some_and(|ink| ink.level != 0));
+                assert!(lit, "160x48: empty column {col} of the module at {dx}");
             }
         }
     }
