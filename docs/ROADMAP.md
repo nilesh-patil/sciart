@@ -309,9 +309,9 @@ Design: [docs/IMPROVEMENTS.md](IMPROVEMENTS.md) · [docs/design/M23-programme.md
 
 ## M24 — Opaque background (in progress)
 Design: [ADR-0027](adr/0027-opaque-background.md) · RND-R20, CLI-R11, CFG-R11. A live terminal showed a horizontal band through every scene; previews and recordings were clean, and a pty capture showed no app background, so the band came from terminal transparency/wallpaper. The fix makes the live background opaque black by default.
-- [ ] Specs + ADR + failing tests (RND-R20, CLI-R11, CFG-R11)
-- [ ] Renderer: `Background::{Opaque, Terminal}`, opaque black default, explicit cell backgrounds preserved
-- [ ] CLI/config: `--background opaque|terminal`, `background` key, precedence
+- [x] Specs + ADR + failing tests (RND-R20, CLI-R11, CFG-R11)
+- [x] Renderer: `Background::{Opaque, Terminal}`, opaque black default, explicit cell backgrounds preserved
+- [x] CLI/config: `--background opaque|terminal`, `background` key, precedence
 - [ ] pty proof, docs, full gate; `v0.6.0` tagged
 
 ## M9 — Future (unscheduled)
