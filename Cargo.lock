@@ -1907,6 +1907,7 @@ dependencies = [
  "clap",
  "crossterm",
  "gif",
+ "insta",
  "png",
  "portable-pty",
  "proptest",
@@ -1975,6 +1976,16 @@ dependencies = [
  "enigo",
  "rand 0.9.5",
  "rand_chacha",
+]
+
+[[package]]
+name = "sciart-qa"
+version = "0.1.0"
+dependencies = [
+ "ratatui",
+ "sciart-core",
+ "sciart-generators",
+ "sciart-render",
 ]
 
 [[package]]

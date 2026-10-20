@@ -1,5 +1,5 @@
 //! Per-scene art bands (GEN-R24, ADR-0018), measured with the RND-R13 metrics
-//! (`sciart::metrics`) on the painted `astro` frame at 200×50, seed 42, t = 5 s and
+//! (`sciart_qa`) on the painted `astro` frame at 200×50, seed 42, t = 5 s and
 //! 20 s: the same numbers `pixi run rs-cost` prints.
 //!
 //! `LIMITS` holds each scene's reviewed look as a band: per scene and time, a darkness
@@ -11,7 +11,7 @@
 //! +10 % + 0.2); `pixi run rs-cost -- <scene> --emit-limits` prints fresh rows, and a
 //! scene's row is re-seeded only after its look is reviewed. Between reviews the band is a
 //! ratchet: a ceiling may only be lowered and a floor only raised (the tests print loose
-//! entries). `cargo test -p sciart --test art_metrics -- --nocapture` prints the headroom.
+//! entries). `cargo test -p sciart-qa --test art_metrics -- --nocapture` prints the headroom.
 
 // Measured table values that happen to look like 1/π are not the constant.
 #![allow(clippy::approx_constant)]
@@ -20,9 +20,9 @@ use std::sync::OnceLock;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use sciart::metrics::{ArtMetrics, art_metrics};
 use sciart_core::prelude::*;
 use sciart_generators::{Entry, registry};
+use sciart_qa::{ArtMetrics, art_metrics};
 use sciart_render::{Theme, paint};
 
 const SEED: u64 = 42;

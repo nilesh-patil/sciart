@@ -1,0 +1,76 @@
+---
+source: crates/sciart/tests/lib_surface.rs
+expression: "surface(&facade()).join(\"\\n\")"
+---
+lib.rs: [unstable-generator] pub mod experimental
+lib.rs: pub use error::Error
+lib.rs: pub use scene::{Category, SceneInfo, find, scenes}
+lib.rs: pub use stage::{Options, Stage}
+lib.rs: pub use theme::Theme
+lib.rs: [widget] pub use widget::SceneWidget
+error.rs: #[non_exhaustive] #[derive(Debug)] pub enum Error
+error.rs: Error::UnknownScene(String)
+error.rs: Error::ScenePanicked(&'static str)
+error.rs: Error::Io(std::io::Error)
+error.rs: impl fmt::Display for Error
+error.rs: impl std::error::Error for Error
+error.rs: impl From<std::io::Error> for Error
+experimental.rs: [unstable-generator] pub use sciart_core::prelude
+experimental.rs: [unstable-generator] pub use sciart_core::{Canvas, Ctx, Generator, Glyph, Ink, Meta, Role, Size}
+scene.rs: #[derive(Clone, Copy)] pub struct SceneInfo
+scene.rs: impl SceneInfo: pub fn name(&self) -> &'static str
+scene.rs: impl SceneInfo: pub fn title(&self) -> &'static str
+scene.rs: impl SceneInfo: pub fn description(&self) -> &'static str
+scene.rs: impl SceneInfo: pub fn category(&self) -> Category
+scene.rs: impl SceneInfo: pub fn captions(&self) -> &'static [&'static str]
+scene.rs: impl PartialEq for SceneInfo
+scene.rs: impl Eq for SceneInfo
+scene.rs: impl std::hash::Hash for SceneInfo
+scene.rs: impl fmt::Debug for SceneInfo
+scene.rs: pub fn scenes() -> impl ExactSizeIterator<Item = SceneInfo>
+scene.rs: pub fn find(name: &str) -> Option<SceneInfo>
+scene.rs: #[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub enum Category
+scene.rs: Category::DeepCosmos
+scene.rs: Category::SunPlanets
+scene.rs: Category::EarthSky
+scene.rs: Category::Voyages
+scene.rs: Category::ForcesWaves
+scene.rs: Category::Reactions
+scene.rs: Category::LivingSystems
+scene.rs: Category::StatesOfMatter
+scene.rs: Category::PhysicsOfLife
+scene.rs: Category::MoleculesOfLife
+scene.rs: Category::LifeFromMatter
+scene.rs: impl Category: pub fn all() -> &'static [Category]
+scene.rs: impl Category: pub fn id(self) -> &'static str
+scene.rs: impl Category: pub fn label(self) -> &'static str
+stage.rs: #[derive(Debug, Clone)] pub struct Options
+stage.rs: impl Default for Options
+stage.rs: impl Options: pub fn seed(mut self, seed: u64) -> Self
+stage.rs: impl Options: pub fn ascii(mut self, on: bool) -> Self
+stage.rs: impl Options: pub fn title(mut self, on: bool) -> Self
+stage.rs: #[derive(Debug)] pub struct Stage
+stage.rs: impl Stage: pub fn new(scene: &str, width: u16, height: u16, options: Options) -> Result<Stage, Error>
+stage.rs: impl Stage: pub fn scene(&self) -> SceneInfo
+stage.rs: impl Stage: pub fn size(&self) -> (u16, u16)
+stage.rs: impl Stage: pub fn time(&self) -> f64
+stage.rs: impl Stage: pub fn is_failed(&self) -> bool
+stage.rs: impl Stage: pub fn resize(&mut self, width: u16, height: u16) -> Result<(), Error>
+stage.rs: impl Stage: pub fn advance(&mut self, seconds: f64) -> Result<(), Error>
+stage.rs: impl Stage: pub fn to_text(&mut self) -> Result<String, Error>
+stage.rs: impl Stage: pub fn to_ansi(&mut self, theme: Theme) -> Result<String, Error>
+stage.rs: [png] impl Stage: pub fn write_png<W: std::io::Write>(&mut self, theme: Theme, out: W) -> Result<(), Error>
+stage.rs: [unstable-generator] impl Stage: pub fn from_generator(generator: Box<dyn sciart_core::Generator>, width: u16, height: u16, options: Options) -> Result<Stage, Error>
+theme.rs: #[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)] pub enum Theme
+theme.rs: #[default] Theme::Astro
+theme.rs: Theme::Rainbow
+theme.rs: Theme::Mono
+theme.rs: Theme::Aurora
+theme.rs: Theme::Colorblind
+theme.rs: impl Theme: pub fn all() -> &'static [Theme]
+theme.rs: impl Theme: pub fn name(self) -> &'static str
+theme.rs: impl Theme: pub fn from_name(name: &str) -> Option<Theme>
+widget.rs: [widget] #[derive(Debug)] pub struct SceneWidget<'a>
+widget.rs: [widget] impl<'a> SceneWidget<'a>: pub fn new(stage: &'a mut Stage) -> Self
+widget.rs: [widget] impl<'a> SceneWidget<'a>: pub fn theme(mut self, theme: Theme) -> Self
+widget.rs: [widget] impl Widget for SceneWidget<'_>
