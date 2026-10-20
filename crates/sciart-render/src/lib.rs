@@ -1,5 +1,6 @@
 //! Themes and ratatui painting for sciart canvases (SPEC-003 RND-*).
 
+mod ansi;
 mod backend;
 mod color;
 mod encode;
@@ -9,6 +10,7 @@ mod paint;
 mod terminal;
 mod theme;
 
+pub use ansi::{AnsiColor, AnsiFraming, DEFAULT_FG, write_ansi};
 pub use backend::FrameBackend;
 pub use color::{indexed, quantize};
 pub use hud::Hud;

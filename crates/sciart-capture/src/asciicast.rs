@@ -5,10 +5,9 @@ use std::io::Write as _;
 use std::path::Path;
 
 use sciart_core::prelude::*;
-use sciart_render::Theme;
+use sciart_render::{AnsiColor, AnsiFraming, Theme, write_ansi};
 
 use crate::RenderOptions;
-use crate::image::TERM_FG;
 
 /// The stage's current frame as an ANSI truecolor screen, for an asciicast event.
 pub fn render_ansi(stage: &mut Stage, options: &RenderOptions) -> String {
@@ -24,47 +23,17 @@ pub fn render_ansi(stage: &mut Stage, options: &RenderOptions) -> String {
 }
 
 /// One frame, starting at the home position: only colour changes emit an SGR sequence, so a
-/// cast stays small.
+/// cast stays small. The rows are the shared ANSI writer's (LIB-R5): `sciart frame` and the
+/// library print the same rows with line framing.
 fn ansi(canvas: &Canvas, theme: Theme) -> String {
-    let width = usize::from(canvas.size().width());
     let mut out = String::with_capacity(canvas.cells().len() * 4);
-    out.push_str("\x1b[0m\x1b[H");
-    let mut fg: Option<sciart_render::Rgb> = None;
-    // `Some(None)` means the terminal default background was requested.
-    let mut bg: Option<Option<sciart_render::Rgb>> = None;
-    for (i, cell) in canvas.cells().iter().enumerate() {
-        if i > 0 && i % width == 0 {
-            out.push_str("\x1b[0m\r\n");
-            fg = None;
-            bg = None;
-        }
-        let (x, y) = ((i % width) as u16, (i / width) as u16);
-        let fg_colour = if cell.ink.role == Role::Background {
-            TERM_FG
-        } else {
-            theme.color(cell.ink, x, y)
-        };
-        if fg != Some(fg_colour) {
-            let _ = write!(
-                out,
-                "\x1b[38;2;{};{};{}m",
-                fg_colour.0, fg_colour.1, fg_colour.2
-            );
-            fg = Some(fg_colour);
-        }
-        let bg_colour = (cell.bg.role != Role::Background).then(|| theme.color(cell.bg, x, y));
-        if bg != Some(bg_colour) {
-            match bg_colour {
-                Some(colour) => {
-                    let _ = write!(out, "\x1b[48;2;{};{};{}m", colour.0, colour.1, colour.2);
-                }
-                None => out.push_str("\x1b[49m"),
-            }
-            bg = Some(bg_colour);
-        }
-        out.push(cell.ch);
-    }
-    out.push_str("\x1b[0m");
+    write_ansi(
+        canvas,
+        theme,
+        AnsiColor::Truecolor,
+        AnsiFraming::Screen,
+        &mut out,
+    );
     out
 }
 
@@ -143,6 +112,11 @@ mod tests {
         );
         assert!(text.contains("AB"));
         assert!(text.ends_with("\x1b[0m"));
+    }
+
+    #[test]
+    fn cli_r8_the_cast_and_the_png_share_the_default_foreground() {
+        assert_eq!(crate::image::TERM_FG, sciart_render::DEFAULT_FG);
     }
 
     #[test]
