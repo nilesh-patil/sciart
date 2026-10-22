@@ -102,6 +102,8 @@ pub enum Command {
     },
     /// Render a scene to GIF, PNG frames or an asciicast (CLI-R8; needs the `record` feature)
     Record(RecordArgs),
+    /// Print one frame of a scene to stdout as ANSI text (CLI-R13)
+    Frame(crate::frame::FrameArgs),
 }
 
 /// CLI-R8: the `record` subcommand's own flags. `--fps`, `--theme`, `--ascii` and `--seed`
@@ -309,7 +311,7 @@ fn speed(s: &str) -> Result<f64, String> {
 }
 
 /// CLI-R8: `WxH` in cells, both at least 1.
-fn size_arg(s: &str) -> Result<Size, String> {
+pub(crate) fn size_arg(s: &str) -> Result<Size, String> {
     let dim = |v: &str| v.parse::<u16>().ok().filter(|&n| n > 0);
     s.split_once('x')
         .and_then(|(w, h)| dim(w).zip(dim(h)))
@@ -444,6 +446,9 @@ pub fn select(
         Command::Run { name } => find(name)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
+        Command::Frame(args) => find(&args.scene)
+            .map(|e| vec![e])
+            .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),
         Command::Record(args) => find(&args.scene)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),
