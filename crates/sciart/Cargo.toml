@@ -33,7 +33,7 @@ cli = [
     "dep:toml",
 ]
 # CLI-R8 / CLI-R15 / ADR-0025: `sciart record` and its capture pipeline (GIF, PNG, asciicast).
-record = ["cli", "png"]
+record = ["cli", "png", "sciart-capture/gif"]
 # LIB-R5: `Stage::write_png` (the capture renderer and the PNG encoder).
 png = ["dep:sciart-capture"]
 # LIB-R1: `SceneWidget`, a ratatui widget (ratatui 0.30).

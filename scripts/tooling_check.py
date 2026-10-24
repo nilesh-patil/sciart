@@ -249,12 +249,13 @@ LIB_TESTS = "cargo nextest run -p sciart --no-default-features --features png,wi
 NO_RECORDER_TESTS = "cargo nextest run -p sciart --no-default-features --features cli"
 
 
-def lean_tree() -> list[str] | None:
-    """Crate names in `sciart`'s normal dependency tree with no default features, or None
-    when cargo cannot resolve it."""
+def lean_tree(features: str = "") -> list[str] | None:
+    """Crate names in `sciart`'s normal dependency tree with no default features (plus
+    `features`), or None when cargo cannot resolve it."""
+    extra = ["--features", features] if features else []
     try:
         out = subprocess.run(
-            ["cargo", "tree", "-p", "sciart", "--no-default-features", "-e", "normal",
+            ["cargo", "tree", "-p", "sciart", "--no-default-features", *extra, "-e", "normal",
              "--prefix", "none", "--locked"],
             cwd=ROOT, capture_output=True, text=True, check=True,
         ).stdout
@@ -286,6 +287,17 @@ def check_lib(problems: list[str]) -> None:
         for crate in CLI_ONLY_CRATES:
             if crate in tree:
                 fail(problems, f"LIB-R4: `{crate}` is in the library's dependency tree without default features")
+    png_tree = lean_tree("png")
+    if png_tree is None:
+        fail(problems, "LIB-R4: `cargo tree -p sciart --no-default-features --features png` did not resolve")
+    else:
+        if "gif" in png_tree:
+            fail(problems, "LIB-R4: `png` must not bring the GIF encoder (only `record` enables it)")
+        for crate in ("png", "font8x8"):
+            if crate not in png_tree:
+                fail(problems, f"LIB-R4: `png` brings `{crate}`")
+    if "sciart-capture/gif" not in features.get("record", []):
+        fail(problems, "LIB-R4 / CLI-R15: `record` turns on the capture crate's `gif` feature")
     pixi = toml_file("pixi.toml")
     lint, _ = pixi_task(pixi, "rs-lint")
     for command in LIB_LINTS:

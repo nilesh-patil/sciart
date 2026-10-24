@@ -8,8 +8,12 @@
 //! The scene itself is built by the caller (the `preview` example and `sciart record` both
 //! resolve it from `sciart-generators`), so this crate depends on neither and stays usable
 //! from tests.
+//!
+//! The GIF encoder is behind the `gif` feature, which only `sciart record` turns on: the
+//! library's PNG output needs the renderer and the PNG encoder, not the GIF one (LIB-R4).
 
 mod asciicast;
+#[cfg(feature = "gif")]
 mod gif;
 mod image;
 
@@ -17,6 +21,7 @@ use sciart_core::prelude::{GlyphMode, Stage};
 use sciart_render::Theme;
 
 pub use self::asciicast::{render_ansi, write_asciicast};
+#[cfg(feature = "gif")]
 pub use self::gif::write_gif;
 pub use self::image::{CELL_H, CELL_W, Image, encode_png, paint, write_png};
 
