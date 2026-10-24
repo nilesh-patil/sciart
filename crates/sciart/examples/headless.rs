@@ -27,8 +27,8 @@ fn main() -> ExitCode {
     let run = || -> Result<(), sciart::Error> {
         let mut stage = Stage::new(scene.name(), 80, 24, Options::default())?;
         stage.advance(seconds)?;
-        print!("{}", stage.to_ansi(Theme::Astro)?);
-        print!("{}", stage.to_text()?);
+        print!("{}", stage.render_ansi(Theme::Astro)?);
+        print!("{}", stage.render_text()?);
         Ok(())
     };
     if let Err(e) = run() {

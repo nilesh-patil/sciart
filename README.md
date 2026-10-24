@@ -116,10 +116,10 @@ use sciart::{Options, Stage, Theme};
 
 let mut stage = Stage::new("aurora", 80, 24, Options::default().seed(7))?;
 stage.advance(5.0)?;                        // simulated seconds, in fixed 1/60 s steps
-print!("{}", stage.to_ansi(Theme::Astro)?);  // the bytes `sciart frame` prints
+print!("{}", stage.render_ansi(Theme::Astro)?);  // the bytes `sciart frame` prints
 ```
 
-`png` adds `Stage::write_png`; `widget` adds `SceneWidget` for ratatui 0.30. Only the `sciart`
+`png` adds `Stage::render_png`; `widget` adds `SceneWidget` for ratatui 0.30. Only the `sciart`
 crate's library carries a stability promise; the crates behind it are internal. The same build,
 scene, seed and size give the same frames on the same platform, not across platforms or
 versions. Writing your own scene is possible behind `unstable-generator`, with no promise.

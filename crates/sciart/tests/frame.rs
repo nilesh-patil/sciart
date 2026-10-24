@@ -108,7 +108,7 @@ fn cli_r13_lib_r5_frame_prints_the_librarys_ansi() {
         let mut stage =
             Stage::new(scene, 64, 20, Options::default().seed(seed).title(title)).unwrap();
         stage.advance(t).unwrap();
-        assert_eq!(cli, stage.to_ansi(theme).unwrap(), "{scene}");
+        assert_eq!(cli, stage.render_ansi(theme).unwrap(), "{scene}");
     }
 }
 
@@ -129,7 +129,7 @@ fn cli_r13_colour_modes() {
     ));
     let mut stage = Stage::new("aurora", 40, 12, Options::default()).unwrap();
     stage.advance(5.0).unwrap();
-    assert_eq!(mono, stage.to_ansi(Theme::Mono).unwrap());
+    assert_eq!(mono, stage.render_ansi(Theme::Mono).unwrap());
 
     let no_color = frame(&["aurora", "--size", "40x12"], &[("NO_COLOR", "1")]);
     assert_eq!(stdout(&no_color), mono, "NO_COLOR selects mono");

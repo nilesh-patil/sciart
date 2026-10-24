@@ -1,6 +1,6 @@
 //! A canvas as ANSI text without a terminal session (CLI-R8, CLI-R13, LIB-R5).
 //!
-//! The one writer behind `sciart frame`, the library's `Stage::to_ansi` and the asciicast
+//! The one writer behind `sciart frame`, the library's `Stage::render_ansi` and the asciicast
 //! recorder: every row starts with no colour state, sets a colour only when it changes and
 //! ends with an SGR reset, so a row can be printed on its own. The two framings only differ
 //! in what goes around the rows: [`AnsiFraming::Lines`] ends every row with `\n` (for
