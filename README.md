@@ -57,10 +57,10 @@ Requires [Rust](https://rustup.rs) 1.88 or newer.
 
 ```sh
 cargo install --git https://github.com/nilesh-patil/sciart sciart --locked
-
-# with the headless recorder (`sciart record`):
-cargo install --git https://github.com/nilesh-patil/sciart sciart --features record --locked
 ```
+
+The default build includes the headless recorder (`sciart record`); add
+`--no-default-features --features cli` for a binary without the image encoders.
 
 Working on the project? Clone it and install through the pixi task instead:
 
@@ -79,7 +79,8 @@ sciart                  # cycle all 85 scenes (the default `sim` mode)
 sciart run aurora       # one scene, full-screen
 sciart list             # every scene: name, category, description
 sciart list --json      # the same catalogue for scripts: {"schema": 1, "scenes": [...]}
-sciart record aurora --seconds 5 --out aurora.gif   # needs --features record
+sciart record aurora --seconds 5 --out aurora.gif   # GIF, PNG frames or an asciicast
+sciart frame aurora --t 5 --size 80x24              # one frame as ANSI text, for a MOTD or a log
 sciart --for 25m        # end by itself after 25 minutes (90s, 25m, 1.5h; at most 24h)
 sciart while -- make    # the art while `make` runs, then its output and exit status
 sciart completions zsh  # shell completions (bash, zsh, fish, elvish, powershell)
@@ -143,6 +144,31 @@ defaults to `off`, since keeping the remote machine awake is rarely what you wan
 explicitly with `--keep-awake caffeinate|inhibit|mouse|off`. The optional `mouse` jiggle
 backend is behind the `mouse` cargo feature and needs macOS Accessibility permission.
 
+## Use it as a library
+
+The `sciart` crate is also a library: run a scene without a terminal, list the scenes, turn a
+frame into text, ANSI or a PNG, or draw a scene inside your own ratatui application. **Turn
+the default features off**, or you also get the command line's dependencies:
+
+```toml
+[dependencies]
+sciart = { git = "https://github.com/nilesh-patil/sciart", default-features = false, features = ["png", "widget"] }
+```
+
+```rust
+use sciart::{Options, Stage, Theme};
+
+let mut stage = Stage::new("aurora", 80, 24, Options::default().seed(7))?;
+stage.advance(5.0)?;                        // simulated seconds, in fixed 1/60 s steps
+print!("{}", stage.render_ansi(Theme::Astro)?);  // the bytes `sciart frame` prints
+```
+
+`png` adds `Stage::render_png`; `widget` adds `SceneWidget` for ratatui 0.30. Only the `sciart`
+crate's library carries a stability promise; the crates behind it are internal. The same build,
+scene, seed and size give the same frames on the same platform, not across platforms or
+versions. Writing your own scene is possible behind `unstable-generator`, with no promise.
+See `examples/headless.rs` and `examples/widget.rs` in `crates/sciart`.
+
 ## How it works
 
 ```text
@@ -150,8 +176,9 @@ sciart-core        canvas, glyphs, inks, generator contract, fixed-step clock, s
   → sciart-scenes-{cosmos,earth,physics,matter,life}   one module per scene, by category
   → sciart-generators   the registry facade over the scene crates (+ sciart-shared models)
   → sciart-render       themes, HUD, ratatui painting
-  → sciart              CLI, TOML config, runtime, event loop
-12 crates · deterministic fixed 1/60 s step · seeded RNG · snapshot-tested
+  → sciart              the library facade (Stage, scenes, themes, widget) + CLI, TOML config,
+                        runtime, event loop
+14 crates · deterministic fixed 1/60 s step · seeded RNG · snapshot-tested
 ```
 
 ## Documentation

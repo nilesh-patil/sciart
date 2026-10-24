@@ -15,43 +15,105 @@ categories = ["command-line-utilities", "graphics", "science", "science::astrono
 # (IMP-05). Also lets cargo-deny allow the workspace's version-less path dependencies.
 publish = false
 
+# LIB-R4 / CLI-R15: the defaults give the full binary (`cargo install sciart`); a library
+# user turns them off and picks `png` and/or `widget`.
 [features]
+default = ["cli", "record"]
+# The terminal application and its dependencies; the binary needs it.
+cli = [
+    "dep:anyhow",
+    "dep:clap",
+    "dep:clap_complete",
+    "dep:clap_mangen",
+    "dep:crossterm",
+    "dep:rand",
+    "dep:rand_chacha",
+    "dep:ratatui",
+    "dep:serde",
+    "dep:sciart-keepawake",
+    "dep:signal-hook",
+    "dep:toml",
+]
+# CLI-R8 / CLI-R15 / ADR-0025: `sciart record` and its capture pipeline (GIF, PNG, asciicast).
+record = ["cli", "png", "sciart-capture/gif"]
+# LIB-R5: `Stage::render_png` (the capture renderer and the PNG encoder).
+png = ["dep:sciart-capture"]
+# LIB-R1: `SceneWidget`, a ratatui widget (ratatui 0.30).
+widget = ["dep:ratatui"]
+# LIB-R3: the `experimental` module, for writing a scene against the internal crates. No
+# semver promise.
+unstable-generator = []
 # Real mouse-jiggle keep-awake backend (KA-R4); needs Accessibility permission on macOS.
-mouse = ["sciart-keepawake/mouse"]
-# CLI-R8 / ADR-0025: `sciart record` and its headless capture pipeline (GIF, PNG, asciicast).
-# Off by default so the normal binary carries no image dependencies.
-record = ["dep:sciart-capture"]
+mouse = ["cli", "sciart-keepawake/mouse"]
+
+[[bin]]
+name = "sciart"
+path = "src/main.rs"
+required-features = ["cli"]
+
+# Suites that spawn the binary need it built.
+[[test]]
+name = "pty_smoke"
+required-features = ["cli"]
+
+[[test]]
+name = "record"
+required-features = ["record"]
+
+[[test]]
+name = "record_disabled"
+required-features = ["cli"]
+
+[[test]]
+name = "frame"
+required-features = ["cli"]
+
+[[test]]
+name = "lib_behaviour"
+required-features = ["png"]
+
+[[example]]
+name = "widget"
+required-features = ["widget"]
 
 [dependencies]
 sciart-core.workspace = true
 sciart-generators.workspace = true
 sciart-render.workspace = true
-sciart-keepawake.workspace = true
 sciart-capture = { workspace = true, optional = true }
-anyhow.workspace = true
-clap.workspace = true
-clap_complete.workspace = true
-clap_mangen.workspace = true
-crossterm.workspace = true
-rand.workspace = true
-rand_chacha.workspace = true
-ratatui.workspace = true
-serde.workspace = true
-toml.workspace = true
+ratatui = { workspace = true, optional = true }
+anyhow = { workspace = true, optional = true }
+clap = { workspace = true, optional = true }
+clap_complete = { workspace = true, optional = true }
+clap_mangen = { workspace = true, optional = true }
+crossterm = { workspace = true, optional = true }
+rand = { workspace = true, optional = true }
+rand_chacha = { workspace = true, optional = true }
+serde = { workspace = true, optional = true }
+sciart-keepawake = { workspace = true, optional = true }
+toml = { workspace = true, optional = true }
 
 [target.'cfg(unix)'.dependencies]
 # RT-R20: termination signals restore the terminal.
-signal-hook.workspace = true
+signal-hook = { workspace = true, optional = true }
 
 [dev-dependencies]
+crossterm.workspace = true
 gif.workspace = true
+insta.workspace = true
 png.workspace = true
 portable-pty.workspace = true
 proptest.workspace = true
+ratatui.workspace = true
 serde_json.workspace = true
 tempfile.workspace = true
 vt100.workspace = true
 sciart-testalloc.workspace = true
+
+# LIB-R4: docs.rs documents the library features, never `mouse` (it needs system libraries).
+[package.metadata.docs.rs]
+no-default-features = true
+features = ["png", "widget", "unstable-generator"]
 
 [lints]
 workspace = true

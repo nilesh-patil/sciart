@@ -185,6 +185,11 @@ pub fn write_png(image: &Image, path: &Path) -> std::io::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     let file = std::fs::File::create(path)?;
+    encode_png(image, std::io::BufWriter::new(file))
+}
+
+/// Encode `image` as an 8-bit RGB PNG into `out` (the library's `Stage::render_png`, LIB-R5).
+pub fn encode_png<W: std::io::Write>(image: &Image, out: W) -> std::io::Result<()> {
     let dims = |n: usize| {
         u32::try_from(n).map_err(|_| {
             std::io::Error::new(
@@ -193,11 +198,7 @@ pub fn write_png(image: &Image, path: &Path) -> std::io::Result<()> {
             )
         })
     };
-    let mut enc = png::Encoder::new(
-        std::io::BufWriter::new(file),
-        dims(image.width)?,
-        dims(image.height)?,
-    );
+    let mut enc = png::Encoder::new(out, dims(image.width)?, dims(image.height)?);
     enc.set_color(png::ColorType::Rgb);
     enc.set_depth(png::BitDepth::Eight);
     let mut writer = enc.write_header().map_err(std::io::Error::other)?;

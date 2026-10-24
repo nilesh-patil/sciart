@@ -5,6 +5,7 @@ mod child;
 mod cli;
 mod config;
 mod fps;
+mod frame;
 mod hint;
 mod keys;
 mod pacer;
@@ -45,6 +46,8 @@ fn main() -> ExitCode {
         } => return run_list(&cli, &command, *json, *categories, *plain),
         // CLI-R8: recording is headless (no config file, terminal or keep-awake).
         Command::Record(_) => return run_record(&cli, &command),
+        // CLI-R13: one frame to stdout, headless like `record`.
+        Command::Frame(args) => return frame::main(&cli, args),
         // CLI-R17: generated from the parser; no config, nothing started.
         Command::Completions { shell } => return print(&cli::completions(*shell)),
         Command::Man { subcommand } => {

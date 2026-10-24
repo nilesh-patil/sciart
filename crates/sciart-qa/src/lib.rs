@@ -13,9 +13,10 @@
 //! is the cell background, and what it *shows* is the glyph's colour.
 //!
 //! Pure functions of the buffer: the probe (`pixi run rs-cost`) and the per-scene ratchet
-//! tables in `crates/sciart/tests/art_metrics.rs` compute exactly the same numbers.
-//! Offline QA, a module of the `sciart` crate next to its only consumers (the cost
-//! example and the art-metrics test); the renderer ships none of it.
+//! tables in `crates/sciart-qa/tests/art_metrics.rs` compute exactly the same numbers.
+//! Offline QA in its own unpublished crate next to its only consumers (the cost example and
+//! the art-metrics test), so neither the renderer nor the `sciart` library ships any of it
+//! (LIB-R1).
 
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
