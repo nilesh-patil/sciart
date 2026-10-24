@@ -319,9 +319,10 @@ Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisio
 - [x] History scrub, survey (distribution, performance, usage and API, portability), decisions, programme
 - [x] Phase 1 — portability (KA-R7..R9, RT-R20, RND-R21, TEST-R13; ADR-0028/0029): Linux inhibitor helper, signal exit, terminal hint, platform tiers; 1,668 default + 201 record-feature tests
 - [ ] Manual Linux keep-awake check on a desktop with logind — [B-96](BACKLOG.md).
-- [ ] Phase 1 — performance (RND-R22/R23, RT-R21/R22; ADR-0030)
-- [ ] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2)
-- [ ] Phase 2 — CLI modes (CLI-R12..R17, RT-R23; ADR-0031)
+- [x] Phase 1 — performance (RND-R22, RT-R21/R22; ADR-0030, ADR-0035): changed-cell paint, diff and encode (pipeline 532 → about 359 µs at 200×50, about 2400 → 1080 µs at 500×150, identical output), event-driven pause, 108 → 93 crates, 3.64 → 3.27 MB stripped with a budget check; both GEN-R8 worst-frame readings are within budget on `release`
+- [ ] `solar_surface` output (54.8 KB per frame, 12× the gallery mean): quantise its ink after a look review, or record the exception (RND-R23 reserved)
+- [x] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2): 18 clips from `docs/showcase.toml`, a lock for stale clips, `record --start` (CLI-R8), capture bitmaps for every scene glyph (CLI-R18)
+- [x] Phase 2 — CLI modes (CLI-R12, R14, R16, R17, RT-R23; ADR-0031): `--for`, `sciart while -- <command>`, a versioned `list --json`, `completions` and `man`; 1,744 default + 268 record-feature tests; the size budget rises to 3.44 MiB and 96 crates for the generators
 - [ ] Phase 2 — library facade (LIB-R1..R8, SPEC-007; ADR-0032)
 - [ ] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033)
 - [ ] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034)

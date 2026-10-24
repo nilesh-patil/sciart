@@ -2,6 +2,118 @@
 
 Every one of the 85 registered scenes, one current frame each: astro theme at 160x48 cells (8x16 px per cell), seed 42, t = 20 s. A compare link, where present, shows the scene's historical looks side by side.
 
+## In motion
+
+18 clips recorded by `sciart record` from [`docs/showcase.toml`](showcase.toml) (`pixi run rs-showcase`); each runs from the simulated time shown, at the size, seed and frame rate shown.
+
+### `strange_attractors` in motion
+
+<img src="media/strange_attractors.gif" alt="Strange attractors: the Lorenz butterfly traced by swarms of fine braille threads, turning in space">
+
+Forces & Waves · 100x30 cells · t = 48–54 s · 15 fps · seed 42 · astro
+
+### `galaxy_collision` in motion
+
+<img src="media/galaxy_collision.gif" alt="Galaxy collision: two spiral galaxies swing through each other and pull out tidal tails">
+
+Deep Cosmos · 80x24 cells · t = 11–19 s · 20 fps · seed 42 · astro
+
+### `electron_orbitals` in motion
+
+<img src="media/electron_orbitals.gif" alt="Electron orbitals: a hydrogen electron cloud, drawn as warm and cool probability stipple, sloshes from the 2p into a 3d state">
+
+States of Matter · 80x24 cells · t = 6–14 s · 15 fps · seed 42 · astro
+
+### `solar_system` in motion
+
+<img src="media/solar_system.gif" alt="Solar system: the planets circle the Sun with short speed trails, the farther ones slower, past the asteroid belt">
+
+Sun & Planets · 80x24 cells · t = 0–8 s · 20 fps · seed 42 · astro
+
+### `total_solar_eclipse` in motion
+
+<img src="media/total_solar_eclipse.gif" alt="Total solar eclipse: the last crescent of Sun thins away, the diamond ring flashes and the pearly corona opens">
+
+Earth & Sky · 80x24 cells · t = 6–14 s · 20 fps · seed 42 · astro
+
+### `belousov_zhabotinsky` in motion
+
+<img src="media/belousov_zhabotinsky.gif" alt="Belousov-Zhabotinsky reaction: oxidation waves wind into a turning spiral, drawn as thin red and blue threads">
+
+Reactions · 80x24 cells · t = 4–12 s · 15 fps · seed 42 · astro
+
+### `snowflake_growth` in motion
+
+<img src="media/snowflake_growth.gif" alt="Snowflake growth: a stellar dendrite grows six branching arms out of the vapour">
+
+States of Matter · 80x24 cells · t = 51.5–59.5 s · 20 fps · seed 42 · astro
+
+### `mitosis` in motion
+
+<img src="media/mitosis.gif" alt="Mitosis: chromosomes align on the spindle, split to opposite poles and the cell pinches in two">
+
+Physics of Life · 80x24 cells · t = 13–23 s · 15 fps · seed 42 · astro
+
+### `vortex_street` in motion
+
+<img src="media/vortex_street.gif" alt="Vortex street: eddies peel off a cylinder, alternating sides, as contour threads of spinning fluid">
+
+Forces & Waves · 80x24 cells · t = 4–10 s · 20 fps · seed 42 · astro
+
+### `aurora` in motion
+
+<img src="media/aurora.gif" alt="Aurora: a substorm breaks up and green auroral curtains surge over a still northern lake">
+
+Earth & Sky · 80x24 cells · t = 5–10 s · 12 fps · seed 42 · astro
+
+### `rocket_launch` in motion
+
+<img src="media/rocket_launch.gif" alt="Rocket launch: ignition, liftoff and the climb away from the tower on an exhaust plume">
+
+Voyages · 80x24 cells · t = 4–12 s · 15 fps · seed 42 · astro
+
+### `double_pendulum` in motion
+
+<img src="media/double_pendulum.gif" alt="Double pendulum: twin pendulums released a thousandth of a radian apart trace dotted trails that drift apart into chaos">
+
+Forces & Waves · 80x24 cells · t = 0–12 s · 15 fps · seed 42 · astro
+
+### `binary_inspiral` in motion
+
+<img src="media/binary_inspiral.gif" alt="Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple">
+
+Deep Cosmos · 80x24 cells · t = 0–8 s · 20 fps · seed 42 · astro
+
+### `physarum` in motion
+
+<img src="media/physarum.gif" alt="Physarum: a slime mould spreads a lace of veins that thickens into a network between food sources">
+
+Living Systems · 80x24 cells · t = 0–8 s · 20 fps · seed 42 · astro
+
+### `chladni_plate` in motion
+
+<img src="media/chladni_plate.gif" alt="Chladni plate: scattered sand on a vibrating plate gathers on the nodal lines into a Chladni figure">
+
+Forces & Waves · 80x24 cells · t = 0–5 s · 20 fps · seed 42 · astro
+
+### `dna_helix` in motion
+
+<img src="media/dna_helix.gif" alt="DNA helix: the double helix turns while a replication fork unzips it and copies each strand">
+
+Molecules of Life · 80x24 cells · t = 6–14 s · 12 fps · seed 42 · astro
+
+### `comet_tails` in motion
+
+<img src="media/comet_tails.gif" alt="Comet tails: a comet rounds the Sun with a curved dust tail and a straight blue ion tail pushed away from it">
+
+Sun & Planets · 80x24 cells · t = 0–8 s · 15 fps · seed 42 · astro
+
+### `black_hole` in motion
+
+<img src="media/black_hole.gif" alt="Black hole: an accretion disk of infalling gas turns around the dark hole, its photon ring drawn as bright dots">
+
+Deep Cosmos · 80x24 cells · t = 0–6 s · 20 fps · seed 42 · astro
+
 ## Deep Cosmos
 
 ### `binary_inspiral`

@@ -107,13 +107,19 @@ jobs:
       # IMP-06: exactly one current frame per registered scene, no orphans.
       - name: Gallery coverage
         run: python3 scripts/gallery.py --check
+      # WEB-R1/R2: the showcase clips match docs/showcase.toml, within the size limits, and
+      # README.md / docs/GALLERY.md reference only manifest media.
+      - name: Showcase manifest
+        run: python3 scripts/showcase.py --check
       # GEN-R15: the generated SPEC-002 scene index is current.
-      # TEST-R1/R4: spec traceability; TEST-R9/R10/R11/R13: tooling schema (as `rs-spec-check`).
+      # TEST-R1/R4: spec traceability; TEST-R9/R10/R11/R13: tooling schema; RT-R22: the
+      # size check's own tests (as `rs-spec-check`).
       - name: Spec index & tooling schema
         run: |
           python3 scripts/spec_index.py --check
           python3 scripts/spec_check.py
           python3 scripts/tooling_check.py
+          python3 scripts/size_check_test.py
       # CLI-R15: the recorder is in the default build above; this is the build without it.
       - name: Tests without the recorder
         run: cargo nextest run -p sciart --no-default-features --features cli
