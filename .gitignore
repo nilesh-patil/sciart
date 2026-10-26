@@ -4,6 +4,9 @@
 
 # Rust build output and pending snapshot reviews
 /target/
+# The browser player's own build (web/, WEB-R3) and the built docs site (WEB-R5)
+/web/target/
+/site/dist/
 *.snap.new
 *.pending-snap
 
