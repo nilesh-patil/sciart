@@ -1,0 +1,262 @@
+// The live player (WEB-R3, WEB-R5): sciart's scenes, compiled to WebAssembly, drawn on a
+// canvas. The module is this site's own file and needs nothing else (WEB-R4, WEB-R6). The
+// page's time comes from the animation frame; the module turns it into fixed 1/60 s steps.
+// Where WebAssembly is missing or fails, the recorded clip in the page stays in place.
+"use strict";
+
+(function () {
+  const data = JSON.parse(document.getElementById("player-data").textContent);
+  const stage = document.getElementById("stage");
+  const fallback = document.getElementById("fallback");
+  const fallbackImg = fallback.querySelector("img");
+  const fallbackNote = document.getElementById("fallback-note");
+  const screen = document.getElementById("screen");
+  const controls = document.getElementById("controls");
+  const status = document.getElementById("status");
+  const sceneSelect = document.getElementById("scene");
+  const themeSelect = document.getElementById("theme");
+  const seedInput = document.getElementById("seed");
+  const playButton = document.getElementById("play");
+  const restartButton = document.getElementById("restart");
+  const reseedButton = document.getElementById("reseed");
+
+  const params = new URLSearchParams(window.location.search);
+  const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+
+  // Show the recorded clip of `scene` when there is one (WebAssembly unavailable).
+  function showFallback(scene, reason) {
+    const clip = data.clips[scene];
+    if (clip) {
+      fallbackImg.src = clip.src;
+      fallbackImg.alt = clip.alt;
+    }
+    fallbackNote.textContent = reason;
+    fallback.hidden = false;
+    screen.hidden = true;
+    controls.hidden = true;
+  }
+
+  if (typeof WebAssembly !== "object" || typeof WebAssembly.instantiate !== "function") {
+    showFallback(params.get("scene") || data.default_scene,
+      "This browser cannot run WebAssembly, so here is a recorded clip instead.");
+    return;
+  }
+
+  // ---- The module, wrapped in a small Player class --------------------------------------
+
+  function load() {
+    return fetch(data.module)
+      .then((response) => {
+        if (!response.ok) throw new Error("the player module did not load (" + response.status + ")");
+        return response.arrayBuffer();
+      })
+      .then((bytes) => WebAssembly.instantiate(bytes, {}))
+      .then((result) => result.instance.exports);
+  }
+
+  function bind(wasm) {
+    const encoder = new TextEncoder();
+    const decoder = new TextDecoder();
+    const output = () => decoder.decode(new Uint8Array(wasm.memory.buffer, wasm.output_ptr(), wasm.output_len()));
+    const input = (text) => {
+      const bytes = encoder.encode(text);
+      const ptr = wasm.input(bytes.length);
+      new Uint8Array(wasm.memory.buffer, ptr, bytes.length).set(bytes);
+    };
+
+    class Player {
+      // new(scene, columns, rows, seed): throws for an unknown scene.
+      constructor(scene, columns, rows, seed) {
+        input(scene);
+        const s = Math.max(0, Math.floor(Number(seed) || 0));
+        this.handle = wasm.player_new(columns, rows, Math.floor(s / 4294967296) >>> 0, s >>> 0);
+        if (this.handle === 0) throw new Error("no scene named " + scene);
+        wasm.player_scene(this.handle);
+        this.scene = output();
+      }
+      advance(seconds) { return wasm.player_advance(this.handle, seconds) === 1; }
+      resize(columns, rows) { wasm.player_resize(this.handle, columns, rows); }
+      // frame(theme): RGBA pixels as an ImageData, theme by name.
+      frame(theme) {
+        const index = Math.max(0, Player.themes().indexOf(theme));
+        const ptr = wasm.player_frame(this.handle, index);
+        const width = wasm.player_width(this.handle);
+        const height = wasm.player_height(this.handle);
+        const pixels = new Uint8ClampedArray(wasm.memory.buffer, ptr, width * height * 4);
+        return new ImageData(pixels, width, height);
+      }
+      free() { wasm.player_free(this.handle); this.handle = 0; }
+      static scenes() { wasm.scenes_json(); return JSON.parse(output()).scenes; }
+      static themes() {
+        if (!Player.themeNames) { wasm.theme_names(); Player.themeNames = output().split("\n"); }
+        return Player.themeNames;
+      }
+    }
+    return Player;
+  }
+
+  // ---- The page --------------------------------------------------------------------------
+
+  load().then((wasm) => {
+    const Player = bind(wasm);
+    const scenes = Player.scenes();
+    const byName = new Map(scenes.map((s) => [s.name, s]));
+
+    // Scene choice, grouped by category as in the gallery.
+    const groups = new Map();
+    for (const s of scenes) {
+      if (!groups.has(s.category_label)) groups.set(s.category_label, []);
+      groups.get(s.category_label).push(s);
+    }
+    for (const [label, members] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+      const group = document.createElement("optgroup");
+      group.label = label;
+      for (const s of members) group.append(new Option(s.name.replace(/_/g, " "), s.name));
+      sceneSelect.append(group);
+    }
+    for (const t of Player.themes()) themeSelect.append(new Option(t, t));
+    // `n` and `p` walk the scenes in the order the list shows them.
+    const names = [...sceneSelect.options].map((o) => o.value);
+
+    const state = {
+      scene: names.includes(params.get("scene")) ? params.get("scene") : data.default_scene,
+      theme: Player.themes().includes(params.get("theme")) ? params.get("theme") : "astro",
+      seed: /^\d{1,15}$/.test(params.get("seed") || "") ? Number(params.get("seed")) : 42,
+      playing: !reduceMotion.matches,
+      time: 0,
+    };
+    let player = null;
+    let last = null;
+    const ctx = screen.getContext("2d");
+
+    function cells() {
+      const width = stage.clientWidth || 800;
+      const columns = Math.max(40, Math.min(100, Math.floor(width / 8)));
+      const rows = Math.max(12, Math.min(30, Math.round(columns * 0.3)));
+      return [columns, rows];
+    }
+
+    function share() {
+      const q = new URLSearchParams({ scene: state.scene, theme: state.theme, seed: String(state.seed) });
+      window.history.replaceState(null, "", "?" + q.toString());
+    }
+
+    function draw() {
+      const image = player.frame(state.theme);
+      if (screen.width !== image.width || screen.height !== image.height) {
+        screen.width = image.width;
+        screen.height = image.height;
+      }
+      ctx.putImageData(image, 0, 0);
+      const info = byName.get(player.scene);
+      status.innerHTML = "";
+      const title = document.createElement("span");
+      title.className = "title";
+      title.textContent = info.title;
+      status.append(title, " · t = " + state.time.toFixed(1) + " s · seed " + state.seed +
+        (state.playing ? "" : " · paused"));
+    }
+
+    function start() {
+      if (player) player.free();
+      const [columns, rows] = cells();
+      player = new Player(state.scene, columns, rows, state.seed);
+      state.time = 0;
+      if (!state.playing) {
+        // A still that shows the scene, not its empty first instant.
+        player.advance(5);
+        state.time = 5;
+      }
+      sceneSelect.value = state.scene;
+      themeSelect.value = state.theme;
+      seedInput.value = String(state.seed);
+      playButton.textContent = state.playing ? "Pause" : "Play";
+      share();
+      draw();
+    }
+
+    function fail(error) {
+      showFallback(state.scene, "The live player stopped (" + error.message + "); here is a recorded clip instead.");
+    }
+
+    function tick(now) {
+      if (!state.playing || !player) { last = null; return; }
+      if (last !== null) {
+        // A hidden tab or a slow frame must not jump the scene forward.
+        const dt = Math.min(Math.max((now - last) / 1000, 0), 0.25);
+        try {
+          player.advance(dt);
+          state.time += dt;
+          draw();
+        } catch (error) { fail(error); return; }
+      }
+      last = now;
+      window.requestAnimationFrame(tick);
+    }
+
+    function setPlaying(playing) {
+      state.playing = playing;
+      playButton.textContent = playing ? "Pause" : "Play";
+      if (playing) { last = null; window.requestAnimationFrame(tick); } else { draw(); }
+    }
+
+    function step(delta) {
+      const i = names.indexOf(state.scene);
+      state.scene = names[(i + delta + names.length) % names.length];
+      start();
+    }
+
+    function nextTheme() {
+      const themes = Player.themes();
+      state.theme = themes[(themes.indexOf(state.theme) + 1) % themes.length];
+      themeSelect.value = state.theme;
+      share();
+      draw();
+    }
+
+    sceneSelect.addEventListener("change", () => { state.scene = sceneSelect.value; start(); });
+    themeSelect.addEventListener("change", () => { state.theme = themeSelect.value; share(); draw(); });
+    seedInput.addEventListener("change", () => {
+      const seed = Math.floor(Number(seedInput.value));
+      if (Number.isFinite(seed) && seed >= 0 && seed <= Number.MAX_SAFE_INTEGER) { state.seed = seed; start(); }
+      else { seedInput.value = String(state.seed); }
+    });
+    playButton.addEventListener("click", () => setPlaying(!state.playing));
+    restartButton.addEventListener("click", start);
+    reseedButton.addEventListener("click", () => { state.seed = Math.floor(Math.random() * 1e9); start(); });
+    controls.addEventListener("submit", (event) => event.preventDefault());
+
+    // Keys, as in the terminal: space, n/p, t, r. Typing in a field is left alone.
+    document.addEventListener("keydown", (event) => {
+      if (event.altKey || event.ctrlKey || event.metaKey) return;
+      const tag = event.target.tagName;
+      if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const key = event.key;
+      if (key === " ") { event.preventDefault(); setPlaying(!state.playing); }
+      else if (key === "n" || key === "ArrowRight") step(1);
+      else if (key === "p" || key === "ArrowLeft") step(-1);
+      else if (key === "t") nextTheme();
+      else if (key === "r") start();
+    });
+
+    let resizeTimer = 0;
+    window.addEventListener("resize", () => {
+      window.clearTimeout(resizeTimer);
+      resizeTimer = window.setTimeout(() => {
+        const [columns, rows] = cells();
+        player.resize(columns, rows);
+        draw();
+      }, 150);
+    });
+
+    fallback.hidden = true;
+    screen.hidden = false;
+    controls.hidden = false;
+    try { start(); } catch (error) { fail(error); return; }
+    if (state.playing) window.requestAnimationFrame(tick);
+    else status.append(" · your system asks for reduced motion; press Play or space to start");
+  }).catch((error) => {
+    showFallback(params.get("scene") || data.default_scene,
+      "The live player could not start (" + error.message + "); here is a recorded clip instead.");
+  });
+})();
