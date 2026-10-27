@@ -1,11 +1,13 @@
 // The live player (WEB-R3, WEB-R5): sciart's scenes, compiled to WebAssembly, drawn on a
-// canvas. The module is this site's own file and needs nothing else (WEB-R4, WEB-R6). The
-// page's time comes from the animation frame; the module turns it into fixed 1/60 s steps.
-// Where WebAssembly is missing or fails, the recorded clip in the page stays in place.
+// canvas. The module is this site's own file and needs nothing else (WEB-R4, WEB-R6): the
+// only address this script loads is the module's path from the page's own data. The page's
+// time comes from the animation frame; the module turns it into fixed 1/60 s steps. Where
+// WebAssembly is missing or the module fails at any point, the recorded clip comes back.
 "use strict";
 
 (function () {
   const data = JSON.parse(document.getElementById("player-data").textContent);
+  const root = document.getElementById("player");
   const stage = document.getElementById("stage");
   const fallback = document.getElementById("fallback");
   const fallbackImg = fallback.querySelector("img");
@@ -22,18 +24,20 @@
 
   const params = new URLSearchParams(window.location.search);
   const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)");
+  let failed = false;
 
-  // Show the recorded clip of `scene` when there is one (WebAssembly unavailable).
+  // Show the recorded clip of `scene` when there is one, and stop the live player.
   function showFallback(scene, reason) {
-    const clip = data.clips[scene];
-    if (clip) {
-      fallbackImg.src = clip.src;
-      fallbackImg.alt = clip.alt;
+    failed = true;
+    if (data.clips[scene]) {
+      fallbackImg.src = data.clips[scene].src;
+      fallbackImg.alt = data.clips[scene].alt;
     }
     fallbackNote.textContent = reason;
     fallback.hidden = false;
     screen.hidden = true;
     controls.hidden = true;
+    status.textContent = "";
   }
 
   if (typeof WebAssembly !== "object" || typeof WebAssembly.instantiate !== "function") {
@@ -129,6 +133,18 @@
     let last = null;
     const ctx = screen.getContext("2d");
 
+    function fail(error) {
+      showFallback(state.scene, "The live player stopped (" + error.message + "); here is a recorded clip instead.");
+    }
+
+    // Every way into the module goes through here: an error or a trap brings the clip back.
+    function guarded(action) {
+      return function (...args) {
+        if (failed) return;
+        try { action.apply(this, args); } catch (error) { fail(error); }
+      };
+    }
+
     function cells() {
       const width = stage.clientWidth || 800;
       const columns = Math.max(40, Math.min(100, Math.floor(width / 8)));
@@ -149,7 +165,7 @@
       }
       ctx.putImageData(image, 0, 0);
       const info = byName.get(player.scene);
-      status.innerHTML = "";
+      status.textContent = "";
       const title = document.createElement("span");
       title.className = "title";
       title.textContent = info.title;
@@ -159,6 +175,7 @@
 
     function start() {
       if (player) player.free();
+      player = null;
       const [columns, rows] = cells();
       player = new Player(state.scene, columns, rows, state.seed);
       state.time = 0;
@@ -175,86 +192,94 @@
       draw();
     }
 
-    function fail(error) {
-      showFallback(state.scene, "The live player stopped (" + error.message + "); here is a recorded clip instead.");
-    }
-
-    function tick(now) {
+    const tick = guarded(function tick(now) {
       if (!state.playing || !player) { last = null; return; }
       if (last !== null) {
         // A hidden tab or a slow frame must not jump the scene forward.
         const dt = Math.min(Math.max((now - last) / 1000, 0), 0.25);
-        try {
-          player.advance(dt);
-          state.time += dt;
-          draw();
-        } catch (error) { fail(error); return; }
+        player.advance(dt);
+        state.time += dt;
+        draw();
       }
       last = now;
       window.requestAnimationFrame(tick);
-    }
+    });
 
-    function setPlaying(playing) {
+    const setPlaying = guarded(function setPlaying(playing) {
       state.playing = playing;
       playButton.textContent = playing ? "Pause" : "Play";
       if (playing) { last = null; window.requestAnimationFrame(tick); } else { draw(); }
-    }
+    });
 
-    function step(delta) {
+    const step = guarded(function step(delta) {
       const i = names.indexOf(state.scene);
       state.scene = names[(i + delta + names.length) % names.length];
       start();
-    }
+    });
 
-    function nextTheme() {
+    const nextTheme = guarded(function nextTheme() {
       const themes = Player.themes();
       state.theme = themes[(themes.indexOf(state.theme) + 1) % themes.length];
       themeSelect.value = state.theme;
       share();
       draw();
-    }
+    });
 
-    sceneSelect.addEventListener("change", () => { state.scene = sceneSelect.value; start(); });
-    themeSelect.addEventListener("change", () => { state.theme = themeSelect.value; share(); draw(); });
-    seedInput.addEventListener("change", () => {
+    const restart = guarded(start);
+
+    sceneSelect.addEventListener("change", guarded(() => { state.scene = sceneSelect.value; start(); }));
+    themeSelect.addEventListener("change", guarded(() => { state.theme = themeSelect.value; share(); draw(); }));
+    seedInput.addEventListener("change", guarded(() => {
       const seed = Math.floor(Number(seedInput.value));
       if (Number.isFinite(seed) && seed >= 0 && seed <= Number.MAX_SAFE_INTEGER) { state.seed = seed; start(); }
       else { seedInput.value = String(state.seed); }
-    });
+    }));
     playButton.addEventListener("click", () => setPlaying(!state.playing));
-    restartButton.addEventListener("click", start);
-    reseedButton.addEventListener("click", () => { state.seed = Math.floor(Math.random() * 1e9); start(); });
+    restartButton.addEventListener("click", restart);
+    reseedButton.addEventListener("click", guarded(() => { state.seed = Math.floor(Math.random() * 1e9); start(); }));
     controls.addEventListener("submit", (event) => event.preventDefault());
 
-    // Keys, as in the terminal: space, n/p, t, r. Typing in a field is left alone.
-    document.addEventListener("keydown", (event) => {
-      if (event.altKey || event.ctrlKey || event.metaKey) return;
+    // Keys, as in the terminal: space, n/p (or the arrows), t, r. Only while focus is inside
+    // the player, and never instead of a focused control's own action: a field keeps every
+    // key, and a button, link or summary keeps space, Enter and the arrows.
+    root.addEventListener("keydown", (event) => {
+      if (event.altKey || event.ctrlKey || event.metaKey || failed) return;
       const tag = event.target.tagName;
       if (tag === "INPUT" || tag === "SELECT" || tag === "TEXTAREA") return;
+      const onControl = tag === "BUTTON" || tag === "A" || tag === "SUMMARY";
       const key = event.key;
-      if (key === " ") { event.preventDefault(); setPlaying(!state.playing); }
-      else if (key === "n" || key === "ArrowRight") step(1);
-      else if (key === "p" || key === "ArrowLeft") step(-1);
-      else if (key === "t") nextTheme();
-      else if (key === "r") start();
+      if (key === "n" || key === "p" || key === "t" || key === "r") {
+        if (key === "n") step(1);
+        else if (key === "p") step(-1);
+        else if (key === "t") nextTheme();
+        else restart();
+      } else if (!onControl && key === " ") {
+        event.preventDefault();
+        setPlaying(!state.playing);
+      } else if (!onControl && (key === "ArrowRight" || key === "ArrowLeft")) {
+        event.preventDefault();
+        step(key === "ArrowRight" ? 1 : -1);
+      }
     });
 
     let resizeTimer = 0;
     window.addEventListener("resize", () => {
       window.clearTimeout(resizeTimer);
-      resizeTimer = window.setTimeout(() => {
+      resizeTimer = window.setTimeout(guarded(() => {
+        if (!player) return;
         const [columns, rows] = cells();
         player.resize(columns, rows);
         draw();
-      }, 150);
+      }), 150);
     });
 
     fallback.hidden = true;
     screen.hidden = false;
     controls.hidden = false;
-    try { start(); } catch (error) { fail(error); return; }
+    restart();
+    if (failed) return;
     if (state.playing) window.requestAnimationFrame(tick);
-    else status.append(" · your system asks for reduced motion; press Play or space to start");
+    else status.append(" · your system asks for reduced motion; press Play, or space on the picture, to start");
   }).catch((error) => {
     showFallback(params.get("scene") || data.default_scene,
       "The live player could not start (" + error.message + "); here is a recorded clip instead.");
