@@ -122,6 +122,8 @@ jobs:
           python3 scripts/spec_check.py
           python3 scripts/tooling_check.py
           python3 scripts/size_check_test.py
+          python3 scripts/site_check_test.py
+          python3 scripts/tooling_check_test.py
       # CLI-R15: the recorder is in the default build above; this is the build without it.
       - name: Tests without the recorder
         run: cargo nextest run -p sciart --no-default-features --features cli
@@ -146,12 +148,19 @@ jobs:
           workspaces: |
             . -> target
             web -> web/target
-      - name: Player module (WebAssembly)
-        run: cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown
-      - name: Player tests (native)
-        run: cargo test --locked --manifest-path web/Cargo.toml
+      # First: the player tests, the smoke test and the site compare against this binary
+      # (`list --json`, completions).
       - name: The binary the site is built from (list, completions)
         run: cargo build --locked --profile ci -p sciart
+      - name: Player module (WebAssembly)
+        run: cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown
+      # WEB-R3: the compiled module outside a browser (pixi's wasmtime-py, pinned the same).
+      - name: Player module smoke test (wasmtime)
+        run: |
+          python3 -m pip install --quiet "wasmtime==51.0.0"
+          python3 scripts/web_smoke.py
+      - name: Player tests (native)
+        run: cargo test --locked --manifest-path web/Cargo.toml
       - name: Docs site
         run: |
           python3 scripts/build_site.py
