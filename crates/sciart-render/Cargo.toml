@@ -13,10 +13,17 @@ keywords = ["terminal", "ratatui", "renderer", "color", "truecolor"]
 categories = ["command-line-utilities", "graphics", "rendering", "visualization"]
 publish = false
 
+# WEB-R3 / ADR-0034: `terminal` (on by default) is the ratatui painting, the HUD and the
+# crossterm backend. Without it the crate is the themes and the ANSI writer, which build
+# for the browser.
+[features]
+default = ["terminal"]
+terminal = ["dep:crossterm", "dep:ratatui"]
+
 [dependencies]
 sciart-core.workspace = true
-crossterm.workspace = true
-ratatui.workspace = true
+crossterm = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
 unicode-width.workspace = true
 
 [dev-dependencies]

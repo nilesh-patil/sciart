@@ -16,7 +16,7 @@ publish = false
 
 [dependencies]
 ratatui.workspace = true
-sciart-render.workspace = true
+sciart-render = { workspace = true, features = ["terminal"] }
 
 [dev-dependencies]
 sciart-core.workspace = true

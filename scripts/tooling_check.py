@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R13; SPEC-007 LIB-R4,
-LIB-R7, LIB-R8; SPEC-005 CLI-R15).
+LIB-R7, LIB-R8; SPEC-005 CLI-R15; SPEC-009 WEB-R3..R8).
 
 Asserts the shape of the build/test tooling the gate depends on: pixi tasks use the
 documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and checks,
-nextest never filters or retries, sccache stays the shared rustc wrapper, and CI covers
-the platform tiers.
+nextest never filters or retries, sccache stays the shared rustc wrapper, CI covers
+the platform tiers, the browser player and the docs site build in the gate and in CI, and
+GitHub Pages is deployed only by hand or on a published release.
 
 Successor of the config half of `crates/sciart-generators/tests/source_rules.rs`; wired
 into `pixi run rs-spec-check` and CI.
@@ -324,9 +325,151 @@ def check_lib(problems: list[str]) -> None:
         fail(problems, "LIB-R8: cargo-semver-checks runs in hosted CI only, not in a pixi task")
 
 
+WEB_BUILD = "cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown"
+WEB_TEST = "cargo test --locked --manifest-path web/Cargo.toml"
+
+
+def check_web(problems: list[str]) -> None:
+    """WEB-R3..R7: the player builds for the browser through pixi and in CI on every push,
+    and the site is built and checked in the gate."""
+    pixi = toml_file("pixi.toml")
+    for task, command in (("web-build", WEB_BUILD), ("web-test", WEB_TEST)):
+        if pixi_task(pixi, task)[0] != command:
+            fail(problems, f"WEB-R3: the `{task}` task runs `{command}`")
+    cmd, deps = pixi_task(pixi, "site-build")
+    if "scripts/build_site.py" not in cmd or "web-build" not in deps:
+        fail(problems, "WEB-R5: `site-build` runs scripts/build_site.py after web-build")
+    cmd, deps = pixi_task(pixi, "site-check")
+    if "scripts/site_check.py" not in cmd or not {"site-build", "web-test"} <= set(deps):
+        fail(problems, "WEB-R4/R7: `site-check` runs scripts/site_check.py after site-build and web-test")
+    if "site-check" not in pixi_task(pixi, "rs-ci")[1]:
+        fail(problems, "WEB-R4/R7: rs-ci runs site-check")
+    web = toml_file("web/Cargo.toml")
+    if "workspace" not in web:
+        fail(problems, "WEB-R3: web/Cargo.toml is its own workspace, outside the product's")
+    members = toml_file("Cargo.toml").get("workspace", {}).get("members", [])
+    if any(m.startswith("web") for m in members):
+        fail(problems, "WEB-R3: web/ is not a member of the product workspace")
+    toolchain = toml_file("rust-toolchain.toml").get("toolchain", {})
+    if "wasm32-unknown-unknown" not in toolchain.get("targets", []):
+        fail(problems, "WEB-R3: rust-toolchain.toml installs the wasm32-unknown-unknown target")
+    cmd, deps = pixi_task(pixi, "web-smoke")
+    if "scripts/web_smoke.py" not in cmd or "web-build" not in deps:
+        fail(problems, "WEB-R3: `web-smoke` runs scripts/web_smoke.py after web-build")
+    if "web-smoke" not in pixi_task(pixi, "site-check")[1]:
+        fail(problems, "WEB-R3: `site-check` (and so rs-ci) runs web-smoke")
+    if "wasmtime-py" not in pixi.get("dependencies", {}):
+        fail(problems, "WEB-R3: the pixi environment provides wasmtime-py for web-smoke")
+    for problem in ci_web_problems((ROOT / ".github/workflows/ci.yml").read_text()):
+        fail(problems, problem)
+
+
+WEB_SMOKE = "python3 scripts/web_smoke.py"
+SCIART_CI_BUILD = "cargo build --locked --profile ci -p sciart"
+
+
+def ci_web_problems(ci: str) -> list[str]:
+    """WEB-R3..R7 in ci.yml: on every push a job builds the `sciart` binary first (the
+    player tests, the smoke test and the site compare against it), then the module, runs
+    the module's smoke test and the player tests, and builds and checks the site."""
+    problems = []
+    if not re.search(r"^on:\n  push:", ci, re.M):
+        problems.append("WEB-R3: ci.yml runs on push")
+    web_jobs = [body for body in workflow_jobs(ci).values() if WEB_BUILD in body]
+    if not web_jobs:
+        return problems + [f"WEB-R3: a ci.yml job runs `{WEB_BUILD}`"]
+    body = web_jobs[0]
+    if "wasm32-unknown-unknown" not in body.split(WEB_BUILD)[0]:
+        problems.append("WEB-R3: the ci.yml web job installs the wasm32-unknown-unknown target")
+    order = [SCIART_CI_BUILD, WEB_BUILD, WEB_SMOKE, WEB_TEST, "python3 scripts/build_site.py",
+             "python3 scripts/site_check.py"]
+    positions = [body.find(step) for step in order]
+    for step, at in zip(order, positions):
+        if at < 0:
+            problems.append(f"WEB-R3..R7: the ci.yml web job runs `{step}`")
+    found = [at for at in positions if at >= 0]
+    if found != sorted(found):
+        problems.append(
+            "WEB-R3: the ci.yml web job builds the binary, then the module, then runs the "
+            "smoke test, the player tests and the site, in that order"
+        )
+    return problems
+
+
+def workflow_on(text: str) -> dict[str, str]:
+    """The workflow's triggers as {event: body}: two-space-indented keys under `on:`."""
+    block = re.search(r"^on:\s*\n((?:(?:  .*)?\n)*)", text, re.M)
+    events: dict[str, str] = {}
+    if block is None:
+        return events
+    name = None
+    for line in block.group(1).splitlines():
+        head = re.match(r"^  ([A-Za-z_]+):\s*(.*)$", line)
+        if head:
+            name = head.group(1)
+            events[name] = head.group(2) + "\n"
+        elif name is not None:
+            events[name] += line + "\n"
+    return events
+
+
+# WEB-R8: the deploy job's guard. A manual run from any other branch builds and stops.
+DEPLOY_CONDITION = (
+    "github.event_name == 'release' || "
+    "github.ref == format('refs/heads/{0}', github.event.repository.default_branch)"
+)
+
+
+def pages_problems(text: str) -> list[str]:
+    """WEB-R8 over pages.yml: deploys only on a published release or a manual run from the
+    default branch, through the `github-pages` environment; a push never deploys."""
+    problems = []
+    events = workflow_on(text)
+    if set(events) != {"workflow_dispatch", "release"}:
+        problems.append(f"WEB-R8: pages.yml runs on workflow_dispatch and release only, not {sorted(events)}")
+    release = events.get("release", "")
+    types = re.search(r"types:\s*\[([^\]]*)\]", release)
+    if types is None or [t.strip() for t in types.group(1).split(",")] != ["published"]:
+        problems.append("WEB-R8: pages.yml deploys on a release only when it is published")
+    top = re.search(r"^permissions:\s*\n((?:  .*\n)*)", text, re.M)
+    if top is None or "pages:" in top.group(1) or "id-token:" in top.group(1):
+        problems.append("WEB-R8: pages.yml grants pages and id-token only to the deploy job")
+    deploys = [body for body in workflow_jobs(text).values() if "actions/deploy-pages@" in body]
+    if len(deploys) != 1:
+        return problems + ["WEB-R8: exactly one pages.yml job deploys (actions/deploy-pages)"]
+    body = deploys[0]
+    if not re.search(r"^    environment:\s*\n      name:\s*github-pages\s*$", body, re.M):
+        problems.append("WEB-R8: the deploy job runs in the `github-pages` environment")
+    for grant in ("pages: write", "id-token: write"):
+        if grant not in body:
+            problems.append(f"WEB-R8: the deploy job has `{grant}`")
+    guard = re.search(r"^    if:\s*(.+?)\s*$", body, re.M)
+    condition = guard.group(1) if guard else ""
+    wrapped = re.fullmatch(r"\$\{\{\s*(.*?)\s*\}\}", condition)
+    if wrapped:
+        condition = wrapped.group(1)
+    if re.sub(r"\s+", " ", condition) != DEPLOY_CONDITION:
+        problems.append(f"WEB-R8: the deploy job runs only `if: {DEPLOY_CONDITION}`, not {condition!r}")
+    if "path: site/dist" not in text:
+        problems.append("WEB-R8: pages.yml publishes site/dist (the output of scripts/build_site.py)")
+    return problems
+
+
+def check_web_r8(problems: list[str]) -> None:
+    path = ROOT / ".github/workflows/pages.yml"
+    if not path.is_file():
+        fail(problems, "WEB-R8: .github/workflows/pages.yml is missing")
+        return
+    for problem in pages_problems(path.read_text()):
+        fail(problems, problem)
+    for workflow in (ROOT / ".github/workflows").glob("*.yml"):
+        if workflow.name != "pages.yml" and "deploy-pages" in workflow.read_text():
+            fail(problems, f"WEB-R8: only pages.yml deploys to Pages, not {workflow.name}")
+
+
 def main() -> int:
     problems: list[str] = []
-    for check in (check_r9, check_r10, check_r11, check_r13, check_lib):
+    for check in (check_r9, check_r10, check_r11, check_r13, check_lib, check_web, check_web_r8):
         check(problems)
     if problems:
         print("tooling schema:", file=sys.stderr)
@@ -334,7 +477,7 @@ def main() -> int:
             print(f"  {p}", file=sys.stderr)
         return 1
     print("tooling schema OK (pixi tasks, cargo profiles, nextest, sccache, platform tiers, "
-          "library features)")
+          "library features, web player, Pages)")
     return 0
 
 

@@ -1,0 +1,67 @@
+name: Pages
+
+# WEB-R8 / ADR-0034: build the docs site (WEB-R5) and publish it to GitHub Pages. Only a
+# manual run or a published release deploys; a push never does (ci.yml builds and checks
+# the site on every push without publishing it). `scripts/tooling_check.py` checks the
+# triggers and the `github-pages` environment.
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer run waits instead of cancelling one in flight.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTUP_TOOLCHAIN: "1.88.0"
+
+jobs:
+  build:
+    name: build the site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            web -> web/target
+      - name: Player module (WebAssembly)
+        run: cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown
+      - name: The binary the site is built from (list, completions)
+        run: cargo build --locked --profile ci -p sciart
+      - name: Build and check the site
+        run: |
+          python3 scripts/build_site.py
+          python3 scripts/site_check.py
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/dist
+
+  deploy:
+    name: deploy to GitHub Pages
+    needs: build
+    # WEB-R8: only a published release or a manual run from the default branch deploys; a
+    # manual run from another branch builds the site and stops here.
+    if: github.event_name == 'release' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
