@@ -654,10 +654,10 @@ mod tests {
     }
 
     #[test]
-    fn kh_a1_scene_runs_on_the_core_lbm_kernel() {
-        // The kernel itself is vortex_street's, pinned bit for bit by
-        // vortex_street::tests::kh_a1_lifted_lbm_keeps_the_vortex_street_bit_identical;
-        // here the scene's own step is exactly `step_periodic` on the core lattice.
+    fn kh_a1_scene_runs_on_the_shared_lbm_kernel() {
+        // The kernel is the crate's shared `lbm` module (pinned by its own spec tests and
+        // by the snapshot suite, which held byte-identical when vortex_street's private
+        // copy was deleted); here the scene's own step is exactly `step_periodic`.
         let (mut g, mut ctx) = scene(3, Size::new(80, 24));
         // Past the amortised pre-roll (GEN-R19), an update is one plain advance.
         while g.preroll_owed > 0 {
