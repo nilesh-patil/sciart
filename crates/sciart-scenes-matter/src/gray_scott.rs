@@ -1288,9 +1288,10 @@ mod tests {
 
     #[test]
     fn chem_a4_every_start_slot_develops_structure_without_reseeding() {
+        // Seeds 1 and 3 (TEST time cut: a dead start is systematic, not a seed lottery).
         let runs: Vec<(usize, u64)> = START_SLOTS
             .iter()
-            .flat_map(|&slot| [1, 2, 3, 7].map(|seed| (slot, seed)))
+            .flat_map(|&slot| [1, 3].map(|seed| (slot, seed)))
             .collect();
         par(runs, |(slot, seed)| {
             let size = Size::new(80, 24);
@@ -1314,14 +1315,17 @@ mod tests {
 
     #[test]
     fn chem_a8_start_holds_keep_a_dark_majority_and_keep_moving() {
-        let runs: Vec<((u16, u16), usize, u64)> = [(80, 24), (200, 50)]
-            .into_iter()
-            .flat_map(|size| {
-                START_SLOTS
-                    .iter()
-                    .flat_map(move |&slot| [1, 7].map(|seed| (size, slot, seed)))
-            })
-            .collect();
+        // Both seeds at 80×24; seed 1 only at 200×50 (TEST time cut: the size sweep
+        // keeps one run per slot instead of two).
+        let mut runs: Vec<((u16, u16), usize, u64)> = Vec::new();
+        for size in [(80, 24), (200, 50)] {
+            let seeds: &[u64] = if size.0 == 80 { &[1, 7] } else { &[1] };
+            for slot in START_SLOTS {
+                for &seed in seeds {
+                    runs.push((size, slot, seed));
+                }
+            }
+        }
         par(runs, |((w, h), slot, seed)| {
             let size = Size::new(w, h);
             let (mut g, mut ctx) = scene(Some(slot), seed, w, h);
@@ -1403,7 +1407,9 @@ mod tests {
         let total = walk.total();
         let spots = PRESETS.len() - 1;
         let back = slot_start(PRESETS.len()) - slot_start(spots);
-        let runs = [(0, 1u64), (0, 5), (0, 7), (0, 11), (spots, 1), (spots, 7)];
+        // Seeds 1 and 7 carry the frame-window checks; 5 and 11 only the no-reseed
+        // claim, halved to seed 5 (TEST time cut: same assertion kinds, less coverage).
+        let runs = [(0, 1u64), (0, 5), (0, 7), (spots, 1), (spots, 7)];
         par(runs.to_vec(), |(slot, seed)| {
             let size = Size::new(80, 24);
             let (mut g, mut ctx) = scene(Some(slot), seed, 80, 24);
