@@ -7,6 +7,7 @@ use std::f64::consts::PI;
 
 use rand::Rng;
 use sciart_core::prelude::*;
+use sciart_core::stellar;
 use sciart_core::{draw, geom};
 
 pub static META: Meta = Meta {
@@ -78,10 +79,10 @@ pub(crate) fn flux(d: f64, rs: f64, rp: f64) -> f64 {
     1.0 - overlap_area(d, rs, rp) / (PI * rs * rs)
 }
 
-/// Linear limb-darkening law for a point at normalized radius `r ∈ [0, 1]` on the disc.
+/// Limb-darkened intensity for a point at normalized radius `r ∈ [0, 1]` on the disc:
+/// the shared law (CORE-R93) with the linear coefficients `(U, 0)`.
 pub(crate) fn limb_intensity(r: f64) -> f64 {
-    let mu = (1.0 - r * r).max(0.0).sqrt();
-    1.0 - U * (1.0 - mu)
+    stellar::limb_darkening((1.0 - r * r).max(0.0).sqrt(), (U, 0.0))
 }
 
 /// Planet offset from the star centre, in rows, at orbital phase `s ∈ [0, 1)`.

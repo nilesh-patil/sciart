@@ -16,6 +16,7 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::geom::v3::{axpy, cross, dot, norm};
 use sciart_core::prelude::*;
+use sciart_core::stellar;
 use sciart_core::timeline::ease;
 use sciart_core::title::{self, Title};
 use sciart_core::{draw, geom, ink};
@@ -161,9 +162,10 @@ const LABEL_INK: Ink = Ink::new(Role::Text, title::READOUT_LEVEL);
 
 // --- Physics (pure) -----------------------------------------------------------------
 
-/// Linear limb darkening `I(μ) = 1 − u(1 − μ)`, u = 0.6 (SUN-A1).
+/// Limb darkening `I(μ) = 1 − u(1 − μ)`, u = `LIMB_U` = 0.6 (SUN-A1): the shared law
+/// (CORE-R93) with linear coefficients.
 pub(crate) fn limb_intensity(mu: f64) -> f64 {
-    1.0 - LIMB_U * (1.0 - mu)
+    stellar::limb_darkening(mu, (LIMB_U, 0.0))
 }
 
 /// Sidereal rotation rate (°/day) at latitude `lat_deg` (SUN-A2).
