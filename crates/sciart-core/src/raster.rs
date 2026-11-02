@@ -693,31 +693,6 @@ impl Density {
             }
         }
     }
-
-    /// Set every pixel of `pixels` from the sum of its 2 × 2 dot block through `tone`
-    /// (CORE-R81): level 0 ⇒ [`Ink::BLANK`], otherwise `ink(level)`. A `Density` and a
-    /// `Pixels` over the same cells line up exactly (4 dot rows per 2 pixel rows); pixels
-    /// with no full block in the density are emptied. One pass, no allocation.
-    pub fn to_pixels(&self, pixels: &mut Pixels, tone: &Tone, mut ink: impl FnMut(u8) -> Ink) {
-        let dw = usize::from(self.dots.width());
-        // Two dot rows per pixel row; the dot height (4·h) is always even.
-        let mut blocks = self.buf.chunks_exact(2 * dw);
-        for row in pixels
-            .px
-            .chunks_exact_mut(usize::from(pixels.cells.width()))
-        {
-            let mut out = row.iter_mut();
-            if let Some(pair) = blocks.next() {
-                let (top, bottom) = pair.split_at(dw);
-                let columns = top.chunks_exact(2).zip(bottom.chunks_exact(2));
-                for ((t, b), px) in columns.zip(&mut out) {
-                    let level = tone.level(t[0] + t[1] + b[0] + b[1]);
-                    *px = if level == 0 { Ink::BLANK } else { ink(level) };
-                }
-            }
-            out.for_each(|px| *px = Ink::BLANK);
-        }
-    }
 }
 
 /// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the values as they are):
@@ -732,57 +707,17 @@ fn fade(buf: &mut [f32], k: f32) {
     }
 }
 
-/// The 3 × 3 [`Glow::splat`] kernel for strokes (CORE-R96): centre 0.36, edge
-/// neighbours 0.12, corners 0.04 (sum 1), so a stroked line exposes a soft two-pixel band.
-pub const STROKE_KERNEL: [(i32, i32, f32); 9] = [
-    (0, 0, 0.36),
-    (-1, 0, 0.12),
-    (1, 0, 0.12),
-    (0, -1, 0.12),
-    (0, 1, 0.12),
-    (-1, -1, 0.04),
-    (1, -1, 0.04),
-    (-1, 1, 0.04),
-    (1, 1, 0.04),
-];
-
-/// A round [`Glow::splat`] halo kernel of radius `r` pixels (CORE-R96): every offset of
-/// the `(2r + 1)²` square, row by row, weighted `(1 − d²/(r + ½)²)²` (0 outside radius
-/// `r + ½`), so it is 1 at the centre and falls smoothly to 0. `N` must be `(2r + 1)²`;
-/// usable in a `const` (`const HALO: [_; 49] = halo_kernel(3);`), where a mismatch fails
-/// the build.
-pub const fn halo_kernel<const N: usize>(r: i32) -> [(i32, i32, f32); N] {
-    assert!(r >= 0 && ((2 * r + 1) * (2 * r + 1)) as usize == N);
-    let mut k = [(0, 0, 0.0f32); N];
-    let reach = (r as f32 + 0.5) * (r as f32 + 0.5);
-    let mut i = 0;
-    let mut dy = -r;
-    while dy <= r {
-        let mut dx = -r;
-        while dx <= r {
-            let w = 1.0 - (dx * dx + dy * dy) as f32 / reach;
-            k[i] = (dx, dy, if w > 0.0 { w * w } else { 0.0 });
-            i += 1;
-            dx += 1;
-        }
-        dy += 1;
-    }
-    k
-}
-
 /// A long-exposure `f32` buffer at [`Pixels`] resolution, `w × 2·h` (CORE-R85): points
 /// [`splat`](Self::splat) weight into it by their [`Dots`] position, [`decay`](Self::decay)
-/// fades it, and [`to_pixels`](Self::to_pixels) tone-maps it 1:1 onto a `Pixels` layer. A
-/// soft glow under a point cloud or an event display, at an eighth of a [`Density`]'s
-/// memory (one value per pixel instead of per dot).
+/// fades it, and scenes tone-map it themselves through [`values`](Self::values) and
+/// [`Tone::level`]. A soft glow under a point cloud or an event display, at an eighth of a
+/// [`Density`]'s memory (one value per pixel instead of per dot).
 #[derive(Debug, Clone)]
 pub struct Glow {
     /// Buffer size in pixels.
     px: Size,
     /// Row-major, `px.w × px.h`.
     buf: Vec<f32>,
-    /// One row of scratch for [`blur121`](Self::blur121), sized in `resize`.
-    row: Vec<f32>,
 }
 
 impl Default for Glow {
@@ -801,7 +736,6 @@ impl Glow {
         let mut g = Self {
             px: Size::new(1, 1),
             buf: Vec::new(),
-            row: Vec::new(),
         };
         g.resize(cells);
         g
@@ -817,57 +751,11 @@ impl Glow {
         self.px = Size::new(cells.width(), sub_axis(cells.height(), 2));
         self.buf.clear();
         self.buf.resize(self.px.area(), 0.0);
-        self.row.clear();
-        self.row.resize(usize::from(self.px.width()), 0.0);
     }
 
     /// Zero every pixel.
     pub fn clear(&mut self) {
         self.buf.fill(0.0);
-    }
-
-    /// Blur in place with the separable 3 × 3 binomial kernel `[1 2 1]/4 ⊗ [1 2 1]/4`,
-    /// edges clamped (CORE-R103): a glow's rim ends softly instead of in pixel steps.
-    /// Both passes walk rows (cache-friendly, vectorisable) and share one scratch row
-    /// sized in `resize`, so it allocates nothing; a constant field is unchanged and
-    /// interior mass is conserved.
-    pub fn blur121(&mut self) {
-        let w = usize::from(self.px.width());
-        if w == 0 || self.row.len() < w {
-            return;
-        }
-        for row in self.buf.chunks_exact_mut(w) {
-            let mut prev = row[0];
-            for x in 0..w {
-                let cur = row[x];
-                let next = row[(x + 1).min(w - 1)];
-                row[x] = 0.25 * (prev + 2.0 * cur + next);
-                prev = cur;
-            }
-        }
-        // Vertical: `up` holds the row above as it was before this pass; each row is
-        // replaced while its old values move into `up` for the row below.
-        let up = &mut self.row[..w];
-        up.copy_from_slice(&self.buf[..w]);
-        let h = self.buf.len() / w;
-        for y in 0..h {
-            let (head, tail) = self.buf.split_at_mut((y + 1) * w);
-            let cur = &mut head[y * w..];
-            if y + 1 < h {
-                for ((c, u), &d) in cur.iter_mut().zip(up.iter_mut()).zip(&tail[..w]) {
-                    let old = *c;
-                    *c = 0.25 * (*u + 2.0 * old + d);
-                    *u = old;
-                }
-            } else {
-                // The last row's neighbour below is itself (clamped).
-                for (c, u) in cur.iter_mut().zip(up.iter_mut()) {
-                    let old = *c;
-                    *c = 0.25 * (*u + 2.0 * old + old);
-                    *u = old;
-                }
-            }
-        }
     }
 
     /// Multiply every value by `k`, clamped to `[0, 1]` (NaN leaves the buffer as is):
@@ -896,25 +784,6 @@ impl Glow {
             if (0..w).contains(&x) && (0..h).contains(&y) && add.is_finite() {
                 self.buf[y as usize * w as usize + x as usize] += add;
             }
-        }
-    }
-
-    /// Stroke the dot-space segment `a → b` (CORE-R96): [`splat`](Self::splat) `kernel`
-    /// at `scale` at `n = clamp(⌈len / 2⌉, 1, 2048)` evenly spaced points (the midpoints
-    /// of `n` equal parts, one per pixel of length, a pixel being 2 dots), so a line's
-    /// exposure per pixel of length does not depend on its length. A non-finite length
-    /// draws nothing; the cap bounds a runaway segment.
-    pub fn stroke(&mut self, a: (f64, f64), b: (f64, f64), kernel: &[(i32, i32, f32)], scale: f32) {
-        let len = (b.0 - a.0).hypot(b.1 - a.1);
-        if !len.is_finite() {
-            return;
-        }
-        let n = (len / f64::from(Self::DOTS_PER_PIXEL))
-            .ceil()
-            .clamp(1.0, 2048.0) as usize;
-        for k in 0..n {
-            let u = (k as f64 + 0.5) / n as f64;
-            self.splat(a.0 + u * (b.0 - a.0), a.1 + u * (b.1 - a.1), kernel, scale);
         }
     }
 
@@ -951,41 +820,12 @@ impl Glow {
         &self.buf
     }
 
-    /// Every pixel value, mutable, row-major: for scene-side filters (a blur) between
-    /// splatting and toning.
-    #[inline]
-    pub fn values_mut(&mut self) -> &mut [f32] {
-        &mut self.buf
-    }
-
     /// The value at pixel `(x, y)`, or `None` off the buffer.
     #[inline]
     pub fn get(&self, x: i32, y: i32) -> Option<f32> {
         let (w, h) = (i32::from(self.px.width()), i32::from(self.px.height()));
         ((0..w).contains(&x) && (0..h).contains(&y))
             .then(|| self.buf[y as usize * w as usize + x as usize])
-    }
-
-    /// Set every pixel of `pixels` from its value through `tone`: level 0 ⇒
-    /// [`Ink::BLANK`], otherwise `ink(level)` (which may itself be blank). A `Glow` and a
-    /// `Pixels` over the same cells line up 1:1; pixels outside the glow are emptied. One
-    /// pass, no allocation.
-    pub fn to_pixels(&self, pixels: &mut Pixels, tone: &Tone, mut ink: impl FnMut(u8) -> Ink) {
-        let gw = usize::from(self.px.width());
-        let mut rows = self.buf.chunks_exact(gw.max(1));
-        for row in pixels
-            .px
-            .chunks_exact_mut(usize::from(pixels.cells.width()).max(1))
-        {
-            let mut out = row.iter_mut();
-            if let Some(src) = rows.next() {
-                for (&v, px) in src.iter().zip(&mut out) {
-                    let level = tone.level(v);
-                    *px = if level == 0 { Ink::BLANK } else { ink(level) };
-                }
-            }
-            out.for_each(|px| *px = Ink::BLANK);
-        }
     }
 }
 

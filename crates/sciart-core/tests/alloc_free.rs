@@ -380,29 +380,20 @@ fn core_r51_r55_dots_line_and_density_do_not_allocate() {
 }
 
 #[test]
-fn core_r81_tone_and_to_pixels_do_not_allocate() {
-    let size = Size::new(200, 50);
-    let mut density = Density::new(size);
-    let mut pixels = Pixels::new(size);
-    for i in 0..400 {
-        density.deposit(f64::from(i), f64::from(i % 200), 3.0);
-    }
+fn core_r81_tone_luts_do_not_allocate() {
     let (tone, stats) = measure(|| {
         let tone = sciart_core::raster::Tone::asinh(0.2, 30.0);
-        density.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
         black_box(tone.level(4.0));
         tone
     });
     black_box(tone);
-    assert_free("Tone::asinh / Density::to_pixels", stats);
+    assert_free("Tone::asinh / Tone::level", stats);
 }
 
 #[test]
-fn core_r85_r92_r103_glow_does_not_allocate_after_resize() {
+fn core_r85_r92_glow_does_not_allocate_after_resize() {
     let size = Size::new(200, 50);
     let mut glow = Glow::new(size);
-    let mut pixels = Pixels::new(size);
-    let tone = sciart_core::raster::Tone::asinh(0.4, 6.0);
     let kernel = [(0, 0, 0.5), (1, 0, 0.25), (0, 1, 0.25)];
     let ((), stats) = measure(|| {
         glow.decay(0.9);
@@ -410,12 +401,9 @@ fn core_r85_r92_r103_glow_does_not_allocate_after_resize() {
             glow.splat(f64::from(i), f64::from(i % 200), &kernel, 3.0);
             glow.splat_bilinear(f64::from(i) * 0.37, f64::from(i % 90) * 0.9, 1.0);
         }
-        black_box(glow.values_mut()[0]);
-        glow.blur121();
-        glow.to_pixels(&mut pixels, &tone, |l| Ink::new(Role::Seq, l));
+        black_box(glow.values()[0]);
         glow.resize(Size::new(100, 20));
         glow.clear();
-        glow.blur121();
     });
     assert_free("Glow", stats);
 }
