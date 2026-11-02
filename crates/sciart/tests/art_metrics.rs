@@ -1,5 +1,5 @@
 //! Per-scene art bands (GEN-R24, ADR-0018), measured with the RND-R13 metrics
-//! (`sciart_render::metrics`) on the painted `astro` frame at 200×50, seed 42, t = 5 s and
+//! (`sciart::metrics`) on the painted `astro` frame at 200×50, seed 42, t = 5 s and
 //! 20 s: the same numbers `pixi run rs-cost` prints.
 //!
 //! `LIMITS` holds each scene's reviewed look as a band: per scene and time, a darkness
@@ -20,9 +20,9 @@ use std::sync::OnceLock;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use sciart::metrics::{ArtMetrics, art_metrics};
 use sciart_core::prelude::*;
 use sciart_generators::{Entry, registry};
-use sciart_render::metrics::{ArtMetrics, art_metrics};
 use sciart_render::{Theme, paint};
 
 const SEED: u64 = 42;

@@ -22,7 +22,7 @@
 //!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; M14's cap
 //!   was 0.20), `p99L` (p99 lit-pixel luma at the worse time; M14's floor was 0.6): the
 //!   RND-R13 art metrics of the exact `astro` frame at t = 5 s and 20 s
-//!   (`sciart_render::metrics`), when `--secs` reaches them. Darkness, coverage, chroma
+//!   (`sciart::metrics`), when `--secs` reaches them. Darkness, coverage, chroma
 //!   mass and edge weight are the GEN-R24 per-scene bands; the rest are informative.
 //!
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
@@ -44,9 +44,9 @@ use std::time::Instant;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
+use sciart::metrics::{ArtMetrics, Clean, art_metrics};
 use sciart_core::prelude::*;
 use sciart_generators::Entry;
-use sciart_render::metrics::{ArtMetrics, Clean, art_metrics};
 use sciart_render::{FrameBackend, Painter, Theme, paint};
 
 const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] \

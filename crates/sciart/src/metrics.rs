@@ -14,11 +14,13 @@
 //!
 //! Pure functions of the buffer: the probe (`pixi run rs-cost`) and the per-scene ratchet
 //! tables in `crates/sciart/tests/art_metrics.rs` compute exactly the same numbers.
+//! Offline QA, a module of the `sciart` crate next to its only consumers (the cost
+//! example and the art-metrics test); the renderer ships none of it.
 
 use ratatui::buffer::Buffer;
 use ratatui::style::Color;
 
-use crate::Rgb;
+use sciart_render::Rgb;
 
 /// Luma at or below which a field pixel is background, not part of a block (GEN-R17).
 pub const DARK_LUMA: f64 = 0.08;

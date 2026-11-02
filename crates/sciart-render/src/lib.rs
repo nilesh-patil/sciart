@@ -5,7 +5,6 @@ mod color;
 mod encode;
 mod fields;
 mod hud;
-pub mod metrics;
 mod paint;
 mod terminal;
 mod theme;
