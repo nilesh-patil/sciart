@@ -17,6 +17,7 @@ use rand::Rng;
 use sciart_core::geom::{self, ASPECT};
 use sciart_core::particles::plot;
 use sciart_core::prelude::*;
+use sciart_core::text::StackStr;
 use sciart_core::{draw, ease};
 
 pub static META: Meta = Meta {
@@ -342,38 +343,6 @@ pub(crate) fn mission_day(t: f64) -> f64 {
 // Text (allocation-free).
 // ---------------------------------------------------------------------------------------
 
-/// Fixed-capacity string for `write!` in `render` without allocating.
-struct TextBuf {
-    buf: [u8; 64],
-    len: usize,
-}
-
-impl TextBuf {
-    fn new() -> Self {
-        Self {
-            buf: [0; 64],
-            len: 0,
-        }
-    }
-
-    fn as_str(&self) -> &str {
-        // Only whole `&str` pieces are ever appended, so this cannot fail.
-        std::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
-    }
-}
-
-impl fmt::Write for TextBuf {
-    fn write_str(&mut self, s: &str) -> fmt::Result {
-        let end = self.len + s.len();
-        if end > self.buf.len() {
-            return Err(fmt::Error);
-        }
-        self.buf[self.len..end].copy_from_slice(s.as_bytes());
-        self.len = end;
-        Ok(())
-    }
-}
-
 /// First option that fits `width` with a one-cell margin each side, or none: captions
 /// are shortened or skipped, never clipped mid-word.
 fn pick<'a>(options: &[&'a str], width: u16) -> Option<&'a str> {
@@ -695,8 +664,12 @@ impl Generator for VoyagerJourney {
 
 /// Top-left date / distance readout, shortened to fit.
 fn readout(canvas: &mut Canvas, today: f64, r: f64) {
-    let (mut long, mut mid, mut short) = (TextBuf::new(), TextBuf::new(), TextBuf::new());
-    let mut date = TextBuf::new();
+    let (mut long, mut mid, mut short) = (
+        StackStr::<64>::default(),
+        StackStr::<64>::default(),
+        StackStr::<64>::default(),
+    );
+    let mut date = StackStr::<64>::default();
     if write_date(&mut date, today).is_err() {
         return;
     }

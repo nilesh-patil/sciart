@@ -107,3 +107,54 @@ impl<const N: usize> AsRef<str> for StackText<N> {
         self.as_str()
     }
 }
+
+/// A fixed-capacity UTF-8 string of at most `N` bytes that *errors* on overflow
+/// (CORE-R109): unlike [`StackText`] a write that does not fit returns [`fmt::Error`]
+/// and leaves the buffer unchanged, so a caller can fall back to a shorter form
+/// (`voyager_journey`'s readout fit ladder) instead of silently losing the tail.
+#[derive(Clone, Debug)]
+pub struct StackStr<const N: usize> {
+    buf: [u8; N],
+    len: usize,
+}
+
+impl<const N: usize> Default for StackStr<N> {
+    fn default() -> Self {
+        Self {
+            buf: [0; N],
+            len: 0,
+        }
+    }
+}
+
+impl<const N: usize> StackStr<N> {
+    /// The text written so far (whole `&str` pieces only, so always valid UTF-8).
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        core::str::from_utf8(&self.buf[..self.len]).unwrap_or("")
+    }
+
+    /// Bytes written so far (width-fitting decisions compare it against the canvas).
+    #[inline]
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Whether nothing has been written.
+    #[inline]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+impl<const N: usize> fmt::Write for StackStr<N> {
+    fn write_str(&mut self, s: &str) -> fmt::Result {
+        let end = self.len + s.len();
+        if end > self.buf.len() {
+            return Err(fmt::Error);
+        }
+        self.buf[self.len..end].copy_from_slice(s.as_bytes());
+        self.len = end;
+        Ok(())
+    }
+}
