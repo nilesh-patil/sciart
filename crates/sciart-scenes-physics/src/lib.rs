@@ -9,7 +9,10 @@ pub mod chladni_plate;
 pub mod cloud_chamber;
 pub mod doppler_effect;
 pub mod double_pendulum;
+// A crate-private numerics module (GEN-R3/GEN-R16): one crate's scenes share it,
+// it is never registered, and only this crate may import it.
 pub mod kelvin_helmholtz;
+pub(crate) mod lbm;
 pub mod particle_accelerator;
 pub mod quantum_double_slit;
 pub mod radioactive_decay;

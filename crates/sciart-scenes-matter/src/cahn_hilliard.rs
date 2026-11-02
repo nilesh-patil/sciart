@@ -122,7 +122,7 @@ pub fn regrid(psi: &mut Grid<f32>, size: Size, scratch: &mut Grid<f32>) {
 /// Characteristic domain length: the first zero crossing of the two-point correlation
 /// of `ψ − ψ̄` along x and along y (periodic), averaged, with linear interpolation
 /// between lattice lags. Test and measurement helper (SPIN-A2).
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn correlation_length(psi: &Grid<f32>) -> f64 {
     let (w, h) = (usize::from(psi.width()), usize::from(psi.height()));
     let m = mean(psi);
@@ -156,7 +156,7 @@ pub fn correlation_length(psi: &Grid<f32>) -> f64 {
 }
 
 /// Number of 4-connected periodic clusters of cells with `ψ < threshold` (SPIN-A3).
-#[cfg(any(test, feature = "test-support"))]
+#[cfg(test)]
 pub fn count_below(psi: &Grid<f32>, threshold: f32, min_cells: usize) -> usize {
     let (w, h) = (usize::from(psi.width()), usize::from(psi.height()));
     let cells = psi.as_slice();

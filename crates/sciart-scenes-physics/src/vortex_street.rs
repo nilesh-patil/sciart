@@ -39,6 +39,8 @@ use std::fmt::Write as _;
 use rand::Rng;
 use sciart_core::grid;
 use sciart_core::prelude::*;
+
+use crate::lbm::{CX, CY, OPP, collide, heq, tau_minus};
 use sciart_core::{draw, ease, ink};
 
 pub static META: Meta = Meta {
@@ -52,25 +54,6 @@ pub static META: Meta = Meta {
 pub fn build() -> Box<dyn Generator> {
     Box::new(VortexStreet::default())
 }
-
-/// D2Q9 velocities in the lattice (rows-down) frame: rest, E, S, W, N, SE, SW, NW, NE.
-const CX: [i32; 9] = [0, 1, 0, -1, 0, 1, -1, -1, 1];
-const CY: [i32; 9] = [0, 0, 1, 0, -1, 1, 1, -1, -1];
-/// Index of the opposite velocity, `c_ī = −c_i`.
-const OPP: [usize; 9] = [0, 3, 4, 1, 2, 7, 8, 5, 6];
-/// The four opposite pairs that TRT splits into even and odd parts.
-const PAIRS: [(usize, usize); 4] = [(1, 3), (2, 4), (5, 7), (6, 8)];
-const W: [f32; 9] = [
-    4.0 / 9.0,
-    1.0 / 9.0,
-    1.0 / 9.0,
-    1.0 / 9.0,
-    1.0 / 9.0,
-    1.0 / 36.0,
-    1.0 / 36.0,
-    1.0 / 36.0,
-    1.0 / 36.0,
-];
 
 /// Relaxation time: ν = (τ − ½)/3 = 0.01 lattice units.
 const TAU: f64 = 0.53;
@@ -197,11 +180,6 @@ pub(crate) struct FlowParams {
     pub re: f64,
 }
 
-/// `τ⁻` from the magic parameter `Λ = (τ − ½)(τ⁻ − ½)` (VOR-A1).
-pub(crate) fn tau_minus(tau: f64, magic: f64) -> f64 {
-    0.5 + magic / (tau - 0.5)
-}
-
 /// The simulation lattice for a display (ADR-0012, VOR-A4): the display's square-pixel
 /// aspect `w/2h`, clamped to [1, 4] and widened by the hidden sponge, is snapped to its
 /// power of [`BUCKET`], and the capped lattice of exactly that aspect is used whatever
@@ -254,37 +232,7 @@ pub(crate) fn flow_params(lattice: Size) -> FlowParams {
 }
 
 /// Shifted equilibrium `f_i^eq − w_i = w_i (δρ + ρ(3 c·u + 4.5 (c·u)² − 1.5 u²))` with
-/// `ρ = 1 + δρ` (Lehmann et al. 2022): the O(Ma²) deviations keep full `f32` precision.
-#[inline(always)]
-pub(crate) fn heq(drho: f32, ux: f32, uy: f32) -> [f32; 9] {
-    let rho = 1.0 + drho;
-    let usq = 1.5 * (ux * ux + uy * uy);
-    std::array::from_fn(|i| {
-        let cu = CX[i] as f32 * ux + CY[i] as f32 * uy;
-        W[i] * (drho + rho * (3.0 * cu + 4.5 * cu * cu - usq))
-    })
-}
-
 /// TRT collision of one node's shifted populations in place; returns the node's
-/// `(ρ, uₓ, u_y)`, which the collision conserves (VOR-A1).
-#[inline(always)]
-pub(crate) fn collide(h: &mut [f32; 9], omega_p: f32, omega_m: f32) -> (f32, f32, f32) {
-    let drho = ((h[0] + h[1]) + (h[2] + h[3])) + ((h[4] + h[5]) + (h[6] + h[7])) + h[8];
-    let rho = 1.0 + drho;
-    let jx = (h[1] - h[3]) + (h[5] - h[7]) + (h[8] - h[6]);
-    let jy = (h[2] - h[4]) + (h[5] - h[7]) + (h[6] - h[8]);
-    let (ux, uy) = (jx / rho, jy / rho);
-    let eq = heq(drho, ux, uy);
-    h[0] -= omega_p * (h[0] - eq[0]);
-    for (i, j) in PAIRS {
-        let (ni, nj) = (h[i] - eq[i], h[j] - eq[j]);
-        let (even, odd) = (0.5 * (ni + nj), 0.5 * (ni - nj));
-        h[i] -= omega_p * even + omega_m * odd;
-        h[j] -= omega_p * even - omega_m * odd;
-    }
-    (rho, ux, uy)
-}
-
 /// Irrotational flow past a cylinder of radius `r` in a uniform stream `u` (y up):
 /// `u = U(1 − R²(x² − y²)/r⁴, −2R²xy/r⁴)`. Rational, so no libm and no jolt at the wall.
 pub(crate) fn potential_flow(x: f64, y: f64, r: f64, u: f64) -> (f64, f64) {
@@ -1121,6 +1069,8 @@ impl Generator for VortexStreet {
 
 #[cfg(test)]
 mod tests {
+    use crate::lbm::{PAIRS, W};
+
     use super::*;
 
     /// A seeded RNG from the scene context (the crate's only RNG, GEN-R7).

@@ -11,7 +11,6 @@ mod generator;
 pub mod geom;
 pub mod grid;
 pub mod ink;
-pub mod lbm;
 pub mod ode;
 pub mod particles;
 pub mod raster;

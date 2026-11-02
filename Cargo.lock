@@ -2021,13 +2021,13 @@ dependencies = [
  "proptest",
  "rand 0.9.5",
  "sciart-core",
- "sciart-shared",
 ]
 
 [[package]]
 name = "sciart-scenes-physics"
 version = "0.1.0"
 dependencies = [
+ "proptest",
  "rand 0.9.5",
  "sciart-core",
 ]

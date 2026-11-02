@@ -1,7 +1,7 @@
 //! Spinodal decomposition: a quenched binary mixture unmixes into two phases whose
 //! domains coarsen (SPEC-002 `spinodal_decomposition`).
 //!
-//! Model: the shared [`cahn_hilliard`](sciart_shared::cahn_hilliard) Oono–Puri cell-dynamics map
+//! Model: the crate-private [`cahn_hilliard`] Oono–Puri cell-dynamics map
 //! on a capped periodic lattice (ADR-0012). Each act is a fresh quench, `ψ = ψ̄ + noise`:
 //!
 //! - **spinodal** (`ψ̄ = 0`, the critical mix): the uniform state is unstable at every
@@ -25,7 +25,7 @@ use rand::Rng;
 use sciart_core::prelude::*;
 use sciart_core::{grid, raster};
 
-use sciart_shared::cahn_hilliard::{self, OONO_PURI, Scratch};
+use crate::cahn_hilliard::{self, OONO_PURI, Scratch};
 
 pub static META: Meta = Meta {
     name: "spinodal_decomposition",
@@ -369,7 +369,7 @@ impl Generator for Spinodal {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sciart_shared::cahn_hilliard::{correlation_length, count_below, mean};
+    use crate::cahn_hilliard::{correlation_length, count_below, mean};
 
     fn scene(w: u16, h: u16, seed: u64) -> (Spinodal, Ctx) {
         let size = Size::new(w, h);
