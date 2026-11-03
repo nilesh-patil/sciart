@@ -64,4 +64,4 @@ The renderer already has `Color::Indexed` support in the encoder and a pure `The
 
 - RND-R18, RND-R19 in [SPEC-003](../specs/SPEC-003-runtime-render.md)
 - CFG-R10 in [SPEC-005](../specs/SPEC-005-cli-config.md)
-- `docs/IMPROVEMENTS.md` IMP-10, IMP-11
+- M23 improvement items IMP-10, IMP-11 ([roadmap](../ROADMAP.md))

@@ -5,8 +5,8 @@
 
 ## Context
 After M12 and M13 the gallery reads worse, even though colourfulness and contrast went up. The
-user named the causes: **over-design, loud colours, large blocks, thick edges**. Scenes grew extra
-elements, saturated full-frame grounds, cell-sized stamps and multi-cell outlines. The user's
+causes, identified in review: **over-design, loud colours, large blocks, thick edges**. Scenes grew
+extra elements, saturated full-frame grounds, cell-sized stamps and multi-cell outlines. The
 references for the wanted look are `double_pendulum` and the **M11** versions of
 `galaxy_collision` and `rocket_launch`: sparse, fine, calm scenes on black. Colourfulness is not
 a measure of quality here, and chasing it caused part of the regression.
@@ -39,7 +39,7 @@ and the art review judges the rest.
 7. **Minimal is also cheap.** Black cells cost nothing to send, fewer layers cost less CPU, and a
    quiet frame changes fewer cells per frame. Style and the M14 resource goals point the same way.
 
-For the 41 scenes that existed at M11, the art review compares the M11 look (`627cde6`) with
+For the 41 scenes that existed at M11, the art review compares the M11 look (the M11 merge) with
 today's. Where M11 is cleaner, the scene returns to that look and keeps everything else later
 milestones added: the M11 titles, GEN-R6 trig, allocation-free rendering, `prepare`, and the model
 fixes that aren't visual.
@@ -52,8 +52,8 @@ fixes that aren't visual.
 - Many snapshots change. Each is reviewed against this ADR, with a before/after sheet.
 
 ## Alternatives considered
-- **Keep the M12/M13 look and only fix blocks and grounds.** Rejected: the user named over-design
-  and loud colour as primary.
-- **Monochrome per scene.** Rejected by the user in favour of physics-true colour, muted.
+- **Keep the M12/M13 look and only fix blocks and grounds.** Rejected: over-design
+  and loud colour were the primary causes.
+- **Monochrome per scene.** Rejected in favour of physics-true colour, muted.
 - **Revert all scenes to M11 wholesale.** Rejected: M13 has no M11 version, and several M12 changes
   are real improvements (e.g. `wave_interference`, `double_pendulum`). The choice is per scene.

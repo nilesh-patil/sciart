@@ -99,8 +99,7 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 
 - A 85-row science-claims audit ([docs/science/claims.md](docs/science/claims.md), 20
-  audited) and the standing 15-minute milestone review
-  ([docs/REVIEW.md](docs/REVIEW.md)).
+  audited) and a standing art, science and performance checklist at each milestone close.
 
 ## [0.4.0] - 2026-10-18
 

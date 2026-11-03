@@ -56,4 +56,4 @@ make the tool depend on a system binary.
 
 - CLI-R8 in [SPEC-005](../specs/SPEC-005-cli-config.md)
 - `crates/sciart-generators/examples/preview.rs` (the renderer being lifted)
-- `docs/IMPROVEMENTS.md` IMP-07
+- M23 improvement item IMP-07 ([roadmap](../ROADMAP.md))

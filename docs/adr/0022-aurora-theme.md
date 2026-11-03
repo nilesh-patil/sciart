@@ -5,8 +5,8 @@
 
 ## Context
 The renderer has three themes (RND-R2): `astro` (the default, which every look rule and art
-metric is measured in), `rainbow` (per-cell hashed hues) and `mono`. The user asked for a new
-theme, *Aurora*. They chose all three options from previews: a fourth theme rather than a new
+metric is measured in), `rainbow` (per-cell hashed hues) and `mono`. A new theme,
+*Aurora*, was wanted. Three options were chosen from previews: a fourth theme rather than a new
 default, the oxygen green + red palette, and the "curtain" field ramps.
 
 ## Decision
@@ -28,7 +28,7 @@ default, the oxygen green + red palette, and the "curtain" field ramps.
 - `preview --swatches` and `--theme aurora` show the theme without new tooling.
 
 ## Alternatives considered
-- Making aurora the default: rejected by the user. Every art metric band was tuned in `astro`.
+- Making aurora the default: rejected. Every art metric band was tuned in `astro`.
 - Replacing `rainbow`: rejected. Existing configs naming `rainbow` would break (CFG-R3).
-- A cool-only violet/green palette or a pastel one: both were offered, and the user chose the
-  saturated red/green pair.
+- A cool-only violet/green palette or a pastel one: both were previewed, and the saturated
+  red/green pair was chosen.
