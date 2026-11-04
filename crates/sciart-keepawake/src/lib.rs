@@ -1,3 +1,6 @@
+//! **Internal crate of [`sciart`](https://docs.rs/sciart)**, with no semver promise: its API
+//! can change in any release. Use the `sciart` crate, the supported entry point.
+//!
 //! Keep-awake backends (SPEC-004): `caffeinate` (macOS default), `inhibit` (Linux default,
 //! ADR-0028), `mouse` (opt-in feature), `off`.
 

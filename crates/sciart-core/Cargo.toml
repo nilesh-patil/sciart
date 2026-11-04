@@ -1,17 +1,17 @@
 [package]
 name = "sciart-core"
-description = "Terminal-agnostic primitives for sciart: canvas, generator trait, fixed-step clock"
-version.workspace = true
+description = "Internal: terminal-agnostic primitives of sciart (canvas, generator trait, fixed-step clock). No semver promise; use the `sciart` crate"
+# DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["terminal", "generative-art", "canvas", "ascii-art", "ratatui"]
-categories = ["command-line-utilities", "graphics", "science", "visualization"]
-publish = false
+readme = "README.md"
+# DIST-R4: the published crate is the library alone.
+exclude = ["tests/", "benches/", "examples/"]
 
 [dependencies]
 rand.workspace = true

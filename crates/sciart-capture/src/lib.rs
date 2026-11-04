@@ -1,3 +1,6 @@
+//! **Internal crate of [`sciart`](https://docs.rs/sciart)**, with no semver promise: its API
+//! can change in any release. Use the `sciart` crate, the supported entry point.
+//!
 //! Headless capture pipeline (ADR-0025, CLI-R8).
 //!
 //! One renderer for review and recording: a seeded [`Stage`] rendered through the real
