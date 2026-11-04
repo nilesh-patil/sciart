@@ -1,0 +1,41 @@
+# Rendered by scripts/render_formula.py from the release's SHA256SUMS (SPEC-008 DIST-R9).
+class Sciart < Formula
+  desc "Real-time generative science & astronomy art in your terminal"
+  homepage "https://github.com/nilesh-patil/sciart"
+  version "@VERSION@"
+  license "MIT"
+
+  on_macos do
+    on_arm do
+      url "@BASE@/download/v@VERSION@/sciart-@VERSION@-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256:aarch64-apple-darwin@"
+    end
+    on_intel do
+      url "@BASE@/download/v@VERSION@/sciart-@VERSION@-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256:x86_64-apple-darwin@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "@BASE@/download/v@VERSION@/sciart-@VERSION@-aarch64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA256:aarch64-unknown-linux-gnu@"
+    end
+    on_intel do
+      url "@BASE@/download/v@VERSION@/sciart-@VERSION@-x86_64-unknown-linux-gnu.tar.gz"
+      sha256 "@SHA256:x86_64-unknown-linux-gnu@"
+    end
+  end
+
+  def install
+    bin.install "sciart"
+    man1.install Dir["man/*.1"]
+    bash_completion.install "completions/sciart.bash" => "sciart"
+    zsh_completion.install "completions/_sciart"
+    fish_completion.install "completions/sciart.fish"
+  end
+
+  test do
+    assert_match "sciart #{version}", shell_output("#{bin}/sciart --version")
+  end
+end
