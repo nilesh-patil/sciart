@@ -14,6 +14,7 @@ mod record;
 mod runtime;
 #[cfg(unix)]
 mod signals;
+mod version;
 
 /// The unit-test binary counts heap calls for the RT-R14 frame-loop test (ADR-0009). The
 /// counters are per thread, so the other tests running in parallel do not disturb it.
