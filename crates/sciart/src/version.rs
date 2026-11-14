@@ -84,7 +84,14 @@ mod tests {
 
     #[test]
     fn dist_r2_anything_but_a_commit_is_left_out() {
-        for bad in ["", "   ", "0123456789a", "0123456789ABCDEF", "not-a-commit-at-all", "v1.2.3"] {
+        for bad in [
+            "",
+            "   ",
+            "0123456789a",
+            "0123456789ABCDEF",
+            "not-a-commit-at-all",
+            "v1.2.3",
+        ] {
             assert_eq!(version_text("1.2.3", Some(bad), "t"), "1.2.3", "{bad:?}");
         }
     }
@@ -113,6 +120,9 @@ mod tests {
         let command = <crate::cli::Cli as clap::CommandFactory>::command();
         let version = env!("CARGO_PKG_VERSION");
         assert_eq!(command.render_version(), format!("sciart {version}\n"));
-        assert_eq!(command.render_long_version(), format!("sciart {}\n", long()));
+        assert_eq!(
+            command.render_long_version(),
+            format!("sciart {}\n", long())
+        );
     }
 }
