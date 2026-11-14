@@ -366,7 +366,7 @@ def check_r5_r6(problems: list[str]) -> None:
     if not re.search(r"^      id-token: write$", package, re.M) or \
             not re.search(r"^      attestations: write$", package, re.M):
         problems.append("DIST-R6: the package job may write attestations (id-token, attestations)")
-    if not re.search(r"uses: actions/attest-build-provenance@v\d+\n\s+with:\n\s+subject-path: dist/\*\.tar\.gz",
+    if not re.search(r"uses: actions/attest-build-provenance@[0-9a-f]{40} # v[\d.]+\n\s+with:\n\s+subject-path: dist/\*\.tar\.gz",
                      package):
         problems.append("DIST-R6: every tarball gets a build-provenance attestation")
     if "sha256sum --check --strict SHA256SUMS" not in package:
