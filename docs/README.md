@@ -14,6 +14,7 @@ what each document is for, and which one is authoritative.
 | know why a decision was made | [ADRs](adr/) |
 | know what is still open | [backlog](BACKLOG.md) · [roadmap](ROADMAP.md) |
 | see the improvement programme | [IMPROVEMENTS](IMPROVEMENTS.md) |
+| cut a release | [RELEASING](RELEASING.md) |
 
 ## Specifications
 
