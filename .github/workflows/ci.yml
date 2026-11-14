@@ -113,13 +113,16 @@ jobs:
         run: python3 scripts/showcase.py --check
       # GEN-R15: the generated SPEC-002 scene index is current.
       # TEST-R1/R4: spec traceability; TEST-R9/R10/R11/R13: tooling schema; RT-R22: the
-      # size check's own tests (as `rs-spec-check`).
+      # size check's own tests; DIST-R1..R10: the release configuration and the installer
+      # against a fixture release (as `rs-spec-check`).
       - name: Spec index & tooling schema
         run: |
           python3 scripts/spec_index.py --check
           python3 scripts/spec_check.py
           python3 scripts/tooling_check.py
           python3 scripts/size_check_test.py
+          python3 scripts/release_check.py
+          python3 scripts/installer_check.py
       # CLI-R15: the recorder is in the default build above; this is the build without it.
       - name: Tests without the recorder
         run: cargo nextest run -p sciart --no-default-features --features cli

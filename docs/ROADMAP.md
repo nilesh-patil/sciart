@@ -324,7 +324,8 @@ Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisio
 - [x] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2): 18 clips from `docs/showcase.toml`, a lock for stale clips, `record --start` (CLI-R8), capture bitmaps for every scene glyph (CLI-R18)
 - [x] Phase 2 — CLI modes (CLI-R12, R14, R16, R17, RT-R23; ADR-0031): `--for`, `sciart while -- <command>`, a versioned `list --json`, `completions` and `man`; 1,744 default + 268 record-feature tests; the size budget rises to 3.44 MiB and 96 crates for the generators
 - [x] Phase 2 — library facade (LIB-R1..R8, SPEC-007; ADR-0032): `Stage`, `scenes`/`find`, text, ANSI and PNG output, a ratatui `SceneWidget`, a reviewed surface snapshot; `sciart frame` (CLI-R13); the recorder in default builds (CLI-R15); 1,799 workspace tests, 281 without the recorder, 38 library-only
-- [ ] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033)
+- [x] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033): one `sciart` version with the internal crates pinned at `0.x`, `--version` with commit and target, crates.io metadata and a passing dry run for twelve crates, release and publish workflows (six targets, checksums, build provenance, a draft release), `packaging/install.sh`, a conda recipe, a Homebrew formula template, `docs/RELEASING.md`
+- [ ] After the first tag: both workflows, the five targets other than macOS arm64, attestations, `cargo binstall`, the conda channel and the tap, and one install per channel on a clean machine — manual (`docs/RELEASING.md`)
 - [ ] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034)
 - [ ] Phase 4 — clean tree and history (public documents only; neutral wording; second history rewrite)
 - [ ] Phase 4 — version 1.0.0, CHANGELOG, docs truth pass, final review, local tag `v1.0.0`

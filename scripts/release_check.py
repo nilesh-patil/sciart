@@ -59,7 +59,7 @@ INTERNAL = (
 PUBLISH_ORDER = INTERNAL + (FACADE,)
 NEVER_PUBLISHED = ("sciart-testalloc", "sciart-qa")
 # Internal crates whose crate-level doc notice is not written yet. May only shrink.
-PENDING_NOTICE = {"sciart-generators"}
+PENDING_NOTICE: set[str] = set()
 NOTICE = ("Internal crate of", "no semver promise")
 EXCLUDED = ("tests/", "benches/", "examples/")
 MAX_CRATE_BYTES = 1 << 20
