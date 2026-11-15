@@ -47,6 +47,9 @@ DOCS = ("README.md", "LICENSE", "CHANGELOG.md")
 COMPLETIONS = {"bash": "sciart.bash", "zsh": "_sciart", "fish": "sciart.fish"}
 INSTALLER = "packaging/install.sh"
 SUMS = "SHA256SUMS"
+# A semantic version, pre-release allowed, no build metadata: it goes into file names,
+# URLs and the formula (DIST-R1, DIST-R9).
+SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$")
 
 
 def asset_dir(version: str, target: str) -> str:
@@ -140,6 +143,9 @@ def main() -> int:
     parser.add_argument("--targets", default=",".join(TARGETS),
                         help="comma-separated (default: all six release targets)")
     args = parser.parse_args()
+    if not SEMVER.match(args.version):
+        print(f"DIST-R5: not a semantic version: {args.version!r}", file=sys.stderr)
+        return 2
     mtime = int(os.environ.get("SOURCE_DATE_EPOCH", "0"))
     targets = [t for t in args.targets.split(",") if t]
     unknown = sorted(set(targets) - set(TARGETS))

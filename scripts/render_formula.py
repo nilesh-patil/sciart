@@ -37,6 +37,8 @@ def parse_sums(text: str) -> dict[str, str]:
 
 
 def render(version: str, sums_text: str, base: str = BASE, template: str | None = None) -> str:
+    if not release_assets.SEMVER.match(version):
+        raise ValueError(f"not a semantic version: {version!r}")
     text = template if template is not None else TEMPLATE.read_text()
     sums = parse_sums(sums_text)
     text = text.replace("@VERSION@", version).replace("@BASE@", base.rstrip("/"))

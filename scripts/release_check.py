@@ -65,7 +65,7 @@ PENDING_NOTICE: set[str] = set()
 NOTICE = ("Internal crate of", "no semver promise")
 EXCLUDED = ("tests/", "benches/", "examples/")
 MAX_CRATE_BYTES = 1 << 20
-SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$")
+SEMVER = release_assets.SEMVER
 PACKAGE_CHECK = ("cargo publish --workspace --dry-run --locked && "
                  "python3 scripts/release_check.py --crates target/package")
 
@@ -400,6 +400,12 @@ def check_r9(problems: list[str], require_ruby: bool) -> None:
         problems.append("DIST-R9: rendering refuses a SHA256SUMS that lacks a formula target")
     except ValueError:
         pass
+    for bad in ("1.2", "1.2.3\" do system 'x' end #", "v1.2.3", "1.2.3+build", "01.2.3", ""):
+        try:
+            render_formula.render(bad, sums)
+            problems.append(f"DIST-R9: rendering refuses the version {bad!r} (not a semantic version)")
+        except ValueError:
+            pass
     ruby = shutil.which("ruby")
     if ruby is None:
         if require_ruby:
