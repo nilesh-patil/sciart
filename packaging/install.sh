@@ -9,13 +9,16 @@
 #   sh install.sh [--version X.Y.Z] [--to DIR] [--force]
 #
 # Picks the build for this machine (on Linux the glibc build when glibc is 2.35 or newer,
-# else the static musl build), downloads it and the release's SHA256SUMS over https,
-# verifies the checksum (and the build-provenance attestation when `gh` is installed and
-# signed in), and copies the binary to $SCIART_INSTALL_DIR (default ~/.local/bin).
+# else the static musl build; under Rosetta the native arm64 build), downloads it and the
+# release's SHA256SUMS over https (TLS 1.2 or newer, https-only redirects), verifies the
+# checksum, verifies the build-provenance attestation when `gh` has that command and is
+# signed in, and copies the binary to $SCIART_INSTALL_DIR (default ~/.local/bin).
 #
-# It refuses: an OS other than macOS or Linux, a 32-bit machine, a missing checksum tool,
-# a checksum mismatch, a non-https URL, running under sudo, and replacing a file that is
-# not a sciart binary unless --force is given. It never edits shell start-up files.
+# It refuses: an OS other than macOS or Linux, a 32-bit machine or userland, a version
+# that is not letters, digits, dots and hyphens, a missing checksum tool, a checksum
+# mismatch, a URL that is neither https nor a local file:// mirror, running under sudo,
+# and replacing a file that is not a sciart binary unless --force is given. It never edits
+# shell start-up files, and removes its temporary files on failure or interrupt.
 #
 # SCIART_INSTALL_BASE_URL replaces https://github.com/nilesh-patil/sciart/releases (a
 # mirror with the same layout: download/v<version>/<asset> and latest/download/<asset>).
@@ -44,6 +47,22 @@ Usage: install.sh [--version X.Y.Z] [--to DIR] [--force]
   --to DIR         where to put the binary (default: $SCIART_INSTALL_DIR or ~/.local/bin)
   --force          replace DIR/sciart even if it is not a sciart binary
 EOF
+}
+
+# The temporary directory and the staged binary, removed on any exit.
+tmp=""
+staged=""
+cleanup() {
+    if [ -n "$tmp" ]; then rm -rf "$tmp"; fi
+    if [ -n "$staged" ]; then rm -f "$staged"; fi
+}
+
+# Whether $1 is a release version: letters, digits, dots and hyphens, starting with a
+# digit, without `..` (it becomes part of a URL and of file names).
+valid_version() {
+    case "$1" in
+    '' | *[!0-9A-Za-z.-]* | *..* | [!0-9]*) return 1 ;;
+    esac
 }
 
 # Whether dotted version $1 is at least $2 (major.minor compared as numbers).
@@ -78,6 +97,7 @@ fetch() {
 
 main() {
     version=""
+    pinned=0
     dir="${SCIART_INSTALL_DIR:-}"
     force=0
     help=0
@@ -86,10 +106,12 @@ main() {
         --version)
             [ $# -ge 2 ] || die "--version needs a value"
             version="$2"
+            pinned=1
             shift 2
             ;;
         --version=*)
             version="${1#--version=}"
+            pinned=1
             shift
             ;;
         --to)
@@ -117,6 +139,9 @@ main() {
         exit 0
     fi
     version="${version#v}"
+    if [ "$pinned" -eq 1 ] && ! valid_version "$version"; then
+        die "not a version: $version"
+    fi
     if [ -z "$dir" ]; then
         [ -n "${HOME:-}" ] || die "HOME is not set; pass --to DIR"
         dir="$HOME/.local/bin"
@@ -130,7 +155,7 @@ main() {
     https://*) proto="=https" ;;
     # A local mirror: nothing travels over the network.
     file://*) proto="=file" ;;
-    *) die "refusing a non-https URL: $BASE" ;;
+    *) die "refusing a URL that is neither https nor file://: $BASE" ;;
     esac
 
     # The build for this machine.
@@ -155,6 +180,9 @@ main() {
     if [ "$os" = darwin ]; then
         target="$arch-apple-darwin"
     else
+        # A 32-bit userland on a 64-bit kernel cannot run the 64-bit binaries.
+        bits="$(getconf LONG_BIT 2>/dev/null || echo 64)"
+        [ "$bits" = 64 ] || die "a ${bits}-bit userland (64-bit binaries only)"
         glibc="$(getconf GNU_LIBC_VERSION 2>/dev/null || true)"
         case "$glibc" in
         "glibc "*) glibc="${glibc#glibc }" ;;
@@ -174,23 +202,21 @@ main() {
     fi
     command -v curl >/dev/null 2>&1 || die "needs curl"
 
-    tmp="$(mktemp -d 2>/dev/null || mktemp -d -t sciart-install)"
-    trap 'rm -rf "$tmp"' EXIT
+    trap cleanup EXIT
     trap 'exit 1' INT TERM HUP
+    tmp="$(mktemp -d "${TMPDIR:-/tmp}/sciart-install.XXXXXX")"
 
-    if [ -z "$version" ]; then
+    if [ "$pinned" -eq 0 ]; then
         fetch "$BASE/latest/download/SHA256SUMS" "$tmp/SHA256SUMS"
         version="$(sed -n "s/^[0-9a-f]\{64\}  sciart-\(.*\)-$target\.tar\.gz\$/\1/p" "$tmp/SHA256SUMS" | head -n 1)"
         [ -n "$version" ] || die "the latest release has no build for $target"
+        valid_version "$version" || die "the latest release names an invalid version: $version"
     else
         fetch "$BASE/download/v$version/SHA256SUMS" "$tmp/SHA256SUMS"
     fi
-    case "$version" in
-    '' | *[!0-9A-Za-z.+-]*) die "not a version: $version" ;;
-    esac
 
     asset="sciart-$version-$target.tar.gz"
-    pattern="$(printf '%s' "$asset" | sed 's/[.+]/\\&/g')"
+    pattern="$(printf '%s' "$asset" | sed 's/[.]/\\&/g')"
     want="$(sed -n "s/^\([0-9a-f]\{64\}\)  $pattern\$/\1/p" "$tmp/SHA256SUMS" | head -n 1)"
     [ -n "$want" ] || die "SHA256SUMS of $version lists no $asset"
     fetch "$BASE/download/v$version/$asset" "$tmp/$asset"
@@ -198,12 +224,16 @@ main() {
     [ "$got" = "$want" ] || die "checksum mismatch for $asset: expected $want, got $got"
     say "checksum verified: $asset"
 
-    if command -v gh >/dev/null 2>&1 && gh auth status >/dev/null 2>&1; then
+    if ! command -v gh >/dev/null 2>&1; then
+        say "gh is not installed: provenance attestation not checked (the checksum was)"
+    elif ! gh attestation --help >/dev/null 2>&1; then
+        say "this gh has no attestation command: provenance attestation not checked (the checksum was)"
+    elif ! gh auth status >/dev/null 2>&1; then
+        say "gh is not signed in: provenance attestation not checked (the checksum was)"
+    else
         gh attestation verify "$tmp/$asset" --repo "$REPO" >/dev/null 2>&1 ||
             die "the build-provenance attestation of $asset does not verify"
         say "provenance attestation verified"
-    else
-        say "gh is not installed or not signed in: provenance attestation not checked"
     fi
 
     tar -xzf "$tmp/$asset" -C "$tmp"
@@ -216,9 +246,11 @@ main() {
         die "$dest exists and is not a sciart binary; pass --force to replace it"
     fi
     mkdir -p "$dir"
-    cp "$binary" "$dir/.sciart.install.$$"
-    chmod 755 "$dir/.sciart.install.$$"
-    mv -f "$dir/.sciart.install.$$" "$dest"
+    staged="$dir/.sciart.install.$$"
+    cp "$binary" "$staged"
+    chmod 755 "$staged"
+    mv -f "$staged" "$dest"
+    staged=""
 
     say "installed sciart $version ($target) as $dest"
     case ":${PATH:-}:" in
