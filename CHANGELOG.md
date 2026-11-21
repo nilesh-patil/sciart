@@ -24,6 +24,12 @@ All notable changes to this project are documented here. The format is based on
   ([ADR-0031](docs/adr/0031-scriptable-modes.md), CLI-R14).
 - `sciart completions <shell>` and `sciart man [subcommand]` print completion scripts and
   manual pages generated from the command line's own definition (CLI-R17).
+- `sciart --version` also names the commit and the build target (DIST-R2).
+- Packaging for a release: builds for macOS (arm64, x86_64) and Linux (x86_64, aarch64;
+  glibc and musl) with checksums and build provenance, an installer script
+  (`packaging/install.sh`), a conda package, a Homebrew formula and crates.io metadata
+  for `sciart` and its internal crates; `docs/RELEASING.md` has the steps
+  ([ADR-0033](docs/adr/0033-distribution-channels.md), SPEC-008).
 
 - Keep-awake on Linux: `--keep-awake inhibit` holds a `systemd-inhibit` (or
   `elogind-inhibit`) lock for as long as sciart runs, and is the default for a local Linux
@@ -39,6 +45,10 @@ All notable changes to this project are documented here. The format is based on
   `rs-showcase-check` fails on a missing, stale or unlisted clip (WEB-R1, WEB-R2).
 - `sciart record --start <seconds>` simulates that long before the first frame, so a
   recording can open on a scene's best moment (CLI-R8).
+- A documentation site with a user guide, a gallery of every scene and a live player that
+  runs the scenes in the browser from the same code; it is self-contained, loads nothing
+  from another origin, and falls back to the recorded clips without WebAssembly
+  ([ADR-0034](docs/adr/0034-web-gallery-and-docs-site.md), SPEC-009).
 
 ### Fixed
 
@@ -95,8 +105,7 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 
 - A 85-row science-claims audit ([docs/science/claims.md](docs/science/claims.md), 20
-  audited) and the standing 15-minute milestone review
-  ([docs/REVIEW.md](docs/REVIEW.md)).
+  audited) and a standing art, science and performance checklist at each milestone close.
 
 ## [0.4.0] - 2026-10-18
 

@@ -19,7 +19,7 @@ const MAX_BLOCK_SHARE: f64 = 0.03;
 const MAX_CHANGED: f64 = 0.10;
 /// Per-scene stillness limits that GEN-R26 states with a reason.
 const CHANGED_EXCEPTIONS: &[(&str, f64)] = &[
-    // The user asked to keep the M16 rubber sheet exactly; its travelling crests alone
+    // The M16 rubber sheet is kept exactly (by choice); its travelling crests alone
     // change 10.1 % of cells per frame.
     ("spacetime_grid", 0.11),
 ];

@@ -16,6 +16,7 @@ use serde::Deserialize;
 #[command(
     name = "sciart",
     version,
+    long_version = crate::version::long(),
     about = "Real-time generative science & astronomy art",
     after_long_help = AFTER_LONG_HELP
 )]

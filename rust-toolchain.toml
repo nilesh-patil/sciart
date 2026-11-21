@@ -1,3 +1,5 @@
 [toolchain]
 channel = "stable"
 components = ["rustfmt", "clippy"]
+# WEB-R3: the browser player (`web/`, `pixi run web-build`) builds for WebAssembly.
+targets = ["wasm32-unknown-unknown"]
