@@ -130,6 +130,13 @@ def check_every_workflow(name: str, text: str, data: dict, out: list[str]) -> No
                     out.append(f"DIST-R6: {name} `{job_name}` uses `{uses}`: owner not in the allow-list")
                 elif not any(re.search(rf"uses:\s*{re.escape(str(uses))}\s+#\s*\S", line) for line in lines):
                     out.append(f"DIST-R6: {name} `{job_name}` uses `{uses}` without its version in a comment")
+            if str(uses or "").startswith("actions/checkout@") and \
+                    (step.get("with") or {}).get("persist-credentials") is not False:
+                out.append(f"DIST-R10: {name} `{job_name}` checks out with stored credentials "
+                           "(set persist-credentials: false)")
+            if name in ("release.yml", "publish.yml") and \
+                    str(uses or "").startswith(("Swatinem/rust-cache@", "actions/cache@")):
+                out.append(f"DIST-R10: {name} `{job_name}` restores a build cache into a release")
             run = str(step.get("run", ""))
             if "secrets." in run:
                 out.append(f"DIST-R10: {name} `{job_name}` puts a secret inside a run script; pass it in env")
@@ -169,6 +176,9 @@ def check_release(data: dict, out: list[str]) -> None:
     if on != {"push": {"tags": ["v*"]}, "workflow_dispatch": None}:
         out.append(f"DIST-R10: release.yml runs on a pushed v* tag and by hand only: {on!r}")
     check_permissions(name, data, out)
+    concurrency = data.get("concurrency")
+    if not isinstance(concurrency, dict) or not concurrency.get("group") or concurrency.get("cancel-in-progress"):
+        out.append("DIST-R10: release.yml has a concurrency group that does not cancel a running release")
     jobs = jobs_of(data)
     for job, want in (("build", {"verify"}), ("package", {"build"}), ("release", {"package"})):
         if job not in jobs:

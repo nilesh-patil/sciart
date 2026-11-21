@@ -127,11 +127,14 @@ jobs:
         if: github.event_name == 'release'
         with:
           repository: ${{ vars.HOMEBREW_TAP }}
-          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
           path: tap
+          persist-credentials: false
       # A rerun after the formula was pushed finds nothing to commit and succeeds.
       - name: Commit to the tap
         if: github.event_name == 'release'
+        env:
+          TAP: ${{ vars.HOMEBREW_TAP }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           mkdir -p tap/Formula
           cp Formula/sciart.rb tap/Formula/sciart.rb
@@ -143,5 +146,5 @@ jobs:
             echo "the tap already has this formula"
           else
             git commit -m "sciart ${TAG#v}"
-            git push
+            git push "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" HEAD
           fi
