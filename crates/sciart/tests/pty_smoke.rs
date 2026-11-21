@@ -21,6 +21,15 @@ const ALT_LEAVE: &[u8] = b"\x1b[?1049l";
 const BEGIN_SYNC: &[u8] = b"\x1b[?2026h";
 const END_SYNC: &[u8] = b"\x1b[?2026l";
 
+/// Sets its flag when dropped, so the reader thread reports its end however its loop ends.
+struct SetOnDrop(Arc<AtomicBool>);
+
+impl Drop for SetOnDrop {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
 struct Session {
     screen: Arc<Mutex<vt100::Parser>>,
     raw: Arc<Mutex<Vec<u8>>>,
@@ -28,6 +37,9 @@ struct Session {
     child: Box<dyn portable_pty::Child + Send + Sync>,
     /// While set, nothing is read from the pty: its buffer fills and sciart's writes stall.
     stalled: Arc<AtomicBool>,
+    /// Set when the reader has seen the end of the stream: everything sciart wrote is in
+    /// `raw` (the pty reports end-of-file once the process and its children have closed it).
+    ended: Arc<AtomicBool>,
     /// Closing the master hangs up the pty, so it lives as long as the session.
     _master: Box<dyn portable_pty::MasterPty + Send>,
     _config_home: tempfile::TempDir,
@@ -85,8 +97,10 @@ impl Session {
         let raw = Arc::new(Mutex::new(Vec::new()));
         let mut reader = pair.master.try_clone_reader().unwrap();
         let stalled = Arc::new(AtomicBool::new(false));
-        let (s, r, hold) = (screen.clone(), raw.clone(), stalled.clone());
+        let ended = Arc::new(AtomicBool::new(false));
+        let (s, r, hold, end) = (screen.clone(), raw.clone(), stalled.clone(), ended.clone());
         thread::spawn(move || {
+            let _end = SetOnDrop(end);
             let mut buf = [0u8; 8192];
             loop {
                 while hold.load(Ordering::Relaxed) {
@@ -110,6 +124,7 @@ impl Session {
             writer,
             child,
             stalled,
+            ended,
             _master: pair.master,
             _config_home: config_home,
         }
@@ -404,29 +419,53 @@ fn running(pid: u32) -> bool {
 /// 40–80) added more than 80 ms. A second still tells a prompt exit from a hang.
 const SIGNAL_EXIT_ALLOWANCE: Duration = Duration::from_secs(1);
 
+/// How long the signal tests wait before calling an exit a hang.
+const HANG: Duration = Duration::from_secs(10);
+
 /// RT-R20: send `signal` and check that sciart exits `code` within
-/// [`SIGNAL_EXIT_ALLOWANCE`] of delivery.
+/// [`SIGNAL_EXIT_ALLOWANCE`] of delivery. The terminal stays as it is (a stalled reader
+/// stays stalled) until the exit has begun; every failure message carries the timeline of
+/// process-state samples and the load average, so a failure says what the process was
+/// doing rather than only that it was late.
 fn assert_signal_ends_in_time(s: &mut Session, signal: &str, code: u32) {
+    let pid = s.pid();
     let kill = Command::new("kill")
-        .args(["-s", signal, &s.pid().to_string()])
+        .args(["-s", signal, &pid.to_string()])
         .status()
         .unwrap();
     assert!(kill.success(), "kill -s {signal}");
     // The clock starts once `kill` has returned, i.e. the signal is delivered: starting it
     // before would also time the fork and exec of `kill` itself.
     let sent = Instant::now();
-    let pid = s.pid();
-    while !exiting(pid) {
+    let load = load_average();
+    // Each change of state with the time it was first seen, and the number of samples.
+    let mut timeline = String::new();
+    let (mut last, mut samples) = (None, 0);
+    // The exit is dated by the start of the sample that first sees it, so a slow `ps` (a
+    // busy machine) is not charged to the app.
+    let took = loop {
+        let at = sent.elapsed();
+        let stat = process_state(pid);
+        samples += 1;
+        if last.as_ref() != Some(&stat) {
+            timeline.push_str(&format!(" {at:.0?}:{stat:?}"));
+            last = Some(stat.clone());
+        }
+        if exited_or_exiting(&stat) {
+            timeline.push_str(&format!(" ({samples} samples)"));
+            break at;
+        }
         assert!(
-            sent.elapsed() < Duration::from_secs(10),
-            "sciart ignored SIG{signal}"
+            at < HANG,
+            "sciart ignored SIG{signal} (load {load}); states:{timeline}"
         );
         thread::sleep(Duration::from_millis(5));
-    }
-    let took = sent.elapsed();
+    };
     assert!(
         took < SIGNAL_EXIT_ALLOWANCE,
-        "SIG{signal} took {took:?} to end the app"
+        "SIG{signal} took {took:?} to end the app (load at the signal {load}, now {}); \
+         states:{timeline}",
+        load_average()
     );
     // The kernel may hold an exiting process until its terminal output drains (macOS does,
     // even after SIGKILL), so the status is read once the terminal reads again.
@@ -436,23 +475,46 @@ fn assert_signal_ends_in_time(s: &mut Session, signal: &str, code: u32) {
             break status;
         }
         assert!(
-            sent.elapsed() < Duration::from_secs(10),
-            "sciart never finished exiting after SIG{signal}"
+            sent.elapsed() < HANG,
+            "sciart never finished exiting after SIG{signal}; states:{timeline}"
         );
         thread::sleep(Duration::from_millis(5));
     };
-    assert_eq!(status.exit_code(), code, "exit status after SIG{signal}");
+    assert_eq!(
+        status.exit_code(),
+        code,
+        "exit status after SIG{signal}; states:{timeline}"
+    );
 }
 
-/// The process has called `exit` (macOS `E`), is a zombie, or is gone.
-fn exiting(pid: u32) -> bool {
+/// `ps`'s state letters for `pid` ("" once the process is gone and reaped).
+fn process_state(pid: u32) -> String {
     let out = Command::new("ps")
         .args(["-o", "stat=", "-p", &pid.to_string()])
         .output()
         .unwrap();
-    let stat = String::from_utf8_lossy(&out.stdout);
-    let stat = stat.trim();
+    String::from_utf8_lossy(&out.stdout).trim().to_owned()
+}
+
+/// The process has called `exit` (macOS `E`), is a zombie, or is gone.
+fn exited_or_exiting(stat: &str) -> bool {
     stat.is_empty() || stat.contains('E') || stat.contains('Z')
+}
+
+/// The 1, 5 and 15 minute load averages, for failure messages.
+fn load_average() -> String {
+    if let Ok(text) = std::fs::read_to_string("/proc/loadavg") {
+        return text
+            .split_whitespace()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" ");
+    }
+    Command::new("sysctl")
+        .args(["-n", "vm.loadavg"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_owned())
+        .unwrap_or_default()
 }
 
 /// RT-R20: send `signal` to sciart in the state `keys` puts it in, then check it left the
@@ -524,11 +586,31 @@ fn rt_r20_sighup_on_the_paused_help_page_restores_and_exits_129() {
 
 /// RT-R20: with the terminal no longer reading (a stalled link), the frame write blocks
 /// while holding stdout; the restore cannot get through, and the exit must not wait for it.
+///
+/// The stall is proven, not assumed: a stall fills the pty's buffer, after which sciart's
+/// own write blocks, so the restore (whose last write leaves the alternate screen) cannot
+/// reach the terminal. If the restore does arrive, the buffer had not filled when the
+/// signal came; that attempt proves nothing either way, and the next one stalls longer.
+/// The scene writes about 60 KB a second at 80×24, so the first stall fills a macOS pty
+/// (1 KB) many times over and Linux's (tens of KB) too.
 #[test]
 fn rt_r20_sigterm_ends_the_app_even_when_its_writes_have_stalled() {
+    let mut unproven = String::new();
+    for stall in [1, 3, 9].map(Duration::from_secs) {
+        match signal_a_stalled_writer(stall) {
+            Ok(()) => return,
+            Err(why) => unproven.push_str(&format!("\n  {why}")),
+        }
+    }
+    panic!("the write never stalled, so RT-R20's stalled case was not exercised:{unproven}");
+}
+
+/// One attempt: stall for `stall`, signal, check the exit; `Err` when the restore got
+/// through, i.e. the write had not stalled.
+fn signal_a_stalled_writer(stall: Duration) -> Result<(), String> {
     let args = [
         "run",
-        "starfield",
+        "cosmic_microwave_background",
         "--hud",
         "--seed",
         "1",
@@ -536,13 +618,31 @@ fn rt_r20_sigterm_ends_the_app_even_when_its_writes_have_stalled() {
         "off",
     ];
     let mut s = Session::start(&args);
-    s.wait_for("stars", |t| {
+    s.wait_for("a lit frame", |t| {
         t.chars().filter(|c| !c.is_whitespace()).count() > 50
     });
     s.stalled.store(true, Ordering::Relaxed);
-    // Long enough for the pty buffer to fill at 30 frames a second.
-    thread::sleep(Duration::from_secs(2));
+    thread::sleep(stall);
+    // Nothing more is read until the exit has begun, so this marks the stall's start.
+    let read_before = s.raw.lock().unwrap().len();
     assert_signal_ends_in_time(&mut s, "TERM", 143);
+    let deadline = Instant::now() + HANG;
+    while !s.ended.load(Ordering::SeqCst) {
+        assert!(
+            Instant::now() < deadline,
+            "the pty never reached end-of-file"
+        );
+        thread::sleep(Duration::from_millis(10));
+    }
+    let raw = s.raw.lock().unwrap();
+    let backlog = raw.len() - read_before;
+    if count(&raw[read_before..], ALT_LEAVE) > 0 {
+        return Err(format!(
+            "stall of {stall:?}: the restore arrived ({backlog} bytes queued), so the write \
+             had not stalled"
+        ));
+    }
+    Ok(())
 }
 
 // ----- M25: terminal hint (RND-R21) -----
