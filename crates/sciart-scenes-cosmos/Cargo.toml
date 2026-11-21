@@ -1,17 +1,17 @@
 [package]
 name = "sciart-scenes-cosmos"
-description = "sciart scenes: Deep Cosmos and Sun & Planets"
-version.workspace = true
+description = "Internal: the Deep Cosmos and Sun & Planets scenes of sciart. No semver promise; use the `sciart` crate"
+# DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["astronomy", "space", "generative-art", "terminal", "ascii-art"]
-categories = ["science", "science::astronomy", "simulation", "graphics", "visualization"]
-publish = false
+readme = "README.md"
+# DIST-R4: the published crate is the library alone.
+exclude = ["tests/", "benches/", "examples/"]
 
 [dependencies]
 sciart-core.workspace = true

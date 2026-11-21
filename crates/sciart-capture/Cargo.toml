@@ -1,19 +1,17 @@
 [package]
 name = "sciart-capture"
-description = "Headless frame capture for sciart: the preview renderer, PNG, GIF and asciicast"
-version.workspace = true
+description = "Internal: headless frame capture of sciart (PNG, GIF, asciicast). No semver promise; use the `sciart` crate"
+# DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["generative-art", "gif", "png", "asciicast", "terminal"]
-categories = ["graphics", "multimedia::images", "command-line-utilities"]
-# ADR-0025: used by `sciart record` behind the `record` feature and by the preview example;
-# never published.
-publish = false
+readme = "README.md"
+# DIST-R4: the published crate is the library alone.
+exclude = ["tests/", "benches/", "examples/"]
 
 # LIB-R4: the GIF encoder only for `sciart record`; the PNG encoder by default (the browser
 # build, WEB-R3, turns it off and keeps the renderer and the glyph font).

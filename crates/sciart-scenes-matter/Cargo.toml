@@ -1,17 +1,17 @@
 [package]
 name = "sciart-scenes-matter"
-description = "sciart scenes: Reactions and States of Matter"
-version.workspace = true
+description = "Internal: the Reactions and States of Matter scenes of sciart. No semver promise; use the `sciart` crate"
+# DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["chemistry", "simulation", "generative-art", "terminal", "ascii-art"]
-categories = ["science", "science::chemistry", "science::physics", "simulation", "visualization"]
-publish = false
+readme = "README.md"
+# DIST-R4: the published crate is the library alone.
+exclude = ["tests/", "benches/", "examples/"]
 
 [dependencies]
 # No sciart-shared dep: this crate's shared models (cahn_hilliard, laplacian_growth)

@@ -1,84 +1,216 @@
 name: Release
 
-# IMP-05: a tagged release builds the binary for both macOS architectures and Linux and
-# attaches one tarball + checksum per target. Release tags are created locally; this workflow
-# never pushes a tag. `workflow_dispatch` exercises the build without creating a release.
+# SPEC-008 / ADR-0033. A pushed `v*` tag builds the six release targets of the platform
+# tiers (TEST-R13), packs one tarball per target plus the installer, writes SHA256SUMS,
+# attests the build provenance of every asset and creates a DRAFT GitHub release (DIST-R5,
+# DIST-R6). Nothing is published here: a maintainer reviews the draft and publishes it,
+# which starts publish.yml (DIST-R10). The maintainer creates and pushes the tag; this
+# workflow never creates or moves one (ADR-0024). `workflow_dispatch` runs every build and
+# check without a release. Expressions reach `run:` scripts only through `env:`.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
+
+# One release build per tag at a time; a second push of the tag waits.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  # The MSRV (workspace `rust-version`): `rust-toolchain.toml` floats on `stable`, which
+  # would otherwise win over the action's toolchain.
+  RUSTUP_TOOLCHAIN: "1.88.0"
 
 jobs:
+  verify:
+    name: Version, tag and release configuration
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      # DIST-R3..R10: the manifests, packaging files and both workflows.
+      - name: Release configuration
+        run: |
+          python3 scripts/yaml_subset_test.py
+          python3 scripts/release_check.py --require-ruby
+          python3 scripts/release_check_test.py
+          python3 scripts/publish_crates_test.py
+          python3 scripts/conda_build_test.py
+          python3 scripts/bump_version_test.py
+      # DIST-R1: the tag is v{version} and the CHANGELOG has its heading.
+      - name: Tag matches the version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: python3 scripts/release_check.py --tag "${GITHUB_REF_NAME}"
+      - name: Installer against a fixture release (DIST-R7)
+        run: python3 scripts/installer_check.py --require-shellcheck
+      - id: version
+        run: echo "version=$(python3 scripts/release_check.py --print-version)" >> "$GITHUB_OUTPUT"
+
   build:
-    name: Build ${{ matrix.target }}
+    name: Build ${{ matrix.target }} (tier ${{ matrix.tier }})
+    needs: verify
     strategy:
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon is the primary platform.
+          # The Linux builds run on the oldest supported runner images, so the glibc
+          # binaries need glibc 2.35 or newer (DIST-R5).
           - target: aarch64-apple-darwin
             os: macos-14
-          # Intel macOS is cross-built on the same Apple Silicon runner: macos-13 (the last
-          # Intel image) was retired on 2025-12-04. The macOS SDK links both architectures.
+            tier: 1
+            smoke: true
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-22.04
+            tier: 1
+            smoke: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-22.04-arm
+            tier: 2
+            smoke: true
+          # Cross-built on Apple Silicon; it cannot run there without Rosetta.
           - target: x86_64-apple-darwin
             os: macos-14
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
+            tier: 3
+            smoke: false
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-22.04
+            tier: 3
+            smoke: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-22.04-arm
+            tier: 3
+            smoke: true
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      # Pin the MSRV (workspace `rust-version` = 1.88), not `stable`: a release build is the
-      # cheapest place to prove the minimum supported compiler still builds the crate.
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@v2
+      # No build cache: a release is built from the tagged sources alone, so a cache
+      # written by another run cannot reach a released binary.
+      # DIST-R6: the dependency list is embedded in the binary (`cargo auditable`).
+      - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
         with:
-          key: ${{ matrix.target }}
+          tool: cargo-auditable
+      # RT-R22 / CLI-R15: both size budgets, on the platform they were measured on, from
+      # plain release builds of this checkout (before the release build below).
+      - name: Size budgets (RT-R22, CLI-R15)
+        if: matrix.target == 'aarch64-apple-darwin'
+        run: |
+          cargo build --release --locked -p sciart --bin sciart --no-default-features --features cli
+          python3 scripts/size_check.py --build lean
+          cargo build --release --locked -p sciart --bin sciart
+          python3 scripts/size_check.py --build default
       - name: Build
-        run: cargo build --release --locked -p sciart --target ${{ matrix.target }}
-      - name: Package
+        env:
+          SCIART_GIT_SHA: ${{ github.sha }}
+          TARGET: ${{ matrix.target }}
+        run: cargo auditable build --release --locked -p sciart --bin sciart --target "$TARGET"
+      # DIST-R5: `-V` is the version, `--version` names the commit and target, and the
+      # scene list parses.
+      - name: Smoke test
+        if: matrix.smoke
         shell: bash
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          TARGET: ${{ matrix.target }}
         run: |
           set -euo pipefail
-          # A release tarball without the licence or the front page is not a release.
-          for file in README.md LICENSE; do
-            test -f "$file" || { echo "::error::missing $file in the checkout"; exit 1; }
-          done
-          name="sciart-${{ matrix.target }}"
-          mkdir -p "dist/$name"
-          cp "target/${{ matrix.target }}/release/sciart" "dist/$name/"
-          cp README.md LICENSE "dist/$name/"
-          tar -C dist -czf "dist/$name.tar.gz" "$name"
-          rm -rf "dist/$name"
-          # GNU coreutils on Linux, perl's shasum on macOS.
-          if command -v sha256sum >/dev/null 2>&1; then
-            (cd dist && sha256sum "$name.tar.gz" > "$name.tar.gz.sha256")
-          else
-            (cd dist && shasum -a 256 "$name.tar.gz" > "$name.tar.gz.sha256")
-          fi
-      - uses: actions/upload-artifact@v4
+          bin="target/$TARGET/release/sciart"
+          test "$("$bin" -V)" = "sciart $VERSION"
+          test "$("$bin" --version)" = "sciart $VERSION (${GITHUB_SHA:0:12} $TARGET)"
+          "$bin" list --json | python3 -c 'import json, sys; assert json.load(sys.stdin)["scenes"]'
+      - name: Stage the binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          mkdir -p "bins/$TARGET"
+          cp "target/$TARGET/release/sciart" "bins/$TARGET/"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: ${{ matrix.target }}
-          path: dist/*
+          name: bin-${{ matrix.target }}
+          path: bins/
+          if-no-files-found: error
+          retention-days: 7
+
+  package:
+    name: Tarballs, checksums and attestations
+    needs: [verify, build]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      id-token: write # sign the build-provenance attestations (DIST-R6)
+      attestations: write # store them with the repository (DIST-R6)
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: bin-*
+          path: bins
+          merge-multiple: true
+      # DIST-R5 / DIST-R6: completions and manual pages from the x86_64 Linux binary (they
+      # are the same for every target), one tarball per target, install.sh, SHA256SUMS.
+      - name: Pack
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          chmod +x bins/*/sciart
+          SOURCE_DATE_EPOCH="$(git log -1 --format=%ct)" python3 scripts/release_assets.py \
+            --version "$VERSION" --bins bins \
+            --tool bins/x86_64-unknown-linux-gnu/sciart --out dist
+      - name: Checksums verify
+        run: cd dist && sha256sum --check --strict SHA256SUMS
+      - uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/install.sh
+            dist/SHA256SUMS
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: dist
+          path: dist/
           if-no-files-found: error
           retention-days: 7
 
   release:
-    name: Attach binaries to the GitHub release
-    needs: build
-    runs-on: ubuntu-latest
-    # A manual dispatch only proves the build; there is no tag to attach to.
+    name: Draft GitHub release
+    needs: [verify, package]
     if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create the draft release and upload its assets (DIST-R10)
     steps:
-      - uses: actions/download-artifact@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: dist
           path: dist
-          merge-multiple: true
-      - uses: softprops/action-gh-release@v2
-        with:
-          files: dist/*
-          generate_release_notes: true
+      - name: Release notes from the CHANGELOG
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: python3 scripts/release_check.py --notes "$VERSION" > notes.md
+      # DIST-R10: a draft, on the tag the maintainer pushed (`--verify-tag` fails rather
+      # than create a tag). Publishing it is the maintainer's decision.
+      - name: Create the draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.verify.outputs.version }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" dist/* --draft --verify-tag \
+            --title "sciart $VERSION" --notes-file notes.md

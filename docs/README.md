@@ -12,6 +12,7 @@ map of the docs tree: what each document is for, and which one is authoritative.
 | know what the project promises | [master specification](specs/sciart-specification.md) |
 | know why a decision was made | [ADRs](adr/) |
 | know what is still open | [backlog](BACKLOG.md) · [roadmap](ROADMAP.md) |
+| cut a release | [RELEASING](RELEASING.md) |
 | see what changed in a release | [changelog](../CHANGELOG.md) |
 
 ## User guide
@@ -54,6 +55,7 @@ are records of decisions, including historical ones — they are not amended ret
 | [SPEC-005 CLI & config](specs/SPEC-005-cli-config.md) | Commands, flags, TOML precedence, colour/speed/filter settings, scriptable modes |
 | [SPEC-006 testing](specs/SPEC-006-testing.md) | Test layers, the `rs-ci` gate, platform tiers, manual checks and traceability |
 | [SPEC-007 library](specs/SPEC-007-library.md) | The `sciart` library facade: `Stage`, scenes, text/ANSI/PNG output, the ratatui widget |
+| [SPEC-008 distribution](specs/SPEC-008-distribution.md) | One version, crates.io, release builds, the installer, the conda package, the Homebrew formula and the publish gates |
 | [SPEC-009 web and docs](specs/SPEC-009-web-docs.md) | The animated showcase, the browser player, the web gallery and the docs site |
 
 ## Architecture decision records
@@ -96,10 +98,10 @@ amend or supersede earlier ones; the index notes the relationship.
 | [0030](adr/0030-changed-cell-pipeline.md) | Changed-cell paint and diff; event-driven pause |
 | [0031](adr/0031-scriptable-modes.md) | Scriptable modes: a deadline, one frame, and running beside a command |
 | [0032](adr/0032-library-facade.md) | The `sciart` library facade |
+| [0033](adr/0033-distribution-channels.md) | Distribution channels: release binaries and an installer, crates.io, a conda package, a Homebrew tap |
 | [0034](adr/0034-web-gallery-and-docs-site.md) | A web gallery and a docs site |
 | [0035](adr/0035-release-profile-and-dependency-trim.md) | Release profile and dependency trim |
 
-ADR-0033 (distribution) is reserved for the open distribution phase of M25.
 
 ## Reference
 
