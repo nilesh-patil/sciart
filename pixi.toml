@@ -28,7 +28,7 @@ rs-test-features = "cargo nextest run -p sciart --no-default-features --features
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
 # DIST-R1..R10: the release configuration (scripts/release_check.py) and the installer
 # against a fixture release (scripts/installer_check.py).
-rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/yaml_subset_test.py && python3 scripts/release_check.py && python3 scripts/release_check_test.py && python3 scripts/publish_crates_test.py && python3 scripts/conda_build_test.py && python3 scripts/installer_check.py"
+rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/yaml_subset_test.py && python3 scripts/release_check.py && python3 scripts/release_check_test.py && python3 scripts/publish_crates_test.py && python3 scripts/conda_build_test.py && python3 scripts/bump_version_test.py && python3 scripts/installer_check.py"
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
