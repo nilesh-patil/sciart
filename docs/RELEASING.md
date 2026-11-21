@@ -72,13 +72,37 @@ These need the repository owner's accounts and cannot be done from a checkout.
    ```
 
 6. **Publish the draft.** This starts the `Publish` workflow. Approve its three jobs in the
-   `release` environment: crates.io (in dependency order), the conda channel (four
-   platforms) and the Homebrew tap.
+   `release` environment: crates.io (one crate at a time, in dependency order), the conda
+   channel (four platforms) and the Homebrew tap.
 7. **Verify** an install through each channel on a clean machine (ROADMAP, manual).
 
 A rehearsal of the publish jobs without uploading: run the `Publish` workflow by hand with
 the tag (`workflow_dispatch`); each job still waits for approval, builds and checks, and
-skips its upload step.
+skips its upload step. `python3 scripts/publish_crates.py --dry-run` lists, from the
+public index and without a token, which crates of this version are already on crates.io.
+
+## When a publish fails half-way
+
+**A crates.io version is permanent.** It can be *yanked* (`cargo yank --version X -p
+<crate>`: new lockfiles stop picking it, existing ones keep working) but never deleted or
+replaced, and the same version number can never be uploaded again. So a mistake found
+after a crate is up is fixed by a new patch release, not by re-uploading.
+
+- **crates.io stopped part-way** (network error, a rejected crate, the new-crate rate
+  limit): fix the cause if there is one, then *re-run the failed `crates.io` job* from
+  the workflow run. `scripts/publish_crates.py` skips every crate whose version is
+  already on the index and publishes the rest in order. Do not bump versions to "start
+  over": the crates already published are correct, and the facade pins exactly these
+  internal versions.
+- **A crate was published with a defect:** yank that version of the affected crates and
+  of `sciart` if it depends on them, then release a patch version (internal crates move
+  to their next `0.x`, `sciart` to `X.Y.(Z+1)`).
+- **The conda upload stopped part-way:** re-run the `conda` job; the upload skips the
+  packages the channel already has (`--skip-existing`).
+- **The Homebrew job failed after the push:** re-run it; with nothing to commit it
+  succeeds without a new commit.
+- **The GitHub release itself** is not affected by any of these: it stays published, and
+  the assets and their attestations stay as they are.
 
 ## README Install section for 1.0
 
