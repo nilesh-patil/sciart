@@ -13,17 +13,20 @@ readme = "README.md"
 # DIST-R4: the published crate is the library alone.
 exclude = ["tests/", "benches/", "examples/"]
 
-# LIB-R4: the GIF encoder only for `sciart record`; the PNG path (renderer, glyph font,
-# PNG encoder) is always built.
+# LIB-R4: the GIF encoder only for `sciart record`; the PNG encoder by default (the browser
+# build, WEB-R3, turns it off and keeps the renderer and the glyph font).
 [features]
+default = ["png"]
 gif = ["dep:gif"]
+# WEB-R3: the PNG encoder; the browser build draws pixels and encodes nothing.
+png = ["dep:png"]
 
 [dependencies]
 sciart-core.workspace = true
 sciart-render.workspace = true
 font8x8.workspace = true
 gif = { workspace = true, optional = true }
-png.workspace = true
+png = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true

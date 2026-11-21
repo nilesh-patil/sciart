@@ -1,0 +1,44 @@
+[package]
+name = "sciart-web"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.88"
+license = "MIT"
+publish = false
+description = "sciart's scenes in the browser: a WebAssembly player for the docs site"
+
+# WEB-R3 / ADR-0034: outside the product workspace, like `fuzz/`. It builds for
+# `wasm32-unknown-unknown` (`pixi run web-build`) and natively, where its tests prove that a
+# player frame is the capture renderer's frame.
+[workspace]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+sciart-core = { path = "../crates/sciart-core" }
+sciart-generators = { path = "../crates/sciart-generators" }
+# No terminal backend and no image encoders in the browser (WEB-R3).
+sciart-render = { path = "../crates/sciart-render", default-features = false }
+sciart-capture = { path = "../crates/sciart-capture", default-features = false }
+
+# WEB-R4: the module is small and fast; a panic in the browser stops the player, and the
+# page reports it.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[lints.rust]
+# The WebAssembly exports (`src/wasm.rs`) are the one place that needs `unsafe`
+# (`#[unsafe(no_mangle)]`); everything else is safe code.
+unsafe_code = "deny"
+missing_debug_implementations = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+cast_lossless = "warn"
+redundant_closure_for_method_calls = "warn"
+semicolon_if_nothing_returned = "warn"

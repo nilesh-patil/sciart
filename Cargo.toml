@@ -27,7 +27,8 @@ sciart-scenes-earth = { path = "crates/sciart-scenes-earth", version = "=0.6.0" 
 sciart-scenes-physics = { path = "crates/sciart-scenes-physics", version = "=0.6.0" }
 sciart-scenes-matter = { path = "crates/sciart-scenes-matter", version = "=0.6.0" }
 sciart-scenes-life = { path = "crates/sciart-scenes-life", version = "=0.6.0" }
-sciart-render = { path = "crates/sciart-render", version = "=0.6.0" }
+# WEB-R3: members that paint to a terminal turn on `terminal`; the capture crate does not.
+sciart-render = { path = "crates/sciart-render", version = "=0.6.0", default-features = false }
 sciart-keepawake = { path = "crates/sciart-keepawake", version = "=0.6.0" }
 sciart-capture = { path = "crates/sciart-capture", version = "=0.6.0" }
 # Dev-only (ADR-0009) and never published: no version, so `cargo publish` drops it from the
@@ -50,7 +51,9 @@ clap_complete = "4.5"
 clap_mangen = "0.2"
 crossterm = "0.29"
 enigo = "0.6"
-rand = "0.9"
+# WEB-R3: no operating-system RNG in the scenes' tree (the browser has none); the binary
+# turns on the default features for its random seed.
+rand = { version = "0.9", default-features = false, features = ["std"] }
 rand_chacha = "0.9"
 # RT-R22: the crossterm backend, buffers, styles and the `Widget` trait; no widget
 # collection extras (calendar), layout cache or macros.
