@@ -14,8 +14,10 @@ sciart list
 ```
 
 `sciart list` prints every scene with its category and a one-line description. If the
-command is not found, make sure Cargo's binary directory (usually `~/.cargo/bin`) is on
-your `PATH`.
+command is not found, make sure the directory it was installed to is on your `PATH`:
+`~/.local/bin` for the installer script (or the folder given to its `--to`), `~/.pixi/bin`
+for `pixi global`, and Cargo's binary directory (usually `~/.cargo/bin`) for
+`cargo install` and `cargo binstall`. Homebrew puts it on the `PATH` itself.
 
 ## Shell completions and the manual page
 
