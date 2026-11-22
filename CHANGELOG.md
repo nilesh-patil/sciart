@@ -6,17 +6,35 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-26
+
+The first public release: a terminal program that cycles 85 animated science and astronomy
+scenes while keeping the machine awake, and a library that runs, renders and embeds the
+same scenes. From this version on, the `sciart` crate follows semantic versioning for its
+command line, config keys, scene names, `list --json` and library API; the internal
+`sciart-*` crates it is built from carry no stability promise
+([ADR-0032](docs/adr/0032-library-facade.md), [ADR-0033](docs/adr/0033-distribution-channels.md)).
+
+### Upgrading from 0.6
+
+- `sciart list --json` prints an object, `{"schema": 1, "scenes": [...]}`, instead of an
+  array: scripts that read the old array need `.scenes` (CLI-R16).
+- `sciart record` is in the default build, so a default build carries the image encoders;
+  `--no-default-features --features cli` builds the binary without them (CLI-R15).
+- On Linux, keep-awake is no longer `off` by default: a local session takes a
+  `systemd-inhibit` (or `elogind-inhibit`) lock, while over SSH it stays `off`; pass
+  `--keep-awake off` for the old behaviour (KA-R7..R9).
+- `SIGTERM` and `SIGHUP` now exit with status 143 or 129 after restoring the terminal
+  (RT-R20).
+
 ### Added
 
-- A library: the `sciart` crate now exposes a small, stable API to run a scene without a
+- A library: the `sciart` crate exposes a small, stable API to run a scene without a
   terminal, list the scenes, render a frame as text, ANSI or PNG, and embed a scene in a
   ratatui application (`SceneWidget`). Use it with `default-features = false`
   ([ADR-0032](docs/adr/0032-library-facade.md), SPEC-007).
 - `sciart frame <scene>` prints one frame as ANSI text, for a login message, a tmux pane or
   a CI log (CLI-R13).
-- `sciart record` is part of the default build; `--no-default-features --features cli`
-  builds without the image encoders (CLI-R15).
-
 - `--for <duration>` ends a run by itself (`90s`, `25m`, `1.5h`), also while paused; the HUD
   shows the time left (CLI-R12, RT-R23).
 - `sciart while -- <command>` shows the art and keeps the machine awake until the command
@@ -24,13 +42,9 @@ All notable changes to this project are documented here. The format is based on
   ([ADR-0031](docs/adr/0031-scriptable-modes.md), CLI-R14).
 - `sciart completions <shell>` and `sciart man [subcommand]` print completion scripts and
   manual pages generated from the command line's own definition (CLI-R17).
+- `sciart record --start <seconds>` simulates that long before the first frame, so a
+  recording can open on a scene's best moment (CLI-R8).
 - `sciart --version` also names the commit and the build target (DIST-R2).
-- Packaging for a release: builds for macOS (arm64, x86_64) and Linux (x86_64, aarch64;
-  glibc and musl) with checksums and build provenance, an installer script
-  (`packaging/install.sh`), a conda package, a Homebrew formula and crates.io metadata
-  for `sciart` and its internal crates; `docs/RELEASING.md` has the steps
-  ([ADR-0033](docs/adr/0033-distribution-channels.md), SPEC-008).
-
 - Keep-awake on Linux: `--keep-awake inhibit` holds a `systemd-inhibit` (or
   `elogind-inhibit`) lock for as long as sciart runs, and is the default for a local Linux
   session; over SSH the default is `off` ([ADR-0028](docs/adr/0028-linux-inhibitor-helper.md),
@@ -40,39 +54,45 @@ All notable changes to this project are documented here. The format is based on
 - A one-line hint on exit when the terminal is unlikely to render truecolor braille (the
   Linux console, Apple Terminal without `COLORTERM`, `screen`/`tmux`), unless a colour mode
   was chosen explicitly (RND-R21).
-- Animated captures in the README and the gallery: 18 clips recorded by `sciart record`
-  from the manifest `docs/showcase.toml`; `pixi run rs-showcase` regenerates them and
-  `rs-showcase-check` fails on a missing, stale or unlisted clip (WEB-R1, WEB-R2).
-- `sciart record --start <seconds>` simulates that long before the first frame, so a
-  recording can open on a scene's best moment (CLI-R8).
+- Packaging for a release: builds for macOS (arm64, x86_64) and Linux (x86_64, aarch64;
+  glibc and musl) with checksums and build provenance, an installer script
+  (`packaging/install.sh`), a conda package, a Homebrew formula and crates.io metadata
+  for `sciart` and its internal crates; `docs/RELEASING.md` has the steps
+  ([ADR-0033](docs/adr/0033-distribution-channels.md), SPEC-008).
 - A documentation site with a user guide, a gallery of every scene and a live player that
   runs the scenes in the browser from the same code; it is self-contained, loads nothing
   from another origin, and falls back to the recorded clips without WebAssembly
   ([ADR-0034](docs/adr/0034-web-gallery-and-docs-site.md), SPEC-009).
-
-### Fixed
-
-- Recordings and gallery frames draw every glyph the scenes use (`•`, `●`, `☉`, arrows,
-  planet symbols, superscripts and more) instead of an ASCII stand-in; 22 gallery frames
-  were re-rendered (CLI-R18).
+- Animated captures in the README and the gallery: 18 clips recorded by `sciart record`
+  from the manifest `docs/showcase.toml`; `pixi run rs-showcase` regenerates them and
+  `rs-showcase-check` fails on a missing, stale or unlisted clip (WEB-R1, WEB-R2).
 
 ### Changed
 
 - **Breaking**: `sciart list --json` is now a versioned object, `{"schema": 1, "scenes": [...]}`,
   and each scene also carries `category_label`, `title`, `captions` and `aliases`; fields
   are only added from here on (CLI-R16). Scripts that read the old array need `.scenes`.
+- `sciart record` is part of the default build; `--no-default-features --features cli`
+  builds without the image encoders (CLI-R15).
 - The terminal pipeline paints, diffs and encodes only the cells that changed since the last
   frame, with identical output: about a third less CPU per frame at 200×50 and more than
   half at 500×150 ([ADR-0030](docs/adr/0030-changed-cell-pipeline.md), RND-R22).
 - A paused scene and the help page wait for the next key instead of redrawing five times a
   second (RT-R21).
-- Smaller and lighter to build: unused `ratatui`, `clap` and `toml` features are off (108 →
-  93 crates) and the release binary is stripped (3.64 → 3.27 MB), both held by
-  `pixi run rs-size` ([ADR-0035](docs/adr/0035-release-profile-and-dependency-trim.md), RT-R22).
+- Smaller and lighter to build: unused `ratatui`, `clap` and `toml` features are off and the
+  release binary is stripped. A build without the recorder is 3.6 MB from 96 crates and the
+  default build 3.8 MB from 110, both held by `pixi run rs-size`
+  ([ADR-0035](docs/adr/0035-release-profile-and-dependency-trim.md), RT-R22, CLI-R15).
 - Platform tiers: macOS arm64 and Linux x86_64 run the whole suite with pinned frames;
   Linux aarch64 runs it without the frame-pinning suites; frames are deterministic per
   platform ([ADR-0029](docs/adr/0029-platform-tiers-and-determinism.md), TEST-R13).
 - The pixi workspace is named `sciart` and also covers Intel macOS and Linux.
+
+### Fixed
+
+- Recordings and gallery frames draw every glyph the scenes use (`•`, `●`, `☉`, arrows,
+  planet symbols, superscripts and more) instead of an ASCII stand-in; 22 gallery frames
+  were re-rendered (CLI-R18).
 
 ## [0.6.0] - 2026-10-18
 
@@ -148,7 +168,7 @@ All notable changes to this project are documented here. The format is based on
 
 ## [0.1.0] - 2026-10-18
 
-First public release.
+First tagged version.
 
 ### Added
 
@@ -179,5 +199,5 @@ First public release.
   per frame; the low-power idle default dropped from 10 minutes to 2; per-scene memory
   ceilings were lowered to their measured values plus a margin. Visuals are unchanged.
 
-[Unreleased]: https://github.com/nilesh-patil/sciart/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/nilesh-patil/sciart/releases/tag/v0.1.0
+[Unreleased]: https://github.com/nilesh-patil/sciart/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/nilesh-patil/sciart/releases/tag/v1.0.0

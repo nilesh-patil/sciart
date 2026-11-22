@@ -1,6 +1,6 @@
 # SPEC-007: The `sciart` library
 
-**Crate**: `crates/sciart` (lib target) · **Milestone**: M25 · **Status**: In progress · **ADR**: [0032](../adr/0032-library-facade.md)
+**Crate**: `crates/sciart` (lib target) · **Milestone**: M25 · **Status**: Implemented (LIB-R1..R8; released in 1.0.0) · **ADR**: [0032](../adr/0032-library-facade.md)
 
 The `sciart` crate is a library as well as a binary. Its library is a small facade: run a
 scene without a terminal, list the scenes, turn a frame into text, ANSI or a PNG, and embed

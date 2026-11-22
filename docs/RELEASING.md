@@ -104,47 +104,8 @@ after a crate is up is fixed by a new patch release, not by re-uploading.
 - **The GitHub release itself** is not affected by any of these: it stays published, and
   the assets and their attestations stay as they are.
 
-## README Install section for 1.0
+## Install instructions
 
-To replace the README's Install section once 1.0 is published:
-
-````markdown
-## Install
-
-macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM64).
-
-**Installer script** (verifies the checksum, and the build provenance when `gh` is signed
-in; installs to `~/.local/bin`, never uses sudo):
-
-```sh
-curl --proto '=https' --tlsv1.2 -sSf https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
-```
-
-**Homebrew**:
-
-```sh
-brew install nilesh-patil/sciart/sciart
-```
-
-**pixi** (or any conda client):
-
-```sh
-pixi global install --channel https://prefix.dev/<channel> sciart
-```
-
-**Cargo** (Rust 1.88 or newer):
-
-```sh
-cargo install sciart --locked      # builds from source
-cargo binstall sciart              # downloads the release binary
-```
-
-**By hand**: download `sciart-<version>-<target>.tar.gz` and `SHA256SUMS` from the
-[releases](https://github.com/nilesh-patil/sciart/releases), check it with
-`shasum -a 256 -c SHA256SUMS --ignore-missing`, and put `sciart` on your `PATH`. Each
-tarball also holds the bash, zsh and fish completions and the manual pages; any build
-prints them with `sciart completions <shell>` and `sciart man`.
-
-The default build includes the headless recorder (`sciart record`); for a binary without
-the image encoders, `cargo install sciart --locked --no-default-features --features cli`.
-````
+The README's Install section and the user guide's installing chapter
+(`docs/guide/installing.md`) must be kept in step: `pixi run site-check` compares the install
+commands the site shows with the README's (WEB-R7).

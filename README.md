@@ -53,24 +53,51 @@ braille and half-block cells at 30 FPS — and it keeps your machine awake while
 
 ## Install
 
-Requires [Rust](https://rustup.rs) 1.88 or newer.
+macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM64).
+
+**Installer script** (verifies the checksum, and the build provenance when `gh` is signed
+in; installs to `~/.local/bin`, never uses sudo):
 
 ```sh
-cargo install --git https://github.com/nilesh-patil/sciart sciart --locked
+curl --proto '=https' --tlsv1.2 -sSf https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
 ```
 
-The default build includes the headless recorder (`sciart record`); add
-`--no-default-features --features cli` for a binary without the image encoders.
+**Homebrew**:
 
-Working on the project? Clone it and install through the pixi task instead:
+```sh
+brew install nilesh-patil/sciart/sciart
+```
+
+**pixi** (or any conda client):
+
+```sh
+pixi global install --channel https://prefix.dev/sciart sciart
+```
+
+**Cargo** (Rust 1.88 or newer):
+
+```sh
+cargo install sciart --locked      # builds from source
+cargo binstall sciart              # downloads the release binary
+```
+
+**By hand**: download `sciart-<version>-<target>.tar.gz` and `SHA256SUMS` from the
+[releases](https://github.com/nilesh-patil/sciart/releases), check it with
+`shasum -a 256 -c SHA256SUMS --ignore-missing`, and put `sciart` on your `PATH`. Each
+tarball also holds the bash, zsh and fish completions and the manual pages; any build
+prints them with `sciart completions <shell>` and `sciart man`.
+
+The default build includes the headless recorder (`sciart record`); for a binary without
+the image encoders, `cargo install sciart --locked --no-default-features --features cli`.
+
+**From source**, to work on the project: clone it and install through the pixi task, which
+builds the release profile of this checkout:
 
 ```sh
 git clone https://github.com/nilesh-patil/sciart
 cd sciart
 pixi run rs-install
 ```
-
-Release tarballs and Homebrew formulae are planned but **not available yet**.
 
 ## Run
 
@@ -138,11 +165,19 @@ than red ↔ green. `t` cycles to it after `aurora`.
 
 ## Platform
 
-macOS and Linux are supported. Keep-awake uses `caffeinate` on macOS and, on Linux, a
+macOS and Linux are supported; Windows is not. Release binaries cover macOS on Apple
+Silicon and Intel and Linux on x86_64 and ARM64; the Linux builds need glibc 2.35 or newer,
+and a static musl build serves older systems (the installer script picks it).
+
+Keep-awake uses `caffeinate` on macOS and, on Linux, a
 `systemd-inhibit` (or `elogind-inhibit`) lock held for as long as sciart runs; over SSH it
 defaults to `off`, since keeping the remote machine awake is rarely what you want. Choose
 explicitly with `--keep-awake caffeinate|inhibit|mouse|off`. The optional `mouse` jiggle
 backend is behind the `mouse` cargo feature and needs macOS Accessibility permission.
+
+When the terminal is unlikely to show truecolor braille well (the Linux console, Apple
+Terminal without `COLORTERM`, `screen` or `tmux`), sciart prints a one-line hint on exit;
+choosing a colour mode explicitly silences it.
 
 ## Use it as a library
 
@@ -152,7 +187,7 @@ the default features off**, or you also get the command line's dependencies:
 
 ```toml
 [dependencies]
-sciart = { git = "https://github.com/nilesh-patil/sciart", default-features = false, features = ["png", "widget"] }
+sciart = { version = "1", default-features = false, features = ["png", "widget"] }
 ```
 
 ```rust
@@ -169,6 +204,20 @@ scene, seed and size give the same frames on the same platform, not across platf
 versions. Writing your own scene is possible behind `unstable-generator`, with no promise.
 See `examples/headless.rs` and `examples/widget.rs` in `crates/sciart`.
 
+## Versioning
+
+From 1.0, sciart follows [semantic versioning](https://semver.org) for its command line,
+config keys, scene names, the `list --json` output and the `sciart` library. The internal
+`sciart-*` crates it is built from are published only because Cargo needs them, and carry no
+promise. Changes are listed in the [changelog](CHANGELOG.md).
+
+## Docs site
+
+The [user guide](docs/guide/index.md), a gallery of every scene and a player that runs the
+scenes in the browser, compiled to WebAssembly from the same code, build into a
+self-contained site with `pixi run site-build`; without WebAssembly the player shows the
+recorded clips.
+
 ## How it works
 
 ```text
@@ -183,11 +232,15 @@ sciart-core        canvas, glyphs, inks, generator contract, fixed-step clock, s
 
 ## Documentation
 
+- [User guide](docs/guide/index.md): installing, running, keys, configuration, terminals,
+  scripting, recording and the library
+- [Full gallery](docs/GALLERY.md) and [changelog](CHANGELOG.md)
+- [Contributing](CONTRIBUTING.md) and the [architecture guide](docs/ARCHITECTURE.md)
 - [Master specification](docs/specs/sciart-specification.md) and the
-  [component specs](docs/specs/) (`SPEC-001` … `SPEC-006`)
-- [Roadmap](docs/ROADMAP.md) and [architecture decisions](docs/adr/)
-- [Architecture](docs/ARCHITECTURE.md) and [changelog](CHANGELOG.md)
-- [Full gallery](docs/GALLERY.md)
+  [component specs](docs/specs/) (`SPEC-001` … `SPEC-009`)
+- [Roadmap](docs/ROADMAP.md), [architecture decisions](docs/adr/) and
+  [how a release is made](docs/RELEASING.md)
+- [Documentation map](docs/README.md)
 
 ## Contributing
 

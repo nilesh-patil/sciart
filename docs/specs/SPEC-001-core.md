@@ -1,6 +1,6 @@
 # SPEC-001: sciart-core
 
-**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R96 in M12
+**Crate**: `crates/sciart-core` · **Milestones**: M1, M4–M7, M10–M12 · **Status**: Implemented (CORE-R1..R77; R60..R70 from the post-M10 audit, R71..R77 in M11); CORE-R78..R96 in M12; CORE-R97..R108 by M18; CORE-R109 in M25
 
 Pure, terminal-agnostic primitives. No I/O, no OS calls, no global state.
 
