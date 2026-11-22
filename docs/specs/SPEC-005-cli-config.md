@@ -1,6 +1,6 @@
 # SPEC-005: CLI & configuration
 
-**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file), M23 (record, filters, list formats, colour capability), M24 (background) · **Status**: Implemented through M22 (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22); CLI-R8..R10 and CFG-R9 in M23; CFG-R10 in M23; CLI-R11/CFG-R11 in M24.
+**Crate**: `crates/sciart` · **Milestones**: M1 (CLI subset), M2 (config file), M23 (record, filters, list formats, colour capability), M24 (background), M25 (scriptable modes, `frame`, completions and manual pages, the recorder by default) · **Status**: Implemented (CLI-R7/CFG-R6/R7 in M11; CFG-R8 in M22); CLI-R8..R10 and CFG-R9 in M23; CFG-R10 in M23; CLI-R11/CFG-R11 in M24; CLI-R12..R18 in M25.
 
 ## CLI (clap derive)
 ```

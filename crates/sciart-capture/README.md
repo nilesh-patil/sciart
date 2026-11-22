@@ -1,6 +1,6 @@
 # sciart-capture
 
-Internal crate of [sciart](https://crates.io/crates/sciart): the headless capture pipeline: PNG frames, GIF clips and asciicast.
+Internal crate of [sciart](https://crates.io/crates/sciart), holding the headless capture pipeline: PNG frames, GIF clips and asciicast.
 
 It is published only because `sciart` depends on it. It carries no semver promise: its API
 can change in any release, and each `sciart` release depends on exactly the version it was

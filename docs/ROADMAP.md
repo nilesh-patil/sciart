@@ -2,7 +2,7 @@
 
 Spec: [docs/specs/sciart-specification.md](specs/sciart-specification.md) · ADRs: [docs/adr/](adr/)
 
-Each milestone ends green on `pixi run rs-ci` and is one or more commits on `feat/rust-rewrite`.
+Each milestone ends green on `pixi run rs-ci` and lands on `main` as one or more commits.
 Tick items as they land. Requirement IDs in brackets link each item to its spec.
 
 Detailed follow-ups live in [docs/BACKLOG.md](BACKLOG.md); the milestone boxes below point at their entries.
@@ -297,7 +297,7 @@ ADR-0023. TEST-R9 (amended), TEST-R10, TEST-R11, TEST-R7 (amended), RT-R17, RND-
 - [x] Review (Rust/perf: 1 blocking + 2 major fixed in round 2); before/after numbers; rs-ci green; local merge (churn cuts skipped: none invisible)
 - [ ] Manual encoder check + M22 follow-ups — [B-80..B-82](BACKLOG.md).
 
-## M23 — Improvement programme (in progress)
+## M23 — Improvement programme ✅
 ADR-0024. All 17 improvement items were taken, in five phases; phase branches merged `--no-ff`, the repository renamed to `sciart`, and a local `v0.1.0` tag.
 
 | Item | Problem it addressed |
@@ -347,9 +347,10 @@ Decisions: binaries + pixi/conda + crates.io + Homebrew; macOS and Linux first-c
 - [ ] After the first tag: both workflows, the five targets other than macOS arm64, attestations, `cargo binstall`, the conda channel and the tap, and one install per channel on a clean machine — manual (`docs/RELEASING.md`)
 - [x] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034): `web/` builds the scenes for the browser (a 1.76 MiB module with no imports, run by `web-smoke` outside a browser), `site/` and `scripts/build_site.py` write a self-contained site (guide, gallery of all 85 scenes, live player with clip fallback), `site_check.py` holds weight, origin and truthfulness, `pages.yml` deploys by hand from the default branch or on a release
 - [ ] The site in Firefox and Safari, a real WebAssembly failure in the player, and the first Pages deploy — manual
-- [ ] Phase 4 — public repository: contributor and architecture guides, documentation map, trimmed history documents
-- [ ] Phase 4 — version 1.0.0, CHANGELOG, docs truth pass, final review, local tag `v1.0.0`
+- [x] Phase 4 — public repository: contributor and architecture guides, documentation map, trimmed history documents
+- [x] Phase 4 — version 1.0.0 (internal crates 0.7.0), the 1.0.0 CHANGELOG section, the README install channels, docs truth pass
+- [ ] Final review and the local tag `v1.0.0`
 - [ ] Publish: crates.io, conda channel, Homebrew tap, GitHub Pages, public repository
 
 ## M9 — Future (unscheduled)
-- Windows/Linux keep-awake backends, light-background theme, per-OS packaging — [B-89..B-91](BACKLOG.md).
+- Windows keep-awake backend (Linux landed in M25), light-background theme, distribution packages beyond the 1.0 channels — [B-89..B-91](BACKLOG.md).

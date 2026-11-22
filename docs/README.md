@@ -46,7 +46,7 @@ are records of decisions, including historical ones — they are not amended ret
 
 | Document | What it covers |
 | --- | --- |
-| [Master specification](specs/sciart-specification.md) | Goals, architecture, F1–F9 scope, performance/testing constraints |
+| [Master specification](specs/sciart-specification.md) | Goals, architecture, F1–F12 scope, performance/testing constraints |
 | [SPEC-001 core](specs/SPEC-001-core.md) | Core types and helpers: canvas, generator contract, fixed step, geometry, raster, RNG, ODE |
 | [SPEC-002 generators](specs/SPEC-002-generators.md) | Registry/stability rules, titles, taxonomy, the look rules and the generated scene index |
 | [SPEC-002 scenes](specs/SPEC-002-scenes-cosmos.md) | Per-scene sections by category: [cosmos](specs/SPEC-002-scenes-cosmos.md) · [earth](specs/SPEC-002-scenes-earth.md) · [physics](specs/SPEC-002-scenes-physics.md) · [matter](specs/SPEC-002-scenes-matter.md) · [life](specs/SPEC-002-scenes-life.md) |
@@ -101,7 +101,6 @@ amend or supersede earlier ones; the index notes the relationship.
 | [0033](adr/0033-distribution-channels.md) | Distribution channels: release binaries and an installer, crates.io, a conda package, a Homebrew tap |
 | [0034](adr/0034-web-gallery-and-docs-site.md) | A web gallery and a docs site |
 | [0035](adr/0035-release-profile-and-dependency-trim.md) | Release profile and dependency trim |
-
 
 ## Reference
 
