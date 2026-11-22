@@ -79,9 +79,10 @@ command line, config keys, scene names, `list --json` and library API; the inter
   half at 500×150 ([ADR-0030](docs/adr/0030-changed-cell-pipeline.md), RND-R22).
 - A paused scene and the help page wait for the next key instead of redrawing five times a
   second (RT-R21).
-- Smaller and lighter to build: unused `ratatui`, `clap` and `toml` features are off (108 →
-  93 crates) and the release binary is stripped (3.64 → 3.27 MB), both held by
-  `pixi run rs-size` ([ADR-0035](docs/adr/0035-release-profile-and-dependency-trim.md), RT-R22).
+- Smaller and lighter to build: unused `ratatui`, `clap` and `toml` features are off and the
+  release binary is stripped. A build without the recorder is 3.6 MB from 96 crates and the
+  default build 3.8 MB from 110, both held by `pixi run rs-size`
+  ([ADR-0035](docs/adr/0035-release-profile-and-dependency-trim.md), RT-R22, CLI-R15).
 - Platform tiers: macOS arm64 and Linux x86_64 run the whole suite with pinned frames;
   Linux aarch64 runs it without the frame-pinning suites; frames are deterministic per
   platform ([ADR-0029](docs/adr/0029-platform-tiers-and-determinism.md), TEST-R13).

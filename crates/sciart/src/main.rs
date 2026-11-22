@@ -233,7 +233,7 @@ fn run_record(cli: &Cli, command: &Command) -> ExitCode {
     }
     eprintln!(
         "sciart: the `record` command is not compiled into this build; \
-         reinstall with `cargo install --path crates/sciart --features record`"
+         the default build has it (`cargo install sciart --locked`)"
     );
     ExitCode::from(2)
 }
