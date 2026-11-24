@@ -1,6 +1,6 @@
 //! Golden frames per generator (SPEC-006, TEST-R2). Review changes with `cargo insta review`.
-//! Seed 42, 80x24, ASCII mode, after 0 s / 1 s / 5 s of simulated time. Pinned on tier-1
-//! targets only (TEST-R13, ADR-0029).
+//! Seed 42, 80x24, ASCII mode, after 0 s / 1 s / 5 s of simulated time. Pinned on the
+//! reference platform (aarch64-apple-darwin) only (TEST-R13, ADR-0029).
 
 #[path = "common/tier.rs"]
 mod tier;
@@ -10,7 +10,7 @@ use sciart_generators::registry;
 
 #[test]
 fn snapshots_seed42_80x24_ascii() {
-    if tier::skip_off_tier_1("snapshots") {
+    if tier::skip_off_reference_platform("snapshots") {
         return;
     }
     for entry in registry() {
@@ -27,13 +27,13 @@ fn snapshots_seed42_80x24_ascii() {
     }
 }
 
-/// TEST-R13: tier 1 is exactly Apple Silicon macOS and x86_64 glibc Linux.
+/// TEST-R13: frames are pinned on exactly one platform, Apple Silicon macOS.
 #[test]
-fn test_r13_tier_1_is_apple_silicon_and_x86_64_glibc_linux() {
-    let expected = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => true,
-        ("linux", "x86_64") => cfg!(target_env = "gnu"),
-        _ => false,
-    };
+fn test_r13_frames_are_pinned_on_apple_silicon_macos_only() {
+    let expected = matches!(
+        (std::env::consts::OS, std::env::consts::ARCH),
+        ("macos", "aarch64")
+    );
     assert_eq!(tier::FRAMES_PINNED, expected);
+    assert_eq!(tier::skip_off_reference_platform("snapshots"), !expected);
 }

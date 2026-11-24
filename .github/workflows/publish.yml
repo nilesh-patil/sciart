@@ -36,7 +36,7 @@ env:
 jobs:
   crates-io:
     name: crates.io
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -73,9 +73,9 @@ jobs:
       matrix:
         include:
           - platform: osx-arm64
-            os: macos-14
+            os: macos-15
           - platform: osx-64
-            os: macos-14
+            os: macos-15
           - platform: linux-64
             os: ubuntu-22.04
           - platform: linux-aarch64
@@ -105,7 +105,7 @@ jobs:
 
   homebrew:
     name: Homebrew tap
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     environment: release
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
