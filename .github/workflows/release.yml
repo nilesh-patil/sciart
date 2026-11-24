@@ -7,6 +7,9 @@ name: Release
 # which starts publish.yml (DIST-R10). The maintainer creates and pushes the tag; this
 # workflow never creates or moves one (ADR-0024). `workflow_dispatch` runs every build and
 # check without a release. Expressions reach `run:` scripts only through `env:`.
+# Attestations are signed for public repositories only (DIST-R6): a tag pushed in a private
+# repository fails in `verify` before anything is built, and a manual run there skips the
+# attestation with a notice.
 on:
   push:
     tags: ["v*"]
@@ -33,6 +36,13 @@ jobs:
     outputs:
       version: ${{ steps.version.outputs.version }}
     steps:
+      # DIST-R6: build-provenance attestations are signed for public repositories only, so
+      # a release from a private one would fail after every build. Refuse it first.
+      - name: A release tag needs a public repository
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.private
+        run: |
+          echo "::error::A release tag needs a public repository: build-provenance attestations are signed for public repositories only (DIST-R6). Make the repository public, then push the tag again; a manual run builds and checks everything without attesting."
+          exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
@@ -173,12 +183,19 @@ jobs:
             --tool bins/x86_64-unknown-linux-gnu/sciart --out dist
       - name: Checksums verify
         run: cd dist && sha256sum --check --strict SHA256SUMS
+      # DIST-R6: signed for public repositories only; a manual run in a private one skips
+      # it with a notice (a tag push there stopped in `verify`).
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        if: github.event.repository.private == false
         with:
           subject-path: |
             dist/*.tar.gz
             dist/install.sh
             dist/SHA256SUMS
+      - name: Attestation skipped (private repository)
+        if: github.event.repository.private
+        run: |
+          echo "::notice::No build-provenance attestations in this run: they are signed for public repositories only (DIST-R6)."
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: dist

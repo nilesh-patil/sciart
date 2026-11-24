@@ -27,6 +27,10 @@ PUBLISH_STEP = """      - name: Publish
 SNEAK = "      # DIST-R4: one crate at a time"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 INSTALL = "taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10"
+PRIVATE_GUARD = """      - name: A release tag needs a public repository
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.private
+"""
+ATTEST_IF = "        if: github.event.repository.private == false\n"
 TAG_STEP_PUBLISH = """      - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
 """
@@ -131,6 +135,14 @@ MUTATIONS = [
      "    runs-on: ubuntu-22.04\n", "release builds only"),
     ("a runner the check cannot read", "fuzz.yml", "    runs-on: ubuntu-24.04\n",
      "    runs-on: ${{ github.event.inputs.runner }}\n", "names no runner image"),
+    # attestations need a public repository (DIST-R6)
+    ("the private-repository guard deleted", "release.yml", PRIVATE_GUARD, "      - name: Anything\n        if: false\n",
+     "private repository"),
+    ("the private-repository guard weakened", "release.yml", PRIVATE_GUARD,
+     PRIVATE_GUARD.replace("        if: ", "        continue-on-error: true\n        if: "), "private repository"),
+    ("the attestation unguarded", "release.yml", ATTEST_IF, "", "only in a public repository"),
+    ("the skipped attestation without a notice", "release.yml",
+     "          echo \"::notice::No build-provenance", "          echo \"No build-provenance", "`::notice::`"),
     ("m: the smoke JSON check swallowed", "release.yml", JSON_CHECK, JSON_CHECK + " || true", "cannot fail"),
     ("the smoke test without -V", "release.yml", '          test "$("$bin" -V)" = "sciart $VERSION"\n', "",
      '"$bin" -V'),
