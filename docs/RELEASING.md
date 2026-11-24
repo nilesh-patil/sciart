@@ -11,9 +11,16 @@ These need the repository owner's accounts and cannot be done from a checkout.
 
 1. **Make the repository public.** The installer, `cargo binstall`, the Homebrew formula
    and `gh attestation verify` all download from public release assets, and artifact
-   attestations need a public repository (or an Enterprise plan).
-2. **Environment `release`** (Settings → Environments): add the maintainers as required
-   reviewers, and restrict it to tags `v*`. Every publish job waits here for approval.
+   attestations need a public repository (or an Enterprise plan). A release tag pushed in
+   a private repository fails in the first job of the `Release` workflow, before anything
+   is built (DIST-R6); a manual run there builds and checks everything and skips the
+   attestations with a notice.
+2. **Environment `release`** (Settings → Environments), **before the first publish**: add
+   the maintainers as required reviewers, and restrict it to tags `v*`. Every publish job
+   waits here for approval. GitHub creates a missing environment, without reviewers, the
+   first time a job names it, so the `Publish` workflow's first job, `environment-gate`,
+   reads the environment and fails a published release unless it requires a reviewer
+   (DIST-R10). A manual rehearsal shows what it found.
 3. **crates.io**: sign in with GitHub, create an API token scoped to `publish-new` and
    `publish-update` for the crates named `sciart` and `sciart-*`, and store it as the
    environment secret `CARGO_REGISTRY_TOKEN`. After the first release, trusted publishing
@@ -103,6 +110,25 @@ after a crate is up is fixed by a new patch release, not by re-uploading.
   succeeds without a new commit.
 - **The GitHub release itself** is not affected by any of these: it stays published, and
   the assets and their attestations stay as they are.
+
+## Runner images
+
+Every workflow job names an explicit GitHub-hosted runner image; `-latest` labels are
+refused because their meaning moves (TEST-R13, DIST-R5). The list lives in one place,
+`RUNNER_IMAGES` in `scripts/tooling_check.py`, which both `scripts/tooling_check.py` and
+`scripts/release_check.py` read:
+
+| Image | Used for |
+| --- | --- |
+| `macos-15` | CI on the reference platform (lint, suite, snapshots), both macOS release builds, the macOS conda packages |
+| `ubuntu-24.04` | CI on Linux x86_64 and every Linux job that builds nothing for release |
+| `ubuntu-24.04-arm` | CI on Linux aarch64 |
+| `ubuntu-22.04`, `ubuntu-22.04-arm` | release builds and the Linux conda packages only: the oldest images, so the gnu binaries need glibc 2.35 |
+
+When GitHub announces that an image is retired, change it in `RUNNER_IMAGES` and in the
+workflows in one commit, and run `pixi run rs-spec-check`. The `ubuntu-22.04` images are
+removed on 2027-04-17; the next glibc baseline has to be chosen before then
+([BACKLOG](BACKLOG.md) B-97).
 
 ## Install instructions
 
