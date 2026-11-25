@@ -21,7 +21,8 @@ name: CI
 # deterministic per platform. Every job names an explicit runner image from the list in
 # `scripts/tooling_check.py` (RUNNER_IMAGES), never a `-latest` label.
 # A second `test` step re-runs only the colour-sensitive suites with NO_COLOR=1 (TEST-R12),
-# so the ambient environment can never decide whether the gate is green.
+# so the ambient environment can never decide whether the gate is green; the local gate
+# runs the same pass (`rs-test-nocolor`).
 # pixi is deliberately not used here: CI installs the toolchain directly (ADR-0024).
 
 on:
@@ -110,7 +111,8 @@ jobs:
       # environment disables colour. Only pty_smoke and encoder_fidelity build
       # crossterm references or drive the real binary through colour paths; the
       # other 1600+ tests never read the ambient colour configuration, so they
-      # are not re-run here.
+      # are not re-run here. The same command and env as `pixi run rs-test-nocolor`,
+      # part of `rs-ci` (scripts/tooling_check.py compares them).
       - name: Colour-sensitive suites (nextest, NO_COLOR=1)
         env:
           NO_COLOR: "1"

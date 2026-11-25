@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
-"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R13; SPEC-007 LIB-R4,
-LIB-R7, LIB-R8; SPEC-005 CLI-R15; SPEC-009 WEB-R3..R8).
+"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R12, TEST-R13;
+SPEC-007 LIB-R4, LIB-R7, LIB-R8; SPEC-005 CLI-R15; SPEC-008 DIST-R5; SPEC-009 WEB-R3..R8).
 
 Asserts the shape of the build/test tooling the gate depends on: pixi tasks use the
 documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and checks,
-nextest never filters or retries, sccache stays the shared rustc wrapper, CI covers
-the platform tiers, the browser player and the docs site build in the gate and in CI, and
-GitHub Pages is deployed only by hand or on a published release.
+nextest never filters or retries, sccache stays the shared rustc wrapper, the local gate
+runs CI's NO_COLOR pass, CI covers the platform tiers on supported runner images, the
+browser player and the docs site build in the gate and in CI, and GitHub Pages is deployed
+only by hand or on a published release.
 
 Successor of the config half of `crates/sciart-generators/tests/source_rules.rs`; wired
 into `pixi run rs-spec-check` and CI.
@@ -131,6 +132,44 @@ def check_r11(problems: list[str]) -> None:
     for name in pixi.get("tasks", {}):
         if "RUSTC_WRAPPER" in pixi_task(pixi, name)[0]:
             fail(problems, f"TEST-R11: task `{name}` overrides RUSTC_WRAPPER")
+
+
+NOCOLOR_TASK = "rs-test-nocolor"
+
+
+def nocolor_problems(pixi: dict, ci: str) -> list[str]:
+    """TEST-R12: CI's `test` job re-runs the colour-sensitive suites with NO_COLOR=1, and the
+    local gate runs the same command with the same environment (`rs-test-nocolor`, a
+    dependency of `rs-ci`), so a test that only fails under NO_COLOR fails locally too."""
+    problems = []
+    task = pixi.get("tasks", {}).get(NOCOLOR_TASK)
+    if not isinstance(task, dict):
+        return [f"TEST-R12: pixi.toml has a `{NOCOLOR_TASK}` task with `cmd` and `env`"]
+    if (task.get("env") or {}).get("NO_COLOR") != "1":
+        problems.append(f"TEST-R12: `{NOCOLOR_TASK}` sets `env = {{ NO_COLOR = \"1\" }}`")
+    if NOCOLOR_TASK not in pixi_task(pixi, "rs-ci")[1]:
+        problems.append(f"TEST-R12: rs-ci depends on `{NOCOLOR_TASK}`")
+    try:
+        data = parse(ci)
+    except YamlError as e:
+        return problems + [f"TEST-R12: cannot read ci.yml: {e}"]
+    test = (data.get("jobs") or {}).get("test") if isinstance(data, dict) else None
+    steps = test.get("steps") if isinstance(test, dict) else None
+    runs = [s for s in steps or [] if isinstance(s, dict) and "NO_COLOR" in (s.get("env") or {})]
+    if len(runs) != 1:
+        return problems + ["TEST-R12: ci.yml `test` has one step with NO_COLOR in its env"]
+    step = runs[0]
+    if str(step["env"]["NO_COLOR"]) != "1":
+        problems.append("TEST-R12: the ci.yml NO_COLOR step sets NO_COLOR to \"1\"")
+    if " ".join(str(step.get("run", "")).split()) != " ".join(str(task.get("cmd", "")).split()):
+        problems.append(f"TEST-R12: the ci.yml NO_COLOR step and `{NOCOLOR_TASK}` run the same command: "
+                        f"{step.get('run')!r} vs {task.get('cmd')!r}")
+    return problems
+
+
+def check_r12(problems: list[str]) -> None:
+    for problem in nocolor_problems(toml_file("pixi.toml"), (ROOT / ".github/workflows/ci.yml").read_text()):
+        fail(problems, problem)
 
 
 # TEST-R13 / ADR-0029: platform tiers.
@@ -567,7 +606,7 @@ def check_web_r8(problems: list[str]) -> None:
 
 def main() -> int:
     problems: list[str] = []
-    for check in (check_r9, check_r10, check_r11, check_r13, check_lib, check_web, check_web_r8):
+    for check in (check_r9, check_r10, check_r11, check_r12, check_r13, check_lib, check_web, check_web_r8):
         check(problems)
     if problems:
         print("tooling schema:", file=sys.stderr)
