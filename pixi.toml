@@ -44,8 +44,10 @@ rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame
 rs-cost = "cargo run -q --profile ci -p sciart-qa --example cost --"
 # The same probe on the install profile (thin LTO, one codegen unit): RT-R16's pipeline-mean CPU claim.
 rs-cost-release = "cargo run -q --release -p sciart-qa --example cost --"
-# RT-R22: release binary size (without `record`/`mouse`) and dependency-count budgets.
-rs-size = "cargo build -q --release -p sciart --bin sciart && python3 scripts/size_check.py"
+# RT-R22 / CLI-R15: release binary size and dependency-count budgets, for the binary without
+# the recorder (`--no-default-features --features cli`) and then the default one (with
+# `record`); each build is judged before the next replaces it.
+rs-size = "cargo build -q --release -p sciart --bin sciart --no-default-features --features cli && python3 scripts/size_check.py --build lean && cargo build -q --release -p sciart --bin sciart && python3 scripts/size_check.py --build default"
 rs-list = "cargo run -q -p sciart -- list"
 # Interactive review runs share the `ci` build with the probes above; frames are the same as
 # an installed (`release`) binary's (GEN-R6), which only links slower.
