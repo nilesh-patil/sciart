@@ -1,6 +1,9 @@
-//! Keep-awake backends (SPEC-004): `caffeinate` (macOS default), `mouse` (opt-in feature), `off`.
+//! Keep-awake backends (SPEC-004): `caffeinate` (macOS default), `inhibit` (Linux default,
+//! ADR-0028), `mouse` (opt-in feature), `off`.
 
+use std::ffi::{OsStr, OsString};
 use std::fmt;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 mod child;
@@ -14,18 +17,57 @@ pub use jiggler::{INTERVAL as MOUSE_INTERVAL, Jiggler, Mover};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
     Caffeinate,
+    Inhibit,
     Mouse,
     Off,
 }
 
-impl Mode {
-    /// `Caffeinate` on macOS, `Off` elsewhere (KA-R1).
-    pub const fn platform_default() -> Mode {
+/// The operating systems whose keep-awake defaults differ (KA-R8).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Os {
+    MacOs,
+    Linux,
+    Other,
+}
+
+impl Os {
+    /// The OS this binary was built for.
+    pub const fn current() -> Os {
         if cfg!(target_os = "macos") {
-            Mode::Caffeinate
+            Os::MacOs
+        } else if cfg!(target_os = "linux") {
+            Os::Linux
         } else {
-            Mode::Off
+            Os::Other
         }
+    }
+}
+
+impl Mode {
+    /// The default mode for `os`, given an environment lookup (KA-R8): `Caffeinate` on
+    /// macOS; on Linux `Inhibit` for a local session and `Off` for a remote one (an SSH
+    /// session without a forwarded display: keeping the remote host awake is not what its
+    /// viewer wants); `Off` elsewhere. An empty variable counts as unset.
+    pub fn default_for(os: Os, env: impl Fn(&str) -> Option<OsString>) -> Mode {
+        let set = |key: &str| env(key).is_some_and(|v| !v.is_empty());
+        match os {
+            Os::MacOs => Mode::Caffeinate,
+            Os::Linux => {
+                let ssh = set("SSH_CONNECTION") || set("SSH_TTY");
+                let display = set("DISPLAY") || set("WAYLAND_DISPLAY");
+                if ssh && !display {
+                    Mode::Off
+                } else {
+                    Mode::Inhibit
+                }
+            }
+            Os::Other => Mode::Off,
+        }
+    }
+
+    /// [`Mode::default_for`] with this OS and the process environment (KA-R1, KA-R8).
+    pub fn platform_default() -> Mode {
+        Self::default_for(Os::current(), |key| std::env::var_os(key))
     }
 }
 
@@ -33,6 +75,7 @@ impl fmt::Display for Mode {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(match self {
             Mode::Caffeinate => "caffeinate",
+            Mode::Inhibit => "inhibit",
             Mode::Mouse => "mouse",
             Mode::Off => "off",
         })
@@ -46,7 +89,7 @@ impl fmt::Display for ParseModeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "unknown keep-awake mode '{}' (expected caffeinate|mouse|off)",
+            "unknown keep-awake mode '{}' (expected caffeinate|inhibit|mouse|off)",
             self.0
         )
     }
@@ -60,6 +103,7 @@ impl FromStr for Mode {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s.to_ascii_lowercase().as_str() {
             "caffeinate" => Ok(Mode::Caffeinate),
+            "inhibit" => Ok(Mode::Inhibit),
             "mouse" => Ok(Mode::Mouse),
             "off" => Ok(Mode::Off),
             _ => Err(ParseModeError(s.to_string())),
@@ -166,13 +210,72 @@ pub fn caffeinate_args(pid: u32) -> Vec<String> {
     vec!["-dimsu".into(), "-w".into(), pid.to_string()]
 }
 
+/// The Linux inhibitor helpers, in order of preference (KA-R7, ADR-0028).
+pub const INHIBIT_HELPERS: [&str; 2] = ["systemd-inhibit", "elogind-inhibit"];
+
+/// Arguments for an inhibitor helper: hold an `idle:sleep` block lock for as long as `cat`
+/// runs. `cat` reads the pipe whose write end the guard keeps, so the lock goes when sciart
+/// does, however it exits (KA-R7).
+pub fn inhibit_args() -> Vec<String> {
+    [
+        "--what=idle:sleep",
+        "--mode=block",
+        "--who=sciart",
+        "--why=sciart is running",
+        "cat",
+    ]
+    .map(String::from)
+    .to_vec()
+}
+
+/// The first of [`INHIBIT_HELPERS`] found on `path` (a `PATH` value), preferring
+/// `systemd-inhibit` wherever it sits; `exists` says whether a candidate is a runnable
+/// file. Empty `PATH` entries are skipped, not read as the working directory (KA-R7).
+pub fn find_inhibitor(path: Option<&OsStr>, exists: impl Fn(&Path) -> bool) -> Option<PathBuf> {
+    let path = path?;
+    INHIBIT_HELPERS.iter().find_map(|helper| {
+        std::env::split_paths(path)
+            .filter(|dir| !dir.as_os_str().is_empty())
+            .map(|dir| dir.join(helper))
+            .find(|candidate| exists(candidate))
+    })
+}
+
 /// Start the backend for `mode` (KA-R2). `seed` drives the mouse path.
 pub fn start(mode: Mode, seed: u64) -> Result<Guard, KeepAwakeError> {
     match mode {
         Mode::Off => Ok(Guard::off()),
         Mode::Caffeinate => start_caffeinate(),
+        Mode::Inhibit => start_inhibit(),
         Mode::Mouse => start_mouse(seed),
     }
+}
+
+#[cfg(target_os = "linux")]
+fn start_inhibit() -> Result<Guard, KeepAwakeError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let runnable = |p: &Path| {
+        p.metadata()
+            .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+    };
+    let helper = find_inhibitor(std::env::var_os("PATH").as_deref(), runnable).ok_or(
+        KeepAwakeError::Unsupported {
+            mode: Mode::Inhibit,
+            reason: "neither systemd-inhibit nor elogind-inhibit is on PATH",
+        },
+    )?;
+    ChildGuard::spawn_piped("inhibit", &helper, &inhibit_args())
+        .map(|child| Guard::new(Box::new(child)))
+        .map_err(KeepAwakeError::Spawn)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn start_inhibit() -> Result<Guard, KeepAwakeError> {
+    Err(KeepAwakeError::Unsupported {
+        mode: Mode::Inhibit,
+        reason: "inhibit is Linux-only (systemd-inhibit or elogind-inhibit)",
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -218,7 +321,7 @@ mod tests {
 
     #[test]
     fn ka_r1_parse_round_trips() {
-        for m in [Mode::Caffeinate, Mode::Mouse, Mode::Off] {
+        for m in [Mode::Caffeinate, Mode::Inhibit, Mode::Mouse, Mode::Off] {
             assert_eq!(m.to_string().parse::<Mode>(), Ok(m));
         }
         assert_eq!("OFF".parse::<Mode>(), Ok(Mode::Off));
@@ -226,13 +329,164 @@ mod tests {
     }
 
     #[test]
-    fn ka_r1_platform_default() {
-        let expected = if cfg!(target_os = "macos") {
-            Mode::Caffeinate
-        } else {
-            Mode::Off
+    fn ka_r7_inhibit_parses_and_displays() {
+        assert_eq!("inhibit".parse::<Mode>(), Ok(Mode::Inhibit));
+        assert_eq!(Mode::Inhibit.to_string(), "inhibit");
+        assert_eq!(Guard::failed(Mode::Inhibit).status(), "inhibit:unavailable");
+        assert!(ParseModeError("x".into()).to_string().contains("inhibit"));
+    }
+
+    #[test]
+    fn ka_r7_helper_args_hold_an_idle_sleep_block_lock_around_cat() {
+        assert_eq!(
+            inhibit_args(),
+            vec![
+                "--what=idle:sleep",
+                "--mode=block",
+                "--who=sciart",
+                "--why=sciart is running",
+                "cat",
+            ]
+        );
+    }
+
+    #[test]
+    fn ka_r7_helper_choice_prefers_systemd_then_elogind_in_path_order() {
+        let path = std::env::join_paths(["/opt/a", "", "/usr/bin"]).unwrap();
+        let only = |present: &'static [&'static str]| {
+            move |p: &Path| present.iter().any(|q| Path::new(q) == p)
         };
-        assert_eq!(Mode::platform_default(), expected);
+        // systemd-inhibit wins over elogind-inhibit wherever each sits on PATH.
+        assert_eq!(
+            find_inhibitor(
+                Some(&path),
+                only(&["/opt/a/elogind-inhibit", "/usr/bin/systemd-inhibit"])
+            ),
+            Some(PathBuf::from("/usr/bin/systemd-inhibit"))
+        );
+        // The first PATH entry that has it.
+        assert_eq!(
+            find_inhibitor(
+                Some(&path),
+                only(&["/opt/a/systemd-inhibit", "/usr/bin/systemd-inhibit"])
+            ),
+            Some(PathBuf::from("/opt/a/systemd-inhibit"))
+        );
+        assert_eq!(
+            find_inhibitor(Some(&path), only(&["/usr/bin/elogind-inhibit"])),
+            Some(PathBuf::from("/usr/bin/elogind-inhibit"))
+        );
+        // Empty PATH entries are skipped rather than read as the working directory.
+        assert_eq!(
+            find_inhibitor(Some(&path), only(&["systemd-inhibit"])),
+            None
+        );
+        assert_eq!(find_inhibitor(Some(&path), only(&[])), None);
+        assert_eq!(find_inhibitor(None, |_| true), None);
+    }
+
+    fn env_of(vars: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<OsString> {
+        move |key| {
+            vars.iter()
+                .find(|(k, _)| *k == key)
+                .map(|(_, v)| OsString::from(v))
+        }
+    }
+
+    #[test]
+    fn ka_r8_default_is_a_function_of_os_and_session() {
+        let local = env_of(&[("DISPLAY", ":0")]);
+        let bare = env_of(&[]);
+        let ssh = env_of(&[("SSH_CONNECTION", "10.0.0.2 5000 10.0.0.1 22")]);
+        let ssh_tty = env_of(&[("SSH_TTY", "/dev/pts/3")]);
+        let ssh_x = env_of(&[("SSH_CONNECTION", "a"), ("DISPLAY", "localhost:10.0")]);
+        let ssh_wayland = env_of(&[("SSH_TTY", "/dev/pts/3"), ("WAYLAND_DISPLAY", "wayland-0")]);
+        let ssh_empty = env_of(&[("SSH_CONNECTION", ""), ("SSH_TTY", "")]);
+
+        for env in [&local as &dyn Fn(&str) -> Option<OsString>, &ssh, &bare] {
+            assert_eq!(Mode::default_for(Os::MacOs, env), Mode::Caffeinate);
+            assert_eq!(Mode::default_for(Os::Other, env), Mode::Off);
+        }
+        assert_eq!(Mode::default_for(Os::Linux, &local), Mode::Inhibit);
+        assert_eq!(
+            Mode::default_for(Os::Linux, &bare),
+            Mode::Inhibit,
+            "a local console"
+        );
+        assert_eq!(
+            Mode::default_for(Os::Linux, &ssh),
+            Mode::Off,
+            "remote: SSH_CONNECTION"
+        );
+        assert_eq!(
+            Mode::default_for(Os::Linux, &ssh_tty),
+            Mode::Off,
+            "remote: SSH_TTY"
+        );
+        assert_eq!(
+            Mode::default_for(Os::Linux, &ssh_x),
+            Mode::Inhibit,
+            "forwarded display"
+        );
+        assert_eq!(Mode::default_for(Os::Linux, &ssh_wayland), Mode::Inhibit);
+        assert_eq!(
+            Mode::default_for(Os::Linux, &ssh_empty),
+            Mode::Inhibit,
+            "empty = unset"
+        );
+    }
+
+    #[test]
+    fn ka_r1_r8_platform_default_uses_the_real_os_and_environment() {
+        assert_eq!(
+            Mode::platform_default(),
+            Mode::default_for(Os::current(), |k| std::env::var_os(k))
+        );
+        let os = if cfg!(target_os = "macos") {
+            Os::MacOs
+        } else if cfg!(target_os = "linux") {
+            Os::Linux
+        } else {
+            Os::Other
+        };
+        assert_eq!(Os::current(), os);
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    #[test]
+    fn ka_r7_inhibit_is_unsupported_off_linux() {
+        let err = start(Mode::Inhibit, 0).unwrap_err();
+        assert!(matches!(
+            err,
+            KeepAwakeError::Unsupported {
+                mode: Mode::Inhibit,
+                ..
+            }
+        ));
+    }
+
+    /// The real helper on a Linux host: it may be missing (no logind), refused by polkit
+    /// (`inhibit:exited` soon after) or running; all three are acceptable outcomes (KA-R2).
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ka_r7_inhibit_on_linux_starts_or_reports() {
+        match start(Mode::Inhibit, 0) {
+            Ok(mut guard) => {
+                guard.poll(0.0);
+                let status = guard.status();
+                assert!(
+                    status == "inhibit:on" || status == "inhibit:exited",
+                    "{status}"
+                );
+            }
+            Err(e) => assert!(
+                matches!(
+                    e,
+                    KeepAwakeError::Unsupported { .. } | KeepAwakeError::Spawn(_)
+                ),
+                "{e}"
+            ),
+        }
     }
 
     struct Fake {

@@ -520,6 +520,14 @@ mod tests {
     }
 
     #[test]
+    fn cfg_r5_ka_r7_config_accepts_inhibit() {
+        let (s, _) = resolve(&cli(&[]).unwrap(), file("keep_awake = \"inhibit\""));
+        assert_eq!(s.keep_awake, Mode::Inhibit);
+        let (s, _) = resolve(&cli(&["--keep-awake", "inhibit"]).unwrap(), file(""));
+        assert_eq!(s.keep_awake, Mode::Inhibit);
+    }
+
+    #[test]
     fn cfg_r5_low_power_values_and_keys_are_validated() {
         for bad in [
             "[low_power]\nidle_after = 0",
