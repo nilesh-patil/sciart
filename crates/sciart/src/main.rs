@@ -4,6 +4,7 @@ mod app;
 mod cli;
 mod config;
 mod fps;
+mod frame;
 mod hint;
 mod keys;
 mod pacer;
@@ -60,6 +61,11 @@ fn main() -> ExitCode {
     // CLI-R8: recording is headless (no config file, terminal or keep-awake).
     if matches!(command, Command::Record(_)) {
         return run_record(&cli, &command);
+    }
+
+    // CLI-R13: one frame to stdout, headless like `record`.
+    if let Command::Frame(args) = &command {
+        return frame::main(&cli, args);
     }
 
     let (opts, hint) = match prepare(&cli, &command) {

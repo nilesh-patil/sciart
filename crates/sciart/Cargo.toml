@@ -63,6 +63,10 @@ name = "record_disabled"
 required-features = ["cli"]
 
 [[test]]
+name = "frame"
+required-features = ["cli"]
+
+[[test]]
 name = "lib_behaviour"
 required-features = ["png"]
 
