@@ -7,13 +7,16 @@ use std::time::{Duration, Instant};
 
 use crossterm::event::{self, Event};
 use ratatui::Terminal;
+use ratatui::backend::Backend as _;
 use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use sciart_core::title::{Form, ascii_of};
 use sciart_core::{GlyphMode, Size};
 use sciart_generators::{Entry, registry};
 use sciart_keepawake::{Guard, Mode};
-use sciart_render::{Background, FrameBackend, Hud, Painter, TerminalGuard, Theme};
+use sciart_render::{
+    Background, Compositor, Content, Draw, FrameBackend, Hud, Painter, TerminalGuard, Theme,
+};
 
 use crate::config::ColorMode;
 use crate::fps::FpsMeter;
@@ -85,6 +88,8 @@ pub(crate) struct HudExtras<'a> {
 #[derive(Debug, Default)]
 pub(crate) struct Screen {
     painter: Painter,
+    /// What the terminal shows, so a frame sends only the cells that changed (RND-R22).
+    compositor: Compositor,
     /// `Runtime::epoch` the painter's memory belongs to.
     epoch: u64,
     /// The keep-awake status, rewritten in place each frame (`Guard::write_status`).
@@ -137,6 +142,7 @@ impl Screen {
         let help = runtime.help();
         let Self {
             painter,
+            compositor,
             keep_awake,
             hud_text,
             help_text,
@@ -148,44 +154,51 @@ impl Screen {
         let background = painter.background();
         let blank = painter.blank_color();
         let overlay = !help && (runtime.status() == Status::AllFailed || runtime.hud());
-        let mut overlay_row = None;
-        terminal.draw(|f| {
-            let area = f.area();
-            if help {
-                // RT-R18: a static page instead of the scene and the HUD.
-                draw_help(area, f.buffer_mut(), help_text, background, blank);
-                return;
-            }
-            if overlay {
-                overlay_row = area.bottom().checked_sub(1);
-            }
-            let buf = f.buffer_mut();
-            painter.paint(runtime.frame(), runtime.theme(), area, buf);
-            if runtime.status() == Status::AllFailed {
-                // RT-R4: keep the last frame, explain on the bottom row, reversed like the
-                // HUD (what `Line::from(msg).reversed()` drew, without building a `Line`).
-                let msg = runtime.notices().last().map_or("", String::as_str);
+        // RND-R22: the compositor paints and sends only the cells that changed; it takes the
+        // full-area path by itself on a resize, theme, painter reset or overlay toggle.
+        let backend = terminal.backend_mut();
+        let size = backend.size()?;
+        let area = Rect::new(0, 0, size.width, size.height);
+        let overlay_row = overlay.then(|| area.bottom().checked_sub(1)).flatten();
+        if help {
+            // RT-R18: a static page instead of the scene and the HUD.
+            let mut page = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
+                draw_help(area, buf, help_text, background, blank);
+            };
+            compositor.compose(area, Content::Full(&mut page));
+        } else if runtime.status() == Status::AllFailed {
+            // RT-R4: keep the last frame, explain on the bottom row, reversed like the
+            // HUD (what `Line::from(msg).reversed()` drew, without building a `Line`).
+            let msg = runtime.notices().last().map_or("", String::as_str);
+            let mut error_line = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
                 let row = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1)
                     .intersection(buf.area);
                 if !msg.is_empty() && !row.is_empty() {
                     buf.set_style(row, Style::new().reversed());
                     buf.set_stringn(row.x, row.y, msg, usize::from(row.width), Style::new());
                 }
-            } else if runtime.hud() {
-                let hud = Hud {
-                    generator: runtime.current_name().unwrap_or("-"),
-                    title: runtime.title(),
-                    fps: extras.fps,
-                    theme: runtime.theme(),
-                    seed: extras.seed,
-                    keep_awake: keep_awake.as_str(),
-                    low_power: extras.low_power,
-                    paused: runtime.paused(),
-                    quarantined: runtime.quarantined(),
-                };
+            };
+            compositor.compose(area, canvas(runtime, painter, Some(&mut error_line)));
+        } else if runtime.hud() {
+            let hud = Hud {
+                generator: runtime.current_name().unwrap_or("-"),
+                title: runtime.title(),
+                fps: extras.fps,
+                theme: runtime.theme(),
+                seed: extras.seed,
+                keep_awake: keep_awake.as_str(),
+                low_power: extras.low_power,
+                paused: runtime.paused(),
+                quarantined: runtime.quarantined(),
+            };
+            let mut line = |area: Rect, buf: &mut ratatui::buffer::Buffer| {
                 hud.render_into(area, buf, hud_text);
-            }
-        })?;
+            };
+            compositor.compose(area, canvas(runtime, painter, Some(&mut line)));
+        } else {
+            compositor.compose(area, canvas(runtime, painter, None));
+        }
+        compositor.emit(backend)?;
         Ok(match terminal.backend().changed_rows() {
             None => false,
             Some((top, _)) => overlay_row.is_none_or(|row| top < row),
@@ -248,6 +261,20 @@ impl Screen {
         out.push('\n');
         let _ = writeln!(out, "  project         {PROJECT_URL}");
         out.push_str(" press ? or Esc to return to the art");
+    }
+}
+
+/// The runtime's frame through `painter`, with `overlay` on the last row (RND-R22).
+fn canvas<'a>(
+    runtime: &'a Runtime,
+    painter: &'a mut Painter,
+    overlay: Option<Draw<'a>>,
+) -> Content<'a> {
+    Content::Canvas {
+        canvas: runtime.frame(),
+        theme: runtime.theme(),
+        painter,
+        overlay,
     }
 }
 
@@ -621,6 +648,318 @@ mod tests {
         rt.handle(Action::ToggleHud);
         rt.tick(0.1);
         assert_eq!(rt.epoch(), e2, "theme/HUD/tick keep the scene");
+    }
+
+    // ----- M25: changed-cell pipeline (RND-R22) -----
+
+    impl Screen {
+        /// The full-area reference (RND-R22): what `Screen::draw` did before M25, a whole
+        /// frame painted into ratatui's buffer and diffed in full by `Terminal::draw`.
+        fn draw_reference<W: Write>(
+            &mut self,
+            terminal: &mut Terminal<FrameBackend<W>>,
+            runtime: &Runtime,
+            extras: HudExtras<'_>,
+        ) -> io::Result<()> {
+            if runtime.epoch() != self.epoch {
+                self.epoch = runtime.epoch();
+                self.painter.reset();
+            }
+            let help = runtime.help();
+            let Self {
+                painter,
+                keep_awake,
+                hud_text,
+                help_text,
+                ..
+            } = self;
+            if help {
+                Self::build_help(help_text, runtime, extras.config_path);
+            }
+            let background = painter.background();
+            let blank = painter.blank_color();
+            terminal.draw(|f| {
+                let area = f.area();
+                if help {
+                    draw_help(area, f.buffer_mut(), help_text, background, blank);
+                    return;
+                }
+                let buf = f.buffer_mut();
+                painter.paint(runtime.frame(), runtime.theme(), area, buf);
+                if runtime.status() == Status::AllFailed {
+                    let msg = runtime.notices().last().map_or("", String::as_str);
+                    let row = Rect::new(area.x, area.bottom().saturating_sub(1), area.width, 1)
+                        .intersection(buf.area);
+                    if !msg.is_empty() && !row.is_empty() {
+                        buf.set_style(row, Style::new().reversed());
+                        buf.set_stringn(row.x, row.y, msg, usize::from(row.width), Style::new());
+                    }
+                } else if runtime.hud() {
+                    let hud = Hud {
+                        generator: runtime.current_name().unwrap_or("-"),
+                        title: runtime.title(),
+                        fps: extras.fps,
+                        theme: runtime.theme(),
+                        seed: extras.seed,
+                        keep_awake: keep_awake.as_str(),
+                        low_power: extras.low_power,
+                        paused: runtime.paused(),
+                        quarantined: runtime.quarantined(),
+                    };
+                    hud.render_into(area, buf, hud_text);
+                }
+            })?;
+            Ok(())
+        }
+    }
+
+    type Recorded = Terminal<FrameBackend<Vec<u8>>>;
+
+    /// A screen on the changed-cell path and one on the full-area reference, with the same
+    /// painter settings, each writing to its own byte stream.
+    struct Pair {
+        label: &'static str,
+        new: (Screen, Recorded),
+        reference: (Screen, Recorded),
+        /// Stream lengths after each frame, to name the first frame that differs.
+        marks: Vec<(usize, usize)>,
+    }
+
+    impl Pair {
+        fn new(label: &'static str, screen: impl Fn() -> Screen, size: Size) -> Self {
+            let term = || {
+                Terminal::new(FrameBackend::with_size(
+                    Vec::new(),
+                    size.width(),
+                    size.height(),
+                ))
+                .expect("terminal")
+            };
+            Self {
+                label,
+                new: (screen(), term()),
+                reference: (screen(), term()),
+                marks: Vec::new(),
+            }
+        }
+
+        fn draw(&mut self, rt: &Runtime, fps: f64) {
+            let extras = HudExtras {
+                fps,
+                seed: 42,
+                low_power: false,
+                config_path: None,
+            };
+            self.new.0.draw(&mut self.new.1, rt, extras).expect("draw");
+            self.reference
+                .0
+                .draw_reference(&mut self.reference.1, rt, extras)
+                .expect("draw");
+            self.marks.push((
+                self.new.1.backend().writer().len(),
+                self.reference.1.backend().writer().len(),
+            ));
+        }
+
+        fn resize(&mut self, size: Size) {
+            for term in [&mut self.new.1, &mut self.reference.1] {
+                term.backend_mut()
+                    .set_fixed_size(size.width(), size.height());
+            }
+        }
+
+        /// `None` when both streams are identical, else where they part.
+        fn mismatch(&self) -> Option<String> {
+            let (a, b) = (
+                self.new.1.backend().writer(),
+                self.reference.1.backend().writer(),
+            );
+            if a == b {
+                return None;
+            }
+            let frame = self
+                .marks
+                .iter()
+                .position(|&(x, y)| x != y || a[..x] != b[..y]);
+            Some(format!(
+                "{}: streams differ ({} vs {} bytes), first at frame {frame:?}",
+                self.label,
+                a.len(),
+                b.len()
+            ))
+        }
+    }
+
+    const DRAWN_FRAMES: u32 = 72;
+
+    /// Every registered scene through both paths, in each colour mode (RND-R18: truecolor,
+    /// 256 colours, mono) and both backgrounds (RND-R20), with the HUD, theme, pause,
+    /// resize, reset and help toggled along the way (RND-R22).
+    fn every_scene_matches_the_full_area_stream(size: Size) {
+        let shrunk = Size::new(size.width() - 7, size.height() - 3);
+        let failures: Vec<String> = std::thread::scope(|s| {
+            let handles: Vec<_> = registry()
+                .iter()
+                .map(|entry| {
+                    s.spawn(move || {
+                        let mut failures = Vec::new();
+                        for mono in [false, true] {
+                            let mut rt =
+                                Runtime::new(vec![entry], 42, size, GlyphMode::Unicode, Some(0));
+                            if mono {
+                                rt = rt.with_theme(Theme::Mono);
+                            }
+                            let opaque = |s: Screen| s.with_background(Background::Opaque);
+                            let terminal = |s: Screen| s.with_background(Background::Terminal);
+                            let mut pairs = if mono {
+                                vec![
+                                    Pair::new("mono/opaque", || opaque(Screen::new()), size),
+                                    Pair::new("mono/terminal", || terminal(Screen::new()), size),
+                                ]
+                            } else {
+                                vec![
+                                    Pair::new("truecolor/opaque", || opaque(Screen::new()), size),
+                                    Pair::new(
+                                        "truecolor/terminal",
+                                        || terminal(Screen::new()),
+                                        size,
+                                    ),
+                                    Pair::new("256/opaque", || opaque(Screen::indexed()), size),
+                                    Pair::new("256/terminal", || terminal(Screen::indexed()), size),
+                                ]
+                            };
+                            for frame in 1..=DRAWN_FRAMES {
+                                let action = match frame {
+                                    10 | 34 | 58 => Some(Action::ToggleHud),
+                                    18 | 64 if !mono => Some(Action::CycleTheme),
+                                    24 | 30 => Some(Action::TogglePause),
+                                    48 => Some(Action::Reset),
+                                    52 | 55 => Some(Action::ToggleHelp),
+                                    _ => None,
+                                };
+                                if let Some(action) = action {
+                                    rt.handle(action);
+                                }
+                                let resize = match frame {
+                                    38 => Some(shrunk),
+                                    44 => Some(size),
+                                    _ => None,
+                                };
+                                if let Some(to) = resize {
+                                    rt.resize(to);
+                                    for pair in &mut pairs {
+                                        pair.resize(to);
+                                    }
+                                }
+                                rt.tick(1.0 / 30.0);
+                                // The HUD's fps readout changes from frame to frame.
+                                let fps = 28.0 + f64::from(frame % 3);
+                                for pair in &mut pairs {
+                                    pair.draw(&rt, fps);
+                                }
+                            }
+                            failures.extend(
+                                pairs
+                                    .iter()
+                                    .filter_map(Pair::mismatch)
+                                    .map(|m| format!("{}: {m}", entry.meta.name)),
+                            );
+                        }
+                        failures
+                    })
+                })
+                .collect();
+            handles
+                .into_iter()
+                .flat_map(|h| h.join().expect("scene thread"))
+                .collect()
+        });
+        assert!(
+            failures.is_empty(),
+            "RND-R22 at {}x{}:\n{}",
+            size.width(),
+            size.height(),
+            failures.join("\n")
+        );
+    }
+
+    #[test]
+    fn rnd_r22_changed_cells_send_the_full_area_bytes_for_every_scene_at_80x24() {
+        every_scene_matches_the_full_area_stream(Size::new(80, 24));
+    }
+
+    #[test]
+    fn rnd_r22_changed_cells_send_the_full_area_bytes_for_every_scene_at_200x50() {
+        every_scene_matches_the_full_area_stream(Size::new(200, 50));
+    }
+
+    #[test]
+    fn rnd_r22_a_frame_visits_only_changed_cells_plus_row_bookkeeping() {
+        let size = Size::new(200, 50);
+        for entry in registry() {
+            let name = entry.meta.name;
+            let mut rt = Runtime::new(vec![entry], 42, size, GlyphMode::Unicode, Some(0));
+            let mut screen = Screen::new().with_background(Background::Opaque);
+            let mut term = Terminal::new(FrameBackend::with_size(
+                io::sink(),
+                size.width(),
+                size.height(),
+            ))
+            .expect("terminal");
+            let mut last: Option<Vec<sciart_core::Cell>> = None;
+            for frame in 0..40 {
+                rt.tick(1.0 / 30.0);
+                draw(&rt, &mut screen, &mut term, 30.0);
+                let work = screen.compositor.work();
+                let cells = rt.frame().cells();
+                if let Some(prev) = &last {
+                    let changed = cells.iter().zip(prev).filter(|(a, b)| a != b).count();
+                    assert!(!work.full, "{name} frame {frame}: full-area path");
+                    assert_eq!(work.changed, changed, "{name} frame {frame}");
+                    assert!(
+                        work.painted <= changed && work.sent <= work.painted,
+                        "{name} frame {frame}: {work:?}, {changed} changed"
+                    );
+                    assert!(work.rows <= usize::from(size.height()), "{name}: {work:?}");
+                }
+                last = Some(cells.to_vec());
+            }
+            // The same frame again: nothing is painted or sent.
+            draw(&rt, &mut screen, &mut term, 30.0);
+            let work = screen.compositor.work();
+            assert_eq!((work.changed, work.painted, work.sent), (0, 0, 0), "{name}");
+        }
+    }
+
+    #[test]
+    fn rnd_r22_resize_theme_reset_and_overlay_take_the_full_area_path() {
+        let mut rt = runtime(&["wave_interference"]);
+        let (mut screen, mut term) = (Screen::new(), terminal());
+        let full = |rt: &Runtime, screen: &mut Screen, term: &mut _| {
+            draw(rt, screen, term, 30.0);
+            screen.compositor.work().full
+        };
+        assert!(full(&rt, &mut screen, &mut term), "first frame");
+        rt.tick(1.0 / 30.0);
+        assert!(!full(&rt, &mut screen, &mut term), "steady frame");
+        rt.handle(Action::CycleTheme);
+        assert!(full(&rt, &mut screen, &mut term), "theme");
+        rt.handle(Action::ToggleHud);
+        assert!(full(&rt, &mut screen, &mut term), "HUD on");
+        rt.tick(1.0 / 30.0);
+        assert!(!full(&rt, &mut screen, &mut term), "steady with HUD");
+        rt.handle(Action::Reset);
+        assert!(
+            full(&rt, &mut screen, &mut term),
+            "reset clears the painter memory"
+        );
+        rt.handle(Action::ToggleHelp);
+        assert!(full(&rt, &mut screen, &mut term), "help");
+        rt.handle(Action::ToggleHelp);
+        assert!(full(&rt, &mut screen, &mut term), "back from help");
+        term.backend_mut().set_fixed_size(W - 4, H - 2);
+        rt.resize(Size::new(W - 4, H - 2));
+        assert!(full(&rt, &mut screen, &mut term), "resize");
     }
 
     // ----- M23: help overlay (RT-R18) -----
