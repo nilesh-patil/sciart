@@ -317,7 +317,8 @@ Design: [ADR-0027](adr/0027-opaque-background.md) · RND-R20, CLI-R11, CFG-R11. 
 ## M25 — v1.0 release programme (in progress)
 Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisions: binaries + pixi/conda + crates.io + Homebrew; macOS and Linux first-class, no Windows; scriptable modes, recorder in the binary, a `sciart` library facade, a WASM gallery and a docs site; per-platform determinism; history scrubbed for privacy.
 - [x] History scrub, survey (distribution, performance, usage and API, portability), decisions, programme
-- [ ] Phase 1 — portability (KA-R7..R9, RT-R20, RND-R21, TEST-R13; ADR-0028/0029)
+- [x] Phase 1 — portability (KA-R7..R9, RT-R20, RND-R21, TEST-R13; ADR-0028/0029): Linux inhibitor helper, signal exit, terminal hint, platform tiers; 1,668 default + 201 record-feature tests
+- [ ] Manual Linux keep-awake check on a desktop with logind — [B-96](BACKLOG.md).
 - [ ] Phase 1 — performance (RND-R22/R23, RT-R21/R22; ADR-0030)
 - [ ] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2)
 - [ ] Phase 2 — CLI modes (CLI-R12..R17, RT-R23; ADR-0031)
