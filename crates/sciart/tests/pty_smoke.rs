@@ -422,6 +422,57 @@ fn rt_r17_a_paused_picture_writes_nothing() {
     assert!(status.success());
 }
 
+/// RT-R21: paused, once the rate has stepped down and a frame's diff is empty, the loop
+/// blocks on the next event: no bytes and at most three wake-ups in 2 s; a key is drawn at
+/// once. `SCIART_TRACE_WAKEUPS` makes the binary write its wake-up count to a file.
+#[test]
+fn rt_r21_a_paused_scene_blocks_writes_nothing_and_resumes_at_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let trace = dir.path().join("wakeups");
+    let wakeups = || -> u64 {
+        std::fs::read_to_string(&trace)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    let args = ["run", "starfield", "--ascii", "--keep-awake", "off"];
+    let trace_env = trace.to_str().unwrap();
+    let mut s = Session::start_with_env(&args, &[("SCIART_TRACE_WAKEUPS", trace_env)]);
+    s.wait_for("stars", |t| {
+        t.chars().filter(|c| "*+.".contains(*c)).count() > 50
+    });
+    s.press(" ");
+    // RT-R17 steps the rate down within 1.5 s of quiet; then the loop blocks.
+    thread::sleep(Duration::from_millis(2500));
+    let (bytes, woken) = (s.raw.lock().unwrap().len(), wakeups());
+    assert!(woken > 0, "the trace hook writes a count");
+    thread::sleep(Duration::from_secs(2));
+    let (after, woken_after) = (s.raw.lock().unwrap().len(), wakeups());
+    assert_eq!(after, bytes, "paused: {} bytes written", after - bytes);
+    assert!(
+        woken_after - woken <= 3,
+        "paused: {} wake-ups in 2 s",
+        woken_after - woken
+    );
+    s.press(" ");
+    let start = Instant::now();
+    while s.raw.lock().unwrap().len() == after {
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "no frame after resuming"
+        );
+        thread::sleep(Duration::from_millis(2));
+    }
+    // One frame interval at 30 FPS, plus the pty's and the test's own scheduling.
+    let latency = start.elapsed();
+    assert!(
+        latency < Duration::from_millis(250),
+        "resumed after {latency:?}"
+    );
+    let (status, _) = s.quit();
+    assert!(status.success());
+}
+
 /// CLI-R10: on a terminal `list` prints the aligned header; `--plain` keeps the TSV.
 #[test]
 fn cli_r10_list_on_a_terminal_is_aligned_and_plain_is_tsv() {

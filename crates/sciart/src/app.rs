@@ -367,6 +367,9 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
     let mut last = wall_clock();
     let mut epoch = runtime.epoch();
     let mut first = true;
+    let mut wakeups = Wakeups::from_env();
+    // When the keep-awake backend was last polled: the RT-R21 block polls it too.
+    let mut polled = last;
 
     loop {
         let now = wall_clock();
@@ -378,7 +381,8 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
             fps.record(elapsed);
         }
         pacer.record(elapsed);
-        keep_awake.poll(elapsed);
+        keep_awake.poll(now.duration_since(polled).as_secs_f64());
+        polled = now;
         runtime.tick(elapsed);
 
         keep_awake.write_status(&mut screen.keep_awake);
@@ -396,11 +400,41 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
         // Handle input until the next frame is due. The rate can change here (RT-R8,
         // RT-R17), so the deadline is recomputed after every event: a key that wakes a
         // stepped-down loop is drawn at the full rate's deadline, not the slow one's.
+        // RT-R21: paused or on the help page, once the rate is down and a frame sent
+        // nothing, nothing can change before the next event: block on it instead. A
+        // visible HUD first lets its fps readout settle on the stepped-down rate, or it
+        // would freeze on a passing value.
+        let settled = !runtime.hud() || (fps.fps() - f64::from(pacer.fps())).abs() < 0.5;
+        let block = (runtime.paused() || runtime.help())
+            && pacer.at_floor()
+            && settled
+            && terminal.backend().changed_rows().is_none();
         loop {
             let frame_time = Duration::from_secs_f64(1.0 / f64::from(pacer.fps()));
-            let wait = (now + frame_time).saturating_duration_since(wall_clock());
-            if !event::poll(wait)? {
+            let wait = if block {
+                BLOCK_POLL
+            } else {
+                (now + frame_time).saturating_duration_since(wall_clock())
+            };
+            let ready = event::poll(wait)?;
+            wakeups.count();
+            if !ready && block {
+                // Only the keep-awake backend needs the time (KA-R3, KA-R4).
+                let t = wall_clock();
+                keep_awake.poll(t.duration_since(polled).as_secs_f64());
+                polled = t;
+                continue;
+            }
+            if !ready {
                 break;
+            }
+            if block {
+                // The blocked span is not a frame interval: keep it out of the fps
+                // readout and the simulation clock (paused or help: nothing to step).
+                let t = wall_clock();
+                pacer.record(t.duration_since(last).as_secs_f64());
+                last = t;
+                first = true;
             }
             match event::read()? {
                 Event::Key(key) => {
@@ -419,6 +453,37 @@ pub fn run(opts: Options, mut keep_awake: Guard) -> anyhow::Result<()> {
                 }
                 _ => {}
             }
+            if block {
+                break; // draw what the event changed now (RT-R21)
+            }
+        }
+    }
+}
+
+/// How long a blocked loop (RT-R21) waits for an event before it polls the keep-awake
+/// backend; at least a second, which every backend's cadence allows (KA-R3, KA-R4).
+const BLOCK_POLL: Duration = Duration::from_secs(1);
+
+/// Test hook (RT-R21): with `SCIART_TRACE_WAKEUPS=<file>` the loop writes how often it
+/// has woken (each return from the event wait) to that file, so the pty test can count
+/// wake-ups from outside. Off, and free, without the variable.
+struct Wakeups {
+    path: Option<PathBuf>,
+    count: u64,
+}
+
+impl Wakeups {
+    fn from_env() -> Self {
+        Self {
+            path: std::env::var_os("SCIART_TRACE_WAKEUPS").map(PathBuf::from),
+            count: 0,
+        }
+    }
+
+    fn count(&mut self) {
+        if let Some(path) = &self.path {
+            self.count += 1;
+            let _ = std::fs::write(path, self.count.to_string());
         }
     }
 }
