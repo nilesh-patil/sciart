@@ -13,6 +13,7 @@
 
 use std::sync::LazyLock;
 
+#[cfg(feature = "terminal")]
 use ratatui::style::Color;
 
 use crate::Rgb;
@@ -77,6 +78,7 @@ pub fn quantize(c: Rgb) -> u8 {
 }
 
 /// `c` as an indexed ratatui colour; the encoder writes `38;5;n`/`48;5;n` (RND-R18).
+#[cfg(feature = "terminal")]
 pub fn indexed(c: Rgb) -> Color {
     Color::Indexed(quantize(c))
 }
@@ -160,6 +162,7 @@ mod tests {
             let i = quantize(c);
             assert!((16..=255).contains(&i), "{c:?} -> {i}");
             assert_eq!(i, quantize(c), "{c:?}");
+            #[cfg(feature = "terminal")]
             assert_eq!(indexed(c), Color::Indexed(i));
         }
     }
