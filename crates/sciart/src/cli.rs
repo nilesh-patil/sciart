@@ -122,6 +122,9 @@ pub struct RecordArgs {
     /// Cell size WxH [default: 80x24]
     #[arg(long, value_parser = size_arg)]
     pub size: Option<Size>,
+    /// Simulated seconds to run before the first frame, 0..=1200 [default: 0]
+    #[arg(long, value_parser = start_secs)]
+    pub start: Option<f64>,
     /// Output format; inferred from --out when omitted
     #[arg(long, value_enum)]
     pub format: Option<FormatArg>,
@@ -159,6 +162,8 @@ pub const RECORD_DEFAULT_SEED: u64 = 42;
 /// CLI-R8: a recording is capped at 36 000 frames (20 min at 30 fps), so a huge `--seconds`
 /// is a usage error instead of an allocation/write that never ends.
 pub const RECORD_MAX_FRAMES: usize = 36_000;
+/// CLI-R8: `--start` is at most 20 simulated minutes, the same bound as a recording's length.
+pub const RECORD_MAX_START_SECONDS: f64 = 1200.0;
 
 /// A validated `record` invocation: CLI-R8 defaults applied, scene resolved, timing checked.
 #[cfg_attr(not(feature = "record"), allow(dead_code))] // read by the record implementation
@@ -173,6 +178,8 @@ pub struct RecordSpec {
     pub theme: Theme,
     pub ascii: bool,
     pub seed: u64,
+    /// Whole 1/60 s steps simulated before frame 0 (`--start`, rounded to the nearest step).
+    pub start_steps: u64,
 }
 
 impl RecordSpec {
@@ -209,6 +216,8 @@ impl RecordSpec {
             theme: cli.theme.map(Theme::from).unwrap_or(Theme::Astro),
             ascii: cli.ascii,
             seed: cli.seed.unwrap_or(RECORD_DEFAULT_SEED),
+            // CLI-R8: frames stay on whole fixed steps, so the offset is rounded to one too.
+            start_steps: (args.start.unwrap_or(0.0) * 60.0).round() as u64,
         })
     }
 }
@@ -295,6 +304,16 @@ fn positive_secs(s: &str) -> Result<f64, String> {
     match s.parse::<f64>() {
         Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
         _ => Err(format!("'{s}' is not a positive number of seconds")),
+    }
+}
+
+/// CLI-R8: a finite start offset in `0..=1200` simulated seconds.
+fn start_secs(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && (0.0..=RECORD_MAX_START_SECONDS).contains(&v) => Ok(v),
+        _ => Err(format!(
+            "'{s}' is not a start time in 0..={RECORD_MAX_START_SECONDS} seconds"
+        )),
     }
 }
 
@@ -1187,6 +1206,39 @@ mod tests {
             RecordSpec::resolve(&cli, &cli.command()),
             Err(UsageError::RecordFrames(_))
         ));
+    }
+
+    #[test]
+    fn cli_r8_record_start_defaults_to_zero_and_rounds_to_whole_steps() {
+        let (_, spec) = record(&["record", "starfield", "--out", "x.gif"]);
+        assert_eq!(spec.start_steps, 0);
+        for (start, steps) in [("0", 0), ("2.5", 150), ("0.01", 1), ("1200", 72_000)] {
+            let (_, spec) = record(&["record", "starfield", "--out", "x.gif", "--start", start]);
+            assert_eq!(spec.start_steps, steps, "--start {start}");
+        }
+        // The offset does not change the frame count.
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--start",
+            "4",
+            "--seconds",
+            "2",
+            "--fps",
+            "10",
+        ]);
+        assert_eq!((spec.start_steps, spec.frames), (240, 20));
+        for bad in ["-1", "1200.5", "nan", "inf", "soon", ""] {
+            assert_eq!(
+                parse(&["record", "starfield", "--out", "x.gif", "--start", bad])
+                    .unwrap_err()
+                    .exit_code(),
+                2,
+                "--start {bad:?}"
+            );
+        }
     }
 
     #[test]
