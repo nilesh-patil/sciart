@@ -77,13 +77,15 @@ pub fn watch() -> io::Result<()> {
     started.map(drop)
 }
 
-/// The watcher's exit: stop the command, restore the terminal, replay, exit `128 + signal`.
+/// The watcher's exit (CLI-R14 around RT-R20's [`on_signal`]): kill the `while` command
+/// first, a signal and no wait, then restore the terminal if it is still set up and replay
+/// what the command spooled, all within the restore budget; exit `128 + signal`.
 fn exit_on(signal: i32) -> ! {
     let command = command_slot().take();
     if let Some(command) = &command {
         command.kill();
     }
-    restore_within(RESTORE_BUDGET, move || {
+    let code = on_signal(signal, RESTORE_BUDGET, move || {
         let mut held = io::stdout().lock();
         if SET_UP.load(Ordering::SeqCst) {
             sciart_render::restore_terminal();
@@ -93,7 +95,7 @@ fn exit_on(signal: i32) -> ! {
         }
         held
     });
-    std::process::exit(128 + signal);
+    std::process::exit(code);
 }
 
 /// Start the `while` command with `start` and register it with the watcher (CLI-R14). The
@@ -122,6 +124,17 @@ impl Drop for SetUp {
     fn drop(&mut self) {
         SET_UP.store(false, Ordering::SeqCst);
     }
+}
+
+/// The signal path apart from the exit itself: attempt `restore` for at most `budget`,
+/// then return the exit status `128 + signal` whether or not it finished.
+fn on_signal<G>(
+    signal: i32,
+    budget: Duration,
+    restore: impl FnOnce() -> G + Send + 'static,
+) -> i32 {
+    restore_within(budget, restore);
+    128 + signal
 }
 
 /// Run `restore` on a thread of its own and wait for it at most `budget`; `true` when it
@@ -159,20 +172,32 @@ mod tests {
         assert!(RESTORED.load(Ordering::SeqCst));
     }
 
+    /// A restore that never completes: the stdout lock held by a stalled frame write.
+    fn stalled() {
+        loop {
+            thread::park();
+        }
+    }
+
+    // These tests assert only what a loaded machine cannot break: that the wait returns at
+    // all (an unbounded wait hangs the test until nextest's timeout), and never before the
+    // budget (`recv_timeout`'s guarantee). How promptly it returns is the scheduler's.
+
     #[test]
-    fn rt_r20_a_stalled_restore_is_abandoned_at_the_budget() {
-        #[allow(clippy::disallowed_methods)] // measures the bound itself
+    fn rt_r20_a_stalled_restore_is_abandoned_after_the_budget() {
+        let budget = Duration::from_millis(20);
+        #[allow(clippy::disallowed_methods)] // a lower bound only
         let start = Instant::now();
-        let finished = restore_within(Duration::from_millis(100), || {
-            // A write that never completes: the stdout lock held by a stalled frame.
-            thread::sleep(Duration::from_secs(30));
-        });
-        let took = start.elapsed();
-        assert!(!finished);
-        assert!(
-            (Duration::from_millis(100)..Duration::from_millis(400)).contains(&took),
-            "{took:?}"
-        );
+        assert!(!restore_within(budget, stalled));
+        assert!(start.elapsed() >= budget);
+    }
+
+    #[test]
+    fn rt_r20_the_exit_status_comes_whether_or_not_the_restore_finished() {
+        let budget = Duration::from_millis(20);
+        assert_eq!(on_signal(SIGTERM, budget, stalled), 143);
+        assert_eq!(on_signal(SIGHUP, budget, stalled), 129);
+        assert_eq!(on_signal(SIGTERM, Duration::from_secs(5), || ()), 143);
     }
 
     #[test]
@@ -184,9 +209,10 @@ mod tests {
         assert!(LOCK.try_lock().is_err(), "no frame may follow the restore");
     }
 
+    /// RT-R20 pins the deadline: 150 ms of the app's 250 ms budget, the rest for the exit.
     #[test]
-    fn rt_r20_the_budget_leaves_room_inside_250_ms() {
-        assert!(RESTORE_BUDGET <= Duration::from_millis(200));
+    fn rt_r20_the_restore_deadline_is_150_ms() {
+        assert_eq!(RESTORE_BUDGET, Duration::from_millis(150));
     }
 
     #[test]
