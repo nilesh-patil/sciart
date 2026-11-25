@@ -90,7 +90,7 @@ pub enum Command {
     Run { name: String },
     /// List generators
     List {
-        /// Print a JSON array of {name, category, description}, sorted by name
+        /// Print a versioned JSON object, {"schema": 1, "scenes": [...]}, sorted by name
         #[arg(long)]
         json: bool,
         /// Print `id<TAB>label<TAB>count` per non-empty category, sorted by label
@@ -486,7 +486,7 @@ pub enum ListFormat {
     Aligned,
     /// The TSV of CLI-R4, when piped or with `--plain`.
     Tsv,
-    /// A JSON array, with `--json`.
+    /// The versioned JSON object of CLI-R16, with `--json`.
     Json,
     /// One line per category, with `--categories`.
     Categories,
@@ -562,24 +562,54 @@ fn list_aligned(entries: &[&Entry]) -> String {
     out
 }
 
-/// A compact JSON array of `{name, category, description}` (CLI-R10), hand-rolled so the
-/// binary needs no JSON dependency.
+/// CLI-R16: the `schema` of `list --json`. Fields are only ever added; removing one or
+/// changing its meaning raises it.
+pub const LIST_SCHEMA: u32 = 1;
+
+/// The versioned catalogue of CLI-R16, `{"schema":1,"scenes":[...]}` on one line,
+/// hand-rolled so the binary needs no JSON dependency.
 fn list_json(entries: &[&Entry]) -> String {
-    let mut out = String::from("[");
+    let mut out = format!("{{\"schema\":{LIST_SCHEMA},\"scenes\":[");
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push_str("{\"name\":");
-        out.push_str(&json_string(e.meta.name));
-        out.push_str(",\"category\":");
-        out.push_str(&json_string(e.meta.category.id()));
-        out.push_str(",\"description\":");
-        out.push_str(&json_string(e.meta.description));
+        let meta = e.meta;
+        for (key, value) in [
+            ("{\"name\":", meta.name),
+            (",\"category\":", meta.category.id()),
+            (",\"category_label\":", meta.category.label()),
+            (",\"title\":", meta.title),
+            (",\"description\":", meta.description),
+        ] {
+            out.push_str(key);
+            out.push_str(&json_string(value));
+        }
+        out.push_str(",\"captions\":");
+        json_array(&mut out, meta.captions.iter().copied());
+        // Retired names that still resolve to this scene (GEN-R14).
+        out.push_str(",\"aliases\":");
+        let aliases = sciart_generators::ALIASES
+            .iter()
+            .filter(|(_, name)| *name == meta.name)
+            .map(|(old, _)| *old);
+        json_array(&mut out, aliases);
         out.push('}');
     }
-    out.push_str("]\n");
+    out.push_str("]}\n");
     out
+}
+
+/// Append `items` as a JSON array of strings.
+fn json_array<'a>(out: &mut String, items: impl Iterator<Item = &'a str>) {
+    out.push('[');
+    for (i, item) in items.enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(item));
+    }
+    out.push(']');
 }
 
 /// A JSON string literal with the minimal escaping a JSON parser requires.
@@ -911,18 +941,25 @@ mod tests {
     }
 
     #[test]
-    fn cli_r10_json_output_is_sorted_and_escaped() {
+    fn cli_r16_json_is_a_versioned_object_sorted_by_name() {
         let entries = select(&list_command(), &[], &Filters::default()).unwrap();
         let text = list_output(&entries, ListFormat::Json);
-        assert!(text.starts_with("[{\"name\":\""), "{text:?}");
-        assert!(text.ends_with("}]\n"));
+        assert!(
+            text.starts_with("{\"schema\":1,\"scenes\":[{\"name\":\""),
+            "{text:?}"
+        );
+        assert!(text.ends_with("}]}\n"));
+        assert_eq!(text.lines().count(), 1, "one line");
         assert_eq!(text.matches("\"name\":").count(), entries.len());
+        let mut sorted = entries.clone();
+        sorted.sort_by_key(|e| e.meta.name);
         let mut pos = 0;
-        for e in &entries {
+        for e in &sorted {
             let needle = format!(
-                "{{\"name\":\"{}\",\"category\":\"{}\",",
+                "{{\"name\":\"{}\",\"category\":\"{}\",\"category_label\":\"{}\",\"title\":",
                 e.meta.name,
-                e.meta.category.id()
+                e.meta.category.id(),
+                e.meta.category.label()
             );
             let at = text[pos..]
                 .find(&needle)
@@ -933,6 +970,54 @@ mod tests {
             json_string("a\"b\\c\nd\te\u{1}"),
             "\"a\\\"b\\\\c\\nd\\te\\u0001\""
         );
+    }
+
+    /// CLI-R16 through a real JSON parser: every field, with the scene's own values.
+    #[test]
+    fn cli_r16_json_fields_parse_and_match_the_registry() {
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let text = list_output(&entries, ListFormat::Json);
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(doc["schema"], 1);
+        let scenes = doc["scenes"].as_array().expect("scenes array");
+        assert_eq!(scenes.len(), registry().len());
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .expect("an array")
+                .iter()
+                .map(|s| s.as_str().expect("a string").to_owned())
+                .collect()
+        };
+        for scene in scenes {
+            let name = scene["name"].as_str().expect("name");
+            let meta = find(name).expect("a registered name").meta;
+            assert_eq!(meta.name, name, "listed under its own name");
+            assert_eq!(scene["category"], meta.category.id(), "{name}");
+            assert_eq!(scene["category_label"], meta.category.label(), "{name}");
+            assert_eq!(scene["title"], meta.title, "{name}");
+            assert_eq!(scene["description"], meta.description, "{name}");
+            assert_eq!(strings(&scene["captions"]), meta.captions, "{name}");
+            let aliases: Vec<&str> = sciart_generators::ALIASES
+                .iter()
+                .filter(|(_, to)| *to == name)
+                .map(|(old, _)| *old)
+                .collect();
+            assert_eq!(strings(&scene["aliases"]), aliases, "{name}");
+        }
+        let gray_scott = scenes.iter().find(|s| s["name"] == "gray_scott").unwrap();
+        assert_eq!(strings(&gray_scott["aliases"]), ["chemical_reaction"]);
+        assert!(
+            scenes.iter().any(|s| !strings(&s["captions"]).is_empty()),
+            "some scene has acts"
+        );
+        // Filters narrow the list, not the shape.
+        let cli = parse(&["list", "--json", "--category", "voyages"]).unwrap();
+        let filters = Filters::from_cli(&cli.command(), &cli).unwrap();
+        let entries = select(&cli.command(), &[], &filters).unwrap();
+        let text = list_output(&entries, ListFormat::Json);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["scenes"].as_array().unwrap().len(), entries.len());
     }
 
     #[test]
