@@ -25,6 +25,11 @@ jobs:
   fuzz:
     name: fuzz (${{ matrix.target }})
     runs-on: ubuntu-24.04
+    # cargo-fuzz passes `-Z` flags, which only nightly accepts; `rust-toolchain.toml` floats
+    # on stable and would otherwise win over the toolchain installed below (as release.yml
+    # pins its MSRV the same way).
+    env:
+      RUSTUP_TOOLCHAIN: nightly
     strategy:
       fail-fast: false
       matrix:
