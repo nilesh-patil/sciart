@@ -11,13 +11,21 @@
 //!
 //! Only the standard library: the command is stopped with `Child::kill` (`SIGKILL` on unix),
 //! so it cannot clean up, and a process it started itself is not stopped with it (ADR-0031).
+//!
+//! The termination-signal watcher (RT-R20) exits the process from its own thread, so it
+//! reaches the command through a [`Stopper`]: it kills the command before the exit and
+//! replays what was spooled within the restore budget.
 
 use std::ffi::OsString;
 use std::fmt;
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::process::{self, ExitStatus, Stdio};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+#[cfg(unix)]
+use std::sync::{TryLockError, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -132,12 +140,30 @@ fn spool(dir: &Path, stream: &str) -> io::Result<(File, Spool)> {
     ))
 }
 
+/// What the main thread and the termination-signal watcher (RT-R20) both reach: the
+/// process handle and the two spool readers. Each lock is held only for one call on it; a
+/// poisoned lock is taken over, since none of these calls leaves the value half-updated.
+#[derive(Debug)]
+struct Shared {
+    process: Mutex<process::Child>,
+    out: Mutex<Spool>,
+    err: Mutex<Spool>,
+}
+
+fn locked<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+    mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Copy what has been spooled to `stream` since the last copy.
+fn copy_new(spool: &mut Spool, stream: &mut dyn Write) -> io::Result<()> {
+    io::copy(&mut spool.reader, stream)?;
+    stream.flush()
+}
+
 /// The running command and its spooled output.
 #[derive(Debug)]
 pub struct Child {
-    process: process::Child,
-    out: Spool,
-    err: Spool,
+    shared: Arc<Shared>,
     /// Kept once the command has been reaped.
     status: Option<ExitStatus>,
 }
@@ -167,17 +193,25 @@ impl Child {
                 error,
             })?;
         Ok(Self {
-            process,
-            out,
-            err,
+            shared: Arc::new(Shared {
+                process: Mutex::new(process),
+                out: Mutex::new(out),
+                err: Mutex::new(err),
+            }),
             status: None,
         })
+    }
+
+    /// The command's process id.
+    #[cfg(test)]
+    fn pid(&self) -> u32 {
+        locked(&self.shared.process).id()
     }
 
     /// The command's exit status if it has exited, without waiting.
     pub fn try_status(&mut self) -> io::Result<Option<ExitStatus>> {
         if self.status.is_none() {
-            self.status = self.process.try_wait()?;
+            self.status = locked(&self.shared.process).try_wait()?;
         }
         Ok(self.status)
     }
@@ -187,9 +221,10 @@ impl Child {
         if let Some(status) = self.try_status()? {
             return Ok(status);
         }
+        let mut process = locked(&self.shared.process);
         // It may exit between the check and the kill; `wait` reaps it either way.
-        let _ = self.process.kill();
-        let status = self.process.wait()?;
+        let _ = process.kill();
+        let status = process.wait()?;
         self.status = Some(status);
         Ok(status)
     }
@@ -197,10 +232,8 @@ impl Child {
     /// Copy what the command has written since the last call: its stdout to `out`, then its
     /// stderr to `err` (CLI-R14).
     pub fn replay(&mut self, out: &mut impl Write, err: &mut impl Write) -> io::Result<()> {
-        io::copy(&mut self.out.reader, out)?;
-        out.flush()?;
-        io::copy(&mut self.err.reader, err)?;
-        err.flush()
+        copy_new(&mut locked(&self.shared.out), out)?;
+        copy_new(&mut locked(&self.shared.err), err)
     }
 
     /// After `q`: keep copying as the command writes, until it exits or `deadline` passes.
@@ -226,12 +259,75 @@ impl Child {
             idle(FOLLOW_POLL);
         }
     }
+
+    /// Run `art` beside the command. Should it panic, the command is stopped and what it
+    /// spooled is replayed into `out` and `err` before the panic goes on (CLI-R14: every exit
+    /// path replays, a panic outside the scene quarantine included).
+    pub fn beside<T>(
+        &mut self,
+        out: &mut impl Write,
+        err: &mut impl Write,
+        art: impl FnOnce(&mut Self) -> T,
+    ) -> T {
+        // Unwind safety: after a panic only `stop` and `replay` run, and every lock they take
+        // is held for a single call, so nothing is seen half-updated (see `Shared`).
+        match panic::catch_unwind(AssertUnwindSafe(|| art(&mut *self))) {
+            Ok(value) => value,
+            Err(payload) => {
+                let _ = self.stop();
+                let _ = self.replay(out, err);
+                panic::resume_unwind(payload)
+            }
+        }
+    }
+
+    /// What the termination-signal watcher needs of the command (RT-R20, CLI-R14). It does
+    /// not keep the command alive: once the `Child` is gone, it does nothing.
+    #[cfg(unix)]
+    pub fn stopper(&self) -> Stopper {
+        Stopper(Arc::downgrade(&self.shared))
+    }
 }
 
 impl Drop for Child {
     /// An early return must not leave the command running.
     fn drop(&mut self) {
         let _ = self.stop();
+    }
+}
+
+/// The command as the termination-signal watcher sees it (RT-R20, CLI-R14): it can kill the
+/// command and replay what was spooled, but never waits on the main thread to do so.
+#[cfg(unix)]
+#[derive(Debug, Clone)]
+pub struct Stopper(Weak<Shared>);
+
+#[cfg(unix)]
+impl Stopper {
+    /// Send the command `SIGKILL`, without reaping it: the exit follows at once, and the
+    /// zombie goes to init. A command already reaped is not signalled, so its pid, which
+    /// may be reused by then, is never hit (std's `Child::kill`).
+    pub fn kill(&self) {
+        if let Some(shared) = self.0.upgrade() {
+            let _ = locked(&shared.process).kill();
+        }
+    }
+
+    /// Copy what is spooled and not yet copied, stdout first. A stream whose reader the main
+    /// thread holds is skipped: that thread is mid-copy, blocked on the stdout lock the
+    /// signal exit keeps, and waiting for it would never end.
+    pub fn replay<'a>(&self, out: &'a mut dyn Write, err: &'a mut dyn Write) {
+        let Some(shared) = self.0.upgrade() else {
+            return;
+        };
+        for (spool, stream) in [(&shared.out, out), (&shared.err, err)] {
+            let mut spool = match spool.try_lock() {
+                Ok(spool) => spool,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => continue,
+            };
+            let _ = copy_new(&mut spool, stream);
+        }
     }
 }
 
@@ -395,7 +491,7 @@ mod tests {
     fn cli_r14_stop_kills_and_reaps_the_command() {
         let dir = tempfile::tempdir().unwrap();
         let mut child = start("exec sleep 30", dir.path());
-        let pid = child.process.id();
+        let pid = child.pid();
         assert!(alive(pid));
         let status = child.stop().unwrap();
         assert_eq!(exit_code(status), 128 + 9, "SIGKILL");
@@ -407,7 +503,7 @@ mod tests {
     fn cli_r14_dropping_the_child_stops_the_command() {
         let dir = tempfile::tempdir().unwrap();
         let child = start("exec sleep 30", dir.path());
-        let pid = child.process.id();
+        let pid = child.pid();
         drop(child);
         assert!(!alive(pid));
     }
@@ -442,5 +538,118 @@ mod tests {
         assert_eq!(followed, Followed::Deadline);
         assert!(child.try_status().unwrap().is_none(), "still running");
         child.stop().unwrap();
+    }
+
+    /// Wait until `file` exists: the command has written everything before it.
+    fn await_file(file: &Path) {
+        let deadline = crate::app::wall_clock() + Duration::from_secs(10);
+        while !file.exists() {
+            assert!(
+                crate::app::wall_clock() < deadline,
+                "{} never came",
+                file.display()
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    /// `echo out; echo err >&2`, then a marker file, then a long sleep.
+    fn chatty_sleeper(dir: &Path) -> (Child, PathBuf) {
+        let marker = dir.join("written");
+        let script = format!(
+            "echo out; echo err >&2; touch '{}'; exec sleep 30",
+            marker.display()
+        );
+        (start(&script, dir), marker)
+    }
+
+    #[test]
+    fn cli_r14_a_panic_beside_the_command_stops_it_and_still_replays() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = chatty_sleeper(dir.path());
+        let pid = child.pid();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let unwound = panic::catch_unwind(AssertUnwindSafe(|| {
+            child.beside(&mut out, &mut err, |_| {
+                await_file(&marker);
+                panic!("outside the quarantine");
+            })
+        }));
+        let payload = unwound.expect_err("the panic goes on");
+        assert_eq!(
+            payload.downcast_ref::<&str>(),
+            Some(&"outside the quarantine")
+        );
+        assert_eq!(String::from_utf8(out).unwrap(), "out\n");
+        assert_eq!(String::from_utf8(err).unwrap(), "err\n");
+        assert!(!alive(pid), "the command was stopped");
+        let status = child.try_status().unwrap().expect("reaped");
+        assert_eq!(exit_code(status), 128 + 9);
+    }
+
+    #[test]
+    fn cli_r14_without_a_panic_beside_returns_the_value_and_leaves_the_command_be() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = start("exec sleep 30", dir.path());
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let running = child.beside(&mut out, &mut err, |c| c.try_status().unwrap().is_none());
+        assert!(running);
+        assert!(alive(child.pid()), "not stopped");
+        assert!(out.is_empty() && err.is_empty(), "nothing replayed yet");
+    }
+
+    #[test]
+    fn cli_r14_rt_r20_the_stopper_kills_and_replays_from_another_thread() {
+        let dir = tempfile::tempdir().unwrap();
+        let (mut child, marker) = chatty_sleeper(dir.path());
+        await_file(&marker);
+        let pid = child.pid();
+        let stopper = child.stopper();
+        let (out, err) = thread::spawn(move || {
+            stopper.kill();
+            let (mut out, mut err) = (Vec::new(), Vec::new());
+            stopper.replay(&mut out, &mut err);
+            (out, err)
+        })
+        .join()
+        .unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "out\n");
+        assert_eq!(String::from_utf8(err).unwrap(), "err\n");
+        let status = wait(&mut child);
+        assert_eq!(exit_code(status), 128 + 9, "SIGKILL");
+        assert!(!alive(pid));
+        // The main thread's replay sees only what came after.
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        child.replay(&mut out, &mut err).unwrap();
+        assert!(out.is_empty() && err.is_empty());
+    }
+
+    #[test]
+    fn cli_r14_rt_r20_the_stopper_skips_a_stream_the_main_thread_is_copying() {
+        let dir = tempfile::tempdir().unwrap();
+        let (child, marker) = chatty_sleeper(dir.path());
+        await_file(&marker);
+        let held = locked(&child.shared.out);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        child.stopper().replay(&mut out, &mut err);
+        assert!(
+            out.is_empty(),
+            "stdout's reader is busy: skipped, not waited for"
+        );
+        assert_eq!(String::from_utf8(err).unwrap(), "err\n");
+        drop(held);
+    }
+
+    #[test]
+    fn cli_r14_rt_r20_a_stopper_outliving_the_command_does_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut child = start("echo late", dir.path());
+        wait(&mut child);
+        let stopper = child.stopper();
+        drop(child);
+        stopper.kill();
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        stopper.replay(&mut out, &mut err);
+        assert!(out.is_empty() && err.is_empty());
     }
 }

@@ -128,9 +128,21 @@ fn run_art(opts: app::Options) -> ExitCode {
 /// CLI-R14: the art, with keep-awake, for as long as `argv` runs; then its output and its
 /// exit status.
 fn run_while(opts: app::Options, argv: &[OsString]) -> ExitCode {
+    // RT-R20 / CLI-R14: the signal watcher runs before the command starts, and the command
+    // starts registered with it, so a signal at any point kills it before the exit.
+    #[cfg(unix)]
+    if let Err(e) = signals::watch() {
+        eprintln!("sciart: {e}");
+        return ExitCode::FAILURE;
+    }
     // Started before the terminal is touched, so a command that cannot start is a plain
     // one-line error (exit 127) and the alternate screen is never entered.
-    let mut child = match Child::start(argv, &std::env::temp_dir()) {
+    let start = || Child::start(argv, &std::env::temp_dir());
+    #[cfg(unix)]
+    let started = signals::start_command(start);
+    #[cfg(not(unix))]
+    let started = start();
+    let mut child = match started {
         Ok(child) => child,
         Err(e) => {
             eprintln!("sciart: {e}");
@@ -144,9 +156,12 @@ fn run_while(opts: app::Options, argv: &[OsString]) -> ExitCode {
         .map(|secs| app::wall_clock() + secs);
     // Keep-awake lasts until the command ends, also after `q` closed the art.
     let mut keep_awake = start_keep_awake(&opts);
-    let ended = app::run(opts, &mut keep_awake, || {
-        // An error asking counts as an exit; `stop` below reports the real status.
-        !matches!(child.try_status(), Ok(None))
+    // A panic outside the scene quarantine still replays what was spooled (CLI-R14).
+    let ended = child.beside(&mut io::stdout(), &mut io::stderr(), |child| {
+        app::run(opts, &mut keep_awake, || {
+            // An error asking counts as an exit; `stop` below reports the real status.
+            !matches!(child.try_status(), Ok(None))
+        })
     });
 
     // The terminal is restored: the spooled output can follow, stdout first.

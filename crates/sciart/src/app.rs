@@ -342,6 +342,9 @@ pub fn run(
     // lock the restore takes (see `signals`).
     #[cfg(unix)]
     crate::signals::watch()?;
+    // Before the guard, so it is dropped after the guard has restored the terminal.
+    #[cfg(unix)]
+    let _set_up = crate::signals::SetUp::mark();
     let mut guard = TerminalGuard::enter()?;
     install_panic_filter();
     let terminal = guard.terminal();

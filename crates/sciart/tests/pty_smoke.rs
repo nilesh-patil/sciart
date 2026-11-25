@@ -1216,6 +1216,10 @@ fn restored_at(raw: &[u8]) -> usize {
         .expect("left the alternate screen")
 }
 
+/// The long-running commands below start with `trap '' HUP`, which `exec` keeps: in the
+/// pty sciart is the session leader, so its exit hangs up its process group and would end
+/// a command it failed to kill. In a real shell sciart is not the leader and nothing
+/// would; ignoring the hang-up makes the tests see what a user would.
 /// The pid a `sh -c 'echo $$ > file; exec …'` command wrote, once it has.
 fn read_pid(file: &std::path::Path) -> u32 {
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -1285,7 +1289,7 @@ fn cli_r14_ctrl_c_kills_the_command_and_exits_130() {
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("pid");
     let script = format!(
-        "echo $$ > '{}'; echo started; exec sleep 30",
+        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 30",
         pid_file.display()
     );
     let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
@@ -1308,7 +1312,10 @@ fn cli_r14_ctrl_c_kills_the_command_and_exits_130() {
 fn cli_r12_cli_r14_a_deadline_kills_the_command_and_exits_124() {
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("pid");
-    let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+    let script = format!(
+        "trap '' HUP; echo $$ > '{}'; exec sleep 30",
+        pid_file.display()
+    );
     let (s, spool_dir) = start_while(&["--for", "2"], &["sh", "-c", &script]);
     let pid = read_pid(&pid_file);
     let (status, raw) = s.wait_exit();
@@ -1440,3 +1447,68 @@ fn cli_r17_completions_and_man_page_need_no_config() {
         .unwrap();
     assert_eq!(out.status.code(), Some(2));
 }
+
+/// Wait until `pid` is no longer a live process (a killed orphan is reaped by init).
+fn assert_gone(pid: u32, what: &str) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while running(pid) {
+        assert!(Instant::now() < deadline, "{what}: {pid} still runs");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// CLI-R14 / RT-R20: a termination signal to sciart, with the art on screen, kills the
+/// command before sciart exits, within RT-R20's bound, and what it wrote is still replayed.
+#[test]
+fn cli_r14_rt_r20_sigterm_during_while_kills_the_command_and_exits_143() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("pid");
+    let script = format!(
+        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 30",
+        pid_file.display()
+    );
+    let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
+    s.wait_for("the art", lit);
+    let pid = read_pid(&pid_file);
+    assert!(running(pid), "the command runs beside the art");
+    assert_signal_ends_in_time(&mut s, "TERM", 143);
+    assert_gone(pid, "the command after SIGTERM");
+    thread::sleep(Duration::from_millis(100)); // let the reader drain
+    let raw = s.raw.lock().unwrap().clone();
+    assert_eq!(count(&raw, ALT_LEAVE), 1, "the terminal is restored once");
+    let restored = restored_at(&raw);
+    assert!(
+        find(&raw, "started").is_some_and(|at| at > restored),
+        "its output is replayed after the restore"
+    );
+    assert_no_spool_left(spool_dir.path());
+}
+
+/// CLI-R14 / RT-R20: after `q` the art is gone and sciart only waits; a hang-up then still
+/// kills the command, and the terminal, already given back, is not "restored" again.
+#[test]
+fn cli_r14_rt_r20_sighup_after_q_kills_the_command_and_leaves_the_terminal_alone() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("pid");
+    let script = format!(
+        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 30",
+        pid_file.display()
+    );
+    let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
+    s.wait_for("the art", lit);
+    let pid = read_pid(&pid_file);
+    s.press("q");
+    s.wait_raw("the restore, then the output so far", |raw| {
+        raw.windows(ALT_LEAVE.len()).any(|w| w == ALT_LEAVE)
+            && find(raw, "started").is_some_and(|at| at > restored_at(raw))
+    });
+    assert!(running(pid), "q leaves the command running");
+    assert_signal_ends_in_time(&mut s, "HUP", 129);
+    assert_gone(pid, "the command after SIGHUP");
+    thread::sleep(Duration::from_millis(100)); // let the reader drain
+    let raw = s.raw.lock().unwrap().clone();
+    assert_eq!(count(&raw, ALT_LEAVE), 1, "no second alternate-screen exit");
+    assert_eq!(count(&raw, "started".as_bytes()), 1, "output copied once");
+    assert_no_spool_left(spool_dir.path());
+}
+
