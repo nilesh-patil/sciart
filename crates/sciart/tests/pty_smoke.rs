@@ -860,12 +860,7 @@ fn rt_r17_a_paused_picture_writes_nothing() {
 fn rt_r21_a_paused_scene_blocks_writes_nothing_and_resumes_at_once() {
     let dir = tempfile::tempdir().unwrap();
     let trace = dir.path().join("wakeups");
-    let wakeups = || -> u64 {
-        std::fs::read_to_string(&trace)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    };
+    let wakeups = || read_wakeups(&trace);
     let args = ["run", "starfield", "--ascii", "--keep-awake", "off"];
     let trace_env = trace.to_str().unwrap();
     let mut s = Session::start_with_env(&args, &[("SCIART_TRACE_WAKEUPS", trace_env)]);
@@ -880,14 +875,14 @@ fn rt_r21_a_paused_scene_blocks_writes_nothing_and_resumes_at_once() {
         let (bytes, woken) = (s.raw.lock().unwrap().len(), wakeups());
         thread::sleep(Duration::from_secs(2));
         let (after, woken_after) = (s.raw.lock().unwrap().len(), wakeups());
-        if woken > 0 && after == bytes && woken_after - woken <= 3 {
+        let woke = wakeups_between(woken, woken_after);
+        if after == bytes && woke <= 3 {
             break after;
         }
         assert!(
             Instant::now() < blocking,
-            "paused: never quiet ({} bytes, {} wake-ups in 2 s)",
+            "paused: never quiet ({} bytes, {woke} wake-ups in 2 s)",
             after - bytes,
-            woken_after - woken
         );
     };
     s.press(" ");
@@ -1385,6 +1380,32 @@ fn start_while(flags: &[&str], command: &[&str]) -> (Session, tempfile::TempDir)
     (s, spool_dir)
 }
 
+/// The wake-up count the binary last wrote to its `SCIART_TRACE_WAKEUPS` file (RT-R21).
+/// A read that does not parse (no file yet, or any other surprise) is retried, never taken
+/// for a count, until [`STUCK`] runs out.
+fn read_wakeups(trace: &std::path::Path) -> u64 {
+    let deadline = Instant::now() + STUCK;
+    loop {
+        let read = std::fs::read_to_string(trace);
+        if let Some(count) = read.as_ref().ok().and_then(|s| s.trim().parse().ok()) {
+            return count;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no wake-up count in {}: {read:?}",
+            trace.display()
+        );
+        thread::sleep(Duration::from_millis(5));
+    }
+}
+
+/// Wake-ups between two reads of the trace file; the count only grows (RT-R21).
+fn wakeups_between(before: u64, after: u64) -> u64 {
+    after
+        .checked_sub(before)
+        .unwrap_or_else(|| panic!("the wake-up count went backwards: {before} -> {after}"))
+}
+
 /// CLI-R14: no spool file outlives the run.
 fn assert_no_spool_left(dir: &std::path::Path) {
     let left: Vec<_> = std::fs::read_dir(dir).unwrap().collect();
@@ -1782,12 +1803,7 @@ fn cli_r14_rt_r21_a_paused_while_notices_the_commands_exit_during_a_blocked_wait
     let scratch = tempfile::tempdir().unwrap();
     let go = scratch.path().join("go");
     let trace = scratch.path().join("wakeups");
-    let wakeups = || -> u64 {
-        std::fs::read_to_string(&trace)
-            .ok()
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0)
-    };
+    let wakeups = || read_wakeups(&trace);
     let script = format!(
         "trap '' HUP; until [ -e '{}' ]; do sleep 0.05; done; echo finished; exit 6",
         go.display()
@@ -1820,7 +1836,7 @@ fn cli_r14_rt_r21_a_paused_while_notices_the_commands_exit_during_a_blocked_wait
     loop {
         let woken = wakeups();
         thread::sleep(Duration::from_millis(1500));
-        if wakeups() - woken <= 3 {
+        if wakeups_between(woken, wakeups()) <= 3 {
             break;
         }
         assert!(Instant::now() < blocking, "the paused loop never blocked");

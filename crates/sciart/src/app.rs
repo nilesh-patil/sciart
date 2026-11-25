@@ -565,24 +565,31 @@ fn redraw_after_poll(runtime: &Runtime, shown: &str, status: &str) -> bool {
 
 /// Test hook (RT-R21): with `SCIART_TRACE_WAKEUPS=<file>` the loop writes how often it
 /// has woken (each return from the event wait) to that file, so the pty test can count
-/// wake-ups from outside. Off, and free, without the variable.
+/// wake-ups from outside. Off, and free, without the variable. Each count is written to a
+/// sibling `<file>.tmp` and renamed over the file, so a reader sees the old count or the
+/// new one, never an empty or half-written file.
 struct Wakeups {
-    path: Option<PathBuf>,
+    /// The trace file and its sibling temporary file.
+    paths: Option<(PathBuf, PathBuf)>,
     count: u64,
 }
 
 impl Wakeups {
     fn from_env() -> Self {
-        Self {
-            path: std::env::var_os("SCIART_TRACE_WAKEUPS").map(PathBuf::from),
-            count: 0,
-        }
+        let paths = std::env::var_os("SCIART_TRACE_WAKEUPS").map(|file| {
+            let mut tmp = file.clone();
+            tmp.push(".tmp");
+            (PathBuf::from(file), PathBuf::from(tmp))
+        });
+        Self { paths, count: 0 }
     }
 
     fn count(&mut self) {
-        if let Some(path) = &self.path {
+        if let Some((path, tmp)) = &self.paths {
             self.count += 1;
-            let _ = std::fs::write(path, self.count.to_string());
+            if std::fs::write(tmp, self.count.to_string()).is_ok() {
+                let _ = std::fs::rename(tmp, path);
+            }
         }
     }
 }
@@ -636,6 +643,30 @@ mod tests {
             config_path: None,
         };
         screen.draw(term, rt, extras).expect("draw");
+    }
+
+    /// RT-R21's test hook replaces the trace file whole (temporary sibling, then rename), so
+    /// a reader never sees it empty or half written, and leaves no temporary file behind.
+    #[test]
+    fn rt_r21_the_wakeup_trace_is_replaced_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wakeups");
+        let mut wakeups = Wakeups {
+            paths: Some((path.clone(), dir.path().join("wakeups.tmp"))),
+            count: 0,
+        };
+        for expected in 1..=3u64 {
+            wakeups.count();
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                expected.to_string()
+            );
+        }
+        let names: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["wakeups"], "only the trace file");
     }
 
     #[test]
