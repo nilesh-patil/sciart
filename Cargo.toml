@@ -28,14 +28,26 @@ sciart-capture = { path = "crates/sciart-capture" }
 sciart-testalloc = { path = "crates/sciart-testalloc" } # dev-only (ADR-0009)
 
 anyhow = "1"
-clap = { version = "4.5", features = ["derive"] }
+# RT-R22: only the features the code uses. clap: the derive API, help and usage text,
+# error context and "did you mean" suggestions; no colour styling of help and errors.
+clap = { version = "4.5", default-features = false, features = [
+    "derive",
+    "error-context",
+    "help",
+    "std",
+    "suggestions",
+    "usage",
+] }
 crossterm = "0.29"
 enigo = "0.6"
 rand = "0.9"
 rand_chacha = "0.9"
-ratatui = "0.30"
+# RT-R22: the crossterm backend, buffers, styles and the `Widget` trait; no widget
+# collection extras (calendar), layout cache or macros.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm"] }
 serde = { version = "1", features = ["derive"] }
-toml = "0.9"
+# RT-R22: the config is only parsed, never written.
+toml = { version = "0.9", default-features = false, features = ["parse", "serde", "std"] }
 unicode-width = "0.2"
 
 criterion = "0.8"
