@@ -2,7 +2,7 @@
 //! greeting, a MOTD or a CI log. No terminal session, keep-awake or config file.
 //!
 //! The rows come from the one ANSI writer (`sciart_render::write_ansi`) that the library's
-//! `Stage::to_ansi` and the asciicast recorder use, and time moves by the library's rule,
+//! `Stage::render_ansi` and the asciicast recorder use, and time moves by the library's rule,
 //! so in truecolor the output is byte for byte the library's for the same frame (LIB-R5).
 
 use std::io::{IsTerminal, Write};
@@ -61,13 +61,16 @@ pub struct FrameSpec {
 }
 
 impl FrameSpec {
-    /// Apply the CLI-R13 defaults. `terminal` is stdout's size when stdout is a terminal.
+    /// Apply the CLI-R13 defaults. `terminal` is stdout's `(columns, rows)` when stdout is a
+    /// terminal; the frame then takes its width and one row less than its height, so the
+    /// prompt that follows does not scroll the top row away.
     pub fn resolve(
         cli: &Cli,
         args: &FrameArgs,
         env: Env,
-        terminal: Option<Size>,
+        terminal: Option<(u16, u16)>,
     ) -> Result<Self, UsageError> {
+        let terminal = terminal.map(|(w, h)| Size::new(w.max(1), h.saturating_sub(1).max(1)));
         let entry = sciart_generators::find(&args.scene)
             .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone()))?;
         // RND-R18: `auto` is truecolor unless NO_COLOR asks for mono; mono paints in greys.
@@ -127,8 +130,7 @@ pub fn main(cli: &Cli, args: &FrameArgs) -> ExitCode {
     let terminal = stdout
         .is_terminal()
         .then(crossterm::terminal::size)
-        .and_then(Result::ok)
-        .map(|(w, h)| Size::new(w.max(1), h.max(1)));
+        .and_then(Result::ok);
     let spec = match FrameSpec::resolve(cli, args, Env::from_process(), terminal) {
         Ok(spec) => spec,
         Err(e) => {
@@ -156,7 +158,11 @@ mod tests {
     use super::*;
     use crate::cli::{Command, parse};
 
-    fn spec(args: &[&str], env: Env, terminal: Option<Size>) -> Result<FrameSpec, UsageError> {
+    fn spec(
+        args: &[&str],
+        env: Env,
+        terminal: Option<(u16, u16)>,
+    ) -> Result<FrameSpec, UsageError> {
         let cli = parse(args).expect("valid CLI");
         let Command::Frame(frame) = cli.command() else {
             panic!("not a frame command: {args:?}");
@@ -177,14 +183,17 @@ mod tests {
 
     #[test]
     fn cli_r13_size_follows_the_terminal_unless_given() {
-        let tty = Some(Size::new(132, 43));
-        assert_eq!(
-            spec(&["frame", "aurora"], Env::default(), tty)
-                .unwrap()
-                .size,
-            Size::new(132, 43)
-        );
-        let given = spec(&["frame", "aurora", "--size", "40x10"], Env::default(), tty).unwrap();
+        // One row less than the terminal, so the returning prompt keeps the top row.
+        for (tty, size) in [((132, 43), (132, 42)), ((80, 1), (80, 1)), ((0, 0), (1, 1))] {
+            let s = spec(&["frame", "aurora"], Env::default(), Some(tty)).unwrap();
+            assert_eq!(s.size, Size::new(size.0, size.1), "{tty:?}");
+        }
+        let given = spec(
+            &["frame", "aurora", "--size", "40x10"],
+            Env::default(),
+            Some((132, 43)),
+        )
+        .unwrap();
         assert_eq!(given.size, Size::new(40, 10));
     }
 
