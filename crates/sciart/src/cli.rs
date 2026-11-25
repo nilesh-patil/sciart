@@ -1,6 +1,8 @@
-//! Command-line interface (SPEC-005 CLI-R1..R11).
+//! Command-line interface (SPEC-005 CLI-R1..R17).
 
+use std::ffi::OsString;
 use std::fmt;
+use std::io;
 use std::path::{Path, PathBuf};
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
@@ -14,7 +16,8 @@ use serde::Deserialize;
 #[command(
     name = "sciart",
     version,
-    about = "Real-time generative science & astronomy art"
+    about = "Real-time generative science & astronomy art",
+    after_long_help = AFTER_LONG_HELP
 )]
 pub struct Cli {
     #[command(subcommand)]
@@ -80,7 +83,35 @@ pub struct Cli {
     /// Config file [default: $XDG_CONFIG_HOME/sciart/config.toml or ~/.config/sciart/config.toml]
     #[arg(long, global = true)]
     pub config: Option<PathBuf>,
+
+    /// End the run after this much wall time: 90s, 25m, 1.5h; a bare number is seconds, at
+    /// most 24h (sim, run, while)
+    #[arg(long = "for", global = true, value_name = "DURATION", value_parser = parse_duration)]
+    pub run_for: Option<f64>,
 }
+
+/// Shown after `--help` and in the manual page (CLI-R12, CLI-R14, ADR-0031).
+const AFTER_LONG_HELP: &str = "\
+Scripting:
+  sciart --for 25m                  cycle the scenes for 25 minutes, then exit 0
+  sciart while -- make -j8          show the art while `make` runs, then print its
+                                    output and exit with its status
+
+How `while` runs its command: `sciart while --help` or `sciart man while`.";
+
+/// The `while` page (CLI-R14): `sciart while --help` and `sciart man while`.
+const WHILE_LONG_HELP: &str = "\
+The command gets no terminal: its stdin is empty, and its stdout and stderr are held in
+temporary files and printed, in that order, once the art has closed, however sciart ends.
+Programs that need a terminal (editors, pagers, password prompts) are not supported. The
+held output is not capped: it takes as much temporary disk space as the command writes
+until it is printed.
+
+`q` closes the art early and keeps waiting for the command, printing its output as it
+comes. Ctrl-C in the art stops the command and exits 130; a deadline set with --for stops
+it and exits 124; SIGTERM or SIGHUP stop it and exit 143 or 129; a command that cannot be
+started exits 127. Otherwise sciart exits with the command's status (128 + n when signal n
+ended it). A process the command started itself is not stopped with it.";
 
 #[derive(Debug, Clone, PartialEq, Subcommand)]
 pub enum Command {
@@ -90,7 +121,7 @@ pub enum Command {
     Run { name: String },
     /// List generators
     List {
-        /// Print a JSON array of {name, category, description}, sorted by name
+        /// Print a versioned JSON object, {"schema": 1, "scenes": [...]}, sorted by name
         #[arg(long)]
         json: bool,
         /// Print `id<TAB>label<TAB>count` per non-empty category, sorted by label
@@ -100,10 +131,48 @@ pub enum Command {
         #[arg(long)]
         plain: bool,
     },
-    /// Render a scene to GIF, PNG frames or an asciicast (CLI-R8; needs the `record` feature)
+    /// Render a scene to GIF, PNG frames or an asciicast
+    // CLI-R8; in default builds since CLI-R15.
     Record(RecordArgs),
-    /// Print one frame of a scene to stdout as ANSI text (CLI-R13)
+    /// Print one frame of a scene to stdout as ANSI text, for a shell greeting or a log
+    // CLI-R13.
     Frame(crate::frame::FrameArgs),
+    /// Show the art while a command runs, then print its output and exit with its status
+    #[command(after_long_help = WHILE_LONG_HELP)]
+    While(WhileArgs),
+    /// Print a shell completion script
+    Completions {
+        /// Shell to complete for
+        #[arg(value_enum)]
+        shell: clap_complete::Shell,
+    },
+    /// Print the manual page (roff) of sciart or of one subcommand
+    Man {
+        /// Subcommand whose page to print [default: sciart's own]
+        #[arg(value_parser = clap::builder::PossibleValuesParser::new(MAN_PAGES))]
+        subcommand: Option<String>,
+    },
+}
+
+/// CLI-R17: the subcommands `sciart man` prints a page for: every one the manual's
+/// SUBCOMMANDS section refers to, checked against the parser by a test.
+const MAN_PAGES: [&str; 8] = [
+    "sim",
+    "run",
+    "list",
+    "record",
+    "frame",
+    "while",
+    "completions",
+    "man",
+];
+
+/// CLI-R14: `while`'s command line, everything after `--`.
+#[derive(Debug, Clone, PartialEq, Args)]
+pub struct WhileArgs {
+    /// Command to run, then its arguments (after `--`)
+    #[arg(last = true, required = true, value_name = "COMMAND")]
+    pub command: Vec<OsString>,
 }
 
 /// CLI-R8: the `record` subcommand's own flags. `--fps`, `--theme`, `--ascii` and `--seed`
@@ -124,6 +193,9 @@ pub struct RecordArgs {
     /// Cell size WxH [default: 80x24]
     #[arg(long, value_parser = size_arg)]
     pub size: Option<Size>,
+    /// Simulated seconds to run before the first frame, 0..=1200 [default: 0]
+    #[arg(long, value_parser = start_secs)]
+    pub start: Option<f64>,
     /// Output format; inferred from --out when omitted
     #[arg(long, value_enum)]
     pub format: Option<FormatArg>,
@@ -161,6 +233,8 @@ pub const RECORD_DEFAULT_SEED: u64 = 42;
 /// CLI-R8: a recording is capped at 36 000 frames (20 min at 30 fps), so a huge `--seconds`
 /// is a usage error instead of an allocation/write that never ends.
 pub const RECORD_MAX_FRAMES: usize = 36_000;
+/// CLI-R8: `--start` is at most 20 simulated minutes, the same bound as a recording's length.
+pub const RECORD_MAX_START_SECONDS: f64 = 1200.0;
 
 /// A validated `record` invocation: CLI-R8 defaults applied, scene resolved, timing checked.
 #[cfg_attr(not(feature = "record"), allow(dead_code))] // read by the record implementation
@@ -175,6 +249,8 @@ pub struct RecordSpec {
     pub theme: Theme,
     pub ascii: bool,
     pub seed: u64,
+    /// Whole 1/60 s steps simulated before frame 0 (`--start`, rounded to the nearest step).
+    pub start_steps: u64,
 }
 
 impl RecordSpec {
@@ -211,6 +287,8 @@ impl RecordSpec {
             theme: cli.theme.map(Theme::from).unwrap_or(Theme::Astro),
             ascii: cli.ascii,
             seed: cli.seed.unwrap_or(RECORD_DEFAULT_SEED),
+            // CLI-R8: frames stay on whole fixed steps, so the offset is rounded to one too.
+            start_steps: (args.start.unwrap_or(0.0) * 60.0).round() as u64,
         })
     }
 }
@@ -299,6 +377,42 @@ fn positive_secs(s: &str) -> Result<f64, String> {
     match s.parse::<f64>() {
         Ok(v) if v.is_finite() && v > 0.0 => Ok(v),
         _ => Err(format!("'{s}' is not a positive number of seconds")),
+    }
+}
+
+/// CLI-R12: the longest `--for`, 24 h in seconds.
+pub const MAX_RUN_SECS: f64 = 24.0 * 3600.0;
+
+/// CLI-R12: `--for` as wall seconds. A positive finite number with an optional unit, `s`,
+/// `m` or `h` (`90s`, `25m`, `1.5h`); a bare number is seconds; at most 24 h.
+pub fn parse_duration(s: &str) -> Result<f64, String> {
+    let (number, unit) = match s.char_indices().last() {
+        Some((i, 's')) => (&s[..i], 1.0),
+        Some((i, 'm')) => (&s[..i], 60.0),
+        Some((i, 'h')) => (&s[..i], 3600.0),
+        _ => (s, 1.0),
+    };
+    let secs = number
+        .parse::<f64>()
+        .ok()
+        .filter(|v| v.is_finite() && *v > 0.0)
+        .map(|v| v * unit);
+    match secs {
+        Some(secs) if secs <= MAX_RUN_SECS => Ok(secs),
+        Some(_) => Err(format!("'{s}' is longer than 24h")),
+        None => Err(format!(
+            "'{s}' is not a positive duration such as 90s, 25m or 1.5h"
+        )),
+    }
+}
+
+/// CLI-R8: a finite start offset in `0..=1200` simulated seconds.
+fn start_secs(s: &str) -> Result<f64, String> {
+    match s.parse::<f64>() {
+        Ok(v) if v.is_finite() && (0.0..=RECORD_MAX_START_SECONDS).contains(&v) => Ok(v),
+        _ => Err(format!(
+            "'{s}' is not a start time in 0..={RECORD_MAX_START_SECONDS} seconds"
+        )),
     }
 }
 
@@ -408,7 +522,8 @@ impl Filters {
                 filters.categories.push(category);
             }
         }
-        if matches!(command, Command::Sim) {
+        // `while` shows the `sim` cycle (CLI-R14).
+        if matches!(command, Command::Sim | Command::While(_)) {
             filters.only = canonical_names(&cli.only)?;
             filters.exclude = canonical_names(&cli.exclude)?;
         }
@@ -452,7 +567,7 @@ pub fn select(
         Command::Record(args) => find(&args.scene)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),
-        Command::Sim => {
+        Command::Sim | Command::While(_) => {
             let disabled: Vec<&str> = disabled
                 .iter()
                 .filter_map(|d| find(d))
@@ -472,6 +587,8 @@ pub fn select(
                 Ok(entries)
             }
         }
+        // They show no scene (CLI-R17).
+        Command::Completions { .. } | Command::Man { .. } => Ok(Vec::new()),
         Command::List { .. } => {
             // `disabled` only filters `sim` (CFG-R4); list honours `--category` only.
             let entries: Vec<_> = registry().iter().filter(|e| filters.matches(e)).collect();
@@ -491,7 +608,7 @@ pub enum ListFormat {
     Aligned,
     /// The TSV of CLI-R4, when piped or with `--plain`.
     Tsv,
-    /// A JSON array, with `--json`.
+    /// The versioned JSON object of CLI-R16, with `--json`.
     Json,
     /// One line per category, with `--categories`.
     Categories,
@@ -567,24 +684,54 @@ fn list_aligned(entries: &[&Entry]) -> String {
     out
 }
 
-/// A compact JSON array of `{name, category, description}` (CLI-R10), hand-rolled so the
-/// binary needs no JSON dependency.
+/// CLI-R16: the `schema` of `list --json`. Fields are only ever added; removing one or
+/// changing its meaning raises it.
+pub const LIST_SCHEMA: u32 = 1;
+
+/// The versioned catalogue of CLI-R16, `{"schema":1,"scenes":[...]}` on one line,
+/// hand-rolled so the binary needs no JSON dependency.
 fn list_json(entries: &[&Entry]) -> String {
-    let mut out = String::from("[");
+    let mut out = format!("{{\"schema\":{LIST_SCHEMA},\"scenes\":[");
     for (i, e) in entries.iter().enumerate() {
         if i > 0 {
             out.push(',');
         }
-        out.push_str("{\"name\":");
-        out.push_str(&json_string(e.meta.name));
-        out.push_str(",\"category\":");
-        out.push_str(&json_string(e.meta.category.id()));
-        out.push_str(",\"description\":");
-        out.push_str(&json_string(e.meta.description));
+        let meta = e.meta;
+        for (key, value) in [
+            ("{\"name\":", meta.name),
+            (",\"category\":", meta.category.id()),
+            (",\"category_label\":", meta.category.label()),
+            (",\"title\":", meta.title),
+            (",\"description\":", meta.description),
+        ] {
+            out.push_str(key);
+            out.push_str(&json_string(value));
+        }
+        out.push_str(",\"captions\":");
+        json_array(&mut out, meta.captions.iter().copied());
+        // Retired names that still resolve to this scene (GEN-R14).
+        out.push_str(",\"aliases\":");
+        let aliases = sciart_generators::ALIASES
+            .iter()
+            .filter(|(_, name)| *name == meta.name)
+            .map(|(old, _)| *old);
+        json_array(&mut out, aliases);
         out.push('}');
     }
-    out.push_str("]\n");
+    out.push_str("]}\n");
     out
+}
+
+/// Append `items` as a JSON array of strings.
+fn json_array<'a>(out: &mut String, items: impl Iterator<Item = &'a str>) {
+    out.push('[');
+    for (i, item) in items.enumerate() {
+        if i > 0 {
+            out.push(',');
+        }
+        out.push_str(&json_string(item));
+    }
+    out.push(']');
 }
 
 /// A JSON string literal with the minimal escaping a JSON parser requires.
@@ -624,6 +771,39 @@ fn list_categories(entries: &[&Entry]) -> String {
         out.push_str(&format!("{}\t{}\t{}\n", category.id(), category.label(), n));
     }
     out
+}
+
+/// CLI-R17: the completion script for `shell`, generated from the parser's own definition.
+/// Built in memory, so a closed pipe is an error to report, not a panic in the generator.
+pub fn completions(shell: clap_complete::Shell) -> Vec<u8> {
+    let mut command = <Cli as clap::CommandFactory>::command();
+    let mut out = Vec::new();
+    clap_complete::generate(shell, &mut command, "sciart", &mut out);
+    out
+}
+
+/// The parser's definition as the manual describes it: built, so subcommands carry the
+/// global flags and their `sciart-<name>` page names, and without clap's implicit `help`
+/// subcommand, which has no page (as `clap_mangen::generate_to` does).
+fn manual_command() -> clap::Command {
+    let mut command = <Cli as clap::CommandFactory>::command().disable_help_subcommand(true);
+    command.build();
+    command
+}
+
+/// CLI-R17: the roff manual page of sciart, or of `subcommand`, generated from the parser's
+/// own definition. The parser admits only [`MAN_PAGES`]; anything else is `InvalidInput`.
+pub fn man_page(subcommand: Option<&str>) -> io::Result<Vec<u8>> {
+    let root = manual_command();
+    let command = match subcommand {
+        None => root,
+        Some(name) => root.find_subcommand(name).cloned().ok_or_else(|| {
+            io::Error::new(io::ErrorKind::InvalidInput, format!("no page for '{name}'"))
+        })?,
+    };
+    let mut out = Vec::new();
+    clap_mangen::Man::new(command).render(&mut out)?;
+    Ok(out)
 }
 
 #[cfg(test)]
@@ -916,18 +1096,25 @@ mod tests {
     }
 
     #[test]
-    fn cli_r10_json_output_is_sorted_and_escaped() {
+    fn cli_r16_json_is_a_versioned_object_sorted_by_name() {
         let entries = select(&list_command(), &[], &Filters::default()).unwrap();
         let text = list_output(&entries, ListFormat::Json);
-        assert!(text.starts_with("[{\"name\":\""), "{text:?}");
-        assert!(text.ends_with("}]\n"));
+        assert!(
+            text.starts_with("{\"schema\":1,\"scenes\":[{\"name\":\""),
+            "{text:?}"
+        );
+        assert!(text.ends_with("}]}\n"));
+        assert_eq!(text.lines().count(), 1, "one line");
         assert_eq!(text.matches("\"name\":").count(), entries.len());
+        let mut sorted = entries.clone();
+        sorted.sort_by_key(|e| e.meta.name);
         let mut pos = 0;
-        for e in &entries {
+        for e in &sorted {
             let needle = format!(
-                "{{\"name\":\"{}\",\"category\":\"{}\",",
+                "{{\"name\":\"{}\",\"category\":\"{}\",\"category_label\":\"{}\",\"title\":",
                 e.meta.name,
-                e.meta.category.id()
+                e.meta.category.id(),
+                e.meta.category.label()
             );
             let at = text[pos..]
                 .find(&needle)
@@ -937,6 +1124,350 @@ mod tests {
         assert_eq!(
             json_string("a\"b\\c\nd\te\u{1}"),
             "\"a\\\"b\\\\c\\nd\\te\\u0001\""
+        );
+    }
+
+    /// CLI-R16 through a real JSON parser: every field, with the scene's own values.
+    #[test]
+    fn cli_r16_json_fields_parse_and_match_the_registry() {
+        let entries = select(&list_command(), &[], &Filters::default()).unwrap();
+        let text = list_output(&entries, ListFormat::Json);
+        let doc: serde_json::Value = serde_json::from_str(&text).expect("valid JSON");
+        assert_eq!(doc["schema"], 1);
+        let scenes = doc["scenes"].as_array().expect("scenes array");
+        assert_eq!(scenes.len(), registry().len());
+        let strings = |v: &serde_json::Value| -> Vec<String> {
+            v.as_array()
+                .expect("an array")
+                .iter()
+                .map(|s| s.as_str().expect("a string").to_owned())
+                .collect()
+        };
+        for scene in scenes {
+            let name = scene["name"].as_str().expect("name");
+            let meta = find(name).expect("a registered name").meta;
+            assert_eq!(meta.name, name, "listed under its own name");
+            assert_eq!(scene["category"], meta.category.id(), "{name}");
+            assert_eq!(scene["category_label"], meta.category.label(), "{name}");
+            assert_eq!(scene["title"], meta.title, "{name}");
+            assert_eq!(scene["description"], meta.description, "{name}");
+            assert_eq!(strings(&scene["captions"]), meta.captions, "{name}");
+            let aliases: Vec<&str> = sciart_generators::ALIASES
+                .iter()
+                .filter(|(_, to)| *to == name)
+                .map(|(old, _)| *old)
+                .collect();
+            assert_eq!(strings(&scene["aliases"]), aliases, "{name}");
+        }
+        let gray_scott = scenes.iter().find(|s| s["name"] == "gray_scott").unwrap();
+        assert_eq!(strings(&gray_scott["aliases"]), ["chemical_reaction"]);
+        assert!(
+            scenes.iter().any(|s| !strings(&s["captions"]).is_empty()),
+            "some scene has acts"
+        );
+        // Filters narrow the list, not the shape.
+        let cli = parse(&["list", "--json", "--category", "voyages"]).unwrap();
+        let filters = Filters::from_cli(&cli.command(), &cli).unwrap();
+        let entries = select(&cli.command(), &[], &filters).unwrap();
+        let text = list_output(&entries, ListFormat::Json);
+        let doc: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(doc["schema"], 1);
+        assert_eq!(doc["scenes"].as_array().unwrap().len(), entries.len());
+    }
+
+    // ----- M25: scriptable modes (CLI-R12, CLI-R14, CLI-R17) -----
+
+    #[test]
+    fn cli_r12_durations_take_s_m_h_or_bare_seconds() {
+        for (text, secs) in [
+            ("90s", 90.0),
+            ("90", 90.0),
+            ("25m", 1500.0),
+            ("1.5h", 5400.0),
+            ("0.5", 0.5),
+            ("24h", MAX_RUN_SECS),
+            ("1440m", MAX_RUN_SECS),
+            ("86400", MAX_RUN_SECS),
+        ] {
+            assert_eq!(parse_duration(text), Ok(secs), "{text}");
+        }
+    }
+
+    #[test]
+    fn cli_r12_bad_or_too_long_durations_are_rejected() {
+        for bad in [
+            "", "s", "m", "h", "0", "0s", "-5", "-1m", "nan", "inf", "infh", "1e400", "5ms", "5 m",
+            " 5", "5d", "1:30", "five", "24.001h", "86401", "1e308h",
+        ] {
+            assert!(parse_duration(bad).is_err(), "{bad:?}");
+        }
+        assert!(parse_duration("25h").unwrap_err().contains("24h"));
+    }
+
+    #[test]
+    fn cli_r12_for_is_a_global_flag_and_a_bad_value_exits_2() {
+        assert_eq!(parse(&[]).unwrap().run_for, None);
+        assert_eq!(parse(&["--for", "25m"]).unwrap().run_for, Some(1500.0));
+        assert_eq!(
+            parse(&["run", "starfield", "--for", "90s"])
+                .unwrap()
+                .run_for,
+            Some(90.0)
+        );
+        assert_eq!(
+            parse(&["--for", "2", "while", "--", "true"])
+                .unwrap()
+                .run_for,
+            Some(2.0)
+        );
+        for bad in ["0", "25h", "soon"] {
+            assert_eq!(parse(&["--for", bad]).unwrap_err().exit_code(), 2, "{bad}");
+        }
+    }
+
+    #[test]
+    fn cli_r14_while_takes_the_command_after_a_double_dash() {
+        let cli = parse(&[
+            "while",
+            "--only",
+            "aurora",
+            "--",
+            "make",
+            "-j8",
+            "--keep-going",
+        ])
+        .unwrap();
+        let Command::While(args) = cli.command() else {
+            panic!("not a while command");
+        };
+        assert_eq!(args.command, ["make", "-j8", "--keep-going"]);
+        // The command's own flags are never read as sciart's.
+        let cli = parse(&["while", "--", "sh", "-c", "exit 3", "--fps", "7"]).unwrap();
+        assert_eq!(cli.fps, None);
+        // A missing command line is a usage error, with or without `--`.
+        for argv in [&["while"][..], &["while", "--"][..], &["while", "make"][..]] {
+            assert_eq!(parse(argv).unwrap_err().exit_code(), 2, "{argv:?}");
+        }
+    }
+
+    #[test]
+    fn cli_r14_while_selects_like_sim() {
+        let names = selected(&["while", "--only", "starfield", "--", "true"], &[]).unwrap();
+        assert_eq!(names, ["starfield"]);
+        let all = selected(&["while", "--", "true"], &[]).unwrap();
+        assert_eq!(all.len(), registry().len());
+        let disabled = vec!["starfield".to_string()];
+        let names = selected(&["while", "--", "true"], &disabled).unwrap();
+        assert!(!names.contains(&"starfield"), "config `disabled` applies");
+    }
+
+    /// The parser's own subcommands and global long flags, which CLI-R17's structure checks
+    /// hold every completion script and manual page to.
+    fn declared() -> (Vec<String>, Vec<String>) {
+        let command = <Cli as clap::CommandFactory>::command();
+        let subcommands: Vec<String> = command
+            .get_subcommands()
+            .map(|c| c.get_name().to_owned())
+            .collect();
+        let globals: Vec<String> = command
+            .get_arguments()
+            .filter(|a| a.is_global_set())
+            .filter_map(|a| a.get_long())
+            .map(str::to_owned)
+            .collect();
+        assert!(subcommands.iter().any(|s| s == "while"), "{subcommands:?}");
+        assert!(globals.iter().any(|g| g == "for"), "{globals:?}");
+        (subcommands, globals)
+    }
+
+    /// Whether `script` offers subcommand `name` and flag `--long`, in each shell's own
+    /// syntax, so a word in a description or a shell keyword (`while`) never counts.
+    fn offers(shell: clap_complete::Shell, script: &str, name: &str, long: &str) -> (bool, bool) {
+        use clap_complete::Shell;
+        let tokens: Vec<&str> = script
+            .split(|c: char| c.is_whitespace() || c == '"')
+            .collect();
+        match shell {
+            Shell::Bash => (
+                script.contains(&format!("sciart,{name})")),
+                tokens.contains(&format!("--{long}").as_str()),
+            ),
+            // A repeatable flag is spelt `'*--only=[…]'`.
+            Shell::Zsh => (
+                script.contains(&format!("'{name}:")),
+                ["'", "'*"].iter().any(|lead| {
+                    script.contains(&format!("{lead}--{long}=["))
+                        || script.contains(&format!("{lead}--{long}["))
+                }),
+            ),
+            Shell::Fish => (
+                script.contains(&format!("-a \"{name}\"")),
+                tokens.windows(2).any(|w| w == ["-l", long]),
+            ),
+            Shell::Elvish => (
+                script.contains(&format!("cand {name} '")),
+                script.contains(&format!("cand --{long} '")),
+            ),
+            Shell::PowerShell => (
+                script.contains(&format!("::new('{name}', '{name}'")),
+                script.contains(&format!("::new('--{long}', '--{long}'")),
+            ),
+            _ => panic!("no structure check for {shell}"),
+        }
+    }
+
+    #[test]
+    fn cli_r17_every_completion_script_offers_every_subcommand_and_global_flag() {
+        let (subcommands, globals) = declared();
+        for shell in clap_complete::Shell::value_variants() {
+            let script = String::from_utf8(completions(*shell)).expect("UTF-8");
+            for name in &subcommands {
+                assert!(offers(*shell, &script, name, "-").0, "{shell}: {name}");
+            }
+            for long in &globals {
+                assert!(offers(*shell, &script, "-", long).1, "{shell}: --{long}");
+            }
+            // The checks are not vacuous: an absent name or flag is not found.
+            assert_eq!(offers(*shell, &script, "nosuch", "nosuch"), (false, false));
+        }
+        for name in ["bash", "zsh", "fish", "elvish", "powershell"] {
+            assert!(parse(&["completions", name]).is_ok(), "completions {name}");
+        }
+        assert_eq!(parse(&["completions", "tcsh"]).unwrap_err().exit_code(), 2);
+        assert_eq!(parse(&["completions"]).unwrap_err().exit_code(), 2);
+    }
+
+    /// Every page `sciart man` prints, unescaped (`\-` is roff's hyphen), with its `.TH` title.
+    fn manual() -> Vec<(String, String)> {
+        std::iter::once(None)
+            .chain(MAN_PAGES.iter().copied().map(Some))
+            .map(|page| {
+                let roff = String::from_utf8(man_page(page).expect("render")).expect("UTF-8");
+                let text = roff.replace("\\-", "-");
+                let title = text
+                    .lines()
+                    .find_map(|l| l.strip_prefix(".TH "))
+                    .and_then(|l| l.split_whitespace().next())
+                    .unwrap_or_else(|| panic!("{page:?}: no .TH"))
+                    .to_owned();
+                (title, text)
+            })
+            .collect()
+    }
+
+    /// The manual pages a page refers to: every `name(1)`.
+    fn references(text: &str) -> Vec<&str> {
+        text.match_indices("(1)")
+            .map(|(at, _)| {
+                let before = &text[..at];
+                let start = before
+                    .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '-'))
+                    .map_or(0, |i| i + 1);
+                &before[start..]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cli_r17_the_manual_has_a_page_per_subcommand_and_every_global_flag() {
+        let (subcommands, globals) = declared();
+        let mut pages: Vec<&str> = MAN_PAGES.to_vec();
+        pages.sort_unstable();
+        let mut want: Vec<&str> = subcommands.iter().map(String::as_str).collect();
+        want.sort_unstable();
+        assert_eq!(pages, want, "`sciart man` covers exactly the subcommands");
+
+        let manual = manual();
+        let (title, root) = &manual[0];
+        assert_eq!(title, "sciart");
+        for name in &subcommands {
+            assert!(
+                root.contains(&format!("sciart-{name}(1)")),
+                "refers to {name}"
+            );
+        }
+        for (page, (title, text)) in std::iter::once("").chain(MAN_PAGES).zip(&manual) {
+            if !page.is_empty() {
+                assert_eq!(*title, format!("sciart-{page}"));
+            }
+            for long in &globals {
+                assert!(text.contains(&format!("--{long}")), "{title}: --{long}");
+            }
+        }
+    }
+
+    #[test]
+    fn cli_r17_the_manual_refers_to_no_page_sciart_man_cannot_print() {
+        let manual = manual();
+        let printable: Vec<&str> = manual.iter().map(|(title, _)| title.as_str()).collect();
+        let mut seen = 0;
+        for (title, text) in &manual {
+            for reference in references(text) {
+                assert!(
+                    printable.contains(&reference),
+                    "{title} refers to {reference}(1)"
+                );
+                seen += 1;
+            }
+        }
+        assert!(
+            seen >= MAN_PAGES.len(),
+            "the SUBCOMMANDS section was checked"
+        );
+        assert!(
+            !printable.contains(&"sciart-help"),
+            "clap's `help` has no page"
+        );
+    }
+
+    #[test]
+    fn cli_r17_man_takes_one_known_subcommand() {
+        let page = |argv: &[&str]| match parse(argv).unwrap().command() {
+            Command::Man { subcommand } => subcommand,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(page(&["man"]), None);
+        assert_eq!(page(&["man", "while"]).as_deref(), Some("while"));
+        for bad in [
+            &["man", "help"][..],
+            &["man", "nosuch"],
+            &["man", "while", "run"],
+        ] {
+            assert_eq!(parse(bad).unwrap_err().exit_code(), 2, "{bad:?}");
+        }
+        assert!(man_page(Some("nosuch")).is_err());
+    }
+
+    /// CLI-R14: the `while` page, in `--help` and the manual, says how the command runs,
+    /// including that its held output is not capped.
+    #[test]
+    fn cli_r14_cli_r17_the_while_page_explains_the_spool() {
+        let mut command = <Cli as clap::CommandFactory>::command();
+        let help = command
+            .find_subcommand_mut("while")
+            .expect("while")
+            .render_long_help()
+            .to_string();
+        let manual = manual();
+        let page = &manual.iter().find(|(t, _)| t == "sciart-while").unwrap().1;
+        // The manual fills its paragraphs itself, so compare word sequences.
+        let words = |t: &str| t.split_whitespace().collect::<Vec<_>>().join(" ");
+        for text in [words(&help), words(page)] {
+            for phrase in [
+                "gets no terminal",
+                "not capped",
+                "exits 130",
+                "exits 124",
+                "exit 143 or 129",
+                "exits 127",
+            ] {
+                assert!(text.contains(phrase), "{phrase:?} in {text}");
+            }
+        }
+        let root = &manual[0].1;
+        assert!(
+            root.contains("sciart man while"),
+            "the top page points at it"
         );
     }
 
@@ -1195,6 +1726,39 @@ mod tests {
             RecordSpec::resolve(&cli, &cli.command()),
             Err(UsageError::RecordFrames(_))
         ));
+    }
+
+    #[test]
+    fn cli_r8_record_start_defaults_to_zero_and_rounds_to_whole_steps() {
+        let (_, spec) = record(&["record", "starfield", "--out", "x.gif"]);
+        assert_eq!(spec.start_steps, 0);
+        for (start, steps) in [("0", 0), ("2.5", 150), ("0.01", 1), ("1200", 72_000)] {
+            let (_, spec) = record(&["record", "starfield", "--out", "x.gif", "--start", start]);
+            assert_eq!(spec.start_steps, steps, "--start {start}");
+        }
+        // The offset does not change the frame count.
+        let (_, spec) = record(&[
+            "record",
+            "starfield",
+            "--out",
+            "x.gif",
+            "--start",
+            "4",
+            "--seconds",
+            "2",
+            "--fps",
+            "10",
+        ]);
+        assert_eq!((spec.start_steps, spec.frames), (240, 20));
+        for bad in ["-1", "1200.5", "nan", "inf", "soon", ""] {
+            assert_eq!(
+                parse(&["record", "starfield", "--out", "x.gif", "--start", bad])
+                    .unwrap_err()
+                    .exit_code(),
+                2,
+                "--start {bad:?}"
+            );
+        }
     }
 
     #[test]

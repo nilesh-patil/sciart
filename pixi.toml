@@ -26,7 +26,7 @@ rs-test-features = "cargo nextest run -p sciart --no-default-features --features
 # GEN-R15: the generated scene index in SPEC-002-generators.md matches the category files.
 # TEST-R1/R4: spec traceability (scripts/spec_check.py); TEST-R9/R10/R11: tooling schema
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
-rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py"
+rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py"
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
@@ -36,7 +36,7 @@ rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- 
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
-rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release"] }
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
@@ -44,6 +44,8 @@ rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame
 rs-cost = "cargo run -q --profile ci -p sciart-qa --example cost --"
 # The same probe on the install profile (thin LTO, one codegen unit): RT-R16's pipeline-mean CPU claim.
 rs-cost-release = "cargo run -q --release -p sciart-qa --example cost --"
+# RT-R22: release binary size (without `record`/`mouse`) and dependency-count budgets.
+rs-size = "cargo build -q --release -p sciart --bin sciart && python3 scripts/size_check.py"
 rs-list = "cargo run -q -p sciart -- list"
 # Interactive review runs share the `ci` build with the probes above; frames are the same as
 # an installed (`release`) binary's (GEN-R6), which only links slower.
@@ -55,6 +57,12 @@ rs-preview = "cargo run -q --profile ci -p sciart-generators --example preview -
 # `rs-gallery-check` verifies one current frame per registered scene and no orphans (CI).
 rs-gallery = "python3 scripts/gallery.py"
 rs-gallery-check = "python3 scripts/gallery.py --check"
+# WEB-R1: record the missing animated clips in `docs/showcase.toml` into `docs/media/` with
+# `sciart record` (`--force` re-records all), then regenerate `docs/GALLERY.md`.
+# WEB-R2: `rs-showcase-check` verifies clips, size limits, coverage and the README/gallery
+# references (rs-ci and CI).
+rs-showcase = "python3 scripts/showcase.py"
+rs-showcase-check = "python3 scripts/showcase.py --check"
 # RND-R19 art review: five scenes at 80x24/200x50 through the colorblind theme.
 rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).

@@ -7,6 +7,7 @@ mod encode;
 mod fields;
 mod hud;
 mod paint;
+mod pipeline;
 mod terminal;
 mod theme;
 
@@ -15,5 +16,6 @@ pub use backend::FrameBackend;
 pub use color::{indexed, quantize};
 pub use hud::Hud;
 pub use paint::{Background, HYSTERESIS, Painter, paint};
+pub use pipeline::{Compositor, Content, Draw, Work};
 pub use terminal::{AppTerminal, TerminalGuard, restore as restore_terminal};
 pub use theme::{Rgb, Theme};

@@ -1,9 +1,10 @@
 //! `sciart record` (CLI-R8, ADR-0025): a headless render of one scene to GIF, a PNG frame
 //! sequence, or an asciicast v2 stream.
 //!
-//! Timing is exact: frame *k* is the scene after exactly *k* / fps simulated seconds, and
-//! every frame lands on whole 1/60 s steps (`--fps` must divide 60), so a recording is
-//! deterministic and frame 0 is `rs-preview` at `t = 0` through the same renderer.
+//! Timing is exact: frame *k* is the scene after exactly `--start` + *k* / fps simulated
+//! seconds, and every frame lands on whole 1/60 s steps (`--fps` must divide 60 and the
+//! offset is rounded to a whole step), so a recording is deterministic and, without
+//! `--start`, frame 0 is `rs-preview` at `t = 0` through the same renderer.
 
 use std::fmt;
 use std::path::{Path, PathBuf};
@@ -86,10 +87,11 @@ fn new_stage(spec: &RecordSpec) -> Stage {
     Stage::new((spec.entry.build)(), spec.seed, spec.size, mode)
 }
 
-/// Advance to frame `k`, taken after exactly `k * 60 / fps` whole 1/60 s steps (CLI-R8).
-fn step_to(stage: &mut Stage, steps: &mut u64, frame: usize, fps: u16) {
+/// Advance to frame `k`, taken after exactly `start + k * 60 / fps` whole 1/60 s steps,
+/// where `start` is the `--start` offset in steps (CLI-R8).
+fn step_to(stage: &mut Stage, steps: &mut u64, start: u64, frame: usize, fps: u16) {
     debug_assert_eq!(STEPS_PER_SECOND % u64::from(fps), 0, "fps must divide 60");
-    let target = frame as u64 * (STEPS_PER_SECOND / u64::from(fps));
+    let target = start + frame as u64 * (STEPS_PER_SECOND / u64::from(fps));
     while *steps < target {
         stage.step(SIM_DT);
         *steps += 1;
@@ -104,11 +106,12 @@ fn images(spec: &RecordSpec, options: RenderOptions) -> impl Iterator<Item = Ima
     let mut frame = 0;
     let total = spec.frames;
     let fps = spec.fps;
+    let start = spec.start_steps;
     std::iter::from_fn(move || {
         if frame >= total {
             return None;
         }
-        step_to(&mut stage, &mut steps, frame, fps);
+        step_to(&mut stage, &mut steps, start, frame, fps);
         frame += 1;
         Some(render_frame(&mut stage, &options))
     })
@@ -120,11 +123,12 @@ fn ansi_frames(spec: &RecordSpec, options: RenderOptions) -> impl Iterator<Item 
     let mut frame = 0;
     let total = spec.frames;
     let fps = spec.fps;
+    let start = spec.start_steps;
     std::iter::from_fn(move || {
         if frame >= total {
             return None;
         }
-        step_to(&mut stage, &mut steps, frame, fps);
+        step_to(&mut stage, &mut steps, start, frame, fps);
         frame += 1;
         Some(render_ansi(&mut stage, &options))
     })
@@ -148,7 +152,37 @@ mod tests {
             theme: Theme::Astro,
             ascii: false,
             seed: 42,
+            start_steps: 0,
         }
+    }
+
+    #[test]
+    fn cli_r8_start_runs_whole_steps_before_frame_zero() {
+        let options = RenderOptions::default();
+        let plain = spec(3);
+        // 0.1 s at 10 fps is exactly one frame interval (6 steps), so a recording that starts
+        // there is the plain recording shifted by one frame.
+        let late = RecordSpec {
+            start_steps: 6,
+            ..spec(2)
+        };
+        let plain_frames: Vec<Image> = images(&plain, options).collect();
+        let late_frames: Vec<Image> = images(&late, options).collect();
+        assert_eq!(late_frames.len(), 2);
+        assert_eq!(late_frames[..], plain_frames[1..]);
+        // Frame 0 of the late recording is a fresh stage after exactly `start_steps` steps.
+        let mut stepped = new_stage(&late);
+        for _ in 0..6 {
+            stepped.step(SIM_DT);
+        }
+        assert_eq!(
+            late_frames[0].rgb(),
+            render_frame(&mut stepped, &options).rgb()
+        );
+        // The asciicast path honours the same offset.
+        let plain_ansi: Vec<String> = ansi_frames(&plain, options).collect();
+        let late_ansi: Vec<String> = ansi_frames(&late, options).collect();
+        assert_eq!(late_ansi[..], plain_ansi[1..]);
     }
 
     #[test]
