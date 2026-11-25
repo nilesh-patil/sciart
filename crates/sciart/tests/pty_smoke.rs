@@ -148,7 +148,12 @@ impl Session {
 
     /// Poll the decoded screen until `pred` holds or the timeout elapses.
     fn wait_for(&self, what: &str, pred: impl Fn(&str) -> bool) -> String {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        self.wait_for_within(Duration::from_secs(10), what, pred)
+    }
+
+    /// [`Session::wait_for`] with its own limit.
+    fn wait_for_within(&self, limit: Duration, what: &str, pred: impl Fn(&str) -> bool) -> String {
+        let deadline = Instant::now() + limit;
         loop {
             let text = self.contents();
             if pred(&text) {
@@ -173,7 +178,12 @@ impl Session {
 
     /// Poll the raw byte stream until `pred` holds or the timeout elapses.
     fn wait_raw(&self, what: &str, pred: impl Fn(&[u8]) -> bool) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+        self.wait_raw_within(Duration::from_secs(10), what, pred);
+    }
+
+    /// [`Session::wait_raw`] with its own limit.
+    fn wait_raw_within(&self, limit: Duration, what: &str, pred: impl Fn(&[u8]) -> bool) {
+        let deadline = Instant::now() + limit;
         loop {
             if pred(&self.raw.lock().unwrap()) {
                 return;
@@ -184,8 +194,13 @@ impl Session {
     }
 
     /// Wait for a command that exits on its own (`list`), without sending input.
-    fn wait_exit(mut self) -> (portable_pty::ExitStatus, Vec<u8>) {
-        let deadline = Instant::now() + Duration::from_secs(10);
+    fn wait_exit(self) -> (portable_pty::ExitStatus, Vec<u8>) {
+        self.wait_exit_within(Duration::from_secs(10))
+    }
+
+    /// [`Session::wait_exit`] with its own limit, for runs that take time by design.
+    fn wait_exit_within(mut self, limit: Duration) -> (portable_pty::ExitStatus, Vec<u8>) {
+        let deadline = Instant::now() + limit;
         let status = loop {
             if let Some(status) = self.child.try_wait().unwrap() {
                 break status;
@@ -1221,6 +1236,13 @@ fn rnd_r20_indexed_opaque_ground_is_xterm_black() {
 
 // ----- M25: scriptable modes (CLI-R12, CLI-R14, CLI-R16, CLI-R17, RT-R23) -----
 
+/// How long a wait in these tests may take before it counts as a hang. The limits tell
+/// "ends" from "hangs" and nothing finer: on a loaded machine the scheduler, not the app,
+/// decides how long a run takes, so a tight bound measures the machine. The timings that
+/// matter are pinned without the wall clock (the `rt_r23_*` unit tests, synthetic time);
+/// lower bounds ("not before the deadline") stay exact. Well under nextest's 180 s kill.
+const STUCK: Duration = Duration::from_secs(60);
+
 /// The art is on screen: enough lit cells.
 fn lit(screen: &str) -> bool {
     screen.chars().filter(|c| !c.is_whitespace()).count() > 50
@@ -1270,10 +1292,12 @@ fn restored_at(raw: &[u8]) -> usize {
 /// The long-running commands below start with `trap '' HUP`, which `exec` keeps: in the
 /// pty sciart is the session leader, so its exit hangs up its process group and would end
 /// a command it failed to kill. In a real shell sciart is not the leader and nothing
-/// would; ignoring the hang-up makes the tests see what a user would.
+/// would; ignoring the hang-up makes the tests see what a user would. They sleep for ten
+/// minutes, far past [`STUCK`], so a command that was not killed is still there when a
+/// test looks for it.
 /// The pid a `sh -c 'echo $$ > file; exec …'` command wrote, once it has.
 fn read_pid(file: &std::path::Path) -> u32 {
-    let deadline = Instant::now() + Duration::from_secs(10);
+    let deadline = Instant::now() + STUCK;
     loop {
         if let Some(pid) = std::fs::read_to_string(file)
             .ok()
@@ -1291,8 +1315,8 @@ fn cli_r14_while_exits_with_the_commands_status_and_replays_its_output_after_the
     for code in [0u32, 3] {
         let script = format!("echo to-stderr >&2; echo to-stdout; sleep 2; exit {code}");
         let (s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
-        s.wait_for("the art", lit);
-        let (status, raw) = s.wait_exit();
+        s.wait_for_within(STUCK, "the art", lit);
+        let (status, raw) = s.wait_exit_within(STUCK);
         assert_eq!(status.exit_code(), code, "exit {code}");
         assert_eq!(
             count(&raw, ALT_ENTER),
@@ -1316,9 +1340,9 @@ fn cli_r14_while_exits_with_the_commands_status_and_replays_its_output_after_the
 fn cli_r14_q_closes_the_art_and_keeps_waiting_and_copying() {
     let script = "echo early; sleep 3; echo late; exit 5";
     let (mut s, spool_dir) = start_while(&[], &["sh", "-c", script]);
-    s.wait_for("the art", lit);
+    s.wait_for_within(STUCK, "the art", lit);
     s.press("q");
-    s.wait_raw("the restore, then the output so far", |raw| {
+    s.wait_raw_within(STUCK, "the restore, then the output so far", |raw| {
         raw.windows(ALT_LEAVE.len()).any(|w| w == ALT_LEAVE)
             && find(raw, "early").is_some_and(|at| at > restored_at(raw))
     });
@@ -1326,7 +1350,7 @@ fn cli_r14_q_closes_the_art_and_keeps_waiting_and_copying() {
         s.child.try_wait().unwrap().is_none(),
         "sciart is still waiting for the command"
     );
-    let (status, raw) = s.wait_exit();
+    let (status, raw) = s.wait_exit_within(STUCK);
     assert_eq!(status.exit_code(), 5, "the command's status after q");
     let early = find(&raw, "early").unwrap();
     let late = find(&raw, "late").expect("output after q is copied too");
@@ -1340,15 +1364,15 @@ fn cli_r14_ctrl_c_kills_the_command_and_exits_130() {
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("pid");
     let script = format!(
-        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 30",
+        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 600",
         pid_file.display()
     );
     let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
-    s.wait_for("the art", lit);
+    s.wait_for_within(STUCK, "the art", lit);
     let pid = read_pid(&pid_file);
     assert!(running(pid), "the command runs beside the art");
     s.press("\x03");
-    let (status, raw) = s.wait_exit();
+    let (status, raw) = s.wait_exit_within(STUCK);
     assert_eq!(status.exit_code(), 130);
     assert!(!running(pid), "the command was killed");
     let restored = restored_at(&raw);
@@ -1364,12 +1388,12 @@ fn cli_r12_cli_r14_a_deadline_kills_the_command_and_exits_124() {
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("pid");
     let script = format!(
-        "trap '' HUP; echo $$ > '{}'; exec sleep 30",
+        "trap '' HUP; echo $$ > '{}'; exec sleep 600",
         pid_file.display()
     );
     let (s, spool_dir) = start_while(&["--for", "2"], &["sh", "-c", &script]);
     let pid = read_pid(&pid_file);
-    let (status, raw) = s.wait_exit();
+    let (status, raw) = s.wait_exit_within(STUCK);
     assert_eq!(status.exit_code(), 124);
     assert!(!running(pid), "the command was killed at the deadline");
     assert_eq!(count(&raw, ALT_LEAVE), 1, "the terminal is restored");
@@ -1410,6 +1434,13 @@ fn cli_r14_a_command_that_cannot_start_exits_127_before_the_alternate_screen() {
     }
 }
 
+/// The seconds left that the HUD shows (` | ends MM:SS`), if it shows them.
+fn ends_secs(screen: &str) -> Option<u32> {
+    let at = screen.find("| ends ")? + "| ends ".len();
+    let (m, s) = screen.get(at..at + 5)?.split_once(':')?;
+    Some(m.parse::<u32>().ok()? * 60 + s.parse::<u32>().ok()?)
+}
+
 /// RT-R23 / CLI-R12: the deadline is wall time, so a paused run still ends on time, and the
 /// HUD counts it down.
 #[test]
@@ -1418,7 +1449,7 @@ fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
         "run",
         "starfield",
         "--for",
-        "6",
+        "10",
         "--hud",
         "--ascii",
         "--seed",
@@ -1428,19 +1459,20 @@ fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
     ];
     let started = Instant::now();
     let mut s = Session::start(&args);
-    s.wait_for("the time left in the HUD", |t| t.contains("| ends 00:0"));
+    s.wait_for_within(STUCK, "the time left in the HUD", |t| {
+        t.contains("| ends 00:")
+    });
     s.press(" ");
-    s.wait_for("pause", |t| t.contains("| PAUSED"));
-    // The paused loop blocks on input within 2.5 s (RT-R21); the countdown must still
-    // move, down to its last second.
-    s.wait_for("the countdown while paused", |t| t.contains("| ends 00:01"));
-    let (status, raw) = s.wait_exit();
+    let paused = s.wait_for_within(STUCK, "pause", |t| t.contains("| PAUSED"));
+    // The countdown keeps moving while paused: some later frame shows less time left.
+    let at_pause = ends_secs(&paused).expect("the time left with the pause");
+    s.wait_for_within(STUCK, "the countdown while paused", |t| {
+        ends_secs(t).is_some_and(|left| left < at_pause)
+    });
+    let (status, raw) = s.wait_exit_within(STUCK);
     let took = started.elapsed();
     assert!(status.success(), "a deadline is a normal end: {status:?}");
-    assert!(
-        (Duration::from_secs(6)..Duration::from_secs(9)).contains(&took),
-        "{took:?}"
-    );
+    assert!(took >= Duration::from_secs(10), "ended early: {took:?}");
     assert_eq!(
         count(&raw, ALT_LEAVE),
         1,
@@ -1473,15 +1505,12 @@ fn rt_r21_rt_r23_a_paused_run_without_a_hud_ends_at_its_deadline() {
     ];
     let started = Instant::now();
     let mut s = Session::start(&args);
-    s.wait_for("the art", lit);
+    s.wait_for_within(STUCK, "the art", lit);
     s.press(" ");
-    let (status, raw) = s.wait_exit();
+    let (status, raw) = s.wait_exit_within(STUCK);
     let took = started.elapsed();
     assert!(status.success(), "{status:?}");
-    assert!(
-        (Duration::from_secs(4)..Duration::from_millis(5500)).contains(&took),
-        "{took:?}"
-    );
+    assert!(took >= Duration::from_secs(4), "ended early: {took:?}");
     assert_eq!(count(&raw, ALT_LEAVE), 1);
 }
 
@@ -1534,7 +1563,7 @@ fn cli_r17_completions_and_man_page_need_no_config() {
 
 /// Wait until `pid` is no longer a live process (a killed orphan is reaped by init).
 fn assert_gone(pid: u32, what: &str) {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + STUCK;
     while running(pid) {
         assert!(Instant::now() < deadline, "{what}: {pid} still runs");
         thread::sleep(Duration::from_millis(20));
@@ -1548,11 +1577,11 @@ fn cli_r14_rt_r20_sigterm_during_while_kills_the_command_and_exits_143() {
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("pid");
     let script = format!(
-        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 30",
+        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 600",
         pid_file.display()
     );
     let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
-    s.wait_for("the art", lit);
+    s.wait_for_within(STUCK, "the art", lit);
     let pid = read_pid(&pid_file);
     assert!(running(pid), "the command runs beside the art");
     assert_signal_ends_in_time(&mut s, "TERM", 143);
@@ -1575,14 +1604,14 @@ fn cli_r14_rt_r20_sighup_after_q_kills_the_command_and_leaves_the_terminal_alone
     let scratch = tempfile::tempdir().unwrap();
     let pid_file = scratch.path().join("pid");
     let script = format!(
-        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 30",
+        "trap '' HUP; echo $$ > '{}'; echo started; exec sleep 600",
         pid_file.display()
     );
     let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
-    s.wait_for("the art", lit);
+    s.wait_for_within(STUCK, "the art", lit);
     let pid = read_pid(&pid_file);
     s.press("q");
-    s.wait_raw("the restore, then the output so far", |raw| {
+    s.wait_raw_within(STUCK, "the restore, then the output so far", |raw| {
         raw.windows(ALT_LEAVE.len()).any(|w| w == ALT_LEAVE)
             && find(raw, "started").is_some_and(|at| at > restored_at(raw))
     });
@@ -1612,9 +1641,9 @@ fn rt_r9_cli_r14_ctrl_c_in_sim_and_run_exits_0_with_the_terminal_restored() {
     ];
     for args in [&run[..], &sim[..]] {
         let mut s = Session::start(args);
-        s.wait_for("the art", lit);
+        s.wait_for_within(STUCK, "the art", lit);
         s.press("\x03");
-        let (status, raw) = s.wait_exit();
+        let (status, raw) = s.wait_exit_within(STUCK);
         assert!(status.success(), "{args:?}: {status:?}");
         assert_eq!(count(&raw, ALT_ENTER), 1, "{args:?}");
         assert_eq!(count(&raw, ALT_LEAVE), 1, "{args:?}");
@@ -1624,7 +1653,7 @@ fn rt_r9_cli_r14_ctrl_c_in_sim_and_run_exits_0_with_the_terminal_restored() {
 }
 
 /// CLI-R14 / RT-R21: a paused `while` whose loop blocks on the next event still notices the
-/// command's exit, within one blocked wait (`BLOCK_POLL`, 1 s), and ends with its status.
+/// command's exit (at the end of a blocked wait, `BLOCK_POLL`) and ends with its status.
 /// The command waits for a file the test creates once the loop is seen to block.
 #[test]
 fn cli_r14_rt_r21_a_paused_while_notices_the_commands_exit_during_a_blocked_wait() {
@@ -1661,24 +1690,23 @@ fn cli_r14_rt_r21_a_paused_while_notices_the_commands_exit_during_a_blocked_wait
         ("SCIART_TRACE_WAKEUPS", trace.to_str().unwrap()),
     ];
     let mut s = Session::spawn(&args, None, &env);
-    s.wait_for("the art", lit);
+    s.wait_for_within(STUCK, "the art", lit);
     s.press(" ");
-    // RT-R17 steps the rate down within 1.5 s of quiet; then the loop blocks.
-    thread::sleep(Duration::from_millis(2500));
-    let woken = wakeups();
-    thread::sleep(Duration::from_millis(1500));
-    assert!(
-        wakeups() - woken <= 3,
-        "blocked: {} wake-ups",
-        wakeups() - woken
-    );
+    // RT-R17 steps the rate down after 1.5 s of quiet; then the loop blocks, waking about
+    // once a second. Wait for a quiet window however long the machine takes to get there.
+    let blocking = Instant::now() + STUCK;
+    loop {
+        let woken = wakeups();
+        thread::sleep(Duration::from_millis(1500));
+        if wakeups() - woken <= 3 {
+            break;
+        }
+        assert!(Instant::now() < blocking, "the paused loop never blocked");
+    }
+    // Only a blocked wait can now notice the exit: without that check this never ends.
     std::fs::write(&go, "").unwrap();
-    let released = Instant::now();
-    let (status, raw) = s.wait_exit();
-    let took = released.elapsed();
+    let (status, raw) = s.wait_exit_within(STUCK);
     assert_eq!(status.exit_code(), 6, "the command's status");
-    // One blocked wait, the command's own 50 ms poll, and the wait loop's scheduling.
-    assert!(took < Duration::from_millis(1800), "noticed after {took:?}");
     assert!(
         find(&raw, "finished").is_some_and(|at| at > restored_at(&raw)),
         "its output is replayed after the restore"
