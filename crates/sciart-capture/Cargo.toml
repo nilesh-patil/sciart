@@ -15,11 +15,16 @@ categories = ["graphics", "multimedia::images", "command-line-utilities"]
 # never published.
 publish = false
 
+# LIB-R4: the GIF encoder only for `sciart record`; the PNG path (renderer, glyph font,
+# PNG encoder) is always built.
+[features]
+gif = ["dep:gif"]
+
 [dependencies]
 sciart-core.workspace = true
 sciart-render.workspace = true
 font8x8.workspace = true
-gif.workspace = true
+gif = { workspace = true, optional = true }
 png.workspace = true
 
 [dev-dependencies]
