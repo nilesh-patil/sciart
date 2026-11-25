@@ -1418,7 +1418,7 @@ fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
         "run",
         "starfield",
         "--for",
-        "4",
+        "6",
         "--hud",
         "--ascii",
         "--seed",
@@ -1431,11 +1431,14 @@ fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
     s.wait_for("the time left in the HUD", |t| t.contains("| ends 00:0"));
     s.press(" ");
     s.wait_for("pause", |t| t.contains("| PAUSED"));
+    // The paused loop blocks on input within 2.5 s (RT-R21); the countdown must still
+    // move, down to its last second.
+    s.wait_for("the countdown while paused", |t| t.contains("| ends 00:01"));
     let (status, raw) = s.wait_exit();
     let took = started.elapsed();
     assert!(status.success(), "a deadline is a normal end: {status:?}");
     assert!(
-        (Duration::from_secs(4)..Duration::from_secs(9)).contains(&took),
+        (Duration::from_secs(6)..Duration::from_secs(9)).contains(&took),
         "{took:?}"
     );
     assert_eq!(
@@ -1450,6 +1453,36 @@ fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
             .unwrap();
         assert_eq!(out.status.code(), Some(2), "--for {bad}");
     }
+}
+
+/// RT-R21 / RT-R23: without a HUD nothing on screen changes while paused, so the loop
+/// blocks on input until the end; the blocked span is wall time and the run still ends on
+/// time.
+#[test]
+fn rt_r21_rt_r23_a_paused_run_without_a_hud_ends_at_its_deadline() {
+    let args = [
+        "run",
+        "starfield",
+        "--for",
+        "4",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let started = Instant::now();
+    let mut s = Session::start(&args);
+    s.wait_for("the art", lit);
+    s.press(" ");
+    let (status, raw) = s.wait_exit();
+    let took = started.elapsed();
+    assert!(status.success(), "{status:?}");
+    assert!(
+        (Duration::from_secs(4)..Duration::from_millis(5500)).contains(&took),
+        "{took:?}"
+    );
+    assert_eq!(count(&raw, ALT_LEAVE), 1);
 }
 
 /// CLI-R16 through the real binary, piped: the versioned object, parsed as JSON.
@@ -1588,4 +1621,67 @@ fn rt_r9_cli_r14_ctrl_c_in_sim_and_run_exits_0_with_the_terminal_restored() {
         let tail = &raw[restored_at(&raw).saturating_sub(64)..];
         assert!(count(tail, b"\x1b[?25h") >= 1, "{args:?}: cursor shown");
     }
+}
+
+/// CLI-R14 / RT-R21: a paused `while` whose loop blocks on the next event still notices the
+/// command's exit, within one blocked wait (`BLOCK_POLL`, 1 s), and ends with its status.
+/// The command waits for a file the test creates once the loop is seen to block.
+#[test]
+fn cli_r14_rt_r21_a_paused_while_notices_the_commands_exit_during_a_blocked_wait() {
+    let scratch = tempfile::tempdir().unwrap();
+    let go = scratch.path().join("go");
+    let trace = scratch.path().join("wakeups");
+    let wakeups = || -> u64 {
+        std::fs::read_to_string(&trace)
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    };
+    let script = format!(
+        "trap '' HUP; until [ -e '{}' ]; do sleep 0.05; done; echo finished; exit 6",
+        go.display()
+    );
+    let spool_dir = tempfile::tempdir().unwrap();
+    let args = [
+        "while",
+        "--only",
+        "starfield",
+        "--seed",
+        "1",
+        "--ascii",
+        "--keep-awake",
+        "off",
+        "--",
+        "sh",
+        "-c",
+        &script,
+    ];
+    let env = [
+        ("TMPDIR", spool_dir.path().to_str().unwrap()),
+        ("SCIART_TRACE_WAKEUPS", trace.to_str().unwrap()),
+    ];
+    let mut s = Session::spawn(&args, None, &env);
+    s.wait_for("the art", lit);
+    s.press(" ");
+    // RT-R17 steps the rate down within 1.5 s of quiet; then the loop blocks.
+    thread::sleep(Duration::from_millis(2500));
+    let woken = wakeups();
+    thread::sleep(Duration::from_millis(1500));
+    assert!(
+        wakeups() - woken <= 3,
+        "blocked: {} wake-ups",
+        wakeups() - woken
+    );
+    std::fs::write(&go, "").unwrap();
+    let released = Instant::now();
+    let (status, raw) = s.wait_exit();
+    let took = released.elapsed();
+    assert_eq!(status.exit_code(), 6, "the command's status");
+    // One blocked wait, the command's own 50 ms poll, and the wait loop's scheduling.
+    assert!(took < Duration::from_millis(1800), "noticed after {took:?}");
+    assert!(
+        find(&raw, "finished").is_some_and(|at| at > restored_at(&raw)),
+        "its output is replayed after the restore"
+    );
+    assert_no_spool_left(spool_dir.path());
 }
