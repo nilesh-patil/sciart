@@ -1,0 +1,15 @@
+# The user guide's chapters, in reading order (WEB-R5). `scripts/build_site.py` builds each
+# Markdown file into a page of the guide on the docs site; the first is the guide's front
+# page.
+
+chapters = [
+    { file = "index.md", title = "Introduction" },
+    { file = "installing.md", title = "Installing" },
+    { file = "running.md", title = "Running" },
+    { file = "keys.md", title = "Keys" },
+    { file = "configuration.md", title = "Configuration" },
+    { file = "terminals.md", title = "Colour and terminals" },
+    { file = "scripting.md", title = "Scripting" },
+    { file = "recording.md", title = "Recording" },
+    { file = "library.md", title = "The library" },
+]
