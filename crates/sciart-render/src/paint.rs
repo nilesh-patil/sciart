@@ -57,7 +57,7 @@ pub fn paint_with_background(
     buf: &mut Buffer,
     background: Background,
 ) {
-    paint_with(
+    let _mapped = paint_with(
         canvas,
         theme,
         area,
@@ -137,6 +137,9 @@ pub struct Painter {
     /// painted before the bump may differ from what painting gives now, so the
     /// changed-cell path repaints the full area (RND-R22).
     epoch: u64,
+    /// Canvas cells mapped to terminal cells so far, counted where a cell is mapped
+    /// ([`Brush::paint`]); the compositor reads it per frame to prove RND-R22's bound.
+    mapped: u64,
 }
 
 impl Painter {
@@ -201,6 +204,11 @@ impl Painter {
         self.epoch
     }
 
+    /// Canvas cells this painter has mapped to terminal cells, over its lifetime (RND-R22).
+    pub fn mapped(&self) -> u64 {
+        self.mapped
+    }
+
     /// Size the tables for `canvas` and forget the memory on a theme change, as every
     /// paint does first.
     fn sync(&mut self, canvas: &Canvas, theme: Theme) {
@@ -260,6 +268,7 @@ impl Painter {
                 sent.push(i as u32);
             }
         }
+        self.mapped += brush.mapped.get();
     }
 
     /// Paint canvas row `y` in full into `buf`, which holds that row at its absolute
@@ -284,6 +293,7 @@ impl Painter {
             };
             store(out, brush.paint(cell, i, x as u16, y, memory));
         }
+        self.mapped += brush.mapped.get();
     }
 
     pub fn paint(&mut self, canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
@@ -293,7 +303,7 @@ impl Painter {
         } else {
             &mut []
         };
-        paint_with(
+        self.mapped += paint_with(
             canvas,
             theme,
             area,
@@ -343,6 +353,9 @@ struct Brush<'a> {
     mode: Mode,
     /// The colour of a `Role::Background` ink (RND-R20).
     blank: Packed,
+    /// Cells this brush has mapped: the painter's RND-R22 work counter, kept at the one
+    /// place every painting path turns a canvas cell into a terminal cell.
+    mapped: std::cell::Cell<u64>,
 }
 
 impl<'a> Brush<'a> {
@@ -366,6 +379,7 @@ impl<'a> Brush<'a> {
             hues,
             mode,
             blank,
+            mapped: std::cell::Cell::new(0),
         }
     }
 
@@ -403,6 +417,7 @@ impl<'a> Brush<'a> {
         y: u16,
         memory: Option<&mut Emitted>,
     ) -> Emitted {
+        self.mapped.set(self.mapped.get() + 1);
         let mut ch = cell.ch;
         let mut fg = self.color(cell.ink, i, x, y);
         let mut bg = self.color(cell.bg, i, x, y);
@@ -453,6 +468,7 @@ fn stored(e: Emitted) -> ratatui::buffer::Cell {
 
 /// The painting loop: `hues` (per-position rainbow parts) and `memory` (hysteresis) may
 /// be empty, in which case rainbow hues are computed per cell and colours are exact.
+/// Returns the cells it mapped (RND-R22).
 fn paint_with(
     canvas: &Canvas,
     theme: Theme,
@@ -461,12 +477,12 @@ fn paint_with(
     hues: &[HuePos],
     memory: &mut [Emitted],
     mode: Mode,
-) {
+) -> u64 {
     let width = usize::from(canvas.size().width());
     let brush = Brush::new(theme, hues, mode);
     // `paint` is only ever given an area inside its buffer; clip to both anyway.
     if area.x < buf.area.x || area.y < buf.area.y {
-        return;
+        return 0;
     }
     let right = area.right().min(buf.area.right());
     let bottom = area.bottom().min(buf.area.bottom());
@@ -482,6 +498,7 @@ fn paint_with(
             store(out, e);
         }
     }
+    brush.mapped.get()
 }
 
 #[cfg(test)]
