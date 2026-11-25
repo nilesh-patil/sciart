@@ -57,7 +57,7 @@ pub fn paint_with_background(
     buf: &mut Buffer,
     background: Background,
 ) {
-    paint_with(
+    let _mapped = paint_with(
         canvas,
         theme,
         area,
@@ -133,6 +133,13 @@ pub struct Painter {
     indexed: bool,
     /// Opaque black or terminal-default background (RND-R20, `--background`).
     background: Background,
+    /// Bumped whenever the emitted-colour memory or the tables are rebuilt: a buffer
+    /// painted before the bump may differ from what painting gives now, so the
+    /// changed-cell path repaints the full area (RND-R22).
+    epoch: u64,
+    /// Canvas cells mapped to terminal cells so far, counted where a cell is mapped
+    /// ([`Brush::paint`]); the compositor reads it per frame to prove RND-R22's bound.
+    mapped: u64,
 }
 
 impl Painter {
@@ -164,6 +171,7 @@ impl Painter {
     pub fn with_background(mut self, background: Background) -> Self {
         self.background = background;
         self.emitted.fill(Emitted::NONE);
+        self.epoch += 1;
         self
     }
 
@@ -187,9 +195,23 @@ impl Painter {
     /// reset, RND-R14).
     pub fn reset(&mut self) {
         self.emitted.fill(Emitted::NONE);
+        self.epoch += 1;
     }
 
-    pub fn paint(&mut self, canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
+    /// Changes whenever painting the same canvas again could give a different buffer:
+    /// after a reset, a new background, size or theme (RND-R22).
+    pub fn epoch(&self) -> u64 {
+        self.epoch
+    }
+
+    /// Canvas cells this painter has mapped to terminal cells, over its lifetime (RND-R22).
+    pub fn mapped(&self) -> u64 {
+        self.mapped
+    }
+
+    /// Size the tables for `canvas` and forget the memory on a theme change, as every
+    /// paint does first.
+    fn sync(&mut self, canvas: &Canvas, theme: Theme) {
         let size = canvas.size();
         let (w, h) = (size.width(), size.height());
         if (w, h) != (self.width, self.height) {
@@ -200,16 +222,88 @@ impl Painter {
             self.hues.clear();
             self.hues
                 .extend((0..h).flat_map(|y| (0..w).map(move |x| hue_pos(x, y))));
+            self.epoch += 1;
         } else if self.theme != Some(theme) {
             self.reset();
         }
         self.theme = Some(theme);
+    }
+
+    fn mode(&self) -> Mode {
+        Mode {
+            indexed: self.indexed,
+            background: self.background,
+        }
+    }
+
+    /// The changed-cell path (RND-R22): paint the canvas cells at `indices` (row-major
+    /// canvas indices; the canvas exactly as wide as `buf`, both at the origin) into `buf`,
+    /// and append to `sent` the indices whose terminal cell actually changed. Every other
+    /// cell of `buf` must already hold what [`Painter::paint`] gave it for the same canvas
+    /// cell in the same [`Painter::epoch`].
+    pub(crate) fn paint_cells(
+        &mut self,
+        canvas: &Canvas,
+        theme: Theme,
+        indices: &[u32],
+        buf: &mut Buffer,
+        sent: &mut Vec<u32>,
+    ) {
+        self.sync(canvas, theme);
+        let width = usize::from(canvas.size().width()).max(1);
+        let brush = Brush::new(theme, &self.hues, self.mode());
+        let cells = canvas.cells();
+        for &i in indices {
+            let i = i as usize;
+            let (x, y) = ((i % width) as u16, (i / width) as u16);
+            let memory = if self.hysteresis {
+                self.emitted.get_mut(i)
+            } else {
+                None
+            };
+            let cell = stored(brush.paint(&cells[i], i, x, y, memory));
+            let out = &mut buf.content[i];
+            if *out != cell {
+                *out = cell;
+                sent.push(i as u32);
+            }
+        }
+        self.mapped += brush.mapped.get();
+    }
+
+    /// Paint canvas row `y` in full into `buf`, which holds that row at its absolute
+    /// position (RND-R22: the row under the HUD or the error line).
+    pub(crate) fn paint_row(&mut self, canvas: &Canvas, theme: Theme, y: u16, buf: &mut Buffer) {
+        self.sync(canvas, theme);
+        let width = usize::from(canvas.size().width());
+        let brush = Brush::new(theme, &self.hues, self.mode());
+        let start = usize::from(y) * width;
+        let Some(src) = canvas.cells().get(start..start + width) else {
+            return;
+        };
+        for (x, cell) in src.iter().enumerate() {
+            let Some(out) = buf.cell_mut((x as u16, y)) else {
+                continue;
+            };
+            let i = start + x;
+            let memory = if self.hysteresis {
+                self.emitted.get_mut(i)
+            } else {
+                None
+            };
+            store(out, brush.paint(cell, i, x as u16, y, memory));
+        }
+        self.mapped += brush.mapped.get();
+    }
+
+    pub fn paint(&mut self, canvas: &Canvas, theme: Theme, area: Rect, buf: &mut Buffer) {
+        self.sync(canvas, theme);
         let memory: &mut [Emitted] = if self.hysteresis {
             &mut self.emitted
         } else {
             &mut []
         };
-        paint_with(
+        self.mapped += paint_with(
             canvas,
             theme,
             area,
@@ -248,8 +342,133 @@ struct Mode {
     background: Background,
 }
 
+/// What one canvas cell paints as: the theme, the per-position hues and the colour mode,
+/// shared by the full-area loop ([`paint_with`]) and the changed-cell path (RND-R22), so
+/// both turn a cell into exactly the same terminal cell.
+struct Brush<'a> {
+    theme: Theme,
+    table: &'static crate::theme::Lut,
+    /// Per-position rainbow parts; empty means "compute per cell".
+    hues: &'a [HuePos],
+    mode: Mode,
+    /// The colour of a `Role::Background` ink (RND-R20).
+    blank: Packed,
+    /// Cells this brush has mapped: the painter's RND-R22 work counter, kept at the one
+    /// place every painting path turns a canvas cell into a terminal cell.
+    mapped: std::cell::Cell<u64>,
+}
+
+impl<'a> Brush<'a> {
+    fn new(theme: Theme, hues: &'a [HuePos], mode: Mode) -> Self {
+        // RND-R20: opaque mode fills every background-role cell with explicit black (the
+        // xterm black index in indexed mode); terminal mode keeps `Color::Reset`.
+        let blank = match mode.background {
+            Background::Terminal => DEFAULT,
+            Background::Opaque => {
+                let black = crate::Rgb(0, 0, 0);
+                if mode.indexed {
+                    pack_indexed(quantize(black))
+                } else {
+                    pack(black)
+                }
+            }
+        };
+        Self {
+            theme,
+            table: lut(theme),
+            hues,
+            mode,
+            blank,
+            mapped: std::cell::Cell::new(0),
+        }
+    }
+
+    #[inline(always)]
+    fn color(&self, ink: Ink, i: usize, x: u16, y: u16) -> Packed {
+        if ink.role == Role::Background {
+            return self.blank;
+        }
+        let theme = self.theme;
+        let c = match role_index(ink.role) {
+            Some(r) if !per_cell(theme, ink.role) => self.table.colors[r][usize::from(ink.level)],
+            _ => self
+                .hues
+                .get(i)
+                .filter(|_| per_cell(theme, ink.role))
+                .map_or_else(|| theme.color(ink, x, y), |&p| rainbow_at(p, ink.level)),
+        };
+        if self.mode.indexed {
+            pack_indexed(quantize(c))
+        } else {
+            pack(c)
+        }
+    }
+
+    /// The emitted glyph and colours of canvas cell `i` at `(x, y)`, updating its
+    /// hysteresis memory (RND-R14, RND-R15). Painting an unchanged cell again returns the
+    /// same result and leaves the memory as it was, which is what lets the changed-cell
+    /// path skip it (RND-R22).
+    #[inline(always)]
+    fn paint(
+        &self,
+        cell: &sciart_core::Cell,
+        i: usize,
+        x: u16,
+        y: u16,
+        memory: Option<&mut Emitted>,
+    ) -> Emitted {
+        self.mapped.set(self.mapped.get() + 1);
+        let mut ch = cell.ch;
+        let mut fg = self.color(cell.ink, i, x, y);
+        let mut bg = self.color(cell.bg, i, x, y);
+        // Invisible attributes (RND-R15): a blank shows no foreground, and a half
+        // block of one colour is a blank in that colour.
+        if fg == bg && bg != DEFAULT && matches!(ch, '▀' | '▄') {
+            ch = ' ';
+        }
+        if ch == ' ' {
+            // A blank shows no foreground; the background carries the opaque ground.
+            fg = DEFAULT;
+        }
+        if let Some(m) = memory {
+            if m.ch == ch {
+                if near(m.fg, fg) {
+                    fg = m.fg;
+                }
+                if near(m.bg, bg) {
+                    bg = m.bg;
+                }
+            }
+            let e = Emitted { ch, fg, bg };
+            if *m != e {
+                *m = e;
+            }
+        }
+        Emitted { ch, fg, bg }
+    }
+}
+
+/// Write an emitted cell into a ratatui cell, as the full-area loop always has.
+#[inline(always)]
+fn store(out: &mut ratatui::buffer::Cell, e: Emitted) {
+    out.set_char(e.ch);
+    out.fg = unpack(e.fg);
+    out.bg = unpack(e.bg);
+    out.modifier = Modifier::empty();
+}
+
+/// The ratatui cell [`store`] leaves for `e` in a reset cell: what the full-area path
+/// would hold for it, for the changed-cell path's comparison (RND-R22).
+#[inline(always)]
+fn stored(e: Emitted) -> ratatui::buffer::Cell {
+    let mut c = ratatui::buffer::Cell::EMPTY;
+    store(&mut c, e);
+    c
+}
+
 /// The painting loop: `hues` (per-position rainbow parts) and `memory` (hysteresis) may
 /// be empty, in which case rainbow hues are computed per cell and colours are exact.
+/// Returns the cells it mapped (RND-R22).
 fn paint_with(
     canvas: &Canvas,
     theme: Theme,
@@ -258,42 +477,12 @@ fn paint_with(
     hues: &[HuePos],
     memory: &mut [Emitted],
     mode: Mode,
-) {
-    // RND-R20: opaque mode fills every background-role cell with explicit black (the
-    // xterm black index in indexed mode); terminal mode keeps `Color::Reset`.
-    let blank = match mode.background {
-        Background::Terminal => DEFAULT,
-        Background::Opaque => {
-            let black = crate::Rgb(0, 0, 0);
-            if mode.indexed {
-                pack_indexed(quantize(black))
-            } else {
-                pack(black)
-            }
-        }
-    };
+) -> u64 {
     let width = usize::from(canvas.size().width());
-    let table = lut(theme);
-    let color = |ink: Ink, i: usize, x: u16, y: u16| -> Packed {
-        if ink.role == Role::Background {
-            return blank;
-        }
-        let c = match role_index(ink.role) {
-            Some(r) if !per_cell(theme, ink.role) => table.colors[r][usize::from(ink.level)],
-            _ => hues
-                .get(i)
-                .filter(|_| per_cell(theme, ink.role))
-                .map_or_else(|| theme.color(ink, x, y), |&p| rainbow_at(p, ink.level)),
-        };
-        if mode.indexed {
-            pack_indexed(quantize(c))
-        } else {
-            pack(c)
-        }
-    };
+    let brush = Brush::new(theme, hues, mode);
     // `paint` is only ever given an area inside its buffer; clip to both anyway.
     if area.x < buf.area.x || area.y < buf.area.y {
-        return;
+        return 0;
     }
     let right = area.right().min(buf.area.right());
     let bottom = area.bottom().min(buf.area.bottom());
@@ -305,39 +494,11 @@ fn paint_with(
         let dst = &mut buf.content[start..start + cols];
         for (cx, (cell, out)) in src.iter().zip(dst).enumerate() {
             let i = cy * width + cx;
-            let (x, y) = (cx as u16, cy as u16);
-            let mut ch = cell.ch;
-            let mut fg = color(cell.ink, i, x, y);
-            let mut bg = color(cell.bg, i, x, y);
-            // Invisible attributes (RND-R15): a blank shows no foreground, and a half
-            // block of one colour is a blank in that colour.
-            if fg == bg && bg != DEFAULT && matches!(ch, '▀' | '▄') {
-                ch = ' ';
-            }
-            if ch == ' ' {
-                // A blank shows no foreground; the background carries the opaque ground.
-                fg = DEFAULT;
-            }
-            if let Some(m) = memory.get_mut(i) {
-                if m.ch == ch {
-                    if near(m.fg, fg) {
-                        fg = m.fg;
-                    }
-                    if near(m.bg, bg) {
-                        bg = m.bg;
-                    }
-                }
-                let e = Emitted { ch, fg, bg };
-                if *m != e {
-                    *m = e;
-                }
-            }
-            out.set_char(ch);
-            out.fg = unpack(fg);
-            out.bg = unpack(bg);
-            out.modifier = Modifier::empty();
+            let e = brush.paint(cell, i, cx as u16, cy as u16, memory.get_mut(i));
+            store(out, e);
         }
     }
+    brush.mapped.get()
 }
 
 #[cfg(test)]

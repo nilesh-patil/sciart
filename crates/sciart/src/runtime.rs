@@ -220,11 +220,14 @@ impl Runtime {
     /// `wait` shortened to the time left, so a loop that waits for input wakes when the
     /// deadline arrives even when nothing else would wake it (RT-R23, RT-R21).
     pub fn cap_wait(&self, wait: Duration) -> Duration {
-        // `try_`: a deadline too far away for a `Duration` caps nothing.
-        match self.time_left().map(Duration::try_from_secs_f64) {
-            Some(Ok(left)) => wait.min(left),
-            _ => wait,
-        }
+        self.remaining().map_or(wait, |left| wait.min(left))
+    }
+
+    /// [`Runtime::time_left`] as a `Duration`, for `block_timeout` (RT-R21, RT-R23). A
+    /// deadline too far away for a `Duration` counts as none: it caps nothing.
+    pub fn remaining(&self) -> Option<Duration> {
+        self.time_left()
+            .and_then(|left| Duration::try_from_secs_f64(left).ok())
     }
 
     /// The scene's share of `tick` (RT-R2, RT-R5).
@@ -897,6 +900,18 @@ mod tests {
         // A deadline beyond what a `Duration` holds caps nothing.
         let r = rt(&[&OK], 0).with_deadline(f64::MAX);
         assert_eq!(r.cap_wait(second), second);
+        assert_eq!(r.remaining(), None);
+    }
+
+    #[test]
+    fn rt_r21_rt_r23_remaining_is_the_time_left_as_a_duration() {
+        assert_eq!(rt(&[&OK], 0).remaining(), None, "no deadline");
+        let mut r = rt(&[&OK], 0).with_deadline(2.0);
+        assert_eq!(r.remaining(), Some(Duration::from_secs(2)));
+        r.pass_wall(1.75);
+        assert_eq!(r.remaining(), Some(Duration::from_millis(250)));
+        r.pass_wall(1.0);
+        assert_eq!(r.remaining(), Some(Duration::ZERO));
     }
 
     #[test]

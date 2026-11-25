@@ -2,19 +2,23 @@
 //!
 //! ```text
 //! pixi run rs-cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] [--sort COL]
-//!                  [--replays N] [--crossterm] [--exact] [--emit-limits]
+//!                  [--replays N] [--full] [--crossterm] [--exact] [--emit-limits]
 //! ```
 //!
 //! Drives every scene the way the app does: 30 drawn frames per simulated second, each
 //! `STEPS_PER_FRAME` fixed steps + one render through `Stage`, then the app's `Painter`
-//! into a ratatui buffer, then the same protocol as `ratatui::Terminal::draw` (diff
-//! against the previous frame, `draw`, `hide_cursor`, `flush`, swap, reset) through the
-//! app's `FrameBackend` into a `LineWriter` like `stdout`'s. Reported per scene (means
-//! over the steady-state frames, the first full-screen draw excluded):
+//! and changed-cell `Compositor` (RND-R22) through the app's `FrameBackend` into a
+//! `LineWriter` like `stdout`'s. `--full` uses the full-area reference instead: the
+//! painter into a cleared ratatui buffer, then the protocol of `ratatui::Terminal::draw`
+//! (diff against the previous frame, `draw`, `hide_cursor`, `flush`, swap, reset); the
+//! bytes are the same, only the time differs. Reported per scene (means over the
+//! steady-state frames, the first full-screen draw excluded):
 //!
 //! - `upd+rnd`: the steps and the render, µs;
-//! - `paint`: the painter, µs;
-//! - `diff+enc`: diff + escape encoding + the buffer swap/reset, µs;
+//! - `paint`: the painter (with the compositor: comparing the canvas and painting the
+//!   changed cells), µs;
+//! - `diff+enc`: diff + escape encoding + the buffer swap/reset (with the compositor:
+//!   encoding the changed cells), µs;
 //! - `B/frame`, `p95`: bytes written per frame, mean and 95th percentile;
 //! - `cells`: changed cells per frame; `wr`: `write` calls (syscalls) per frame;
 //! - `blk@5`, `blk@20`, `blk2@20` (2×2 squares, not ratcheted), `dark@5`, `dark@20`,
@@ -28,7 +32,7 @@
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
 //! descending), `dark` (dark@20, ascending), `cov`, `cmass`, `edge`, `neon` (at 20 s,
 //! descending), `p99l` (at 20 s, ascending) or `name` (default: registry order).
-//! `--crossterm` uses ratatui's `CrosstermBackend` and `--exact` turns
+//! `--crossterm` (which implies `--full`) uses ratatui's `CrosstermBackend` and `--exact` turns
 //! the RND-R14 colour hysteresis off, for before/after comparisons. `--emit-limits`
 //! prints ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs` instead.
 //! `--replays N` runs each scene N times and keeps every frame's fastest time (use 3 or
@@ -47,10 +51,10 @@ use ratatui::layout::Rect;
 use sciart::metrics::{ArtMetrics, Clean, art_metrics};
 use sciart_core::prelude::*;
 use sciart_generators::Entry;
-use sciart_render::{FrameBackend, Painter, Theme, paint};
+use sciart_render::{Compositor, Content, FrameBackend, Painter, Theme, paint};
 
 const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] \
-                     [--sort bytes|cpu|blk|dark|cov|cmass|edge|neon|p99l|name] [--replays N] [--crossterm] [--exact] [--emit-limits]";
+                     [--sort bytes|cpu|blk|dark|cov|cmass|edge|neon|p99l|name] [--replays N] [--full] [--crossterm] [--exact] [--emit-limits]";
 /// The app's default 30 FPS over the fixed 60 Hz update (ADR-0003).
 const STEPS_PER_FRAME: u64 = 2;
 /// Art metrics are sampled at these simulated times (GEN-R17, GEN-R18, GEN-R21).
@@ -64,6 +68,8 @@ struct Args {
     seed: u64,
     theme: Theme,
     sort: String,
+    /// The full-area reference instead of the changed-cell compositor (RND-R22).
+    full: bool,
     /// ratatui's `CrosstermBackend` instead of the app's `FrameBackend` (before/after).
     crossterm: bool,
     /// No colour hysteresis (RND-R14), for before/after.
@@ -82,6 +88,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
         seed: 42,
         theme: Theme::Astro,
         sort: "name".into(),
+        full: false,
         crossterm: false,
         exact: false,
         emit_limits: false,
@@ -134,6 +141,7 @@ fn parse(mut it: impl Iterator<Item = String>) -> Result<Args, String> {
                     .filter(|&n| n > 0)
                     .ok_or(format!("bad --replays {v}"))?;
             }
+            "--full" => args.full = true,
             "--crossterm" => args.crossterm = true,
             "--exact" => args.exact = true,
             "--emit-limits" => args.emit_limits = true,
@@ -227,6 +235,8 @@ fn run<B: Backend>(entry: &Entry, args: &Args, mut backend: B, sink: &Sink) -> R
         Painter::new()
     };
     let (mut prev, mut cur) = (Buffer::empty(area), Buffer::empty(area));
+    // RND-R22: the app's path; `--full` (and the crossterm backend) keep the reference.
+    let mut compositor = (!args.full && !args.crossterm).then(Compositor::new);
     let frames = (args.secs * 30.0).round() as u64;
     let metric_frames = METRIC_TIMES.map(|t| (t / SIM_DT / STEPS_PER_FRAME as f64).round() as u64);
 
@@ -244,19 +254,33 @@ fn run<B: Backend>(entry: &Entry, args: &Args, mut backend: B, sink: &Sink) -> R
         }
         stage.render();
         let t1 = Instant::now();
-        painter.paint(stage.frame(), args.theme, area, &mut cur);
-        let t2 = Instant::now();
-        let before = sink.0.get();
         let mut changed = 0usize;
-        {
-            let diff = prev.diff_iter(&cur).inspect(|_| changed += 1);
+        let (t2, before) = if let Some(compositor) = compositor.as_mut() {
+            let content = Content::Canvas {
+                canvas: stage.frame(),
+                theme: args.theme,
+                painter: &mut painter,
+                overlay: None,
+            };
+            compositor.compose(area, content);
+            let (t2, before) = (Instant::now(), sink.0.get());
             // The sink cannot fail.
-            let _ = backend.draw(diff);
-            let _ = backend.hide_cursor();
-            let _ = backend.flush();
-        }
-        std::mem::swap(&mut prev, &mut cur);
-        cur.reset();
+            let _ = compositor.emit(&mut backend);
+            changed = compositor.work().sent;
+            (t2, before)
+        } else {
+            painter.paint(stage.frame(), args.theme, area, &mut cur);
+            let (t2, before) = (Instant::now(), sink.0.get());
+            {
+                let diff = prev.diff_iter(&cur).inspect(|_| changed += 1);
+                let _ = backend.draw(diff);
+                let _ = backend.hide_cursor();
+                let _ = backend.flush();
+            }
+            std::mem::swap(&mut prev, &mut cur);
+            cur.reset();
+            (t2, before)
+        };
         let t3 = Instant::now();
         let after = sink.0.get();
         // Measured outside the timed spans, on the exact colours (RND-R13).
