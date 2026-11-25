@@ -36,7 +36,7 @@ rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- 
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
-rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check"] }
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check", "site-check"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
@@ -65,6 +65,15 @@ rs-gallery-check = "python3 scripts/gallery.py --check"
 # references (rs-ci and CI).
 rs-showcase = "python3 scripts/showcase.py"
 rs-showcase-check = "python3 scripts/showcase.py --check"
+# WEB-R3 / ADR-0034: the browser player, `web/` (outside the workspace, its own `web/target`).
+# `web-build` compiles the WebAssembly module; `web-test` proves natively that a player frame
+# is the capture renderer's frame and that it lists the scenes as `sciart list --json` does.
+web-build = "cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown"
+web-test = "cargo test --locked --manifest-path web/Cargo.toml"
+# WEB-R5: the docs site (guide, gallery, player) into `site/dist/`; WEB-R4/R6/R7: its checks
+# (rs-ci and CI). `.github/workflows/pages.yml` publishes it by hand or on a release (WEB-R8).
+site-build = { cmd = "python3 scripts/build_site.py", depends-on = ["web-build"] }
+site-check = { cmd = "python3 scripts/site_check.py", depends-on = ["site-build", "web-test"] }
 # RND-R19 art review: five scenes at 80x24/200x50 through the colorblind theme.
 rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).

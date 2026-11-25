@@ -1,0 +1,143 @@
+/* The docs site (WEB-R5): a black ground, restrained type, the art small and crisp.
+   System fonts only (WEB-R6); no framework. */
+
+:root {
+  --ground: #0c0c12;      /* the recorder's terminal background, so the art sits flush */
+  --ink: #c9c9cf;
+  --quiet: #85858f;
+  --faint: #2a2a33;
+  --accent: #ffb454;      /* warm, as the scenes' `Hot` */
+  --cool: #6cb4ff;        /* and their `Cold` */
+  --mono: ui-monospace, "SF Mono", SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html { background: var(--ground); }
+
+body {
+  margin: 0;
+  background: var(--ground);
+  color: var(--ink);
+  font: 16px/1.6 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: var(--ink); text-decoration-color: var(--faint); text-underline-offset: 3px; }
+a:hover, a:focus-visible { color: var(--accent); text-decoration-color: currentColor; }
+:focus-visible { outline: 1px solid var(--accent); outline-offset: 3px; }
+
+/* Header and footer: one quiet line each. */
+.site {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0.5rem 2rem;
+  max-width: 72rem;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 0;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+}
+.site .mark { color: var(--ink); text-decoration: none; letter-spacing: 0.08em; }
+.site nav { display: flex; flex-wrap: wrap; gap: 0 1.5rem; }
+.site nav a { color: var(--quiet); text-decoration: none; }
+.site nav a[aria-current="page"], .site nav a:hover { color: var(--ink); }
+
+footer {
+  max-width: 72rem;
+  margin: 6rem auto 0;
+  padding: 0 1.5rem 3rem;
+  color: var(--quiet);
+  font-family: var(--mono);
+  font-size: 0.75rem;
+}
+
+main { max-width: 72rem; margin: 0 auto; padding: 0 1.5rem; }
+
+h1, h2, h3 { font-weight: 400; line-height: 1.25; color: var(--ink); }
+h1 { font-size: 1.75rem; margin: 4rem 0 1rem; }
+h2 { font-size: 1.25rem; margin: 3rem 0 0.75rem; }
+h3 { font-size: 1rem; margin: 2rem 0 0.5rem; font-family: var(--mono); }
+p, ul, ol, table, pre { margin: 0 0 1.1rem; }
+.lede { color: var(--quiet); max-width: 38rem; }
+
+code, pre, kbd { font-family: var(--mono); font-size: 0.875em; }
+code { color: #e6e6ea; }
+pre {
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+  background: #08080c;
+  border-left: 1px solid var(--faint);
+  line-height: 1.5;
+}
+pre code { color: var(--ink); }
+kbd { padding: 0 0.3em; border: 1px solid var(--faint); border-radius: 3px; }
+
+table { border-collapse: collapse; }
+th, td { text-align: left; padding: 0.35rem 1.25rem 0.35rem 0; border-bottom: 1px solid var(--faint); vertical-align: top; }
+th { font-weight: 400; color: var(--quiet); }
+
+img { max-width: 100%; height: auto; }
+
+/* Home */
+.hero { margin: 5rem 0 1rem; }
+.hero img { display: block; width: 800px; margin: 0 auto; }
+.hero figcaption { text-align: center; }
+.hero figcaption, figcaption { color: var(--quiet); font-size: 0.8125rem; font-family: var(--mono); margin-top: 0.5rem; }
+.home h1 { margin-top: 3rem; font-family: var(--mono); letter-spacing: 0.04em; }
+.doors { display: flex; flex-wrap: wrap; gap: 1rem 3rem; padding: 0; list-style: none; font-family: var(--mono); }
+
+/* The guide: chapters on the left, the text in a readable measure. */
+.book { display: grid; grid-template-columns: 13rem minmax(0, 40rem); gap: 3rem; }
+.book nav.chapters { padding-top: 4.4rem; font-family: var(--mono); font-size: 0.8125rem; }
+.book nav.chapters ol { list-style: none; margin: 0; padding: 0; }
+.book nav.chapters li { margin: 0 0 0.45rem; }
+.book nav.chapters a { color: var(--quiet); text-decoration: none; }
+.book nav.chapters a[aria-current="page"] { color: var(--accent); }
+.pager { display: flex; justify-content: space-between; gap: 1rem; margin-top: 4rem; font-family: var(--mono); font-size: 0.875rem; }
+.pager a { color: var(--quiet); }
+
+/* Gallery */
+.clips, .scenes { display: grid; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); gap: 2.5rem 2rem; padding: 0; list-style: none; }
+.clips figure, .scenes figure { margin: 0; }
+.clips img, .scenes img { display: block; width: 100%; background: var(--ground); }
+.scenes .name { font-family: var(--mono); font-size: 0.8125rem; color: var(--ink); margin: 0.6rem 0 0.1rem; }
+.scenes .name a { text-decoration: none; }
+.scenes figcaption { font-family: var(--sans); margin: 0; }
+.scenes .desc { color: var(--quiet); font-size: 0.875rem; margin: 0; }
+.scenes .play { font-family: var(--mono); font-size: 0.75rem; }
+.toc { display: flex; flex-wrap: wrap; gap: 0.25rem 1.5rem; padding: 0; list-style: none; font-family: var(--mono); font-size: 0.8125rem; }
+.toc a { color: var(--quiet); }
+
+/* Player */
+.player-stage { margin: 3rem 0 0; }
+.player-stage canvas, .player-stage .fallback img { display: block; max-width: 100%; height: auto; margin: 0 auto; background: var(--ground); }
+.player-stage .fallback { margin: 0; }
+.controls { display: flex; flex-wrap: wrap; align-items: end; gap: 1rem 1.5rem; margin: 1.5rem 0 0; font-family: var(--mono); font-size: 0.8125rem; }
+.controls label { display: flex; flex-direction: column; gap: 0.3rem; color: var(--quiet); }
+.controls select, .controls input, .controls button {
+  font: inherit;
+  color: var(--ink);
+  background: #08080c;
+  border: 1px solid var(--faint);
+  border-radius: 3px;
+  padding: 0.35rem 0.55rem;
+}
+.controls input { width: 9rem; }
+.controls select, .controls input, .controls button { height: 2.25rem; }
+.controls button { cursor: pointer; }
+.controls button:hover { border-color: var(--quiet); }
+.status { font-family: var(--mono); font-size: 0.8125rem; color: var(--quiet); min-height: 1.5em; margin: 1rem 0 0; }
+.status .title { color: var(--ink); }
+.note { color: var(--quiet); font-size: 0.875rem; max-width: 40rem; }
+
+[hidden] { display: none !important; }
+
+@media (max-width: 48rem) {
+  .book { grid-template-columns: minmax(0, 1fr); gap: 0; }
+  .book nav.chapters { padding-top: 2rem; }
+  h1 { margin-top: 2.5rem; }
+}
