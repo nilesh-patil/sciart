@@ -4,7 +4,7 @@ Every one of the 85 registered scenes, one current frame each: astro theme at 16
 
 ## In motion
 
-16 clips recorded by `sciart record` from [`docs/showcase.toml`](showcase.toml) (`pixi run rs-showcase`); each runs from the simulated time shown, at the size, seed and frame rate shown.
+18 clips recorded by `sciart record` from [`docs/showcase.toml`](showcase.toml) (`pixi run rs-showcase`); each runs from the simulated time shown, at the size, seed and frame rate shown.
 
 ### `strange_attractors` in motion
 
@@ -72,6 +72,12 @@ Earth & Sky · 80x24 cells · t = 5–10 s · 12 fps · seed 42 · astro
 
 Voyages · 80x24 cells · t = 4–12 s · 15 fps · seed 42 · astro
 
+### `double_pendulum` in motion
+
+<img src="media/double_pendulum.gif" alt="Double pendulum: twin pendulums released a thousandth of a radian apart trace dotted trails that drift apart into chaos">
+
+Forces & Waves · 80x24 cells · t = 0–12 s · 15 fps · seed 42 · astro
+
 ### `binary_inspiral` in motion
 
 <img src="media/binary_inspiral.gif" alt="Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple">
@@ -101,6 +107,12 @@ Molecules of Life · 80x24 cells · t = 6–14 s · 12 fps · seed 42 · astro
 <img src="media/comet_tails.gif" alt="Comet tails: a comet rounds the Sun with a curved dust tail and a straight blue ion tail pushed away from it">
 
 Sun & Planets · 80x24 cells · t = 0–8 s · 15 fps · seed 42 · astro
+
+### `black_hole` in motion
+
+<img src="media/black_hole.gif" alt="Black hole: an accretion disk of infalling gas turns around the dark hole, its photon ring drawn as bright dots">
+
+Deep Cosmos · 80x24 cells · t = 0–6 s · 20 fps · seed 42 · astro
 
 ## Deep Cosmos
 

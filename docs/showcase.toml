@@ -159,6 +159,19 @@ readme = "grid"
 alt = "Rocket launch: ignition, liftoff and the climb away from the tower on an exhaust plume"
 
 [[clip]]
+id = "double-pendulum"
+scene = "double_pendulum"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 12.0
+fps = 15
+theme = "astro"
+out = "docs/media/double_pendulum.gif"
+readme = "grid"
+alt = "Double pendulum: twin pendulums released a thousandth of a radian apart trace dotted trails that drift apart into chaos"
+
+[[clip]]
 id = "binary-inspiral"
 scene = "binary_inspiral"
 seed = 42
@@ -168,7 +181,8 @@ seconds = 8.0
 fps = 20
 theme = "astro"
 out = "docs/media/binary_inspiral.gif"
-alt = "Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple"
+readme = "grid"
+alt ="Binary inspiral: two black holes circle closer, radiating a two-armed gravitational-wave spiral in stipple"
 
 [[clip]]
 id = "physarum"
@@ -217,3 +231,15 @@ fps = 15
 theme = "astro"
 out = "docs/media/comet_tails.gif"
 alt = "Comet tails: a comet rounds the Sun with a curved dust tail and a straight blue ion tail pushed away from it"
+
+[[clip]]
+id = "black-hole"
+scene = "black_hole"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 6.0
+fps = 20
+theme = "astro"
+out = "docs/media/black_hole.gif"
+alt = "Black hole: an accretion disk of infalling gas turns around the dark hole, its photon ring drawn as bright dots"
