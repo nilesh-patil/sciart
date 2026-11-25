@@ -1,6 +1,6 @@
 //! End-to-end: the real binary in an 80x24 pseudo-terminal, screen decoded by a vt100
 //! emulator (SPEC-006 end-to-end layer; RND-R4, RND-R5, RND-R9, RT-R6, RT-R9, RT-R12, CLI-R7,
-//! CFG-R2, CFG-R3, RT-R17, RND-R18).
+//! CFG-R2, CFG-R3, RT-R17, RND-R18, CLI-R12, CLI-R14, CLI-R16, CLI-R17, RT-R23).
 //! Unix only (portable-pty's native backend).
 #![cfg(unix)]
 #![allow(clippy::disallowed_methods)] // real-time timeouts against a real process (ADR-0008 applies to generators)
@@ -1166,4 +1166,277 @@ fn rnd_r20_indexed_opaque_ground_is_xterm_black() {
     s.press("\x1b");
     let (status, _) = s.quit();
     assert!(status.success(), "exit status {status:?}");
+}
+
+// ----- M25: scriptable modes (CLI-R12, CLI-R14, CLI-R16, CLI-R17, RT-R23) -----
+
+/// The art is on screen: enough lit cells.
+fn lit(screen: &str) -> bool {
+    screen.chars().filter(|c| !c.is_whitespace()).count() > 50
+}
+
+/// `sciart while … -- <command>` in the pty, a fixed scene and no keep-awake helper, with
+/// the spool directory (`TMPDIR`) under the test's control.
+fn start_while(flags: &[&str], command: &[&str]) -> (Session, tempfile::TempDir) {
+    let spool_dir = tempfile::tempdir().unwrap();
+    let mut args = vec![
+        "while",
+        "--only",
+        "starfield",
+        "--seed",
+        "1",
+        "--ascii",
+        "--keep-awake",
+        "off",
+    ];
+    args.extend_from_slice(flags);
+    args.push("--");
+    args.extend_from_slice(command);
+    let tmpdir = spool_dir.path().to_str().unwrap();
+    let s = Session::spawn(&args, None, &[("TMPDIR", tmpdir)]);
+    (s, spool_dir)
+}
+
+/// CLI-R14: no spool file outlives the run.
+fn assert_no_spool_left(dir: &std::path::Path) {
+    let left: Vec<_> = std::fs::read_dir(dir).unwrap().collect();
+    assert!(left.is_empty(), "spool files left behind: {left:?}");
+}
+
+fn find(haystack: &[u8], needle: &str) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|w| w == needle.as_bytes())
+}
+
+/// Where the terminal was restored: the (last) alternate-screen exit.
+fn restored_at(raw: &[u8]) -> usize {
+    raw.windows(ALT_LEAVE.len())
+        .rposition(|w| w == ALT_LEAVE)
+        .expect("left the alternate screen")
+}
+
+/// The pid a `sh -c 'echo $$ > file; exec …'` command wrote, once it has.
+fn read_pid(file: &std::path::Path) -> u32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(pid) = std::fs::read_to_string(file)
+            .ok()
+            .and_then(|t| t.trim().parse().ok())
+        {
+            return pid;
+        }
+        assert!(Instant::now() < deadline, "the command never wrote its pid");
+        thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn cli_r14_while_exits_with_the_commands_status_and_replays_its_output_after_the_restore() {
+    for code in [0u32, 3] {
+        let script = format!("echo to-stderr >&2; echo to-stdout; sleep 2; exit {code}");
+        let (s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
+        s.wait_for("the art", lit);
+        let (status, raw) = s.wait_exit();
+        assert_eq!(status.exit_code(), code, "exit {code}");
+        assert_eq!(
+            count(&raw, ALT_ENTER),
+            1,
+            "entered the alternate screen once"
+        );
+        assert_eq!(count(&raw, ALT_LEAVE), 1, "left the alternate screen once");
+        let restored = restored_at(&raw);
+        let out = find(&raw, "to-stdout").expect("stdout replayed");
+        let err = find(&raw, "to-stderr").expect("stderr replayed");
+        assert!(restored < out, "stdout only after the restore");
+        assert!(
+            out < err,
+            "stdout, then stderr, whatever order they were written in"
+        );
+        assert_no_spool_left(spool_dir.path());
+    }
+}
+
+#[test]
+fn cli_r14_q_closes_the_art_and_keeps_waiting_and_copying() {
+    let script = "echo early; sleep 3; echo late; exit 5";
+    let (mut s, spool_dir) = start_while(&[], &["sh", "-c", script]);
+    s.wait_for("the art", lit);
+    s.press("q");
+    s.wait_raw("the restore, then the output so far", |raw| {
+        raw.windows(ALT_LEAVE.len()).any(|w| w == ALT_LEAVE)
+            && find(raw, "early").is_some_and(|at| at > restored_at(raw))
+    });
+    assert!(
+        s.child.try_wait().unwrap().is_none(),
+        "sciart is still waiting for the command"
+    );
+    let (status, raw) = s.wait_exit();
+    assert_eq!(status.exit_code(), 5, "the command's status after q");
+    let early = find(&raw, "early").unwrap();
+    let late = find(&raw, "late").expect("output after q is copied too");
+    assert!(early < late);
+    assert_eq!(count(&raw, ALT_LEAVE), 1, "the terminal is restored once");
+    assert_no_spool_left(spool_dir.path());
+}
+
+#[test]
+fn cli_r14_ctrl_c_kills_the_command_and_exits_130() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("pid");
+    let script = format!(
+        "echo $$ > '{}'; echo started; exec sleep 30",
+        pid_file.display()
+    );
+    let (mut s, spool_dir) = start_while(&[], &["sh", "-c", &script]);
+    s.wait_for("the art", lit);
+    let pid = read_pid(&pid_file);
+    assert!(running(pid), "the command runs beside the art");
+    s.press("\x03");
+    let (status, raw) = s.wait_exit();
+    assert_eq!(status.exit_code(), 130);
+    assert!(!running(pid), "the command was killed");
+    let restored = restored_at(&raw);
+    assert!(
+        find(&raw, "started").is_some_and(|at| at > restored),
+        "its output so far is still replayed"
+    );
+    assert_no_spool_left(spool_dir.path());
+}
+
+#[test]
+fn cli_r12_cli_r14_a_deadline_kills_the_command_and_exits_124() {
+    let scratch = tempfile::tempdir().unwrap();
+    let pid_file = scratch.path().join("pid");
+    let script = format!("echo $$ > '{}'; exec sleep 30", pid_file.display());
+    let (s, spool_dir) = start_while(&["--for", "2"], &["sh", "-c", &script]);
+    let pid = read_pid(&pid_file);
+    let (status, raw) = s.wait_exit();
+    assert_eq!(status.exit_code(), 124);
+    assert!(!running(pid), "the command was killed at the deadline");
+    assert_eq!(count(&raw, ALT_LEAVE), 1, "the terminal is restored");
+    assert_no_spool_left(spool_dir.path());
+}
+
+#[test]
+fn cli_r14_a_command_that_cannot_start_exits_127_before_the_alternate_screen() {
+    let spool_dir = tempfile::tempdir().unwrap();
+    let out = Command::new(BIN)
+        .args([
+            "while",
+            "--keep-awake",
+            "off",
+            "--",
+            "/definitely/not/a/command",
+        ])
+        .env("TMPDIR", spool_dir.path())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(127));
+    assert!(
+        out.stdout.is_empty(),
+        "no terminal set-up: {:?}",
+        out.stdout
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.starts_with("sciart: cannot run '/definitely/not/a/command': "),
+        "{stderr}"
+    );
+    assert_eq!(stderr.lines().count(), 1, "one line: {stderr}");
+    assert_no_spool_left(spool_dir.path());
+    // A missing command line is a usage error.
+    for args in [&["while"][..], &["while", "--"][..]] {
+        let out = Command::new(BIN).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
+}
+
+/// RT-R23 / CLI-R12: the deadline is wall time, so a paused run still ends on time, and the
+/// HUD counts it down.
+#[test]
+fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
+    let args = [
+        "run",
+        "starfield",
+        "--for",
+        "4",
+        "--hud",
+        "--ascii",
+        "--seed",
+        "1",
+        "--keep-awake",
+        "off",
+    ];
+    let started = Instant::now();
+    let mut s = Session::start(&args);
+    s.wait_for("the time left in the HUD", |t| t.contains("| ends 00:0"));
+    s.press(" ");
+    s.wait_for("pause", |t| t.contains("| PAUSED"));
+    let (status, raw) = s.wait_exit();
+    let took = started.elapsed();
+    assert!(status.success(), "a deadline is a normal end: {status:?}");
+    assert!(
+        (Duration::from_secs(4)..Duration::from_secs(9)).contains(&took),
+        "{took:?}"
+    );
+    assert_eq!(
+        count(&raw, ALT_LEAVE),
+        1,
+        "the terminal is restored as by q"
+    );
+    for bad in ["0", "25h", "soon"] {
+        let out = Command::new(BIN)
+            .args(["run", "starfield", "--for", bad])
+            .output()
+            .unwrap();
+        assert_eq!(out.status.code(), Some(2), "--for {bad}");
+    }
+}
+
+/// CLI-R16 through the real binary, piped: the versioned object, parsed as JSON.
+#[test]
+fn cli_r16_list_json_is_the_versioned_object() {
+    let out = Command::new(BIN).args(["list", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
+    assert_eq!(doc["schema"], 1);
+    let scenes = doc["scenes"].as_array().unwrap();
+    let starfield = scenes.iter().find(|s| s["name"] == "starfield").unwrap();
+    assert_eq!(starfield["category"], "deep-cosmos");
+    assert_eq!(starfield["category_label"], "Deep Cosmos");
+    assert!(
+        starfield["title"]
+            .as_str()
+            .is_some_and(|t| t.contains("Parallax"))
+    );
+    assert!(starfield["captions"].is_array() && starfield["aliases"].is_array());
+}
+
+/// CLI-R17: completions and the manual page come from the binary, read no config and exit 0;
+/// an unknown shell is a usage error.
+#[test]
+fn cli_r17_completions_and_man_page_need_no_config() {
+    let missing = ["--config", "/definitely/not/here.toml"];
+    for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
+        let out = Command::new(BIN)
+            .args(missing)
+            .args(["completions", shell])
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{shell}: {out:?}");
+        let script = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            script.contains("sciart") && script.contains("while"),
+            "{shell}"
+        );
+    }
+    let out = Command::new(BIN).args(missing).arg("man").output().unwrap();
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains(".TH sciart"));
+    let out = Command::new(BIN)
+        .args(["completions", "tcsh"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
 }
