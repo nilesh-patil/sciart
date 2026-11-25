@@ -1,0 +1,182 @@
+# The parameters each clip in this directory was recorded with (WEB-R1).
+# Written by scripts/showcase.py after each recording; do not edit by hand.
+
+[[clip]]
+out = "docs/media/strange_attractors.gif"
+scene = "strange_attractors"
+seed = 42
+size = "100x30"
+start = 48.0
+seconds = 6.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/galaxy_collision.gif"
+scene = "galaxy_collision"
+seed = 42
+size = "80x24"
+start = 11.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/electron_orbitals.gif"
+scene = "electron_orbitals"
+seed = 42
+size = "80x24"
+start = 6.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/solar_system.gif"
+scene = "solar_system"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/total_solar_eclipse.gif"
+scene = "total_solar_eclipse"
+seed = 42
+size = "80x24"
+start = 6.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/belousov_zhabotinsky.gif"
+scene = "belousov_zhabotinsky"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/snowflake_growth.gif"
+scene = "snowflake_growth"
+seed = 42
+size = "80x24"
+start = 51.5
+seconds = 8.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/mitosis.gif"
+scene = "mitosis"
+seed = 42
+size = "80x24"
+start = 13.0
+seconds = 10.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/vortex_street.gif"
+scene = "vortex_street"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 6.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/aurora.gif"
+scene = "aurora"
+seed = 42
+size = "80x24"
+start = 5.0
+seconds = 5.0
+fps = 12
+theme = "astro"
+
+[[clip]]
+out = "docs/media/rocket_launch.gif"
+scene = "rocket_launch"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/double_pendulum.gif"
+scene = "double_pendulum"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 12.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/binary_inspiral.gif"
+scene = "binary_inspiral"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/physarum.gif"
+scene = "physarum"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/chladni_plate.gif"
+scene = "chladni_plate"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 5.0
+fps = 20
+theme = "astro"
+
+[[clip]]
+out = "docs/media/dna_helix.gif"
+scene = "dna_helix"
+seed = 42
+size = "80x24"
+start = 6.0
+seconds = 8.0
+fps = 12
+theme = "astro"
+
+[[clip]]
+out = "docs/media/comet_tails.gif"
+scene = "comet_tails"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/black_hole.gif"
+scene = "black_hole"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 6.0
+fps = 20
+theme = "astro"

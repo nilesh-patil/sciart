@@ -127,6 +127,10 @@ fn cli_r8_bad_record_requests_exit_2_without_writing() {
             vec!["record", "starfield", "--out", out, "--size", "0x0"],
             "WxH",
         ),
+        (
+            vec!["record", "starfield", "--out", out, "--start", "1201"],
+            "1201",
+        ),
     ] {
         let output = run(&args);
         assert_eq!(

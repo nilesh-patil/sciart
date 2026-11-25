@@ -28,6 +28,8 @@ proptest.workspace = true
 sciart-capture.workspace = true
 sciart-render.workspace = true
 sciart-testalloc.workspace = true
+# CLI-R18: the capture glyph test skips glyphs wider than one cell.
+unicode-width.workspace = true
 # source_rules reads the scene crates' Cargo.toml manifests (GEN-R6/GEN-R16).
 toml.workspace = true
 
