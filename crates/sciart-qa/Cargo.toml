@@ -1,0 +1,26 @@
+[package]
+name = "sciart-qa"
+description = "Offline art metrics for sciart: the rs-cost probe and the per-scene art bands"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "../../README.md"
+keywords = ["terminal", "generative-art", "metrics", "testing"]
+categories = ["development-tools::testing", "visualization"]
+# LIB-R1: quality assurance only, never published; the `sciart` library ships none of it.
+publish = false
+
+[dependencies]
+ratatui.workspace = true
+sciart-render.workspace = true
+
+[dev-dependencies]
+sciart-core.workspace = true
+sciart-generators.workspace = true
+
+[lints]
+workspace = true

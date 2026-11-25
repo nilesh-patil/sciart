@@ -131,8 +131,12 @@ pub enum Command {
         #[arg(long)]
         plain: bool,
     },
-    /// Render a scene to GIF, PNG frames or an asciicast (CLI-R8; needs the `record` feature)
+    /// Render a scene to GIF, PNG frames or an asciicast
+    // CLI-R8; in default builds since CLI-R15.
     Record(RecordArgs),
+    /// Print one frame of a scene to stdout as ANSI text, for a shell greeting or a log
+    // CLI-R13.
+    Frame(crate::frame::FrameArgs),
     /// Show the art while a command runs, then print its output and exit with its status
     #[command(after_long_help = WHILE_LONG_HELP)]
     While(WhileArgs),
@@ -152,11 +156,12 @@ pub enum Command {
 
 /// CLI-R17: the subcommands `sciart man` prints a page for: every one the manual's
 /// SUBCOMMANDS section refers to, checked against the parser by a test.
-const MAN_PAGES: [&str; 7] = [
+const MAN_PAGES: [&str; 8] = [
     "sim",
     "run",
     "list",
     "record",
+    "frame",
     "while",
     "completions",
     "man",
@@ -420,7 +425,7 @@ fn speed(s: &str) -> Result<f64, String> {
 }
 
 /// CLI-R8: `WxH` in cells, both at least 1.
-fn size_arg(s: &str) -> Result<Size, String> {
+pub(crate) fn size_arg(s: &str) -> Result<Size, String> {
     let dim = |v: &str| v.parse::<u16>().ok().filter(|&n| n > 0);
     s.split_once('x')
         .and_then(|(w, h)| dim(w).zip(dim(h)))
@@ -556,6 +561,9 @@ pub fn select(
         Command::Run { name } => find(name)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(name.clone())),
+        Command::Frame(args) => find(&args.scene)
+            .map(|e| vec![e])
+            .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),
         Command::Record(args) => find(&args.scene)
             .map(|e| vec![e])
             .ok_or_else(|| UsageError::UnknownGenerator(args.scene.clone())),

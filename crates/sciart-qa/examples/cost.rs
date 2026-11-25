@@ -26,7 +26,7 @@
 //!   `edge@5`, `edge@20` (edge weight), `neon` (chroma p90 at the worse time; M14's cap
 //!   was 0.20), `p99L` (p99 lit-pixel luma at the worse time; M14's floor was 0.6): the
 //!   RND-R13 art metrics of the exact `astro` frame at t = 5 s and 20 s
-//!   (`sciart::metrics`), when `--secs` reaches them. Darkness, coverage, chroma
+//!   (`sciart_qa`), when `--secs` reaches them. Darkness, coverage, chroma
 //!   mass and edge weight are the GEN-R24 per-scene bands; the rest are informative.
 //!
 //! `--sort` orders the rows by `bytes` (descending), `cpu` (descending), `blk` (blk@20,
@@ -34,7 +34,7 @@
 //! descending), `p99l` (at 20 s, ascending) or `name` (default: registry order).
 //! `--crossterm` (which implies `--full`) uses ratatui's `CrosstermBackend` and `--exact` turns
 //! the RND-R14 colour hysteresis off, for before/after comparisons. `--emit-limits`
-//! prints ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs` instead.
+//! prints ready-to-paste `LIMITS` rows for `crates/sciart-qa/tests/art_metrics.rs` instead.
 //! `--replays N` runs each scene N times and keeps every frame's fastest time (use 3 or
 //! more on a busy machine).
 #![allow(clippy::disallowed_methods)] // wall-clock timing is the point of this tool
@@ -48,9 +48,9 @@ use std::time::Instant;
 use ratatui::backend::{Backend, CrosstermBackend};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use sciart::metrics::{ArtMetrics, Clean, art_metrics};
 use sciart_core::prelude::*;
 use sciart_generators::Entry;
+use sciart_qa::{ArtMetrics, Clean, art_metrics};
 use sciart_render::{Compositor, Content, FrameBackend, Painter, Theme, paint};
 
 const USAGE: &str = "usage: cost [scene ...] [--size WxH] [--secs S] [--seed N] [--theme T] \
@@ -312,7 +312,7 @@ fn run<B: Backend>(entry: &Entry, args: &Args, mut backend: B, sink: &Sink) -> R
     row
 }
 
-/// Ready-to-paste `LIMITS` rows for `crates/sciart/tests/art_metrics.rs`: the measured
+/// Ready-to-paste `LIMITS` rows for `crates/sciart-qa/tests/art_metrics.rs`: the measured
 /// values with the table's slack (darkness −0.02, lit coverage +0.02, chroma mass +0.003,
 /// edge weight +10 % + 0.2), alphabetical (GEN-R24).
 fn emit_limits(rows: &[Row]) {

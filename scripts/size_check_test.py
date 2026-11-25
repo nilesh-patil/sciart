@@ -105,6 +105,27 @@ class SizeCheck(unittest.TestCase):
         untrimmed = {"workspace": {"dependencies": {}}, "profile": {"release": {"strip": True}}}
         self.assertEqual(len(size_check.manifest_problems(untrimmed)), len(size_check.TRIMMED))
 
+    def test_rt_r22_cli_r15_the_default_build_must_carry_the_recorder(self) -> None:
+        tree = Tree(self.root, DEFAULT)
+        problems = size_check.judge_binary(tree.binary, self.root, "default")
+        self.assertTrue(any("without the `record` feature" in p for p in problems), problems)
+        root = self.root / "recorder"
+        tree = Tree(root, DEFAULT + ["crates/sciart/src/record.rs"])
+        self.assertEqual(size_check.judge_binary(tree.binary, root, "default"), [])
+        root = self.root / "mouse"
+        tree = Tree(root, DEFAULT + ["crates/sciart/src/record.rs", "crates/sciart-keepawake/src/mouse.rs"])
+        problems = size_check.judge_binary(tree.binary, root, "default")
+        self.assertTrue(any("`mouse`" in p for p in problems), problems)
+
+    def test_cli_r15_the_default_build_budgets_are_the_spec_values(self) -> None:
+        lines = [
+            next(l for l in (size_check.ROOT / "docs" / "specs" / name).read_text().splitlines() if l.startswith(head))
+            for name, head in (("SPEC-003-runtime-render.md", "- **RT-R22**"), ("SPEC-005-cli-config.md", "- **CLI-R15**"))
+        ]
+        size = f"{size_check.DEFAULT_BINARY_BUDGET:,}".replace(",", " ")
+        crates = f"at most {size_check.DEFAULT_CRATE_BUDGET} crates"
+        self.assertTrue(any(size in l and crates in l for l in lines), (size, crates))
+
     def test_rt_r22_budgets_are_the_spec_values(self) -> None:
         spec = (size_check.ROOT / "docs" / "specs" / "SPEC-003-runtime-render.md").read_text()
         line = next(l for l in spec.splitlines() if l.startswith("- **RT-R22**"))

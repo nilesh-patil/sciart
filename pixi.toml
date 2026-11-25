@@ -19,8 +19,10 @@ rs-build = "cargo build --workspace"
 rs-test = "cargo test --workspace --doc && cargo nextest run --workspace"
 # TEST-R10 evidence: rs-test runs exactly the tests `cargo test --workspace` lists.
 rs-test-parity = "python3 scripts/test_set_parity.py"
-# CLI-R8: the feature-gated record tests (`sciart record`, capture crate) run in the gate too.
-rs-test-record = "cargo nextest run -p sciart --features record"
+# CLI-R15: the build without the recorder (`record` still parses and exits 2, CLI-R8).
+# LIB-R7: the library's doctests with every library feature, and its tests on the library
+# alone (`--no-default-features`: the facade without the binary's dependencies).
+rs-test-features = "cargo nextest run -p sciart --no-default-features --features cli && cargo test -p sciart --doc --features png,widget,unstable-generator && cargo nextest run -p sciart --no-default-features --features png,widget,unstable-generator"
 # GEN-R15: the generated scene index in SPEC-002-generators.md matches the category files.
 # TEST-R1/R4: spec traceability (scripts/spec_check.py); TEST-R9/R10/R11: tooling schema
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
@@ -28,20 +30,24 @@ rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_c
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
-rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings"
+# LIB-R4: the library is also linted the way a library user builds it: with no default
+# features, and with `png,widget`.
+rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo clippy --workspace --all-targets --all-features -- -D warnings && cargo clippy -p sciart --all-targets --no-default-features -- -D warnings && cargo clippy -p sciart --all-targets --no-default-features --features png,widget -- -D warnings"
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
-rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-record", "rs-spec-check", "rs-snap-release", "rs-showcase-check"] }
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
 # RND-R13 per-scene CPU, terminal bytes and art metrics: `pixi run rs-cost [scene ...] [--size WxH] [--secs N] [--sort bytes]`.
-rs-cost = "cargo run -q --profile ci -p sciart --example cost --"
+rs-cost = "cargo run -q --profile ci -p sciart-qa --example cost --"
 # The same probe on the install profile (thin LTO, one codegen unit): RT-R16's pipeline-mean CPU claim.
-rs-cost-release = "cargo run -q --release -p sciart --example cost --"
-# RT-R22: release binary size (without `record`/`mouse`) and dependency-count budgets.
-rs-size = "cargo build -q --release -p sciart --bin sciart && python3 scripts/size_check.py"
+rs-cost-release = "cargo run -q --release -p sciart-qa --example cost --"
+# RT-R22 / CLI-R15: release binary size and dependency-count budgets, for the binary without
+# the recorder (`--no-default-features --features cli`) and then the default one (with
+# `record`); each build is judged before the next replaces it.
+rs-size = "cargo build -q --release -p sciart --bin sciart --no-default-features --features cli && python3 scripts/size_check.py --build lean && cargo build -q --release -p sciart --bin sciart && python3 scripts/size_check.py --build default"
 rs-list = "cargo run -q -p sciart -- list"
 # Interactive review runs share the `ci` build with the probes above; frames are the same as
 # an installed (`release`) binary's (GEN-R6), which only links slower.
@@ -64,9 +70,10 @@ rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).
 rs-install = "cargo install --path crates/sciart"
 rs-install-mouse = "cargo install --path crates/sciart --features mouse"
-# CLI-R8/ADR-0025: install or run with the headless recorder.
-rs-install-record = "cargo install --path crates/sciart --features record"
-rs-record = "cargo run --profile ci -p sciart --features record -- record"
+# CLI-R8/ADR-0025: the headless recorder; in default builds since CLI-R15, so
+# `rs-install-record` is `rs-install` under its older name.
+rs-install-record = "cargo install --path crates/sciart"
+rs-record = "cargo run --profile ci -p sciart -- record"
 
 [dependencies]
 cargo-nextest = ">=0.9.148,<0.10"
