@@ -25,14 +25,28 @@ pub struct TerminalGuard {
 /// SGR reset + show cursor: what the shell expects after the alternate screen.
 const RESTORE: &[u8] = b"\x1b[0m\x1b[?25h";
 
+/// Focus reporting off, raw mode off, alternate screen left: the steps every exit shares.
+fn leave() {
+    let _ = execute!(stdout(), DisableFocusChange);
+    ratatui::restore();
+}
+
+/// Put the terminal back the way the shell expects it without the guard: SGR reset, cursor
+/// shown, then [`leave`]. For exits that cannot run the guard's `Drop`: the panic hook and
+/// the termination-signal watcher (RT-R20). Idempotent, best effort (errors are ignored: the
+/// terminal may already be gone after `SIGHUP`).
+pub fn restore() {
+    let mut out = stdout();
+    let _ = out.write_all(RESTORE);
+    let _ = out.flush();
+    leave();
+}
+
 impl TerminalGuard {
     pub fn enter() -> io::Result<Self> {
         let prev = std::panic::take_hook();
         std::panic::set_hook(Box::new(move |info| {
-            let mut out = stdout();
-            let _ = out.write_all(RESTORE);
-            let _ = execute!(out, DisableFocusChange);
-            ratatui::restore();
+            restore();
             prev(info);
         }));
         enable_raw_mode()?;
@@ -52,7 +66,6 @@ impl Drop for TerminalGuard {
     fn drop(&mut self) {
         let _ = self.terminal.backend_mut().finish();
         let _ = self.terminal.show_cursor();
-        let _ = execute!(stdout(), DisableFocusChange);
-        ratatui::restore();
+        leave();
     }
 }
