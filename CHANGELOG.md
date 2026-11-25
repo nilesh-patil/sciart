@@ -8,6 +8,14 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- `--for <duration>` ends a run by itself (`90s`, `25m`, `1.5h`), also while paused; the HUD
+  shows the time left (CLI-R12, RT-R23).
+- `sciart while -- <command>` shows the art and keeps the machine awake until the command
+  exits, then replays its output and exits with its status
+  ([ADR-0031](docs/adr/0031-scriptable-modes.md), CLI-R14).
+- `sciart completions <shell>` and `sciart man [subcommand]` print completion scripts and
+  manual pages generated from the command line's own definition (CLI-R17).
+
 - Keep-awake on Linux: `--keep-awake inhibit` holds a `systemd-inhibit` (or
   `elogind-inhibit`) lock for as long as sciart runs, and is the default for a local Linux
   session; over SSH the default is `off` ([ADR-0028](docs/adr/0028-linux-inhibitor-helper.md),
@@ -31,6 +39,9 @@ All notable changes to this project are documented here. The format is based on
 
 ### Changed
 
+- **Breaking**: `sciart list --json` is now a versioned object, `{"schema": 1, "scenes": [...]}`,
+  and each scene also carries `category_label`, `title`, `captions` and `aliases`; fields
+  are only added from here on (CLI-R16). Scripts that read the old array need `.scenes`.
 - The terminal pipeline paints, diffs and encodes only the cells that changed since the last
   frame, with identical output: about a third less CPU per frame at 200×50 and more than
   half at 500×150 ([ADR-0030](docs/adr/0030-changed-cell-pipeline.md), RND-R22).
