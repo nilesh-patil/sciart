@@ -93,8 +93,10 @@ than red ↔ green. `t` cycles to it after `aurora`.
 
 ## Platform
 
-macOS is the primary platform: keep-awake uses `caffeinate` by default. Linux builds and
-passes the test suite (keep-awake defaults to `off` there). The optional `mouse` jiggle
+macOS and Linux are supported. Keep-awake uses `caffeinate` on macOS and, on Linux, a
+`systemd-inhibit` (or `elogind-inhibit`) lock held for as long as sciart runs; over SSH it
+defaults to `off`, since keeping the remote machine awake is rarely what you want. Choose
+explicitly with `--keep-awake caffeinate|inhibit|mouse|off`. The optional `mouse` jiggle
 backend is behind the `mouse` cargo feature and needs macOS Accessibility permission.
 
 ## How it works

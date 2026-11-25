@@ -4,11 +4,14 @@ mod app;
 mod cli;
 mod config;
 mod fps;
+mod hint;
 mod keys;
 mod pacer;
 #[cfg(feature = "record")]
 mod record;
 mod runtime;
+#[cfg(unix)]
+mod signals;
 
 /// The unit-test binary counts heap calls for the RT-R14 frame-loop test (ADR-0009). The
 /// counters are per thread, so the other tests running in parallel do not disturb it.
@@ -59,8 +62,8 @@ fn main() -> ExitCode {
         return run_record(&cli, &command);
     }
 
-    let opts = match prepare(&cli, &command) {
-        Ok(opts) => opts,
+    let (opts, hint) = match prepare(&cli, &command) {
+        Ok(prepared) => prepared,
         Err(e) => {
             eprintln!("sciart: {e}");
             return ExitCode::from(2);
@@ -73,13 +76,18 @@ fn main() -> ExitCode {
         sciart_keepawake::Guard::failed(opts.keep_awake)
     });
 
-    match app::run(opts, keep_awake) {
+    let code = match app::run(opts, keep_awake) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("sciart: {e:#}");
             ExitCode::FAILURE
         }
+    };
+    // RND-R21: advice goes out once, after the terminal is restored, so it stays readable.
+    if let Some(hint) = hint {
+        eprintln!("{hint}");
     }
+    code
 }
 
 /// CLI-R8: validate the recording request (exit 2) and write it (I/O errors exit 1).
@@ -116,14 +124,24 @@ fn run_record(cli: &Cli, command: &Command) -> ExitCode {
     ExitCode::from(2)
 }
 
-/// Load config, resolve settings (CFG-R1..R4) and pick the generators to run.
-fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
+/// Load config, resolve settings (CFG-R1..R4) and pick the generators to run; also the
+/// terminal hint to print on exit, unless the colour mode was chosen explicitly (RND-R21).
+fn prepare(
+    cli: &Cli,
+    command: &Command,
+) -> Result<(app::Options, Option<&'static str>), UsageError> {
     let default = config::default_path(
         std::env::var_os("XDG_CONFIG_HOME"),
         std::env::var_os("HOME"),
     );
     let file = config::load(cli.config.as_deref(), default.as_deref())?;
-    let (settings, warnings) = config::resolve(cli, file, config::Env::from_process());
+    let env = config::Env::from_process();
+    let hint = if config::color_explicit(cli, &file, env) {
+        None
+    } else {
+        hint::terminal_hint(&hint::TermEnv::from_process())
+    };
+    let (settings, warnings) = config::resolve(cli, file, env);
     for warning in warnings {
         eprintln!("sciart: warning: {warning}");
     }
@@ -134,7 +152,7 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
 
     #[allow(clippy::disallowed_methods)] // seeding from OS entropy is the binary's job
     let seed = settings.seed.unwrap_or_else(rand::random);
-    Ok(app::Options {
+    let opts = app::Options {
         entries,
         fps: settings.fps,
         seed,
@@ -155,5 +173,6 @@ fn prepare(cli: &Cli, command: &Command) -> Result<app::Options, UsageError> {
         idle_after: settings.idle_after,
         config_path,
         favorites: settings.favorites,
-    })
+    };
+    Ok((opts, hint))
 }

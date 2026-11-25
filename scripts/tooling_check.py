@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11).
+"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R13).
 
 Asserts the shape of the build/test tooling the gate depends on: pixi tasks use the
 documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and checks,
-nextest never filters or retries, and sccache stays the shared rustc wrapper.
+nextest never filters or retries, sccache stays the shared rustc wrapper, and CI covers
+the platform tiers.
 
 Successor of the config half of `crates/sciart-generators/tests/source_rules.rs`; wired
 into `pixi run rs-spec-check` and CI.
@@ -11,8 +12,9 @@ into `pixi run rs-spec-check` and CI.
 
 from __future__ import annotations
 
-import tomllib
+import re
 import sys
+import tomllib
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -125,16 +127,125 @@ def check_r11(problems: list[str]) -> None:
             fail(problems, f"TEST-R11: task `{name}` overrides RUSTC_WRAPPER")
 
 
+# TEST-R13 / ADR-0029: platform tiers.
+TIER_1 = {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"}
+TIER_2 = {"aarch64-unknown-linux-gnu"}
+PIXI_PLATFORMS = ("osx-arm64", "osx-64", "linux-64", "linux-aarch64")
+PINNING_SUITES = (
+    "crates/sciart-generators/tests/snapshots.rs",
+    "crates/sciart-generators/tests/m11_fidelity.rs",
+)
+
+
+def runner_target(label: str) -> str | None:
+    """The target a GitHub-hosted runner label builds natively."""
+    if label.startswith("macos-") and not label.endswith("-intel") and label != "macos-13":
+        return "aarch64-apple-darwin"
+    if label.startswith("ubuntu-"):
+        if label.endswith("-arm"):
+            return "aarch64-unknown-linux-gnu"
+        return "x86_64-unknown-linux-gnu"
+    return None
+
+
+def workflow_jobs(text: str) -> dict[str, str]:
+    """Top-level jobs of a workflow as {name: body}: two-space-indented keys under `jobs:`."""
+    parts = text.split("\njobs:\n", 1)
+    jobs: dict[str, str] = {}
+    if len(parts) != 2:
+        return jobs
+    name = None
+    for line in parts[1].splitlines():
+        head = re.match(r"^  ([A-Za-z0-9_-]+):\s*$", line)
+        if head:
+            name = head.group(1)
+            jobs[name] = ""
+        elif name is not None:
+            jobs[name] += line + "\n"
+    return jobs
+
+
+def matrix_values(body: str, key: str) -> list[str] | None:
+    """Every value `key` takes in the job's `strategy.matrix` (plain lists and `include`
+    entries), or None when the matrix cannot be read that simply (an `exclude`, or no
+    matrix at all), so the caller fails closed."""
+    block = re.search(r"^      matrix:\n((?:(?:        .*)?\n)*)", body, re.M)
+    if block is None or "exclude:" in block.group(1):
+        return None
+    text = block.group(1)
+    values = re.findall(rf"^\s+(?:-\s+)?{re.escape(key)}:\s*([A-Za-z0-9._-]+)\s*$", text, re.M)
+    for listed in re.findall(rf"^\s+{re.escape(key)}:\s*\[([^\]]*)\]", text, re.M):
+        values += [v.strip() for v in listed.split(",") if v.strip()]
+    return values
+
+
+def job_targets(body: str) -> set[str]:
+    """Targets a job actually runs on, read from its `runs-on`: a literal label, or every
+    value of the matrix key it names (`${{ matrix.os }}`). Matrix values that `runs-on`
+    does not use count for nothing."""
+    runs_on = re.search(r"^    runs-on:\s*(.+?)\s*$", body, re.M)
+    if runs_on is None:
+        return set()
+    value = runs_on.group(1).strip("'\"")
+    from_matrix = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", value)
+    if from_matrix:
+        labels = matrix_values(body, from_matrix.group(1)) or []
+    elif re.fullmatch(r"[A-Za-z0-9._-]+", value):
+        labels = [value]
+    else:
+        labels = []  # any other expression: not checkable, so it proves nothing
+    return {t for t in map(runner_target, labels) if t}
+
+
+def forces_lf(lines: list[str], pattern: str) -> bool:
+    for line in lines:
+        fields = line.split()
+        if fields and not fields[0].startswith("#") and fields[0].endswith(pattern) \
+                and "eol=lf" in fields[1:]:
+            return True
+    return False
+
+
+def check_r13(problems: list[str]) -> None:
+    jobs = workflow_jobs((ROOT / ".github/workflows/ci.yml").read_text())
+    for job, targets in {"lint": TIER_1, "test": TIER_1 | TIER_2, "snapshots": TIER_1}.items():
+        if job not in jobs:
+            fail(problems, f"TEST-R13: ci.yml has no `{job}` job")
+            continue
+        missing = targets - job_targets(jobs[job])
+        if missing:
+            fail(problems, f"TEST-R13: ci.yml `{job}` does not run on {sorted(missing)}")
+    if "test" in jobs and not re.search(r"run: cargo nextest run --workspace\s*$", jobs["test"], re.M):
+        fail(problems, "TEST-R13: ci.yml `test` runs the whole suite (`cargo nextest run --workspace`)")
+    pixi = toml_file("pixi.toml")
+    workspace = pixi.get("workspace", pixi.get("project", {}))
+    if workspace.get("name") != "sciart":
+        fail(problems, f"TEST-R13: pixi.toml is named `sciart`, not {workspace.get('name')!r}")
+    platforms = set(workspace.get("platforms", []))
+    for platform in PIXI_PLATFORMS:
+        if platform not in platforms:
+            fail(problems, f"TEST-R13: pixi.toml lists the `{platform}` platform")
+    attributes = (ROOT / ".gitattributes").read_text().splitlines()
+    for pattern in ("*.snap", "tests/fixtures/**"):
+        if not forces_lf(attributes, pattern):
+            fail(problems, f"TEST-R13: .gitattributes forces `eol=lf` for `{pattern}`")
+    for suite in PINNING_SUITES:
+        if "tier::skip_off_tier_1(" not in (ROOT / suite).read_text():
+            fail(problems, f"TEST-R13: {suite} skips itself off tier 1 (`tier::skip_off_tier_1`)")
+    if "TEST-R13" not in (ROOT / "crates/sciart-generators/tests/common/tier.rs").read_text():
+        fail(problems, "TEST-R13: the tier-1 skip reason (tests/common/tier.rs) names TEST-R13")
+
+
 def main() -> int:
     problems: list[str] = []
-    for check in (check_r9, check_r10, check_r11):
+    for check in (check_r9, check_r10, check_r11, check_r13):
         check(problems)
     if problems:
         print("tooling schema:", file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
-    print("tooling schema OK (pixi tasks, cargo profiles, nextest, sccache)")
+    print("tooling schema OK (pixi tasks, cargo profiles, nextest, sccache, platform tiers)")
     return 0
 
 

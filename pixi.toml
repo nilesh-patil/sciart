@@ -1,8 +1,9 @@
 [workspace]
 authors = ["Nilesh Patil <4813079+nilesh-patil@users.noreply.github.com>"]
 channels = ["conda-forge"]
-name = "tasks-adhoc"
-platforms = ["osx-arm64"]
+name = "sciart"
+# TEST-R13: the tier-1 and tier-2 hosts plus Intel macOS (tier 3, builds only).
+platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
 version = "0.1.0"
 
 # Rust toolchain comes from rust-toolchain.toml via rustup; pixi is the task runner (ADR-0007).

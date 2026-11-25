@@ -35,6 +35,8 @@ rand = "0.9"
 rand_chacha = "0.9"
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
+# RT-R20: SIGTERM/SIGHUP restore the terminal (already in the tree through crossterm).
+signal-hook = "0.3"
 toml = "0.9"
 unicode-width = "0.2"
 
