@@ -31,6 +31,9 @@ mod inkframes;
 #[path = "common/gen_r25.rs"]
 mod gen_r25;
 
+#[path = "common/tier.rs"]
+mod tier;
+
 use gen_r25::is_restyled;
 use inkframes::{CellKey, HEIGHT, MODES, WIDTH, decode, frame_keys, header, render_frames};
 use sciart_core::prelude::*;
@@ -86,6 +89,10 @@ fn exempt(scene: &str, t: u32) -> bool {
 
 #[test]
 fn gen_r22_m11_scenes_match_the_m11_ink_frames() {
+    // Frames are pinned on tier 1 only (TEST-R13, ADR-0029).
+    if tier::skip_off_tier_1("m11_fidelity") {
+        return;
+    }
     let (w, h) = (usize::from(WIDTH), usize::from(HEIGHT));
     let reference = decode(FIXTURE, w, h).expect("fixture decodes");
     assert_eq!(reference.len(), 41 * MODES.len() * 3, "fixture frame count");
