@@ -37,9 +37,9 @@ rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
 # RND-R13 per-scene CPU, terminal bytes and art metrics: `pixi run rs-cost [scene ...] [--size WxH] [--secs N] [--sort bytes]`.
-rs-cost = "cargo run -q --profile ci -p sciart --example cost --"
+rs-cost = "cargo run -q --profile ci -p sciart-qa --example cost --"
 # The same probe on the install profile (thin LTO, one codegen unit): RT-R16's pipeline-mean CPU claim.
-rs-cost-release = "cargo run -q --release -p sciart --example cost --"
+rs-cost-release = "cargo run -q --release -p sciart-qa --example cost --"
 rs-list = "cargo run -q -p sciart -- list"
 # Interactive review runs share the `ci` build with the probes above; frames are the same as
 # an installed (`release`) binary's (GEN-R6), which only links slower.
