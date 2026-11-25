@@ -6,6 +6,25 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Added
+
+- Keep-awake on Linux: `--keep-awake inhibit` holds a `systemd-inhibit` (or
+  `elogind-inhibit`) lock for as long as sciart runs, and is the default for a local Linux
+  session; over SSH the default is `off` ([ADR-0028](docs/adr/0028-linux-inhibitor-helper.md),
+  KA-R7..R9).
+- `SIGTERM` and `SIGHUP` restore the terminal and exit with status 143 or 129 instead of
+  leaving the shell in raw mode (RT-R20).
+- A one-line hint on exit when the terminal is unlikely to render truecolor braille (the
+  Linux console, Apple Terminal without `COLORTERM`, `screen`/`tmux`), unless a colour mode
+  was chosen explicitly (RND-R21).
+
+### Changed
+
+- Platform tiers: macOS arm64 and Linux x86_64 run the whole suite with pinned frames;
+  Linux aarch64 runs it without the frame-pinning suites; frames are deterministic per
+  platform ([ADR-0029](docs/adr/0029-platform-tiers-and-determinism.md), TEST-R13).
+- The pixi workspace is named `sciart` and also covers Intel macOS and Linux.
+
 ## [0.6.0] - 2026-10-18
 
 ### Added

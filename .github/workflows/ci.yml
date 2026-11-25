@@ -4,14 +4,18 @@ name: CI
 # definition of "green". The commands below mirror the pixi tasks and must be kept in step
 # with `pixi.toml` (ADR-0024):
 #   lint      = `cargo fmt --all --check` + clippy with and without `--all-features` (TEST-R3)
-#   test      = doctests + every test under nextest (TEST-R10), on macOS and Linux
+#   test      = doctests + every test under nextest (TEST-R10)
 #   snapshots = the snapshot suite in the optimised `ci` profile (TEST-R9)
 #   deny      = cargo-deny (advisories, licences, bans, sources; `deny.toml`)
-# Linux is a supported build/test platform; macOS also runs lint and the
-# optimiser-sensitive snapshots. A second `test` step re-runs only the colour-sensitive
-# suites with NO_COLOR=1 (TEST-R12), so the ambient environment can never decide whether
-# the gate is green.
-# pixi is deliberately not used here: Linux needs no conda platform for this workflow.
+# Platform tiers (TEST-R13, ADR-0029), checked by `scripts/tooling_check.py`:
+#   tier 1 = aarch64-apple-darwin (macos-14) and x86_64-unknown-linux-gnu (ubuntu-latest):
+#            lint, the whole suite, and the frame-pinning suites (snapshots, m11_fidelity);
+#   tier 2 = aarch64-unknown-linux-gnu (ubuntu-24.04-arm): the whole suite, in which the
+#            frame-pinning suites skip themselves (frames are deterministic per platform);
+#   tier 3 = x86_64-apple-darwin and the musl targets: release builds only (release.yml).
+# A second `test` step re-runs only the colour-sensitive suites with NO_COLOR=1 (TEST-R12),
+# so the ambient environment can never decide whether the gate is green.
+# pixi is deliberately not used here: CI installs the toolchain directly (ADR-0024).
 
 on:
   push:
@@ -35,14 +39,26 @@ env:
 
 jobs:
   lint:
-    name: lint (macOS)
-    runs-on: macos-14
+    name: lint (${{ matrix.os }}, tier ${{ matrix.tier }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            tier: 1
+          - os: ubuntu-latest
+            tier: 1
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+      # `--all-features` builds the `mouse` backend, whose enigo links libxkbcommon on Linux.
+      - name: System libraries (Linux)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libxkbcommon-dev
       - name: Format
         run: cargo fmt --all --check
       - name: Clippy
@@ -51,12 +67,18 @@ jobs:
         run: cargo clippy --workspace --all-targets --all-features -- -D warnings
 
   test:
-    name: test (${{ matrix.os }})
+    name: test (${{ matrix.os }}, tier ${{ matrix.tier }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [macos-14, ubuntu-latest]
+        include:
+          - os: macos-14
+            tier: 1
+          - os: ubuntu-latest
+            tier: 1
+          - os: ubuntu-24.04-arm
+            tier: 2
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -83,7 +105,7 @@ jobs:
       - name: Showcase manifest
         run: python3 scripts/showcase.py --check
       # GEN-R15: the generated SPEC-002 scene index is current.
-      # TEST-R1/R4: spec traceability; TEST-R9/R10/R11: tooling schema (as `rs-spec-check`).
+      # TEST-R1/R4: spec traceability; TEST-R9/R10/R11/R13: tooling schema (as `rs-spec-check`).
       - name: Spec index & tooling schema
         run: |
           python3 scripts/spec_index.py --check
@@ -94,13 +116,21 @@ jobs:
         run: cargo nextest run -p sciart --features record
 
   snapshots:
-    name: snapshots (macOS, ci profile)
-    runs-on: macos-14
+    name: snapshots (${{ matrix.os }}, ci profile)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            tier: 1
+          - os: ubuntu-latest
+            tier: 1
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@1.88.0
       - uses: Swatinem/rust-cache@v2
-      # TEST-R9: frames must not depend on the optimiser.
+      # TEST-R9: frames must not depend on the optimiser; TEST-R13: pinned on tier 1.
       - name: Snapshot suite (optimised)
         run: cargo test --profile ci -p sciart-generators --test snapshots
 

@@ -1920,6 +1920,7 @@ dependencies = [
  "sciart-render",
  "sciart-testalloc",
  "serde",
+ "signal-hook",
  "tempfile",
  "toml",
  "vt100",

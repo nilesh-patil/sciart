@@ -57,7 +57,7 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub no_title: bool,
 
-    /// How to keep the machine awake [default: caffeinate on macOS, off elsewhere]
+    /// How to keep the machine awake [default: caffeinate on macOS; inhibit on Linux, off over SSH]
     #[arg(long, global = true, value_enum)]
     pub keep_awake: Option<KeepAwakeArg>,
 
@@ -285,6 +285,7 @@ impl From<BackgroundArg> for Background {
 #[serde(rename_all = "lowercase")]
 pub enum KeepAwakeArg {
     Caffeinate,
+    Inhibit,
     Mouse,
     Off,
 }
@@ -293,6 +294,7 @@ impl From<KeepAwakeArg> for Mode {
     fn from(k: KeepAwakeArg) -> Mode {
         match k {
             KeepAwakeArg::Caffeinate => Mode::Caffeinate,
+            KeepAwakeArg::Inhibit => Mode::Inhibit,
             KeepAwakeArg::Mouse => Mode::Mouse,
             KeepAwakeArg::Off => Mode::Off,
         }
@@ -1024,9 +1026,10 @@ mod tests {
     }
 
     #[test]
-    fn cli_r6_keep_awake_flag() {
+    fn cli_r6_ka_r7_keep_awake_flag() {
         for (arg, mode) in [
             ("caffeinate", Mode::Caffeinate),
+            ("inhibit", Mode::Inhibit),
             ("mouse", Mode::Mouse),
             ("off", Mode::Off),
         ] {
