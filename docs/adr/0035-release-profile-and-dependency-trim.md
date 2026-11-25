@@ -29,8 +29,10 @@ Each candidate was measured for size and for frame time on the release profile.
 - The release profile strips symbols: 3 636 112 bytes become 3 213 264.
 - Thin LTO and one codegen unit stay (ADR-0023). Fat LTO is not worth its build time, and
   size-optimising the cold crates makes the binary larger.
-- A checker holds both numbers: at most 3.25 MiB and 93 crates for the build without the
-  recorder (RT-R22). The budgets only go down.
+- A checker holds both numbers for the build without the recorder (RT-R22): 3.25 MiB and
+  93 crates when this was decided. The budgets only go down, unless the spec raises them
+  for a feature: the completion and manual generators (CLI-R17) added three crates and
+  about 335 KB, and RT-R22 carries the current numbers.
 
 ## Consequences
 

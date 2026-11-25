@@ -78,9 +78,23 @@ Release tarballs and Homebrew formulae are planned but **not available yet**.
 sciart                  # cycle all 85 scenes (the default `sim` mode)
 sciart run aurora       # one scene, full-screen
 sciart list             # every scene: name, category, description
-sciart list --json      # the same catalogue for scripts
+sciart list --json      # the same catalogue for scripts: {"schema": 1, "scenes": [...]}
 sciart record aurora --seconds 5 --out aurora.gif   # needs --features record
+sciart --for 25m        # end by itself after 25 minutes (90s, 25m, 1.5h; at most 24h)
+sciart while -- make    # the art while `make` runs, then its output and exit status
+sciart completions zsh  # shell completions (bash, zsh, fish, elvish, powershell)
+sciart man              # the manual page, e.g. `sciart man > ~/.local/share/man/man1/sciart.1`
+sciart man while        # one subcommand's page (sciart-while.1)
 ```
+
+`sciart while -- <command>` gives the command no terminal: its stdin is empty and its
+output is held back and printed, stdout then stderr, once the art closes, so it suits
+builds, downloads and batch jobs, not editors or password prompts. It exits with the
+command's status (`128 + n` after a signal). `q` closes the art early and keeps waiting
+for the command; `Ctrl-C` stops it (exit 130); a `--for` deadline stops it (exit 124);
+`SIGTERM` or `SIGHUP` stop it (exit 143 or 129); a command that cannot be started exits
+127. The held output is not capped, so a command that writes gigabytes needs that much
+temporary disk space. `sciart man while` has the details.
 
 85 scenes across **11 categories**. Five themes — `astro` (default), `rainbow`, `mono`,
 `aurora` and the colour-blind-safe `colorblind` — cycle with `t`. The default frame rate is

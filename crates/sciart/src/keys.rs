@@ -10,7 +10,8 @@ pub fn action_for(key: KeyEvent) -> Option<Action> {
         return None;
     }
     if key.modifiers.contains(KeyModifiers::CONTROL) {
-        return matches!(key.code, KeyCode::Char('c' | 'C')).then_some(Action::Quit);
+        // Its own action, so `while` can tell an interrupt from a quit (CLI-R14).
+        return matches!(key.code, KeyCode::Char('c' | 'C')).then_some(Action::Interrupt);
     }
     Some(match key.code {
         KeyCode::Right => Action::Next,
@@ -70,7 +71,7 @@ mod tests {
     }
 
     #[test]
-    fn rt_r9_letters_are_case_insensitive_and_ctrl_c_quits() {
+    fn rt_r9_cli_r14_letters_are_case_insensitive_and_ctrl_c_interrupts() {
         let shifted = KeyEvent::new(KeyCode::Char('N'), KeyModifiers::SHIFT);
         assert_eq!(action_for(shifted), Some(Action::Next));
         for (c, action) in [
@@ -83,7 +84,7 @@ mod tests {
             assert_eq!(action_for(key), Some(action), "{c}");
         }
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(action_for(ctrl_c), Some(Action::Quit));
+        assert_eq!(action_for(ctrl_c), Some(Action::Interrupt));
     }
 
     #[test]

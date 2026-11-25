@@ -5,7 +5,8 @@
 //! where `<name>` is the scene's science title (RND-R9), or its id without one.
 //! When it is wider than the terminal it is *fitted*, not clipped: lower-priority fields are
 //! dropped or shortened one step at a time (see [`LADDER`]), then the name is shortened, so
-//! the state flags (`LOW-POWER`, `PAUSED`, `<k> quarantined`) are the last thing to go.
+//! the state flags (`ends <time left>`, `LOW-POWER`, `PAUSED`, `<k> quarantined`) are the last
+//! thing to go.
 
 use std::fmt::{self, Write};
 
@@ -37,6 +38,9 @@ pub struct Hud<'a> {
     pub low_power: bool,
     pub paused: bool,
     pub quarantined: usize,
+    /// Whole seconds left before a `--for` deadline, rounded up (CLI-R12, RT-R23); shown as
+    /// `ends MM:SS` (`H:MM:SS` from an hour) with the state flags.
+    pub ends: Option<u64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -207,6 +211,9 @@ impl Hud<'_> {
             },
             KeepAwake::Hidden => {}
         }
+        if let Some(secs) = self.ends {
+            f.field(format_args!("ends {}", TimeLeft(secs)))?;
+        }
         if self.low_power {
             f.field(format_args!("LOW-POWER"))?;
         }
@@ -220,6 +227,20 @@ impl Hud<'_> {
             f.field(format_args!("{KEY_HINTS}"))?;
         }
         Ok(())
+    }
+}
+
+/// Seconds as `MM:SS`, or `H:MM:SS` from an hour on (CLI-R12).
+struct TimeLeft(u64);
+
+impl fmt::Display for TimeLeft {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let (h, m, s) = (self.0 / 3600, self.0 / 60 % 60, self.0 % 60);
+        if h > 0 {
+            write!(f, "{h}:{m:02}:{s:02}")
+        } else {
+            write!(f, "{m:02}:{s:02}")
+        }
     }
 }
 
@@ -353,6 +374,7 @@ mod tests {
             low_power: false,
             paused: false,
             quarantined: 0,
+            ends: None,
         }
     }
 
@@ -538,6 +560,55 @@ mod tests {
     }
 
     #[test]
+    fn cli_r12_time_left_is_shown_with_the_flags() {
+        let h = Hud {
+            ends: Some(12 * 60 + 34),
+            ..hud()
+        };
+        assert_eq!(
+            h.line(),
+            "starfield | 30 fps | astro | seed 42 | caffeinate:on | ends 12:34 \
+             | n p space r h t ? q"
+        );
+        for (secs, text) in [
+            (0, "00:00"),
+            (5, "00:05"),
+            (59, "00:59"),
+            (60, "01:00"),
+            (3599, "59:59"),
+            (3600, "1:00:00"),
+            (3661, "1:01:01"),
+            (86_400, "24:00:00"),
+        ] {
+            assert_eq!(TimeLeft(secs).to_string(), text, "{secs} s");
+        }
+    }
+
+    #[test]
+    fn cli_r12_time_left_outlasts_every_field_but_the_other_flags() {
+        let h = Hud {
+            ends: Some(90),
+            ..cmb()
+        };
+        assert_eq!(
+            h.fit(80),
+            "cosmic_microwave_background | 30 fps | caffeinate:on | ends 01:30 | PAUSED"
+        );
+        assert_eq!(
+            h.fit(49),
+            "cosmic_microwave_background | ends 01:30 | PAUSED"
+        );
+        // Below that the name is elided before the time left goes.
+        assert_eq!(
+            h.fit(48),
+            "cosmic_microwave_backgrou~ | ends 01:30 | PAUSED"
+        );
+        assert_eq!(h.fit(30), "cosmic_~ | ends 01:30 | PAUSED");
+        assert_eq!(h.fit(19), "ends 01:30 | PAUSED");
+        assert_eq!(h.fit(12), "ends 01:30 ~");
+    }
+
+    #[test]
     fn rnd_r4_fit_without_flags_elides_only_the_name() {
         let h = Hud {
             keep_awake: "off",
@@ -583,7 +654,7 @@ mod tests {
                     // Shortest and longest seed and fps texts: only their widths matter.
                     for seed in [0, u64::MAX] {
                         for fps in [0.0, 144.0] {
-                            for bits in 0..8u8 {
+                            for bits in 0..16u8 {
                                 check_fit(&Hud {
                                     generator: name,
                                     title,
@@ -593,6 +664,7 @@ mod tests {
                                     low_power: bits & 1 != 0,
                                     paused: bits & 2 != 0,
                                     quarantined: if bits & 4 != 0 { 3 } else { 0 },
+                                    ends: (bits & 8 != 0).then_some(5025),
                                     ..hud()
                                 });
                             }
@@ -605,6 +677,9 @@ mod tests {
 
     fn check_fit(h: &Hud<'_>) {
         let mut flags = Vec::new();
+        if let Some(secs) = h.ends {
+            flags.push(format!("ends {}", TimeLeft(secs)));
+        }
         if h.low_power {
             flags.push("LOW-POWER".to_string());
         }
