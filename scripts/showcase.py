@@ -4,21 +4,25 @@
 Every animated capture in the README and the gallery is a clip in the manifest, recorded by
 `sciart record` with exactly the manifest's parameters:
 
-    python3 scripts/showcase.py            # record missing clips, then write docs/GALLERY.md
+    python3 scripts/showcase.py            # record missing and stale clips, write the gallery
     python3 scripts/showcase.py --force    # re-record every clip, then write the gallery
     python3 scripts/showcase.py --check    # WEB-R2; exit 1 when anything is off
 
 WEB-R1: the manifest lists each clip's id, scene, seed, size, start, seconds, fps, theme and
-output path under docs/media/; a GIF is at most 1.5 MB and the set at most 16 MB; the set
-covers at least 12 scenes from at least 8 categories, including the thread idiom (GEN-R25),
-the orbital-thread stipple idiom (GEN-R26) and a half-block field scene.
+output path under docs/media/; docs/media/showcase.lock records the parameters each clip was
+recorded with, and a clip whose manifest entry differs is stale; a GIF is at most 1.5 MB and
+the set at most 16 MB; the set covers at least 12 scenes from at least 8 categories,
+including the thread idiom (GEN-R25), the orbital-thread stipple idiom (GEN-R26) and a
+half-block field scene.
 
-WEB-R2 (`--check`): fails when a manifest clip is missing, a file under docs/media/ is not in
-the manifest, a clip or the set is over its size limit, a manifest scene is not registered,
-the WEB-R1 coverage is not met, or README.md or docs/GALLERY.md references a media file that
-is not in the manifest. README.md shows the one `readme = "hero"` clip and every
-`readme = "grid"` clip (at least eight), each with alt text naming the scene; docs/GALLERY.md
-(written by scripts/gallery.py) shows every clip.
+WEB-R2 (`--check`): fails when a manifest clip is missing, stale, or not a GIF with at least
+one frame; a file under docs/media/ is neither a clip nor the lock; a clip or the set is over
+its size limit; a manifest scene is not registered; the WEB-R1 coverage is not met;
+README.md or docs/GALLERY.md references an animated image that is not a manifest clip
+(wherever it lives, however the tag is written) or an image that does not resolve to a file;
+or the animated section of docs/GALLERY.md differs from what scripts/gallery.py writes.
+README.md shows the one `readme = "hero"` clip and every `readme = "grid"` clip (at least
+eight), each with alt text naming the scene; docs/GALLERY.md shows every clip.
 
 Clips are recorded through `cargo run --profile ci -p sciart --features record -- record`,
 the same build as `pixi run rs-record`. This is the only script that writes docs/media/.
@@ -85,12 +89,23 @@ RECORD = [
     "record",
 ]
 
-# A media reference in Markdown or HTML: `docs/media/x.gif`, `media/x.gif`, `../docs/media/…`.
-MEDIA_REF = re.compile(r"""(?P<path>(?:\.\./)*(?:docs/)?media/[^\s"'()<>]+)""")
-# `<img … src="…" … alt="…">` in either attribute order, and `![alt](src)`.
-IMG_TAG = re.compile(r"<img\b[^>]*>", re.IGNORECASE)
-ATTR = re.compile(r"""(\w+)\s*=\s*"([^"]*)\"""")
-MD_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\((?P<src>[^)\s]+)\)")
+LOCK = MEDIA_DIR / "showcase.lock"
+# The parameters a recording depends on; the lock keeps them per output path (WEB-R1).
+RECORDED = ("scene", "seed", "size", "start", "seconds", "fps", "theme")
+
+# HTML image tags (`<img src>`, `<source srcset>`) with double, single or no quotes, and
+# Markdown images `![alt](src "title")`.
+TAG = re.compile(r"<(?P<name>img|source)\b(?P<attrs>[^>]*)>", re.IGNORECASE)
+ATTR = re.compile(r"""([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s"'>]+))""")
+MD_IMAGE = re.compile(r"!\[(?P<alt>[^\]]*)\]\(\s*<?(?P<src>[^)\s>]+)>?(?:\s+[\"'][^)]*)?\)")
+# Any reference to an animated image, in a tag, a link or plain text.
+ANIMATED = re.compile(
+    r"""(?P<ref>[^\s"'()<>=,\[\]`]+\.(?:gif|apng|webp|avif|mp4|webm|mov))(?=[\s"'()<>,?#\]]|$)""",
+    re.IGNORECASE,
+)
+# Code is not a reference: fenced blocks and inline spans are blanked before scanning.
+FENCE = re.compile(r"^(```|~~~).*?^\1[^\n]*$", re.MULTILINE | re.DOTALL)
+CODE_SPAN = re.compile(r"`[^`\n]*`")
 
 
 @dataclass(frozen=True)
@@ -110,6 +125,10 @@ class Clip:
     @property
     def path(self) -> Path:
         return ROOT / self.out
+
+    def recorded(self) -> dict[str, object]:
+        """The parameters this clip is recorded with, as the lock stores them (WEB-R1)."""
+        return {key: getattr(self, key) for key in RECORDED}
 
     def command(self) -> list[str]:
         """The exact `sciart record` invocation for this clip (WEB-R1)."""
@@ -229,25 +248,126 @@ def alt_names_scene(alt: str, scene: str) -> bool:
     return name in words and len(words) >= len(name) + 20
 
 
+def read_lock() -> dict[str, dict[str, object]]:
+    """docs/media/showcase.lock: output path -> the parameters it was recorded with."""
+    if not LOCK.is_file():
+        return {}
+    try:
+        data = tomllib.loads(LOCK.read_text(encoding="utf-8"))
+    except tomllib.TOMLDecodeError as err:
+        fail(f"cannot read {LOCK.relative_to(ROOT)}: {err}")
+    lock = {}
+    for entry in data.get("clip", []):
+        out = entry.get("out")
+        if isinstance(out, str):
+            lock[out] = {key: entry.get(key) for key in RECORDED}
+    return lock
+
+
+def write_lock(clips: list[Clip], lock: dict[str, dict[str, object]]) -> None:
+    """Write the lock for the manifest's clips, in manifest order (WEB-R1)."""
+
+    def value(v: object) -> str:
+        if isinstance(v, str):
+            return '"' + v.replace("\\", "\\\\").replace('"', '\\"') + '"'
+        if isinstance(v, float):
+            return repr(v)
+        return str(v)
+
+    lines = [
+        "# The parameters each clip in this directory was recorded with (WEB-R1).",
+        "# Written by scripts/showcase.py after each recording; do not edit by hand.",
+    ]
+    for clip in clips:
+        params = lock.get(clip.out)
+        if params is None:
+            continue
+        lines += ["", "[[clip]]", f"out = {value(clip.out)}"]
+        lines += [f"{key} = {value(params[key])}" for key in RECORDED]
+    LOCK.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def stale_reason(clip: Clip, lock: dict[str, dict[str, object]]) -> str | None:
+    """Why `clip` no longer matches its recording, or None when it does (WEB-R1)."""
+    recorded = lock.get(clip.out)
+    if recorded is None:
+        return "not in docs/media/showcase.lock"
+    wanted = clip.recorded()
+    changed = [
+        f"{key} {recorded[key]!r} -> {wanted[key]!r}"
+        for key in RECORDED
+        if recorded[key] != wanted[key]
+    ]
+    return ("recorded with " + ", ".join(changed)) if changed else None
+
+
 def record(clips: list[Clip], force: bool) -> list[tuple[str, str]]:
-    """Record every missing (or, with `force`, every) clip. Returns failures."""
+    """Record every missing or stale (with `force`, every) clip. Returns failures."""
     MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-    todo = [clip for clip in clips if force or not clip.path.is_file()]
+    lock = read_lock()
+    todo = [
+        clip
+        for clip in clips
+        if force or not clip.path.is_file() or stale_reason(clip, lock)
+    ]
     if not todo:
-        print(f"showcase: all {len(clips)} clips present")
+        print(f"showcase: all {len(clips)} clips present and current")
+        write_lock(clips, lock)
         return []
     print(f"showcase: recording {len(todo)} clip(s)")
     failed = []
     for number, clip in enumerate(todo, 1):
+        # A failed recording must not leave the old clip looking current.
+        lock.pop(clip.out, None)
         proc = subprocess.run(clip.command(), cwd=ROOT)
         if proc.returncode != 0 or not clip.path.is_file():
             failed.append((clip.id, f"sciart record exited {proc.returncode}"))
             print(f"  [{number}/{len(todo)}] {clip.id}: FAILED", file=sys.stderr)
-            continue
-        print(
-            f"  [{number}/{len(todo)}] {clip.out} ({clip.path.stat().st_size / 1e6:.2f} MB)"
-        )
+        else:
+            lock[clip.out] = clip.recorded()
+            print(
+                f"  [{number}/{len(todo)}] {clip.out} "
+                f"({clip.path.stat().st_size / 1e6:.2f} MB)"
+            )
+        write_lock(clips, lock)
     return failed
+
+
+def gif_problem(path: Path) -> str | None:
+    """Why `path` is not a well-formed GIF with at least one frame, or None (WEB-R2)."""
+    data = path.read_bytes()
+    if data[:6] not in (b"GIF87a", b"GIF89a"):
+        return "is not a GIF (bad header)"
+    if len(data) < 13:
+        return "is a truncated GIF (no screen descriptor)"
+    pos = 13
+    if data[10] & 0x80:  # global colour table
+        pos += 3 * (2 << (data[10] & 0x07))
+
+    def skip_sub_blocks(p: int) -> int:
+        while p < len(data) and data[p] != 0:
+            p += 1 + data[p]
+        return p + 1
+
+    frames = 0
+    while pos < len(data):
+        block = data[pos]
+        if block == 0x3B:  # trailer
+            return None if frames else "is a GIF with no frames"
+        if block == 0x21:  # extension: label, then data sub-blocks
+            pos = skip_sub_blocks(pos + 2)
+        elif block == 0x2C:  # image descriptor, optional local table, LZW data
+            if pos + 10 > len(data):
+                break
+            flags = data[pos + 9]
+            pos += 10
+            if flags & 0x80:
+                pos += 3 * (2 << (flags & 0x07))
+            pos = skip_sub_blocks(pos + 1)
+            frames += 1
+        else:
+            return f"is a corrupt GIF (unknown block 0x{block:02x} at byte {pos})"
+    return "is a truncated GIF (no trailer)"
 
 
 def idiom_lists() -> tuple[set[str], set[str]]:
@@ -270,28 +390,56 @@ def is_half_block_field(scene: str, thread: set[str], stipple: set[str]) -> bool
     return any("Pixels" in path.read_text(encoding="utf-8") for path in sources)
 
 
-def media_refs(path: Path) -> set[Path]:
-    """Every docs/media/ file `path` refers to, resolved against the file's directory."""
-    refs = set()
-    for match in MEDIA_REF.finditer(path.read_text(encoding="utf-8")):
-        target = (path.parent / match.group("path")).resolve()
-        if MEDIA_DIR.resolve() in target.parents:
-            refs.add(target)
-    return refs
+def is_external(ref: str) -> bool:
+    """A URL (a badge, say) rather than a file in the repository."""
+    return bool(re.match(r"^[a-z][a-z0-9+.-]*:", ref, re.IGNORECASE)) or ref.startswith("//")
 
 
-def images(path: Path) -> list[tuple[Path, str]]:
-    """`(resolved src, alt)` for every <img> tag and Markdown image in `path`."""
-    text = path.read_text(encoding="utf-8")
+def resolve(page: Path, ref: str) -> Path:
+    """`ref` (query and fragment dropped) resolved against `page`'s directory."""
+    ref = html.unescape(ref).split("#", 1)[0].split("?", 1)[0]
+    return (page.parent / ref).resolve()
+
+
+def prose(page: Path) -> str:
+    """`page` with fenced code blocks and inline code spans blanked out."""
+    text = page.read_text(encoding="utf-8")
+    text = FENCE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
+    return CODE_SPAN.sub("", text)
+
+
+def images(page: Path) -> list[tuple[str, str]]:
+    """`(src, alt)` for every <img>, every <source srcset> candidate and every Markdown
+    image in `page`, however its attributes are quoted."""
+    text = prose(page)
     found = []
-    for tag in IMG_TAG.findall(text):
-        attrs = {key.lower(): value for key, value in ATTR.findall(tag)}
+    for tag in TAG.finditer(text):
+        attrs = {}
+        for m in ATTR.finditer(tag.group("attrs")):
+            attrs[m.group(1).lower()] = next(v for v in m.groups()[1:] if v is not None)
+        alt = html.unescape(attrs.get("alt", ""))
         if "src" in attrs:
-            alt = html.unescape(attrs.get("alt", ""))
-            found.append(((path.parent / html.unescape(attrs["src"])).resolve(), alt))
+            found.append((attrs["src"], alt))
+        for candidate in attrs.get("srcset", "").split(","):
+            if candidate.strip():
+                found.append((candidate.split()[0], alt))
     for match in MD_IMAGE.finditer(text):
-        found.append(((path.parent / match.group("src")).resolve(), match.group("alt")))
+        found.append((match.group("src"), match.group("alt")))
     return found
+
+
+def reference_problems(page: Path, clips: set[Path]) -> list[str]:
+    """WEB-R2: every animated reference is a manifest clip; every image resolves to a file."""
+    name = page.relative_to(ROOT)
+    problems = []
+    for match in ANIMATED.finditer(prose(page)):
+        ref = match.group("ref")
+        if is_external(ref) or resolve(page, ref) not in clips:
+            problems.append(f"{name} references animated {ref}, which is not a manifest clip")
+    for src, _ in images(page):
+        if not is_external(src) and not resolve(page, src).is_file():
+            problems.append(f"{name} shows {src}, which does not resolve to a file")
+    return sorted(set(problems))
 
 
 def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
@@ -299,12 +447,19 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
     problems: list[str] = []
     registered = {scene.name: scene for scene in scenes}
 
-    # Clips present, within the limits, and no orphans in docs/media/.
+    # Clips present, current, real GIFs, within the limits; no orphans in docs/media/.
     total = 0
+    lock = read_lock()
     for clip in clips:
         if not clip.path.is_file():
             problems.append(f"missing {clip.out} (clip `{clip.id}`)")
             continue
+        reason = stale_reason(clip, lock)
+        if reason:
+            problems.append(f"stale {clip.out}: {reason}")
+        bad = gif_problem(clip.path)
+        if bad:
+            problems.append(f"{clip.out} {bad}")
         size = clip.path.stat().st_size
         total += size
         if size > CLIP_LIMIT:
@@ -318,8 +473,10 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
     wanted = {clip.path.resolve() for clip in clips}
     if MEDIA_DIR.is_dir():
         for path in sorted(MEDIA_DIR.rglob("*")):
-            if path.is_file() and path.resolve() not in wanted:
+            if path.is_file() and path.resolve() not in wanted | {LOCK.resolve()}:
                 problems.append(f"orphan {path.relative_to(ROOT)} is not in the manifest")
+    for out in sorted(set(lock) - {clip.out for clip in clips}):
+        problems.append(f"docs/media/showcase.lock lists {out}, which is not in the manifest")
 
     # Registered scenes and WEB-R1 coverage.
     unknown = sorted({clip.scene for clip in clips} - set(registered))
@@ -342,15 +499,19 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
     if not fields:
         problems.append("coverage: no half-block field scene")
 
-    # README and gallery: only manifest media, the hero and grid shown with alt text.
+    # README and gallery: only manifest clips animate, every image resolves, the hero and
+    # grid are shown with alt text, and the gallery's animated section is the generator's.
     for page in (README, GALLERY):
         if not page.is_file():
             problems.append(f"{page.relative_to(ROOT)} is missing")
             continue
-        for ref in sorted(media_refs(page) - wanted):
+        problems.extend(reference_problems(page, wanted))
+    if GALLERY.is_file():
+        section = "\n".join(gallery.motion_section(scenes))
+        if section not in GALLERY.read_text(encoding="utf-8"):
             problems.append(
-                f"{page.relative_to(ROOT)} references {ref.relative_to(ROOT.resolve())}, "
-                "which is not in the manifest"
+                "docs/GALLERY.md: the animated section differs from what scripts/gallery.py "
+                "writes; run `python3 scripts/gallery.py`"
             )
     heroes = [clip for clip in clips if clip.readme == "hero"]
     grid = [clip for clip in clips if clip.readme == "grid"]
@@ -359,7 +520,7 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
     if len(grid) < MIN_GRID:
         problems.append(f"the manifest marks {len(grid)} grid clips, want at least {MIN_GRID}")
     if README.is_file():
-        shown = images(README)
+        shown = [(resolve(README, src), alt) for src, alt in images(README)]
         for clip in heroes + grid:
             alts = [alt for src, alt in shown if src == clip.path.resolve()]
             if not alts:
@@ -370,7 +531,7 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
                     f"`{scene_words(clip.scene)}` and what it shows"
                 )
     if GALLERY.is_file():
-        shown_in_gallery = {src for src, _ in images(GALLERY)}
+        shown_in_gallery = {resolve(GALLERY, src) for src, _ in images(GALLERY)}
         for clip in clips:
             if clip.path.resolve() not in shown_in_gallery:
                 problems.append(
@@ -383,7 +544,7 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
             print(f"  {problem}", file=sys.stderr)
         print(
             "showcase: run `python3 scripts/showcase.py` (pixi run rs-showcase) to record "
-            "missing clips; edit docs/showcase.toml or README.md for the rest",
+            "missing and stale clips; edit docs/showcase.toml or README.md for the rest",
             file=sys.stderr,
         )
         return 1
@@ -408,7 +569,7 @@ def main(argv: list[str]) -> int:
     group.add_argument(
         "--force",
         action="store_true",
-        help="re-record every clip instead of only the missing ones",
+        help="re-record every clip instead of only the missing and stale ones",
     )
     args = parser.parse_args(argv)
     clips = load_manifest()
