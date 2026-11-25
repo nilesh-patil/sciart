@@ -392,12 +392,15 @@ fn assert_signal_exit(keys: &str, state: impl Fn(&str) -> bool, signal: &str, co
     if cfg!(target_os = "macos") {
         assert!(!helpers.is_empty(), "caffeinate runs as sciart's child");
     }
-    let sent = Instant::now();
     let kill = Command::new("kill")
         .args(["-s", signal, &s.pid().to_string()])
         .status()
         .unwrap();
     assert!(kill.success(), "kill -s {signal}");
+    // The clock starts once `kill` has returned, i.e. the signal is delivered: starting it
+    // before would time the fork and exec of `kill` itself, which under a loaded parallel
+    // test run took longer than the requirement's whole budget.
+    let sent = Instant::now();
     let status = loop {
         if let Some(status) = s.child.try_wait().unwrap() {
             break status;
