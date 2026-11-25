@@ -178,6 +178,13 @@ pub fn load(explicit: Option<&Path>, default: Option<&Path>) -> Result<FileConfi
     }
 }
 
+/// Whether the colour mode was chosen rather than left to `auto`'s default: `--color`
+/// (an explicit `auto` included), the config key `color`, or `NO_COLOR`. The terminal hint
+/// stays quiet then (RND-R21).
+pub fn color_explicit(cli: &Cli, file: &FileConfig, env: Env) -> bool {
+    cli.color.is_some() || file.color.is_some() || env.no_color
+}
+
 /// Merge CLI > file > defaults (CFG-R1); returns warnings for unknown `disabled` and
 /// `favorites` names (CFG-R4, CFG-R9) and for an automatic `NO_COLOR` downgrade (RND-R18).
 ///
@@ -517,6 +524,38 @@ mod tests {
         let f = file("keep_awake = \"mouse\"");
         let (s, _) = resolve(&cli(&["--keep-awake", "off"]).unwrap(), f);
         assert_eq!(s.keep_awake, Mode::Off, "flag wins");
+    }
+
+    #[test]
+    fn rnd_r21_colour_is_explicit_by_flag_config_or_no_color() {
+        let quiet = Env { no_color: false };
+        let loud = Env { no_color: true };
+        let none = file("");
+        assert!(!color_explicit(&cli(&[]).unwrap(), &none, quiet));
+        assert!(color_explicit(&cli(&[]).unwrap(), &none, loud), "NO_COLOR");
+        assert!(color_explicit(
+            &cli(&["--color", "auto"]).unwrap(),
+            &none,
+            quiet
+        ));
+        assert!(color_explicit(
+            &cli(&["--color", "256"]).unwrap(),
+            &none,
+            quiet
+        ));
+        assert!(color_explicit(
+            &cli(&[]).unwrap(),
+            &file("color = \"truecolor\""),
+            quiet
+        ));
+    }
+
+    #[test]
+    fn cfg_r5_ka_r7_config_accepts_inhibit() {
+        let (s, _) = resolve(&cli(&[]).unwrap(), file("keep_awake = \"inhibit\""));
+        assert_eq!(s.keep_awake, Mode::Inhibit);
+        let (s, _) = resolve(&cli(&["--keep-awake", "inhibit"]).unwrap(), file(""));
+        assert_eq!(s.keep_awake, Mode::Inhibit);
     }
 
     #[test]

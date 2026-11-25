@@ -317,13 +317,15 @@ Design: [ADR-0027](adr/0027-opaque-background.md) · RND-R20, CLI-R11, CFG-R11. 
 ## M25 — v1.0 release programme (in progress)
 Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisions: binaries + pixi/conda + crates.io + Homebrew; macOS and Linux first-class, no Windows; scriptable modes, recorder in the binary, a `sciart` library facade, a WASM gallery and a docs site; per-platform determinism; history scrubbed for privacy.
 - [x] History scrub, survey (distribution, performance, usage and API, portability), decisions, programme
-- [ ] Phase 1 — portability (KA-R7..R9, RT-R20, RND-R21, TEST-R13; ADR-0028/0029)
+- [x] Phase 1 — portability (KA-R7..R9, RT-R20, RND-R21, TEST-R13; ADR-0028/0029): Linux inhibitor helper, signal exit, terminal hint, platform tiers; 1,668 default + 201 record-feature tests
+- [ ] Manual Linux keep-awake check on a desktop with logind — [B-96](BACKLOG.md).
 - [ ] Phase 1 — performance (RND-R22/R23, RT-R21/R22; ADR-0030)
-- [ ] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2)
+- [x] Phase 1 — showcase: animated captures in README and docs (WEB-R1/R2): 18 clips from `docs/showcase.toml`, a lock for stale clips, `record --start` (CLI-R8), capture bitmaps for every scene glyph (CLI-R18)
 - [ ] Phase 2 — CLI modes (CLI-R12..R17, RT-R23; ADR-0031)
 - [ ] Phase 2 — library facade (LIB-R1..R8, SPEC-007; ADR-0032)
 - [ ] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033)
 - [ ] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034)
+- [ ] Phase 4 — clean tree and history (public documents only; neutral wording; second history rewrite)
 - [ ] Phase 4 — version 1.0.0, CHANGELOG, docs truth pass, final review, local tag `v1.0.0`
 - [ ] Publish (owner): crates.io, conda channel, Homebrew tap, GitHub Pages, public repository
 

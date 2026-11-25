@@ -22,8 +22,10 @@ speed = 1.0
 # `v` shows only favourites. This file is not rewritten by the app.
 favorites = []
 
-# caffeinate (macOS default) | mouse (needs `pixi run rs-install-mouse` + Accessibility
-# permission) | off. A backend that can't start is a warning; the art keeps running.
+# caffeinate (macOS default) | inhibit (Linux default for a local session: a
+# systemd-inhibit/elogind-inhibit lock against idle and sleep; off over SSH) | mouse (needs
+# `pixi run rs-install-mouse` + Accessibility permission) | off. A backend that can't start
+# is a warning; the art keeps running.
 keep_awake = "caffeinate"
 
 # Drop to a lower frame rate when nobody is watching: after `idle_after` seconds
