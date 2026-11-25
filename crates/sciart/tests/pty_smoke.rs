@@ -64,6 +64,11 @@ impl Session {
         // The colour environment is part of what RND-R18 tests assert, so the test's own
         // `env` list decides it; the developer's shell must not leak in (TEST-R12).
         cmd.env_remove("NO_COLOR");
+        // Likewise the terminal identity RND-R21's hint reads: a developer inside tmux or
+        // Terminal.app must not change what the tests see.
+        cmd.env("TERM", "xterm-256color");
+        cmd.env_remove("TERM_PROGRAM");
+        cmd.env_remove("COLORTERM");
         for (key, value) in env {
             cmd.env(key, value);
         }
@@ -420,6 +425,89 @@ fn rt_r20_sigterm_on_the_help_page_restores_and_exits_143() {
 #[test]
 fn rt_r20_sighup_on_the_paused_help_page_restores_and_exits_129() {
     assert_signal_exit(" ?", |t| t.contains("help"), "HUP", 129);
+}
+
+// ----- M25: terminal hint (RND-R21) -----
+
+const HINT: &str = "sciart: hint: ";
+
+/// RND-R21: on the Linux console the advice comes once, after the terminal is restored.
+#[test]
+fn rnd_r21_linux_console_hint_is_printed_once_after_the_restore() {
+    let args = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
+    let s = Session::start_with_env(&args, &[("TERM", "linux")]);
+    s.wait_for("a lit frame", |t| {
+        t.chars().filter(|c| !c.is_whitespace()).count() > 50
+    });
+    let (status, raw) = s.quit();
+    assert!(status.success(), "exit status {status:?}");
+    let leave = raw
+        .windows(ALT_LEAVE.len())
+        .position(|w| w == ALT_LEAVE)
+        .expect("left the alternate screen");
+    assert_eq!(count(&raw, HINT.as_bytes()), 1, "one hint");
+    let after = String::from_utf8_lossy(&raw[leave..]);
+    assert!(
+        after.contains("Linux console"),
+        "hint after the restore: {after:?}"
+    );
+    assert!(after.contains("--ascii"), "{after:?}");
+}
+
+/// Arguments, config text and extra environment for one [`Session::spawn`].
+type Launch<'a> = (&'a [&'a str], Option<&'a str>, &'a [(&'a str, &'a str)]);
+
+/// RND-R21: an explicit colour choice (flag, config or NO_COLOR) silences the hint, and a
+/// capable terminal never gets one.
+#[test]
+fn rnd_r21_explicit_colour_or_a_capable_terminal_gets_no_hint() {
+    let base = ["run", "starfield", "--seed", "1", "--keep-awake", "off"];
+    let flag = [&base[..], &["--color", "truecolor"]].concat();
+    let cases: [Launch; 4] = [
+        (&flag, None, &[("TERM", "linux")]),
+        (
+            &base,
+            Some("color = \"256\"\n"),
+            &[("TERM", "tmux-256color")],
+        ),
+        (&base, None, &[("TERM", "linux"), ("NO_COLOR", "1")]),
+        (
+            &base,
+            None,
+            &[
+                ("TERM_PROGRAM", "Apple_Terminal"),
+                ("COLORTERM", "truecolor"),
+            ],
+        ),
+    ];
+    for (args, config, env) in cases {
+        let s = Session::spawn(args, config, env);
+        s.wait_for("a lit frame", |t| {
+            t.chars().filter(|c| !c.is_whitespace()).count() > 50
+        });
+        let (status, raw) = s.quit();
+        assert!(status.success(), "{args:?} {env:?}: {status:?}");
+        assert_eq!(
+            count(&raw, HINT.as_bytes()),
+            0,
+            "{args:?} {config:?} {env:?}"
+        );
+    }
+}
+
+/// RND-R21: `list` and a usage error never print the hint.
+#[test]
+fn rnd_r21_list_and_usage_errors_never_hint() {
+    for args in [&["list"][..], &["run", "no_such_scene"][..]] {
+        let out = Command::new(BIN)
+            .args(args)
+            .env("TERM", "linux")
+            .env_remove("NO_COLOR")
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(!stderr.contains(HINT), "{args:?}: {stderr}");
+    }
 }
 
 // ----- M3: keep-awake and low power -----
