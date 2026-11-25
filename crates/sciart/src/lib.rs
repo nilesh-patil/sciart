@@ -12,7 +12,7 @@
 //!
 //! | Feature | Adds |
 //! |---|---|
-//! | `png` | `Stage::write_png` |
+//! | `png` | `Stage::render_png` |
 //! | `widget` | `SceneWidget`, a ratatui 0.30 widget |
 //! | `unstable-generator` | the `experimental` module: write your own scene, with no semver promise |
 //! | `cli`, `record`, `mouse` | the binary (on by default) |
@@ -29,7 +29,7 @@
 //! let mut stage = Stage::new("aurora", 80, 24, Options::default().seed(7))?;
 //! stage.advance(5.0)?;
 //! assert_eq!(stage.time(), 5.0);
-//! let text = stage.to_text()?;
+//! let text = stage.render_text()?;
 //! assert_eq!(text.lines().count(), 24);
 //! # Ok::<(), sciart::Error>(())
 //! ```
@@ -55,7 +55,7 @@
 //!
 //! let mut stage = Stage::new("solar_system", 60, 20, Options::default())?;
 //! stage.advance(2.0)?;
-//! print!("{}", stage.to_ansi(Theme::Astro)?);
+//! print!("{}", stage.render_ansi(Theme::Astro)?);
 //! # Ok::<(), sciart::Error>(())
 //! ```
 //!
@@ -70,7 +70,7 @@
 //! let mut stage = Stage::new("black_hole", 40, 12, Options::default())?;
 //! stage.advance(1.0)?;
 //! let mut png = Vec::new();
-//! stage.write_png(Theme::Aurora, &mut png)?;
+//! stage.render_png(Theme::Aurora, &mut png)?;
 //! assert!(png.starts_with(b"\x89PNG"));
 //! # }
 //! # Ok::<(), sciart::Error>(())
@@ -102,9 +102,9 @@
 //! # Panics
 //!
 //! Scenes are tested never to panic for any size and step, but if one does, the stage
-//! catches it and reports [`Error::ScenePanicked`] from then on, provided the crate is built
-//! with unwinding (the default). Built with `panic = "abort"`, a panic in a scene aborts the
-//! process. The library never installs a panic hook and never touches the terminal, so the
+//! catches it and reports an error of kind [`ErrorKind::ScenePanicked`] from then on,
+//! provided the crate is built with unwinding (the default). Built with `panic = "abort"`, a
+//! panic in a scene aborts the process. The library never installs a panic hook and never touches the terminal, so the
 //! default hook still prints the panic message to stderr unless the application sets its
 //! own.
 
@@ -119,7 +119,7 @@ mod theme;
 #[cfg(feature = "widget")]
 mod widget;
 
-pub use error::Error;
+pub use error::{Error, ErrorKind};
 pub use scene::{Category, SceneInfo, find, scenes};
 pub use stage::{Options, Stage};
 pub use theme::Theme;

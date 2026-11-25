@@ -49,9 +49,9 @@
 //! let blink = Blink { on: false, size: Size::new(1, 1), clock: 0.0 };
 //! let mut stage = Stage::from_generator(Box::new(blink), 9, 3, Options::default().title(false))?;
 //! stage.advance(0.25)?;
-//! assert!(stage.to_text()?.contains('●'));
+//! assert!(stage.render_text()?.contains('●'));
 //! stage.advance(0.5)?;
-//! assert!(!stage.to_text()?.contains('●'));
+//! assert!(!stage.render_text()?.contains('●'));
 //! # Ok::<(), sciart::Error>(())
 //! ```
 //!

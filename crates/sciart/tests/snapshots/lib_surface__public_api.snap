@@ -1,20 +1,24 @@
 ---
 source: crates/sciart/tests/lib_surface.rs
-expression: "surface(&facade()).join(\"\\n\")"
+assertion_line: 497
+expression: "surface().join(\"\\n\")"
 ---
 lib.rs: [unstable-generator] pub mod experimental
-lib.rs: pub use error::Error
+lib.rs: pub use error::{Error, ErrorKind}
 lib.rs: pub use scene::{Category, SceneInfo, find, scenes}
 lib.rs: pub use stage::{Options, Stage}
 lib.rs: pub use theme::Theme
 lib.rs: [widget] pub use widget::SceneWidget
-error.rs: #[non_exhaustive] #[derive(Debug)] pub enum Error
-error.rs: Error::UnknownScene(String)
-error.rs: Error::ScenePanicked(&'static str)
-error.rs: Error::Io(std::io::Error)
+error.rs: #[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)] pub enum ErrorKind
+error.rs: ErrorKind::UnknownScene
+error.rs: ErrorKind::ScenePanicked
+error.rs: ErrorKind::InvalidInput
+error.rs: ErrorKind::Io
+error.rs: #[derive(Debug)] pub struct Error
+error.rs: impl Error: pub fn kind(&self) -> ErrorKind
+error.rs: impl Error: pub fn scene(&self) -> Option<&str>
 error.rs: impl fmt::Display for Error
 error.rs: impl std::error::Error for Error
-error.rs: impl From<std::io::Error> for Error
 experimental.rs: [unstable-generator] pub use sciart_core::prelude
 experimental.rs: [unstable-generator] pub use sciart_core::{Canvas, Ctx, Generator, Glyph, Ink, Meta, Role, Size}
 scene.rs: #[derive(Clone, Copy)] pub struct SceneInfo
@@ -57,9 +61,9 @@ stage.rs: impl Stage: pub fn time(&self) -> f64
 stage.rs: impl Stage: pub fn is_failed(&self) -> bool
 stage.rs: impl Stage: pub fn resize(&mut self, width: u16, height: u16) -> Result<(), Error>
 stage.rs: impl Stage: pub fn advance(&mut self, seconds: f64) -> Result<(), Error>
-stage.rs: impl Stage: pub fn to_text(&mut self) -> Result<String, Error>
-stage.rs: impl Stage: pub fn to_ansi(&mut self, theme: Theme) -> Result<String, Error>
-stage.rs: [png] impl Stage: pub fn write_png<W: std::io::Write>(&mut self, theme: Theme, out: W) -> Result<(), Error>
+stage.rs: impl Stage: pub fn render_text(&mut self) -> Result<String, Error>
+stage.rs: impl Stage: pub fn render_ansi(&mut self, theme: Theme) -> Result<String, Error>
+stage.rs: [png] impl Stage: pub fn render_png<W: std::io::Write>(&mut self, theme: Theme, out: W) -> Result<(), Error>
 stage.rs: [unstable-generator] impl Stage: pub fn from_generator(generator: Box<dyn sciart_core::Generator>, width: u16, height: u16, options: Options) -> Result<Stage, Error>
 theme.rs: #[non_exhaustive] #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)] pub enum Theme
 theme.rs: #[default] Theme::Astro

@@ -9,6 +9,10 @@ use crate::{Error, SceneInfo, Theme};
 
 /// Fixed steps per simulated second (ADR-0003).
 const STEPS_PER_SECOND: f64 = 60.0;
+/// The largest side a stage takes, in cells (LIB-R5); larger sizes are clamped to it.
+const MAX_SIDE: u16 = 1024;
+/// The most simulated seconds one `advance` call takes (LIB-R5).
+const MAX_ADVANCE: f64 = 3600.0;
 
 /// How a [`Stage`] starts: the seed, the glyph set and whether the science title is drawn.
 ///
@@ -58,13 +62,16 @@ impl Options {
 ///
 /// Time only moves through [`advance`](Stage::advance), in whole steps of 1/60 s, so a
 /// frame depends on the scene, the seed, the size and the simulated time, never on how
-/// often it is drawn.
+/// often it is drawn. Each `render_*` method draws the current frame again.
+///
+/// Sizes are in cells and clamped to 1..=1024 on each side.
 ///
 /// # Panics
 ///
-/// No method panics. If the scene itself panics, the stage reports
-/// [`Error::ScenePanicked`] and stays failed, provided the crate is built with unwinding;
-/// built with `panic = "abort"`, the process aborts.
+/// No method panics. If the scene itself panics, the stage reports an error of kind
+/// [`ErrorKind::ScenePanicked`](crate::ErrorKind::ScenePanicked) and stays failed,
+/// provided the crate is built with unwinding; built with `panic = "abort"`, the process
+/// aborts.
 #[derive(Debug)]
 pub struct Stage {
     inner: sciart_core::Stage,
@@ -76,11 +83,9 @@ pub struct Stage {
 }
 
 impl Stage {
-    /// Start `scene` (a name or a retired name) at `width` × `height` cells; a side of 0
-    /// counts as 1.
+    /// Start `scene` (a name or a retired name) at `width` × `height` cells.
     pub fn new(scene: &str, width: u16, height: u16, options: Options) -> Result<Stage, Error> {
-        let entry =
-            sciart_generators::find(scene).ok_or_else(|| Error::UnknownScene(scene.to_owned()))?;
+        let entry = sciart_generators::find(scene).ok_or_else(|| Error::unknown_scene(scene))?;
         Self::start(entry.meta, entry.build, width, height, options)
     }
 
@@ -101,7 +106,7 @@ impl Stage {
         let mut inner = catch_unwind(AssertUnwindSafe(|| {
             sciart_core::Stage::new(build(), options.seed, size, mode)
         }))
-        .map_err(|_| Error::ScenePanicked(meta.name))?;
+        .map_err(|_| Error::panicked(meta.name))?;
         inner.set_title_visible(options.title);
         Ok(Stage {
             inner,
@@ -128,13 +133,14 @@ impl Stage {
         self.steps as f64 / STEPS_PER_SECOND
     }
 
-    /// Whether the scene has panicked; a failed stage only returns
-    /// [`Error::ScenePanicked`].
+    /// Whether the scene has panicked; a failed stage only returns errors of kind
+    /// [`ErrorKind::ScenePanicked`](crate::ErrorKind::ScenePanicked).
     pub fn is_failed(&self) -> bool {
         self.failed
     }
 
-    /// Change the size; the scene rebuilds what depends on it. A side of 0 counts as 1.
+    /// Change the size; the scene rebuilds what depends on it. Each side is clamped to
+    /// 1..=1024.
     pub fn resize(&mut self, width: u16, height: u16) -> Result<(), Error> {
         self.check()?;
         let size = clamp(width, height);
@@ -143,16 +149,20 @@ impl Stage {
         self.settle(result)
     }
 
-    /// Move simulated time on by `seconds`. The stage takes fixed steps of 1/60 s until
-    /// `floor(60 · total + 1e-6)` steps have been taken in all, where `total` is every
-    /// second asked for so far; so `advance(1.0)` equals sixty calls of `advance(1.0 / 60.0)`.
-    /// A negative or non-finite `seconds` adds nothing. The cost is linear in the simulated
-    /// time.
+    /// Move simulated time on by `seconds`, at most 3600 per call. The stage takes fixed
+    /// steps of 1/60 s until `floor(60 · total + 1e-6)` steps have been taken in all, where
+    /// `total` is every second asked for so far; so `advance(1.0)` equals sixty calls of
+    /// `advance(1.0 / 60.0)`. A negative, non-finite or larger `seconds` is an error of kind
+    /// [`ErrorKind::InvalidInput`](crate::ErrorKind::InvalidInput) and steps nothing. The
+    /// cost is linear in the simulated time.
     pub fn advance(&mut self, seconds: f64) -> Result<(), Error> {
         self.check()?;
-        if seconds.is_finite() && seconds > 0.0 {
-            self.total += seconds;
+        if !(seconds.is_finite() && (0.0..=MAX_ADVANCE).contains(&seconds)) {
+            return Err(Error::invalid(
+                "advance takes a finite number of seconds in 0..=3600",
+            ));
         }
+        self.total += seconds;
         let target = (self.total * STEPS_PER_SECOND + 1e-6).floor() as u64;
         let (inner, steps) = (&mut self.inner, &mut self.steps);
         let result = catch_unwind(AssertUnwindSafe(|| {
@@ -164,8 +174,8 @@ impl Stage {
         self.settle(result)
     }
 
-    /// The current frame as plain text: one line per row, each ending in `\n`.
-    pub fn to_text(&mut self) -> Result<String, Error> {
+    /// Draw the current frame as plain text: one line per row, each ending in `\n`.
+    pub fn render_text(&mut self) -> Result<String, Error> {
         let canvas = self.draw()?;
         let mut out =
             String::with_capacity(canvas.cells().len() + usize::from(canvas.size().height()));
@@ -176,11 +186,11 @@ impl Stage {
         Ok(out)
     }
 
-    /// The current frame as ANSI text in `theme`: one line per row with truecolor SGR
+    /// Draw the current frame as ANSI text in `theme`: one line per row with truecolor SGR
     /// sequences, a reset at the end of every line and a final newline. Cells without a
     /// background of their own stay on the terminal's background. These are the bytes
     /// `sciart frame` prints, and the rows `sciart record --format asciicast` embeds.
-    pub fn to_ansi(&mut self, theme: Theme) -> Result<String, Error> {
+    pub fn render_ansi(&mut self, theme: Theme) -> Result<String, Error> {
         let canvas = self.draw()?;
         let mut out = String::with_capacity(canvas.cells().len() * 4);
         write_ansi(
@@ -193,20 +203,20 @@ impl Stage {
         Ok(out)
     }
 
-    /// Write the current frame in `theme` to `out` as an 8-bit RGB PNG, 8 × 16 pixels per
-    /// cell: the renderer of `sciart record`. Needs the `png` feature.
+    /// Draw the current frame in `theme` and write it to `out` as an 8-bit RGB PNG, 8 × 16
+    /// pixels per cell: the renderer of `sciart record`. Needs the `png` feature.
     ///
     /// ```
     /// use sciart::{Options, Stage, Theme};
     ///
     /// let mut stage = Stage::new("pulsar", 20, 6, Options::default())?;
     /// let mut png = Vec::new();
-    /// stage.write_png(Theme::Mono, &mut png)?;
+    /// stage.render_png(Theme::Mono, &mut png)?;
     /// assert!(png.starts_with(b"\x89PNG"));
     /// # Ok::<(), sciart::Error>(())
     /// ```
     #[cfg(feature = "png")]
-    pub fn write_png<W: std::io::Write>(&mut self, theme: Theme, out: W) -> Result<(), Error> {
+    pub fn render_png<W: std::io::Write>(&mut self, theme: Theme, out: W) -> Result<(), Error> {
         self.check()?;
         let options = sciart_capture::RenderOptions {
             theme: theme.render(),
@@ -216,19 +226,15 @@ impl Stage {
         let image = catch_unwind(AssertUnwindSafe(|| {
             sciart_capture::render_frame(inner, &options)
         }));
-        let image = match image {
-            Ok(image) => image,
-            Err(_) => {
-                self.failed = true;
-                return Err(Error::ScenePanicked(self.meta.name));
-            }
+        let Ok(image) = image else {
+            self.failed = true;
+            return Err(Error::panicked(self.meta.name));
         };
-        sciart_capture::encode_png(&image, out)?;
-        Ok(())
+        sciart_capture::encode_png(&image, out).map_err(Error::io)
     }
 
     /// Start a scene written against the internal crates (`unstable-generator`, no semver
-    /// promise). A side of 0 counts as 1.
+    /// promise). Each side is clamped to 1..=1024.
     #[cfg(feature = "unstable-generator")]
     pub fn from_generator(
         generator: Box<dyn sciart_core::Generator>,
@@ -253,7 +259,7 @@ impl Stage {
 
     fn check(&self) -> Result<(), Error> {
         if self.failed {
-            Err(Error::ScenePanicked(self.meta.name))
+            Err(Error::panicked(self.meta.name))
         } else {
             Ok(())
         }
@@ -267,8 +273,9 @@ impl Stage {
     }
 }
 
+/// LIB-R5: each side in 1..=1024 cells.
 fn clamp(width: u16, height: u16) -> Size {
-    Size::new(width.max(1), height.max(1))
+    Size::new(width.clamp(1, MAX_SIDE), height.clamp(1, MAX_SIDE))
 }
 
 #[cfg(test)]
@@ -276,6 +283,7 @@ pub(crate) mod tests {
     use sciart_core::{Category, Ctx, Generator, Glyph, Ink, Role};
 
     use super::*;
+    use crate::ErrorKind;
 
     static META: Meta = Meta {
         name: "fragile",
@@ -326,7 +334,7 @@ pub(crate) mod tests {
     }
 
     fn failed(result: Result<impl std::fmt::Debug, Error>) -> bool {
-        matches!(result, Err(Error::ScenePanicked("fragile")))
+        result.is_err_and(|e| e.kind() == ErrorKind::ScenePanicked && e.scene() == Some("fragile"))
     }
 
     #[test]
@@ -339,18 +347,25 @@ pub(crate) mod tests {
         assert!(failed(resize.advance(1.0)));
 
         let mut update = fragile(PanicIn::Update).unwrap();
-        assert!(update.to_text().is_ok(), "drawing before any step works");
+        assert!(
+            update.render_text().is_ok(),
+            "drawing before any step works"
+        );
         assert!(failed(update.advance(0.5)));
         assert!(update.is_failed());
-        assert!(failed(update.to_text()));
-        assert!(failed(update.to_ansi(Theme::Astro)));
+        assert!(failed(update.render_text()));
+        assert!(failed(update.render_ansi(Theme::Astro)));
         assert!(failed(update.resize(9, 9)));
         assert!(failed(update.advance(0.5)));
+        assert!(
+            failed(update.advance(-1.0)),
+            "a failed stage reports the panic first"
+        );
 
         let mut render = fragile(PanicIn::Render).unwrap();
         assert!(render.advance(1.0).is_ok());
-        assert!(failed(render.to_ansi(Theme::Astro)));
-        assert!(failed(render.to_text()));
+        assert!(failed(render.render_ansi(Theme::Astro)));
+        assert!(failed(render.render_text()));
         assert_eq!(
             render.scene().name(),
             "fragile",
@@ -362,7 +377,19 @@ pub(crate) mod tests {
     #[test]
     fn lib_r6_a_panic_while_drawing_a_png_fails_the_stage() {
         let mut render = fragile(PanicIn::Render).unwrap();
-        assert!(failed(render.write_png(Theme::Astro, Vec::new())));
+        assert!(failed(render.render_png(Theme::Astro, Vec::new())));
         assert!(failed(render.advance(1.0)));
+    }
+
+    #[test]
+    fn lib_r5_sides_clamp_to_1_through_1024() {
+        assert_eq!(clamp(0, 0), Size::new(1, 1));
+        assert_eq!(clamp(1024, 1025), Size::new(1024, 1024));
+        assert_eq!(clamp(u16::MAX, 7), Size::new(1024, 7));
+        let mut stage = fragile(PanicIn::Update).unwrap();
+        stage.resize(u16::MAX, 2).unwrap();
+        assert_eq!(stage.size(), (1024, 2));
+        stage.resize(2, u16::MAX).unwrap();
+        assert_eq!(stage.size(), (2, 1024));
     }
 }
