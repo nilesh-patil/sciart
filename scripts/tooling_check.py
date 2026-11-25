@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
-"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R13).
+"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R13; SPEC-007 LIB-R4,
+LIB-R7, LIB-R8; SPEC-005 CLI-R15).
 
 Asserts the shape of the build/test tooling the gate depends on: pixi tasks use the
 documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and checks,
@@ -13,6 +14,7 @@ into `pixi run rs-spec-check` and CI.
 from __future__ import annotations
 
 import re
+import subprocess
 import sys
 import tomllib
 from pathlib import Path
@@ -236,16 +238,91 @@ def check_r13(problems: list[str]) -> None:
         fail(problems, "TEST-R13: the tier-1 skip reason (tests/common/tier.rs) names TEST-R13")
 
 
+# LIB-R4 / CLI-R15: what the library pulls in without the binary's defaults.
+CLI_ONLY_CRATES = ("clap", "anyhow", "toml", "serde", "gif", "sciart-keepawake")
+LIB_DOC_TESTS = "cargo test -p sciart --doc --features png,widget,unstable-generator"
+LIB_LINTS = (
+    "cargo clippy -p sciart --all-targets --no-default-features -- -D warnings",
+    "cargo clippy -p sciart --all-targets --no-default-features --features png,widget -- -D warnings",
+)
+LIB_TESTS = "cargo nextest run -p sciart --no-default-features --features png,widget,unstable-generator"
+NO_RECORDER_TESTS = "cargo nextest run -p sciart --no-default-features --features cli"
+
+
+def lean_tree() -> list[str] | None:
+    """Crate names in `sciart`'s normal dependency tree with no default features, or None
+    when cargo cannot resolve it."""
+    try:
+        out = subprocess.run(
+            ["cargo", "tree", "-p", "sciart", "--no-default-features", "-e", "normal",
+             "--prefix", "none", "--locked"],
+            cwd=ROOT, capture_output=True, text=True, check=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return None
+    return sorted({line.split()[0] for line in out.splitlines() if line.strip()})
+
+
+def check_lib(problems: list[str]) -> None:
+    manifest = toml_file("crates/sciart/Cargo.toml")
+    features = manifest.get("features", {})
+    if features.get("default") != ["cli", "record"]:
+        fail(problems, f"LIB-R4 / CLI-R15: sciart's default features are cli and record: {features.get('default')}")
+    for name in ("cli", "record", "png", "widget", "unstable-generator"):
+        if name not in features:
+            fail(problems, f"LIB-R4: sciart has a `{name}` feature")
+    if "png" not in features.get("record", []):
+        fail(problems, "CLI-R15: `record` enables `png` (the capture pipeline)")
+    bins = manifest.get("bin", [])
+    if not any(b.get("name") == "sciart" and b.get("required-features") == ["cli"] for b in bins):
+        fail(problems, "LIB-R4: the `sciart` binary has required-features = [\"cli\"]")
+    docs = manifest.get("package", {}).get("metadata", {}).get("docs", {}).get("rs", {})
+    if sorted(docs.get("features", [])) != ["png", "unstable-generator", "widget"] or "mouse" in str(docs):
+        fail(problems, f"LIB-R4: docs.rs builds png, widget and unstable-generator, never mouse: {docs}")
+    tree = lean_tree()
+    if tree is None:
+        fail(problems, "LIB-R4: `cargo tree -p sciart --no-default-features` did not resolve")
+    else:
+        for crate in CLI_ONLY_CRATES:
+            if crate in tree:
+                fail(problems, f"LIB-R4: `{crate}` is in the library's dependency tree without default features")
+    pixi = toml_file("pixi.toml")
+    lint, _ = pixi_task(pixi, "rs-lint")
+    for command in LIB_LINTS:
+        if command not in lint:
+            fail(problems, f"LIB-R4: rs-lint runs `{command}`")
+    tests, _ = pixi_task(pixi, "rs-test-features")
+    for command, req in ((LIB_DOC_TESTS, "LIB-R7"), (LIB_TESTS, "LIB-R7"), (NO_RECORDER_TESTS, "CLI-R15")):
+        if command not in tests:
+            fail(problems, f"{req}: rs-test-features runs `{command}`")
+    if "rs-test-features" not in pixi_task(pixi, "rs-ci")[1]:
+        fail(problems, "LIB-R7: rs-ci runs rs-test-features")
+    workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+    jobs = workflow_jobs(workflow)
+    for command in LIB_LINTS:
+        if command not in jobs.get("lint", ""):
+            fail(problems, f"LIB-R4: ci.yml `lint` runs `{command}`")
+    for command in (LIB_DOC_TESTS, LIB_TESTS, NO_RECORDER_TESTS):
+        if command not in jobs.get("test", ""):
+            fail(problems, f"LIB-R7 / CLI-R15: ci.yml `test` runs `{command}`")
+    semver = [body for body in jobs.values() if "cargo semver-checks" in body]
+    if not semver or "--baseline-version 1.0.0" not in semver[0]:
+        fail(problems, "LIB-R8: ci.yml has a cargo-semver-checks step against the published 1.0.0")
+    if any("semver-checks" in pixi_task(pixi, name)[0] for name in pixi.get("tasks", {})):
+        fail(problems, "LIB-R8: cargo-semver-checks runs in hosted CI only, not in a pixi task")
+
+
 def main() -> int:
     problems: list[str] = []
-    for check in (check_r9, check_r10, check_r11, check_r13):
+    for check in (check_r9, check_r10, check_r11, check_r13, check_lib):
         check(problems)
     if problems:
         print("tooling schema:", file=sys.stderr)
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
-    print("tooling schema OK (pixi tasks, cargo profiles, nextest, sccache, platform tiers)")
+    print("tooling schema OK (pixi tasks, cargo profiles, nextest, sccache, platform tiers, "
+          "library features)")
     return 0
 
 
