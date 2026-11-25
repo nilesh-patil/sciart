@@ -582,6 +582,8 @@ impl Wakeups {
     fn count(&mut self) {
         if let Some(path) = &self.path {
             self.count += 1;
+            // Truncated, then written: a reader must retry a read that does not parse
+            // (the pty tests' `read_wakeups` does); RT-R22 keeps this test hook minimal.
             let _ = std::fs::write(path, self.count.to_string());
         }
     }

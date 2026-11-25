@@ -31,7 +31,7 @@ pixi tasks when in doubt. Extra arguments after a task name are passed to the co
 
 | Task | Command |
 |------|---------|
-| Full gate — run before every commit | `pixi run rs-ci` (fmt check + clippy `-D warnings` with and without `--all-features` + all tests under cargo-nextest, TEST-R10 + the snapshot suite again in the optimised `ci` profile, TEST-R9) |
+| Full gate — run before every commit | `pixi run rs-ci` (fmt check + clippy `-D warnings` with and without `--all-features` + all tests under cargo-nextest, TEST-R10 + `pty_smoke` and `encoder_fidelity` again with `NO_COLOR=1`, `rs-test-nocolor`, TEST-R12 + the snapshot suite again in the optimised `ci` profile, TEST-R9) |
 | Library and feature sets (LIB-R4/R7, CLI-R15; part of `rs-ci`) | `pixi run rs-test-features` (the binary without the recorder, the library's doctests, and the library-only tests with `png,widget,unstable-generator`); `rs-lint` also lints `--no-default-features` and `png,widget` |
 | Tests only / build | `pixi run rs-test` (nextest on the opt-level 2 `test` profile with debug assertions; extra args go to nextest: `pixi run rs-test contract`) / `pixi run rs-build`; `pixi run rs-test-parity` proves rs-test runs exactly `cargo test --workspace`'s tests |
 | Format | `pixi run rs-fmt` |
@@ -249,10 +249,12 @@ the [backlog](docs/BACKLOG.md). At every milestone close:
 - Every pixi task routes rustc through `sccache` from the pixi environment
   (`scripts/pixi-activate.sh`, TEST-R11; `sccache --show-stats`). Plain `cargo` outside pixi
   does not use it; `RUSTC_WRAPPER= pixi run …` turns it off.
-- Platforms (TEST-R13, ADR-0029): macOS arm64 and Linux x86_64 run the full suite with frames
-  pinned; Linux aarch64 runs it without the frame-pinning suites, which skip themselves; Intel
-  macOS and Linux musl get release builds only. Frames are deterministic per platform, not
-  across platforms.
+- Platforms (TEST-R13, ADR-0029): macOS arm64 and Linux x86_64 run lint and the full suite;
+  Linux aarch64 runs the full suite; Intel macOS and Linux musl get release builds only.
+  Frames are deterministic per platform, not across platforms, so they are pinned on macOS
+  arm64 only: the snapshot suite and `m11_fidelity` skip themselves elsewhere. Record and
+  review snapshots there. A unit test of a chaotic model asserts a margin that holds over
+  many seeds (measure 64 or more), never a threshold one platform's rounding decides.
 - Keep-awake defaults to `caffeinate` on macOS (ADR-0005) and to `inhibit` on Linux for a local
   session, `off` over SSH (KA-R7/R8, ADR-0028). The `mouse` backend is an opt-in cargo feature
   (`pixi run rs-install-mouse`) and needs Accessibility permission.

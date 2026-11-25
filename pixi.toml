@@ -23,6 +23,9 @@ rs-test-parity = "python3 scripts/test_set_parity.py"
 # LIB-R7: the library's doctests with every library feature, and its tests on the library
 # alone (`--no-default-features`: the facade without the binary's dependencies).
 rs-test-features = "cargo nextest run -p sciart --no-default-features --features cli && cargo test -p sciart --doc --features png,widget,unstable-generator && cargo nextest run -p sciart --no-default-features --features png,widget,unstable-generator"
+# TEST-R12: the colour-sensitive suites again with NO_COLOR set, exactly as CI's `test` job
+# runs them (scripts/tooling_check.py holds the two to the same command).
+rs-test-nocolor = { cmd = "cargo nextest run -p sciart --test pty_smoke --test encoder_fidelity", env = { NO_COLOR = "1" } }
 # GEN-R15: the generated scene index in SPEC-002-generators.md matches the category files.
 # TEST-R1/R4: spec traceability (scripts/spec_check.py); TEST-R9/R10/R11: tooling schema
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
@@ -38,7 +41,7 @@ rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- 
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
-rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check", "site-check"] }
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-test-nocolor", "rs-spec-check", "rs-snap-release", "rs-showcase-check", "site-check"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"

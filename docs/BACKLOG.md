@@ -25,11 +25,11 @@ below split it so each can close on its own.
 
 | Status | Count |
 | --- | ---: |
-| open | 64 |
+| open | 66 |
 | done | 16 |
 | superseded | 13 |
 | won't fix | 3 |
-| **total** | **96** |
+| **total** | **98** |
 
 Counted from the tables below (M25); re-count after edits.
 
@@ -203,6 +203,8 @@ Counted from the tables below (M25); re-count after edits.
 | B-93 | science / GEN-R12 | `solar_surface` title says "boiling granules"; granulation is convection. | [claims](science/claims.md) | open | P2 | Proposed "Solar surface · convection cells"; the scene is M11-pinned, so a title change needs a GEN-R22 exception. |
 | B-94 | science / GEN-R12 | `molecular_dynamics` title says "cool atoms"; the model is Lennard-Jones sites. | [claims](science/claims.md) | open | P2 | Proposed "Condensation · cool particles cling"; M11-pinned, same fixture decision as B-93. |
 | B-95 | art | `io_volcanoes`' faint fixed Pele guide dome is a static element under the live grains. | M23 art pass | open | P3 | Deliberate silhouette aid; remove if a future review prefers pure live grains. |
+| B-97 | release / DIST-R5 | The `ubuntu-22.04` and `ubuntu-22.04-arm` runner images are removed on 2027-04-17, and with them the glibc 2.35 baseline of the Linux gnu builds. | [RELEASING](RELEASING.md#runner-images) | open | P1 | Choose the next baseline (an older glibc in a container, or `ubuntu-24.04` and glibc 2.39) before then; change `RUNNER_IMAGES` in `scripts/tooling_check.py`, `OLDEST_UBUNTU`, the workflows, the installer's glibc check and SPEC-008 together. |
+| B-98 | tests / TEST-R13 | Frames are pinned on macOS arm64 only; pinning them on x86_64 Linux as well needs a second reviewed snapshot set (and M11 fixtures) re-recorded with every look change. | [ADR-0029](adr/0029-platform-tiers-and-determinism.md) | open | P3 | Deferred after 1.0; `molecular_dynamics_t5` is the one snapshot that differs there today. |
 
 ## Notes
 

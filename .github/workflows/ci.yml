@@ -12,13 +12,17 @@ name: CI
 #   web       = the WebAssembly player and the docs site: `web-build`, `web-test`,
 #               `site-build` and `site-check` (WEB-R3..R7); publishing is pages.yml (WEB-R8)
 # Platform tiers (TEST-R13, ADR-0029), checked by `scripts/tooling_check.py`:
-#   tier 1 = aarch64-apple-darwin (macos-14) and x86_64-unknown-linux-gnu (ubuntu-latest):
-#            lint, the whole suite, and the frame-pinning suites (snapshots, m11_fidelity);
-#   tier 2 = aarch64-unknown-linux-gnu (ubuntu-24.04-arm): the whole suite, in which the
-#            frame-pinning suites skip themselves (frames are deterministic per platform);
+#   tier 1 = aarch64-apple-darwin (macos-15) and x86_64-unknown-linux-gnu (ubuntu-24.04):
+#            lint and the whole suite;
+#   tier 2 = aarch64-unknown-linux-gnu (ubuntu-24.04-arm): the whole suite;
 #   tier 3 = x86_64-apple-darwin and the musl targets: release builds only (release.yml).
+# Frames are pinned on the reference platform, aarch64-apple-darwin, only: the frame-pinning
+# suites (snapshots, m11_fidelity) skip themselves everywhere else, because frames are
+# deterministic per platform. Every job names an explicit runner image from the list in
+# `scripts/tooling_check.py` (RUNNER_IMAGES), never a `-latest` label.
 # A second `test` step re-runs only the colour-sensitive suites with NO_COLOR=1 (TEST-R12),
-# so the ambient environment can never decide whether the gate is green.
+# so the ambient environment can never decide whether the gate is green; the local gate
+# runs the same pass (`rs-test-nocolor`).
 # pixi is deliberately not used here: CI installs the toolchain directly (ADR-0024).
 
 on:
@@ -49,12 +53,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             tier: 1
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             tier: 1
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
@@ -84,14 +88,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             tier: 1
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             tier: 1
           - os: ubuntu-24.04-arm
             tier: 2
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
@@ -107,7 +111,8 @@ jobs:
       # environment disables colour. Only pty_smoke and encoder_fidelity build
       # crossterm references or drive the real binary through colour paths; the
       # other 1600+ tests never read the ambient colour configuration, so they
-      # are not re-run here.
+      # are not re-run here. The same command and env as `pixi run rs-test-nocolor`,
+      # part of `rs-ci` (scripts/tooling_check.py compares them).
       - name: Colour-sensitive suites (nextest, NO_COLOR=1)
         env:
           NO_COLOR: "1"
@@ -151,9 +156,9 @@ jobs:
   # and checked (`pixi run site-check`). Publishing is pages.yml, never this workflow (WEB-R8).
   web:
     name: web (player module and docs site)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
@@ -186,9 +191,9 @@ jobs:
   # the published 1.0.0. Before then there is no baseline and the step says so.
   semver:
     name: semver (library API against 1.0.0)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
@@ -212,25 +217,25 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
-            tier: 1
-          - os: ubuntu-latest
+          # TEST-R13: the reference platform only; the suite skips itself elsewhere.
+          - os: macos-15
             tier: 1
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      # TEST-R9: frames must not depend on the optimiser; TEST-R13: pinned on tier 1.
+      # TEST-R9: frames must not depend on the optimiser; TEST-R13: pinned on the
+      # reference platform.
       - name: Snapshot suite (optimised)
         run: cargo test --profile ci -p sciart-generators --test snapshots
 
   deny:
     name: cargo-deny
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4

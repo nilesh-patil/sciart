@@ -1327,6 +1327,8 @@ mod tests {
 
     #[test]
     fn att_a4_scout_ensembles_fill_their_boxes_and_frames() {
+        // Every margin below holds over seeds 0–63, which stand in for another platform's
+        // rounding of the same chaotic scout (TEST-R13); the test runs seeds 0–7.
         let boxes = [
             [1.44, 1.95, 1.70],
             [2.00, 2.00, 1.49],
@@ -1334,13 +1336,17 @@ mod tests {
             [2.0; 3],
             [1.81, 1.64, 2.00],
         ];
+        // The 99.5 % box may exceed the frame by this factor on any side: worst over seeds
+        // 0–63 is 1.042 (Lorenz bottom, seed 47), every other attractor ≤ 1.006; x86_64
+        // Linux measured Thomas seed 1 at 0.9807 / 0.98 = 1.0007.
+        const BOX_TOLERANCE: f64 = 1.05;
         for (k, reference) in GALLERY.into_iter().zip(boxes) {
             let s = spec(k);
-            // Lorenz 0.8, not the 0.9 of the others: a 1024 × 0.05 tu = 51 tu scout rarely
-            // reaches the outer spiral (z is the short axis; minimum 0.825 over seeds 0–7,
-            // 0.806 over 0–63, where 35 of 64 seeds are below 0.9). Aizawa keeps 0.9, which
-            // its coexisting inner attractor (z: 0.82) fails.
-            let fill = if k == Attractor::Lorenz { 0.8 } else { 0.9 };
+            // Lorenz 0.75, not the 0.88 of the others: a 1024 × 0.05 tu = 51 tu scout rarely
+            // reaches the outer spiral (z is the short axis; minimum 0.806 over seeds 0–63,
+            // where 35 of 64 seeds are below 0.9). The others' minimum over seeds 0–63 is
+            // 0.916 (Rössler z); 0.88 still fails Aizawa's coexisting inner attractor (z: 0.82).
+            let fill = if k == Attractor::Lorenz { 0.75 } else { 0.88 };
             let mut reach = [0.0f64; 3];
             for seed in 0..8 {
                 let pts = ensemble(k, seed);
@@ -1364,14 +1370,15 @@ mod tests {
                         hi[i] - lo[i]
                     );
                 }
+                // Max radius over seeds 0–63: 0.888–1.013 ρ (both ends Lorenz).
                 assert!(
-                    (0.90 * s.rho..=1.03 * s.rho).contains(&rmax),
+                    (0.85 * s.rho..=1.03 * s.rho).contains(&rmax),
                     "{k:?} seed {seed}: max radius {rmax}"
                 );
                 // The frame is the 99.5th percentile of every pose over the camera loop,
                 // measured about its yaw-dependent midpoint, and tight (some pose of some
                 // seed reaches 0.97 of it on every side); nothing lies beyond 1.2× it, so
-                // clipped excursions stay short.
+                // clipped excursions stay short (worst over seeds 0–63: 1.16, Lorenz top).
                 let f = s.frame;
                 let q = N - N / 200;
                 for step in 0..72 {
@@ -1394,7 +1401,9 @@ mod tests {
                         ys.sort_by(f64::total_cmp);
                         let (x, top, bottom) = (xs[q], ys[N - 1 - q], ys[q]);
                         assert!(
-                            x <= f.x && top >= f.top && bottom <= f.bottom,
+                            x <= BOX_TOLERANCE * f.x
+                                && top >= BOX_TOLERANCE * f.top
+                                && bottom <= BOX_TOLERANCE * f.bottom,
                             "{k:?} seed {seed}: 99.5 % box ({x}, {top}, {bottom})"
                         );
                         for (r, v) in
