@@ -9,6 +9,8 @@ name: CI
 #   deny      = cargo-deny (advisories, licences, bans, sources; `deny.toml`)
 #   semver    = cargo-semver-checks on the library against the published 1.0.0 (LIB-R8);
 #               hosted only, not part of `rs-ci`
+#   web       = the WebAssembly player and the docs site: `web-build`, `web-test`,
+#               `site-build` and `site-check` (WEB-R3..R7); publishing is pages.yml (WEB-R8)
 # Platform tiers (TEST-R13, ADR-0029), checked by `scripts/tooling_check.py`:
 #   tier 1 = aarch64-apple-darwin (macos-14) and x86_64-unknown-linux-gnu (ubuntu-latest):
 #            lint, the whole suite, and the frame-pinning suites (snapshots, m11_fidelity);
@@ -128,6 +130,32 @@ jobs:
         run: cargo test -p sciart --doc --features png,widget,unstable-generator
       - name: Library tests (no default features)
         run: cargo nextest run -p sciart --no-default-features --features png,widget,unstable-generator
+
+  # WEB-R3: the player module is built on every push; WEB-R4..R7: the site is built from it
+  # and checked (`pixi run site-check`). Publishing is pages.yml, never this workflow (WEB-R8).
+  web:
+    name: web (player module and docs site)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88.0
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            web -> web/target
+      - name: Player module (WebAssembly)
+        run: cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown
+      - name: Player tests (native)
+        run: cargo test --locked --manifest-path web/Cargo.toml
+      - name: The binary the site is built from (list, completions)
+        run: cargo build --locked --profile ci -p sciart
+      - name: Docs site
+        run: |
+          python3 scripts/build_site.py
+          python3 scripts/site_check.py
 
   # LIB-R8: from the first release after 1.0.0, the library's public API is compared with
   # the published 1.0.0. Before then there is no baseline and the step says so.
