@@ -36,8 +36,20 @@ enough to poll the keep-awake backend.
 
 ## Consequences
 
-- Expected: about a third less pipeline time at 200×50 and more than half at 500×150; the
-  quiet scenes gain most. The merge records the measured numbers.
+- Measured on the release profile (M4 Max, 85 scenes, gallery mean, runs taken back to back):
+
+  | Size | Paint | Diff + encode | Pipeline with the scene |
+  |---|---|---|---|
+  | 200×50 | 96 → 43 µs | 143 → 23 µs | 532 → about 359 µs |
+  | 500×150 | 694 → 253 µs | 936 → 99 µs | about 2400 → about 1080 µs |
+
+  Bytes per frame, changed cells and the art metrics are identical on every scene. The
+  quiet scenes gain most; a scene that changes most of the screen every frame, such as
+  `solar_surface`, gains little.
+- CPU of the running binary (one scene, 200×50, 20 s): 2.7 % → 1.1 % of a core while
+  animating, 0.76 % → 0.17 % paused, 0.74 % → 0.46 % in low power. Peak memory grows by
+  about 1 MiB, because the pipeline keeps a copy of the last screen beside the canvas.
+- A paused scene wakes about once a second, to poll keep-awake, instead of five times.
 - Frames, bytes and the M11 look do not change: the output stream is identical by test.
 - The renderer owns its diff instead of relying on ratatui's `Buffer::diff`; ratatui remains
   the buffer type and the widget layer (HUD, help).
