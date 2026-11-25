@@ -8,6 +8,15 @@ All notable changes to this project are documented here. The format is based on
 
 ### Added
 
+- A library: the `sciart` crate now exposes a small, stable API to run a scene without a
+  terminal, list the scenes, render a frame as text, ANSI or PNG, and embed a scene in a
+  ratatui application (`SceneWidget`). Use it with `default-features = false`
+  ([ADR-0032](docs/adr/0032-library-facade.md), SPEC-007).
+- `sciart frame <scene>` prints one frame as ANSI text, for a login message, a tmux pane or
+  a CI log (CLI-R13).
+- `sciart record` is part of the default build; `--no-default-features --features cli`
+  builds without the image encoders (CLI-R15).
+
 - `--for <duration>` ends a run by itself (`90s`, `25m`, `1.5h`), also while paused; the HUD
   shows the time left (CLI-R12, RT-R23).
 - `sciart while -- <command>` shows the art and keeps the machine awake until the command
