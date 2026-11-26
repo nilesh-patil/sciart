@@ -4,7 +4,7 @@ channels = ["conda-forge"]
 name = "sciart"
 # TEST-R13: the tier-1 and tier-2 hosts plus Intel macOS (tier 3, builds only).
 platforms = ["osx-arm64", "osx-64", "linux-64", "linux-aarch64"]
-version = "0.1.0"
+# DIST-R1: no version here; the root Cargo.toml holds the one version.
 
 # Rust toolchain comes from rust-toolchain.toml via rustup; pixi is the task runner (ADR-0007).
 # TEST-R11: every task runs with sccache as the rustc wrapper when it is installed.
@@ -26,7 +26,9 @@ rs-test-features = "cargo nextest run -p sciart --no-default-features --features
 # GEN-R15: the generated scene index in SPEC-002-generators.md matches the category files.
 # TEST-R1/R4: spec traceability (scripts/spec_check.py); TEST-R9/R10/R11: tooling schema
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
-rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py"
+# DIST-R1..R10: the release configuration (scripts/release_check.py) and the installer
+# against a fixture release (scripts/installer_check.py).
+rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/site_check_test.py && python3 scripts/tooling_check_test.py && python3 scripts/yaml_subset_test.py && python3 scripts/release_check.py && python3 scripts/release_check_test.py && python3 scripts/publish_crates_test.py && python3 scripts/conda_build_test.py && python3 scripts/bump_version_test.py && python3 scripts/installer_check.py"
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
@@ -36,7 +38,7 @@ rs-lint = "cargo fmt --all --check && cargo clippy --workspace --all-targets -- 
 # TEST-R9 / GEN-R6: frames must not depend on the optimiser, so the snapshots also run at
 # opt-level 3 (the `ci` profile: release codegen without LTO, ADR-0023).
 rs-snap-release = "cargo test --profile ci -p sciart-generators --test snapshots"
-rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check"] }
+rs-ci = { depends-on = ["rs-lint", "rs-test", "rs-test-features", "rs-spec-check", "rs-snap-release", "rs-showcase-check", "site-check"] }
 rs-bench = "cargo bench -p sciart-generators"
 # GEN-R8 worst single frame per scene (criterion reports means): `pixi run rs-worst [scene ...] --size 500x150`.
 rs-worst = "cargo run -q --profile ci -p sciart-generators --example worst_frame --"
@@ -65,6 +67,18 @@ rs-gallery-check = "python3 scripts/gallery.py --check"
 # references (rs-ci and CI).
 rs-showcase = "python3 scripts/showcase.py"
 rs-showcase-check = "python3 scripts/showcase.py --check"
+# WEB-R3 / ADR-0034: the browser player, `web/` (outside the workspace, its own `web/target`).
+# `web-build` compiles the WebAssembly module; `web-test` proves natively that a player frame
+# is the capture renderer's frame and that it lists the scenes as `sciart list --json` does.
+web-build = "cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown"
+web-test = "cargo test --locked --manifest-path web/Cargo.toml"
+# WEB-R3: the compiled module itself, outside a browser (wasmtime-py): it imports nothing,
+# lists exactly the registered scenes, and every scene advances and draws a full frame.
+web-smoke = { cmd = "python3 scripts/web_smoke.py", depends-on = ["web-build"] }
+# WEB-R5: the docs site (guide, gallery, player) into `site/dist/`; WEB-R4/R6/R7: its checks
+# (rs-ci and CI). `.github/workflows/pages.yml` publishes it by hand or on a release (WEB-R8).
+site-build = { cmd = "python3 scripts/build_site.py", depends-on = ["web-build"] }
+site-check = { cmd = "python3 scripts/site_check.py", depends-on = ["site-build", "web-test", "web-smoke"] }
 # RND-R19 art review: five scenes at 80x24/200x50 through the colorblind theme.
 rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).
@@ -74,7 +88,28 @@ rs-install-mouse = "cargo install --path crates/sciart --features mouse"
 # `rs-install-record` is `rs-install` under its older name.
 rs-install-record = "cargo install --path crates/sciart"
 rs-record = "cargo run --profile ci -p sciart -- record"
+# DIST-R4: every crate `cargo publish` would upload, packaged and verified together (needs
+# cargo 1.90 or newer for `--workspace`; the MSRV stays 1.88), then the .crate files' sizes
+# and contents.
+rs-package-check = "cargo publish --workspace --dry-run --locked && python3 scripts/release_check.py --crates target/package"
 
 [dependencies]
 cargo-nextest = ">=0.9.148,<0.10"
 sccache = ">=0.18.0,<0.19"
+wasmtime-py = ">=51.0.0,<52"
+
+# DIST-R7 / DIST-R8 (ADR-0033): the release tools, in their own environment so the default
+# one stays lean: `pixi run -e dist rs-conda-build`.
+[feature.dist.dependencies]
+rattler-build = ">=0.81.0,<0.82"
+shellcheck = ">=0.11.0,<0.12"
+
+[feature.dist.tasks]
+# DIST-R8: the conda package for the host platform (or `--target-platform <platform>`),
+# into target/conda; never uploaded from here.
+rs-conda-build = "python3 scripts/conda_build.py"
+# DIST-R7: the installer check with shellcheck required.
+rs-installer-check = "python3 scripts/installer_check.py --require-shellcheck"
+
+[environments]
+dist = ["dist"]

@@ -1605,8 +1605,8 @@ mod tests {
         }
 
         // The seeded start reaches every molecule. Six uniform draws cover all six only
-        // 6!/6⁶ ≈ 1.5 % of the time, so this checks seeds 1..=32 (MOL-A5 wording
-        // (noted: "seeds 1..=32 yield all six starting molecules").
+        // 6!/6⁶ ≈ 1.5 % of the time, so this checks seeds 1..=32 (a candidate MOL-A5
+        // clause: "seeds 1..=32 yield all six starting molecules").
         let size = Size::new(80, 24);
         let starts: std::collections::BTreeSet<usize> = (1..=32)
             .map(|seed| {

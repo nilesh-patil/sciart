@@ -38,7 +38,7 @@ that matches:
 
 Each variant has a kebab-case ASCII `id()` for machine output and an evocative `label()` for
 people. SPEC-002 headings record every scene's label, and GEN-R15 checks them against the code.
-The assignment of the 41 existing scenes is the table in `docs/design/M11-titles-taxonomy.md` §2.
+The assignment of the 41 existing scenes is recorded in their SPEC-002 headings.
 
 ## Consequences
 + Every future scene has one category by rule, not by taste; the lattice shows where the gaps
@@ -71,6 +71,6 @@ with more added (no rule, so every new scene is a judgement call).
 
 The Earth & Sky setting rule now reads: a view from Earth's surface or atmosphere, **or of Earth's
 weather or atmosphere from above** → Earth & Sky. `hurricane` (a storm seen from orbit) is the
-case that prompted it: its subject is Earth's atmosphere, not a planet as an astronomical body, so
+case that led to it: its subject is Earth's atmosphere, not a planet as an astronomical body, so
 it sits with aurora and noctilucent clouds rather than in Sun & Planets. The order of the setting
 check is unchanged: a scene about a human spacecraft or mission is still Voyages first.

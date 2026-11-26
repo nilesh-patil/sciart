@@ -1,17 +1,17 @@
 [package]
 name = "sciart-shared"
-description = "Scene models shared by several sciart scenes (never registered)"
-version.workspace = true
+description = "Internal: scene models shared by several sciart scenes. No semver promise; use the `sciart` crate"
+# DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["simulation", "generative-art", "terminal", "ascii-art", "math"]
-categories = ["science", "simulation", "graphics", "visualization"]
-publish = false
+readme = "README.md"
+# DIST-R4: the published crate is the library alone.
+exclude = ["tests/", "benches/", "examples/"]
 
 [features]
 # Measurement helpers the scenes' unit tests use (correlation lengths, box dimensions,

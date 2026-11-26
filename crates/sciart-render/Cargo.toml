@@ -1,22 +1,29 @@
 [package]
 name = "sciart-render"
-description = "Themes and ratatui painting for sciart canvases"
-version.workspace = true
+description = "Internal: themes and terminal painting of sciart. No semver promise; use the `sciart` crate"
+# DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
+version = "0.6.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
-readme = "../../README.md"
-keywords = ["terminal", "ratatui", "renderer", "color", "truecolor"]
-categories = ["command-line-utilities", "graphics", "rendering", "visualization"]
-publish = false
+readme = "README.md"
+# DIST-R4: the published crate is the library alone.
+exclude = ["tests/", "benches/", "examples/"]
+
+# WEB-R3 / ADR-0034: `terminal` (on by default) is the ratatui painting, the HUD and the
+# crossterm backend. Without it the crate is the themes and the ANSI writer, which build
+# for the browser.
+[features]
+default = ["terminal"]
+terminal = ["dep:crossterm", "dep:ratatui"]
 
 [dependencies]
 sciart-core.workspace = true
-crossterm.workspace = true
-ratatui.workspace = true
+crossterm = { workspace = true, optional = true }
+ratatui = { workspace = true, optional = true }
 unicode-width.workspace = true
 
 [dev-dependencies]

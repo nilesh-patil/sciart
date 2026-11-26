@@ -1,5 +1,6 @@
 //! The preview renderer: a [`Canvas`] painted as a terminal would, at 8 × 16 px per cell.
 
+#[cfg(feature = "png")]
 use std::path::Path;
 
 use font8x8::UnicodeFonts as _;
@@ -180,6 +181,7 @@ pub fn paint(canvas: &Canvas, fallback: &Canvas, theme: Theme) -> Image {
 }
 
 /// Write `image` to `path` as an 8-bit RGB PNG, creating the parent directory if needed.
+#[cfg(feature = "png")]
 pub fn write_png(image: &Image, path: &Path) -> std::io::Result<()> {
     if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
         std::fs::create_dir_all(dir)?;
@@ -189,6 +191,7 @@ pub fn write_png(image: &Image, path: &Path) -> std::io::Result<()> {
 }
 
 /// Encode `image` as an 8-bit RGB PNG into `out` (the library's `Stage::render_png`, LIB-R5).
+#[cfg(feature = "png")]
 pub fn encode_png<W: std::io::Write>(image: &Image, out: W) -> std::io::Result<()> {
     let dims = |n: usize| {
         u32::try_from(n).map_err(|_| {

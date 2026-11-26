@@ -1,3 +1,6 @@
+//! **Internal crate of [`sciart`](https://docs.rs/sciart)**, with no semver promise: its API
+//! can change in any release. Use the `sciart` crate, the supported entry point.
+//!
 //! Headless capture pipeline (ADR-0025, CLI-R8).
 //!
 //! One renderer for review and recording: a seeded [`Stage`] rendered through the real
@@ -24,7 +27,9 @@ use sciart_render::Theme;
 pub use self::asciicast::{render_ansi, write_asciicast};
 #[cfg(feature = "gif")]
 pub use self::gif::write_gif;
-pub use self::image::{CELL_H, CELL_W, Image, draws_natively, encode_png, paint, write_png};
+pub use self::image::{CELL_H, CELL_W, Image, draws_natively, paint};
+#[cfg(feature = "png")]
+pub use self::image::{encode_png, write_png};
 
 /// How to render frames: the colour theme and whether to use the ASCII glyph set.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

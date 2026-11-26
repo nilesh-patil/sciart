@@ -1453,7 +1453,7 @@ mod tests {
             "Deep Cosmos",
             "yes   filter",
             "all scenes",
-            "0.1.0",
+            env!("CARGO_PKG_VERSION"),
             "/tmp/sciart/config.toml",
             PROJECT_URL,
         ] {

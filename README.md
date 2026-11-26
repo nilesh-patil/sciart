@@ -186,13 +186,13 @@ sciart-core        canvas, glyphs, inks, generator contract, fixed-step clock, s
 - [Master specification](docs/specs/sciart-specification.md) and the
   [component specs](docs/specs/) (`SPEC-001` … `SPEC-006`)
 - [Roadmap](docs/ROADMAP.md) and [architecture decisions](docs/adr/)
-- [Improvement proposal](docs/IMPROVEMENTS.md) and [changelog](CHANGELOG.md)
+- [Architecture](docs/ARCHITECTURE.md) and [changelog](CHANGELOG.md)
 - [Full gallery](docs/GALLERY.md)
 
 ## Contributing
 
 Read [CONTRIBUTING.md](CONTRIBUTING.md). The gate is `pixi run rs-ci`; changes are spec-first
-and test-first, and snapshots are reviewed by a person before they are accepted.
+and test-first, and snapshots are reviewed before they are accepted.
 
 ## License
 
