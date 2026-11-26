@@ -178,6 +178,32 @@ class FuzzTarget(unittest.TestCase):
 PIXI = tooling_check.toml_file("pixi.toml")
 
 
+class SemverBaseline(unittest.TestCase):
+    """LIB-R8: the library API is compared with the v1.0.0 tag, from a full-history checkout."""
+
+    CHECK = "--baseline-rev v1.0.0"
+    CHECKOUT = "          fetch-depth: 0\n"
+
+    def test_lib_r8_the_real_workflow_passes(self) -> None:
+        self.assertEqual(tooling_check.semver_problems(CI), [])
+
+    def test_lib_r8_a_registry_baseline_fails(self) -> None:
+        self.assertIn(self.CHECK, CI)
+        self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECK, "--baseline-version 1.0.0")))
+
+    def test_lib_r8_another_baseline_tag_fails(self) -> None:
+        self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECK, "--baseline-rev main")))
+
+    def test_lib_r8_a_shallow_checkout_fails(self) -> None:
+        self.assertIn(self.CHECKOUT, CI)
+        for new in ("", "          fetch-depth: 1\n"):
+            with self.subTest(new=new):
+                self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECKOUT, new)))
+
+    def test_lib_r8_no_semver_step_fails(self) -> None:
+        self.assertTrue(tooling_check.semver_problems(CI.replace("cargo semver-checks check-release", "true")))
+
+
 class NoColorParity(unittest.TestCase):
     """TEST-R12: `rs-ci` runs CI's NO_COLOR pass, with the same command and environment."""
 

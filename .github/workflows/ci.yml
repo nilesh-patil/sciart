@@ -7,7 +7,7 @@ name: CI
 #   test      = doctests + every test under nextest (TEST-R10)
 #   snapshots = the snapshot suite in the optimised `ci` profile (TEST-R9)
 #   deny      = cargo-deny (advisories, licences, bans, sources; `deny.toml`)
-#   semver    = cargo-semver-checks on the library against the published 1.0.0 (LIB-R8);
+#   semver    = cargo-semver-checks on the library against the v1.0.0 tag (LIB-R8);
 #               hosted only, not part of `rs-ci`
 #   web       = the WebAssembly player and the docs site: `web-build`, `web-test`,
 #               `site-build` and `site-check` (WEB-R3..R7); publishing is pages.yml (WEB-R8)
@@ -188,13 +188,16 @@ jobs:
           python3 scripts/site_check.py
 
   # LIB-R8: from the first release after 1.0.0, the library's public API is compared with
-  # the published 1.0.0. Before then there is no baseline and the step says so.
+  # the `v1.0.0` tag, built from this repository (1.0.0 is not on crates.io, so there is no
+  # registry baseline). Before then there is no baseline and the step says so.
   semver:
-    name: semver (library API against 1.0.0)
+    name: semver (library API against v1.0.0)
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          # The whole history and the tags: `--baseline-rev v1.0.0` needs the tag.
+          fetch-depth: 0
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
@@ -205,8 +208,8 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
           case "$version" in
-            0.*|1.0.0) echo "sciart $version: no published 1.0.0 to compare against yet" ;;
-            *) cargo semver-checks check-release -p sciart --baseline-version 1.0.0 \
+            0.*|1.0.0) echo "sciart $version: no earlier 1.x to compare against yet" ;;
+            *) cargo semver-checks check-release -p sciart --baseline-rev v1.0.0 \
                  --only-explicit-features --features png,widget ;;
           esac
 
