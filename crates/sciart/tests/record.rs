@@ -2,10 +2,13 @@
 #![cfg(feature = "record")]
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
+
+#[path = "common/hermetic.rs"]
+mod hermetic;
 
 fn run(args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_sciart"))
+    hermetic::sciart()
         .args(args)
         .output()
         .expect("spawn the sciart binary")

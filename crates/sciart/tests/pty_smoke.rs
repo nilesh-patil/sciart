@@ -14,6 +14,10 @@ use std::time::{Duration, Instant};
 
 use portable_pty::{CommandBuilder, PtySize, native_pty_system};
 
+// Raw spawns (no pty) go through `hermetic::sciart()`, the same environment `Session` sets.
+#[path = "common/hermetic.rs"]
+mod hermetic;
+
 const BIN: &str = env!("CARGO_BIN_EXE_sciart");
 const ALT_ENTER: &[u8] = b"\x1b[?1049h";
 const ALT_LEAVE: &[u8] = b"\x1b[?1049l";
@@ -353,13 +357,13 @@ fn cli_r7_no_title_shows_the_id_in_the_hud_and_nothing_on_the_canvas() {
 
 #[test]
 fn cfg_r2_missing_explicit_config_exits_2() {
-    let out = Command::new(BIN)
+    let out = hermetic::sciart()
         .args(["--config", "/definitely/not/here.toml", "list"])
         .output()
         .unwrap();
     assert!(out.status.success(), "list does not load config");
 
-    let out = Command::new(BIN)
+    let out = hermetic::sciart()
         .args(["--config", "/definitely/not/here.toml", "run", "starfield"])
         .output()
         .unwrap();
@@ -373,7 +377,7 @@ fn cfg_r3_unknown_key_exits_2_with_location() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("config.toml");
     std::fs::write(&path, "fps = 30\nwarp = 9\n").unwrap();
-    let out = Command::new(BIN)
+    let out = hermetic::sciart()
         .args(["--config", path.to_str().unwrap(), "sim"])
         .output()
         .unwrap();
@@ -720,10 +724,9 @@ fn rnd_r21_explicit_colour_or_a_capable_terminal_gets_no_hint() {
 #[test]
 fn rnd_r21_list_and_usage_errors_never_hint() {
     for args in [&["list"][..], &["run", "no_such_scene"][..]] {
-        let out = Command::new(BIN)
+        let out = hermetic::sciart()
             .args(args)
             .env("TERM", "linux")
-            .env_remove("NO_COLOR")
             .output()
             .unwrap();
         let stderr = String::from_utf8_lossy(&out.stderr);
@@ -939,7 +942,7 @@ fn cli_r10_list_on_a_terminal_is_aligned_and_plain_is_tsv() {
 /// CLI-R4/CLI-R10: piped output is the TSV of CLI-R4, with no header.
 #[test]
 fn cli_r4_r10_list_when_piped_is_tsv() {
-    let out = Command::new(BIN).arg("list").output().unwrap();
+    let out = hermetic::sciart().arg("list").output().unwrap();
     assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     let lines: Vec<&str> = text.lines().collect();
@@ -953,7 +956,7 @@ fn cli_r4_r10_list_when_piped_is_tsv() {
 fn cli_r9_list_category_and_usage_errors_exit_2() {
     let home = tempfile::tempdir().unwrap();
     let run = |args: &[&str]| {
-        Command::new(BIN)
+        hermetic::sciart()
             .args(args)
             .env("XDG_CONFIG_HOME", home.path())
             .output()
@@ -988,7 +991,7 @@ fn cli_r9_list_category_and_usage_errors_exit_2() {
 fn cfg_r10_no_color_warns_once_and_an_explicit_color_silences_it() {
     let home = tempfile::tempdir().unwrap();
     let run = |args: &[&str], no_color: &str| {
-        Command::new(BIN)
+        hermetic::sciart()
             .args(args)
             // The category error exits before the TUI, after settings are resolved.
             .args(["sim", "--category", "definitely-not-a-category"])
@@ -1194,7 +1197,7 @@ fn rnd_r18_no_color_selects_mono_with_a_warning() {
 #[test]
 fn rnd_r18_bad_color_exits_2() {
     let home = tempfile::tempdir().unwrap();
-    let out = Command::new(BIN)
+    let out = hermetic::sciart()
         .args(["--color", "42", "run", "starfield"])
         .env("XDG_CONFIG_HOME", home.path())
         .output()
@@ -1515,7 +1518,7 @@ fn cli_r12_cli_r14_a_deadline_kills_the_command_and_exits_124() {
 #[test]
 fn cli_r14_a_command_that_cannot_start_exits_127_before_the_alternate_screen() {
     let spool_dir = tempfile::tempdir().unwrap();
-    let out = Command::new(BIN)
+    let out = hermetic::sciart()
         .args([
             "while",
             "--keep-awake",
@@ -1541,7 +1544,7 @@ fn cli_r14_a_command_that_cannot_start_exits_127_before_the_alternate_screen() {
     assert_no_spool_left(spool_dir.path());
     // A missing command line is a usage error.
     for args in [&["while"][..], &["while", "--"][..]] {
-        let out = Command::new(BIN).args(args).output().unwrap();
+        let out = hermetic::sciart().args(args).output().unwrap();
         assert_eq!(out.status.code(), Some(2), "{args:?}");
     }
 }
@@ -1591,7 +1594,7 @@ fn cli_r12_rt_r23_for_ends_even_a_paused_run_and_the_hud_shows_the_time_left() {
         "the terminal is restored as by q"
     );
     for bad in ["0", "25h", "soon"] {
-        let out = Command::new(BIN)
+        let out = hermetic::sciart()
             .args(["run", "starfield", "--for", bad])
             .output()
             .unwrap();
@@ -1629,7 +1632,10 @@ fn rt_r21_rt_r23_a_paused_run_without_a_hud_ends_at_its_deadline() {
 /// CLI-R16 through the real binary, piped: the versioned object, parsed as JSON.
 #[test]
 fn cli_r16_list_json_is_the_versioned_object() {
-    let out = Command::new(BIN).args(["list", "--json"]).output().unwrap();
+    let out = hermetic::sciart()
+        .args(["list", "--json"])
+        .output()
+        .unwrap();
     assert!(out.status.success());
     let doc: serde_json::Value = serde_json::from_slice(&out.stdout).expect("JSON");
     assert_eq!(doc["schema"], 1);
@@ -1651,7 +1657,7 @@ fn cli_r16_list_json_is_the_versioned_object() {
 fn cli_r17_completions_and_man_page_need_no_config() {
     let missing = ["--config", "/definitely/not/here.toml"];
     for shell in ["bash", "zsh", "fish", "elvish", "powershell"] {
-        let out = Command::new(BIN)
+        let out = hermetic::sciart()
             .args(missing)
             .args(["completions", shell])
             .output()
@@ -1663,10 +1669,14 @@ fn cli_r17_completions_and_man_page_need_no_config() {
             "{shell}"
         );
     }
-    let out = Command::new(BIN).args(missing).arg("man").output().unwrap();
+    let out = hermetic::sciart()
+        .args(missing)
+        .arg("man")
+        .output()
+        .unwrap();
     assert!(out.status.success(), "{out:?}");
     assert!(String::from_utf8_lossy(&out.stdout).contains(".TH sciart"));
-    let out = Command::new(BIN)
+    let out = hermetic::sciart()
         .args(["completions", "tcsh"])
         .output()
         .unwrap();
@@ -1824,4 +1834,56 @@ fn cli_r14_rt_r21_a_paused_while_notices_the_commands_exit_during_a_blocked_wait
         "its output is replayed after the restore"
     );
     assert_no_spool_left(spool_dir.path());
+}
+
+// ----- TEST-R12: hermetic spawns -----
+
+/// TEST-R12: the raw-spawn helper clears the ambient colour and terminal settings and hides
+/// any config file, whatever the shell running the tests sets.
+#[test]
+fn test_r12_the_raw_spawn_helper_clears_the_ambient_environment() {
+    let command = hermetic::sciart();
+    let envs: Vec<_> = command.get_envs().collect();
+    let value = |key: &str| {
+        envs.iter()
+            .find(|(k, _)| *k == key)
+            .map(|(_, v)| v.map(|v| v.to_string_lossy().into_owned()))
+    };
+    for removed in ["NO_COLOR", "COLORTERM", "TERM_PROGRAM"] {
+        assert_eq!(value(removed), Some(None), "{removed} is removed");
+    }
+    assert_eq!(value("TERM"), Some(Some("xterm-256color".into())));
+    let config = value("XDG_CONFIG_HOME")
+        .flatten()
+        .expect("XDG_CONFIG_HOME is set");
+    assert!(
+        !std::path::Path::new(&config).join("sciart").exists(),
+        "no config directory at {config}"
+    );
+}
+
+/// TEST-R12: every test of this crate spawns the binary through `common/hermetic.rs` (or a
+/// pty `Session`, which sets the same environment), never with the ambient environment.
+#[test]
+fn test_r12_no_test_spawns_the_binary_with_the_ambient_environment() {
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().is_none_or(|e| e != "rs") {
+            continue;
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        // Built at run time, so this file's own source does not match.
+        for arg in ["BIN", "env!(\"CARGO_BIN_EXE_sciart\")"] {
+            let raw = format!("Command::new({arg})");
+            assert!(
+                !text.contains(&raw),
+                "{}: `{raw}`; use hermetic::sciart()",
+                path.display()
+            );
+        }
+        checked += 1;
+    }
+    assert!(checked >= 5, "{checked} test files checked");
 }

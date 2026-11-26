@@ -1,12 +1,15 @@
 //! CLI-R13 and LIB-R5: `sciart frame` through the real binary, against the library.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use sciart::{Options, Stage, Theme};
 
+#[path = "common/hermetic.rs"]
+mod hermetic;
+
 fn frame(args: &[&str], envs: &[(&str, &str)]) -> Output {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_sciart"));
-    command.arg("frame").args(args).env_remove("NO_COLOR");
+    let mut command = hermetic::sciart();
+    command.arg("frame").args(args);
     for (key, value) in envs {
         command.env(key, value);
     }
