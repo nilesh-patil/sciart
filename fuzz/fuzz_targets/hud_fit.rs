@@ -38,6 +38,10 @@ fuzz_target!(|s: &str| {
             low_power: b.get(3).is_some_and(|x| x & 1 == 1),
             paused: b.get(4).is_some_and(|x| x & 1 == 1),
             quarantined: usize::from(b.get(5).copied().unwrap_or(0)),
+            // The `--for` countdown (CLI-R12): absent, or any number of seconds.
+            ends: b
+                .get(7)
+                .map(|&x| u64::from_le_bytes(seed).rotate_left(u32::from(x))),
         };
         for width in widths {
             let _ = hud.fit(width);
@@ -47,7 +51,8 @@ fuzz_target!(|s: &str| {
         let _ = hud.line();
     }
 
-    // Non-finite measurements and a saturated quarantine count must also format.
+    // Non-finite measurements, a saturated quarantine count and the longest countdown must
+    // also format.
     let hud = Hud {
         generator: s,
         title: None,
@@ -58,6 +63,7 @@ fuzz_target!(|s: &str| {
         low_power: true,
         paused: true,
         quarantined: usize::MAX,
+        ends: Some(u64::MAX),
     };
     let _ = hud.fit(80);
     let _ = hud.line();
