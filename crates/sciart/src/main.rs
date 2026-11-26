@@ -232,7 +232,7 @@ fn run_record(cli: &Cli, command: &Command) -> ExitCode {
         return ExitCode::from(2);
     }
     eprintln!(
-        "sciart: the `record` command is not compiled into this build; \
+        "sciart: this build was made without the `record` feature; \
          the default build has it (`cargo install sciart --locked`)"
     );
     ExitCode::from(2)
