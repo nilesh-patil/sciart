@@ -24,11 +24,22 @@ interval = 60
 fps = 20
 ```
 
-Only the space scenes, never the rocket:
+Only the space scenes, never the rocket. Categories are chosen on the command line, and
+`--exclude` drops a scene from the cycle:
 
-```toml
-disabled = ["rocket_launch", "moon_landing"]
-favorites = ["solar_system", "saturn_rings", "galaxy_collision"]
+```sh
+sciart --category deep-cosmos --category sun-planets --category voyages --exclude rocket_launch
 ```
 
-Press `v` to show only the favourites.
+To keep the rocket out of every cycle for good, disable it in the file instead; `sciart run
+rocket_launch` still works:
+
+```toml
+disabled = ["rocket_launch"]
+```
+
+A few favourites to come back to; press `v` to show only them:
+
+```toml
+favorites = ["solar_system", "saturn_rings", "galaxy_collision"]
+```
