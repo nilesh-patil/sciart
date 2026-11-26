@@ -20,7 +20,8 @@ with `yaml_subset` (a file it cannot read is a problem, never skipped) and repor
   and the size budgets present and able to fail the job, the packing, the checksum check,
   the attestation of every asset in a public repository (a notice when skipped), a draft
   release on the pushed tag;
-- publish.yml: triggers, a concurrency group, the three jobs in the `release`
+- publish.yml: triggers, a concurrency group, an environment gate outside the `release`
+  environment that every publish job needs, the three jobs in the `release`
   environment with a tag check each, uploads only in steps gated on the release event,
   the crates published one at a time by the resumable script, a rehearsal, the conda
   matrix, an upload that skips what exists, a tap commit that tolerates no change.
@@ -54,12 +55,17 @@ TAG_IF = "startsWith(github.ref, 'refs/tags/v')"
 PRIVATE = "github.event.repository.private"
 PRIVATE_TAG_IF = f"{TAG_IF} && {PRIVATE}"
 PUBLIC_IF = f"{PRIVATE} == false"
+# DIST-R10: the job that reads the `release` environment before any publish job starts.
+GATE_JOB = "environment-gate"
+PUBLISH_JOBS = ("crates-io", "conda", "homebrew")
 LEVELS = {"none": 0, "read": 1, "write": 2}
 # DIST-R10: what each job may be granted (a job without `permissions` gets the workflow's,
 # which must be `contents: read`).
 PERMISSIONS = {
     ("release.yml", "package"): {"contents": "read", "id-token": "write", "attestations": "write"},
     ("release.yml", "release"): {"contents": "write"},
+    # Reading an environment's protection rules is an `actions: read` endpoint.
+    ("publish.yml", GATE_JOB): {"actions": "read"},
 }
 ATTESTED = ("dist/*.tar.gz", "dist/install.sh", "dist/SHA256SUMS")
 # A command that cannot fail the job.
@@ -316,11 +322,29 @@ def check_publish(data: dict, out: list[str]) -> None:
     if not isinstance(concurrency, dict) or not concurrency.get("group") or concurrency.get("cancel-in-progress"):
         out.append("DIST-R10: publish.yml has a concurrency group that does not cancel a running publish")
     jobs = jobs_of(data)
-    for job_name in ("crates-io", "conda", "homebrew"):
+    gate = jobs.get(GATE_JOB)
+    if not isinstance(gate, dict):
+        out.append(f"DIST-R10: publish.yml has an `{GATE_JOB}` job that reads the `release` environment")
+    else:
+        if gate.get("environment") is not None:
+            out.append(f"DIST-R10: publish.yml `{GATE_JOB}` runs outside the `release` environment "
+                       "(naming it would create a missing one)")
+        reads = find(gate, "environments/release")
+        run = str(reads[0].get("run", "")) if len(reads) == 1 else ""
+        if len(reads) != 1 or "gh api" not in run or "required_reviewers" not in run or \
+                "GITHUB_EVENT_NAME" not in run or "exit 1" not in run:
+            out.append(f"DIST-R10: publish.yml `{GATE_JOB}` reads the environment with `gh api` and, on the "
+                       "release event (GITHUB_EVENT_NAME), fails (`exit 1`) unless it has `required_reviewers`")
+        elif "if" in reads[0] or not can_fail(reads[0], gate):
+            out.append(f"DIST-R10: publish.yml `{GATE_JOB}`'s environment check runs unconditionally and can "
+                       "fail the job")
+    for job_name in PUBLISH_JOBS:
         job = jobs.get(job_name)
         if not isinstance(job, dict):
             out.append(f"DIST-R10: publish.yml has a `{job_name}` job")
             continue
+        if GATE_JOB not in needs(job):
+            out.append(f"DIST-R10: publish.yml `{job_name}` needs `{GATE_JOB}`")
         env = job.get("environment")
         if (env.get("name") if isinstance(env, dict) else env) != "release":
             out.append(f"DIST-R10: publish.yml `{job_name}` runs in the `release` environment")

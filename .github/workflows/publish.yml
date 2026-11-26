@@ -9,7 +9,7 @@ name: Publish
 # packages it has, and the tap is committed only when the formula changed.
 #
 # Repository configuration this needs (see docs/RELEASING.md):
-#   environment `release` with required reviewers;
+#   environment `release` with required reviewers (checked first by `environment-gate`);
 #   secrets CARGO_REGISTRY_TOKEN, PREFIX_API_KEY, HOMEBREW_TAP_TOKEN (in that environment);
 #   variables CONDA_CHANNEL (the prefix.dev channel) and HOMEBREW_TAP (owner/homebrew-repo).
 on:
@@ -34,8 +34,43 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
+  # DIST-R10: the hosting service creates a missing environment, without reviewers, the
+  # first time a job names it, so a missing or unprotected `release` environment would let
+  # the jobs below run unapproved. This job names no environment: it reads the rules and,
+  # on a published release, stops everything unless a reviewer is required. A manual
+  # rehearsal only reports what it found.
+  environment-gate:
+    name: The release environment requires a reviewer
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # GET /repos/{owner}/{repo}/environments/{name}
+    steps:
+      - name: Read the protection rules of the release environment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if rules="$(gh api "repos/${GITHUB_REPOSITORY}/environments/release" --jq '[.protection_rules[]?.type] | join(" ")')"; then
+            echo "environment release: protection rules: ${rules:-none}"
+          else
+            rules=""
+            echo "environment release: not found (or not readable with this token)"
+          fi
+          case " ${rules} " in
+            *" required_reviewers "*)
+              echo "environment release requires a reviewer" ;;
+            *)
+              if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+                echo "::error::The release environment must exist and require a reviewer before anything is published (DIST-R10, docs/RELEASING.md)."
+                exit 1
+              fi
+              echo "::notice::The release environment does not require a reviewer; a published release would stop here (DIST-R10)." ;;
+          esac
+
   crates-io:
     name: crates.io
+    needs: environment-gate
     runs-on: ubuntu-24.04
     environment: release
     steps:
@@ -66,6 +101,7 @@ jobs:
 
   conda:
     name: conda (${{ matrix.platform }})
+    needs: environment-gate
     runs-on: ${{ matrix.os }}
     environment: release
     strategy:
@@ -105,6 +141,7 @@ jobs:
 
   homebrew:
     name: Homebrew tap
+    needs: environment-gate
     runs-on: ubuntu-24.04
     environment: release
     steps:

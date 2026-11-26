@@ -31,6 +31,7 @@ PRIVATE_GUARD = """      - name: A release tag needs a public repository
         if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.private
 """
 ATTEST_IF = "        if: github.event.repository.private == false\n"
+GATE_NEEDS = "    needs: environment-gate\n"
 TAG_STEP_PUBLISH = """      - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
 """
@@ -143,6 +144,18 @@ MUTATIONS = [
     ("the attestation unguarded", "release.yml", ATTEST_IF, "", "only in a public repository"),
     ("the skipped attestation without a notice", "release.yml",
      "          echo \"::notice::No build-provenance", "          echo \"No build-provenance", "`::notice::`"),
+    # the release environment gate (DIST-R10)
+    ("the environment gate deleted", "publish.yml", "  environment-gate:\n", "  x-environment-gate:\n",
+     "`environment-gate` job"),
+    ("a publish job that does not need the gate", "publish.yml", GATE_NEEDS + "    runs-on: ${{ matrix.os }}\n",
+     "    runs-on: ${{ matrix.os }}\n", "`conda` needs `environment-gate`"),
+    ("the gate inside the environment it checks", "publish.yml",
+     "    permissions:\n      actions: read", "    environment: release\n    permissions:\n      actions: read",
+     "outside the `release` environment"),
+    ("a gate that never fails", "publish.yml", "                exit 1\n", "", "required_reviewers"),
+    ("a gate that cannot fail", "publish.yml", "          set -euo pipefail\n          if rules=",
+     "          set +e\n          if rules=", "can fail the job"),
+    ("the gate may write", "publish.yml", "      actions: read #", "      actions: write #", "beyond its allow-list"),
     ("m: the smoke JSON check swallowed", "release.yml", JSON_CHECK, JSON_CHECK + " || true", "cannot fail"),
     ("the smoke test without -V", "release.yml", '          test "$("$bin" -V)" = "sciart $VERSION"\n', "",
      '"$bin" -V'),
