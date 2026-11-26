@@ -15,6 +15,11 @@ on:
 permissions:
   contents: read
 
+# One release build per tag at a time; a second push of the tag waits.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   CARGO_TERM_COLOR: always
   # The MSRV (workspace `rust-version`): `rust-toolchain.toml` floats on `stable`, which
@@ -91,9 +96,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
         with:
           targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          key: release-${{ matrix.target }}
+      # No build cache: a release is built from the tagged sources alone, so a cache
+      # written by another run cannot reach a released binary.
       # DIST-R6: the dependency list is embedded in the binary (`cargo auditable`).
       - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
         with:
@@ -146,8 +150,8 @@ jobs:
     runs-on: ubuntu-22.04
     permissions:
       contents: read
-      id-token: write
-      attestations: write
+      id-token: write # sign the build-provenance attestations (DIST-R6)
+      attestations: write # store them with the repository (DIST-R6)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
@@ -188,7 +192,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: write # create the draft release and upload its assets (DIST-R10)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:

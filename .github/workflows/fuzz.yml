@@ -31,6 +31,8 @@ jobs:
         target: [title_fit, hud_fit, theme_name]
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
       - uses: dtolnay/rust-toolchain@2c76c034f9e32a5d6e2c104dc4df23a22476db04 # nightly
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
@@ -46,7 +48,9 @@ jobs:
       # 90 s per target: three short runs weekly, not a continuous fuzzing service.
       - name: Fuzz ${{ matrix.target }} for 90 s
         working-directory: fuzz
-        run: cargo fuzz run ${{ matrix.target }} -- -max_total_time=90 -rss_limit_mb=4096
+        env:
+          TARGET: ${{ matrix.target }}
+        run: cargo fuzz run "$TARGET" -- -max_total_time=90 -rss_limit_mb=4096
       # Keep the corpus on success; keep artifacts even on a crash so the reproducer uploads.
       - name: Upload corpus and crashes
         if: always()
