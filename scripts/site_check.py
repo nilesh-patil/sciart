@@ -26,7 +26,9 @@ and its one-line `curl … | sh` follows redirects with its https-only flags (DI
 the guide names no subcommand, flag or flag value the binary does not have (checked
 against `sciart completions bash`).
 WEB-R2: the gallery's headings list the categories in the README's domain order, each under
-its domain heading (`DOMAINS` in scripts/showcase.py).
+its domain heading (`DOMAINS` in scripts/showcase.py); the player's data carries the same
+category order and player.js groups its scene picker by it, so the picker and `n`/`p` walk
+the scenes in the gallery's order.
 WEB-R9: the README's opening sentence, the crate `description`, the command line's `about`
 (or its short form), the site's lede and every page's meta description, and the opening
 lines of the architecture guide and the user guide carry the one description; the Homebrew
@@ -628,6 +630,39 @@ def gallery_order_problems(page: Path, catalogue: list[dict]) -> list[str]:
     ]
 
 
+PLAYER_DATA = re.compile(r'<script type="application/json" id="player-data">(.*?)</script>', re.S)
+# The player script orders its scene picker's category groups by the page's data, not by
+# their labels (`.sort(... localeCompare ...)` over the groups).
+GROUP_LABEL_SORT = re.compile(r"\[\.\.\.groups\]\s*\.sort\([^)]*\)\s*=>\s*a\[0\]\.localeCompare")
+
+
+def player_order_problems(page: Path, script: Path, catalogue: list[dict]) -> list[str]:
+    """WEB-R2: the player's scene picker (and `n`/`p`) walks the categories in the gallery's
+    domain order: the page's data carries that order as `category_order`, and the script
+    groups the scenes by it."""
+    if not page.is_file() or not script.is_file():
+        return []  # WEB-R5 reports a player that was not built
+    match = PLAYER_DATA.search(page.read_text(encoding="utf-8"))
+    try:
+        data = json.loads(match.group(1)) if match else {}
+    except json.JSONDecodeError:
+        return []  # WEB-R6 reports it
+    want = site_build.showcase.ordered_categories({scene["category"] for scene in catalogue})
+    got = data.get("category_order") if isinstance(data, dict) else None
+    problems = []
+    if got != want:
+        problems.append(
+            f"WEB-R2: the player's data gives the category order {got!r}, want the gallery's "
+            f"domain order {want!r}"
+        )
+    code = strip_comments(script.read_text(encoding="utf-8"))
+    if "data.category_order" not in code or GROUP_LABEL_SORT.search(code):
+        problems.append(
+            "WEB-R2: player.js does not order its scene groups by the data's `category_order`"
+        )
+    return problems
+
+
 # ---- WEB-R9: one description, science first ------------------------------------------------
 
 DESCRIPTION = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
@@ -832,6 +867,9 @@ def main(argv: list[str]) -> int:
     check_guide_commands(problems)
     problems += description_problems(ROOT, DIST)
     problems += gallery_order_problems(DIST / "gallery" / "index.html", catalogue)
+    problems += player_order_problems(
+        DIST / "play" / "index.html", DIST / "assets" / "player.js", catalogue
+    )
     problems = list(dict.fromkeys(problems))
     if problems:
         print(f"site_check: {len(problems)} problem(s):", file=sys.stderr)

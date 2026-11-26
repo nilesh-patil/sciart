@@ -106,15 +106,23 @@
     const scenes = Player.scenes();
     const byName = new Map(scenes.map((s) => [s.name, s]));
 
-    // Scene choice, grouped by category as in the gallery.
+    // Scene choice, grouped by category in the gallery's domain order, which the page's data
+    // gives (WEB-R2); a category it does not name comes last, by label.
+    const order = Array.isArray(data.category_order) ? data.category_order : [];
+    const rank = (category) => {
+      const i = order.indexOf(category);
+      return i < 0 ? order.length : i;
+    };
     const groups = new Map();
     for (const s of scenes) {
-      if (!groups.has(s.category_label)) groups.set(s.category_label, []);
-      groups.get(s.category_label).push(s);
+      if (!groups.has(s.category)) groups.set(s.category, []);
+      groups.get(s.category).push(s);
     }
-    for (const [label, members] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {
+    const sorted = [...groups].sort((a, b) =>
+      rank(a[0]) - rank(b[0]) || a[1][0].category_label.localeCompare(b[1][0].category_label));
+    for (const [, members] of sorted) {
       const group = document.createElement("optgroup");
-      group.label = label;
+      group.label = members[0].category_label;
       for (const s of members) group.append(new Option(s.name.replace(/_/g, " "), s.name));
       sceneSelect.append(group);
     }

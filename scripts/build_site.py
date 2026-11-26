@@ -461,6 +461,8 @@ def player_page(clips: list[showcase.Clip], scenes: list[dict]) -> Page:
     data = {
         "module": "../assets/sciart_web.wasm",
         "default_scene": hero.scene,
+        # WEB-R2: the scene picker groups the categories in the gallery's domain order.
+        "category_order": showcase.ordered_categories(set(category_of.values())),
         "clips": {
             clip.scene: {"src": f"../media/{Path(clip.out).name}", "alt": clip.alt}
             for clip in clips
