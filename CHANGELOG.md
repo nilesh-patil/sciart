@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format is based on
 ## [1.0.1] - 2026-11-26
 
 Documentation and release tooling only: the program and the library are the same as in
-1.0.0. This is the first version on crates.io, the conda channel and the Homebrew tap.
+1.0.0. This is the first version on crates.io and the Homebrew tap.
 
 ### Fixed
 
