@@ -285,5 +285,45 @@ class DescriptionRule(unittest.TestCase):
         )
 
 
+CATALOGUE = [
+    {"name": "double_pendulum", "category": "forces-waves", "category_label": "Forces & Waves"},
+    {"name": "gray_scott", "category": "reactions", "category_label": "Reactions"},
+    {"name": "aurora", "category": "earth-sky", "category_label": "Earth & Sky"},
+    {"name": "black_hole", "category": "deep-cosmos", "category_label": "Deep Cosmos"},
+]
+
+
+class GalleryOrder(unittest.TestCase):
+    """WEB-R2: the site's gallery lists the categories in the domain order."""
+
+    def problems(self, body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "index.html"
+            page.write_text(f"<h1>Gallery</h1>\n<h2 id=\"in-motion\">In motion</h2>\n{body}")
+            return site_check.gallery_order_problems(page, CATALOGUE)
+
+    def test_web_r2_categories_under_their_domains_in_order_pass(self) -> None:
+        body = (
+            "<h2>Physics</h2><h3>Forces &amp; Waves</h3><h2>Chemistry</h2><h3>Reactions</h3>"
+            "<h2>Earth</h2><h3>Earth &amp; Sky</h3><h2>Space</h2><h3>Deep Cosmos</h3>"
+        )
+        self.assertEqual(self.problems(body), [])
+
+    def test_web_r2_space_first_fails(self) -> None:
+        body = (
+            "<h2>Deep Cosmos</h2><h2>Earth &amp; Sky</h2><h2>Forces &amp; Waves</h2>"
+            "<h2>Reactions</h2>"
+        )
+        problems = self.problems(body)
+        self.assertTrue(problems and all(p.startswith("WEB-R2") for p in problems), problems)
+
+    def test_web_r2_a_missing_domain_heading_fails(self) -> None:
+        body = (
+            "<h2>Physics</h2><h3>Forces &amp; Waves</h3><h3>Reactions</h3>"
+            "<h2>Earth</h2><h3>Earth &amp; Sky</h3><h2>Space</h2><h3>Deep Cosmos</h3>"
+        )
+        self.assertTrue(self.problems(body))
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -77,6 +77,58 @@ DOMAINS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("Space", ("sun-planets", "deep-cosmos", "voyages")),
 )
 DOMAIN_OF = {category: domain for domain, categories in DOMAINS for category in categories}
+# The docs present categories in this order (WEB-R2): the README, docs/GALLERY.md and the
+# site's gallery. The program's own order (`sciart list`, the `[`/`]` keys) is the registry's.
+CATEGORY_ORDER = [category for _, categories in DOMAINS for category in categories]
+
+
+def category_rank(category: str) -> int:
+    """`category`'s place in the docs' domain order; unknown categories come last."""
+    return CATEGORY_ORDER.index(category) if category in CATEGORY_ORDER else len(CATEGORY_ORDER)
+
+
+def ordered_categories(categories: set[str]) -> list[str]:
+    """`categories` in the domain order (WEB-R2), any unknown ones after, by name."""
+    return sorted(categories, key=lambda c: (category_rank(c), c))
+
+
+def domain_sections(categories: set[str]) -> list[tuple[str, list[str]]]:
+    """`(domain, its categories present)` in order; unknown categories under "Other"."""
+    found = [
+        (domain, [c for c in members if c in categories]) for domain, members in DOMAINS
+    ]
+    other = sorted(categories - set(CATEGORY_ORDER))
+    if other:
+        found.append(("Other", other))
+    return [(domain, members) for domain, members in found if members]
+
+
+def clips_by_domain(clips: list["Clip"], category_of: dict[str, str]) -> list["Clip"]:
+    """`clips` in the domain order of their scenes' categories, manifest order within one."""
+    return sorted(clips, key=lambda clip: category_rank(category_of.get(clip.scene, "")))
+
+
+def heading_order_problems(where: str, headings: list[str], labels: dict[str, str],
+                           categories: set[str]) -> list[str]:
+    """WEB-R2: the category headings in `headings` (labels or ids) come in the domain order,
+    each domain's heading before its categories'. `labels` maps a category id to its label."""
+    names = {**{label: cat for cat, label in labels.items()}, **{cat: cat for cat in labels}}
+    domains = {domain for domain, _ in DOMAINS} | {"Other"}
+    seen = [h for h in headings if h in names or h in domains]
+    want: list[str] = []
+    for domain, members in domain_sections(categories):
+        want.append(domain)
+        want += members
+    got = [names.get(h, h) for h in seen]
+    if got != want:
+        def show(items: list[str]) -> str:
+            return " > ".join(labels.get(item, f"[{item}]") for item in items)
+
+        return [
+            f"{where} lists the categories as {show(got)}; want the domain order "
+            f"{show(want)} (domains in brackets; DOMAINS in scripts/showcase.py)"
+        ]
+    return []
 # `sciart` subcommands whose first argument is a scene name.
 SCENE_COMMANDS = ("run", "record", "frame")
 
@@ -692,6 +744,7 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
             continue
         problems.extend(reference_problems(page, wanted))
     if GALLERY.is_file():
+        problems.extend(gallery.order_problems(GALLERY.read_text(encoding="utf-8"), scenes))
         section = "\n".join(gallery.motion_section(scenes))
         if section not in GALLERY.read_text(encoding="utf-8"):
             problems.append(
