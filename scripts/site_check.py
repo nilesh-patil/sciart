@@ -21,8 +21,9 @@ values from the player's data; a computed address passed to `fetch`, `import()`,
 fails. Nothing names an analytics or tracking service. Ordinary links (`<a href>`) to other
 sites are allowed. `scripts/site_check_test.py` proves each case.
 WEB-R7: every registered scene is in the gallery; every internal link and asset resolves
-(fragments included); the install commands on the site are the README's Install section's;
-and the guide names no subcommand, flag or flag value the binary does not have (checked
+(fragments included); the install commands on the site are the README's Install section's,
+and its one-line `curl … | sh` follows redirects with its https-only flags (DIST-R7); and
+the guide names no subcommand, flag or flag value the binary does not have (checked
 against `sciart completions bash`).
 """
 
@@ -37,6 +38,7 @@ from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
 import build_site as site_build
+from installer_check import one_liner_problems
 
 ROOT = Path(__file__).resolve().parent.parent
 DIST = site_build.DIST
@@ -592,6 +594,11 @@ def check_install(problems: list[str]) -> None:
                 line = line.split(" #", 1)[0].strip()
                 if install_like.match(line) and line not in readme:
                     problems.append(f"WEB-R7: {path.relative_to(DIST)} gives an install command not in the README: {line}")
+                # DIST-R7: the one-line command the site shows follows redirects and keeps
+                # its https-only flags (the rule scripts/installer_check.py applies to the
+                # README and the installer's header).
+                if re.match(r"^curl .*\|\s*sh$", line):
+                    problems += [f"DIST-R7: {path.relative_to(DIST)}: {p}" for p in one_liner_problems(line)]
 
 
 def completions() -> tuple[set[str], dict[str, set[str]], dict[str, dict[str, set[str] | None]]]:

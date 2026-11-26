@@ -59,7 +59,7 @@ macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM64).
 in; installs to `~/.local/bin`, never uses sudo):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
 ```
 
 **Homebrew**:
