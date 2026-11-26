@@ -451,10 +451,54 @@ def check_r10(problems: list[str]) -> None:
 
 # --- modes ---------------------------------------------------------------------------------
 
+# DIST-R10: Markdown link targets, inline (`[text](target "title")`) and reference
+# definitions (`[label]: target`); code spans and fenced blocks are left as they are.
+INLINE_LINK = re.compile(r"(\]\()([^)\s]+)((?:\s+\"[^\"]*\")?\))")
+REFERENCE = re.compile(r"^(\s{0,3}\[[^\]\n]+\]:\s*)(\S+)", re.M)
+CODE = re.compile(r"(```.*?```|`[^`\n]*`)", re.S)
+
+
+def is_relative(target: str) -> bool:
+    """A link target that resolves against the page it is on: not a URL with a scheme
+    (`https:`, `mailto:`, ...), not protocol-relative, not an anchor on the same page."""
+    return not re.match(r"[A-Za-z][A-Za-z0-9+.-]*:|//|#", target)
+
+
+def pinned_links(text: str, repo: str, version: str) -> str:
+    """`text` with every relative link target made absolute in the repository's tree at the
+    tag `v<version>`, its `#fragment` kept: on a release page a relative link resolves under
+    /releases/tag/ and is dead."""
+    base = f"{repo.removesuffix('.git').rstrip('/')}/blob/v{version}/"
+
+    def pin(target: str) -> str:
+        if not is_relative(target):
+            return target
+        path = re.sub(r"^(\./)+", "", target).lstrip("/")
+        return base + path
+
+    def outside_code(part: str) -> str:
+        part = INLINE_LINK.sub(lambda m: m.group(1) + pin(m.group(2)) + m.group(3), part)
+        return REFERENCE.sub(lambda m: m.group(1) + pin(m.group(2)), part)
+
+    return "".join(part if CODE.fullmatch(part) else outside_code(part) for part in CODE.split(text))
+
+
+def relative_targets(text: str) -> list[str]:
+    """The relative link targets left in `text` (outside code)."""
+    prose = "".join(part for part in CODE.split(text) if not CODE.fullmatch(part))
+    targets = [m.group(2) for m in INLINE_LINK.finditer(prose)] + [m.group(2) for m in REFERENCE.finditer(prose)]
+    return [t for t in targets if is_relative(t)]
+
+
 def notes(version: str) -> str | None:
+    """The release notes of `version`: its CHANGELOG section, with relative links pinned to
+    the tag (DIST-R10). The repository is the workspace manifest's `repository`."""
     text = (ROOT / "CHANGELOG.md").read_text()
     found = re.search(rf"^## \[{re.escape(version)}\] - [^\n]*\n(.*?)(?=^## \[|\Z)", text, re.M | re.S)
-    return found.group(1).strip() + "\n" if found else None
+    if not found:
+        return None
+    repo = toml_file("Cargo.toml")["workspace"]["package"]["repository"]
+    return pinned_links(found.group(1).strip(), repo, version) + "\n"
 
 
 def main() -> int:
