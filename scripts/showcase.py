@@ -11,9 +11,9 @@ Every animated capture in the README and the gallery is a clip in the manifest, 
 WEB-R1: the manifest lists each clip's id, scene, seed, size, start, seconds, fps, theme and
 output path under docs/media/; docs/media/showcase.lock records the parameters each clip was
 recorded with, and a clip whose manifest entry differs is stale; a GIF is at most 1.5 MB and
-the set at most 16 MB; the set covers at least 12 scenes from at least 8 categories,
-including the thread idiom (GEN-R25), the orbital-thread stipple idiom (GEN-R26) and a
-half-block field scene.
+the set at most 16 MB; the set covers every category of the registry with at least one clip
+and at least 12 scenes in all, including the thread idiom (GEN-R25), the orbital-thread
+stipple idiom (GEN-R26) and a half-block field scene.
 
 WEB-R2 (`--check`): fails when a manifest clip is missing, stale, or not a GIF with at least
 one frame; a file under docs/media/ is neither a clip nor the lock; a clip or the set is over
@@ -23,6 +23,13 @@ README.md or docs/GALLERY.md references an animated image that is not a manifest
 or the animated section of docs/GALLERY.md differs from what scripts/gallery.py writes.
 README.md shows the one `readme = "hero"` clip and every `readme = "grid"` clip (at least
 eight), each with alt text naming the scene; docs/GALLERY.md shows every clip.
+
+The README's layout (WEB-R2): its `## Gallery` is grouped under the `### <domain>` headings of
+DOMAINS, in that order, each clip under its category's domain, with a clip from every
+category; its `## What's inside` table has one row per category with the registry's scene
+count (example scenes named in a row belong to that category); and the `sciart` commands in
+its shell blocks name scenes from at least five categories, with real scenes and category ids
+after `run`, `record`, `frame`, `--only`, `--exclude` and `--category`.
 
 Clips are recorded through `cargo run --profile ci -p sciart --features record -- record`,
 the same build as `pixi run rs-record`. This is the only script that writes docs/media/.
@@ -56,8 +63,22 @@ SCENE_SOURCES = ROOT / "crates"
 CLIP_LIMIT = 1_500_000
 SET_LIMIT = 16_000_000
 MIN_SCENES = 12
-MIN_CATEGORIES = 8
 MIN_GRID = 8
+# WEB-R2: the README's example commands name scenes from at least this many categories.
+MIN_COMMAND_CATEGORIES = 5
+
+# The README's science domains (WEB-R2), in the order it presents them: the sciences first,
+# then Earth and space. Every registry category belongs to exactly one.
+DOMAINS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("Physics", ("forces-waves", "states-of-matter")),
+    ("Chemistry", ("reactions",)),
+    ("Life", ("living-systems", "physics-of-life", "molecules-of-life", "life-from-matter")),
+    ("Earth", ("earth-sky",)),
+    ("Space", ("sun-planets", "deep-cosmos", "voyages")),
+)
+DOMAIN_OF = {category: domain for domain, categories in DOMAINS for category in categories}
+# `sciart` subcommands whose first argument is a scene name.
+SCENE_COMMANDS = ("run", "record", "frame")
 
 THEMES = ("astro", "rainbow", "mono", "aurora", "colorblind")
 FIELDS = {
@@ -401,17 +422,25 @@ def resolve(page: Path, ref: str) -> Path:
     return (page.parent / ref).resolve()
 
 
-def prose(page: Path) -> str:
-    """`page` with fenced code blocks and inline code spans blanked out."""
-    text = page.read_text(encoding="utf-8")
+def blank_code(text: str) -> str:
+    """`text` with fenced code blocks and inline code spans blanked out."""
     text = FENCE.sub(lambda m: "\n" * m.group(0).count("\n"), text)
     return CODE_SPAN.sub("", text)
+
+
+def prose(page: Path) -> str:
+    """`page` with fenced code blocks and inline code spans blanked out."""
+    return blank_code(page.read_text(encoding="utf-8"))
 
 
 def images(page: Path) -> list[tuple[str, str]]:
     """`(src, alt)` for every <img>, every <source srcset> candidate and every Markdown
     image in `page`, however its attributes are quoted."""
-    text = prose(page)
+    return images_in(prose(page))
+
+
+def images_in(text: str) -> list[tuple[str, str]]:
+    """`images` over text whose code is already blanked."""
     found = []
     for tag in TAG.finditer(text):
         attrs = {}
@@ -440,6 +469,164 @@ def reference_problems(page: Path, clips: set[Path]) -> list[str]:
         if not is_external(src) and not resolve(page, src).is_file():
             problems.append(f"{name} shows {src}, which does not resolve to a file")
     return sorted(set(problems))
+
+
+def sections(text: str, level: int) -> list[tuple[str, str]]:
+    """`(heading, body)` for each heading of `level` in `text` (code already blanked); the
+    text before the first heading comes first, with the heading ""."""
+    parts = re.split(rf"^{'#' * level} +(.+?)\s*$", text, flags=re.MULTILINE)
+    return [("", parts[0])] + [
+        (parts[i].strip(), parts[i + 1]) for i in range(1, len(parts), 2)
+    ]
+
+
+def section(text: str, heading: str) -> str | None:
+    """The body of the level-2 section `heading` (code already blanked), or None."""
+    return next((body for title, body in sections(text, 2) if title == heading), None)
+
+
+def plain(cell: str) -> str:
+    """A Markdown table cell without emphasis, code marks or links' targets."""
+    cell = re.sub(r"\[([^\]]*)\]\([^)]*\)", r"\1", cell)
+    return re.sub(r"[*_`]", "", cell).strip()
+
+
+def readme_layout_problems(
+    text: str, page: Path, clips: list[Clip], scenes: list[gallery.Scene]
+) -> list[str]:
+    """WEB-R2: the README's gallery is grouped by domain with a clip from every category, its
+    "What's inside" table has every category with the registry's count, and its example
+    commands name scenes from at least five categories."""
+    problems: list[str] = []
+    name = page.name
+    category_of = {scene.name: scene.category for scene in scenes}
+    counts: dict[str, int] = {}
+    for scene in scenes:
+        counts[scene.category] = counts.get(scene.category, 0) + 1
+    for category in sorted(set(counts) - set(DOMAIN_OF)):
+        problems.append(
+            f"category `{category}` belongs to no domain; add it to DOMAINS in scripts/showcase.py"
+        )
+    label = gallery.category_label
+    domain_names = [domain for domain, _ in DOMAINS]
+    by_path = {clip.path.resolve(): clip for clip in clips}
+
+    # Gallery: `### <domain>` headings in DOMAINS order, each clip under its own domain.
+    prose_text = blank_code(text)
+    body = section(prose_text, "Gallery")
+    if body is None:
+        problems.append(f"{name} has no `## Gallery` section")
+    else:
+        parts = sections(body, 3)
+        headings = [heading for heading, _ in parts[1:]]
+        if headings != domain_names:
+            problems.append(
+                f"{name}: the gallery's `###` headings are {headings}, want the domains "
+                f"{domain_names} in that order"
+            )
+        shown: set[str] = set()
+        in_gallery: set[Path] = set()
+        for heading, part in parts:
+            for src, _ in images_in(part):
+                clip = by_path.get(resolve(page, src))
+                if clip is None:
+                    continue
+                in_gallery.add(clip.path.resolve())
+                category = category_of.get(clip.scene)
+                if category is None:
+                    continue  # reported as an unregistered manifest scene
+                shown.add(category)
+                want = DOMAIN_OF.get(category)
+                if heading != want:
+                    where = f"under `### {heading}`" if heading else "before the first domain heading"
+                    problems.append(
+                        f"{name}: the gallery shows {clip.out} ({label(category)}) {where}, "
+                        f"want `### {want}`"
+                    )
+        for category in sorted(set(counts) - shown):
+            problems.append(f"{name}: the gallery shows no clip from {label(category)}")
+        for clip in clips:
+            if clip.readme == "grid" and clip.path.resolve() not in in_gallery:
+                problems.append(f"{name}: grid clip {clip.out} is not in the `## Gallery` section")
+
+    # What's inside: one row per category, with the registry's count. Code spans stay: the
+    # example scenes are written as code.
+    body = section(FENCE.sub(lambda m: "\n" * m.group(0).count("\n"), text), "What's inside")
+    if body is None:
+        problems.append(f"{name} has no `## What's inside` section")
+    else:
+        rows = [
+            [cell.strip() for cell in line.strip().strip("|").split("|")]
+            for line in body.splitlines()
+            if line.strip().startswith("|")
+        ]
+        rows = [row for row in rows if not all(re.fullmatch(r":?-+:?", c) for c in row)]
+        header = [plain(cell).lower() for cell in rows[0]] if rows else []
+        if "category" not in header or "scenes" not in header:
+            problems.append(
+                f"{name}: `## What's inside` has no table with `Category` and `Scenes` columns"
+            )
+        else:
+            by_label = {label(category): category for category in counts}
+            col_category, col_scenes = header.index("category"), header.index("scenes")
+            seen: list[str] = []
+            for row in rows[1:]:
+                cell = plain(row[col_category]) if col_category < len(row) else ""
+                category = by_label.get(cell)
+                if category is None:
+                    problems.append(f"{name}: `What's inside` names an unknown category {cell!r}")
+                    continue
+                seen.append(category)
+                count = plain(row[col_scenes]) if col_scenes < len(row) else ""
+                if count != str(counts[category]):
+                    problems.append(
+                        f"{name}: `What's inside` gives {cell} {count!r} scenes; the "
+                        f"registry has {counts[category]}"
+                    )
+                for scene in re.findall(r"`([a-z0-9_]+)`", "|".join(row)):
+                    if category_of.get(scene) != category:
+                        problems.append(
+                            f"{name}: `What's inside` names `{scene}` under {cell}, which is "
+                            "not a scene of that category"
+                        )
+            for category in sorted(set(counts) - set(seen)):
+                problems.append(f"{name}: `What's inside` has no row for {label(category)}")
+            for category in sorted({c for c in seen if seen.count(c) > 1}):
+                problems.append(f"{name}: `What's inside` has {label(category)} more than once")
+            order = [domain_names.index(DOMAIN_OF[c]) for c in seen if c in DOMAIN_OF]
+            if order != sorted(order):
+                problems.append(
+                    f"{name}: `What's inside` is not grouped by domain in the order {domain_names}"
+                )
+
+    # Example commands: real scenes and categories, from at least five categories.
+    named: set[str] = set()
+    categories = set(counts)
+    for block in re.findall(r"^```(?:sh|bash|console)\s*\n(.*?)^```", text, re.S | re.M):
+        for line in block.splitlines():
+            line = line.split(" #", 1)[0].strip().removeprefix("$ ")
+            tokens = line.split()
+            if not tokens or tokens[0] != "sciart":
+                continue
+            tokens = tokens[1 : tokens.index("--")] if "--" in tokens else tokens[1:]
+            for i, token in enumerate(tokens):
+                value = tokens[i + 1] if i + 1 < len(tokens) else ""
+                if token in ("--only", "--exclude") and value not in category_of:
+                    problems.append(f"{name}: `{line}`: {token} {value!r} is not a scene")
+                if token == "--category" and value not in categories:
+                    problems.append(f"{name}: `{line}`: --category {value!r} is not a category id")
+                if token in category_of:
+                    named.add(category_of[token])
+            if tokens and tokens[0] in SCENE_COMMANDS:
+                first = tokens[1] if len(tokens) > 1 else ""
+                if first not in category_of and not first.startswith("<"):
+                    problems.append(f"{name}: `{line}`: {first!r} is not a scene")
+    if len(named) < MIN_COMMAND_CATEGORIES:
+        problems.append(
+            f"{name}: the example commands name scenes from {len(named)} categories, want at "
+            f"least {MIN_COMMAND_CATEGORIES}"
+        )
+    return problems
 
 
 def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
@@ -488,10 +675,8 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
     fields = {name for name in known if is_half_block_field(name, thread, stipple)}
     if len(known) < MIN_SCENES:
         problems.append(f"coverage: {len(known)} scenes, want at least {MIN_SCENES}")
-    if len(categories) < MIN_CATEGORIES:
-        problems.append(
-            f"coverage: {len(categories)} categories, want at least {MIN_CATEGORIES}"
-        )
+    for category in sorted({scene.category for scene in scenes} - categories):
+        problems.append(f"coverage: no clip from {gallery.category_label(category)}")
     if not known & thread:
         problems.append("coverage: no thread-idiom scene (GEN-R25)")
     if not known & stipple:
@@ -530,6 +715,9 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
                     f"README.md shows {clip.out} without alt text naming "
                     f"`{scene_words(clip.scene)}` and what it shows"
                 )
+        problems.extend(
+            readme_layout_problems(README.read_text(encoding="utf-8"), README, clips, scenes)
+        )
     if GALLERY.is_file():
         shown_in_gallery = {resolve(GALLERY, src) for src, _ in images(GALLERY)}
         for clip in clips:
@@ -550,7 +738,7 @@ def check(clips: list[Clip], scenes: list[gallery.Scene]) -> int:
         return 1
     print(
         f"showcase: ok, {len(clips)} clips ({total / 1e6:.2f} MB), {len(known)} scenes in "
-        f"{len(categories)} categories; thread {len(known & thread)}, stipple "
+        f"all {len(categories)} categories; thread {len(known & thread)}, stipple "
         f"{len(known & stipple)}, half-block field {len(fields)}"
     )
     return 0
