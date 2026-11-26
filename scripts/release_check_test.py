@@ -25,7 +25,13 @@ PUBLISH_STEP = """      - name: Publish
         run: python3 scripts/publish_crates.py
 """
 SNEAK = "      # DIST-R4: one crate at a time"
-CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0"
+CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+INSTALL = "taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10"
+PRIVATE_GUARD = """      - name: A release tag needs a public repository
+        if: startsWith(github.ref, 'refs/tags/v') && github.event.repository.private
+"""
+ATTEST_IF = "        if: github.event.repository.private == false\n"
+GATE_NEEDS = "    needs: environment-gate\n"
 TAG_STEP_PUBLISH = """      - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
 """
@@ -110,12 +116,46 @@ MUTATIONS = [
      "build -> package -> release"),
     ("k: package does not need build", "release.yml", "    needs: [verify, build]\n", "    needs: [verify]\n",
      "build -> package -> release"),
-    ("l: a third-party action swapped in", "release.yml",
-     "taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10",
-     "someone-else/install-action@main", "not pinned"),
-    ("l: a pinned action from an unknown owner", "release.yml",
-     "taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10",
-     "someone-else/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10", "allow-list"),
+    ("l: a third-party action swapped in", "release.yml", INSTALL, "someone-else/install-action@main", "not pinned"),
+    ("l: a pinned action from an unknown owner", "release.yml", INSTALL,
+     INSTALL.replace("taiki-e/", "someone-else/"), "allow-list"),
+    ("an install step that names no tool", "fuzz.yml", INSTALL + "\n        with:\n          tool: cargo-fuzz\n",
+     INSTALL + "\n", "without naming its tool"),
+    ("an install step with an empty tool", "ci.yml", "          tool: nextest\n", "          tool: \"\"\n",
+     "without naming its tool"),
+    # runner images (TEST-R13, DIST-R5)
+    ("a retired macOS image", "ci.yml", "          - os: macos-15\n", "          - os: macos-14\n",
+     "runs on `macos-14`"),
+    ("a moving ubuntu label", "pages.yml", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-latest\n",
+     "runs on `ubuntu-latest`"),
+    ("a moving macOS label in a matrix", "publish.yml", "            os: macos-15\n", "            os: macos-latest\n",
+     "runs on `macos-latest`"),
+    ("a retired image for a release build", "release.yml", "            os: macos-15\n", "            os: macos-14\n",
+     "runs on `macos-14`"),
+    ("the oldest image outside the release builds", "ci.yml", "    runs-on: ubuntu-24.04\n",
+     "    runs-on: ubuntu-22.04\n", "release builds only"),
+    ("a runner the check cannot read", "fuzz.yml", "    runs-on: ubuntu-24.04\n",
+     "    runs-on: ${{ github.event.inputs.runner }}\n", "names no runner image"),
+    # attestations need a public repository (DIST-R6)
+    ("the private-repository guard deleted", "release.yml", PRIVATE_GUARD, "      - name: Anything\n        if: false\n",
+     "private repository"),
+    ("the private-repository guard weakened", "release.yml", PRIVATE_GUARD,
+     PRIVATE_GUARD.replace("        if: ", "        continue-on-error: true\n        if: "), "private repository"),
+    ("the attestation unguarded", "release.yml", ATTEST_IF, "", "only in a public repository"),
+    ("the skipped attestation without a notice", "release.yml",
+     "          echo \"::notice::No build-provenance", "          echo \"No build-provenance", "`::notice::`"),
+    # the release environment gate (DIST-R10)
+    ("the environment gate deleted", "publish.yml", "  environment-gate:\n", "  x-environment-gate:\n",
+     "`environment-gate` job"),
+    ("a publish job that does not need the gate", "publish.yml", GATE_NEEDS + "    runs-on: ${{ matrix.os }}\n",
+     "    runs-on: ${{ matrix.os }}\n", "`conda` needs `environment-gate`"),
+    ("the gate inside the environment it checks", "publish.yml",
+     "    permissions:\n      actions: read", "    environment: release\n    permissions:\n      actions: read",
+     "outside the `release` environment"),
+    ("a gate that never fails", "publish.yml", "                exit 1\n", "", "required_reviewers"),
+    ("a gate that cannot fail", "publish.yml", "          set -euo pipefail\n          if rules=",
+     "          set +e\n          if rules=", "can fail the job"),
+    ("the gate may write", "publish.yml", "      actions: read #", "      actions: write #", "beyond its allow-list"),
     ("m: the smoke JSON check swallowed", "release.yml", JSON_CHECK, JSON_CHECK + " || true", "cannot fail"),
     ("the smoke test without -V", "release.yml", '          test "$("$bin" -V)" = "sciart $VERSION"\n', "",
      '"$bin" -V'),

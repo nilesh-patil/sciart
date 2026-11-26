@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
-"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R13; SPEC-007 LIB-R4,
-LIB-R7, LIB-R8; SPEC-005 CLI-R15; SPEC-009 WEB-R3..R8).
+"""Tooling schema checks (SPEC-006 TEST-R9, TEST-R10, TEST-R11, TEST-R12, TEST-R13;
+SPEC-007 LIB-R4, LIB-R7, LIB-R8; SPEC-005 CLI-R15; SPEC-008 DIST-R5; SPEC-009 WEB-R3..R8).
 
 Asserts the shape of the build/test tooling the gate depends on: pixi tasks use the
 documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and checks,
-nextest never filters or retries, sccache stays the shared rustc wrapper, CI covers
-the platform tiers, the browser player and the docs site build in the gate and in CI, and
-GitHub Pages is deployed only by hand or on a published release.
+nextest never filters or retries, sccache stays the shared rustc wrapper, the local gate
+runs CI's NO_COLOR pass, CI covers the platform tiers on supported runner images, a
+workflow that installs a toolchain other than stable pins it with RUSTUP_TOOLCHAIN, the
+fuzz run names its `--target`, the browser player and the docs site build in the gate and
+in CI, and GitHub Pages is deployed only by hand or on a published release.
 
 Successor of the config half of `crates/sciart-generators/tests/source_rules.rs`; wired
 into `pixi run rs-spec-check` and CI.
@@ -19,6 +21,9 @@ import subprocess
 import sys
 import tomllib
 from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from yaml_subset import YamlError, parse  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -130,14 +135,64 @@ def check_r11(problems: list[str]) -> None:
             fail(problems, f"TEST-R11: task `{name}` overrides RUSTC_WRAPPER")
 
 
+NOCOLOR_TASK = "rs-test-nocolor"
+
+
+def nocolor_problems(pixi: dict, ci: str) -> list[str]:
+    """TEST-R12: CI's `test` job re-runs the colour-sensitive suites with NO_COLOR=1, and the
+    local gate runs the same command with the same environment (`rs-test-nocolor`, a
+    dependency of `rs-ci`), so a test that only fails under NO_COLOR fails locally too."""
+    problems = []
+    task = pixi.get("tasks", {}).get(NOCOLOR_TASK)
+    if not isinstance(task, dict):
+        return [f"TEST-R12: pixi.toml has a `{NOCOLOR_TASK}` task with `cmd` and `env`"]
+    if (task.get("env") or {}).get("NO_COLOR") != "1":
+        problems.append(f"TEST-R12: `{NOCOLOR_TASK}` sets `env = {{ NO_COLOR = \"1\" }}`")
+    if NOCOLOR_TASK not in pixi_task(pixi, "rs-ci")[1]:
+        problems.append(f"TEST-R12: rs-ci depends on `{NOCOLOR_TASK}`")
+    try:
+        data = parse(ci)
+    except YamlError as e:
+        return problems + [f"TEST-R12: cannot read ci.yml: {e}"]
+    test = (data.get("jobs") or {}).get("test") if isinstance(data, dict) else None
+    steps = test.get("steps") if isinstance(test, dict) else None
+    runs = [s for s in steps or [] if isinstance(s, dict) and "NO_COLOR" in (s.get("env") or {})]
+    if len(runs) != 1:
+        return problems + ["TEST-R12: ci.yml `test` has one step with NO_COLOR in its env"]
+    step = runs[0]
+    if str(step["env"]["NO_COLOR"]) != "1":
+        problems.append("TEST-R12: the ci.yml NO_COLOR step sets NO_COLOR to \"1\"")
+    if " ".join(str(step.get("run", "")).split()) != " ".join(str(task.get("cmd", "")).split()):
+        problems.append(f"TEST-R12: the ci.yml NO_COLOR step and `{NOCOLOR_TASK}` run the same command: "
+                        f"{step.get('run')!r} vs {task.get('cmd')!r}")
+    return problems
+
+
+def check_r12(problems: list[str]) -> None:
+    for problem in nocolor_problems(toml_file("pixi.toml"), (ROOT / ".github/workflows/ci.yml").read_text()):
+        fail(problems, problem)
+
+
 # TEST-R13 / ADR-0029: platform tiers.
 TIER_1 = {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"}
 TIER_2 = {"aarch64-unknown-linux-gnu"}
+# Frames are pinned here only: the snapshots and the M11 fixtures were reviewed on it.
+REFERENCE_PLATFORM = "aarch64-apple-darwin"
 PIXI_PLATFORMS = ("osx-arm64", "osx-64", "linux-64", "linux-aarch64")
 PINNING_SUITES = (
     "crates/sciart-generators/tests/snapshots.rs",
     "crates/sciart-generators/tests/m11_fidelity.rs",
 )
+PINNING_SKIP = "tier::skip_off_reference_platform("
+
+# TEST-R13 / DIST-R5: the GitHub-hosted runner images a workflow job may name. A `-latest`
+# label changes meaning when the hosting service moves it, and a retired image rejects the
+# job, so every job names one of these. When an image is retired, change it here and in the
+# workflows together (docs/RELEASING.md).
+RUNNER_IMAGES = ("macos-15", "ubuntu-24.04", "ubuntu-24.04-arm", "ubuntu-22.04", "ubuntu-22.04-arm")
+# The oldest images, for the release builds' glibc baseline only (DIST-R5).
+RELEASE_ONLY_IMAGES = ("ubuntu-22.04", "ubuntu-22.04-arm")
+RELEASE_WORKFLOWS = ("release.yml", "publish.yml")
 
 
 def runner_target(label: str) -> str | None:
@@ -200,6 +255,118 @@ def job_targets(body: str) -> set[str]:
     return {t for t in map(runner_target, labels) if t}
 
 
+def runner_labels(job: dict) -> list[str] | None:
+    """Every runner label a parsed job can run on: a literal `runs-on`, or every value of
+    the matrix key it names (plain lists and `include` entries). None when that cannot be
+    read so simply (another expression, a label list, an `exclude`, no value at all), so
+    the caller fails closed."""
+    runs_on = job.get("runs-on")
+    if not isinstance(runs_on, str):
+        return None
+    value = runs_on.strip()
+    from_matrix = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", value)
+    if from_matrix is None:
+        return [value] if re.fullmatch(r"[A-Za-z0-9._-]+", value) else None
+    key = from_matrix.group(1)
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if not isinstance(matrix, dict) or "exclude" in matrix:
+        return None
+    listed = matrix.get(key, [])
+    labels = list(listed) if isinstance(listed, list) else [listed]
+    include = matrix.get("include", [])
+    if not isinstance(include, list):
+        return None
+    labels += [entry[key] for entry in include if isinstance(entry, dict) and key in entry]
+    if not labels or not all(isinstance(label, str) for label in labels):
+        return None
+    return labels
+
+
+def runner_image_problems(texts: dict[str, str]) -> list[str]:
+    """TEST-R13 / DIST-R5 over every workflow ({file name: text}): each job runs on an
+    image from RUNNER_IMAGES, the oldest ones only in the release workflows."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        try:
+            data = parse(text)
+        except YamlError as e:
+            problems.append(f"TEST-R13: cannot read {name} to check its runner images: {e}")
+            continue
+        jobs = data.get("jobs") if isinstance(data, dict) else None
+        for job_name, job in (jobs.items() if isinstance(jobs, dict) else []):
+            labels = runner_labels(job) if isinstance(job, dict) else None
+            if labels is None:
+                problems.append(f"TEST-R13: {name} `{job_name}` names no runner image the check can read "
+                                f"(runs-on: {job.get('runs-on') if isinstance(job, dict) else job!r})")
+                continue
+            for label in dict.fromkeys(labels):
+                if label not in RUNNER_IMAGES:
+                    problems.append(f"TEST-R13: {name} `{job_name}` runs on `{label}`, not a supported "
+                                    f"runner image ({', '.join(RUNNER_IMAGES)})")
+                elif label in RELEASE_ONLY_IMAGES and name not in RELEASE_WORKFLOWS:
+                    problems.append(f"TEST-R13: {name} `{job_name}` runs on `{label}`, an image kept for "
+                                    "the release builds only")
+    return problems
+
+
+def workflow_texts() -> dict[str, str]:
+    return {p.name: p.read_text() for p in sorted((ROOT / ".github/workflows").glob("*.yml"))}
+
+
+def fuzz_target_problems(texts: dict[str, str]) -> list[str]:
+    """IMP-14 over every workflow: each `cargo fuzz run` names its `--target`. The install
+    action ships cargo-fuzz as a musl binary, which otherwise builds for musl, where the
+    sanitizer cannot link (a statically linked libc)."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        joined = re.sub(r"\\\n\s*", " ", text)
+        for command in re.findall(r"cargo\s+fuzz\s+run\b[^\n]*", joined):
+            if not re.search(r"\s--target[\s=]", command.split(" -- ")[0] + " "):
+                problems.append(f"IMP-14: {name} runs `{command.strip()}` without `--target` (the host triple)")
+    return problems
+
+
+TOOLCHAIN_ACTION = "dtolnay/rust-toolchain@"
+
+
+def toolchain_problems(texts: dict[str, str]) -> list[str]:
+    """ADR-0024 over every workflow ({file name: text}): `rust-toolchain.toml` floats on
+    stable and wins over the toolchain an action installs, so a job that installs any other
+    toolchain (`with: toolchain:`, or the version in the pinned action's comment) sets
+    `RUSTUP_TOOLCHAIN` to it at job or workflow level; otherwise its cargo commands run on
+    stable (and `cargo fuzz` refuses `-Z`)."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        try:
+            data = parse(text)
+        except YamlError as e:
+            problems.append(f"ADR-0024: cannot read {name} to check its toolchains: {e}")
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
+            continue
+        top = data.get("env") if isinstance(data.get("env"), dict) else {}
+        for job_name, job in data["jobs"].items():
+            if not isinstance(job, dict):
+                continue
+            env = dict(top, **(job.get("env") if isinstance(job.get("env"), dict) else {}))
+            for step in job.get("steps") or []:
+                uses = str(step.get("uses", "")) if isinstance(step, dict) else ""
+                if not uses.startswith(TOOLCHAIN_ACTION):
+                    continue
+                chosen = (step.get("with") or {}).get("toolchain") if isinstance(step.get("with"), dict) else None
+                if chosen is None:
+                    comment = re.search(rf"uses:\s*{re.escape(uses)}\s+#\s*(\S+)", text)
+                    chosen = comment.group(1) if comment else None
+                if chosen is None:
+                    problems.append(f"ADR-0024: {name} `{job_name}` installs a toolchain it does not name")
+                elif str(chosen) != "stable" and str(env.get("RUSTUP_TOOLCHAIN")) != str(chosen):
+                    problems.append(f"ADR-0024: {name} `{job_name}` installs the {chosen} toolchain but does not set "
+                                    f"`RUSTUP_TOOLCHAIN: {chosen}` at job or workflow level, so "
+                                    "rust-toolchain.toml (stable) wins")
+    return problems
+
+
 def forces_lf(lines: list[str], pattern: str) -> bool:
     for line in lines:
         fields = line.split()
@@ -211,13 +378,21 @@ def forces_lf(lines: list[str], pattern: str) -> bool:
 
 def check_r13(problems: list[str]) -> None:
     jobs = workflow_jobs((ROOT / ".github/workflows/ci.yml").read_text())
-    for job, targets in {"lint": TIER_1, "test": TIER_1 | TIER_2, "snapshots": TIER_1}.items():
+    for job, targets in {"lint": TIER_1, "test": TIER_1 | TIER_2}.items():
         if job not in jobs:
             fail(problems, f"TEST-R13: ci.yml has no `{job}` job")
             continue
         missing = targets - job_targets(jobs[job])
         if missing:
             fail(problems, f"TEST-R13: ci.yml `{job}` does not run on {sorted(missing)}")
+    for problem in snapshot_job_problems(jobs):
+        fail(problems, problem)
+    for problem in runner_image_problems(workflow_texts()):
+        fail(problems, problem)
+    for problem in toolchain_problems(workflow_texts()):
+        fail(problems, problem)
+    for problem in fuzz_target_problems(workflow_texts()):
+        fail(problems, problem)
     if "test" in jobs and not re.search(r"run: cargo nextest run --workspace\s*$", jobs["test"], re.M):
         fail(problems, "TEST-R13: ci.yml `test` runs the whole suite (`cargo nextest run --workspace`)")
     pixi = toml_file("pixi.toml")
@@ -233,10 +408,30 @@ def check_r13(problems: list[str]) -> None:
         if not forces_lf(attributes, pattern):
             fail(problems, f"TEST-R13: .gitattributes forces `eol=lf` for `{pattern}`")
     for suite in PINNING_SUITES:
-        if "tier::skip_off_tier_1(" not in (ROOT / suite).read_text():
-            fail(problems, f"TEST-R13: {suite} skips itself off tier 1 (`tier::skip_off_tier_1`)")
-    if "TEST-R13" not in (ROOT / "crates/sciart-generators/tests/common/tier.rs").read_text():
-        fail(problems, "TEST-R13: the tier-1 skip reason (tests/common/tier.rs) names TEST-R13")
+        if PINNING_SKIP not in (ROOT / suite).read_text():
+            fail(problems, f"TEST-R13: {suite} skips itself off the reference platform (`{PINNING_SKIP}`)")
+    tier = (ROOT / "crates/sciart-generators/tests/common/tier.rs").read_text()
+    if "TEST-R13" not in tier:
+        fail(problems, "TEST-R13: the reference-platform skip reason (tests/common/tier.rs) names TEST-R13")
+    pinned = re.search(r"pub const FRAMES_PINNED: bool = cfg!\((.*?)\);", tier, re.S)
+    if pinned is None or " ".join(pinned.group(1).split()) != 'all(target_os = "macos", target_arch = "aarch64")':
+        fail(problems, f"TEST-R13: tests/common/tier.rs pins frames on {REFERENCE_PLATFORM} only "
+                       "(`FRAMES_PINNED = cfg!(all(target_os = \"macos\", target_arch = \"aarch64\"))`)")
+
+
+def snapshot_job_problems(jobs: dict[str, str]) -> list[str]:
+    """TEST-R13 / TEST-R9: the optimised snapshot job runs on the reference platform, and
+    only there (the suite skips itself elsewhere, so another runner would prove nothing)."""
+    if "snapshots" not in jobs:
+        return ["TEST-R13: ci.yml has no `snapshots` job"]
+    body = jobs["snapshots"]
+    if "cargo test --profile ci -p sciart-generators --test snapshots" not in body:
+        return ["TEST-R9: ci.yml `snapshots` runs the snapshot suite in the `ci` profile"]
+    targets = job_targets(body)
+    if targets != {REFERENCE_PLATFORM}:
+        return [f"TEST-R13: ci.yml `snapshots` runs on the reference platform ({REFERENCE_PLATFORM}) "
+                f"only, not {sorted(targets)}"]
+    return []
 
 
 # LIB-R4 / CLI-R15: what the library pulls in without the binary's defaults.
@@ -469,7 +664,7 @@ def check_web_r8(problems: list[str]) -> None:
 
 def main() -> int:
     problems: list[str] = []
-    for check in (check_r9, check_r10, check_r11, check_r13, check_lib, check_web, check_web_r8):
+    for check in (check_r9, check_r10, check_r11, check_r12, check_r13, check_lib, check_web, check_web_r8):
         check(problems)
     if problems:
         print("tooling schema:", file=sys.stderr)

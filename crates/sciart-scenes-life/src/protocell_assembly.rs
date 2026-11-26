@@ -847,7 +847,13 @@ mod tests {
     #[test]
     fn proto_a2_micelles_hide_their_tails() {
         // One run per seed: chance level at t = 5 s (no attraction yet), micelles late in
-        // their act. "Most" tails, so two seeds keep the debug run short.
+        // their act. "Most" tails, so two seeds keep the debug run short. The margins hold
+        // over seeds 0–95, which stand in for another platform's rounding of the same
+        // chaotic soup (TEST-R13). Chance is 0.5 (n − 1 of the 2n − 2 other sites are
+        // tails); measured at t = 5 s: 0.458–0.583. In the micelle act: tails 0.572–0.708,
+        // so `tails > 0.55` (chance + 0.05) keeps 0.022 of headroom; the gain over t = 5 s
+        // is 0.022–0.221, never negative; heads outward 0.840–0.942. x86_64 Linux measured
+        // seed 1 at 0.46 → 0.58, which passes both.
         for seed in [1, 2] {
             let (mut g, mut ctx) = started(seed, Size::new(200, 50));
             run_to(&mut g, &mut ctx, 5.0);
@@ -860,14 +866,11 @@ mod tests {
             assert_eq!(g.caption(), Some("micelles"));
             let (tails, out) = micelle_stats(&g.soup);
             assert!(
-                tails > 0.5,
+                tails > 0.55,
                 "seed {seed}: {tails:.2} of tails next to a tail"
             );
             assert!(out > 0.7, "seed {seed}: {out:.2} of heads outward");
-            assert!(
-                tails > before + 0.15,
-                "seed {seed}: {before:.2} → {tails:.2}"
-            );
+            assert!(tails > before, "seed {seed}: {before:.2} → {tails:.2}");
         }
     }
 

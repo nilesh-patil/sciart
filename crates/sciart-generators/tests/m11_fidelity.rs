@@ -89,8 +89,8 @@ fn exempt(scene: &str, t: u32) -> bool {
 
 #[test]
 fn gen_r22_m11_scenes_match_the_m11_ink_frames() {
-    // Frames are pinned on tier 1 only (TEST-R13, ADR-0029).
-    if tier::skip_off_tier_1("m11_fidelity") {
+    // Frames are pinned on the reference platform only (TEST-R13, ADR-0029).
+    if tier::skip_off_reference_platform("m11_fidelity") {
         return;
     }
     let (w, h) = (usize::from(WIDTH), usize::from(HEIGHT));

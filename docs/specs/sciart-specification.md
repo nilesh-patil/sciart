@@ -245,8 +245,8 @@ hermetic with respect to terminal colour configuration (TEST-R12).
   lint/test/snapshot/deny jobs (ADR-0024, TEST-R13); `pixi run rs-ci` remains the
   pre-commit gate.
 - Platforms (TEST-R13, ADR-0029): tier 1 macOS arm64 and Linux x86_64; tier 2 Linux
-  aarch64; tier 3 Intel macOS and Linux musl (release builds only). Windows is not
-  supported.
+  aarch64; tier 3 Intel macOS and Linux musl (release builds only). Frames are pinned on
+  the reference platform, macOS arm64, only. Windows is not supported.
 - Install: release tarballs with an installer script, a Homebrew tap, a conda package for
   pixi, and crates.io (`cargo install sciart`, `cargo binstall sciart`); the README lists
   the commands and SPEC-008 the rules. In a checkout, `pixi run rs-install`.

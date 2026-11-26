@@ -9,7 +9,7 @@ name: Publish
 # packages it has, and the tap is committed only when the formula changed.
 #
 # Repository configuration this needs (see docs/RELEASING.md):
-#   environment `release` with required reviewers;
+#   environment `release` with required reviewers (checked first by `environment-gate`);
 #   secrets CARGO_REGISTRY_TOKEN, PREFIX_API_KEY, HOMEBREW_TAP_TOKEN (in that environment);
 #   variables CONDA_CHANNEL (the prefix.dev channel) and HOMEBREW_TAP (owner/homebrew-repo).
 on:
@@ -34,12 +34,47 @@ env:
   TAG: ${{ github.event.release.tag_name || inputs.tag }}
 
 jobs:
+  # DIST-R10: the hosting service creates a missing environment, without reviewers, the
+  # first time a job names it, so a missing or unprotected `release` environment would let
+  # the jobs below run unapproved. This job names no environment: it reads the rules and,
+  # on a published release, stops everything unless a reviewer is required. A manual
+  # rehearsal only reports what it found.
+  environment-gate:
+    name: The release environment requires a reviewer
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # GET /repos/{owner}/{repo}/environments/{name}
+    steps:
+      - name: Read the protection rules of the release environment
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          if rules="$(gh api "repos/${GITHUB_REPOSITORY}/environments/release" --jq '[.protection_rules[]?.type] | join(" ")')"; then
+            echo "environment release: protection rules: ${rules:-none}"
+          else
+            rules=""
+            echo "environment release: not found (or not readable with this token)"
+          fi
+          case " ${rules} " in
+            *" required_reviewers "*)
+              echo "environment release requires a reviewer" ;;
+            *)
+              if [ "${GITHUB_EVENT_NAME}" = "release" ]; then
+                echo "::error::The release environment must exist and require a reviewer before anything is published (DIST-R10, docs/RELEASING.md)."
+                exit 1
+              fi
+              echo "::notice::The release environment does not require a reviewer; a published release would stop here (DIST-R10)." ;;
+          esac
+
   crates-io:
     name: crates.io
-    runs-on: ubuntu-latest
+    needs: environment-gate
+    runs-on: ubuntu-24.04
     environment: release
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -66,6 +101,7 @@ jobs:
 
   conda:
     name: conda (${{ matrix.platform }})
+    needs: environment-gate
     runs-on: ${{ matrix.os }}
     environment: release
     strategy:
@@ -73,21 +109,21 @@ jobs:
       matrix:
         include:
           - platform: osx-arm64
-            os: macos-14
+            os: macos-15
           - platform: osx-64
-            os: macos-14
+            os: macos-15
           - platform: linux-64
             os: ubuntu-22.04
           - platform: linux-aarch64
             os: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
       - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
-      - uses: prefix-dev/setup-pixi@8ca4608ef7f4daeb54f5205b20d0b7cb42f11143 # v0.8.14
+      - uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e # v0.11.3
         with:
           environments: dist
       - name: Build (DIST-R8)
@@ -105,10 +141,11 @@ jobs:
 
   homebrew:
     name: Homebrew tap
-    runs-on: ubuntu-latest
+    needs: environment-gate
+    runs-on: ubuntu-24.04
     environment: release
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -123,7 +160,7 @@ jobs:
         run: |
           python3 scripts/render_formula.py --version "${TAG#v}" --sums dist/SHA256SUMS --out Formula/sciart.rb
           ruby -c Formula/sciart.rb
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'release'
         with:
           repository: ${{ vars.HOMEBREW_TAP }}

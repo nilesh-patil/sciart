@@ -245,11 +245,13 @@ automatically.
 
 ## Platforms and environment
 
-- **Platform tiers** (TEST-R13, ADR-0029): tier 1 = macOS arm64 and Linux x86_64 (full suite,
-  frames pinned); tier 2 = Linux aarch64 (suite without the frame-pinning suites, which skip
-  themselves); tier 3 = Intel macOS and Linux musl (release builds only). Frames are
-  deterministic per platform, not across platforms. `pixi.toml` covers osx-arm64, osx-64,
-  linux-64 and linux-aarch64.
+- **Platform tiers** (TEST-R13, ADR-0029): tier 1 = macOS arm64 and Linux x86_64 (lint and
+  the whole suite); tier 2 = Linux aarch64 (the whole suite); tier 3 = Intel macOS and Linux
+  musl (release builds only). Frames are deterministic per platform, not across platforms, so
+  they are pinned on the reference platform, macOS arm64, only: the snapshot suite and
+  `m11_fidelity` skip themselves elsewhere (`tests/common/tier.rs`). Every workflow job names
+  a runner image from `RUNNER_IMAGES` in `scripts/tooling_check.py`. `pixi.toml` covers
+  osx-arm64, osx-64, linux-64 and linux-aarch64.
 - **Build cache.** Every pixi task routes rustc through `sccache` from the pixi environment
   (`scripts/pixi-activate.sh`, TEST-R11; `sccache --show-stats`). Plain `cargo` outside pixi
   does not use it; `RUSTC_WRAPPER= pixi run …` turns it off. Dev and test builds stay
