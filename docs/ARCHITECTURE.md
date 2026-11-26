@@ -7,9 +7,9 @@ contract, the [specifications](specs/) and the [architecture decision records](a
 
 ## Overview
 
-sciart is real-time generative science and astronomy art for the terminal: 85 animated scenes
-drawn at 30 FPS with ratatui, which also keeps the machine awake while it runs. It replaced a
-Python prototype at the M8 cutover.
+sciart is real-time generative science art for the terminal: physics, chemistry, biology,
+Earth and space. Its 85 animated scenes are drawn at 30 FPS with ratatui, and it keeps the
+machine awake while it runs. It replaced a Python prototype at the M8 cutover.
 
 A frame travels in one direction:
 

@@ -1,4 +1,5 @@
-//! `sciart` - real-time generative science & astronomy art in the terminal.
+//! `sciart` - real-time generative science art for the terminal: physics, chemistry, biology,
+//! Earth and space.
 
 mod app;
 mod child;

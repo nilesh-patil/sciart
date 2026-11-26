@@ -1,6 +1,6 @@
 # Rendered by scripts/render_formula.py from the release's SHA256SUMS (SPEC-008 DIST-R9).
 class Sciart < Formula
-  desc "Real-time generative science & astronomy art in your terminal"
+  desc "Real-time generative science art for the terminal"
   homepage "https://github.com/nilesh-patil/sciart"
   version "@VERSION@"
   license "MIT"
