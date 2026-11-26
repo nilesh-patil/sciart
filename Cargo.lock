@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "sciart"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-qa"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "ratatui",
  "sciart-core",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-testalloc"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "toml",
 ]

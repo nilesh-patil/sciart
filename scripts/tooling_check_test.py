@@ -178,6 +178,57 @@ class FuzzTarget(unittest.TestCase):
 PIXI = tooling_check.toml_file("pixi.toml")
 
 
+class SemverBaseline(unittest.TestCase):
+    """LIB-R8: the library API is compared with the v1.0.0 tag, from a full-history checkout."""
+
+    CHECK = "--baseline-rev v1.0.0"
+    CHECKOUT = "          fetch-depth: 0\n"
+
+    def test_lib_r8_the_real_workflow_passes(self) -> None:
+        self.assertEqual(tooling_check.semver_problems(CI), [])
+
+    def test_lib_r8_a_registry_baseline_fails(self) -> None:
+        self.assertIn(self.CHECK, CI)
+        self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECK, "--baseline-version 1.0.0")))
+
+    def test_lib_r8_another_baseline_tag_fails(self) -> None:
+        self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECK, "--baseline-rev main")))
+
+    def test_lib_r8_a_shallow_checkout_fails(self) -> None:
+        self.assertIn(self.CHECKOUT, CI)
+        for new in ("", "          fetch-depth: 1\n"):
+            with self.subTest(new=new):
+                self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECKOUT, new)))
+
+    STABLE_ENV = "    env:\n      RUSTUP_TOOLCHAIN: stable\n"
+    STABLE = "dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable"
+    MSRV = "dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0"
+
+    def semver_job(self) -> str:
+        return tooling_check.workflow_jobs(CI)["semver"]
+
+    def test_lib_r8_the_job_on_the_msrv_fails(self) -> None:
+        self.assertIn(self.STABLE, self.semver_job())
+        job = self.semver_job()
+        text = CI.replace(job, job.replace(self.STABLE, self.MSRV).replace(self.STABLE_ENV, ""))
+        self.assertTrue(tooling_check.semver_problems(text))
+
+    def test_lib_r8_the_stable_step_without_the_env_override_fails(self) -> None:
+        self.assertIn(self.STABLE_ENV, self.semver_job())
+        job = self.semver_job()
+        self.assertTrue(tooling_check.semver_problems(CI.replace(job, job.replace(self.STABLE_ENV, ""))))
+
+    def test_lib_r8_the_env_override_with_the_msrv_step_fails(self) -> None:
+        job = self.semver_job()
+        self.assertTrue(tooling_check.semver_problems(CI.replace(job, job.replace(self.STABLE, self.MSRV))))
+
+    def test_lib_r8_the_semver_job_passes_the_toolchain_rule(self) -> None:
+        self.assertEqual(tooling_check.toolchain_problems({"ci.yml": CI}), [])
+
+    def test_lib_r8_no_semver_step_fails(self) -> None:
+        self.assertTrue(tooling_check.semver_problems(CI.replace("cargo semver-checks check-release", "true")))
+
+
 class NoColorParity(unittest.TestCase):
     """TEST-R12: `rs-ci` runs CI's NO_COLOR pass, with the same command and environment."""
 
