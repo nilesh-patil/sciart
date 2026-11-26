@@ -1,3 +1,6 @@
+//! **Internal crate of [`sciart`](https://docs.rs/sciart)**, with no semver promise: its API
+//! can change in any release. Use the `sciart` crate, the supported entry point.
+//!
 //! sciart scenes in Living Systems, Physics of Life, Molecules of Life and Life from Matter (`Category::{Biology, Biophysics, Biochemistry, LivingMatter}`, ADR-0013, ADR-0023).
 //!
 //! One module per scene; each is listed once in `sciart-generators`' `registry![…]`

@@ -24,6 +24,12 @@ All notable changes to this project are documented here. The format is based on
   ([ADR-0031](docs/adr/0031-scriptable-modes.md), CLI-R14).
 - `sciart completions <shell>` and `sciart man [subcommand]` print completion scripts and
   manual pages generated from the command line's own definition (CLI-R17).
+- `sciart --version` also names the commit and the build target (DIST-R2).
+- Packaging for a release: builds for macOS (arm64, x86_64) and Linux (x86_64, aarch64;
+  glibc and musl) with checksums and build provenance, an installer script
+  (`packaging/install.sh`), a conda package, a Homebrew formula and crates.io metadata
+  for `sciart` and its internal crates; `docs/RELEASING.md` has the steps
+  ([ADR-0033](docs/adr/0033-distribution-channels.md), SPEC-008).
 
 - Keep-awake on Linux: `--keep-awake inhibit` holds a `systemd-inhibit` (or
   `elogind-inhibit`) lock for as long as sciart runs, and is the default for a local Linux

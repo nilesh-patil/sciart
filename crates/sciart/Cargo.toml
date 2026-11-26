@@ -10,10 +10,10 @@ repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
 keywords = ["terminal", "generative-art", "astronomy", "ascii-art", "screensaver"]
-categories = ["command-line-utilities", "graphics", "science", "science::astronomy", "visualization"]
-# Not published to crates.io: installs are `cargo install --git` / a release tarball
-# (IMP-05). Also lets cargo-deny allow the workspace's version-less path dependencies.
-publish = false
+categories = ["command-line-utilities", "graphics", "science", "simulation", "visualization"]
+# DIST-R4: `LICENSE` and `CHANGELOG.md` are links to the root files, so the published crate
+# carries them; the suites under `tests/` drive a workspace checkout and stay out of it.
+exclude = ["tests/"]
 
 # LIB-R4 / CLI-R15: the defaults give the full binary (`cargo install sciart`); a library
 # user turns them off and picks `png` and/or `widget`.
@@ -114,6 +114,13 @@ sciart-testalloc.workspace = true
 [package.metadata.docs.rs]
 no-default-features = true
 features = ["png", "widget", "unstable-generator"]
+
+# DIST-R5: `cargo binstall sciart` downloads the release tarball of the build target; the
+# names match `scripts/release_assets.py`.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ version }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ version }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "tgz"
 
 [lints]
 workspace = true

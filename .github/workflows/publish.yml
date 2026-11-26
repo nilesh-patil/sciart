@@ -1,0 +1,150 @@
+name: Publish
+
+# SPEC-008 DIST-R10 / ADR-0033. Runs when a maintainer publishes the draft release that
+# release.yml created. Each job below publishes to one channel and runs in the `release`
+# environment, which requires a maintainer's approval before it starts: crates.io, the
+# conda channel and the Homebrew tap. A manual run (`workflow_dispatch`) rehearses every job
+# without uploading anything. Every job can be run again after a partial failure: crates
+# already on crates.io are skipped (scripts/publish_crates.py), the channel upload skips
+# packages it has, and the tap is committed only when the formula changed.
+#
+# Repository configuration this needs (see docs/RELEASING.md):
+#   environment `release` with required reviewers;
+#   secrets CARGO_REGISTRY_TOKEN, PREFIX_API_KEY, HOMEBREW_TAP_TOKEN (in that environment);
+#   variables CONDA_CHANNEL (the prefix.dev channel) and HOMEBREW_TAP (owner/homebrew-repo).
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to rehearse (nothing is uploaded)
+        required: true
+
+permissions:
+  contents: read
+
+# One publish per tag at a time; a second run waits instead of racing the first.
+concurrency:
+  group: publish-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  TAG: ${{ github.event.release.tag_name || inputs.tag }}
+
+jobs:
+  crates-io:
+    name: crates.io
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Tag matches the version (DIST-R1)
+        run: python3 scripts/release_check.py --tag "$TAG"
+      # `cargo publish --workspace` needs cargo 1.90 or newer; the MSRV (1.88) only
+      # constrains what users build with.
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
+      - name: Rehearse (DIST-R4)
+        env:
+          RUSTUP_TOOLCHAIN: stable
+        run: |
+          cargo publish --workspace --dry-run --locked
+          python3 scripts/release_check.py --crates target/package
+          python3 scripts/publish_crates.py --dry-run
+      # DIST-R4: one crate at a time in dependency order, skipping versions already on the
+      # index, so a rerun after a failure publishes only what is left.
+      - name: Publish
+        if: github.event_name == 'release'
+        env:
+          RUSTUP_TOOLCHAIN: stable
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: python3 scripts/publish_crates.py
+
+  conda:
+    name: conda (${{ matrix.platform }})
+    runs-on: ${{ matrix.os }}
+    environment: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: osx-arm64
+            os: macos-14
+          - platform: osx-64
+            os: macos-14
+          - platform: linux-64
+            os: ubuntu-22.04
+          - platform: linux-aarch64
+            os: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Tag matches the version (DIST-R1)
+        run: python3 scripts/release_check.py --tag "$TAG"
+      - uses: prefix-dev/setup-pixi@8ca4608ef7f4daeb54f5205b20d0b7cb42f11143 # v0.8.14
+        with:
+          environments: dist
+      - name: Build (DIST-R8)
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: pixi run -e dist rs-conda-build --target-platform "$PLATFORM"
+      - name: Upload to the channel
+        if: github.event_name == 'release'
+        env:
+          PREFIX_API_KEY: ${{ secrets.PREFIX_API_KEY }}
+          CONDA_CHANNEL: ${{ vars.CONDA_CHANNEL }}
+        run: |
+          shopt -s globstar
+          pixi run -e dist rattler-build upload prefix --skip-existing --channel "$CONDA_CHANNEL" target/conda/**/*.conda
+
+  homebrew:
+    name: Homebrew tap
+    runs-on: ubuntu-latest
+    environment: release
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          ref: ${{ env.TAG }}
+          persist-credentials: false
+      - name: Tag matches the version (DIST-R1)
+        run: python3 scripts/release_check.py --tag "$TAG"
+      - name: Release checksums
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release download "$TAG" --pattern SHA256SUMS --dir dist
+      # DIST-R9: the formula from the template and the release's own SHA256SUMS.
+      - name: Render the formula
+        run: |
+          python3 scripts/render_formula.py --version "${TAG#v}" --sums dist/SHA256SUMS --out Formula/sciart.rb
+          ruby -c Formula/sciart.rb
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        if: github.event_name == 'release'
+        with:
+          repository: ${{ vars.HOMEBREW_TAP }}
+          path: tap
+          persist-credentials: false
+      # A rerun after the formula was pushed finds nothing to commit and succeeds.
+      - name: Commit to the tap
+        if: github.event_name == 'release'
+        env:
+          TAP: ${{ vars.HOMEBREW_TAP }}
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          mkdir -p tap/Formula
+          cp Formula/sciart.rb tap/Formula/sciart.rb
+          cd tap
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/sciart.rb
+          if git diff --cached --quiet; then
+            echo "the tap already has this formula"
+          else
+            git commit -m "sciart ${TAG#v}"
+            git push "https://x-access-token:${TAP_TOKEN}@github.com/${TAP}.git" HEAD
+          fi

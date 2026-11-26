@@ -54,11 +54,13 @@ jobs:
           - os: ubuntu-latest
             tier: 1
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
         with:
           components: rustfmt, clippy
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # `--all-features` builds the `mouse` backend, whose enigo links libxkbcommon on Linux.
       - name: System libraries (Linux)
         if: runner.os == 'Linux'
@@ -89,10 +91,14 @@ jobs:
           - os: ubuntu-24.04-arm
             tier: 2
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@nextest
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
+        with:
+          tool: nextest
       - name: Doctests
         run: cargo test --workspace --doc
       - name: Tests (nextest)
@@ -115,7 +121,8 @@ jobs:
         run: python3 scripts/showcase.py --check
       # GEN-R15: the generated SPEC-002 scene index is current.
       # TEST-R1/R4: spec traceability; TEST-R9/R10/R11/R13: tooling schema; RT-R22: the
-      # size check's own tests (as `rs-spec-check`).
+      # size check's own tests; DIST-R1..R10: the release configuration and the installer
+      # against a fixture release (as `rs-spec-check`).
       - name: Spec index & tooling schema
         run: |
           python3 scripts/spec_index.py --check
@@ -124,6 +131,13 @@ jobs:
           python3 scripts/size_check_test.py
           python3 scripts/site_check_test.py
           python3 scripts/tooling_check_test.py
+          python3 scripts/yaml_subset_test.py
+          python3 scripts/release_check.py
+          python3 scripts/release_check_test.py
+          python3 scripts/publish_crates_test.py
+          python3 scripts/conda_build_test.py
+          python3 scripts/bump_version_test.py
+          python3 scripts/installer_check.py
       # CLI-R15: the recorder is in the default build above; this is the build without it.
       - name: Tests without the recorder
         run: cargo nextest run -p sciart --no-default-features --features cli
@@ -139,11 +153,13 @@ jobs:
     name: web (player module and docs site)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
         with:
           targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
           workspaces: |
             . -> target
@@ -172,10 +188,14 @@ jobs:
     name: semver (library API against 1.0.0)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
-      - uses: taiki-e/install-action@cargo-semver-checks
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
+        with:
+          tool: cargo-semver-checks
       - name: cargo-semver-checks
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
@@ -197,9 +217,11 @@ jobs:
           - os: ubuntu-latest
             tier: 1
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.88.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       # TEST-R9: frames must not depend on the optimiser; TEST-R13: pinned on tier 1.
       - name: Snapshot suite (optimised)
         run: cargo test --profile ci -p sciart-generators --test snapshots
@@ -208,5 +230,7 @@ jobs:
     name: cargo-deny
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: EmbarkStudios/cargo-deny-action@81891abc19297b21343b15ef67dc61e4aea74fda # v2.1.4

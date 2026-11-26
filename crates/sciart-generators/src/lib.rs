@@ -1,3 +1,6 @@
+//! **Internal crate of [`sciart`](https://docs.rs/sciart)**, with no semver promise: its API
+//! can change in any release. Use the `sciart` crate, the supported entry point.
+//!
 //! The registry of all sciart scenes (SPEC-002), over the category crates (ADR-0023).
 //!
 //! Adding a generator (GEN-R3): create `crates/sciart-scenes-<crate>/src/<name>.rs` in the
