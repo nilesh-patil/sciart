@@ -266,6 +266,20 @@ mod tests {
         parse(text, Path::new("test.toml")).unwrap()
     }
 
+    /// The documented example config (`docs/config.example.toml`), read at run time so the
+    /// crate packed for crates.io still compiles its tests (DIST-R4): it has no `docs/`,
+    /// and only there do these tests skip. A checkout with `docs/` but no example fails.
+    fn example_config() -> Option<String> {
+        let docs = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
+        if !docs.is_dir() {
+            eprintln!("no docs/ beside this crate (a packed crate): example config not checked");
+            return None;
+        }
+        Some(
+            fs::read_to_string(docs.join("config.example.toml")).expect("docs/config.example.toml"),
+        )
+    }
+
     #[test]
     fn cfg_r1_defaults_without_file_or_flags() {
         let (s, warnings) = resolve(&cli(&[]).unwrap(), FileConfig::default());
@@ -574,8 +588,8 @@ mod tests {
 
     #[test]
     fn cfg_r3_documented_example_config_is_valid() {
-        let text = include_str!("../../../docs/config.example.toml");
-        let f = parse(text, Path::new("docs/config.example.toml")).unwrap();
+        let Some(text) = example_config() else { return };
+        let f = parse(&text, Path::new("docs/config.example.toml")).unwrap();
         assert_eq!(f.fps, Some(DEFAULT_FPS));
         assert_eq!(f.interval, Some(DEFAULT_INTERVAL));
         assert_eq!(f.title, Some(true), "CFG-R6 key documented");
@@ -587,8 +601,8 @@ mod tests {
         assert_eq!(s.idle_after, 120.0);
         assert_eq!(s.fps, 30);
         assert_eq!(s.low_power_fps, 5);
-        let text = include_str!("../../../docs/config.example.toml");
-        let f = parse(text, Path::new("docs/config.example.toml")).unwrap();
+        let Some(text) = example_config() else { return };
+        let f = parse(&text, Path::new("docs/config.example.toml")).unwrap();
         assert_eq!(
             f.low_power.idle_after,
             Some(120.0),
