@@ -513,11 +513,45 @@ def check_lib(problems: list[str]) -> None:
     for command in (LIB_DOC_TESTS, LIB_TESTS, NO_RECORDER_TESTS):
         if command not in jobs.get("test", ""):
             fail(problems, f"LIB-R7 / CLI-R15: ci.yml `test` runs `{command}`")
-    semver = [body for body in jobs.values() if "cargo semver-checks" in body]
-    if not semver or "--baseline-version 1.0.0" not in semver[0]:
-        fail(problems, "LIB-R8: ci.yml has a cargo-semver-checks step against the published 1.0.0")
+    for problem in semver_problems(workflow):
+        fail(problems, problem)
     if any("semver-checks" in pixi_task(pixi, name)[0] for name in pixi.get("tasks", {})):
         fail(problems, "LIB-R8: cargo-semver-checks runs in hosted CI only, not in a pixi task")
+
+
+SEMVER_BASELINE = "--baseline-rev v1.0.0"
+
+
+def semver_problems(ci: str) -> list[str]:
+    """LIB-R8 in ci.yml: a job runs `cargo semver-checks check-release` against the `v1.0.0`
+    tag (`--baseline-rev`, built from this repository; never a registry version, since 1.0.0
+    is not on crates.io), and its checkout has the full history and the tags
+    (`fetch-depth: 0`) without stored credentials."""
+    try:
+        data = parse(ci)
+    except YamlError as e:
+        return [f"LIB-R8: cannot read ci.yml: {e}"]
+    jobs = data.get("jobs") if isinstance(data, dict) else None
+    found = []
+    for name, job in (jobs.items() if isinstance(jobs, dict) else []):
+        steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)] if isinstance(job, dict) else []
+        runs = [str(s.get("run", "")) for s in steps if "cargo semver-checks check-release" in str(s.get("run", ""))]
+        if runs:
+            found.append((name, steps, runs))
+    if len(found) != 1:
+        return ["LIB-R8: exactly one ci.yml job runs `cargo semver-checks check-release`"]
+    name, steps, runs = found[0]
+    problems = []
+    command = " ".join(" ".join(runs).replace("\\\n", " ").split())
+    if SEMVER_BASELINE not in command or "--baseline-version" in command:
+        problems.append(f"LIB-R8: ci.yml `{name}` compares with the v1.0.0 tag (`{SEMVER_BASELINE}`), "
+                        "not a registry version")
+    checkouts = [s for s in steps if str(s.get("uses", "")).startswith("actions/checkout@")]
+    options = (checkouts[0].get("with") or {}) if len(checkouts) == 1 else {}
+    if len(checkouts) != 1 or options.get("fetch-depth") != 0 or options.get("persist-credentials") is not False:
+        problems.append(f"LIB-R8: ci.yml `{name}` checks out the full history and tags (`fetch-depth: 0`, "
+                        "`persist-credentials: false`), or the v1.0.0 tag is missing")
+    return problems
 
 
 WEB_BUILD = "cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown"
