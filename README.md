@@ -59,7 +59,7 @@ macOS (Apple Silicon or Intel) and Linux (x86_64 or ARM64).
 in; installs to `~/.local/bin`, never uses sudo):
 
 ```sh
-curl --proto '=https' --tlsv1.2 -sSf https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
 ```
 
 **Homebrew**:
@@ -83,9 +83,11 @@ cargo binstall sciart              # downloads the release binary
 
 **By hand**: download `sciart-<version>-<target>.tar.gz` and `SHA256SUMS` from the
 [releases](https://github.com/nilesh-patil/sciart/releases), check it with
-`shasum -a 256 -c SHA256SUMS --ignore-missing`, and put `sciart` on your `PATH`. Each
-tarball also holds the bash, zsh and fish completions and the manual pages; any build
-prints them with `sciart completions <shell>` and `sciart man`.
+`shasum -a 256 -c SHA256SUMS --ignore-missing` (or `sha256sum -c --ignore-missing SHA256SUMS`
+where `shasum` is not installed), unpack it with `tar -xzf`, and put the `sciart` binary
+from the unpacked folder on your `PATH`. Each tarball also holds the bash, zsh and fish
+completions and the manual pages; any build prints them with `sciart completions <shell>`
+and `sciart man`.
 
 The default build includes the headless recorder (`sciart record`); for a binary without
 the image encoders, `cargo install sciart --locked --no-default-features --features cli`.

@@ -4,7 +4,7 @@
 # function as a use before definition; every function here is defined before main runs.)
 # Install the sciart release binary (SPEC-008 DIST-R7).
 #
-#   curl --proto '=https' --tlsv1.2 -sSf \
+#   curl --proto '=https' --tlsv1.2 -LsSf \
 #     https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh | sh
 #   sh install.sh [--version X.Y.Z] [--to DIR] [--force]
 #

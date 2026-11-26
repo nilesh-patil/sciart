@@ -5,6 +5,9 @@ Each row breaks the real workflows in one way a careless edit or a hostile chang
 and the check must report it; the unmodified workflows must pass. A row whose text no
 longer appears in the workflow fails too, so the table cannot rot silently.
 
+Before them, the release notes (`release_check.py --notes`): relative links pinned to the
+tag, everything else left alone, and no relative link target in the real 1.0.0 notes.
+
     python3 scripts/release_check_test.py
 """
 
@@ -14,6 +17,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import release_check  # noqa: E402
 import release_workflows  # noqa: E402
 
 GATED = "        if: github.event_name == 'release'\n"
@@ -183,9 +187,46 @@ MUTATIONS = [
 ]
 
 
+REPO = "https://github.com/someone/project"
+# DIST-R10: the release notes are the CHANGELOG section; on the release page a relative link
+# resolves under /releases/tag/, so every relative target is pinned to the tag's tree.
+# (label, the CHANGELOG text, the notes text)
+NOTES_CASES = [
+    ("a relative file link", "see [ADR-0032](docs/adr/0032-library-facade.md).",
+     f"see [ADR-0032]({REPO}/blob/v1.2.3/docs/adr/0032-library-facade.md)."),
+    ("a relative link with a fragment", "[guide](docs/guide/running.md#keys)",
+     f"[guide]({REPO}/blob/v1.2.3/docs/guide/running.md#keys)"),
+    ("a ./ link and a title", '[x](./README.md "Read me")', f'[x]({REPO}/blob/v1.2.3/README.md "Read me")'),
+    ("a reference definition", "[adr]: docs/adr/0001-x.md", f"[adr]: {REPO}/blob/v1.2.3/docs/adr/0001-x.md"),
+    ("an absolute link left alone", "[spec](https://keepachangelog.com/en/1.1.0/)",
+     "[spec](https://keepachangelog.com/en/1.1.0/)"),
+    ("an anchor-only link left alone", "[above](#upgrading-from-06)", "[above](#upgrading-from-06)"),
+    ("a mailto link left alone", "[mail](mailto:someone@example.invalid)", "[mail](mailto:someone@example.invalid)"),
+    ("code that looks like a link left alone", "`[a](b)` in code", "`[a](b)` in code"),
+]
+
+
+def notes_problems() -> list[str]:
+    problems = []
+    for label, text, want in NOTES_CASES:
+        got = release_check.pinned_links(text, REPO + ".git", "1.2.3")
+        if got != want:
+            problems.append(f"notes, {label}: {got!r}, expected {want!r}")
+    real = release_check.notes("1.0.0") or ""
+    if not real:
+        problems.append("notes: CHANGELOG.md has no 1.0.0 section")
+    left = release_check.relative_targets(real)
+    if left:
+        problems.append(f"notes: the 1.0.0 release notes keep relative link targets: {left}")
+    repo = release_check.toml_file("Cargo.toml")["workspace"]["package"]["repository"]
+    if f"{repo}/blob/v1.0.0/" not in real:
+        problems.append(f"notes: the 1.0.0 release notes do not link into {repo}/blob/v1.0.0/")
+    return problems
+
+
 def main() -> int:
     texts = release_workflows.load()
-    problems = []
+    problems = notes_problems()
     base = release_workflows.problems(texts)
     if base:
         problems.append("the real workflows fail the check:\n    " + "\n    ".join(base))
@@ -206,7 +247,8 @@ def main() -> int:
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
-    print(f"DIST-R10 workflow mutations OK: {caught} of {len(MUTATIONS)} caught, the real workflows pass")
+    print(f"DIST-R10 workflow mutations OK: {caught} of {len(MUTATIONS)} caught, the real workflows pass; "
+          f"release notes: {len(NOTES_CASES)} link cases, no relative link in the 1.0.0 notes")
     return 0
 
 
