@@ -68,12 +68,6 @@ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/nilesh-patil/sciart/rel
 brew install nilesh-patil/sciart/sciart
 ```
 
-**pixi** (or any conda client):
-
-```sh
-pixi global install --channel https://prefix.dev/sciart sciart
-```
-
 **Cargo** (Rust 1.88 or newer):
 
 ```sh

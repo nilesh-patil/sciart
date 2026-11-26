@@ -1,6 +1,6 @@
 # ADR-0033: Four install channels, one version, gated publishing
 
-- **Status**: Accepted
+- **Status**: Accepted; amended in 1.0.1 (the conda channel withdrawn, below)
 - **Date**: 2026-11-25
 - **Amends**: ADR-0024 (hosted CI and release), ADR-0007 (pixi)
 
@@ -51,3 +51,11 @@ Homebrew tap, for macOS and Linux, with one facade crate carrying the stability 
 - **conda-forge**: the widest reach for pixi users; review takes time, so it follows 1.0.
 - **Skip crates.io**: `cargo install --git` and binstall already work, but the library
   facade needs a registry.
+
+## Amendment, 1.0.1 (2026-11-26)
+
+The conda channel is withdrawn before its first upload. A self-hosted channel is one more
+credential and one more install path to keep working, and no other channel depends on it.
+The channels are the release assets with the installer script, crates.io and the Homebrew
+tap. It can return through a community channel without changing the others. DIST-R8 is
+withdrawn and its ID is not reused; pixi remains the project's task runner (ADR-0007).
