@@ -1,6 +1,6 @@
 # SPEC-004: Keep-awake
 
-**Crate**: `crates/sciart-keepawake` · **Milestone**: M3 · **Status**: Implemented (M3)
+**Crate**: `crates/sciart-keepawake` · **Milestones**: M3, M25 (Linux inhibitor) · **Status**: Implemented (KA-R1..R6 in M3; KA-R7..R9 in M25)
 
 - **KA-R1** `Mode = Caffeinate | Mouse | Off`; parsed from `caffeinate|mouse|off`. Default: `Caffeinate` on macOS, `Off` elsewhere.
 - **KA-R2** `start(mode, seed) -> Result<Guard, KeepAwakeError>`; the guard releases the assertion on `Drop`. Errors are reported, never fatal: the binary prints a warning and continues with `Guard::failed(mode)` (status `<mode>:unavailable`). `Guard::off()` is the explicit no-op guard.

@@ -1490,7 +1490,7 @@ dependencies = [
 
 [[package]]
 name = "sciart"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "clap",
@@ -1521,7 +1521,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-capture"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "font8x8",
  "gif",
@@ -1533,7 +1533,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "proptest",
  "rand",
@@ -1544,7 +1544,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-generators"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "criterion",
  "insta",
@@ -1564,7 +1564,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-keepawake"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "enigo",
  "rand",
@@ -1573,7 +1573,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-qa"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "ratatui",
  "sciart-core",
@@ -1583,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-render"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "crossterm",
  "ratatui",
@@ -1594,7 +1594,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-scenes-cosmos"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "rand",
  "sciart-core",
@@ -1603,7 +1603,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-scenes-earth"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "rand",
  "sciart-core",
@@ -1612,7 +1612,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-scenes-life"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "rand",
  "sciart-core",
@@ -1621,7 +1621,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-scenes-matter"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "proptest",
  "rand",
@@ -1630,7 +1630,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-scenes-physics"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "proptest",
  "rand",
@@ -1639,7 +1639,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-shared"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "rand",
  "sciart-core",
@@ -1647,7 +1647,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-testalloc"
-version = "0.6.0"
+version = "1.0.0"
 dependencies = [
  "toml",
 ]

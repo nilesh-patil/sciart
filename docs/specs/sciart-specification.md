@@ -1,40 +1,43 @@
 # Project Specification: sciart
 
-**Status**: Approved (spec interview, 2026-09-26; current as of M23, 2026-10-18)
+**Status**: Approved (spec interview, 2026-09-26; current as of 1.0.0, M25, 2026-11-26)
 **Repository**: `https://github.com/nilesh-patil/sciart`
 **Supersedes**: the Python prototype (removed at the M8 cutover)
 
 ## Executive Summary
 
 `sciart` is real-time generative science and astronomy art for the terminal: **85 animated
-scenes at 30 FPS**, drawn with ratatui + crossterm, while keeping the machine awake (macOS
-`caffeinate` by default, optional mouse jiggle). It replaced the Python prototype, which
-rendered one static frame every 15 seconds; the Python era ended at the M8 cutover.
+scenes at 30 FPS**, drawn with ratatui + crossterm, while keeping the machine awake
+(`caffeinate` on macOS, a `systemd-inhibit` lock on Linux, optional mouse jiggle). It
+replaced the Python prototype, which rendered one static frame every 15 seconds; the Python
+era ended at the M8 cutover.
 
 The implementation is a Cargo workspace with a small, testable core (canvas, generator
 trait, fixed-step clock, seeded RNG), five category scene crates behind a registry facade,
 shared models used by several scenes, a renderer with semantic colour palettes, a
-keep-awake crate, and a thin CLI binary. Development follows **SDD** (numbered
+keep-awake crate, a headless capture crate, and the `sciart` crate: a small library facade,
+the only crate with a stability promise (SPEC-007), plus the CLI binary. Development follows **SDD** (numbered
 requirements in `docs/specs/SPEC-*.md`, decisions in `docs/adr/`) and **TDD** (tests cite
 requirement IDs; contract, property, snapshot, end-to-end, allocation, leak and benchmark
 layers).
 
-Current scope: 85 scenes in 11 categories, 4 themes (`astro`, `rainbow`, `mono`, `aurora`),
-85 scenes × 3 snapshot times, and a hosted CI gate that mirrors the local `rs-ci` task
-(ADR-0024).
+Current scope (1.0.0): 85 scenes in 11 categories, 5 themes (`astro`, `rainbow`, `mono`,
+`aurora`, `colorblind`), 85 scenes × 3 snapshot times, a hosted CI gate that mirrors the
+local `rs-ci` task (ADR-0024), release builds for macOS and Linux through four install
+channels (SPEC-008), and a docs site with a browser player (SPEC-009).
 
 ## Project Goals & Success Criteria
 
 | Goal | Success criterion |
 |------|-------------------|
-| Smooth animation | Every scene animates at 30 FPS; worst update+render < 2 ms at 200×50 and < 5 ms at 500×150 (release/`ci` profiles); the gallery averages ≈ 0.5 ms and ≈ 4.3 KB per frame (RT-R16) |
+| Smooth animation | Every scene animates at 30 FPS; worst update+render < 2 ms at 200×50 and < 5 ms at 500×150 (release/`ci` profiles); the whole pipeline averages about 0.36 ms and 4.5 KB per frame at 200×50 (M25, `rs-cost-release`), within the RT-R16 budget |
 | Stability | No generator panics for any `width, height >= 1`, any resize/dt sequence (contract + proptest). The runtime survives any generator panic via quarantine |
 | Modularity | A scene depends only on `sciart-core`, `sciart-shared` and `rand`; scene crates never import each other; the core has no terminal/OS/I/O dependencies (ADR-0023, GEN-R16) |
-| Determinism | `--seed N` reproduces a run; frames are byte-stable across dev, `ci` and `release` (ADR-0016); snapshot tests are stable |
+| Determinism | `--seed N` reproduces a run; frames are byte-stable across dev, `ci` and `release` on a given platform (ADR-0016, ADR-0029); snapshot tests are stable |
 | Scope | All 26 original Python scenes exist in Rust (M8), and the catalogue has grown to 85 scenes across 11 categories |
 | Traceability | Every requirement ID (e.g. `CORE-R3`, `TEST-R12`) is cited by at least one test or listed as manual (TEST-R1) |
 | Science honesty | Every scene carries a `Phenomenon · mechanism` title that never claims more than its model (GEN-R12, ADR-0014) |
-| Shareability | A stranger can install, run and browse the catalogue from the README and gallery (M23) |
+| Shareability | A stranger can install, run and browse the catalogue from the README, the user guide and the gallery (M23, M25) |
 
 ## Technical Architecture
 
@@ -43,11 +46,11 @@ Current scope: 85 scenes in 11 categories, 4 themes (`astro`, `rainbow`, `mono`,
 | Concern | Choice | ADR |
 |---------|--------|-----|
 | Language | Rust, edition 2024, MSRV 1.88 | — |
-| Structure | Cargo workspace, 12 crates: core, registry facade, five scene crates, shared, render, keep-awake, binary, test allocator | [ADR-0001](../adr/0001-cargo-workspace.md), [ADR-0023](../adr/0023-lean-build-and-runtime.md) |
+| Structure | Cargo workspace, 14 crates: core, registry facade, five scene crates, shared, render, keep-awake, capture, the `sciart` library and binary, QA probes, test allocator | [ADR-0001](../adr/0001-cargo-workspace.md), [ADR-0023](../adr/0023-lean-build-and-runtime.md), [ADR-0032](../adr/0032-library-facade.md) |
 | Terminal | ratatui + crossterm (alt screen, raw mode, truecolor) | [ADR-0002](../adr/0002-ratatui-crossterm.md) |
 | Time | Fixed-step `update(dt)` with accumulator, dt = 1/60 s, `MAX_STEPS = 15` | [ADR-0003](../adr/0003-fixed-step-simulation.md) |
 | Colour | Semantic inks mapped by themes; generators never pick RGB | [ADR-0004](../adr/0004-semantic-palettes.md) |
-| Keep-awake | `caffeinate` (macOS default) \| `mouse` (enigo, cargo feature) \| `off` | [ADR-0005](../adr/0005-keep-awake-backends.md) |
+| Keep-awake | `caffeinate` (macOS default) \| `inhibit` (Linux default for a local session) \| `mouse` (enigo, cargo feature) \| `off` | [ADR-0005](../adr/0005-keep-awake-backends.md), [ADR-0028](../adr/0028-linux-inhibitor-helper.md) |
 | Fault isolation | `catch_unwind` + per-session quarantine | [ADR-0006](../adr/0006-panic-quarantine.md) |
 | Task runner | pixi tasks wrapping cargo | [ADR-0007](../adr/0007-pixi-task-runner.md) |
 | RNG | Injected, seedable `rand_chacha::ChaCha8Rng`; no global RNG in generators | [ADR-0008](../adr/0008-injected-rng.md) |
@@ -57,12 +60,16 @@ Current scope: 85 scenes in 11 categories, 4 themes (`astro`, `rainbow`, `mono`,
 | Determinism (M12) | Trig through non-inlined libm wrappers, so no `sincos` fusion changes a frame between builds | [ADR-0016](../adr/0016-profile-independent-trig.md) |
 | CLI / config | clap (derive) + TOML file, flags override file | [SPEC-005](SPEC-005-cli-config.md) |
 | Tests | built-in test + proptest + insta + nextest + criterion + counting allocator | [SPEC-006](SPEC-006-testing.md) |
-| CI / release | GitHub Actions (macOS + Linux, `cargo-deny`, tagged tarballs); local `rs-ci` stays the pre-commit gate | [ADR-0024](../adr/0024-hosted-ci-and-release.md) |
+| Capture | Headless PNG, GIF and asciicast output for `sciart record` and `Stage::render_png` | [ADR-0025](../adr/0025-capture-and-record.md) |
+| Library | The `sciart` crate's facade: `Stage`, scenes, text/ANSI/PNG output, a ratatui widget | [ADR-0032](../adr/0032-library-facade.md) |
+| Platforms | Tiers: macOS arm64 and Linux x86_64, then Linux aarch64, then release builds for Intel macOS and Linux musl; determinism per platform | [ADR-0029](../adr/0029-platform-tiers-and-determinism.md) |
+| CI / release | GitHub Actions (macOS + Linux, `cargo-deny`); a tag builds a draft release, and each publish job waits for a maintainer's approval; local `rs-ci` stays the pre-commit gate | [ADR-0024](../adr/0024-hosted-ci-and-release.md), [ADR-0033](../adr/0033-distribution-channels.md) |
+| Docs site | A self-contained site: user guide, gallery and a WebAssembly player | [ADR-0034](../adr/0034-web-gallery-and-docs-site.md) |
 
 ### System Architecture
 
 ```
-sciart (bin): cli → config → Runtime (state machine) → event loop
+sciart (library facade + bin): cli → config → Runtime (state machine) → event loop
   ├── sciart-generators (registry facade)
   │     ├── sciart-scenes-cosmos    (Deep Cosmos, Sun & Planets)
   │     ├── sciart-scenes-earth     (Earth & Sky, Voyages)
@@ -73,7 +80,8 @@ sciart (bin): cli → config → Runtime (state machine) → event loop
   │     ├── sciart-shared           (models shared by scenes; never registered)
   │     └── sciart-core             (canvas, Generator, Ctx, FixedStep, helpers)
   ├── sciart-render                 (themes, paint, HUD, terminal guard) → sciart-core
-  └── sciart-keepawake              (caffeinate / mouse / off)
+  ├── sciart-capture                (PNG / GIF / asciicast; `record`, `png`) → sciart-render
+  └── sciart-keepawake              (caffeinate / inhibit / mouse / off)
 ```
 
 Dependency arrows point downward only. `sciart-core` has no terminal, OS, or I/O
@@ -117,7 +125,8 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
 - `Ink { role: Role, level: u8 }` — semantic role (Star, Planet, Particle, Wave, Accent,
   Text, Hot, Cold, Dim, Seq, Div, …) and intensity 0..=255.
 - `Theme` — `fn color(&self, ink: Ink, x: u16, y: u16) -> Rgb`; built-ins `astro`
-  (default), `rainbow` (stable per-cell hue), `mono`, `aurora` (RND-R16).
+  (default), `rainbow` (stable per-cell hue), `mono`, `aurora` (RND-R16) and the
+  colour-blind-safe `colorblind` (ADR-0026).
 - Config file `~/.config/sciart/config.toml` — see SPEC-005.
 
 ## Feature Specifications
@@ -133,10 +142,12 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
   one twice in a row (when >1 available).
 - Keys: `n`/`→` next, `p`/`←` previous (history), `space` pause/resume the auto-cycle **and** the
   simulation, `r` reset current generator, `h` toggle HUD, `t` cycle theme, `q`/`Esc`/`Ctrl-C` quit
-  (RT-R9). The same keys work in `run` mode.
+  (RT-R9); `?` help, `f`/`v` favourites, `[`/`]` category and `s` shuffle (RT-R18, RT-R19).
+  The same keys work in `run` mode.
 
 ### F3: `sciart list`
 - Prints `name  category  description` for every registered generator, sorted by name (category id since M11, CLI-R4).
+- `--json` is a versioned object for scripts (CLI-R16); `--categories` and `--plain` (CLI-R10).
 
 ### F4: HUD overlay
 - Toggleable one-line status bar: science title (M11, RND-R9; the id when titles are off), measured FPS, theme, keep-awake state,
@@ -150,7 +161,8 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
   (RT-R17); a resize or a changed frame restores it.
 
 ### F6: Keep-awake
-- `--keep-awake caffeinate|mouse|off`, default `caffeinate` on macOS, `off` elsewhere.
+- `--keep-awake caffeinate|inhibit|mouse|off`, default `caffeinate` on macOS, `inhibit` for
+  a local Linux session, `off` over SSH and elsewhere (KA-R8).
 - Failures never stop the art (logged in HUD); see SPEC-004.
 
 ### F7: Fault isolation
@@ -170,6 +182,20 @@ Full requirements: [SPEC-001 core](SPEC-001-core.md), [SPEC-002 generators](SPEC
 - Every scene shows a short `Phenomenon · mechanism` title at the bottom-left, fitted to the width and
   dimmed after 8 s; it moves into the HUD while the HUD is on. `title = false` or `--no-title` hides it.
   See ADR-0014, CORE-R71..R76, GEN-R12/R13, RT-R12, RND-R8/R9, CFG-R6, CLI-R7.
+
+### F10: Recording and single frames
+- `sciart record` renders a scene headlessly to a GIF, PNG frames or an asciicast, and is in
+  the default build (CLI-R8, CLI-R15, ADR-0025); `sciart frame` prints one frame as ANSI
+  text (CLI-R13).
+
+### F11: Scriptable modes
+- `--for <duration>` ends a run on a deadline (CLI-R12, RT-R23); `sciart while -- <command>`
+  shows the art while a command runs and exits with its status (CLI-R14); `completions` and
+  `man` are generated from the command line's definition (CLI-R17). See ADR-0031.
+
+### F12: The library
+- The `sciart` crate's library runs, renders and embeds scenes without the CLI's
+  dependencies; it is the only API with a semver promise (SPEC-007, ADR-0032).
 
 ## UI/UX Specifications
 
@@ -211,15 +237,19 @@ hermetic with respect to terminal colour configuration (TEST-R12).
 ## DevOps & Deployment
 
 - pixi tasks: `rs-build`, `rs-test` (nextest + doctests), `rs-fmt`, `rs-lint`, `rs-ci`
-  (lint + test + optimised snapshots), `rs-bench`, `rs-worst`, `rs-cost`, `rs-list`,
-  `rs-sim`, `rs-run`, `rs-preview`, `rs-install`, `rs-gallery`.
-- Hosted CI: GitHub Actions on macOS 14 and Ubuntu runs the same lint/test/snapshot/deny
-  jobs (ADR-0024); `pixi run rs-ci` remains the pre-commit gate.
-- Platforms: macOS arm64 primary; Linux must build and pass tests. Windows builds
-  best-effort; no keep-awake backend there yet.
-- Install: `cargo install --git https://github.com/nilesh-patil/sciart sciart --locked`
-  (or `pixi run rs-install` in a checkout); release tarballs are built by the tag workflow.
-  crates.io publishing is deferred.
+  (lint + test + feature sets + optimised snapshots + showcase and site checks), `rs-bench`,
+  `rs-worst`, `rs-cost`, `rs-size`, `rs-list`, `rs-sim`, `rs-run`, `rs-preview`,
+  `rs-record`, `rs-install`, `rs-gallery`, `rs-showcase`, `site-build`, `site-check`,
+  `rs-package-check`.
+- Hosted CI: GitHub Actions on macOS 14, Ubuntu x86_64 and Ubuntu ARM64 runs the same
+  lint/test/snapshot/deny jobs (ADR-0024, TEST-R13); `pixi run rs-ci` remains the
+  pre-commit gate.
+- Platforms (TEST-R13, ADR-0029): tier 1 macOS arm64 and Linux x86_64; tier 2 Linux
+  aarch64; tier 3 Intel macOS and Linux musl (release builds only). Windows is not
+  supported.
+- Install: release tarballs with an installer script, a Homebrew tap, a conda package for
+  pixi, and crates.io (`cargo install sciart`, `cargo binstall sciart`); the README lists
+  the commands and SPEC-008 the rules. In a checkout, `pixi run rs-install`.
 
 ## Error Handling & Edge Cases
 
@@ -231,33 +261,31 @@ hermetic with respect to terminal colour configuration (TEST-R12).
 | Generator panic | Quarantine (F7) |
 | All generators quarantined | Show error screen; keep running until quit (keep-awake stays active) |
 | `caffeinate` missing / fails | Log in HUD, continue without keep-awake |
+| No inhibitor helper, or the lock is refused (Linux) | HUD shows `inhibit:unavailable` or `inhibit:exited`, art continues (ADR-0028) |
+| `SIGTERM` / `SIGHUP` | Terminal restored, exit 143 / 129 (RT-R20) |
 | Mouse backend lacks accessibility permission | Log, continue |
 | Invalid config file | Exit code 2 with file path + line/col of the TOML error |
 | Wide / zero-width unicode glyph | Canvas substitutes the ASCII fallback |
-| `NO_COLOR` set in the developer environment | Tests still pass (TEST-R12); the art is unaffected until colour capability lands (planned) |
+| `NO_COLOR` set | Tests still pass (TEST-R12); at run time a non-empty `NO_COLOR` selects mono with one warning, and an explicit `--color` overrides it (ADR-0026) |
 
 ## Constraints & Assumptions
 
 - The Python implementation was kept until M8 and then removed (M8 cutover).
 - Hosted CI mirrors `pixi run rs-ci`; the local gate is still the contract (ADR-0024).
 - The registry is the source of truth for the scene count and categories (85 scenes, 11
-  categories at M23); docs and the gallery are generated or checked against it.
-- macOS is the supported keep-awake experience; Linux is a supported build/test target.
+  categories at 1.0.0); docs and the gallery are generated or checked against it.
+- macOS and Linux both keep the machine awake (Linux through a logind inhibitor lock,
+  ADR-0028); Windows is out of scope.
 
-## Future Considerations (M23 improvement programme)
+## Future considerations
 
-- `sciart record` (GIF/PNG/asciicast) so scenes can leave the terminal.
-- In-app help overlay, favourites and category filtering.
-- Colour capability negotiation (`auto`/`truecolor`/`256`/`mono`), `NO_COLOR` → mono, and a
-  colour-blind-safe theme.
-- Per-scene configuration and a speed multiplier.
-- Windows keep-awake (`SetThreadExecutionState`) and Linux (`systemd-inhibit`), if the
-  project becomes cross-platform.
-- Splitting `SPEC-002` by category crate and generating the scene index.
+- Per-scene configuration.
+- A Windows keep-awake backend (`SetThreadExecutionState`) and Windows support
+  ([B-89](../BACKLOG.md)).
+- A light-background theme ([B-90](../BACKLOG.md)).
+- Distribution packages beyond the 1.0 channels, such as apt or rpm ([B-91](../BACKLOG.md)).
+- `cargo-semver-checks` against the published 1.0.0 surface (ADR-0032).
 
 ## Open Questions
 
-- Should the light-background `paper` theme be part of the colour-capability work or a
-  separate accessibility review? (Proposed: separate.)
-- Should `NO_COLOR` select `mono` automatically, or only via `--color mono`? (Proposed:
-  automatic, with one warning line, overridable by an explicit `--color`/`--theme`.)
+None at 1.0.0; open follow-ups live in the [backlog](../BACKLOG.md).

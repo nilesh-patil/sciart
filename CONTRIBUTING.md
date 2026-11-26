@@ -44,8 +44,8 @@ pixi tasks when in doubt. Extra arguments after a task name are passed to the co
 | Cycle all scenes | `pixi run rs-sim` (e.g. `pixi run rs-sim --hud --ascii --fps 60 --seed 7`) |
 | Run one scene | `pixi run rs-run <name>` (same flags) |
 | Review frames as text / truecolor PNG | `cargo run -q -p sciart-generators --example frames -- <name> --inks` / `pixi run rs-preview <name> --size 120x40 --t 0,5,20 --theme astro --out /tmp/p/<name>` (`--sheet` stacks the times; `--swatches` shows every field palette) |
-| Install the binary | `pixi run rs-install` (or `rs-install-mouse` for the mouse keep-awake backend; `rs-install-record` adds the headless recorder), then `sciart sim` |
-| Record a scene | `pixi run rs-record <name> --out out.gif [--start S] [--seconds N]` (feature `record`; PNG/asciicast too; the capture draws every scene glyph natively, CLI-R18: a new glyph in a scene needs a bitmap in `sciart-capture/src/glyphs.rs`) |
+| Install the binary | `pixi run rs-install` (the default build, headless recorder included; `rs-install-record` is its older name), or `rs-install-mouse` for the mouse keep-awake backend; then `sciart sim` |
+| Record a scene | `pixi run rs-record <name> --out out.gif [--start S] [--seconds N]` (feature `record`, on by default; PNG/asciicast too; the capture draws every scene glyph natively, CLI-R18: a new glyph in a scene needs a bitmap in `sciart-capture/src/glyphs.rs`) |
 | Animated showcase (WEB-R1/R2) | `pixi run rs-showcase` records missing or stale clips from `docs/showcase.toml` into `docs/media/` (`--force` after a look change); `pixi run rs-showcase-check` (in `rs-ci`) verifies clips, lock, sizes, coverage and README/gallery references |
 
 `rs-sim`, `rs-run`, `rs-preview`, `rs-cost` and `rs-worst` build the `ci` profile (opt-level 3,
@@ -65,7 +65,8 @@ Both `nextest` and `cargo test` build the optimised `test` profile that `rs-test
 ### Running the art
 
 - **Keys**: `n`/`→` next · `p`/`←` previous · `space` pause · `r` reset scene · `h` HUD · `t`
-  theme (astro → rainbow → mono → aurora) · `q`/`Esc`/`Ctrl-C` quit.
+  theme (astro → rainbow → mono → aurora → colorblind) · `?` help · `f` favourite · `v`
+  favourites only · `[`/`]` category · `s` shuffle · `q`/`Esc`/`Ctrl-C` quit.
 - **Config file**: `~/.config/sciart/config.toml` (see
   [docs/config.example.toml](docs/config.example.toml)); flags override it.
 - **Scriptable modes** (ADR-0031): `--for <duration>` ends a run on a wall-clock deadline held

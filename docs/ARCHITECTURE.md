@@ -62,16 +62,17 @@ crates/
   sciart-shared/      Models shared by several scene crates (excitable, plume, skyline, vortex_advect); never
                       registered; depends only on sciart-core and rand. Its `test-support`
                       feature holds helpers the scenes' unit tests use (enabled only via dev-dependencies).
-  sciart-render/      Theme (Ink -> RGB: astro (default), rainbow, mono, aurora), paint(Canvas -> ratatui Buffer),
+  sciart-render/      Theme (Ink -> RGB: astro (default), rainbow, mono, aurora, colorblind), paint(Canvas -> ratatui Buffer),
                       pipeline (changed cells only: one equality pass, then paint, diff and encode visit just those
                       cells; the full-area path is the tested reference, RND-R22, ADR-0030), backend+encode (diffed
                       terminal writes, RND-R15/R17), Hud (priority fitting), TerminalGuard.
   sciart-keepawake/   Mode + default_for(os, env), Backend trait + Guard, ChildGuard (caffeinate on macOS; a piped
                       systemd-inhibit/elogind-inhibit helper on Linux, ADR-0028), Jiggler<Mover>
                       (pure mouse logic); the enigo Mover only with feature `mouse`.
-  sciart-capture/     Headless capture behind the binary's `record` feature (ADR-0025): Canvas -> RGB
-                      pixels (braille/half-block exact, other glyphs via font8x8) -> PNG/GIF/asciicast;
-                      used by `sciart record` and the preview example. Off by default: the normal
+  sciart-capture/     Headless capture behind the binary's `record` feature and the library's `png` feature
+                      (ADR-0025): Canvas -> RGB pixels (braille/half-block exact, other glyphs via font8x8)
+                      -> PNG/GIF/asciicast; used by `sciart record`, `Stage::render_png` and the preview
+                      example. `record` is on by default (CLI-R15); a `--no-default-features --features cli`
                       binary carries no image dependencies.
   sciart/             Binary + library: the lib target is the 1.0 facade (SPEC-007, ADR-0032: `Stage`, `scenes`/`find`,
                       `SceneInfo`, `Category`, `Theme`, `Options`, `Error`/`ErrorKind`; `SceneWidget` behind `widget`,
@@ -231,7 +232,7 @@ What pins the look:
 | `sciart-generators/tests/thread_style.rs` | GEN-R25: its scene list (`tests/common/gen_r25.rs`, also used by `m11_fidelity` to unpin those M11 scenes) equals SPEC-002's; ≤ 3 % of a listed scene's lit cells are half-block cells at 200×50, t = 5/20 s (`PENDING_GEN_R25` may only shrink) |
 | `sciart-generators/tests/orbital_style.rs` | GEN-R26: its scene list (`tests/common/gen_r25.rs`, disjoint from GEN-R25's) equals SPEC-002's; ≤ 3 % half-block cells at 200×50, t = 5/20 s; stipple holds still: ≤ 10 % of cells change per drawn frame over t = 10–12 s |
 | `sciart-generators/tests/palette.rs` | GEN-R23: every scene inks only with M11's 14 roles (no `Ramp`, `Blackbody`, `Phase`) |
-| `sciart/tests/resource_budget.rs` | RT-R16: gallery mean ≤ 20 480 B and ≤ 880 changed cells per frame at 200×50 through the real pipeline |
+| `sciart/tests/resource_budget.rs` | RT-R16: gallery mean ≤ 4 700 B and ≤ 480 changed cells per frame at 200×50 through the real pipeline |
 | `sciart/tests/pty_smoke.rs` | The real binary in a pty (vt100): rendering, keys, HUD, exit codes, keep-awake cleanup |
 | `scripts/spec_check.py` (`pixi run rs-spec-check`, CI) | TEST-R1: every requirement ID in `docs/specs` is cited by a test or checker script or listed in its `MANUAL` table (GEN-R8, TEST-R2, TEST-R3); also rejects citations of undefined IDs. TEST-R4: proptest case caps outside `sciart-core` |
 | `scripts/tooling_check.py` (`pixi run rs-spec-check`, CI) | TEST-R9 (`rs-ci` runs the snapshots in the `ci` profile; probes use it, installs keep `release`), TEST-R10 (rs-test = nextest + doctests, nothing narrowed; test profile opt ≥ 2 with checks), TEST-R11 (sccache wrapper via pixi activation) |
