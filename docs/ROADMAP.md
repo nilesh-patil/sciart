@@ -349,8 +349,9 @@ Decisions: binaries + pixi/conda + crates.io + Homebrew; macOS and Linux first-c
 - [ ] The site in Firefox and Safari, a real WebAssembly failure in the player, and the first Pages deploy — manual
 - [x] Phase 4 — public repository: contributor and architecture guides, documentation map, trimmed history documents
 - [x] Phase 4 — version 1.0.0 (internal crates 0.7.0), the 1.0.0 CHANGELOG section, the README install channels, docs truth pass
-- [ ] Final review and the local tag `v1.0.0`
-- [ ] Publish: crates.io, conda channel, Homebrew tap, GitHub Pages, public repository
+- [x] Final review, the tag `v1.0.0` and the GitHub release (2026-11-26); 1.0.1 the same day for the install command in the README
+- [x] Publish: public repository, GitHub Pages
+- [ ] Publish: crates.io, conda channel, Homebrew tap (from 1.0.1)
 
 ## M9 — Future (unscheduled)
 - Windows keep-awake backend (Linux landed in M25), light-background theme, distribution packages beyond the 1.0 channels — [B-89..B-91](BACKLOG.md).
