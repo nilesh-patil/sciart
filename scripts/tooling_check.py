@@ -7,8 +7,8 @@ documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and ch
 nextest never filters or retries, sccache stays the shared rustc wrapper, the local gate
 runs CI's NO_COLOR pass, CI covers the platform tiers on supported runner images, a
 workflow that installs a toolchain other than stable pins it with RUSTUP_TOOLCHAIN, the
-browser player and the docs site build in the gate and in CI, and GitHub Pages is deployed
-only by hand or on a published release.
+fuzz run names its `--target`, the browser player and the docs site build in the gate and
+in CI, and GitHub Pages is deployed only by hand or on a published release.
 
 Successor of the config half of `crates/sciart-generators/tests/source_rules.rs`; wired
 into `pixi run rs-spec-check` and CI.
@@ -314,6 +314,19 @@ def workflow_texts() -> dict[str, str]:
     return {p.name: p.read_text() for p in sorted((ROOT / ".github/workflows").glob("*.yml"))}
 
 
+def fuzz_target_problems(texts: dict[str, str]) -> list[str]:
+    """IMP-14 over every workflow: each `cargo fuzz run` names its `--target`. The install
+    action ships cargo-fuzz as a musl binary, which otherwise builds for musl, where the
+    sanitizer cannot link (a statically linked libc)."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        joined = re.sub(r"\\\n\s*", " ", text)
+        for command in re.findall(r"cargo\s+fuzz\s+run\b[^\n]*", joined):
+            if not re.search(r"\s--target[\s=]", command.split(" -- ")[0] + " "):
+                problems.append(f"IMP-14: {name} runs `{command.strip()}` without `--target` (the host triple)")
+    return problems
+
+
 TOOLCHAIN_ACTION = "dtolnay/rust-toolchain@"
 
 
@@ -377,6 +390,8 @@ def check_r13(problems: list[str]) -> None:
     for problem in runner_image_problems(workflow_texts()):
         fail(problems, problem)
     for problem in toolchain_problems(workflow_texts()):
+        fail(problems, problem)
+    for problem in fuzz_target_problems(workflow_texts()):
         fail(problems, problem)
     if "test" in jobs and not re.search(r"run: cargo nextest run --workspace\s*$", jobs["test"], re.M):
         fail(problems, "TEST-R13: ci.yml `test` runs the whole suite (`cargo nextest run --workspace`)")

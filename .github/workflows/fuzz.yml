@@ -57,7 +57,10 @@ jobs:
         working-directory: fuzz
         env:
           TARGET: ${{ matrix.target }}
-        run: cargo fuzz run "$TARGET" -- -max_total_time=90 -rss_limit_mb=4096
+        # The installed cargo-fuzz is a musl binary and would build for musl, where the
+        # sanitizer cannot link; name the host triple (of the nightly rustc, as pinned above).
+        run: |
+          cargo fuzz run "$TARGET" --target "$(rustc -vV | sed -n 's/^host: //p')" -- -max_total_time=90 -rss_limit_mb=4096
       # Keep the corpus on success; keep artifacts even on a crash so the reproducer uploads.
       - name: Upload corpus and crashes
         if: always()

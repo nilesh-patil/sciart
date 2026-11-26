@@ -156,6 +156,25 @@ class Toolchains(unittest.TestCase):
         self.assertTrue(any("beta" in p for p in found), found)
 
 
+class FuzzTarget(unittest.TestCase):
+    """IMP-14: the fuzz run names the host triple, not cargo-fuzz's own (musl) default."""
+
+    TARGET = ' --target "$(rustc -vV | sed -n \'s/^host: //p\')"'
+
+    def test_imp_14_every_workflow_passes(self) -> None:
+        self.assertEqual(tooling_check.fuzz_target_problems(WORKFLOWS), [])
+
+    def test_imp_14_a_fuzz_run_without_a_target_fails(self) -> None:
+        self.assertIn(self.TARGET, WORKFLOWS["fuzz.yml"])
+        text = WORKFLOWS["fuzz.yml"].replace(self.TARGET, "")
+        self.assertTrue(tooling_check.fuzz_target_problems(dict(WORKFLOWS, **{"fuzz.yml": text})))
+
+    def test_imp_14_a_target_after_the_separator_does_not_count(self) -> None:
+        text = WORKFLOWS["fuzz.yml"].replace(self.TARGET, "").replace(
+            "-rss_limit_mb=4096", "-rss_limit_mb=4096 --target x86_64-unknown-linux-gnu")
+        self.assertTrue(tooling_check.fuzz_target_problems(dict(WORKFLOWS, **{"fuzz.yml": text})))
+
+
 PIXI = tooling_check.toml_file("pixi.toml")
 
 
