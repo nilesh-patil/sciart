@@ -10,13 +10,12 @@
 *.snap.new
 *.pending-snap
 
-# Local compiler cache when the home cache is unavailable
+# Local compiler cache, used when the home cache directory is unavailable
 .sccache/
 
 # Python bytecode from scripts/ (gallery, test-set parity)
 __pycache__/
 *.pyc
-
 
 # macOS metadata
 .DS_Store
