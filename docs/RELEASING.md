@@ -1,8 +1,7 @@
 # Releasing sciart
 
-How a version reaches its four install channels (SPEC-008, ADR-0033): GitHub Releases
-(tarballs and the installer script), crates.io, the conda channel for pixi, and the
-Homebrew tap. A pushed tag builds everything into a **draft** release; nothing is published
+How a version reaches its three install channels (SPEC-008, ADR-0033): GitHub Releases
+(tarballs and the installer script), crates.io and the Homebrew tap. A pushed tag builds everything into a **draft** release; nothing is published
 until a maintainer publishes the draft and approves each publish job.
 
 ## One-time setup
@@ -26,20 +25,17 @@ These need the repository owner's accounts and cannot be done from a checkout.
    environment secret `CARGO_REGISTRY_TOKEN`. After the first release, trusted publishing
    from this repository can replace the token. New crates are rate-limited, so the first
    publish of twelve crates can take a while.
-4. **Conda channel**: create a channel on prefix.dev, store its name as the repository
-   variable `CONDA_CHANNEL` and an API key with upload rights as the environment secret
-   `PREFIX_API_KEY`.
-5. **Homebrew tap**: create a public repository named `homebrew-sciart` (users then run
+4. **Homebrew tap**: create a public repository named `homebrew-sciart` (users then run
    `brew tap <owner>/sciart`), store `<owner>/homebrew-sciart` as the repository variable
    `HOMEBREW_TAP`, and a fine-grained token with *Contents: read and write* on that one
    repository as the environment secret `HOMEBREW_TAP_TOKEN`.
-6. **Docs site** (Settings → Pages): set the source to *GitHub Actions*. The `Pages`
+5. **Docs site** (Settings → Pages): set the source to *GitHub Actions*. The `Pages`
    workflow deploys on a published release, whose ref is the tag, while the `github-pages`
    environment that GitHub creates allows the default branch only: add the tag rule `v*`
    to it (Settings → Environments → github-pages → Deployment branches and tags), or the
    release's deployment is rejected. A manual run of the workflow from the default branch
    deploys at any time.
-7. **Tag signing** (recommended): configure `git` to sign tags (`gpg.format = ssh` and
+6. **Tag signing** (recommended): configure `git` to sign tags (`gpg.format = ssh` and
    `user.signingkey`), and add the key to the GitHub account as a signing key, so the tag
    shows as verified.
 
@@ -63,7 +59,6 @@ These need the repository owner's accounts and cannot be done from a checkout.
    python3 scripts/release_check.py --tag v1.0.0
    pixi run rs-package-check          # needs cargo 1.90+ (`rustup update stable`)
    pixi run -e dist rs-installer-check
-   pixi run -e dist rs-conda-build    # optional: the conda package for this machine
    ```
 
 4. **Commit, tag, push.**
@@ -84,9 +79,9 @@ These need the repository owner's accounts and cannot be done from a checkout.
    gh attestation verify sciart-1.0.0-aarch64-apple-darwin.tar.gz --repo <owner>/sciart
    ```
 
-6. **Publish the draft.** This starts the `Publish` workflow. Approve its three jobs in the
-   `release` environment: crates.io (one crate at a time, in dependency order), the conda
-   channel (four platforms) and the Homebrew tap.
+6. **Publish the draft.** This starts the `Publish` workflow. Approve its two jobs in the
+   `release` environment: crates.io (one crate at a time, in dependency order) and the
+   Homebrew tap.
 7. **Verify** an install through each channel on a clean machine (ROADMAP, manual).
 
 A rehearsal of the publish jobs without uploading: run the `Publish` workflow by hand with
@@ -110,8 +105,6 @@ after a crate is up is fixed by a new patch release, not by re-uploading.
 - **A crate was published with a defect:** yank that version of the affected crates and
   of `sciart` if it depends on them, then release a patch version (internal crates move
   to their next `0.x`, `sciart` to `X.Y.(Z+1)`).
-- **The conda upload stopped part-way:** re-run the `conda` job; the upload skips the
-  packages the channel already has (`--skip-existing`).
 - **The Homebrew job failed after the push:** re-run it; with nothing to commit it
   succeeds without a new commit.
 - **The GitHub release itself** is not affected by any of these: it stays published, and
@@ -126,10 +119,10 @@ refused because their meaning moves (TEST-R13, DIST-R5). The list lives in one p
 
 | Image | Used for |
 | --- | --- |
-| `macos-15` | CI on the reference platform (lint, suite, snapshots), both macOS release builds, the macOS conda packages |
+| `macos-15` | CI on the reference platform (lint, suite, snapshots), both macOS release builds |
 | `ubuntu-24.04` | CI on Linux x86_64 and every Linux job that builds nothing for release |
 | `ubuntu-24.04-arm` | CI on Linux aarch64 |
-| `ubuntu-22.04`, `ubuntu-22.04-arm` | release builds and the Linux conda packages only: the oldest images, so the gnu binaries need glibc 2.35 |
+| `ubuntu-22.04`, `ubuntu-22.04-arm` | release builds only (`release.yml`): the oldest images, so the gnu binaries need glibc 2.35 |
 
 When GitHub announces that an image is retired, change it in `RUNNER_IMAGES` and in the
 workflows in one commit, and run `pixi run rs-spec-check`. The `ubuntu-22.04` images are

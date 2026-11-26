@@ -9,7 +9,7 @@ All notable changes to this project are documented here. The format is based on
 ## [1.0.1] - 2026-11-26
 
 Documentation and release tooling only: the program and the library are the same as in
-1.0.0. This is the first version on crates.io, the conda channel and the Homebrew tap.
+1.0.0. This is the first version on crates.io and the Homebrew tap.
 
 ### Changed
 
@@ -36,6 +36,12 @@ Documentation and release tooling only: the program and the library are the same
   page; they now link into the repository at the release's tag (DIST-R10).
 - The by-hand install text names the unpack step and `sha256sum` for systems without
   `shasum` (DIST-R7).
+
+### Removed
+
+- The conda package and channel announced in 1.0.0 were never published and are
+  withdrawn; install with the installer script, Homebrew or cargo
+  ([ADR-0033](docs/adr/0033-distribution-channels.md), DIST-R8).
 
 ## [1.0.0] - 2026-11-26
 

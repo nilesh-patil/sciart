@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Release configuration checks (SPEC-008 DIST-R1, DIST-R3..DIST-R6, DIST-R8..DIST-R10).
+"""Release configuration checks (SPEC-008 DIST-R1, DIST-R3..DIST-R6, DIST-R9, DIST-R10).
 
 Without arguments it checks, from the files alone:
 
 - DIST-R1 one version: the root Cargo.toml's version of `sciart`, the internal crates'
-  shared 0.x version and their `=` pins, Cargo.lock, no version in pixi.toml, the conda
-  recipe reading SCIART_VERSION;
+  shared 0.x version and their `=` pins, Cargo.lock, no version in pixi.toml;
 - DIST-R3 the published set and the labels of the internal crates;
 - DIST-R4 the packaging rules (excludes, licence and changelog links, publish order);
 - DIST-R5 / DIST-R6 the packing of a fixture release and the binstall metadata;
-- DIST-R8 the conda recipe and its pixi environment;
 - DIST-R9 the Homebrew formula rendered from a fixture (and `ruby -c` when Ruby is
   installed; `--require-ruby` makes it mandatory);
-- DIST-R5 / DIST-R6 / DIST-R8 / DIST-R10 every workflow, read as data
+- DIST-R5 / DIST-R6 / DIST-R10 every workflow, read as data
   (scripts/release_workflows.py): pinned actions, secrets on steps only, no event data in
   scripts, the release chain and its checks, and every upload behind the gated publish
-  step.
+  step; and no pixi task that uploads.
 
 Other modes:
 
@@ -150,8 +148,6 @@ def check_r1(problems: list[str], tag: str | None) -> None:
     pixi = toml_file("pixi.toml")
     if "version" in pixi.get("workspace", pixi.get("project", {})):
         problems.append("DIST-R1: pixi.toml carries no version of its own")
-    if 'version: ${{ env.get("SCIART_VERSION") }}' not in (ROOT / "packaging/conda/recipe.yaml").read_text():
-        problems.append("DIST-R1: the conda recipe takes its version from SCIART_VERSION")
     expected = lock_versions(version, str(internal))
     locks = lock_files(ROOT)
     if ROOT / "Cargo.lock" not in locks:
@@ -357,37 +353,6 @@ def check_assets(problems: list[str]) -> None:
             problems.append("DIST-R5: packing is reproducible")
 
 
-# --- DIST-R8 -------------------------------------------------------------------------------
-
-def check_r8(problems: list[str]) -> None:
-    recipe = (ROOT / "packaging/conda/recipe.yaml").read_text()
-    for needle, why in (
-        ("  name: sciart\n", "the package is named sciart"),
-        ('${{ compiler("rust") }}', "it builds with the conda Rust compiler"),
-        ("cargo-bundle-licenses", "it bundles the third-party licences"),
-        ("    - THIRDPARTY.yml\n", "the bundled licences are a licence file"),
-        ("    - LICENSE\n", "sciart's licence is a licence file"),
-        ("--locked", "it builds with the lock file"),
-        ("SCIART_GIT_SHA", "--version names the commit (DIST-R2)"),
-        ("      - sciart --version\n", "it tests `sciart --version`"),
-        ("      - sciart list\n", "it tests `sciart list`"),
-        ("  path: ../..\n", "it builds this checkout"),
-    ):
-        if needle not in recipe:
-            problems.append(f"DIST-R8: recipe.yaml: {why} (`{needle.strip()}`)")
-    pixi = toml_file("pixi.toml")
-    feature = pixi.get("feature", {}).get("dist", {})
-    if "rattler-build" not in feature.get("dependencies", {}):
-        problems.append("DIST-R8: the pixi `dist` feature provides rattler-build")
-    if feature.get("tasks", {}).get("rs-conda-build") != "python3 scripts/conda_build.py":
-        problems.append("DIST-R8: `rs-conda-build` (dist feature) runs scripts/conda_build.py")
-    if "dist" not in pixi.get("environments", {}):
-        problems.append("DIST-R8: pixi has a `dist` environment")
-    for name, task in [*pixi.get("tasks", {}).items(), *feature.get("tasks", {}).items()]:
-        if "upload" in str(task):
-            problems.append(f"DIST-R8 / DIST-R10: pixi task {name} uploads; only the publish workflow does")
-
-
 # --- DIST-R9 -------------------------------------------------------------------------------
 
 def check_r9(problems: list[str], require_ruby: bool) -> None:
@@ -445,8 +410,16 @@ def check_r9(problems: list[str], require_ruby: bool) -> None:
 # --- DIST-R10 ------------------------------------------------------------------------------
 
 def check_r10(problems: list[str]) -> None:
-    """DIST-R5 / R6 / R8 / R10 in the workflows, read as data (release_workflows.py)."""
+    """DIST-R5 / R6 / R10 in the workflows, read as data (release_workflows.py); no pixi
+    task uploads anything (only the publish workflow does)."""
     problems += release_workflows.problems(release_workflows.load(ROOT))
+    pixi = toml_file("pixi.toml")
+    tasks = [*pixi.get("tasks", {}).items()]
+    for feature in pixi.get("feature", {}).values():
+        tasks += [*feature.get("tasks", {}).items()]
+    for name, task in tasks:
+        if "upload" in str(task):
+            problems.append(f"DIST-R10: pixi task {name} uploads; only the publish workflow does")
 
 
 # --- modes ---------------------------------------------------------------------------------
@@ -532,7 +505,6 @@ def main() -> int:
         check_r3(problems)
         check_r4(problems)
         check_r5_r6(problems)
-        check_r8(problems)
         check_r9(problems, "--require-ruby" in args)
         check_r10(problems)
         label = "release configuration"
