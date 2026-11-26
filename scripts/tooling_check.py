@@ -192,7 +192,7 @@ PINNING_SKIP = "tier::skip_off_reference_platform("
 RUNNER_IMAGES = ("macos-15", "ubuntu-24.04", "ubuntu-24.04-arm", "ubuntu-22.04", "ubuntu-22.04-arm")
 # The oldest images, for the release builds' glibc baseline only (DIST-R5).
 RELEASE_ONLY_IMAGES = ("ubuntu-22.04", "ubuntu-22.04-arm")
-RELEASE_WORKFLOWS = ("release.yml", "publish.yml")
+RELEASE_WORKFLOWS = ("release.yml",)
 
 
 def runner_target(label: str) -> str | None:

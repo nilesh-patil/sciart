@@ -31,7 +31,7 @@ rs-test-nocolor = { cmd = "cargo nextest run -p sciart --test pty_smoke --test e
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
 # DIST-R1..R10: the release configuration (scripts/release_check.py) and the installer
 # against a fixture release (scripts/installer_check.py).
-rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/site_check_test.py && python3 scripts/tooling_check_test.py && python3 scripts/yaml_subset_test.py && python3 scripts/release_check.py && python3 scripts/release_check_test.py && python3 scripts/publish_crates_test.py && python3 scripts/conda_build_test.py && python3 scripts/bump_version_test.py && python3 scripts/installer_check.py"
+rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/site_check_test.py && python3 scripts/tooling_check_test.py && python3 scripts/yaml_subset_test.py && python3 scripts/release_check.py && python3 scripts/release_check_test.py && python3 scripts/publish_crates_test.py && python3 scripts/bump_version_test.py && python3 scripts/installer_check.py"
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
@@ -101,16 +101,12 @@ cargo-nextest = ">=0.9.148,<0.10"
 sccache = ">=0.18.0,<0.19"
 wasmtime-py = ">=51.0.0,<52"
 
-# DIST-R7 / DIST-R8 (ADR-0033): the release tools, in their own environment so the default
-# one stays lean: `pixi run -e dist rs-conda-build`.
+# DIST-R7 (ADR-0033): the release tools, in their own environment so the default one stays
+# lean: `pixi run -e dist rs-installer-check`.
 [feature.dist.dependencies]
-rattler-build = ">=0.81.0,<0.82"
 shellcheck = ">=0.11.0,<0.12"
 
 [feature.dist.tasks]
-# DIST-R8: the conda package for the host platform (or `--target-platform <platform>`),
-# into target/conda; never uploaded from here.
-rs-conda-build = "python3 scripts/conda_build.py"
 # DIST-R7: the installer check with shellcheck required.
 rs-installer-check = "python3 scripts/installer_check.py --require-shellcheck"
 

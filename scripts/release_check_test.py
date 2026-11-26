@@ -36,6 +36,7 @@ PRIVATE_GUARD = """      - name: A release tag needs a public repository
 """
 ATTEST_IF = "        if: github.event.repository.private == false\n"
 GATE_NEEDS = "    needs: environment-gate\n"
+HOMEBREW_HEAD = "    name: Homebrew tap\n" + GATE_NEEDS
 TAG_STEP_PUBLISH = """      - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
 """
@@ -79,11 +80,14 @@ MUTATIONS = [
      "        run: python3 scripts/publish_crates.py\n", "        run: cargo publish --workspace --locked\n",
      "one resumable publish"),
     ("no rehearsal", "publish.yml", "          python3 scripts/publish_crates.py --dry-run\n", "", "rehearses"),
-    ("the conda job outside the release environment", "publish.yml",
-     "    runs-on: ${{ matrix.os }}\n    environment: release\n", "    runs-on: ${{ matrix.os }}\n",
-     "`conda` runs in the `release` environment"),
-    ("a channel upload that fails on a rerun", "publish.yml", "upload prefix --skip-existing", "upload prefix",
-     "--skip-existing"),
+    ("the Homebrew job outside the release environment", "publish.yml",
+     HOMEBREW_HEAD + "    runs-on: ubuntu-24.04\n    environment: release\n",
+     HOMEBREW_HEAD + "    runs-on: ubuntu-24.04\n", "`homebrew` runs in the `release` environment"),
+    ("a third publish job", "publish.yml", "  homebrew:\n",
+     "  extra:\n    needs: environment-gate\n    runs-on: ubuntu-24.04\n    environment: release\n"
+     "    steps:\n      - run: echo\n\n  homebrew:\n", "exactly the jobs"),
+    ("the oldest image in the publish workflow", "publish.yml", "    runs-on: ubuntu-24.04\n",
+     "    runs-on: ubuntu-22.04\n", "release builds only"),
     ("a tap commit that fails on a rerun", "publish.yml", "          if git diff --cached --quiet; then\n"
      "            echo \"the tap already has this formula\"\n          else\n", "          if true; then\n",
      "tolerates a formula"),
@@ -132,7 +136,7 @@ MUTATIONS = [
      "runs on `macos-14`"),
     ("a moving ubuntu label", "pages.yml", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-latest\n",
      "runs on `ubuntu-latest`"),
-    ("a moving macOS label in a matrix", "publish.yml", "            os: macos-15\n", "            os: macos-latest\n",
+    ("a moving macOS label in a matrix", "release.yml", "            os: macos-15\n", "            os: macos-latest\n",
      "runs on `macos-latest`"),
     ("a retired image for a release build", "release.yml", "            os: macos-15\n", "            os: macos-14\n",
      "runs on `macos-14`"),
@@ -151,8 +155,8 @@ MUTATIONS = [
     # the release environment gate (DIST-R10)
     ("the environment gate deleted", "publish.yml", "  environment-gate:\n", "  x-environment-gate:\n",
      "`environment-gate` job"),
-    ("a publish job that does not need the gate", "publish.yml", GATE_NEEDS + "    runs-on: ${{ matrix.os }}\n",
-     "    runs-on: ${{ matrix.os }}\n", "`conda` needs `environment-gate`"),
+    ("a publish job that does not need the gate", "publish.yml", HOMEBREW_HEAD, "    name: Homebrew tap\n",
+     "`homebrew` needs `environment-gate`"),
     ("the gate inside the environment it checks", "publish.yml",
      "    permissions:\n      actions: read", "    environment: release\n    permissions:\n      actions: read",
      "outside the `release` environment"),
