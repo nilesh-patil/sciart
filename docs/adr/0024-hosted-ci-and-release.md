@@ -17,7 +17,7 @@ Two things changed the calculus:
    not. A gate that depends on the developer's shell is not a gate.
 2. **There is something to ship.** The README, gallery and install story need a
    downloadable binary and a visible green badge, and Linux must keep building and passing
-   tests even though macOS is the supported experience.
+   tests (an engineering rule since M0) even though macOS is the supported experience.
 
 ## Decision
 
@@ -61,7 +61,7 @@ Two things changed the calculus:
 - **Run pixi in CI.** Elegant (one task definition) but needs `linux-64` in the pixi lock,
   a conda solve on every runner, and makes the workflow harder to debug. Revisit if the
   command duplication causes drift.
-- **macOS-only CI.** Cheaper, but drops the Linux build/test guarantee that the contributor guide has
+- **macOS-only CI.** Cheaper, but drops the Linux build/test guarantee that the project has
   required since M0.
 - **No releases.** Keeps the maintenance surface small, but leaves `cargo install --git`
   as the only install path and gives the README no artifact to point at.
@@ -70,4 +70,4 @@ Two things changed the calculus:
 
 - [ADR-0007](0007-pixi-task-runner.md) (task runner; the deferred-CI clause is superseded)
 - TEST-R3, TEST-R9, TEST-R10, TEST-R11, TEST-R12 in [SPEC-006](../specs/SPEC-006-testing.md)
-- `docs/IMPROVEMENTS.md` IMP-01, IMP-04, IMP-05
+- M23 improvement items IMP-01, IMP-04, IMP-05 ([roadmap](../ROADMAP.md))

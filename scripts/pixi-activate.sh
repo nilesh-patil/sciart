@@ -1,7 +1,7 @@
 # Sourced by pixi for every task and `pixi shell` (pixi.toml [activation]). POSIX sh.
 #
-# TEST-R11 / ADR-0023: route rustc through sccache so a new checkout or workspace, which
-# starts with an empty target/, reuses crates compiled by any other tree on this machine.
+# TEST-R11 / ADR-0023: route rustc through sccache so a fresh checkout, which starts with an
+# empty target/, reuses crates compiled by any other tree on this machine.
 # - Skipped when sccache is not on PATH (the build is the same, only slower).
 # - An explicit RUSTC_WRAPPER wins; `RUSTC_WRAPPER= pixi run ...` (empty) turns it off.
 # - Incremental builds stay on for dev/test (focused loops rebuild only what changed).

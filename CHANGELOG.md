@@ -45,6 +45,10 @@ All notable changes to this project are documented here. The format is based on
   `rs-showcase-check` fails on a missing, stale or unlisted clip (WEB-R1, WEB-R2).
 - `sciart record --start <seconds>` simulates that long before the first frame, so a
   recording can open on a scene's best moment (CLI-R8).
+- A documentation site with a user guide, a gallery of every scene and a live player that
+  runs the scenes in the browser from the same code; it is self-contained, loads nothing
+  from another origin, and falls back to the recorded clips without WebAssembly
+  ([ADR-0034](docs/adr/0034-web-gallery-and-docs-site.md), SPEC-009).
 
 ### Fixed
 
@@ -101,8 +105,7 @@ All notable changes to this project are documented here. The format is based on
 ### Added
 
 - A 85-row science-claims audit ([docs/science/claims.md](docs/science/claims.md), 20
-  audited) and the standing 15-minute milestone review
-  ([docs/REVIEW.md](docs/REVIEW.md)).
+  audited) and a standing art, science and performance checklist at each milestone close.
 
 ## [0.4.0] - 2026-10-18
 

@@ -4,8 +4,8 @@
 - **Date**: 2026-10-15
 
 ## Context
-The user found the Rust build "taking a LONG time" and asked for ways to cut build time and the
-CPU and memory used while the art runs, without losing visual quality. Measured before M22
+The Rust build had become slow, and the goal was to cut build time and the CPU and memory used
+while the art runs, without losing visual quality. Measured before M22
 (M21 tree, 14 cores, 85 scenes, `sciart-generators` ≈ 96 k lines in one crate):
 
 | Step | Time |
@@ -16,14 +16,14 @@ CPU and memory used while the art runs, without losing visual quality. Measured 
 | `rs-lint` / `rs-test` / `rs-snap-release` after editing one scene | 16 s / **173 s** / 35 s |
 
 `rs-test` is dominated by running the test binaries one after another (generators unit tests
-69 s at opt-level 1, `contract` 18 s, `resource_budget` 14 s, …). New checkouts and new
-workspaces start from an empty `target/` and reinstall the pixi environment.
+69 s at opt-level 1, `contract` 18 s, `resource_budget` 14 s, …). A fresh checkout starts from
+an empty `target/` and reinstalls the pixi environment.
 
 At runtime (200×50, 30 FPS, `sciart sim`) the process uses ≈ 2.4 % of a core and 6–9 MB RSS, but
 writes ≈ 238 KB/s to the terminal, and iTerm2 spent ≈ 11 % CPU drawing it: the terminal is the
 main cost.
 
-The user chose every option offered (AskUserQuestion): faster test runs, an optimised CI profile,
+Every option considered was adopted: faster test runs, an optimised CI profile,
 a shared build cache, splitting the generators crate by category; an idle-aware frame loop, fewer
 bytes per frame, earlier low-power mode (2 min idle, 30 FPS kept) and lower memory ceilings
 (measured + margin).
@@ -37,7 +37,7 @@ bytes per frame, earlier low-power mode (2 min idle, 30 FPS kept) and lower memo
    partitioning because trigonometry goes through `Trig` (GEN-R6, ADR-0016), so the snapshot run
    still guards optimiser-dependent frames.
 3. **A shared compiler cache** (sccache from the pixi environment) is used by every task, so a
-   new checkout or workspace reuses compiled crates (TEST-R11).
+   second checkout of the repository reuses compiled crates (TEST-R11).
 4. **Split `sciart-generators`** into a shared-models crate and five scene crates by category
    (cosmos, earth & voyages, physics, matter, life); `sciart-generators` stays the registry facade,
    so the binary, the test suites and `find`/`registry` are unchanged (GEN-R3, GEN-R16 amended).
@@ -56,6 +56,6 @@ bytes per frame, earlier low-power mode (2 min idle, 30 FPS kept) and lower memo
 ## Alternatives considered
 - Lowering `release` to many codegen units / no LTO: rejected for installs (runtime speed); used
   only for CI-style builds.
-- 24 FPS by default: offered; the user kept 30 FPS.
-- One crate per scene: offered; rejected (workspace overhead).
+- 24 FPS by default: considered; 30 FPS was kept.
+- One crate per scene: considered; rejected (workspace overhead).
 - 256-colour output: not offered as a default; it changes colours.

@@ -4,11 +4,11 @@
 - **Date**: 2026-10-01
 
 ## Context
-After M15 the user picked `strange_attractors` as the look to follow: fine braille threads on
+After M15 `strange_attractors` was picked as the look to follow: fine braille threads on
 black, colour along the thread, density where threads cross, no fills. `light_echo` was
-restyled that way first and accepted. The user then listed 25 more scenes to restyle (several
-redesigned, some heavily) and asked for `seashell_pigmentation` to be removed. The choices,
-made scene by scene, are recorded in `docs/design/M16-thread-style.md`.
+restyled that way first and accepted. 25 more scenes were then chosen for the restyle (several
+redesigned, some heavily), and `seashell_pigmentation` was removed. The choices, made scene by
+scene, are recorded in each scene's `Look` entry in SPEC-002.
 
 Six of the scenes are M11 scenes that GEN-R22 pins to their M11 ink frames
 (`belousov_zhabotinsky`, `ising_model`, `globular_cluster`, `vortex_street`,

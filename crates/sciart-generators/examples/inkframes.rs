@@ -19,8 +19,8 @@
 //! role letter (see `role_char`), the level as two hex digits, and a repeat count when a
 //! run is longer than one cell.
 //!
-//! The file is self-contained and uses only API that existed at M11 (`627cde6`), so the
-//! same example builds in that tree and writes the reference (the fixture) there. Roles
+//! The file is self-contained and uses only API that existed at M11 (the M11 merge), so
+//! the same example builds in that tree and writes the reference (the fixture) there. Roles
 //! added after M11 all map to `?`: they never occur in the reference, so any such cell is
 //! a mismatch. `tests/m11_fidelity.rs` includes this file to decode the fixture and
 //! encode live frames with the same code.
