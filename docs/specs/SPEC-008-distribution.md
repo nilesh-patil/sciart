@@ -1,13 +1,13 @@
 # SPEC-008: Distribution
 
-**Milestone**: M25 · **Status**: implemented; everything that needs a pushed tag is a manual check (docs/RELEASING.md) · **ADR**: [0033](../adr/0033-distribution-channels.md)
+**Milestone**: M25 · **Status**: implemented (DIST-R8 withdrawn in 1.0.1); everything that needs a pushed tag is a manual check (docs/RELEASING.md) · **ADR**: [0033](../adr/0033-distribution-channels.md)
 
-sciart 1.0 is installed four ways: a release binary (by hand or through the installer
-script), a conda package for pixi, `cargo install`, and a Homebrew tap. One version number
-feeds all of them, a release can be verified by whoever installs it, and nothing is
-published without a maintainer's approval.
+sciart 1.0 is installed three ways: a release binary (by hand or through the installer
+script), `cargo install`, and a Homebrew tap; a conda package was withdrawn in 1.0.1
+(DIST-R8). One version number feeds all of them, a release can be verified by whoever
+installs it, and nothing is published without a maintainer's approval.
 
-- **DIST-R1** One version: `workspace.package.version` in the root `Cargo.toml` is the only hand-edited version of the `sciart` crate. `pixi.toml` carries no version of its own; the conda recipe takes it from `SCIART_VERSION`; on a tag build the tag equals `v{version}` and `CHANGELOG.md` has a `## [{version}] - YYYY-MM-DD` heading. `scripts/release_check.py` enforces this (`--tag <name>` in the release workflow). `scripts/bump_version.py <sciart-version> <internal-version>` writes both version streams and every lock file in the repository that names a sciart crate (the workspace's, `fuzz/`'s and `web/`'s).
+- **DIST-R1** One version: `workspace.package.version` in the root `Cargo.toml` is the only hand-edited version of the `sciart` crate. `pixi.toml` carries no version of its own; on a tag build the tag equals `v{version}` and `CHANGELOG.md` has a `## [{version}] - YYYY-MM-DD` heading. `scripts/release_check.py` enforces this (`--tag <name>` in the release workflow). `scripts/bump_version.py <sciart-version> <internal-version>` writes both version streams and every lock file in the repository that names a sciart crate (the workspace's, `fuzz/`'s and `web/`'s).
 - **DIST-R2** `sciart -V` prints `sciart X.Y.Z`. `sciart --version` adds ` (<12-hex commit> <target triple>)` when the build was given `SCIART_GIT_SHA`, and nothing more otherwise (a crates.io build has no commit). The text comes from a pure `version_text()` that is unit-tested.
 - **DIST-R3** Published crates: `sciart` and the eleven crates it needs. `sciart-testalloc`, `sciart-qa`, `fuzz/` and `web/` are never published. The internal crates share one `0.x` version of their own and are pinned from the workspace with `=`, so a given `sciart` release always builds against exactly the internals it was tested with. Each internal crate has its own `README.md` and a crate-level doc notice, both saying it is internal, carries no semver promise and that `sciart` is the supported entry point; its `description` starts with `Internal:`; it has no keywords or categories. The docs.rs metadata of `sciart` never enables `mouse`. `scripts/release_check.py` enforces this.
 - **DIST-R4** `cargo publish --workspace --dry-run --locked` passes, in dependency order (core, shared, the five scene crates, generators, render, keepawake, capture, sciart). Every `.crate` file is at most 1 MiB: internal crates exclude `tests/`, `benches/` and `examples/`. The `sciart` crate ships `LICENSE`, `README.md` and `CHANGELOG.md`. `pixi run rs-package-check` runs the dry run and `scripts/release_check.py --crates` checks the sizes and contents. The real publish (DIST-R10) uploads one crate at a time in that order and skips a version that is already on the index, so a run that failed half-way can be run again; a published version can be yanked but never replaced.
