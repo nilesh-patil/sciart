@@ -599,7 +599,10 @@ fn rt_r20_sigterm_ends_the_app_even_when_its_writes_have_stalled() {
     for stall in [1, 3, 9].map(Duration::from_secs) {
         match signal_a_stalled_writer(stall) {
             Ok(()) => return,
-            Err(why) => unproven.push_str(&format!("\n  {why}")),
+            Err(why) => {
+                eprintln!("retrying with a longer stall: {why}");
+                unproven.push_str(&format!("\n  {why}"));
+            }
         }
     }
     panic!("the write never stalled, so RT-R20's stalled case was not exercised:{unproven}");
