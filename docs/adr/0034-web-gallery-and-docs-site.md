@@ -36,6 +36,11 @@ The scenes are pure: a seed, fixed steps and a canvas of cells, with no clock an
   the page says which build it runs.
 - The site shows 8×16 px cells, the recorder's look, not the visitor's terminal font.
 - One more build target and one more workflow to keep green.
+- A second documented `unsafe` exception after ADR-0009: edition 2024 spells an exported
+  symbol `#[unsafe(no_mangle)]`, so `web/` (outside the workspace) sets `unsafe_code =
+  "deny"` and allows it in `src/wasm.rs` alone. That file dereferences no pointer and has
+  no `unsafe` block; addresses leave it only as numbers. The workspace crates, and with
+  them the binary and the published library, keep `unsafe_code = "forbid"`.
 
 ## Alternatives considered
 
