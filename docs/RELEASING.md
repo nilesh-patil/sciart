@@ -23,8 +23,10 @@ These need the repository owner's accounts and cannot be done from a checkout.
 3. **crates.io**: sign in with GitHub, create an API token scoped to `publish-new` and
    `publish-update` for the crates named `sciart` and `sciart-*`, and store it as the
    environment secret `CARGO_REGISTRY_TOKEN`. After the first release, trusted publishing
-   from this repository can replace the token. New crates are rate-limited, so the first
-   publish of twelve crates can take a while.
+   from this repository can replace the token. New crates are rate-limited (a burst of
+   five, then about one every ten minutes), so the first publish of twelve crates takes
+   over an hour: the job waits out each limit by itself (up to 90 minutes in all) and
+   prints how long.
 4. **Homebrew tap**: create a public repository named `homebrew-sciart` (users then run
    `brew tap <owner>/sciart`), store `<owner>/homebrew-sciart` as the repository variable
    `HOMEBREW_TAP`, and a fine-grained token with *Contents: read and write* on that one
@@ -96,12 +98,13 @@ public index and without a token, which crates of this version are already on cr
 replaced, and the same version number can never be uploaded again. So a mistake found
 after a crate is up is fixed by a new patch release, not by re-uploading.
 
-- **crates.io stopped part-way** (network error, a rejected crate, the new-crate rate
-  limit): fix the cause if there is one, then *re-run the failed `crates.io` job* from
-  the workflow run. `scripts/publish_crates.py` skips every crate whose version is
-  already on the index and publishes the rest in order. Do not bump versions to "start
-  over": the crates already published are correct, and the facade pins exactly these
-  internal versions.
+- **crates.io stopped part-way** (network error, a rejected crate, a rate limit longer
+  than the job waits): fix the cause if there is one, then *re-run the failed `crates.io`
+  job* from the workflow run. `scripts/publish_crates.py` skips every crate whose version
+  is already on the index and publishes the rest in order, so a crate published by hand
+  in between (`cargo publish -p <crate> --locked`, in the order of `PUBLISH_ORDER`) is
+  skipped too. Do not bump versions to "start over": the crates already published are
+  correct, and the facade pins exactly these internal versions.
 - **A crate was published with a defect:** yank that version of the affected crates and
   of `sciart` if it depends on them, then release a patch version (internal crates move
   to their next `0.x`, `sciart` to `X.Y.(Z+1)`).
