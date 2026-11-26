@@ -140,7 +140,6 @@ jobs:
           python3 scripts/release_check.py
           python3 scripts/release_check_test.py
           python3 scripts/publish_crates_test.py
-          python3 scripts/conda_build_test.py
           python3 scripts/bump_version_test.py
           python3 scripts/installer_check.py
       # CLI-R15: the recorder is in the default build above; this is the build without it.

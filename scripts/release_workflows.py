@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
-"""The release and publish workflows, read as data (SPEC-008 DIST-R5, DIST-R6, DIST-R8,
-DIST-R10).
+"""The release and publish workflows, read as data (SPEC-008 DIST-R5, DIST-R6, DIST-R10).
 
 `problems(texts)` takes every file under `.github/workflows/` as {name: text}, parses each
 with `yaml_subset` (a file it cannot read is a problem, never skipped) and reports:
@@ -12,7 +11,7 @@ with `yaml_subset` (a file it cannot read is a problem, never skipped) and repor
   `run:` script; an expression from `github.event.*`, `inputs.*` or `github.head_ref`
   inside a `run:` script; a command that creates or pushes a tag; an upload
   (`cargo publish` without `--dry-run`, `scripts/publish_crates.py` without
-  `--dry-run`, `rattler-build upload`, `git push`) anywhere but a gated publish step;
+  `--dry-run`, `git push`) anywhere but a gated publish step;
 - release.yml: triggers, permissions per job against an allow-list, a tag push in a
   private repository refused first, the chain
   verify -> build -> package -> release, the six targets on their runners, the build
@@ -21,10 +20,10 @@ with `yaml_subset` (a file it cannot read is a problem, never skipped) and repor
   the attestation of every asset in a public repository (a notice when skipped), a draft
   release on the pushed tag;
 - publish.yml: triggers, a concurrency group, an environment gate outside the `release`
-  environment that every publish job needs, the three jobs in the `release`
-  environment with a tag check each, uploads only in steps gated on the release event,
-  the crates published one at a time by the resumable script, a rehearsal, the conda
-  matrix, an upload that skips what exists, a tap commit that tolerates no change.
+  environment that every publish job needs, exactly the crates.io and Homebrew jobs in
+  the `release` environment with a tag check each, uploads only in steps gated on the
+  release event, the crates published one at a time by the resumable script, a rehearsal,
+  a tap commit that tolerates no change.
 """
 
 from __future__ import annotations
@@ -40,13 +39,12 @@ from yaml_subset import YamlError, parse  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
-ALLOWED_OWNERS = {"actions", "dtolnay", "Swatinem", "taiki-e", "prefix-dev", "EmbarkStudios"}
+ALLOWED_OWNERS = {"actions", "dtolnay", "Swatinem", "taiki-e", "EmbarkStudios"}
 PIN = re.compile(r"^(?P<owner>[A-Za-z0-9_.-]+)/[A-Za-z0-9_.-]+(/[^@\s]*)?@[0-9a-f]{40}$")
 # The runner images themselves are listed once, in tooling_check.RUNNER_IMAGES (TEST-R13).
 OLDEST_UBUNTU = "ubuntu-22.04"  # glibc 2.35 (DIST-R5)
 MACOS_IMAGE = "macos-15"  # both macOS targets (DIST-R5)
 assert OLDEST_UBUNTU in RELEASE_ONLY_IMAGES and OLDEST_UBUNTU + "-arm" in RELEASE_ONLY_IMAGES
-CONDA_PLATFORMS = {"osx-arm64", "osx-64", "linux-64", "linux-aarch64"}
 BUILD = 'cargo auditable build --release --locked -p sciart --bin sciart --target "$TARGET"'
 GATE = "github.event_name == 'release'"
 TAG_IF = "startsWith(github.ref, 'refs/tags/v')"
@@ -57,7 +55,7 @@ PRIVATE_TAG_IF = f"{TAG_IF} && {PRIVATE}"
 PUBLIC_IF = f"{PRIVATE} == false"
 # DIST-R10: the job that reads the `release` environment before any publish job starts.
 GATE_JOB = "environment-gate"
-PUBLISH_JOBS = ("crates-io", "conda", "homebrew")
+PUBLISH_JOBS = ("crates-io", "homebrew")
 LEVELS = {"none": 0, "read": 1, "write": 2}
 # DIST-R10: what each job may be granted (a job without `permissions` gets the workflow's,
 # which must be `contents: read`).
@@ -97,7 +95,7 @@ def uploads(run: str) -> list[str]:
             out.append(c)
         elif "publish_crates.py" in c and "--dry-run" not in c:
             out.append(c)
-        elif re.search(r"\brattler-build\b.*\bupload\b", c) or re.search(r"\bgit\s+push\b", c):
+        elif re.search(r"\bgit\s+push\b", c):
             out.append(c)
     return out
 
@@ -371,17 +369,9 @@ def check_publish(data: dict, out: list[str]) -> None:
             not find(crates, "publish_crates.py --dry-run"):
         out.append("DIST-R4: the crates.io job rehearses (`cargo publish --workspace --dry-run`, "
                    "`publish_crates.py --dry-run`)")
-    conda = jobs.get("conda", {}) if isinstance(jobs.get("conda"), dict) else {}
-    matrix = (conda.get("strategy") or {}).get("matrix", {}) if isinstance(conda.get("strategy"), dict) else {}
-    platforms = {e.get("platform") for e in (matrix.get("include") or []) if isinstance(e, dict)}
-    if platforms != CONDA_PLATFORMS:
-        out.append(f"DIST-R8: publish.yml builds the conda package for {sorted(CONDA_PLATFORMS)}: "
-                   f"{sorted(map(str, platforms))}")
-    if not find(conda, 'rs-conda-build --target-platform "$PLATFORM"'):
-        out.append("DIST-R8: publish.yml builds each platform with rs-conda-build")
-    upload = [s for s in steps_of(conda) if uploads(str(s.get("run", "")))]
-    if len(upload) != 1 or "--skip-existing" not in str(upload[0].get("run")):
-        out.append("DIST-R10: the channel upload skips packages it already has (`--skip-existing`)")
+    if set(jobs) != {GATE_JOB, *PUBLISH_JOBS}:
+        out.append(f"DIST-R10: publish.yml has exactly the jobs {sorted({GATE_JOB, *PUBLISH_JOBS})}, "
+                   f"not {sorted(jobs)}")
     brew = jobs.get("homebrew", {}) if isinstance(jobs.get("homebrew"), dict) else {}
     push = [s for s in steps_of(brew) if uploads(str(s.get("run", "")))]
     if len(push) != 1 or "git diff --cached --quiet" not in str(push[0].get("run")):

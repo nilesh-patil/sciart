@@ -50,6 +50,8 @@ REPOSITORY = "https://github.com/nilesh-patil/sciart"
 # The still frames' size in pixels (scripts/gallery.py renders 160x48 cells at 8x16 px).
 STILL_W, STILL_H = 1280, 768
 SITE_NAME = "sciart"
+# WEB-R9: the project's one description, for the lede and every page's meta description.
+DESCRIPTION = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
 
 
 def fail(message: str) -> NoReturn:
@@ -289,7 +291,7 @@ def page_html(page: Page, build: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
-<meta name="description" content="Real-time generative science and astronomy art for the terminal: 85 scenes, drawn in braille and half-block cells.">
+<meta name="description" content="{DESCRIPTION}. 85 scenes, drawn in braille and half-block cells.">
 <link rel="icon" href="{root}assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="{root}assets/style.css">
 </head>
@@ -320,20 +322,35 @@ def clip_img(clip: showcase.Clip, root: str, width: int | None = None) -> str:
     )
 
 
+def home_tiles(clips: list[showcase.Clip], scenes: list[dict], count: int = 6) -> list[showcase.Clip]:
+    """`count` README grid clips taken in turn from each domain (WEB-R2's order), so the home
+    page shows every science, not the first few clips of the manifest."""
+    category = {s["name"]: s["category"] for s in scenes}
+    queues = [
+        [c for c in clips if c.readme == "grid" and category.get(c.scene) in members]
+        for _, members in showcase.DOMAINS
+    ]
+    tiles: list[showcase.Clip] = []
+    while len(tiles) < count and any(queues):
+        for queue in queues:
+            if queue and len(tiles) < count:
+                tiles.append(queue.pop(0))
+    return tiles
+
+
 def home(clips: list[showcase.Clip], scenes: list[dict]) -> Page:
     hero = next(clip for clip in clips if clip.readme == "hero")
-    grid = [clip for clip in clips if clip.readme == "grid"][:6]
     tiles = "\n".join(
         f'<li><figure>{clip_img(clip, "")}<figcaption>{html.escape(clip.scene)}</figcaption></figure></li>'
-        for clip in grid
+        for clip in home_tiles(clips, scenes)
     )
     categories = len({s["category"] for s in scenes})
     body = f"""<div class="home">
 <figure class="hero">{clip_img(hero, "")}<figcaption>{html.escape(hero.scene)} · recorded with <code>sciart record</code></figcaption></figure>
 <h1>{SITE_NAME}</h1>
-<p class="lede">Real-time generative science and astronomy art for the terminal: {len(scenes)} scenes in
-{categories} categories, each a small simulation drawn in braille dots and half-block cells at
-30 frames per second. It keeps your machine awake while you watch.</p>
+<p class="lede">{DESCRIPTION}. {len(scenes)} scenes in {categories} categories, each a small
+simulation drawn in braille dots and half-block cells at 30 frames per second. It keeps your
+machine awake while you watch.</p>
 <ul class="doors">
 <li><a href="play/index.html">Play a scene in your browser</a></li>
 <li><a href="gallery/index.html">See all {len(scenes)} scenes</a></li>
@@ -387,21 +404,26 @@ def gallery_page(scenes: list[dict], clips: list[showcase.Clip]) -> Page:
     by_category: dict[str, list[dict]] = {}
     for scene in sorted(scenes, key=lambda s: s["name"]):
         by_category.setdefault(scene["category"], []).append(scene)
-    order = [c for c in gallery.CATEGORIES if c in by_category] + sorted(
-        set(by_category) - set(gallery.CATEGORIES)
-    )
+    # WEB-R2: the categories in the README's domain order, under the domain headings.
+    domains = showcase.domain_sections(set(by_category))
+    order = [cat for _, members in domains for cat in members]
     toc = "".join(
         f'<li><a href="#{cat}">{html.escape(by_category[cat][0]["category_label"])}</a></li>'
         for cat in order
     )
+    category_of = {s["name"]: s["category"] for s in scenes}
     clip_items = "\n".join(
         f'<li><figure>{clip_img(clip, "../")}<figcaption>'
         f'<a href="#{html.escape(clip.scene)}">{html.escape(clip.scene)}</a> · '
         f't = {clip.start:g}–{clip.start + clip.seconds:g} s</figcaption></figure></li>'
-        for clip in clips
+        for clip in showcase.clips_by_domain(clips, category_of)
     )
+    first_of = {members[0]: domain for domain, members in domains}
     sections = []
     for cat in order:
+        if cat in first_of:
+            domain = first_of[cat]
+            sections.append(f'<h2 id="domain-{slug(domain)}">{html.escape(domain)}</h2>')
         items = []
         for scene in by_category[cat]:
             name = scene["name"]
@@ -419,7 +441,7 @@ def gallery_page(scenes: list[dict], clips: list[showcase.Clip]) -> Page:
             )
         label = html.escape(by_category[cat][0]["category_label"])
         sections.append(
-            f'<h2 id="{cat}">{label}</h2>\n<ul class="scenes">\n' + "\n".join(items) + "\n</ul>"
+            f'<h3 id="{cat}">{label}</h3>\n<ul class="scenes">\n' + "\n".join(items) + "\n</ul>"
         )
     body = f"""<h1>Gallery</h1>
 <p class="lede">Every one of the {len(scenes)} scenes, as sciart draws it at 160×48 cells after 20
@@ -433,11 +455,14 @@ simulated seconds (seed 42, astro theme). Select a scene to play it live.</p>
     return Page("gallery/index.html", "Gallery", "gallery", body)
 
 
-def player_page(clips: list[showcase.Clip]) -> Page:
+def player_page(clips: list[showcase.Clip], scenes: list[dict]) -> Page:
     hero = next(clip for clip in clips if clip.readme == "hero")
+    category_of = {s["name"]: s["category"] for s in scenes}
     data = {
         "module": "../assets/sciart_web.wasm",
         "default_scene": hero.scene,
+        # WEB-R2: the scene picker groups the categories in the gallery's domain order.
+        "category_order": showcase.ordered_categories(set(category_of.values())),
         "clips": {
             clip.scene: {"src": f"../media/{Path(clip.out).name}", "alt": clip.alt}
             for clip in clips
@@ -447,7 +472,7 @@ def player_page(clips: list[showcase.Clip]) -> Page:
     payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
     others = "".join(
         f'<li><a href="../media/{Path(clip.out).name}">{html.escape(clip.scene)}</a></li>'
-        for clip in clips
+        for clip in showcase.clips_by_domain(clips, category_of)
     )
     body = f"""<h1>Player</h1>
 <p class="lede">The scenes running in your browser: the same code as the terminal program,
@@ -508,7 +533,7 @@ def main(argv: list[str]) -> int:
     scenes = catalogue()
     clips = showcase.load_manifest()
     build = build_label()
-    pages = [home(clips, scenes), gallery_page(scenes, clips), player_page(clips), *guide_pages()]
+    pages = [home(clips, scenes), gallery_page(scenes, clips), player_page(clips, scenes), *guide_pages()]
     if DIST.exists():
         shutil.rmtree(DIST)
     DIST.mkdir(parents=True)

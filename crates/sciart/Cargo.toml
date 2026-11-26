@@ -1,6 +1,6 @@
 [package]
 name = "sciart"
-description = "Real-time generative science & astronomy art in your terminal"
+description = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -9,7 +9,7 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 readme = "../../README.md"
-keywords = ["terminal", "generative-art", "astronomy", "ascii-art", "screensaver"]
+keywords = ["terminal", "generative-art", "science", "ascii-art", "screensaver"]
 categories = ["command-line-utilities", "graphics", "science", "simulation", "visualization"]
 # DIST-R4: `LICENSE` and `CHANGELOG.md` are links to the root files, so the published crate
 # carries them; the suites under `tests/` drive a workspace checkout and stay out of it.

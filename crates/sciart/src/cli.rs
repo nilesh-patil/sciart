@@ -17,7 +17,7 @@ use serde::Deserialize;
     name = "sciart",
     version,
     long_version = crate::version::long(),
-    about = "Real-time generative science & astronomy art",
+    about = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space",
     after_long_help = AFTER_LONG_HELP
 )]
 pub struct Cli {

@@ -1,9 +1,11 @@
 # Introduction
 
-sciart draws science and astronomy in your terminal: galaxies that collide, planets that
-keep Kepler's time, a nerve that fires, sand that finds the nodes of a vibrating plate.
-There are 85 scenes in 11 categories, each a small simulation drawn in braille dots and
-half-block cells at 30 frames per second. While it runs, it keeps your machine awake.
+sciart is real-time generative science art for the terminal: physics, chemistry, biology,
+Earth and space. Sand finds the nodes of a vibrating plate, a chemical wave winds into a
+spiral, a nerve fires, a cell divides, an aurora folds over a lake and two galaxies
+collide. There are 85 scenes in 11 categories, each a small simulation drawn in braille
+dots and half-block cells at 30 frames per second. While it runs, it keeps your machine
+awake.
 
 Every scene is a real model, simplified to fit a terminal, and every one carries a short
 science title in its bottom-left corner that names the phenomenon and the mechanism. The

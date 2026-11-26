@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/site_check.py's origin rule (WEB-R6): a built site that would load
 anything from another origin fails, however the reference is written, and the site's own
-pages and player script pass.
+pages and player script pass; and for its description rule (WEB-R9): every place that
+describes the project carries the one description, and astronomy-first wording fails.
 
 Usage: python3 scripts/site_check_test.py
 """
@@ -184,6 +185,188 @@ class OriginRule(unittest.TestCase):
     def test_web_r6_the_site_stylesheet_meets_the_rule(self) -> None:
         css = (ROOT / "site" / "static" / "style.css").read_text(encoding="utf-8")
         self.assertEqual(site_check.css_problems(css, "style.css"), [])
+
+
+D = site_check.DESCRIPTION
+SHORT = site_check.SHORT_DESCRIPTION
+# A tree that carries the description everywhere WEB-R9 names, keyed by path.
+DESCRIBED = {
+    "README.md": f"# sciart\n\n[![CI](x.svg)](y)\n\n{D}. **85 scenes**,\nat 30 FPS.\n",
+    "crates/sciart/Cargo.toml": f'[package]\nname = "sciart"\ndescription = "{D}"\n',
+    "crates/sciart/src/cli.rs": f'#[command(\n    name = "sciart",\n    about = "{D}",\n)]\n',
+    "crates/sciart/src/lib.rs": f"//! {D}, as a library.\n",
+    "crates/sciart/src/main.rs": "//! `sciart`, the binary.\n",
+    "docs/ARCHITECTURE.md": f"# Architecture\n\n## Overview\n\nsciart is {D[0].lower()}{D[1:]}:\n85 scenes.\n",
+    "docs/GALLERY.md": "# Gallery\n",
+    "docs/guide/index.md": f"# Introduction\n\nsciart is {D[0].lower()}{D[1:]}.\nIt keeps your machine awake.\n",
+    "packaging/homebrew/sciart.rb.in": f'class Sciart < Formula\n  desc "{SHORT}"\nend\n',
+    "site/dist/index.html": f'<meta name="description" content="{D}: 85 scenes.">\n<p class="lede">{D}: 85\nscenes.</p>\n',
+    "site/dist/guide/index.html": f'<meta name="description" content="{D}: 85 scenes.">\n',
+}
+
+
+class DescriptionRule(unittest.TestCase):
+    """WEB-R9: one description, science first."""
+
+    def setUp(self) -> None:
+        self.tmp = tempfile.TemporaryDirectory()
+        self.n = 0
+
+    def tearDown(self) -> None:
+        self.tmp.cleanup()
+
+    def check(self, changed: dict[str, str | None]) -> list[str]:
+        """`description_problems` over DESCRIBED with the files in `changed` replaced."""
+        self.n += 1
+        root = Path(self.tmp.name) / f"tree{self.n}"
+        for rel, text in {**DESCRIBED, **changed}.items():
+            if text is None:
+                continue
+            path = root / rel
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(text, encoding="utf-8")
+        return site_check.description_problems(root, root / "site" / "dist")
+
+    def fails(self, changed: dict[str, str | None]) -> None:
+        problems = self.check(changed)
+        self.assertTrue(problems, f"expected a WEB-R9 problem for {changed}")
+        self.assertTrue(all(p.startswith("WEB-R9") for p in problems), problems)
+
+    def test_web_r9_a_tree_carrying_the_description_passes(self) -> None:
+        self.assertEqual(self.check({}), [])
+
+    def test_web_r9_the_short_about_passes(self) -> None:
+        cli = f'#[command(\n    about = "{SHORT}",\n)]\n'
+        self.assertEqual(self.check({"crates/sciart/src/cli.rs": cli}), [])
+
+    def test_web_r9_the_description_is_under_eighty_characters_short(self) -> None:
+        self.assertLessEqual(len(SHORT), site_check.HOMEBREW_DESC_LIMIT)
+        self.assertEqual(SHORT, "Real-time generative science art for the terminal")
+
+    def test_web_r9_a_readme_that_opens_otherwise_fails(self) -> None:
+        self.fails({"README.md": f"# sciart\n\nArt for the terminal. {D}.\n"})
+
+    def test_web_r9_a_different_crate_description_fails(self) -> None:
+        self.fails({"crates/sciart/Cargo.toml": 'description = "Generative art in your terminal"\n'})
+
+    def test_web_r9_a_different_about_fails(self) -> None:
+        self.fails({"crates/sciart/src/cli.rs": 'about = "Generative art",\n'})
+
+    def test_web_r9_the_guides_opening_lines_carry_it(self) -> None:
+        self.fails({"docs/ARCHITECTURE.md": "# Architecture\n\n## Overview\n\nsciart draws art.\n"})
+        self.fails({"docs/guide/index.md": "# Introduction\n\nsciart draws art.\n\n" + D + "\n"})
+
+    def test_web_r9_the_homebrew_desc_is_the_short_form(self) -> None:
+        self.fails({"packaging/homebrew/sciart.rb.in": f'  desc "{D}"\n'})
+        self.fails({"packaging/homebrew/sciart.rb.in": '  desc "Terminal art"\n'})
+
+    def test_web_r9_the_site_lede_and_every_meta_description_carry_it(self) -> None:
+        self.fails({"site/dist/index.html": f'<meta name="description" content="{D}.">\n<p class="lede">Art.</p>\n'})
+        self.fails({"site/dist/guide/index.html": '<meta name="description" content="Art.">\n'})
+        self.fails({"site/dist/guide/index.html": "<p>No meta.</p>\n"})
+
+    def test_web_r9_astronomy_first_wording_fails_wherever_users_read_it(self) -> None:
+        for rel, text in (
+            ("docs/GALLERY.md", "# Gallery\n\nScience & astronomy art.\n"),
+            ("crates/sciart/src/main.rs", "//! real-time generative science and astronomy art\n"),
+            ("crates/sciart/src/lib.rs", f"//! {D}.\n//! Was: science  and\tastronomy.\n"),
+            ("README.md", f"# sciart\n\n{D}.\n\nScience &\nastronomy.\n"),
+            ("docs/guide/keys.md", "# Keys\n\nsciart is science &amp; astronomy art.\n"),
+            ("site/dist/gallery/index.html", f'<meta name="description" content="{D}.">\n<p>Science and Astronomy</p>\n'),
+        ):
+            with self.subTest(rel=rel):
+                self.fails({rel: text})
+
+    def test_web_r9_the_repository_meets_the_rule_outside_the_built_site(self) -> None:
+        # The built site is checked by `pixi run site-check`; here, the sources it comes from.
+        problems = site_check.description_problems(site_check.ROOT, Path(self.tmp.name) / "none")
+        self.assertEqual(
+            [p for p in problems if "site/dist" not in p and "index.html" not in p], []
+        )
+
+
+CATALOGUE = [
+    {"name": "double_pendulum", "category": "forces-waves", "category_label": "Forces & Waves"},
+    {"name": "gray_scott", "category": "reactions", "category_label": "Reactions"},
+    {"name": "aurora", "category": "earth-sky", "category_label": "Earth & Sky"},
+    {"name": "black_hole", "category": "deep-cosmos", "category_label": "Deep Cosmos"},
+]
+
+
+class GalleryOrder(unittest.TestCase):
+    """WEB-R2: the site's gallery lists the categories in the domain order."""
+
+    def problems(self, body: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "index.html"
+            page.write_text(f"<h1>Gallery</h1>\n<h2 id=\"in-motion\">In motion</h2>\n{body}")
+            return site_check.gallery_order_problems(page, CATALOGUE)
+
+    def test_web_r2_categories_under_their_domains_in_order_pass(self) -> None:
+        body = (
+            "<h2>Physics</h2><h3>Forces &amp; Waves</h3><h2>Chemistry</h2><h3>Reactions</h3>"
+            "<h2>Earth</h2><h3>Earth &amp; Sky</h3><h2>Space</h2><h3>Deep Cosmos</h3>"
+        )
+        self.assertEqual(self.problems(body), [])
+
+    def test_web_r2_space_first_fails(self) -> None:
+        body = (
+            "<h2>Deep Cosmos</h2><h2>Earth &amp; Sky</h2><h2>Forces &amp; Waves</h2>"
+            "<h2>Reactions</h2>"
+        )
+        problems = self.problems(body)
+        self.assertTrue(problems and all(p.startswith("WEB-R2") for p in problems), problems)
+
+    def test_web_r2_a_missing_domain_heading_fails(self) -> None:
+        body = (
+            "<h2>Physics</h2><h3>Forces &amp; Waves</h3><h3>Reactions</h3>"
+            "<h2>Earth</h2><h3>Earth &amp; Sky</h3><h2>Space</h2><h3>Deep Cosmos</h3>"
+        )
+        self.assertTrue(self.problems(body))
+
+
+ORDERED = '{"module": "../assets/sciart_web.wasm", "category_order": ["forces-waves", "reactions", "earth-sky", "deep-cosmos"]}'
+GROUPED_JS = (
+    "const rank = (c) => data.category_order.indexOf(c);\n"
+    "for (const [cat, members] of [...groups].sort((a, b) => rank(a[0]) - rank(b[0]))) {}\n"
+)
+LABEL_SORTED_JS = (
+    "// data.category_order is not used\n"
+    "for (const [label, members] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {}\n"
+)
+
+
+class PlayerOrder(unittest.TestCase):
+    """WEB-R2: the player's scene picker walks the categories in the gallery's order."""
+
+    def problems(self, data: str, js: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            page, script = Path(tmp) / "index.html", Path(tmp) / "player.js"
+            page.write_text(f'<script type="application/json" id="player-data">{data}</script>')
+            script.write_text(js)
+            return site_check.player_order_problems(page, script, CATALOGUE)
+
+    def test_web_r2_the_domain_order_in_data_and_script_passes(self) -> None:
+        self.assertEqual(self.problems(ORDERED, GROUPED_JS), [])
+
+    def test_web_r2_a_registry_or_alphabetical_order_in_the_data_fails(self) -> None:
+        for order in ('["deep-cosmos", "earth-sky", "forces-waves", "reactions"]', None):
+            data = ORDERED.replace(
+                ', "category_order": ["forces-waves", "reactions", "earth-sky", "deep-cosmos"]',
+                "" if order is None else f', "category_order": {order}',
+            )
+            with self.subTest(order=order):
+                self.assertTrue(self.problems(data, GROUPED_JS))
+
+    def test_web_r2_a_script_sorting_groups_by_label_fails(self) -> None:
+        self.assertTrue(self.problems(ORDERED, LABEL_SORTED_JS))
+
+    def test_web_r2_the_site_player_script_groups_by_the_data(self) -> None:
+        script = ROOT / "site" / "static" / "player.js"
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "index.html"
+            page.write_text(f'<script type="application/json" id="player-data">{ORDERED}</script>')
+            self.assertEqual(site_check.player_order_problems(page, script, CATALOGUE), [])
 
 
 if __name__ == "__main__":

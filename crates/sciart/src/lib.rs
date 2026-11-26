@@ -1,4 +1,5 @@
-//! Real-time generative science and astronomy art, as a library (SPEC-007, ADR-0032).
+//! Real-time generative science art for the terminal: physics, chemistry, biology, Earth and
+//! space, as a library (SPEC-007, ADR-0032).
 //!
 //! Run any of sciart's scenes without a terminal, list them, turn a frame into text, ANSI
 //! or a PNG, or draw one inside a ratatui application. This crate also builds the `sciart`

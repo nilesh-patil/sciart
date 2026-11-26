@@ -8,8 +8,23 @@ All notable changes to this project are documented here. The format is based on
 
 ## [1.0.1] - 2026-11-26
 
-Documentation and release tooling only: the program and the library are the same as in
-1.0.0. This is the first version on crates.io, the conda channel and the Homebrew tap.
+Documentation, packaging and release tooling: the scenes, the command line and the
+library API are the same as in 1.0.0; only the program's one-line description changed.
+This is the first version on crates.io and the Homebrew tap.
+
+### Changed
+
+- The README and the gallery present every science domain: a "What's inside" table of the
+  11 categories by domain (physics, chemistry, life, Earth, space) with their scene counts,
+  a gallery grouped by domain with at least one clip from every category (new clips of
+  `gray_scott`, `firefly_sync`, `protocell_assembly` and `action_potential`), example
+  commands from many categories, and links to the live player, gallery and guide
+  (WEB-R1, WEB-R2).
+- The one-line description names the domains: "Real-time generative science art for the
+  terminal: physics, chemistry, biology, Earth and space", in the README, the crate, the
+  `--help` text and the site, and its part before the colon in the Homebrew formula
+  (WEB-R9). The installer still recognises a 1.0.0 binary by the start of its
+  description (DIST-R7).
 
 ### Fixed
 
@@ -22,6 +37,12 @@ Documentation and release tooling only: the program and the library are the same
   page; they now link into the repository at the release's tag (DIST-R10).
 - The by-hand install text names the unpack step and `sha256sum` for systems without
   `shasum` (DIST-R7).
+
+### Removed
+
+- The conda package and channel announced in 1.0.0 were never published and are
+  withdrawn; install with the installer script, Homebrew or cargo
+  ([ADR-0033](docs/adr/0033-distribution-channels.md), DIST-R8).
 
 ## [1.0.0] - 2026-11-26
 

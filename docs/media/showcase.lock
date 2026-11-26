@@ -180,3 +180,43 @@ start = 0.0
 seconds = 6.0
 fps = 20
 theme = "astro"
+
+[[clip]]
+out = "docs/media/gray_scott.gif"
+scene = "gray_scott"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 9.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/firefly_sync.gif"
+scene = "firefly_sync"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 10.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/protocell_assembly.gif"
+scene = "protocell_assembly"
+seed = 42
+size = "80x24"
+start = 28.0
+seconds = 10.0
+fps = 15
+theme = "astro"
+
+[[clip]]
+out = "docs/media/action_potential.gif"
+scene = "action_potential"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 15
+theme = "astro"

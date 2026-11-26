@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-`sciart` is real-time generative science and astronomy art for the terminal: **85 animated
+`sciart` is real-time generative science art for the terminal (physics, chemistry, biology, Earth and space): **85 animated
 scenes at 30 FPS**, drawn with ratatui + crossterm, while keeping the machine awake
 (`caffeinate` on macOS, a `systemd-inhibit` lock on Linux, optional mouse jiggle). It
 replaced the Python prototype, which rendered one static frame every 15 seconds; the Python
@@ -247,9 +247,9 @@ hermetic with respect to terminal colour configuration (TEST-R12).
 - Platforms (TEST-R13, ADR-0029): tier 1 macOS arm64 and Linux x86_64; tier 2 Linux
   aarch64; tier 3 Intel macOS and Linux musl (release builds only). Frames are pinned on
   the reference platform, macOS arm64, only. Windows is not supported.
-- Install: release tarballs with an installer script, a Homebrew tap, a conda package for
-  pixi, and crates.io (`cargo install sciart`, `cargo binstall sciart`); the README lists
-  the commands and SPEC-008 the rules. In a checkout, `pixi run rs-install`.
+- Install: release tarballs with an installer script, a Homebrew tap, and crates.io
+  (`cargo install sciart`, `cargo binstall sciart`); the README lists the commands and
+  SPEC-008 the rules. In a checkout, `pixi run rs-install`.
 
 ## Error Handling & Edge Cases
 
