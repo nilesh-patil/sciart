@@ -39,7 +39,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -81,13 +81,13 @@ jobs:
           - platform: linux-aarch64
             os: ubuntu-22.04-arm
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
       - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
-      - uses: prefix-dev/setup-pixi@8ca4608ef7f4daeb54f5205b20d0b7cb42f11143 # v0.8.14
+      - uses: prefix-dev/setup-pixi@9936258fee697aff89b3fed6ca1f80a382ef694e # v0.11.3
         with:
           environments: dist
       - name: Build (DIST-R8)
@@ -108,7 +108,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: release
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.TAG }}
           persist-credentials: false
@@ -123,7 +123,7 @@ jobs:
         run: |
           python3 scripts/render_formula.py --version "${TAG#v}" --sums dist/SHA256SUMS --out Formula/sciart.rb
           ruby -c Formula/sciart.rb
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         if: github.event_name == 'release'
         with:
           repository: ${{ vars.HOMEBREW_TAP }}

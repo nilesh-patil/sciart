@@ -25,7 +25,7 @@ PUBLISH_STEP = """      - name: Publish
         run: python3 scripts/publish_crates.py
 """
 SNEAK = "      # DIST-R4: one crate at a time"
-CHECKOUT = "actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0"
+CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 TAG_STEP_PUBLISH = """      - name: Tag matches the version (DIST-R1)
         run: python3 scripts/release_check.py --tag "$TAG"
 """
