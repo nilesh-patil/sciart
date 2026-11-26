@@ -130,6 +130,32 @@ class SnapshotJob(unittest.TestCase):
         self.assertTrue(tooling_check.snapshot_job_problems(tooling_check.workflow_jobs(text)))
 
 
+class Toolchains(unittest.TestCase):
+    """ADR-0024: a job that installs a toolchain other than stable pins RUSTUP_TOOLCHAIN."""
+
+    def test_adr_0024_every_workflow_passes(self) -> None:
+        self.assertEqual(tooling_check.toolchain_problems(WORKFLOWS), [])
+
+    def test_adr_0024_nightly_without_rustup_toolchain_fails(self) -> None:
+        old = "    env:\n      RUSTUP_TOOLCHAIN: nightly\n"
+        self.assertIn(old, WORKFLOWS["fuzz.yml"])
+        found = tooling_check.toolchain_problems(dict(WORKFLOWS, **{"fuzz.yml": WORKFLOWS["fuzz.yml"].replace(old, "")}))
+        self.assertTrue(any("nightly" in p for p in found), found)
+
+    def test_adr_0024_the_msrv_without_rustup_toolchain_fails(self) -> None:
+        old = '  RUSTUP_TOOLCHAIN: "1.88.0"\n'
+        self.assertIn(old, WORKFLOWS["ci.yml"])
+        found = tooling_check.toolchain_problems(dict(WORKFLOWS, **{"ci.yml": WORKFLOWS["ci.yml"].replace(old, "")}))
+        self.assertTrue(any("1.88.0" in p for p in found), found)
+
+    def test_adr_0024_a_named_toolchain_input_counts(self) -> None:
+        old = "          targets: wasm32-unknown-unknown\n"
+        self.assertIn(old, WORKFLOWS["pages.yml"])
+        text = WORKFLOWS["pages.yml"].replace(old, "          toolchain: beta\n" + old, 1)
+        found = tooling_check.toolchain_problems(dict(WORKFLOWS, **{"pages.yml": text}))
+        self.assertTrue(any("beta" in p for p in found), found)
+
+
 PIXI = tooling_check.toml_file("pixi.toml")
 
 

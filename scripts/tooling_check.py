@@ -5,7 +5,8 @@ SPEC-007 LIB-R4, LIB-R7, LIB-R8; SPEC-005 CLI-R15; SPEC-008 DIST-R5; SPEC-009 WE
 Asserts the shape of the build/test tooling the gate depends on: pixi tasks use the
 documented profiles, the cargo `ci`/`test` profiles keep their opt-levels and checks,
 nextest never filters or retries, sccache stays the shared rustc wrapper, the local gate
-runs CI's NO_COLOR pass, CI covers the platform tiers on supported runner images, the
+runs CI's NO_COLOR pass, CI covers the platform tiers on supported runner images, a
+workflow that installs a toolchain other than stable pins it with RUSTUP_TOOLCHAIN, the
 browser player and the docs site build in the gate and in CI, and GitHub Pages is deployed
 only by hand or on a published release.
 
@@ -313,6 +314,46 @@ def workflow_texts() -> dict[str, str]:
     return {p.name: p.read_text() for p in sorted((ROOT / ".github/workflows").glob("*.yml"))}
 
 
+TOOLCHAIN_ACTION = "dtolnay/rust-toolchain@"
+
+
+def toolchain_problems(texts: dict[str, str]) -> list[str]:
+    """ADR-0024 over every workflow ({file name: text}): `rust-toolchain.toml` floats on
+    stable and wins over the toolchain an action installs, so a job that installs any other
+    toolchain (`with: toolchain:`, or the version in the pinned action's comment) sets
+    `RUSTUP_TOOLCHAIN` to it at job or workflow level; otherwise its cargo commands run on
+    stable (and `cargo fuzz` refuses `-Z`)."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        try:
+            data = parse(text)
+        except YamlError as e:
+            problems.append(f"ADR-0024: cannot read {name} to check its toolchains: {e}")
+            continue
+        if not isinstance(data, dict) or not isinstance(data.get("jobs"), dict):
+            continue
+        top = data.get("env") if isinstance(data.get("env"), dict) else {}
+        for job_name, job in data["jobs"].items():
+            if not isinstance(job, dict):
+                continue
+            env = dict(top, **(job.get("env") if isinstance(job.get("env"), dict) else {}))
+            for step in job.get("steps") or []:
+                uses = str(step.get("uses", "")) if isinstance(step, dict) else ""
+                if not uses.startswith(TOOLCHAIN_ACTION):
+                    continue
+                chosen = (step.get("with") or {}).get("toolchain") if isinstance(step.get("with"), dict) else None
+                if chosen is None:
+                    comment = re.search(rf"uses:\s*{re.escape(uses)}\s+#\s*(\S+)", text)
+                    chosen = comment.group(1) if comment else None
+                if chosen is None:
+                    problems.append(f"ADR-0024: {name} `{job_name}` installs a toolchain it does not name")
+                elif str(chosen) != "stable" and str(env.get("RUSTUP_TOOLCHAIN")) != str(chosen):
+                    problems.append(f"ADR-0024: {name} `{job_name}` installs the {chosen} toolchain but does not set "
+                                    f"`RUSTUP_TOOLCHAIN: {chosen}` at job or workflow level, so "
+                                    "rust-toolchain.toml (stable) wins")
+    return problems
+
+
 def forces_lf(lines: list[str], pattern: str) -> bool:
     for line in lines:
         fields = line.split()
@@ -334,6 +375,8 @@ def check_r13(problems: list[str]) -> None:
     for problem in snapshot_job_problems(jobs):
         fail(problems, problem)
     for problem in runner_image_problems(workflow_texts()):
+        fail(problems, problem)
+    for problem in toolchain_problems(workflow_texts()):
         fail(problems, problem)
     if "test" in jobs and not re.search(r"run: cargo nextest run --workspace\s*$", jobs["test"], re.M):
         fail(problems, "TEST-R13: ci.yml `test` runs the whole suite (`cargo nextest run --workspace`)")
