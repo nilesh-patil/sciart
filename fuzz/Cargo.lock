@@ -1205,7 +1205,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "sciart-core"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "rand 0.9.5",
  "rand_chacha",
@@ -1223,7 +1223,7 @@ dependencies = [
 
 [[package]]
 name = "sciart-render"
-version = "0.1.0"
+version = "0.6.0"
 dependencies = [
  "crossterm",
  "ratatui",

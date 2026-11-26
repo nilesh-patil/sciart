@@ -3,7 +3,9 @@ resolver = "3"
 members = ["crates/*"]
 
 [workspace.package]
-version = "0.1.0"
+# DIST-R1: the version of `sciart`, and the only hand-edited one (`scripts/bump_version.py`
+# sets it together with the internal crates' version below).
+version = "0.6.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -13,19 +15,24 @@ homepage = "https://github.com/nilesh-patil/sciart"
 readme = "README.md"
 
 [workspace.dependencies]
-sciart-core = { path = "crates/sciart-core" }
-sciart-generators = { path = "crates/sciart-generators" }
+# DIST-R3 / ADR-0033: the internal crates share one 0.x version of their own and are pinned
+# exactly, so a `sciart` release always builds against the internals it was tested with.
+# `scripts/bump_version.py` keeps these pins and the crates' `version` lines in step.
+sciart-core = { path = "crates/sciart-core", version = "=0.6.0" }
+sciart-generators = { path = "crates/sciart-generators", version = "=0.6.0" }
 # ADR-0023: the scenes, split by category behind the sciart-generators registry facade.
-sciart-shared = { path = "crates/sciart-shared" }
-sciart-scenes-cosmos = { path = "crates/sciart-scenes-cosmos" }
-sciart-scenes-earth = { path = "crates/sciart-scenes-earth" }
-sciart-scenes-physics = { path = "crates/sciart-scenes-physics" }
-sciart-scenes-matter = { path = "crates/sciart-scenes-matter" }
-sciart-scenes-life = { path = "crates/sciart-scenes-life" }
-sciart-render = { path = "crates/sciart-render" }
-sciart-keepawake = { path = "crates/sciart-keepawake" }
-sciart-capture = { path = "crates/sciart-capture" }
-sciart-testalloc = { path = "crates/sciart-testalloc" } # dev-only (ADR-0009)
+sciart-shared = { path = "crates/sciart-shared", version = "=0.6.0" }
+sciart-scenes-cosmos = { path = "crates/sciart-scenes-cosmos", version = "=0.6.0" }
+sciart-scenes-earth = { path = "crates/sciart-scenes-earth", version = "=0.6.0" }
+sciart-scenes-physics = { path = "crates/sciart-scenes-physics", version = "=0.6.0" }
+sciart-scenes-matter = { path = "crates/sciart-scenes-matter", version = "=0.6.0" }
+sciart-scenes-life = { path = "crates/sciart-scenes-life", version = "=0.6.0" }
+sciart-render = { path = "crates/sciart-render", version = "=0.6.0" }
+sciart-keepawake = { path = "crates/sciart-keepawake", version = "=0.6.0" }
+sciart-capture = { path = "crates/sciart-capture", version = "=0.6.0" }
+# Dev-only (ADR-0009) and never published: no version, so `cargo publish` drops it from the
+# published manifests (DIST-R3).
+sciart-testalloc = { path = "crates/sciart-testalloc" }
 
 anyhow = "1"
 # RT-R22: only the features the code uses. clap: the derive API, help and usage text,

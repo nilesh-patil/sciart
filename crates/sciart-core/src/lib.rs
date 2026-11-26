@@ -1,3 +1,6 @@
+//! **Internal crate of [`sciart`](https://docs.rs/sciart)**, with no semver promise: its API
+//! can change in any release. Use the `sciart` crate, the supported entry point.
+//!
 //! Terminal-agnostic primitives for sciart (SPEC-001).
 //!
 //! Nothing in this crate touches the terminal, the OS, the wall clock or a global RNG:

@@ -40,11 +40,10 @@ confidence-threshold = 0.8
 
 [bans]
 # Duplicate versions are common in a deep dev-dependency graph; keep them visible without
-# blocking. `*` requirements hide updates and are never acceptable — except for the
-# workspace's own path dependencies, which carry no version by design (their versions
-# move together). cargo-deny honours `allow-wildcard-paths` only for crates that are not
-# publishable, so every workspace crate carries `publish = false` (crate metadata is owned
-# by another branch; merge it before this gate can be green).
+# blocking. `*` requirements hide updates and are never acceptable. The published crates
+# pin each other with `=` (DIST-R3), so they have none; `allow-wildcard-paths` covers what
+# is left, the version-less dev-dependency on the never-published `sciart-testalloc`,
+# which `cargo publish` drops from the published manifests.
 multiple-versions = "warn"
 wildcards = "deny"
 allow-wildcard-paths = true
