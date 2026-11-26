@@ -1,6 +1,6 @@
 # Gallery
 
-Every one of the 85 registered scenes, one current frame each: astro theme at 160x48 cells (8x16 px per cell), seed 42, t = 20 s. A compare link, where present, shows the scene's historical looks side by side.
+Every one of the 85 registered scenes, one current frame each: astro theme at 160x48 cells (8x16 px per cell), seed 42, t = 20 s.
 
 ## In motion
 

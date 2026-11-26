@@ -292,8 +292,7 @@ def write_gallery(scenes: list[Scene]) -> None:
         "",
         (
             f"Every one of the {len(scenes)} registered scenes, one current frame each: astro "
-            f"theme at {SIZE} cells (8x16 px per cell), seed 42, t = {TIME} s. A compare link, "
-            "where present, shows the scene's historical looks side by side."
+            f"theme at {SIZE} cells (8x16 px per cell), seed 42, t = {TIME} s."
         ),
         "",
         *motion_section(scenes),
