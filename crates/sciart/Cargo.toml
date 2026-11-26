@@ -1,6 +1,6 @@
 [package]
 name = "sciart"
-description = "Real-time generative science & astronomy art in your terminal"
+description = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

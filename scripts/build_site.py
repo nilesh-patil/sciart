@@ -50,6 +50,8 @@ REPOSITORY = "https://github.com/nilesh-patil/sciart"
 # The still frames' size in pixels (scripts/gallery.py renders 160x48 cells at 8x16 px).
 STILL_W, STILL_H = 1280, 768
 SITE_NAME = "sciart"
+# WEB-R9: the project's one description, for the lede and every page's meta description.
+DESCRIPTION = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
 
 
 def fail(message: str) -> NoReturn:
@@ -289,7 +291,7 @@ def page_html(page: Page, build: str) -> str:
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>
-<meta name="description" content="Real-time generative science and astronomy art for the terminal: 85 scenes, drawn in braille and half-block cells.">
+<meta name="description" content="{DESCRIPTION}. 85 scenes, drawn in braille and half-block cells.">
 <link rel="icon" href="{root}assets/icon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="{root}assets/style.css">
 </head>
@@ -320,20 +322,35 @@ def clip_img(clip: showcase.Clip, root: str, width: int | None = None) -> str:
     )
 
 
+def home_tiles(clips: list[showcase.Clip], scenes: list[dict], count: int = 6) -> list[showcase.Clip]:
+    """`count` README grid clips taken in turn from each domain (WEB-R2's order), so the home
+    page shows every science, not the first few clips of the manifest."""
+    category = {s["name"]: s["category"] for s in scenes}
+    queues = [
+        [c for c in clips if c.readme == "grid" and category.get(c.scene) in members]
+        for _, members in showcase.DOMAINS
+    ]
+    tiles: list[showcase.Clip] = []
+    while len(tiles) < count and any(queues):
+        for queue in queues:
+            if queue and len(tiles) < count:
+                tiles.append(queue.pop(0))
+    return tiles
+
+
 def home(clips: list[showcase.Clip], scenes: list[dict]) -> Page:
     hero = next(clip for clip in clips if clip.readme == "hero")
-    grid = [clip for clip in clips if clip.readme == "grid"][:6]
     tiles = "\n".join(
         f'<li><figure>{clip_img(clip, "")}<figcaption>{html.escape(clip.scene)}</figcaption></figure></li>'
-        for clip in grid
+        for clip in home_tiles(clips, scenes)
     )
     categories = len({s["category"] for s in scenes})
     body = f"""<div class="home">
 <figure class="hero">{clip_img(hero, "")}<figcaption>{html.escape(hero.scene)} · recorded with <code>sciart record</code></figcaption></figure>
 <h1>{SITE_NAME}</h1>
-<p class="lede">Real-time generative science and astronomy art for the terminal: {len(scenes)} scenes in
-{categories} categories, each a small simulation drawn in braille dots and half-block cells at
-30 frames per second. It keeps your machine awake while you watch.</p>
+<p class="lede">{DESCRIPTION}. {len(scenes)} scenes in {categories} categories, each a small
+simulation drawn in braille dots and half-block cells at 30 frames per second. It keeps your
+machine awake while you watch.</p>
 <ul class="doors">
 <li><a href="play/index.html">Play a scene in your browser</a></li>
 <li><a href="gallery/index.html">See all {len(scenes)} scenes</a></li>
