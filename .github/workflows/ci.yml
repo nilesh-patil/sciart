@@ -193,13 +193,18 @@ jobs:
   semver:
     name: semver (library API against v1.0.0)
     runs-on: ubuntu-24.04
+    # cargo-semver-checks needs a newer rustc than the MSRV; rustdoc JSON comes from the
+    # toolchain that runs it, so baseline and current both build on stable (the MSRV is
+    # checked by the other jobs).
+    env:
+      RUSTUP_TOOLCHAIN: stable
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           # The whole history and the tags: `--baseline-rev v1.0.0` needs the tag.
           fetch-depth: 0
           persist-credentials: false
-      - uses: dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: taiki-e/install-action@893d6ee8d714b6c7dfe2bcd94e5759e9a7958a7e # v2.90.10
         with:
