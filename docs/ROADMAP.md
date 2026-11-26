@@ -325,7 +325,8 @@ Design: [docs/design/M25-v1-release.md](design/M25-v1-release.md). Owner decisio
 - [x] Phase 2 — CLI modes (CLI-R12, R14, R16, R17, RT-R23; ADR-0031): `--for`, `sciart while -- <command>`, a versioned `list --json`, `completions` and `man`; 1,744 default + 268 record-feature tests; the size budget rises to 3.44 MiB and 96 crates for the generators
 - [x] Phase 2 — library facade (LIB-R1..R8, SPEC-007; ADR-0032): `Stage`, `scenes`/`find`, text, ANSI and PNG output, a ratatui `SceneWidget`, a reviewed surface snapshot; `sciart frame` (CLI-R13); the recorder in default builds (CLI-R15); 1,799 workspace tests, 281 without the recorder, 38 library-only
 - [ ] Phase 3 — distribution (DIST-R1..R10, SPEC-008; ADR-0033)
-- [ ] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034)
+- [x] Phase 3 — web gallery and docs site (WEB-R3..R8, SPEC-009; ADR-0034): `web/` builds the scenes for the browser (a 1.76 MiB module with no imports, run by `web-smoke` outside a browser), `site/` and `scripts/build_site.py` write a self-contained site (guide, gallery of all 85 scenes, live player with clip fallback), `site_check.py` holds weight, origin and truthfulness, `pages.yml` deploys by hand from the default branch or on a release
+- [ ] The site in Firefox and Safari, a real WebAssembly failure in the player, and the first Pages deploy — manual
 - [ ] Phase 4 — clean tree and history (public documents only; neutral wording; second history rewrite)
 - [ ] Phase 4 — version 1.0.0, CHANGELOG, docs truth pass, final review, local tag `v1.0.0`
 - [ ] Publish (owner): crates.io, conda channel, Homebrew tap, GitHub Pages, public repository

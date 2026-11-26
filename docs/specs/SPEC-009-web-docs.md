@@ -1,6 +1,6 @@
 # SPEC-009: Showcase, web gallery and docs site
 
-**Milestone**: M25 · **Status**: WEB-R1/R2 (showcase) implemented; WEB-R3..R8 (web gallery, docs site) in progress · **ADR**: [0034](../adr/0034-web-gallery-and-docs-site.md)
+**Milestone**: M25 · **Status**: implemented; the first Pages deploy and browsers other than Chrome are manual checks · **ADR**: [0034](../adr/0034-web-gallery-and-docs-site.md)
 
 The README, the gallery and the docs site show the art moving. Every animated capture is
 recorded from the binary, from a manifest, so it can be regenerated and never drifts from
