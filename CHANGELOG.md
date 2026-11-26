@@ -13,6 +13,8 @@ All notable changes to this project are documented here. The format is based on
   the empty redirect body and `sh` exited 0 without a word. The command is now
   `curl --proto '=https' --tlsv1.2 -LsSf … | sh`, and the installer check fails a
   documented command that does not follow redirects (DIST-R7).
+- The release notes carried the changelog's relative links, which are dead on a release
+  page; they now link into the repository at the release's tag (DIST-R10).
 
 ## [1.0.0] - 2026-11-26
 
