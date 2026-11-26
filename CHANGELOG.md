@@ -6,6 +6,11 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-11-26
+
+Documentation and release tooling only: the program and the library are the same as in
+1.0.0. This is the first version on crates.io, the conda channel and the Homebrew tap.
+
 ### Fixed
 
 - The installer-script command in the README did not follow redirects, so it installed
@@ -15,6 +20,8 @@ All notable changes to this project are documented here. The format is based on
   documented command that does not follow redirects (DIST-R7).
 - The release notes carried the changelog's relative links, which are dead on a release
   page; they now link into the repository at the release's tag (DIST-R10).
+- The by-hand install text names the unpack step and `sha256sum` for systems without
+  `shasum` (DIST-R7).
 
 ## [1.0.0] - 2026-11-26
 
@@ -209,5 +216,6 @@ First tagged version.
   per frame; the low-power idle default dropped from 10 minutes to 2; per-scene memory
   ceilings were lowered to their measured values plus a margin. Visuals are unchanged.
 
-[Unreleased]: https://github.com/nilesh-patil/sciart/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/nilesh-patil/sciart/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/nilesh-patil/sciart/releases/tag/v1.0.1
 [1.0.0]: https://github.com/nilesh-patil/sciart/releases/tag/v1.0.0
