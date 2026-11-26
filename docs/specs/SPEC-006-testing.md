@@ -1,6 +1,6 @@
 # SPEC-006: Testing & quality gates
 
-**Status**: Implemented (all layers, including `alloc_free`, cover all 85 scenes); TEST-R6..R8 (leak guards) landed in M11; TEST-R12 (hermetic environment) in M23; TEST-R1/R4 and the tooling schema (TEST-R9/R10/R11) moved to checker scripts (`scripts/spec_check.py`, `scripts/tooling_check.py`)
+**Status**: Implemented (all layers, including `alloc_free`, cover all 85 scenes); TEST-R6..R8 (leak guards) landed in M11; TEST-R12 (hermetic environment) in M23; TEST-R1/R4 and the tooling schema (TEST-R9/R10/R11) moved to checker scripts (`scripts/spec_check.py`, `scripts/tooling_check.py`); TEST-R13 (platform tiers) in M25
 
 ## TDD workflow
 1. Pick the next unchecked item in `docs/ROADMAP.md`.

@@ -1,6 +1,6 @@
 # SPEC-002: Generators & registry
 
-**Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches), M10 (Batch E), M11 (titles, taxonomy), M13/M21 (new scenes) · **Status**: Implemented through M22 (GEN-R1..GEN-R26); the registry holds 85 scenes in 11 categories
+**Crate**: `crates/sciart-generators` · **Milestones**: M1 (registry, starfield), M4–M7 (batches), M10 (Batch E), M11 (titles, taxonomy), M13/M21 (new scenes) · **Status**: Implemented (GEN-R1..GEN-R26); the registry holds 85 scenes in 11 categories
 
 Ports the Python prototype's stability contract (its rule R1) to Rust
 and extends it for real-time animation.
