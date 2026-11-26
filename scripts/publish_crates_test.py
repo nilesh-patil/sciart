@@ -7,12 +7,14 @@ sparse index on disk and a fake `cargo` that records what it is asked to publish
 
 from __future__ import annotations
 
+import email.utils
 import json
 import os
 import stat
 import subprocess
 import sys
 import tempfile
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -68,6 +70,68 @@ def run(index: Path, work: Path, *args: str, fail_on: str = "") -> tuple[int, st
     return done.returncode, done.stdout + done.stderr, calls
 
 
+NOW = datetime(2026, 11, 26, 12, 0, 0, tzinfo=timezone.utc)
+LIMITED = ("error: failed to publish to registry at https://crates.io\n\nCaused by:\n  the remote server "
+           "responded with an error (status 429 Too Many Requests): You have published too many new crates "
+           "in a short period of time. Please try again after {when} or email help@crates.io to have your "
+           "limit increased.\n")
+
+
+def limited(minutes: float) -> str:
+    return LIMITED.format(when=email.utils.format_datetime(NOW + timedelta(minutes=minutes), usegmt=True))
+
+
+class FakeCargo:
+    """`cargo publish -p <name>` answers: a list of (exit code, output) per crate, the last
+    one repeated."""
+
+    def __init__(self, answers: dict[str, list[tuple[int, str]]]) -> None:
+        self.answers, self.calls = answers, []
+
+    def __call__(self, name: str) -> tuple[int, str]:
+        self.calls.append(name)
+        queue = self.answers.get(name, [(0, "")])
+        return queue.pop(0) if len(queue) > 1 else queue[0]
+
+
+def rate_limit_problems() -> list[str]:
+    """DIST-R4: a 429 for the new-crate limit is waited out (the sleep is injected, so
+    nothing here sleeps); any other failure still stops the run."""
+    problems: list[str] = []
+    check = lambda cond, msg: None if cond else problems.append(msg)  # noqa: E731
+    left = [("sciart-core", "0.7.1"), ("sciart-shared", "0.7.1"), ("sciart", "1.0.2")]
+    check(publish_crates.retry_at(limited(10)) == NOW + timedelta(minutes=10),
+          "DIST-R4: the time crates.io names in a 429 is read")
+    check(publish_crates.retry_at("error: 500 Internal Server Error") is None,
+          "DIST-R4: another failure names no retry time")
+    check(publish_crates.retry_at("status 429 Too Many Requests: slow down") is None,
+          "DIST-R4: a 429 without a time is not waited for")
+    # Limited once, then accepted: one wait to the named time plus the margin, then on.
+    cargo, sleeps = FakeCargo({"sciart-shared": [(101, limited(10)), (0, "")]}), []
+    code = publish_crates.publish_all(left, cargo, sleeps.append, lambda: NOW)
+    check(code == 0 and cargo.calls == ["sciart-core", "sciart-shared", "sciart-shared", "sciart"]
+          and sleeps == [10 * 60 + publish_crates.RETRY_MARGIN],
+          f"DIST-R4: a rate-limited crate is tried again after the wait: exit {code}, {cargo.calls}, {sleeps}")
+    # Limited every time: the run stops within the bounds.
+    cargo, sleeps = FakeCargo({"sciart-shared": [(101, limited(10))]}), []
+    code = publish_crates.publish_all(left, cargo, sleeps.append, lambda: NOW)
+    check(code == 1 and "sciart" not in cargo.calls and sum(sleeps) <= publish_crates.MAX_WAIT
+          and cargo.calls.count("sciart-shared") <= publish_crates.MAX_TRIES,
+          f"DIST-R4: a lasting limit stops the run within its bounds: exit {code}, "
+          f"{cargo.calls.count('sciart-shared')} tries, {sum(sleeps) / 60:.0f} minutes")
+    # A short limit hit many times stops at the try bound.
+    cargo, sleeps = FakeCargo({"sciart-shared": [(101, limited(0))]}), []
+    code = publish_crates.publish_all(left, cargo, sleeps.append, lambda: NOW)
+    check(code == 1 and cargo.calls.count("sciart-shared") == publish_crates.MAX_TRIES,
+          f"DIST-R4: the tries are bounded: exit {code}, {cargo.calls.count('sciart-shared')}")
+    # Any other failure stops at once, without waiting.
+    cargo, sleeps = FakeCargo({"sciart-shared": [(101, "error: the crate is rejected")]}), []
+    code = publish_crates.publish_all(left, cargo, sleeps.append, lambda: NOW)
+    check(code == 1 and cargo.calls == ["sciart-core", "sciart-shared"] and not sleeps,
+          f"DIST-R4: another failure stops the run: exit {code}, {cargo.calls}, {sleeps}")
+    return problems
+
+
 def main() -> int:
     problems: list[str] = []
     check = lambda cond, msg: None if cond else problems.append(msg)  # noqa: E731
@@ -106,6 +170,8 @@ def main() -> int:
         check(code == 0 and not calls and "0 of" in out,
               f"DIST-R10: a third run has nothing to do: exit {code}, {calls}")
 
+    problems += rate_limit_problems()
+
     def down(url: str) -> str | None:
         raise OSError(f"cannot reach {url}")
 
@@ -120,7 +186,7 @@ def main() -> int:
         for p in problems:
             print(f"  {p}", file=sys.stderr)
         return 1
-    print("publish_crates OK (plan, dry run, a failed run and its rerun)")
+    print("publish_crates OK (plan, dry run, a failed run and its rerun, the rate-limit wait and its bounds)")
     return 0
 
 

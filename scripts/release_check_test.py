@@ -228,9 +228,69 @@ def notes_problems() -> list[str]:
     return problems
 
 
+# DIST-R4: the publish order, judged from manifests. A fixture workspace: `a` <- `b` <- `c`,
+# with a never-published `t`; the workspace table gives `a`, `b`, `c` a version, `t` a path.
+WORKSPACE = {"a": {"path": "a", "version": "=0.1.0"}, "b": {"path": "b", "version": "=0.1.0"},
+             "c": {"path": "c", "version": "=0.1.0"}, "t": {"path": "t"}}
+
+
+def manifests(**extra: dict) -> dict[str, dict]:
+    base = {
+        "a": {"package": {"name": "a"}},
+        "b": {"package": {"name": "b"}, "dependencies": {"a": {"workspace": True}}},
+        "c": {"package": {"name": "c"}, "dependencies": {"b": {"workspace": True}}},
+        "t": {"package": {"name": "t", "publish": False}},
+    }
+    for name, tables in extra.items():
+        for kind, table in tables.items():
+            base[name].setdefault(kind, {}).update(table)
+    return base
+
+
+# (label, order, manifests, a phrase every report must contain, or None when accepted)
+ORDER_CASES = [
+    ("in order", ("a", "b", "c"), manifests(), None),
+    ("a dependency published later", ("b", "a", "c"), manifests(), "published after it"),
+    ("a dev-dependency published later", ("a", "b", "c"),
+     manifests(a={"dev-dependencies": {"c": {"workspace": True}}}), "published after it"),
+    ("a target-specific dev-dependency published later", ("a", "b", "c"),
+     manifests(a={"target": {"cfg(unix)": {"dev-dependencies": {"b": {"workspace": True}}}}}),
+     "published after it"),
+    ("a direct version requirement published later", ("a", "b", "c"),
+     manifests(a={"dev-dependencies": {"b": {"path": "../b", "version": "0.1"}}}), "published after it"),
+    ("a renamed dependency published later", ("a", "b", "c"),
+     manifests(a={"dev-dependencies": {"bee": {"package": "b", "path": "../b", "version": "0.1"}}}),
+     "published after it"),
+    ("a path-only dev-dependency on an unpublished crate", ("a", "b", "c"),
+     manifests(a={"dev-dependencies": {"t": {"workspace": True}}}), None),
+    ("a path-only dev-dependency published later", ("a", "b", "c"),
+     manifests(a={"dev-dependencies": {"c": {"path": "../c"}}}), None),
+    ("a versioned dependency on an unpublished crate", ("a", "b", "c"),
+     manifests(b={"dev-dependencies": {"t": {"path": "../t", "version": "0.1"}}}), "never published"),
+    ("a published crate missing from the order", ("a", "b"), manifests(), "not in the publish order"),
+    ("a cycle", ("a", "b", "c"), manifests(a={"dev-dependencies": {"c": {"workspace": True}}}), "cycle"),
+]
+
+
+def order_problems() -> list[str]:
+    problems = []
+    for label, order, crates, expect in ORDER_CASES:
+        found = release_check.publish_order_problems(order, crates, WORKSPACE)
+        if expect is None and found:
+            problems.append(f"order, {label}: rejected: {found}")
+        elif expect is not None and not any(expect in p for p in found):
+            problems.append(f"order, {label}: not rejected with {expect!r}: {found}")
+    real = {name: manifest for name, (_, manifest) in release_check.members().items()}
+    workspace = release_check.toml_file("Cargo.toml")["workspace"]["dependencies"]
+    found = release_check.publish_order_problems(release_check.PUBLISH_ORDER, real, workspace)
+    if found:
+        problems.append(f"order: the real PUBLISH_ORDER is rejected: {found}")
+    return problems
+
+
 def main() -> int:
     texts = release_workflows.load()
-    problems = notes_problems()
+    problems = order_problems() + notes_problems()
     base = release_workflows.problems(texts)
     if base:
         problems.append("the real workflows fail the check:\n    " + "\n    ".join(base))
@@ -252,7 +312,8 @@ def main() -> int:
             print(f"  {p}", file=sys.stderr)
         return 1
     print(f"DIST-R10 workflow mutations OK: {caught} of {len(MUTATIONS)} caught, the real workflows pass; "
-          f"release notes: {len(NOTES_CASES)} link cases, no relative link in the 1.0.0 notes")
+          f"release notes: {len(NOTES_CASES)} link cases, no relative link in the 1.0.0 notes; "
+          f"publish order: {len(ORDER_CASES)} manifest cases, the real order accepted")
     return 0
 
 

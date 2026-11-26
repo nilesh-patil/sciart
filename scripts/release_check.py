@@ -43,7 +43,9 @@ from tooling_check import TIER_1, TIER_2  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 FACADE = "sciart"
-# DIST-R4: the publish order, each crate after everything it depends on.
+# DIST-R4: the publish order, each crate after every workspace crate it needs from the
+# registry, dev-dependencies included (`publish_order_problems` checks it against the
+# manifests): sciart-generators' tests use sciart-render and sciart-capture.
 INTERNAL = (
     "sciart-core",
     "sciart-shared",
@@ -52,10 +54,10 @@ INTERNAL = (
     "sciart-scenes-physics",
     "sciart-scenes-matter",
     "sciart-scenes-life",
-    "sciart-generators",
     "sciart-render",
     "sciart-keepawake",
     "sciart-capture",
+    "sciart-generators",
 )
 PUBLISH_ORDER = INTERNAL + (FACADE,)
 NEVER_PUBLISHED = ("sciart-testalloc", "sciart-qa")
@@ -118,6 +120,71 @@ def deps(manifest: dict, kinds: tuple[str, ...] = ("dependencies", "build-depend
         for kind in kinds:
             names |= set(table.get(kind, {}))
     return names
+
+
+DEP_KINDS = ("dependencies", "build-dependencies", "dev-dependencies")
+
+
+def versioned_deps(manifest: dict, workspace: dict, members: set[str]) -> set[str]:
+    """The workspace crates `manifest` depends on with a version requirement, in any of
+    `DEP_KINDS`, target-specific tables included. `workspace = true` reads the workspace
+    dependency table. A path-only dependency has no version: cargo strips it from the
+    published manifest, so it needs nothing on the registry."""
+    out: set[str] = set()
+    tables = [manifest] + [t for t in manifest.get("target", {}).values() if isinstance(t, dict)]
+    for table in tables:
+        for kind in DEP_KINDS:
+            for key, spec in table.get(kind, {}).items():
+                if isinstance(spec, dict) and spec.get("workspace") is True:
+                    inherited = workspace.get(key, {})
+                    spec = dict(inherited) if isinstance(inherited, dict) else {"version": inherited}
+                name = spec.get("package", key) if isinstance(spec, dict) else key
+                has_version = isinstance(spec, str) or (isinstance(spec, dict) and "version" in spec)
+                if name in members and has_version:
+                    out.add(name)
+    return out
+
+
+def publish_order_problems(order: tuple[str, ...], manifests: dict[str, dict], workspace: dict) -> list[str]:
+    """DIST-R4: each published crate comes after every workspace crate it needs from the
+    registry: normal, build and dev-dependencies with a version (`cargo publish` resolves
+    all three against the registry; a workspace dry run resolves them locally and cannot
+    see a wrong order). `manifests` maps every workspace crate to its manifest."""
+    problems = []
+    published = {n for n, m in manifests.items() if m.get("package", {}).get("publish", True) is not False}
+    for name in sorted(published - set(order)):
+        problems.append(f"DIST-R4: {name} is published but not in the publish order")
+    edges = {name: versioned_deps(manifests[name], workspace, set(manifests)) for name in published}
+    position = {name: i for i, name in enumerate(order)}
+    for name in order:
+        for dep in sorted(edges.get(name, set())):
+            if dep not in published:
+                problems.append(f"DIST-R4: published {name} depends with a version on {dep}, which is "
+                                "never published (a path-only dependency would be stripped)")
+            elif dep in position and position[dep] > position[name]:
+                problems.append(f"DIST-R4: {name} depends on {dep}, which is published after it")
+    # Cycles: a crate that needs itself through others can be published in no order.
+    state: dict[str, int] = {}
+    stack: list[str] = []
+    cycles: list[list[str]] = []
+
+    def visit(node: str) -> None:
+        state[node] = 1
+        stack.append(node)
+        for dep in sorted(edges.get(node, set()) & published):
+            if state.get(dep) == 1:
+                cycles.append(stack[stack.index(dep):] + [dep])
+            elif dep not in state:
+                visit(dep)
+        stack.pop()
+        state[node] = 2
+
+    for node in sorted(published):
+        if node not in state:
+            visit(node)
+    for cycle in cycles:
+        problems.append(f"DIST-R4: a dependency cycle among published crates: {' -> '.join(cycle)}")
+    return problems
 
 
 # --- DIST-R1 -------------------------------------------------------------------------------
@@ -243,10 +310,8 @@ def check_r4(problems: list[str]) -> None:
     readme = crates[FACADE][1]["package"].get("readme")
     if not readme or (crates[FACADE][0] / readme).resolve() != (ROOT / "README.md").resolve():
         problems.append("DIST-R4: sciart ships the root README.md")
-    for i, name in enumerate(PUBLISH_ORDER):
-        later = set(PUBLISH_ORDER[i + 1:])
-        for dep in deps(crates[name][1]) & later:
-            problems.append(f"DIST-R4: {name} depends on {dep}, which is published after it")
+    workspace = toml_file("Cargo.toml")["workspace"]["dependencies"]
+    problems += publish_order_problems(PUBLISH_ORDER, {n: m for n, (_, m) in crates.items()}, workspace)
     task = toml_file("pixi.toml").get("tasks", {}).get("rs-package-check")
     if task != PACKAGE_CHECK:
         problems.append(f"DIST-R4: pixi task rs-package-check is `{PACKAGE_CHECK}`")

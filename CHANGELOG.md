@@ -6,6 +6,14 @@ All notable changes to this project are documented here. The format is based on
 
 ## [Unreleased]
 
+### Fixed
+
+- The crates were uploaded in an order that put `sciart-generators` before two crates it
+  needs for its tests (`sciart-render`, `sciart-capture`), so the first publish stopped
+  half-way. The order is now checked against every manifest, dev-dependencies included,
+  and the publish job waits out crates.io's new-crate rate limit instead of stopping
+  (DIST-R4).
+
 ## [1.0.1] - 2026-11-26
 
 Documentation, packaging and release tooling: the scenes, the command line and the
