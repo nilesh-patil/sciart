@@ -27,6 +27,7 @@ Other modes:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -90,6 +91,27 @@ def internal_version(crates: dict[str, tuple[Path, dict]]) -> object:
     return crates["sciart-core"][1]["package"].get("version")
 
 
+LOCK_SKIP = {"target", ".git", ".pixi", "node_modules"}
+
+
+def lock_files(root: Path) -> list[Path]:
+    """Every Cargo.lock in the repository that names a sciart crate (the workspace's,
+    fuzz/'s, web/'s, ...), found by search, not by a list."""
+    found = []
+    for folder, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if d not in LOCK_SKIP)
+        if "Cargo.lock" in files:
+            path = Path(folder) / "Cargo.lock"
+            if 'name = "sciart' in path.read_text():
+                found.append(path)
+    return sorted(found)
+
+
+def lock_versions(version: str, internal: str) -> dict[str, str]:
+    """The version every workspace crate has in a lock file (as a path package)."""
+    return {FACADE: version} | {n: internal for n in INTERNAL} | {n: version for n in NEVER_PUBLISHED}
+
+
 def deps(manifest: dict, kinds: tuple[str, ...] = ("dependencies", "build-dependencies")) -> set[str]:
     """Names of a manifest's dependencies of `kinds`, target-specific ones included."""
     names: set[str] = set()
@@ -130,17 +152,16 @@ def check_r1(problems: list[str], tag: str | None) -> None:
         problems.append("DIST-R1: pixi.toml carries no version of its own")
     if 'version: ${{ env.get("SCIART_VERSION") }}' not in (ROOT / "packaging/conda/recipe.yaml").read_text():
         problems.append("DIST-R1: the conda recipe takes its version from SCIART_VERSION")
-    expected = {FACADE: version} | {n: internal for n in INTERNAL} | {n: version for n in NEVER_PUBLISHED}
-    for lock, names in (("Cargo.lock", expected), ("fuzz/Cargo.lock", {"sciart-core": internal,
-                                                                        "sciart-render": internal})):
-        path = ROOT / lock
-        if not path.exists():
-            continue
+    expected = lock_versions(version, str(internal))
+    locks = lock_files(ROOT)
+    if ROOT / "Cargo.lock" not in locks:
+        problems.append("DIST-R1: the workspace Cargo.lock names the sciart crates")
+    for path in locks:
         packages = tomllib.loads(path.read_text()).get("package", [])
         found = {p["name"]: p["version"] for p in packages if "source" not in p}
-        for name, want in names.items():
+        for name, want in expected.items():
             if name in found and found[name] != want:
-                problems.append(f"DIST-R1: {lock} has {name} {found[name]}, not {want} "
+                problems.append(f"DIST-R1: {path.relative_to(ROOT)} has {name} {found[name]}, not {want} "
                                 f"(`scripts/bump_version.py` updates it)")
     if tag is not None:
         if tag != f"v{version}":
