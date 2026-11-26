@@ -130,5 +130,45 @@ class SnapshotJob(unittest.TestCase):
         self.assertTrue(tooling_check.snapshot_job_problems(tooling_check.workflow_jobs(text)))
 
 
+PIXI = tooling_check.toml_file("pixi.toml")
+
+
+class NoColorParity(unittest.TestCase):
+    """TEST-R12: `rs-ci` runs CI's NO_COLOR pass, with the same command and environment."""
+
+    STEP = "        run: cargo nextest run -p sciart --test pty_smoke --test encoder_fidelity\n"
+
+    def pixi_with(self, **task: object) -> dict:
+        tasks = dict(PIXI["tasks"])
+        tasks[tooling_check.NOCOLOR_TASK] = dict(tasks[tooling_check.NOCOLOR_TASK], **task)
+        return dict(PIXI, tasks=tasks)
+
+    def test_test_r12_the_task_and_the_ci_step_agree(self) -> None:
+        self.assertEqual(tooling_check.nocolor_problems(PIXI, CI), [])
+
+    def test_test_r12_a_different_command_in_ci_fails(self) -> None:
+        self.assertIn(self.STEP, CI)
+        text = CI.replace(self.STEP, self.STEP.replace(" --test encoder_fidelity", ""))
+        self.assertTrue(tooling_check.nocolor_problems(PIXI, text))
+
+    def test_test_r12_a_different_command_in_the_task_fails(self) -> None:
+        pixi = self.pixi_with(cmd="cargo nextest run -p sciart --test pty_smoke")
+        self.assertTrue(tooling_check.nocolor_problems(pixi, CI))
+
+    def test_test_r12_the_task_without_no_color_fails(self) -> None:
+        self.assertTrue(tooling_check.nocolor_problems(self.pixi_with(env={}), CI))
+
+    def test_test_r12_rs_ci_without_the_task_fails(self) -> None:
+        tasks = dict(PIXI["tasks"])
+        deps = [d for d in tasks["rs-ci"]["depends-on"] if d != tooling_check.NOCOLOR_TASK]
+        tasks["rs-ci"] = dict(tasks["rs-ci"], **{"depends-on": deps})
+        self.assertTrue(tooling_check.nocolor_problems(dict(PIXI, tasks=tasks), CI))
+
+    def test_test_r12_ci_without_the_no_color_step_fails(self) -> None:
+        old = '        env:\n          NO_COLOR: "1"\n'
+        self.assertIn(old, CI)
+        self.assertTrue(tooling_check.nocolor_problems(PIXI, CI.replace(old, "")))
+
+
 if __name__ == "__main__":
     unittest.main()

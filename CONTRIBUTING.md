@@ -31,7 +31,7 @@ pixi tasks when in doubt. Extra arguments after a task name are passed to the co
 
 | Task | Command |
 |------|---------|
-| Full gate — run before every commit | `pixi run rs-ci` (fmt check + clippy `-D warnings` with and without `--all-features` + all tests under cargo-nextest, TEST-R10 + the snapshot suite again in the optimised `ci` profile, TEST-R9) |
+| Full gate — run before every commit | `pixi run rs-ci` (fmt check + clippy `-D warnings` with and without `--all-features` + all tests under cargo-nextest, TEST-R10 + `pty_smoke` and `encoder_fidelity` again with `NO_COLOR=1`, `rs-test-nocolor`, TEST-R12 + the snapshot suite again in the optimised `ci` profile, TEST-R9) |
 | Library and feature sets (LIB-R4/R7, CLI-R15; part of `rs-ci`) | `pixi run rs-test-features` (the binary without the recorder, the library's doctests, and the library-only tests with `png,widget,unstable-generator`); `rs-lint` also lints `--no-default-features` and `png,widget` |
 | Tests only / build | `pixi run rs-test` (nextest on the opt-level 2 `test` profile with debug assertions; extra args go to nextest: `pixi run rs-test contract`) / `pixi run rs-build`; `pixi run rs-test-parity` proves rs-test runs exactly `cargo test --workspace`'s tests |
 | Format | `pixi run rs-fmt` |
