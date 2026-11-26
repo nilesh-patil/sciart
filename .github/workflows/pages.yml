@@ -52,6 +52,9 @@ jobs:
   deploy:
     name: deploy to GitHub Pages
     needs: build
+    # WEB-R8: only a published release or a manual run from the default branch deploys; a
+    # manual run from another branch builds the site and stops here.
+    if: github.event_name == 'release' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
     runs-on: ubuntu-latest
     permissions:
       pages: write

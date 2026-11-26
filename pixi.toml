@@ -26,7 +26,7 @@ rs-test-features = "cargo nextest run -p sciart --no-default-features --features
 # GEN-R15: the generated scene index in SPEC-002-generators.md matches the category files.
 # TEST-R1/R4: spec traceability (scripts/spec_check.py); TEST-R9/R10/R11: tooling schema
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
-rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/site_check_test.py"
+rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/site_check_test.py && python3 scripts/tooling_check_test.py"
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
@@ -70,10 +70,13 @@ rs-showcase-check = "python3 scripts/showcase.py --check"
 # is the capture renderer's frame and that it lists the scenes as `sciart list --json` does.
 web-build = "cargo build --release --locked --manifest-path web/Cargo.toml --target wasm32-unknown-unknown"
 web-test = "cargo test --locked --manifest-path web/Cargo.toml"
+# WEB-R3: the compiled module itself, outside a browser (wasmtime-py): it imports nothing,
+# lists exactly the registered scenes, and every scene advances and draws a full frame.
+web-smoke = { cmd = "python3 scripts/web_smoke.py", depends-on = ["web-build"] }
 # WEB-R5: the docs site (guide, gallery, player) into `site/dist/`; WEB-R4/R6/R7: its checks
 # (rs-ci and CI). `.github/workflows/pages.yml` publishes it by hand or on a release (WEB-R8).
 site-build = { cmd = "python3 scripts/build_site.py", depends-on = ["web-build"] }
-site-check = { cmd = "python3 scripts/site_check.py", depends-on = ["site-build", "web-test"] }
+site-check = { cmd = "python3 scripts/site_check.py", depends-on = ["site-build", "web-test", "web-smoke"] }
 # RND-R19 art review: five scenes at 80x24/200x50 through the colorblind theme.
 rs-colorblind-review = "python3 scripts/colorblind_review.py"
 # Installs keep the `release` profile (thin LTO, one codegen unit) for runtime speed (TEST-R9).
@@ -87,3 +90,4 @@ rs-record = "cargo run --profile ci -p sciart -- record"
 [dependencies]
 cargo-nextest = ">=0.9.148,<0.10"
 sccache = ">=0.18.0,<0.19"
+wasmtime-py = ">=51.0.0,<52"
