@@ -25,7 +25,7 @@ env:
 jobs:
   build:
     name: build the site
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -57,7 +57,7 @@ jobs:
     # WEB-R8: only a published release or a manual run from the default branch deploys; a
     # manual run from another branch builds the site and stops here.
     if: github.event_name == 'release' || github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       pages: write
       id-token: write

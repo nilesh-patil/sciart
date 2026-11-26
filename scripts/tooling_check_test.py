@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 """Unit tests for scripts/tooling_check.py's web rules: the Pages workflow deploys only on a
 published release or a manual run from the default branch (WEB-R8), and the CI `web` job
-builds the binary first, then the module, its smoke test and the site (WEB-R3).
+builds the binary first, then the module, its smoke test and the site (WEB-R3). Its platform
+rules: every workflow job names a supported runner image, and the optimised snapshot job
+runs on the reference platform only (TEST-R13).
 
 Usage: python3 scripts/tooling_check_test.py
 """
@@ -72,6 +74,60 @@ class CiWebJob(unittest.TestCase):
         self.assertIn(build, CI)
         moved = CI.replace(build, "").replace("      - name: Docs site\n", build + "      - name: Docs site\n")
         self.assertTrue(tooling_check.ci_web_problems(moved))
+
+
+WORKFLOWS = {p.name: p.read_text() for p in sorted((ROOT / ".github" / "workflows").glob("*.yml"))}
+
+
+class RunnerImages(unittest.TestCase):
+    """TEST-R13 / DIST-R5: every job names a supported runner image."""
+
+    def problems(self, name: str, old: str, new: str) -> list[str]:
+        self.assertIn(old, WORKFLOWS[name], "the text to mutate is gone; update the test")
+        return tooling_check.runner_image_problems(dict(WORKFLOWS, **{name: WORKFLOWS[name].replace(old, new, 1)}))
+
+    def test_test_r13_every_workflow_passes(self) -> None:
+        self.assertEqual(tooling_check.runner_image_problems(WORKFLOWS), [])
+
+    def test_test_r13_retired_and_moving_labels_fail(self) -> None:
+        for name, old, new in (
+            ("ci.yml", "          - os: macos-15\n", "          - os: macos-14\n"),
+            ("ci.yml", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-latest\n"),
+            ("release.yml", "            os: macos-15\n", "            os: macos-latest\n"),
+            ("fuzz.yml", "    runs-on: ubuntu-24.04\n", "    runs-on: windows-2025\n"),
+        ):
+            with self.subTest(name=name, new=new.strip()):
+                found = self.problems(name, old, new)
+                self.assertTrue(any(new.split(":")[-1].strip() in p for p in found), found)
+
+    def test_test_r13_the_oldest_images_are_for_release_builds_only(self) -> None:
+        found = self.problems("pages.yml", "    runs-on: ubuntu-24.04\n", "    runs-on: ubuntu-22.04\n")
+        self.assertTrue(any("release builds only" in p for p in found), found)
+
+    def test_test_r13_a_runner_the_check_cannot_read_fails(self) -> None:
+        for new in ("    runs-on: ${{ inputs.os }}\n", "    runs-on: [self-hosted, linux]\n"):
+            with self.subTest(new=new.strip()):
+                self.assertTrue(self.problems("ci.yml", "    runs-on: ubuntu-24.04\n", new))
+
+
+class SnapshotJob(unittest.TestCase):
+    """TEST-R13: the optimised snapshot job runs on the reference platform only."""
+
+    def test_test_r13_the_snapshot_job_passes(self) -> None:
+        self.assertEqual(tooling_check.snapshot_job_problems(tooling_check.workflow_jobs(CI)), [])
+
+    def test_test_r13_a_linux_snapshot_row_fails(self) -> None:
+        old = "          - os: macos-15\n            tier: 1\n    steps:"
+        self.assertIn(old, CI)
+        text = CI.replace(old, "          - os: macos-15\n            tier: 1\n          - os: ubuntu-24.04\n"
+                               "            tier: 1\n    steps:")
+        self.assertTrue(tooling_check.snapshot_job_problems(tooling_check.workflow_jobs(text)))
+
+    def test_test_r13_a_snapshot_job_off_the_reference_platform_fails(self) -> None:
+        old = "          # TEST-R13: the reference platform only; the suite skips itself elsewhere.\n          - os: macos-15\n"
+        self.assertIn(old, CI)
+        text = CI.replace(old, "          - os: ubuntu-24.04\n")
+        self.assertTrue(tooling_check.snapshot_job_problems(tooling_check.workflow_jobs(text)))
 
 
 if __name__ == "__main__":

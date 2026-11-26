@@ -5,8 +5,10 @@ DIST-R10).
 `problems(texts)` takes every file under `.github/workflows/` as {name: text}, parses each
 with `yaml_subset` (a file it cannot read is a problem, never skipped) and reports:
 
-- every workflow: an action not pinned to a full commit SHA with its version in a comment,
-  or from an owner outside the allow-list; a secret at workflow or job level, or inside a
+- every workflow: a job on a runner image outside `tooling_check.RUNNER_IMAGES` (TEST-R13);
+  an action not pinned to a full commit SHA with its version in a comment, or from an
+  owner outside the allow-list; an install-action step that names no tool; a secret at
+  workflow or job level, or inside a
   `run:` script; an expression from `github.event.*`, `inputs.*` or `github.head_ref`
   inside a `run:` script; a command that creates or pushes a tag; an upload
   (`cargo publish` without `--dry-run`, `scripts/publish_crates.py` without
@@ -30,14 +32,17 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_assets  # noqa: E402
-from tooling_check import runner_target  # noqa: E402
+from tooling_check import RELEASE_ONLY_IMAGES, runner_image_problems, runner_target  # noqa: E402
 from yaml_subset import YamlError, parse  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 
 ALLOWED_OWNERS = {"actions", "dtolnay", "Swatinem", "taiki-e", "prefix-dev", "EmbarkStudios"}
 PIN = re.compile(r"^(?P<owner>[A-Za-z0-9_.-]+)/[A-Za-z0-9_.-]+(/[^@\s]*)?@[0-9a-f]{40}$")
+# The runner images themselves are listed once, in tooling_check.RUNNER_IMAGES (TEST-R13).
 OLDEST_UBUNTU = "ubuntu-22.04"  # glibc 2.35 (DIST-R5)
+MACOS_IMAGE = "macos-15"  # both macOS targets (DIST-R5)
+assert OLDEST_UBUNTU in RELEASE_ONLY_IMAGES and OLDEST_UBUNTU + "-arm" in RELEASE_ONLY_IMAGES
 CONDA_PLATFORMS = {"osx-arm64", "osx-64", "linux-64", "linux-aarch64"}
 BUILD = 'cargo auditable build --release --locked -p sciart --bin sciart --target "$TARGET"'
 GATE = "github.event_name == 'release'"
@@ -130,6 +135,13 @@ def check_every_workflow(name: str, text: str, data: dict, out: list[str]) -> No
                     out.append(f"DIST-R6: {name} `{job_name}` uses `{uses}`: owner not in the allow-list")
                 elif not any(re.search(rf"uses:\s*{re.escape(str(uses))}\s+#\s*\S", line) for line in lines):
                     out.append(f"DIST-R6: {name} `{job_name}` uses `{uses}` without its version in a comment")
+            # DIST-R6: without `tool:` the install action installs nothing, and the step
+            # that needs the tool fails later with an unrelated message.
+            if str(uses or "").startswith("taiki-e/install-action@"):
+                tool = (step.get("with") or {}).get("tool") if isinstance(step.get("with"), dict) else None
+                if not isinstance(tool, str) or not tool.strip():
+                    out.append(f"DIST-R6: {name} `{job_name}` uses taiki-e/install-action without naming "
+                               "its tool (`with: tool:`)")
             if str(uses or "").startswith("actions/checkout@") and \
                     (step.get("with") or {}).get("persist-credentials") is not False:
                 out.append(f"DIST-R10: {name} `{job_name}` checks out with stored credentials "
@@ -217,8 +229,8 @@ def check_release(data: dict, out: list[str]) -> None:
         os_label = str(entry.get("os", ""))
         arch = target.split("-")[0]
         if target.endswith("-apple-darwin"):
-            if not os_label.startswith("macos-"):
-                out.append(f"DIST-R5: {target} builds on a macOS runner, not {os_label}")
+            if os_label != MACOS_IMAGE:
+                out.append(f"DIST-R5: {target} builds on {MACOS_IMAGE}, not {os_label}")
         else:
             want = OLDEST_UBUNTU + ("-arm" if arch == "aarch64" else "")
             if os_label != want:
@@ -347,6 +359,8 @@ def problems(texts: dict[str, str]) -> list[str]:
             continue
         parsed[name] = data
         check_every_workflow(name, text, data, out)
+    # TEST-R13 / DIST-R5: every job names a supported runner image.
+    out += runner_image_problems({n: t for n, t in texts.items() if n in parsed})
     for name, check in (("release.yml", check_release), ("publish.yml", check_publish)):
         if name not in texts:
             out.append(f"DIST-R10: .github/workflows/{name} exists")

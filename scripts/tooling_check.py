@@ -20,6 +20,9 @@ import sys
 import tomllib
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from yaml_subset import YamlError, parse  # noqa: E402
+
 ROOT = Path(__file__).resolve().parent.parent
 
 
@@ -133,11 +136,23 @@ def check_r11(problems: list[str]) -> None:
 # TEST-R13 / ADR-0029: platform tiers.
 TIER_1 = {"aarch64-apple-darwin", "x86_64-unknown-linux-gnu"}
 TIER_2 = {"aarch64-unknown-linux-gnu"}
+# Frames are pinned here only: the snapshots and the M11 fixtures were reviewed on it.
+REFERENCE_PLATFORM = "aarch64-apple-darwin"
 PIXI_PLATFORMS = ("osx-arm64", "osx-64", "linux-64", "linux-aarch64")
 PINNING_SUITES = (
     "crates/sciart-generators/tests/snapshots.rs",
     "crates/sciart-generators/tests/m11_fidelity.rs",
 )
+PINNING_SKIP = "tier::skip_off_reference_platform("
+
+# TEST-R13 / DIST-R5: the GitHub-hosted runner images a workflow job may name. A `-latest`
+# label changes meaning when the hosting service moves it, and a retired image rejects the
+# job, so every job names one of these. When an image is retired, change it here and in the
+# workflows together (docs/RELEASING.md).
+RUNNER_IMAGES = ("macos-15", "ubuntu-24.04", "ubuntu-24.04-arm", "ubuntu-22.04", "ubuntu-22.04-arm")
+# The oldest images, for the release builds' glibc baseline only (DIST-R5).
+RELEASE_ONLY_IMAGES = ("ubuntu-22.04", "ubuntu-22.04-arm")
+RELEASE_WORKFLOWS = ("release.yml", "publish.yml")
 
 
 def runner_target(label: str) -> str | None:
@@ -200,6 +215,65 @@ def job_targets(body: str) -> set[str]:
     return {t for t in map(runner_target, labels) if t}
 
 
+def runner_labels(job: dict) -> list[str] | None:
+    """Every runner label a parsed job can run on: a literal `runs-on`, or every value of
+    the matrix key it names (plain lists and `include` entries). None when that cannot be
+    read so simply (another expression, a label list, an `exclude`, no value at all), so
+    the caller fails closed."""
+    runs_on = job.get("runs-on")
+    if not isinstance(runs_on, str):
+        return None
+    value = runs_on.strip()
+    from_matrix = re.fullmatch(r"\$\{\{\s*matrix\.([A-Za-z0-9_-]+)\s*\}\}", value)
+    if from_matrix is None:
+        return [value] if re.fullmatch(r"[A-Za-z0-9._-]+", value) else None
+    key = from_matrix.group(1)
+    strategy = job.get("strategy")
+    matrix = strategy.get("matrix") if isinstance(strategy, dict) else None
+    if not isinstance(matrix, dict) or "exclude" in matrix:
+        return None
+    listed = matrix.get(key, [])
+    labels = list(listed) if isinstance(listed, list) else [listed]
+    include = matrix.get("include", [])
+    if not isinstance(include, list):
+        return None
+    labels += [entry[key] for entry in include if isinstance(entry, dict) and key in entry]
+    if not labels or not all(isinstance(label, str) for label in labels):
+        return None
+    return labels
+
+
+def runner_image_problems(texts: dict[str, str]) -> list[str]:
+    """TEST-R13 / DIST-R5 over every workflow ({file name: text}): each job runs on an
+    image from RUNNER_IMAGES, the oldest ones only in the release workflows."""
+    problems = []
+    for name, text in sorted(texts.items()):
+        try:
+            data = parse(text)
+        except YamlError as e:
+            problems.append(f"TEST-R13: cannot read {name} to check its runner images: {e}")
+            continue
+        jobs = data.get("jobs") if isinstance(data, dict) else None
+        for job_name, job in (jobs.items() if isinstance(jobs, dict) else []):
+            labels = runner_labels(job) if isinstance(job, dict) else None
+            if labels is None:
+                problems.append(f"TEST-R13: {name} `{job_name}` names no runner image the check can read "
+                                f"(runs-on: {job.get('runs-on') if isinstance(job, dict) else job!r})")
+                continue
+            for label in dict.fromkeys(labels):
+                if label not in RUNNER_IMAGES:
+                    problems.append(f"TEST-R13: {name} `{job_name}` runs on `{label}`, not a supported "
+                                    f"runner image ({', '.join(RUNNER_IMAGES)})")
+                elif label in RELEASE_ONLY_IMAGES and name not in RELEASE_WORKFLOWS:
+                    problems.append(f"TEST-R13: {name} `{job_name}` runs on `{label}`, an image kept for "
+                                    "the release builds only")
+    return problems
+
+
+def workflow_texts() -> dict[str, str]:
+    return {p.name: p.read_text() for p in sorted((ROOT / ".github/workflows").glob("*.yml"))}
+
+
 def forces_lf(lines: list[str], pattern: str) -> bool:
     for line in lines:
         fields = line.split()
@@ -211,13 +285,17 @@ def forces_lf(lines: list[str], pattern: str) -> bool:
 
 def check_r13(problems: list[str]) -> None:
     jobs = workflow_jobs((ROOT / ".github/workflows/ci.yml").read_text())
-    for job, targets in {"lint": TIER_1, "test": TIER_1 | TIER_2, "snapshots": TIER_1}.items():
+    for job, targets in {"lint": TIER_1, "test": TIER_1 | TIER_2}.items():
         if job not in jobs:
             fail(problems, f"TEST-R13: ci.yml has no `{job}` job")
             continue
         missing = targets - job_targets(jobs[job])
         if missing:
             fail(problems, f"TEST-R13: ci.yml `{job}` does not run on {sorted(missing)}")
+    for problem in snapshot_job_problems(jobs):
+        fail(problems, problem)
+    for problem in runner_image_problems(workflow_texts()):
+        fail(problems, problem)
     if "test" in jobs and not re.search(r"run: cargo nextest run --workspace\s*$", jobs["test"], re.M):
         fail(problems, "TEST-R13: ci.yml `test` runs the whole suite (`cargo nextest run --workspace`)")
     pixi = toml_file("pixi.toml")
@@ -233,10 +311,30 @@ def check_r13(problems: list[str]) -> None:
         if not forces_lf(attributes, pattern):
             fail(problems, f"TEST-R13: .gitattributes forces `eol=lf` for `{pattern}`")
     for suite in PINNING_SUITES:
-        if "tier::skip_off_tier_1(" not in (ROOT / suite).read_text():
-            fail(problems, f"TEST-R13: {suite} skips itself off tier 1 (`tier::skip_off_tier_1`)")
-    if "TEST-R13" not in (ROOT / "crates/sciart-generators/tests/common/tier.rs").read_text():
-        fail(problems, "TEST-R13: the tier-1 skip reason (tests/common/tier.rs) names TEST-R13")
+        if PINNING_SKIP not in (ROOT / suite).read_text():
+            fail(problems, f"TEST-R13: {suite} skips itself off the reference platform (`{PINNING_SKIP}`)")
+    tier = (ROOT / "crates/sciart-generators/tests/common/tier.rs").read_text()
+    if "TEST-R13" not in tier:
+        fail(problems, "TEST-R13: the reference-platform skip reason (tests/common/tier.rs) names TEST-R13")
+    pinned = re.search(r"pub const FRAMES_PINNED: bool = cfg!\((.*?)\);", tier, re.S)
+    if pinned is None or " ".join(pinned.group(1).split()) != 'all(target_os = "macos", target_arch = "aarch64")':
+        fail(problems, f"TEST-R13: tests/common/tier.rs pins frames on {REFERENCE_PLATFORM} only "
+                       "(`FRAMES_PINNED = cfg!(all(target_os = \"macos\", target_arch = \"aarch64\"))`)")
+
+
+def snapshot_job_problems(jobs: dict[str, str]) -> list[str]:
+    """TEST-R13 / TEST-R9: the optimised snapshot job runs on the reference platform, and
+    only there (the suite skips itself elsewhere, so another runner would prove nothing)."""
+    if "snapshots" not in jobs:
+        return ["TEST-R13: ci.yml has no `snapshots` job"]
+    body = jobs["snapshots"]
+    if "cargo test --profile ci -p sciart-generators --test snapshots" not in body:
+        return ["TEST-R9: ci.yml `snapshots` runs the snapshot suite in the `ci` profile"]
+    targets = job_targets(body)
+    if targets != {REFERENCE_PLATFORM}:
+        return [f"TEST-R13: ci.yml `snapshots` runs on the reference platform ({REFERENCE_PLATFORM}) "
+                f"only, not {sorted(targets)}"]
+    return []
 
 
 # LIB-R4 / CLI-R15: what the library pulls in without the binary's defaults.
