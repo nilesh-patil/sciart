@@ -325,5 +325,49 @@ class GalleryOrder(unittest.TestCase):
         self.assertTrue(self.problems(body))
 
 
+ORDERED = '{"module": "../assets/sciart_web.wasm", "category_order": ["forces-waves", "reactions", "earth-sky", "deep-cosmos"]}'
+GROUPED_JS = (
+    "const rank = (c) => data.category_order.indexOf(c);\n"
+    "for (const [cat, members] of [...groups].sort((a, b) => rank(a[0]) - rank(b[0]))) {}\n"
+)
+LABEL_SORTED_JS = (
+    "// data.category_order is not used\n"
+    "for (const [label, members] of [...groups].sort((a, b) => a[0].localeCompare(b[0]))) {}\n"
+)
+
+
+class PlayerOrder(unittest.TestCase):
+    """WEB-R2: the player's scene picker walks the categories in the gallery's order."""
+
+    def problems(self, data: str, js: str) -> list[str]:
+        with tempfile.TemporaryDirectory() as tmp:
+            page, script = Path(tmp) / "index.html", Path(tmp) / "player.js"
+            page.write_text(f'<script type="application/json" id="player-data">{data}</script>')
+            script.write_text(js)
+            return site_check.player_order_problems(page, script, CATALOGUE)
+
+    def test_web_r2_the_domain_order_in_data_and_script_passes(self) -> None:
+        self.assertEqual(self.problems(ORDERED, GROUPED_JS), [])
+
+    def test_web_r2_a_registry_or_alphabetical_order_in_the_data_fails(self) -> None:
+        for order in ('["deep-cosmos", "earth-sky", "forces-waves", "reactions"]', None):
+            data = ORDERED.replace(
+                ', "category_order": ["forces-waves", "reactions", "earth-sky", "deep-cosmos"]',
+                "" if order is None else f', "category_order": {order}',
+            )
+            with self.subTest(order=order):
+                self.assertTrue(self.problems(data, GROUPED_JS))
+
+    def test_web_r2_a_script_sorting_groups_by_label_fails(self) -> None:
+        self.assertTrue(self.problems(ORDERED, LABEL_SORTED_JS))
+
+    def test_web_r2_the_site_player_script_groups_by_the_data(self) -> None:
+        script = ROOT / "site" / "static" / "player.js"
+        with tempfile.TemporaryDirectory() as tmp:
+            page = Path(tmp) / "index.html"
+            page.write_text(f'<script type="application/json" id="player-data">{ORDERED}</script>')
+            self.assertEqual(site_check.player_order_problems(page, script, CATALOGUE), [])
+
+
 if __name__ == "__main__":
     unittest.main()
