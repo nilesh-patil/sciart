@@ -1,7 +1,7 @@
 //! The text of `sciart --version` (SPEC-008 DIST-R2).
 //!
 //! `-V` prints the crate version alone. `--version` adds the commit and the build target
-//! when the build was given `SCIART_GIT_SHA` (the release workflow and the conda recipe do);
+//! when the build was given `SCIART_GIT_SHA` (the release workflow does);
 //! a build without it, such as `cargo install sciart`, prints the version alone.
 
 use std::sync::OnceLock;
