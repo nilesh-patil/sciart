@@ -33,7 +33,13 @@ These need the repository owner's accounts and cannot be done from a checkout.
    `brew tap <owner>/sciart`), store `<owner>/homebrew-sciart` as the repository variable
    `HOMEBREW_TAP`, and a fine-grained token with *Contents: read and write* on that one
    repository as the environment secret `HOMEBREW_TAP_TOKEN`.
-6. **Tag signing** (recommended): configure `git` to sign tags (`gpg.format = ssh` and
+6. **Docs site** (Settings → Pages): set the source to *GitHub Actions*. The `Pages`
+   workflow deploys on a published release, whose ref is the tag, while the `github-pages`
+   environment that GitHub creates allows the default branch only: add the tag rule `v*`
+   to it (Settings → Environments → github-pages → Deployment branches and tags), or the
+   release's deployment is rejected. A manual run of the workflow from the default branch
+   deploys at any time.
+7. **Tag signing** (recommended): configure `git` to sign tags (`gpg.format = ssh` and
    `user.signingkey`), and add the key to the GitHub account as a signing key, so the tag
    shows as verified.
 
