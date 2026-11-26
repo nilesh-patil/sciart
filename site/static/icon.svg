@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-labelledby="icon-title icon-desc">
+  <title id="icon-title">sciart</title>
+  <desc id="icon-desc">A small sun with a dotted orbit and one planet, on a black ground.</desc>
+  <!-- decorative: the site icon, drawn on its own dark ground (#0c0c12), not on white -->
+  <rect width="32" height="32" fill="#0c0c12"/>
+  <circle cx="16" cy="16" r="11" fill="none" stroke="#6cb4ff" stroke-width="1" stroke-dasharray="1.5 2.5"/> <!-- decorative, on the dark ground -->
+  <circle cx="16" cy="16" r="3" fill="#ffb454"/> <!-- decorative, on the dark ground -->
+  <circle cx="26" cy="12" r="1.6" fill="#c9c9cf"/> <!-- decorative, on the dark ground -->
+</svg>

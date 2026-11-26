@@ -1,3 +1,6 @@
+// The paint tables below serve the ratatui painter, which is part of `terminal` (WEB-R3).
+#![cfg_attr(not(feature = "terminal"), allow(dead_code))]
+
 use sciart_core::{Ink, Role, ink};
 
 use crate::fields;
