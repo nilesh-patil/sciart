@@ -452,10 +452,11 @@ def player_page(clips: list[showcase.Clip]) -> Page:
     body = f"""<h1>Player</h1>
 <p class="lede">The scenes running in your browser: the same code as the terminal program,
 compiled to WebAssembly, drawn at 8×16 pixels per cell. Choose a scene, a theme and a seed.</p>
+<section class="player" id="player" aria-label="Scene player">
 <div class="player-stage" id="stage">
 <figure class="fallback" id="fallback">{clip_img(hero, "../")}
 <figcaption id="fallback-note">A recorded clip. The live player needs JavaScript and WebAssembly.</figcaption></figure>
-<canvas id="screen" hidden aria-label="The selected scene, animated"></canvas>
+<canvas id="screen" hidden tabindex="0" aria-label="The selected scene, animated; keys work while it has focus"></canvas>
 </div>
 <form class="controls" id="controls" hidden>
 <label>Scene <select id="scene"></select></label>
@@ -466,10 +467,12 @@ compiled to WebAssembly, drawn at 8×16 pixels per cell. Choose a scene, a theme
 <button type="button" id="reseed">New seed</button>
 </form>
 <p class="status" id="status"></p>
-<p class="note">Keys: <kbd>space</kbd> pause, <kbd>n</kbd> and <kbd>p</kbd> next and previous scene,
-<kbd>t</kbd> next theme, <kbd>r</kbd> restart. With reduced motion turned on in your system, the
-player starts paused. The browser is its own platform: frames can differ from a terminal's in the
-last bits of the arithmetic.</p>
+</section>
+<p class="note">Keys, once you click the picture or tab into the player: <kbd>space</kbd> pause,
+<kbd>n</kbd> and <kbd>p</kbd> (or the arrows) next and previous scene, <kbd>t</kbd> next theme,
+<kbd>r</kbd> restart. With reduced motion turned on in your system, the player starts paused.
+The browser is its own platform: frames can differ from a terminal's in the last bits of the
+arithmetic.</p>
 <details>
 <summary>Recorded clips</summary>
 <ul>{others}</ul>
