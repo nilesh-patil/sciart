@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the built docs site in site/dist/ (WEB-R3, WEB-R4, WEB-R5, WEB-R6, WEB-R7).
+"""Check the built docs site in site/dist/ (WEB-R3, WEB-R4, WEB-R5, WEB-R6, WEB-R7, WEB-R9).
 
     python3 scripts/site_check.py    # pixi run site-check (builds the module and the site first)
 
@@ -25,6 +25,12 @@ WEB-R7: every registered scene is in the gallery; every internal link and asset 
 and its one-line `curl … | sh` follows redirects with its https-only flags (DIST-R7); and
 the guide names no subcommand, flag or flag value the binary does not have (checked
 against `sciart completions bash`).
+WEB-R9: the README's opening sentence, the crate `description`, the command line's `about`
+(or its short form), the site's lede and every page's meta description, and the opening
+lines of the architecture guide and the user guide carry the one description; the Homebrew
+`desc` is its part before the colon, within 80 characters; and no user-facing page or built
+site page describes the project as "science & astronomy" or "science and astronomy".
+`scripts/site_check_test.py` proves each case.
 """
 
 from __future__ import annotations
@@ -601,6 +607,127 @@ def check_install(problems: list[str]) -> None:
                     problems += [f"DIST-R7: {path.relative_to(DIST)}: {p}" for p in one_liner_problems(line)]
 
 
+# ---- WEB-R9: one description, science first ------------------------------------------------
+
+DESCRIPTION = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
+# The part before the colon: the Homebrew `desc` (at most 80 characters), and the command
+# line's `about` when the full sentence would break a size budget (RT-R22).
+SHORT_DESCRIPTION = DESCRIPTION.split(":", 1)[0]
+HOMEBREW_DESC_LIMIT = 80
+# How the project described itself before WEB-R9: astronomy beside science as its subject.
+ASTRONOMY_FIRST = re.compile(r"science\s+(?:&|&amp;|and)\s+astronomy", re.IGNORECASE)
+# Files whose text users read as the project's own description (the CHANGELOG keeps its
+# history and docs/specs its record, so neither is here).
+USER_FACING = (
+    "README.md",
+    "docs/ARCHITECTURE.md",
+    "docs/GALLERY.md",
+    "docs/guide/*.md",
+    "crates/sciart/Cargo.toml",
+    "crates/sciart/src/cli.rs",
+    "crates/sciart/src/lib.rs",
+    "crates/sciart/src/main.rs",
+    "packaging/homebrew/sciart.rb.in",
+)
+
+
+def squash(text: str) -> str:
+    """`text` with tags dropped, entities decoded and whitespace runs made single spaces."""
+    return " ".join(html.unescape(re.sub(r"<[^>]+>", " ", text)).split())
+
+
+def first_paragraph(markdown: str, after: str | None = None) -> str:
+    """The first prose paragraph of `markdown` (after the heading line `after`, if given):
+    headings, badge lines and blank lines before it are skipped."""
+    lines = markdown.splitlines()
+    if after is not None:
+        if after not in lines:
+            return ""
+        lines = lines[lines.index(after) + 1 :]
+    paragraph: list[str] = []
+    for line in lines:
+        stripped = line.strip()
+        if not paragraph and (not stripped or stripped.startswith(("#", "[![", "<"))):
+            continue
+        if not stripped:
+            break
+        paragraph.append(stripped)
+    return squash(" ".join(paragraph))
+
+
+def carries(text: str, phrase: str = DESCRIPTION) -> bool:
+    """`text` contains `phrase`, ignoring letter case (a sentence may start in lower case)."""
+    return phrase.lower() in squash(text).lower()
+
+
+def description_problems(root: Path, dist: Path) -> list[str]:
+    """WEB-R9: every place that describes the project carries the one description, and no
+    user-facing page presents the project as science and astronomy."""
+    problems: list[str] = []
+
+    def read(rel: str) -> str:
+        path = root / rel
+        if not path.is_file():
+            problems.append(f"WEB-R9: {rel} is missing")
+            return ""
+        return path.read_text(encoding="utf-8")
+
+    readme = first_paragraph(read("README.md"))
+    if not readme.startswith(DESCRIPTION):
+        problems.append(f"WEB-R9: README.md does not open with the description: {readme[:100]!r}")
+    cargo = re.search(r'^description\s*=\s*"([^"]*)"', read("crates/sciart/Cargo.toml"), re.M)
+    if not cargo or cargo.group(1) != DESCRIPTION:
+        problems.append("WEB-R9: crates/sciart/Cargo.toml's `description` is not the description")
+    about = re.search(r'^\s*about\s*=\s*"([^"]*)"', read("crates/sciart/src/cli.rs"), re.M)
+    if not about or about.group(1) not in (DESCRIPTION, SHORT_DESCRIPTION):
+        problems.append(
+            "WEB-R9: crates/sciart/src/cli.rs's `about` is neither the description nor its "
+            "part before the colon"
+        )
+    architecture = first_paragraph(read("docs/ARCHITECTURE.md"), after="## Overview")
+    if not carries(architecture):
+        problems.append("WEB-R9: docs/ARCHITECTURE.md's overview does not open with the description")
+    guide = first_paragraph(read("docs/guide/index.md"))
+    if not carries(guide):
+        problems.append("WEB-R9: docs/guide/index.md does not open with the description")
+    desc = re.search(r'^\s*desc\s+"([^"]*)"', read("packaging/homebrew/sciart.rb.in"), re.M)
+    if not desc or desc.group(1) != SHORT_DESCRIPTION:
+        problems.append(
+            f"WEB-R9: the Homebrew formula's `desc` is not {SHORT_DESCRIPTION!r}"
+        )
+    elif len(desc.group(1)) > HOMEBREW_DESC_LIMIT:
+        problems.append(f"WEB-R9: the Homebrew `desc` is over {HOMEBREW_DESC_LIMIT} characters")
+
+    # The built site: the home page's lede and every page's meta description.
+    home = dist / "index.html"
+    if home.is_file():
+        lede = re.search(r'<p class="lede">(.*?)</p>', home.read_text(encoding="utf-8"), re.S)
+        if not lede or not squash(lede.group(1)).startswith(DESCRIPTION):
+            problems.append("WEB-R9: the site's home page lede does not open with the description")
+    else:
+        problems.append("WEB-R9: site/dist/index.html was not built")
+    for page in sorted(dist.rglob("*.html")):
+        text = page.read_text(encoding="utf-8")
+        meta = re.search(r'<meta\s+name="description"\s+content="([^"]*)"', text)
+        if not meta or not squash(meta.group(1)).startswith(DESCRIPTION):
+            problems.append(
+                f"WEB-R9: {page.relative_to(dist)}: the meta description does not open with "
+                "the description"
+            )
+
+    # Astronomy first: the old description anywhere users read it.
+    pages = [path for pattern in USER_FACING for path in sorted(root.glob(pattern))]
+    pages += sorted(dist.rglob("*.html"))
+    for path in pages:
+        if ASTRONOMY_FIRST.search(path.read_text(encoding="utf-8")):
+            where = path.relative_to(dist if path.is_relative_to(dist) else root)
+            problems.append(
+                f"WEB-R9: {where} describes the project as science and astronomy, astronomy "
+                "first; use the description"
+            )
+    return problems
+
+
 def completions() -> tuple[set[str], dict[str, set[str]], dict[str, dict[str, set[str] | None]]]:
     """From `sciart completions bash`: the subcommands, each command's flags, and for each
     flag that takes a value, its allowed values (None when any value goes)."""
@@ -681,6 +808,7 @@ def main(argv: list[str]) -> int:
     pages = check_files(problems, registered)
     check_install(problems)
     check_guide_commands(problems)
+    problems += description_problems(ROOT, DIST)
     problems = list(dict.fromkeys(problems))
     if problems:
         print(f"site_check: {len(problems)} problem(s):", file=sys.stderr)
