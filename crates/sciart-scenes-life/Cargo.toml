@@ -2,7 +2,7 @@
 name = "sciart-scenes-life"
 description = "Internal: the life-science scenes of sciart. No semver promise; use the `sciart` crate"
 # DIST-R3: the internal crates' shared 0.x version (scripts/bump_version.py).
-version = "0.6.0"
+version = "0.7.0"
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
