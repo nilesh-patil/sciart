@@ -8,13 +8,14 @@ Without arguments it checks, from the files alone:
   recipe reading SCIART_VERSION;
 - DIST-R3 the published set and the labels of the internal crates;
 - DIST-R4 the packaging rules (excludes, licence and changelog links, publish order);
-- DIST-R5 / DIST-R6 the release workflow: targets, runners, build command, smoke tests,
-  size budgets, packing, checksums, attestations, and the binstall metadata;
+- DIST-R5 / DIST-R6 the packing of a fixture release and the binstall metadata;
 - DIST-R8 the conda recipe and its pixi environment;
 - DIST-R9 the Homebrew formula rendered from a fixture (and `ruby -c` when Ruby is
   installed; `--require-ruby` makes it mandatory);
-- DIST-R10 the gates: a draft release on a pushed tag, and every upload behind the
-  `release` environment.
+- DIST-R5 / DIST-R6 / DIST-R8 / DIST-R10 every workflow, read as data
+  (scripts/release_workflows.py): pinned actions, secrets on steps only, no event data in
+  scripts, the release chain and its checks, and every upload behind the gated publish
+  step.
 
 Other modes:
 
@@ -38,7 +39,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import release_assets  # noqa: E402
 import render_formula  # noqa: E402
-from tooling_check import TIER_1, TIER_2, runner_target, workflow_jobs  # noqa: E402
+import release_workflows  # noqa: E402
+from tooling_check import TIER_1, TIER_2  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 FACADE = "sciart"
@@ -64,12 +66,8 @@ NOTICE = ("Internal crate of", "no semver promise")
 EXCLUDED = ("tests/", "benches/", "examples/")
 MAX_CRATE_BYTES = 1 << 20
 SEMVER = re.compile(r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-[0-9A-Za-z.-]+)?$")
-OLDEST_UBUNTU = "ubuntu-22.04"  # glibc 2.35 (DIST-R5)
-CONDA_PLATFORMS = {"osx-arm64", "osx-64", "linux-64", "linux-aarch64"}
 PACKAGE_CHECK = ("cargo publish --workspace --dry-run --locked && "
                  "python3 scripts/release_check.py --crates target/package")
-BUILD = "cargo auditable build --release --locked -p sciart --bin sciart --target ${{ matrix.target }}"
-UPLOADS = ("cargo publish --workspace --locked", "rattler-build upload", "git push")
 
 
 def toml_file(rel: str) -> dict:
@@ -100,41 +98,6 @@ def deps(manifest: dict, kinds: tuple[str, ...] = ("dependencies", "build-depend
         for kind in kinds:
             names |= set(table.get(kind, {}))
     return names
-
-
-def steps(job_body: str) -> list[str]:
-    """The steps of a job, each as its text (six-space `- ` items under `steps:`)."""
-    text = job_body.split("\n    steps:\n", 1)
-    if len(text) != 2:
-        return []
-    out: list[str] = []
-    for line in text[1].splitlines():
-        if line.startswith("      #"):
-            continue
-        if line.startswith("      - "):
-            out.append(line + "\n")
-        elif out and (line.startswith("        ") or not line.strip()):
-            out[-1] += line + "\n"
-        elif line.strip():
-            break
-    return out
-
-
-def matrix_entries(job_body: str) -> list[dict[str, str]]:
-    """The `include:` entries of a job's matrix as {key: value}."""
-    block = re.search(r"^        include:\n((?:(?:          .*)?\n)*)", job_body, re.M)
-    if block is None:
-        return []
-    entries: list[dict[str, str]] = []
-    for line in block.group(1).splitlines():
-        found = re.match(r"^          (- )?\s*([A-Za-z0-9_-]+):\s*(.+?)\s*$", line)
-        if not found or line.strip().startswith("#"):
-            continue
-        if found.group(1):
-            entries.append({})
-        if entries:
-            entries[-1][found.group(2)] = found.group(3)
-    return entries
 
 
 # --- DIST-R1 -------------------------------------------------------------------------------
@@ -315,62 +278,6 @@ def render_binstall(template: str, version: str, target: str, repo: str) -> str:
 def check_r5_r6(problems: list[str]) -> None:
     if set(release_assets.TIER_1) != TIER_1 or set(release_assets.TIER_2) != TIER_2:
         problems.append("DIST-R5: release_assets.py and tooling_check.py agree on the platform tiers")
-    text = (ROOT / ".github/workflows/release.yml").read_text()
-    jobs = workflow_jobs(text)
-    build = jobs.get("build", "")
-    entries = matrix_entries(build)
-    by_target = {e.get("target"): e for e in entries}
-    if set(by_target) != set(release_assets.TARGETS) or len(entries) != len(release_assets.TARGETS):
-        problems.append(f"DIST-R5: release.yml builds exactly the six targets: {sorted(by_target, key=str)}")
-    for target, entry in by_target.items():
-        if target is None:
-            continue
-        os_label = entry.get("os", "")
-        arch = target.split("-")[0]
-        native = runner_target(os_label)
-        if target.endswith("-apple-darwin"):
-            if not os_label.startswith("macos-"):
-                problems.append(f"DIST-R5: {target} builds on a macOS runner, not {os_label}")
-        else:
-            want = OLDEST_UBUNTU + ("-arm" if arch == "aarch64" else "")
-            if os_label != want:
-                problems.append(f"DIST-R5: {target} builds on {want} (glibc 2.35), not {os_label}")
-        runs_here = native is not None and native.split("-")[0] == arch and \
-            native.endswith("darwin") == target.endswith("darwin")
-        if (entry.get("smoke") == "true") != runs_here:
-            problems.append(f"DIST-R5: {target} is smoke-tested exactly when it runs on its runner "
-                            f"({os_label}): smoke = {entry.get('smoke')}")
-    build_steps = steps(build)
-    command = [s for s in build_steps if "cargo auditable build" in s]
-    if len(command) != 1 or f"run: {BUILD}" not in command[0]:
-        problems.append(f"DIST-R5 / DIST-R6: the build step runs `{BUILD}` (default features)")
-    elif "SCIART_GIT_SHA: ${{ github.sha }}" not in command[0]:
-        problems.append("DIST-R2 / DIST-R5: the release build is given SCIART_GIT_SHA")
-    for step in build_steps:
-        if "cargo auditable build" in step and re.search(r"--(no-default-|all-)?features", step):
-            problems.append("DIST-R5: release binaries are built with the default features")
-    smoke = next((s for s in build_steps if "if: matrix.smoke" in s), "")
-    for probe in ('"$bin" -V', '"$bin" --version', '"$bin" list --json'):
-        if probe not in smoke:
-            problems.append(f"DIST-R5: the smoke test runs `{probe}`")
-    size = next((s for s in build_steps if "size_check.py" in s), "")
-    if "matrix.target == 'aarch64-apple-darwin'" not in size or "--build lean" not in size \
-            or "--build default" not in size:
-        problems.append("DIST-R5 / RT-R22: the aarch64-apple-darwin build checks both size budgets")
-    package = jobs.get("package", "")
-    if "scripts/release_assets.py" not in package or \
-            "--tool bins/x86_64-unknown-linux-gnu/sciart" not in package:
-        problems.append("DIST-R5: the package job packs with release_assets.py, generating the "
-                        "completions and manual with the x86_64 Linux binary")
-    # DIST-R6
-    if not re.search(r"^      id-token: write$", package, re.M) or \
-            not re.search(r"^      attestations: write$", package, re.M):
-        problems.append("DIST-R6: the package job may write attestations (id-token, attestations)")
-    if not re.search(r"uses: actions/attest-build-provenance@[0-9a-f]{40} # v[\d.]+\n\s+with:\n\s+subject-path: dist/\*\.tar\.gz",
-                     package):
-        problems.append("DIST-R6: every tarball gets a build-provenance attestation")
-    if "sha256sum --check --strict SHA256SUMS" not in package:
-        problems.append("DIST-R6: the package job verifies SHA256SUMS")
     check_assets(problems)
     # binstall (DIST-R5)
     manifest = members()[FACADE][1]
@@ -458,13 +365,6 @@ def check_r8(problems: list[str]) -> None:
     for name, task in [*pixi.get("tasks", {}).items(), *feature.get("tasks", {}).items()]:
         if "upload" in str(task):
             problems.append(f"DIST-R8 / DIST-R10: pixi task {name} uploads; only the publish workflow does")
-    conda = workflow_jobs((ROOT / ".github/workflows/publish.yml").read_text()).get("conda", "")
-    platforms = {e.get("platform") for e in matrix_entries(conda)}
-    if platforms != CONDA_PLATFORMS:
-        problems.append(f"DIST-R8: publish.yml builds the conda package for {sorted(CONDA_PLATFORMS)}: "
-                        f"{sorted(map(str, platforms))}")
-    if "rs-conda-build --target-platform ${{ matrix.platform }}" not in conda:
-        problems.append("DIST-R8: publish.yml builds each platform with rs-conda-build")
 
 
 # --- DIST-R9 -------------------------------------------------------------------------------
@@ -517,60 +417,9 @@ def check_r9(problems: list[str], require_ruby: bool) -> None:
 
 # --- DIST-R10 ------------------------------------------------------------------------------
 
-def on_block(text: str) -> str:
-    found = re.search(r"^on:\n((?:  .*\n|\n)*)", text, re.M)
-    return found.group(1) if found else ""
-
-
 def check_r10(problems: list[str]) -> None:
-    release = (ROOT / ".github/workflows/release.yml").read_text()
-    publish = (ROOT / ".github/workflows/publish.yml").read_text()
-    triggers = set(re.findall(r"^  ([a-z_]+):", on_block(release), re.M))
-    if triggers != {"push", "workflow_dispatch"} or 'tags: ["v*"]' not in on_block(release):
-        problems.append(f"DIST-R10: release.yml runs on a pushed v* tag and by hand only: {sorted(triggers)}")
-    if not re.search(r"^permissions:\n  contents: read$", release, re.M) or \
-            not re.search(r"^permissions:\n  contents: read$", publish, re.M):
-        problems.append("DIST-R10: both workflows default to read-only permissions")
-    jobs = workflow_jobs(release)
-    draft = jobs.get("release", "")
-    if "if: startsWith(github.ref, 'refs/tags/v')" not in draft:
-        problems.append("DIST-R10: the release job runs only for a tag")
-    create = [s for s in steps(draft) if "gh release create" in s]
-    if len(create) != 1 or "--draft" not in create[0] or "--verify-tag" not in create[0]:
-        problems.append("DIST-R10: the release job creates a draft (`--draft`) on the pushed tag (`--verify-tag`)")
-    for name, body in jobs.items():
-        if name != "release" and "contents: write" in body:
-            problems.append(f"DIST-R10: only the release job of release.yml writes contents ({name})")
-    if not re.search(r"^  release:\n    types: \[published\]$", on_block(publish), re.M):
-        problems.append("DIST-R10: publish.yml runs when a release is published")
-    triggers = set(re.findall(r"^  ([a-z_]+):", on_block(publish), re.M))
-    if triggers != {"release", "workflow_dispatch"}:
-        problems.append(f"DIST-R10: publish.yml runs on a published release or by hand only: {sorted(triggers)}")
-    pub_jobs = workflow_jobs(publish)
-    for name in ("crates-io", "conda", "homebrew"):
-        body = pub_jobs.get(name)
-        if body is None:
-            problems.append(f"DIST-R10: publish.yml has a `{name}` job")
-        elif not re.search(r"^    environment: release$", body, re.M):
-            problems.append(f"DIST-R10: publish.yml `{name}` runs in the `release` environment")
-    for name, body in pub_jobs.items():
-        gated = re.search(r"^    environment: release$", body, re.M) is not None
-        for step in steps(body):
-            if any(u in step for u in UPLOADS):
-                if not gated or "if: github.event_name == 'release'" not in step:
-                    problems.append(f"DIST-R10: publish.yml `{name}` uploads only on a published release, "
-                                    f"in the `release` environment")
-    for workflow in sorted((ROOT / ".github/workflows").glob("*.yml")):
-        text = workflow.read_text()
-        for pattern, why in ((r"\bgit tag\b", "creates a tag"), (r"git push[^\n]*(--tags|refs/tags| v\d)", "pushes a tag"),
-                             (r"softprops/action-gh-release", "publishes a release directly"),
-                             (r"gh release (edit|create)[^\n]*--draft=false", "publishes a release")):
-            if re.search(pattern, text):
-                problems.append(f"DIST-R10: {workflow.name} {why}")
-        if workflow.name != "publish.yml":
-            for upload in UPLOADS:
-                if upload in text:
-                    problems.append(f"DIST-R10: {workflow.name} runs `{upload}`; only publish.yml uploads")
+    """DIST-R5 / R6 / R8 / R10 in the workflows, read as data (release_workflows.py)."""
+    problems += release_workflows.problems(release_workflows.load(ROOT))
 
 
 # --- modes ---------------------------------------------------------------------------------
