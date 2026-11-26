@@ -6,7 +6,7 @@
 
 ## Executive Summary
 
-`sciart` is real-time generative science and astronomy art for the terminal: **85 animated
+`sciart` is real-time generative science art for the terminal (physics, chemistry, biology, Earth and space): **85 animated
 scenes at 30 FPS**, drawn with ratatui + crossterm, while keeping the machine awake
 (`caffeinate` on macOS, a `systemd-inhibit` lock on Linux, optional mouse jiggle). It
 replaced the Python prototype, which rendered one static frame every 15 seconds; the Python
