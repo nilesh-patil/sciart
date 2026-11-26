@@ -13,11 +13,13 @@ with `yaml_subset` (a file it cannot read is a problem, never skipped) and repor
   inside a `run:` script; a command that creates or pushes a tag; an upload
   (`cargo publish` without `--dry-run`, `scripts/publish_crates.py` without
   `--dry-run`, `rattler-build upload`, `git push`) anywhere but a gated publish step;
-- release.yml: triggers, permissions per job against an allow-list, the chain
+- release.yml: triggers, permissions per job against an allow-list, a tag push in a
+  private repository refused first, the chain
   verify -> build -> package -> release, the six targets on their runners, the build
   command, the tag check, the installer check, the configuration checks, the smoke test
   and the size budgets present and able to fail the job, the packing, the checksum check,
-  the attestation of every asset, a draft release on the pushed tag;
+  the attestation of every asset in a public repository (a notice when skipped), a draft
+  release on the pushed tag;
 - publish.yml: triggers, a concurrency group, the three jobs in the `release`
   environment with a tag check each, uploads only in steps gated on the release event,
   the crates published one at a time by the resumable script, a rehearsal, the conda
@@ -47,6 +49,11 @@ CONDA_PLATFORMS = {"osx-arm64", "osx-64", "linux-64", "linux-aarch64"}
 BUILD = 'cargo auditable build --release --locked -p sciart --bin sciart --target "$TARGET"'
 GATE = "github.event_name == 'release'"
 TAG_IF = "startsWith(github.ref, 'refs/tags/v')"
+# DIST-R6: attestations are signed for public repositories only. `repository.private` is
+# in the payload of both triggers (a pushed tag, a manual run).
+PRIVATE = "github.event.repository.private"
+PRIVATE_TAG_IF = f"{TAG_IF} && {PRIVATE}"
+PUBLIC_IF = f"{PRIVATE} == false"
 LEVELS = {"none": 0, "read": 1, "write": 2}
 # DIST-R10: what each job may be granted (a job without `permissions` gets the workflow's,
 # which must be `contents: read`).
@@ -198,6 +205,12 @@ def check_release(data: dict, out: list[str]) -> None:
         elif not want <= needs(jobs[job]):
             out.append(f"DIST-R10: release.yml `{job}` needs {sorted(want)} (build -> package -> release)")
     verify = jobs.get("verify", {})
+    first = steps_of(verify)[:1]
+    if not first or norm(first[0].get("if")) != PRIVATE_TAG_IF or \
+            "exit 1" not in str(first[0].get("run", "")) or "::error::" not in str(first[0].get("run", "")) or \
+            not can_fail(first[0], verify):
+        out.append(f"DIST-R6: release.yml `verify` first fails a tag push in a private repository with an "
+                   f"error (if: {PRIVATE_TAG_IF}; `::error::` and `exit 1`), before anything is built")
     for needle, what, condition in (
         ("release_check.py --tag", "tag check", TAG_IF),
         ("installer_check.py --require-shellcheck", "installer check", None),
@@ -278,6 +291,12 @@ def check_release(data: dict, out: list[str]) -> None:
     subjects = str((attest[0].get("with") or {}).get("subject-path", "")).split() if attest else []
     if len(attest) != 1 or sorted(subjects) != sorted(ATTESTED):
         out.append(f"DIST-R6: the package job attests {', '.join(ATTESTED)}: {subjects}")
+    elif norm(attest[0].get("if")) != PUBLIC_IF:
+        out.append(f"DIST-R6: the attestation runs only in a public repository (if: {PUBLIC_IF})")
+    notice = [s for s in steps_of(package) if norm(s.get("if")) == PRIVATE]
+    if len(notice) != 1 or "::notice::" not in str(notice[0].get("run", "")):
+        out.append(f"DIST-R6: the package job says with a `::notice::` when it skips the attestation "
+                   f"(if: {PRIVATE})")
     release = jobs.get("release", {})
     if norm(release.get("if")) != TAG_IF:
         out.append("DIST-R10: the release job runs only for a tag")
