@@ -4,7 +4,7 @@ Every one of the 85 registered scenes, one current frame each: astro theme at 16
 
 ## In motion
 
-18 clips recorded by `sciart record` from [`docs/showcase.toml`](showcase.toml) (`pixi run rs-showcase`); each runs from the simulated time shown, at the size, seed and frame rate shown.
+22 clips recorded by `sciart record` from [`docs/showcase.toml`](showcase.toml) (`pixi run rs-showcase`); each runs from the simulated time shown, at the size, seed and frame rate shown.
 
 ### `strange_attractors` in motion
 
@@ -113,6 +113,30 @@ Sun & Planets · 80x24 cells · t = 0–8 s · 15 fps · seed 42 · astro
 <img src="media/black_hole.gif" alt="Black hole: an accretion disk of infalling gas turns around the dark hole, its photon ring drawn as bright dots">
 
 Deep Cosmos · 80x24 cells · t = 0–6 s · 20 fps · seed 42 · astro
+
+### `gray_scott` in motion
+
+<img src="media/gray_scott.gif" alt="Gray-Scott reaction-diffusion: spots of a self-making chemical stretch, split in two and spread until they fill the dish">
+
+Reactions · 80x24 cells · t = 0–9 s · 15 fps · seed 42 · astro
+
+### `firefly_sync` in motion
+
+<img src="media/firefly_sync.gif" alt="Firefly sync: fireflies on a mangrove tree flash at random, then nudge one another until the whole tree pulses in step">
+
+Living Systems · 80x24 cells · t = 4–14 s · 15 fps · seed 42 · astro
+
+### `protocell_assembly` in motion
+
+<img src="media/protocell_assembly.gif" alt="Protocell assembly: a two-layer sheet of lipids, tails in and heads out, curls up and closes into a hollow vesicle around a few solutes">
+
+Life from Matter · 80x24 cells · t = 28–38 s · 15 fps · seed 42 · astro
+
+### `action_potential` in motion
+
+<img src="media/action_potential.gif" alt="Action potential: a nerve spike races down the axon as ions cross the membrane, and an oscilloscope traces each spike">
+
+Physics of Life · 80x24 cells · t = 0–8 s · 15 fps · seed 42 · astro
 
 ## Deep Cosmos
 
