@@ -167,7 +167,10 @@ than red ↔ green. `t` cycles to it after `aurora`.
 
 macOS and Linux are supported; Windows is not. Release binaries cover macOS on Apple
 Silicon and Intel and Linux on x86_64 and ARM64; the Linux builds need glibc 2.35 or newer,
-and a static musl build serves older systems (the installer script picks it).
+and a static musl build serves older systems (the installer script picks it). CI runs the
+whole test suite on macOS on Apple Silicon and on Linux x86_64 and ARM64; the reviewed
+reference frames are compared on macOS on Apple Silicon only, since frames can differ in the
+last detail between platforms.
 
 Keep-awake uses `caffeinate` on macOS and, on Linux, a
 `systemd-inhibit` (or `elogind-inhibit`) lock held for as long as sciart runs; over SSH it
