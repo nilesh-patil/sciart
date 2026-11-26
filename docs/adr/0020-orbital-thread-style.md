@@ -4,13 +4,13 @@
 - **Date**: 2026-10-02
 
 ## Context
-After M16 the user asked for ten scenes to be redesigned "in the same theme as a mix of hydrogen
+After M16 ten scenes were chosen for a redesign "in the same theme as a mix of hydrogen
 atoms and strange attractors": `gray_scott`, `molecular_motors`, `gravitational_lensing`,
 `io_volcanoes`, `spacetime_grid` (central objects only), `solar_eruption`, `three_body`,
 `spiral_galaxy`, `supernova_remnant` and `ising_model`. Three of them still drew flat half-block
-fills (`gray_scott`, `molecular_motors`, `io_volcanoes`); six were M16 thread scenes the user wanted
-improved. The user chose one design per scene from previews (all recommended options, recorded in
-`docs/design/M17-orbital-thread.md`) and asked for the lowest CPU and memory cost.
+fills (`gray_scott`, `molecular_motors`, `io_volcanoes`); six were M16 thread scenes that needed
+improvement. One design per scene was chosen from previews (recorded in each scene's `Look (M17)`
+entry in SPEC-002), with the lowest CPU and memory cost as a goal.
 
 `electron_orbitals` draws each orbital as a Monte-Carlo cloud whose points carry fixed uniforms,
 so the cloud holds still and only changes where the density crosses a threshold. That is what

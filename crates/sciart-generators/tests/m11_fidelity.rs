@@ -1,5 +1,5 @@
-//! GEN-R22 (ADR-0018): the 41 scenes registered at M11 (`627cde6`) render as they did at
-//! M11. The reference is `tests/fixtures/m11_frames.txt`, written from the M11 tree by
+//! GEN-R22 (ADR-0018): the 41 scenes registered at M11 (the M11 merge) render as they did
+//! at M11. The reference is `tests/fixtures/m11_frames.txt`, written from the M11 tree by
 //! `examples/inkframes.rs` (the same file builds in both trees; this test includes it, so
 //! fixture and live frames share one encoder):
 //!
@@ -44,7 +44,7 @@ const FIXTURE: &str = include_str!("fixtures/m11_frames.txt");
 /// Minimum share of equal cells per frame.
 const MIN_EQUAL: f64 = 0.995;
 
-/// M11's title-row readout level (`title::READOUT_LEVEL` at `627cde6`).
+/// M11's title-row readout level (`title::READOUT_LEVEL` at the M11 merge).
 const M11_READOUT_LEVEL: u8 = 110;
 
 /// The reference frame with M11's title-row readouts moved to today's CORE-R76 level:

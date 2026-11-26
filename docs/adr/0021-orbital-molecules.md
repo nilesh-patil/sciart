@@ -4,14 +4,14 @@
 - **Date**: 2026-10-02
 
 ## Context
-After M17 the user asked for six more scenes to be redesigned "into the same theme as a mix of
+After M17 six more scenes were chosen for a redesign "into the same theme as a mix of
 hydrogen atoms, strange attractors and molecules": `wave_interference`, `chemical_garden`,
 `physarum`, `firefly_sync`, `heart_fibrillation`, and `spiral_galaxy` again, now with six arms.
 ADR-0020 gives clouds and threads. The new ingredient is the molecule, as `molecule_viewer` draws
 it: small round atoms joined by thin bonds. Four of the six scenes have discrete bodies (wave
 sources, precipitate beads, oat flakes, fireflies, spiral tips) that had been drawn as single
-pixels, glyphs or flat blocks. The user chose one design per scene from previews; see
-`docs/design/M18-orbital-molecules.md`.
+pixels, glyphs or flat blocks. One design per scene was chosen from previews; see each
+scene's `Look (M18)` entry in SPEC-002.
 
 ## Decision
 1. GEN-R26 gains a third rule, *molecules*: discrete bodies are small Gaussian stipple atoms,

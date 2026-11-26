@@ -3,7 +3,7 @@
 # Deliberately permissive: it should report drift, not block on the tree as it stands. The
 # allowlist is the licence set the current dependency graph actually uses
 # (`cargo metadata --locked`), so a newly added crate with an unreviewed licence fails here
-# instead of slipping in. Hardened in Phase 4 (IMP-14): the yanked/unmaintained policies
+# instead of slipping in. Hardened at M23 (IMP-14): the yanked/unmaintained policies
 # are explicit.
 
 [advisories]
