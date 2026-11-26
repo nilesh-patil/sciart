@@ -5,7 +5,7 @@ members = ["crates/*"]
 [workspace.package]
 # DIST-R1: the version of `sciart`, and the only hand-edited one (`scripts/bump_version.py`
 # sets it together with the internal crates' version below).
-version = "1.0.0"
+version = "1.0.1"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"

@@ -284,7 +284,7 @@ hermetic with respect to terminal colour configuration (TEST-R12).
   ([B-89](../BACKLOG.md)).
 - A light-background theme ([B-90](../BACKLOG.md)).
 - Distribution packages beyond the 1.0 channels, such as apt or rpm ([B-91](../BACKLOG.md)).
-- `cargo-semver-checks` against the published 1.0.0 surface (ADR-0032).
+- `cargo-semver-checks` against the 1.0 surface as tagged, `v1.0.0` (ADR-0032).
 
 ## Open Questions
 
