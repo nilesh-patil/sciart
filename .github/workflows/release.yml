@@ -1,7 +1,7 @@
 name: Release
 
 # IMP-05: a tagged release builds the binary for both macOS architectures and Linux and
-# attaches one tarball + checksum per target. The maintainer tags `v0.1.0` locally; this workflow
+# attaches one tarball + checksum per target. Release tags are created locally; this workflow
 # never pushes a tag. `workflow_dispatch` exercises the build without creating a release.
 on:
   push:

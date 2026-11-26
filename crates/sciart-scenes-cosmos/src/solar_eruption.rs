@@ -1675,7 +1675,7 @@ mod tests {
     #[test]
     fn erup_a17_loops_rise_is_calmer_than_m16() {
         // M16's lit cells in `loops rise` (seed 42, 200×50, the scene alone), measured at
-        // the base commit 75f5552 before the M17 redesign.
+        // the end of M16, before the M17 redesign.
         const M16: [(f64, usize); 4] = [(7.0, 1094), (9.0, 973), (11.0, 1391), (13.0, 1830)];
         let size = Size::new(200, 50);
         let mut g = SolarEruption::new();
