@@ -28,8 +28,9 @@ set -eu
 REPO="nilesh-patil/sciart"
 BASE="${SCIART_INSTALL_BASE_URL:-https://github.com/$REPO/releases}"
 GLIBC_FLOOR="2.35"
-# Text every sciart binary contains (its command-line description).
-MARKER="Real-time generative science & astronomy art"
+# Text every sciart binary contains: the start of its command-line description, which the
+# 1.0.0 binaries and the later ones share.
+MARKER="Real-time generative science"
 
 say() { printf 'sciart-install: %s\n' "$*"; }
 die() {

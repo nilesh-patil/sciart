@@ -51,7 +51,13 @@ import release_assets  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent.parent
 INSTALLER = ROOT / "packaging" / "install.sh"
-MARKER = "Real-time generative science & astronomy art"
+# DIST-R7: the installer knows a sciart binary by the start of its `about`, which the 1.0.0
+# binaries (RELEASED_ABOUT) and the later ones (the `about` in cli.rs, WEB-R9) share.
+MARKER = "Real-time generative science"
+RELEASED_ABOUT = "Real-time generative science & astronomy art"
+CLI = ROOT / "crates" / "sciart" / "src" / "cli.rs"
+_ABOUT = re.search(r'^\s*about\s*=\s*"([^"]*)"', CLI.read_text(encoding="utf-8"), re.M)
+CURRENT_ABOUT = _ABOUT.group(1) if _ABOUT else ""
 LATEST, OLDER = "0.6.0", "0.5.0"
 HTTPS_FIXTURE = "https://fixture.invalid/releases"
 TOOLS = ("sh", "cut", "sed", "head", "mktemp", "rm", "tar", "gzip", "grep", "mkdir",
@@ -115,8 +121,8 @@ exit 1
 """
 
 
-def fake_binary(version: str, target: str) -> bytes:
-    return f"#!/bin/sh\n# {MARKER}\necho 'sciart {version} {target}'\n".encode()
+def fake_binary(version: str, target: str, about: str = MARKER) -> bytes:
+    return f"#!/bin/sh\n# {about}\necho 'sciart {version} {target}'\n".encode()
 
 
 FAKE_EXTRA = {"completions/sciart.bash": b"# bash\n", "completions/_sciart": b"#compdef sciart\n",
@@ -213,6 +219,12 @@ CASES = [
          args=["--force"], installs=f"{LATEST} aarch64-apple-darwin"),
     Case("upgrading an installed sciart", existing=fake_binary(OLDER, "aarch64-apple-darwin"),
          installs=f"{LATEST} aarch64-apple-darwin"),
+    Case("upgrading a sciart with the 1.0.0 description",
+         existing=fake_binary(OLDER, "aarch64-apple-darwin", RELEASED_ABOUT),
+         installs=f"{LATEST} aarch64-apple-darwin"),
+    Case("upgrading a sciart with the current description",
+         existing=fake_binary(OLDER, "aarch64-apple-darwin", CURRENT_ABOUT),
+         installs=f"{LATEST} aarch64-apple-darwin"),
     Case("attestation verifies", gh="ok", installs=f"{LATEST} aarch64-apple-darwin",
          says="attestation verified"),
     Case("attestation fails", gh="fail", ok=False, says="does not verify"),
@@ -272,6 +284,10 @@ MUTATIONS = [
                                                  '    asset="sciart-$version-$target.tar.gz"\n')],
      [c.name for c in CASES if c.name.startswith("hostile")]),
     ("another program replaced", [('[ "$force" -ne 1 ] && ', '[ "$force" -ne 0 ] && ')], ["replacing another program"]),
+    ("only the 1.0.0 description recognised", [(f'MARKER="{MARKER}"', f'MARKER="{RELEASED_ABOUT}"')],
+     ["upgrading a sciart with the current description"]),
+    ("only the current description recognised", [(f'MARKER="{MARKER}"', f'MARKER="{CURRENT_ABOUT}"')],
+     ["upgrading a sciart with the 1.0.0 description"]),
 ]
 
 
@@ -601,6 +617,12 @@ def main() -> int:
     if not script.startswith("#!/bin/sh\n"):
         problems.append("DIST-R7: packaging/install.sh starts with #!/bin/sh (POSIX sh)")
     problems += shellcheck(required)
+    # The installer's marker is the shared start of every released `about`.
+    if f'\nMARKER="{MARKER}"\n' not in script:
+        problems.append(f"DIST-R7: packaging/install.sh's MARKER is not {MARKER!r}")
+    for about in (RELEASED_ABOUT, CURRENT_ABOUT):
+        if not about.startswith(MARKER):
+            problems.append(f"DIST-R7: the `about` {about!r} does not start with the marker {MARKER!r}")
     readme = README.read_text()
     problems += documented_problems(readme, script)
     for label, _, names in MUTATIONS:
