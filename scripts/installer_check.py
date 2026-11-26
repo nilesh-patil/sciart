@@ -16,6 +16,11 @@ skipped on the latest path, glibc floor lowered, Rosetta ignored, version not va
 TLS or redirect flags dropped, cleanup traps removed, sudo half-detected, ...) and each
 broken installer must fail at least one of the cases named for it.
 
+The documented one-line command (`curl … | sh` in the README and the installer's header)
+must follow redirects and keep its https-only flags; it is also run against a local fixture
+host that redirects `latest/download/` the way the release host does, and a second table of
+command variants (no `-L`, no `-f`, ...) must each be judged right.
+
 shellcheck runs when it is installed (`--require-shellcheck` makes it mandatory, as the
 release workflow does).
 
@@ -24,14 +29,19 @@ release workflow does).
 
 from __future__ import annotations
 
+import http.server
 import os
+import re
+import shlex
 import shutil
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import time
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -265,6 +275,183 @@ MUTATIONS = [
 ]
 
 
+# ---- The documented one-line command -----------------------------------------------------
+#
+# The release host answers `releases/latest/download/<asset>` with a redirect (to
+# `download/v<version>/<asset>`, then to its asset host). curl without -L prints the empty
+# redirect body, so `curl ... | sh` reads nothing and exits 0: nothing installed, nothing
+# said. Two checks divide the work. The static rule reads the command verbatim wherever it
+# is documented (the README, the installer's header; the site check applies it to the built
+# site) and needs every flag: https only (`--proto '=https'`), TLS 1.2 or newer, follow
+# redirects, fail on an HTTP error, show errors. The fixture run serves a release over local
+# plain http that redirects like the real host and runs the README's curl flags against it,
+# with the one https-only value swapped (`=https` -> `=http`): it proves the redirect is
+# followed and that the script fetched that way installs.
+
+DOC_URL = "https://github.com/nilesh-patil/sciart/releases/latest/download/install.sh"
+README = ROOT / "README.md"
+
+
+def logical_lines(text: str, comment: bool = False) -> list[str]:
+    """`text` as shell lines: with `comment`, a leading `#` and its spaces are dropped first;
+    a line ending in a backslash continues on the next."""
+    out, pending = [], ""
+    for line in text.splitlines():
+        if comment:
+            line = re.sub(r"^#\s*", "", line)
+        line = line.strip()
+        if line.endswith("\\"):
+            pending += line[:-1].strip() + " "
+            continue
+        out.append(pending + line)
+        pending = ""
+    return out
+
+
+def documented_commands(text: str, comment: bool = False) -> list[str]:
+    """The one-line install commands in `text`: a curl of the installer piped to a shell."""
+    return [line for line in logical_lines(text, comment) if line.startswith("curl ") and DOC_URL in line]
+
+
+def _short_groups(tokens: list[str]) -> str:
+    return "".join(t[1:] for t in tokens if re.fullmatch(r"-[A-Za-z0-9]+", t))
+
+
+def one_liner_problems(command: str) -> list[str]:
+    """DIST-R7 over one documented command, read as the shell would split it."""
+    fetch, _, rest = command.partition("|")
+    try:
+        tokens = shlex.split(fetch)
+    except ValueError as e:
+        return [f"cannot read the command ({e}): {command}"]
+    short = _short_groups(tokens)
+    problems = []
+    if not tokens or tokens[0] != "curl" or DOC_URL not in tokens:
+        problems.append(f"it does not curl {DOC_URL}")
+    if rest.strip() != "sh":
+        problems.append("it does not pipe the script to `sh`")
+    if _after(tokens, "--proto") != "=https":
+        problems.append("it does not restrict curl to https (`--proto '=https'`)")
+    if "--tlsv1.2" not in tokens:
+        problems.append("it does not require TLS 1.2 or newer (`--tlsv1.2`)")
+    for letter, long, what in (("L", "--location", "follow redirects (the release host redirects "
+                                "latest/download, and without it `sh` reads nothing and exits 0)"),
+                               ("f", "--fail", "fail on an HTTP error"),
+                               ("S", "--show-error", "show errors")):
+        if letter not in short and long not in tokens:
+            problems.append(f"curl does not {what}: `-{letter}` or `{long}`")
+    return [f"{p}: {command}" for p in problems]
+
+
+def documented_problems(readme: str, installer: str) -> list[str]:
+    problems = []
+    for where, commands in (("README.md", documented_commands(readme)),
+                            ("packaging/install.sh", documented_commands(installer, comment=True))):
+        if not commands:
+            problems.append(f"DIST-R7: {where} documents no one-line install command ({DOC_URL} | sh)")
+        problems += [f"DIST-R7: {where}: {p}" for c in commands for p in one_liner_problems(c)]
+    return problems
+
+
+class _Release(http.server.BaseHTTPRequestHandler):
+    """A release host over plain http that redirects like the real one: `latest/download/`
+    to `download/v<latest>/`, and that to an asset path, which serves the file."""
+
+    root = Path()
+
+    def do_GET(self) -> None:  # noqa: N802 (the handler's name)
+        path = urllib.parse.urlparse(self.path).path
+        latest, versioned = "/releases/latest/download/", "/releases/download/"
+        if path.startswith(latest):
+            self._redirect(f"{versioned}v{LATEST}/{path[len(latest):]}")
+        elif path.startswith(versioned):
+            self._redirect(f"/assets/{path[len(versioned):]}")
+        elif path.startswith("/assets/") and (self.root / "download" / path[len("/assets/"):]).is_file():
+            data = (self.root / "download" / path[len("/assets/"):]).read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+        else:
+            self.send_error(404)
+
+    def _redirect(self, location: str) -> None:
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def log_message(self, *_: object) -> None:
+        pass
+
+
+def fetch_like(command: str, base: str) -> bytes | None:
+    """The body the documented command's curl gives at the fixture host `base` (http), with
+    `=https` swapped for `=http`; None when curl fails."""
+    tokens = shlex.split(command.partition("|")[0])
+    path = DOC_URL[DOC_URL.index("/releases/"):]
+    tokens = [base + path if t == DOC_URL else ("=http" if t == "=https" else t) for t in tokens]
+    run = subprocess.run(tokens, capture_output=True, timeout=30)
+    return run.stdout if run.returncode == 0 else None
+
+
+# (label, the README command's text, its replacement, whether the rule must reject it,
+# whether the fixture fetch must come back empty)
+DOC_MUTATIONS = [
+    ("the command without -L", "-LsSf", "-sSf", True, True),
+    ("without -f", "-LsSf", "-LsS", True, False),
+    ("without -S", "-LsSf", "-Lsf", True, False),
+    ("without https only", "--proto '=https' ", "", True, False),
+    ("without TLS 1.2", "--tlsv1.2 ", "", True, False),
+    ("not piped to sh", "| sh", "", True, False),
+    ("long flags", "-LsSf", "--location --silent --show-error --fail", False, False),
+    ("separate short flags", "-LsSf", "-L -s -S -f", False, False),
+]
+
+
+def fixture_problems(work: Path, fixtures: Path, home: Path, command: str) -> tuple[list[str], int]:
+    """The README's command against a redirecting fixture host, then the mutation rows."""
+    problems: list[str] = []
+    _Release.root = fixtures / "good"
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _Release)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    base = f"http://127.0.0.1:{server.server_address[1]}"
+    try:
+        body = fetch_like(command, base)
+        if body != INSTALLER.read_bytes():
+            problems.append(f"DIST-R7: the README's command through the redirecting fixture host gives "
+                            f"{len(body or b'')} bytes, not the installer: {command}")
+        else:
+            fetched = work / "fetched-install.sh"
+            fetched.write_bytes(body)
+            latest = next(c for c in CASES if c.name == "macOS arm64, latest")
+            problems += [f"DIST-R7: the script fetched by the README's command: {p}"
+                         for p in run_cases(work, fixtures, home, [latest], fetched)]
+        # Without -L, the real host's failure: exit 0 and an empty body, which `sh` runs as
+        # nothing. Anything else means the fixture does not redirect as the host does.
+        without = fetch_like(command.replace("-LsSf", "-sSf"), base)
+        if without != b"":
+            problems.append("DIST-R7: the fixture host does not redirect latest/download like the release host "
+                            f"(without -L: {'a failure' if without is None else f'{len(without)} bytes'})")
+        caught = 0
+        for label, old, new, rejected, empty in DOC_MUTATIONS:
+            if old not in command:
+                problems.append(f"DIST-R7: documented-command mutation {label!r} no longer applies: {old!r}")
+                continue
+            variant = command.replace(old, new, 1)
+            if bool(one_liner_problems(variant)) != rejected:
+                problems.append(f"DIST-R7: the rule {'accepts' if rejected else 'rejects'} {label!r}: {variant}")
+                continue
+            if empty and fetch_like(variant, base) != b"":
+                problems.append(f"DIST-R7: {label!r} does not reproduce the silent empty fetch at the fixture host")
+                continue
+            caught += 1
+    finally:
+        server.shutdown()
+        server.server_close()
+    return problems, caught
+
+
 def make_exec(path: Path, text: str) -> None:
     path.write_text(text)
     path.chmod(path.stat().st_mode | stat.S_IXUSR)
@@ -414,6 +601,8 @@ def main() -> int:
     if not script.startswith("#!/bin/sh\n"):
         problems.append("DIST-R7: packaging/install.sh starts with #!/bin/sh (POSIX sh)")
     problems += shellcheck(required)
+    readme = README.read_text()
+    problems += documented_problems(readme, script)
     for label, _, names in MUTATIONS:
         unknown = sorted(set(names) - CASE_NAMES)
         if unknown or not names:
@@ -437,6 +626,10 @@ def main() -> int:
         if after != before:
             problems.append(f"DIST-R7: the installer wrote into the home directory: "
                             f"{sorted(set(map(str, after)) - set(map(str, before)))}")
+        doc_caught = 0
+        for command in documented_commands(readme)[:1]:
+            found, doc_caught = fixture_problems(work, fixtures, home, command)
+            problems += found
         caught = 0
         by_name = {c.name: c for c in CASES}
         for label, edits, names in MUTATIONS:
@@ -462,7 +655,9 @@ def main() -> int:
             print(f"  {p}", file=sys.stderr)
         return 1
     print(f"installer OK ({len(CASES)} cases under {Path(SHELL).name} against a fixture release; "
-          f"{caught} of {len(MUTATIONS)} broken installers caught)")
+          f"{caught} of {len(MUTATIONS)} broken installers caught; the documented command follows the "
+          f"fixture host's redirects and installs, {doc_caught} of {len(DOC_MUTATIONS)} command variants "
+          "judged right)")
     return 0
 
 
