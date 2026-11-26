@@ -10,7 +10,7 @@ Turn the default features off, or you also get the command line's dependencies:
 
 ```toml
 [dependencies]
-sciart = { git = "https://github.com/nilesh-patil/sciart", default-features = false, features = ["png", "widget"] }
+sciart = { version = "1", default-features = false, features = ["png", "widget"] }
 ```
 
 | Feature | Adds |
