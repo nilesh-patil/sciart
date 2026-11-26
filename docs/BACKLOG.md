@@ -205,6 +205,7 @@ Counted from the tables below (M25); re-count after edits.
 | B-95 | art | `io_volcanoes`' faint fixed Pele guide dome is a static element under the live grains. | M23 art pass | open | P3 | Deliberate silhouette aid; remove if a future review prefers pure live grains. |
 | B-97 | release / DIST-R5 | The `ubuntu-22.04` and `ubuntu-22.04-arm` runner images are removed on 2027-04-17, and with them the glibc 2.35 baseline of the Linux gnu builds. | [RELEASING](RELEASING.md#runner-images) | open | P1 | Choose the next baseline (an older glibc in a container, or `ubuntu-24.04` and glibc 2.39) before then; change `RUNNER_IMAGES` in `scripts/tooling_check.py`, `OLDEST_UBUNTU`, the workflows, the installer's glibc check and SPEC-008 together. |
 | B-98 | tests / TEST-R13 | Frames are pinned on macOS arm64 only; pinning them on x86_64 Linux as well needs a second reviewed snapshot set (and M11 fixtures) re-recorded with every look change. | [ADR-0029](adr/0029-platform-tiers-and-determinism.md) | open | P3 | Deferred after 1.0; `molecular_dynamics_t5` is the one snapshot that differs there today. |
+| B-99 | release / DIST-R7 | A tarball saved by a macOS browser carries the quarantine attribute; whether the unpacked, unsigned binary then starts has not been tried. | [README](../README.md#install) | open | P2 | The installer script and `curl` do not set the attribute. If Gatekeeper stops the binary, document the workaround in the by-hand install text, or sign and notarise the macOS builds. |
 
 ## Notes
 
