@@ -525,8 +525,8 @@ SEMVER_BASELINE = "--baseline-rev v1.0.0"
 def semver_problems(ci: str) -> list[str]:
     """LIB-R8 in ci.yml: a job runs `cargo semver-checks check-release` against the `v1.0.0`
     tag (`--baseline-rev`, built from this repository; never a registry version, since 1.0.0
-    is not on crates.io), and its checkout has the full history and the tags
-    (`fetch-depth: 0`) without stored credentials."""
+    is not on crates.io), on the stable toolchain the tool needs, and its checkout has the
+    full history and the tags (`fetch-depth: 0`) without stored credentials."""
     try:
         data = parse(ci)
     except YamlError as e:
@@ -537,11 +537,25 @@ def semver_problems(ci: str) -> list[str]:
         steps = [s for s in (job.get("steps") or []) if isinstance(s, dict)] if isinstance(job, dict) else []
         runs = [str(s.get("run", "")) for s in steps if "cargo semver-checks check-release" in str(s.get("run", ""))]
         if runs:
-            found.append((name, steps, runs))
+            found.append((name, job, steps, runs))
     if len(found) != 1:
         return ["LIB-R8: exactly one ci.yml job runs `cargo semver-checks check-release`"]
-    name, steps, runs = found[0]
+    name, job, steps, runs = found[0]
     problems = []
+    # cargo-semver-checks needs a newer rustc than the MSRV the workflow pins, so the job
+    # overrides RUSTUP_TOOLCHAIN and installs stable; nothing else.
+    env = job.get("env") if isinstance(job.get("env"), dict) else {}
+    toolchains = []
+    for step in steps:
+        uses = str(step.get("uses", ""))
+        if uses.startswith(TOOLCHAIN_ACTION):
+            chosen = (step.get("with") or {}).get("toolchain") if isinstance(step.get("with"), dict) else None
+            comment = re.search(rf"uses:\s*{re.escape(uses)}\s+#\s*(\S+)", ci)
+            toolchains.append(str(chosen or (comment.group(1) if comment else None)))
+    if env.get("RUSTUP_TOOLCHAIN") != "stable" or toolchains != ["stable"]:
+        problems.append(f"LIB-R8: ci.yml `{name}` runs on the stable toolchain (job-level "
+                        f"`RUSTUP_TOOLCHAIN: stable` and one stable toolchain step), not {toolchains} with "
+                        f"RUSTUP_TOOLCHAIN {env.get('RUSTUP_TOOLCHAIN')!r}")
     command = " ".join(" ".join(runs).replace("\\\n", " ").split())
     if SEMVER_BASELINE not in command or "--baseline-version" in command:
         problems.append(f"LIB-R8: ci.yml `{name}` compares with the v1.0.0 tag (`{SEMVER_BASELINE}`), "

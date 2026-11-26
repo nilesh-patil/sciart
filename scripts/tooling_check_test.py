@@ -200,6 +200,31 @@ class SemverBaseline(unittest.TestCase):
             with self.subTest(new=new):
                 self.assertTrue(tooling_check.semver_problems(CI.replace(self.CHECKOUT, new)))
 
+    STABLE_ENV = "    env:\n      RUSTUP_TOOLCHAIN: stable\n"
+    STABLE = "dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable"
+    MSRV = "dtolnay/rust-toolchain@5445741acf05630efa19e221cc588ebe0842b13d # 1.88.0"
+
+    def semver_job(self) -> str:
+        return tooling_check.workflow_jobs(CI)["semver"]
+
+    def test_lib_r8_the_job_on_the_msrv_fails(self) -> None:
+        self.assertIn(self.STABLE, self.semver_job())
+        job = self.semver_job()
+        text = CI.replace(job, job.replace(self.STABLE, self.MSRV).replace(self.STABLE_ENV, ""))
+        self.assertTrue(tooling_check.semver_problems(text))
+
+    def test_lib_r8_the_stable_step_without_the_env_override_fails(self) -> None:
+        self.assertIn(self.STABLE_ENV, self.semver_job())
+        job = self.semver_job()
+        self.assertTrue(tooling_check.semver_problems(CI.replace(job, job.replace(self.STABLE_ENV, ""))))
+
+    def test_lib_r8_the_env_override_with_the_msrv_step_fails(self) -> None:
+        job = self.semver_job()
+        self.assertTrue(tooling_check.semver_problems(CI.replace(job, job.replace(self.STABLE, self.MSRV))))
+
+    def test_lib_r8_the_semver_job_passes_the_toolchain_rule(self) -> None:
+        self.assertEqual(tooling_check.toolchain_problems({"ci.yml": CI}), [])
+
     def test_lib_r8_no_semver_step_fails(self) -> None:
         self.assertTrue(tooling_check.semver_problems(CI.replace("cargo semver-checks check-release", "true")))
 
