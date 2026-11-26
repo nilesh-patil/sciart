@@ -194,6 +194,7 @@ seconds = 8.0
 fps = 20
 theme = "astro"
 out = "docs/media/physarum.gif"
+readme = "grid"
 alt = "Physarum: a slime mould spreads a lace of veins that thickens into a network between food sources"
 
 [[clip]]
@@ -218,6 +219,7 @@ seconds = 8.0
 fps = 12
 theme = "astro"
 out = "docs/media/dna_helix.gif"
+readme = "grid"
 alt = "DNA helix: the double helix turns while a replication fork unzips it and copies each strand"
 
 [[clip]]
@@ -243,3 +245,55 @@ fps = 20
 theme = "astro"
 out = "docs/media/black_hole.gif"
 alt = "Black hole: an accretion disk of infalling gas turns around the dark hole, its photon ring drawn as bright dots"
+
+[[clip]]
+id = "gray-scott"
+scene = "gray_scott"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 9.0
+fps = 15
+theme = "astro"
+out = "docs/media/gray_scott.gif"
+readme = "grid"
+alt = "Gray-Scott reaction-diffusion: spots of a self-making chemical stretch, split in two and spread until they fill the dish"
+
+[[clip]]
+id = "firefly-sync"
+scene = "firefly_sync"
+seed = 42
+size = "80x24"
+start = 4.0
+seconds = 10.0
+fps = 15
+theme = "astro"
+out = "docs/media/firefly_sync.gif"
+readme = "grid"
+alt = "Firefly sync: fireflies on a mangrove tree flash at random, then nudge one another until the whole tree pulses in step"
+
+[[clip]]
+id = "protocell-assembly"
+scene = "protocell_assembly"
+seed = 42
+size = "80x24"
+start = 28.0
+seconds = 10.0
+fps = 15
+theme = "astro"
+out = "docs/media/protocell_assembly.gif"
+readme = "grid"
+alt = "Protocell assembly: a two-layer sheet of lipids, tails in and heads out, curls up and closes into a hollow vesicle around a few solutes"
+
+[[clip]]
+id = "action-potential"
+scene = "action_potential"
+seed = 42
+size = "80x24"
+start = 0.0
+seconds = 8.0
+fps = 15
+theme = "astro"
+out = "docs/media/action_potential.gif"
+readme = "grid"
+alt = "Action potential: a nerve spike races down the axon as ions cross the membrane, and an oscilloscope traces each spike"
