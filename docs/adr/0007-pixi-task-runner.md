@@ -10,7 +10,7 @@ The repo already uses pixi for Python. During the transition both implementation
 Rust commands are pixi tasks prefixed `rs-` (`rs-ci`, `rs-test`, `rs-lint`, `rs-bench`, `rs-run`, `rs-sim`, …) wrapping cargo. The toolchain is pinned by `rust-toolchain.toml` (rustup), not conda, so cargo and rust-analyzer agree. No hosted CI for now; `pixi run rs-ci` is the pre-commit gate.
 
 ## Consequences
-+ One entry point (`pixi run …`) for contributors.
++ One entry point (`pixi run …`) for every contributor and for CI.
 − Contributors need rustup as well as pixi.
 
 ## Update (M8)

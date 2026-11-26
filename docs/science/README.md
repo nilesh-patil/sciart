@@ -23,7 +23,7 @@ in the same change; do not edit a SPEC to match this table.
 ## Flagged titles
 
 Two audited titles claim more than the model does. The proposed wording is in the row and
-repeated here; the spec is intentionally untouched (the maintainer applies title/spec changes):
+repeated here; the spec is intentionally untouched (title changes go through the spec):
 
 | Scene | Current title | Problem | Proposed |
 | --- | --- | --- | --- |

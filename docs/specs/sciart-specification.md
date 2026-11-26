@@ -2,7 +2,7 @@
 
 **Status**: Approved (spec interview, 2026-09-26; current as of M23, 2026-10-18)
 **Repository**: `https://github.com/nilesh-patil/sciart`
-**Supersedes**: the Python prototype (removed at the M8 cutover; its design notes are archived in `docs/archive/python-prototype-spec.md`)
+**Supersedes**: the Python prototype (removed at the M8 cutover)
 
 ## Executive Summary
 
