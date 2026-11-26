@@ -25,6 +25,8 @@ WEB-R7: every registered scene is in the gallery; every internal link and asset 
 and its one-line `curl … | sh` follows redirects with its https-only flags (DIST-R7); and
 the guide names no subcommand, flag or flag value the binary does not have (checked
 against `sciart completions bash`).
+WEB-R2: the gallery's headings list the categories in the README's domain order, each under
+its domain heading (`DOMAINS` in scripts/showcase.py).
 WEB-R9: the README's opening sentence, the crate `description`, the command line's `about`
 (or its short form), the site's lede and every page's meta description, and the opening
 lines of the architecture guide and the user guide carry the one description; the Homebrew
@@ -607,6 +609,25 @@ def check_install(problems: list[str]) -> None:
                     problems += [f"DIST-R7: {path.relative_to(DIST)}: {p}" for p in one_liner_problems(line)]
 
 
+# ---- WEB-R2: the gallery's domain order ---------------------------------------------------
+
+
+def gallery_order_problems(page: Path, catalogue: list[dict]) -> list[str]:
+    """WEB-R2: the built gallery's headings list the categories in the README's domain
+    order, each under its domain heading (`showcase.DOMAINS`)."""
+    if not page.is_file():
+        return []  # WEB-R5 reports a gallery that was not built
+    text = page.read_text(encoding="utf-8")
+    headings = [squash(h) for h in re.findall(r"<h[23]\b[^>]*>(.*?)</h[23]>", text, re.S)]
+    labels = {scene["category"]: scene["category_label"] for scene in catalogue}
+    return [
+        f"WEB-R2: {p}"
+        for p in site_build.showcase.heading_order_problems(
+            "the site's gallery", headings, labels, set(labels)
+        )
+    ]
+
+
 # ---- WEB-R9: one description, science first ------------------------------------------------
 
 DESCRIPTION = "Real-time generative science art for the terminal: physics, chemistry, biology, Earth and space"
@@ -802,13 +823,15 @@ def main(argv: list[str]) -> int:
     if not DIST.is_dir():
         sys.exit("site_check: site/dist/ is missing; run `pixi run site-build`")
     problems: list[str] = []
-    registered = [scene["name"] for scene in site_build.catalogue()]
+    catalogue = site_build.catalogue()
+    registered = [scene["name"] for scene in catalogue]
     check_module(problems)
     problems += origin_problems(DIST)
     pages = check_files(problems, registered)
     check_install(problems)
     check_guide_commands(problems)
     problems += description_problems(ROOT, DIST)
+    problems += gallery_order_problems(DIST / "gallery" / "index.html", catalogue)
     problems = list(dict.fromkeys(problems))
     if problems:
         print(f"site_check: {len(problems)} problem(s):", file=sys.stderr)

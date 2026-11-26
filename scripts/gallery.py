@@ -21,6 +21,7 @@ from __future__ import annotations
 import argparse
 import html
 import os
+import re
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -135,8 +136,29 @@ def frame_path(scene: Scene) -> Path:
     return CURRENT_DIR / f"{scene.name}.png"
 
 
+def order_problems(text: str, scenes: list[Scene]) -> list[str]:
+    """WEB-R2: docs/GALLERY.md lists its categories in the README's domain order, under the
+    domain headings (`showcase.DOMAINS`)."""
+    import showcase  # here: showcase imports this module
+
+    headings = [h.strip() for h in re.findall(r"^#{2,4} +(.+?)\s*$", text, re.MULTILINE)]
+    categories = {scene.category for scene in scenes}
+    labels = {category: category_label(category) for category in categories}
+    return showcase.heading_order_problems(
+        "docs/GALLERY.md", headings, labels, categories
+    )
+
+
 def check(scenes: list[Scene]) -> int:
-    """IMP-06: every registered scene has one current frame and there are no orphans."""
+    """IMP-06: every registered scene has one current frame and there are no orphans.
+    WEB-R2: docs/GALLERY.md lists the categories in the domain order."""
+    if GALLERY.is_file():
+        problems = order_problems(GALLERY.read_text(encoding="utf-8"), scenes)
+        if problems:
+            for problem in problems:
+                print(f"gallery: {problem}", file=sys.stderr)
+            print("gallery: run `python3 scripts/gallery.py` to rewrite it", file=sys.stderr)
+            return 1
     names = {scene.name for scene in scenes}
     missing = [scene.name for scene in scenes if not frame_path(scene).is_file()]
     orphans = []
