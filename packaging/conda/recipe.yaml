@@ -1,0 +1,61 @@
+# The conda package of sciart, built with rattler-build (SPEC-008 DIST-R8).
+#
+#   pixi run -e dist rs-conda-build [--target-platform <platform>]
+#
+# builds it from this checkout; `scripts/conda_build.py` sets SCIART_VERSION (from the root
+# Cargo.toml, DIST-R1) and SCIART_GIT_SHA (the checked-out commit, DIST-R2).
+schema_version: 1
+
+context:
+  version: ${{ env.get("SCIART_VERSION") }}
+
+package:
+  name: sciart
+  version: ${{ version }}
+
+source:
+  path: ../..
+  use_gitignore: true
+
+build:
+  number: 0
+  script:
+    env:
+      SCIART_GIT_SHA: ${{ env.get("SCIART_GIT_SHA", default="") }}
+    content:
+      - cargo-bundle-licenses --format yaml --output "${SRC_DIR}/THIRDPARTY.yml"
+      - cargo install --locked --no-track --bins --root "${PREFIX}" --path crates/sciart
+      - mkdir -p "${PREFIX}/share/man/man1" "${PREFIX}/share/bash-completion/completions" "${PREFIX}/share/zsh/site-functions" "${PREFIX}/share/fish/vendor_completions.d"
+      - '"${PREFIX}/bin/sciart" man > "${PREFIX}/share/man/man1/sciart.1"'
+      - '"${PREFIX}/bin/sciart" completions bash > "${PREFIX}/share/bash-completion/completions/sciart"'
+      - '"${PREFIX}/bin/sciart" completions zsh > "${PREFIX}/share/zsh/site-functions/_sciart"'
+      - '"${PREFIX}/bin/sciart" completions fish > "${PREFIX}/share/fish/vendor_completions.d/sciart.fish"'
+
+requirements:
+  build:
+    - ${{ compiler("rust") }}
+    - ${{ compiler("c") }}
+    - cargo-bundle-licenses
+
+tests:
+  - script:
+      - sciart --version
+      - sciart -V | grep -F "sciart ${{ version }}"
+      - sciart list
+  - package_contents:
+      bin:
+        - sciart
+      files:
+        - share/man/man1/sciart.1
+
+about:
+  homepage: https://github.com/nilesh-patil/sciart
+  repository: https://github.com/nilesh-patil/sciart
+  license: MIT
+  license_file:
+    - LICENSE
+    - THIRDPARTY.yml
+  summary: Real-time generative science & astronomy art in your terminal
+  description: |
+    85 animated science and astronomy scenes for the terminal, at 30 frames per second,
+    that also keep the machine awake. Includes the headless recorder (`sciart record`).
