@@ -53,7 +53,6 @@ jobs:
           python3 scripts/release_check.py --require-ruby
           python3 scripts/release_check_test.py
           python3 scripts/publish_crates_test.py
-          python3 scripts/conda_build_test.py
           python3 scripts/bump_version_test.py
       # DIST-R1: the tag is v{version} and the CHANGELOG has its heading.
       - name: Tag matches the version

@@ -20,7 +20,7 @@
 | Bench | `criterion` | `crates/sciart-generators/benches/frame.rs` | update(1/60)+render at 200×50 and 400×100 per generator; the slowest known hand-over frames (`worst`) and resize hitches (`resize`) |
 | Leak (M11) | `sciart_testalloc` live bytes | `crates/sciart-generators/tests/leak_free.rs` | resize churn and a live-bytes ceiling per generator (TEST-R6, TEST-R7) |
 
-- **TEST-R1** Every requirement ID defined in `docs/specs` (bold `**X-RN**` requirements and backticked `X-AN` IDs on `- **Acceptance**` lines) is cited by ≥ 1 test — in its name (chains like `core_r9_r10_…` count), the comments/attributes directly above it, or its body — or is listed here as manual. Enforced by `scripts/spec_check.py` (in `pixi run rs-spec-check` and CI), which scans `#[test]` functions under `crates/` and the checker scripts under `scripts/` for citations, and also rejects citations of undefined IDs and stale manual entries (its `MANUAL` list must match this table):
+- **TEST-R1** Every requirement ID defined in `docs/specs` (bold `**X-RN**` requirements and backticked `X-AN` IDs on `- **Acceptance**` lines) is cited by ≥ 1 test — in its name (chains like `core_r9_r10_…` count), the comments/attributes directly above it, or its body — or is listed here as manual. Enforced by `scripts/spec_check.py` (in `pixi run rs-spec-check` and CI), which scans `#[test]` functions under `crates/` and the checker scripts under `scripts/` for citations, and also rejects citations of undefined IDs and stale manual entries (its `MANUAL` list must match this table). A withdrawn requirement keeps its definition, which says "Withdrawn", is listed in the checker's `WITHDRAWN` table and is cited by nothing:
 
   | ID | Verified by |
   |----|-------------|

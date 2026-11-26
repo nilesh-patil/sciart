@@ -8,6 +8,9 @@ an ID through its name, the comments/attributes directly above it, or its body (
 messages), case-insensitively with `-`/`_` equivalence: `core_r10_...`, `[GEN-R4]`, and
 chains such as `core_r9_r10_r12_...` or `cry_a1_a2_...`.
 
+A withdrawn requirement keeps its definition (which says "Withdrawn"), is listed in
+`WITHDRAWN` with the reason, and must not be cited any more.
+
 Also enforces TEST-R4: every `proptest!` block outside the pure `sciart-core` pins
 `with_cases(n <= 64)`.
 
@@ -32,6 +35,12 @@ MANUAL: dict[str, str] = {
     "TEST-R3": "process: `pixi run rs-ci` is the pre-commit gate (definition lives in pixi.toml)",
 }
 
+# Requirements withdrawn without reusing their ID (SPEC-006 TEST-R1): the definition stays in
+# the spec and says "Withdrawn"; nothing may cite it any more, since nothing enforces it.
+WITHDRAWN: dict[str, str] = {
+    "DIST-R8": "1.0.1: the conda channel was withdrawn before its first upload (ADR-0033)",
+}
+
 ID_RE = re.compile(r"^[A-Z]+-[RA][0-9]+$")
 
 
@@ -53,6 +62,15 @@ def spec_ids() -> dict[str, str]:
                     if is_id(seg, "A"):
                         ids.setdefault(seg, path.name)
     return ids
+
+
+def definition(pid: str, file: str) -> str:
+    """The spec line that defines `pid` in `file` (empty when not found)."""
+    for path in (ROOT / "docs" / "specs").rglob(file):
+        for line in path.read_text().splitlines():
+            if f"**{pid}**" in line:
+                return line
+    return ""
 
 
 def sources() -> list[tuple[str, str]]:
@@ -129,7 +147,15 @@ def check_traceability() -> list[str]:
         if ".rs::" in name:
             cited_by_tests |= found
     uncited = [f"  {pid} ({file})" for pid, file in ids.items()
-               if pid not in cited and pid not in MANUAL]
+               if pid not in cited and pid not in MANUAL and pid not in WITHDRAWN]
+    for pid in WITHDRAWN:
+        if pid not in ids:
+            problems.append(f"WITHDRAWN entry {pid} is not defined in docs/specs (keep the definition)")
+        elif "Withdrawn" not in definition(pid, ids[pid]):
+            problems.append(f"WITHDRAWN entry {pid}: its definition in {ids[pid]} does not say \"Withdrawn\"")
+        users = [name for name in cited.get(pid, []) if name != "scripts/spec_check.py"]
+        if users:
+            problems.append(f"withdrawn {pid} is still cited (remove the rule or the test): {', '.join(users)}")
     undefined = [f"  {pid} cited by {', '.join(by)}" for pid, by in cited.items()
                  if pid not in ids]
     stale = [f"  {pid}" for pid in MANUAL if pid not in ids or pid in cited_by_tests]
