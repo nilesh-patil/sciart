@@ -26,7 +26,7 @@ rs-test-features = "cargo nextest run -p sciart --no-default-features --features
 # GEN-R15: the generated scene index in SPEC-002-generators.md matches the category files.
 # TEST-R1/R4: spec traceability (scripts/spec_check.py); TEST-R9/R10/R11: tooling schema
 # (scripts/tooling_check.py) — the config half of the old source_rules tests, now scripts.
-rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py"
+rs-spec-check = "python3 scripts/spec_index.py --check && python3 scripts/spec_check.py && python3 scripts/tooling_check.py && python3 scripts/size_check_test.py && python3 scripts/site_check_test.py"
 # Since M22 the scene crates declare their modules with plain `pub mod` lines (ADR-0023), so
 # `cargo fmt` reaches every scene file; no separate per-file rustfmt pass.
 rs-fmt = "cargo fmt --all"
